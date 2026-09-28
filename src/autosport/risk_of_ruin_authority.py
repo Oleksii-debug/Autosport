@@ -26,7 +26,7 @@ _CONFIDENCE_SEMANTICS = "protocol_defined_upper_bound"
 
 
 def _canonical_decimal(value: Decimal) -> str:
-    if not isinstance(value, Decimal) or not value.is_finite():
+    if type(value) is not Decimal or not value.is_finite():
         raise ValueError("risk-of-ruin authority requires finite Decimal values")
     text = format(value, "f")
     if "." in text:

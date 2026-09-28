@@ -264,46 +264,151 @@ class BetfairValueReadResult:
         return self.value
 
 
-_ISSUED_LOCK = Lock()
-_ISSUED_WITNESSES: dict[int, tuple[str, bool]] = {}
-_ISSUED_RESULTS: dict[int, str] = {}
+def _prepare_issuance_authority():
+    """Build closure-private issuance state and return the one-time observer installer.
+
+    Positive completeness/result issuance is intentionally not exposed as a module
+    function or writable module registry.  The only mutating capability is captured
+    by wrappers installed around the canonical observer acquisition methods below.
+    """
+
+    lock = Lock()
+    issued_witnesses = weakref.WeakKeyDictionary()
+    issued_results = weakref.WeakKeyDictionary()
+    active_observers = weakref.WeakKeyDictionary()
+
+    def witness_assert_issued(self: BetfairReadCompletenessWitness) -> None:
+        with lock:
+            issued = issued_witnesses.get(self)
+        if issued is None or issued[0] != self._fingerprint():
+            raise BetfairReadOnlyError(
+                "Betfair completeness witness was not issued by the observer"
+            )
+
+    def witness_assert_authoritative(self: BetfairReadCompletenessWitness) -> None:
+        if (
+            self.completeness
+            is not BetfairObservationCompleteness.COMPLETE_FOR_DECLARED_QUERY_WINDOW
+        ):
+            raise BetfairReadOnlyError(
+                f"Betfair read is not complete: {self.completeness.value}"
+            )
+        witness_assert_issued(self)
+        with lock:
+            issued = issued_witnesses.get(self)
+        if issued is None or not issued[1]:
+            raise BetfairReadOnlyError(
+                "Betfair completeness witness lacks product-owned provider origin"
+            )
+
+    def result_assert_issued(
+        self: BetfairPagedReadResult | BetfairValueReadResult,
+    ) -> None:
+        with lock:
+            issued = issued_results.get(self)
+        if issued != self._fingerprint():
+            raise BetfairReadOnlyError(
+                "Betfair read result was not issued by the observer"
+            )
+
+    # Freeze the verification readers directly onto the evidence/result types.
+    # Their closure state is read-only to callers; ordinary module rebinding cannot
+    # replace the issuance registry or its truth predicate.
+    BetfairReadCompletenessWitness.assert_issued = witness_assert_issued
+    BetfairReadCompletenessWitness.assert_authoritative = witness_assert_authoritative
+    BetfairPagedReadResult._assert_issued = result_assert_issued
+    BetfairValueReadResult._assert_issued = result_assert_issued
+
+    def enter(observer: object) -> None:
+        with lock:
+            active_observers[observer] = active_observers.get(observer, 0) + 1
+
+    def leave(observer: object) -> None:
+        with lock:
+            depth = active_observers.get(observer, 0)
+            if depth <= 1:
+                active_observers.pop(observer, None)
+            else:
+                active_observers[observer] = depth - 1
+
+    def is_active(observer: object) -> bool:
+        with lock:
+            return active_observers.get(observer, 0) > 0
+
+    def issue_witness(
+        observer: object,
+        witness: BetfairReadCompletenessWitness,
+        *,
+        authoritative_origin: bool,
+    ) -> BetfairReadCompletenessWitness:
+        if type(authoritative_origin) is not bool:
+            raise TypeError("authoritative_origin must be bool")
+        if not is_active(observer):
+            return witness
+        with lock:
+            issued_witnesses[witness] = (
+                witness._fingerprint(),
+                authoritative_origin,
+            )
+        return witness
+
+    def issue_result(
+        observer: object,
+        result: BetfairPagedReadResult | BetfairValueReadResult,
+    ) -> BetfairPagedReadResult | BetfairValueReadResult:
+        if not is_active(observer):
+            return result
+        with lock:
+            issued_results[result] = result._fingerprint()
+        return result
+
+    def install(observer_type: type) -> None:
+        original_witness = observer_type._witness
+        original_paged_result = observer_type._paged_result
+        original_read_value = observer_type._read_value
+
+        def guarded_witness(self, *args, **kwargs):
+            witness = original_witness(self, *args, **kwargs)
+            return issue_witness(
+                self,
+                witness,
+                authoritative_origin=self._product_origin_is_intact(),
+            )
+
+        def guarded_paged_result(self, *args, **kwargs):
+            result = original_paged_result(self, *args, **kwargs)
+            return issue_result(self, result)
+
+        def guarded_read_value(self, *args, **kwargs):
+            result = original_read_value(self, *args, **kwargs)
+            return issue_result(self, result)
+
+        observer_type._witness = guarded_witness
+        observer_type._paged_result = guarded_paged_result
+        observer_type._read_value = guarded_read_value
+
+        def wrap_public(method):
+            def guarded(self, *args, **kwargs):
+                enter(self)
+                try:
+                    return method(self, *args, **kwargs)
+                finally:
+                    leave(self)
+            return guarded
+
+        for name in (
+            "read_account_funds",
+            "read_account_details",
+            "read_current_orders",
+            "read_cleared_orders",
+        ):
+            setattr(observer_type, name, wrap_public(getattr(observer_type, name)))
+
+    return install
 
 
-def _drop_issued(identity: int) -> None:
-    with _ISSUED_LOCK:
-        _ISSUED_WITNESSES.pop(identity, None)
-
-
-def _drop_issued_result(identity: int) -> None:
-    with _ISSUED_LOCK:
-        _ISSUED_RESULTS.pop(identity, None)
-
-
-def _issue(
-    witness: BetfairReadCompletenessWitness,
-    *,
-    authoritative_origin: bool,
-) -> BetfairReadCompletenessWitness:
-    if type(authoritative_origin) is not bool:
-        raise TypeError("authoritative_origin must be bool")
-    identity = id(witness)
-    with _ISSUED_LOCK:
-        _ISSUED_WITNESSES[identity] = (
-            witness._fingerprint(),
-            authoritative_origin,
-        )
-    weakref.finalize(witness, _drop_issued, identity)
-    return witness
-
-
-def _issue_result(
-    result: BetfairPagedReadResult | BetfairValueReadResult,
-) -> BetfairPagedReadResult | BetfairValueReadResult:
-    identity = id(result)
-    with _ISSUED_LOCK:
-        _ISSUED_RESULTS[identity] = result._fingerprint()
-    weakref.finalize(result, _drop_issued_result, identity)
-    return result
+_INSTALL_OBSERVER_ISSUANCE = _prepare_issuance_authority()
+del _prepare_issuance_authority
 
 
 class BetfairReadCompletenessObserver:
@@ -561,7 +666,7 @@ class BetfairReadCompletenessObserver:
                 completeness,
                 code,
             )
-            return _issue_result(BetfairValueReadResult(None, witness))
+            return BetfairValueReadResult(None, witness)
         page = (
             0,
             1,
@@ -578,7 +683,7 @@ class BetfairReadCompletenessObserver:
             BetfairObservationCompleteness.COMPLETE_FOR_DECLARED_QUERY_WINDOW,
             None,
         )
-        return _issue_result(BetfairValueReadResult(value, witness))
+        return BetfairValueReadResult(value, witness)
 
     def _paged_result(
         self,
@@ -601,7 +706,7 @@ class BetfairReadCompletenessObserver:
             completeness,
             failure_code,
         )
-        return _issue_result(BetfairPagedReadResult(tuple(items), witness))
+        return BetfairPagedReadResult(tuple(items), witness)
 
     def _witness(
         self,
@@ -629,10 +734,7 @@ class BetfairReadCompletenessObserver:
             rows_observed,
             failure_code,
         )
-        return _issue(
-            witness,
-            authoritative_origin=self._product_origin_is_intact(),
-        )
+        return witness
 
     def _client_read_dispatch_is_intact(self) -> bool:
         """Reject caller-shadowed or rebound provider read executables."""
@@ -714,6 +816,10 @@ class BetfairReadCompletenessObserver:
         if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
             raise BetfairReadOnlyError("completeness clock must return timezone-aware datetime")
         return value.isoformat()
+
+
+_INSTALL_OBSERVER_ISSUANCE(BetfairReadCompletenessObserver)
+del _INSTALL_OBSERVER_ISSUANCE
 
 
 def _provider_end_completeness(

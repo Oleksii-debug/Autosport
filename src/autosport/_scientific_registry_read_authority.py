@@ -198,6 +198,16 @@ def _read_authority_verified(self: _registry.ScientificRegistry) -> dict[str, An
         module=_registry,
         qualname="ScientificRegistry._validate_promotion_effective_sample_causal_inputs",
     )
+    _source_owned_function(
+        _raw_class_function("_promotion_effective_sample_bundle_from_entry"),
+        module=_registry,
+        qualname="ScientificRegistry._promotion_effective_sample_bundle_from_entry",
+    )
+    _source_owned_function(
+        _raw_class_function("_entry"),
+        module=_registry,
+        qualname="ScientificRegistry._entry",
+    )
     raw = _integrity.read_verified_scientific_registry_text(self.path)
     try:
         state = json.loads(

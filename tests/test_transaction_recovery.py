@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import autosport._paperbook_preload_authority_guard as paper_guard
 from autosport.dataset import load_dataset
 from autosport.decision_ledger import DecisionRecord, JsonlDecisionLedger
 from autosport.integrity import sha256_file
@@ -170,9 +171,22 @@ class TransactionRecoveryTests(unittest.TestCase):
             registry, key, item = self._in_progress(root)
             tx = RunTransaction(root, str(item["run_id"]))
 
-            # Simulate a process dying after the first os.replace: PaperBook is NEW,
-            # Decision Ledger and summary are still BASE/absent.
-            os.replace(tx.staged_book_path, root / "paper_book.json")
+            # Simulate process death after the canonical PaperBook PREPARE + replace
+            # but before COMMIT. Path-bound authority recovery must complete that exact
+            # generation before the remaining transaction artifacts are reconciled.
+            canonical_book_path = root / "paper_book.json"
+            staged_sha = sha256_file(tx.staged_book_path)
+            _records, committed, pending = paper_guard._read_witnesses(canonical_book_path)
+            self.assertIsNotNone(committed)
+            self.assertIsNone(pending)
+            generation = committed[0] + 1
+            paper_guard._append_witness(
+                canonical_book_path,
+                event=paper_guard._PREPARE,
+                generation=generation,
+                snapshot_sha256=staged_sha,
+            )
+            os.replace(tx.staged_book_path, canonical_book_path)
             session.close()
 
             report = reconcile_late_crashes(root)
@@ -398,6 +412,360 @@ class TransactionRecoveryTests(unittest.TestCase):
                 tx.commit()
             self.assertEqual(PaperBook.load(root / "paper_book.json").balance, 10000)
             self.assertEqual((root / "decisions.jsonl").read_text(encoding="utf-8"), "")
+
+    def test_stage_outputs_rejects_unbound_paper_book_before_staging(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            book_path = root / "paper_book.json"
+            ledger_path = root / "decisions.jsonl"
+            PaperBook("10000").save(book_path)
+            ledger_path.write_bytes(b"")
+            canonical_bytes = book_path.read_bytes()
+            witness_path = paper_guard._witness_path(book_path)
+            witness_bytes = witness_path.read_bytes()
+
+            tx = RunTransaction.start(
+                root,
+                run_id="reject-unbound-stage",
+                experiment_key="experiment",
+                market_sha256="a" * 64,
+                results_sha256="b" * 64,
+                strategy_id="baseline-v1",
+                base_paper_book_sha256=sha256_file(book_path),
+                base_decision_ledger_sha256=sha256_file(ledger_path),
+            )
+            arbitrary = PaperBook("25000")
+
+            with self.assertRaisesRegex(
+                RunTransactionError,
+                "verified path-bound authority",
+            ):
+                tx.stage_outputs(arbitrary, ledger_path)
+
+            self.assertFalse(tx.staged_book_path.exists())
+            self.assertFalse(paper_guard._witness_path(tx.staged_book_path).exists())
+            self.assertEqual(book_path.read_bytes(), canonical_bytes)
+            self.assertEqual(witness_path.read_bytes(), witness_bytes)
+
+    def test_stage_outputs_binding_ignores_rebound_guard_validator(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            book_path = root / "paper_book.json"
+            ledger_path = root / "decisions.jsonl"
+            PaperBook("10000").save(book_path)
+            ledger_path.write_bytes(b"")
+            snapshot_before = book_path.read_bytes()
+            witness_path = paper_guard._witness_path(book_path)
+            witness_before = witness_path.read_bytes()
+            tx = RunTransaction.start(
+                root,
+                run_id="sealed-binding-reject-unbound",
+                experiment_key="experiment",
+                market_sha256="a" * 64,
+                results_sha256="b" * 64,
+                strategy_id="baseline-v1",
+                base_paper_book_sha256=sha256_file(book_path),
+                base_decision_ledger_sha256=sha256_file(ledger_path),
+            )
+            arbitrary = PaperBook("25000")
+            hostile_calls: list[tuple[object, object]] = []
+
+            def hostile(book: object, path: object) -> None:
+                hostile_calls.append((book, path))
+                return None
+
+            with patch.object(paper_guard, "_require_bound_book", new=hostile):
+                with self.assertRaisesRegex(
+                    RunTransactionError,
+                    "verified path-bound authority",
+                ):
+                    tx.stage_outputs(arbitrary, ledger_path)
+
+            self.assertEqual(hostile_calls, [])
+            self.assertFalse(tx.staged_book_path.exists())
+            self.assertFalse(paper_guard._witness_path(tx.staged_book_path).exists())
+            self.assertEqual(book_path.read_bytes(), snapshot_before)
+            self.assertEqual(witness_path.read_bytes(), witness_before)
+
+    def test_stage_outputs_bound_book_survives_rebound_guard_validator(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            book_path = root / "paper_book.json"
+            ledger_path = root / "decisions.jsonl"
+            PaperBook("10000").save(book_path)
+            ledger_path.write_bytes(b"")
+            working = PaperBook.load(book_path)
+            tx = RunTransaction.start(
+                root,
+                run_id="sealed-binding-positive",
+                experiment_key="experiment",
+                market_sha256="a" * 64,
+                results_sha256="b" * 64,
+                strategy_id="baseline-v1",
+                base_paper_book_sha256=sha256_file(book_path),
+                base_decision_ledger_sha256=sha256_file(ledger_path),
+            )
+            hostile_calls: list[tuple[object, object]] = []
+
+            def hostile(book: object, path: object) -> None:
+                hostile_calls.append((book, path))
+                raise AssertionError("rebound mutable binding validator was dispatched")
+
+            with patch.object(paper_guard, "_require_bound_book", new=hostile):
+                staged_book_hash, _staged_ledger_hash = tx.stage_outputs(
+                    working,
+                    ledger_path,
+                )
+
+            self.assertEqual(hostile_calls, [])
+            self.assertEqual(staged_book_hash, sha256_file(book_path))
+            self.assertTrue(tx.staged_book_path.is_file())
+            self.assertFalse(paper_guard._witness_path(tx.staged_book_path).exists())
+
+    def test_stage_outputs_binding_rejects_retargeted_consumer_globals(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            book_path = root / "paper_book.json"
+            ledger_path = root / "decisions.jsonl"
+            PaperBook("10000").save(book_path)
+            ledger_path.write_bytes(b"")
+            snapshot_before = book_path.read_bytes()
+            witness_path = paper_guard._witness_path(book_path)
+            witness_before = witness_path.read_bytes()
+            tx = RunTransaction.start(
+                root,
+                run_id="consumer-global-reject-unbound",
+                experiment_key="experiment",
+                market_sha256="a" * 64,
+                results_sha256="b" * 64,
+                strategy_id="baseline-v1",
+                base_paper_book_sha256=sha256_file(book_path),
+                base_decision_ledger_sha256=sha256_file(ledger_path),
+            )
+            arbitrary = PaperBook("25000")
+            hostile_calls: list[tuple[object, object]] = []
+
+            def hostile(book: object, path: object) -> None:
+                hostile_calls.append((book, path))
+                return None
+
+            public_stage = RunTransaction._stage_paper_book_snapshot
+            with (
+                patch.dict(
+                    public_stage.__globals__,
+                    {
+                        "_FROZEN_REQUIRE_BOUND_BOOK": hostile,
+                        "_FROZEN_REQUIRE_BOUND_BOOK_CODE": hostile.__code__,
+                        "_REQUIRE_CURRENT_BINDING": hostile,
+                    },
+                ),
+                self.assertRaisesRegex(RunTransactionError, "verified path-bound authority"),
+            ):
+                tx.stage_outputs(arbitrary, ledger_path)
+
+            self.assertEqual(hostile_calls, [])
+            self.assertFalse(tx.staged_book_path.exists())
+            self.assertFalse(paper_guard._witness_path(tx.staged_book_path).exists())
+            self.assertEqual(book_path.read_bytes(), snapshot_before)
+            self.assertEqual(witness_path.read_bytes(), witness_before)
+
+    def test_stage_outputs_bound_book_survives_retargeted_consumer_globals(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            book_path = root / "paper_book.json"
+            ledger_path = root / "decisions.jsonl"
+            PaperBook("10000").save(book_path)
+            ledger_path.write_bytes(b"")
+            working = PaperBook.load(book_path)
+            tx = RunTransaction.start(
+                root,
+                run_id="consumer-global-bound-positive",
+                experiment_key="experiment",
+                market_sha256="a" * 64,
+                results_sha256="b" * 64,
+                strategy_id="baseline-v1",
+                base_paper_book_sha256=sha256_file(book_path),
+                base_decision_ledger_sha256=sha256_file(ledger_path),
+            )
+            hostile_calls: list[tuple[object, object]] = []
+
+            def hostile(book: object, path: object) -> None:
+                hostile_calls.append((book, path))
+                raise AssertionError("retargeted consumer globals were dispatched")
+
+            public_stage = RunTransaction._stage_paper_book_snapshot
+            with patch.dict(
+                public_stage.__globals__,
+                {
+                    "_FROZEN_REQUIRE_BOUND_BOOK": hostile,
+                    "_FROZEN_REQUIRE_BOUND_BOOK_CODE": hostile.__code__,
+                    "_REQUIRE_CURRENT_BINDING": hostile,
+                },
+            ):
+                staged_book_hash, _ = tx.stage_outputs(working, ledger_path)
+
+            self.assertEqual(hostile_calls, [])
+            self.assertEqual(staged_book_hash, sha256_file(book_path))
+            self.assertTrue(tx.staged_book_path.is_file())
+            self.assertFalse(paper_guard._witness_path(tx.staged_book_path).exists())
+
+    def test_stage_outputs_keeps_transaction_snapshot_non_authoritative(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            book_path = root / "paper_book.json"
+            ledger_path = root / "decisions.jsonl"
+            initial = PaperBook("10000")
+            initial.save(book_path)
+            ledger_path.write_bytes(b"")
+            working = PaperBook.load(book_path)
+
+            tx = RunTransaction.start(
+                root,
+                run_id="bounded-stage",
+                experiment_key="experiment",
+                market_sha256="a" * 64,
+                results_sha256="b" * 64,
+                strategy_id="baseline-v1",
+                base_paper_book_sha256=sha256_file(book_path),
+                base_decision_ledger_sha256=sha256_file(ledger_path),
+            )
+            tx.stage_outputs(working, ledger_path)
+
+            self.assertTrue(tx.staged_book_path.is_file())
+            self.assertFalse(paper_guard._witness_path(tx.staged_book_path).exists())
+            structural = PaperBook.load_bytes(tx.staged_book_path.read_bytes())
+            self.assertEqual(structural.balance, 10000)
+            with self.assertRaisesRegex(
+                ValueError,
+                "missing independent durable opening witness",
+            ):
+                PaperBook.load(tx.staged_book_path)
+            self.assertEqual(PaperBook.load(book_path).balance, 10000)
+
+    def test_precommitted_noop_paper_book_recovery_preserves_witness_generation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            book_path = root / "paper_book.json"
+            ledger_path = root / "decisions.jsonl"
+            PaperBook("10000").save(book_path)
+            ledger_path.write_bytes(b"")
+
+            base_book_hash = sha256_file(book_path)
+            base_ledger_hash = sha256_file(ledger_path)
+            canonical_book_bytes = book_path.read_bytes()
+            witness_path = paper_guard._witness_path(book_path)
+            witness_bytes = witness_path.read_bytes()
+            _records_before, committed_before, pending_before = paper_guard._read_witnesses(
+                book_path
+            )
+            self.assertIsNotNone(committed_before)
+            self.assertIsNone(pending_before)
+
+            run_id = "noop-paper-book-recovery"
+            market_hash = "a" * 64
+            results_hash = "b" * 64
+            strategy_id = "baseline-v1"
+            tx = RunTransaction.start(
+                root,
+                run_id=run_id,
+                experiment_key="experiment",
+                market_sha256=market_hash,
+                results_sha256=results_hash,
+                strategy_id=strategy_id,
+                base_paper_book_sha256=base_book_hash,
+                base_decision_ledger_sha256=base_ledger_hash,
+            )
+            JsonlDecisionLedger(tx.run_ledger_path).append(
+                DecisionRecord(
+                    run_id,
+                    "agent",
+                    "2026-01-01T00:00:00+00:00",
+                    "OBSERVE",
+                    {"reason": "no-bet"},
+                    "ctx",
+                )
+            )
+
+            working = PaperBook.load(book_path)
+            staged_book_hash, staged_ledger_hash = tx.stage_outputs(
+                working,
+                ledger_path,
+            )
+            self.assertEqual(staged_book_hash, base_book_hash)
+            self.assertNotEqual(staged_ledger_hash, base_ledger_hash)
+            self.assertFalse(paper_guard._witness_path(tx.staged_book_path).exists())
+
+            summary = tx.precommit(
+                {
+                    "run_id": run_id,
+                    "experiment_key": "experiment",
+                    "market_sha256": market_hash,
+                    "sealed_results_sha256": results_hash,
+                    "strategy_id": strategy_id,
+                    "real_money_execution": False,
+                }
+            )
+            self.assertEqual(summary["paper_book_sha256"], base_book_hash)
+            manifest = json.loads(tx.manifest_path.read_text(encoding="utf-8"))
+            self.assertEqual(manifest["base"]["paper_book_sha256"], base_book_hash)
+            self.assertEqual(manifest["new"]["paper_book_sha256"], base_book_hash)
+            self.assertNotEqual(
+                manifest["new"]["decision_ledger_sha256"],
+                base_ledger_hash,
+            )
+
+            registry_item = {
+                "run_id": run_id,
+                "market_sha256": market_hash,
+                "results_sha256": results_hash,
+                "strategy_id": strategy_id,
+                "base_paper_book_sha256": base_book_hash,
+                "base_decision_ledger_sha256": base_ledger_hash,
+            }
+            recovery = RunTransaction.recover(
+                root,
+                run_id=run_id,
+                registry_item=registry_item,
+                experiment_key="experiment",
+            )
+            self.assertEqual(recovery.disposition, "committed")
+            self.assertIsNotNone(recovery.summary_path)
+            self.assertTrue(recovery.summary_path.is_file())
+
+            _records_after, committed_after, pending_after = paper_guard._read_witnesses(
+                book_path
+            )
+            self.assertEqual(book_path.read_bytes(), canonical_book_bytes)
+            self.assertEqual(witness_path.read_bytes(), witness_bytes)
+            self.assertEqual(committed_after, committed_before)
+            self.assertIsNone(pending_after)
+            self.assertFalse(paper_guard._witness_path(tx.staged_book_path).exists())
+            self.assertEqual(PaperBook.load(book_path).balance, 10000)
+            self.assertEqual(
+                len(ledger_path.read_text(encoding="utf-8").splitlines()),
+                1,
+            )
+            committed_manifest = json.loads(
+                tx.manifest_path.read_text(encoding="utf-8")
+            )
+            self.assertEqual(committed_manifest["phase"], "canonical_committed")
+
+            # Recovery is idempotent and still must not create an economic generation
+            # solely because the other transaction artifacts are already committed.
+            retry = RunTransaction.recover(
+                root,
+                run_id=run_id,
+                registry_item=registry_item,
+                experiment_key="experiment",
+            )
+            self.assertEqual(retry.disposition, "committed")
+            self.assertEqual(witness_path.read_bytes(), witness_bytes)
+            _records_retry, committed_retry, pending_retry = paper_guard._read_witnesses(
+                book_path
+            )
+            self.assertEqual(committed_retry, committed_before)
+            self.assertIsNone(pending_retry)
+
 
     def test_precommit_rejects_nonfinite_summary_before_manifest_precommit(self):
         with tempfile.TemporaryDirectory() as tmp:

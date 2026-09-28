@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
@@ -10,6 +9,7 @@ import pytest
 
 from autosport.gui import AutosportApp
 from autosport.live_observation import observe_workspace_once
+from autosport.paper import PaperBook
 from autosport.localization import text
 from autosport.providers import ProviderBatch, ProviderQuote
 from autosport.session import AutosportSession
@@ -146,13 +146,18 @@ def test_real_paperbook_corruption_does_not_block_real_live_market_observation(t
     )
     assert len(initial.current_quotes) == 1
 
-    corrupt_paper = b"{ definitely-not-valid-json"
     paper_path = workspace / "paper_book.json"
+    PaperBook("10000").save(paper_path)
+    corrupt_paper = b"{ definitely-not-valid-json"
     paper_path.write_bytes(corrupt_paper)
 
-    # The real economic session now fails specifically while loading PaperBook,
-    # after the same market/source-health prerequisites have opened successfully.
-    with pytest.raises(json.JSONDecodeError):
+    # The real economic session now fails specifically while loading PaperBook.
+    # This is a real durable-corruption case: a canonical witness exists, so the
+    # mismatch is rejected before untrusted corrupt bytes reach the JSON parser.
+    with pytest.raises(
+        ValueError,
+        match="snapshot bytes do not match independent durable opening witness",
+    ):
         AutosportSession(workspace, "10000")
 
     # Live observation uses only market.db + source_health.json. It must continue

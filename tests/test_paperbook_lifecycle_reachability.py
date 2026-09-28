@@ -95,10 +95,9 @@ class PaperBookLifecycleReachabilityTests(unittest.TestCase):
                 },
             ],
         }
-        self.path.write_text(json.dumps(payload), encoding="utf-8")
 
         with self.assertRaisesRegex(ValueError, "inconsistent with lifecycle settlement witness"):
-            PaperBook.load(self.path)
+            PaperBook.load_bytes(json.dumps(payload).encode("utf-8"))
 
     def test_schema2_rejects_ticket_that_could_not_be_afforded_when_opened(self) -> None:
         payload = {
@@ -133,10 +132,9 @@ class PaperBookLifecycleReachabilityTests(unittest.TestCase):
                 },
             ],
         }
-        self.path.write_text(json.dumps(payload), encoding="utf-8")
 
         with self.assertRaisesRegex(ValueError, "was not affordable"):
-            PaperBook.load(self.path)
+            PaperBook.load_bytes(json.dumps(payload).encode("utf-8"))
 
     def test_settlement_rejects_unknown_resolution_key_before_mutation(self) -> None:
         book = PaperBook("100")
@@ -249,7 +247,7 @@ class PaperBookLifecycleReachabilityTests(unittest.TestCase):
 
         self.assertFalse(self.path.exists())
 
-    def test_legacy_open_only_snapshot_remains_loadable_and_upgrades_on_save(self) -> None:
+    def test_legacy_open_only_snapshot_is_forensic_only_without_independent_witness(self) -> None:
         payload = {
             "initial_bankroll": "100",
             "balance": "90",
@@ -274,15 +272,20 @@ class PaperBookLifecycleReachabilityTests(unittest.TestCase):
         }
         self.path.write_text(json.dumps(payload), encoding="utf-8")
 
-        book = PaperBook.load(self.path)
-        book.save(self.path)
-        upgraded = json.loads(self.path.read_text(encoding="utf-8"))
+        book = PaperBook.load_bytes(self.path.read_bytes())
+        self.assertEqual(book.balance, Decimal("90"))
+        self.assertEqual(tuple(book.tickets), ("ticket-1",))
 
-        self.assertEqual(upgraded["schema_version"], 7)
-        self.assertEqual(
-            upgraded["lifecycle"],
-            [{"action": "open", "ticket_id": "ticket-1"}],
-        )
+        with self.assertRaisesRegex(
+            ValueError,
+            "missing independent durable opening witness",
+        ):
+            PaperBook.load(self.path)
+        with self.assertRaisesRegex(
+            ValueError,
+            "byte-loaded snapshot lacks product-issued opening authority",
+        ):
+            book.save(Path(self._tmp.name) / "upgrade.json")
 
     def test_legacy_settled_snapshot_fails_closed_without_lifecycle_provenance(self) -> None:
         payload = {
@@ -307,10 +310,149 @@ class PaperBookLifecycleReachabilityTests(unittest.TestCase):
                 }
             ],
         }
-        self.path.write_text(json.dumps(payload), encoding="utf-8")
 
         with self.assertRaisesRegex(ValueError, "missing lifecycle provenance"):
-            PaperBook.load(self.path)
+            PaperBook.load_bytes(json.dumps(payload).encode("utf-8"))
+
+    def test_private_causal_history_rejects_coherent_winner_to_loss_rewrite(self) -> None:
+        book = PaperBook("100")
+        leg = self._leg("event-1", "alice", "2")
+        ticket = book.open_ticket(
+            [leg],
+            "10",
+            placed_at="2026-09-14T09:00:00+00:00",
+        )
+        settlement_time = "2026-09-14T10:00:00+00:00"
+        book.settle(
+            ticket.ticket_id,
+            {leg.quote_key},
+            settled_at=settlement_time,
+        )
+        book.save(self.path)
+        durable_before = self.path.read_bytes()
+
+        # Rewrite every visible settlement fact into a self-consistent loss while
+        # leaving the product-issued opening facts untouched.
+        ticket.status = TicketStatus.LOST
+        ticket.payout = Decimal("0")
+        book.balance = Decimal("90")
+        book._lifecycle[-1] = ("settle", ticket.ticket_id, (), ())
+        self.assertEqual(book._settlement_times[ticket.ticket_id], settlement_time)
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "causal history changed outside product-issued transitions",
+        ):
+            book.save(self.path)
+        self.assertEqual(self.path.read_bytes(), durable_before)
+
+    def test_serialized_candidate_rejects_post_validation_causal_rewrite(self) -> None:
+        book = PaperBook("100")
+        leg = self._leg("event-1", "alice", "2")
+        ticket = book.open_ticket(
+            [leg],
+            "10",
+            placed_at="2026-09-14T09:00:00+00:00",
+        )
+        settlement_time = "2026-09-14T10:00:00+00:00"
+        book.settle(
+            ticket.ticket_id,
+            {leg.quote_key},
+            settled_at=settlement_time,
+        )
+        book.save(self.path)
+        durable_before = self.path.read_bytes()
+
+        original_descriptor = PaperBook.__dict__["_validate_loaded_state"]
+        original_validate = original_descriptor.__func__
+        injected = False
+
+        def validate_then_rewrite(cls, candidate):
+            nonlocal injected
+            result = original_validate(cls, candidate)
+            if candidate is book and not injected:
+                injected = True
+                ticket.status = TicketStatus.LOST
+                ticket.payout = Decimal("0")
+                book.balance = Decimal("90")
+                book._lifecycle[-1] = ("settle", ticket.ticket_id, (), ())
+            return result
+
+        PaperBook._validate_loaded_state = classmethod(validate_then_rewrite)
+        try:
+            with self.assertRaisesRegex(
+                ValueError,
+                "persistence class dispatch authority changed",
+            ):
+                book.save(self.path)
+        finally:
+            PaperBook._validate_loaded_state = original_descriptor
+
+        self.assertFalse(injected)
+        self.assertEqual(self.path.read_bytes(), durable_before)
+
+    def test_private_causal_history_rejects_coherent_reopen_before_second_settlement(self) -> None:
+        book = PaperBook("100")
+        leg = self._leg("event-1", "alice", "2")
+        ticket = book.open_ticket(
+            [leg],
+            "10",
+            placed_at="2026-09-14T09:00:00+00:00",
+        )
+        book.settle(
+            ticket.ticket_id,
+            {leg.quote_key},
+            settled_at="2026-09-14T10:00:00+00:00",
+        )
+
+        # Reconstruct a structurally coherent pre-settlement epoch. Structural
+        # replay alone accepts it; private product history must not.
+        ticket.status = TicketStatus.OPEN
+        ticket.payout = Decimal("0")
+        ticket.settled_at = None
+        book.balance = Decimal("90")
+        book._lifecycle[:] = [("open", ticket.ticket_id, (), ())]
+        book._settlement_times.clear()
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "causal history changed outside product-issued transitions",
+        ):
+            book.settle(
+                ticket.ticket_id,
+                {leg.quote_key},
+                settled_at="2026-09-14T11:00:00+00:00",
+            )
+        self.assertEqual(book.balance, Decimal("90"))
+        self.assertIs(ticket.status, TicketStatus.OPEN)
+        self.assertEqual(ticket.payout, Decimal("0"))
+
+    def test_committed_stake_rejects_status_rewrite_inconsistent_with_causal_history(self) -> None:
+        book = PaperBook("100")
+        leg = self._leg("event-1", "alice", "2")
+        ticket = book.open_ticket(
+            [leg],
+            "10",
+            placed_at="2026-09-14T09:00:00+00:00",
+        )
+        book.settle(
+            ticket.ticket_id,
+            {leg.quote_key},
+            settled_at="2026-09-14T10:00:00+00:00",
+        )
+        self.assertEqual(book.committed_stake, Decimal("0"))
+
+        # Caller-visible status alone is not opening identity. A readout must
+        # validate it against the product-issued causal settlement witness.
+        ticket.status = TicketStatus.OPEN
+        ticket.payout = Decimal("0")
+        ticket.settled_at = None
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "settled_at is inconsistent with lifecycle provenance",
+        ):
+            _ = book.committed_stake
 
 
 if __name__ == "__main__":

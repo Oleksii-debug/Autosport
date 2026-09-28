@@ -2,6 +2,7 @@ import json
 import sqlite3
 import tempfile
 import unittest
+from decimal import Decimal
 from pathlib import Path
 from unittest.mock import patch
 
@@ -23,7 +24,7 @@ from autosport.collector_retention import (
     RetentionPinKind,
 )
 from autosport.decision_ledger import DecisionRecord, JsonlDecisionLedger
-from autosport.domain import MarketEvent
+from autosport.domain import MarketEvent, TicketLeg
 from autosport.integrity import sha256_file
 from autosport.paper import PaperBook
 from autosport.run_registry import RunRegistry
@@ -183,7 +184,23 @@ class CollectorRetentionCompactionTests(unittest.TestCase):
             )
         )
         if complete:
-            transaction.stage_outputs(PaperBook("10001"), ledger.path)
+            staged_book = PaperBook.load(book_path)
+            staged_book.open_ticket(
+                [
+                    TicketLeg(
+                        event_id="retention-owner-fixture:event",
+                        market_id="retention-owner-fixture:winner",
+                        selection_id="retention-owner-fixture:home",
+                        locked_odds=Decimal("2"),
+                        sport="motorsport",
+                        exchange_side="back",
+                    )
+                ],
+                Decimal("1"),
+                reason="retention-owner-bound-new",
+                placed_at="2000-01-01T00:00:00+00:00",
+            )
+            transaction.stage_outputs(staged_book, ledger.path)
             summary = transaction.precommit(
                 {
                     "schema_version": 2,

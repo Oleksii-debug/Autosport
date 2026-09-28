@@ -45,7 +45,6 @@ def _exact_positive_inputs():
     (
         ("snapshot", CompleteGameBoardSnapshot, "snapshot must be CompleteGameBoardSnapshot"),
         ("bound", BoundPreEvaluationSession, "bound must be BoundPreEvaluationSession"),
-        ("risk_policy", PaperRiskPolicy, "risk_policy must be PaperRiskPolicy"),
         ("book", PaperBook, "book must be PaperBook"),
         (
             "dependency_graph",
@@ -68,6 +67,11 @@ def test_product_origin_rejects_polymorphic_authority_before_resolver_dispatch(
             **kwargs,
             material_action_id="material-action",
         )
+
+
+def test_paper_risk_policy_rejects_polymorphic_authority_before_product_origin_dispatch():
+    with pytest.raises(TypeError, match="canonical PaperRiskPolicy is not extensible"):
+        _subclass(PaperRiskPolicy)
 
 
 def test_product_origin_rejects_polymorphic_provider_member_before_attribute_read():

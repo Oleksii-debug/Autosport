@@ -181,6 +181,20 @@ class PaperExecutionAdoptionRuntime:
                 self.book,
                 "configured PaperBook does not match durable snapshot",
             )
+            # Existing durable state must be read-only at construction. Requiring
+            # the canonical generation binding proves that this exact caller object
+            # was loaded/adopted through the existing PaperBook authority without
+            # minting a no-op PREPARE/COMMIT generation. A merely structurally-equal
+            # caller is rejected rather than gaining path authority through save().
+            try:
+                _REQUIRE_CURRENT_BINDING(
+                    self.book,
+                    self.paper_book_path,
+                )
+            except (TypeError, ValueError) as exc:
+                raise PaperExecutionAdoptionError(
+                    "configured PaperBook lacks current durable snapshot authority"
+                ) from exc
         else:
             self.book.save(self.paper_book_path)
             durable_book = PaperBook.load(self.paper_book_path)
@@ -276,10 +290,12 @@ class PaperExecutionAdoptionRuntime:
                 or leg.market_id != event.market_id
                 or leg.selection_id != event.selection_id
                 or leg.sport != event.sport
+                or leg.exchange_side != event.exchange_side
             ):
                 raise PaperExecutionAdoptionError(
                     "ticket leg identity does not match canonical execution quote"
                 )
+            self._require_back_compatible_exchange_side(event.exchange_side)
 
             account_by_source = dict(context.provider_accounts)
             if set(account_by_source) != {event.source_id}:
@@ -360,6 +376,18 @@ class PaperExecutionAdoptionRuntime:
             )
         )
 
+    @staticmethod
+    def _require_back_compatible_exchange_side(exchange_side: str | None) -> None:
+        if exchange_side == "lay":
+            raise PaperExecutionAdoptionError(
+                "LAY PAPER adoption is unavailable until canonical liability "
+                "and settlement semantics are integrated"
+            )
+        if exchange_side not in {None, "back"}:
+            raise PaperExecutionAdoptionError(
+                "PAPER adoption exchange side is not supported"
+            )
+
     def prepare_paper_value_action(
         self,
         *,
@@ -387,6 +415,7 @@ class PaperExecutionAdoptionRuntime:
             raise ValueError("account_id must be non-empty canonical text")
         if (bankroll_id is None) != (currency is None):
             raise ValueError("bankroll_id and currency must be supplied together")
+        self._require_back_compatible_exchange_side(event.exchange_side)
 
         quote_time = _utc_timestamp(
             event.source_ts or event.observed_ts,
@@ -524,6 +553,27 @@ class PaperExecutionAdoptionRuntime:
             payload=self._exposure_scope_payload(prepared),
         )
 
+    @staticmethod
+    def _require_attempt_action_identity(attempt, action: ExecutionAction) -> None:
+        if attempt.side != action.side:
+            raise PaperExecutionAdoptionError(
+                "durable execution attempt side must match prepared action side"
+            )
+        if (
+            attempt.action_id != action.action_id
+            or attempt.bookmaker_id != action.bookmaker_id
+            or attempt.account_id != action.account_id
+            or attempt.event_id != action.event_id
+            or attempt.market_id != action.market_id
+            or attempt.selection_id != action.selection_id
+            or attempt.decision_quote_id != action.quote_id
+            or attempt.decision_odds != action.requested_odds
+            or attempt.requested_stake != action.requested_stake
+        ):
+            raise PaperExecutionAdoptionError(
+                "durable execution attempt identity does not match prepared action"
+            )
+
     def assert_recoverable_book_state(
         self,
         *,
@@ -582,6 +632,11 @@ class PaperExecutionAdoptionRuntime:
                 raise PaperExecutionAdoptionError(
                     "durable attempt is not bound to prepared execution action"
                 )
+            self._require_attempt_action_identity(attempt, action)
+            if action.side != "BACK":
+                raise PaperExecutionAdoptionError(
+                    "PaperBook recovery materialization requires matching BACK attempt side"
+                )
             if attempt.execution_odds is None or attempt.execution_stake is None:
                 raise PaperExecutionAdoptionError(
                     "accepted-equivalent durable attempt lacks execution truth"
@@ -594,6 +649,7 @@ class PaperExecutionAdoptionRuntime:
                         selection_id=attempt.selection_id,
                         locked_odds=attempt.execution_odds,
                         sport=binding.sport,
+                        exchange_side="back",
                     )
                 ],
                 attempt.execution_stake,
@@ -758,6 +814,11 @@ class PaperExecutionAdoptionRuntime:
         binding: PaperExposureBinding,
         decision_id: str,
     ) -> PaperTicket:
+        if action.side != "BACK":
+            raise PaperExecutionAdoptionError(
+                "PaperBook materialization supports BACK execution only"
+            )
+        self._require_attempt_action_identity(attempt, action)
         if attempt.execution_odds is None or attempt.execution_stake is None:
             raise PaperExecutionAdoptionError(
                 "accepted-equivalent attempt lacks execution odds/stake"
@@ -793,6 +854,7 @@ class PaperExecutionAdoptionRuntime:
                     selection_id=attempt.selection_id,
                     locked_odds=attempt.execution_odds,
                     sport=binding.sport,
+                    exchange_side="back",
                 )
             ],
             attempt.execution_stake,
@@ -817,7 +879,15 @@ class PaperExecutionAdoptionRuntime:
         binding: PaperExposureBinding,
     ) -> bool:
         if (
-            ticket.stake != attempt.execution_stake
+            attempt.action_id != action.action_id
+            or action.side != "BACK"
+            or attempt.side != action.side
+            or attempt.bookmaker_id != action.bookmaker_id
+            or attempt.account_id != action.account_id
+            or attempt.event_id != action.event_id
+            or attempt.market_id != action.market_id
+            or attempt.selection_id != action.selection_id
+            or ticket.stake != attempt.execution_stake
             or ticket.placed_at != attempt.execution_observed_at
             or len(ticket.legs) != 1
             or ticket.provider_source_ids != (attempt.bookmaker_id,)
@@ -837,4 +907,17 @@ class PaperExecutionAdoptionRuntime:
             and leg.selection_id == attempt.selection_id
             and leg.locked_odds == attempt.execution_odds
             and leg.sport == binding.sport
+            and leg.exchange_side == "back"
         )
+
+
+# Seal existing-path admission behind an inert-globals trampoline. Binding authority
+# is resolved from the sealed PaperBook persistence graph per invocation.
+from ._paperbook_current_binding_verifier import (
+    seal_current_binding_consumer as _seal_current_binding_consumer,
+)
+
+PaperExecutionAdoptionRuntime.__init__ = _seal_current_binding_consumer(
+    PaperExecutionAdoptionRuntime.__init__
+)
+del _seal_current_binding_consumer

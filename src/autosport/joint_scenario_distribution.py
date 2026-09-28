@@ -172,6 +172,92 @@ class _GroupSnapshot:
     declared_probabilities: tuple[tuple[str, Decimal], ...]
 
 
+def _paper_book_structural_sha256(book: PaperBook) -> str | None:
+    """Hash detached PaperBook structure without minting live risk authority.
+
+    Joint-scenario analysis needs an immutable working copy so caller-visible
+    PaperTicket mutation cannot affect scenario arithmetic.  A deepcopy must not
+    inherit product/current-generation capabilities, so authority-bearing risk
+    entrypoints cannot be used to authenticate that detached copy.  This helper is
+    deliberately assertion-only: it validates canonical PaperBook structure and
+    hashes every economic/identity/lifecycle field used to prove copy equality.
+    The report still carries the live authority hash from PaperRiskPolicy.
+    """
+
+    if not isinstance(book, PaperBook):
+        return None
+    try:
+        PaperBook._validate_loaded_state(book)
+        tickets: list[dict[str, object]] = []
+        for ticket_id in sorted(book.tickets):
+            ticket = book.tickets[ticket_id]
+            tickets.append(
+                {
+                    "ticket_id": ticket.ticket_id,
+                    "stake": str(ticket.stake),
+                    "placed_at": ticket.placed_at,
+                    "settled_at": ticket.settled_at,
+                    "status": ticket.status.value,
+                    "payout": str(ticket.payout),
+                    "strategy_reason": ticket.strategy_reason,
+                    "provider_source_ids": list(ticket.provider_source_ids),
+                    "provider_accounts": [
+                        {"source_id": source_id, "account_id": account_id}
+                        for source_id, account_id in ticket.provider_accounts
+                    ],
+                    "bankroll_id": ticket.bankroll_id,
+                    "currency": ticket.currency,
+                    "legs": [
+                        {
+                            "event_id": leg.event_id,
+                            "market_id": leg.market_id,
+                            "selection_id": leg.selection_id,
+                            "locked_odds": str(leg.locked_odds),
+                            "sport": leg.sport,
+                            "exchange_side": leg.exchange_side,
+                        }
+                        for leg in ticket.legs
+                    ],
+                }
+            )
+
+        lifecycle: list[dict[str, object]] = []
+        for raw_entry in book._lifecycle:
+            action, ticket_id, winners, voids = PaperBook._validate_lifecycle_entry(
+                raw_entry
+            )
+            lifecycle.append(
+                {
+                    "action": action,
+                    "ticket_id": ticket_id,
+                    "winning_quote_keys": list(winners),
+                    "void_quote_keys": list(voids),
+                    "settled_at": (
+                        book._settlement_times[ticket_id]
+                        if action == "settle"
+                        else None
+                    ),
+                }
+            )
+
+        canonical = json.dumps(
+            {
+                "schema": "autosport.joint-scenario-paperbook-structural-cut.v1",
+                "initial_bankroll": str(book.initial_bankroll),
+                "balance": str(book.balance),
+                "tickets": tickets,
+                "lifecycle": lifecycle,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+        return hashlib.sha256(canonical).hexdigest()
+    except (ArithmeticError, AttributeError, TypeError, ValueError):
+        return None
+
+
 def _snapshot_groups(groups: Iterable[ScenarioGroup]) -> tuple[_GroupSnapshot, ...]:
     materialized = _bounded_materialize(
         groups,
@@ -292,25 +378,28 @@ def analyse_joint_distribution(
     if not isinstance(book, PaperBook):
         raise ValueError("joint scenario analysis requires a canonical PaperBook")
     before_sha256 = PaperRiskPolicy.risk_of_ruin_portfolio_sha256(book)
-    if before_sha256 is None:
+    before_structural_sha256 = _paper_book_structural_sha256(book)
+    if before_sha256 is None or before_structural_sha256 is None:
         raise ValueError("joint scenario analysis requires a valid canonical PaperBook")
 
     # Bind all scenario economics to one detached canonical PaperBook cut. A live
     # PaperTicket is mutable during settlement, so a tuple of object references is
     # not a snapshot: an ABA mutation can affect one scenario and be restored before
-    # the final live-book hash. The detached book must independently hash to the
-    # exact pre-analysis commitment, and the live source must still match immediately
-    # after capture.
+    # the final live-book hash. The detached copy intentionally carries NO durable
+    # PaperBook/risk capability; compare it with an assertion-only structural digest
+    # while the original live book remains fenced by the authority-bearing risk hash.
     try:
         book_snapshot = copy.deepcopy(book)
     except Exception as exc:
         raise ValueError("cannot capture canonical PaperBook snapshot") from exc
-    snapshot_sha256 = PaperRiskPolicy.risk_of_ruin_portfolio_sha256(book_snapshot)
+    snapshot_structural_sha256 = _paper_book_structural_sha256(book_snapshot)
     capture_after_sha256 = PaperRiskPolicy.risk_of_ruin_portfolio_sha256(book)
+    capture_after_structural_sha256 = _paper_book_structural_sha256(book)
     if (
-        snapshot_sha256 is None
-        or snapshot_sha256 != before_sha256
+        snapshot_structural_sha256 is None
+        or snapshot_structural_sha256 != before_structural_sha256
         or capture_after_sha256 != before_sha256
+        or capture_after_structural_sha256 != before_structural_sha256
     ):
         raise ValueError("PaperBook changed during joint scenario analysis")
 
@@ -402,16 +491,21 @@ def analyse_joint_distribution(
             raise ValueError(
                 "portfolio scenario profit changed during joint scenario analysis"
             )
-        snapshot_after_sha256 = PaperRiskPolicy.risk_of_ruin_portfolio_sha256(
+        snapshot_after_structural_sha256 = _paper_book_structural_sha256(
             book_snapshot
         )
-        if snapshot_after_sha256 != snapshot_sha256:
+        if snapshot_after_structural_sha256 != snapshot_structural_sha256:
             raise ValueError("PaperBook snapshot changed during joint scenario analysis")
         profits.append(canonical_profit)
         weighted_profit += Fraction(state.probability) * Fraction(canonical_profit)
 
     after_sha256 = PaperRiskPolicy.risk_of_ruin_portfolio_sha256(book)
-    if after_sha256 is None or after_sha256 != before_sha256:
+    after_structural_sha256 = _paper_book_structural_sha256(book)
+    if (
+        after_sha256 is None
+        or after_sha256 != before_sha256
+        or after_structural_sha256 != before_structural_sha256
+    ):
         raise ValueError("PaperBook changed during joint scenario analysis")
 
     return JointScenarioReport(

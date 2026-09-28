@@ -1,9 +1,11 @@
 import json
 import tempfile
 import unittest
+from decimal import Decimal
 from pathlib import Path
 
 from autosport.decision_ledger import JsonlDecisionLedger
+from autosport.domain import TicketLeg
 from autosport.integrity import sha256_file
 from autosport.paper import PaperBook
 from autosport.run_registry import RunRegistry
@@ -43,7 +45,23 @@ class RunTransactionTerminalCompletionTests(unittest.TestCase):
             base_paper_book_sha256=base_book_hash,
             base_decision_ledger_sha256=base_ledger_hash,
         )
-        tx.stage_outputs(PaperBook("10001"), ledger.path)
+        staged_book = PaperBook.load(book_path)
+        staged_book.open_ticket(
+            [
+                TicketLeg(
+                    event_id="terminal-completion-fixture:event",
+                    market_id="terminal-completion-fixture:winner",
+                    selection_id="terminal-completion-fixture:home",
+                    locked_odds=Decimal("2"),
+                    sport="motorsport",
+                    exchange_side="back",
+                )
+            ],
+            Decimal("1"),
+            reason="terminal-completion-bound-new",
+            placed_at="2000-01-01T00:00:00+00:00",
+        )
+        tx.stage_outputs(staged_book, ledger.path)
         summary = tx.precommit(
             {
                 "schema_version": 2,

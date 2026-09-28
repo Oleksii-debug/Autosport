@@ -137,3 +137,37 @@ def _install() -> None:
 
 
 _install()
+
+# PAPER path persistence is structural evidence unless an independent durable
+# authority re-admits it. Install that fail-closed boundary as part of the existing
+# PAPER execution durability composition rather than inventing a parallel runtime.
+from . import _paperbook_preload_authority_guard as _paperbook_preload_authority_guard  # noqa: E402,F401
+
+# Restore the accepted object-generation CAS and one cross-process publication lock
+# inside that same witness authority before later composition freezes its dispatch.
+from . import _paperbook_preload_generation_cas_guard as _paperbook_preload_generation_cas_guard  # noqa: E402,F401
+
+# Freeze mutable stdlib member dispatch used inside the owning witness protocol before
+# its Python function graph is cloned. This prevents later json/hash/os/tempfile member
+# rebinding from retargeting the otherwise-frozen positive persistence path.
+from . import _paperbook_preload_module_member_freeze as _paperbook_preload_module_member_freeze  # noqa: E402,F401
+
+# Freeze the owning guard's positive load and durable-save dispatch graph after the
+# witness protocol is installed. This preserves one parser/serializer/authority while
+# making later guard-module or PaperBook helper retargeting non-authoritative.
+from . import _paperbook_preload_load_dispatch_guard as _paperbook_preload_load_dispatch_guard  # noqa: E402,F401
+
+# The frozen stdlib facades still dispatch attribute access through their Python class.
+# Extend the already-installed value-type witness before the final wrapper seal so
+# in-place facade-class executable mutation cannot retarget positive persistence.
+from . import _paperbook_preload_surface_type_guard as _paperbook_preload_surface_type_guard  # noqa: E402,F401
+
+# The installed wrappers themselves retain verifier function objects in a private
+# globals mapping. Seal those verifier executables against in-place code mutation so
+# disabling the graph check cannot authorize a later parser/serializer retarget.
+from . import _paperbook_preload_wrapper_helper_guard as _paperbook_preload_wrapper_helper_guard  # noqa: E402,F401
+
+# The fully sealed public graph no longer needs the pre-generation trusted path
+# load/save callables to remain reachable from the owning guard module. Retire those
+# obsolete capability handles only after every canonical wrapper has captured them.
+from . import _paperbook_preload_generation_handle_cleanup as _paperbook_preload_generation_handle_cleanup  # noqa: E402,F401

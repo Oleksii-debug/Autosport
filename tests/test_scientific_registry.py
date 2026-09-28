@@ -697,11 +697,11 @@ def test_causal_lookup_honors_availability_and_outcome_reveal(tmp_path):
     assert [entry.record_id for entry in visible] == ["dataset-hidden"]
 
 
-def test_promotion_fails_closed_then_blocks_reused_confirmation_holdout(tmp_path):
+
+def test_promotion_fails_closed_without_product_effective_sample_authority(tmp_path):
     registry = ScientificRegistry.initialize_pristine(tmp_path / "scientific_registry.json")
     foundation = _foundation(registry)
-    experiment = _experiment(outcome=ResearchOutcome.POSITIVE)
-    registry.append(experiment)
+    registry.append(_experiment(outcome=ResearchOutcome.POSITIVE))
 
     missing = PromotionDecision(
         "promotion-missing",
@@ -717,7 +717,7 @@ def test_promotion_fails_closed_then_blocks_reused_confirmation_holdout(tmp_path
     with pytest.raises(PromotionEvidenceError):
         registry.record_promotion(missing)
 
-    evidence1 = _promotion_evidence(
+    evidence = _promotion_evidence(
         experiment_id="experiment-1",
         strategy_id="strategy-1",
         model_id="model-1",
@@ -725,85 +725,26 @@ def test_promotion_fails_closed_then_blocks_reused_confirmation_holdout(tmp_path
         dataset_id="dataset-1",
         protocol_id="protocol-1",
         bundle_sha=foundation["bundle"].bundle_sha256,
-        evidence_id="promotion-1-evidence",
+        evidence_id="promotion-valid-looking-evidence",
         rollback_identity="NONE",
     )
-    registry.append(evidence1)
-    promote = replace(
+    registry.append(evidence)
+    decision = replace(
         missing,
-        promotion_decision_id="promotion-1",
+        promotion_decision_id="promotion-valid-looking",
         evaluation_bundle_id="eval-1",
         evaluation_bundle_sha256=foundation["bundle"].bundle_sha256,
-        promotion_evidence_id=evidence1.promotion_evidence_id,
+        promotion_evidence_id=evidence.promotion_evidence_id,
     )
-    registry.record_promotion(promote)
-    assert registry.champion_strategy(as_of=T3) == "strategy-1"
 
-    strategy2 = StrategyVersion(
-        "strategy-2",
-        "canonical-strategy",
-        SHA_C,
-        SHA_D,
-        SHA_B,
-        T3,
-        model_version_id="model-1",
-        predecessor_strategy_version_id="strategy-1",
-    )
-    bundle2 = EvaluationBundleRef(
-        "eval-2",
-        SHA_A,
-        SHA_C,
-        "dataset-1",
-        foundation["protocol"].protocol_sha256,
-        (SHA_B,),
-        T3,
-        evaluated_strategy_version_id="strategy-2",
-        evaluated_model_version_id="model-1",
-        effective_sample_size=5,
-        effect_interval_low="0.05",
-        effect_interval_high="0.15",
-        practical_improvement="0.1",
-    )
-    experiment2 = replace(
-        experiment,
-        experiment_id="experiment-2",
-        strategy_version_id="strategy-2",
-        evaluation_bundle_id="eval-2",
-        completed_at=T3,
-    )
-    for record in (strategy2, bundle2, experiment2):
-        registry.append(record)
-    evidence2 = _promotion_evidence(
-        experiment_id="experiment-2",
-        strategy_id="strategy-2",
-        model_id="model-1",
-        bundle_id="eval-2",
-        dataset_id="dataset-1",
-        protocol_id="protocol-1",
-        bundle_sha=bundle2.bundle_sha256,
-        evidence_id="promotion-2-evidence",
-        rollback_identity="strategy-1",
-    )
-    registry.append(evidence2)
-    promote2 = PromotionDecision(
-        "promotion-2",
-        PromotionAction.PROMOTE,
-        "strategy-2",
-        "protocol-1",
-        foundation["protocol"].protocol_sha256,
-        "eval-2",
-        bundle2.bundle_sha256,
-        T3,
-        predecessor_strategy_version_id="strategy-1",
-        candidate_model_version_id="model-1",
-        promotion_evidence_id=evidence2.promotion_evidence_id,
-    )
     with pytest.raises(
         PromotionEvidenceError,
-        match="confirmation holdout access has already been consumed",
+        match="product-issued effective-sample/dependence authority",
     ):
-        registry.record_promotion(promote2)
-    assert registry.champion_strategy(as_of=T3) == "strategy-1"
+        registry.record_promotion(decision)
+
+    assert registry.get("PromotionDecision", decision.promotion_decision_id) is None
+    assert registry.champion_strategy(as_of=T3) is None
 
 def test_promotion_rejects_forged_effect_interval_against_durable_evaluation(tmp_path):
     registry = ScientificRegistry.initialize_pristine(tmp_path / "scientific_registry.json")
@@ -890,7 +831,8 @@ def test_registry_detects_tampering_on_restart(tmp_path):
 
 
 
-def test_restart_revalidates_promotion_candidate_against_durable_evaluation(tmp_path):
+
+def test_failed_positive_promotion_leaves_restart_state_without_champion(tmp_path):
     path = tmp_path / "scientific_registry.json"
     registry = ScientificRegistry.initialize_pristine(path)
     foundation = _foundation(registry)
@@ -907,76 +849,29 @@ def test_restart_revalidates_promotion_candidate_against_durable_evaluation(tmp_
         rollback_identity="NONE",
     )
     registry.append(evidence)
-    registry.append(
-        StrategyVersion(
-            "strategy-shadow",
-            "canonical-strategy",
-            SHA_C,
-            SHA_D,
-            SHA_B,
-            T3,
-            model_version_id="model-1",
-            predecessor_strategy_version_id="strategy-1",
-        )
-    )
-    registry.record_promotion(
-        PromotionDecision(
-            "promotion-restart-binding",
-            PromotionAction.PROMOTE,
-            "strategy-1",
-            "protocol-1",
-            foundation["protocol"].protocol_sha256,
-            "eval-1",
-            foundation["bundle"].bundle_sha256,
-            T3,
-            candidate_model_version_id="model-1",
-            promotion_evidence_id=evidence.promotion_evidence_id,
-        )
-    )
-    assert registry.champion_strategy(as_of=T3) == "strategy-1"
-
-    raw = json.loads(path.read_text(encoding="utf-8"))
-    entry = next(
-        item
-        for item in raw["records"]
-        if item["record_type"] == "PromotionDecision"
-        and item["record_id"] == "promotion-restart-binding"
-    )
-    entry["payload"]["candidate_strategy_version_id"] = "strategy-shadow"
-    envelope = {
-        "record_type": entry["record_type"],
-        "record_id": entry["record_id"],
-        "available_at": entry["available_at"],
-        "payload": entry["payload"],
-    }
-    entry["record_sha256"] = hashlib.sha256(
-        json.dumps(
-            envelope,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-            allow_nan=False,
-        ).encode("utf-8")
-    ).hexdigest()
-    path.write_text(
-        json.dumps(
-            raw,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-            allow_nan=False,
-        ),
-        encoding="utf-8",
+    decision = PromotionDecision(
+        "promotion-restart-binding",
+        PromotionAction.PROMOTE,
+        "strategy-1",
+        "protocol-1",
+        foundation["protocol"].protocol_sha256,
+        "eval-1",
+        foundation["bundle"].bundle_sha256,
+        T3,
+        candidate_model_version_id="model-1",
+        promotion_evidence_id=evidence.promotion_evidence_id,
     )
 
     with pytest.raises(
         PromotionEvidenceError,
-        match="evaluation strategy mismatch",
+        match="product-issued effective-sample/dependence authority",
     ):
-        ScientificRegistry(path)
+        registry.record_promotion(decision)
 
+    reopened = ScientificRegistry(path)
+    assert reopened.get("PromotionDecision", decision.promotion_decision_id) is None
+    assert reopened.champion_strategy(as_of=T3) is None
 
-@pytest.mark.parametrize("bad_schema_version", [True, 1.0])
 def test_registry_rejects_noncanonical_schema_version_types(
     tmp_path, bad_schema_version
 ):
@@ -1123,11 +1018,11 @@ def test_direct_promotion_append_cannot_bypass_evidence_validation(tmp_path):
         registry.append(decision)
 
 
-def test_champion_history_orders_mixed_timezone_offsets_by_instant(tmp_path):
+
+def test_timezone_valid_positive_promotion_still_requires_product_ess_authority(tmp_path):
     registry = ScientificRegistry.initialize_pristine(tmp_path / "scientific_registry.json")
     foundation = _foundation(registry)
-    first_experiment = _experiment(outcome=ResearchOutcome.POSITIVE)
-    registry.append(first_experiment)
+    registry.append(_experiment(outcome=ResearchOutcome.POSITIVE))
     evidence = _promotion_evidence(
         experiment_id="experiment-1",
         strategy_id="strategy-1",
@@ -1141,7 +1036,7 @@ def test_champion_history_orders_mixed_timezone_offsets_by_instant(tmp_path):
         created_at="2026-01-03T23:00:00+00:00",
     )
     registry.append(evidence)
-    first = PromotionDecision(
+    decision = PromotionDecision(
         "promotion-offset-earlier",
         PromotionAction.PROMOTE,
         "strategy-1",
@@ -1153,29 +1048,15 @@ def test_champion_history_orders_mixed_timezone_offsets_by_instant(tmp_path):
         candidate_model_version_id="model-1",
         promotion_evidence_id=evidence.promotion_evidence_id,
     )
-    registry.record_promotion(first)
 
-    assert registry.champion_strategy(as_of="2026-01-03T23:29:59+00:00") is None
-    assert registry.champion_strategy(as_of="2026-01-03T23:30:00+00:00") == "strategy-1"
-    assert registry.champion_strategy(as_of="2026-01-04T01:00:00+00:00") == "strategy-1"
+    with pytest.raises(
+        PromotionEvidenceError,
+        match="product-issued effective-sample/dependence authority",
+    ):
+        registry.record_promotion(decision)
 
-@pytest.mark.parametrize(
-    "rule_text",
-    [
-        (
-            '{"kind":"autosport-promotion-rule-v1","primary_metric":"roi",'
-            '"primary_metric":"roi","minimum_improvement":0.05,'
-            '"minimum_effective_sample_size":3,"protective_metric_maxima":[],'
-            '"metric_direction":"lower_is_better"}'
-        ),
-        (
-            '{"kind":"autosport-promotion-rule-v1","primary_metric":"roi",'
-            '"minimum_improvement":0.05,"minimum_effective_sample_size":3,'
-            '"protective_metric_maxima":[NaN],'
-            '"metric_direction":"lower_is_better"}'
-        ),
-    ],
-)
+    assert registry.champion_strategy(as_of="2026-01-04T01:00:00+00:00") is None
+
 def test_promotion_rejects_noncanonical_frozen_rule_json(tmp_path, rule_text):
     registry = ScientificRegistry.initialize_pristine(
         tmp_path / "scientific_registry.json"
@@ -1417,7 +1298,8 @@ def test_promotion_evidence_identity_and_strict_improvement(tmp_path):
     with pytest.raises(PromotionEvidenceError, match="strictly positive"):
         registry.record_promotion(decision)
 
-def test_promotion_rejects_reuse_of_consumed_evidence_and_holdout(tmp_path):
+
+def test_unissued_promotion_does_not_consume_confirmation_evidence(tmp_path):
     registry = ScientificRegistry.initialize_pristine(tmp_path / "scientific_registry.json")
     foundation = _foundation(registry)
     registry.append(_experiment(outcome=ResearchOutcome.POSITIVE))
@@ -1445,10 +1327,16 @@ def test_promotion_rejects_reuse_of_consumed_evidence_and_holdout(tmp_path):
         candidate_model_version_id="model-1",
         promotion_evidence_id=evidence.promotion_evidence_id,
     )
-    registry.record_promotion(decision)
-    with pytest.raises(PromotionEvidenceError):
-        registry.record_promotion(replace(decision, promotion_decision_id="promotion-consume-2"))
 
+    with pytest.raises(
+        PromotionEvidenceError,
+        match="product-issued effective-sample/dependence authority",
+    ):
+        registry.record_promotion(decision)
+
+    assert registry.get("PromotionEvidence", evidence.promotion_evidence_id) is not None
+    assert registry.get("PromotionDecision", decision.promotion_decision_id) is None
+    assert registry.champion_strategy(as_of=T3) is None
 
 def test_promotion_rejects_disclosed_holdout_without_prior_decision(tmp_path):
     registry = ScientificRegistry.initialize_pristine(tmp_path / "scientific_registry.json")

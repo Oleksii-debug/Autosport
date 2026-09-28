@@ -1177,7 +1177,7 @@ def _snapshot_from_payload(payload: dict[str, object]) -> BookmakerAccountSnapsh
 # caller-constructed BookmakerAccountSnapshot to a minting function.
 def _install_account_snapshot_acquisition_authority() -> None:
     issued: dict[int, tuple[object, _AccountSnapshotStore, BetfairReadOnlyClient]] = {}
-    live_issued: dict[str, tuple[object, str]] = {}
+    live_issued: dict[str, tuple[object, str, BetfairSessionCredentials]] = {}
     raw_init = BetfairAccountSnapshotAcquirer.__init__
     raw_read = BetfairAccountSnapshotAcquirer._read_provider_snapshot
     raw_record = _AccountSnapshotStore.record
@@ -1203,7 +1203,13 @@ def _install_account_snapshot_acquisition_authority() -> None:
 
     def issue_live(
         acquired: AuthoritativeAccountSnapshot,
+        *,
+        credentials: BetfairSessionCredentials,
     ) -> AuthoritativeAccountSnapshot:
+        if type(credentials) is not BetfairSessionCredentials:
+            raise AccountSnapshotAcquisitionError(
+                "live account snapshot authority requires exact Betfair credentials"
+            )
         acquisition_id = acquired.receipt.acquisition_id
         reference = ref(
             acquired,
@@ -1214,12 +1220,19 @@ def _install_account_snapshot_acquisition_authority() -> None:
         live_issued[acquisition_id] = (
             reference,
             live_fingerprint(acquired),
+            credentials,
         )
         return acquired
 
     def current_live(
         acquisition_id: str,
+        *,
+        credentials: BetfairSessionCredentials,
     ) -> AuthoritativeAccountSnapshot | None:
+        if type(credentials) is not BetfairSessionCredentials:
+            raise AccountSnapshotAcquisitionError(
+                "live account snapshot retry requires exact Betfair credentials"
+            )
         current = live_issued.get(acquisition_id)
         if current is None:
             return None
@@ -1233,6 +1246,11 @@ def _install_account_snapshot_acquisition_authority() -> None:
         ):
             live_issued.pop(acquisition_id, None)
             return None
+        if current[2] != credentials:
+            raise AccountSnapshotAcquisitionError(
+                "live account snapshot acquisition is bound to a different "
+                "authenticated credential origin"
+            )
         return value
 
     def assert_live(
@@ -1242,8 +1260,12 @@ def _install_account_snapshot_acquisition_authority() -> None:
             raise AccountSnapshotAcquisitionError(
                 "provider-origin authority requires exact acquired snapshot evidence"
             )
-        current = current_live(acquired.receipt.acquisition_id)
-        if current is not acquired:
+        current = live_issued.get(acquired.receipt.acquisition_id)
+        if (
+            current is None
+            or current[0]() is not acquired
+            or current[1] != live_fingerprint(acquired)
+        ):
             raise AccountSnapshotAcquisitionError(
                 "account snapshot was not issued by live canonical provider acquisition"
             )
@@ -1344,7 +1366,11 @@ def _install_account_snapshot_acquisition_authority() -> None:
                 raise AccountSnapshotAcquisitionError(
                     "acquisition_id cannot be reused for another provider/account/capability scope"
                 )
-            live = current_live(existing.receipt.acquisition_id)
+            credentials = getattr(client, "_credentials", None)
+            live = current_live(
+                existing.receipt.acquisition_id,
+                credentials=credentials,
+            )
             if live is not None:
                 return live
             raise AccountSnapshotAcquisitionError(
@@ -1365,6 +1391,7 @@ def _install_account_snapshot_acquisition_authority() -> None:
             requested_capabilities,
             canonical_snapshot_read,
         )
+        credentials = getattr(client, "_credentials", None)
         return issue_live(
             raw_record(
                 store,
@@ -1374,7 +1401,8 @@ def _install_account_snapshot_acquisition_authority() -> None:
                 acquisition_request_id_sha256=acquisition_request_id_sha256,
                 authenticated_account_identity_sha256=account_identity.account_identity_sha256,
                 account_identity_observed_at=account_identity.observed_at,
-            )
+            ),
+            credentials=credentials,
         )
 
     def resolve(

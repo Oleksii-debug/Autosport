@@ -219,3 +219,93 @@ def test_inner_live_retry_origin_survives_outer_guard_bypass(
     )
     assert retry is first
     assert same_origin_calls == []
+
+
+def _extract_inner_acquirer_state(raw_acquire):
+    closure = raw_acquire.__closure__
+    assert closure is not None
+    candidates = [
+        cell.cell_contents
+        for cell in closure
+        if callable(cell.cell_contents)
+        and getattr(cell.cell_contents, "__name__", None) == "state"
+    ]
+    assert len(candidates) == 1
+    return candidates[0]
+
+
+def test_account_snapshot_reader_class_dispatch_rebind_fails_before_provider_io(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    calls = _install_transport(monkeypatch, [])
+    acquirer = BetfairAccountSnapshotAcquirer(
+        tmp_path / "account.sqlite3",
+        _credentials("A"),
+        account_id="default-account",
+    )
+    attacker_calls = 0
+
+    def forged_funds(self):
+        nonlocal attacker_calls
+        attacker_calls += 1
+        del self
+        raise AssertionError("forged account funds reader executed")
+
+    monkeypatch.setattr(
+        betfair_readonly.BetfairReadOnlyClient,
+        "read_account_funds",
+        forged_funds,
+    )
+
+    with pytest.raises(
+        AccountSnapshotAcquisitionError,
+        match="account snapshot reader dispatch changed: read_account_funds",
+    ):
+        acquirer.acquire(
+            _balance_capabilities(),
+            acquisition_id="class-dispatch-rebind",
+        )
+
+    assert attacker_calls == 0
+    assert calls == []
+
+
+def test_account_snapshot_reader_instance_shadow_fails_before_provider_io(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    calls = _install_transport(monkeypatch, [])
+    acquirer = BetfairAccountSnapshotAcquirer(
+        tmp_path / "account.sqlite3",
+        _credentials("A"),
+        account_id="default-account",
+    )
+    raw_acquire = _extract_outer_guard_raw_acquire()
+    state = _extract_inner_acquirer_state(raw_acquire)
+    _, client = state(acquirer)
+    attacker_calls = 0
+
+    def forged_funds():
+        nonlocal attacker_calls
+        attacker_calls += 1
+        raise AssertionError("instance-shadowed account funds reader executed")
+
+    monkeypatch.setattr(
+        client,
+        "read_account_funds",
+        forged_funds,
+        raising=False,
+    )
+
+    with pytest.raises(
+        AccountSnapshotAcquisitionError,
+        match="instance-level dispatch shadow: read_account_funds",
+    ):
+        acquirer.acquire(
+            _balance_capabilities(),
+            acquisition_id="instance-dispatch-shadow",
+        )
+
+    assert attacker_calls == 0
+    assert calls == []

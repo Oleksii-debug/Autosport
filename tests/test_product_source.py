@@ -459,6 +459,9 @@ class ParlayApiProductSourceTests(unittest.TestCase):
                         "AUTOSPORT_PRODUCT_WORKSPACE": workspace,
                         "AUTOSPORT_PARLAY_LAWFUL_TERMS_REF": "terms:parlayapi:v1",
                         "AUTOSPORT_PARLAY_RETENTION_REF": "retention:parlayapi:v1",
+                        "AUTOSPORT_MONOTONIC_AUTHORITY_ROOT": str(
+                            Path(directory) / "monotonic-authority"
+                        ),
                     },
                     clear=True,
                 ),

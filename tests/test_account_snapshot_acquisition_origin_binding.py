@@ -145,3 +145,77 @@ def test_live_retry_cannot_cross_authenticated_credential_origin(
     )
     assert retry is first
     assert same_origin_calls == []
+
+
+def _extract_outer_guard_raw_acquire():
+    guarded = vars(BetfairAccountSnapshotAcquirer)["acquire"]
+    closure = guarded.__closure__
+    assert closure is not None
+    candidates = [
+        cell.cell_contents
+        for cell in closure
+        if callable(cell.cell_contents)
+        and getattr(cell.cell_contents, "__name__", None) == "acquire"
+        and cell.cell_contents is not guarded
+    ]
+    assert len(candidates) == 1
+    return candidates[0]
+
+
+def test_inner_live_retry_origin_survives_outer_guard_bypass(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    database = tmp_path / "account.sqlite3"
+    first_calls = _install_transport(
+        monkeypatch,
+        [_DEVELOPER_APPS, _DETAILS, _FUNDS],
+    )
+    first_acquirer = BetfairAccountSnapshotAcquirer(
+        database,
+        _credentials("A"),
+        account_id="default-account",
+    )
+    first = first_acquirer.acquire(
+        _balance_capabilities(),
+        acquisition_id="inner-origin-request",
+    )
+    assert len(first_calls) == 3
+    assert first.source_authority_proven is True
+
+    # The outer origin guard is ordinary Python and its closure exposes the owning
+    # acquisition callable. The owning live-authority model must therefore enforce
+    # the credential origin itself rather than relying on the wrapper as the only
+    # cross-credential fence.
+    raw_acquire = _extract_outer_guard_raw_acquire()
+
+    different_origin_calls = _install_transport(monkeypatch, [])
+    second = BetfairAccountSnapshotAcquirer(
+        database,
+        _credentials("B"),
+        account_id="default-account",
+    )
+    with pytest.raises(
+        AccountSnapshotAcquisitionError,
+        match="bound to a different authenticated credential origin",
+    ):
+        raw_acquire(
+            second,
+            _balance_capabilities(),
+            acquisition_id="inner-origin-request",
+        )
+    assert different_origin_calls == []
+
+    same_origin_calls = _install_transport(monkeypatch, [])
+    same_origin = BetfairAccountSnapshotAcquirer(
+        database,
+        _credentials("A"),
+        account_id="default-account",
+    )
+    retry = raw_acquire(
+        same_origin,
+        _balance_capabilities(),
+        acquisition_id="inner-origin-request",
+    )
+    assert retry is first
+    assert same_origin_calls == []

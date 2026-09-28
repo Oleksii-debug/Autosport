@@ -1,8 +1,10 @@
-"""Read-only current PaperBook binding verification from the sealed persistence graph.
+"""Seal current PaperBook binding checks behind the sealed persistence graph.
 
-This module owns no path binding or second registry. It recovers the already-cloned
-current-binding verifier from the final sealed PaperBook.load composition and wraps
-that exact function graph with before/after executable and binding witnesses.
+No path binding, generation registry, or alternate persistence authority is created.
+The installed public consumer function never stores positive binding authority in its
+globals. Instead, each call resolves the verifier from the already-sealed PaperBook
+load graph, witnesses that graph, reconstructs the original consumer with an ephemeral
+globals snapshot, and injects the verified read-only capability only for that call.
 """
 
 from __future__ import annotations
@@ -45,11 +47,7 @@ def _capture_function_graph(root: FunctionType) -> tuple[tuple[object, ...], ...
             value = globals_mapping[name]
             expected_code = value.__code__ if type(value) is FunctionType else None
             bindings.append((name, value, expected_code))
-            if (
-                type(value) is FunctionType
-                and value.__globals__ is globals_mapping
-                and value not in seen
-            ):
+            if type(value) is FunctionType and value.__globals__ is globals_mapping and value not in seen:
                 pending.append(value)
         witnesses.append(
             (
@@ -85,7 +83,7 @@ def _sealed_load_trusted_globals(load_wrapper: FunctionType) -> dict[str, object
     raise RuntimeError("canonical sealed PaperBook load trusted globals are unavailable")
 
 
-def _capture_current_binding_verifier() -> FunctionType:
+def _make_current_binding_resolver() -> FunctionType:
     descriptor = vars(_paper.PaperBook).get("load")
     if type(descriptor) is not classmethod or type(descriptor.__func__) is not FunctionType:
         raise RuntimeError("canonical sealed PaperBook load wrapper is unavailable")
@@ -101,8 +99,18 @@ def _capture_current_binding_verifier() -> FunctionType:
     exact_type = type
     function_type = FunctionType
     empty_cell = _EMPTY_CELL
+    frozen_load_code = frozen_load.__code__
+    frozen_load_globals = frozen_load.__globals__
 
-    def check_graph() -> None:
+    def resolve_current_binding() -> FunctionType:
+        if (
+            trusted_globals.get("_FROZEN_LOAD") is not frozen_load
+            or exact_type(frozen_load) is not function_type
+            or frozen_load.__code__ is not frozen_load_code
+            or frozen_load.__globals__ is not frozen_load_globals
+            or frozen_load_globals.get("_require_bound_book") is not verifier
+        ):
+            raise ValueError("PaperBook current-binding persistence authority changed")
         for (
             function,
             code,
@@ -133,9 +141,7 @@ def _capture_current_binding_verifier() -> FunctionType:
                     try:
                         current = cell.cell_contents
                     except ValueError as exc:
-                        raise ValueError(
-                            "PaperBook current-binding verifier closure authority changed"
-                        ) from exc
+                        raise ValueError("PaperBook current-binding verifier closure authority changed") from exc
                     if current is not expected:
                         raise ValueError("PaperBook current-binding verifier closure authority changed")
             for name, expected, expected_code in bindings:
@@ -146,34 +152,53 @@ def _capture_current_binding_verifier() -> FunctionType:
                     or expected.__code__ is not expected_code
                 ):
                     raise ValueError("PaperBook current-binding verifier dependency executable changed")
+        return verifier
 
-    def require_current_binding(book: object, snapshot_path: object) -> None:
-        check_graph()
-        verifier(book, snapshot_path)
-        check_graph()
-
-    return require_current_binding
+    return resolve_current_binding
 
 
-def bind_current_binding_verifier(function: FunctionType) -> FunctionType:
-    """Clone one consumer function with the sealed verifier in detached globals."""
-
+def seal_current_binding_consumer(function: FunctionType) -> FunctionType:
     if type(function) is not FunctionType:
         raise TypeError("PaperBook current-binding consumer must be a Python function")
-    verifier = _capture_current_binding_verifier()
-    private_globals = dict(function.__globals__)
-    private_globals["_FROZEN_REQUIRE_BOUND_BOOK"] = verifier
-    private_globals["_FROZEN_REQUIRE_BOUND_BOOK_CODE"] = verifier.__code__
-    clone = FunctionType(
-        function.__code__,
-        private_globals,
-        name=function.__name__,
-        argdefs=function.__defaults__,
-        closure=function.__closure__,
-    )
-    if function.__kwdefaults__ is not None:
-        clone.__kwdefaults__ = dict(function.__kwdefaults__)
-    clone.__annotations__ = dict(function.__annotations__)
-    clone.__doc__ = function.__doc__
-    clone.__qualname__ = function.__qualname__
-    return clone
+
+    resolver = _make_current_binding_resolver()
+    resolver_code = resolver.__code__
+    inner_code = function.__code__
+    inner_name = function.__name__
+    inner_qualname = function.__qualname__
+    inner_doc = function.__doc__
+    inner_annotations = dict(function.__annotations__)
+    inner_defaults = function.__defaults__
+    inner_kwdefaults = None if function.__kwdefaults__ is None else dict(function.__kwdefaults__)
+    inner_closure = function.__closure__
+    inner_globals = function.__globals__
+    exact_type = type
+    function_type = FunctionType
+
+    def guarded_consumer(*args, **kwargs):
+        if exact_type(resolver) is not function_type or resolver.__code__ is not resolver_code:
+            raise ValueError("PaperBook current-binding resolver executable authority changed")
+        verifier = resolver()
+        call_globals = dict(inner_globals)
+        call_globals["_REQUIRE_CURRENT_BINDING"] = verifier
+        delegate = function_type(
+            inner_code,
+            call_globals,
+            name=inner_name,
+            argdefs=inner_defaults,
+            closure=inner_closure,
+        )
+        if inner_kwdefaults is not None:
+            delegate.__kwdefaults__ = dict(inner_kwdefaults)
+        try:
+            return delegate(*args, **kwargs)
+        finally:
+            if exact_type(resolver) is not function_type or resolver.__code__ is not resolver_code:
+                raise ValueError("PaperBook current-binding resolver executable authority changed")
+            resolver()
+
+    guarded_consumer.__name__ = inner_name
+    guarded_consumer.__qualname__ = inner_qualname
+    guarded_consumer.__doc__ = inner_doc
+    guarded_consumer.__annotations__ = inner_annotations
+    return guarded_consumer

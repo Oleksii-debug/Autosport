@@ -527,3 +527,45 @@ def test_product_verifier_rechecks_runtime_profile_before_positive_return(
                 execution_plan_id=bound.execution_plan.plan_id,
                 action_id=action.action_id,
             )
+
+
+def test_product_verifier_does_not_inherit_caller_selected_issuance_authority_root(
+    monkeypatch, tmp_path: Path
+) -> None:
+    bound, approval, _goal = _bound(_profile())
+    default_handle = _store(monkeypatch, tmp_path, bound)
+    caller_store = SupervisedPlanIssuanceStore(
+        default_handle.workspace,
+        authority_root=tmp_path / "caller-selected-machine-authority",
+    )
+    caller_store.issue(bound=bound, approval=approval)
+    action = bound.execution_plan.actions[0]
+    ledger = RealExecutionLedger(
+        default_handle.workspace / "execution-ledger.jsonl"
+    )
+    ledger.reserve_plan(bound.execution_plan)
+    ledger.bind_supervised_approval(
+        plan_id=bound.execution_plan.plan_id,
+        approval_id=approval.ledger_identity,
+        approval_fingerprint=approval.fingerprint,
+        approved_at=approval.approved_at,
+        evidence_sha256=approval.evidence_sha256,
+    )
+    evidence = resolve_betfair_standard_limit_price_bound(
+        bound=bound,
+        action_id=action.action_id,
+    )
+
+    with _active_runtime_profile(default_handle.workspace) as runtime_profile:
+        with pytest.raises(
+            BetfairStandardLimitPriceBoundError,
+            match="durable product supervised-plan issuance is missing or invalid",
+        ):
+            verify_product_betfair_standard_limit_price_bound(
+                evidence=evidence,
+                ledger=ledger,
+                issuance_store=caller_store,
+                runtime_profile=runtime_profile,
+                execution_plan_id=bound.execution_plan.plan_id,
+                action_id=action.action_id,
+            )

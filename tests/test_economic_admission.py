@@ -46,6 +46,7 @@ def test_allowed_admission_evaluates_and_opens_inside_one_workspace_lock(tmp_pat
     persisted = PaperBook.load(tmp_path / "paper_book.json")
     assert persisted.balance == Decimal("950")
     assert result.ticket.ticket_id in persisted.tickets
+    assert result.book is book
 
 
 def test_missing_canonical_book_fails_closed_without_bootstrap(tmp_path):
@@ -221,6 +222,7 @@ def test_matching_risk_context_proposal_time_is_persisted_exactly(tmp_path):
     assert result.admitted is True
     assert result.ticket is not None
     assert result.ticket.placed_at == context.proposal_ts
+    assert result.book is book
 
 
 def test_risk_context_bankroll_identity_must_match_persisted_ticket(tmp_path):
@@ -276,9 +278,10 @@ def test_matching_risk_context_remains_admissible(tmp_path):
     assert result.ticket.legs == context.legs
     assert result.ticket.bankroll_id == context.bankroll_id
     assert result.ticket.currency == context.currency
+    assert result.book is book
 
 
-def test_second_stale_book_refreshes_under_lock_before_risk_admission(tmp_path):
+def test_second_stale_book_uses_fresh_canonical_view_without_rebinding_caller(tmp_path):
     book_path = tmp_path / "paper_book.json"
     PaperBook("1000").save(book_path)
     first_view = PaperBook.load(book_path)
@@ -309,14 +312,55 @@ def test_second_stale_book_refreshes_under_lock_before_risk_admission(tmp_path):
     )
 
     assert first.admitted is True
+    assert first.book is first_view
     assert second.admitted is False
-    assert stale_second_view.balance == Decimal("900")
-    assert len(stale_second_view.tickets) == 1
+    # The old caller remains stale instead of being granted the new generation.
+    assert stale_second_view.balance == Decimal("1000")
+    assert stale_second_view.tickets == {}
+    assert second.book is not stale_second_view
+    assert second.book.balance == Decimal("900")
+    assert len(second.book.tickets) == 1
+    assert second.book.committed_stake == Decimal("100")
     persisted = PaperBook.load(book_path)
     assert persisted.balance == Decimal("900")
     assert len(persisted.tickets) == 1
     assert first.ticket is not None
     assert first.ticket.ticket_id in persisted.tickets
+    assert set(second.book.tickets) == set(persisted.tickets)
+
+
+def test_current_bound_caller_cannot_substitute_unpublished_semantic_state(tmp_path):
+    book_path = tmp_path / "paper_book.json"
+    book = PaperBook("1000")
+    book.save(book_path)
+
+    # This is a legitimate in-memory PaperBook transition, but it has not been
+    # published to the canonical workspace generation and therefore cannot be
+    # substituted into a separate atomic admission.
+    book.open_ticket(
+        [_leg()],
+        Decimal("10"),
+        reason="unpublished caller mutation",
+        placed_at="2026-09-24T15:59:59Z",
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="supplied current PaperBook does not match canonical durable state",
+    ):
+        admit_paper_ticket(
+            workspace=tmp_path,
+            book=book,
+            risk_policy=PaperRiskPolicy(),
+            stake=Decimal("10"),
+            legs=(_other_leg(),),
+            reason="must not substitute caller state",
+            placed_at="2026-09-24T16:00:00Z",
+        )
+
+    persisted = PaperBook.load(book_path)
+    assert persisted.balance == Decimal("1000")
+    assert persisted.tickets == {}
 
 
 class _PaperBookSubclass(PaperBook):

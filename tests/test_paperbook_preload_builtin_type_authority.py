@@ -1,10 +1,26 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import FunctionType
 
 import pytest
 
 import autosport.paper as paper
+
+
+def _clone_with_builtins(function: FunctionType, builtins_map: dict[str, object]) -> FunctionType:
+    globals_copy = dict(function.__globals__)
+    globals_copy["__builtins__"] = builtins_map
+    clone = FunctionType(
+        function.__code__,
+        globals_copy,
+        name=function.__name__,
+        argdefs=function.__defaults__,
+        closure=function.__closure__,
+    )
+    if function.__kwdefaults__ is not None:
+        clone.__kwdefaults__ = dict(function.__kwdefaults__)
+    return clone
 
 
 class _HostilePaperBook(paper.PaperBook):
@@ -20,7 +36,7 @@ def test_durable_save_exact_type_fence_ignores_self_restoring_builtin_substituti
 
     book = _HostilePaperBook("100")
     guarded_save = paper.PaperBook.save
-    builtins_map = guarded_save.__builtins__
+    builtins_map = dict(guarded_save.__builtins__)
     original_type = builtins_map["type"]
     bypass_attempted = False
 
@@ -33,11 +49,9 @@ def test_durable_save_exact_type_fence_ignores_self_restoring_builtin_substituti
         return original_type(value)
 
     builtins_map["type"] = hostile_type
-    try:
-        with pytest.raises(TypeError, match="canonical PaperBook class"):
-            guarded_save(book, tmp_path / "paper-book.json")
-    finally:
-        builtins_map["type"] = original_type
+    isolated_save = _clone_with_builtins(guarded_save, builtins_map)
+    with pytest.raises(TypeError, match="canonical PaperBook class"):
+        isolated_save(book, tmp_path / "paper-book.json")
 
     assert bypass_attempted is False
     assert not (tmp_path / "paper-book.json").exists()
@@ -53,7 +67,7 @@ def test_next_generation_ignores_self_restoring_builtin_int_substitution(
     book.save(path)
 
     guarded_save = paper.PaperBook.save
-    builtins_map = guarded_save.__builtins__
+    builtins_map = dict(guarded_save.__builtins__)
     original_int = builtins_map["int"]
     bypass_attempted = False
 
@@ -66,10 +80,8 @@ def test_next_generation_ignores_self_restoring_builtin_int_substitution(
         return original_int(value, *args, **kwargs)
 
     builtins_map["int"] = hostile_int
-    try:
-        guarded_save(book, path)
-    finally:
-        builtins_map["int"] = original_int
+    isolated_save = _clone_with_builtins(guarded_save, builtins_map)
+    isolated_save(book, path)
 
     assert bypass_attempted is False
     loaded = paper.PaperBook.load(path)

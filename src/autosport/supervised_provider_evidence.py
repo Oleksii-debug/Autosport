@@ -446,11 +446,20 @@ def verify_betfair_provider_state(
             raise ProviderEvidenceError(
                 "provider order identity conflicts with execution action"
             )
-        if _time(order.placed_date, "provider order placed_date") < _time(
+        placed_at = _time(order.placed_date, "provider order placed_date")
+        if placed_at < _time(
             action.quote_observed_at, "execution quote_observed_at"
         ):
             raise ProviderEvidenceError(
                 "provider order placement predates execution action quote"
+            )
+        captured_at = _time(
+            order.evidence.observed_at,
+            "provider order evidence observed_at",
+        )
+        if placed_at > captured_at:
+            raise ProviderEvidenceError(
+                "provider order placement postdates provider capture"
             )
         if kind == "current":
             assert isinstance(order, BetfairCurrentOrderObservation)
@@ -467,6 +476,15 @@ def verify_betfair_provider_state(
                 )
         if kind == "cleared":
             assert isinstance(order, BetfairClearedOrderObservation)
+            settled_at = _time(order.settled_date, "provider order settled_date")
+            if settled_at < placed_at:
+                raise ProviderEvidenceError(
+                    "provider order settlement predates provider placement"
+                )
+            if settled_at > captured_at:
+                raise ProviderEvidenceError(
+                    "provider order settlement postdates provider capture"
+                )
             if order.event_id != action.event_id:
                 raise ProviderEvidenceError(
                     "provider cleared order event conflicts with execution action"

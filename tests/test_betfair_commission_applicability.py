@@ -233,3 +233,22 @@ def test_public_assessment_root_keeps_canonical_reader_and_issuer_after_module_r
     assert require_product_betfair_commission_applicability(assessment) is assessment
     assert assessment.prospective_commission_amount_authorized is False
     assert assessment.complete_execution_fee_cost_authorized is False
+
+
+def test_verifier_does_not_trust_rebound_assessment_to_dict(monkeypatch):
+    client, _ = _client()
+    assessment = assess_betfair_commission_applicability(client, market_id="1.234")
+    original_projection = assessment.to_dict()
+
+    object.__setattr__(assessment, "venue_id", "forged-venue")
+    monkeypatch.setattr(
+        BetfairCommissionApplicabilityAssessment,
+        "to_dict",
+        lambda _self: dict(original_projection),
+    )
+
+    with pytest.raises(
+        BetfairCommissionApplicabilityError,
+        match="assessment identity is inconsistent",
+    ):
+        require_product_betfair_commission_applicability(assessment)

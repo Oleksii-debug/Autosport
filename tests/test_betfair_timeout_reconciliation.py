@@ -618,6 +618,44 @@ def test_bound_absence_not_issued_by_timeout_resolver_is_rejected() -> None:
         timeout_resolution.assert_betfair_timeout_absence_authoritative(evidence)
 
 
+def test_attempt_bound_timeout_assertion_rejects_unissued_exact_ref_evidence(
+    tmp_path, monkeypatch
+) -> None:
+    ledger, action, provider_ref, _ = _ledger_with_timeout(tmp_path, monkeypatch)
+    assert provider_ref is not None
+    evidence = _absence("2026-09-21T18:00:30+00:00", provider_ref)
+
+    with pytest.raises(
+        timeout_resolution.BetfairTimeoutResolutionError,
+        match="not bound to this timeout attempt",
+    ):
+        timeout_resolution.assert_betfair_timeout_absence_authoritative_for_attempt(
+            ledger,
+            action,
+            "attempt-1",
+            evidence,
+        )
+
+
+def test_attempt_bound_timeout_assertion_rejects_missing_provider_ref(
+    tmp_path, monkeypatch
+) -> None:
+    ledger, action, provider_ref, _ = _ledger_with_timeout(tmp_path, monkeypatch)
+    assert provider_ref is not None
+    evidence = _absence("2026-09-21T18:00:30+00:00", None)
+
+    with pytest.raises(
+        timeout_resolution.BetfairTimeoutResolutionError,
+        match="mismatches durable provider order reference",
+    ):
+        timeout_resolution.assert_betfair_timeout_absence_authoritative_for_attempt(
+            ledger,
+            action,
+            "attempt-1",
+            evidence,
+        )
+
+
 def test_legacy_unbound_absence_keeps_generic_authority_scope() -> None:
     evidence = _absence("2026-09-21T18:00:30+00:00", None)
     timeout_resolution.assert_betfair_timeout_absence_authoritative(evidence)

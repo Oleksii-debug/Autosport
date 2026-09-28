@@ -17,7 +17,7 @@ WSU_NS: Final = "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecur
 _MAX_XML_BYTES: Final = 4 * 1024 * 1024
 _MAX_TEXT: Final = 512
 _RC016_MARKET_NEITHER_SUSPENDED_NOR_ACTIVE: Final = 16
-_XSD_DECIMAL_RE: Final = re.compile(r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)\\Z", re.ASCII)
+_XSD_DECIMAL_RE: Final = re.compile(r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)\Z", re.ASCII)
 
 
 class BetdaqWireError(ValueError):

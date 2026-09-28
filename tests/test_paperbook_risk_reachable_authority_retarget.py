@@ -5,10 +5,10 @@ from types import FunctionType
 
 import pytest
 
-from autosport.domain import TicketLeg
+from autosport.domain import MarketEvent, TicketLeg
 from autosport.economic_goal import EconomicGoalContract
 from autosport.paper import PaperBook
-from autosport.risk import PaperRiskPolicy, RiskDecision
+from autosport.risk import PaperRiskPolicy, ProposedTicketRiskContext, RiskDecision
 
 
 def _noop_validator(cls, book) -> None:
@@ -369,3 +369,123 @@ def test_closure_reachable_goal_stake_spec_rejects_generation_change(
 
     assert writer_published is True
     assert amount is None
+
+
+def test_closure_reachable_stake_vector_spec_rejects_generation_change(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(
+        "AUTOSPORT_PAPER_EXECUTION_WITNESS_DIR",
+        str(tmp_path.parent / f"{tmp_path.name}-vector-closure-reconstruct-authority"),
+    )
+    path = tmp_path / "paper-book.json"
+
+    initial = PaperBook("100")
+    initial.save(path)
+    evaluated = PaperBook.load(path)
+    writer = PaperBook.load(path)
+
+    goal = EconomicGoalContract(
+        goal_id="risk-reconstruct-vector-goal",
+        revision=1,
+        bankroll_id="paper-bankroll",
+        currency="USD",
+        max_stake_fraction=Decimal("1"),
+        max_session_loss_fraction=Decimal("1"),
+        max_day_loss_fraction=Decimal("1"),
+        max_drawdown_fraction=Decimal("1"),
+        max_capital_at_risk_fraction=Decimal("1"),
+        max_turnover_fraction=Decimal("1000"),
+        max_risk_of_ruin=Decimal("1"),
+        max_concurrent_positions=10,
+    )
+    policy = PaperRiskPolicy(
+        max_ticket_fraction=Decimal("1"),
+        max_committed_fraction=Decimal("1"),
+        minimum_cash_reserve_fraction=Decimal("0"),
+        economic_goal=goal,
+    )
+
+    quote = MarketEvent(
+        event_id="risk-vector-event",
+        market_id="risk-vector-market",
+        selection_id="risk-vector-selection",
+        decimal_odds=Decimal("2"),
+        observed_ts="2026-09-27T21:40:00+00:00",
+        source_id="risk-vector-provider",
+        sequence=1,
+        source_ts="2026-09-27T21:39:59+00:00",
+        ingest_ts="2026-09-27T21:40:00+00:00",
+    )
+    context = ProposedTicketRiskContext(
+        legs=(
+            TicketLeg(
+                quote.event_id,
+                quote.market_id,
+                quote.selection_id,
+                quote.decimal_odds,
+                sport="soccer",
+                exchange_side="back",
+            ),
+        ),
+        quotes=(quote,),
+        bankroll_id=goal.bankroll_id,
+        currency=goal.currency,
+        proposal_ts=quote.observed_ts,
+    )
+
+    public_root = vars(PaperRiskPolicy)["derive_goal_stake_vector"]
+    assert type(public_root) is FunctionType
+    nested_spec = None
+    for cell in public_root.__closure__ or ():
+        try:
+            candidate = cell.cell_contents
+        except ValueError:
+            continue
+        if (
+            type(candidate) is tuple
+            and len(candidate) == 6
+            and type(candidate[5]) is tuple
+        ):
+            globals_snapshot = dict(candidate[5])
+            inner = globals_snapshot.get("_DERIVE_GOAL_STAKE_VECTOR_SPEC")
+            if type(inner) is tuple and len(inner) == 6:
+                nested_spec = inner
+                break
+    assert nested_spec is not None
+    reconstructed = _reconstruct_spec(nested_spec)
+
+    original_limits = PaperRiskPolicy._effective_fraction_limits
+    writer_published = False
+
+    def interleave_publication(self):
+        nonlocal writer_published
+        if not writer_published:
+            writer.open_ticket(
+                [_generation_race_leg()],
+                "95",
+                placed_at=_TS,
+            )
+            writer.save(path)
+            writer_published = True
+        return original_limits(self)
+
+    monkeypatch.setattr(
+        PaperRiskPolicy,
+        "_effective_fraction_limits",
+        interleave_publication,
+    )
+
+    decision = reconstructed(
+        policy,
+        evaluated,
+        (Decimal("0.5"),),
+        contexts=(context,),
+        risk_of_ruin_vector_evidence=None,
+    )
+
+    assert writer_published is True
+    assert decision.action == "WAIT"
+    assert decision.stakes == (Decimal("0"),)
+    assert "changed during stake-vector allocation" in decision.reason

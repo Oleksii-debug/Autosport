@@ -112,7 +112,7 @@ def test_stopped_runtime_status_uses_ukrainian_operator_copy(tmp_path: Path) -> 
     assert "оператор" in status.casefold()
 
 
-def test_error_runtime_status_localizes_copy_but_preserves_bounded_type(
+def test_error_runtime_status_localizes_copy_without_python_type_leakage(
     tmp_path: Path,
 ) -> None:
     status = _project(
@@ -127,5 +127,6 @@ def test_error_runtime_status_localizes_copy_but_preserves_bounded_type(
     )
 
     assert "PAPER" not in status
-    assert "RuntimeError" in status
+    assert "RuntimeError" not in status
+    assert "BaseException" not in status
     assert "віднов" in status.casefold()

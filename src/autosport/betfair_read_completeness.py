@@ -273,13 +273,21 @@ def _prepare_issuance_authority():
     """
 
     lock = Lock()
-    issued_witnesses = weakref.WeakKeyDictionary()
-    issued_results = weakref.WeakKeyDictionary()
-    active_observers = weakref.WeakKeyDictionary()
+    issued_witnesses: dict[int, tuple[str, bool]] = {}
+    issued_results: dict[int, str] = {}
+    active_observers: dict[int, int] = {}
+
+    def drop_witness(identity: int) -> None:
+        with lock:
+            issued_witnesses.pop(identity, None)
+
+    def drop_result(identity: int) -> None:
+        with lock:
+            issued_results.pop(identity, None)
 
     def witness_assert_issued(self: BetfairReadCompletenessWitness) -> None:
         with lock:
-            issued = issued_witnesses.get(self)
+            issued = issued_witnesses.get(id(self))
         if issued is None or issued[0] != self._fingerprint():
             raise BetfairReadOnlyError(
                 "Betfair completeness witness was not issued by the observer"
@@ -295,7 +303,7 @@ def _prepare_issuance_authority():
             )
         witness_assert_issued(self)
         with lock:
-            issued = issued_witnesses.get(self)
+            issued = issued_witnesses.get(id(self))
         if issued is None or not issued[1]:
             raise BetfairReadOnlyError(
                 "Betfair completeness witness lacks product-owned provider origin"
@@ -305,10 +313,11 @@ def _prepare_issuance_authority():
         self: BetfairPagedReadResult | BetfairValueReadResult,
     ) -> None:
         with lock:
-            issued = issued_results.get(self)
+            issued = issued_results.get(id(self))
         if issued != self._fingerprint():
+            kind = "paged" if isinstance(self, BetfairPagedReadResult) else "value"
             raise BetfairReadOnlyError(
-                "Betfair read result was not issued by the observer"
+                f"Betfair {kind} result was not issued by the observer"
             )
 
     # Freeze the verification readers directly onto the evidence/result types.
@@ -320,20 +329,22 @@ def _prepare_issuance_authority():
     BetfairValueReadResult._assert_issued = result_assert_issued
 
     def enter(observer: object) -> None:
+        identity = id(observer)
         with lock:
-            active_observers[observer] = active_observers.get(observer, 0) + 1
+            active_observers[identity] = active_observers.get(identity, 0) + 1
 
     def leave(observer: object) -> None:
+        identity = id(observer)
         with lock:
-            depth = active_observers.get(observer, 0)
+            depth = active_observers.get(identity, 0)
             if depth <= 1:
-                active_observers.pop(observer, None)
+                active_observers.pop(identity, None)
             else:
-                active_observers[observer] = depth - 1
+                active_observers[identity] = depth - 1
 
     def is_active(observer: object) -> bool:
         with lock:
-            return active_observers.get(observer, 0) > 0
+            return active_observers.get(id(observer), 0) > 0
 
     def issue_witness(
         observer: object,
@@ -345,11 +356,13 @@ def _prepare_issuance_authority():
             raise TypeError("authoritative_origin must be bool")
         if not is_active(observer):
             return witness
+        identity = id(witness)
         with lock:
-            issued_witnesses[witness] = (
+            issued_witnesses[identity] = (
                 witness._fingerprint(),
                 authoritative_origin,
             )
+        weakref.finalize(witness, drop_witness, identity)
         return witness
 
     def issue_result(
@@ -358,8 +371,10 @@ def _prepare_issuance_authority():
     ) -> BetfairPagedReadResult | BetfairValueReadResult:
         if not is_active(observer):
             return result
+        identity = id(result)
         with lock:
-            issued_results[result] = result._fingerprint()
+            issued_results[identity] = result._fingerprint()
+        weakref.finalize(result, drop_result, identity)
         return result
 
     def install(observer_type: type) -> None:

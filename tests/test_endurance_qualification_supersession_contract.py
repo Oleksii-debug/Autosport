@@ -36,6 +36,6 @@ def test_trusted_supersession_controller_covers_endurance() -> None:
 
     assert "workflows: [CI, Windows candidate, Endurance]" in text
     assert "actions: write" in text
-    assert "cancel-in-progress: false" in text
+    assert "cancel-in-progress: true" in text
     assert "github.event.workflow_run.head_sha" in text
     assert "github.event.workflow_run.name" in text

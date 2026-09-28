@@ -402,3 +402,23 @@ def test_result_and_return_status_unknown_attributes_fail_closed() -> None:
     with pytest.raises(BetdaqSoapProtocolError, match="unexpected attribute"):
         parse_get_prices_response(status_extra)
 
+
+
+def test_soap_body_rejects_sibling_payload_smuggling() -> None:
+    payload = _response().replace(
+        "<soap:Body>",
+        f'<soap:Body><Unexpected xmlns="{API}" />',
+        1,
+    )
+    with pytest.raises(BetdaqSoapProtocolError, match="exactly one GetPricesResponse"):
+        parse_get_prices_response(payload)
+
+
+def test_getprices_response_rejects_sibling_result_smuggling() -> None:
+    payload = _response().replace(
+        "<GetPricesResult>",
+        '<Unexpected /><GetPricesResult>',
+        1,
+    )
+    with pytest.raises(BetdaqSoapProtocolError, match="exactly one GetPricesResult"):
+        parse_get_prices_response(payload)

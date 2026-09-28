@@ -195,11 +195,20 @@ def _assessment_payload(
 
 
 def _issue_assessment(
+    payload_builder,
+    canonical_json,
+    hash_constructor,
+    assessment_type,
+    unproven_status,
+    canonical_reasons,
+    ruleset_id,
+    provider_rule_sources,
+    register_issued,
     observation: BetfairExecutionFeeInputsObservation,
 ) -> BetfairCommissionApplicabilityAssessment:
-    payload = _assessment_payload(observation)
-    assessment_id = sha256(_canonical_json(payload)).hexdigest()
-    assessment = object.__new__(BetfairCommissionApplicabilityAssessment)
+    payload = payload_builder(observation)
+    assessment_id = hash_constructor(canonical_json(payload)).hexdigest()
+    assessment = object.__new__(assessment_type)
     object.__setattr__(assessment, "venue_id", observation.venue_id)
     object.__setattr__(assessment, "account_id", observation.account_id)
     object.__setattr__(assessment, "market_id", observation.market_id)
@@ -216,21 +225,31 @@ def _issue_assessment(
         "market_source_payload_sha256",
         observation.market_evidence.source_payload_sha256,
     )
-    object.__setattr__(assessment, "status", BetfairCommissionApplicabilityStatus.UNPROVEN)
-    object.__setattr__(assessment, "reasons", _CANONICAL_REASONS)
-    object.__setattr__(assessment, "ruleset_id", _RULESET_ID)
-    object.__setattr__(
-        assessment,
-        "provider_rule_sources",
-        (_PROVIDER_COMMISSION_SOURCE, _PROVIDER_CHARGES_SOURCE, _PROVIDER_MBR_SOURCE),
-    )
+    object.__setattr__(assessment, "status", unproven_status)
+    object.__setattr__(assessment, "reasons", canonical_reasons)
+    object.__setattr__(assessment, "ruleset_id", ruleset_id)
+    object.__setattr__(assessment, "provider_rule_sources", provider_rule_sources)
     object.__setattr__(assessment, "prospective_commission_amount_authorized", False)
     object.__setattr__(assessment, "complete_execution_fee_cost_authorized", False)
     object.__setattr__(assessment, "provider_write_authorized", False)
     object.__setattr__(assessment, "real_money_execution_authorized", False)
     object.__setattr__(assessment, "assessment_id", assessment_id)
-    _register_issued(assessment)
+    register_issued(assessment)
     return assessment
+
+
+_ISSUE_ASSESSMENT_CAPABILITY = partial(
+    _issue_assessment,
+    _assessment_payload,
+    _canonical_json,
+    sha256,
+    BetfairCommissionApplicabilityAssessment,
+    BetfairCommissionApplicabilityStatus.UNPROVEN,
+    _CANONICAL_REASONS,
+    _RULESET_ID,
+    (_PROVIDER_COMMISSION_SOURCE, _PROVIDER_CHARGES_SOURCE, _PROVIDER_MBR_SOURCE),
+    _register_issued,
+)
 
 
 def _assess_betfair_commission_applicability(
@@ -259,7 +278,7 @@ def _assess_betfair_commission_applicability(
 assess_betfair_commission_applicability = partial(
     _assess_betfair_commission_applicability,
     read_betfair_execution_fee_inputs,
-    _issue_assessment,
+    _ISSUE_ASSESSMENT_CAPABILITY,
 )
 assess_betfair_commission_applicability.__name__ = (
     "assess_betfair_commission_applicability"

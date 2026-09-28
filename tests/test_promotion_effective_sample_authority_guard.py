@@ -64,3 +64,14 @@ def test_diagnostic_effective_sample_without_promotion_interval_remains_compatib
     assert durable.record_sha256 == record_sha256
     assert durable.payload["effective_sample_size"] == 1_000_000
     assert "effect_interval_low" not in durable.payload
+
+
+def test_private_append_path_cannot_bypass_promotion_lineage(tmp_path) -> None:
+    """The invariant belongs to ScientificRegistry, not one public wrapper."""
+
+    registry = ScientificRegistry.initialize_pristine(
+        tmp_path / "scientific-registry-private-append.json"
+    )
+
+    with pytest.raises(ValueError, match="canonical scientific lineage"):
+        registry._append(_bundle(promotion_shaped=True))

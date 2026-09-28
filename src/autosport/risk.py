@@ -1856,6 +1856,39 @@ class PaperRiskPolicy(metaclass=_PaperRiskPolicyMeta):
         *,
         context: ProposedTicketRiskContext | None = None,
     ) -> RiskDecision:
+        # Older executable specs remain reconstructible from Python-visible wrapper
+        # state, so the raw canonical evaluator must itself fail closed if any helper
+        # it dispatches through the class has been replaced or had its code mutated.
+        # _book_state is deliberately excluded because composition replaces it with
+        # the generation/private-authority wrapper; that wrapper is independently
+        # sealed. The witnesses below cover the remaining raw helper dispatch.
+        for (
+            helper_name,
+            expected_descriptor,
+            expected_function,
+            expected_code,
+            descriptor_wrapped,
+        ) in _PAPER_RISK_EVALUATE_HELPER_WITNESSES:
+            current_descriptor = PaperRiskPolicy.__dict__.get(helper_name)
+            if current_descriptor is not expected_descriptor:
+                return RiskDecision(
+                    False,
+                    "virtual bankroll risk helper authority is invalid",
+                )
+            current_function = (
+                current_descriptor.__func__
+                if descriptor_wrapped
+                else current_descriptor
+            )
+            if (
+                current_function is not expected_function
+                or current_function.__code__ is not expected_code
+            ):
+                return RiskDecision(
+                    False,
+                    "virtual bankroll risk helper authority is invalid",
+                )
+
         if context is not None and not isinstance(context, ProposedTicketRiskContext):
             return RiskDecision(False, "proposed ticket risk context is invalid")
 
@@ -1960,3 +1993,58 @@ class PaperRiskPolicy(metaclass=_PaperRiskPolicyMeta):
         if self._book_state(book) != state:
             return RiskDecision(False, "virtual bankroll changed during risk evaluation")
         return RiskDecision(True, "allowed")
+
+# Raw risk executable specs are intentionally reconstructible evidence. Preserve
+# fail-closed semantics by binding the exact class descriptors/functions they may
+# dispatch to outside the separately wrapped _book_state authority. A reconstructed
+# evaluator carries this immutable witness tuple in its captured globals snapshot.
+_eval_proposal = PaperRiskPolicy.__dict__["_proposal_restriction_decision"]
+_eval_history = PaperRiskPolicy.__dict__["_goal_history_rooms"]
+_eval_quote = PaperRiskPolicy.__dict__["_quote_risk_decision"]
+_eval_ruin = PaperRiskPolicy.__dict__["_risk_of_ruin_evidence_decision"]
+_eval_derived = PaperRiskPolicy.__dict__["_derived_risk_values"]
+
+_PAPER_RISK_EVALUATE_HELPER_WITNESSES = (
+    (
+        "_proposal_restriction_decision",
+        _eval_proposal,
+        _eval_proposal.__func__,
+        _eval_proposal.__func__.__code__,
+        True,
+    ),
+    (
+        "_goal_history_rooms",
+        _eval_history,
+        _eval_history.__func__,
+        _eval_history.__func__.__code__,
+        True,
+    ),
+    (
+        "_quote_risk_decision",
+        _eval_quote,
+        _eval_quote.__func__,
+        _eval_quote.__func__.__code__,
+        True,
+    ),
+    (
+        "_risk_of_ruin_evidence_decision",
+        _eval_ruin,
+        _eval_ruin.__func__,
+        _eval_ruin.__func__.__code__,
+        True,
+    ),
+    (
+        "_derived_risk_values",
+        _eval_derived,
+        _eval_derived,
+        _eval_derived.__code__,
+        False,
+    ),
+)
+
+del _eval_proposal
+del _eval_history
+del _eval_quote
+del _eval_ruin
+del _eval_derived
+

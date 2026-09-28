@@ -21,10 +21,13 @@ permissions:
   contents: read
   pull-requests: read
 
-# PR runs must reach lightweight live-head admission before any scheduler-level
-# cancellation can happen. Isolate each PR run; main/push runs remain coalesced.
+# Coalesce only scheduler-safe classes before runner allocation. Fresh integration-capable
+# events share one QUALIFY lane; draft/closed events use a separate LIFECYCLE lane and
+# cannot evict useful qualification. Re-runs are isolated by exact event head SHA so a
+# stale-head rerun cannot cancel current-head qualification. Live admission remains the
+# authority for PR head/state before the expensive Windows runner can allocate.
 concurrency:
-  group: windows-candidate-${{ github.event_name == 'pull_request' && format('pr-{0}-run-{1}', github.event.pull_request.number, github.run_id) || github.ref }}
+  group: windows-candidate-${{ github.event_name == 'pull_request' && format('pr-{0}-{1}', github.event.pull_request.number, github.run_attempt != 1 && format('rerun-{0}', github.event.pull_request.head.sha) || ((github.event.action == 'converted_to_draft' || github.event.action == 'closed') && 'lifecycle' || 'qualify')) || github.ref }}
   cancel-in-progress: true
 
 jobs:

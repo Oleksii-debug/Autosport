@@ -1,12 +1,15 @@
 from __future__ import annotations
 
-from dataclasses import fields
+from contextlib import contextmanager
+from dataclasses import fields, replace
 import json
 from pathlib import Path
+from threading import RLock
 from types import SimpleNamespace
 
 import pytest
 
+import autosport.trusted_runtime_code_profile as trusted_runtime_profile
 from autosport.betfair_standard_limit_price_bound import (
     BetfairStandardLimitPriceBoundError,
     BetfairStandardLimitPriceBoundEvidence,
@@ -16,6 +19,8 @@ from autosport.betfair_standard_limit_price_bound import (
 from autosport.betfair_standard_limit_price_bound_product_verifier import (
     verify_product_betfair_standard_limit_price_bound,
 )
+from autosport.continuous_session import SessionState
+from autosport.product_runtime import AutonomousProductRuntime
 from autosport.real_execution_ledger import RealExecutionLedger
 from autosport.supervised_plan_issuance import (
     SupervisedPlanIssuanceError,
@@ -44,12 +49,8 @@ def _store(monkeypatch, tmp_path: Path, bound):
         ),
     )
     workspace = tmp_path / "workspace"
-    authority_root = tmp_path / "machine-authority"
     workspace.mkdir()
-    return SupervisedPlanIssuanceStore(
-        workspace,
-        authority_root=authority_root,
-    )
+    return SupervisedPlanIssuanceStore(workspace)
 
 
 def _issue(monkeypatch, tmp_path: Path):
@@ -57,6 +58,72 @@ def _issue(monkeypatch, tmp_path: Path):
     store = _store(monkeypatch, tmp_path, bound)
     issued = store.issue(bound=bound, approval=approval)
     return bound, approval, store, issued
+
+
+class _RuntimeLease:
+    authority_active = True
+
+
+class _StartTransitionStore:
+    @staticmethod
+    def pending() -> None:
+        return None
+
+
+class _RunningCoordinator:
+    @staticmethod
+    def status() -> SimpleNamespace:
+        return SimpleNamespace(state=SessionState.RUNNING)
+
+
+class _RunningCollector:
+    @staticmethod
+    def status() -> dict[str, object | None]:
+        return {"stopped_at": None, "stop_reason": None}
+
+
+@contextmanager
+def _active_runtime_profile(workspace: Path):
+    workspace = Path(workspace).resolve()
+    runtime = object.__new__(AutonomousProductRuntime)
+    runtime.workspace = workspace
+    runtime.manifest = SimpleNamespace(source_id="parlayapi:table_tennis")
+    runtime.coordinator = _RunningCoordinator()
+    runtime.collector = _RunningCollector()
+    runtime._runtime_lease = _RuntimeLease()
+    runtime._start_transition_store = _StartTransitionStore()
+    runtime._closed = False
+    runtime._operation_fence = RLock()
+    trusted_runtime_profile._register_started_product_runtime_origin(
+        runtime,
+        source_factory="autosport.product_source:create_parlay_product_source",
+        expected_provider_source_id="parlayapi:table_tennis",
+    )
+    profile = trusted_runtime_profile.issue_trusted_runtime_code_profile(runtime)
+    try:
+        yield profile
+    finally:
+        trusted_runtime_profile.revoke_trusted_runtime_code_profile(profile)
+        trusted_runtime_profile._clear_started_product_runtime_origin(runtime)
+
+
+def _verify_product(
+    *,
+    evidence,
+    ledger,
+    issuance_store,
+    execution_plan_id,
+    action_id,
+):
+    with _active_runtime_profile(issuance_store.workspace) as runtime_profile:
+        return verify_product_betfair_standard_limit_price_bound(
+            evidence=evidence,
+            ledger=ledger,
+            issuance_store=issuance_store,
+            runtime_profile=runtime_profile,
+            execution_plan_id=execution_plan_id,
+            action_id=action_id,
+        )
 
 
 def test_generic_issuance_survives_unavailable_betfair_price_bound_without_authority_upgrade(
@@ -92,7 +159,7 @@ def test_generic_issuance_survives_unavailable_betfair_price_bound_without_autho
     # an old generic issuance must not retroactively acquire positive #735
     # authority that was absent at issuance time.
     action = bound.execution_plan.actions[0]
-    ledger = RealExecutionLedger(tmp_path / "execution-ledger.jsonl")
+    ledger = RealExecutionLedger(store.workspace / "execution-ledger.jsonl")
     ledger.reserve_plan(bound.execution_plan)
     ledger.bind_supervised_approval(
         plan_id=bound.execution_plan.plan_id,
@@ -110,7 +177,7 @@ def test_generic_issuance_survives_unavailable_betfair_price_bound_without_autho
         BetfairStandardLimitPriceBoundError,
         match="not durably proven at plan issuance",
     ):
-        verify_product_betfair_standard_limit_price_bound(
+        _verify_product(
             evidence=evidence,
             ledger=ledger,
             issuance_store=restarted,
@@ -243,7 +310,7 @@ def test_product_verifier_reloads_issuance_instead_of_accepting_caller_bound(
 ) -> None:
     bound, approval, store, _issued = _issue(monkeypatch, tmp_path)
     action = bound.execution_plan.actions[0]
-    ledger = RealExecutionLedger(tmp_path / "execution-ledger.jsonl")
+    ledger = RealExecutionLedger(store.workspace / "execution-ledger.jsonl")
     ledger.reserve_plan(bound.execution_plan)
     ledger.bind_supervised_approval(
         plan_id=bound.execution_plan.plan_id,
@@ -257,7 +324,7 @@ def test_product_verifier_reloads_issuance_instead_of_accepting_caller_bound(
         action_id=action.action_id,
     )
 
-    verified = verify_product_betfair_standard_limit_price_bound(
+    verified = _verify_product(
         evidence=evidence,
         ledger=ledger,
         issuance_store=store,
@@ -282,7 +349,7 @@ def test_product_verifier_rejects_unissued_plan_identity(
 ) -> None:
     bound, approval, store, _issued = _issue(monkeypatch, tmp_path)
     action = bound.execution_plan.actions[0]
-    ledger = RealExecutionLedger(tmp_path / "execution-ledger.jsonl")
+    ledger = RealExecutionLedger(store.workspace / "execution-ledger.jsonl")
     ledger.reserve_plan(bound.execution_plan)
     ledger.bind_supervised_approval(
         plan_id=bound.execution_plan.plan_id,
@@ -300,10 +367,163 @@ def test_product_verifier_rejects_unissued_plan_identity(
         BetfairStandardLimitPriceBoundError,
         match="durable product supervised-plan issuance is missing or invalid",
     ):
-        verify_product_betfair_standard_limit_price_bound(
+        _verify_product(
             evidence=evidence,
             ledger=ledger,
             issuance_store=store,
             execution_plan_id="supervised-v2-" + "0" * 64,
             action_id=action.action_id,
         )
+
+
+def test_product_verifier_rejects_self_consistent_unrelated_workspace(
+    monkeypatch, tmp_path: Path
+) -> None:
+    bound, approval, store, _issued = _issue(monkeypatch, tmp_path)
+    action = bound.execution_plan.actions[0]
+    ledger = RealExecutionLedger(store.workspace / "execution-ledger.jsonl")
+    ledger.reserve_plan(bound.execution_plan)
+    ledger.bind_supervised_approval(
+        plan_id=bound.execution_plan.plan_id,
+        approval_id=approval.ledger_identity,
+        approval_fingerprint=approval.fingerprint,
+        approved_at=approval.approved_at,
+        evidence_sha256=approval.evidence_sha256,
+    )
+    evidence = resolve_betfair_standard_limit_price_bound(
+        bound=bound,
+        action_id=action.action_id,
+    )
+    product_workspace = tmp_path / "actual-product-workspace"
+    product_workspace.mkdir()
+
+    with _active_runtime_profile(product_workspace) as runtime_profile:
+        with pytest.raises(
+            BetfairStandardLimitPriceBoundError,
+            match="issuance store is outside the active runtime workspace",
+        ):
+            verify_product_betfair_standard_limit_price_bound(
+                evidence=evidence,
+                ledger=ledger,
+                issuance_store=store,
+                runtime_profile=runtime_profile,
+                execution_plan_id=bound.execution_plan.plan_id,
+                action_id=action.action_id,
+            )
+
+
+def test_product_verifier_rejects_ledger_outside_active_workspace(
+    monkeypatch, tmp_path: Path
+) -> None:
+    bound, approval, store, _issued = _issue(monkeypatch, tmp_path)
+    action = bound.execution_plan.actions[0]
+    outside = tmp_path / "other-root"
+    ledger = RealExecutionLedger(outside / "execution-ledger.jsonl")
+    ledger.reserve_plan(bound.execution_plan)
+    ledger.bind_supervised_approval(
+        plan_id=bound.execution_plan.plan_id,
+        approval_id=approval.ledger_identity,
+        approval_fingerprint=approval.fingerprint,
+        approved_at=approval.approved_at,
+        evidence_sha256=approval.evidence_sha256,
+    )
+    evidence = resolve_betfair_standard_limit_price_bound(
+        bound=bound,
+        action_id=action.action_id,
+    )
+
+    with _active_runtime_profile(store.workspace) as runtime_profile:
+        with pytest.raises(
+            BetfairStandardLimitPriceBoundError,
+            match="execution ledger is outside the active runtime workspace",
+        ):
+            verify_product_betfair_standard_limit_price_bound(
+                evidence=evidence,
+                ledger=ledger,
+                issuance_store=store,
+                runtime_profile=runtime_profile,
+                execution_plan_id=bound.execution_plan.plan_id,
+                action_id=action.action_id,
+            )
+
+
+def test_product_verifier_rejects_copied_runtime_profile(
+    monkeypatch, tmp_path: Path
+) -> None:
+    bound, approval, store, _issued = _issue(monkeypatch, tmp_path)
+    action = bound.execution_plan.actions[0]
+    ledger = RealExecutionLedger(store.workspace / "execution-ledger.jsonl")
+    ledger.reserve_plan(bound.execution_plan)
+    ledger.bind_supervised_approval(
+        plan_id=bound.execution_plan.plan_id,
+        approval_id=approval.ledger_identity,
+        approval_fingerprint=approval.fingerprint,
+        approved_at=approval.approved_at,
+        evidence_sha256=approval.evidence_sha256,
+    )
+    evidence = resolve_betfair_standard_limit_price_bound(
+        bound=bound,
+        action_id=action.action_id,
+    )
+
+    with _active_runtime_profile(store.workspace) as runtime_profile:
+        copied = replace(runtime_profile)
+        with pytest.raises(
+            BetfairStandardLimitPriceBoundError,
+            match="canonical product runtime authority is missing or changed",
+        ):
+            verify_product_betfair_standard_limit_price_bound(
+                evidence=evidence,
+                ledger=ledger,
+                issuance_store=store,
+                runtime_profile=copied,
+                execution_plan_id=bound.execution_plan.plan_id,
+                action_id=action.action_id,
+            )
+
+
+def test_product_verifier_rechecks_runtime_profile_before_positive_return(
+    monkeypatch, tmp_path: Path
+) -> None:
+    bound, approval, store, _issued = _issue(monkeypatch, tmp_path)
+    action = bound.execution_plan.actions[0]
+    ledger = RealExecutionLedger(store.workspace / "execution-ledger.jsonl")
+    ledger.reserve_plan(bound.execution_plan)
+    ledger.bind_supervised_approval(
+        plan_id=bound.execution_plan.plan_id,
+        approval_id=approval.ledger_identity,
+        approval_fingerprint=approval.fingerprint,
+        approved_at=approval.approved_at,
+        evidence_sha256=approval.evidence_sha256,
+    )
+    evidence = resolve_betfair_standard_limit_price_bound(
+        bound=bound,
+        action_id=action.action_id,
+    )
+
+    with _active_runtime_profile(store.workspace) as runtime_profile:
+        original_init = RealExecutionLedger.__init__
+
+        def revoke_during_reopen(self, path):
+            original_init(self, path)
+            trusted_runtime_profile.revoke_trusted_runtime_code_profile(
+                runtime_profile
+            )
+
+        monkeypatch.setattr(
+            RealExecutionLedger,
+            "__init__",
+            revoke_during_reopen,
+        )
+        with pytest.raises(
+            BetfairStandardLimitPriceBoundError,
+            match="canonical product runtime authority is missing or changed",
+        ):
+            verify_product_betfair_standard_limit_price_bound(
+                evidence=evidence,
+                ledger=ledger,
+                issuance_store=store,
+                runtime_profile=runtime_profile,
+                execution_plan_id=bound.execution_plan.plan_id,
+                action_id=action.action_id,
+            )

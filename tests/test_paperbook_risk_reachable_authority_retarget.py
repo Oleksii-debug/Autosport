@@ -697,3 +697,60 @@ def test_reconstructed_evaluate_rejects_mutated_policy_helper_graph() -> None:
     assert hostile_executed is False
     assert decision.allowed is False
     assert "virtual bankroll" in decision.reason
+
+def test_reconstructed_evaluate_rejects_in_place_mutated_policy_helper_code() -> None:
+    """Raw reconstructed evaluator must witness helper code, not only descriptor identity."""
+
+    book = PaperBook("100")
+    policy = PaperRiskPolicy(
+        max_ticket_fraction=Decimal("1"),
+        max_committed_fraction=Decimal("1"),
+        minimum_cash_reserve_fraction=Decimal("0"),
+    )
+    public_root = vars(PaperRiskPolicy)["evaluate"]
+    assert type(public_root) is FunctionType
+    nested_spec = None
+    for cell in public_root.__closure__ or ():
+        try:
+            candidate = cell.cell_contents
+        except ValueError:
+            continue
+        if (
+            type(candidate) is tuple
+            and len(candidate) == 6
+            and type(candidate[5]) is tuple
+        ):
+            globals_snapshot = dict(candidate[5])
+            inner = globals_snapshot.get("_EVALUATE_SPEC")
+            if type(inner) is tuple and len(inner) == 6:
+                nested_spec = inner
+                break
+    assert nested_spec is not None
+    reconstructed = _reconstruct_spec(nested_spec)
+
+    helper = vars(PaperRiskPolicy)["_derived_risk_values"]
+    original_code = helper.__code__
+    hostile_executed = False
+
+    def hostile_derived(self, initial_bankroll, balance, committed_stake, amount):
+        nonlocal hostile_executed
+        del self, initial_bankroll, balance, committed_stake, amount
+        hostile_executed = True
+        return (
+            Decimal("100"),
+            Decimal("0"),
+            Decimal("100"),
+            Decimal("100"),
+            Decimal("0"),
+        )
+
+    try:
+        helper.__code__ = hostile_derived.__code__
+        decision = reconstructed(policy, book, Decimal("1"))
+    finally:
+        helper.__code__ = original_code
+
+    assert hostile_executed is False
+    assert decision.allowed is False
+    assert "virtual bankroll" in decision.reason
+

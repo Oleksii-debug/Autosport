@@ -243,7 +243,11 @@ def _bound():
     return bound, approval, portfolio, intent
 
 
-def _ledger_with_unknown(path: Path):
+def _ledger_with_unknown(
+    path: Path,
+    *,
+    unknown_reason: str = "ambiguous_external_effect",
+):
     bound, approval, portfolio, intent = _bound()
     ledger = RealExecutionLedger(path)
     reserve_supervised_plan(ledger, bound, approval)
@@ -256,7 +260,7 @@ def _ledger_with_unknown(path: Path):
         attempt_id="attempt-1",
     )
     ledger.mark_submitted("attempt-1", submitted_at=SUBMITTED_AT)
-    ledger.mark_unknown("attempt-1", reason="ambiguous_external_effect", observed_at=UNKNOWN_AT)
+    ledger.mark_unknown("attempt-1", reason=unknown_reason, observed_at=UNKNOWN_AT)
     return ledger, bound, approval, action, portfolio, intent
 
 
@@ -776,6 +780,51 @@ def test_complete_provider_absence_is_diagnostic_without_retry_authority() -> No
             plan_id=bound.execution_plan.plan_id,
             action_id=action.action_id,
         ) is False
+
+
+def test_betfair_timeout_unknown_requires_timeout_visibility_authority() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        ledger, bound, _, action, _, _ = _ledger_with_unknown(
+            Path(tmp) / "execution.jsonl",
+            unknown_reason="betfair_placeOrders_ambiguous_effect_requires_readback",
+        )
+        verified = _verified_state(bound, action, matched_stake=None)
+        assert isinstance(verified, VerifiedProviderAbsenceEvidence)
+
+        with pytest.raises(
+            SupervisedExecutionError,
+            match="provider absence evidence is not authoritative",
+        ):
+            reconcile_provider_not_found(
+                ledger,
+                bound,
+                attempt_id="attempt-1",
+                readback=verified,
+            )
+        assert ledger.attempt_state("attempt-1") is AttemptState.UNKNOWN
+
+
+def test_betfair_timeout_unknown_still_accepts_positive_provider_effect() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        ledger, bound, _, action, _, _ = _ledger_with_unknown(
+            Path(tmp) / "execution.jsonl",
+            unknown_reason="betfair_placeOrders_ambiguous_effect_requires_readback",
+        )
+        verified = _verified_state(
+            bound,
+            action,
+            matched_stake=action.requested_stake,
+        )
+        assert isinstance(verified, VerifiedProviderEffectEvidence)
+
+        result = reconcile_provider_readback(
+            ledger,
+            bound,
+            attempt_id="attempt-1",
+            readback=verified,
+        )
+        assert result.outcome is ReadbackOutcome.ACCEPTED
+        assert ledger.attempt_state("attempt-1") is AttemptState.ACCEPTED
 
 
 def test_opaque_not_found_hashes_cannot_release_retry() -> None:

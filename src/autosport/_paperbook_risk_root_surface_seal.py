@@ -2,7 +2,7 @@
 
 ``risk.PaperRiskPolicy`` is created at its source definition with a dedicated metaclass.
 Generation/private-authority composition is intentionally allowed to replace the three
-owner-facing Python functions before this final step. We then install data descriptors
+owner-facing Python functions and the private classmethod book-state root before this final step. We then install data descriptors
 on that *existing* metaclass. Python's class-assignment path, including an explicit
 ``type.__setattr__`` / ``type.__delattr__`` call, must pass through those descriptors,
 so the finalized class-dict functions cannot be replaced or deleted afterward.
@@ -19,6 +19,7 @@ from . import risk as _risk
 
 
 _PROTECTED_ROOTS = (
+    "_book_state",
     "derive_goal_stake",
     "derive_goal_stake_vector",
     "evaluate",
@@ -66,7 +67,15 @@ def _install() -> None:
     root_descriptors: dict[str, object] = {}
     for name in _PROTECTED_ROOTS:
         descriptor = namespace.get(name)
-        if type(descriptor) is not FunctionType:
+        if name == "_book_state":
+            if (
+                type(descriptor) is not classmethod
+                or type(descriptor.__func__) is not FunctionType
+            ):
+                raise RuntimeError(
+                    f"canonical PaperRiskPolicy root changed before sealing: {name}"
+                )
+        elif type(descriptor) is not FunctionType:
             raise RuntimeError(f"canonical PaperRiskPolicy root changed before sealing: {name}")
         root_descriptors[name] = descriptor
 
@@ -102,7 +111,15 @@ def _install() -> None:
         if current_namespace.get(name) is not expected:
             raise RuntimeError(f"canonical PaperRiskPolicy root moved during sealing: {name}")
         resolved = getattr(policy, name)
-        if resolved is not expected:
+        if type(expected) is classmethod:
+            if (
+                getattr(resolved, "__func__", None) is not expected.__func__
+                or getattr(resolved, "__self__", None) is not policy
+            ):
+                raise RuntimeError(
+                    f"canonical PaperRiskPolicy root lookup changed during sealing: {name}"
+                )
+        elif resolved is not expected:
             raise RuntimeError(f"canonical PaperRiskPolicy root lookup changed during sealing: {name}")
 
 

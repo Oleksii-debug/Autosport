@@ -640,3 +640,60 @@ def test_reconstructed_evaluate_cannot_retarget_book_state_root() -> None:
     assert hostile_executed is False
     assert decision.allowed is False
     assert "virtual bankroll" in decision.reason
+
+
+def test_reconstructed_evaluate_rejects_mutated_policy_helper_graph() -> None:
+    """Sealed _book_state must witness helper dispatch before raw delegate authority."""
+
+    book = PaperBook("100")
+    policy = PaperRiskPolicy(
+        max_ticket_fraction=Decimal("1"),
+        max_committed_fraction=Decimal("1"),
+        minimum_cash_reserve_fraction=Decimal("0"),
+    )
+    public_root = vars(PaperRiskPolicy)["evaluate"]
+    assert type(public_root) is FunctionType
+    nested_spec = None
+    for cell in public_root.__closure__ or ():
+        try:
+            candidate = cell.cell_contents
+        except ValueError:
+            continue
+        if (
+            type(candidate) is tuple
+            and len(candidate) == 6
+            and type(candidate[5]) is tuple
+        ):
+            globals_snapshot = dict(candidate[5])
+            inner = globals_snapshot.get("_EVALUATE_SPEC")
+            if type(inner) is tuple and len(inner) == 6:
+                nested_spec = inner
+                break
+    assert nested_spec is not None
+    reconstructed = _reconstruct_spec(nested_spec)
+
+    original = vars(PaperRiskPolicy)["_derived_risk_values"]
+    hostile_executed = False
+
+    def hostile_derived(self, initial_bankroll, balance, committed_stake, amount):
+        nonlocal hostile_executed
+        del self, initial_bankroll, balance, committed_stake, amount
+        hostile_executed = True
+        return (
+            Decimal("100"),
+            Decimal("0"),
+            Decimal("100"),
+            Decimal("100"),
+            Decimal("0"),
+        )
+
+    try:
+        setattr(PaperRiskPolicy, "_derived_risk_values", hostile_derived)
+        decision = reconstructed(policy, book, Decimal("1"))
+    finally:
+        if vars(PaperRiskPolicy).get("_derived_risk_values") is not original:
+            setattr(PaperRiskPolicy, "_derived_risk_values", original)
+
+    assert hostile_executed is False
+    assert decision.allowed is False
+    assert "virtual bankroll" in decision.reason

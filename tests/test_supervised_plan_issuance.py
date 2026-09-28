@@ -559,7 +559,7 @@ def test_product_verifier_does_not_inherit_caller_selected_issuance_authority_ro
     with _active_runtime_profile(default_handle.workspace) as runtime_profile:
         with pytest.raises(
             BetfairStandardLimitPriceBoundError,
-            match="durable product supervised-plan issuance is missing or invalid",
+            match="product issuance store must use the product-selected authority root",
         ):
             verify_product_betfair_standard_limit_price_bound(
                 evidence=evidence,

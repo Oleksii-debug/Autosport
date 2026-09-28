@@ -156,3 +156,27 @@ def test_checked_private_begin_global_mutation_fails_closed_before_begin(
         match=r"frozen causal RunRegistry begin global '_sealed_product_utc_now' was rebound",
     ):
         _attempt_begin(registry)
+
+def test_outcome_trust_transitive_dispatch_rebind_fails_before_attacker(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    registry = _new_registry(tmp_path)
+    outcome_trust = availability._outcome_trust
+    attacker_called = False
+
+    def attacker(*_args, **_kwargs):
+        nonlocal attacker_called
+        attacker_called = True
+        return "1900-01-01T00:00:00.000000Z"
+
+    monkeypatch.setattr(outcome_trust, "_canonical_timestamp", attacker)
+
+    with pytest.raises(
+        OutcomeLineageTrustError,
+        match=r"outcome availability transitive dependency '_canonical_timestamp' was rebound",
+    ):
+        _attempt_begin(registry)
+
+    assert attacker_called is False
+

@@ -277,16 +277,19 @@ def test_terminal_product_message_is_drained_before_start_can_reenable(
     assert refreshed == [True]
 
 
-def test_visible_exception_projection_never_contains_raw_detail() -> None:
+def test_visible_exception_projection_never_contains_raw_detail_or_python_type() -> None:
     projected = _safe_exception_text(RuntimeError("token=/secret/path"))
-    assert "RuntimeError" in projected
+    assert "RuntimeError" not in projected
+    assert "BaseException" not in projected
     assert "token" not in projected
     assert "/secret/path" not in projected
+    assert any("\u0400" <= char <= "\u04ff" for char in projected)
 
     hostile_type = type("СекретнийТип", (Exception,), {})
     hostile = _safe_exception_text(hostile_type("credential=hidden"))
     assert "СекретнийТип" not in hostile
     assert "credential" not in hostile
+    assert any("\u0400" <= char <= "\u04ff" for char in hostile)
 
 
 def test_semantic_shell_contains_runtime_controls_and_real_tickets_table() -> None:

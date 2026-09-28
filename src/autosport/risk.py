@@ -207,7 +207,7 @@ class RiskOfRuinEvidence:
             )
 
         if (
-            not isinstance(self.evaluated_stake, Decimal)
+            type(self.evaluated_stake) is not Decimal
             or not self.evaluated_stake.is_finite()
             or self.evaluated_stake <= 0
         ):
@@ -215,7 +215,7 @@ class RiskOfRuinEvidence:
                 "risk-of-ruin evaluated_stake must be a positive finite exact Decimal"
             )
         if (
-            not isinstance(self.upper_bound, Decimal)
+            type(self.upper_bound) is not Decimal
             or not self.upper_bound.is_finite()
             or self.upper_bound < Decimal("0")
             or self.upper_bound > Decimal("1")
@@ -301,7 +301,7 @@ class RiskOfRuinVectorEvidence:
         has_positive = False
         for stake in self.evaluated_stakes:
             if (
-                not isinstance(stake, Decimal)
+                type(stake) is not Decimal
                 or not stake.is_finite()
                 or stake < Decimal("0")
             ):
@@ -314,7 +314,7 @@ class RiskOfRuinVectorEvidence:
                 "vector risk-of-ruin evaluated_stakes must contain a positive stake"
             )
         if (
-            not isinstance(self.upper_bound, Decimal)
+            type(self.upper_bound) is not Decimal
             or not self.upper_bound.is_finite()
             or self.upper_bound < Decimal("0")
             or self.upper_bound > Decimal("1")

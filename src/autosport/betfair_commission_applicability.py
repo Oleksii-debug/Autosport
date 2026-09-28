@@ -320,8 +320,30 @@ def require_product_betfair_commission_applicability(
         raise BetfairCommissionApplicabilityError(
             "assessment exceeds the canonical fail-closed applicability boundary"
         )
-    payload = assessment.to_dict()
-    claimed_id = payload.pop("assessment_id")
-    if claimed_id != sha256(_canonical_json(payload)).hexdigest():
+    payload = {
+        "schema": _SCHEMA,
+        "schema_version": _SCHEMA_VERSION,
+        "venue_id": assessment.venue_id,
+        "account_id": assessment.account_id,
+        "market_id": assessment.market_id,
+        "currency_code": assessment.currency_code,
+        "region": assessment.region,
+        "fee_input_sha256": assessment.fee_input_sha256,
+        "account_source_payload_sha256": assessment.account_source_payload_sha256,
+        "market_source_payload_sha256": assessment.market_source_payload_sha256,
+        "status": assessment.status.value,
+        "reasons": [reason.value for reason in assessment.reasons],
+        "ruleset_id": assessment.ruleset_id,
+        "provider_rule_sources": list(assessment.provider_rule_sources),
+        "prospective_commission_amount_authorized": (
+            assessment.prospective_commission_amount_authorized
+        ),
+        "complete_execution_fee_cost_authorized": (
+            assessment.complete_execution_fee_cost_authorized
+        ),
+        "provider_write_authorized": assessment.provider_write_authorized,
+        "real_money_execution_authorized": assessment.real_money_execution_authorized,
+    }
+    if assessment.assessment_id != sha256(_canonical_json(payload)).hexdigest():
         raise BetfairCommissionApplicabilityError("assessment identity is inconsistent")
     return assessment

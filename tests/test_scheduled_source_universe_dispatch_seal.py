@@ -271,5 +271,54 @@ class ScheduledSourceUniverseDispatchSealTests(unittest.TestCase):
                 setattr(result_type, "_issue", original)
 
 
+    def test_source_result_issue_code_mutation_fails_before_hostile_issuer(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path, store, cycle_seq, _candidate = _ready_store(tmp)
+            descriptor = vars(source_module.SourceUniverseCommitment)["_issue"]
+            issue_function = descriptor.__func__
+            original_code = issue_function.__code__
+
+            def hostile_issue(cls, payload):
+                raise AssertionError("hostile source-universe issuer executed")
+
+            issue_function.__code__ = hostile_issue.__code__
+            try:
+                with self.assertRaisesRegex(
+                    source_module.SourceUniverseCommitmentError,
+                    "result issuance surface is rebound or mutated",
+                ):
+                    source_module.build_source_universe_commitment(
+                        store,
+                        expected_store_path=path,
+                        source_id=SOURCE_ID,
+                        start_cycle_seq=cycle_seq,
+                        end_cycle_seq=cycle_seq,
+                    )
+            finally:
+                issue_function.__code__ = original_code
+
+    def test_scheduled_result_issue_code_mutation_fails_before_hostile_issuer(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path, store, _cycle_seq, candidate = _ready_store(tmp)
+            descriptor = vars(
+                scheduled_module.ScheduledSourceUniverseResolution
+            )["_issue"]
+            issue_function = descriptor.__func__
+            original_code = issue_function.__code__
+
+            def hostile_issue(cls, payload):
+                raise AssertionError("hostile scheduled-universe issuer executed")
+
+            issue_function.__code__ = hostile_issue.__code__
+            try:
+                with self.assertRaisesRegex(
+                    scheduled_module.ScheduledSourceUniverseError,
+                    "result issuance surface is rebound or mutated",
+                ):
+                    _resolve(path, store, candidate)
+            finally:
+                issue_function.__code__ = original_code
+
+
 if __name__ == "__main__":
     unittest.main()

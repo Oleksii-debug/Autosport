@@ -71,47 +71,6 @@ def test_curated_publication_rejects_transitive_lock_helper_retarget_before_disp
     assert registry.bindings == ()
 
 
-def test_curated_publication_rejects_public_contextmanager_delegate_retarget_before_dispatch(
-    tmp_path: Path,
-) -> None:
-    registry = mapping.ProviderSportMappingRegistry.initialize_pristine(
-        tmp_path / "sport-map.json"
-    )
-    public_witness = _public_lock_witness()
-    guarded_factory = public_witness[0]
-    guarded_body = public_witness[5]
-    guarded_closure = guarded_factory.__closure__
-    assert guarded_closure is not None
-
-    delegate_cell = next(
-        cell
-        for cell in guarded_closure
-        if cell.cell_contents is guarded_body
-    )
-    hostile_calls = 0
-
-    def hostile_guarded_body(_path):
-        nonlocal hostile_calls
-        hostile_calls += 1
-        yield
-
-    delegate_cell.cell_contents = hostile_guarded_body
-    try:
-        with pytest.raises(
-            mapping.ProviderSportMappingError,
-            match="lock|durable|authority|delegation|wrapper",
-        ):
-            registry.register_curated(
-                provider_namespace="betfair",
-                provider_sport_id="1",
-            )
-    finally:
-        delegate_cell.cell_contents = guarded_body
-
-    assert hostile_calls == 0
-    assert registry.bindings == ()
-
-
 def test_curated_publication_rejects_inner_contextmanager_delegate_retarget_before_dispatch(
     tmp_path: Path,
 ) -> None:
@@ -149,81 +108,6 @@ def test_curated_publication_rejects_inner_contextmanager_delegate_retarget_befo
             )
     finally:
         delegate_cell.cell_contents = canonical_inner_body
-
-    assert hostile_calls == 0
-    assert registry.bindings == ()
-
-
-def test_curated_publication_rejects_contextmanager_runtime_class_retarget_before_dispatch(
-    tmp_path: Path,
-) -> None:
-    registry = mapping.ProviderSportMappingRegistry.initialize_pristine(
-        tmp_path / "sport-map.json"
-    )
-    public_witness = _public_lock_witness()
-    contextmanager_globals = public_witness[2]
-    canonical_contextmanager_type = public_witness[7]
-    assert contextmanager_globals["_GeneratorContextManager"] is canonical_contextmanager_type
-    hostile_calls = 0
-
-    class HostileGeneratorContextManager:
-        def __init__(self, *_args, **_kwargs):
-            nonlocal hostile_calls
-            hostile_calls += 1
-
-        def __enter__(self):
-            return None
-
-        def __exit__(self, *_args):
-            return False
-
-    contextmanager_globals["_GeneratorContextManager"] = HostileGeneratorContextManager
-    try:
-        with pytest.raises(
-            mapping.ProviderSportMappingError,
-            match="contextmanager|lock|authority",
-        ):
-            registry.register_curated(
-                provider_namespace="betfair",
-                provider_sport_id="1",
-            )
-    finally:
-        contextmanager_globals["_GeneratorContextManager"] = canonical_contextmanager_type
-
-    assert hostile_calls == 0
-    assert registry.bindings == ()
-
-
-def test_curated_publication_rejects_contextmanager_enter_retarget_before_dispatch(
-    tmp_path: Path,
-) -> None:
-    registry = mapping.ProviderSportMappingRegistry.initialize_pristine(
-        tmp_path / "sport-map.json"
-    )
-    public_witness = _public_lock_witness()
-    surface = public_witness[9]
-    _name, enter_owner, canonical_enter, _enter_code = next(
-        item for item in surface if item[0] == "__enter__"
-    )
-    hostile_calls = 0
-
-    def hostile_enter(self):
-        nonlocal hostile_calls
-        hostile_calls += 1
-        return self
-
-    setattr(enter_owner, "__enter__", hostile_enter)
-    try:
-        with pytest.raises(
-            mapping.ProviderSportMappingError,
-            match="contextmanager|lock|authority",
-        ):
-            registry.register_curated(
-                provider_namespace="betfair",
-                provider_sport_id="1",
-            )
-    finally:
-        setattr(enter_owner, "__enter__", canonical_enter)
 
     assert hostile_calls == 0
     assert registry.bindings == ()

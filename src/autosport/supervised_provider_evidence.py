@@ -2,11 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
 from typing import TypeAlias
-from weakref import ref
 
 from .betfair_account_readonly import (
     ADAPTER_ID as BETFAIR_ADAPTER_ID,
@@ -203,6 +202,21 @@ class VerifiedProviderEffectEvidence:
     accepted_stake: Decimal
     evidence_id: str
     provider_order_ref: str | None = None
+    _authority_action: ExecutionAction | None = field(
+        default=None, init=False, repr=False, compare=False
+    )
+    _authority_profile: BookmakerCapabilityProfile | None = field(
+        default=None, init=False, repr=False, compare=False
+    )
+    _authority_expected_profile_sha256: str | None = field(
+        default=None, init=False, repr=False, compare=False
+    )
+    _authority_readback: BetfairExecutionReadbackEnvelope | None = field(
+        default=None, init=False, repr=False, compare=False
+    )
+    _authority_expected_provider_order_ref: str | None = field(
+        default=None, init=False, repr=False, compare=False
+    )
 
 
 @dataclass(frozen=True, slots=True, weakref_slot=True)
@@ -221,6 +235,21 @@ class VerifiedProviderAbsenceEvidence:
     cleared_source_payload_sha256: str
     evidence_id: str
     provider_order_ref: str | None = None
+    _authority_action: ExecutionAction | None = field(
+        default=None, init=False, repr=False, compare=False
+    )
+    _authority_profile: BookmakerCapabilityProfile | None = field(
+        default=None, init=False, repr=False, compare=False
+    )
+    _authority_expected_profile_sha256: str | None = field(
+        default=None, init=False, repr=False, compare=False
+    )
+    _authority_readback: BetfairExecutionReadbackEnvelope | None = field(
+        default=None, init=False, repr=False, compare=False
+    )
+    _authority_expected_provider_order_ref: str | None = field(
+        default=None, init=False, repr=False, compare=False
+    )
 
 
 VerifiedProviderState: TypeAlias = (
@@ -633,17 +662,22 @@ def verify_betfair_provider_state(
         readback.provider_order_ref,
     )
 
-# Verified provider state is an in-process capability, not a caller assertion.
-# The verifier issues object identities into a non-exported closure and reconciliation
-# rechecks that exact identity plus the immutable payload fingerprint before any ledger
-# transition. A public dataclass constructor or dataclasses.replace() therefore cannot
-# mint provider authority, and there is no importable sentinel/token to reuse.
+# Verified provider state is an origin-reverifiable in-process capability, not a
+# caller assertion. Canonical verification binds the exact action/profile/readback
+# inputs into non-init slots. Reconciliation reruns the frozen canonical verifier over
+# those exact origins and requires the same evidence kind and canonical fingerprint.
+# Public construction or dataclasses.replace() therefore carries no origin proof, while
+# authority no longer depends on caller-reachable mutable registry membership.
 def _install_verified_provider_evidence_authority() -> None:
-    issued: dict[int, tuple[object, str]] = {}
     raw_verify = verify_betfair_provider_state
     raw_verify_code = raw_verify.__code__
     sealed_effect_type = VerifiedProviderEffectEvidence
     sealed_absence_type = VerifiedProviderAbsenceEvidence
+    sealed_evidence_descriptors = tuple(
+        (owner, name, vars(owner).get(name))
+        for owner in (sealed_effect_type, sealed_absence_type)
+        for name in owner.__dataclass_fields__
+    )
     sealed_fingerprint = _verified_provider_evidence_fingerprint
     sealed_fingerprint_code = sealed_fingerprint.__code__
     sealed_error = ProviderEvidenceError
@@ -740,6 +774,11 @@ def _install_verified_provider_evidence_authority() -> None:
                 raise sealed_error(
                     f"provider evidence authority binding changed: {name}"
                 )
+        for owner, name, expected in sealed_evidence_descriptors:
+            if vars(owner).get(name, missing) is not expected:
+                raise sealed_error(
+                    f"provider evidence field authority changed: {owner.__name__}.{name}"
+                )
         current_readback_assertion = getattr(
             BetfairExecutionReadbackEnvelope,
             "assert_authoritative",
@@ -792,15 +831,20 @@ def _install_verified_provider_evidence_authority() -> None:
             expected_provider_order_ref=expected_provider_order_ref,
         )
         assert_executable_authority_intact()
-        evidence_key = id(evidence)
-
-        def forget(_weakref: object, *, key: int = evidence_key) -> None:
-            issued.pop(key, None)
-
-        issued[evidence_key] = (
-            ref(evidence, forget),
-            sealed_fingerprint(evidence),
+        object.__setattr__(evidence, "_authority_action", action)
+        object.__setattr__(evidence, "_authority_profile", profile)
+        object.__setattr__(
+            evidence,
+            "_authority_expected_profile_sha256",
+            expected_profile_sha256,
         )
+        object.__setattr__(evidence, "_authority_readback", readback)
+        object.__setattr__(
+            evidence,
+            "_authority_expected_provider_order_ref",
+            expected_provider_order_ref,
+        )
+        assert_executable_authority_intact()
         return evidence
 
     def assert_verified_provider_evidence_authoritative(
@@ -809,14 +853,40 @@ def _install_verified_provider_evidence_authority() -> None:
         assert_executable_authority_intact()
         if type(evidence) not in (sealed_effect_type, sealed_absence_type):
             raise sealed_error("provider evidence type is not canonical")
-        record = issued.get(id(evidence))
-        if record is None or record[0]() is not evidence:
+        action = object.__getattribute__(evidence, "_authority_action")
+        profile = object.__getattribute__(evidence, "_authority_profile")
+        expected_profile_sha256 = object.__getattribute__(
+            evidence,
+            "_authority_expected_profile_sha256",
+        )
+        readback = object.__getattribute__(evidence, "_authority_readback")
+        expected_provider_order_ref = object.__getattribute__(
+            evidence,
+            "_authority_expected_provider_order_ref",
+        )
+        if (
+            type(action) is not ExecutionAction
+            or type(profile) is not BookmakerCapabilityProfile
+            or type(expected_profile_sha256) is not str
+            or type(readback) is not BetfairExecutionReadbackEnvelope
+        ):
             raise sealed_error(
-                "verified provider evidence was not issued by canonical verifier"
+                "verified provider evidence lacks canonical origin authority"
             )
-        if record[1] != sealed_fingerprint(evidence):
+        expected = raw_verify(
+            action,
+            profile,
+            expected_profile_sha256=expected_profile_sha256,
+            readback=readback,
+            expected_provider_order_ref=expected_provider_order_ref,
+        )
+        assert_executable_authority_intact()
+        if (
+            type(expected) is not type(evidence)
+            or sealed_fingerprint(expected) != sealed_fingerprint(evidence)
+        ):
             raise sealed_error(
-                "verified provider evidence changed after canonical verification"
+                "verified provider evidence conflicts with canonical origin verification"
             )
         assert_executable_authority_intact()
 

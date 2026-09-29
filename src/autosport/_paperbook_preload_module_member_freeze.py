@@ -78,6 +78,10 @@ class _FrozenSurface(tuple, metaclass=_FrozenSurfaceMeta):
     def __new__(cls, **values: object):
         return tuple.__new__(cls, tuple(values.items()))
 
+    # Make the inherited primary attribute-lookup root explicit so the metaclass seal
+    # below can protect it. Otherwise a caller can add ``__getattribute__`` after
+    # composition, bypass ``__getattr__`` entirely, and retarget every frozen member.
+    __getattribute__ = object.__getattribute__
     __iter__ = tuple.__iter__
 
     def __getattr__(self, name: str) -> object:
@@ -110,7 +114,14 @@ def _seal_surface_type() -> None:
         raise RuntimeError("canonical PaperBook frozen-surface metaclass changed before sealing")
 
     namespace = type.__getattribute__(surface_type, "__dict__")
-    protected = ("__new__", "__iter__", "__getattr__", "__setattr__", "__delattr__")
+    protected = (
+        "__new__",
+        "__getattribute__",
+        "__iter__",
+        "__getattr__",
+        "__setattr__",
+        "__delattr__",
+    )
     descriptors: dict[str, object] = {}
     for name in protected:
         descriptor = namespace.get(name)

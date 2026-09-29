@@ -83,3 +83,9 @@ from . import _paperbook_risk_private_authority_guard as _paperbook_risk_private
 # wrappers are installed. The source-defined custom metaclass lets data descriptors
 # reject normal and base-type class mutation without replacing PaperRiskPolicy identity.
 from . import _paperbook_risk_root_surface_seal as _paperbook_risk_root_surface_seal  # noqa: E402,F401
+
+# RunTransaction is first imported only after the canonical PaperBook persistence
+# graph above is fully composed. Detach its already-installed stage/promotion wrappers
+# from live module-global stdlib/PaperBook dispatch before later product surfaces can
+# import and capture the transaction class.
+from . import _run_transaction_paperbook_direct_dispatch_guard as _run_transaction_paperbook_direct_dispatch_guard  # noqa: E402,F401

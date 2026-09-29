@@ -89,3 +89,8 @@ from . import _paperbook_risk_root_surface_seal as _paperbook_risk_root_surface_
 # from live module-global stdlib/PaperBook dispatch before later product surfaces can
 # import and capture the transaction class.
 from . import _run_transaction_paperbook_direct_dispatch_guard as _run_transaction_paperbook_direct_dispatch_guard  # noqa: E402,F401
+
+# The detached binding verifier itself still exposes closure cells for exact lookup
+# primitives as tamper evidence. Seal those helpers immediately after direct-dispatch
+# composition so a later retarget is rejected before the verifier can execute it.
+from . import _run_transaction_detached_verifier_helper_guard as _run_transaction_detached_verifier_helper_guard  # noqa: E402,F401

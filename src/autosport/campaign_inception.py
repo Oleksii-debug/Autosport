@@ -67,6 +67,7 @@ _CANONICAL_SCHEDULE_ID = CollectorDeltaStore._collector_schedule_id
 _CANONICAL_SCHEDULE_DUE_AT = CollectorDeltaStore._collector_schedule_due_at
 _CANONICAL_PATH_EQUALITY = Path.__eq__
 _CANONICAL_PATH_FSPATH = Path.__fspath__
+_CANONICAL_OS_FSPATH = os.fspath
 _CANONICAL_ABSPATH = os.path.abspath
 _CANONICAL_STORE_SEAMS = frozenset(
     {
@@ -1163,6 +1164,7 @@ def _seal_campaign_inception_dispatch() -> None:
     expected_json_dumps_code = getattr(expected_json_dumps, "__code__", None)
     expected_os = os
     expected_os_path = os.path
+    expected_os_fspath = os.fspath
     expected_abspath = os.path.abspath
     expected_os_open = os.open
     expected_os_fdopen = os.fdopen
@@ -1206,6 +1208,7 @@ def _seal_campaign_inception_dispatch() -> None:
             ("_CANONICAL_SCHEDULE_DUE_AT", _CANONICAL_SCHEDULE_DUE_AT),
             ("_CANONICAL_PATH_EQUALITY", _CANONICAL_PATH_EQUALITY),
             ("_CANONICAL_PATH_FSPATH", _CANONICAL_PATH_FSPATH),
+            ("_CANONICAL_OS_FSPATH", _CANONICAL_OS_FSPATH),
             ("_CANONICAL_ABSPATH", _CANONICAL_ABSPATH),
         )
     )
@@ -1340,6 +1343,8 @@ def _seal_campaign_inception_dispatch() -> None:
             is not expected_path_fspath
             or getattr(expected_path_fspath, "__code__", None)
             is not expected_path_fspath_code
+            or module_globals.get("_CANONICAL_OS_FSPATH")
+            is not expected_os_fspath
             or module_globals.get("_CANONICAL_ABSPATH")
             is not expected_canonical_abspath
             or getattr(expected_canonical_abspath, "__code__", None)
@@ -1377,6 +1382,7 @@ def _seal_campaign_inception_dispatch() -> None:
         if (
             module_globals.get("os") is not expected_os
             or expected_os.path is not expected_os_path
+            or expected_os.fspath is not expected_os_fspath
             or expected_os_path.abspath is not expected_abspath
             or expected_os.open is not expected_os_open
             or expected_os.fdopen is not expected_os_fdopen

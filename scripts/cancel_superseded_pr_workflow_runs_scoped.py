@@ -65,6 +65,7 @@ class WorkflowScopedGitHubApi(GitHubApi):
         self._recovery_head_sha: str | None = None
         self._recovery_workflow_name: str | None = None
         self._recovery_current_run_id: int | None = None
+        self._recovered_run_ids: set[int] = set()
 
     def configure_same_head_candidate_recovery(
         self,
@@ -92,6 +93,7 @@ class WorkflowScopedGitHubApi(GitHubApi):
         self._recovery_head_sha = None
         self._recovery_workflow_name = None
         self._recovery_current_run_id = None
+        self._recovered_run_ids.clear()
         try:
             associated_pr_number = self.associated_pr_number(event_head_sha)
         except CancellationError:
@@ -120,6 +122,7 @@ class WorkflowScopedGitHubApi(GitHubApi):
             or run.head_sha != head_sha
         ):
             return run
+        self._recovered_run_ids.add(run.run_id)
         return WorkflowRun(
             run_id=run.run_id,
             head_sha=run.head_sha,
@@ -127,6 +130,27 @@ class WorkflowScopedGitHubApi(GitHubApi):
             pr_numbers=(pr_number,),
             status=run.status,
         )
+
+    def cancel(self, run_id: int) -> None:
+        """Revalidate synthetic candidate identity at the irreversible boundary."""
+
+        run_id = _require_positive_int(run_id, field="run id")
+        if run_id in self._recovered_run_ids:
+            pr_number = self._recovery_pr_number
+            head_sha = self._recovery_head_sha
+            if pr_number is None or head_sha is None:
+                raise CancellationError("recovered workflow run identity is unavailable")
+            try:
+                associated_pr_number = self.associated_pr_number(head_sha)
+            except CancellationError as exc:
+                raise CancellationError(
+                    "recovered workflow run pull request association is no longer unique"
+                ) from exc
+            if associated_pr_number != pr_number:
+                raise CancellationError(
+                    "recovered workflow run pull request association changed"
+                )
+        super().cancel(run_id)
 
     def _active_runs_for_status(self, status: str) -> tuple[WorkflowRun, ...]:
         if status not in _ACTIVE_STATUSES:

@@ -366,6 +366,27 @@ def test_dtd_and_entity_declarations_are_forbidden() -> None:
         parse_get_prices_response(payload)
 
 
+def test_utf16_entity_payload_cannot_bypass_declaration_fence() -> None:
+    payload = _response().replace(
+        '<?xml version="1.0" encoding="utf-8"?>',
+        '<?xml version="1.0" encoding="utf-16"?>\n'
+        '<!DOCTYPE x [<!ENTITY boom "Success">]>',
+        1,
+    ).replace(
+        'Description="Success"',
+        'Description="&boom;"',
+        1,
+    ).encode("utf-16")
+
+    with pytest.raises(BetdaqSoapProtocolError, match="UTF-8"):
+        parse_get_prices_response(payload)
+
+
+def test_utf8_bom_remains_supported() -> None:
+    response = parse_get_prices_response(_response().encode("utf-8-sig"))
+    assert response.markets[0].market_id == 9001
+
+
 def test_unexpected_child_cannot_leak_partial_success() -> None:
     payload = _response(
         price_nodes=(

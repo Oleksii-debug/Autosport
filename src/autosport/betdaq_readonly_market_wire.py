@@ -504,12 +504,23 @@ def parse_get_prices_response(
         raise TypeError("xml_payload must be bytes or str")
     if not payload or len(payload) > _MAX_XML_BYTES:
         raise BetdaqSoapProtocolError("SOAP payload size is invalid")
-    upper = payload.upper()
-    if b"<!DOCTYPE" in upper or b"<!ENTITY" in upper:
+
+    # ElementTree accepts XML-declared UTF-16 bytes and expands internal entities.
+    # Scanning the raw bytes for ASCII declaration tokens is therefore insufficient:
+    # UTF-16 interleaves NUL bytes and can bypass that fence. This adapter's supported
+    # wire contract is UTF-8, so normalize that encoding boundary before declaration
+    # inspection and before handing anything to ElementTree.
+    try:
+        text = payload.decode("utf-8-sig")
+    except UnicodeDecodeError as exc:
+        raise BetdaqSoapProtocolError("SOAP XML must use UTF-8 encoding") from exc
+
+    upper = text.upper()
+    if "<!DOCTYPE" in upper or "<!ENTITY" in upper:
         raise BetdaqSoapProtocolError("DTD/entity declarations are forbidden")
 
     try:
-        root = ET.fromstring(payload)
+        root = ET.fromstring(text)
     except ET.ParseError as exc:
         raise BetdaqSoapProtocolError("malformed SOAP XML") from exc
 

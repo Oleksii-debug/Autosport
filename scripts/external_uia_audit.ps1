@@ -3,6 +3,7 @@ param(
     [string]$Exe,
     [Parameter(Mandatory = $true)]
     [string]$Output,
+    [string]$WorkingDirectory = '',
     [int]$TimeoutSeconds = 20
 )
 
@@ -337,6 +338,7 @@ $report = [ordered]@{
     status = 'FAIL'
     source = 'external_windows_uia_client'
     evidence_scope = 'external System.Windows.Automation client against the fresh-extracted packaged Autosport.exe; semantic HTML collections may be legitimately empty at startup; not NVDA speech or physical-human proof'
+    launch_working_directory = $null
     launcher_process_id = $null
     process_id = $null
     process_family_ids = @()
@@ -360,7 +362,17 @@ try {
         New-Item -ItemType Directory -Path $outputDirectory -Force | Out-Null
     }
 
-    $process = Start-Process -FilePath $exePath -PassThru
+    if ([string]::IsNullOrWhiteSpace($WorkingDirectory)) {
+        $launchWorkingDirectory = (Resolve-Path -LiteralPath $PWD.Path).Path
+    } else {
+        $launchWorkingDirectory = (Resolve-Path -LiteralPath $WorkingDirectory).Path
+    }
+    if (-not (Test-Path -LiteralPath $launchWorkingDirectory -PathType Container)) {
+        throw "External UIA launch working directory is not an existing directory"
+    }
+    $report.launch_working_directory = $launchWorkingDirectory
+
+    $process = Start-Process -FilePath $exePath -WorkingDirectory $launchWorkingDirectory -PassThru
     $report.launcher_process_id = $process.Id
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     while ([DateTime]::UtcNow -lt $deadline) {

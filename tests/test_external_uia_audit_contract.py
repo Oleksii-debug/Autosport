@@ -3,10 +3,15 @@ from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parents[1]
 _EXTERNAL_UIA_AUDIT = _ROOT / "scripts" / "external_uia_audit.ps1"
+_WINDOWS_WORKFLOW = _ROOT / ".github" / "workflows" / "windows-build.yml"
 
 
 def _audit() -> str:
     return _EXTERNAL_UIA_AUDIT.read_text(encoding="utf-8")
+
+
+def _windows_workflow() -> str:
+    return _WINDOWS_WORKFLOW.read_text(encoding="utf-8")
 
 
 def test_external_uia_audit_loads_required_automation_assemblies() -> None:
@@ -145,3 +150,29 @@ def test_external_uia_audit_fails_closed_on_writable_readonly_value() -> None:
     assert "value_read_only = $valueReadOnly" in audit
     assert "$valueReadOnlyRequired -and $valueReadOnly -ne $true" in audit
     assert "external UIA ValuePattern is writable or read-only state unavailable" in audit
+
+
+
+def test_external_uia_audit_launches_with_explicit_evidence_bound_working_directory() -> None:
+    audit = _audit()
+
+    assert "[string]$WorkingDirectory = ''" in audit
+    assert "launch_working_directory = $null" in audit
+    assert "$report.launch_working_directory = $launchWorkingDirectory" in audit
+    assert (
+        "$process = Start-Process -FilePath $exePath "
+        "-WorkingDirectory $launchWorkingDirectory -PassThru"
+    ) in audit
+
+
+def test_windows_candidate_external_uia_uses_system32_as_hostile_child_cwd() -> None:
+    workflow = _windows_workflow()
+    step_start = workflow.index("- name: External UIA fresh-extraction gate")
+    step_end = workflow.index("- name: Upload external UIA failure evidence", step_start)
+    step = workflow[step_start:step_end]
+
+    assert "$hostileCwd = (Resolve-Path -LiteralPath (Join-Path $env:SystemRoot 'System32')).Path" in step
+    assert "-WorkingDirectory $hostileCwd" in step
+    assert "External UIA hostile CWD unexpectedly aliases the repository checkout" in step
+    assert "External UIA evidence did not preserve the hostile child working directory" in step
+    assert "extracted_external_uia_hostile_cwd_status" in step

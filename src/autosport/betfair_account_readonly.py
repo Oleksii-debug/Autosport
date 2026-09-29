@@ -15,7 +15,7 @@ from threading import Lock
 from types import MappingProxyType
 from typing import Callable, Mapping, Protocol, Sequence
 from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from urllib.request import Request, build_opener
 from weakref import ref
 
 ACCOUNT_JSON_RPC_ENDPOINT = "https://api.betfair.com/exchange/account/json-rpc/v1"
@@ -132,7 +132,12 @@ class UrllibBetfairHttpTransport:
     def post(self, url: str, *, headers: Mapping[str, str], body: bytes, timeout_seconds: float) -> bytes:
         request = Request(url, data=body, headers=dict(headers), method="POST")
         try:
-            with urlopen(request, timeout=timeout_seconds) as response:
+            # Build an isolated opener for every authority-bearing provider request.
+            # urllib.request.urlopen() dereferences the mutable process-global
+            # urllib.request._opener; using a fresh opener prevents caller-installed
+            # global opener state from redirecting authenticated Betfair acquisition.
+            opener = build_opener()
+            with opener.open(request, timeout=timeout_seconds) as response:
                 payload = response.read(self._max_response_bytes + 1)
         except HTTPError as exc:
             raise BetfairReadOnlyError(f"Betfair HTTP request failed with status {exc.code}") from None

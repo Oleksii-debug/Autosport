@@ -18,6 +18,11 @@ _WEBVIEW2_STARTUP_ERROR = (
     "Автоспорт не може відкрити доступний інтерфейс WebView2. "
     "Перевірте наявність Microsoft Edge WebView2 Runtime."
 )
+_WEBVIEW2_STORAGE_ERROR = (
+    "Автоспорт не може підготувати локальне сховище WebView2 для вашого профілю. "
+    "Перевірте, що LOCALAPPDATA вказує на абсолютну папку вашого користувача, "
+    "доступну для запису, і перезапустіть Автоспорт. Права адміністратора не потрібні."
+)
 
 
 def _show_workspace_configuration_error(detail: str) -> None:
@@ -175,7 +180,10 @@ def _run_interactive_gui() -> int:
     try:
         controller = EmergencyStopWebController(workspace)
         return launch_windows_shell(AutosportWebBridge(controller))
-    except WindowsWebViewUnavailable:
+    except WindowsWebViewUnavailable as exc:
+        if getattr(exc, "reason", None) == "storage":
+            _show_startup_error(_WEBVIEW2_STORAGE_ERROR)
+            return 2
         _show_startup_error(_WEBVIEW2_STARTUP_ERROR)
         return 3
 

@@ -12,6 +12,7 @@ from autosport.windows_webview_shell import (
     _PYWEBVIEW_RELEASE_SETTINGS,
     _WEBVIEW2_ENVIRONMENT_OVERRIDES,
     WindowsWebViewUnavailable,
+    _probe_webview_storage_writable,
     launch_windows_shell,
 )
 
@@ -264,4 +265,66 @@ def test_external_pywebview_release_setting_fails_before_shell_creation(
     ):
         launch_windows_shell(_Bridge())
 
+    assert calls == {}
+
+
+
+def test_webview_storage_probe_creates_root_and_leaves_no_probe_artifact(
+    tmp_path: Path,
+) -> None:
+    storage = tmp_path / "Користувач Тест" / "Local" / "Autosport" / "webview2"
+
+    _probe_webview_storage_writable(storage)
+
+    assert storage.is_dir()
+    assert list(storage.iterdir()) == []
+
+
+def test_webview_storage_probe_classifies_write_failure_without_raw_detail(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    secret = "secret-bearing-webview-storage-detail"
+
+    def deny_probe(*args, **kwargs):
+        del args, kwargs
+        raise PermissionError(secret)
+
+    monkeypatch.setattr(
+        "autosport.windows_webview_shell.tempfile.NamedTemporaryFile",
+        deny_probe,
+    )
+
+    with pytest.raises(WindowsWebViewUnavailable) as captured:
+        _probe_webview_storage_writable(tmp_path / "Local" / "Autosport" / "webview2")
+
+    assert captured.value.reason == "storage"
+    assert secret not in str(captured.value)
+    assert "not writable" in str(captured.value)
+
+
+def test_unwritable_webview_storage_fails_before_webview_import_or_window_creation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "Local"))
+    _clear_webview2_environment_overrides(monkeypatch)
+    calls: dict[str, object] = {}
+    monkeypatch.setitem(sys.modules, "webview", _fake_webview(calls))
+
+    def fail_probe(_path: Path) -> None:
+        raise WindowsWebViewUnavailable(
+            "bounded storage failure",
+            reason="storage",
+        )
+
+    monkeypatch.setattr(
+        "autosport.windows_webview_shell._probe_webview_storage_writable",
+        fail_probe,
+    )
+
+    with pytest.raises(WindowsWebViewUnavailable) as captured:
+        launch_windows_shell(_Bridge())
+
+    assert captured.value.reason == "storage"
     assert calls == {}

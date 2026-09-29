@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import tempfile
 import threading
 from pathlib import Path
 from typing import Any, Mapping
@@ -113,7 +114,11 @@ _CANONICAL_MESSAGE_KEYS = {
 
 
 class WindowsWebViewUnavailable(RuntimeError):
-    pass
+    """Bounded Windows shell startup failure with operator-safe reason class."""
+
+    def __init__(self, message: str, *, reason: str = "runtime") -> None:
+        super().__init__(message)
+        self.reason = reason
 
 
 class WindowsWebBridgeTrustError(RuntimeError):
@@ -158,6 +163,47 @@ def _reject_pywebview_release_settings(webview: object) -> None:
             + ", ".join(active)
             + "."
         )
+
+
+def _probe_webview_storage_writable(storage_path: Path) -> None:
+    """Verify the canonical per-user UDF root before constructing the WebView.
+
+    This host-process probe only proves that Autosport can create and durably write
+    within its chosen root. It is deliberately not treated as proof that WebView2
+    child processes have sufficient LowIL/AppContainer access; actual WebView startup
+    remains the final runtime gate for that stronger condition.
+    """
+
+    payload = b"autosport webview storage write probe\n"
+    probe_path: Path | None = None
+    try:
+        storage_path.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(
+            mode="wb",
+            dir=storage_path,
+            prefix=".autosport-webview-write-probe-",
+            suffix=".tmp",
+            delete=False,
+        ) as probe:
+            probe_path = Path(probe.name)
+            probe.write(payload)
+            probe.flush()
+            os.fsync(probe.fileno())
+        if probe_path.read_bytes() != payload:
+            raise OSError("WebView storage probe readback did not match")
+        probe_path.unlink()
+        probe_path = None
+    except OSError as exc:
+        raise WindowsWebViewUnavailable(
+            "Autosport canonical WebView storage is not writable",
+            reason="storage",
+        ) from exc
+    finally:
+        if probe_path is not None:
+            try:
+                probe_path.unlink()
+            except OSError:
+                pass
 
 
 def web_shell_index_path() -> Path:
@@ -1593,6 +1639,7 @@ def launch_windows_shell(
         raise WindowsWebViewUnavailable(
             "Autosport WebView storage path must be absolute"
         )
+    _probe_webview_storage_writable(storage_path)
 
     try:
         import webview

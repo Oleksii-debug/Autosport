@@ -341,7 +341,7 @@ class PnLReconciliationJournal:
         if type(seq) is not int or seq < 1:
             raise ValueError("revision_seq must be a positive integer")
         settled = _decimal(event["cumulative_settled_stake"], "cumulative_settled_stake")
-        _decimal(event["cumulative_realized_pnl"], "cumulative_realized_pnl")
+        realized = _decimal(event["cumulative_realized_pnl"], "cumulative_realized_pnl")
         order = self._orders.get(key)
         if order is None:
             raise ValueError("settlement revision references unknown provider order")
@@ -351,6 +351,17 @@ class PnLReconciliationJournal:
             raise ValueError("cumulative_settled_stake must not move backward")
         if settled > order.stake:
             raise ValueError("cumulative_settled_stake exceeds accepted_stake")
+        with localcontext(_CTX):
+            if order.side == "BACK":
+                minimum_realized = -settled
+                maximum_realized = settled * (order.odds - Decimal("1"))
+            else:
+                minimum_realized = -(settled * (order.odds - Decimal("1")))
+                maximum_realized = settled
+        if realized < minimum_realized or realized > maximum_realized:
+            raise ValueError(
+                "cumulative_realized_pnl exceeds accepted-order outcome bounds"
+            )
 
     def _apply(self, event: dict[str, object], encoded: bytes) -> None:
         key = (event["provider_source_id"], event["provider_order_id"])

@@ -44,10 +44,20 @@ class _Clock:
 
 
 class _Transport:
-    def __init__(self, *, side: str, bet_outcome: str, status: str = "SETTLED") -> None:
+    def __init__(
+        self,
+        *,
+        side: str,
+        bet_outcome: str,
+        status: str = "SETTLED",
+        handicap: Decimal | None = None,
+        voided_date: str | None = None,
+    ) -> None:
         self.side = side
         self.bet_outcome = bet_outcome
         self.status = status
+        self.handicap = handicap
+        self.voided_date = voided_date
         self.customer_order_ref: str | None = None
 
     def post(self, url: str, *, headers, body: bytes, timeout_seconds: float) -> bytes:
@@ -61,23 +71,26 @@ class _Transport:
         elif method.endswith("listClearedOrders"):
             rows = []
             if request["params"]["betStatus"] == self.status:
-                rows.append(
-                    {
-                        "betId": "bet-777",
-                        "marketId": "1.234",
-                        "eventId": "event-1",
-                        "selectionId": 10,
-                        "side": self.side,
-                        "placedDate": "2026-09-29T00:00:00+00:00",
-                        "settledDate": "2026-09-29T00:30:00+00:00",
-                        "priceRequested": 2,
-                        "priceMatched": 2,
-                        "sizeSettled": 5,
-                        "profit": 4,
-                        "customerOrderRef": self.customer_order_ref,
-                        "betOutcome": self.bet_outcome,
-                    }
-                )
+                row = {
+                    "betId": "bet-777",
+                    "marketId": "1.234",
+                    "eventId": "event-1",
+                    "selectionId": 10,
+                    "side": self.side,
+                    "placedDate": "2026-09-29T00:00:00+00:00",
+                    "settledDate": "2026-09-29T00:30:00+00:00",
+                    "priceRequested": 2,
+                    "priceMatched": 2,
+                    "sizeSettled": 5,
+                    "profit": 4,
+                    "customerOrderRef": self.customer_order_ref,
+                    "betOutcome": self.bet_outcome,
+                }
+                if self.handicap is not None:
+                    row["handicap"] = str(self.handicap)
+                if self.voided_date is not None:
+                    row["voidedDate"] = self.voided_date
+                rows.append(row)
             result = {"clearedOrders": rows, "moreAvailable": False}
         else:  # pragma: no cover
             raise AssertionError(method)
@@ -87,7 +100,15 @@ class _Transport:
         ).encode("utf-8")
 
 
-def _context(tmp_path, *, side: str = "BACK", outcome: str = "WON", status: str = "SETTLED"):
+def _context(
+    tmp_path,
+    *,
+    side: str = "BACK",
+    outcome: str = "WON",
+    status: str = "SETTLED",
+    handicap: Decimal | None = None,
+    voided_date: str | None = None,
+):
     action = ExecutionAction(
         action_id="action-1",
         bookmaker_id="betfair",
@@ -136,7 +157,13 @@ def _context(tmp_path, *, side: str = "BACK", outcome: str = "WON", status: str 
             accepted_stake=Decimal("5"),
         )
     )
-    transport = _Transport(side=side, bet_outcome=outcome, status=status)
+    transport = _Transport(
+        side=side,
+        bet_outcome=outcome,
+        status=status,
+        handicap=handicap,
+        voided_date=voided_date,
+    )
     transport.customer_order_ref = provider_ref
     client = BetfairReadOnlyClient(
         BetfairSessionCredentials("app-key", "session-token"),
@@ -229,6 +256,36 @@ def test_voided_settlement_cannot_become_binary_selection_outcome(tmp_path) -> N
     with pytest.raises(
         BetfairOutcomeEvidenceError,
         match="only SETTLED provider status",
+    ):
+        _resolve(store)
+
+
+def test_handicap_settlement_cannot_mint_unqualified_selection_label(tmp_path) -> None:
+    store, ledger, plan, action, ref, _transport, client = _context(
+        tmp_path,
+        handicap=Decimal("-1.5"),
+    )
+    revision = _ingest(store, ledger, plan, action, _capture(client, ref)).revision
+    assert revision.provider_handicap == Decimal("-1.5")
+
+    with pytest.raises(
+        BetfairOutcomeEvidenceError,
+        match="handicap settlement cannot prove unqualified binary selection outcome",
+    ):
+        _resolve(store)
+
+
+def test_void_dated_settlement_cannot_mint_binary_selection_label(tmp_path) -> None:
+    store, ledger, plan, action, ref, _transport, client = _context(
+        tmp_path,
+        voided_date="2026-09-29T00:31:00+00:00",
+    )
+    revision = _ingest(store, ledger, plan, action, _capture(client, ref)).revision
+    assert revision.provider_voided_date == "2026-09-29T00:31:00+00:00"
+
+    with pytest.raises(
+        BetfairOutcomeEvidenceError,
+        match="void-dated settlement cannot prove binary selection outcome",
     ):
         _resolve(store)
 

@@ -46,6 +46,7 @@ _ZIP_UTF8_FLAG = 0x800
 _ZIP_LOCAL_HEADER = struct.Struct("<IHHHHHIIIHH")
 _ZIP_LOCAL_HEADER_SIGNATURE = 0x04034B50
 _WINDOWS_REPARSE_POINT_FLAG = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+_MAX_RELEASE_SOURCE_TREE_DEPTH = 64
 
 
 class _DuplicateJsonKeyError(ValueError):
@@ -214,6 +215,10 @@ def _scan_regular_source_tree(
     """Validate one tree without descending through symlink/reparse directories."""
 
     relative_text = relative.as_posix() if relative.parts else None
+    if len(relative.parts) > _MAX_RELEASE_SOURCE_TREE_DEPTH:
+        raise ValueError(
+            f"{label} exceeds supported directory depth: {relative_text}"
+        )
     before = _require_source_tree_directory(
         path,
         label=label,
@@ -295,6 +300,10 @@ def _copy_regular_source_tree(
         relative: Path,
     ) -> None:
         relative_text = relative.as_posix() if relative.parts else None
+        if len(relative.parts) > _MAX_RELEASE_SOURCE_TREE_DEPTH:
+            raise ValueError(
+                f"{label} exceeds supported directory depth: {relative_text}"
+            )
         before = _require_source_tree_directory(
             source_dir,
             label=label,

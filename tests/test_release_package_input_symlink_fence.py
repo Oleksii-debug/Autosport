@@ -199,6 +199,32 @@ class ReleasePackageInputSymlinkFenceTests(unittest.TestCase):
 
             self.assertFalse(paths["package"].exists())
 
+    def test_example_tree_depth_is_bounded_before_staging(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paths = self._make_inputs(root)
+            current = paths["example"]
+            for _ in range(release_package._MAX_RELEASE_SOURCE_TREE_DEPTH + 1):
+                current = current / "d"
+                current.mkdir()
+
+            staging = root / "Autosport-V1"
+            staging.mkdir()
+            marker = staging / "keep.txt"
+            marker.write_text("preserve-on-preflight-failure", encoding="utf-8")
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "release example tree exceeds supported directory depth",
+            ):
+                self._build(paths)
+
+            self.assertEqual(
+                marker.read_text(encoding="utf-8"),
+                "preserve-on-preflight-failure",
+            )
+            self.assertFalse(paths["package"].exists())
+
     def test_real_windows_nested_junction_is_rejected(self) -> None:
         if os.name != "nt":
             self.skipTest("Windows junction semantics require an NT runner")

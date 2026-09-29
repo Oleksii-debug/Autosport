@@ -79,6 +79,8 @@ def test_valid_workspace_configuration_delegates_to_webview_shell(tmp_path: Path
     build_controller.assert_called_once_with(workspace)
     build_bridge.assert_called_once_with(controller)
     launch_shell.assert_called_once_with(bridge)
+
+
 def test_machine_mode_does_not_validate_interactive_workspace() -> None:
     run_diagnostic = MagicMock(return_value=0)
     fake_diagnostic_module = types.ModuleType("autosport.diagnostic")
@@ -101,19 +103,22 @@ def test_machine_mode_does_not_validate_interactive_workspace() -> None:
     run_diagnostic.assert_called_once_with("diagnostic.json")
     validate_workspace.assert_not_called()
     show_error.assert_not_called()
+
+
 def test_native_workspace_error_dialog_is_actionable_and_accessible_boundary() -> None:
     user32 = MagicMock()
     fake_windll = types.SimpleNamespace(user32=user32)
+    detail = "AUTOSPORT_WORKSPACE must be an absolute path"
 
     with patch("ctypes.windll", fake_windll, create=True):
-        windows_entry._show_workspace_configuration_error(
-            "AUTOSPORT_WORKSPACE must be an absolute path"
-        )
+        windows_entry._show_workspace_configuration_error(detail)
 
     user32.MessageBoxW.assert_called_once()
     hwnd, message, title, flags = user32.MessageBoxW.call_args.args
     assert hwnd is None
-    assert "AUTOSPORT_WORKSPACE must be an absolute path" in message
+    assert detail not in message
+    assert "AUTOSPORT_WORKSPACE" in message
+    assert "LOCALAPPDATA" in message
     assert "потім перезапустіть Автоспорт" in message
     assert "Economic і live state не змінено" in message
     assert "помилка конфігурації workspace" in title

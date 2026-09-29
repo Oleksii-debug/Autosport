@@ -210,8 +210,8 @@ def _scan_regular_source_tree(
     *,
     label: str,
     relative: Path = Path(),
-) -> list[tuple[Path, Path, bool]]:
-    """Enumerate one tree without descending through symlink/reparse directories."""
+) -> None:
+    """Validate one tree without descending through symlink/reparse directories."""
 
     relative_text = relative.as_posix() if relative.parts else None
     before = _require_source_tree_directory(
@@ -226,7 +226,6 @@ def _scan_regular_source_tree(
         target = relative_text or str(path)
         raise ValueError(f"{label} contains an inaccessible entry: {target}") from exc
 
-    discovered: list[tuple[Path, Path, bool]] = []
     for entry in entries:
         source = path / entry.name
         child_relative = relative / entry.name
@@ -253,16 +252,13 @@ def _scan_regular_source_tree(
                 raise ValueError(
                     f"{label} directory changed during traversal: {child_text}"
                 )
-            discovered.append((source, child_relative, True))
-            discovered.extend(
-                _scan_regular_source_tree(
-                    source,
-                    label=label,
-                    relative=child_relative,
-                )
+            _scan_regular_source_tree(
+                source,
+                label=label,
+                relative=child_relative,
             )
         elif stat.S_ISREG(metadata.st_mode):
-            discovered.append((source, child_relative, False))
+            continue
         else:
             raise ValueError(f"{label} contains a non-regular entry: {child_text}")
 
@@ -274,7 +270,6 @@ def _scan_regular_source_tree(
     if not os.path.samestat(before, after):
         target = relative_text or "."
         raise ValueError(f"{label} directory changed during traversal: {target}")
-    return discovered
 
 
 def _require_regular_source_tree(path: Path, *, label: str) -> None:

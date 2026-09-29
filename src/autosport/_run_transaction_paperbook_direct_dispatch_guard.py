@@ -108,6 +108,7 @@ def _guard_detached_consumer(
     if exact_type(inner_function_globals) is not dict_type:
         raise RuntimeError("RunTransaction guarded consumer Python globals are invalid")
     frozen_function_globals_items = tuple_type(dict_items(inner_function_globals))
+    frozen_function_globals_items_anchor = (frozen_function_globals_items,)
     inner_name = function.__name__
     inner_qualname = function.__qualname__
     inner_doc = function.__doc__
@@ -133,7 +134,9 @@ def _guard_detached_consumer(
     if closure_values[inner_globals_index] is not inner_globals:
         raise RuntimeError("RunTransaction guarded consumer globals changed before sealing")
     frozen_closure_values = tuple_type(closure_values)
+    frozen_closure_values_anchor = (frozen_closure_values,)
     frozen_globals_items = tuple_type(dict_items(inner_globals))
+    frozen_globals_items_anchor = (frozen_globals_items,)
     frozen_globals_size = dict_len(inner_globals)
     # Keep a separate immutable composition-time identity anchor. The executable clone
     # and the verifier deliberately hold different writable closure cells, so comparing
@@ -205,6 +208,9 @@ def _guard_detached_consumer(
             exact_type(function) is not function_type
             or function.__code__ is not inner_code
             or function.__closure__ is not inner_closure
+            or frozen_function_globals_items is not frozen_function_globals_items_anchor[0]
+            or frozen_closure_values is not frozen_closure_values_anchor[0]
+            or frozen_globals_items is not frozen_globals_items_anchor[0]
             or exact_type(require_surface) is not function_type
             or require_surface.__code__ is not require_surface_code
             or exact_type(require_bindings) is not function_type
@@ -238,6 +244,9 @@ def _guard_detached_consumer(
                 exact_type(function) is not function_type
                 or function.__code__ is not inner_code
                 or function.__closure__ is not inner_closure
+                or frozen_function_globals_items is not frozen_function_globals_items_anchor[0]
+                or frozen_closure_values is not frozen_closure_values_anchor[0]
+                or frozen_globals_items is not frozen_globals_items_anchor[0]
                 or exact_type(require_surface) is not function_type
                 or require_surface.__code__ is not require_surface_code
                 or exact_type(require_bindings) is not function_type

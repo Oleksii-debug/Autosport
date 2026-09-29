@@ -424,6 +424,10 @@ def _seal_source_universe_dispatch() -> None:
     expected_issue_surface = expected_getattr_static(
         expected_commitment_type, "_issue"
     )
+    expected_issue_function = getattr(expected_issue_surface, "__func__", None)
+    expected_issue_function_code = getattr(
+        expected_issue_function, "__code__", None
+    )
     helper_witnesses = tuple(
         (
             name,
@@ -518,12 +522,18 @@ def _seal_source_universe_dispatch() -> None:
             raise expected_error_type(
                 "source-universe verification field authority is rebound"
             )
+        current_issue_surface = expected_getattr_static(
+            expected_commitment_type, "_issue", None
+        )
         if (
-            expected_getattr_static(expected_commitment_type, "_issue", None)
-            is not expected_issue_surface
+            current_issue_surface is not expected_issue_surface
+            or getattr(current_issue_surface, "__func__", None)
+            is not expected_issue_function
+            or getattr(expected_issue_function, "__code__", None)
+            is not expected_issue_function_code
         ):
             raise expected_error_type(
-                "source-universe result issuance surface is rebound"
+                "source-universe result issuance surface is rebound or mutated"
             )
         for name, expected_helper, expected_code in helper_witnesses:
             current_helper = module_globals.get(name)

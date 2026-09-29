@@ -45,6 +45,12 @@ class WorkflowScopedGitHubApi(GitHubApi):
     authority and live-PR rechecks, but enumerate only runs belonging to the exact source
     workflow that triggered this controller invocation.
 
+    The workflow id is the canonical source-workflow identity. Historical Actions runs
+    can retain an older display name after a workflow rename, so display-name drift must
+    not make an exact-id member invisible to the existing canonical selector. Runs from
+    the exact workflow-id endpoint are normalized to the current event display name only
+    for that selector; this does not widen enumeration beyond the exact workflow id.
+
     GitHub may also clear ``pull_requests`` on source runs for merged/closed lifecycle
     events. The optional recovery context below is intentionally narrower than ordinary
     run parsing: it can restore one missing candidate PR reference only for the exact
@@ -58,9 +64,13 @@ class WorkflowScopedGitHubApi(GitHubApi):
         repository: str,
         token: str,
         workflow_id: int,
+        workflow_name: str,
     ) -> None:
         super().__init__(repository=repository, token=token)
         self._workflow_id = _require_positive_int(workflow_id, field="workflow id")
+        if not isinstance(workflow_name, str) or not workflow_name:
+            raise CancellationError("workflow name is required")
+        self._workflow_name = workflow_name
         self._recovery_pr_number: int | None = None
         self._recovery_head_sha: str | None = None
         self._recovery_workflow_name: str | None = None
@@ -86,8 +96,8 @@ class WorkflowScopedGitHubApi(GitHubApi):
         pr_number = _require_positive_int(pr_number, field="pull request number")
         event_head_sha = _require_sha(event_head_sha, field="event head sha")
         current_run_id = _require_positive_int(current_run_id, field="current run id")
-        if not workflow_name:
-            raise CancellationError("workflow name is required")
+        if workflow_name != self._workflow_name:
+            raise CancellationError("workflow name does not match exact workflow id")
 
         self._recovery_pr_number = None
         self._recovery_head_sha = None
@@ -105,6 +115,17 @@ class WorkflowScopedGitHubApi(GitHubApi):
         self._recovery_head_sha = event_head_sha
         self._recovery_workflow_name = workflow_name
         self._recovery_current_run_id = current_run_id
+
+    def _canonicalize_workflow_identity(self, run: WorkflowRun) -> WorkflowRun:
+        if run.workflow_name == self._workflow_name:
+            return run
+        return WorkflowRun(
+            run_id=run.run_id,
+            head_sha=run.head_sha,
+            workflow_name=self._workflow_name,
+            pr_numbers=run.pr_numbers,
+            status=run.status,
+        )
 
     def _recover_candidate_run_reference(self, run: WorkflowRun) -> WorkflowRun:
         pr_number = self._recovery_pr_number
@@ -178,7 +199,9 @@ class WorkflowScopedGitHubApi(GitHubApi):
                 raise CancellationError("invalid workflow-runs response")
             page_runs = payload["workflow_runs"]
             runs.extend(
-                self._recover_candidate_run_reference(parse_run(item))
+                self._recover_candidate_run_reference(
+                    self._canonicalize_workflow_identity(parse_run(item))
+                )
                 for item in page_runs
             )
             total_count = payload["total_count"]
@@ -216,6 +239,7 @@ def main(argv: list[str] | None = None) -> int:
             repository=os.environ.get("GITHUB_REPOSITORY", ""),
             token=os.environ.get("GITHUB_TOKEN", ""),
             workflow_id=args.workflow_id,
+            workflow_name=args.workflow_name,
         )
         pr_number = args.pr_number
         if pr_number <= 0:

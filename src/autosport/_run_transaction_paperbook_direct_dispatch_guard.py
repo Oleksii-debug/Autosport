@@ -138,12 +138,12 @@ def _guard_detached_consumer(
     frozen_globals_items = tuple_type(dict_items(inner_globals))
     frozen_globals_items_anchor = (frozen_globals_items,)
     frozen_globals_size = dict_len(inner_globals)
-    # Keep a separate immutable composition-time identity anchor. The executable clone
-    # and the verifier deliberately hold different writable closure cells, so comparing
-    # those two cells only to one another is insufficient: an attacker can coherently
-    # retarget both to the same copied dictionary. This tuple is not an execution
-    # mapping; it is independent tamper evidence for the exact detached mapping object.
+    # Retain the writable tuple only as non-authoritative tamper evidence for focused
+    # regressions. The actual composition-time identity root is injected below into the
+    # immutable require_bindings code constants, so coordinated closure-cell retargeting
+    # cannot replace both the executable mapping and the verifier's identity witness.
     inner_globals_anchor = (inner_globals,)
+    identity_anchor_marker = "__AUTOSPORT_RUN_TRANSACTION_DETACHED_GLOBALS_IDENTITY_ANCHOR__"
     missing = object()
 
     def require_bindings() -> None:
@@ -161,7 +161,9 @@ def _guard_detached_consumer(
             raise ValueError(
                 "RunTransaction detached direct-dispatch globals cell is empty"
             ) from exc
-        anchored_inner_globals = inner_globals_anchor[0]
+        anchored_inner_globals = "__AUTOSPORT_RUN_TRANSACTION_DETACHED_GLOBALS_IDENTITY_ANCHOR__"
+        if exact_type(inner_globals_anchor) is not tuple_type:
+            raise ValueError("RunTransaction detached direct-dispatch anchor changed")
         if (
             current_inner_globals is not anchored_inner_globals
             or inner_globals is not anchored_inner_globals
@@ -184,6 +186,15 @@ def _guard_detached_consumer(
                     f"RunTransaction detached direct-dispatch binding changed: {name}"
                 )
 
+    anchor_constants = require_bindings.__code__.co_consts
+    if sum(item == identity_anchor_marker for item in anchor_constants) != 1:
+        raise RuntimeError("RunTransaction detached globals identity anchor is ambiguous")
+    require_bindings.__code__ = require_bindings.__code__.replace(
+        co_consts=tuple_type(
+            inner_globals if item == identity_anchor_marker else item
+            for item in anchor_constants
+        )
+    )
     require_bindings_code = require_bindings.__code__
 
     def require_surface() -> None:

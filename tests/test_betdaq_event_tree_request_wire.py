@@ -76,6 +76,7 @@ def test_event_subtree_request_serializes_exact_readonly_contract_without_secret
         (-1,),
         (True,),
         ("100",),
+        ((1 << 63),),
     ],
 )
 def test_event_subtree_request_rejects_noncanonical_scope(ids) -> None:

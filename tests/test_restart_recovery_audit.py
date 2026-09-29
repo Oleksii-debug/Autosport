@@ -169,6 +169,18 @@ class RestartRecoveryAuditTests(unittest.TestCase):
             self.assertFalse(payload["human_tested"])
             self.assertFalse(payload["nvda_verified"])
 
+    def test_phase_call_preserves_original_exception_and_records_subphase(self):
+        def fail():
+            raise ValueError("phase-canary")
+
+        with self.assertRaisesRegex(ValueError, "phase-canary") as captured:
+            restart_audit._phase_call("session_restart:first_run", fail)
+
+        self.assertEqual(
+            captured.exception.__dict__.get("_autosport_restart_phase"),
+            "session_restart:first_run",
+        )
+
     def test_transaction_recovery_failure_is_attributed_to_recovery_phase(self):
         with tempfile.TemporaryDirectory() as tmp:
             output = Path(tmp) / "restart-recovery-audit.json"

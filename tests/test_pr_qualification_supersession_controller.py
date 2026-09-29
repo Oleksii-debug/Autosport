@@ -14,7 +14,7 @@ def test_supersession_controller_is_default_branch_owned_and_write_bounded() -> 
     workflow = _text()
 
     assert "workflow_run:" in workflow
-    assert "workflows: [CI, Windows candidate]" in workflow
+    assert "workflows: [CI, Windows candidate, Endurance]" in workflow
     assert "types: [requested]" in workflow
     assert "actions: write" in workflow
     assert "contents: read" in workflow

@@ -7,10 +7,6 @@ _ACTIVITY_TYPES = (
 _PR_INTEGRATION_GATE = (
     "github.event.action != 'closed' && github.event.pull_request.draft == false"
 )
-_RERUN_LANE = (
-    "${{ github.run_attempt == 1 && 'fresh' "
-    "|| format('rerun-{0}', github.event.pull_request.head.sha || github.sha) }}"
-)
 
 
 def _workflow(path: str) -> str:
@@ -79,11 +75,13 @@ def test_windows_pr_scheduler_isolates_lifecycle_events_until_live_head_admissio
     assert "github.run_attempt == 1 && 'fresh'" not in workflow
 
 
-def test_endurance_keeps_existing_fresh_vs_rerun_lane() -> None:
+def test_endurance_pr_scheduler_isolates_lifecycle_events_until_live_head_admission() -> None:
     workflow = _workflow(".github/workflows/endurance.yml")
 
-    assert "cancel-in-progress: true" in workflow
-    assert "github.run_attempt == 1" in workflow
-    assert "'fresh'" in workflow
-    assert _RERUN_LANE in workflow
-    assert "github.event.pull_request.head.sha || github.sha" in workflow
+    concurrency_block = workflow.split("concurrency:", 1)[1].split("jobs:", 1)[0]
+    assert "cancel-in-progress: true" in concurrency_block
+    assert "github.run_id" in concurrency_block
+    assert "format('pr-{0}-run-{1}'" in concurrency_block
+    assert "github.run_attempt == 1" not in concurrency_block
+    assert "'fresh'" not in concurrency_block
+    assert "github.event.pull_request.number || github.ref" not in concurrency_block

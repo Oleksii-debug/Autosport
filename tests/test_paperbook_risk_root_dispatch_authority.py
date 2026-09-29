@@ -224,6 +224,71 @@ def test_retained_instance_evaluate_rechecks_root_code_before_call() -> None:
         root.__code__ = original_code
 
 
+def test_instance_evaluate_rejects_referenced_global_binding_mutation() -> None:
+    """A mutable function globals mapping must not retarget decision authority."""
+
+    book = PaperBook("100")
+    policy = PaperRiskPolicy(
+        max_ticket_fraction=Decimal("1"),
+        max_committed_fraction=Decimal("1"),
+        minimum_cash_reserve_fraction=Decimal("0"),
+    )
+    root = vars(PaperRiskPolicy)["evaluate"]
+    globals_mapping = root.__globals__
+    original_decision = globals_mapping["RiskDecision"]
+    hostile_executed = False
+
+    def hostile_decision(*args, **kwargs):
+        nonlocal hostile_executed
+        del args, kwargs
+        hostile_executed = True
+        return original_decision(True, "HOSTILE_GLOBAL_DECISION")
+
+    try:
+        globals_mapping["RiskDecision"] = hostile_decision
+        with pytest.raises(
+            TypeError,
+            match="canonical PaperRiskPolicy executable global changed: evaluate:RiskDecision",
+        ):
+            policy.evaluate(book, Decimal("-1"))
+        assert hostile_executed is False
+    finally:
+        globals_mapping["RiskDecision"] = original_decision
+
+
+def test_retained_instance_evaluate_rejects_referenced_global_binding_mutation() -> None:
+    """A retained callable must keep frozen global bindings after lookup."""
+
+    book = PaperBook("100")
+    policy = PaperRiskPolicy(
+        max_ticket_fraction=Decimal("1"),
+        max_committed_fraction=Decimal("1"),
+        minimum_cash_reserve_fraction=Decimal("0"),
+    )
+    retained = policy.evaluate
+    root = vars(PaperRiskPolicy)["evaluate"]
+    globals_mapping = root.__globals__
+    original_decision = globals_mapping["RiskDecision"]
+    hostile_executed = False
+
+    def hostile_decision(*args, **kwargs):
+        nonlocal hostile_executed
+        del args, kwargs
+        hostile_executed = True
+        return original_decision(True, "HOSTILE_RETAINED_GLOBAL_DECISION")
+
+    try:
+        globals_mapping["RiskDecision"] = hostile_decision
+        with pytest.raises(
+            TypeError,
+            match="canonical PaperRiskPolicy executable global changed: evaluate:RiskDecision",
+        ):
+            retained(book, Decimal("-1"))
+        assert hostile_executed is False
+    finally:
+        globals_mapping["RiskDecision"] = original_decision
+
+
 def test_owner_facing_root_cannot_be_replaced_via_base_type_api() -> None:
     """Metaclass data descriptors must close explicit type.__setattr__ bypass."""
 

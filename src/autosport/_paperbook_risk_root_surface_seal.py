@@ -15,9 +15,10 @@ state, store or second risk authority is created.
 
 from __future__ import annotations
 
+from dis import get_instructions
 from functools import partial
 import sys
-from types import FunctionType
+from types import CodeType, FunctionType
 
 from . import risk as _risk
 
@@ -124,6 +125,20 @@ def _make_instance_root_getattribute(
     partial_type = partial
     empty_cell = object()
 
+    def referenced_global_names(code):
+        names: set[str] = set()
+        for instruction in get_instructions(code):
+            if (
+                instruction.opname
+                in ("LOAD_GLOBAL", "LOAD_NAME", "LOAD_FROM_DICT_OR_GLOBALS")
+                and type(instruction.argval) is str
+            ):
+                names.add(instruction.argval)
+        for constant in code.co_consts:
+            if type(constant) is CodeType:
+                names.update(referenced_global_names(constant))
+        return tuple(sorted(names))
+
     witnesses: list[tuple[object, ...]] = []
     for name in _INSTANCE_CALL_ROOT_NAMES:
         function = root_descriptors.get(name)
@@ -144,6 +159,23 @@ def _make_instance_root_getattribute(
                     value = empty_cell
                 values.append((cell, value))
             closure_witnesses = tuple(values)
+        globals_mapping = function.__globals__
+        builtins_mapping = function.__builtins__
+        if type(globals_mapping) is not dict or type(builtins_mapping) is not dict:
+            raise RuntimeError(
+                f"canonical PaperRiskPolicy executable namespace is invalid: {name}"
+            )
+        referenced_names = referenced_global_names(function.__code__)
+        global_bindings = tuple(
+            (binding_name, globals_mapping[binding_name])
+            for binding_name in referenced_names
+            if binding_name in globals_mapping
+        )
+        builtin_bindings = tuple(
+            (binding_name, builtins_mapping[binding_name])
+            for binding_name in referenced_names
+            if binding_name not in globals_mapping and binding_name in builtins_mapping
+        )
         kwdefaults = (
             None
             if function.__kwdefaults__ is None
@@ -154,7 +186,10 @@ def _make_instance_root_getattribute(
                 name,
                 function,
                 function.__code__,
-                function.__globals__,
+                globals_mapping,
+                global_bindings,
+                builtins_mapping,
+                builtin_bindings,
                 function.__defaults__,
                 kwdefaults,
                 closure,
@@ -180,6 +215,9 @@ def _make_instance_root_getattribute(
             function,
             code,
             globals_mapping,
+            global_bindings,
+            builtins_mapping,
+            builtin_bindings,
             defaults,
             kwdefaults,
             closure,
@@ -192,12 +230,32 @@ def _make_instance_root_getattribute(
             or current is not function
             or current.__code__ is not code
             or current.__globals__ is not globals_mapping
+            or current.__builtins__ is not builtins_mapping
             or current.__defaults__ is not defaults
             or current.__closure__ is not closure
         ):
             raise failure_type_arg(
                 f"canonical PaperRiskPolicy executable root changed: {name}"
             )
+
+        for binding_name, expected_value in global_bindings:
+            if (
+                binding_name not in globals_mapping
+                or globals_mapping[binding_name] is not expected_value
+            ):
+                raise failure_type_arg(
+                    f"canonical PaperRiskPolicy executable global changed: "
+                    f"{name}:{binding_name}"
+                )
+        for binding_name, expected_value in builtin_bindings:
+            if (
+                binding_name not in builtins_mapping
+                or builtins_mapping[binding_name] is not expected_value
+            ):
+                raise failure_type_arg(
+                    f"canonical PaperRiskPolicy executable builtin changed: "
+                    f"{name}:{binding_name}"
+                )
 
         current_kwdefaults = current.__kwdefaults__
         if kwdefaults is None:
@@ -277,15 +335,20 @@ def _make_instance_root_getattribute(
             name,
             _function,
             code,
-            globals_mapping,
+            _globals_mapping,
+            global_bindings,
+            _builtins_mapping,
+            builtin_bindings,
             defaults,
             kwdefaults,
             closure,
             _closure_witnesses,
         ) = witness
+        delegate_globals = dict_type_arg(global_bindings)
+        delegate_globals["__builtins__"] = dict_type_arg(builtin_bindings)
         delegate = function_type_arg(
             code,
-            globals_mapping,
+            delegate_globals,
             name=name,
             argdefs=defaults,
             closure=closure,

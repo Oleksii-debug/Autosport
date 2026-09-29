@@ -24,6 +24,7 @@ from autosport.forward_universe_precommit_authority import (
 from autosport.provider_observation_authority import (
     CompleteGameBoardEvidenceStore,
     CompleteGameBoardRequest,
+    ProviderObservationUnsupportedError,
 )
 
 
@@ -77,7 +78,7 @@ def _frame() -> dict[str, object]:
         "truncated_books": [],
         "snapshot_partial_reasons": [],
         "count": 3,
-        "timestamp": 4102495200,
+        "timestamp": 4102466400,
         "data": [
             {
                 "event_id": "event-1",
@@ -237,6 +238,7 @@ def test_provider_io_occurs_only_after_authorized_scheduled_start(
     assert receipt.run_id == spec.run_id
     assert receipt.cycle_seq == 1
     assert receipt.slot_ordinal == 0
+    assert len(receipt.gate_binding_sha256) == 64
     assert receipt.artifact_kind == ARTIFACT_KIND
     assert len(receipt.collector_artifact_evidence_sha256) == 64
     assert len(receipt.receipt_sha256) == 64
@@ -263,7 +265,10 @@ def test_provider_failure_records_terminal_failure_without_artifact(
     monkeypatch.setattr(provider_module, "urlopen", fail_urlopen)
     monkeypatch.setattr(provider_module, "_default_clock", lambda: CAPTURED_AT)
 
-    with pytest.raises(Exception, match="provider SSE initial-state acquisition failed"):
+    with pytest.raises(
+        ProviderObservationUnsupportedError,
+        match="provider SSE initial-state acquisition failed",
+    ):
         capture_campaign_complete_game_board(
             precommit_locator=locator,
             store=store,

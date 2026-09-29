@@ -33,13 +33,19 @@ concurrency:
 
 jobs:
   superseded_run_admission:
+    # Draft/closed PR lifecycle runs are already non-integration-capable. Skip this job
+    # at server-side job evaluation so they do not reserve an Ubuntu admission runner.
+    # ready_for_review has draft=false and still executes exact-head admission.
+    if: >-
+      github.event_name != 'pull_request' ||
+      (github.event.action != 'closed' && github.event.pull_request.draft == false)
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
       current_head: ${{ steps.lifecycle.outputs.current_head || steps.admission.outputs.current_head }}
     steps:
-      - name: Admit non-PR and closed lifecycle events without PR checkout
-        if: github.event_name != 'pull_request' || github.event.action == 'closed'
+      - name: Admit non-PR events without PR checkout
+        if: github.event_name != 'pull_request'
         id: lifecycle
         run: echo "current_head=true" >> "$GITHUB_OUTPUT"
       - name: Checkout exact PR head for read-only admission helper

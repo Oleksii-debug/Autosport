@@ -7,6 +7,16 @@ _ACTIVITY_TYPES = (
 _PR_INTEGRATION_GATE = (
     "github.event.action != 'closed' && github.event.pull_request.draft == false"
 )
+_RUNNER_FREE_PR_ADMISSION = (
+    "  superseded_run_admission:\n"
+    "    # Draft/closed PR lifecycle runs are already non-integration-capable. Skip this job\n"
+    "    # at server-side job evaluation so they do not reserve an Ubuntu admission runner.\n"
+    "    # ready_for_review has draft=false and still executes exact-head admission.\n"
+    "    if: >-\n"
+    "      github.event_name != 'pull_request' ||\n"
+    "      (github.event.action != 'closed' && github.event.pull_request.draft == false)\n"
+    "    runs-on: ubuntu-latest"
+)
 
 
 def _workflow(path: str) -> str:
@@ -49,6 +59,7 @@ def test_ci_heavy_matrix_is_deferred_for_stale_draft_or_closed_pull_request() ->
 
     assert _ACTIVITY_TYPES in workflow
     assert _PR_INTEGRATION_GATE in workflow
+    assert _RUNNER_FREE_PR_ADMISSION in workflow
     assert "needs.superseded_run_admission.outputs.current_head == 'true'" in workflow
     assert "--admission-only" in workflow
     assert "matrix:" in workflow

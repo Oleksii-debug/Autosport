@@ -128,10 +128,14 @@ class BetdaqLiveReadOnlyProvider(BetdaqReadOnlyProvider):
                 raise AssertionError("successful live load must publish request evidence")
             aggregate = hashlib.sha256()
             aggregate.update(bytes.fromhex(self._evidence.aggregate_sha256))
+            aggregate.update(bytes.fromhex(catalogue_evidence.request_fingerprint))
             aggregate.update(bytes.fromhex(catalogue_evidence.response_sha256))
             self._evidence = replace(
                 self._evidence,
                 aggregate_sha256=aggregate.hexdigest(),
+                catalogue_request_fingerprint=(
+                    catalogue_evidence.request_fingerprint
+                ),
                 catalogue_response_sha256=catalogue_evidence.response_sha256,
                 catalogue_rate_admission_receipt=(
                     catalogue_evidence.rate_admission_receipt

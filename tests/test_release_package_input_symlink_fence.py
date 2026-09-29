@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
 import autosport.release_package as release_package
+from autosport.data_tool_package import bind_portable_data_tool, verify_portable_data_tool
 
 
 class ReleasePackageInputSymlinkFenceTests(unittest.TestCase):
@@ -27,8 +29,44 @@ class ReleasePackageInputSymlinkFenceTests(unittest.TestCase):
             "restart": root / "restart.json",
             "package": root / "candidate.zip",
         }
-        for key in ("exe", "start", "diagnostic", "accessibility", "keyboard", "restart"):
-            paths[key].write_bytes(f"{key}-payload".encode("ascii"))
+        paths["exe"].write_bytes(b"autosport-executable")
+        paths["start"].write_text("start\n", encoding="utf-8")
+
+        common = {
+            "status": "PASS",
+            "real_money_execution": False,
+            "human_tested": False,
+            "nvda_verified": False,
+        }
+        for key in ("diagnostic", "accessibility", "keyboard"):
+            paths[key].write_text(
+                json.dumps(common) + "\n",
+                encoding="utf-8",
+            )
+        paths["restart"].write_text(
+            json.dumps(
+                {
+                    **common,
+                    "session_restart_status": "PASS",
+                    "transaction_recovery_status": "PASS",
+                    "recovery_disposition": "aborted_uncommitted",
+                    "process_kill_relaunch_status": "PASS",
+                    "process_kill_stage_pid": 101,
+                    "process_kill_return_code": -15,
+                    "process_recovery_pid": 202,
+                    "process_recovery_run_id": "symlink-fence-regression",
+                    "process_recovery_disposition": "committed",
+                    "process_recovery_registry_status": "completed",
+                    "process_recovery_manifest_phase": "completed",
+                    "process_recovery_base_paper_book_sha256": "1" * 64,
+                    "process_recovery_base_decision_ledger_sha256": "2" * 64,
+                    "process_recovery_new_paper_book_sha256": "3" * 64,
+                    "process_recovery_new_decision_ledger_sha256": "4" * 64,
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
         return paths
 
     def _symlink_or_skip(self, target: Path, link: Path) -> None:
@@ -131,6 +169,38 @@ class ReleasePackageInputSymlinkFenceTests(unittest.TestCase):
 
             self.assertTrue(swapped)
             self.assertFalse(paths["package"].exists())
+
+    def test_portable_data_executable_symlink_is_rejected_before_read(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paths = self._make_inputs(root)
+            self._build(paths)
+
+            secret = root / "outside-data-tool.exe"
+            secret.write_bytes(b"external-data-tool")
+            data_link = root / "Autosport-Data.exe"
+            self._symlink_or_skip(secret, data_link)
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "portable data tool executable input must not be a symbolic link",
+            ):
+                bind_portable_data_tool(paths["package"], data_link)
+
+    def test_portable_data_base_package_symlink_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paths = self._make_inputs(root)
+            self._build(paths)
+
+            package_link = root / "candidate-link.zip"
+            self._symlink_or_skip(paths["package"], package_link)
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "base release package input must not be a symbolic link",
+            ):
+                verify_portable_data_tool(package_link)
 
 
 if __name__ == "__main__":

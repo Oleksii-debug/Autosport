@@ -2,6 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import autosport._collector_service_state_serialization as serialization
 from autosport.causal_collector import CollectorDeltaStore
 from autosport.collector_service import (
     CollectorServiceConfig,
@@ -74,7 +75,19 @@ class CollectorInterruptibleProviderBackoffTests(unittest.TestCase):
                 stop_reason=stop.reason,
             )
 
-            result = service.run(max_cycles=3)
+            class _HostileMath:
+                @staticmethod
+                def isfinite(_value):
+                    raise AssertionError(
+                        "rebound wrapper module global must not become authority"
+                    )
+
+            original_math = serialization.math
+            serialization.math = _HostileMath()
+            try:
+                result = service.run(max_cycles=3)
+            finally:
+                serialization.math = original_math
 
             self.assertEqual(result.cycles_executed, 0)
             self.assertIsNone(result.last_cycle)

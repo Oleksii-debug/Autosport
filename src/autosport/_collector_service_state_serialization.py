@@ -122,7 +122,13 @@ def _make_interruptible_provider_call(
 ):
     getattr_fn = getattr
     isinstance_fn = isinstance
+    type_fn = type
+    bool_type = bool
+    int_type = int
+    float_type = float
     float_fn = float
+    min_fn = min
+    isfinite_fn = math.isfinite
     original_code = getattr_fn(original_provider_call, "__code__", None)
     stop_code = getattr_fn(stop_check, "__code__", None)
     wait_code = getattr_fn(signal_wait, "__code__", None)
@@ -153,9 +159,9 @@ def _make_interruptible_provider_call(
                 stop_check(self)
                 random_value = self.random_value()
                 if (
-                    isinstance_fn(random_value, bool)
-                    or not isinstance_fn(random_value, (int, float))
-                    or not math.isfinite(random_value)
+                    isinstance_fn(random_value, bool_type)
+                    or not isinstance_fn(random_value, (int_type, float_type))
+                    or not isfinite_fn(random_value)
                     or not 0 <= random_value <= 1
                 ):
                     raise collector_error_type(
@@ -164,18 +170,18 @@ def _make_interruptible_provider_call(
                 jittered = delay * (
                     1 + self.config.jitter_fraction * float_fn(random_value)
                 )
-                backoff = min(self.config.max_backoff_seconds, jittered)
+                backoff = min_fn(self.config.max_backoff_seconds, jittered)
                 stop_source = self.stop_requested
                 if isinstance_fn(stop_source, signal_type):
                     wait_result = stop_source.wait(backoff)
-                    if type(wait_result) is not bool:
+                    if type_fn(wait_result) is not bool_type:
                         raise collector_error_type(
                             "canonical signal STOP wait must return bool"
                         )
                     stop_check(self)
                 else:
                     self.sleep(backoff)
-                delay = min(self.config.max_backoff_seconds, delay * 2)
+                delay = min_fn(self.config.max_backoff_seconds, delay * 2)
         raise AssertionError("unreachable retry loop")
 
     return interruptible_provider_call

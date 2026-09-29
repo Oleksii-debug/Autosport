@@ -120,6 +120,7 @@ def test_supported_dispatch_preserves_admission_receipt_semantics(tmp_path):
 @pytest.mark.parametrize(
     "attribute",
     (
+        "__init__",
         "admit",
         "_assert_policy_integrity",
         "_blacklist_state",
@@ -162,6 +163,7 @@ def test_supported_dispatch_rejects_class_surface_replacement(
 @pytest.mark.parametrize(
     "attribute",
     (
+        "__init__",
         "__setattr__",
         "__delattr__",
         "admit",
@@ -197,16 +199,20 @@ def test_supported_dispatch_rejects_in_place_class_method_code_replacement(
     assert hostile_calls == []
 
 
-def test_supported_dispatch_rejects_class_getattribute_injection(tmp_path):
+@pytest.mark.parametrize("attribute", ("__getattribute__", "__new__"))
+def test_supported_dispatch_rejects_expected_absent_class_special_injection(
+    tmp_path,
+    attribute,
+):
     governor = _resolved_governor(tmp_path)
-    assert "__getattribute__" not in vars(BetdaqRateGovernor)
+    assert attribute not in vars(BetdaqRateGovernor)
     hostile_calls = []
 
     def hostile(*args, **kwargs):
         hostile_calls.append((args, kwargs))
-        raise AssertionError("hostile __getattribute__ executed")
+        raise AssertionError(f"hostile {attribute} executed")
 
-    type.__setattr__(BetdaqRateGovernor, "__getattribute__", hostile)
+    type.__setattr__(BetdaqRateGovernor, attribute, hostile)
     try:
         with pytest.raises(
             BetdaqRateGovernorError,
@@ -214,6 +220,42 @@ def test_supported_dispatch_rejects_class_getattribute_injection(tmp_path):
         ):
             admit_betdaq_rate_request(governor, "GetPrices")
     finally:
-        type.__delattr__(BetdaqRateGovernor, "__getattribute__")
+        type.__delattr__(BetdaqRateGovernor, attribute)
+
+    assert hostile_calls == []
+
+
+@pytest.mark.parametrize("attribute", ("__init__", "__new__"))
+def test_resolver_rejects_constructor_dispatch_replacement_before_execution(
+    tmp_path,
+    attribute,
+):
+    clock = _Clock()
+    original = vars(BetdaqRateGovernor).get(attribute)
+    hostile_calls = []
+
+    def hostile(*args, **kwargs):
+        hostile_calls.append((args, kwargs))
+        raise AssertionError(f"hostile {attribute} executed")
+
+    type.__setattr__(BetdaqRateGovernor, attribute, hostile)
+    try:
+        with pytest.raises(
+            BetdaqRateGovernorError,
+            match="canonical rate governor class dispatch was replaced",
+        ):
+            resolve_betdaq_rate_governor(
+                tmp_path,
+                default_betdaq_rate_policy(),
+                clock=clock,
+                wall_clock=lambda: datetime(
+                    2026, 9, 29, tzinfo=timezone.utc
+                ),
+            )
+    finally:
+        if original is None:
+            type.__delattr__(BetdaqRateGovernor, attribute)
+        else:
+            type.__setattr__(BetdaqRateGovernor, attribute, original)
 
     assert hostile_calls == []

@@ -345,22 +345,40 @@ def redact_operator_value(
         return redact_operator_text(value, extra_secret_values=secrets)
     if isinstance(value, Mapping):
         redacted: dict[Any, Any] = {}
-        # Original keys have priority over generated redaction aliases. This keeps
-        # ordinary presentation labels byte-for-byte stable even when an unrelated
-        # secret-bearing key would otherwise redact to the same spelling.
+        # Original string keys have priority over generated presentation aliases.
+        # Bytes keys are presentation data too: normalize exact bytes through a
+        # strict UTF-8 boundary so configured secrets and credential labels cannot
+        # bypass the same canonical string redaction/classification engine.
         reserved_keys = set(value.keys())
         for key, item in value.items():
-            # Mapping keys are presentation data too. A provider/error payload can
-            # echo a configured credential as a key rather than a value; retaining
-            # that key byte-for-byte would bypass the structured redaction boundary.
-            # Redact known secret substrings in string keys before publishing the
-            # presentation copy while preserving ordinary non-secret labels.
-            safe_key = (
-                redact_operator_text(key, extra_secret_values=secrets)
-                if isinstance(key, str)
-                else key
-            )
-            if isinstance(key, str) and safe_key != key:
+            if type(key) is bytes:
+                try:
+                    decoded_key = bytes.decode(key, "utf-8", "strict")
+                except UnicodeDecodeError:
+                    # An undecodable structured key cannot be classified safely.
+                    # Fail closed: publish no original bytes and redact its value.
+                    safe_key = REDACTED
+                    key_is_sensitive = True
+                else:
+                    safe_key = redact_operator_text(
+                        decoded_key,
+                        extra_secret_values=secrets,
+                    )
+                    key_is_sensitive = is_sensitive_key(decoded_key)
+                key_was_transformed = True
+            elif isinstance(key, str):
+                safe_key = redact_operator_text(
+                    key,
+                    extra_secret_values=secrets,
+                )
+                key_is_sensitive = is_sensitive_key(key)
+                key_was_transformed = safe_key != key
+            else:
+                safe_key = key
+                key_is_sensitive = False
+                key_was_transformed = False
+
+            if key_was_transformed:
                 candidate = safe_key
                 suffix = 2
                 while candidate in reserved_keys or candidate in redacted:
@@ -368,7 +386,7 @@ def redact_operator_value(
                     suffix += 1
                 safe_key = candidate
 
-            if is_sensitive_key(key):
+            if key_is_sensitive:
                 redacted[safe_key] = REDACTED
             else:
                 redacted[safe_key] = redact_operator_value(

@@ -91,3 +91,47 @@ def test_same_redacted_embedded_key_spelling_preserves_both_records() -> None:
     assert first not in repr(redacted)
     assert second not in repr(redacted)
 
+
+def test_configured_secret_embedded_in_bytes_mapping_key_is_redacted() -> None:
+    secret = "AS-MAPPING-BYTES-SECRET-7f31"
+    payload = {
+        f"provider-{secret}-error".encode("utf-8"): "provider-error",
+    }
+
+    redacted = redact_operator_value(
+        payload,
+        extra_secret_values=(secret,),
+    )
+
+    assert redacted == {f"provider-{REDACTED}-error": "provider-error"}
+    assert secret not in repr(redacted)
+
+
+def test_bytes_sensitive_label_redacts_its_value() -> None:
+    redacted = redact_operator_value({b"api_key": "provider-secret"})
+
+    assert redacted == {"api_key": REDACTED}
+    assert "provider-secret" not in repr(redacted)
+
+
+def test_invalid_utf8_bytes_mapping_key_fails_closed() -> None:
+    redacted = redact_operator_value({b"\xffapi_key": "provider-secret"})
+
+    assert redacted == {REDACTED: REDACTED}
+    assert "provider-secret" not in repr(redacted)
+    assert "\\xff" not in repr(redacted)
+
+
+def test_bytes_presentation_key_cannot_overwrite_ordinary_string_key() -> None:
+    payload = {
+        REDACTED: "ordinary-record",
+        REDACTED.encode("utf-8"): "bytes-record",
+    }
+
+    redacted = redact_operator_value(payload)
+
+    assert redacted == {
+        REDACTED: "ordinary-record",
+        f"{REDACTED}#2": "bytes-record",
+    }
+    assert len(redacted) == 2

@@ -159,6 +159,11 @@ from . import _robust_portfolio_quantum_grid as _robust_portfolio_quantum_grid  
 # authority merely because independent monotonic history is absent.
 from . import _betfair_settlement_monotonic_baseline_guard as _betfair_settlement_monotonic_baseline_guard  # noqa: F401,E402
 
+# Preserve the exact canonical provider cleared-order row before adapter normalization
+# drops correction-relevant facts such as betOutcome. Install this before the execution
+# identity guard so that guard captures the corrected match-order dispatch as canonical.
+from . import _betfair_settlement_provider_row_semantics as _betfair_settlement_provider_row_semantics  # noqa: F401,E402
+
 # Provider settlement must retain the durable execution action's exact requested
 # economics and physically possible provider chronology before a revision is issued.
 from . import _betfair_settlement_execution_identity_guard as _betfair_settlement_execution_identity_guard  # noqa: F401,E402

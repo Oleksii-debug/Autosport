@@ -6,6 +6,8 @@ import pytest
 
 import autosport._strategy_model_factory_publish_receipt_guard as receipt_guard
 import autosport.strategy_model_factory as factory_module
+from autosport.integrity import atomic_write_json
+from autosport.monotonic_workspace_authority import MonotonicWorkspaceAuthority
 from autosport.scientific_registry import ResearchQuestion, ScientificRegistry
 from autosport.strategy_model_factory import FactoryArtifactStore
 
@@ -59,6 +61,20 @@ def _final_registry(tmp_path: Path):
         )
     )
     return registry, original, registry._read()
+
+
+def _committed_transaction(tmp_path: Path):
+    registry, original_state, final_state = _final_registry(tmp_path)
+    store = FactoryArtifactStore(tmp_path / "factory-artifacts")
+    artifact_sha256 = _write_artifact(store)
+    transaction = _transaction(
+        original_sha256=factory_module._registry_state_sha256(original_state),
+        final_sha256=factory_module._registry_state_sha256(final_state),
+        artifact_sha256=artifact_sha256,
+    )
+    atomic_write_json(factory_module._publish_transaction_path(registry), transaction)
+    factory_module._record_committed_factory_publish(registry, store)
+    return registry, store, artifact_sha256
 
 
 def test_direct_publish_append_cannot_mint_receipt_without_canonical_issuer(
@@ -194,3 +210,111 @@ def test_append_instance_shadow_cannot_intercept_canonical_issuer(
 
     assert hostile_calls == 0
     assert not store._publish_commit_ledger_path().exists()
+
+
+def test_rebound_store_sha256_cannot_mint_publication_receipt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry, original_state, final_state = _final_registry(tmp_path)
+    store = FactoryArtifactStore(tmp_path / "factory-artifacts")
+    artifact_sha256 = _write_artifact(store)
+    transaction = _transaction(
+        original_sha256=factory_module._registry_state_sha256(original_state),
+        final_sha256=factory_module._registry_state_sha256(final_state),
+        artifact_sha256=artifact_sha256,
+    )
+    atomic_write_json(factory_module._publish_transaction_path(registry), transaction)
+    hostile_calls = 0
+
+    def hostile_sha256(_self, _kind, _identity):
+        nonlocal hostile_calls
+        hostile_calls += 1
+        return artifact_sha256
+
+    monkeypatch.setattr(FactoryArtifactStore, "sha256", hostile_sha256)
+
+    with pytest.raises(RuntimeError, match="factory artifact store core"):
+        factory_module._record_committed_factory_publish(registry, store)
+
+    assert hostile_calls == 0
+    assert not store._publish_commit_ledger_path().exists()
+
+
+def test_rebound_store_sha256_cannot_validate_tampered_artifact(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _registry, store, artifact_sha256 = _committed_transaction(tmp_path)
+    artifact_path = store.path_for_testing("model", "model-v2")
+    artifact_path.write_text('{"schema_version":1,"model_id":"tampered"}\n', encoding="utf-8")
+    hostile_calls = 0
+
+    def hostile_sha256(_self, _kind, _identity):
+        nonlocal hostile_calls
+        hostile_calls += 1
+        return artifact_sha256
+
+    monkeypatch.setattr(FactoryArtifactStore, "sha256", hostile_sha256)
+
+    with pytest.raises(RuntimeError, match="factory artifact store core"):
+        store.publication_receipt(
+            "model",
+            "model-v2",
+            expected_sha256=artifact_sha256,
+        )
+
+    assert hostile_calls == 0
+
+
+def test_store_sha256_instance_shadow_cannot_mint_publication_receipt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry, original_state, final_state = _final_registry(tmp_path)
+    store = FactoryArtifactStore(tmp_path / "factory-artifacts")
+    artifact_sha256 = _write_artifact(store)
+    transaction = _transaction(
+        original_sha256=factory_module._registry_state_sha256(original_state),
+        final_sha256=factory_module._registry_state_sha256(final_state),
+        artifact_sha256=artifact_sha256,
+    )
+    atomic_write_json(factory_module._publish_transaction_path(registry), transaction)
+    hostile_calls = 0
+
+    def hostile_sha256(_kind, _identity):
+        nonlocal hostile_calls
+        hostile_calls += 1
+        return artifact_sha256
+
+    monkeypatch.setattr(store, "sha256", hostile_sha256)
+
+    with pytest.raises(RuntimeError, match="instance dispatch changed: sha256"):
+        factory_module._record_committed_factory_publish(registry, store)
+
+    assert hostile_calls == 0
+    assert not store._publish_commit_ledger_path().exists()
+
+
+def test_rebound_monotonic_recover_cannot_validate_publication_receipt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _registry, store, artifact_sha256 = _committed_transaction(tmp_path)
+    hostile_calls = 0
+
+    def hostile_recover(_self, **_kwargs):
+        nonlocal hostile_calls
+        hostile_calls += 1
+        return object()
+
+    monkeypatch.setattr(MonotonicWorkspaceAuthority, "recover", hostile_recover)
+
+    with pytest.raises(RuntimeError, match="monotonic workspace authority"):
+        store.publication_receipt(
+            "model",
+            "model-v2",
+            expected_sha256=artifact_sha256,
+        )
+
+    assert hostile_calls == 0

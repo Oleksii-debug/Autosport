@@ -79,6 +79,8 @@ def test_webview_launch_failure_does_not_announce_exception_detail(tmp_path: Pat
 
     show_error.assert_called_once_with(windows_entry._WEBVIEW2_STARTUP_ERROR)
     shown = show_error.call_args.args[0]
+    assert "Microsoft Edge WebView2 Runtime" in shown
+    assert "локального сховища WebView2" in shown
     assert secret not in shown
     assert "WindowsWebViewUnavailable" not in shown
     assert "RuntimeError" not in shown

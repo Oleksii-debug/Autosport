@@ -16,7 +16,8 @@ _MACHINE_MODE_ARITY = {
 }
 _WEBVIEW2_STARTUP_ERROR = (
     "Автоспорт не може відкрити доступний інтерфейс WebView2. "
-    "Перевірте наявність Microsoft Edge WebView2 Runtime."
+    "Перевірте наявність Microsoft Edge WebView2 Runtime і доступ до локального "
+    "сховища WebView2 у профілі вашого користувача."
 )
 _WEBVIEW2_STORAGE_ERROR = (
     "Автоспорт не може підготувати локальне сховище WebView2 для вашого профілю. "

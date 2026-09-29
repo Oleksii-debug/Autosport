@@ -14,7 +14,9 @@ _RUNNER_FREE_PR_ADMISSION = (
     "    # ready_for_review has draft=false and still executes exact-head admission.\n"
     "    if: >-\n"
     "      github.event_name != 'pull_request' ||\n"
-    "      (github.event.action != 'closed' && github.event.pull_request.draft == false)\n"
+    "      (github.event.action != 'closed' &&\n"
+    "      github.event.pull_request.head.sha &&\n"
+    "      github.event.pull_request.draft == false)\n"
     "    runs-on: ubuntu-latest"
 )
 
@@ -31,6 +33,7 @@ def _assert_head_partitioned_pr_scheduler(path: str) -> None:
     assert "format('pr-{0}-{1}'" in concurrency_block
     assert "github.event.number" in concurrency_block
     assert "github.event.pull_request.number" not in concurrency_block
+    assert "github.event_name == 'pull_request' && github.event.pull_request.head.sha && format(" in concurrency_block
     assert "github.run_attempt != 1" in concurrency_block
     assert "format('rerun-{0}', github.event.pull_request.head.sha)" in concurrency_block
     assert "format('qualify-{0}', github.event.pull_request.head.sha)" in concurrency_block

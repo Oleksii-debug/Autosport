@@ -961,29 +961,37 @@ class RunTransaction:
                 verification_descriptor = _open_read_only_descriptor(path)
             except OSError:
                 return False
-            close_failed = False
             try:
-                try:
-                    same_file = os.path.sameopenfile(
-                        handle.fileno(),
-                        verification_descriptor,
-                    )
-                    current_after_open = os.stat(path, follow_symlinks=False)
-                except OSError:
-                    return False
-                return (
+                same_file = os.path.sameopenfile(
+                    handle.fileno(),
+                    verification_descriptor,
+                )
+                current_after_open = os.stat(path, follow_symlinks=False)
+                result = (
                     same_file
                     and stat.S_ISREG(current_after_open.st_mode)
                     and current_after_open.st_nlink == 1
                     and stable_metadata(expected_path_stat, current_after_open)
                 )
-            finally:
+            except OSError:
+                result = False
+            except BaseException as primary_error:
                 try:
                     os.close(verification_descriptor)
-                except OSError:
-                    close_failed = True
-                if close_failed:
-                    return False
+                except OSError as close_error:
+                    try:
+                        primary_error.add_note(
+                            "transaction verification descriptor cleanup also failed: "
+                            f"{type(close_error).__name__}: {close_error}"
+                        )
+                    except BaseException:
+                        pass
+                raise
+            try:
+                os.close(verification_descriptor)
+            except OSError:
+                return False
+            return result
 
         try:
             path_before = os.stat(path, follow_symlinks=False)

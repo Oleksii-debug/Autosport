@@ -13,7 +13,7 @@ from autosport.betfair_account_readonly import (
 from autosport.betfair_commission_applicability import (
     BetfairCommissionApplicabilityError,
     assess_betfair_commission_applicability,
-    require_product_betfair_commission_applicability,
+    validate_betfair_commission_applicability_assessment,
 )
 
 
@@ -89,22 +89,34 @@ def _recomputed_assessment_id(assessment) -> str:
     ).hexdigest()
 
 
-def test_product_issued_object_cannot_be_relabelled_after_issuance() -> None:
+def test_assessment_checksum_is_integrity_not_product_issuance_authority() -> None:
     assessment = assess_betfair_commission_applicability(
         _client(),
         market_id="1.234",
     )
-    assert require_product_betfair_commission_applicability(assessment) is assessment
+    assert validate_betfair_commission_applicability_assessment(assessment) is assessment
 
-    # frozen=True is not an authority boundary against direct object.__setattr__.
-    # Before the issuance snapshot was retained, a caller could change bound evidence,
-    # recompute the public digest exactly, and keep the same registered object identity.
-    object.__setattr__(assessment, "market_id", "1.forged")
+    # frozen=True and a public checksum are not authenticity boundaries against direct
+    # object mutation. A caller can coherently relabel a negative value and recompute its
+    # checksum; validation therefore deliberately promises only canonical negative shape
+    # and checksum consistency, never provider-read provenance or product issuance.
+    object.__setattr__(assessment, "market_id", "1.caller-relabeled")
     object.__setattr__(assessment, "fee_input_sha256", "f" * 64)
     object.__setattr__(assessment, "assessment_id", _recomputed_assessment_id(assessment))
 
+    assert validate_betfair_commission_applicability_assessment(assessment) is assessment
+    assert assessment.prospective_commission_amount_authorized is False
+    assert assessment.complete_execution_fee_cost_authorized is False
+    assert assessment.provider_write_authorized is False
+    assert assessment.real_money_execution_authorized is False
+
+    # Structural self-consistency can never be used to turn the negative prerequisite
+    # into positive economic or execution authority, even if the caller recomputes the
+    # checksum after mutation.
+    object.__setattr__(assessment, "prospective_commission_amount_authorized", True)
+    object.__setattr__(assessment, "assessment_id", _recomputed_assessment_id(assessment))
     with pytest.raises(
         BetfairCommissionApplicabilityError,
-        match="changed after product issuance",
+        match="exceeds the canonical fail-closed applicability boundary",
     ):
-        require_product_betfair_commission_applicability(assessment)
+        validate_betfair_commission_applicability_assessment(assessment)

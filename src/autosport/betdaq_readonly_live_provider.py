@@ -81,6 +81,7 @@ class BetdaqLiveReadOnlyProvider(BetdaqReadOnlyProvider):
             transport=live_transport,
             timeout_seconds=self.timeout_seconds,
             clock=clock,
+            max_attempts=max_attempts,
             max_message_age_seconds=max_message_age_seconds,
         )
         self._catalogue_bindings: dict[int, BetdaqResolvedMarketBinding] = {}
@@ -139,8 +140,8 @@ class BetdaqLiveReadOnlyProvider(BetdaqReadOnlyProvider):
                     catalogue_evidence.request_fingerprint
                 ),
                 catalogue_response_sha256=catalogue_evidence.response_sha256,
-                catalogue_rate_admission_receipt=(
-                    catalogue_evidence.rate_admission_receipt
+                catalogue_rate_admission_receipts=(
+                    catalogue_evidence.rate_admission_receipts
                 ),
                 catalogue_event_classifier_ids=(
                     catalogue_evidence.requested_event_classifier_ids

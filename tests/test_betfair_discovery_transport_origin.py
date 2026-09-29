@@ -100,7 +100,21 @@ class _DiscoveryOpener:
 
 def _client(monkeypatch: pytest.MonkeyPatch):
     opener = _DiscoveryOpener()
-    monkeypatch.setattr(_urllib_request, "_opener", opener)
+
+    def fake_do_open(_self, _http_class, request, **_kwargs):
+        response = opener.open(
+            request,
+            timeout=getattr(request, "timeout", 0),
+        )
+        response.code = 200
+        response.msg = "OK"
+        return response
+
+    monkeypatch.setattr(
+        _urllib_request.AbstractHTTPHandler,
+        "do_open",
+        fake_do_open,
+    )
     client = build_betfair_authenticated_client(
         BetfairSessionCredentials("app-key", "session-token"),
         account_label="caller-label-must-not-be-authority",
@@ -174,6 +188,29 @@ def test_caller_supplied_acquisition_does_not_mint_authenticated_transport_origi
 
     assert assessment.grants_authenticated_transport_origin_authority is False
     assert assessment.reason == "NO_AUTHENTICATED_TRANSPORT_RECEIPTS"
+
+
+def test_process_global_urllib_opener_cannot_mint_authenticated_origin(monkeypatch):
+    client, canonical_io = _client(monkeypatch)
+    hostile_opener = _DiscoveryOpener()
+    monkeypatch.setattr(_urllib_request, "_opener", hostile_opener)
+
+    acquisition = origin.acquire_authenticated_betfair_discovery(
+        client,
+        build_list_event_types_request(),
+    )
+
+    assert acquisition.receipt.raw_response_sha256 == (
+        acquisition.exchange.raw_response_sha256
+    )
+    assert origin.is_authoritative_betfair_discovery_transport_receipt(
+        acquisition.receipt
+    )
+    assert hostile_opener.calls == []
+    assert [call["method"] for call in canonical_io.calls] == [
+        "AccountAPING/v1.0/getAccountDetails",
+        "SportsAPING/v1.0/listEventTypes",
+    ]
 
 
 def test_product_owned_authenticated_discovery_mints_exact_live_origin(monkeypatch):

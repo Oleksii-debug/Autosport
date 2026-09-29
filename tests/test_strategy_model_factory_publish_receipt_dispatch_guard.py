@@ -105,7 +105,7 @@ def test_rebound_transaction_reader_cannot_mint_receipt(
         hostile_calls += 1
         return forged_transaction
 
-    # No canonical publish manifest exists.  Rebinding the owning guard's reader used
+    # No canonical publish manifest exists. Rebinding the owning guard's reader used
     # to let the unchanged installed issuer consume this forged prepared transaction.
     monkeypatch.setattr(receipt_guard, "_READ_PUBLISH_TRANSACTION", hostile_reader)
 
@@ -139,6 +139,58 @@ def test_rebound_recovery_original_cannot_redirect_installed_recovery(
 
     with pytest.raises(RuntimeError, match="global dispatch authority changed"):
         factory_module._recover_interrupted_factory_publish(registry, store)
+
+    assert hostile_calls == 0
+    assert not store._publish_commit_ledger_path().exists()
+
+
+def test_rebound_append_class_dispatch_cannot_intercept_canonical_issuer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry = ScientificRegistry.initialize_pristine(
+        tmp_path / "scientific_registry.json"
+    )
+    store = FactoryArtifactStore(tmp_path / "factory-artifacts")
+    hostile_calls = 0
+
+    def hostile_append(_self, _transaction):
+        nonlocal hostile_calls
+        hostile_calls += 1
+        return {"forged": True}
+
+    monkeypatch.setattr(
+        FactoryArtifactStore,
+        "_append_publish_commit_record",
+        hostile_append,
+    )
+
+    with pytest.raises(RuntimeError, match="append class dispatch changed"):
+        factory_module._record_committed_factory_publish(registry, store)
+
+    assert hostile_calls == 0
+    assert not store._publish_commit_ledger_path().exists()
+
+
+def test_append_instance_shadow_cannot_intercept_canonical_issuer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry = ScientificRegistry.initialize_pristine(
+        tmp_path / "scientific_registry.json"
+    )
+    store = FactoryArtifactStore(tmp_path / "factory-artifacts")
+    hostile_calls = 0
+
+    def hostile_append(_transaction):
+        nonlocal hostile_calls
+        hostile_calls += 1
+        return {"forged": True}
+
+    monkeypatch.setattr(store, "_append_publish_commit_record", hostile_append)
+
+    with pytest.raises(RuntimeError, match="append instance dispatch changed"):
+        factory_module._record_committed_factory_publish(registry, store)
 
     assert hostile_calls == 0
     assert not store._publish_commit_ledger_path().exists()

@@ -1,0 +1,667 @@
+from __future__ import annotations
+
+import json
+import os
+from dataclasses import asdict, dataclass, field, fields
+from datetime import datetime, timezone
+from math import isfinite
+from pathlib import Path
+from typing import BinaryIO
+
+
+_ALLOWED_HEALTH_STATUSES = frozenset({"unknown", "healthy", "degraded", "failed"})
+_COUNTER_FIELDS = (
+    "poll_count",
+    "total_received",
+    "total_accepted",
+    "total_rejected",
+    "total_failures",
+    "consecutive_failures",
+)
+_SCHEMA_V1 = 1
+_SCHEMA_V2 = 2
+_SCHEMA_V3 = 3
+_HISTORY_ENTRY_V2_FIELDS = frozenset({"recorded_at", "state"})
+_HISTORY_ENTRY_V3_FIELDS = frozenset({"recorded_at", "transition_order", "state"})
+
+
+def parse_source_timestamp(value: str) -> datetime:
+    if not isinstance(value, str) or not value or value.strip() != value:
+        raise ValueError("provider source timestamp must be a non-empty trimmed string")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError(f"invalid provider source timestamp: {value}") from exc
+    if parsed.tzinfo is None:
+        raise ValueError("provider source timestamps must include timezone")
+    return parsed.astimezone(timezone.utc)
+
+
+def _validate_source_id(value: object) -> str:
+    if not isinstance(value, str) or not value or value.strip() != value:
+        raise ValueError("source_id must be a non-empty trimmed string")
+    return value
+
+
+def _validate_nonnegative_count(name: str, value: object) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(f"{name} must be a non-negative integer")
+    return value
+
+
+def _validate_quality_flags(value: object) -> tuple[str, ...]:
+    if not isinstance(value, tuple):
+        raise ValueError("quality_flags must be a tuple of strings")
+    seen: set[str] = set()
+    for flag in value:
+        if not isinstance(flag, str) or not flag or flag.strip() != flag:
+            raise ValueError("quality_flags must contain non-empty trimmed strings")
+        if flag in seen:
+            raise ValueError("quality_flags must not contain duplicates")
+        seen.add(flag)
+    return value
+
+
+def _reject_duplicate_json_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate JSON object key in source health store: {key}")
+        result[key] = value
+    return result
+
+
+def _reject_nonfinite_json_constant(value: str) -> None:
+    raise ValueError(f"non-finite JSON constant in source health store: {value}")
+
+
+@dataclass(frozen=True, slots=True)
+class IngestionPolicy:
+    max_batch_size: int = 5000
+    stale_after_seconds: float = 120.0
+    max_future_skew_seconds: float = 5.0
+
+    def __post_init__(self) -> None:
+        if (
+            isinstance(self.max_batch_size, bool)
+            or not isinstance(self.max_batch_size, int)
+            or self.max_batch_size <= 0
+        ):
+            raise ValueError("max_batch_size must be a positive integer")
+        for field_name, value in (
+            ("stale_after_seconds", self.stale_after_seconds),
+            ("max_future_skew_seconds", self.max_future_skew_seconds),
+        ):
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not isfinite(value)
+                or value < 0
+            ):
+                raise ValueError(f"{field_name} must be a finite non-negative number")
+
+
+@dataclass(slots=True)
+class SourceHealthState:
+    source_id: str
+    status: str = "unknown"
+    poll_count: int = 0
+    total_received: int = 0
+    total_accepted: int = 0
+    total_rejected: int = 0
+    total_failures: int = 0
+    consecutive_failures: int = 0
+    last_success_at: str | None = None
+    last_error_at: str | None = None
+    last_error: str | None = None
+    last_cursor: str | None = None
+    latest_source_ts: str | None = None
+    quality_flags: tuple[str, ...] = field(default_factory=tuple)
+
+    def __post_init__(self) -> None:
+        self.validate()
+
+    def validate(self) -> None:
+        _validate_source_id(self.source_id)
+        if not isinstance(self.status, str) or self.status not in _ALLOWED_HEALTH_STATUSES:
+            raise ValueError("invalid source health status")
+        for field_name in _COUNTER_FIELDS:
+            _validate_nonnegative_count(field_name, getattr(self, field_name))
+        if self.total_failures > self.poll_count:
+            raise ValueError("total_failures cannot exceed poll_count")
+        if self.consecutive_failures > self.total_failures:
+            raise ValueError("consecutive_failures cannot exceed total_failures")
+        if self.total_accepted + self.total_rejected > self.total_received:
+            raise ValueError("accepted and rejected source totals cannot exceed total_received")
+
+        for field_name in ("last_success_at", "last_error_at", "latest_source_ts"):
+            value = getattr(self, field_name)
+            if value is not None:
+                try:
+                    parse_source_timestamp(value)
+                except ValueError as exc:
+                    raise ValueError(f"invalid {field_name} in source health state") from exc
+
+        for field_name in ("last_error", "last_cursor"):
+            value = getattr(self, field_name)
+            if value is not None and not isinstance(value, str):
+                raise ValueError(f"{field_name} must be a string or null")
+
+        _validate_quality_flags(self.quality_flags)
+
+        successful_polls = self.poll_count - self.total_failures
+        if successful_polls == 0:
+            if self.total_failures > 0 and self.consecutive_failures != self.total_failures:
+                raise ValueError(
+                    "source health without successful polls requires all failures to be consecutive"
+                )
+            if self.last_success_at is not None:
+                raise ValueError("source health without successful polls cannot have last_success_at")
+            if self.total_received or self.total_accepted or self.total_rejected:
+                raise ValueError("source health without successful polls cannot have received event totals")
+            if self.quality_flags:
+                raise ValueError("source health without successful polls cannot have quality flags")
+            if self.last_cursor is not None:
+                raise ValueError("source health without successful polls cannot have last_cursor")
+            if self.latest_source_ts is not None:
+                raise ValueError("source health without successful polls cannot have latest_source_ts")
+        elif self.last_success_at is None:
+            raise ValueError("successful poll history requires last_success_at")
+
+        if self.total_failures == 0:
+            if self.last_error_at is not None:
+                raise ValueError("source health without failures cannot have last_error_at")
+        elif self.last_error_at is None:
+            raise ValueError("failure history requires last_error_at")
+
+        if self.status == "unknown":
+            if (
+                self.poll_count != 0
+                or self.consecutive_failures != 0
+                or self.last_error is not None
+                or self.last_cursor is not None
+                or self.latest_source_ts is not None
+            ):
+                raise ValueError("unknown source health must be pristine")
+            return
+
+        if self.status == "failed":
+            if self.consecutive_failures == 0:
+                raise ValueError("failed source health requires a positive consecutive failure count")
+            if not isinstance(self.last_error, str) or not self.last_error.strip():
+                raise ValueError("failed source health requires non-empty last error evidence")
+        else:
+            if self.consecutive_failures != 0:
+                raise ValueError("successful source health cannot retain consecutive failures")
+            if self.last_error is not None:
+                raise ValueError("successful source health cannot retain last_error")
+            if successful_polls == 0:
+                raise ValueError("successful source health requires at least one successful poll")
+
+        if self.status == "healthy" and self.quality_flags:
+            raise ValueError("healthy source health cannot retain quality flags")
+        if self.status == "degraded" and not self.quality_flags:
+            raise ValueError("degraded source health requires quality flags")
+
+
+_SOURCE_STATE_FIELDS = frozenset(item.name for item in fields(SourceHealthState))
+
+
+class _SourceHealthWriterLock:
+    """Cross-process lock for one source-health JSON read/modify/write transaction."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self._handle: BinaryIO | None = None
+
+    def __enter__(self) -> "_SourceHealthWriterLock":
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        handle = self.path.open("a+b")
+        try:
+            handle.seek(0, os.SEEK_END)
+            if handle.tell() == 0:
+                handle.write(b"\0")
+                handle.flush()
+                os.fsync(handle.fileno())
+            handle.seek(0)
+            self._lock_handle(handle)
+        except BaseException:
+            handle.close()
+            raise
+        self._handle = handle
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback) -> None:
+        handle = self._handle
+        if handle is None:
+            return
+        try:
+            self._unlock_handle(handle)
+        finally:
+            handle.close()
+            self._handle = None
+
+    @staticmethod
+    def _lock_handle(handle: BinaryIO) -> None:
+        if os.name == "nt":
+            import msvcrt
+
+            msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+            return
+
+        import fcntl
+
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+
+    @staticmethod
+    def _unlock_handle(handle: BinaryIO) -> None:
+        handle.seek(0)
+        if os.name == "nt":
+            import msvcrt
+
+            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            return
+
+        import fcntl
+
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+class SourceHealthStore:
+    """Durable provider-health projection plus causal append-only state history.
+
+    Schema v3 keeps exact transition evidence time plus a durable per-source order key,
+    so equal-time transitions remain totally ordered without inventing timestamps.
+    Legacy schema-v1/v2 stores remain readable and are upgraded on the first successful
+    mutation. A legacy projection is never backfilled earlier than the timestamp
+    evidenced by that projection itself.
+    """
+
+    def __init__(self, path: str | Path) -> None:
+        self.path = Path(path)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._lock_path = self.path.with_name(self.path.name + ".lock")
+        with self._writer_guard():
+            if not self.path.exists():
+                self._write({"schema_version": _SCHEMA_V3, "sources": {}, "history": {}})
+            else:
+                self._read()
+
+    @staticmethod
+    def _state_from_payload(payload: dict, *, normalize_failed_flags: bool = True) -> SourceHealthState:
+        value = dict(payload)
+        value["quality_flags"] = tuple(value["quality_flags"])
+        if normalize_failed_flags and value.get("status") == "failed":
+            # Old schema-v1 stores could retain the preceding successful batch's
+            # quality flags on a later failed poll. Those flags are not current
+            # failed-state evidence, so normalize them at the public boundary.
+            value["quality_flags"] = ()
+        return SourceHealthState(**value)
+
+    @staticmethod
+    def _payload(state: SourceHealthState) -> dict:
+        payload = asdict(state)
+        payload["quality_flags"] = list(state.quality_flags)
+        return payload
+
+    @staticmethod
+    def _transition_at(state: SourceHealthState) -> str | None:
+        if state.status == "failed":
+            return state.last_error_at
+        if state.status in {"healthy", "degraded"}:
+            return state.last_success_at
+        return None
+
+    @staticmethod
+    def _as_of(value: datetime) -> datetime:
+        if not isinstance(value, datetime):
+            raise TypeError("as_of must be a datetime")
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("as_of must be timezone-aware")
+        return value.astimezone(timezone.utc)
+
+    def get(self, source_id: str) -> SourceHealthState:
+        _validate_source_id(source_id)
+        raw = self._read()["sources"].get(source_id)
+        if raw is None:
+            return SourceHealthState(source_id=source_id)
+        return self._state_from_payload(raw)
+
+    def get_as_of(self, source_id: str, *, as_of: datetime) -> SourceHealthState:
+        """Return health state known at ``as_of`` without consulting future transitions."""
+        _validate_source_id(source_id)
+        boundary = self._as_of(as_of)
+        raw = self._read()
+
+        if raw["schema_version"] == _SCHEMA_V1:
+            payload = raw["sources"].get(source_id)
+            if payload is None:
+                return SourceHealthState(source_id=source_id)
+            state = self._state_from_payload(payload)
+            recorded_at = self._transition_at(state)
+            if recorded_at is None or parse_source_timestamp(recorded_at) > boundary:
+                return SourceHealthState(source_id=source_id)
+            return state
+
+        entries = raw["history"].get(source_id, ())
+        selected: dict | None = None
+        for entry in entries:
+            if parse_source_timestamp(entry["recorded_at"]) <= boundary:
+                selected = entry["state"]
+            else:
+                break
+        if selected is None:
+            return SourceHealthState(source_id=source_id)
+        return self._state_from_payload(selected, normalize_failed_flags=False)
+
+    @staticmethod
+    def _validate_success_update(
+        *,
+        received: int,
+        accepted: int,
+        rejected: int,
+        quality_flags: tuple[str, ...],
+    ) -> None:
+        _validate_nonnegative_count("received", received)
+        _validate_nonnegative_count("accepted", accepted)
+        _validate_nonnegative_count("rejected", rejected)
+        if accepted + rejected > received:
+            raise ValueError("accepted and rejected counts cannot exceed received")
+        _validate_quality_flags(quality_flags)
+
+    def _record_success_locked(
+        self,
+        state: SourceHealthState,
+        *,
+        now: str,
+        received: int,
+        accepted: int,
+        rejected: int,
+        cursor: str | None,
+        latest_source_ts: str | None,
+        quality_flags: tuple[str, ...],
+    ) -> SourceHealthState:
+        state.poll_count += 1
+        state.total_received += received
+        state.total_accepted += accepted
+        state.total_rejected += rejected
+        state.consecutive_failures = 0
+        state.last_success_at = now
+        state.last_error = None
+        state.last_cursor = cursor
+        if latest_source_ts is not None:
+            if state.latest_source_ts is None or (
+                parse_source_timestamp(latest_source_ts)
+                >= parse_source_timestamp(state.latest_source_ts)
+            ):
+                state.latest_source_ts = latest_source_ts
+        state.quality_flags = tuple(sorted(quality_flags))
+        state.status = "degraded" if state.quality_flags else "healthy"
+        self._put(state, recorded_at=now)
+        return state
+
+    def record_success(
+        self,
+        source_id: str,
+        *,
+        now: str,
+        received: int,
+        accepted: int,
+        rejected: int,
+        cursor: str | None,
+        latest_source_ts: str | None,
+        quality_flags: tuple[str, ...],
+    ) -> SourceHealthState:
+        self._validate_success_update(
+            received=received,
+            accepted=accepted,
+            rejected=rejected,
+            quality_flags=quality_flags,
+        )
+
+        with self._writer_guard():
+            state = self.get(source_id)
+            return self._record_success_locked(
+                state,
+                now=now,
+                received=received,
+                accepted=accepted,
+                rejected=rejected,
+                cursor=cursor,
+                latest_source_ts=latest_source_ts,
+                quality_flags=quality_flags,
+            )
+
+    def record_success_if_current(
+        self,
+        expected_before: SourceHealthState,
+        *,
+        ambiguous_after: SourceHealthState | None = None,
+        now: str,
+        received: int,
+        accepted: int,
+        rejected: int,
+        cursor: str | None,
+        latest_source_ts: str | None,
+        quality_flags: tuple[str, ...],
+    ) -> SourceHealthState:
+        """Apply one success only if the durable state still equals expected_before."""
+        if not isinstance(expected_before, SourceHealthState):
+            raise TypeError("expected_before must be SourceHealthState")
+        expected_before.validate()
+        if ambiguous_after is not None:
+            if not isinstance(ambiguous_after, SourceHealthState):
+                raise TypeError("ambiguous_after must be SourceHealthState or null")
+            ambiguous_after.validate()
+            if ambiguous_after.source_id != expected_before.source_id:
+                raise ValueError("ambiguous_after source_id must match expected_before")
+        self._validate_success_update(
+            received=received,
+            accepted=accepted,
+            rejected=rejected,
+            quality_flags=quality_flags,
+        )
+
+        with self._writer_guard():
+            current = self.get(expected_before.source_id)
+            if ambiguous_after is not None and current == ambiguous_after:
+                raise RuntimeError(
+                    "source health matches the expected post-state but this outcome "
+                    "cannot prove it performed that durable mutation; refusing ambiguous retry"
+                )
+            if current != expected_before:
+                raise RuntimeError(
+                    "source health changed since the committed ingestion outcome; "
+                    "refusing ambiguous retry"
+                )
+            return self._record_success_locked(
+                current,
+                now=now,
+                received=received,
+                accepted=accepted,
+                rejected=rejected,
+                cursor=cursor,
+                latest_source_ts=latest_source_ts,
+                quality_flags=quality_flags,
+            )
+
+    def record_failure(self, source_id: str, *, now: str, error: BaseException) -> SourceHealthState:
+        with self._writer_guard():
+            state = self.get(source_id)
+            state.poll_count += 1
+            state.total_failures += 1
+            state.consecutive_failures += 1
+            state.last_error_at = now
+            state.last_error = f"{type(error).__name__}: {error}"
+            state.quality_flags = ()
+            state.status = "failed"
+            self._put(state, recorded_at=now)
+            return state
+
+    def _writer_guard(self) -> _SourceHealthWriterLock:
+        return _SourceHealthWriterLock(self._lock_path)
+
+    def _upgrade_to_v3(self, raw: dict) -> dict:
+        if raw["schema_version"] == _SCHEMA_V3:
+            return raw
+        upgraded = {"schema_version": _SCHEMA_V3, "sources": {}, "history": {}}
+        if raw["schema_version"] == _SCHEMA_V1:
+            for source_id, payload in raw["sources"].items():
+                state = self._state_from_payload(payload)
+                normalized = self._payload(state)
+                upgraded["sources"][source_id] = normalized
+                recorded_at = self._transition_at(state)
+                if recorded_at is None:
+                    raise ValueError(
+                        "persisted non-pristine source health requires transition timestamp"
+                    )
+                upgraded["history"][source_id] = [
+                    {
+                        "recorded_at": recorded_at,
+                        "transition_order": 1,
+                        "state": normalized,
+                    }
+                ]
+            return upgraded
+
+        for source_id, payload in raw["sources"].items():
+            upgraded["sources"][source_id] = payload
+            upgraded["history"][source_id] = [
+                {
+                    "recorded_at": entry["recorded_at"],
+                    "transition_order": index,
+                    "state": entry["state"],
+                }
+                for index, entry in enumerate(raw["history"][source_id], start=1)
+            ]
+        return upgraded
+
+    def _put(self, state: SourceHealthState, *, recorded_at: str) -> None:
+        state.validate()
+        recorded = parse_source_timestamp(recorded_at)
+        transition_at = self._transition_at(state)
+        if transition_at is None or parse_source_timestamp(transition_at) != recorded:
+            raise ValueError("source health transition timestamp mismatch")
+
+        raw = self._upgrade_to_v3(self._read())
+        entries = raw["history"].setdefault(state.source_id, [])
+        if entries and parse_source_timestamp(entries[-1]["recorded_at"]) > recorded:
+            raise ValueError("source health transitions cannot move backwards in evidence time")
+
+        payload = self._payload(state)
+        transition_order = entries[-1]["transition_order"] + 1 if entries else 1
+        entries.append(
+            {
+                "recorded_at": recorded_at,
+                "transition_order": transition_order,
+                "state": payload,
+            }
+        )
+        raw["sources"][state.source_id] = payload
+        self._write(raw)
+
+    @staticmethod
+    def _validate_persisted_state(source_id: str, payload: object) -> None:
+        _validate_source_id(source_id)
+        if not isinstance(payload, dict) or set(payload) != _SOURCE_STATE_FIELDS:
+            raise ValueError("invalid source health state fields")
+        if payload.get("source_id") != source_id:
+            raise ValueError("source health state identity mismatch")
+        if not isinstance(payload.get("quality_flags"), list):
+            raise ValueError("persisted quality_flags must be a JSON array")
+        value = dict(payload)
+        value["quality_flags"] = tuple(value["quality_flags"])
+        SourceHealthState(**value)
+
+    def _read(self) -> dict:
+        try:
+            raw = json.loads(
+                self.path.read_text(encoding="utf-8"),
+                object_pairs_hook=_reject_duplicate_json_keys,
+                parse_constant=_reject_nonfinite_json_constant,
+            )
+        except (UnicodeError, json.JSONDecodeError, ValueError) as exc:
+            raise ValueError("invalid source health store") from exc
+
+        schema_version = raw.get("schema_version") if isinstance(raw, dict) else None
+        if (
+            not isinstance(raw, dict)
+            or isinstance(schema_version, bool)
+            or not isinstance(schema_version, int)
+            or schema_version not in {_SCHEMA_V1, _SCHEMA_V2, _SCHEMA_V3}
+            or not isinstance(raw.get("sources"), dict)
+        ):
+            raise ValueError("invalid source health store")
+
+        expected_fields = (
+            {"schema_version", "sources"}
+            if schema_version == _SCHEMA_V1
+            else {"schema_version", "sources", "history"}
+        )
+        if set(raw) != expected_fields:
+            raise ValueError("invalid source health store")
+        if schema_version in {_SCHEMA_V2, _SCHEMA_V3} and not isinstance(
+            raw.get("history"), dict
+        ):
+            raise ValueError("invalid source health store")
+
+        try:
+            for source_id, payload in raw["sources"].items():
+                self._validate_persisted_state(source_id, payload)
+
+            if schema_version in {_SCHEMA_V2, _SCHEMA_V3}:
+                if set(raw["history"]) != set(raw["sources"]):
+                    raise ValueError("source health history/projection identity mismatch")
+                for source_id, entries in raw["history"].items():
+                    if not isinstance(entries, list) or not entries:
+                        raise ValueError("source health history must be a non-empty array")
+                    previous_recorded: datetime | None = None
+                    previous_order = 0
+                    for entry in entries:
+                        expected_entry_fields = (
+                            _HISTORY_ENTRY_V2_FIELDS
+                            if schema_version == _SCHEMA_V2
+                            else _HISTORY_ENTRY_V3_FIELDS
+                        )
+                        if not isinstance(entry, dict) or set(entry) != expected_entry_fields:
+                            raise ValueError("invalid source health history entry")
+                        recorded_at = parse_source_timestamp(entry["recorded_at"])
+                        if schema_version == _SCHEMA_V2:
+                            if previous_recorded is not None and recorded_at <= previous_recorded:
+                                raise ValueError("source health history is not strictly increasing")
+                        else:
+                            order = entry["transition_order"]
+                            if (
+                                isinstance(order, bool)
+                                or not isinstance(order, int)
+                                or order != previous_order + 1
+                            ):
+                                raise ValueError("source health transition order is not contiguous")
+                            if previous_recorded is not None and recorded_at < previous_recorded:
+                                raise ValueError("source health history evidence time moved backwards")
+                            previous_order = order
+                        previous_recorded = recorded_at
+                        self._validate_persisted_state(source_id, entry["state"])
+                        state = self._state_from_payload(
+                            entry["state"], normalize_failed_flags=False
+                        )
+                        transition_at = self._transition_at(state)
+                        if (
+                            transition_at is None
+                            or parse_source_timestamp(transition_at) != recorded_at
+                        ):
+                            raise ValueError("source health history timestamp mismatch")
+                    if entries[-1]["state"] != raw["sources"][source_id]:
+                        raise ValueError("source health latest projection/history mismatch")
+        except (TypeError, ValueError) as exc:
+            raise ValueError("invalid source health state/history") from exc
+        return raw
+
+    def _write(self, raw: dict) -> None:
+        temporary = self.path.with_suffix(self.path.suffix + ".tmp")
+        with temporary.open("w", encoding="utf-8", newline="\n") as handle:
+            json.dump(raw, handle, ensure_ascii=False, indent=2, sort_keys=True)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, self.path)

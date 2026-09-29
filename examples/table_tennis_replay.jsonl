@@ -1,0 +1,4 @@
+{"event_id":"tt-demo-1","market_id":"winner","selection_id":"player-a","decimal_odds":"1.62","observed_ts":"2026-09-12T10:00:00+00:00","source_id":"fixture","sequence":1,"market_type":"winner","score_state":"0-0","metadata":{"paper_signal":true,"paper_signal_id":"fixture-1"}}
+{"event_id":"tt-demo-1","market_id":"winner","selection_id":"player-b","decimal_odds":"2.30","observed_ts":"2026-09-12T10:00:00+00:00","source_id":"fixture","sequence":2,"market_type":"winner","score_state":"0-0"}
+{"event_id":"tt-demo-1","market_id":"winner","selection_id":"player-a","decimal_odds":"2.05","observed_ts":"2026-09-12T10:00:01+00:00","source_id":"fixture","sequence":3,"market_type":"winner","score_state":"3-6"}
+{"event_id":"tt-demo-1","market_id":"winner","selection_id":"player-b","decimal_odds":"1.74","observed_ts":"2026-09-12T10:00:01+00:00","source_id":"fixture","sequence":4,"market_type":"winner","score_state":"3-6"}

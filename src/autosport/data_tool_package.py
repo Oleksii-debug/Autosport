@@ -11,6 +11,7 @@ from typing import Any, BinaryIO
 
 from autosport.release_package import (
     _decode_json_object,
+    _require_regular_source_file,
     _validate_windows_member,
     _write_canonical_zip,
     verify_windows_package,
@@ -87,6 +88,10 @@ def _verified_base_members(
             label="expected_base_package_sha256",
         )
 
+    _require_regular_source_file(
+        package,
+        label="base release package input",
+    )
     base_bytes = package.read_bytes()
     captured_sha = _sha256_bytes(base_bytes)
     if (
@@ -141,6 +146,10 @@ def bind_portable_data_tool(
 
     package = Path(package_zip)
     data_path = Path(data_exe)
+    _require_regular_source_file(
+        data_path,
+        label="portable data tool executable input",
+    )
     data_bytes = data_path.read_bytes()
     if not data_bytes:
         raise ValueError("portable data tool executable is empty")

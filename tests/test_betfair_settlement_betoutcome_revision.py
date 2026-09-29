@@ -141,7 +141,8 @@ def _capture(client: BetfairReadOnlyClient, provider_ref: str):
 
 def test_bet_outcome_only_provider_correction_creates_new_revision(tmp_path) -> None:
     ledger, plan, action, provider_ref, transport, client = _context(tmp_path)
-    store = BetfairSettlementRevisionStore(tmp_path / "settlement.jsonl")
+    path = tmp_path / "settlement.jsonl"
+    store = BetfairSettlementRevisionStore(path)
 
     first_capture = _capture(client, provider_ref)
     first = store.ingest(
@@ -151,6 +152,7 @@ def test_bet_outcome_only_provider_correction_creates_new_revision(tmp_path) -> 
         action=action,
         capture=first_capture,
     )
+    assert first.revision.bet_outcome == "WON"
 
     transport.bet_outcome = "LOST"
     second_capture = _capture(client, provider_ref)
@@ -168,7 +170,14 @@ def test_bet_outcome_only_provider_correction_creates_new_revision(tmp_path) -> 
     assert second.revision.revision_number == 2
     assert second.revision.previous_revision_id == first.revision.revision_id
     assert second.revision.revision_id != first.revision.revision_id
+    assert second.revision.bet_outcome == "LOST"
     assert second.revision.source_payload_sha256 != first.revision.source_payload_sha256
+
+    restarted = BetfairSettlementRevisionStore(path)
+    persisted = restarted.current("betfair", "acct-1", "bet-777")
+    assert persisted is not None
+    assert persisted.revision_id == second.revision.revision_id
+    assert persisted.bet_outcome == "LOST"
 
 
 def test_identical_provider_row_with_new_rpc_ids_remains_idempotent(tmp_path) -> None:
@@ -196,4 +205,6 @@ def test_identical_provider_row_with_new_rpc_ids_remains_idempotent(tmp_path) ->
 
     assert second.created is False
     assert second.revision.revision_id == first.revision.revision_id
+    assert second.revision.bet_outcome == "WON"
     assert second.revision.source_payload_sha256 == first.revision.source_payload_sha256
+    assert len(store.revisions) == 1

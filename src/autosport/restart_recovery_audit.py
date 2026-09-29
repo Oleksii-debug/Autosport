@@ -78,6 +78,8 @@ def _safe_exception_site(exc: Exception) -> str:
 def _safe_exception_trace(exc: Exception, *, limit: int = 8) -> list[str]:
     """Return the bounded innermost call chain without paths, locals, or source text."""
 
+    if type(limit) is not int or limit <= 0:
+        return []
     try:
         traceback = BaseException.__getattribute__(exc, "__traceback__")
         frames: list[str] = []

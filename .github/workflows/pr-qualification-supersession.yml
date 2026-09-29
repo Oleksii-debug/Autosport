@@ -18,22 +18,21 @@ permissions:
 # event has no cancellation authority. Exact-head partitioning preserves that scheduler
 # safety while still coalescing duplicate/rerun controller work for the same head.
 #
-# GitHub can omit workflow_run.pull_requests on close/merge lifecycle runs. Before a job
-# starts there is no scheduler-safe PR identity in that case: two distinct PRs may point
-# at the same exact commit, so head_sha must not be used as a surrogate PR key. Keep an
-# empty-reference controller run-unique until the trusted helper resolves the missing PR
-# number from commit association and fails closed unless exactly one PR still names that
-# exact head. Controllers with an explicit PR number retain same-head latest-wins
-# coalescing. Controllers for CI, Windows candidate, and Endurance must not preempt one
-# another, because each invocation cancels only obsolete runs of its own source workflow.
-# Replacing an older same-head same-workflow controller cannot grant cancellation
-# authority: every irreversible cancellation is still guarded by a fresh live
-# head/state/draft snapshot inside the trusted helper. The controller also enumerates
+# workflow_run.pull_requests is an array. Treat its PR number as scheduler authority only
+# when exactly one reference is present; an empty or multi-reference payload is unresolved
+# and therefore run-unique until the trusted helper resolves the exact head to one unique
+# PR. This prevents an arbitrary first array member from becoming Actions-write authority.
+# In particular, two distinct PRs may point at the same exact commit, so head_sha must not
+# be used as a surrogate PR key. Controllers with one explicit PR number retain same-head
+# latest-wins coalescing. Controllers for CI, Windows candidate, and Endurance must not
+# preempt one another, because each invocation cancels only obsolete runs of its own
+# source workflow. Replacing an older same-head same-workflow controller cannot grant
+# cancellation authority: every irreversible cancellation is still guarded by a fresh
+# live head/state/draft snapshot inside the trusted helper. The controller also enumerates
 # active runs only inside the exact workflow_id carried by workflow_run, avoiding
-# repository-wide queue scans while preserving the existing workflow-name and PR/head
-# cancellation filters.
+# repository-wide queue scans while preserving the existing PR/head cancellation filters.
 concurrency:
-  group: pr-qualification-supersession-${{ github.event.workflow_run.pull_requests[0].number || format('unresolved-run-{0}', github.event.workflow_run.id) }}-${{ github.event.workflow_run.head_sha }}-${{ github.event.workflow_run.workflow_id }}
+  group: pr-qualification-supersession-${{ github.event.workflow_run.pull_requests[0].number && !github.event.workflow_run.pull_requests[1].number && github.event.workflow_run.pull_requests[0].number || format('unresolved-run-{0}', github.event.workflow_run.id) }}-${{ github.event.workflow_run.head_sha }}-${{ github.event.workflow_run.workflow_id }}
   cancel-in-progress: true
 
 jobs:
@@ -53,7 +52,7 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: >-
           python scripts/cancel_superseded_pr_workflow_runs_scoped.py
-          --pr-number "${{ github.event.workflow_run.pull_requests[0].number || 0 }}"
+          --pr-number "${{ github.event.workflow_run.pull_requests[0].number && !github.event.workflow_run.pull_requests[1].number && github.event.workflow_run.pull_requests[0].number || 0 }}"
           --event-head-sha "${{ github.event.workflow_run.head_sha }}"
           --workflow-name "${{ github.event.workflow_run.name }}"
           --workflow-id "${{ github.event.workflow_run.workflow_id }}"

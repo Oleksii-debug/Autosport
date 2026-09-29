@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import marshal
 from pathlib import Path
 
 import pytest
@@ -60,15 +61,18 @@ def test_frozen_surface_getattribute_ignores_late_object_global_injection(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Primary lookup uses its code-anchored primitive, not a late module global."""
+    """Primary lookup is global-independent and remains marshalable for packaging."""
 
     path = tmp_path / "paper-book.json"
     book = paper.PaperBook("100")
     book.save(path)
     surface_type = type(guard.json)
     lookup = vars(surface_type)["__getattribute__"]
-    assert object.__getattribute__ in lookup.__code__.co_consts
-    assert "__AUTOSPORT_FROZEN_SURFACE_GETATTRIBUTE_ANCHOR__" not in lookup.__code__.co_consts
+
+    assert "object" not in lookup.__code__.co_names
+    assert "tuple" not in lookup.__code__.co_names
+    assert all(not callable(item) for item in lookup.__code__.co_consts)
+    assert marshal.loads(marshal.dumps(lookup.__code__)).co_code == lookup.__code__.co_code
 
     _HOSTILE_OBJECT_CALLS.clear()
     monkeypatch.setattr(freeze, "object", _HostileObject, raising=False)

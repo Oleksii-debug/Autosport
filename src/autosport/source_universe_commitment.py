@@ -421,6 +421,13 @@ def _seal_source_universe_dispatch() -> None:
         for name, expected in sorted(expected_class_seams.items())
     )
     expected_field_names = _COMMITMENT_FIELD_NAMES
+    expected_commitment_field_surfaces = tuple(
+        (
+            name,
+            expected_getattr_static(expected_commitment_type, name),
+        )
+        for name in expected_field_names
+    )
     expected_issue_surface = expected_getattr_static(
         expected_commitment_type, "_issue"
     )
@@ -522,6 +529,14 @@ def _seal_source_universe_dispatch() -> None:
             raise expected_error_type(
                 "source-universe verification field authority is rebound"
             )
+        for name, expected_surface in expected_commitment_field_surfaces:
+            if (
+                expected_getattr_static(expected_commitment_type, name, None)
+                is not expected_surface
+            ):
+                raise expected_error_type(
+                    "source-universe result field surface is rebound: " + name
+                )
         current_issue_surface = expected_getattr_static(
             expected_commitment_type, "_issue", None
         )

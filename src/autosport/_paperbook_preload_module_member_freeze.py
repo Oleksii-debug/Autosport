@@ -16,9 +16,10 @@ import hashlib
 import json
 import os
 import tempfile
-from types import MappingProxyType
+from types import FunctionType, MappingProxyType
 
 from . import _paperbook_preload_authority_guard as _guard
+from . import paper as _paper
 
 
 class _FrozenSurfaceMetaMeta(type):
@@ -109,6 +110,37 @@ class _FrozenSurface(tuple, metaclass=_FrozenSurfaceMeta):
         raise AttributeError("PaperBook persistence module surface is frozen")
 
 
+def _clone_module_function_graph(function: FunctionType, label: str) -> FunctionType:
+    """Detach one stdlib Python-function graph from its live public function objects."""
+
+    if type(function) is not FunctionType:
+        raise RuntimeError(f"canonical PaperBook {label} member is not a Python function")
+    module_globals = function.__globals__
+    trusted_globals: dict[str, object] = dict(module_globals)
+    clones: dict[str, FunctionType] = {}
+    for name, value in tuple(module_globals.items()):
+        if type(value) is not FunctionType or value.__globals__ is not module_globals:
+            continue
+        clone = FunctionType(
+            value.__code__,
+            trusted_globals,
+            name=value.__name__,
+            argdefs=value.__defaults__,
+            closure=value.__closure__,
+        )
+        if value.__kwdefaults__ is not None:
+            clone.__kwdefaults__ = dict(value.__kwdefaults__)
+        clone.__annotations__ = dict(value.__annotations__)
+        clone.__doc__ = value.__doc__
+        clone.__qualname__ = value.__qualname__
+        clones[name] = clone
+    trusted_globals.update(clones)
+    frozen = clones.get(function.__name__)
+    if frozen is None:
+        raise RuntimeError(f"canonical PaperBook {label} detached member is unavailable")
+    return frozen
+
+
 def _seal_surface_type() -> None:
     surface_type = _FrozenSurface
     surface_meta = _FrozenSurfaceMeta
@@ -171,6 +203,23 @@ def _install() -> None:
         raise RuntimeError("canonical PaperBook OS module authority changed")
     if _guard.tempfile is not tempfile:
         raise RuntimeError("canonical PaperBook tempfile module authority changed")
+    if _paper.json is not json:
+        raise RuntimeError("canonical PaperBook parser/serializer JSON module authority changed")
+    if _paper.os is not os:
+        raise RuntimeError("canonical PaperBook serializer OS module authority changed")
+    if _paper.tempfile is not tempfile:
+        raise RuntimeError("canonical PaperBook serializer tempfile module authority changed")
+
+    # The owning witness protocol already used frozen member facades. Extend that same
+    # composition boundary to the canonical parser/serializer delegates themselves.
+    # Python stdlib functions are detached from their public FunctionType objects, so
+    # an identity-preserving public ``__code__`` mutation cannot reach positive load/save.
+    detached_json_loads = _clone_module_function_graph(json.loads, "json.loads")
+    detached_json_dump = _clone_module_function_graph(json.dump, "json.dump")
+    detached_named_temporary_file = _clone_module_function_graph(
+        tempfile.NamedTemporaryFile,
+        "tempfile.NamedTemporaryFile",
+    )
 
     frozen_path = _FrozenSurface(
         normcase=os.path.normcase,
@@ -190,6 +239,31 @@ def _install() -> None:
         name=os.name,
     )
     _guard.tempfile = _FrozenSurface(mkstemp=tempfile.mkstemp)
+
+    _paper.json = _FrozenSurface(
+        loads=detached_json_loads,
+        dump=detached_json_dump,
+    )
+    _paper.os = _FrozenSurface(
+        fsync=os.fsync,
+        replace=os.replace,
+    )
+    _paper.tempfile = _FrozenSurface(
+        NamedTemporaryFile=detached_named_temporary_file,
+    )
+
+    # The original delegate witnesses were captured before composition and therefore
+    # still name the live stdlib modules. Re-capture only those two canonical delegates
+    # after their globals have been narrowed to the frozen detached surfaces. All later
+    # load-dispatch/class-graph seals consume these exact same delegates and witnesses.
+    _guard._LOAD_BYTES_WITNESS = _guard._capture_delegate_witness(
+        _guard._LOAD_BYTES,
+        "canonical load_bytes",
+    )
+    _guard._ORIGINAL_SAVE_WITNESS = _guard._capture_delegate_witness(
+        _guard._ORIGINAL_SAVE,
+        "canonical save",
+    )
 
 
 _install()

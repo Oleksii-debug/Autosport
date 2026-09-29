@@ -243,6 +243,56 @@ class ParlayApiProductSourceTests(unittest.TestCase):
             self.assertEqual(delta.lawful_terms_ref, "terms:parlayapi:before-io")
             self.assertEqual(delta.retention_ref, "retention:parlayapi:before-io")
 
+    def test_legacy_event_migration_commits_before_source_history_clear(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            source = ParlayApiProductSource(
+                _Provider([_batch(cursor="snapshot-1")]),
+                workspace=Path(directory) / "workspace",
+                authority_root=Path(directory) / "authority",
+                lawful_terms_ref="terms:parlayapi:v1",
+                retention_ref="retention:parlayapi:v1",
+                clock=lambda: "2026-09-20T17:34:02+00:00",
+            )
+            source.fetch_catalog_page(None)
+            delta = source.fetch_deltas(None, (), 1)[0]
+            event = source.resolve_event(delta)
+            store = source._require_collector_store()
+            store._append_with_runtime_stream_epoch(
+                delta,
+                activated_at=delta.collector_committed_at,
+            )
+            state = source._read_state()
+            state["event_cache"] = {delta.delta_id: event.to_dict()}
+            state["last_committed_quote_digests"] = {
+                event.quote_key: delta.canonical_event_digest
+            }
+            state["last_committed_dedupe_digests"] = {
+                event.dedupe_key: delta.canonical_event_digest
+            }
+            source._write_state(state)
+
+            with patch.object(
+                source,
+                "_write_state",
+                side_effect=ProductSourceStateError("injected source publish failure"),
+            ):
+                with self.assertRaisesRegex(
+                    ProductSourceStateError,
+                    "injected source publish failure",
+                ):
+                    source._migrate_legacy_history_to_collector_store()
+
+            self.assertEqual(store.resolve_event(delta), event)
+            still_legacy = source._read_state()
+            self.assertIn(delta.delta_id, still_legacy["event_cache"])
+
+            source._migrate_legacy_history_to_collector_store()
+            migrated = source._read_state()
+            self.assertEqual(migrated["event_cache"], {})
+            self.assertEqual(migrated["last_committed_quote_digests"], {})
+            self.assertEqual(migrated["last_committed_dedupe_digests"], {})
+            self.assertEqual(store.resolve_event(delta), event)
+
     def test_legacy_digest_migration_verifies_in_bounded_chunks(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             source = ParlayApiProductSource(

@@ -66,6 +66,7 @@ class ParlayApiProductSource:
     _MAX_SNAPSHOT_ITEMS = 50_000
     _MAX_STATE_BYTES = 512 * 1024 * 1024
     _LEGACY_HISTORY_VERIFY_CHUNK = 10_000
+    _LEGACY_EVENT_MIGRATION_CHUNK = 1_000
     _STATE_FIELDS = {
         "schema",
         "schema_version",
@@ -625,23 +626,31 @@ class ParlayApiProductSource:
                 delta = CollectorDelta.from_dict(item["delta"])
                 pending_delta_ids.add(delta.delta_id)
 
-        migrate: dict[str, MarketEvent] = {}
-        for delta_id, event_raw in cache.items():
+        cache_items = list(cache.items())
+        for offset in range(
+            0,
+            len(cache_items),
+            self._LEGACY_EVENT_MIGRATION_CHUNK,
+        ):
+            migrate: dict[str, MarketEvent] = {}
+            for delta_id, event_raw in cache_items[
+                offset : offset + self._LEGACY_EVENT_MIGRATION_CHUNK
+            ]:
+                try:
+                    migrate[delta_id] = MarketEvent.from_dict(event_raw)
+                except (TypeError, ValueError) as exc:
+                    raise ProductSourceStateError(
+                        "legacy historical event cache is invalid"
+                    ) from exc
             try:
-                migrate[delta_id] = MarketEvent.from_dict(event_raw)
+                store.migrate_event_payloads(
+                    migrate,
+                    allow_missing_delta_ids=tuple(sorted(pending_delta_ids)),
+                )
             except (TypeError, ValueError) as exc:
                 raise ProductSourceStateError(
-                    "legacy historical event cache is invalid"
+                    "legacy historical event cache conflicts with canonical collector retention"
                 ) from exc
-        try:
-            store.migrate_event_payloads(
-                migrate,
-                allow_missing_delta_ids=tuple(sorted(pending_delta_ids)),
-            )
-        except (TypeError, ValueError) as exc:
-            raise ProductSourceStateError(
-                "legacy historical event cache conflicts with canonical collector retention"
-            ) from exc
 
         def verify_history(
             history: dict[str, object],

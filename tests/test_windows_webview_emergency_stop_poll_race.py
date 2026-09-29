@@ -39,7 +39,8 @@ def test_emergency_stop_pending_feedback_is_isolated_from_ordinary_state_poll() 
 def test_emergency_stop_pending_fence_spans_the_backend_await() -> None:
     script = _asset("emergency_stop.js")
 
-    pending = script.index("beginPendingStatus(")
+    activation = script.index("async function activateEmergencyStop()")
+    pending = script.index("beginPendingStatus(", activation)
     awaited = script.index("const result = await dispatch(", pending)
     finished = script.index("finishPendingStatus(resultMessage);", awaited)
 
@@ -51,8 +52,31 @@ def test_emergency_stop_pending_fence_spans_the_backend_await() -> None:
     # The transient pending node is presentation-only. It does not call the backend,
     # inspect durable execution authority, or claim that STOP has already succeeded.
     begin = script.index("function beginPendingStatus(message)")
-    finish = script.index("function finishPendingStatus(message)", begin)
+    finish = script.index("function focusPendingStatus()", begin)
     begin_body = script[begin:finish]
     assert "pywebview" not in begin_body
     assert "execution_blocked" not in begin_body
     assert "STOP ПІДТВЕРДЖЕНО" not in begin_body
+
+
+def test_repeated_emergency_stop_activation_reuses_one_inflight_command() -> None:
+    script = _asset("emergency_stop.js")
+
+    activation = script.index("async function activateEmergencyStop()")
+    body = script[activation:]
+    guard = body.index("if (activationInFlight)")
+    begin = body.index("beginPendingStatus(", guard)
+    mark_inflight = body.index("activationInFlight = true;", begin)
+    awaited = body.index("const result = await dispatch(", mark_inflight)
+    clear_inflight = body.index("activationInFlight = false;", awaited)
+    finished = body.index("finishPendingStatus(resultMessage);", clear_inflight)
+
+    assert guard < begin < mark_inflight < awaited < clear_inflight < finished
+    guarded = body[guard:begin]
+    assert "focusPendingStatus();" in guarded
+    assert "return;" in guarded
+
+    # The emergency button remains statically enabled; frontend coalescing is an
+    # ordering fence only, not a new permission gate or a disabled safety control.
+    assert "button.disabled" not in script
+    assert "disabled =" not in script

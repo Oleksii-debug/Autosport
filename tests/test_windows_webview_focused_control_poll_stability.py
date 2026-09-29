@@ -69,6 +69,31 @@ def test_readonly_readbacks_preserve_focused_review_position_and_noop_stability(
         assert projection not in source
 
 
+def test_structured_readbacks_defer_poll_mutation_while_operator_focuses_them() -> None:
+    source = _source()
+
+    assert "function hasFocusedReadback(node)" in source
+    assert "active === node" in source
+    assert "node.contains(active)" in source
+    assert 'node.tagName === "TBODY" && active === node.closest("table")' in source
+
+    list_start = source.index("function syncTextChildren(node, values, tagName)")
+    list_end = source.index("\n  function renderList", list_start)
+    list_helper = source[list_start:list_end]
+    assert "if (hasFocusedReadback(node)) return;" in list_helper
+
+    table_start = source.index("function renderSingleColumnTable(body, values)")
+    table_end = source.index("\n  function setSelectOptions", table_start)
+    table_helper = source[table_start:table_end]
+    assert "if (hasFocusedReadback(body)) return;" in table_helper
+
+    assert 'renderList(byId(203), state.live_quotes);' in source
+    assert 'renderSingleColumnTable(byId("tickets-table-body"), state.tickets);' in source
+    assert 'renderList(byId(204), state.evaluation);' in source
+    assert 'renderList(byId(304), surfaceDetails);' in source
+    assert 'renderList(byId(307), state.owner.lines || []);' in source
+
+
 def test_runtime_start_stop_transition_keeps_focus_on_an_action_or_fallback() -> None:
     source = _source()
 

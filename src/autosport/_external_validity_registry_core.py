@@ -8,8 +8,6 @@ external-validity report can be produced.
 
 from __future__ import annotations
 
-import hashlib
-import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Mapping, Sequence
@@ -25,6 +23,7 @@ from .external_validity_policy_issuance import (
     IssuedPolicyEvaluationRef,
     ProductPolicyEvaluationIssuanceError,
     ProductPolicyEvaluationWorkspace,
+    canonical_product_policy_evaluation_bundle_sha256,
     verify_product_policy_evaluation,
 )
 from .scientific_registry import ScientificRegistry
@@ -77,45 +76,14 @@ def _instant(value: object, field: str) -> datetime:
 
 
 def canonical_policy_evaluation_bundle_sha256(evaluation: PolicyEvaluation) -> str:
-    """Commit an evaluation bundle SHA to the exact canonical result payload.
+    """Use the product evaluator's single canonical result commitment authority."""
 
-    The caller-carried ``evaluation_bundle_sha256`` is intentionally excluded from
-    the commitment to avoid a recursive identity. Every scientific value that the
-    descriptive comparison consumes is included, including baseline identity when
-    present. Therefore an opaque matching SHA cannot bless changed result values.
-    """
-
-    if type(evaluation) is not PolicyEvaluation:
+    try:
+        return canonical_product_policy_evaluation_bundle_sha256(evaluation)
+    except ProductPolicyEvaluationIssuanceError as exc:
         raise ExternalValidityRegistryError(
-            "evaluation must be an exact PolicyEvaluation value"
-        )
-    payload: dict[str, object] = {
-        "schema_version": 1,
-        "kind": "autosport_external_validity_policy_evaluation_bundle",
-        "policy_id": evaluation.policy_id,
-        "policy_artifact_sha256": evaluation.policy_artifact_sha256,
-        "protocol_sha256": evaluation.protocol_sha256,
-        "evidence_scope_sha256": evaluation.evidence_scope_sha256,
-        "cohort_sha256": evaluation.cohort_sha256,
-        "primary_metric": evaluation.primary_metric,
-        "evaluated_at": evaluation.evaluated_at,
-        "metric_value": evaluation.metric_value,
-        "uncertainty_low": evaluation.uncertainty_low,
-        "uncertainty_high": evaluation.uncertainty_high,
-        "observed_count": evaluation.observed_count,
-        "scored_count": evaluation.scored_count,
-        "abstention_count": evaluation.abstention_count,
-        "total_cost": evaluation.total_cost,
-        "baseline_definition_sha256": evaluation.baseline_definition_sha256,
-    }
-    encoded = json.dumps(
-        payload,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-        allow_nan=False,
-    ).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
+            "evaluation must be an exact product PolicyEvaluation value"
+        ) from exc
 
 
 def _require_exact_registry_authority(registry: object) -> ScientificRegistry:

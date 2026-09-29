@@ -56,11 +56,30 @@ def _event_response(
     market_id: int = 9001,
     market_type: int = 1,
     event_name: str = "Fixture A",
+    created_at: str | None = None,
 ) -> bytes:
     api = EXTERNAL_API_NS
     soap = SOAP11_NS
     xsi = "http://www.w3.org/2001/XMLSchema-instance"
+    wsse = (
+        "http://docs.oasis-open.org/wss/2004/01/"
+        "oasis-200401-wss-wssecurity-secext-1.0.xsd"
+    )
+    wsu = (
+        "http://docs.oasis-open.org/wss/2004/01/"
+        "oasis-200401-wss-wssecurity-utility-1.0.xsd"
+    )
+    header = ""
+    if created_at is not None:
+        header = f"""<soap:Header>
+          <wsse:Security xmlns:wsse="{wsse}">
+            <wsu:Timestamp xmlns:wsu="{wsu}">
+              <wsu:Created>{created_at}</wsu:Created>
+            </wsu:Timestamp>
+          </wsse:Security>
+        </soap:Header>"""
     return f"""<soap:Envelope xmlns:soap="{soap}" xmlns:xsi="{xsi}">
+      {header}
       <soap:Body>
         <GetEventSubTreeNoSelectionsResponse xmlns="{api}">
           <GetEventSubTreeNoSelectionsResult>
@@ -183,6 +202,7 @@ def _provider(
     root: str = "100",
     sport: str = "football",
     market_type: MarketType = MarketType.WINNER,
+    max_message_age_seconds: int | None = None,
 ) -> BetdaqLiveReadOnlyProvider:
     monkeypatch.setattr(betdaq_account_readonly_module, "urlopen", router)
     return BetdaqLiveReadOnlyProvider(
@@ -198,6 +218,7 @@ def _provider(
         ],
         threshold_amount=Decimal("1"),
         max_attempts=1,
+        max_message_age_seconds=max_message_age_seconds,
         clock=lambda: "2026-09-29T19:00:00Z",
     )
 
@@ -323,6 +344,36 @@ def test_live_scope_assertion_requires_provider_decimal_event_id(
             _CanonicalUrlopenRouter(),
             root=scope,
         )
+
+
+@pytest.mark.parametrize(
+    ("created_at", "max_age", "message"),
+    [
+        ("2026-09-29T19:00:01Z", None, "future"),
+        ("2026-09-29T18:59:00Z", 30, "stale"),
+    ],
+)
+def test_catalogue_message_time_must_be_causally_valid(
+    tmp_path,
+    monkeypatch,
+    created_at,
+    max_age,
+    message,
+) -> None:
+    provider = _provider(
+        tmp_path,
+        monkeypatch,
+        _CanonicalUrlopenRouter(
+            event_payload=_event_response(created_at=created_at)
+        ),
+        max_message_age_seconds=max_age,
+    )
+
+    with pytest.raises(BetdaqSoapProtocolError, match=message):
+        provider.read_batch()
+
+    assert provider.last_request_evidence is None
+    assert provider.last_catalogue_evidence is None
 
 
 def test_catalogue_acquisition_is_bound_into_snapshot_evidence(

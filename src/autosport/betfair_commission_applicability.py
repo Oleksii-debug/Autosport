@@ -384,12 +384,13 @@ def _build_product_boundary():
             identity_payload_code_witness,
         ) = "__AUTOSPORT_BETFAIR_COMMISSION_EXECUTABLE_GRAPH_WITNESS__"
         (
+            trusted_fee_input_reader,
             nested_partial_witnesses,
             nested_function_witnesses,
         ) = "__AUTOSPORT_BETFAIR_COMMISSION_NESTED_READER_GRAPH_WITNESS__"
 
-        # Keep the historical expected-code cells inspectable for diagnostics and
-        # adversarial tests, but never use those mutable cells as authority.
+        # Keep the historical expected-code/graph cells inspectable for diagnostics and
+        # adversarial tests, but never use those mutable cells as the trust root.
         _ = (
             fee_input_reader_function_code,
             fee_payload_function_code,
@@ -401,7 +402,8 @@ def _build_product_boundary():
         )
 
         if (
-            type(fee_input_reader) is not partial
+            fee_input_reader is not trusted_fee_input_reader
+            or type(fee_input_reader) is not partial
             or fee_input_reader.func is not fee_input_reader_function
             or fee_input_reader.args is not fee_input_reader_args
             or fee_input_reader.keywords != fee_input_reader_keywords
@@ -519,6 +521,7 @@ def _build_product_boundary():
         identity_payload_builder_code,
     )
     immutable_nested_reader_witnesses = (
+        fee_input_reader,
         reader_partial_witnesses,
         reader_function_witnesses,
     )

@@ -26,6 +26,11 @@ class _HostileTupleAuthority:
         return iter((("loads", lambda _raw: {"balance": "999999"}),))
 
 
+def _hostile_surface_iter(surface: object):
+    _HOSTILE_TUPLE_ITER_CALLS.append(surface)
+    return iter((("loads", lambda _raw: {"balance": "999999"}),))
+
+
 def _saved_book(tmp_path: Path) -> tuple[Path, paper.PaperBook]:
     path = tmp_path / "paper-book.json"
     book = paper.PaperBook("100")
@@ -93,6 +98,39 @@ def test_late_tuple_global_injection_cannot_retarget_frozen_surface_dispatch(
     loaded = paper.PaperBook.load(path)
 
     assert loaded.balance == book.balance
+    assert _HOSTILE_TUPLE_ITER_CALLS == []
+
+
+@pytest.mark.parametrize(
+    ("root_name", "hostile"),
+    (("__getattr__", _hostile_surface_getattr), ("__iter__", _hostile_surface_iter)),
+)
+def test_frozen_surface_class_dispatch_rejects_post_composition_retarget(
+    tmp_path: Path,
+    root_name: str,
+    hostile: object,
+) -> None:
+    """Pre-existing facades cannot be retargeted by mutating their shared heap type."""
+
+    path, book = _saved_book(tmp_path)
+    surface_type = type(guard.json)
+    original = vars(surface_type)[root_name]
+    _HOSTILE_GETATTR_CALLS.clear()
+    _HOSTILE_TUPLE_ITER_CALLS.clear()
+
+    with pytest.raises(TypeError, match="frozen-surface root is sealed"):
+        setattr(surface_type, root_name, hostile)
+    with pytest.raises(TypeError, match="frozen-surface root is sealed"):
+        type.__setattr__(surface_type, root_name, hostile)
+    with pytest.raises(TypeError, match="frozen-surface root is sealed"):
+        delattr(surface_type, root_name)
+    with pytest.raises(TypeError, match="frozen-surface root is sealed"):
+        type.__delattr__(surface_type, root_name)
+
+    assert vars(surface_type)[root_name] is original
+    loaded = paper.PaperBook.load(path)
+    assert loaded.balance == book.balance
+    assert _HOSTILE_GETATTR_CALLS == []
     assert _HOSTILE_TUPLE_ITER_CALLS == []
 
 

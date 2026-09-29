@@ -27,80 +27,84 @@ def _inner_binding_verifier(guarded: FunctionType) -> FunctionType:
     return require_bindings
 
 
-def test_binding_verifier_rejects_dict_get_helper_retarget_before_dispatch() -> None:
+def _guarded_methods() -> tuple[FunctionType, FunctionType]:
+    stage = run_transaction._stage_paper_book_snapshot
+    promotion = run_transaction._promote_paper_book_snapshot
+    assert isinstance(stage, FunctionType)
+    assert isinstance(promotion, FunctionType)
+    return stage, promotion
+
+
+def test_binding_verifiers_reject_dict_get_helper_retarget_before_dispatch() -> None:
     """Mutable verifier lookup helpers must not become executable authority."""
 
-    guarded = run_transaction._promote_paper_book_snapshot
-    assert isinstance(guarded, FunctionType)
-    original_require = _inner_binding_verifier(guarded)
+    for guarded in _guarded_methods():
+        original_require = _inner_binding_verifier(guarded)
+        dict_get_cell = _closure_cell(original_require, "dict_get")
+        original_dict_get = dict_get_cell.cell_contents
+        assert original_dict_get is dict.get
 
-    dict_get_cell = _closure_cell(original_require, "dict_get")
-    original_dict_get = dict_get_cell.cell_contents
-    assert original_dict_get is dict.get
+        hostile_calls = 0
 
-    hostile_calls = 0
+        def hostile_dict_get(mapping, key, default=None):
+            nonlocal hostile_calls
+            hostile_calls += 1
+            return dict.get(mapping, key, default)
 
-    def hostile_dict_get(mapping, key, default=None):
-        nonlocal hostile_calls
-        hostile_calls += 1
-        return dict.get(mapping, key, default)
-
-    dict_get_cell.cell_contents = hostile_dict_get
-    try:
+        dict_get_cell.cell_contents = hostile_dict_get
         try:
-            guarded(object())
-        except Exception as exc:  # noqa: BLE001 - any fail-closed rejection is acceptable.
-            assert not isinstance(exc, TypeError), (
-                "mutable verifier dict_get helper executed far enough to delegate "
-                "argument binding instead of being rejected by identity authority"
-            )
-        else:
-            raise AssertionError(
-                "guard unexpectedly returned after verifier dict_get helper retargeting"
-            )
-        assert hostile_calls == 0, "hostile verifier dict_get helper was dispatched"
-    finally:
-        dict_get_cell.cell_contents = original_dict_get
+            try:
+                guarded(object())
+            except Exception as exc:  # noqa: BLE001 - any fail-closed rejection is acceptable.
+                assert not isinstance(exc, TypeError), (
+                    "mutable verifier dict_get helper executed far enough to delegate "
+                    "argument binding instead of being rejected by identity authority"
+                )
+            else:
+                raise AssertionError(
+                    "guard unexpectedly returned after verifier dict_get helper retargeting"
+                )
+            assert hostile_calls == 0, "hostile verifier dict_get helper was dispatched"
+        finally:
+            dict_get_cell.cell_contents = original_dict_get
 
-    assert dict_get_cell.cell_contents is original_dict_get
+        assert dict_get_cell.cell_contents is original_dict_get
 
 
-def test_binding_verifier_rejects_dict_len_helper_retarget_before_dispatch() -> None:
+def test_binding_verifiers_reject_dict_len_helper_retarget_before_dispatch() -> None:
     """Verifier size checks must not dispatch through a retargeted helper cell."""
 
-    guarded = run_transaction._promote_paper_book_snapshot
-    assert isinstance(guarded, FunctionType)
-    original_require = _inner_binding_verifier(guarded)
+    for guarded in _guarded_methods():
+        original_require = _inner_binding_verifier(guarded)
+        dict_len_cell = _closure_cell(original_require, "dict_len")
+        original_dict_len = dict_len_cell.cell_contents
+        assert original_dict_len is dict.__len__
 
-    dict_len_cell = _closure_cell(original_require, "dict_len")
-    original_dict_len = dict_len_cell.cell_contents
-    assert original_dict_len is dict.__len__
+        hostile_calls = 0
 
-    hostile_calls = 0
+        def hostile_dict_len(mapping):
+            nonlocal hostile_calls
+            hostile_calls += 1
+            return dict.__len__(mapping)
 
-    def hostile_dict_len(mapping):
-        nonlocal hostile_calls
-        hostile_calls += 1
-        return dict.__len__(mapping)
-
-    dict_len_cell.cell_contents = hostile_dict_len
-    try:
+        dict_len_cell.cell_contents = hostile_dict_len
         try:
-            guarded(object())
-        except Exception as exc:  # noqa: BLE001 - any fail-closed rejection is acceptable.
-            assert not isinstance(exc, TypeError), (
-                "mutable verifier dict_len helper executed far enough to delegate "
-                "argument binding instead of being rejected by identity authority"
-            )
-        else:
-            raise AssertionError(
-                "guard unexpectedly returned after verifier dict_len helper retargeting"
-            )
-        assert hostile_calls == 0, "hostile verifier dict_len helper was dispatched"
-    finally:
-        dict_len_cell.cell_contents = original_dict_len
+            try:
+                guarded(object())
+            except Exception as exc:  # noqa: BLE001 - any fail-closed rejection is acceptable.
+                assert not isinstance(exc, TypeError), (
+                    "mutable verifier dict_len helper executed far enough to delegate "
+                    "argument binding instead of being rejected by identity authority"
+                )
+            else:
+                raise AssertionError(
+                    "guard unexpectedly returned after verifier dict_len helper retargeting"
+                )
+            assert hostile_calls == 0, "hostile verifier dict_len helper was dispatched"
+        finally:
+            dict_len_cell.cell_contents = original_dict_len
 
-    assert dict_len_cell.cell_contents is original_dict_len
+        assert dict_len_cell.cell_contents is original_dict_len
 
 
 def test_install_mutators_are_not_runtime_module_capabilities() -> None:

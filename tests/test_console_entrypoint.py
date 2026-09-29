@@ -42,6 +42,14 @@ class ConsoleEntrypointTests(unittest.TestCase):
         self.assertEqual(result, 23)
         cli_main.assert_called_once_with(argv)
 
+    def test_gui_with_extra_arguments_remains_owned_by_cli_parser(self):
+        argv = ["gui", "--help"]
+        with patch("autosport.cli.main", return_value=29) as cli_main:
+            result = console_entrypoint.main(argv)
+
+        self.assertEqual(result, 29)
+        cli_main.assert_called_once_with(argv)
+
     def test_process_arguments_consume_gui_before_windows_entry(self):
         canonical, legacy, canonical_main, legacy_main = _gui_modules(result=31)
 

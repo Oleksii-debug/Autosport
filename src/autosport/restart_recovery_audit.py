@@ -219,12 +219,16 @@ def run_restart_recovery_audit(output_path: str | Path) -> int:
     destination = Path(output_path)
     destination.parent.mkdir(parents=True, exist_ok=True)
     exit_code = 0
+    phase = "session_restart"
     try:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             restart = _audit_session_restart(root)
+            phase = "transaction_recovery"
             recovery = _audit_uncommitted_recovery(root)
+            phase = "bounded_endurance"
             endurance = _audit_bounded_endurance(root)
+            phase = "evidence_assembly"
         payload = {
             "status": "PASS",
             "session_restart_status": restart["status"],
@@ -254,6 +258,7 @@ def run_restart_recovery_audit(output_path: str | Path) -> int:
     except Exception as exc:
         payload = {
             "status": "FAIL",
+            "phase": phase,
             "error": _safe_exception_detail(exc),
             "real_money_execution": False,
             "human_tested": False,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import gc
+from dataclasses import replace
 from datetime import datetime
 from decimal import Decimal
 import json
@@ -834,6 +835,44 @@ def test_runtime_clock_rebind_cannot_change_capture_start_authority(
     assert captured_wall != forged_wall
     assert captured_tick is not None
     assert captured_tick != forged_tick
+
+
+def test_capture_start_authority_does_not_survive_readback_copy() -> None:
+    action = _action()
+    provider_ref = "a" * 32
+    capture = _empty_provider_capture(action, provider_ref)
+    copied = replace(capture)
+
+    assert timeout_resolution._betfair_readback_capture_started_at(capture) is not None
+    assert (
+        timeout_resolution._betfair_readback_capture_started_monotonic_ns(capture)
+        is not None
+    )
+    assert timeout_resolution._betfair_readback_capture_started_at(copied) is None
+    assert (
+        timeout_resolution._betfair_readback_capture_started_monotonic_ns(copied)
+        is None
+    )
+
+
+def test_capture_start_authority_rejects_readback_fingerprint_method_rebind(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    action = _action()
+    provider_ref = "a" * 32
+    capture = _empty_provider_capture(action, provider_ref)
+
+    monkeypatch.setattr(
+        BetfairExecutionReadbackEnvelope,
+        "_authority_fingerprint",
+        lambda self: "0" * 64,
+    )
+
+    assert timeout_resolution._betfair_readback_capture_started_at(capture) is None
+    assert (
+        timeout_resolution._betfair_readback_capture_started_monotonic_ns(capture)
+        is None
+    )
 
 
 def test_full_semantic_visibility_horizon_qualifies_absence_without_issuing_authority(

@@ -1209,7 +1209,11 @@ _CANONICAL_PRUNE: Final = BetdaqRateGovernor._prune
 _CANONICAL_ADMIT: Final = BetdaqRateGovernor.admit
 _MISSING_CLASS_SLOT: Final = object()
 _CANONICAL_GOVERNOR_CLASS_SURFACE: Final = tuple(
-    (name, vars(BetdaqRateGovernor).get(name, _MISSING_CLASS_SLOT))
+    (
+        name,
+        member,
+        getattr(member, "__code__", None),
+    )
     for name in (
         "workspace",
         "policy",
@@ -1227,13 +1231,21 @@ _CANONICAL_GOVERNOR_CLASS_SURFACE: Final = tuple(
         "_prune",
         "admit",
     )
+    for member in (vars(BetdaqRateGovernor).get(name, _MISSING_CLASS_SLOT),)
 )
 
 
 def _assert_canonical_governor_dispatch() -> None:
     class_dict = vars(_CANONICAL_GOVERNOR_TYPE)
-    for name, expected in _CANONICAL_GOVERNOR_CLASS_SURFACE:
-        if class_dict.get(name, _MISSING_CLASS_SLOT) is not expected:
+    for name, expected, expected_code in _CANONICAL_GOVERNOR_CLASS_SURFACE:
+        current = class_dict.get(name, _MISSING_CLASS_SLOT)
+        if (
+            current is not expected
+            or (
+                expected_code is not None
+                and getattr(current, "__code__", None) is not expected_code
+            )
+        ):
             raise BetdaqRateGovernorError(
                 "BETDAQ canonical rate governor class dispatch was replaced"
             )

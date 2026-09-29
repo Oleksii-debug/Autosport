@@ -14,6 +14,21 @@ def _closure_value(function: FunctionType, name: str):
     return closure[freevars.index(name)].cell_contents
 
 
+def _authority_witness(function: FunctionType) -> tuple[FunctionType, object]:
+    matches = tuple(
+        item
+        for item in function.__code__.co_consts
+        if isinstance(item, tuple)
+        and len(item) == 2
+        and type(item[0]) is FunctionType
+        and item[0].__name__ == "require_executable_authority"
+    )
+    assert len(matches) == 1
+    authority, authority_code = matches[0]
+    assert type(authority) is FunctionType
+    return authority, authority_code
+
+
 def _hostile_canonical_json(_payload: object) -> bytes:
     return b"hostile-constant-identity"
 
@@ -70,12 +85,21 @@ def test_captured_identity_python_code_retarget_fails_before_provider_read(
         target.__code__ = original_code
 
 
-def test_reachable_executable_guard_code_retarget_fails_before_boundary_dispatch() -> None:
+def test_reachable_executable_guard_is_code_constant_anchored_and_retarget_fails() -> None:
     public_assess = applicability.assess_betfair_commission_applicability
     public_require = applicability.require_product_betfair_commission_applicability
-    authority = _closure_value(public_assess, "require_executable_authority")
-    assert authority is _closure_value(public_require, "require_executable_authority")
-    assert type(authority) is FunctionType
+
+    assert "require_executable_authority" not in public_assess.__code__.co_freevars
+    assert "require_executable_authority_code" not in public_assess.__code__.co_freevars
+    assert "require_executable_authority" not in public_require.__code__.co_freevars
+    assert "require_executable_authority_code" not in public_require.__code__.co_freevars
+
+    authority, authority_code = _authority_witness(public_assess)
+    require_authority, require_authority_code = _authority_witness(public_require)
+    assert require_authority is authority
+    assert require_authority_code is authority_code
+    assert authority.__code__ is authority_code
+
     original_code = authority.__code__
     try:
         authority.__code__ = _hostile_authority_noop.__code__
@@ -95,11 +119,12 @@ def test_reachable_executable_guard_code_retarget_fails_before_boundary_dispatch
 
 def test_fee_input_hash_partial_binding_is_witnessed_exactly() -> None:
     public_assess = applicability.assess_betfair_commission_applicability
-    authority = _closure_value(public_assess, "require_executable_authority")
+    authority, authority_code = _authority_witness(public_assess)
     fee_payload_builder = _closure_value(public_assess, "fee_payload_builder")
     fee_payload_function = _closure_value(public_assess, "fee_payload_function")
     fee_payload_args = _closure_value(public_assess, "fee_payload_args")
 
+    assert authority.__code__ is authority_code
     assert fee_payload_builder.func is fee_payload_function
     assert fee_payload_builder.args == fee_payload_args
     authority()

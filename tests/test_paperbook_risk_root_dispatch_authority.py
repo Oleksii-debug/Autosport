@@ -476,6 +476,68 @@ def test_retained_instance_book_state_rechecks_code_before_call() -> None:
         root.__code__ = original_code
 
 
+def test_retained_book_state_rejects_closure_cell_retarget() -> None:
+    """Retained transitive authority must revalidate exact closure cell contents."""
+
+    book = PaperBook("100")
+    policy = PaperRiskPolicy(
+        max_ticket_fraction=Decimal("1"),
+        max_committed_fraction=Decimal("1"),
+        minimum_cash_reserve_fraction=Decimal("0"),
+    )
+    retained = policy._book_state
+    descriptor = vars(PaperRiskPolicy)["_book_state"]
+    root = descriptor.__func__
+    closure = root.__closure__
+    assert closure
+    cell = closure[0]
+    original = cell.cell_contents
+
+    try:
+        cell.cell_contents = object()
+        with pytest.raises(
+            TypeError,
+            match="canonical PaperRiskPolicy executable root changed: _book_state",
+        ):
+            retained(book)
+    finally:
+        cell.cell_contents = original
+
+
+def test_retained_decimal_context_rejects_global_binding_retarget() -> None:
+    """Protected static helpers must not execute through rebound module globals."""
+
+    policy = PaperRiskPolicy(
+        max_ticket_fraction=Decimal("1"),
+        max_committed_fraction=Decimal("1"),
+        minimum_cash_reserve_fraction=Decimal("0"),
+    )
+    retained = policy._decimal_context
+    descriptor = vars(PaperRiskPolicy)["_decimal_context"]
+    assert type(descriptor) is staticmethod
+    root = descriptor.__func__
+    globals_mapping = root.__globals__
+    original_context = globals_mapping["Context"]
+    hostile_executed = False
+
+    def hostile_context(*args, **kwargs):
+        nonlocal hostile_executed
+        del args, kwargs
+        hostile_executed = True
+        return original_context()
+
+    try:
+        globals_mapping["Context"] = hostile_context
+        with pytest.raises(
+            TypeError,
+            match="canonical PaperRiskPolicy executable global changed: _decimal_context:Context",
+        ):
+            retained()
+        assert hostile_executed is False
+    finally:
+        globals_mapping["Context"] = original_context
+
+
 def test_book_state_root_cannot_be_retargeted_or_deleted() -> None:
     """Reconstructed delegates must not bypass admission by replacing _book_state."""
 

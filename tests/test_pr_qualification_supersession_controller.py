@@ -2,6 +2,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from scripts.cancel_superseded_pr_workflow_runs import PullRequestQualification
+from scripts.cancel_superseded_pr_workflow_runs_scoped import (
+    _cancel_triggering_run_if_nonqualifying,
+)
+
 
 _WORKFLOW = Path(".github/workflows/pr-qualification-supersession.yml")
 
@@ -109,3 +114,76 @@ def test_controller_does_not_cross_cancel_other_source_workflow_controllers() ->
     assert "each invocation cancels only obsolete runs of its own" in workflow
     assert "source workflow" in workflow
     assert "exact workflow_id carried by workflow_run" in workflow
+
+
+class FakeTriggeringRunApi:
+    def __init__(self, qualifications: list[PullRequestQualification]) -> None:
+        self._qualifications = list(qualifications)
+        self.cancelled: list[int] = []
+
+    def live_pr_qualification(self, pr_number: int) -> PullRequestQualification:
+        assert pr_number == 2022
+        if not self._qualifications:
+            raise AssertionError("unexpected qualification reread")
+        return self._qualifications.pop(0)
+
+    def cancel(self, run_id: int) -> None:
+        self.cancelled.append(run_id)
+
+
+def test_trusted_controller_cancels_stable_same_head_nonqualifying_source_run() -> None:
+    qualification = PullRequestQualification(
+        head_sha="a" * 40,
+        integration_capable=False,
+    )
+    api = FakeTriggeringRunApi([qualification])
+
+    assert _cancel_triggering_run_if_nonqualifying(
+        api,
+        pr_number=2022,
+        event_head_sha="a" * 40,
+        current_run_id=7001,
+        qualification=qualification,
+    )
+    assert api.cancelled == [7001]
+
+
+def test_trusted_controller_does_not_cancel_after_live_qualification_becomes_capable() -> None:
+    initial = PullRequestQualification(
+        head_sha="a" * 40,
+        integration_capable=False,
+    )
+    api = FakeTriggeringRunApi(
+        [
+            PullRequestQualification(
+                head_sha="a" * 40,
+                integration_capable=True,
+            )
+        ]
+    )
+
+    assert not _cancel_triggering_run_if_nonqualifying(
+        api,
+        pr_number=2022,
+        event_head_sha="a" * 40,
+        current_run_id=7002,
+        qualification=initial,
+    )
+    assert api.cancelled == []
+
+
+def test_trusted_controller_does_not_cancel_stale_event_head() -> None:
+    qualification = PullRequestQualification(
+        head_sha="b" * 40,
+        integration_capable=False,
+    )
+    api = FakeTriggeringRunApi([])
+
+    assert not _cancel_triggering_run_if_nonqualifying(
+        api,
+        pr_number=2022,
+        event_head_sha="a" * 40,
+        current_run_id=7003,
+        qualification=qualification,
+    )
+    assert api.cancelled == []

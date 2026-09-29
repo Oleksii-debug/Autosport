@@ -571,16 +571,6 @@ def test_inception_rejects_canonical_alias_rebind_before_hostile_dispatch(
     )
 
 
-@pytest.mark.parametrize(
-    "helper_name",
-    (
-        "_resolve_precommit",
-        "_write_state",
-        "_prepared_payload_from_existing_gate",
-        "_resolve_gate_and_authorize",
-        "_issue_receipt",
-    ),
-)
 def test_inception_rejects_path_equality_rebind_before_prestart_dispatch(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -621,6 +611,16 @@ def test_inception_rejects_path_equality_rebind_before_prestart_dispatch(
     )
 
 
+@pytest.mark.parametrize(
+    "helper_name",
+    (
+        "_resolve_precommit",
+        "_write_state",
+        "_prepared_payload_from_existing_gate",
+        "_resolve_gate_and_authorize",
+        "_issue_receipt",
+    ),
+)
 def test_inception_rejects_helper_rebind_before_state_mutation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

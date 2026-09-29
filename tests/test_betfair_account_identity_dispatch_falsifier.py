@@ -121,15 +121,15 @@ def test_instance_support_dispatch_rebinding_cannot_mint_k07_authority() -> None
             resolve_betfair_authenticated_account_identity(client)
 
 
-def test_readonly_urlopen_rebinding_revokes_k07_origin(
+def test_readonly_build_opener_rebinding_revokes_k07_origin(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     client = _client()
     monkeypatch.setattr(
         _readonly,
-        "urlopen",
+        "build_opener",
         lambda *args, **kwargs: (_ for _ in ()).throw(
-            AssertionError("forged network dependency must never be called")
+            AssertionError("forged opener factory must never be called")
         ),
     )
 

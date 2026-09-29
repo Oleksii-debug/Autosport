@@ -695,20 +695,22 @@ def _install_verified_provider_evidence_authority() -> None:
     sealed_readback_assertion_code = descriptor_code(sealed_readback_assertion)
     sealed_readback_fingerprint = BetfairExecutionReadbackEnvelope._authority_fingerprint
     sealed_readback_fingerprint_code = descriptor_code(sealed_readback_fingerprint)
-    sealed_profile_descriptors = {
-        "profile_id": BookmakerCapabilityProfile.profile_id,
-        "to_canonical_dict": BookmakerCapabilityProfile.to_canonical_dict,
-        "state_of": BookmakerCapabilityProfile.state_of,
-        "require": BookmakerCapabilityProfile.require,
-    }
-    sealed_profile_descriptor_codes = {
-        name: descriptor_code(value)
-        for name, value in sealed_profile_descriptors.items()
-    }
+    sealed_profile_descriptors = tuple(
+        (name, value, descriptor_code(value))
+        for name, value in (
+            ("profile_id", BookmakerCapabilityProfile.profile_id),
+            ("to_canonical_dict", BookmakerCapabilityProfile.to_canonical_dict),
+            ("state_of", BookmakerCapabilityProfile.state_of),
+            ("require", BookmakerCapabilityProfile.require),
+        )
+    )
 
-    def seal_function_graph(root: object) -> dict[str, tuple[object, object | None]]:
+    def seal_function_graph(
+        root: object,
+    ) -> tuple[tuple[str, object, object | None], ...]:
         module_globals = globals()
-        sealed: dict[str, tuple[object, object | None]] = {}
+        sealed: list[tuple[str, object, object | None]] = []
+        sealed_names: set[str] = set()
         pending = [root]
         visited: set[int] = set()
         while pending:
@@ -721,33 +723,34 @@ def _install_verified_provider_evidence_authority() -> None:
             if code is None or function_globals is not module_globals:
                 continue
             for name in code.co_names:
-                if name not in module_globals or name in sealed:
+                if name not in module_globals or name in sealed_names:
                     continue
                 value = module_globals[name]
                 value_code = getattr(value, "__code__", None)
-                sealed[name] = (value, value_code)
+                sealed.append((name, value, value_code))
+                sealed_names.add(name)
                 if (
                     value_code is not None
                     and getattr(value, "__globals__", None) is module_globals
                 ):
                     pending.append(value)
-        return sealed
+        return tuple(sealed)
 
     sealed_verify_graph = seal_function_graph(raw_verify)
     sealed_fingerprint_graph = seal_function_graph(sealed_fingerprint)
-    sealed_wrapper_bindings = {
-        "BetfairExecutionReadbackEnvelope": BetfairExecutionReadbackEnvelope,
-        "VerifiedProviderEffectEvidence": sealed_effect_type,
-        "VerifiedProviderAbsenceEvidence": sealed_absence_type,
-        "_verified_provider_evidence_fingerprint": sealed_fingerprint,
-        "ProviderEvidenceError": sealed_error,
-    }
+    sealed_wrapper_bindings = (
+        ("BetfairExecutionReadbackEnvelope", BetfairExecutionReadbackEnvelope),
+        ("VerifiedProviderEffectEvidence", sealed_effect_type),
+        ("VerifiedProviderAbsenceEvidence", sealed_absence_type),
+        ("_verified_provider_evidence_fingerprint", sealed_fingerprint),
+        ("ProviderEvidenceError", sealed_error),
+    )
 
     def assert_graph_intact(
-        graph: dict[str, tuple[object, object | None]],
+        graph: tuple[tuple[str, object, object | None], ...],
     ) -> None:
         module_globals = globals()
-        for name, (expected, expected_code) in graph.items():
+        for name, expected, expected_code in graph:
             current = module_globals.get(name, missing)
             if current is not expected:
                 raise sealed_error(
@@ -769,7 +772,7 @@ def _install_verified_provider_evidence_authority() -> None:
             raise sealed_error("provider evidence fingerprint executable code changed")
         assert_graph_intact(sealed_verify_graph)
         assert_graph_intact(sealed_fingerprint_graph)
-        for name, expected in sealed_wrapper_bindings.items():
+        for name, expected in sealed_wrapper_bindings:
             if module_globals.get(name, missing) is not expected:
                 raise sealed_error(
                     f"provider evidence authority binding changed: {name}"
@@ -803,12 +806,11 @@ def _install_verified_provider_evidence_authority() -> None:
             raise sealed_error(
                 "provider readback authority fingerprint method changed"
             )
-        for name, expected in sealed_profile_descriptors.items():
+        for name, expected, expected_code in sealed_profile_descriptors:
             current = getattr(BookmakerCapabilityProfile, name, missing)
             if (
                 current is not expected
-                or descriptor_code(current)
-                is not sealed_profile_descriptor_codes[name]
+                or descriptor_code(current) is not expected_code
             ):
                 raise sealed_error(
                     f"provider capability profile authority method changed: {name}"

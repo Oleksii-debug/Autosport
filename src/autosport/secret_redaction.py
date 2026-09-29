@@ -346,10 +346,20 @@ def redact_operator_value(
     if isinstance(value, Mapping):
         redacted: dict[Any, Any] = {}
         for key, item in value.items():
+            # Mapping keys are presentation data too. A provider/error payload can
+            # echo a configured credential as a key rather than a value; retaining
+            # that key byte-for-byte would bypass the structured redaction boundary.
+            # Redact known secret substrings in string keys before publishing the
+            # presentation copy while preserving ordinary non-secret labels.
+            safe_key = (
+                redact_operator_text(key, extra_secret_values=secrets)
+                if isinstance(key, str)
+                else key
+            )
             if is_sensitive_key(key):
-                redacted[key] = REDACTED
+                redacted[safe_key] = REDACTED
             else:
-                redacted[key] = redact_operator_value(
+                redacted[safe_key] = redact_operator_value(
                     item,
                     extra_secret_values=secrets,
                 )

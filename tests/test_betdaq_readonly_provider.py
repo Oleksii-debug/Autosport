@@ -215,7 +215,7 @@ def test_response_hash_and_message_evidence_are_durable_strings():
     assert len(ev.requests[0].request_fingerprint) == 64
     assert len(ev.requests[0].response_sha256) == 64
     assert len(ev.aggregate_sha256) == 64
-    assert batch.cursor == ev.aggregate_sha256
+    assert batch.cursor is None
 
 def test_status_codes_are_preserved_not_relabelled_as_open():
     p=provider(Transport([response()]))

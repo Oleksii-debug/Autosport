@@ -539,7 +539,10 @@ class BetdaqReadOnlyProvider:
         batch = ProviderBatch(
             self.source_id,
             quotes,
-            cursor=self._cursor,
+            # GetPrices supplies no provider progress/sequence cursor. The aggregate
+            # response digest is retained in BetdaqSnapshotEvidence only and must not
+            # be laundered into durable ingestion last_cursor authority.
+            cursor=None,
             quality_flags=tuple(flags),
         )
         if self._offset >= len(self._pending):

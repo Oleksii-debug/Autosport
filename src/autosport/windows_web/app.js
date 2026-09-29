@@ -313,17 +313,17 @@
     projectLiveState(state.status, state.last_error);
     projectEmergencyStopState(state.emergency_stop);
 
-    byId("workspace-value").textContent = state.workspace || "—";
-    byId("active-workspace-value").textContent = state.active_workspace || "—";
+    setTextIfChanged(byId("workspace-value"), state.workspace || "—");
+    setTextIfChanged(byId("active-workspace-value"), state.active_workspace || "—");
     setValueIfChanged(byId(205), state.bank || "");
-    byId("dataset-summary").textContent = state.dataset_summary || "";
+    setTextIfChanged(byId("dataset-summary"), state.dataset_summary || "");
     if (document.activeElement !== byId("dataset-path")) {
       byId("dataset-path").value = state.dataset_path || "";
     }
     if (document.activeElement !== byId("research-plan-path")) {
       byId("research-plan-path").value = state.research_plan_path || "";
     }
-    byId("research-plan-summary").textContent = state.research_plan_summary || "";
+    setTextIfChanged(byId("research-plan-summary"), state.research_plan_summary || "");
 
     const strategy = byId(106);
     const previousStrategy = strategy.value;

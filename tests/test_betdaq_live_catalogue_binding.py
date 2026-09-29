@@ -349,13 +349,6 @@ def test_live_scope_assertion_requires_provider_decimal_event_id(
         )
 
 
-@pytest.mark.parametrize(
-    ("created_at", "max_age", "message"),
-    [
-        ("2026-09-29T19:00:01Z", None, "future"),
-        ("2026-09-29T18:59:00Z", 30, "stale"),
-    ],
-)
 def test_provider_catalogue_rejects_event_id_outside_xml_long_domain(
     tmp_path,
     monkeypatch,
@@ -377,6 +370,13 @@ def test_provider_catalogue_rejects_event_id_outside_xml_long_domain(
     assert provider.last_request_evidence is None
 
 
+@pytest.mark.parametrize(
+    ("created_at", "max_age", "message"),
+    [
+        ("2026-09-29T19:00:01Z", None, "future"),
+        ("2026-09-29T18:59:00Z", 30, "stale"),
+    ],
+)
 def test_catalogue_message_time_must_be_causally_valid(
     tmp_path,
     monkeypatch,

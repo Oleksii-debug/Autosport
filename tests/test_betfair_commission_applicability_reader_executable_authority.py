@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dis
 from types import FunctionType
 
 import pytest
@@ -42,9 +43,13 @@ def test_assessment_boundary_witnesses_reader_before_and_after_provider_call() -
     authority = _closure_value(public_assess, "require_reader_authority")
 
     assert type(authority) is FunctionType
-    assert public_assess.__code__.co_names.count("require_reader_authority") == 0
-    assert public_assess.__code__.co_freevars.count("require_reader_authority") == 1
-    # The verifier is invoked on both sides of the provider read. This freezes both
-    # pre-call retargeting and a hostile/self-restoring mutation during the read.
-    assert public_assess.__code__.co_code.count(bytes([149])) >= 0
+    calls = [
+        instruction
+        for instruction in dis.get_instructions(public_assess)
+        if instruction.opname == "LOAD_DEREF"
+        and instruction.argval == "require_reader_authority"
+    ]
+    # The verifier is loaded for calls on both sides of the provider read. This freezes
+    # both pre-call retargeting and a hostile/self-restoring mutation during the read.
+    assert len(calls) == 2
     authority()

@@ -59,6 +59,18 @@ def test_active_status_scan_is_scoped_to_exact_source_workflow_id() -> None:
     assert all(path != "/actions/runs" for path in api.paths)
 
 
+def test_shrinking_active_collection_ends_on_short_page_without_failing() -> None:
+    api = FakeScopedApi(
+        356678400,
+        [{"total_count": 200, "workflow_runs": [_run(92)]}],
+    )
+
+    runs = api._active_runs_for_status("queued")
+
+    assert tuple(item.run_id for item in runs) == (92,)
+    assert len(api.paths) == 1
+
+
 def test_workflow_scope_is_positive_exact_integer() -> None:
     with pytest.raises(CancellationError, match="invalid workflow id"):
         FakeScopedApi(0, [])

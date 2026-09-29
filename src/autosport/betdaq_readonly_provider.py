@@ -294,9 +294,10 @@ class BetdaqReadOnlyProvider:
         return value
 
     def _rate_admission_receipt(self) -> str | None:
-        if not hasattr(self.transport, "last_rate_admission"):
+        try:
+            admission = getattr(self.transport, "last_rate_admission")
+        except AttributeError:
             return None
-        admission = getattr(self.transport, "last_rate_admission")
         if admission is None:
             return None
         if type(admission) is not BetdaqRateAdmission:

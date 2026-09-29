@@ -103,10 +103,6 @@ def _make_post_stop_fence(*, stopped_error_type, stop_fields):
             if not stopped_before:
                 return
 
-            # Explicit resume is the only supported transition that clears STOP.
-            if raw.get("stopped_at") is None and raw.get("stop_reason") is None:
-                return
-
             assert before is not None
             changed_non_stop = any_fn(
                 raw.get(name) != value
@@ -117,6 +113,19 @@ def _make_post_stop_fence(*, stopped_error_type, stop_fields):
                 raise stopped_error_type(
                     "collector run is durably STOPPED; terminal mutation is forbidden until explicit resume"
                 )
+
+            stopped_after = raw.get("stopped_at") is not None
+            reason_after = raw.get("stop_reason") is not None
+            if stopped_after != reason_after:
+                raise stopped_error_type(
+                    "collector run STOP state cannot become incomplete during mutation"
+                )
+
+            # Explicit resume may clear only the STOP pair. The non-STOP equality
+            # check above prevents a caller from using resume as an umbrella for
+            # counter/error/timestamp rewrites in the same durable transaction.
+            if not stopped_after:
+                return
 
         return guarded
 

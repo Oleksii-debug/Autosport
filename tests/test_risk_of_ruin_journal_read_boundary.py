@@ -60,6 +60,46 @@ def test_oversized_journal_fails_before_materialization(tmp_path: Path) -> None:
         risk_module._read_stable_journal_bytes(journal)
 
 
+def test_swap_to_symlink_at_open_is_rejected_by_no_follow_descriptor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    journal = tmp_path / "journal.json"
+    journal.write_text('{"original":true}', encoding="utf-8")
+    original_file = tmp_path / "journal.original.json"
+    target = tmp_path / "replacement-target.json"
+    target.write_text('{"replacement":true}', encoding="utf-8")
+
+    canonical_open = risk_module._open_read_only_descriptor
+    swap_attempted = False
+
+    def swap_then_open(path: Path) -> int:
+        nonlocal swap_attempted
+        swap_attempted = True
+        journal.replace(original_file)
+        try:
+            journal.symlink_to(target.name)
+        except (OSError, NotImplementedError):
+            original_file.replace(journal)
+            pytest.skip("symlink replacement is unavailable on this host")
+        return canonical_open(path)
+
+    monkeypatch.setattr(
+        risk_module,
+        "_open_read_only_descriptor",
+        swap_then_open,
+    )
+
+    with pytest.raises(
+        RiskOfRuinIssuanceError,
+        match="journal (?:is unreadable|changed during open)",
+    ):
+        risk_module._read_stable_journal_bytes(journal)
+
+    assert swap_attempted
+    assert target.read_text(encoding="utf-8") == '{"replacement":true}'
+
+
 def test_symlink_journal_is_not_accepted_as_durable_state(tmp_path: Path) -> None:
     target = tmp_path / "target.json"
     target.write_text("{}", encoding="utf-8")

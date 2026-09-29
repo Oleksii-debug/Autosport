@@ -10,6 +10,10 @@ from autosport.betdaq_account_readonly import (
     BetdaqAccountReadOnlyError,
     BetdaqCredentials,
 )
+from autosport.betdaq_event_tree_request_wire import (
+    BETDAQ_EVENT_SUBTREE_SOAP_ACTION,
+    BetdaqEventSubTreeRequest,
+)
 from autosport.betdaq_readonly_live_provider import BetdaqLiveReadOnlyProvider
 from autosport.betdaq_readonly_live_transport import BetdaqReadOnlyLiveTransport
 from autosport.betdaq_readonly_market_wire import EXTERNAL_API_NS, SOAP11_NS
@@ -24,6 +28,7 @@ from autosport.betdaq_readonly_provider import (
     BetdaqGetPricesRequest,
     BetdaqMarketBinding,
 )
+from autosport.domain import MarketType
 from autosport.providers import ProviderUnavailableError
 
 
@@ -94,6 +99,61 @@ def _response() -> bytes:
     </soap:Envelope>""".encode()
 
 
+def _event_response(*, market_type: int = 1) -> bytes:
+    api = EXTERNAL_API_NS
+    soap = SOAP11_NS
+    xsi = "http://www.w3.org/2001/XMLSchema-instance"
+    return f"""<soap:Envelope xmlns:soap="{soap}" xmlns:xsi="{xsi}">
+      <soap:Body>
+        <GetEventSubTreeNoSelectionsResponse xmlns="{api}">
+          <GetEventSubTreeNoSelectionsResult>
+            <EventClassifiers
+              Id="100"
+              Name="Football"
+              DisplayOrder="1"
+              IsEnabledForMultiples="true"
+              ParentId="0"
+            >
+              <EventClassifiers
+                Id="101"
+                Name="Fixture A"
+                DisplayOrder="1"
+                IsEnabledForMultiples="true"
+                ParentId="100"
+              >
+                <Markets
+                  Id="9001"
+                  Name="Match Odds"
+                  Type="{market_type}"
+                  IsPlayMarket="false"
+                  Status="2"
+                  NumberOfWinningSelections="1"
+                  StartTime="2026-09-23T18:00:00Z"
+                  WithdrawalSequenceNumber="7"
+                  DisplayOrder="1"
+                  IsEnabledForMultiples="true"
+                  IsInRunningAllowed="true"
+                  IsManagedWhenInRunning="true"
+                  IsCurrentlyInRunning="false"
+                  InRunningDelaySeconds="5"
+                  EventClassifierId="101"
+                  RaceGrade=""
+                  PlacePayout="0"
+                >
+                  <Selections xsi:nil="true" />
+                </Markets>
+              </EventClassifiers>
+            </EventClassifiers>
+          </GetEventSubTreeNoSelectionsResult>
+        </GetEventSubTreeNoSelectionsResponse>
+      </soap:Body>
+    </soap:Envelope>""".encode()
+
+
+def _is_event_tree(headers: dict[str, str]) -> bool:
+    return "GetEventSubTreeNoSelections" in headers.get("SOAPAction", "")
+
+
 class _PostTransport:
     def __init__(self, payload: bytes | object | None = None) -> None:
         self.payload = _response() if payload is None else payload
@@ -101,6 +161,8 @@ class _PostTransport:
 
     def post(self, url, *, headers, body, timeout_seconds):
         self.calls.append((url, dict(headers), body, timeout_seconds))
+        if _is_event_tree(headers):
+            return _event_response()
         return self.payload
 
 
@@ -110,6 +172,8 @@ class _ExplodingPostTransport:
 
     def post(self, url, *, headers, body, timeout_seconds):
         self.calls += 1
+        if _is_event_tree(headers):
+            return _event_response()
         raise RuntimeError("fixture-password must never escape")
 
 
@@ -119,6 +183,8 @@ class _OpaqueCanonicalErrorTransport:
 
     def post(self, url, *, headers, body, timeout_seconds):
         self.calls += 1
+        if _is_event_tree(headers):
+            return _event_response()
         raise BetdaqAccountReadOnlyError(
             "opaque failure containing fixture-password must never escape"
         )
@@ -130,16 +196,22 @@ class _ExplicitTransientPostTransport:
 
     def post(self, url, *, headers, body, timeout_seconds):
         self.calls += 1
+        if _is_event_tree(headers):
+            return _event_response()
         raise TimeoutError("explicit transient fixture")
 
 
 class _TransientThenSuccessPostTransport:
     def __init__(self) -> None:
         self.calls = 0
+        self.price_calls = 0
 
     def post(self, url, *, headers, body, timeout_seconds):
         self.calls += 1
-        if self.calls == 1:
+        if _is_event_tree(headers):
+            return _event_response()
+        self.price_calls += 1
+        if self.price_calls == 1:
             raise TimeoutError("first attempt is explicitly transient")
         return _response()
 
@@ -153,7 +225,7 @@ def _provider(transport, *, max_attempts: int, rate_governor) -> BetdaqLiveReadO
         credentials=_credentials(),
         rate_governor=rate_governor,
         transport=transport,
-        market_bindings=[BetdaqMarketBinding(9001, "event-1", "football")],
+        market_bindings=[BetdaqMarketBinding(9001, "100", "football", MarketType.WINNER)],
         threshold_amount=Decimal("1.50"),
         max_attempts=max_attempts,
         clock=lambda: "2026-09-23T19:00:00Z",
@@ -186,6 +258,35 @@ def test_bridge_delegates_exactly_one_getprices_post_without_own_retry(tmp_path)
     admission = bridge.last_rate_admission
     assert admission is not None
     assert admission.method == "GetPrices"
+    assert admission.sequence == 1
+    assert admission.grants_execution_authority is False
+    assert admission.grants_write_permission is False
+
+
+def test_bridge_event_tree_uses_same_governor_and_readonly_transport(tmp_path) -> None:
+    post = _PostTransport()
+    governor, _ = _rate_governor(tmp_path)
+    bridge = BetdaqReadOnlyLiveTransport(
+        credentials=_credentials(),
+        rate_governor=governor,
+        transport=post,
+    )
+
+    payload = bridge.get_event_subtree_no_selections(
+        BetdaqEventSubTreeRequest((100,)),
+        timeout_seconds=2.0,
+    )
+
+    assert payload == _event_response()
+    assert len(post.calls) == 1
+    _, headers, body, timeout = post.calls[0]
+    assert headers["SOAPAction"] == f'"{BETDAQ_EVENT_SUBTREE_SOAP_ACTION}"'
+    assert timeout == 2.0
+    assert b"fixture-password" not in body
+    assert b"fixture-app" not in body
+    admission = bridge.last_rate_admission
+    assert admission is not None
+    assert admission.method == "GetEventSubTreeNoSelections"
     assert admission.sequence == 1
     assert admission.grants_execution_authority is False
     assert admission.grants_write_permission is False
@@ -241,7 +342,7 @@ def test_provider_does_not_retry_unclassified_custom_failure(tmp_path) -> None:
         match="without retryable classification",
     ):
         provider.read_batch()
-    assert post.calls == 1
+    assert post.calls == 2
     assert provider.last_request_evidence is None
 
 
@@ -254,7 +355,7 @@ def test_provider_does_not_retry_opaque_canonical_transport_error(tmp_path) -> N
         match="without retryable classification",
     ) as raised:
         provider.read_batch()
-    assert post.calls == 1
+    assert post.calls == 2
     assert "fixture-password" not in str(raised.value)
     assert provider.last_request_evidence is None
 
@@ -265,10 +366,10 @@ def test_provider_retries_only_preserved_explicit_transient_signal(tmp_path) -> 
     provider = _provider(post, max_attempts=2, rate_governor=governor)
     with pytest.raises(ProviderUnavailableError, match="after 2 bounded attempts"):
         provider.read_batch()
-    assert post.calls == 2
+    assert post.calls == 3
     admission = provider.live_transport.last_rate_admission
     assert admission is not None
-    assert admission.sequence == 2
+    assert admission.sequence == 3
     assert provider.last_request_evidence is None
 
 
@@ -280,7 +381,7 @@ def test_retry_then_success_binds_both_rate_admissions_to_request_evidence(tmp_p
     batch = provider.read_batch()
 
     assert len(batch.quotes) == 2
-    assert post.calls == 2
+    assert post.calls == 3
     evidence = provider.last_request_evidence
     assert evidence is not None
     request = evidence.requests[0]
@@ -290,7 +391,7 @@ def test_retry_then_success_binds_both_rate_admissions_to_request_evidence(tmp_p
     admission = provider.live_transport.last_rate_admission
     assert admission is not None
     assert request.rate_admission_receipts[-1] == admission.receipt_sha256
-    assert admission.sequence == 2
+    assert admission.sequence == 3
     assert admission.grants_execution_authority is False
     assert admission.grants_write_permission is False
     assert admission.grants_freshness is False
@@ -328,7 +429,7 @@ def test_non_bytes_transport_contract_failure_is_not_retried(tmp_path) -> None:
     provider = _provider(post, max_attempts=4, rate_governor=governor)
     with pytest.raises(ProviderUnavailableError, match="non-bytes payload"):
         provider.read_batch()
-    assert len(post.calls) == 1
+    assert len(post.calls) == 2
     assert provider.last_request_evidence is None
 
 
@@ -340,13 +441,27 @@ def test_live_provider_keeps_origin_unverified_after_valid_snapshot(tmp_path) ->
     batch = provider.read_batch()
 
     assert len(batch.quotes) == 2
+    assert batch.quotes[0].provider_event_id == "101"
+    assert batch.quotes[0].sport is None
+    assert batch.quotes[0].market_type is MarketType.OTHER
     assert "UNVERIFIED_PROVIDER_ORIGIN" in batch.quality_flags
     assert "LIVE_ENTITLEMENT_UNVERIFIED" in batch.quality_flags
+    assert "CATALOGUE_BOUND_EVENT_IDENTITY" in batch.quality_flags
+    assert "CANONICAL_SPORT_UNMAPPED" in batch.quality_flags
+    assert "CANONICAL_MARKET_TYPE_UNMAPPED" in batch.quality_flags
     evidence = provider.last_request_evidence
     assert evidence is not None
     assert evidence.provider_origin_verified is False
     assert evidence.live_entitlement_verified is False
     assert len(evidence.requests[0].rate_admission_receipts) == 1
+    catalogue = provider.last_catalogue_evidence
+    assert catalogue is not None
+    assert evidence.catalogue_response_sha256 == catalogue.response_sha256
+    assert (
+        evidence.catalogue_rate_admission_receipt
+        == catalogue.rate_admission_receipt
+    )
+    assert evidence.catalogue_event_classifier_ids == (100,)
     admission = provider.live_transport.last_rate_admission
     assert admission is not None
     assert evidence.requests[0].rate_admission_receipts == (
@@ -359,7 +474,7 @@ def test_default_live_provider_composes_canonical_transport_without_origin_promo
     provider = BetdaqLiveReadOnlyProvider(
         credentials=_credentials(),
         rate_governor=governor,
-        market_bindings=[BetdaqMarketBinding(9001, "event-1", "football")],
+        market_bindings=[BetdaqMarketBinding(9001, "100", "football", MarketType.WINNER)],
         threshold_amount=Decimal("1.50"),
     )
     assert provider.live_transport.canonical_transport_selected is True

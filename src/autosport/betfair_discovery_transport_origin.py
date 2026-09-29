@@ -344,6 +344,17 @@ def assess_betfair_discovery_transport_origin(
                 0,
                 fingerprints,
             )
+        if (
+            receipt.transport_authority_ref
+            != evidence.visibility_scope.account_scope_ref
+        ):
+            return BetfairDiscoveryTransportOriginAssessment(
+                False,
+                "AUTHENTICATED_TRANSPORT_ACCOUNT_SCOPE_MISMATCH",
+                len(exchanges),
+                0,
+                fingerprints,
+            )
         key = (receipt.method, receipt.request_sha256)
         if key in receipt_by_key:
             raise BetfairDiscoveryProvenanceError(

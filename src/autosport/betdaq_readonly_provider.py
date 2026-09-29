@@ -141,6 +141,59 @@ class BetdaqMarketBinding:
 
 
 @dataclass(frozen=True, slots=True)
+class BetdaqResolvedMarketBinding:
+    """Provider-returned market identity used by the live catalogue-bound path."""
+
+    market_id: int
+    provider_event_id: str
+    provider_market_type_code: int
+    event_path_ids: tuple[int, ...]
+    event_path_names: tuple[str, ...]
+    catalogue_response_sha256: str
+    sport: str | None = None
+    market_type: MarketType = MarketType.OTHER
+
+    def __post_init__(self) -> None:
+        if type(self.market_id) is not int or self.market_id < 0:
+            raise ValueError("market_id must be non-negative")
+        if (
+            type(self.provider_event_id) is not str
+            or not self.provider_event_id
+            or not self.provider_event_id.isascii()
+            or not self.provider_event_id.isdigit()
+            or str(int(self.provider_event_id, 10)) != self.provider_event_id
+        ):
+            raise ValueError("provider_event_id must be canonical decimal provider id")
+        if type(self.provider_market_type_code) is not int or self.provider_market_type_code < 0:
+            raise ValueError("provider_market_type_code must be non-negative int")
+        if (
+            type(self.event_path_ids) is not tuple
+            or not self.event_path_ids
+            or any(type(value) is not int or value < 0 for value in self.event_path_ids)
+            or self.event_path_ids[-1] != int(self.provider_event_id, 10)
+        ):
+            raise ValueError("event_path_ids must terminate at provider_event_id")
+        if (
+            type(self.event_path_names) is not tuple
+            or len(self.event_path_names) != len(self.event_path_ids)
+            or any(type(value) is not str or not value for value in self.event_path_names)
+        ):
+            raise ValueError("event_path_names must align with event_path_ids")
+        if (
+            type(self.catalogue_response_sha256) is not str
+            or len(self.catalogue_response_sha256) != 64
+            or any(ch not in "0123456789abcdef" for ch in self.catalogue_response_sha256)
+        ):
+            raise ValueError("catalogue_response_sha256 must be lowercase SHA-256")
+        if self.sport is not None:
+            raise ValueError("live catalogue binding does not yet authorize canonical sport")
+        if self.market_type is not MarketType.OTHER:
+            raise ValueError(
+                "live catalogue binding does not yet authorize canonical MarketType"
+            )
+
+
+@dataclass(frozen=True, slots=True)
 class BetdaqRequestEvidence:
     request_id: int
     market_ids: tuple[int, ...]
@@ -164,6 +217,9 @@ class BetdaqSnapshotEvidence:
     provider_origin_verified: bool = False
     receipt_clock_verified: bool = False
     unavailable_market_ids: tuple[int, ...] = ()
+    catalogue_response_sha256: str | None = None
+    catalogue_rate_admission_receipt: str | None = None
+    catalogue_event_classifier_ids: tuple[int, ...] = ()
 
 
 Clock = Callable[[], str]
@@ -363,6 +419,15 @@ class BetdaqReadOnlyProvider:
             raise BetdaqSoapProtocolError("GetPrices market set mismatch")
         return tuple(sorted(unavailable))
 
+    def _binding_for_market(
+        self,
+        market: object,
+    ) -> BetdaqMarketBinding | BetdaqResolvedMarketBinding:
+        market_id = getattr(market, "market_id", None)
+        if type(market_id) is not int:
+            raise BetdaqSoapProtocolError("BETDAQ market identity is malformed")
+        return self._bindings[market_id]
+
     def _map(
         self,
         response: BetdaqGetPricesWireResponse,
@@ -373,7 +438,12 @@ class BetdaqReadOnlyProvider:
         self._validated_market_scope(response, market_ids)
         result: list[ProviderQuote] = []
         for market in sorted(response.markets, key=lambda x: x.market_id):
-            binding = self._bindings[market.market_id]
+            binding = self._binding_for_market(market)
+            if type(binding) is BetdaqResolvedMarketBinding:
+                if market.market_type_code != binding.provider_market_type_code:
+                    raise BetdaqSoapProtocolError(
+                        "GetPrices market Type conflicts with catalogue-bound market Type"
+                    )
             for selection in sorted(market.selections, key=lambda x: x.selection_id):
                 if len(selection.for_side_prices) > 1 or len(selection.against_side_prices) > 1:
                     raise BetdaqSoapProtocolError(
@@ -392,6 +462,16 @@ class BetdaqReadOnlyProvider:
                     "betdaq_in_running_delay_seconds": market.in_running_delay_seconds,
                     "betdaq_message_created_at": response.provider_created_at_text,
                 }
+                if type(binding) is BetdaqResolvedMarketBinding:
+                    base["betdaq_catalogue_event_path_ids"] = list(
+                        binding.event_path_ids
+                    )
+                    base["betdaq_catalogue_event_path_names"] = list(
+                        binding.event_path_names
+                    )
+                    base["betdaq_catalogue_response_sha256"] = (
+                        binding.catalogue_response_sha256
+                    )
                 if selection.deduction_factor is not None:
                     base["betdaq_deduction_factor"] = _fixed_decimal_text(
                         selection.deduction_factor,

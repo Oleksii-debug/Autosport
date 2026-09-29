@@ -297,11 +297,7 @@ def test_account_snapshot_reader_class_dispatch_rebind_fails_before_provider_io(
     assert calls == []
 
 
-def test_account_snapshot_reader_instance_shadow_fails_before_provider_io(
-    tmp_path,
-    monkeypatch,
-) -> None:
-    calls = _install_transport(monkeypatch, [])
+def test_closure_boundary_does_not_expose_hidden_client_state(tmp_path) -> None:
     acquirer = BetfairAccountSnapshotAcquirer(
         tmp_path / "account.sqlite3",
         _credentials("A"),
@@ -309,32 +305,19 @@ def test_account_snapshot_reader_instance_shadow_fails_before_provider_io(
     )
     raw_acquire = _extract_outer_guard_raw_acquire()
     authority = _extract_inner_authority_boundary(raw_acquire)
-    _, client, _ = authority._state(acquirer)
-    attacker_calls = 0
 
-    def forged_funds():
-        nonlocal attacker_calls
-        attacker_calls += 1
-        raise AssertionError("instance-shadowed account funds reader executed")
-
-    monkeypatch.setattr(
-        client,
-        "read_account_funds",
-        forged_funds,
-        raising=False,
-    )
-
-    with pytest.raises(
-        AccountSnapshotAcquisitionError,
-        match="instance-level dispatch shadow: read_account_funds",
+    assert not hasattr(acquirer, "_client")
+    assert not hasattr(acquirer, "_store")
+    for name in (
+        "_state",
+        "_publish_live",
+        "_retry_live",
+        "_bind",
+        "_issued",
+        "_live",
+        "_lock",
     ):
-        acquirer.acquire(
-            _balance_capabilities(),
-            acquisition_id="instance-dispatch-shadow",
-        )
-
-    assert attacker_calls == 0
-    assert calls == []
+        assert not hasattr(authority, name)
 
 
 def test_raw_acquire_metadata_does_not_expose_live_issuer_function() -> None:
@@ -342,67 +325,49 @@ def test_raw_acquire_metadata_does_not_expose_live_issuer_function() -> None:
     reachable = _reachable_function_names(raw_acquire)
 
     # Durable record/resolve helpers may remain closure-reachable because they cannot
-    # mint live provider origin. The live issuer/retry/state primitives must not.
+    # mint live provider origin. There must be no independently invocable registrar,
+    # state-returning capability, or mutable live registry on the recovered boundary.
     assert "issue_live" not in reachable
     assert "current_live" not in reachable
     assert "state" not in reachable
 
-
     authority = _extract_inner_authority_boundary(raw_acquire)
-    # The closure-recovered checked object exposes no public mint/retry/state surface.
-    # Internal underscore methods are outside the ordinary public-metadata contract.
-    for name in ("publish_live", "retry_live", "state", "bind", "assert_live"):
+    for name in (
+        "publish_live",
+        "retry_live",
+        "state",
+        "bind",
+        "_publish_live",
+        "_retry_live",
+        "_state",
+        "_bind",
+        "_issued",
+        "_live",
+        "_lock",
+    ):
         assert not hasattr(authority, name)
 
+    # The remaining authority-bearing operation is safe to invoke: it accepts an
+    # acquirer + request and must execute the canonical provider acquisition path.
+    assert callable(authority.acquire)
+    assert callable(authority.assert_live)
 
-def test_mutable_client_credentials_cannot_retarget_init_origin(
-    tmp_path,
-    monkeypatch,
-) -> None:
-    database = tmp_path / "account.sqlite3"
-    credentials_a = _credentials("A")
-    credentials_b = _credentials("B")
-    first_calls = _install_transport(
-        monkeypatch,
-        [_DEVELOPER_APPS, _DETAILS, _FUNDS],
-    )
-    first_acquirer = BetfairAccountSnapshotAcquirer(
-        database,
-        credentials_a,
-        account_id="default-account",
-    )
-    first = first_acquirer.acquire(
-        _balance_capabilities(),
-        acquisition_id="mutable-client-origin",
-    )
-    assert len(first_calls) == 3
-    assert first.source_authority_proven is True
 
-    second = BetfairAccountSnapshotAcquirer(
-        database,
-        credentials_b,
+def test_boundary_cannot_rebind_initialized_acquirer_state(tmp_path) -> None:
+    acquirer = BetfairAccountSnapshotAcquirer(
+        tmp_path / "account.sqlite3",
+        _credentials("A"),
         account_id="default-account",
     )
     raw_acquire = _extract_outer_guard_raw_acquire()
     authority = _extract_inner_authority_boundary(raw_acquire)
-    _, client, init_origin = authority._state(second)
-    assert init_origin == credentials_b
 
-    # This is ordinary attribute assignment on the hidden client recovered through the
-    # same raw-acquire closure surface. Origin authority must not be re-derived from it.
-    client._credentials = credentials_a
-    different_origin_calls = _install_transport(monkeypatch, [])
-    with pytest.raises(
-        AccountSnapshotAcquisitionError,
-        match="credential origin changed after initialization",
-    ):
-        raw_acquire(
-            second,
-            _balance_capabilities(),
-            acquisition_id="mutable-client-origin",
-        )
-    assert different_origin_calls == []
-    assert first.source_authority_proven is True
+    # The previous boundary exposed _state/_bind and therefore the exact hidden client
+    # and credential origin. Ordinary recovered-boundary API no longer exposes either.
+    assert not hasattr(authority, "_state")
+    assert not hasattr(authority, "_bind")
+    assert not hasattr(authority, "_publish_live")
+    assert not hasattr(authority, "_retry_live")
 
 
 def test_durable_resolve_remains_non_authoritative_without_new_provider_read(
@@ -435,3 +400,19 @@ def test_durable_resolve_remains_non_authoritative_without_new_provider_read(
     reachable = _reachable_function_names(raw_acquire)
     assert "issue_live" not in reachable
     assert "current_live" not in reachable
+
+    authority = _extract_inner_authority_boundary(raw_acquire)
+    assert not hasattr(authority, "_publish_live")
+    assert not hasattr(authority, "_state")
+    assert not hasattr(authority, "_live")
+    assert durable.source_authority_proven is False
+
+    # Even the remaining safe acquisition operation cannot accept a durable snapshot
+    # as a substitute for a canonically initialized acquirer/provider read.
+    with pytest.raises(AccountSnapshotAcquisitionError):
+        authority.acquire(
+            durable,
+            _balance_capabilities(),
+            acquisition_id="durable-cannot-self-promote-again",
+        )
+    assert durable.source_authority_proven is False

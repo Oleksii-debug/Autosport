@@ -43,16 +43,56 @@ on:
 
 permissions:
   contents: read
+  pull-requests: read
 
+# PR lifecycle events on one exact head must not cancel each other before live-head
+# admission can distinguish draft from integration-capable truth. Isolate every PR run
+# at scheduler level; the trusted supersession controller cancels obsolete/draft work.
+# Push/workflow-dispatch runs keep their ordinary branch/ref coalescing behavior.
 concurrency:
-  group: endurance-${{ github.event.pull_request.number || github.ref }}-${{ github.run_attempt == 1 && 'fresh' || format('rerun-{0}', github.event.pull_request.head.sha || github.sha) }}
+  group: endurance-${{ github.event_name == 'pull_request' && format('pr-{0}-run-{1}', github.event.pull_request.number, github.run_id) || github.ref }}
   cancel-in-progress: true
 
 jobs:
+  superseded_run_admission:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      current_head: ${{ steps.lifecycle.outputs.current_head || steps.admission.outputs.current_head }}
+    steps:
+      - name: Admit non-PR and closed lifecycle events without PR checkout
+        if: github.event_name != 'pull_request' || github.event.action == 'closed'
+        id: lifecycle
+        run: echo "current_head=true" >> "$GITHUB_OUTPUT"
+      - name: Checkout exact PR head for read-only admission helper
+        if: github.event_name == 'pull_request' && github.event.action != 'closed'
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Reject stale or non-integration-capable PR head before endurance allocation
+        if: github.event_name == 'pull_request' && github.event.action != 'closed'
+        id: admission
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: >-
+          python scripts/cancel_superseded_pr_workflow_runs.py
+          --pr-number "${{ github.event.pull_request.number }}"
+          --event-head-sha "${{ github.event.pull_request.head.sha }}"
+          --workflow-name "${{ github.workflow }}"
+          --current-run-id "${{ github.run_id }}"
+          --admission-only
+
   endurance:
-    # Draft/closed PRs do not need fresh endurance qualification. Keep the
-    # cross-platform evidence for integration-capable heads; lifecycle runs shed work.
-    if: github.event_name != 'pull_request' || (github.event.action != 'closed' && github.event.pull_request.draft == false)
+    needs: superseded_run_admission
+    # Draft/closed/stale PR runs do not qualify. Same-head lifecycle events remain
+    # independent until admission so an older draft event cannot suppress a newer
+    # ready_for_review run before current live PR state is re-resolved.
+    if: >-
+      needs.superseded_run_admission.outputs.current_head == 'true' &&
+      (github.event_name != 'pull_request' ||
+      (github.event.action != 'closed' && github.event.pull_request.draft == false))
     name: endurance (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20

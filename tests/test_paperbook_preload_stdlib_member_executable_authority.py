@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import functools
 import json
 import os
 import tempfile
 from pathlib import Path
+
+import pytest
 
 import autosport._paperbook_preload_authority_guard as guard
 import autosport.paper as paper
@@ -21,6 +24,15 @@ _MKSTEMP_CODE_KEY = "_autosport_test_original_mkstemp_code"
 _MKSTEMP_CALLED_KEY = "_autosport_test_hostile_mkstemp_called"
 _ABSPATH_CODE_KEY = "_autosport_test_original_abspath_code"
 _ABSPATH_CALLED_KEY = "_autosport_test_hostile_abspath_called"
+_DECODER_CODE_KEY = "_autosport_test_original_decoder_code"
+_DECODER_CALLED_KEY = "_autosport_test_hostile_decoder_called"
+_ENCODER_CODE_KEY = "_autosport_test_original_encoder_code"
+_ENCODER_CALLED_KEY = "_autosport_test_hostile_encoder_called"
+_WRAPPER_CODE_KEY = "_autosport_test_original_wrapper_enter_code"
+_WRAPPER_CALLED_KEY = "_autosport_test_hostile_wrapper_enter_called"
+_WRAPS_CODE_KEY = "_autosport_test_original_wraps_code"
+_WRAPS_CALLED_KEY = "_autosport_test_hostile_wraps_called"
+_HOSTILE_GLOBAL_GETATTR_CALLED = False
 
 
 def _hostile_loads(*args, **kwargs):
@@ -65,6 +77,42 @@ def _hostile_abspath(*args, **kwargs):
     return abspath(*args, **kwargs)
 
 
+def _hostile_json_decoder_decode(self, payload, *args, **kwargs):
+    namespace = globals()
+    namespace["_autosport_test_hostile_decoder_called"] = True
+    JSONDecoder.decode.__code__ = namespace["_autosport_test_original_decoder_code"]
+    return JSONDecoder.decode(self, payload, *args, **kwargs)
+
+
+def _hostile_json_encoder_iterencode(self, value, *args, **kwargs):
+    namespace = globals()
+    namespace["_autosport_test_hostile_encoder_called"] = True
+    JSONEncoder.iterencode.__code__ = namespace["_autosport_test_original_encoder_code"]
+    return JSONEncoder.iterencode(self, value, *args, **kwargs)
+
+
+def _hostile_temp_wrapper_enter(self):
+    namespace = globals()
+    namespace["_autosport_test_hostile_wrapper_enter_called"] = True
+    _TemporaryFileWrapper.__enter__.__code__ = namespace[
+        "_autosport_test_original_wrapper_enter_code"
+    ]
+    return _TemporaryFileWrapper.__enter__(self)
+
+
+def _hostile_wraps(*args, **kwargs):
+    namespace = globals()
+    namespace["_autosport_test_hostile_wraps_called"] = True
+    wraps.__code__ = namespace["_autosport_test_original_wraps_code"]
+    return wraps(*args, **kwargs)
+
+
+def _hostile_global_getattr(*args, **kwargs):
+    global _HOSTILE_GLOBAL_GETATTR_CALLED
+    _HOSTILE_GLOBAL_GETATTR_CALLED = True
+    return getattr(*args, **kwargs)
+
+
 def _install_same_object_code_substitution(
     module,
     function_name: str,
@@ -91,6 +139,22 @@ def _restore_same_object_code_substitution(
     called = bool(vars(module).pop(called_key, False))
     vars(module).pop(code_key, None)
     return called
+
+
+def _install_method_code_substitution(
+    owner,
+    method_name: str,
+    hostile_code,
+    code_key: str,
+    called_key: str,
+):
+    function = vars(owner)[method_name]
+    module = __import__(function.__module__, fromlist=["*"])
+    original_code = function.__code__
+    vars(module)[code_key] = original_code
+    vars(module)[called_key] = False
+    function.__code__ = hostile_code
+    return module, function, original_code
 
 
 def test_path_load_ignores_same_object_json_loads_code_substitution(tmp_path: Path) -> None:
@@ -283,3 +347,155 @@ def test_path_load_ignores_same_object_abspath_code_for_witness_identity(
 
     assert hostile_called is False
     assert loaded.balance == book.balance
+
+
+def test_path_load_rejects_same_object_json_decoder_code_substitution_before_dispatch(
+    tmp_path: Path,
+) -> None:
+    """Detached json.loads may not traverse a retargeted shared JSONDecoder method."""
+
+    path = tmp_path / "paper-book.json"
+    book = paper.PaperBook("100")
+    book.save(path)
+
+    module, function, original_code = _install_method_code_substitution(
+        json.JSONDecoder,
+        "decode",
+        _hostile_json_decoder_decode.__code__,
+        _DECODER_CODE_KEY,
+        _DECODER_CALLED_KEY,
+    )
+    try:
+        with pytest.raises(ValueError, match="transitive|executable|authority"):
+            paper.PaperBook.load(path)
+    finally:
+        hostile_called = _restore_same_object_code_substitution(
+            module,
+            function,
+            original_code,
+            _DECODER_CODE_KEY,
+            _DECODER_CALLED_KEY,
+        )
+
+    assert hostile_called is False
+
+
+def test_save_rejects_same_object_json_encoder_code_before_durable_mutation(
+    tmp_path: Path,
+) -> None:
+    """Detached json.dump/dumps may not traverse a retargeted JSONEncoder method."""
+
+    path = tmp_path / "paper-book.json"
+    witness_path = guard._witness_path(path)
+    book = paper.PaperBook("100")
+
+    module, function, original_code = _install_method_code_substitution(
+        json.JSONEncoder,
+        "iterencode",
+        _hostile_json_encoder_iterencode.__code__,
+        _ENCODER_CODE_KEY,
+        _ENCODER_CALLED_KEY,
+    )
+    try:
+        with pytest.raises(ValueError, match="transitive|executable|authority"):
+            book.save(path)
+    finally:
+        hostile_called = _restore_same_object_code_substitution(
+            module,
+            function,
+            original_code,
+            _ENCODER_CODE_KEY,
+            _ENCODER_CALLED_KEY,
+        )
+
+    assert hostile_called is False
+    assert not path.exists()
+    assert not witness_path.exists()
+
+
+def test_save_rejects_same_object_tempfile_wrapper_code_before_durable_mutation(
+    tmp_path: Path,
+) -> None:
+    """Detached NamedTemporaryFile may not traverse mutable wrapper class methods."""
+
+    path = tmp_path / "paper-book.json"
+    witness_path = guard._witness_path(path)
+    book = paper.PaperBook("100")
+
+    module, function, original_code = _install_method_code_substitution(
+        tempfile._TemporaryFileWrapper,
+        "__enter__",
+        _hostile_temp_wrapper_enter.__code__,
+        _WRAPPER_CODE_KEY,
+        _WRAPPER_CALLED_KEY,
+    )
+    try:
+        with pytest.raises(ValueError, match="transitive|executable|authority"):
+            book.save(path)
+    finally:
+        hostile_called = _restore_same_object_code_substitution(
+            module,
+            function,
+            original_code,
+            _WRAPPER_CODE_KEY,
+            _WRAPPER_CALLED_KEY,
+        )
+
+    assert hostile_called is False
+    assert not path.exists()
+    assert not witness_path.exists()
+
+
+def test_save_rejects_same_object_functools_wraps_code_before_durable_mutation(
+    tmp_path: Path,
+) -> None:
+    """Nested module-member Python helpers remain part of persistence authority."""
+
+    path = tmp_path / "paper-book.json"
+    witness_path = guard._witness_path(path)
+    book = paper.PaperBook("100")
+
+    function, original_code = _install_same_object_code_substitution(
+        functools,
+        "wraps",
+        _hostile_wraps.__code__,
+        _WRAPS_CODE_KEY,
+        _WRAPS_CALLED_KEY,
+    )
+    try:
+        with pytest.raises(ValueError, match="transitive|executable|authority"):
+            book.save(path)
+    finally:
+        hostile_called = _restore_same_object_code_substitution(
+            functools,
+            function,
+            original_code,
+            _WRAPS_CODE_KEY,
+            _WRAPS_CALLED_KEY,
+        )
+
+    assert hostile_called is False
+    assert not path.exists()
+    assert not witness_path.exists()
+
+
+def test_save_rejects_late_builtin_shadow_before_durable_mutation(tmp_path: Path) -> None:
+    """A new module global must not shadow a composition-time builtin dependency."""
+
+    global _HOSTILE_GLOBAL_GETATTR_CALLED
+    _HOSTILE_GLOBAL_GETATTR_CALLED = False
+    path = tmp_path / "paper-book.json"
+    witness_path = guard._witness_path(path)
+    book = paper.PaperBook("100")
+    namespace = vars(tempfile)
+    assert "getattr" not in namespace
+    namespace["getattr"] = _hostile_global_getattr
+    try:
+        with pytest.raises(ValueError, match="transitive|builtin|authority"):
+            book.save(path)
+    finally:
+        namespace.pop("getattr", None)
+
+    assert _HOSTILE_GLOBAL_GETATTR_CALLED is False
+    assert not path.exists()
+    assert not witness_path.exists()

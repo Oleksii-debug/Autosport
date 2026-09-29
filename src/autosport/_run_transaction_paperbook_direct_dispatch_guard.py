@@ -8,10 +8,10 @@ change executable dispatch without changing the already-witnessed PaperBook grap
 
 This module adds no persistence authority. It detaches the already-installed guarded
 consumers, reuses the owning persistence graph's witnessed immutable surface type for
-promotion's exact direct call targets, and snapshots both the guarded consumer closure
-mapping and its Python globals at composition. Each call reconstructs fresh ephemeral
+promotion's exact direct call targets, and snapshots both guarded consumer closure
+mappings and Python globals at composition. Each call reconstructs fresh ephemeral
 mappings from those snapshots. Reachable live mappings remain tamper evidence only and
-cannot become a check/use dispatch race.
+cannot become a check/use dispatch race in either transaction phase.
 """
 
 from __future__ import annotations
@@ -80,16 +80,19 @@ def _make_surface_authority_checker() -> FunctionType:
     return require_surface_authority
 
 
-def _guard_surface_consumer(
+def _guard_detached_consumer(
     function: FunctionType,
     *,
     inner_globals: dict[str, object],
     expected_bindings: tuple[tuple[str, object], ...],
+    guard_surface: bool,
 ) -> FunctionType:
-    """Require exact frozen surface/bindings and execute from private snapshots."""
+    """Execute a detached consumer only from composition-time private snapshots."""
 
-    require_surface_authority = _make_surface_authority_checker()
-    require_surface_authority_code = require_surface_authority.__code__
+    surface_authority = _make_surface_authority_checker() if guard_surface else None
+    surface_authority_code = (
+        None if surface_authority is None else surface_authority.__code__
+    )
     exact_type = type
     function_type = FunctionType
     dict_type = dict
@@ -151,28 +154,37 @@ def _guard_surface_consumer(
 
     require_bindings_code = require_bindings.__code__
 
+    def require_surface() -> None:
+        if surface_authority is None:
+            return
+        if (
+            exact_type(surface_authority) is not function_type
+            or surface_authority.__code__ is not surface_authority_code
+        ):
+            raise ValueError(
+                "RunTransaction frozen direct-dispatch verifier executable changed"
+            )
+        surface_authority()
+
+    require_surface_code = require_surface.__code__
+
     def guarded_consumer(*args, **kwargs):
         # Intentionally retain the real detached globals in this closure. Existing
         # diagnostics/tests use that exact handle to prove the consumer is detached.
         # Neither it nor the owning guard module globals are execution mappings now.
         if (
-            exact_type(require_surface_authority) is not function_type
-            or require_surface_authority.__code__ is not require_surface_authority_code
-        ):
-            raise ValueError(
-                "RunTransaction frozen direct-dispatch verifier executable changed"
-            )
-        if (
-            exact_type(require_bindings) is not function_type
+            exact_type(require_surface) is not function_type
+            or require_surface.__code__ is not require_surface_code
+            or exact_type(require_bindings) is not function_type
             or require_bindings.__code__ is not require_bindings_code
             or exact_type(fresh_cell) is not function_type
             or fresh_cell.__code__ is not fresh_cell_code
         ):
             raise ValueError(
-                "RunTransaction detached direct-dispatch binding verifier changed"
+                "RunTransaction detached direct-dispatch verifier changed"
             )
         require_bindings()
-        require_surface_authority()
+        require_surface()
 
         call_function_globals = dict_type(frozen_function_globals_items)
         call_globals = dict_type(frozen_globals_items)
@@ -191,23 +203,18 @@ def _guard_surface_consumer(
             return delegate(*args, **kwargs)
         finally:
             if (
-                exact_type(require_surface_authority) is not function_type
-                or require_surface_authority.__code__ is not require_surface_authority_code
-            ):
-                raise ValueError(
-                    "RunTransaction frozen direct-dispatch verifier executable changed"
-                )
-            if (
-                exact_type(require_bindings) is not function_type
+                exact_type(require_surface) is not function_type
+                or require_surface.__code__ is not require_surface_code
+                or exact_type(require_bindings) is not function_type
                 or require_bindings.__code__ is not require_bindings_code
                 or exact_type(fresh_cell) is not function_type
                 or fresh_cell.__code__ is not fresh_cell_code
             ):
                 raise ValueError(
-                    "RunTransaction detached direct-dispatch binding verifier changed"
+                    "RunTransaction detached direct-dispatch verifier changed"
                 )
             require_bindings()
-            require_surface_authority()
+            require_surface()
 
     guarded_consumer.__name__ = inner_name
     guarded_consumer.__qualname__ = inner_qualname
@@ -232,6 +239,7 @@ def _detach_consumer(function: FunctionType) -> FunctionType:
 
     detached_globals = dict(inner_globals)
     expected_bindings: tuple[tuple[str, object], ...] = ()
+    guard_surface = False
     if function.__qualname__ == "RunTransaction._promote_paper_book_snapshot":
         if inner_globals.get("os") is not os:
             raise RuntimeError("RunTransaction canonical OS dispatch changed before sealing")
@@ -263,6 +271,7 @@ def _detach_consumer(function: FunctionType) -> FunctionType:
             ("hashlib", frozen_hashlib),
             ("PaperBook", frozen_paper_book),
         )
+        guard_surface = True
 
     detached_closure = list(closure)
     detached_closure[globals_index] = _fresh_cell(detached_globals)
@@ -278,13 +287,12 @@ def _detach_consumer(function: FunctionType) -> FunctionType:
     clone.__qualname__ = function.__qualname__
     clone.__doc__ = function.__doc__
     clone.__annotations__ = dict(function.__annotations__)
-    if expected_bindings:
-        return _guard_surface_consumer(
-            clone,
-            inner_globals=detached_globals,
-            expected_bindings=expected_bindings,
-        )
-    return clone
+    return _guard_detached_consumer(
+        clone,
+        inner_globals=detached_globals,
+        expected_bindings=expected_bindings,
+        guard_surface=guard_surface,
+    )
 
 
 def _install() -> None:

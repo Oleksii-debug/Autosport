@@ -33,6 +33,10 @@ def _forged_but_structurally_valid_revision() -> settlement.BetfairSettlementRev
         "price_matched": format(price_matched, "f"),
         "size_settled": format(size_settled, "f"),
         "provider_profit": format(provider_profit, "f"),
+        "bet_outcome": None,
+        "provider_handicap": None,
+        "provider_voided_date": None,
+        "provider_profit_currency": None,
     }
     content_sha256 = settlement._digest(semantic_payload)
     revision_id = settlement._digest(
@@ -71,6 +75,10 @@ def _forged_but_structurally_valid_revision() -> settlement.BetfairSettlementRev
         source_payload_sha256="1" * 64,
         capture_evidence_sha256="2" * 64,
         content_sha256=content_sha256,
+        bet_outcome=None,
+        provider_handicap=None,
+        provider_voided_date=None,
+        provider_profit_currency=None,
     )
 
 

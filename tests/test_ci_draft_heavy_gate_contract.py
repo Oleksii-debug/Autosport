@@ -71,7 +71,9 @@ def test_ci_heavy_matrix_is_deferred_for_stale_draft_or_closed_pull_request() ->
     assert "os: [ubuntu-latest, windows-latest]" in workflow
     assert "python-version: ['3.11', '3.12']" in workflow
     assert "cancel-in-progress: true" in workflow
-    # Full Windows/Python 3.12 qualification exceeded 60 minutes on exact-head #2035;\n    # keep the complete matrix and give it a bounded 90-minute execution ceiling.\n    assert "timeout-minutes: 90" in workflow
+    # Full Windows/Python 3.12 qualification exceeded 60 minutes on exact-head #2035;
+    # keep the complete matrix and give it a bounded 90-minute execution ceiling.
+    assert "timeout-minutes: 90" in workflow
     assert "python -m pytest -v tests" in workflow
     assert "python -m autosport demo" in workflow
 

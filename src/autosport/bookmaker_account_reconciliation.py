@@ -468,11 +468,65 @@ def _position_to_dict(value: BookmakerPositionObservation) -> dict[str, object]:
     }
 
 
-def snapshot_to_canonical_dict(snapshot: BookmakerAccountSnapshot) -> dict[str, object]:
-    if not isinstance(snapshot, BookmakerAccountSnapshot):
+def _require_canonical_snapshot_graph(snapshot: object) -> BookmakerAccountSnapshot:
+    """Reject caller-defined DTO subclasses at the durable evidence boundary.
+
+    The capability DTOs are frozen+slots dataclasses, but Python still permits
+    subclassing them and overriding __post_init__ or inherited slot descriptors.
+    isinstance therefore is not an issuance/canonicality boundary. Durable
+    reconciliation accepts only the exact product DTO graph.
+    """
+
+    if type(snapshot) is not BookmakerAccountSnapshot:
         raise AccountReconciliationIntegrityError(
-            "snapshot must be a BookmakerAccountSnapshot"
+            "snapshot must be the exact canonical BookmakerAccountSnapshot"
         )
+
+    profile = snapshot.profile
+    if type(profile) is not BookmakerCapabilityProfile:
+        raise AccountReconciliationIntegrityError(
+            "snapshot profile must be the exact canonical BookmakerCapabilityProfile"
+        )
+    if type(profile.facts) is not tuple or any(
+        type(fact) is not BookmakerCapabilityFact for fact in profile.facts
+    ):
+        raise AccountReconciliationIntegrityError(
+            "snapshot profile facts must be exact canonical BookmakerCapabilityFact values"
+        )
+
+    if type(snapshot.observed_capabilities) is not frozenset or any(
+        type(capability) is not BookmakerCapability
+        for capability in snapshot.observed_capabilities
+    ):
+        raise AccountReconciliationIntegrityError(
+            "snapshot observed_capabilities must contain exact canonical capability values"
+        )
+
+    if (
+        snapshot.balance is not None
+        and type(snapshot.balance) is not BookmakerBalanceObservation
+    ):
+        raise AccountReconciliationIntegrityError(
+            "snapshot balance must be the exact canonical BookmakerBalanceObservation"
+        )
+
+    for field, positions in (
+        ("open_positions", snapshot.open_positions),
+        ("settled_positions", snapshot.settled_positions),
+    ):
+        if type(positions) is not tuple or any(
+            type(position) is not BookmakerPositionObservation
+            for position in positions
+        ):
+            raise AccountReconciliationIntegrityError(
+                f"snapshot {field} must contain exact canonical BookmakerPositionObservation values"
+            )
+
+    return snapshot
+
+
+def snapshot_to_canonical_dict(snapshot: BookmakerAccountSnapshot) -> dict[str, object]:
+    snapshot = _require_canonical_snapshot_graph(snapshot)
     return {
         "profile": snapshot.profile.to_canonical_dict(),
         "observed_capabilities": sorted(
@@ -821,10 +875,7 @@ class BookmakerAccountReconciliationStore:
         return authority
 
     def append_snapshot(self, snapshot: BookmakerAccountSnapshot) -> bool:
-        if not isinstance(snapshot, BookmakerAccountSnapshot):
-            raise AccountReconciliationIntegrityError(
-                "snapshot must be a BookmakerAccountSnapshot"
-            )
+        snapshot = _require_canonical_snapshot_graph(snapshot)
         with _write_lock(self.path):
             history = self._load_history()
             incoming_id = snapshot_fingerprint(snapshot)

@@ -264,6 +264,8 @@ def _guard_detached_consumer(
     builtins_snapshot_marker = "__AUTOSPORT_RUN_TRANSACTION_PRIVATE_BUILTINS_ANCHOR__"
     function_marker = "__AUTOSPORT_RUN_TRANSACTION_DETACHED_FUNCTION_ANCHOR__"
     inner_code_marker = "__AUTOSPORT_RUN_TRANSACTION_DETACHED_CODE_ANCHOR__"
+    surface_authority_marker = "__AUTOSPORT_RUN_TRANSACTION_SURFACE_AUTHORITY_ANCHOR__"
+    surface_authority_code_marker = "__AUTOSPORT_RUN_TRANSACTION_SURFACE_AUTHORITY_CODE_ANCHOR__"
 
     def guarded_consumer(*args, **kwargs):
         # Intentionally retain the real detached globals in this closure. Existing
@@ -283,6 +285,8 @@ def _guard_detached_consumer(
         anchored_builtins_items = "__AUTOSPORT_RUN_TRANSACTION_PRIVATE_BUILTINS_ANCHOR__"
         anchored_function = "__AUTOSPORT_RUN_TRANSACTION_DETACHED_FUNCTION_ANCHOR__"
         anchored_inner_code = "__AUTOSPORT_RUN_TRANSACTION_DETACHED_CODE_ANCHOR__"
+        anchored_surface_authority = "__AUTOSPORT_RUN_TRANSACTION_SURFACE_AUTHORITY_ANCHOR__"
+        anchored_surface_authority_code = "__AUTOSPORT_RUN_TRANSACTION_SURFACE_AUTHORITY_CODE_ANCHOR__"
         if (
             exact_type is not anchored_exact_type
             or function_type is not anchored_function_type
@@ -292,6 +296,8 @@ def _guard_detached_consumer(
             or frozen_builtins_items is not anchored_builtins_items
             or function is not anchored_function
             or inner_code is not anchored_inner_code
+            or surface_authority is not anchored_surface_authority
+            or surface_authority_code is not anchored_surface_authority_code
             or exact_type(function) is not function_type
             or function.__code__ is not anchored_inner_code
             or function.__code__ is not inner_code
@@ -345,6 +351,8 @@ def _guard_detached_consumer(
                 or frozen_builtins_items is not anchored_builtins_items
                 or function is not anchored_function
                 or inner_code is not anchored_inner_code
+                or surface_authority is not anchored_surface_authority
+                or surface_authority_code is not anchored_surface_authority_code
                 or exact_type(function) is not function_type
                 or function.__code__ is not anchored_inner_code
                 or function.__code__ is not inner_code
@@ -388,6 +396,8 @@ def _guard_detached_consumer(
         (builtins_snapshot_marker, frozen_builtins_items),
         (function_marker, function),
         (inner_code_marker, inner_code),
+        (surface_authority_marker, surface_authority),
+        (surface_authority_code_marker, surface_authority_code),
     )
     if any(sum(item == marker for item in guarded_constants) != 1 for marker, _ in guarded_anchors):
         raise RuntimeError("RunTransaction detached verifier identity anchor is ambiguous")

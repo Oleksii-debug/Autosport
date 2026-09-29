@@ -30,6 +30,9 @@ _SQLITE_HEADER = b"SQLite format 3\x00"
 _PROJECTION_INTEGRITY_META_KEY = "indexed_projection_integrity_v1"
 _PROJECTION_IMMUTABILITY_TRIGGER = "collector_deltas_projection_immutable_v1"
 _EVENT_PAYLOAD_TABLE = "collector_event_payloads_v1"
+_EVENT_PAYLOAD_SCHEMA_META_KEY = "collector_event_payload_schema_v1"
+_EVENT_PAYLOAD_QUOTE_INDEX = "collector_event_payloads_v1_quote"
+_EVENT_PAYLOAD_DEDUPE_INDEX = "collector_event_payloads_v1_dedupe"
 _EVENT_PAYLOAD_IMMUTABLE_UPDATE_TRIGGER = "collector_event_payloads_immutable_update_v1"
 _EVENT_PAYLOAD_MAX_QUERY_KEYS = 50_000
 _EVENT_PAYLOAD_QUERY_CHUNK = 400
@@ -178,32 +181,71 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
         connection = self._connect()
         try:
             connection.execute("BEGIN IMMEDIATE")
-            connection.execute(
-                f"CREATE TABLE IF NOT EXISTS {_EVENT_PAYLOAD_TABLE} ("
-                "delta_id TEXT PRIMARY KEY NOT NULL,"
-                "source_id TEXT NOT NULL,"
-                "stream_epoch TEXT NOT NULL,"
-                "quote_key TEXT NOT NULL,"
-                "dedupe_key TEXT NOT NULL,"
-                "event_id TEXT NOT NULL,"
-                "canonical_event_digest TEXT NOT NULL,"
-                "payload_json TEXT NOT NULL,"
-                "FOREIGN KEY(delta_id) REFERENCES collector_deltas(delta_id) "
-                "ON DELETE CASCADE)"
-            )
-            connection.execute(
-                f"CREATE INDEX IF NOT EXISTS {_EVENT_PAYLOAD_TABLE}_quote "
-                f"ON {_EVENT_PAYLOAD_TABLE}(source_id, stream_epoch, quote_key)"
-            )
-            connection.execute(
-                f"CREATE INDEX IF NOT EXISTS {_EVENT_PAYLOAD_TABLE}_dedupe "
-                f"ON {_EVENT_PAYLOAD_TABLE}(source_id, stream_epoch, dedupe_key)"
-            )
-            connection.execute(
-                f"CREATE TRIGGER IF NOT EXISTS {_EVENT_PAYLOAD_IMMUTABLE_UPDATE_TRIGGER} "
-                f"BEFORE UPDATE ON {_EVENT_PAYLOAD_TABLE} BEGIN "
-                "SELECT RAISE(ABORT, 'collector event payload evidence is immutable'); END"
-            )
+            event_schema_marker = connection.execute(
+                "SELECT value FROM collector_meta WHERE key=?",
+                (_EVENT_PAYLOAD_SCHEMA_META_KEY,),
+            ).fetchone()
+            event_object_names = {
+                row["name"]
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master "
+                    "WHERE name IN (?,?,?,?)",
+                    (
+                        _EVENT_PAYLOAD_TABLE,
+                        _EVENT_PAYLOAD_QUOTE_INDEX,
+                        _EVENT_PAYLOAD_DEDUPE_INDEX,
+                        _EVENT_PAYLOAD_IMMUTABLE_UPDATE_TRIGGER,
+                    ),
+                ).fetchall()
+            }
+            required_event_objects = {
+                _EVENT_PAYLOAD_TABLE,
+                _EVENT_PAYLOAD_QUOTE_INDEX,
+                _EVENT_PAYLOAD_DEDUPE_INDEX,
+                _EVENT_PAYLOAD_IMMUTABLE_UPDATE_TRIGGER,
+            }
+            if event_schema_marker is None:
+                if event_object_names:
+                    raise ValueError(
+                        "collector event payload schema is present without its durable marker"
+                    )
+                connection.execute(
+                    f"CREATE TABLE {_EVENT_PAYLOAD_TABLE} ("
+                    "delta_id TEXT PRIMARY KEY NOT NULL,"
+                    "source_id TEXT NOT NULL,"
+                    "stream_epoch TEXT NOT NULL,"
+                    "quote_key TEXT NOT NULL,"
+                    "dedupe_key TEXT NOT NULL,"
+                    "event_id TEXT NOT NULL,"
+                    "canonical_event_digest TEXT NOT NULL,"
+                    "payload_json TEXT NOT NULL,"
+                    "FOREIGN KEY(delta_id) REFERENCES collector_deltas(delta_id) "
+                    "ON DELETE CASCADE)"
+                )
+                connection.execute(
+                    f"CREATE INDEX {_EVENT_PAYLOAD_QUOTE_INDEX} "
+                    f"ON {_EVENT_PAYLOAD_TABLE}(source_id, stream_epoch, quote_key)"
+                )
+                connection.execute(
+                    f"CREATE INDEX {_EVENT_PAYLOAD_DEDUPE_INDEX} "
+                    f"ON {_EVENT_PAYLOAD_TABLE}(source_id, stream_epoch, dedupe_key)"
+                )
+                connection.execute(
+                    f"CREATE TRIGGER {_EVENT_PAYLOAD_IMMUTABLE_UPDATE_TRIGGER} "
+                    f"BEFORE UPDATE ON {_EVENT_PAYLOAD_TABLE} BEGIN "
+                    "SELECT RAISE(ABORT, 'collector event payload evidence is immutable'); END"
+                )
+                connection.execute(
+                    "INSERT INTO collector_meta(key, value) VALUES(?, '1')",
+                    (_EVENT_PAYLOAD_SCHEMA_META_KEY,),
+                )
+            elif (
+                event_schema_marker[0] != "1"
+                or event_object_names != required_event_objects
+            ):
+                raise ValueError(
+                    "collector event payload schema integrity guard is missing"
+                )
             connection.execute(
                 "CREATE TABLE IF NOT EXISTS collector_cycle_starts_v1 ("
                 "source_id TEXT NOT NULL,"

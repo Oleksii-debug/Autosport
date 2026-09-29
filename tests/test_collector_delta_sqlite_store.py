@@ -101,6 +101,32 @@ class CollectorSQLiteStoreTests(unittest.TestCase):
             checkpoint = reopened.stream_checkpoint("source-x", "epoch-1")
             self.assertEqual(checkpoint.last_delta_id, delta.delta_id)
 
+    def test_event_payload_schema_marker_prevents_silent_recreation_after_loss(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "collector.json"
+            store = CollectorDeltaStore(path)
+            payload = event_payload()
+            event = MarketEvent.from_dict(payload)
+            delta = make_delta(payload=payload)
+            store._append_with_runtime_stream_epoch(
+                delta,
+                activated_at="2026-01-01T00:00:00+00:00",
+                event=event,
+            )
+
+            connection = sqlite3.connect(path)
+            try:
+                connection.execute("DROP TABLE collector_event_payloads_v1")
+                connection.commit()
+            finally:
+                connection.close()
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "event payload schema integrity guard is missing",
+            ):
+                CollectorDeltaStore(path)
+
     def test_runtime_append_archives_event_atomically_and_resolves_exact_payload(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = CollectorDeltaStore(Path(tmp) / "collector.json")

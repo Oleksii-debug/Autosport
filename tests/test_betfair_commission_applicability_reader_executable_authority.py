@@ -16,6 +16,21 @@ def _closure_value(function: FunctionType, name: str):
     return closure[freevars.index(name)].cell_contents
 
 
+def _authority_witness(function: FunctionType) -> tuple[FunctionType, object]:
+    matches = tuple(
+        item
+        for item in function.__code__.co_consts
+        if isinstance(item, tuple)
+        and len(item) == 2
+        and type(item[0]) is FunctionType
+        and item[0].__name__ == "require_executable_authority"
+    )
+    assert len(matches) == 1
+    authority, authority_code = matches[0]
+    assert type(authority) is FunctionType
+    return authority, authority_code
+
+
 def _hostile_fee_input_reader(_client, *, market_id: str):
     raise AssertionError(f"hostile fee-input reader executed for {market_id}")
 
@@ -58,18 +73,26 @@ def test_fee_input_reader_partial_keyword_mutation_fails_before_provider_ingress
         reader.keywords.pop("hostile")
 
 
-def test_assessment_boundary_witnesses_executable_graph_around_provider_call() -> None:
+def test_assessment_boundary_code_constant_witnesses_executable_graph_around_provider_call() -> None:
     public_assess = applicability.assess_betfair_commission_applicability
-    authority = _closure_value(public_assess, "require_executable_authority")
+    authority, authority_code = _authority_witness(public_assess)
 
-    assert type(authority) is FunctionType
-    calls = [
-        instruction
-        for instruction in dis.get_instructions(public_assess)
-        if instruction.opname == "LOAD_DEREF"
-        and instruction.argval == "require_executable_authority"
-    ]
-    # Four guards cover pre-read, post-read, post fee-input identity derivation and
-    # post assessment-id derivation. This makes self-restoring mutations fail closed.
-    assert len(calls) == 4
+    assert authority.__code__ is authority_code
+    assert "require_executable_authority" not in public_assess.__code__.co_freevars
+
+    instructions = tuple(dis.get_instructions(public_assess))
+    direct_authority_calls = 0
+    for index, instruction in enumerate(instructions):
+        if instruction.opname != "LOAD_FAST" or instruction.argval != "authority":
+            continue
+        following = instructions[index + 1 : index + 4]
+        if any(item.opname == "LOAD_ATTR" for item in following):
+            continue
+        if any(item.opname == "CALL" for item in following):
+            direct_authority_calls += 1
+
+    # Four calls cover pre-read, post-read, post fee-input identity derivation and
+    # post assessment-id derivation. The guard itself is loaded from a code-constant
+    # witness so writable closure cells cannot replace the guard identity/code pair.
+    assert direct_authority_calls == 4
     authority()

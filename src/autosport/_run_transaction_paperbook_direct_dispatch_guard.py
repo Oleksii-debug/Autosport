@@ -46,6 +46,7 @@ def _make_surface_authority_checker() -> FunctionType:
     surface_type = _FROZEN_SURFACE
     exact_type = type
     function_type = FunctionType
+    failure_type = ValueError
     type_getattribute = type.__getattribute__
     surface_bases = type_getattribute(surface_type, "__bases__")
     namespace = type_getattribute(surface_type, "__dict__")
@@ -66,8 +67,10 @@ def _make_surface_authority_checker() -> FunctionType:
     type_getattribute_marker = "__AUTOSPORT_RUN_TRANSACTION_TYPE_GETATTRIBUTE_ANCHOR__"
     exact_type_marker = "__AUTOSPORT_RUN_TRANSACTION_SURFACE_EXACT_TYPE_ANCHOR__"
     function_type_marker = "__AUTOSPORT_RUN_TRANSACTION_SURFACE_FUNCTION_TYPE_ANCHOR__"
+    failure_type_marker = "__AUTOSPORT_RUN_TRANSACTION_SURFACE_FAILURE_TYPE_ANCHOR__"
 
     def require_surface_authority() -> None:
+        ValueError = "__AUTOSPORT_RUN_TRANSACTION_SURFACE_FAILURE_TYPE_ANCHOR__"  # noqa: N806
         anchored_surface_type = "__AUTOSPORT_RUN_TRANSACTION_SURFACE_TARGET_TYPE_ANCHOR__"
         anchored_surface_bases = "__AUTOSPORT_RUN_TRANSACTION_SURFACE_BASES_ANCHOR__"
         anchored_frozen_witnesses = "__AUTOSPORT_RUN_TRANSACTION_SURFACE_WITNESSES_ANCHOR__"
@@ -107,6 +110,7 @@ def _make_surface_authority_checker() -> FunctionType:
         (type_getattribute_marker, type_getattribute),
         (exact_type_marker, exact_type),
         (function_type_marker, function_type),
+        (failure_type_marker, failure_type),
     )
     if any(
         sum(item == marker for item in surface_constants) != 1
@@ -140,6 +144,7 @@ def _guard_detached_consumer(
     )
     exact_type = type
     function_type = FunctionType
+    failure_type = ValueError
     dict_type = dict
     list_type = list
     tuple_type = tuple
@@ -200,9 +205,11 @@ def _guard_detached_consumer(
     globals_items_anchor_marker = "__AUTOSPORT_RUN_TRANSACTION_GLOBALS_ITEMS_SNAPSHOT_ANCHOR__"
     globals_index_anchor_marker = "__AUTOSPORT_RUN_TRANSACTION_GLOBALS_INDEX_ANCHOR__"
     globals_cell_anchor_marker = "__AUTOSPORT_RUN_TRANSACTION_GLOBALS_CELL_ANCHOR__"
+    bindings_failure_type_marker = "__AUTOSPORT_RUN_TRANSACTION_BINDINGS_FAILURE_TYPE_ANCHOR__"
     missing = object()
 
     def require_bindings() -> None:
+        ValueError = "__AUTOSPORT_RUN_TRANSACTION_BINDINGS_FAILURE_TYPE_ANCHOR__"  # noqa: N806
         anchored_inner_globals_index = "__AUTOSPORT_RUN_TRANSACTION_GLOBALS_INDEX_ANCHOR__"
         anchored_inner_globals_cell = "__AUTOSPORT_RUN_TRANSACTION_GLOBALS_CELL_ANCHOR__"
         current_closure = function.__closure__
@@ -269,6 +276,7 @@ def _guard_detached_consumer(
         globals_items_anchor_marker,
         globals_index_anchor_marker,
         globals_cell_anchor_marker,
+        bindings_failure_type_marker,
     )
     if any(sum(item == marker for item in anchor_constants) != 1 for marker in anchor_markers):
         raise RuntimeError("RunTransaction detached snapshot identity anchor is ambiguous")
@@ -288,6 +296,8 @@ def _guard_detached_consumer(
             if item == globals_index_anchor_marker
             else inner_globals_cell
             if item == globals_cell_anchor_marker
+            else failure_type
+            if item == bindings_failure_type_marker
             else item
             for item in anchor_constants
         )
@@ -296,8 +306,10 @@ def _guard_detached_consumer(
 
     direct_surface_authority_marker = "__AUTOSPORT_RUN_TRANSACTION_DIRECT_SURFACE_AUTHORITY_ANCHOR__"
     direct_surface_authority_code_marker = "__AUTOSPORT_RUN_TRANSACTION_DIRECT_SURFACE_AUTHORITY_CODE_ANCHOR__"
+    direct_surface_failure_type_marker = "__AUTOSPORT_RUN_TRANSACTION_DIRECT_SURFACE_FAILURE_TYPE_ANCHOR__"
 
     def require_surface() -> None:
+        ValueError = "__AUTOSPORT_RUN_TRANSACTION_DIRECT_SURFACE_FAILURE_TYPE_ANCHOR__"  # noqa: N806
         anchored_surface_authority = "__AUTOSPORT_RUN_TRANSACTION_DIRECT_SURFACE_AUTHORITY_ANCHOR__"
         anchored_surface_authority_code = "__AUTOSPORT_RUN_TRANSACTION_DIRECT_SURFACE_AUTHORITY_CODE_ANCHOR__"
         if surface_authority is None:
@@ -318,6 +330,7 @@ def _guard_detached_consumer(
     direct_surface_anchors = (
         (direct_surface_authority_marker, surface_authority),
         (direct_surface_authority_code_marker, surface_authority_code),
+        (direct_surface_failure_type_marker, failure_type),
     )
     if any(
         sum(item == marker for item in require_surface_constants) != 1
@@ -350,11 +363,13 @@ def _guard_detached_consumer(
     inner_code_marker = "__AUTOSPORT_RUN_TRANSACTION_DETACHED_CODE_ANCHOR__"
     surface_authority_marker = "__AUTOSPORT_RUN_TRANSACTION_SURFACE_AUTHORITY_ANCHOR__"
     surface_authority_code_marker = "__AUTOSPORT_RUN_TRANSACTION_SURFACE_AUTHORITY_CODE_ANCHOR__"
+    guarded_failure_type_marker = "__AUTOSPORT_RUN_TRANSACTION_GUARDED_FAILURE_TYPE_ANCHOR__"
 
     def guarded_consumer(*args, **kwargs):
         # Intentionally retain the real detached globals in this closure. Existing
         # diagnostics/tests use that exact handle to prove the consumer is detached.
         # Neither it nor the owning guard module globals are execution mappings now.
+        ValueError = "__AUTOSPORT_RUN_TRANSACTION_GUARDED_FAILURE_TYPE_ANCHOR__"  # noqa: N806
         anchored_require_bindings = "__AUTOSPORT_RUN_TRANSACTION_BINDING_VERIFIER_FUNCTION_ANCHOR__"
         anchored_require_bindings_code = "__AUTOSPORT_RUN_TRANSACTION_BINDING_VERIFIER_CODE_ANCHOR__"
         anchored_require_surface = "__AUTOSPORT_RUN_TRANSACTION_SURFACE_VERIFIER_FUNCTION_ANCHOR__"
@@ -490,6 +505,7 @@ def _guard_detached_consumer(
         (surface_authority_code_marker, surface_authority_code),
         (globals_index_anchor_marker, inner_globals_index),
         (globals_cell_anchor_marker, inner_globals_cell),
+        (guarded_failure_type_marker, failure_type),
     )
     if any(sum(item == marker for item in guarded_constants) != 1 for marker, _ in guarded_anchors):
         raise RuntimeError("RunTransaction detached verifier identity anchor is ambiguous")

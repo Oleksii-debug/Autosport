@@ -158,7 +158,6 @@ def test_reconstructed_evaluate_rejects_transitive_concentration_helper_before_d
 
     descriptor = vars(PaperRiskPolicy)["_identity_concentration_decision"]
     assert type(descriptor) is classmethod
-    original = descriptor.__func__
     hostile_calls = 0
 
     def hostile_identity_concentration_decision(
@@ -191,5 +190,5 @@ def test_reconstructed_evaluate_rejects_transitive_concentration_helper_before_d
         type.__setattr__(
             PaperRiskPolicy,
             "_identity_concentration_decision",
-            classmethod(original),
+            descriptor,
         )

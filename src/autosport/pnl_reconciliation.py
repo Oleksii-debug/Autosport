@@ -374,6 +374,12 @@ class PnLReconciliationJournal:
         self._events[event["event_id"]] = encoded
 
     def _append(self, encoded: bytes) -> None:
+        payload = encoded + b"\n"
+        expected_identity = self._loaded_file_identity
+        current_size = 0 if expected_identity is None else expected_identity[2]
+        if current_size + len(payload) > _MAX_FILE_BYTES:
+            raise ValueError("reconciliation journal append exceeds bounded replay size")
+
         self.path.parent.mkdir(parents=True, exist_ok=True)
         base_flags = (
             os.O_WRONLY
@@ -384,7 +390,6 @@ class PnLReconciliationJournal:
         no_follow = getattr(os, "O_NOFOLLOW", 0)
         fd: int | None = None
         created = False
-        expected_identity = self._loaded_file_identity
         try:
             if expected_identity is None:
                 try:
@@ -411,7 +416,6 @@ class PnLReconciliationJournal:
                     raise ValueError(
                         "reconciliation journal path disappeared after replay"
                     ) from exc
-            payload = encoded + b"\n"
             offset = 0
             while offset < len(payload):
                 written = os.write(fd, payload[offset:])

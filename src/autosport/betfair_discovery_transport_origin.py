@@ -129,6 +129,7 @@ def _make_transport_origin_authority():
     request_type = BetfairCatalogRequest
     exchange_type = BetfairDiscoveryExchange
     receipt_type = BetfairDiscoveryTransportOriginReceipt
+    acquisition_type = BetfairAuthenticatedDiscoveryAcquisition
     identity_type = BetfairAuthenticatedAccountIdentity
     evidence_type = BetfairDiscoveryAcquisitionEvidence
     visibility_scope_type = BetfairDiscoveryVisibilityScope
@@ -141,6 +142,8 @@ def _make_transport_origin_authority():
     canonical_exchange_init = exchange_type.__init__
     canonical_exchange_post_init = exchange_type.__post_init__
     canonical_receipt_issue = receipt_type._issue
+    canonical_decode_json = _readonly._decode_json
+    canonical_decode_json_code = canonical_decode_json.__code__
     resolve_identity = resolve_betfair_authenticated_account_identity
     require_identity = require_authoritative_betfair_account_identity
 
@@ -154,6 +157,10 @@ def _make_transport_origin_authority():
             "observed_at_utc",
         )
     )
+    acquisition_fields = {
+        name: acquisition_type.__dict__[name]
+        for name in ("exchange", "result", "receipt", "account_identity")
+    }
     evidence_fields = {
         name: evidence_type.__dict__[name]
         for name in (
@@ -307,6 +314,8 @@ def _make_transport_origin_authority():
             and _account_identity.require_authoritative_betfair_account_identity
             is require_identity
             and _readonly._RpcResult is rpc_result_type
+            and _readonly._decode_json is canonical_decode_json
+            and canonical_decode_json.__code__ is canonical_decode_json_code
         )
 
     def issue(
@@ -349,6 +358,107 @@ def _make_transport_origin_authority():
         except Exception:
             return False
         return True
+
+    def resolve_acquisition_result(
+        acquisition: BetfairAuthenticatedDiscoveryAcquisition,
+    ) -> object:
+        """Revalidate one issued acquisition and decode result from exact live bytes."""
+
+        if type(acquisition) is not acquisition_type or not class_dispatch_is_current():
+            raise provenance_error_type(
+                "authenticated discovery acquisition is not canonical"
+            )
+        try:
+            exchange = acquisition_fields["exchange"].__get__(
+                acquisition, acquisition_type
+            )
+            supplied_result = acquisition_fields["result"].__get__(
+                acquisition, acquisition_type
+            )
+            receipt = acquisition_fields["receipt"].__get__(
+                acquisition, acquisition_type
+            )
+            supplied_identity = acquisition_fields["account_identity"].__get__(
+                acquisition, acquisition_type
+            )
+        except (AttributeError, TypeError) as exc:
+            raise provenance_error_type(
+                "authenticated discovery acquisition fields are unavailable"
+            ) from exc
+
+        if type(receipt) is not receipt_type or not is_authoritative(receipt):
+            raise provenance_error_type(
+                "authenticated discovery acquisition receipt is not authoritative"
+            )
+        record = issued.get(id(receipt))
+        if record is None or record[0]() is not receipt:
+            raise provenance_error_type(
+                "authenticated discovery acquisition receipt is not issued"
+            )
+        identity = record[2]()
+        client = record[3]()
+        if (
+            type(identity) is not identity_type
+            or type(client) is not client_type
+            or supplied_identity is not identity
+        ):
+            raise provenance_error_type(
+                "authenticated discovery acquisition identity changed"
+            )
+        try:
+            require_identity(identity, client=client)
+        except Exception as exc:
+            raise provenance_error_type(
+                "authenticated discovery acquisition identity is stale"
+            ) from exc
+
+        method, request_sha256, raw_response_sha256, observed_at_utc = (
+            exchange_snapshot(exchange)
+        )
+        if receipt_snapshot(receipt) != (
+            identity.session_context_id,
+            method,
+            request_sha256,
+            raw_response_sha256,
+            observed_at_utc,
+        ):
+            raise provenance_error_type(
+                "authenticated discovery receipt does not bind current exchange"
+            )
+
+        raw_response = exchange_core_fields["raw_response"].__get__(
+            exchange, exchange_type
+        )
+        if not class_dispatch_is_current():
+            raise provenance_error_type(
+                "canonical Betfair discovery/authenticated dispatch changed"
+            )
+        try:
+            envelope = canonical_decode_json(raw_response)
+        except Exception as exc:
+            raise provenance_error_type(
+                "authenticated discovery raw response cannot be decoded canonically"
+            ) from exc
+        if not class_dispatch_is_current():
+            raise provenance_error_type(
+                "canonical Betfair discovery/authenticated dispatch changed"
+            )
+        if (
+            type(envelope) is not dict
+            or envelope.get("jsonrpc") != "2.0"
+            or ("error" in envelope and envelope["error"] is not None)
+            or "result" not in envelope
+        ):
+            raise provenance_error_type(
+                "authenticated discovery raw response envelope is invalid"
+            )
+        decoded_result = envelope["result"]
+        if decoded_result != supplied_result:
+            raise provenance_error_type(
+                "authenticated discovery result changed after acquisition"
+            )
+        return decoded_result
+
 
     def acquire(
         client: BetfairReadOnlyClient,
@@ -583,12 +693,13 @@ def _make_transport_origin_authority():
                 "authenticated Betfair transport origin is not proven: " + reason
             )
 
-    return acquire, is_authoritative, assess, require
+    return acquire, is_authoritative, resolve_acquisition_result, assess, require
 
 
 (
     acquire_authenticated_betfair_discovery,
     is_authoritative_betfair_discovery_transport_receipt,
+    resolve_authoritative_betfair_authenticated_discovery_result,
     assess_betfair_discovery_transport_origin,
     require_betfair_authenticated_transport_origin,
 ) = _make_transport_origin_authority()

@@ -177,9 +177,7 @@ def test_malformed_response_remains_unknown_even_when_http_transport_succeeded()
 
 
 def test_unknown_provider_code_stays_unknown() -> None:
-    result = classify_account_readback_degradation(
-        _signal(provider_code="SOME_FUTURE_ERROR")
-    )
+    result = classify_account_readback_degradation(_signal(provider_code="SOME_FUTURE_ERROR"))
     assert result.state is ReadbackDegradationState.UNKNOWN
     _assert_never_positive(result)
 
@@ -205,14 +203,9 @@ def test_digest_is_deterministic_and_changes_with_authority_bearing_inputs() -> 
 
 def test_failure_identity_is_bound_to_concrete_attempt_and_causal_time() -> None:
     first = classify_account_readback_degradation(_signal())
-    next_attempt = classify_account_readback_degradation(
-        _signal(attempt_id="attempt-0002")
-    )
+    next_attempt = classify_account_readback_degradation(_signal(attempt_id="attempt-0002"))
     later_same_shape = classify_account_readback_degradation(
-        _signal(
-            attempt_id="attempt-0003",
-            observed_at="2026-09-23T01:31:00Z",
-        )
+        _signal(attempt_id="attempt-0003", observed_at="2026-09-23T01:31:00Z")
     )
 
     assert first.attempt_id == "attempt-0001"
@@ -223,9 +216,7 @@ def test_failure_identity_is_bound_to_concrete_attempt_and_causal_time() -> None
 
 
 def test_observed_at_is_timezone_aware_and_canonicalized_to_utc() -> None:
-    utc = classify_account_readback_degradation(
-        _signal(observed_at="2026-09-23T01:30:00Z")
-    )
+    utc = classify_account_readback_degradation(_signal(observed_at="2026-09-23T01:30:00Z"))
     offset = classify_account_readback_degradation(
         _signal(observed_at="2026-09-23T03:30:00+02:00")
     )
@@ -275,22 +266,26 @@ def test_provider_id_case_alias_is_rejected_not_normalized() -> None:
         _signal(provider_id="Betfair")
 
 
-def test_direct_evidence_construction_cannot_mint_classifier_result() -> None:
-    with pytest.raises(ReadbackDegradationError):
-        AccountReadbackDegradationEvidence(
-            state=ReadbackDegradationState.UNKNOWN,
-            provider_id="betfair",
-            adapter_id="betfair-readonly",
-            operation="listCurrentOrders",
-            scope_sha256=TEST_SCOPE_SHA256,
-            attempt_id="attempt-forged",
-            observed_at="2026-09-23T01:30:00Z",
-            provider_code=None,
-            http_status=None,
-            partial_observation_present=False,
-            prior_snapshot_id=None,
-            evidence_sha256=hashlib.sha256(b"forged-evidence").hexdigest(),
-        )
+def test_direct_negative_dto_construction_cannot_mint_positive_authority() -> None:
+    forged = AccountReadbackDegradationEvidence(
+        state=ReadbackDegradationState.UNKNOWN,
+        provider_id="caller-forged",
+        adapter_id="caller-forged",
+        operation="caller-forged",
+        scope_sha256="0" * 64,
+        attempt_id="caller-forged",
+        observed_at="caller-forged",
+        provider_code=None,
+        http_status=None,
+        partial_observation_present=True,
+        prior_snapshot_id="caller-forged",
+        evidence_sha256="f" * 64,
+    )
+    _assert_never_positive(forged)
+    # Direct DTO construction is deliberately not provenance/authenticity evidence.
+    # Only classifier output has normalized/classified semantics; neither form grants
+    # freshness, balances, exposure release, failover or stake authority.
+    assert forged.state is ReadbackDegradationState.UNKNOWN
 
 
 def test_direct_non_exact_signal_subclass_is_rejected() -> None:

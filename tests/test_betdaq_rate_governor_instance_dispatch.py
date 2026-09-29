@@ -5,6 +5,9 @@ from datetime import datetime, timezone
 import pytest
 
 from autosport.betdaq_rate_governor import (
+    BetdaqRateGovernor,
+    BetdaqRateGovernorError,
+    admit_betdaq_rate_request,
     default_betdaq_rate_policy,
     resolve_betdaq_rate_governor,
 )
@@ -99,3 +102,57 @@ def test_resolved_governor_authority_bindings_are_write_once(tmp_path, attribute
     admission = governor.admit("GetPrices")
     assert admission.method == "GetPrices"
     assert admission.sequence == 1
+
+
+
+def test_supported_dispatch_preserves_admission_receipt_semantics(tmp_path):
+    governor = _resolved_governor(tmp_path)
+
+    admission = admit_betdaq_rate_request(governor, "GetPrices")
+
+    assert admission.method == "GetPrices"
+    assert admission.sequence == 1
+    assert admission.grants_execution_authority is False
+    assert admission.grants_write_permission is False
+    assert admission.multi_process_safe is False
+
+
+@pytest.mark.parametrize(
+    "attribute",
+    (
+        "admit",
+        "_assert_policy_integrity",
+        "_blacklist_state",
+        "_now",
+        "_prune",
+        "policy",
+        "_runtime",
+        "_blacklist_store",
+        "policy_fingerprint",
+        "_method_policies",
+        "governor_id",
+    ),
+)
+def test_supported_dispatch_rejects_class_surface_replacement(
+    tmp_path,
+    attribute,
+):
+    governor = _resolved_governor(tmp_path)
+    original = vars(BetdaqRateGovernor)[attribute]
+    hostile_calls = []
+
+    def hostile(*args, **kwargs):
+        hostile_calls.append((args, kwargs))
+        raise AssertionError("hostile class dispatch executed")
+
+    type.__setattr__(BetdaqRateGovernor, attribute, hostile)
+    try:
+        with pytest.raises(
+            BetdaqRateGovernorError,
+            match="canonical rate governor class dispatch was replaced",
+        ):
+            admit_betdaq_rate_request(governor, "GetPrices")
+    finally:
+        type.__setattr__(BetdaqRateGovernor, attribute, original)
+
+    assert hostile_calls == []

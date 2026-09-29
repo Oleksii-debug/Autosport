@@ -1043,7 +1043,7 @@ class BetdaqRateGovernor:
         *,
         priority: BetdaqRatePriority = BetdaqRatePriority.BACKGROUND_READ,
     ) -> BetdaqRateAdmission:
-        self._assert_policy_integrity()
+        _CANONICAL_ASSERT_POLICY_INTEGRITY(self)
         name = _canonical_text(method, "method")
         if type(priority) is not BetdaqRatePriority:
             raise BetdaqRateGovernorError(
@@ -1058,10 +1058,10 @@ class BetdaqRateGovernor:
             )
 
         with _REGISTRY_LOCK:
-            now = self._now(name)
+            now = _CANONICAL_NOW(self, name)
             window = self._runtime.methods[name]
-            self._prune(window.admitted_at, now)
-            self._prune(self._runtime.combined.admitted_at, now)
+            _CANONICAL_PRUNE(self, window.admitted_at, now)
+            _CANONICAL_PRUNE(self, self._runtime.combined.admitted_at, now)
             cold_blocked_until = max(
                 window.blocked_until,
                 self._runtime.combined.blocked_until,
@@ -1073,7 +1073,8 @@ class BetdaqRateGovernor:
                     retry_after_seconds=cold_blocked_until - now,
                 )
 
-            status, blacklist_retry = self._blacklist_state(
+            status, blacklist_retry = _CANONICAL_BLACKLIST_STATE(
+                self,
                 name,
                 now_monotonic=now,
             )
@@ -1198,6 +1199,59 @@ class BetdaqRateGovernor:
             values.popleft()
 
 
+_CANONICAL_GOVERNOR_TYPE: Final = BetdaqRateGovernor
+_CANONICAL_ASSERT_POLICY_INTEGRITY: Final = (
+    BetdaqRateGovernor._assert_policy_integrity
+)
+_CANONICAL_BLACKLIST_STATE: Final = BetdaqRateGovernor._blacklist_state
+_CANONICAL_NOW: Final = BetdaqRateGovernor._now
+_CANONICAL_PRUNE: Final = BetdaqRateGovernor._prune
+_CANONICAL_ADMIT: Final = BetdaqRateGovernor.admit
+_MISSING_CLASS_SLOT: Final = object()
+_CANONICAL_GOVERNOR_CLASS_SURFACE: Final = tuple(
+    (name, vars(BetdaqRateGovernor).get(name, _MISSING_CLASS_SLOT))
+    for name in (
+        "workspace",
+        "policy",
+        "_runtime",
+        "_blacklist_store",
+        "policy_fingerprint",
+        "_method_policies",
+        "governor_id",
+        "__setattr__",
+        "__delattr__",
+        "_assert_policy_integrity",
+        "_blacklist_state",
+        "_now",
+        "_prune",
+        "admit",
+    )
+)
+
+
+def _assert_canonical_governor_dispatch() -> None:
+    class_dict = vars(_CANONICAL_GOVERNOR_TYPE)
+    for name, expected in _CANONICAL_GOVERNOR_CLASS_SURFACE:
+        if class_dict.get(name, _MISSING_CLASS_SLOT) is not expected:
+            raise BetdaqRateGovernorError(
+                "BETDAQ canonical rate governor class dispatch was replaced"
+            )
+
+
+def admit_betdaq_rate_request(
+    governor: BetdaqRateGovernor,
+    method: str,
+    *,
+    priority: BetdaqRatePriority = BetdaqRatePriority.BACKGROUND_READ,
+) -> BetdaqRateAdmission:
+    """Use the witnessed product-owned rate-admission dispatch boundary."""
+
+    if type(governor) is not _CANONICAL_GOVERNOR_TYPE:
+        raise TypeError("governor must be canonical BetdaqRateGovernor")
+    _assert_canonical_governor_dispatch()
+    return _CANONICAL_ADMIT(governor, method, priority=priority)
+
+
 def _workspace(path: str | Path) -> Path:
     try:
         value = Path(path).expanduser()
@@ -1259,6 +1313,7 @@ def resolve_betdaq_rate_governor(
     fingerprint = policy.fingerprint()
 
     with _REGISTRY_LOCK:
+        _assert_canonical_governor_dispatch()
         existing = _GOVERNORS.get(workspace_key)
         runtime = _RUNTIME.get(workspace_key)
         if existing is not None or runtime is not None:
@@ -1266,7 +1321,7 @@ def resolve_betdaq_rate_governor(
                 raise BetdaqRateGovernorError(
                     "BETDAQ governor registry is internally inconsistent"
                 )
-            existing._assert_policy_integrity()
+            _CANONICAL_ASSERT_POLICY_INTEGRITY(existing)
             if runtime.policy_fingerprint != fingerprint:
                 raise BetdaqRateGovernorError(
                     "same BETDAQ workspace cannot be rebound to a different rate policy"

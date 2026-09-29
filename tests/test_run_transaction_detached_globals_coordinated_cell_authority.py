@@ -163,3 +163,51 @@ def test_guard_rejects_coordinated_binding_verifier_and_snapshot_retarget() -> N
     assert verifier_code_cell.cell_contents is original_verifier_code
     assert snapshot_cell.cell_contents is original_snapshot
     assert anchor_cell.cell_contents is original_anchor
+
+
+def test_guard_rejects_coordinated_type_and_dict_primitive_retarget() -> None:
+    """Type validation and execution-map construction cannot be retargeted together."""
+
+    guarded = run_transaction._promote_paper_book_snapshot
+    assert isinstance(guarded, FunctionType)
+
+    exact_type_cell = _closure_cell(guarded, "exact_type")
+    dict_type_cell = _closure_cell(guarded, "dict_type")
+    original_exact_type = exact_type_cell.cell_contents
+    original_dict_type = dict_type_cell.cell_contents
+    assert original_exact_type is type
+    assert original_dict_type is dict
+
+    calls = 0
+
+    def hostile_dict(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return dict(*args, **kwargs)
+
+    def discriminator(value):
+        if type(value) is dict:
+            return hostile_dict
+        return type(value)
+
+    exact_type_cell.cell_contents = discriminator
+    dict_type_cell.cell_contents = hostile_dict
+    try:
+        try:
+            guarded()
+        except Exception as exc:  # noqa: BLE001 - rejection must precede map construction.
+            assert not isinstance(exc, TypeError), (
+                "guard admitted coordinated type/dict primitive retargeting far enough "
+                "to invoke delegated argument binding"
+            )
+        else:
+            raise AssertionError(
+                "guard unexpectedly returned after coordinated primitive retargeting"
+            )
+        assert calls == 0, "hostile execution-map constructor was invoked"
+    finally:
+        dict_type_cell.cell_contents = original_dict_type
+        exact_type_cell.cell_contents = original_exact_type
+
+    assert exact_type_cell.cell_contents is original_exact_type
+    assert dict_type_cell.cell_contents is original_dict_type

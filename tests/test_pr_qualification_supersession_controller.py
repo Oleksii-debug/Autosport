@@ -38,15 +38,26 @@ def test_current_head_request_cancels_only_obsolete_same_pr_workflow_runs() -> N
     assert "--admission-only" not in workflow
 
 
-def test_controller_keeps_only_latest_same_pr_same_workflow_cancellation_decision() -> None:
+def test_controller_coalesces_only_same_pr_same_head_same_workflow_decision() -> None:
     workflow = _text()
 
     concurrency = workflow.split("concurrency:", 1)[1].split("jobs:", 1)[0]
     assert "group: pr-qualification-supersession-" in concurrency
     assert "github.event.workflow_run.pull_requests[0].number" in concurrency
+    assert "github.event.workflow_run.head_sha" in concurrency
     assert "github.event.workflow_run.workflow_id" in concurrency
     assert "cancel-in-progress: true" in concurrency
-    assert "fresh live head/state/draft" in workflow
+    assert "fresh live" in workflow
+    assert "head/state/draft" in workflow
+
+
+def test_delayed_stale_head_controller_cannot_preempt_current_head_controller() -> None:
+    workflow = _text()
+
+    concurrency = workflow.split("concurrency:", 1)[1].split("jobs:", 1)[0]
+    assert "github.event.workflow_run.head_sha" in concurrency
+    assert "delayed stale-head workflow_run event must never evict" in workflow
+    assert "same-head latest-wins" in workflow
 
 
 def test_empty_ref_controller_is_run_unique_until_pr_identity_is_resolved() -> None:
@@ -54,7 +65,7 @@ def test_empty_ref_controller_is_run_unique_until_pr_identity_is_resolved() -> N
 
     concurrency = workflow.split("concurrency:", 1)[1].split("jobs:", 1)[0]
     assert "format('unresolved-run-{0}', github.event.workflow_run.id)" in concurrency
-    assert "github.event.workflow_run.head_sha" not in concurrency
+    assert "github.event.workflow_run.head_sha" in concurrency
     assert "two distinct PRs may point" in workflow
     assert "empty-reference controller run-unique" in workflow
 
@@ -73,6 +84,7 @@ def test_controller_does_not_skip_close_merge_run_when_nested_pr_list_is_empty()
 def test_controller_does_not_cross_cancel_other_source_workflow_controllers() -> None:
     workflow = _text()
 
-    assert "Controllers for CI, Windows candidate, and Endurance must not preempt one another" in workflow
+    assert "Controllers for CI, Windows candidate, and Endurance must not preempt one" in workflow
+    assert "another" in workflow
     assert "each invocation cancels only obsolete runs of its own source workflow" in workflow
     assert "exact workflow_id carried by workflow_run" in workflow

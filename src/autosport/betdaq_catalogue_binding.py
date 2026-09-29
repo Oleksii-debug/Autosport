@@ -85,7 +85,7 @@ def betdaq_event_scope_id(value: str) -> int:
     result = int(value, 10)
     if str(result) != value or result > BETDAQ_PROVIDER_LONG_MAX:
         raise ValueError(
-            "live BETDAQ provider_event_id scope assertion must use canonical provider long text"
+            "live BETDAQ provider_event_id event-classifier id must use canonical provider long text"
         )
     return result
 

@@ -8,6 +8,8 @@ import urllib.request as _urllib_request
 
 import pytest
 
+import autosport.betfair_multisport_catalog as _catalog
+
 from autosport.betfair_account_identity import (
     build_betfair_authenticated_client,
     resolve_betfair_authenticated_account_identity,
@@ -365,9 +367,57 @@ def test_mutated_current_exchange_bytes_cannot_reuse_authenticated_receipt(
 
     with pytest.raises(
         BetfairCatalogCoverageError,
-        match="receipt does not bind the current exchange state",
+        match="provider result is not authoritative",
     ):
         record_catalog_coverage_acquisition(
+            store,
+            expected_store_path=store.path,
+            plan_id=plan.plan_id,
+            leaf_id=root.leaf_id,
+            acquisition=acquisition,
+        )
+
+
+def test_captured_coverage_record_rejects_catalog_parser_rebinding(
+    tmp_path,
+    monkeypatch,
+):
+    store = CollectorDeltaStore(tmp_path / "collector.db")
+    source = _successful_source_window(store)
+    client, scope, _opener = _client_and_scope(monkeypatch)
+    plan = create_catalog_coverage_plan(
+        store,
+        expected_store_path=store.path,
+        source_universe=source,
+        expected_source_id="source-x",
+        expected_start_cycle_seq=1,
+        expected_end_cycle_seq=1,
+        client=client,
+        visibility_scope=scope,
+        causal_cutoff=datetime(2099, 1, 1, tzinfo=timezone.utc),
+        root_request=_root_request(),
+    )
+    root = pending_catalog_coverage_leaves(
+        store,
+        expected_store_path=store.path,
+        plan_id=plan.plan_id,
+    )[0]
+    acquisition = acquire_authenticated_betfair_discovery(client, root.request)
+    captured_record = record_catalog_coverage_acquisition
+
+    monkeypatch.setattr(
+        _catalog,
+        "parse_market_catalogue_result_for_request",
+        lambda _result, *, request: pytest.fail(
+            f"forged parser must not execute for {request!r}"
+        ),
+    )
+
+    with pytest.raises(
+        BetfairCatalogCoverageError,
+        match="catalogue parser dispatch changed",
+    ):
+        captured_record(
             store,
             expected_store_path=store.path,
             plan_id=plan.plan_id,

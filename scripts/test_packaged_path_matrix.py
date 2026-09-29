@@ -12,7 +12,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Iterable, Sequence
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 SEMANTIC_KEY = "windows.packaged-launch-path-matrix-v1"
 AUTHORITY_FAMILY = "product.windows-packaging.path-compatibility"
 LAUNCH_CWD_POLICY = "UNRELATED_CASE_DIRECTORY"
@@ -45,6 +45,7 @@ class ScenarioResult:
     copied_bytes_equal: bool
     launched: bool
     startup_stable: bool
+    window_witnessed: bool
     exit_code: int | None
     probe_mode: str
     elapsed_seconds: float
@@ -105,6 +106,40 @@ def detect_privilege_context() -> str:
         return "ADMINISTRATOR" if bool(ctypes.windll.shell32.IsUserAnAdmin()) else "STANDARD_USER"
     except Exception:
         return "UNKNOWN"
+
+
+def _has_visible_top_level_window(process_id: int) -> bool:
+    """Return whether Windows currently exposes a visible top-level window for PID.
+
+    Process liveness alone is not a GUI startup witness: a packaged executable can
+    hang during resource/runtime initialization before creating its product window.
+    Keep this probe machine-only and fail closed when Win32 enumeration is unavailable.
+    """
+
+    if os.name != "nt" or type(process_id) is not int or process_id <= 0:
+        return False
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        user32 = ctypes.windll.user32
+        found = False
+
+        @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+        def visit(hwnd: int, _lparam: int) -> bool:
+            nonlocal found
+            owner = wintypes.DWORD()
+            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(owner))
+            if owner.value == process_id and bool(user32.IsWindowVisible(hwnd)):
+                found = True
+                return False
+            return True
+
+        if not bool(user32.EnumWindows(visit, 0)) and not found:
+            return False
+        return found
+    except Exception:
+        return False
 
 
 def _safe_relative_path(path: Path) -> str:
@@ -190,13 +225,14 @@ def probe_process(
     timeout_seconds: float,
     capture_output: bool,
     environment: dict[str, str] | None = None,
-) -> tuple[bool, bool, int | None, float, str, str | None]:
+) -> tuple[bool, bool, bool, int | None, float, str, str | None]:
     if mode not in {"persistent", "exit-zero"}:
         raise MatrixError(f"unsupported probe mode: {mode}")
     started_at = time.monotonic()
     process: subprocess.Popen[bytes] | None = None
     launched = False
     stable = False
+    window_witnessed = False
     exit_code: int | None = None
     status = "FAIL"
     error_type: str | None = None
@@ -222,10 +258,14 @@ def probe_process(
             while time.monotonic() < deadline:
                 exit_code = process.poll()
                 if exit_code is not None:
-                    return launched, False, exit_code, time.monotonic() - started_at, "FAIL_EARLY_EXIT", None
+                    return launched, False, False, exit_code, time.monotonic() - started_at, "FAIL_EARLY_EXIT", None
                 time.sleep(min(0.1, max(0.0, deadline - time.monotonic())))
             stable = process.poll() is None
-            status = "PASS" if stable else "FAIL_EARLY_EXIT"
+            if stable:
+                window_witnessed = _has_visible_top_level_window(process.pid)
+                status = "PASS" if window_witnessed else "FAIL_NO_VISIBLE_WINDOW"
+            else:
+                status = "FAIL_EARLY_EXIT"
         else:
             try:
                 exit_code = process.wait(timeout=timeout_seconds)
@@ -249,7 +289,7 @@ def probe_process(
             exit_code = process.poll()
         if log_handle is not None:
             log_handle.close()
-    return launched, stable, exit_code, time.monotonic() - started_at, status, error_type
+    return launched, stable, window_witnessed, exit_code, time.monotonic() - started_at, status, error_type
 
 
 def classify_matrix(results: Sequence[ScenarioResult]) -> str:
@@ -306,6 +346,7 @@ def run_matrix(
         copied_equal = False
         launched = False
         stable = False
+        window_witnessed = False
         exit_code: int | None = None
         elapsed = 0.0
         status = "FAIL_SETUP"
@@ -324,7 +365,7 @@ def run_matrix(
                 raise MatrixError(f"copied executable missing: {rel}")
             rendered_args = render_arguments(arguments, case_root=case_root, package_root=package_root)
             cmd = command_for(executable, rendered_args, launcher)
-            launched, stable, exit_code, elapsed, status, error_type = probe_process(
+            launched, stable, window_witnessed, exit_code, elapsed, status, error_type = probe_process(
                 cmd,
                 cwd=launch_cwd,
                 stdout_path=log_path,
@@ -345,6 +386,7 @@ def run_matrix(
                 copied_bytes_equal=copied_equal,
                 launched=launched,
                 startup_stable=stable,
+                window_witnessed=window_witnessed,
                 exit_code=exit_code,
                 probe_mode=mode,
                 elapsed_seconds=round(elapsed, 3),

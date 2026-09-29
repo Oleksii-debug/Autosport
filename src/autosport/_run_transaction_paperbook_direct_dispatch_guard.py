@@ -237,11 +237,19 @@ def _guard_detached_consumer(
     )
     require_bindings_code = require_bindings.__code__
 
+    direct_surface_authority_marker = "__AUTOSPORT_RUN_TRANSACTION_DIRECT_SURFACE_AUTHORITY_ANCHOR__"
+    direct_surface_authority_code_marker = "__AUTOSPORT_RUN_TRANSACTION_DIRECT_SURFACE_AUTHORITY_CODE_ANCHOR__"
+
     def require_surface() -> None:
+        anchored_surface_authority = "__AUTOSPORT_RUN_TRANSACTION_DIRECT_SURFACE_AUTHORITY_ANCHOR__"
+        anchored_surface_authority_code = "__AUTOSPORT_RUN_TRANSACTION_DIRECT_SURFACE_AUTHORITY_CODE_ANCHOR__"
         if surface_authority is None:
             return
         if (
-            exact_type(surface_authority) is not function_type
+            surface_authority is not anchored_surface_authority
+            or surface_authority_code is not anchored_surface_authority_code
+            or exact_type(surface_authority) is not function_type
+            or surface_authority.__code__ is not anchored_surface_authority_code
             or surface_authority.__code__ is not surface_authority_code
         ):
             raise ValueError(
@@ -249,6 +257,25 @@ def _guard_detached_consumer(
             )
         surface_authority()
 
+    require_surface_constants = require_surface.__code__.co_consts
+    direct_surface_anchors = (
+        (direct_surface_authority_marker, surface_authority),
+        (direct_surface_authority_code_marker, surface_authority_code),
+    )
+    if any(
+        sum(item == marker for item in require_surface_constants) != 1
+        for marker, _ in direct_surface_anchors
+    ):
+        raise RuntimeError("RunTransaction direct surface verifier anchor is ambiguous")
+    require_surface.__code__ = require_surface.__code__.replace(
+        co_consts=tuple_type(
+            next(
+                (anchored for marker, anchored in direct_surface_anchors if item == marker),
+                item,
+            )
+            for item in require_surface_constants
+        )
+    )
     require_surface_code = require_surface.__code__
     binding_function_marker = "__AUTOSPORT_RUN_TRANSACTION_BINDING_VERIFIER_FUNCTION_ANCHOR__"
     binding_code_marker = "__AUTOSPORT_RUN_TRANSACTION_BINDING_VERIFIER_CODE_ANCHOR__"

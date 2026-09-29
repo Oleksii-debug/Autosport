@@ -267,6 +267,12 @@ def _build_product_boundary():
     # accepts a caller-supplied observation and can mint product issuance without the
     # canonical provider read first.
     fee_input_reader = read_betfair_execution_fee_inputs
+    fee_input_reader_code = fee_input_reader.__code__
+    fee_input_reader_globals = fee_input_reader.__globals__
+    fee_input_reader_closure = fee_input_reader.__closure__
+    fee_input_reader_closure_values = tuple(
+        cell.cell_contents for cell in (fee_input_reader_closure or ())
+    )
     fee_payload_builder = _FEE_INPUT_SHA256_CAPABILITY
     canonical_json = _canonical_json
     hash_constructor = sha256
@@ -287,12 +293,32 @@ def _build_product_boundary():
     ] = {}
     issue_lock = RLock()
 
+    def require_reader_authority() -> None:
+        if (
+            fee_input_reader.__code__ is not fee_input_reader_code
+            or fee_input_reader.__globals__ is not fee_input_reader_globals
+            or fee_input_reader.__closure__ is not fee_input_reader_closure
+        ):
+            raise error_type("fee input reader executable authority changed")
+        current_closure = fee_input_reader.__closure__ or ()
+        if len(current_closure) != len(fee_input_reader_closure_values):
+            raise error_type("fee input reader closure authority changed")
+        for cell, expected in zip(current_closure, fee_input_reader_closure_values):
+            try:
+                current = cell.cell_contents
+            except ValueError as exc:
+                raise error_type("fee input reader closure authority changed") from exc
+            if current is not expected:
+                raise error_type("fee input reader closure authority changed")
+
     def assess(
         client: BetfairReadOnlyClient,
         *,
         market_id: str,
     ) -> BetfairCommissionApplicabilityAssessment:
+        require_reader_authority()
         observation = fee_input_reader(client, market_id=market_id)
+        require_reader_authority()
         if type(observation) is not observation_type:
             raise error_type(
                 "fee inputs must be exact BetfairExecutionFeeInputsObservation"

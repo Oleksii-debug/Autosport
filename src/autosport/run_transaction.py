@@ -1151,7 +1151,13 @@ class RunTransaction:
     ) -> None:
         del cls, path
         try:
-            PaperBook.load_bytes(snapshot.payload)
+            _paperbook_authority._call_witnessed_delegate(
+                _paperbook_authority._LOAD_BYTES,
+                _paperbook_authority._LOAD_BYTES_WITNESS,
+                "canonical load_bytes",
+                _paperbook_authority._PAPER_BOOK,
+                snapshot.payload,
+            )
         except Exception as exc:
             raise RunTransactionError(f"{label} semantic validation failed: {exc}") from exc
 

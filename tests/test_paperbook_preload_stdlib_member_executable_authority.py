@@ -4,8 +4,6 @@ import json
 import tempfile
 from pathlib import Path
 
-import pytest
-
 import autosport._paperbook_preload_authority_guard as guard
 import autosport.paper as paper
 
@@ -67,8 +65,8 @@ def _restore_same_object_code_substitution(
     return called
 
 
-def test_path_load_rejects_same_object_json_loads_code_substitution(tmp_path: Path) -> None:
-    """Identity-preserving json.loads code mutation must not reach snapshot parsing."""
+def test_path_load_ignores_same_object_json_loads_code_substitution(tmp_path: Path) -> None:
+    """Identity-preserving public json.loads mutation cannot reach snapshot parsing."""
 
     path = tmp_path / "paper-book.json"
     book = paper.PaperBook("100")
@@ -82,8 +80,7 @@ def test_path_load_rejects_same_object_json_loads_code_substitution(tmp_path: Pa
         _LOADS_CALLED_KEY,
     )
     try:
-        with pytest.raises(ValueError, match="executable|authority"):
-            paper.PaperBook.load(path)
+        loaded = paper.PaperBook.load(path)
     finally:
         hostile_called = _restore_same_object_code_substitution(
             json,
@@ -94,10 +91,13 @@ def test_path_load_rejects_same_object_json_loads_code_substitution(tmp_path: Pa
         )
 
     assert hostile_called is False
+    assert loaded.balance == book.balance
 
 
-def test_save_rejects_same_object_json_dump_code_before_durable_mutation(tmp_path: Path) -> None:
-    """Serializer code mutation must fail before snapshot/witness publication begins."""
+def test_save_ignores_same_object_json_dump_code_and_publishes_canonical_snapshot(
+    tmp_path: Path,
+) -> None:
+    """Public json.dump code mutation cannot retarget canonical serializer dispatch."""
 
     path = tmp_path / "paper-book.json"
     witness_path = guard._witness_path(path)
@@ -111,8 +111,7 @@ def test_save_rejects_same_object_json_dump_code_before_durable_mutation(tmp_pat
         _DUMP_CALLED_KEY,
     )
     try:
-        with pytest.raises(ValueError, match="executable|authority"):
-            book.save(path)
+        book.save(path)
     finally:
         hostile_called = _restore_same_object_code_substitution(
             json,
@@ -123,14 +122,15 @@ def test_save_rejects_same_object_json_dump_code_before_durable_mutation(tmp_pat
         )
 
     assert hostile_called is False
-    assert not path.exists()
-    assert not witness_path.exists()
+    assert path.exists()
+    assert witness_path.exists()
+    assert paper.PaperBook.load(path).balance == book.balance
 
 
-def test_save_rejects_same_object_named_temporary_file_code_before_durable_mutation(
+def test_save_ignores_same_object_named_temporary_file_code_and_publishes_canonical_snapshot(
     tmp_path: Path,
 ) -> None:
-    """The Python tempfile member used by canonical save is executable authority too."""
+    """The Python tempfile member used by canonical save is detached executable authority."""
 
     path = tmp_path / "paper-book.json"
     witness_path = guard._witness_path(path)
@@ -144,8 +144,7 @@ def test_save_rejects_same_object_named_temporary_file_code_before_durable_mutat
         _NAMED_TEMP_CALLED_KEY,
     )
     try:
-        with pytest.raises(ValueError, match="executable|authority"):
-            book.save(path)
+        book.save(path)
     finally:
         hostile_called = _restore_same_object_code_substitution(
             tempfile,
@@ -156,5 +155,6 @@ def test_save_rejects_same_object_named_temporary_file_code_before_durable_mutat
         )
 
     assert hostile_called is False
-    assert not path.exists()
-    assert not witness_path.exists()
+    assert path.exists()
+    assert witness_path.exists()
+    assert paper.PaperBook.load(path).balance == book.balance

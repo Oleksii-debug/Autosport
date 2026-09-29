@@ -345,6 +345,10 @@ def redact_operator_value(
         return redact_operator_text(value, extra_secret_values=secrets)
     if isinstance(value, Mapping):
         redacted: dict[Any, Any] = {}
+        # Original keys have priority over generated redaction aliases. This keeps
+        # ordinary presentation labels byte-for-byte stable even when an unrelated
+        # secret-bearing key would otherwise redact to the same spelling.
+        reserved_keys = set(value.keys())
         for key, item in value.items():
             # Mapping keys are presentation data too. A provider/error payload can
             # echo a configured credential as a key rather than a value; retaining
@@ -356,6 +360,14 @@ def redact_operator_value(
                 if isinstance(key, str)
                 else key
             )
+            if isinstance(key, str) and safe_key != key:
+                candidate = safe_key
+                suffix = 2
+                while candidate in reserved_keys or candidate in redacted:
+                    candidate = f"{safe_key}#{suffix}"
+                    suffix += 1
+                safe_key = candidate
+
             if is_sensitive_key(key):
                 redacted[safe_key] = REDACTED
             else:

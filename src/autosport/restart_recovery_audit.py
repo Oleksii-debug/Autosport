@@ -55,6 +55,26 @@ def _safe_exception_detail(exc: Exception) -> str:
     return f"{exception_type}: {rendered}"
 
 
+def _safe_exception_site(exc: Exception) -> str:
+    """Return a bounded code location without exposing filesystem paths or locals."""
+
+    try:
+        traceback = BaseException.__getattribute__(exc, "__traceback__")
+        if traceback is None:
+            return "unknown"
+        while traceback.tb_next is not None:
+            traceback = traceback.tb_next
+        frame = traceback.tb_frame
+        module_name = frame.f_globals.get("__name__", "unknown")
+        function_name = frame.f_code.co_name
+        line_number = traceback.tb_lineno
+        if type(module_name) is not str or type(function_name) is not str:
+            return "unknown"
+        return f"{module_name}:{function_name}:{line_number}"
+    except BaseException:
+        return "unknown"
+
+
 def _phase_call(phase: str, callable_, *args, **kwargs):
     try:
         return callable_(*args, **kwargs)
@@ -287,6 +307,7 @@ def run_restart_recovery_audit(output_path: str | Path) -> int:
             "status": "FAIL",
             "phase": failure_phase,
             "error": _safe_exception_detail(exc),
+            "failure_site": _safe_exception_site(exc),
             "real_money_execution": False,
             "human_tested": False,
             "nvda_verified": False,

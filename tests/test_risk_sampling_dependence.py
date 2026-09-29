@@ -455,5 +455,48 @@ class RiskSamplingDependenceTests(unittest.TestCase):
             )
 
 
+    def test_structural_sampling_result_cannot_subclass_to_claim_iid_authority(self):
+        structure = inspect_fixed_n_iid_sampling_structure(
+            self._membership(),
+            sampling_manifest_json=self._manifest(),
+        )
+
+        with self.assertRaisesRegex(
+            TypeError,
+            "ResolvedFixedNIidSamplingStructure must not be subclassed",
+        ):
+            class ForgedStructure(type(structure)):
+                @property
+                def iid_qualified(self):
+                    return True
+
+                @property
+                def grants_real_money_authority(self):
+                    return True
+
+    def test_occurrence_set_cannot_subclass_to_claim_iid_authority(self):
+        structure = inspect_fixed_n_iid_sampling_structure(
+            self._membership(),
+            sampling_manifest_json=self._manifest(),
+        )
+        resolved = inspect_fixed_n_iid_occurrences(
+            structure,
+            self._occurrences(structure),
+        )
+
+        with self.assertRaisesRegex(
+            TypeError,
+            "ResolvedFixedNIidOccurrenceSet must not be subclassed",
+        ):
+            class ForgedOccurrenceSet(type(resolved)):
+                @property
+                def iid_qualified(self):
+                    return True
+
+                @property
+                def grants_real_money_authority(self):
+                    return True
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -5,7 +5,9 @@ _ACTIVITY_TYPES = (
     "types: [opened, synchronize, reopened, ready_for_review, converted_to_draft, closed]"
 )
 _PR_INTEGRATION_GATE = (
-    "github.event.action != 'closed' && github.event.pull_request.draft == false"
+    "github.event.action != 'closed' &&\n"
+    "       github.event.action != 'converted_to_draft' &&\n"
+    "       (!github.event.pull_request.head.sha || github.event.pull_request.draft == false)"
 )
 _RUNNER_FREE_PR_ADMISSION = (
     "  superseded_run_admission:\n"
@@ -14,7 +16,9 @@ _RUNNER_FREE_PR_ADMISSION = (
     "    # ready_for_review has draft=false and still executes exact-head admission.\n"
     "    if: >-\n"
     "      github.event_name != 'pull_request' ||\n"
-    "      (github.event.action != 'closed' && github.event.pull_request.draft == false)\n"
+    "      (github.event.action != 'closed' &&\n"
+    "       github.event.action != 'converted_to_draft' &&\n"
+    "       (!github.event.pull_request.head.sha || github.event.pull_request.draft == false))\n"
     "    runs-on: ubuntu-latest"
 )
 
@@ -38,13 +42,18 @@ def _assert_head_partitioned_pr_scheduler(path: str) -> None:
     assert "github.event.action == 'closed'" in concurrency_block
     assert "github.event.pull_request.draft == true" in concurrency_block
     assert "'lifecycle'" in concurrency_block
-    assert "format('pr-{0}-run-{1}'" not in concurrency_block
+    assert "format('payload-empty-run-{0}', github.run_id)" in concurrency_block
 
     # Non-PR workflow activity has no trustworthy PR/head identity. Keep it run-unique
     # rather than coalescing on github.ref, which could pre-cancel same-ref work before
     # admission or product qualification executes.
     assert "|| format('run-{0}', github.run_id)" in concurrency_block
     assert "github.ref" not in concurrency_block
+    # Fork-origin pull_request payloads can omit nested PR data. They must never
+    # share an exact-head scheduler lane until the lightweight admission job
+    # reconstructs the event head from the checked-out merge commit.
+    assert "github.event.pull_request.head.sha &&" in concurrency_block
+    assert "format('payload-empty-run-{0}', github.run_id)" in concurrency_block
 
     # Closed, converted-to-draft, and any already-draft PR activity must coalesce
     # before exact-head rerun/qualification classification. This prevents each
@@ -57,6 +66,24 @@ def _assert_head_partitioned_pr_scheduler(path: str) -> None:
     assert lifecycle_index < rerun_index
     assert draft_index < rerun_index
     assert draft_index < qualify_index
+
+
+def _assert_payload_empty_fork_admission(path: str, heavy_job: str) -> None:
+    workflow = _workflow(path)
+    admission = workflow.split("  superseded_run_admission:", 1)[1].split(
+        f"\n  {heavy_job}:", 1
+    )[0]
+    heavy = workflow.split(f"\n  {heavy_job}:", 1)[1]
+
+    assert "(!github.event.pull_request.head.sha || github.event.pull_request.draft == false)" in admission
+    assert "ref: ${{ github.event.pull_request.head.sha || github.sha }}" in admission
+    assert "fetch-depth: 2" in admission
+    assert "EVENT_PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}" in admission
+    assert 'candidate_head="$(git rev-parse HEAD^2)"' in admission
+    assert '--pr-number "${{ github.event.number }}"' in admission
+    assert '--event-head-sha "${{ steps.event_head.outputs.candidate_head }}"' in admission
+    assert "needs.superseded_run_admission.outputs.current_head == 'true'" in heavy
+    assert "github.event.pull_request.draft == false" not in heavy
 
 
 def test_ci_heavy_matrix_is_deferred_for_stale_draft_or_closed_pull_request() -> None:
@@ -133,3 +160,15 @@ def test_qualification_workflows_have_repository_wide_distinct_group_prefixes() 
     assert "group: ci-${{ github.workflow }}-" in blocks[".github/workflows/ci.yml"]
     assert "group: windows-candidate-" in blocks[".github/workflows/windows-build.yml"]
     assert "group: endurance-" in blocks[".github/workflows/endurance.yml"]
+
+
+def test_ci_supports_payload_empty_fork_pr_admission_without_head_guessing() -> None:
+    _assert_payload_empty_fork_admission(".github/workflows/ci.yml", "test")
+
+
+def test_windows_supports_payload_empty_fork_pr_admission_without_head_guessing() -> None:
+    _assert_payload_empty_fork_admission(".github/workflows/windows-build.yml", "build")
+
+
+def test_endurance_supports_payload_empty_fork_pr_admission_without_head_guessing() -> None:
+    _assert_payload_empty_fork_admission(".github/workflows/endurance.yml", "endurance")

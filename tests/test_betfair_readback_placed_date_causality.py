@@ -6,6 +6,8 @@ import json
 
 import pytest
 
+from betfair_execution_readback_test_support import authoritative_execution_readback
+
 from autosport.betfair_account_readonly import (
     BetfairReadOnlyClient,
     BetfairSessionCredentials,
@@ -117,17 +119,12 @@ def _capture(action: ExecutionAction, *, placed_date: str):
             )
         )
 
-    client = BetfairReadOnlyClient(
-        BetfairSessionCredentials("app-secret", "session-secret"),
-        transport=_ReadbackTransport(responses),
-        clock=lambda: datetime.fromisoformat(OBSERVED_AT),
-        venue_id="betfair",
-        account_id="acct-1",
-    )
-    return client.read_execution_readback(
+    return authoritative_execution_readback(
+        responses,
         action_id=action.action_id,
         market_id=action.market_id,
         provider_order_ref=PROVIDER_REF,
+        account_id=action.account_id,
     )
 
 
@@ -174,17 +171,12 @@ def _capture_cleared(
             )
         )
 
-    client = BetfairReadOnlyClient(
-        BetfairSessionCredentials("app-secret", "session-secret"),
-        transport=_ReadbackTransport(responses),
-        clock=lambda: datetime.fromisoformat(OBSERVED_AT),
-        venue_id="betfair",
-        account_id="acct-1",
-    )
-    return client.read_execution_readback(
+    return authoritative_execution_readback(
+        responses,
         action_id=action.action_id,
         market_id=action.market_id,
         provider_order_ref=PROVIDER_REF,
+        account_id=action.account_id,
     )
 
 

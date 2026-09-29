@@ -20,26 +20,32 @@ _NAMED_TEMP_CALLED_KEY = "_autosport_test_hostile_named_temp_called"
 
 def _hostile_loads(*args, **kwargs):
     namespace = globals()
-    namespace[_LOADS_CALLED_KEY] = True
-    loads.__code__ = namespace[_LOADS_CODE_KEY]
+    namespace["_autosport_test_hostile_loads_called"] = True
+    loads.__code__ = namespace["_autosport_test_original_loads_code"]
     return loads(*args, **kwargs)
 
 
 def _hostile_dump(*args, **kwargs):
     namespace = globals()
-    namespace[_DUMP_CALLED_KEY] = True
-    dump.__code__ = namespace[_DUMP_CODE_KEY]
+    namespace["_autosport_test_hostile_dump_called"] = True
+    dump.__code__ = namespace["_autosport_test_original_dump_code"]
     return dump(*args, **kwargs)
 
 
 def _hostile_named_temporary_file(*args, **kwargs):
     namespace = globals()
-    namespace[_NAMED_TEMP_CALLED_KEY] = True
-    NamedTemporaryFile.__code__ = namespace[_NAMED_TEMP_CODE_KEY]
+    namespace["_autosport_test_hostile_named_temp_called"] = True
+    NamedTemporaryFile.__code__ = namespace["_autosport_test_original_named_temp_code"]
     return NamedTemporaryFile(*args, **kwargs)
 
 
-def _install_same_object_code_substitution(module, function_name: str, hostile_code, code_key: str, called_key: str):
+def _install_same_object_code_substitution(
+    module,
+    function_name: str,
+    hostile_code,
+    code_key: str,
+    called_key: str,
+):
     function = vars(module)[function_name]
     original_code = function.__code__
     vars(module)[code_key] = original_code
@@ -48,7 +54,13 @@ def _install_same_object_code_substitution(module, function_name: str, hostile_c
     return function, original_code
 
 
-def _restore_same_object_code_substitution(module, function, original_code, code_key: str, called_key: str) -> bool:
+def _restore_same_object_code_substitution(
+    module,
+    function,
+    original_code,
+    code_key: str,
+    called_key: str,
+) -> bool:
     function.__code__ = original_code
     called = bool(vars(module).pop(called_key, False))
     vars(module).pop(code_key, None)

@@ -225,15 +225,30 @@ class GitHubApi:
     def live_pr_qualification(self, pr_number: int) -> PullRequestQualification:
         payload = self._pull_request(pr_number)
         head = payload.get("head")
+        base = payload.get("base")
         state = payload.get("state")
         draft = payload.get("draft")
-        if not isinstance(head, dict):
-            raise CancellationError("invalid pull request head")
+        if not isinstance(head, dict) or not isinstance(base, dict):
+            raise CancellationError("invalid pull request head/base")
         if state not in ("open", "closed") or type(draft) is not bool:
             raise CancellationError("invalid pull request qualification state")
+
+        base_repo = base.get("repo")
+        if not isinstance(base_repo, dict) or base_repo.get("full_name") != self._repository:
+            raise CancellationError("pull request base repository is not canonical")
+
+        head_repo = head.get("repo")
+        same_repository_head = (
+            isinstance(head_repo, dict)
+            and head_repo.get("full_name") == self._repository
+        )
         return PullRequestQualification(
             head_sha=_require_sha(head.get("sha"), field="live pull request head"),
-            integration_capable=state == "open" and draft is False,
+            integration_capable=(
+                state == "open"
+                and draft is False
+                and same_repository_head
+            ),
         )
 
     def live_pr_head(self, pr_number: int) -> str:
@@ -244,12 +259,7 @@ class GitHubApi:
         return _require_sha(head.get("sha"), field="live pull request head")
 
     def pr_is_integration_capable(self, pr_number: int) -> bool:
-        payload = self._pull_request(pr_number)
-        state = payload.get("state")
-        draft = payload.get("draft")
-        if state not in ("open", "closed") or type(draft) is not bool:
-            raise CancellationError("invalid pull request qualification state")
-        return state == "open" and draft is False
+        return self.live_pr_qualification(pr_number).integration_capable
 
     def _active_runs_for_status(self, status: str) -> tuple[WorkflowRun, ...]:
         if status not in _ACTIVE_STATUSES:

@@ -26,6 +26,10 @@ from autosport.external_validity_policy_issuance import (
     resolve_product_policy_evaluation,
     verify_product_policy_evaluation,
 )
+from autosport.external_validity_registry import (
+    ExternalValidityRegistryError,
+    build_registered_external_validity_report,
+)
 from autosport.monotonic_workspace_binding import WorkspaceIdentityBinding
 from autosport.opportunity import StrategyClass
 
@@ -1182,6 +1186,22 @@ def test_product_policy_evaluation_issue_restart_idempotency_and_fresh_mint_reje
         reference.evaluation_bundle_sha256
     )
 
+    # Downstream #757/#758 composition: the public registered-report adapter accepts
+    # the result only by re-resolving the product-issued reference first.  This
+    # fixture intentionally has no supported baselines, so candidate issuance is the
+    # complete positive control and unsupported baseline reporting stays descriptive.
+    registered_report = build_registered_external_validity_report(
+        ScientificRegistry(registry_path),
+        protocol,
+        issued,
+        (),
+        authority=authority,
+        candidate_issued_reference=reference,
+        baseline_issued_references={},
+    )
+    assert registered_report.protocol_sha256 == protocol.identity_sha256
+    assert registered_report.to_payload()["truth"]["promotion_authority"] is False
+
     # Restart from durable workspace identity + serialized public reference only.
     reopened_authority = ProductPolicyEvaluationWorkspace.open(
         workspace,
@@ -1246,6 +1266,24 @@ def test_product_policy_evaluation_issue_restart_idempotency_and_fresh_mint_reje
     assert ScientificRegistry(registry_path).get(
         "EvaluationBundle", attacker_bundle_id
     ).payload["bundle_sha256"] == forged.evaluation_bundle_sha256
+
+    # The exact #758 historical bypass is now decisive: even a fresh caller DTO,
+    # recomputed public commitment, and matching caller-appended EvaluationBundleRef
+    # cannot cross the public registered-report boundary without product issuance.
+    with pytest.raises(
+        ExternalValidityRegistryError,
+        match="not exact product-issued evaluator truth",
+    ):
+        build_registered_external_validity_report(
+            ScientificRegistry(registry_path),
+            protocol,
+            forged,
+            (),
+            authority=reopened_authority,
+            candidate_issued_reference=restarted_reference,
+            baseline_issued_references={},
+            candidate_evaluation_bundle_id=attacker_bundle_id,
+        )
 
     with pytest.raises(
         ProductPolicyEvaluationIssuanceError,

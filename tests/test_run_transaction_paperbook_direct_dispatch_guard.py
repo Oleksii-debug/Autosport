@@ -242,6 +242,18 @@ class RunTransactionPaperBookDirectDispatchGuardTests(unittest.TestCase):
 
         self.assertEqual(hostile_calls, [])
 
+    def test_direct_dispatch_setup_mutators_are_not_runtime_capabilities(self):
+        """One-shot detached-consumer factories disappear after product composition."""
+
+        for name in (
+            "_install",
+            "_detach_consumer",
+            "_guard_detached_consumer",
+            "_make_surface_authority_checker",
+            "_fresh_cell",
+        ):
+            self.assertFalse(hasattr(direct_guard, name), name)
+
     def test_terminal_surface_witness_rejects_meta_meta_bypass_before_promotion(self):
         """Consumer witness remains fail-closed beyond any finite metaclass seal chain."""
 

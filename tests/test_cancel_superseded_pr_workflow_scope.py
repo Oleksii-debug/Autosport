@@ -317,8 +317,24 @@ def test_recovered_candidate_rejects_historical_cross_pr_reuse_at_cancel_boundar
 @pytest.mark.parametrize(
     "live_payload",
     (
-        {"head": {"sha": HEAD}, "state": "open", "draft": False},
-        {"head": {"sha": STALE_HEAD}, "state": "closed", "draft": False},
+        {
+            "head": {
+                "sha": HEAD,
+                "repo": {"full_name": "Oleksii-debug/Autosport"},
+            },
+            "base": {"repo": {"full_name": "Oleksii-debug/Autosport"}},
+            "state": "open",
+            "draft": False,
+        },
+        {
+            "head": {
+                "sha": STALE_HEAD,
+                "repo": {"full_name": "Oleksii-debug/Autosport"},
+            },
+            "base": {"repo": {"full_name": "Oleksii-debug/Autosport"}},
+            "state": "closed",
+            "draft": False,
+        },
     ),
 )
 def test_recovered_candidate_rechecks_live_lifecycle_after_association_before_post(

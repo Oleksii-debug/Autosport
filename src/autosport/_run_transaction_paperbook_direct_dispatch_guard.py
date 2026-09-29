@@ -10,7 +10,9 @@ could therefore change the executable path around the sealed persistence facade.
 This module adds no persistence authority. It detaches the already-installed guarded
 consumers from that live globals mapping and reuses the owning persistence graph's
 already-witnessed immutable surface type for the exact direct call targets promotion
-already consumes.
+already consumes. The direct consumer additionally witnesses both that shared facade
+class and its metaclass seal before and after execution, so removing the metaclass
+data descriptor cannot turn an already-created facade into a retargetable capability.
 """
 
 from __future__ import annotations
@@ -26,6 +28,7 @@ from . import run_transaction as _run_transaction
 
 
 _FROZEN_SURFACE = _member_freeze._FrozenSurface
+_SURFACE_ROOTS = ("__new__", "__iter__", "__getattr__", "__setattr__", "__delattr__")
 
 
 def _fresh_cell(value: object):
@@ -36,6 +39,112 @@ def _fresh_cell(value: object):
     if closure is None:
         raise RuntimeError("RunTransaction dispatch closure capture failed")
     return closure[0]
+
+
+def _make_surface_authority_checker() -> FunctionType:
+    """Capture the exact facade roots and the metaclass descriptors sealing them."""
+
+    surface_type = _FROZEN_SURFACE
+    surface_meta = type(surface_type)
+    exact_type = type
+    function_type = FunctionType
+    type_getattribute = type.__getattribute__
+    surface_bases = type_getattribute(surface_type, "__bases__")
+    surface_namespace = type_getattribute(surface_type, "__dict__")
+    meta_namespace = type_getattribute(surface_meta, "__dict__")
+
+    surface_witnesses: list[tuple[str, object, object | None]] = []
+    meta_witnesses: list[tuple[str, object]] = []
+    for name in _SURFACE_ROOTS:
+        descriptor = surface_namespace.get(name)
+        seal = meta_namespace.get(name)
+        if descriptor is None or seal is None:
+            raise RuntimeError(
+                f"canonical RunTransaction frozen-surface authority is incomplete: {name}"
+            )
+        code = descriptor.__code__ if exact_type(descriptor) is function_type else None
+        surface_witnesses.append((name, descriptor, code))
+        meta_witnesses.append((name, seal))
+
+    frozen_surface_witnesses = tuple(surface_witnesses)
+    frozen_meta_witnesses = tuple(meta_witnesses)
+
+    def require_surface_authority() -> None:
+        if (
+            exact_type(surface_type) is not surface_meta
+            or type_getattribute(surface_type, "__bases__") != surface_bases
+        ):
+            raise ValueError("RunTransaction frozen direct-dispatch surface type changed")
+        current_surface = type_getattribute(surface_type, "__dict__")
+        current_meta = type_getattribute(surface_meta, "__dict__")
+        for name, expected, expected_code in frozen_surface_witnesses:
+            if current_surface.get(name) is not expected:
+                raise ValueError(
+                    f"RunTransaction frozen direct-dispatch surface root changed: {name}"
+                )
+            if expected_code is not None and (
+                exact_type(expected) is not function_type
+                or expected.__code__ is not expected_code
+            ):
+                raise ValueError(
+                    f"RunTransaction frozen direct-dispatch surface executable changed: {name}"
+                )
+        for name, expected in frozen_meta_witnesses:
+            if current_meta.get(name) is not expected:
+                raise ValueError(
+                    f"RunTransaction frozen direct-dispatch metaclass seal changed: {name}"
+                )
+
+    return require_surface_authority
+
+
+def _guard_surface_consumer(
+    function: FunctionType,
+    *,
+    inner_globals: dict[str, object],
+) -> FunctionType:
+    """Fail closed if a shared frozen facade was retargeted after composition."""
+
+    require_surface_authority = _make_surface_authority_checker()
+    require_surface_authority_code = require_surface_authority.__code__
+    exact_type = type
+    function_type = FunctionType
+    inner_name = function.__name__
+    inner_qualname = function.__qualname__
+    inner_doc = function.__doc__
+    inner_annotations = dict(function.__annotations__)
+
+    def guarded_consumer(*args, **kwargs):
+        # Keep ``inner_globals`` in this outer closure intentionally. Existing focused
+        # tests and downstream composition inspect the sealed consumer's exact detached
+        # globals, and that diagnostic handle must continue to describe the real call.
+        if exact_type(inner_globals) is not dict:
+            raise ValueError("RunTransaction detached direct-dispatch globals changed")
+        if (
+            exact_type(require_surface_authority) is not function_type
+            or require_surface_authority.__code__ is not require_surface_authority_code
+        ):
+            raise ValueError(
+                "RunTransaction frozen direct-dispatch verifier executable changed"
+            )
+        require_surface_authority()
+        try:
+            return function(*args, **kwargs)
+        finally:
+            if (
+                exact_type(require_surface_authority) is not function_type
+                or require_surface_authority.__code__ is not require_surface_authority_code
+            ):
+                raise ValueError(
+                    "RunTransaction frozen direct-dispatch verifier executable changed"
+                )
+            require_surface_authority()
+
+    guarded_consumer.__name__ = inner_name
+    guarded_consumer.__qualname__ = inner_qualname
+    guarded_consumer.__doc__ = inner_doc
+    guarded_consumer.__annotations__ = inner_annotations
+    return guarded_consumer
 
 
 def _detach_consumer(function: FunctionType) -> FunctionType:
@@ -53,6 +162,7 @@ def _detach_consumer(function: FunctionType) -> FunctionType:
         raise RuntimeError("RunTransaction sealed consumer globals are invalid")
 
     detached_globals = dict(inner_globals)
+    guard_direct_surface = False
     if function.__qualname__ == "RunTransaction._promote_paper_book_snapshot":
         if inner_globals.get("os") is not os:
             raise RuntimeError("RunTransaction canonical OS dispatch changed before sealing")
@@ -74,6 +184,7 @@ def _detach_consumer(function: FunctionType) -> FunctionType:
         detached_globals["PaperBook"] = _FROZEN_SURFACE(
             load_bytes=_paper.PaperBook.load_bytes,
         )
+        guard_direct_surface = True
 
     detached_closure = list(closure)
     detached_closure[globals_index] = _fresh_cell(detached_globals)
@@ -89,6 +200,8 @@ def _detach_consumer(function: FunctionType) -> FunctionType:
     clone.__qualname__ = function.__qualname__
     clone.__doc__ = function.__doc__
     clone.__annotations__ = dict(function.__annotations__)
+    if guard_direct_surface:
+        return _guard_surface_consumer(clone, inner_globals=detached_globals)
     return clone
 
 

@@ -491,6 +491,26 @@ def _datetime(value: str) -> datetime:
     return datetime.fromisoformat(value.replace("Z", "+00:00"))
 
 
+def _canonical_utc_timestamp(value: object, field: str) -> str:
+    """Canonicalize one semantic instant for durable provider/request identity."""
+
+    try:
+        instant = _datetime(_timestamp(value, field)).astimezone(timezone.utc)
+    except (OverflowError, ValueError) as exc:
+        raise TheOddsApiPayloadError(
+            f"{field} cannot be represented as canonical UTC"
+        ) from exc
+    rendered = instant.isoformat(timespec="microseconds")
+    if not rendered.endswith("+00:00"):
+        raise TheOddsApiPayloadError(
+            f"{field} cannot be represented as canonical UTC"
+        )
+    body = rendered[:-6]
+    if "." in body:
+        body = body.rstrip("0").rstrip(".")
+    return body + "Z"
+
+
 def _chronological_microseconds(value: str, field: str) -> int:
     """Map one provider timestamp to exact UTC microseconds for source ordering."""
 
@@ -815,7 +835,7 @@ class TheOddsApiProvider:
     ) -> TheOddsApiHistoricalSnapshot:
         if type(max_items) is not int or max_items <= 0:
             raise ValueError("max_items must be a positive non-boolean integer")
-        requested_at = _timestamp(requested_at, "requested_at")
+        requested_at = _canonical_utc_timestamp(requested_at, "requested_at")
         response, provider_origin_verified = self._request(
             self._historical_url(requested_at)
         )
@@ -830,7 +850,7 @@ class TheOddsApiProvider:
         if not isinstance(payload, dict):
             raise TheOddsApiPayloadError("historical response must be an object")
 
-        snapshot_at = _timestamp(payload.get("timestamp"), "timestamp")
+        snapshot_at = _canonical_utc_timestamp(payload.get("timestamp"), "timestamp")
         if _datetime(snapshot_at) > _datetime(requested_at):
             raise TheOddsApiPayloadError(
                 "historical snapshot timestamp must not be later than requested_at"
@@ -838,10 +858,14 @@ class TheOddsApiProvider:
         previous = payload.get("previous_timestamp")
         next_snapshot = payload.get("next_timestamp")
         previous_at = (
-            None if previous is None else _timestamp(previous, "previous_timestamp")
+            None
+            if previous is None
+            else _canonical_utc_timestamp(previous, "previous_timestamp")
         )
         next_at = (
-            None if next_snapshot is None else _timestamp(next_snapshot, "next_timestamp")
+            None
+            if next_snapshot is None
+            else _canonical_utc_timestamp(next_snapshot, "next_timestamp")
         )
         if previous_at is not None and _datetime(previous_at) >= _datetime(snapshot_at):
             raise TheOddsApiPayloadError(
@@ -1219,7 +1243,7 @@ class TheOddsApiProvider:
             raise TheOddsApiPayloadError(
                 "event sport_key does not match requested sport"
             )
-        commence_time = _timestamp(
+        commence_time = _canonical_utc_timestamp(
             event.get("commence_time"), "event.commence_time"
         )
         bookmakers = event.get("bookmakers")
@@ -1265,7 +1289,7 @@ class TheOddsApiProvider:
                 market_sid = _optional_provider_text(
                     raw_market.get("sid"), "market.sid"
                 )
-                source_ts = _timestamp(
+                source_ts = _canonical_utc_timestamp(
                     raw_market.get("last_update"), "market.last_update"
                 )
                 self._validate_freshness(

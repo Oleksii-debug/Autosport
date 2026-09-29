@@ -213,6 +213,84 @@ def test_process_global_urllib_opener_cannot_mint_authenticated_origin(monkeypat
     ]
 
 
+def test_product_owned_result_resolver_redecodes_exact_authenticated_bytes(monkeypatch):
+    client, _opener = _client(monkeypatch)
+    acquisition = origin.acquire_authenticated_betfair_discovery(
+        client,
+        build_list_event_types_request(),
+    )
+
+    result = origin.resolve_authoritative_betfair_authenticated_discovery_result(
+        acquisition
+    )
+
+    assert result == acquisition.result
+    assert result == [
+        {
+            "eventType": {"id": "1", "name": "Soccer"},
+            "marketCount": 2,
+        }
+    ]
+
+
+def test_product_owned_result_resolver_rejects_post_acquisition_raw_mutation(monkeypatch):
+    client, _opener = _client(monkeypatch)
+    acquisition = origin.acquire_authenticated_betfair_discovery(
+        client,
+        build_list_event_types_request(),
+    )
+    forged = json.dumps(
+        {"jsonrpc": "2.0", "id": 2, "result": []},
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    ).encode("utf-8")
+    object.__setattr__(acquisition.exchange, "raw_response", forged)
+
+    with pytest.raises(
+        BetfairDiscoveryProvenanceError,
+        match="changed after authenticated acquisition",
+    ):
+        origin.resolve_authoritative_betfair_authenticated_discovery_result(
+            acquisition
+        )
+
+
+def test_product_owned_result_resolver_rejects_result_or_decoder_rebinding(monkeypatch):
+    client, _opener = _client(monkeypatch)
+    acquisition = origin.acquire_authenticated_betfair_discovery(
+        client,
+        build_list_event_types_request(),
+    )
+    object.__setattr__(acquisition, "result", [])
+
+    with pytest.raises(
+        BetfairDiscoveryProvenanceError,
+        match="result changed after acquisition",
+    ):
+        origin.resolve_authoritative_betfair_authenticated_discovery_result(
+            acquisition
+        )
+
+    client2, _opener2 = _client(monkeypatch)
+    acquisition2 = origin.acquire_authenticated_betfair_discovery(
+        client2,
+        build_list_event_types_request(),
+    )
+    monkeypatch.setattr(
+        origin._readonly,
+        "_decode_json",
+        lambda _payload: {"jsonrpc": "2.0", "result": []},
+    )
+    with pytest.raises(
+        BetfairDiscoveryProvenanceError,
+        match="not canonical",
+    ):
+        origin.resolve_authoritative_betfair_authenticated_discovery_result(
+            acquisition2
+        )
+
+
 def test_product_owned_authenticated_discovery_mints_exact_live_origin(monkeypatch):
     _client_obj, opener, evidence, event_acq, market_acq = _live_evidence(monkeypatch)
 

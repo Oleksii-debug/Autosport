@@ -174,6 +174,35 @@ def test_scoped_scan_applies_authorized_same_head_empty_reference_recovery() -> 
     ]
 
 
+def test_recovered_candidate_identity_is_revalidated_at_cancel_boundary() -> None:
+    api = FakeScopedApi(
+        356678400,
+        [
+            [_associated_pr(2022)],
+            [_associated_pr(2022), _associated_pr(3030)],
+        ],
+    )
+    api.configure_same_head_candidate_recovery(
+        pr_number=2022,
+        event_head_sha=HEAD,
+        workflow_name="CI",
+        current_run_id=100,
+    )
+    recovered = api._recover_candidate_run_reference(_candidate(99))
+    assert recovered.pr_numbers == (2022,)
+
+    with pytest.raises(
+        CancellationError,
+        match="association is no longer unique",
+    ):
+        api.cancel(99)
+
+    assert api.paths == [
+        f"/commits/{HEAD}/pulls?per_page=100&page=1",
+        f"/commits/{HEAD}/pulls?per_page=100&page=1",
+    ]
+
+
 @pytest.mark.parametrize(
     "candidate",
     (

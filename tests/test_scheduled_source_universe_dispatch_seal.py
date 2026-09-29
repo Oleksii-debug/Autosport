@@ -388,5 +388,50 @@ class ScheduledSourceUniverseDispatchSealTests(unittest.TestCase):
                 )
 
 
+    def test_canonical_json_code_mutation_fails_before_source_dispatch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path, store, cycle_seq, _candidate = _ready_store(tmp)
+            dumps = source_module.json.dumps
+            original_code = dumps.__code__
+
+            def hostile_dumps(*args, **kwargs):
+                return "{}"
+
+            dumps.__code__ = hostile_dumps.__code__
+            try:
+                with self.assertRaisesRegex(
+                    source_module.SourceUniverseCommitmentError,
+                    "canonical JSON authority is rebound",
+                ):
+                    source_module.build_source_universe_commitment(
+                        store,
+                        expected_store_path=path,
+                        source_id=SOURCE_ID,
+                        start_cycle_seq=cycle_seq,
+                        end_cycle_seq=cycle_seq,
+                    )
+            finally:
+                dumps.__code__ = original_code
+
+    def test_reflection_code_mutation_fails_before_scheduled_dispatch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path, store, _cycle_seq, candidate = _ready_store(tmp)
+            getattr_static = scheduled_module.inspect.getattr_static
+            original_code = getattr_static.__code__
+
+            def hostile_getattr_static(*args, **kwargs):
+                return None
+
+            getattr_static.__code__ = hostile_getattr_static.__code__
+            try:
+                with self.assertRaisesRegex(
+                    scheduled_module.ScheduledSourceUniverseError,
+                    "reflection authority is rebound",
+                ):
+                    _resolve(path, store, candidate)
+            finally:
+                getattr_static.__code__ = original_code
+
+
 if __name__ == "__main__":
     unittest.main()

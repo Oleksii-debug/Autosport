@@ -357,6 +357,78 @@ def test_directory_replacement_before_descent_fails_closed(
     )
 
 
+
+
+def test_late_file_created_after_directory_snapshot_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    canary = "planted-secret"
+    original_scan_directory = secret_canary_scan._scan_directory
+    injected = False
+
+    def scan_then_inject(
+        path: Path,
+        expected_identity: secret_canary_scan._PathIdentity,
+    ):
+        nonlocal injected
+        entries = original_scan_directory(path, expected_identity)
+        if path == tmp_path and not injected:
+            (tmp_path / "late-secret.txt").write_text(canary, encoding="utf-8")
+            injected = True
+        return entries
+
+    monkeypatch.setattr(
+        secret_canary_scan,
+        "_scan_directory",
+        scan_then_inject,
+    )
+
+    report = secret_canary_scan.scan_secret_canary(tmp_path, canary)
+
+    assert injected is True
+    assert report.status == "INCOMPLETE"
+    assert report.exit_code == 3
+    assert report.findings == ()
+    assert any(
+        error.error_type == "DirectoryIdentityChanged"
+        for error in report.errors
+    )
+
+
+def test_file_mutated_after_bound_read_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    canary = "planted-secret"
+    victim = tmp_path / "artifact.bin"
+    victim.write_bytes(b"safe")
+    original_scan_file = secret_canary_scan._scan_file
+    mutated = False
+
+    def scan_then_mutate(*args, **kwargs):
+        nonlocal mutated
+        result = original_scan_file(*args, **kwargs)
+        path = args[0]
+        if path == victim and not mutated:
+            path.write_text(canary, encoding="utf-8")
+            mutated = True
+        return result
+
+    monkeypatch.setattr(secret_canary_scan, "_scan_file", scan_then_mutate)
+
+    report = secret_canary_scan.scan_secret_canary(tmp_path, canary)
+
+    assert mutated is True
+    assert report.status == "INCOMPLETE"
+    assert report.exit_code == 3
+    assert report.findings == ()
+    assert any(
+        error.error_type == "FileIdentityChanged"
+        for error in report.errors
+    )
+
+
 def test_symlink_swap_immediately_before_open_fails_closed(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

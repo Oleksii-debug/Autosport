@@ -21,7 +21,11 @@ from types import MappingProxyType
 from . import _paperbook_preload_authority_guard as _guard
 
 
-class _FrozenSurfaceMeta(type):
+class _FrozenSurfaceMetaMeta(type):
+    """Protect the descriptor-bearing facade metaclass from one-step root removal."""
+
+
+class _FrozenSurfaceMeta(type, metaclass=_FrozenSurfaceMetaMeta):
     """Dedicated metaclass so finalized facade dispatch can be data-descriptor sealed."""
 
 
@@ -63,9 +67,10 @@ class _FrozenSurface(tuple, metaclass=_FrozenSurfaceMeta):
     mutating any object reachable from that projection cannot retarget this facade.
 
     The class-level executable roots are sealed below through metaclass data descriptors.
-    That matters because tuple payload immutability alone does not stop a later
-    ``_FrozenSurface.__getattr__`` or ``__iter__`` replacement from retargeting every
-    already-created facade.
+    The descriptor-bearing metaclass roots are themselves guarded one level higher so a
+    caller cannot first remove the seal with ``type.__delattr__`` and then retarget the
+    already-created facade class. Positive persistence still independently witnesses the
+    executable surface before and after authority-bearing dispatch.
     """
 
     __slots__ = ()
@@ -98,8 +103,11 @@ class _FrozenSurface(tuple, metaclass=_FrozenSurfaceMeta):
 
 def _seal_surface_type() -> None:
     surface_type = _FrozenSurface
-    if type(surface_type) is not _FrozenSurfaceMeta or surface_type.__bases__ != (tuple,):
+    surface_meta = _FrozenSurfaceMeta
+    if type(surface_type) is not surface_meta or surface_type.__bases__ != (tuple,):
         raise RuntimeError("canonical PaperBook frozen-surface type changed before sealing")
+    if type(surface_meta) is not _FrozenSurfaceMetaMeta or surface_meta.__bases__ != (type,):
+        raise RuntimeError("canonical PaperBook frozen-surface metaclass changed before sealing")
 
     namespace = type.__getattribute__(surface_type, "__dict__")
     protected = ("__new__", "__iter__", "__getattr__", "__setattr__", "__delattr__")
@@ -110,17 +118,31 @@ def _seal_surface_type() -> None:
             raise RuntimeError(f"canonical PaperBook frozen-surface root missing: {name}")
         descriptors[name] = descriptor
 
+    meta_roots: dict[str, object] = {}
     for name, descriptor in descriptors.items():
+        sealed = _SealedSurfaceRoot(name, descriptor, surface_type)
+        type.__setattr__(surface_meta, name, sealed)
+        meta_roots[name] = sealed
+
+    # Explicit ``type.__delattr__(surface_meta, name)`` bypasses surface_meta's own
+    # ordinary __delattr__ dispatch. Put matching data descriptors on its metaclass so
+    # the exact descriptor-removal-then-retarget route is rejected before the inner
+    # seal can be removed. This complements (rather than replaces) the positive-path
+    # executable witness that independently rejects a changed facade graph.
+    for name, descriptor in meta_roots.items():
         type.__setattr__(
-            _FrozenSurfaceMeta,
+            _FrozenSurfaceMetaMeta,
             name,
-            _SealedSurfaceRoot(name, descriptor, surface_type),
+            _SealedSurfaceRoot(name, descriptor, surface_meta),
         )
 
     current = type.__getattribute__(surface_type, "__dict__")
+    current_meta = type.__getattribute__(surface_meta, "__dict__")
     for name, expected in descriptors.items():
         if current.get(name) is not expected:
             raise RuntimeError(f"canonical PaperBook frozen-surface root moved: {name}")
+        if current_meta.get(name) is not meta_roots[name]:
+            raise RuntimeError(f"canonical PaperBook frozen-surface metaclass root moved: {name}")
 
 
 _seal_surface_type()

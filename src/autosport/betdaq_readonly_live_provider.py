@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from decimal import Decimal
+import hashlib
 from typing import Sequence
 
 from .betdaq_account_readonly import BetdaqCredentials, BetdaqSoapTransport
@@ -120,8 +121,12 @@ class BetdaqLiveReadOnlyProvider(BetdaqReadOnlyProvider):
             )
             if self._evidence is None:
                 raise AssertionError("successful live load must publish request evidence")
+            aggregate = hashlib.sha256()
+            aggregate.update(bytes.fromhex(self._evidence.aggregate_sha256))
+            aggregate.update(bytes.fromhex(catalogue_evidence.response_sha256))
             self._evidence = replace(
                 self._evidence,
+                aggregate_sha256=aggregate.hexdigest(),
                 catalogue_response_sha256=catalogue_evidence.response_sha256,
                 catalogue_rate_admission_receipt=(
                     catalogue_evidence.rate_admission_receipt

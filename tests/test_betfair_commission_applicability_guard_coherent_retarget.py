@@ -36,10 +36,10 @@ def _hostile_reader(*_args: object, **_kwargs: object):
 def test_guard_rejects_coherent_reader_code_and_expected_witness_retarget() -> None:
     """Expected reader code must not be caller-mutable guard authority.
 
-    The public boundary anchors the guard function/code in its own code constants, but
-    the guard historically kept the expected provider-reader code in a writable closure
-    cell.  Retargeting both the reader and that expected-code cell coherently must fail
-    closed before the hostile provider reader can execute.
+    The public boundary anchors the guard function/code in its own code constants. The
+    guard keeps historical expected-code cells only as diagnostics; coherently moving
+    both the provider reader and that writable diagnostic cell must still fail against
+    the independent immutable code witness embedded in the guard code constants.
     """
 
     public_assess = applicability.assess_betfair_commission_applicability
@@ -47,14 +47,11 @@ def test_guard_rejects_coherent_reader_code_and_expected_witness_retarget() -> N
     assert authority.__code__ is authority_code
 
     reader = _closure_cell(public_assess, "fee_input_reader").cell_contents
-    reader_function = _closure_cell(
-        public_assess, "fee_input_reader_function"
-    ).cell_contents
+    reader_function = reader.func
     expected_code_cell = _closure_cell(
         authority, "fee_input_reader_function_code"
     )
 
-    assert reader.func is reader_function
     original_code = reader_function.__code__
     original_expected_code = expected_code_cell.cell_contents
     hostile_code = _hostile_reader.__code__

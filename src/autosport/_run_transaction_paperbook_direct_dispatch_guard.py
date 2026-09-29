@@ -198,19 +198,25 @@ def _guard_detached_consumer(
     builtins_items_anchor_marker = "__AUTOSPORT_RUN_TRANSACTION_BUILTINS_SNAPSHOT_ANCHOR__"
     closure_values_anchor_marker = "__AUTOSPORT_RUN_TRANSACTION_CLOSURE_SNAPSHOT_ANCHOR__"
     globals_items_anchor_marker = "__AUTOSPORT_RUN_TRANSACTION_GLOBALS_ITEMS_SNAPSHOT_ANCHOR__"
+    globals_index_anchor_marker = "__AUTOSPORT_RUN_TRANSACTION_GLOBALS_INDEX_ANCHOR__"
+    globals_cell_anchor_marker = "__AUTOSPORT_RUN_TRANSACTION_GLOBALS_CELL_ANCHOR__"
     missing = object()
 
     def require_bindings() -> None:
+        anchored_inner_globals_index = "__AUTOSPORT_RUN_TRANSACTION_GLOBALS_INDEX_ANCHOR__"
+        anchored_inner_globals_cell = "__AUTOSPORT_RUN_TRANSACTION_GLOBALS_CELL_ANCHOR__"
         current_closure = function.__closure__
         if (
-            exact_type(function) is not function_type
+            inner_globals_index != anchored_inner_globals_index
+            or inner_globals_cell is not anchored_inner_globals_cell
+            or exact_type(function) is not function_type
             or function.__code__ is not inner_code
             or current_closure is None
-            or current_closure[inner_globals_index] is not inner_globals_cell
+            or current_closure[anchored_inner_globals_index] is not anchored_inner_globals_cell
         ):
             raise ValueError("RunTransaction detached direct-dispatch executable changed")
         try:
-            current_inner_globals = inner_globals_cell.cell_contents
+            current_inner_globals = anchored_inner_globals_cell.cell_contents
         except ValueError as exc:
             raise ValueError(
                 "RunTransaction detached direct-dispatch globals cell is empty"
@@ -261,6 +267,8 @@ def _guard_detached_consumer(
         builtins_items_anchor_marker,
         closure_values_anchor_marker,
         globals_items_anchor_marker,
+        globals_index_anchor_marker,
+        globals_cell_anchor_marker,
     )
     if any(sum(item == marker for item in anchor_constants) != 1 for marker in anchor_markers):
         raise RuntimeError("RunTransaction detached snapshot identity anchor is ambiguous")
@@ -276,6 +284,10 @@ def _guard_detached_consumer(
             if item == closure_values_anchor_marker
             else frozen_globals_items
             if item == globals_items_anchor_marker
+            else inner_globals_index
+            if item == globals_index_anchor_marker
+            else inner_globals_cell
+            if item == globals_cell_anchor_marker
             else item
             for item in anchor_constants
         )
@@ -359,8 +371,12 @@ def _guard_detached_consumer(
         anchored_inner_code = "__AUTOSPORT_RUN_TRANSACTION_DETACHED_CODE_ANCHOR__"
         anchored_surface_authority = "__AUTOSPORT_RUN_TRANSACTION_SURFACE_AUTHORITY_ANCHOR__"
         anchored_surface_authority_code = "__AUTOSPORT_RUN_TRANSACTION_SURFACE_AUTHORITY_CODE_ANCHOR__"
+        anchored_inner_globals_index = "__AUTOSPORT_RUN_TRANSACTION_GLOBALS_INDEX_ANCHOR__"
+        anchored_inner_globals_cell = "__AUTOSPORT_RUN_TRANSACTION_GLOBALS_CELL_ANCHOR__"
         if (
-            exact_type is not anchored_exact_type
+            inner_globals_index != anchored_inner_globals_index
+            or inner_globals_cell is not anchored_inner_globals_cell
+            or exact_type is not anchored_exact_type
             or function_type is not anchored_function_type
             or dict_type is not anchored_dict_type
             or list_type is not anchored_list_type
@@ -401,7 +417,7 @@ def _guard_detached_consumer(
         call_function_globals["__builtins__"] = dict_type(frozen_builtins_items)
         call_globals = dict_type(frozen_globals_items)
         call_closure_values = list_type(frozen_closure_values)
-        call_closure_values[inner_globals_index] = call_globals
+        call_closure_values[anchored_inner_globals_index] = call_globals
         delegate = function_type(
             inner_code,
             call_function_globals,
@@ -415,7 +431,9 @@ def _guard_detached_consumer(
             return delegate(*args, **kwargs)
         finally:
             if (
-                exact_type is not anchored_exact_type
+                inner_globals_index != anchored_inner_globals_index
+                or inner_globals_cell is not anchored_inner_globals_cell
+                or exact_type is not anchored_exact_type
                 or function_type is not anchored_function_type
                 or dict_type is not anchored_dict_type
                 or list_type is not anchored_list_type
@@ -470,6 +488,8 @@ def _guard_detached_consumer(
         (inner_code_marker, inner_code),
         (surface_authority_marker, surface_authority),
         (surface_authority_code_marker, surface_authority_code),
+        (globals_index_anchor_marker, inner_globals_index),
+        (globals_cell_anchor_marker, inner_globals_cell),
     )
     if any(sum(item == marker for item in guarded_constants) != 1 for marker, _ in guarded_anchors):
         raise RuntimeError("RunTransaction detached verifier identity anchor is ambiguous")

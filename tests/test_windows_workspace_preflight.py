@@ -32,6 +32,10 @@ def test_interactive_gui_fails_before_gui_import_when_workspace_is_unwritable(
 ) -> None:
     workspace = tmp_path / "readonly workspace"
     monkeypatch.setenv("AUTOSPORT_WORKSPACE", str(workspace))
+    monkeypatch.setattr(
+        "autosport.webview2_runtime_deployment.ensure_webview2_runtime",
+        lambda: SimpleNamespace(available=True),
+    )
 
     def fail_probe(candidate: Path) -> None:
         assert candidate == workspace
@@ -66,6 +70,10 @@ def test_interactive_gui_fails_before_gui_import_when_atomic_publish_primitive_f
 ) -> None:
     workspace = tmp_path / "atomic publish workspace"
     monkeypatch.setenv("AUTOSPORT_WORKSPACE", str(workspace))
+    monkeypatch.setattr(
+        "autosport.webview2_runtime_deployment.ensure_webview2_runtime",
+        lambda: SimpleNamespace(available=True),
+    )
 
     if failing_primitive == "fsync":
         def fail_fsync(_fd: int) -> None:

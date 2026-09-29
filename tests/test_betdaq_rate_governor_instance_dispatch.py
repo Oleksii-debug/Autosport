@@ -64,3 +64,38 @@ def test_resolved_governor_cannot_inject_new_instance_dispatch_surface(tmp_path)
         governor.caller_owned_rate_authority = lambda *args, **kwargs: None
 
     assert not hasattr(governor, "caller_owned_rate_authority")
+
+
+@pytest.mark.parametrize(
+    "attribute",
+    (
+        "workspace",
+        "policy",
+        "_runtime",
+        "_blacklist_store",
+        "policy_fingerprint",
+        "_method_policies",
+        "governor_id",
+    ),
+)
+def test_resolved_governor_authority_bindings_are_write_once(tmp_path, attribute):
+    governor = _resolved_governor(tmp_path)
+    original = getattr(governor, attribute)
+
+    with pytest.raises(
+        AttributeError,
+        match="authority bindings are write-once",
+    ):
+        setattr(governor, attribute, object())
+    assert getattr(governor, attribute) is original
+
+    with pytest.raises(
+        AttributeError,
+        match="authority bindings are write-once",
+    ):
+        delattr(governor, attribute)
+    assert getattr(governor, attribute) is original
+
+    admission = governor.admit("GetPrices")
+    assert admission.method == "GetPrices"
+    assert admission.sequence == 1

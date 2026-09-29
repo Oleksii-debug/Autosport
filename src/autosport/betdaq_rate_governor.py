@@ -864,6 +864,20 @@ class BetdaqRateGovernor:
         "governor_id",
     )
 
+    def __setattr__(self, name: str, value: object) -> None:
+        """Bind canonical governor state exactly once during construction."""
+
+        try:
+            object.__getattribute__(self, name)
+        except AttributeError:
+            object.__setattr__(self, name, value)
+            return
+        raise AttributeError("BetdaqRateGovernor authority bindings are write-once")
+
+    def __delattr__(self, name: str) -> None:
+        del name
+        raise AttributeError("BetdaqRateGovernor authority bindings are write-once")
+
     def __init__(
         self,
         workspace: Path,

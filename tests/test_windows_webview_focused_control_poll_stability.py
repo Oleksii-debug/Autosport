@@ -85,6 +85,28 @@ def test_readonly_readbacks_preserve_focused_review_position_and_noop_stability(
         assert projection not in source
 
 
+def test_scalar_readbacks_avoid_noop_text_node_replacement() -> None:
+    source = _source()
+
+    stable_scalar_projections = (
+        'setTextIfChanged(byId("workspace-value"), state.workspace || "—");',
+        'setTextIfChanged(byId("active-workspace-value"), state.active_workspace || "—");',
+        'setTextIfChanged(byId("dataset-summary"), state.dataset_summary || "");',
+        'setTextIfChanged(byId("research-plan-summary"), state.research_plan_summary || "");',
+    )
+    for projection in stable_scalar_projections:
+        assert projection in source
+
+    stale_scalar_projections = (
+        'byId("workspace-value").textContent = state.workspace || "—";',
+        'byId("active-workspace-value").textContent = state.active_workspace || "—";',
+        'byId("dataset-summary").textContent = state.dataset_summary || "";',
+        'byId("research-plan-summary").textContent = state.research_plan_summary || "";',
+    )
+    for projection in stale_scalar_projections:
+        assert projection not in source
+
+
 def test_structured_readbacks_defer_poll_mutation_while_operator_focuses_them() -> None:
     source = _source()
 

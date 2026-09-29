@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import dis
+from functools import partial
 from types import FunctionType
 
 import pytest
@@ -22,20 +23,39 @@ def _hostile_fee_input_reader(_client, *, market_id: str):
 def test_in_place_fee_input_reader_code_retarget_fails_before_provider_ingress() -> None:
     public_assess = applicability.assess_betfair_commission_applicability
     reader = _closure_value(public_assess, "fee_input_reader")
-    captured_code = _closure_value(public_assess, "fee_input_reader_code")
+    captured_function = _closure_value(public_assess, "fee_input_reader_function")
+    captured_code = _closure_value(public_assess, "fee_input_reader_function_code")
 
-    assert type(reader) is FunctionType
-    assert reader.__code__ is captured_code
-    original_code = reader.__code__
+    assert type(reader) is partial
+    assert reader.func is captured_function
+    assert captured_function.__code__ is captured_code
+    original_code = captured_function.__code__
     try:
-        reader.__code__ = _hostile_fee_input_reader.__code__
+        captured_function.__code__ = _hostile_fee_input_reader.__code__
         with pytest.raises(
             applicability.BetfairCommissionApplicabilityError,
             match="fee input reader executable authority changed",
         ):
             public_assess(object(), market_id="1.234")
     finally:
-        reader.__code__ = original_code
+        captured_function.__code__ = original_code
+
+
+def test_fee_input_reader_partial_keyword_mutation_fails_before_provider_ingress() -> None:
+    public_assess = applicability.assess_betfair_commission_applicability
+    reader = _closure_value(public_assess, "fee_input_reader")
+
+    assert type(reader) is partial
+    assert reader.keywords == {}
+    reader.keywords["hostile"] = True
+    try:
+        with pytest.raises(
+            applicability.BetfairCommissionApplicabilityError,
+            match="fee input reader executable authority changed",
+        ):
+            public_assess(object(), market_id="1.234")
+    finally:
+        reader.keywords.pop("hostile")
 
 
 def test_assessment_boundary_witnesses_executable_graph_around_provider_call() -> None:

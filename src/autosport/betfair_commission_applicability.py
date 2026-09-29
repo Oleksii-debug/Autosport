@@ -267,12 +267,19 @@ def _build_product_boundary():
     # accepts a caller-supplied observation and can mint product issuance without the
     # canonical provider read first.
     fee_input_reader = read_betfair_execution_fee_inputs
-    fee_input_reader_code = fee_input_reader.__code__
-    fee_input_reader_globals = fee_input_reader.__globals__
-    fee_input_reader_closure = fee_input_reader.__closure__
-    fee_input_reader_closure_values = tuple(
-        cell.cell_contents for cell in (fee_input_reader_closure or ())
+    if type(fee_input_reader) is not partial:
+        raise BetfairCommissionApplicabilityError(
+            "fee input reader must be exact sealed functools.partial"
+        )
+    fee_input_reader_function = fee_input_reader.func
+    fee_input_reader_function_code = fee_input_reader_function.__code__
+    fee_input_reader_function_globals = fee_input_reader_function.__globals__
+    fee_input_reader_function_closure = fee_input_reader_function.__closure__
+    fee_input_reader_function_closure_values = tuple(
+        cell.cell_contents for cell in (fee_input_reader_function_closure or ())
     )
+    fee_input_reader_args = fee_input_reader.args
+    fee_input_reader_keywords = dict(fee_input_reader.keywords)
     fee_payload_builder = _FEE_INPUT_SHA256_CAPABILITY
     fee_payload_function = fee_payload_builder.func
     fee_payload_function_code = fee_payload_function.__code__
@@ -306,15 +313,22 @@ def _build_product_boundary():
 
     def require_executable_authority() -> None:
         if (
-            fee_input_reader.__code__ is not fee_input_reader_code
-            or fee_input_reader.__globals__ is not fee_input_reader_globals
-            or fee_input_reader.__closure__ is not fee_input_reader_closure
+            type(fee_input_reader) is not partial
+            or fee_input_reader.func is not fee_input_reader_function
+            or fee_input_reader.args is not fee_input_reader_args
+            or fee_input_reader.keywords != fee_input_reader_keywords
+            or fee_input_reader_function.__code__ is not fee_input_reader_function_code
+            or fee_input_reader_function.__globals__ is not fee_input_reader_function_globals
+            or fee_input_reader_function.__closure__ is not fee_input_reader_function_closure
         ):
             raise error_type("fee input reader executable authority changed")
-        current_closure = fee_input_reader.__closure__ or ()
-        if len(current_closure) != len(fee_input_reader_closure_values):
+        current_closure = fee_input_reader_function.__closure__ or ()
+        if len(current_closure) != len(fee_input_reader_function_closure_values):
             raise error_type("fee input reader closure authority changed")
-        for cell, expected in zip(current_closure, fee_input_reader_closure_values):
+        for cell, expected in zip(
+            current_closure,
+            fee_input_reader_function_closure_values,
+        ):
             try:
                 current = cell.cell_contents
             except ValueError as exc:

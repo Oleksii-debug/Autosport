@@ -530,6 +530,7 @@ def _seal_scheduled_source_universe_dispatch() -> None:
     expected_commitment_type = SourceUniverseCommitment
     expected_source_error_type = SourceUniverseCommitmentError
     expected_resolution_type = ScheduledSourceUniverseResolution
+    expected_resolution_field_names = tuple(expected_resolution_type.__slots__)
     expected_error_type = ScheduledSourceUniverseError
     expected_path_type = Path
     expected_hashlib = hashlib
@@ -557,6 +558,13 @@ def _seal_scheduled_source_universe_dispatch() -> None:
     expected_hex = _HEX
     expected_verifier = verify_source_universe_commitment
     expected_verifier_code = expected_verifier.__code__
+    expected_resolution_field_surfaces = tuple(
+        (
+            name,
+            expected_getattr_static(expected_resolution_type, name),
+        )
+        for name in expected_resolution_field_names
+    )
     expected_resolution_issue_surface = expected_getattr_static(
         expected_resolution_type, "_issue"
     )
@@ -701,6 +709,15 @@ def _seal_scheduled_source_universe_dispatch() -> None:
             raise expected_error_type(
                 "scheduled source-universe verifier authority is rebound"
             )
+        for name, expected_surface in expected_resolution_field_surfaces:
+            if (
+                expected_getattr_static(expected_resolution_type, name, None)
+                is not expected_surface
+            ):
+                raise expected_error_type(
+                    "scheduled source-universe result field surface is rebound: "
+                    + name
+                )
         current_resolution_issue_surface = expected_getattr_static(
             expected_resolution_type, "_issue", None
         )

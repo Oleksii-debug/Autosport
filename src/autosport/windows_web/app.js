@@ -35,6 +35,16 @@
     if (document.activeElement !== node && node.value !== text) node.value = text;
   }
 
+  function hasFocusedReadback(node) {
+    const active = document.activeElement;
+    if (!(active instanceof HTMLElement)) return false;
+    return (
+      active === node
+      || node.contains(active)
+      || (node.tagName === "TBODY" && active === node.closest("table"))
+    );
+  }
+
   function setDisabledWithFocusFallback(node, disabled) {
     const wasFocused = document.activeElement === node;
     node.disabled = Boolean(disabled);
@@ -170,6 +180,7 @@
   }
 
   function syncTextChildren(node, values, tagName) {
+    if (hasFocusedReadback(node)) return;
     const projected = Array.from(values || [], (value) => String(value));
     while (node.children.length > projected.length) {
       node.removeChild(node.lastElementChild);
@@ -189,6 +200,7 @@
   }
 
   function renderSingleColumnTable(body, values) {
+    if (hasFocusedReadback(body)) return;
     const projected = Array.from(values || [], (value) => String(value));
     while (body.rows.length > projected.length) {
       body.deleteRow(body.rows.length - 1);
@@ -266,8 +278,6 @@
     const useGlobalAnnouncement = options.globalAnnouncement !== false;
     const useResultFocus = options.resultFocus !== false;
     const usePostRefresh = options.postRefresh !== false;
-    // A state read that began before this command is not allowed to overwrite
-    // the operator-visible result after the command crosses the backend bridge.
     invalidateStateProjection();
     try {
       const result = await globalThis.pywebview.api.dispatch({
@@ -275,8 +285,6 @@
         action_id: actionId,
         payload,
       });
-      // Also invalidate reads started while the command was in flight. The
-      // shared refresh loop will skip them and obtain one post-command snapshot.
       invalidateStateProjection();
       const rejected = !result || result.status !== "completed";
       if (useGlobalAnnouncement) {
@@ -297,8 +305,6 @@
     }
   }
 
-  // The dedicated emergency-STOP asset reuses this frontend ordering fence.
-  // Backend emergency dispatch remains an independent safety lane.
   globalThis.autosportDispatch = dispatch;
 
   function renderState(state) {
@@ -425,8 +431,6 @@
           if (requestEpoch === stateProjectionEpoch) {
             renderState(state);
           } else {
-            // A mutating action crossed the bridge while this snapshot was in
-            // flight. Never render that causally older view; fetch its successor.
             refreshPending = true;
           }
         } catch (_error) {
@@ -434,8 +438,6 @@
           if (requestEpoch === stateProjectionEpoch) {
             announce("Не вдалося оновити стан застосунку.", true);
           } else {
-            // A failure from a causally stale poll is stale presentation too.
-            // Do not overwrite a newer action result with an obsolete error.
             refreshPending = true;
           }
         }

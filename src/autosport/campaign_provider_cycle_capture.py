@@ -190,6 +190,7 @@ class CampaignCompleteBoardCycleReceipt:
     run_id: str
     stream_epoch: str
     schedule_id: str
+    gate_binding_sha256: str
     cycle_seq: int
     slot_ordinal: int
     artifact_id: str
@@ -239,6 +240,7 @@ def _issue_receipt(
         "run_id": collector_evidence["run_id"],
         "stream_epoch": collector_evidence["stream_epoch"],
         "schedule_id": collector_evidence["schedule_id"],
+        "gate_binding_sha256": collector_evidence["gate_binding_sha256"],
         "cycle_seq": collector_evidence["cycle_seq"],
         "slot_ordinal": collector_evidence["slot_ordinal"],
         "artifact_id": collector_evidence["artifact_id"],
@@ -371,6 +373,8 @@ def capture_campaign_complete_game_board(
         if (
             collector_evidence.get("run_id") != source_spec.run_id
             or collector_evidence.get("schedule_id") != campaign.schedule_id
+            or collector_evidence.get("gate_binding_sha256")
+            != campaign.gate_binding_sha256
             or collector_evidence.get("authorization_sha256")
             != campaign.authority_record_sha256
             or collector_evidence.get("slot_ordinal") != slot.get("slot_ordinal")

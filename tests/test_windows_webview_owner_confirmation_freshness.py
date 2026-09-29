@@ -70,8 +70,11 @@ def test_any_owner_contract_edit_invalidates_prior_confirmation() -> None:
     assert "ownerReviewFresh = false;" in body
     assert 'byId("owner-confirm-checkbox").checked = false;' in body
     assert 'document.querySelectorAll("[data-owner-field]").forEach((node) => {' in source
-    assert 'node.addEventListener("input", invalidateOwnerReview);' in source
-    assert 'node.addEventListener("change", invalidateOwnerReview);' in source
+    assert "function markOwnerFieldEdited(event)" in source
+    assert "ownerEditedFields.add(node);" in source
+    assert "invalidateOwnerReview();" in source
+    assert 'node.addEventListener("input", markOwnerFieldEdited);' in source
+    assert 'node.addEventListener("change", markOwnerFieldEdited);' in source
     assert 'byId(327).addEventListener("change", invalidateOwnerReview);' in source
 
     # Changing strategy or the bound research plan invalidates the backend review
@@ -84,6 +87,33 @@ def test_any_owner_contract_edit_invalidates_prior_confirmation() -> None:
     assert source.index("invalidateOwnerReview();", plan) < source.index(
         'dispatch("research_plan.select"', plan
     )
+
+
+def test_owner_defaults_never_overwrite_focused_or_edited_fields() -> None:
+    source = _source()
+
+    assert "const ownerEditedFields = new WeakSet();" in source
+    start = source.index("function applyOwnerDefaults(defaults)")
+    end = source.index("\n  function focusResult", start)
+    body = source[start:end]
+
+    assert "let pendingFocusedDefault = false;" in body
+    assert "ownerEditedFields.has(node)" in body
+    assert 'node.value !== ""' in body
+    assert "document.activeElement === node" in body
+    assert "pendingFocusedDefault = true;" in body
+    assert "node.value = String(defaults[key]);" in body
+    assert "ownerDefaultsApplied = !pendingFocusedDefault;" in body
+
+    edited = source.index("function markOwnerFieldEdited(event)")
+    invalidate = source.index("function invalidateOwnerReview()", edited)
+    edited_body = source[edited:invalidate]
+    assert "const node = event.currentTarget;" in edited_body
+    assert "ownerEditedFields.add(node);" in edited_body
+    assert "invalidateOwnerReview();" in edited_body
+
+    assert 'node.addEventListener("input", markOwnerFieldEdited);' in source
+    assert 'node.addEventListener("change", markOwnerFieldEdited);' in source
 
 
 def test_stale_preview_response_cannot_restore_confirmation_after_newer_edit() -> None:

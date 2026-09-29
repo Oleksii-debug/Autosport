@@ -47,31 +47,24 @@ def _require_canonical_class_read_seams() -> None:
 
 def _require_product_expected_store_path(
     store: CollectorDeltaStore,
-    expected_store_path: str | Path,
+    expected_store_path: Path,
 ) -> Path:
     """Fail closed if a caller redirects the canonical store object to another DB."""
-
-    if isinstance(expected_store_path, str):
-        if not expected_store_path or expected_store_path.strip() != expected_store_path:
-            raise SourceUniverseCommitmentError(
-                "expected_store_path must be a non-empty trimmed path"
-            )
-        expected = Path(expected_store_path)
-    elif isinstance(expected_store_path, Path):
-        expected = expected_store_path
-    else:
-        raise TypeError("expected_store_path must be str or Path")
 
     current = getattr(store, "path", None)
     if not isinstance(current, Path):
         raise SourceUniverseCommitmentError(
             "canonical collector store path identity is unavailable"
         )
-    if _CANONICAL_PATH_EQUALITY(current, expected) is not True:
+    if type(expected_store_path) is not type(current):
+        raise TypeError(
+            "expected_store_path must be the exact canonical Path type"
+        )
+    if _CANONICAL_PATH_EQUALITY(current, expected_store_path) is not True:
         raise SourceUniverseCommitmentError(
             "canonical collector store path does not match product-expected authority path"
         )
-    return expected
+    return expected_store_path
 
 
 def _canonical_json(value: object) -> bytes:
@@ -158,7 +151,7 @@ class SourceUniverseCommitment:
 def build_source_universe_commitment(
     store: CollectorDeltaStore,
     *,
-    expected_store_path: str | Path,
+    expected_store_path: Path,
     source_id: str,
     start_cycle_seq: int,
     end_cycle_seq: int,
@@ -352,7 +345,7 @@ def verify_source_universe_commitment(
     store: CollectorDeltaStore,
     candidate: SourceUniverseCommitment,
     *,
-    expected_store_path: str | Path,
+    expected_store_path: Path,
     expected_source_id: str,
     expected_start_cycle_seq: int,
     expected_end_cycle_seq: int,
@@ -609,7 +602,7 @@ def _seal_source_universe_dispatch() -> None:
     def sealed_build_source_universe_commitment(
         store: CollectorDeltaStore,
         *,
-        expected_store_path: str | Path,
+        expected_store_path: Path,
         source_id: str,
         start_cycle_seq: int,
         end_cycle_seq: int,
@@ -640,7 +633,7 @@ def _seal_source_universe_dispatch() -> None:
         store: CollectorDeltaStore,
         candidate: SourceUniverseCommitment,
         *,
-        expected_store_path: str | Path,
+        expected_store_path: Path,
         expected_source_id: str,
         expected_start_cycle_seq: int,
         expected_end_cycle_seq: int,

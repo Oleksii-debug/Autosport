@@ -5,16 +5,32 @@ import os
 import sys
 from urllib.parse import urlencode
 
-from scripts.cancel_superseded_pr_workflow_runs import (
-    _ACTIVE_STATUSES,
-    _RUNS_PER_PAGE,
-    CancellationError,
-    GitHubApi,
-    WorkflowRun,
-    _require_positive_int,
-    cancel_superseded,
-    parse_run,
-)
+if __package__:
+    from scripts.cancel_superseded_pr_workflow_runs import (
+        _ACTIVE_STATUSES,
+        _RUNS_PER_PAGE,
+        CancellationError,
+        GitHubApi,
+        WorkflowRun,
+        _require_positive_int,
+        cancel_superseded,
+        parse_run,
+    )
+else:
+    # GitHub Actions executes this file directly as
+    # `python scripts/cancel_superseded_pr_workflow_runs_scoped.py`. In that mode
+    # Python puts the scripts directory, not the repository root, first on sys.path.
+    # Import the canonical sibling module without requiring package resolution.
+    from cancel_superseded_pr_workflow_runs import (
+        _ACTIVE_STATUSES,
+        _RUNS_PER_PAGE,
+        CancellationError,
+        GitHubApi,
+        WorkflowRun,
+        _require_positive_int,
+        cancel_superseded,
+        parse_run,
+    )
 
 
 class WorkflowScopedGitHubApi(GitHubApi):

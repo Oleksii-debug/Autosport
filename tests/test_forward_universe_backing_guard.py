@@ -1,11 +1,20 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 import pytest
 
 from autosport._forward_universe_backing_guard import (
     ForwardUniverseBackingGuardError,
     resolve_forward_universe_backing_locator,
 )
+from autosport.forward_evaluation_universe_binding import (
+    FORWARD_UNIVERSE_RULE_ID,
+    FORWARD_UNIVERSE_RULE_SHA256,
+    ForwardEvaluationUniverseBindingError,
+    resolve_forward_universe_members,
+)
+from autosport.forward_evidence_completeness import ForwardEvidenceProtocolEnvelope
 from autosport.provider_evaluation_universe import ProviderEvaluationUniverseStore
 
 
@@ -15,6 +24,22 @@ def _store(tmp_path, name: str) -> ProviderEvaluationUniverseStore:
         authority_id="provider-intake-1",
         source_id="parlayapi:table_tennis",
         authority_root=tmp_path / name / "authority",
+    )
+
+
+def _protocol() -> ForwardEvidenceProtocolEnvelope:
+    return ForwardEvidenceProtocolEnvelope(
+        campaign_id="campaign-1",
+        scientific_protocol_sha256="1" * 64,
+        candidate_universe_rule_id=FORWARD_UNIVERSE_RULE_ID,
+        candidate_universe_rule_sha256=FORWARD_UNIVERSE_RULE_SHA256,
+        forward_evaluation_policy_sha256="2" * 64,
+        runtime_identity_sha256="3" * 64,
+        baseline_set_sha256="4" * 64,
+        protective_metric_set_sha256="5" * 64,
+        cost_policy_sha256="6" * 64,
+        precommit_anchor_lower=datetime(2026, 9, 20, 7, 0, tzinfo=UTC),
+        precommit_anchor_upper=datetime(2026, 9, 20, 7, 30, tzinfo=UTC),
     )
 
 
@@ -68,3 +93,21 @@ def test_coherent_private_backing_substitution_fails_closed(tmp_path):
         match="backing locator changed",
     ):
         resolve_forward_universe_backing_locator(canonical)
+
+
+def test_public_forward_resolver_rejects_coherent_backing_substitution(tmp_path):
+    canonical = _store(tmp_path, "canonical-public")
+    alternate = _store(tmp_path, "alternate-public")
+    resolve_forward_universe_backing_locator(canonical)
+
+    canonical._store = alternate._store
+    canonical._intake = alternate._intake
+
+    with pytest.raises(
+        ForwardEvaluationUniverseBindingError,
+        match="backing locator authority changed",
+    ):
+        resolve_forward_universe_members(
+            store=canonical,
+            protocol=_protocol(),
+        )

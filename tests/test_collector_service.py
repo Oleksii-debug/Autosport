@@ -3,6 +3,7 @@ import signal
 import tempfile
 import unittest
 from dataclasses import replace
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from autosport.causal_collector import (
@@ -167,6 +168,14 @@ class HeadlessCollectorServiceTests(unittest.TestCase):
     ):
         from autosport.event_lifecycle import ContinuousEventLifecycle
 
+        default_now = [datetime.fromisoformat("2026-01-01T00:00:10+00:00")]
+
+        def default_clock():
+            return default_now[0].isoformat()
+
+        def default_sleep(seconds):
+            default_now[0] += timedelta(seconds=seconds)
+
         return HeadlessCollectorService(
             delta_store=CollectorDeltaStore(Path(root) / "collector.json"),
             lifecycle=ContinuousEventLifecycle(Path(root) / "catalog.json"),
@@ -180,8 +189,8 @@ class HeadlessCollectorServiceTests(unittest.TestCase):
                 max_backoff_seconds=4,
                 jitter_fraction=0,
             ),
-            clock=clock or (lambda: "2026-01-01T00:00:10+00:00"),
-            sleep=sleep or (lambda _: None),
+            clock=clock or default_clock,
+            sleep=sleep or default_sleep,
             random_value=random_value or (lambda: 0),
             stop_requested=stop_requested,
             stop_reason=stop_reason,

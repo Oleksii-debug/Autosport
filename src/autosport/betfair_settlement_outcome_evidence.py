@@ -5,9 +5,11 @@ settlement store, does not claim provider permanent finality, and does not autho
 training, forecasting, promotion, execution, bankroll mutation, or real-money use.
 
 The projection deliberately distinguishes *bet* outcome from *selection* outcome:
-for BACK they agree, while for LAY they are inverted.  VOIDED/CANCELLED/LAPSED,
-missing/unknown betOutcome values, and zero settled quantity cannot become binary
-selection labels.
+for plain BACK they agree, while for plain LAY they are inverted. Handicap/line facts
+and provider void-date facts remain settlement facts only and fail closed here because
+betOutcome alone cannot prove an unqualified binary selection result for those cases.
+VOIDED/CANCELLED/LAPSED, missing/unknown betOutcome values, and zero settled quantity
+also cannot become binary selection labels.
 
 Evidence is bound to one exact current settlement revision.  Because #1272 explicitly
 keeps permanent_final=false, downstream users must re-resolve the store and require the
@@ -160,6 +162,14 @@ def _project(revision: object) -> BetfairBinarySelectionOutcomeEvidence:
     if bet_outcome not in _ALLOWED_BET_OUTCOMES:
         raise BetfairOutcomeEvidenceError(
             "settlement lacks supported WON/LOST betOutcome"
+        )
+    if getattr(revision, "provider_handicap", None) is not None:
+        raise BetfairOutcomeEvidenceError(
+            "handicap settlement cannot prove unqualified binary selection outcome"
+        )
+    if getattr(revision, "provider_voided_date", None) is not None:
+        raise BetfairOutcomeEvidenceError(
+            "void-dated settlement cannot prove binary selection outcome"
         )
     if revision.size_settled <= 0:
         raise BetfairOutcomeEvidenceError(

@@ -66,13 +66,15 @@ def _strictly_after_registry_fence(
 def _registry_availability_fence(
     registry,
     *,
+    read_state,
+    trust_bindings,
     canonical_timestamp,
     parse_timestamp,
 ) -> str | None:
     """Read the maximum established first-availability across every outcome identity."""
 
-    state = registry._read()
-    bindings = registry._outcome_lineage_trust_bindings(state)
+    state = read_state(registry)
+    bindings = trust_bindings(state)
     established: list[str] = []
     for binding in bindings.values():
         for revision in binding.revisions:
@@ -95,6 +97,8 @@ def _install_guard() -> None:
     canonical_timestamp = outcome_trust._canonical_timestamp
     parse_timestamp = outcome_trust._parse_timestamp
     canonical_path_lock = _availability.durable_path_lock
+    canonical_read = registry_type._read
+    canonical_trust_bindings = registry_type._outcome_lineage_trust_bindings
     canonical_public_clock = _run_registry._utc_now
     canonical_begin = registry_type.begin
 
@@ -104,6 +108,10 @@ def _install_guard() -> None:
         raise RuntimeError("canonical RunRegistry product clock is not a plain function")
     if type(canonical_begin) is not FunctionType:
         raise RuntimeError("canonical causal RunRegistry begin is not a plain function")
+    if type(canonical_read) is not FunctionType:
+        raise RuntimeError("canonical RunRegistry read authority is not a plain function")
+    if type(canonical_trust_bindings) is not FunctionType:
+        raise RuntimeError("canonical RunRegistry outcome trust parser is not a plain function")
     if not callable(canonical_path_lock):
         raise RuntimeError("canonical outcome availability path lock is unavailable")
 
@@ -228,6 +236,8 @@ def _install_guard() -> None:
             "_clock",
             "_outcome_trust_dependencies",
             "_path_lock",
+            "_read_state",
+            "_trust_bindings",
             "_fence_context",
             "_canonical_timestamp",
             "_parse_timestamp",
@@ -247,6 +257,8 @@ def _install_guard() -> None:
             clock,
             outcome_trust_dependencies: tuple[tuple[object, str, object], ...],
             path_lock,
+            read_state,
+            trust_bindings,
             fence_context,
             canonicalize,
             parse,
@@ -262,6 +274,8 @@ def _install_guard() -> None:
             self._clock = clock
             self._outcome_trust_dependencies = outcome_trust_dependencies
             self._path_lock = path_lock
+            self._read_state = read_state
+            self._trust_bindings = trust_bindings
             self._fence_context = fence_context
             self._canonical_timestamp = canonicalize
             self._parse_timestamp = parse
@@ -275,8 +289,14 @@ def _install_guard() -> None:
             self._public_wrapper = wrapper
 
         def __call__(self, registry, *args, **kwargs):
+            if type(registry) is not self._registry_type:
+                raise self._error_type("causal RunRegistry begin requires exact registry type")
             if self._registry_type.begin is not self._public_wrapper:
                 raise self._error_type("causal RunRegistry begin dispatch was rebound")
+            if self._registry_type._read is not self._read_state:
+                raise self._error_type("RunRegistry read authority dispatch was rebound")
+            if self._registry_type._outcome_lineage_trust_bindings is not self._trust_bindings:
+                raise self._error_type("RunRegistry outcome trust parser dispatch was rebound")
             if self._run_registry_module._utc_now is not self._canonical_public_clock:
                 raise self._error_type("product UTC clock authority was rebound")
             if self._availability_module._sealed_product_utc_now is not self._clock:
@@ -306,6 +326,8 @@ def _install_guard() -> None:
             with self._path_lock(registry.path):
                 fence = self._fence_reader(
                     registry,
+                    read_state=self._read_state,
+                    trust_bindings=self._trust_bindings,
                     canonical_timestamp=self._canonical_timestamp,
                     parse_timestamp=self._parse_timestamp,
                 )
@@ -336,6 +358,8 @@ def _install_guard() -> None:
         checked_clock,
         outcome_trust_dependencies,
         canonical_path_lock,
+        canonical_read,
+        canonical_trust_bindings,
         _REGISTRY_AVAILABILITY_FENCE,
         canonical_timestamp,
         parse_timestamp,

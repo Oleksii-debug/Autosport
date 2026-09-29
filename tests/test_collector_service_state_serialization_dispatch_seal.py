@@ -167,6 +167,28 @@ class CollectorServiceSerializationDispatchSealTests(unittest.TestCase):
             self.assertEqual(service.status()["cycles_attempted"], 0)
             self.assertEqual(service.status()["cycles_succeeded"], 0)
 
+    def test_serialized_cycle_preserves_current_prospective_schedule_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._service(Path(tmp), "scheduled-cycle")
+
+            result = service.run(max_cycles=1)
+
+            self.assertEqual(result.cycles_executed, 1)
+            self.assertIsNotNone(result.last_cycle)
+            self.assertEqual(result.last_cycle.source_id, "source-x")
+            status = service.status()
+            self.assertEqual(status["cycles_attempted"], 1)
+            self.assertEqual(status["cycles_succeeded"], 1)
+            self.assertEqual(status["stop_reason"], "max_cycles_reached")
+            evidence = service.delta_store.collector_schedule_evidence(
+                source_id="source-x",
+                run_id="scheduled-cycle",
+                start_slot_ordinal=0,
+                end_slot_ordinal=0,
+            )
+            self.assertEqual(evidence["bound_start_count"], 1)
+            self.assertEqual(evidence["missing_start_count"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()

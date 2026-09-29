@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 import json
 import urllib.request as _urllib_request
 
@@ -134,3 +135,57 @@ def authoritative_execution_readback_with_client(
         )
     opener.assert_drained()
     return client, capture
+
+
+class _DelegatingOpener:
+    def __init__(self, transport) -> None:
+        self._transport = transport
+
+    def open(self, request, data=None, timeout: float = 0):
+        assert data is None
+        assert request.data is not None
+        assert timeout > 0
+        rpc_request = json.loads(request.data.decode("utf-8"))
+        if rpc_request["method"] == _ACCOUNT_DETAILS_METHOD:
+            assert request.full_url == ACCOUNT_JSON_RPC_ENDPOINT
+            payload = json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "id": rpc_request["id"],
+                    "result": {
+                        "currencyCode": "EUR",
+                        "localeCode": "en",
+                        "region": "GBR",
+                        "timezone": "Europe/London",
+                    },
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+            ).encode("utf-8")
+        else:
+            assert request.full_url == BETTING_JSON_RPC_ENDPOINT
+            payload = self._transport.post(
+                request.full_url,
+                headers={key: value for key, value in request.header_items()},
+                body=request.data,
+                timeout_seconds=timeout,
+            )
+        return _Response(payload)
+
+
+@contextmanager
+def canonical_authenticated_readback_client(transport, *, account_id: str):
+    """Yield a K07 client while deterministic betting I/O stays below canonical transport."""
+
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.setattr(
+            _urllib_request,
+            "_opener",
+            _DelegatingOpener(transport),
+        )
+        client = build_betfair_authenticated_client(
+            BetfairSessionCredentials("fixture-app-key", "fixture-session-token"),
+            account_label=account_id,
+        )
+        yield client

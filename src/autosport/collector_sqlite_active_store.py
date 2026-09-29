@@ -52,6 +52,18 @@ _SCHEDULE_IMMUTABLE_UPDATE_TRIGGER = "collector_schedules_immutable_update_v1"
 _SCHEDULE_IMMUTABLE_DELETE_TRIGGER = "collector_schedules_immutable_delete_v1"
 _SCHEDULE_SLOT_IMMUTABLE_UPDATE_TRIGGER = "collector_schedule_slots_immutable_update_v1"
 _SCHEDULE_SLOT_IMMUTABLE_DELETE_TRIGGER = "collector_schedule_slots_immutable_delete_v1"
+_SCHEDULE_START_GATE_IMMUTABLE_UPDATE_TRIGGER = (
+    "collector_schedule_start_gates_immutable_update_v1"
+)
+_SCHEDULE_START_GATE_IMMUTABLE_DELETE_TRIGGER = (
+    "collector_schedule_start_gates_immutable_delete_v1"
+)
+_SCHEDULE_START_AUTH_IMMUTABLE_UPDATE_TRIGGER = (
+    "collector_schedule_start_authorizations_immutable_update_v1"
+)
+_SCHEDULE_START_AUTH_IMMUTABLE_DELETE_TRIGGER = (
+    "collector_schedule_start_authorizations_immutable_delete_v1"
+)
 _MAX_SCHEDULE_EVIDENCE_SLOTS = 1_000_000
 
 
@@ -252,6 +264,28 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
                 "FOREIGN KEY(source_id, cycle_seq) "
                 "REFERENCES collector_cycle_starts_v1(source_id, cycle_seq))"
             )
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS collector_schedule_start_gates_v1 ("
+                "source_id TEXT NOT NULL,"
+                "run_id TEXT NOT NULL,"
+                "schedule_id TEXT NOT NULL,"
+                "gate_binding_sha256 TEXT NOT NULL,"
+                "PRIMARY KEY(source_id, run_id),"
+                "UNIQUE(schedule_id),"
+                "FOREIGN KEY(source_id, run_id) "
+                "REFERENCES collector_schedules_v1(source_id, run_id))"
+            )
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS collector_schedule_start_authorizations_v1 ("
+                "source_id TEXT NOT NULL,"
+                "run_id TEXT NOT NULL,"
+                "schedule_id TEXT NOT NULL,"
+                "gate_binding_sha256 TEXT NOT NULL,"
+                "authorization_sha256 TEXT NOT NULL,"
+                "PRIMARY KEY(source_id, run_id),"
+                "FOREIGN KEY(source_id, run_id) "
+                "REFERENCES collector_schedule_start_gates_v1(source_id, run_id))"
+            )
             for trigger_name, table_name, timing in (
                 (_SCHEDULE_IMMUTABLE_UPDATE_TRIGGER, "collector_schedules_v1", "UPDATE"),
                 (_SCHEDULE_IMMUTABLE_DELETE_TRIGGER, "collector_schedules_v1", "DELETE"),
@@ -263,6 +297,26 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
                 (
                     _SCHEDULE_SLOT_IMMUTABLE_DELETE_TRIGGER,
                     "collector_schedule_slots_v1",
+                    "DELETE",
+                ),
+                (
+                    _SCHEDULE_START_GATE_IMMUTABLE_UPDATE_TRIGGER,
+                    "collector_schedule_start_gates_v1",
+                    "UPDATE",
+                ),
+                (
+                    _SCHEDULE_START_GATE_IMMUTABLE_DELETE_TRIGGER,
+                    "collector_schedule_start_gates_v1",
+                    "DELETE",
+                ),
+                (
+                    _SCHEDULE_START_AUTH_IMMUTABLE_UPDATE_TRIGGER,
+                    "collector_schedule_start_authorizations_v1",
+                    "UPDATE",
+                ),
+                (
+                    _SCHEDULE_START_AUTH_IMMUTABLE_DELETE_TRIGGER,
+                    "collector_schedule_start_authorizations_v1",
                     "DELETE",
                 ),
             ):
@@ -395,6 +449,17 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
         return value
 
     @staticmethod
+    def _schedule_authority_sha256(value: object, name: str) -> str:
+        if (
+            type(value) is not str
+            or len(value) != 64
+            or value != value.lower()
+            or any(character not in "0123456789abcdef" for character in value)
+        ):
+            raise ValueError(f"{name} must be canonical lowercase SHA-256 hex")
+        return value
+
+    @staticmethod
     def _schedule_evaluation_window(
         start_slot_ordinal: object,
         end_slot_ordinal: object,
@@ -484,8 +549,16 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
         max_items: int,
         evaluation_start_slot_ordinal: int | None = None,
         evaluation_end_slot_ordinal: int | None = None,
+        start_gate_binding_sha256: str | None = None,
     ) -> dict[str, object]:
-        """Create or re-resolve one immutable prospective schedule for a durable run."""
+        """Create or re-resolve one immutable prospective schedule for a durable run.
+
+        When start_gate_binding_sha256 is supplied, the gate is installed in the
+        same BEGIN IMMEDIATE transaction that creates/re-resolves the schedule. The
+        gate can only be installed while the durable run has zero collector STARTs.
+        Once present, every scheduled START remains fail-closed until an exact
+        authorization is durably appended for that same schedule/gate binding.
+        """
 
         source_id = _text(source_id, "source_id")
         run_id = _text(run_id, "run_id")
@@ -493,6 +566,14 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
         canonical_anchor = _instant(anchor_at, "anchor_at").isoformat()
         interval_text = self._schedule_interval_text(interval_seconds)
         canonical_max_items = self._schedule_max_items(max_items)
+        canonical_start_gate = (
+            None
+            if start_gate_binding_sha256 is None
+            else self._schedule_authority_sha256(
+                start_gate_binding_sha256,
+                "start_gate_binding_sha256",
+            )
+        )
         evaluation_start, evaluation_end = self._schedule_evaluation_window(
             evaluation_start_slot_ordinal,
             evaluation_end_slot_ordinal,
@@ -610,6 +691,52 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
                         "within a durable run"
                     )
                 schedule_id = row["schedule_id"]
+
+            gate_row = connection.execute(
+                "SELECT schedule_id, gate_binding_sha256 "
+                "FROM collector_schedule_start_gates_v1 "
+                "WHERE source_id=? AND run_id=?",
+                (source_id, run_id),
+            ).fetchone()
+            if gate_row is not None:
+                stored_gate = self._schedule_authority_sha256(
+                    gate_row["gate_binding_sha256"],
+                    "stored gate_binding_sha256",
+                )
+                if gate_row["schedule_id"] != schedule_id:
+                    raise ValueError(
+                        "collector schedule START gate references another schedule"
+                    )
+                if (
+                    canonical_start_gate is not None
+                    and canonical_start_gate != stored_gate
+                ):
+                    raise ValueError(
+                        "collector schedule START gate binding cannot change "
+                        "within a durable run"
+                    )
+            elif canonical_start_gate is not None:
+                prior_start = connection.execute(
+                    "SELECT 1 FROM collector_cycle_starts_v1 "
+                    "WHERE source_id=? AND run_id=? LIMIT 1",
+                    (source_id, run_id),
+                ).fetchone()
+                if prior_start is not None:
+                    raise ValueError(
+                        "collector schedule START gate cannot be installed "
+                        "after collector START"
+                    )
+                connection.execute(
+                    "INSERT INTO collector_schedule_start_gates_v1("
+                    "source_id, run_id, schedule_id, gate_binding_sha256"
+                    ") VALUES(?,?,?,?)",
+                    (
+                        source_id,
+                        run_id,
+                        schedule_id,
+                        canonical_start_gate,
+                    ),
+                )
             connection.commit()
             return {
                 "schema_version": 4,
@@ -628,6 +755,150 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
             if connection.in_transaction:
                 connection.rollback()
             raise ValueError("cannot establish collector schedule authority") from exc
+        except Exception:
+            if connection.in_transaction:
+                connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    def _collector_schedule_start_gate_status(
+        self,
+        *,
+        source_id: str,
+        run_id: str,
+    ) -> dict[str, object] | None:
+        """Return exact durable gate state without minting schedule/START authority."""
+
+        source_id = _text(source_id, "source_id")
+        run_id = _text(run_id, "run_id")
+        connection = self._connect()
+        try:
+            row = connection.execute(
+                "SELECT g.schedule_id, g.gate_binding_sha256, "
+                "a.authorization_sha256 "
+                "FROM collector_schedule_start_gates_v1 AS g "
+                "LEFT JOIN collector_schedule_start_authorizations_v1 AS a "
+                "ON a.source_id=g.source_id AND a.run_id=g.run_id "
+                "WHERE g.source_id=? AND g.run_id=?",
+                (source_id, run_id),
+            ).fetchone()
+            if row is None:
+                return None
+            gate_binding = self._schedule_authority_sha256(
+                row["gate_binding_sha256"],
+                "stored gate_binding_sha256",
+            )
+            authorization = row["authorization_sha256"]
+            if authorization is not None:
+                authorization = self._schedule_authority_sha256(
+                    authorization,
+                    "stored authorization_sha256",
+                )
+            return {
+                "schedule_id": _text(row["schedule_id"], "schedule_id"),
+                "gate_binding_sha256": gate_binding,
+                "authorization_sha256": authorization,
+            }
+        finally:
+            connection.close()
+
+    def _authorize_collector_schedule_start_gate(
+        self,
+        *,
+        source_id: str,
+        run_id: str,
+        schedule_id: str,
+        gate_binding_sha256: str,
+        authorization_sha256: str,
+    ) -> dict[str, object]:
+        """Append the one durable authorization that permits scheduled START.
+
+        This low-level store seam deliberately does not decide what constitutes a
+        valid campaign receipt. The campaign-inception composition must first
+        re-resolve its product authority and pass its exact receipt digest here.
+        """
+
+        source_id = _text(source_id, "source_id")
+        run_id = _text(run_id, "run_id")
+        schedule_id = self._schedule_authority_sha256(schedule_id, "schedule_id")
+        gate_binding = self._schedule_authority_sha256(
+            gate_binding_sha256,
+            "gate_binding_sha256",
+        )
+        authorization = self._schedule_authority_sha256(
+            authorization_sha256,
+            "authorization_sha256",
+        )
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            gate = connection.execute(
+                "SELECT schedule_id, gate_binding_sha256 "
+                "FROM collector_schedule_start_gates_v1 "
+                "WHERE source_id=? AND run_id=?",
+                (source_id, run_id),
+            ).fetchone()
+            if gate is None:
+                raise ValueError("collector schedule START gate is missing")
+            stored_gate = self._schedule_authority_sha256(
+                gate["gate_binding_sha256"],
+                "stored gate_binding_sha256",
+            )
+            if gate["schedule_id"] != schedule_id or stored_gate != gate_binding:
+                raise ValueError(
+                    "collector schedule START gate identity does not match authorization"
+                )
+            prior_start = connection.execute(
+                "SELECT 1 FROM collector_cycle_starts_v1 "
+                "WHERE source_id=? AND run_id=? LIMIT 1",
+                (source_id, run_id),
+            ).fetchone()
+            if prior_start is not None:
+                raise ValueError(
+                    "collector schedule START authorization cannot follow collector START"
+                )
+            existing = connection.execute(
+                "SELECT schedule_id, gate_binding_sha256, authorization_sha256 "
+                "FROM collector_schedule_start_authorizations_v1 "
+                "WHERE source_id=? AND run_id=?",
+                (source_id, run_id),
+            ).fetchone()
+            if existing is None:
+                connection.execute(
+                    "INSERT INTO collector_schedule_start_authorizations_v1("
+                    "source_id, run_id, schedule_id, gate_binding_sha256, "
+                    "authorization_sha256"
+                    ") VALUES(?,?,?,?,?)",
+                    (
+                        source_id,
+                        run_id,
+                        schedule_id,
+                        gate_binding,
+                        authorization,
+                    ),
+                )
+            elif (
+                existing["schedule_id"] != schedule_id
+                or existing["gate_binding_sha256"] != gate_binding
+                or existing["authorization_sha256"] != authorization
+            ):
+                raise ValueError(
+                    "collector schedule START authorization is already bound "
+                    "to different authority"
+                )
+            connection.commit()
+            return {
+                "schedule_id": schedule_id,
+                "gate_binding_sha256": gate_binding,
+                "authorization_sha256": authorization,
+            }
+        except sqlite3.DatabaseError as exc:
+            if connection.in_transaction:
+                connection.rollback()
+            raise ValueError(
+                "cannot durably authorize collector schedule START gate"
+            ) from exc
         except Exception:
             if connection.in_transaction:
                 connection.rollback()
@@ -777,6 +1048,42 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
             )
             if schedule["schedule_id"] != expected_id:
                 raise ValueError("collector schedule identity digest mismatch")
+            gate = connection.execute(
+                "SELECT schedule_id, gate_binding_sha256 "
+                "FROM collector_schedule_start_gates_v1 "
+                "WHERE source_id=? AND run_id=?",
+                (source_id, run_id),
+            ).fetchone()
+            if gate is not None:
+                stored_gate = self._schedule_authority_sha256(
+                    gate["gate_binding_sha256"],
+                    "stored gate_binding_sha256",
+                )
+                if gate["schedule_id"] != expected_id:
+                    raise ValueError(
+                        "collector schedule START gate references another schedule"
+                    )
+                authorization = connection.execute(
+                    "SELECT schedule_id, gate_binding_sha256, authorization_sha256 "
+                    "FROM collector_schedule_start_authorizations_v1 "
+                    "WHERE source_id=? AND run_id=?",
+                    (source_id, run_id),
+                ).fetchone()
+                if authorization is None:
+                    raise ValueError(
+                        "collector schedule START gate is not durably authorized"
+                    )
+                if (
+                    authorization["schedule_id"] != expected_id
+                    or authorization["gate_binding_sha256"] != stored_gate
+                ):
+                    raise ValueError(
+                        "collector schedule START authorization is corrupt"
+                    )
+                self._schedule_authority_sha256(
+                    authorization["authorization_sha256"],
+                    "stored authorization_sha256",
+                )
             expected_due = self._collector_schedule_due_at(
                 anchor_at=schedule["anchor_at"],
                 interval_seconds=schedule["interval_seconds"],

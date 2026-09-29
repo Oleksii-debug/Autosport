@@ -132,6 +132,26 @@ def test_structured_readbacks_defer_poll_mutation_while_operator_focuses_them() 
     assert 'renderList(byId(307), state.owner.lines || []);' in source
 
 
+def test_poll_value_projection_is_focus_safe_and_mutation_minimal() -> None:
+    source = _source()
+
+    stable_value_projections = (
+        'setValueUnlessFocused(byId("dataset-path"), state.dataset_path || "");',
+        'setValueUnlessFocused(byId("research-plan-path"), state.research_plan_path || "");',
+        'setValueUnlessFocused(sourceSelect, productSource.selected_id);',
+    )
+    for projection in stable_value_projections:
+        assert projection in source
+
+    stale_value_projections = (
+        'byId("dataset-path").value = state.dataset_path || "";',
+        'byId("research-plan-path").value = state.research_plan_path || "";',
+        'sourceSelect.value = productSource.selected_id;',
+    )
+    for projection in stale_value_projections:
+        assert projection not in source
+
+
 def test_runtime_start_stop_transition_keeps_focus_on_an_action_or_fallback() -> None:
     source = _source()
 

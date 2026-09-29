@@ -213,6 +213,7 @@
   }
 
   function setSelectOptions(node, options, valueKey = "id", labelKey = "label") {
+    if (document.activeElement === node) return;
     const current = node.value;
     const projected = Array.from(options || [], (option) => ({
       value: String(option[valueKey]),

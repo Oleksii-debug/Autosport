@@ -165,18 +165,21 @@ def test_forged_settlement_values_cannot_promote_any_authority(tmp_path: Path) -
         external_receipt_id="receipt-1",
     )
 
+    # This is the exact gross BACK win bound for 4.25 @ 2.50. It is mechanically
+    # possible but remains caller-derived settlement data and therefore cannot mint
+    # provider/economic authority.
     snapshot = journal.record_settlement_revision(
         event_id="settlement-caller-1",
         provider_source_id="betfair",
         provider_order_id="receipt-1",
         revision_seq=1,
         cumulative_settled_stake="4.25",
-        cumulative_realized_pnl="999999999.99",
+        cumulative_realized_pnl="6.375",
     )
 
     assert snapshot.execution_provenance_bound is False
     assert snapshot.execution_evidence_verified is False
-    assert snapshot.realized_pnl == Decimal("999999999.99")
+    assert snapshot.realized_pnl == Decimal("6.375")
     assert snapshot.positive_authority_verified is False
 
 

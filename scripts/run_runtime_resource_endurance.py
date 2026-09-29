@@ -184,7 +184,7 @@ def _write_json_atomic(path: Path, payload: dict[str, object]) -> None:
     temporary_path = Path(temporary)
     try:
         try:
-            handle = os.fdopen(fd, "w", encoding="utf-8", newline="\\n")
+            handle = os.fdopen(fd, "w", encoding="utf-8", newline="\n")
         except BaseException:
             try:
                 os.close(fd)

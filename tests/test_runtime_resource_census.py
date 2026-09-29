@@ -281,6 +281,27 @@ class RuntimeResourceWorkspaceProbeTests(unittest.TestCase):
         self.assertEqual(result.status, "FAIL")
         self.assertEqual(result.error_type, "FileNotFoundError")
 
+    def test_endurance_evidence_writer_publishes_canonical_json(self) -> None:
+        namespace = runpy.run_path(
+            str(
+                Path(__file__).resolve().parents[1]
+                / "scripts"
+                / "run_runtime_resource_endurance.py"
+            )
+        )
+        writer = namespace["_write_json_atomic"]
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output = root / "report.json"
+            writer(output, {"b": 2, "a": 1})
+
+            self.assertEqual(output.read_text(encoding="utf-8"), '{"a":1,"b":2}\\n')
+            self.assertEqual(
+                [path.name for path in root.iterdir()],
+                ["report.json"],
+            )
+
     def test_endurance_evidence_writer_closes_raw_fd_when_fdopen_fails(self) -> None:
         namespace = runpy.run_path(
             str(

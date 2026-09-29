@@ -424,7 +424,7 @@ def _scan_directory(
     pre_metadata = path.lstat()
     pre_identity = _identity_from_stat(pre_metadata)
     if (
-        not _same_object_identity(pre_identity, expected_identity)
+        pre_identity != expected_identity
         or stat.S_ISLNK(pre_metadata.st_mode)
         or _metadata_is_reparse_point(pre_metadata)
         or not stat.S_ISDIR(pre_metadata.st_mode)
@@ -437,7 +437,7 @@ def _scan_directory(
     post_metadata = path.lstat()
     post_identity = _identity_from_stat(post_metadata)
     if (
-        not _same_object_identity(post_identity, expected_identity)
+        post_identity != expected_identity
         or stat.S_ISLNK(post_metadata.st_mode)
         or _metadata_is_reparse_point(post_metadata)
         or not stat.S_ISDIR(post_metadata.st_mode)
@@ -569,6 +569,8 @@ def scan_secret_canary(
     needles = _encoded_needles(canary)
     stack: list[tuple[Path, _PathIdentity]] = [(root_path, root_identity)]
     fixture_excluded = False
+    validated_files: list[tuple[Path, _PathIdentity]] = []
+    validated_directories: list[tuple[Path, _PathIdentity]] = []
     while stack:
         directory, directory_identity = stack.pop()
         try:
@@ -582,6 +584,7 @@ def scan_secret_canary(
             )
             continue
 
+        validated_directories.append((directory, directory_identity))
         child_directories: list[tuple[Path, _PathIdentity]] = []
         for entry in ordered:
             path = Path(entry.path)
@@ -652,6 +655,7 @@ def scan_secret_canary(
                     chunk_size=chunk_size,
                     expected_identity=scan_identity,
                 )
+                validated_files.append((path, scan_identity))
                 if encodings:
                     findings.append(
                         SecretCanaryFinding(
@@ -667,6 +671,48 @@ def scan_secret_canary(
                     )
                 )
         stack.extend(reversed(child_directories))
+
+    # CLEAN is a statement about one stable artifact snapshot, not merely about
+    # bytes that happened to be read earlier in the traversal. Revalidate every
+    # successfully scanned file and enumerated directory immediately before the
+    # final status so late writes/creates/deletes/renames fail closed.
+    for path, expected_identity in validated_files:
+        try:
+            metadata = path.lstat()
+            current_identity = _identity_from_stat(metadata)
+            if (
+                current_identity != expected_identity
+                or not stat.S_ISREG(metadata.st_mode)
+                or stat.S_ISLNK(metadata.st_mode)
+                or _metadata_is_reparse_point(metadata)
+            ):
+                raise _ScanIntegrityError("FileIdentityChanged")
+        except (OSError, _ScanIntegrityError):
+            errors.append(
+                SecretCanaryScanError(
+                    _path_digest(root_path, path),
+                    "FileIdentityChanged",
+                )
+            )
+
+    for directory, expected_identity in validated_directories:
+        try:
+            metadata = directory.lstat()
+            current_identity = _identity_from_stat(metadata)
+            if (
+                current_identity != expected_identity
+                or not stat.S_ISDIR(metadata.st_mode)
+                or stat.S_ISLNK(metadata.st_mode)
+                or _metadata_is_reparse_point(metadata)
+            ):
+                raise _ScanIntegrityError("DirectoryIdentityChanged")
+        except (OSError, _ScanIntegrityError):
+            errors.append(
+                SecretCanaryScanError(
+                    _path_digest(root_path, directory),
+                    "DirectoryIdentityChanged",
+                )
+            )
 
     if fixture is not None and fixture_excluded:
         try:

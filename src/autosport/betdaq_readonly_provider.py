@@ -217,6 +217,7 @@ class BetdaqSnapshotEvidence:
     provider_origin_verified: bool = False
     receipt_clock_verified: bool = False
     unavailable_market_ids: tuple[int, ...] = ()
+    catalogue_request_fingerprint: str | None = None
     catalogue_response_sha256: str | None = None
     catalogue_rate_admission_receipt: str | None = None
     catalogue_event_classifier_ids: tuple[int, ...] = ()

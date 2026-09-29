@@ -70,19 +70,22 @@ def _hostile_fee_payload(_observation):
 
 
 @pytest.mark.parametrize(
-    ("closure_name", "hostile_code", "message"),
+    ("owner", "closure_name", "hostile_code", "message"),
     (
         (
+            "assess",
             "canonical_json",
             _hostile_canonical_json.__code__,
             "assessment identity executable authority changed",
         ),
         (
+            "validate",
             "identity_payload_builder",
             _hostile_identity_payload.__code__,
             "assessment identity executable authority changed",
         ),
         (
+            "authority",
             "fee_input_payload_builder",
             _hostile_fee_payload.__code__,
             "fee input identity executable authority changed",
@@ -90,12 +93,21 @@ def _hostile_fee_payload(_observation):
     ),
 )
 def test_captured_identity_python_code_retarget_fails_before_provider_read(
+    owner: str,
     closure_name: str,
     hostile_code,
     message: str,
 ) -> None:
     public_assess = applicability.assess_betfair_commission_applicability
-    target = _closure_value(public_assess, closure_name)
+    public_validate = applicability.validate_betfair_commission_applicability_assessment
+    authority, authority_code = _authority_witness(public_assess)
+    assert authority.__code__ is authority_code
+    owner_function = {
+        "assess": public_assess,
+        "validate": public_validate,
+        "authority": authority,
+    }[owner]
+    target = _closure_value(owner_function, closure_name)
     assert type(target) is FunctionType
     original_code = target.__code__
     try:
@@ -111,17 +123,17 @@ def test_captured_identity_python_code_retarget_fails_before_provider_read(
 
 def test_reachable_executable_guard_is_code_constant_anchored_and_retarget_fails() -> None:
     public_assess = applicability.assess_betfair_commission_applicability
-    public_require = applicability.require_product_betfair_commission_applicability
+    public_validate = applicability.validate_betfair_commission_applicability_assessment
 
     assert "require_executable_authority" not in public_assess.__code__.co_freevars
     assert "require_executable_authority_code" not in public_assess.__code__.co_freevars
-    assert "require_executable_authority" not in public_require.__code__.co_freevars
-    assert "require_executable_authority_code" not in public_require.__code__.co_freevars
+    assert "require_executable_authority" not in public_validate.__code__.co_freevars
+    assert "require_executable_authority_code" not in public_validate.__code__.co_freevars
 
     authority, authority_code = _authority_witness(public_assess)
-    require_authority, require_authority_code = _authority_witness(public_require)
-    assert require_authority is authority
-    assert require_authority_code is authority_code
+    validate_authority, validate_authority_code = _authority_witness(public_validate)
+    assert validate_authority is authority
+    assert validate_authority_code is authority_code
     assert authority.__code__ is authority_code
 
     original_code = authority.__code__
@@ -137,7 +149,7 @@ def test_reachable_executable_guard_is_code_constant_anchored_and_retarget_fails
             applicability.BetfairCommissionApplicabilityError,
             match="commission applicability executable authority guard changed",
         ):
-            public_require(object())
+            public_validate(object())
     finally:
         authority.__code__ = original_code
 
@@ -146,8 +158,8 @@ def test_fee_input_hash_partial_binding_is_witnessed_exactly() -> None:
     public_assess = applicability.assess_betfair_commission_applicability
     authority, authority_code = _authority_witness(public_assess)
     fee_payload_builder = _closure_value(public_assess, "fee_payload_builder")
-    fee_payload_function = _closure_value(public_assess, "fee_payload_function")
-    fee_payload_args = _closure_value(public_assess, "fee_payload_args")
+    fee_payload_function = _closure_value(authority, "fee_payload_function")
+    fee_payload_args = _closure_value(authority, "fee_payload_args")
 
     assert authority.__code__ is authority_code
     assert fee_payload_builder.func is fee_payload_function

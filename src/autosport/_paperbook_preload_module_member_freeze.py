@@ -22,6 +22,17 @@ from . import _paperbook_preload_authority_guard as _guard
 from . import paper as _paper
 
 
+# Filled once, before any frozen surface becomes reachable by a persistence delegate.
+# Each record keeps the exact live function defaults objects plus an immutable identity
+# snapshot of keyword-default entries.  The surface lookup validates these records at
+# the final attribute-dispatch boundary, so mutating a detached function's defaults
+# cannot retarget a positive load/save while its code/globals/closure remain unchanged.
+_FROZEN_FUNCTION_DEFAULT_WITNESSES: tuple[
+    tuple[FunctionType, object, object, tuple[tuple[str, object], ...] | None], ...
+] = ()
+_FROZEN_DEFAULT_MISSING = object()
+
+
 class _FrozenSurfaceMetaMeta(type):
     """Protect the descriptor-bearing facade metaclass from one-step root removal."""
 
@@ -97,8 +108,34 @@ class _FrozenSurface(tuple, metaclass=_FrozenSurfaceMeta):
         # could otherwise be injected later and retarget positive persistence dispatch
         # without changing this method's code object.
         for member_name, member_value in self:
-            if member_name == name:
-                return member_value
+            if member_name != name:
+                continue
+            if type(member_value) is FunctionType:
+                for function, defaults, kwdefaults, kwdefault_items in _FROZEN_FUNCTION_DEFAULT_WITNESSES:
+                    if member_value is not function:
+                        continue
+                    if (
+                        member_value.__defaults__ is not defaults
+                        or member_value.__kwdefaults__ is not kwdefaults
+                    ):
+                        raise TypeError(
+                            "canonical PaperBook frozen function defaults authority changed"
+                        )
+                    if kwdefaults is not None:
+                        if kwdefault_items is None or len(kwdefaults) != len(kwdefault_items):
+                            raise TypeError(
+                                "canonical PaperBook frozen function keyword defaults authority changed"
+                            )
+                        for key, expected in kwdefault_items:
+                            if kwdefaults.get(key, _FROZEN_DEFAULT_MISSING) is not expected:
+                                raise TypeError(
+                                    "canonical PaperBook frozen function keyword defaults authority changed"
+                                )
+                    return member_value
+                raise TypeError(
+                    "canonical PaperBook frozen function defaults witness is unavailable"
+                )
+            return member_value
         raise AttributeError(name)
 
     def __setattr__(self, name: str, value: object) -> None:
@@ -193,6 +230,8 @@ del _seal_surface_type
 
 
 def _install() -> None:
+    global _FROZEN_FUNCTION_DEFAULT_WITNESSES
+
     # Refuse to bless a pre-retargeted owning graph. This composition runs
     # immediately after the guard import and before its positive graph is cloned.
     if _guard.json is not json:
@@ -225,6 +264,28 @@ def _install() -> None:
     paper_named_temporary_file = _clone_module_function_graph(
         tempfile.NamedTemporaryFile,
         "serializer tempfile.NamedTemporaryFile",
+    )
+
+    frozen_functions = (
+        guard_json_loads,
+        guard_json_dumps,
+        guard_mkstemp,
+        guard_normcase,
+        guard_abspath,
+        paper_json_loads,
+        paper_json_dump,
+        paper_named_temporary_file,
+    )
+    _FROZEN_FUNCTION_DEFAULT_WITNESSES = tuple(
+        (
+            function,
+            function.__defaults__,
+            function.__kwdefaults__,
+            None
+            if function.__kwdefaults__ is None
+            else tuple(function.__kwdefaults__.items()),
+        )
+        for function in frozen_functions
     )
 
     frozen_path = _FrozenSurface(

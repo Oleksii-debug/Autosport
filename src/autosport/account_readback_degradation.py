@@ -245,6 +245,12 @@ class AccountReadbackDegradationEvidence:
     prior_snapshot_id: str | None
     evidence_sha256: str
 
+    def __init_subclass__(cls, **kwargs: object) -> None:
+        del kwargs
+        raise TypeError(
+            "AccountReadbackDegradationEvidence is a final negative-authority DTO"
+        )
+
     @property
     def freshness_proven(self) -> bool:
         return False

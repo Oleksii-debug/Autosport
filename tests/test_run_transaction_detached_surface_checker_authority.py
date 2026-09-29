@@ -5,6 +5,9 @@ from types import FunctionType
 import autosport.run_transaction as run_transaction
 
 
+_HOSTILE_GETATTRIBUTE_CALLS: list[str] = []
+
+
 def _closure_cell(function: FunctionType, name: str):
     freevars = function.__code__.co_freevars
     assert function.__closure__ is not None
@@ -36,6 +39,11 @@ def _no_op_code_with_same_freevars(function: FunctionType):
     assert isinstance(hostile, FunctionType)
     assert hostile.__code__.co_freevars == names
     return hostile.__code__
+
+
+def _hostile_getattribute(self, name: str):
+    _HOSTILE_GETATTRIBUTE_CALLS.append(name)
+    return object.__getattribute__(self, name)
 
 
 def test_surface_verifier_rejects_coordinated_checker_code_retarget() -> None:
@@ -73,3 +81,36 @@ def test_surface_verifier_rejects_coordinated_checker_code_retarget() -> None:
 
     assert checker.__code__ is original_code
     assert checker_code_cell.cell_contents is original_code
+
+
+def test_surface_verifier_rejects_primary_getattribute_root_retarget() -> None:
+    """Detached promotion must witness the lookup root that runs before __getattr__."""
+
+    guarded = run_transaction._promote_paper_book_snapshot
+    assert isinstance(guarded, FunctionType)
+    require_surface = _closure_cell(guarded, "require_surface").cell_contents
+    assert isinstance(require_surface, FunctionType)
+    checker = _closure_cell(require_surface, "surface_authority").cell_contents
+    assert isinstance(checker, FunctionType)
+
+    surface_type = _closure_cell(checker, "surface_type").cell_contents
+    frozen_witnesses = _closure_cell(checker, "frozen_witnesses").cell_contents
+    witness = next(item for item in frozen_witnesses if item[0] == "__getattribute__")
+    original = vars(surface_type)["__getattribute__"]
+    assert witness[1] is original
+    assert witness[2] is original.__code__
+    _HOSTILE_GETATTRIBUTE_CALLS.clear()
+
+    type.__setattr__(surface_type, "__getattribute__", _hostile_getattribute)
+    try:
+        try:
+            require_surface()
+        except Exception:  # noqa: BLE001 - fail closed is the required oracle.
+            pass
+        else:
+            raise AssertionError("surface verifier accepted __getattribute__ retargeting")
+    finally:
+        type.__setattr__(surface_type, "__getattribute__", original)
+
+    require_surface()
+    assert _HOSTILE_GETATTRIBUTE_CALLS == []

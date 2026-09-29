@@ -5,10 +5,12 @@ from pathlib import Path
 import pytest
 
 import autosport._paperbook_preload_authority_guard as guard
+import autosport._paperbook_preload_module_member_freeze as freeze
 import autosport.paper as paper
 
 
 _HOSTILE_GETATTRIBUTE_CALLS: list[str] = []
+_HOSTILE_OBJECT_CALLS: list[str] = []
 
 
 def _hostile_getattribute(self, name: str):
@@ -16,6 +18,13 @@ def _hostile_getattribute(self, name: str):
     if name == "loads":
         return lambda _raw: {"balance": "999999"}
     return object.__getattribute__(self, name)
+
+
+class _HostileObject:
+    @staticmethod
+    def __getattribute__(self, name: str):
+        _HOSTILE_OBJECT_CALLS.append(name)
+        return object.__getattribute__(self, name)
 
 
 def test_frozen_surface_getattribute_retarget_fails_before_member_dispatch(
@@ -45,3 +54,25 @@ def test_frozen_surface_getattribute_retarget_fails_before_member_dispatch(
     loaded = paper.PaperBook.load(path)
     assert loaded.balance == book.balance
     assert _HOSTILE_GETATTRIBUTE_CALLS == []
+
+
+def test_frozen_surface_getattribute_ignores_late_object_global_injection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Primary lookup uses its code-anchored primitive, not a late module global."""
+
+    path = tmp_path / "paper-book.json"
+    book = paper.PaperBook("100")
+    book.save(path)
+    surface_type = type(guard.json)
+    lookup = vars(surface_type)["__getattribute__"]
+    assert object.__getattribute__ in lookup.__code__.co_consts
+    assert "__AUTOSPORT_FROZEN_SURFACE_GETATTRIBUTE_ANCHOR__" not in lookup.__code__.co_consts
+
+    _HOSTILE_OBJECT_CALLS.clear()
+    monkeypatch.setattr(freeze, "object", _HostileObject, raising=False)
+    loaded = paper.PaperBook.load(path)
+
+    assert loaded.balance == book.balance
+    assert _HOSTILE_OBJECT_CALLS == []

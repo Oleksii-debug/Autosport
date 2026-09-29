@@ -544,6 +544,7 @@ class _RuntimeState:
     policy_fingerprint: str
     clock: Clock
     wall_clock: WallClock
+    blacklist_store: _BlacklistStore
     methods: dict[str, _Window]
     combined: _Window
     blacklist_blocked_until: dict[str, float]
@@ -910,19 +911,7 @@ class BetdaqRateGovernor:
         )
 
     def _assert_policy_integrity(self) -> None:
-        try:
-            current_fingerprint = self.policy.fingerprint()
-        except Exception as exc:
-            raise BetdaqRateGovernorError(
-                "BETDAQ rate policy changed after governor resolution"
-            ) from exc
-        if (
-            current_fingerprint != self.policy_fingerprint
-            or self.policy_fingerprint != self._runtime.policy_fingerprint
-        ):
-            raise BetdaqRateGovernorError(
-                "BETDAQ rate policy changed after governor resolution"
-            )
+        _canonical_governor_binding(self)
 
     @property
     def multi_process_safe(self) -> bool:
@@ -966,6 +955,7 @@ class BetdaqRateGovernor:
         return BetdaqBlacklistStatus.EXPIRED_OBSERVATION, 0.0
 
     def blacklist_status(self, api_name: str) -> BetdaqBlacklistStatus:
+        _canonical_governor_binding(self)
         raw_name = _canonical_text(api_name, "api_name")
         operation_id = _provider_operation_id(raw_name)
         if operation_id is None:
@@ -985,6 +975,7 @@ class BetdaqRateGovernor:
         remaining_ms: int,
         provider_observation_sha256: str,
     ) -> BetdaqBlacklistObservation:
+        _canonical_governor_binding(self)
         name = _canonical_text(api_name, "api_name")
         operation_id = _provider_operation_id(name)
         if (
@@ -1253,6 +1244,92 @@ def _assert_canonical_governor_dispatch() -> None:
             )
 
 
+def _canonical_governor_binding(
+    governor: BetdaqRateGovernor,
+) -> tuple[BetdaqRatePolicy, _RuntimeState, _BlacklistStore]:
+    """Resolve and validate one governor against registry-owned authority state."""
+
+    if type(governor) is not _CANONICAL_GOVERNOR_TYPE:
+        raise TypeError("governor must be canonical BetdaqRateGovernor")
+
+    matches = [
+        workspace_key
+        for workspace_key, candidate in _GOVERNORS.items()
+        if candidate is governor
+    ]
+    if len(matches) != 1:
+        raise BetdaqRateGovernorError(
+            "BETDAQ governor is not uniquely bound to the canonical registry"
+        )
+    workspace_key = matches[0]
+    runtime = _RUNTIME.get(workspace_key)
+    if type(runtime) is not _RuntimeState:
+        raise BetdaqRateGovernorError(
+            "BETDAQ governor registry is internally inconsistent"
+        )
+
+    try:
+        workspace = object.__getattribute__(governor, "workspace")
+        bound_runtime = object.__getattribute__(governor, "_runtime")
+        blacklist_store = object.__getattribute__(
+            governor, "_blacklist_store"
+        )
+        policy = object.__getattribute__(governor, "policy")
+        policy_fingerprint = object.__getattribute__(
+            governor, "policy_fingerprint"
+        )
+        method_policies = object.__getattribute__(
+            governor, "_method_policies"
+        )
+        governor_id = object.__getattribute__(governor, "governor_id")
+    except AttributeError as exc:
+        raise BetdaqRateGovernorError(
+            "BETDAQ governor canonical instance binding is incomplete"
+        ) from exc
+
+    if (
+        not isinstance(workspace, Path)
+        or _workspace_registry_key(workspace) != workspace_key
+        or bound_runtime is not runtime
+        or blacklist_store is not runtime.blacklist_store
+        or type(blacklist_store) is not _BlacklistStore
+        or blacklist_store.workspace != workspace
+        or blacklist_store.path != workspace / _BLACKLIST_FILE
+        or type(policy) is not BetdaqRatePolicy
+    ):
+        raise BetdaqRateGovernorError(
+            "BETDAQ governor canonical instance binding was replaced"
+        )
+
+    try:
+        current_fingerprint = policy.fingerprint()
+        expected_methods = policy.by_method()
+    except Exception as exc:
+        raise BetdaqRateGovernorError(
+            "BETDAQ rate policy changed after governor resolution"
+        ) from exc
+    if (
+        current_fingerprint != runtime.policy_fingerprint
+        or policy_fingerprint != runtime.policy_fingerprint
+        or type(method_policies) is not MappingProxyType
+        or dict(method_policies) != expected_methods
+    ):
+        raise BetdaqRateGovernorError(
+            "BETDAQ governor canonical instance binding was replaced"
+        )
+    expected_governor_id = "betdaq-rate:" + _digest(
+        {
+            "workspace_key": runtime.workspace_key,
+            "policy_fingerprint": runtime.policy_fingerprint,
+        }
+    )
+    if governor_id != expected_governor_id:
+        raise BetdaqRateGovernorError(
+            "BETDAQ governor canonical instance binding was replaced"
+        )
+    return policy, runtime, blacklist_store
+
+
 def admit_betdaq_rate_request(
     governor: BetdaqRateGovernor,
     method: str,
@@ -1354,12 +1431,17 @@ def resolve_betdaq_rate_governor(
         now_value = clock()
         now = _nonnegative_finite(now_value, "monotonic clock")
         cold_until = now + float(policy.cold_start_seconds)
+        blacklist_store = _BlacklistStore(
+            root,
+            authority_root=resolved_authority,
+        )
         runtime = _RuntimeState(
             workspace_key=workspace_key,
             authority_root_key=authority_root_key,
             policy_fingerprint=fingerprint,
             clock=clock,
             wall_clock=wall_clock,
+            blacklist_store=blacklist_store,
             methods={
                 method.method: _Window(
                     admitted_at=deque(),
@@ -1374,10 +1456,6 @@ def resolve_betdaq_rate_governor(
             blacklist_blocked_until={},
             last_monotonic=now,
             clock_failed_closed=False,
-        )
-        blacklist_store = _BlacklistStore(
-            root,
-            authority_root=resolved_authority,
         )
         wall_now = _utc(wall_clock(), "wall_clock")
         for observation in blacklist_store.observations().values():

@@ -19,6 +19,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from enum import Enum
+from hashlib import sha256
 import json
 import threading
 from time import monotonic_ns
@@ -90,20 +91,41 @@ def _time(value: str, name: str) -> datetime:
 
 
 def _install_betfair_readback_capture_start_authority() -> None:
-    """Bind canonical readback object identity to its system capture-start instant.
+    """Bind canonical readback to its capture-start instant without an id registry.
 
-    The existing BetfairReadOnlyClient origin seal remains authoritative for the
-    readback payload itself.  This second, narrower seal records when that exact
-    canonical capture began so a request started before the provider visibility
-    horizon cannot become negative authority merely because transport latency makes
-    its response timestamps cross the deadline.
+    Timing origin is stored only in non-init fields on the exact returned envelope.
+    A dataclass copy/reconstruction therefore carries no timing authority. Helpers
+    recompute a fingerprint over the structural readback plus both start clocks,
+    so post-capture mutation invalidates the timing witness.
     """
 
-    issued: dict[int, tuple[object, str, int]] = {}
     raw_read = BetfairReadOnlyClient.read_execution_readback
+    raw_read_code = raw_read.__code__
+    envelope_type = BetfairExecutionReadbackEnvelope
     capture_datetime = datetime
     capture_timezone_utc = timezone.utc
     capture_monotonic_ns = monotonic_ns
+    json_dumps = json.dumps
+    sha256_fn = sha256
+
+    def timing_fingerprint(
+        readback: BetfairExecutionReadbackEnvelope,
+        started_at: str,
+        started_monotonic_ns: int,
+    ) -> str:
+        payload = {
+            "readback_fingerprint": readback._authority_fingerprint(),
+            "capture_started_at": started_at,
+            "capture_started_monotonic_ns": started_monotonic_ns,
+        }
+        encoded = json_dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            allow_nan=False,
+        ).encode("utf-8")
+        return sha256_fn(encoded).hexdigest()
 
     def authoritative_read(
         self: BetfairReadOnlyClient,
@@ -114,6 +136,10 @@ def _install_betfair_readback_capture_start_authority() -> None:
         page_size: int = 1000,
         max_pages: int = 100,
     ) -> BetfairExecutionReadbackEnvelope:
+        if raw_read.__code__ is not raw_read_code:
+            raise BetfairTimeoutResolutionError(
+                "canonical Betfair readback origin code changed"
+            )
         capture_started_at = capture_datetime.now(capture_timezone_utc).isoformat()
         capture_started_monotonic_ns = capture_monotonic_ns()
         capture = raw_read(
@@ -124,37 +150,80 @@ def _install_betfair_readback_capture_start_authority() -> None:
             page_size=page_size,
             max_pages=max_pages,
         )
-        capture_id = id(capture)
-
-        def forget(_weakref: object, *, key: int = capture_id) -> None:
-            issued.pop(key, None)
-
-        issued[capture_id] = (
-            ref(capture, forget),
+        if type(capture) is not envelope_type:
+            raise BetfairTimeoutResolutionError(
+                "canonical Betfair readback returned non-canonical envelope"
+            )
+        fingerprint = timing_fingerprint(
+            capture,
             capture_started_at,
             capture_started_monotonic_ns,
         )
+        object.__setattr__(
+            capture,
+            "_authority_capture_started_at",
+            capture_started_at,
+        )
+        object.__setattr__(
+            capture,
+            "_authority_capture_started_monotonic_ns",
+            capture_started_monotonic_ns,
+        )
+        object.__setattr__(
+            capture,
+            "_authority_capture_start_fingerprint",
+            fingerprint,
+        )
         return capture
+
+    def validated_capture_start(
+        readback: BetfairExecutionReadbackEnvelope,
+    ) -> tuple[str, int] | None:
+        if type(readback) is not envelope_type:
+            return None
+        try:
+            started_at = object.__getattribute__(
+                readback,
+                "_authority_capture_started_at",
+            )
+            started_monotonic_ns = object.__getattribute__(
+                readback,
+                "_authority_capture_started_monotonic_ns",
+            )
+            fingerprint = object.__getattribute__(
+                readback,
+                "_authority_capture_start_fingerprint",
+            )
+            if (
+                type(started_at) is not str
+                or type(started_monotonic_ns) is not int
+                or started_monotonic_ns < 0
+                or type(fingerprint) is not str
+            ):
+                return None
+            _time(started_at, "capture_started_at")
+            expected = timing_fingerprint(
+                readback,
+                started_at,
+                started_monotonic_ns,
+            )
+        except BaseException:
+            return None
+        if fingerprint != expected:
+            return None
+        return started_at, started_monotonic_ns
 
     def capture_started_at(
         readback: BetfairExecutionReadbackEnvelope,
     ) -> str | None:
-        if not isinstance(readback, BetfairExecutionReadbackEnvelope):
-            return None
-        record = issued.get(id(readback))
-        if record is None or record[0]() is not readback:
-            return None
-        return record[1]
+        record = validated_capture_start(readback)
+        return None if record is None else record[0]
 
     def capture_started_monotonic_ns(
         readback: BetfairExecutionReadbackEnvelope,
     ) -> int | None:
-        if not isinstance(readback, BetfairExecutionReadbackEnvelope):
-            return None
-        record = issued.get(id(readback))
-        if record is None or record[0]() is not readback:
-            return None
-        return record[2]
+        record = validated_capture_start(readback)
+        return None if record is None else record[1]
 
     BetfairReadOnlyClient.read_execution_readback = authoritative_read
     globals()["_betfair_readback_capture_started_at"] = capture_started_at

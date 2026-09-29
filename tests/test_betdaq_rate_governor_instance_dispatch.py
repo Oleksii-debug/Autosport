@@ -74,8 +74,6 @@ def test_resolved_governor_cannot_inject_new_instance_dispatch_surface(tmp_path)
     (
         "workspace",
         "policy",
-        "_runtime",
-        "_blacklist_store",
         "policy_fingerprint",
         "_method_policies",
         "governor_id",
@@ -122,8 +120,6 @@ def test_supported_dispatch_preserves_admission_receipt_semantics(tmp_path):
     (
         "workspace",
         "policy",
-        "_runtime",
-        "_blacklist_store",
         "policy_fingerprint",
         "_method_policies",
         "governor_id",
@@ -150,43 +146,22 @@ def test_supported_dispatch_rejects_object_setattr_instance_rebinding(
     assert admission.sequence == 1
 
 
-def test_direct_admit_rejects_object_setattr_runtime_rebinding(tmp_path):
+@pytest.mark.parametrize("attribute", ("_runtime", "_blacklist_store"))
+def test_resolved_governor_does_not_expose_registry_mutable_capability(
+    tmp_path,
+    attribute,
+):
     governor = _resolved_governor(tmp_path)
-    original = object.__getattribute__(governor, "_runtime")
 
-    object.__setattr__(governor, "_runtime", object())
-    try:
-        with pytest.raises(
-            BetdaqRateGovernorError,
-            match="canonical instance binding",
-        ):
-            governor.admit("GetPrices")
-    finally:
-        object.__setattr__(governor, "_runtime", original)
+    assert attribute not in vars(BetdaqRateGovernor)
+    with pytest.raises(AttributeError):
+        object.__getattribute__(governor, attribute)
+    with pytest.raises(AttributeError):
+        object.__setattr__(governor, attribute, object())
 
-
-def test_blacklist_methods_reject_object_setattr_store_rebinding(tmp_path):
-    governor = _resolved_governor(tmp_path)
-    original = object.__getattribute__(governor, "_blacklist_store")
-
-    object.__setattr__(governor, "_blacklist_store", object())
-    try:
-        with pytest.raises(
-            BetdaqRateGovernorError,
-            match="canonical instance binding",
-        ):
-            governor.blacklist_status("GetPrices")
-        with pytest.raises(
-            BetdaqRateGovernorError,
-            match="canonical instance binding",
-        ):
-            governor.observe_blacklist(
-                api_name="GetPrices",
-                remaining_ms=0,
-                provider_observation_sha256="0" * 64,
-            )
-    finally:
-        object.__setattr__(governor, "_blacklist_store", original)
+    admission = admit_betdaq_rate_request(governor, "GetPrices")
+    assert admission.method == "GetPrices"
+    assert admission.sequence == 1
 
 
 @pytest.mark.parametrize(
@@ -199,8 +174,6 @@ def test_blacklist_methods_reject_object_setattr_store_rebinding(tmp_path):
         "_now",
         "_prune",
         "policy",
-        "_runtime",
-        "_blacklist_store",
         "policy_fingerprint",
         "_method_policies",
         "governor_id",
@@ -271,7 +244,10 @@ def test_supported_dispatch_rejects_in_place_class_method_code_replacement(
     assert hostile_calls == []
 
 
-@pytest.mark.parametrize("attribute", ("__getattribute__", "__new__"))
+@pytest.mark.parametrize(
+    "attribute",
+    ("_runtime", "_blacklist_store", "__getattribute__", "__new__"),
+)
 def test_supported_dispatch_rejects_expected_absent_class_special_injection(
     tmp_path,
     attribute,

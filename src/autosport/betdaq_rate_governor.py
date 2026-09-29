@@ -858,8 +858,6 @@ class BetdaqRateGovernor:
     __slots__ = (
         "workspace",
         "policy",
-        "_runtime",
-        "_blacklist_store",
         "policy_fingerprint",
         "_method_policies",
         "governor_id",
@@ -895,8 +893,10 @@ class BetdaqRateGovernor:
             )
         self.workspace = workspace
         self.policy = policy
-        self._runtime = runtime
-        self._blacklist_store = blacklist_store
+        if runtime.blacklist_store is not blacklist_store:
+            raise BetdaqRateGovernorError(
+                "BETDAQ governor registry is internally inconsistent"
+            )
         self.policy_fingerprint = policy.fingerprint()
         if self.policy_fingerprint != runtime.policy_fingerprint:
             raise BetdaqRateGovernorError(
@@ -931,10 +931,11 @@ class BetdaqRateGovernor:
         *,
         now_monotonic: float,
     ) -> tuple[BetdaqBlacklistStatus, float]:
-        observation = self._blacklist_store.observations().get(operation_id)
+        _, runtime, blacklist_store = _canonical_governor_binding(self)
+        observation = blacklist_store.observations().get(operation_id)
         if observation is None:
             return BetdaqBlacklistStatus.UNKNOWN, 0.0
-        wall_now = _utc(self._runtime.wall_clock(), "wall_clock")
+        wall_now = _utc(runtime.wall_clock(), "wall_clock")
         wall_remaining = max(
             0.0,
             (
@@ -944,7 +945,7 @@ class BetdaqRateGovernor:
         )
         monotonic_remaining = max(
             0.0,
-            self._runtime.blacklist_blocked_until.get(
+            runtime.blacklist_blocked_until.get(
                 operation_id, now_monotonic
             )
             - now_monotonic,
@@ -975,7 +976,7 @@ class BetdaqRateGovernor:
         remaining_ms: int,
         provider_observation_sha256: str,
     ) -> BetdaqBlacklistObservation:
-        _canonical_governor_binding(self)
+        _, runtime, blacklist_store = _canonical_governor_binding(self)
         name = _canonical_text(api_name, "api_name")
         operation_id = _provider_operation_id(name)
         if (
@@ -992,7 +993,7 @@ class BetdaqRateGovernor:
             provider_observation_sha256,
             "provider_observation_sha256",
         )
-        observed = _utc(self._runtime.wall_clock(), "wall_clock")
+        observed = _utc(runtime.wall_clock(), "wall_clock")
         blocked = observed + timedelta(milliseconds=remaining_ms)
         observation = BetdaqBlacklistObservation(
             api_name=name,
@@ -1002,11 +1003,11 @@ class BetdaqRateGovernor:
             provider_observation_sha256=digest,
         )
         if operation_id is None:
-            return self._blacklist_store.extend(observation)
+            return blacklist_store.extend(observation)
 
         with _REGISTRY_LOCK:
             now = self._now(operation_id)
-            persisted = self._blacklist_store.extend(observation)
+            persisted = blacklist_store.extend(observation)
             persisted_remaining = max(
                 0.0,
                 (
@@ -1020,8 +1021,8 @@ class BetdaqRateGovernor:
                 remaining_ms / 1000.0,
                 persisted_remaining,
             )
-            self._runtime.blacklist_blocked_until[operation_id] = max(
-                self._runtime.blacklist_blocked_until.get(
+            runtime.blacklist_blocked_until[operation_id] = max(
+                runtime.blacklist_blocked_until.get(
                     operation_id, relative_until
                 ),
                 relative_until,
@@ -1035,6 +1036,7 @@ class BetdaqRateGovernor:
         priority: BetdaqRatePriority = BetdaqRatePriority.BACKGROUND_READ,
     ) -> BetdaqRateAdmission:
         _CANONICAL_ASSERT_POLICY_INTEGRITY(self)
+        _, runtime, _ = _canonical_governor_binding(self)
         name = _canonical_text(method, "method")
         if type(priority) is not BetdaqRatePriority:
             raise BetdaqRateGovernorError(
@@ -1050,12 +1052,12 @@ class BetdaqRateGovernor:
 
         with _REGISTRY_LOCK:
             now = _CANONICAL_NOW(self, name)
-            window = self._runtime.methods[name]
+            window = runtime.methods[name]
             _CANONICAL_PRUNE(self, window.admitted_at, now)
-            _CANONICAL_PRUNE(self, self._runtime.combined.admitted_at, now)
+            _CANONICAL_PRUNE(self, runtime.combined.admitted_at, now)
             cold_blocked_until = max(
                 window.blocked_until,
-                self._runtime.combined.blocked_until,
+                runtime.combined.blocked_until,
             )
             if cold_blocked_until > now:
                 raise BetdaqRateDeferred(
@@ -1083,7 +1085,7 @@ class BetdaqRateGovernor:
                 combined_limit -= self.policy.combined_safety_reserve
 
             method_active = len(window.admitted_at)
-            combined_active = len(self._runtime.combined.admitted_at)
+            combined_active = len(runtime.combined.admitted_at)
             retry_candidates: list[float] = []
             if method_active >= method_limit:
                 retry_candidates.append(
@@ -1092,7 +1094,7 @@ class BetdaqRateGovernor:
                 )
             if combined_active >= combined_limit:
                 retry_candidates.append(
-                    self._runtime.combined.admitted_at[
+                    runtime.combined.admitted_at[
                         combined_active - combined_limit
                     ]
                     + self.policy.window_seconds
@@ -1115,10 +1117,10 @@ class BetdaqRateGovernor:
                 )
 
             window.admitted_at.append(now)
-            self._runtime.combined.admitted_at.append(now)
-            self._runtime.sequence += 1
+            runtime.combined.admitted_at.append(now)
+            runtime.sequence += 1
             method_after = len(window.admitted_at)
-            combined_after = len(self._runtime.combined.admitted_at)
+            combined_after = len(runtime.combined.admitted_at)
             method_background = (
                 method_policy.capacity - method_policy.safety_reserve
             )
@@ -1135,10 +1137,10 @@ class BetdaqRateGovernor:
                 method=name,
                 rate_policy_key=method_policy.rate_policy_key,
                 priority=priority,
-                sequence=self._runtime.sequence,
+                sequence=runtime.sequence,
                 admitted_monotonic=now,
                 admitted_at=_utc_text(
-                    _utc(self._runtime.wall_clock(), "wall_clock")
+                    _utc(runtime.wall_clock(), "wall_clock")
                 ),
                 method_active=method_after,
                 combined_active=combined_after,
@@ -1158,34 +1160,36 @@ class BetdaqRateGovernor:
             )
 
     def _now(self, method: str) -> float:
-        if self._runtime.clock_failed_closed:
+        _, runtime, _ = _canonical_governor_binding(self)
+        if runtime.clock_failed_closed:
             raise BetdaqRateDeferred(
                 method=method,
                 reason="monotonic_clock_failed_closed",
                 retry_after_seconds=None,
             )
         try:
-            value = self._runtime.clock()
+            value = runtime.clock()
         except Exception as exc:
-            self._runtime.clock_failed_closed = True
+            runtime.clock_failed_closed = True
             raise BetdaqRateDeferred(
                 method=method,
                 reason="monotonic_clock_failed_closed",
                 retry_after_seconds=None,
             ) from exc
         now = _nonnegative_finite(value, "monotonic clock")
-        if now < self._runtime.last_monotonic:
-            self._runtime.clock_failed_closed = True
+        if now < runtime.last_monotonic:
+            runtime.clock_failed_closed = True
             raise BetdaqRateDeferred(
                 method=method,
                 reason="monotonic_clock_rollback",
                 retry_after_seconds=None,
             )
-        self._runtime.last_monotonic = now
+        runtime.last_monotonic = now
         return now
 
     def _prune(self, values: deque[float], now: float) -> None:
-        cutoff = now - self.policy.window_seconds
+        policy, _, _ = _canonical_governor_binding(self)
+        cutoff = now - policy.window_seconds
         while values and values[0] <= cutoff:
             values.popleft()
 
@@ -1270,10 +1274,6 @@ def _canonical_governor_binding(
 
     try:
         workspace = object.__getattribute__(governor, "workspace")
-        bound_runtime = object.__getattribute__(governor, "_runtime")
-        blacklist_store = object.__getattribute__(
-            governor, "_blacklist_store"
-        )
         policy = object.__getattribute__(governor, "policy")
         policy_fingerprint = object.__getattribute__(
             governor, "policy_fingerprint"
@@ -1287,11 +1287,10 @@ def _canonical_governor_binding(
             "BETDAQ governor canonical instance binding is incomplete"
         ) from exc
 
+    blacklist_store = runtime.blacklist_store
     if (
         not isinstance(workspace, Path)
         or _workspace_registry_key(workspace) != workspace_key
-        or bound_runtime is not runtime
-        or blacklist_store is not runtime.blacklist_store
         or type(blacklist_store) is not _BlacklistStore
         or blacklist_store.workspace != workspace
         or blacklist_store.path != workspace / _BLACKLIST_FILE

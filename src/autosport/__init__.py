@@ -190,3 +190,40 @@ from . import _drift_decimal_resource_guard as _drift_decimal_resource_guard  # 
 # K07 authenticated account identity must acquire account details from a sealed
 # product-origin snapshot, not mutable live-client fields during provider I/O.
 from . import _betfair_account_identity_io_snapshot_guard as _betfair_account_identity_io_snapshot_guard  # noqa: F401,E402
+
+# Bind source-scoped settlement outcomes to durable ticket provider provenance and
+# reject ambiguity before optional learning or economic side effects. Install before
+# Wave M captures and freezes the resulting exact coordinator helpers.
+from . import _continuous_session_settlement_event_scope as _continuous_session_settlement_event_scope  # noqa: F401,E402
+
+# The composed PaperBook loader must reconstruct source/economic truth through the
+# exact canonical domain DTO constructors and field/property dispatch it validates.
+# Install this narrow witness before Wave M freezes the final coordinator helper.
+from . import _continuous_session_paperbook_materialization_guard as _continuous_session_paperbook_materialization_guard  # noqa: F401,E402
+
+# The coordinator's loader late-resolves continuous_session.PaperBook separately from
+# the canonical autosport.paper surface. Bind that session-global origin before the
+# final Wave M dispatch seal freezes the composed loader graph.
+from . import _continuous_session_paperbook_session_global_guard as _continuous_session_paperbook_session_global_guard  # noqa: F401,E402
+
+# Ticket provenance is aggregate while TicketLeg has no provider-source binding.
+# Fail closed on multi-source attribution after outcome resolution and before Wave M
+# seals the composed settlement entrypoints for learning/economic use.
+from . import _continuous_session_settlement_multisource_scope_guard as _continuous_session_settlement_multisource_scope_guard  # noqa: F401,E402
+
+# Wave M settlement composition must not dispatch authority-bearing causal/economic
+# helpers through caller-shadowable instance/subclass/class slots.
+from . import _continuous_session_settlement_dispatch_guard as _continuous_session_settlement_dispatch_guard  # noqa: F401,E402
+
+# Registered shard verification crosses the lineage reader's existing registry and
+# monotonic authorities. Exact-fence those nested instance/class dispatch surfaces
+# before the broader Wave M shard guard captures the public entrypoints.
+from . import _dataset_shard_nested_authority_guard as _dataset_shard_nested_authority_guard  # noqa: F401,E402
+
+# Wave M registered-shard authority must not depend on caller-mutable function
+# kwdefaults or module-level shadows of interpreter/data-path dependencies.
+from . import _dataset_shard_manifest_authority_guard as _dataset_shard_manifest_authority_guard  # noqa: F401,E402
+
+# The canonical PAPER product loop must cross the same non-virtual Wave M session
+# entry authority rather than returning to mutable coordinator method lookup.
+from . import _product_runtime_continuous_session_entry_guard as _product_runtime_continuous_session_entry_guard  # noqa: F401,E402

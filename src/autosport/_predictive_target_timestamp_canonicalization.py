@@ -1,10 +1,10 @@
-"""Canonicalize predictive-target population timestamp identity.
+"""Canonicalize predictive-target timestamp identity.
 
 The factory training-points manifest already normalizes timezone-aware instants to
-UTC before hashing.  The downstream predictive-target population digest must use
+UTC before hashing.  Predictive-target contract and population identities must use
 the same semantic instant identity; otherwise equivalent ISO-8601 spellings such
-as ``Z`` and ``+00:00`` can produce different target-population hashes for the
-same already-frozen training population.
+as ``Z`` and ``+00:00`` can produce different hashes for the same frozen contract
+or the same already-frozen training population.
 
 This is identity hardening only.  It does not verify outcome-label semantics or
 grant model-output probability, calibration, forecast, promotion, allocation,
@@ -19,8 +19,21 @@ from . import predictive_target_semantics as _target
 from ._strategy_model_factory_impl import TrainingPoint
 
 
+_ORIGINAL_CONTRACT_CANONICAL_PAYLOAD = (
+    _target.PredictiveTargetContract.canonical_payload
+)
+
+
 def _canonical_instant_text(value: object, name: str) -> str:
     return _target._instant(value, name).isoformat()
+
+
+def _canonical_contract_payload(
+    self: _target.PredictiveTargetContract,
+) -> dict[str, object]:
+    payload = _ORIGINAL_CONTRACT_CANONICAL_PAYLOAD(self)
+    payload["frozen_at"] = _canonical_instant_text(self.frozen_at, "frozen_at")
+    return payload
 
 
 def _canonical_target_population_digest(
@@ -61,6 +74,7 @@ def install() -> None:
         False,
     ):
         return
+    _target.PredictiveTargetContract.canonical_payload = _canonical_contract_payload
     _target._target_population_digest = _canonical_target_population_digest
     _target._autosport_target_timestamp_canonicalization_installed = True
 

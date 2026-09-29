@@ -1134,18 +1134,18 @@ class TheOddsApiProvider:
     def _query_items(self) -> list[tuple[str, str]]:
         items = [
             ("apiKey", self.api_key),
-            ("markets", ",".join(self.markets)),
+            ("markets", ",".join(sorted(self.markets))),
             ("oddsFormat", "decimal"),
             ("dateFormat", "iso"),
             ("includeSids", "true" if self.include_sids else "false"),
             ("includeBetLimits", "true" if self.include_bet_limits else "false"),
         ]
         if self.bookmakers:
-            items.append(("bookmakers", ",".join(self.bookmakers)))
+            items.append(("bookmakers", ",".join(sorted(self.bookmakers))))
         else:
-            items.append(("regions", ",".join(self.regions)))
+            items.append(("regions", ",".join(sorted(self.regions))))
         if self.event_ids:
-            items.append(("eventIds", ",".join(self.event_ids)))
+            items.append(("eventIds", ",".join(sorted(self.event_ids))))
         return items
 
     def _request_evidence(
@@ -1160,13 +1160,17 @@ class TheOddsApiProvider:
         requested_snapshot_at: str | None = None,
         actual_snapshot_at: str | None = None,
     ) -> TheOddsApiRequestEvidence:
+        effective_bookmakers = tuple(sorted(self.bookmakers))
+        effective_regions = (
+            () if effective_bookmakers else tuple(sorted(self.regions))
+        )
         return TheOddsApiRequestEvidence(
             endpoint_kind=endpoint_kind,
             sport=self.sport,
-            regions=self.regions,
-            bookmakers=self.bookmakers,
-            markets=self.markets,
-            event_ids=self.event_ids,
+            regions=effective_regions,
+            bookmakers=effective_bookmakers,
+            markets=tuple(sorted(self.markets)),
+            event_ids=tuple(sorted(self.event_ids)),
             include_sids=self.include_sids,
             include_bet_limits=self.include_bet_limits,
             observed_at=observed_at,

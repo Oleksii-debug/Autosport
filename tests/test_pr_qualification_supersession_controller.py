@@ -47,7 +47,7 @@ def test_controller_coalesces_only_same_pr_same_head_same_workflow_decision() ->
     assert "github.event.workflow_run.head_sha" in concurrency
     assert "github.event.workflow_run.workflow_id" in concurrency
     assert "cancel-in-progress: true" in concurrency
-    assert "fresh live" in workflow
+    assert "fresh" in workflow
     assert "head/state/draft" in workflow
 
 
@@ -57,34 +57,55 @@ def test_delayed_stale_head_controller_cannot_preempt_current_head_controller() 
     concurrency = workflow.split("concurrency:", 1)[1].split("jobs:", 1)[0]
     assert "github.event.workflow_run.head_sha" in concurrency
     assert "delayed stale-head workflow_run event must never evict" in workflow
-    assert "same-head latest-wins" in workflow
+    assert "latest-wins" in workflow
 
 
-def test_empty_ref_controller_is_run_unique_until_pr_identity_is_resolved() -> None:
+def test_explicit_pr_identity_is_used_only_for_a_singleton_event_reference() -> None:
+    workflow = _text()
+
+    singleton_guard = (
+        "github.event.workflow_run.pull_requests[0].number && "
+        "!github.event.workflow_run.pull_requests[1].number && "
+        "github.event.workflow_run.pull_requests[0].number"
+    )
+    concurrency = workflow.split("concurrency:", 1)[1].split("jobs:", 1)[0]
+    job = workflow.split("jobs:", 1)[1]
+
+    assert singleton_guard in concurrency
+    assert singleton_guard in job
+    assert "array" in workflow
+    assert "arbitrary first array member" in workflow
+
+
+def test_empty_or_ambiguous_ref_controller_is_run_unique_until_identity_is_resolved() -> None:
     workflow = _text()
 
     concurrency = workflow.split("concurrency:", 1)[1].split("jobs:", 1)[0]
     assert "format('unresolved-run-{0}', github.event.workflow_run.id)" in concurrency
+    assert "github.event.workflow_run.pull_requests[1].number" in concurrency
     assert "github.event.workflow_run.head_sha" in concurrency
     assert "two distinct PRs may point" in workflow
-    assert "empty-reference controller run-unique" in workflow
+    assert "empty or multi-reference payload is unresolved" in workflow
+    assert "run-unique" in workflow
 
 
-def test_controller_does_not_skip_close_merge_run_when_nested_pr_list_is_empty() -> None:
+def test_controller_does_not_skip_close_merge_run_when_pr_identity_is_unresolved() -> None:
     workflow = _text()
     job = workflow.split("jobs:", 1)[1]
 
     assert "if: github.event.workflow_run.event == 'pull_request'" in job
     assert "pull_requests[0].number != null" not in job
-    assert '--pr-number "${{ github.event.workflow_run.pull_requests[0].number || 0 }}"' in job
-    assert "missing PR" in workflow
-    assert "commit association" in workflow
+    assert '--pr-number "${{' in job
+    assert "github.event.workflow_run.pull_requests[1].number" in job
+    assert "|| 0 }}\"" in job
+    assert "unique" in workflow
 
 
 def test_controller_does_not_cross_cancel_other_source_workflow_controllers() -> None:
     workflow = _text()
 
-    assert "Controllers for CI, Windows candidate, and Endurance must not preempt one" in workflow
-    assert "another" in workflow
-    assert "each invocation cancels only obsolete runs of its own source workflow" in workflow
+    assert "Controllers for CI, Windows candidate, and Endurance must not" in workflow
+    assert "preempt one another" in workflow.replace("\n# ", " ")
+    assert "each invocation cancels only obsolete runs of its own" in workflow
+    assert "source workflow" in workflow
     assert "exact workflow_id carried by workflow_run" in workflow

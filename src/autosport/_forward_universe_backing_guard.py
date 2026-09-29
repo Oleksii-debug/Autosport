@@ -148,37 +148,71 @@ def resolve_forward_universe_backing_locator(
         return origin
 
 
-def load_guarded_provider_evaluation_universe(
-    store: ProviderEvaluationUniverseStore,
-) -> tuple[EvaluationUniverseLedger | None, ForwardUniverseBackingLocator]:
-    """Load through one captured canonical backing with before/after locator checks.
+def _build_guarded_load(
+    *,
+    store_type: type[ProviderEvaluationUniverseStore],
+    backing_type: type[EvaluationUniverseStore],
+    canonical_load,
+    locator_resolver,
+):
+    """Capture exact load/locator executables so module aliases cannot retarget them."""
 
-    Calling ``ProviderEvaluationUniverseStore.load`` after a separate locator check
-    would leave a TOCTOU window because that method dereferences mutable ``_store``.
-    Instead this function pins the origin, captures the exact current backing, verifies
-    the pin again, invokes the import-time sealed unbound EvaluationUniverseStore.load
-    on that captured object, and verifies the outer store still has the same locator
-    before releasing positive evidence.
-    """
+    canonical_load_code = canonical_load.__code__
+    locator_code = locator_resolver.__code__
 
-    origin = resolve_forward_universe_backing_locator(store)
-    backing = getattr(store, "_store", None)
-    if type(backing) is not EvaluationUniverseStore:
-        raise ForwardUniverseBackingGuardError(
-            "provider-universe backing store changed during guarded load"
-        )
-    if resolve_forward_universe_backing_locator(store) != origin:
-        raise ForwardUniverseBackingGuardError(
-            "provider-universe backing locator changed before durable load"
-        )
+    def guarded_load(
+        store: ProviderEvaluationUniverseStore,
+    ) -> tuple[EvaluationUniverseLedger | None, ForwardUniverseBackingLocator]:
+        if type(store) is not store_type:
+            raise TypeError("store must be exact ProviderEvaluationUniverseStore")
+        if locator_resolver.__code__ is not locator_code:
+            raise ForwardUniverseBackingGuardError(
+                "provider-universe backing locator resolver changed"
+            )
+        origin = locator_resolver(store)
+        backing = getattr(store, "_store", None)
+        if type(backing) is not backing_type:
+            raise ForwardUniverseBackingGuardError(
+                "provider-universe backing store changed during guarded load"
+            )
+        if locator_resolver.__code__ is not locator_code:
+            raise ForwardUniverseBackingGuardError(
+                "provider-universe backing locator resolver changed"
+            )
+        if locator_resolver(store) != origin:
+            raise ForwardUniverseBackingGuardError(
+                "provider-universe backing locator changed before durable load"
+            )
+        if canonical_load.__code__ is not canonical_load_code:
+            raise ForwardUniverseBackingGuardError(
+                "canonical evaluation-universe load authority changed"
+            )
 
-    ledger = _CANONICAL_EVALUATION_UNIVERSE_LOAD(backing)
+        ledger = canonical_load(backing)
 
-    if resolve_forward_universe_backing_locator(store) != origin:
-        raise ForwardUniverseBackingGuardError(
-            "provider-universe backing locator changed during durable load"
-        )
-    return ledger, origin
+        if canonical_load.__code__ is not canonical_load_code:
+            raise ForwardUniverseBackingGuardError(
+                "canonical evaluation-universe load authority changed"
+            )
+        if locator_resolver.__code__ is not locator_code:
+            raise ForwardUniverseBackingGuardError(
+                "provider-universe backing locator resolver changed"
+            )
+        if locator_resolver(store) != origin:
+            raise ForwardUniverseBackingGuardError(
+                "provider-universe backing locator changed during durable load"
+            )
+        return ledger, origin
+
+    return guarded_load
+
+
+load_guarded_provider_evaluation_universe = _build_guarded_load(
+    store_type=ProviderEvaluationUniverseStore,
+    backing_type=EvaluationUniverseStore,
+    canonical_load=_CANONICAL_EVALUATION_UNIVERSE_LOAD,
+    locator_resolver=resolve_forward_universe_backing_locator,
+)
 
 
 __all__ = [

@@ -37,6 +37,11 @@ _WINDOWS_RESERVED_DEVICE_NAMES = frozenset(
 )
 
 
+# Match the repository's existing durable-replay file ceiling. Transaction manifests
+# are fixed-schema control records and must never force unbounded restart materialization.
+_MAX_TRANSACTION_MANIFEST_BYTES = 64 * 1024 * 1024
+
+
 class RunTransactionError(RuntimeError):
     pass
 
@@ -650,9 +655,14 @@ class RunTransaction:
 
     @classmethod
     def _read_strict_json_file(cls, path: Path, *, label: str) -> Any:
+        snapshot = cls._read_canonical_file_snapshot(
+            path,
+            label,
+            max_bytes=_MAX_TRANSACTION_MANIFEST_BYTES,
+        )
         try:
-            text = path.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError) as exc:
+            text = snapshot.payload.decode("utf-8")
+        except UnicodeDecodeError as exc:
             raise RunTransactionError(f"{label} is unreadable or invalid UTF-8") from exc
         return cls._decode_strict_json(text, label=label)
 
@@ -916,7 +926,12 @@ class RunTransaction:
         )
 
     @staticmethod
-    def _read_canonical_file_snapshot(path: Path, label: str) -> VerifiedFileSnapshot:
+    def _read_canonical_file_snapshot(
+        path: Path,
+        label: str,
+        *,
+        max_bytes: int | None = None,
+    ) -> VerifiedFileSnapshot:
         """Read exact canonical bytes while rejecting pathname indirection/replacement."""
 
         def stable_metadata(left: os.stat_result, right: os.stat_result) -> bool:
@@ -975,6 +990,11 @@ class RunTransaction:
             raise RunTransactionError(
                 f"{label} canonical path must not have hard-link aliases"
             )
+        if max_bytes is not None:
+            if type(max_bytes) is not int or max_bytes <= 0:
+                raise RunTransactionError(f"{label} byte limit is invalid")
+            if path_before.st_size > max_bytes:
+                raise RunTransactionError(f"{label} exceeds bounded size")
 
         try:
             handle = path.open("rb")
@@ -1000,9 +1020,16 @@ class RunTransaction:
                 raise RunTransactionError(
                     f"{label} canonical path must be a stable regular non-symlink file"
                 )
+            if max_bytes is not None and opened_before.st_size > max_bytes:
+                raise RunTransactionError(f"{label} exceeds bounded size")
 
             try:
-                payload = handle.read()
+                if max_bytes is None:
+                    payload = handle.read()
+                else:
+                    payload = handle.read(max_bytes + 1)
+                    if len(payload) > max_bytes:
+                        raise RunTransactionError(f"{label} exceeds bounded size")
                 opened_after = os.fstat(handle.fileno())
             except OSError as exc:
                 raise RunTransactionError(

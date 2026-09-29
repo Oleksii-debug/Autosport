@@ -289,7 +289,7 @@ def test_unregistered_or_tampered_candidate_bundle_fails_closed(tmp_path):
         )
 
 
-def test_fresh_matching_opaque_bundle_cannot_bless_changed_metric(tmp_path):
+def test_verified_helper_rejects_stale_payload_commitment(tmp_path):
     protocol = _protocol()
     candidate, baselines = _evaluations(protocol)
     changed = replace(candidate, metric_value="0.08")

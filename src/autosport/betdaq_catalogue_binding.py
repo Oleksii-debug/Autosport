@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import hashlib
+import json
 from typing import Mapping, Sequence
 
 from .betdaq_event_tree_request_wire import BetdaqEventSubTreeRequest
@@ -23,6 +24,7 @@ from .betdaq_readonly_provider import (
 class BetdaqCatalogueEvidence:
     requested_event_classifier_ids: tuple[int, ...]
     received_at: str
+    request_fingerprint: str
     response_sha256: str
     provider_call_id: str | None
     provider_created_at: str | None
@@ -30,6 +32,37 @@ class BetdaqCatalogueEvidence:
     provider_origin_verified: bool = False
     grants_execution_authority: bool = False
     grants_write_permission: bool = False
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.requested_event_classifier_ids) is not tuple
+            or not self.requested_event_classifier_ids
+            or any(
+                type(value) is not int or value < 0
+                for value in self.requested_event_classifier_ids
+            )
+            or len(set(self.requested_event_classifier_ids))
+            != len(self.requested_event_classifier_ids)
+        ):
+            raise ValueError(
+                "requested_event_classifier_ids must be canonical provider ids"
+            )
+        _time(self.received_at, "catalogue received_at")
+        for value, field in (
+            (self.request_fingerprint, "catalogue request_fingerprint"),
+            (self.response_sha256, "catalogue response_sha256"),
+            (self.rate_admission_receipt, "catalogue rate_admission_receipt"),
+        ):
+            if (
+                type(value) is not str
+                or len(value) != 64
+                or any(ch not in "0123456789abcdef" for ch in value)
+            ):
+                raise ValueError(f"{field} must be lowercase SHA-256")
+        if self.grants_execution_authority is not False:
+            raise ValueError("catalogue evidence cannot grant execution authority")
+        if self.grants_write_permission is not False:
+            raise ValueError("catalogue evidence cannot grant write permission")
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,6 +150,20 @@ class BetdaqLiveCatalogueResolver:
             want_direct_descendents_only=False,
             want_play_markets=True,
         )
+        request_fingerprint = hashlib.sha256(
+            json.dumps(
+                {
+                    "operation": "GetEventSubTreeNoSelections",
+                    "event_classifier_ids": request.event_classifier_ids,
+                    "want_direct_descendents_only": (
+                        request.want_direct_descendents_only
+                    ),
+                    "want_play_markets": request.want_play_markets,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
         payload = self._transport.get_event_subtree_no_selections(
             request,
             timeout_seconds=self._timeout_seconds,
@@ -163,6 +210,7 @@ class BetdaqLiveCatalogueResolver:
         evidence = BetdaqCatalogueEvidence(
             requested_event_classifier_ids=requested_roots,
             received_at=received_at,
+            request_fingerprint=request_fingerprint,
             response_sha256=response_sha256,
             provider_call_id=parsed.call_id,
             provider_created_at=parsed.provider_created_at_text,

@@ -4,6 +4,7 @@ import tempfile
 import unittest
 
 import autosport  # noqa: F401 - package composition installs the guard
+import autosport._paperbook_current_binding_verifier as current_binding_guard
 import autosport._paperbook_preload_authority_guard as paper_guard
 import autosport._run_transaction_paperbook_direct_dispatch_guard as direct_guard
 import autosport.run_transaction as run_transaction_module
@@ -184,6 +185,36 @@ class RunTransactionPaperBookDirectDispatchGuardTests(unittest.TestCase):
         self.assertNotIn("list", method.__code__.co_names)
         self.assertNotIn("tuple", method.__code__.co_names)
         self.assertNotIn("len", method.__code__.co_names)
+
+    def test_guarded_consumer_python_globals_are_snapshotted_for_execution(self):
+        """The current-binding wrapper cannot be retargeted through its live module."""
+
+        method = RunTransaction._promote_paper_book_snapshot
+        frozen_items = _closure_value(method, "frozen_function_globals_items")
+        frozen_globals = dict(frozen_items)
+        self.assertNotIn("dict", frozen_globals)
+
+        hostile_calls: list[object] = []
+
+        def hostile_dict(*_args, **_kwargs):
+            hostile_calls.append(object())
+            raise AssertionError("live current-binding module globals were dispatched")
+
+        had_dict = "dict" in current_binding_guard.__dict__
+        previous_dict = current_binding_guard.__dict__.get("dict")
+        try:
+            current_binding_guard.__dict__["dict"] = hostile_dict
+            try:
+                method(object())
+            except (AttributeError, RuntimeError, TypeError, ValueError):
+                pass
+        finally:
+            if had_dict:
+                current_binding_guard.__dict__["dict"] = previous_dict
+            else:
+                current_binding_guard.__dict__.pop("dict", None)
+
+        self.assertEqual(hostile_calls, [])
 
     def test_terminal_surface_witness_rejects_meta_meta_bypass_before_promotion(self):
         """Consumer witness remains fail-closed beyond any finite metaclass seal chain."""

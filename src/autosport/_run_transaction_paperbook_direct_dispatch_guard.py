@@ -262,6 +262,8 @@ def _guard_detached_consumer(
     list_type_marker = "__AUTOSPORT_RUN_TRANSACTION_LIST_TYPE_ANCHOR__"
     tuple_type_marker = "__AUTOSPORT_RUN_TRANSACTION_TUPLE_TYPE_ANCHOR__"
     builtins_snapshot_marker = "__AUTOSPORT_RUN_TRANSACTION_PRIVATE_BUILTINS_ANCHOR__"
+    function_marker = "__AUTOSPORT_RUN_TRANSACTION_DETACHED_FUNCTION_ANCHOR__"
+    inner_code_marker = "__AUTOSPORT_RUN_TRANSACTION_DETACHED_CODE_ANCHOR__"
 
     def guarded_consumer(*args, **kwargs):
         # Intentionally retain the real detached globals in this closure. Existing
@@ -279,6 +281,8 @@ def _guard_detached_consumer(
         anchored_list_type = "__AUTOSPORT_RUN_TRANSACTION_LIST_TYPE_ANCHOR__"
         anchored_tuple_type = "__AUTOSPORT_RUN_TRANSACTION_TUPLE_TYPE_ANCHOR__"
         anchored_builtins_items = "__AUTOSPORT_RUN_TRANSACTION_PRIVATE_BUILTINS_ANCHOR__"
+        anchored_function = "__AUTOSPORT_RUN_TRANSACTION_DETACHED_FUNCTION_ANCHOR__"
+        anchored_inner_code = "__AUTOSPORT_RUN_TRANSACTION_DETACHED_CODE_ANCHOR__"
         if (
             exact_type is not anchored_exact_type
             or function_type is not anchored_function_type
@@ -286,7 +290,10 @@ def _guard_detached_consumer(
             or list_type is not anchored_list_type
             or tuple_type is not anchored_tuple_type
             or frozen_builtins_items is not anchored_builtins_items
+            or function is not anchored_function
+            or inner_code is not anchored_inner_code
             or exact_type(function) is not function_type
+            or function.__code__ is not anchored_inner_code
             or function.__code__ is not inner_code
             or function.__closure__ is not inner_closure
             or frozen_function_globals_items is not frozen_function_globals_items_anchor[0]
@@ -336,7 +343,10 @@ def _guard_detached_consumer(
                 or list_type is not anchored_list_type
                 or tuple_type is not anchored_tuple_type
                 or frozen_builtins_items is not anchored_builtins_items
+                or function is not anchored_function
+                or inner_code is not anchored_inner_code
                 or exact_type(function) is not function_type
+                or function.__code__ is not anchored_inner_code
                 or function.__code__ is not inner_code
                 or function.__closure__ is not inner_closure
                 or frozen_function_globals_items is not frozen_function_globals_items_anchor[0]
@@ -376,6 +386,8 @@ def _guard_detached_consumer(
         (list_type_marker, list_type),
         (tuple_type_marker, tuple_type),
         (builtins_snapshot_marker, frozen_builtins_items),
+        (function_marker, function),
+        (inner_code_marker, inner_code),
     )
     if any(sum(item == marker for item in guarded_constants) != 1 for marker, _ in guarded_anchors):
         raise RuntimeError("RunTransaction detached verifier identity anchor is ambiguous")

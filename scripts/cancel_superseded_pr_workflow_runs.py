@@ -178,12 +178,15 @@ class GitHubApi:
         """Resolve a missing workflow_run PR reference from its exact source head.
 
         GitHub may omit workflow_run.pull_requests for close/merge lifecycle runs. The
-        commit association endpoint is trusted API data, but cancellation authority is
-        granted only when exactly one associated PR still names the exact event head.
-        Zero or ambiguous exact matches fail closed.
+        commit association endpoint is trusted API data, but head equality alone is not
+        enough to identify the emitting PR: another PR may have used the same commit and
+        later advanced. Cancellation authority is therefore granted only when the commit
+        is associated with exactly one PR in total and that same PR still names the exact
+        event head. Historical cross-PR reuse, zero matches, and ambiguity fail closed.
         """
 
         head_sha = _require_sha(head_sha, field="event head sha")
+        associated_numbers: set[int] = set()
         exact_numbers: set[int] = set()
         page = 1
         while True:
@@ -200,16 +203,20 @@ class GitHubApi:
                 candidate_sha = _require_sha(
                     head.get("sha"), field="associated pull request head"
                 )
+                candidate_number = _require_positive_int(
+                    item.get("number"), field="associated pull request number"
+                )
+                associated_numbers.add(candidate_number)
                 if candidate_sha == head_sha:
-                    exact_numbers.add(
-                        _require_positive_int(
-                            item.get("number"), field="associated pull request number"
-                        )
-                    )
+                    exact_numbers.add(candidate_number)
             if len(payload) < _PULLS_PER_PAGE:
                 break
             page += 1
-        if len(exact_numbers) != 1:
+        if (
+            len(associated_numbers) != 1
+            or len(exact_numbers) != 1
+            or associated_numbers != exact_numbers
+        ):
             raise CancellationError(
                 "event head does not resolve to exactly one associated pull request"
             )

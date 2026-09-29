@@ -33,11 +33,18 @@ def _pr(number: int, head_sha: str) -> dict[str, object]:
     return {"number": number, "head": {"sha": head_sha}}
 
 
-def test_missing_workflow_run_pr_number_resolves_one_exact_associated_head() -> None:
-    api = FakeAssociatedPullsApi([[ _pr(2022, HEAD_A), _pr(1999, HEAD_B) ]])
+def test_missing_workflow_run_pr_number_resolves_one_unambiguous_associated_head() -> None:
+    api = FakeAssociatedPullsApi([[_pr(2022, HEAD_A)]])
 
     assert api.associated_pr_number(HEAD_A) == 2022
     assert api.paths == [f"/commits/{HEAD_A}/pulls?per_page=100&page=1"]
+
+
+def test_missing_workflow_run_pr_number_rejects_historical_cross_pr_commit_reuse() -> None:
+    api = FakeAssociatedPullsApi([[_pr(2022, HEAD_A), _pr(1999, HEAD_B)]])
+
+    with pytest.raises(CancellationError, match="exactly one associated pull request"):
+        api.associated_pr_number(HEAD_A)
 
 
 def test_missing_workflow_run_pr_number_fails_closed_on_ambiguous_exact_head() -> None:

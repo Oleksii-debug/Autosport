@@ -290,6 +290,30 @@ def test_recovered_candidate_identity_is_revalidated_at_cancel_boundary() -> Non
     ]
 
 
+def test_recovered_candidate_rejects_historical_cross_pr_reuse_at_cancel_boundary() -> None:
+    api = FakeScopedApi(
+        356678400,
+        [
+            [_associated_pr(2022)],
+            [_associated_pr(2022), _associated_pr(3030, head_sha=STALE_HEAD)],
+        ],
+    )
+    api.configure_same_head_candidate_recovery(
+        pr_number=2022,
+        event_head_sha=HEAD,
+        workflow_name="CI",
+        current_run_id=100,
+    )
+    recovered = api._recover_candidate_run_reference(_candidate(99))
+    assert recovered.pr_numbers == (2022,)
+
+    with pytest.raises(
+        CancellationError,
+        match="association is no longer unique",
+    ):
+        api.cancel(99)
+
+
 @pytest.mark.parametrize(
     "candidate",
     (
@@ -318,6 +342,7 @@ def test_same_head_candidate_recovery_never_expands_current_stale_foreign_or_bou
     (
         [_associated_pr(3030)],
         [_associated_pr(2022), _associated_pr(3030)],
+        [_associated_pr(2022), _associated_pr(3030, head_sha=STALE_HEAD)],
         [],
     ),
 )

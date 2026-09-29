@@ -22,6 +22,7 @@ from .collector_sqlite_store import (
     _canonical_delta_json,
     _payload_digest,
 )
+from .json_integrity import strict_json_loads
 
 
 _SQLITE_HEADER = b"SQLite format 3\x00"
@@ -1741,6 +1742,10 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
                 "s.run_id, s.stream_epoch, s.attempted_at, "
                 "t.payload_sha256, t.payload_json, "
                 "slots.slot_ordinal, slots.due_at, schedules.schedule_id, "
+                "gate.schedule_id AS gate_schedule_id, "
+                "gate.gate_binding_sha256 AS gate_binding_sha256, "
+                "auth.schedule_id AS auth_schedule_id, "
+                "auth.gate_binding_sha256 AS auth_gate_binding_sha256, "
                 "auth.authorization_sha256 "
                 "FROM collector_cycle_artifacts_v1 AS a "
                 "JOIN collector_cycle_starts_v1 AS s "
@@ -1751,8 +1756,10 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
                 "ON slots.source_id=a.source_id AND slots.cycle_seq=a.cycle_seq "
                 "LEFT JOIN collector_schedules_v1 AS schedules "
                 "ON schedules.source_id=slots.source_id AND schedules.run_id=slots.run_id "
+                "LEFT JOIN collector_schedule_start_gates_v1 AS gate "
+                "ON gate.source_id=s.source_id AND gate.run_id=s.run_id "
                 "LEFT JOIN collector_schedule_start_authorizations_v1 AS auth "
-                "ON auth.source_id=s.source_id AND auth.run_id=s.run_id "
+                "ON auth.source_id=gate.source_id AND auth.run_id=gate.run_id "
                 "WHERE a.source_id=? AND a.cycle_seq=? "
                 "AND a.artifact_kind=? AND a.artifact_sha256=?",
                 (source_id, cycle_seq, artifact_kind, artifact_sha256),
@@ -1769,10 +1776,17 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
             if self._cycle_terminal_payload_sha256(terminal_json) != terminal_sha256:
                 raise ValueError("collector cycle terminal digest mismatch")
             try:
-                terminal = json.loads(terminal_json)
-            except (TypeError, json.JSONDecodeError) as exc:
+                terminal = strict_json_loads(terminal_json)
+            except (TypeError, ValueError, json.JSONDecodeError) as exc:
                 raise ValueError("collector cycle terminal payload is invalid") from exc
-            if type(terminal) is not dict or terminal.get("status") != "SUCCESS":
+            if (
+                type(terminal) is not dict
+                or self._cycle_terminal_payload_json(terminal) != terminal_json
+            ):
+                raise ValueError(
+                    "collector cycle terminal payload is not canonical JSON"
+                )
+            if terminal.get("status") != "SUCCESS":
                 raise ValueError(
                     "collector cycle observation artifact is not SUCCESS-terminal evidence"
                 )
@@ -1794,6 +1808,10 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
                 row["schedule_id"] is None
                 or row["slot_ordinal"] is None
                 or row["due_at"] is None
+                or row["gate_schedule_id"] is None
+                or row["gate_binding_sha256"] is None
+                or row["auth_schedule_id"] is None
+                or row["auth_gate_binding_sha256"] is None
                 or row["authorization_sha256"] is None
             ):
                 raise ValueError(
@@ -1803,6 +1821,30 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
                 row["schedule_id"],
                 "schedule_id",
             )
+            gate_schedule_id = self._schedule_authority_sha256(
+                row["gate_schedule_id"],
+                "gate schedule_id",
+            )
+            auth_schedule_id = self._schedule_authority_sha256(
+                row["auth_schedule_id"],
+                "authorization schedule_id",
+            )
+            gate_binding_sha256 = self._schedule_authority_sha256(
+                row["gate_binding_sha256"],
+                "gate_binding_sha256",
+            )
+            auth_gate_binding_sha256 = self._schedule_authority_sha256(
+                row["auth_gate_binding_sha256"],
+                "authorization gate_binding_sha256",
+            )
+            if (
+                schedule_id != gate_schedule_id
+                or schedule_id != auth_schedule_id
+                or gate_binding_sha256 != auth_gate_binding_sha256
+            ):
+                raise ValueError(
+                    "collector cycle schedule gate/authorization identity conflicts"
+                )
             authorization_sha256 = self._schedule_authority_sha256(
                 row["authorization_sha256"],
                 "authorization_sha256",
@@ -1815,6 +1857,7 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
                 "stream_epoch": _text(row["stream_epoch"], "stream_epoch"),
                 "attempted_at": _instant(row["attempted_at"], "attempted_at").isoformat(),
                 "schedule_id": schedule_id,
+                "gate_binding_sha256": gate_binding_sha256,
                 "slot_ordinal": int(row["slot_ordinal"]),
                 "due_at": _instant(row["due_at"], "due_at").isoformat(),
                 "authorization_sha256": authorization_sha256,

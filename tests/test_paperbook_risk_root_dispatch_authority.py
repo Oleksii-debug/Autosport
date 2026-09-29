@@ -450,6 +450,32 @@ def test_instance_evaluate_cannot_consume_mutated_book_state_root() -> None:
         root.__code__ = original_code
 
 
+def test_retained_instance_book_state_rechecks_code_before_call() -> None:
+    """A retained transitive root must not survive executable mutation."""
+
+    book = PaperBook("100")
+    policy = PaperRiskPolicy(
+        max_ticket_fraction=Decimal("1"),
+        max_committed_fraction=Decimal("1"),
+        minimum_cash_reserve_fraction=Decimal("0"),
+    )
+    retained = policy._book_state
+    descriptor = vars(PaperRiskPolicy)["_book_state"]
+    root = descriptor.__func__
+    original_code = root.__code__
+    hostile_code = _hostile_book_state_code_with_matching_closure(root)
+
+    try:
+        root.__code__ = hostile_code
+        with pytest.raises(
+            TypeError,
+            match="canonical PaperRiskPolicy executable root changed: _book_state",
+        ):
+            retained(book)
+    finally:
+        root.__code__ = original_code
+
+
 def test_book_state_root_cannot_be_retargeted_or_deleted() -> None:
     """Reconstructed delegates must not bypass admission by replacing _book_state."""
 

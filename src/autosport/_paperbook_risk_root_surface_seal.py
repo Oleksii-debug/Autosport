@@ -202,9 +202,15 @@ def _make_instance_root_getattribute(
     for descriptor_name, descriptor in root_descriptors.items():
         if type(descriptor) is FunctionType:
             descriptor_type = FunctionType
+            descriptor_kind = "function"
             function = descriptor
-        elif type(descriptor) in (classmethod, staticmethod):
-            descriptor_type = type(descriptor)
+        elif type(descriptor) is classmethod:
+            descriptor_type = classmethod
+            descriptor_kind = "classmethod"
+            function = descriptor.__func__
+        elif type(descriptor) is staticmethod:
+            descriptor_type = staticmethod
+            descriptor_kind = "staticmethod"
             function = descriptor.__func__
         else:
             raise RuntimeError(
@@ -222,6 +228,28 @@ def _make_instance_root_getattribute(
                     value = empty_cell
                 values.append((cell, value))
             closure_witnesses = tuple(values)
+        globals_mapping = function.__globals__
+        builtins_mapping = function.__builtins__
+        if type(globals_mapping) is not dict or type(builtins_mapping) is not dict:
+            raise RuntimeError(
+                f"canonical PaperRiskPolicy protected namespace is invalid: {descriptor_name}"
+            )
+        referenced_names = referenced_global_names(function.__code__)
+        global_bindings = tuple(
+            (binding_name, globals_mapping[binding_name])
+            for binding_name in referenced_names
+            if binding_name in globals_mapping
+        )
+        builtin_bindings = tuple(
+            (binding_name, builtins_mapping[binding_name])
+            for binding_name in referenced_names
+            if binding_name not in globals_mapping and binding_name in builtins_mapping
+        )
+        missing_bindings = tuple(
+            binding_name
+            for binding_name in referenced_names
+            if binding_name not in globals_mapping and binding_name not in builtins_mapping
+        )
         kwdefaults = (
             None
             if function.__kwdefaults__ is None
@@ -232,9 +260,14 @@ def _make_instance_root_getattribute(
                 descriptor_name,
                 descriptor,
                 descriptor_type,
+                descriptor_kind,
                 function,
                 function.__code__,
-                function.__globals__,
+                globals_mapping,
+                global_bindings,
+                builtins_mapping,
+                builtin_bindings,
+                missing_bindings,
                 function.__defaults__,
                 kwdefaults,
                 closure,
@@ -362,9 +395,14 @@ def _make_instance_root_getattribute(
             name,
             descriptor,
             descriptor_type,
+            _descriptor_kind,
             function,
             code,
             globals_mapping,
+            global_bindings,
+            builtins_mapping,
+            builtin_bindings,
+            missing_bindings,
             defaults,
             kwdefaults,
             closure,
@@ -373,9 +411,7 @@ def _make_instance_root_getattribute(
         namespace = type_getattribute_arg(owner, "__dict__")
         current = namespace.get(name, empty_cell_arg)
         if current is not descriptor or exact_type_arg(current) is not descriptor_type:
-            raise failure_type_arg(
-                f"canonical PaperRiskPolicy root changed: {name}"
-            )
+            raise failure_type_arg(f"canonical PaperRiskPolicy root changed: {name}")
         if descriptor_type is function_type_arg:
             current_function = current
         else:
@@ -384,12 +420,38 @@ def _make_instance_root_getattribute(
             current_function is not function
             or current_function.__code__ is not code
             or current_function.__globals__ is not globals_mapping
+            or current_function.__builtins__ is not builtins_mapping
             or current_function.__defaults__ is not defaults
             or current_function.__closure__ is not closure
         ):
             raise failure_type_arg(
                 f"canonical PaperRiskPolicy executable root changed: {name}"
             )
+
+        for binding_name, expected_value in global_bindings:
+            if (
+                binding_name not in globals_mapping
+                or globals_mapping[binding_name] is not expected_value
+            ):
+                raise failure_type_arg(
+                    f"canonical PaperRiskPolicy executable global changed: "
+                    f"{name}:{binding_name}"
+                )
+        for binding_name, expected_value in builtin_bindings:
+            if (
+                binding_name not in builtins_mapping
+                or builtins_mapping[binding_name] is not expected_value
+            ):
+                raise failure_type_arg(
+                    f"canonical PaperRiskPolicy executable builtin changed: "
+                    f"{name}:{binding_name}"
+                )
+        for binding_name in missing_bindings:
+            if binding_name in globals_mapping or binding_name in builtins_mapping:
+                raise failure_type_arg(
+                    f"canonical PaperRiskPolicy executable missing binding changed: "
+                    f"{name}:{binding_name}"
+                )
 
         current_kwdefaults = current_function.__kwdefaults__
         if kwdefaults is None:
@@ -434,6 +496,92 @@ def _make_instance_root_getattribute(
                         f"canonical PaperRiskPolicy executable root changed: {name}"
                     )
         return witness
+
+    def guarded_instance_descriptor_call(
+        witness,
+        validator,
+        owner,
+        exact_type_arg,
+        function_type_arg,
+        dict_type_arg,
+        type_getattribute_arg,
+        failure_type_arg,
+        value_error_type_arg,
+        len_fn_arg,
+        empty_cell_arg,
+        bound_self,
+        *args,
+        **kwargs,
+    ):
+        current = validator(
+            witness,
+            owner,
+            exact_type_arg,
+            function_type_arg,
+            dict_type_arg,
+            type_getattribute_arg,
+            failure_type_arg,
+            value_error_type_arg,
+            len_fn_arg,
+            empty_cell_arg,
+        )
+        if current is not witness or exact_type_arg(bound_self) is not owner:
+            raise failure_type_arg("canonical PaperRiskPolicy instance identity changed")
+        (
+            name,
+            _descriptor,
+            _descriptor_type,
+            descriptor_kind,
+            _function,
+            code,
+            _globals_mapping,
+            global_bindings,
+            _builtins_mapping,
+            builtin_bindings,
+            _missing_bindings,
+            defaults,
+            kwdefaults,
+            closure,
+            _closure_witnesses,
+        ) = witness
+        delegate_globals = dict_type_arg(global_bindings)
+        delegate_globals["__builtins__"] = dict_type_arg(builtin_bindings)
+        delegate = function_type_arg(
+            code,
+            delegate_globals,
+            name=name,
+            argdefs=defaults,
+            closure=closure,
+        )
+        if kwdefaults is not None:
+            delegate.__kwdefaults__ = dict_type_arg(kwdefaults)
+        try:
+            if descriptor_kind == "function":
+                return delegate(bound_self, *args, **kwargs)
+            if descriptor_kind == "classmethod":
+                return delegate(owner, *args, **kwargs)
+            if descriptor_kind == "staticmethod":
+                return delegate(*args, **kwargs)
+            raise failure_type_arg(
+                f"canonical PaperRiskPolicy protected descriptor is invalid: {name}"
+            )
+        finally:
+            current_after = validator(
+                witness,
+                owner,
+                exact_type_arg,
+                function_type_arg,
+                dict_type_arg,
+                type_getattribute_arg,
+                failure_type_arg,
+                value_error_type_arg,
+                len_fn_arg,
+                empty_cell_arg,
+            )
+            if current_after is not witness:
+                raise failure_type_arg(
+                    f"canonical PaperRiskPolicy executable root changed: {name}"
+                )
 
     def guarded_instance_root_call(
         witness,
@@ -528,6 +676,7 @@ def _make_instance_root_getattribute(
         empty_cell_arg=None,
         descriptor_roots=None,
         descriptor_validator=None,
+        descriptor_guarded_call=None,
     ):
         for witness in roots:
             if name != witness[0]:
@@ -578,9 +727,21 @@ def _make_instance_root_getattribute(
                 len_fn_arg,
                 empty_cell_arg,
             )
-            descriptor = descriptor_witness[1]
-            getter = descriptor.__get__
-            return getter(self, owner)
+            return partial_type_arg(
+                descriptor_guarded_call,
+                descriptor_witness,
+                descriptor_validator,
+                owner,
+                exact_type_arg,
+                function_type_arg,
+                dict_type_arg,
+                type_getattribute_arg,
+                failure_type_arg,
+                value_error_type_arg,
+                len_fn_arg,
+                empty_cell_arg,
+                self,
+            )
         return object_getattribute_arg(self, name)
 
     sealed_instance_getattribute.__defaults__ = (
@@ -600,6 +761,7 @@ def _make_instance_root_getattribute(
         empty_cell,
         frozen_descriptor_witnesses,
         validate_instance_descriptor_root,
+        guarded_instance_descriptor_call,
     )
 
     def reject_guard_metadata_mutation(
@@ -632,6 +794,7 @@ def _make_instance_root_getattribute(
         validate_instance_root,
         validate_instance_descriptor_root,
         guarded_instance_root_call,
+        guarded_instance_descriptor_call,
         sealed_instance_getattribute,
         reject_guard_metadata_mutation,
     )

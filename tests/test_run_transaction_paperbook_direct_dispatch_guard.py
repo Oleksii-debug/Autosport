@@ -4,6 +4,7 @@ import tempfile
 import unittest
 
 import autosport  # noqa: F401 - package composition installs the guard
+import autosport._paperbook_preload_authority_guard as paper_guard
 import autosport.run_transaction as run_transaction_module
 from autosport.paper import PaperBook
 from autosport.run_transaction import RunTransaction
@@ -33,7 +34,7 @@ class RunTransactionPaperBookDirectDispatchGuardTests(unittest.TestCase):
         self.assertIs(stage_globals["RunTransaction"], RunTransaction)
         self.assertIs(promotion_globals["RunTransaction"], RunTransaction)
 
-    def test_promotion_uses_frozen_direct_dispatch_members(self):
+    def test_promotion_reuses_witnessed_frozen_direct_dispatch_surface(self):
         promotion_globals = _sealed_inner_globals(
             RunTransaction._promote_paper_book_snapshot
         )
@@ -41,6 +42,12 @@ class RunTransactionPaperBookDirectDispatchGuardTests(unittest.TestCase):
         frozen_tempfile = promotion_globals["tempfile"]
         frozen_hashlib = promotion_globals["hashlib"]
         frozen_paper_book = promotion_globals["PaperBook"]
+
+        witnessed_surface_type = type(paper_guard.os)
+        self.assertIs(type(frozen_os), witnessed_surface_type)
+        self.assertIs(type(frozen_tempfile), witnessed_surface_type)
+        self.assertIs(type(frozen_hashlib), witnessed_surface_type)
+        self.assertIs(type(frozen_paper_book), witnessed_surface_type)
 
         self.assertIsNot(frozen_os, os)
         self.assertIs(frozen_os.close, os.close)

@@ -108,6 +108,39 @@ def test_curated_publication_rejects_contextmanager_enter_rebind_before_dispatch
     assert registry.bindings == ()
 
 
+def test_curated_publication_rejects_inherited_contextmanager_init_shadow_before_dispatch(
+    tmp_path: Path,
+) -> None:
+    registry = _registry(tmp_path)
+    witness = _public_witness()
+    contextmanager_type = witness[7]
+    contextmanager_surface = witness[9]
+    init_entry = next(
+        entry for entry in contextmanager_surface if entry[0] == "__init__"
+    )
+    _name, owner, canonical_init, _canonical_init_code = init_entry
+    assert owner is not contextmanager_type
+    assert "__init__" not in vars(contextmanager_type)
+    hostile_calls = 0
+
+    def hostile_init(self, *args, **kwargs):
+        nonlocal hostile_calls
+        hostile_calls += 1
+        return canonical_init(self, *args, **kwargs)
+
+    setattr(contextmanager_type, "__init__", hostile_init)
+    try:
+        _assert_publication_fails_closed(
+            registry,
+            "contextmanager runtime authority changed: __init__",
+        )
+    finally:
+        delattr(contextmanager_type, "__init__")
+
+    assert hostile_calls == 0
+    assert registry.bindings == ()
+
+
 def test_curated_publication_rejects_guarded_contextmanager_delegate_retarget_before_dispatch(
     tmp_path: Path,
 ) -> None:

@@ -149,7 +149,16 @@ def _install() -> None:
                 "provider sport contextmanager runtime authority changed"
             )
         for name, owner, expected_slot, expected_code in generator_contextmanager_surface:
-            if exact_vars(owner).get(name, missing) is not expected_slot:
+            current_owner = None
+            current_slot = missing
+            for candidate_owner in generator_contextmanager_mro:
+                candidate_slot = exact_vars(candidate_owner).get(name, missing)
+                if candidate_slot is missing:
+                    continue
+                current_owner = candidate_owner
+                current_slot = candidate_slot
+                break
+            if current_owner is not owner or current_slot is not expected_slot:
                 raise failure_type(
                     "provider sport contextmanager runtime authority changed: " + name
                 )
@@ -273,7 +282,19 @@ def _install() -> None:
             expected_slot,
             expected_code,
         ) in trusted_contextmanager_surface:
-            if trusted_vars(owner).get(name, trusted_missing) is not expected_slot:
+            current_owner = None
+            current_slot = trusted_missing
+            for candidate_owner in trusted_contextmanager_mro:
+                candidate_slot = trusted_vars(candidate_owner).get(
+                    name,
+                    trusted_missing,
+                )
+                if candidate_slot is trusted_missing:
+                    continue
+                current_owner = candidate_owner
+                current_slot = candidate_slot
+                break
+            if current_owner is not owner or current_slot is not expected_slot:
                 raise trusted_failure_type(
                     "provider sport contextmanager runtime authority changed: " + name
                 )
@@ -452,7 +473,19 @@ def _install() -> None:
             expected_slot,
             expected_code,
         ) in trusted_contextmanager_surface:
-            if trusted_vars(owner).get(name, trusted_missing) is not expected_slot:
+            current_owner = None
+            current_slot = trusted_missing
+            for candidate_owner in trusted_contextmanager_mro:
+                candidate_slot = trusted_vars(candidate_owner).get(
+                    name,
+                    trusted_missing,
+                )
+                if candidate_slot is trusted_missing:
+                    continue
+                current_owner = candidate_owner
+                current_slot = candidate_slot
+                break
+            if current_owner is not owner or current_slot is not expected_slot:
                 raise trusted_failure_type(
                     "provider sport contextmanager runtime authority changed: " + name
                 )

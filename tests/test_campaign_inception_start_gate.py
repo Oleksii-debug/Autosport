@@ -532,6 +532,9 @@ def test_source_mismatch_is_rejected_before_schedule_mutation(
         "_CANONICAL_GATE_AUTHORIZE",
         "_CANONICAL_SCHEDULE_ID",
         "_CANONICAL_SCHEDULE_DUE_AT",
+        "_CANONICAL_PATH_EQUALITY",
+        "_CANONICAL_PATH_FSPATH",
+        "_CANONICAL_ABSPATH",
     ),
 )
 def test_inception_rejects_canonical_alias_rebind_before_hostile_dispatch(
@@ -578,6 +581,46 @@ def test_inception_rejects_canonical_alias_rebind_before_hostile_dispatch(
         "_issue_receipt",
     ),
 )
+def test_inception_rejects_path_equality_rebind_before_prestart_dispatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _manifest_value, locator, store, spec, _authority_root = _setup(tmp_path)
+    had_own_equality = "__eq__" in vars(Path)
+    original_own_equality = vars(Path).get("__eq__")
+    hostile_calls: list[bool] = []
+
+    def hostile_equality(_left: object, _right: object) -> bool:
+        hostile_calls.append(True)
+        return True
+
+    setattr(Path, "__eq__", hostile_equality)
+    try:
+        with pytest.raises(
+            CampaignInceptionIntegrityError,
+            match=r"dynamic method authority drifted: Path\.__eq__",
+        ):
+            establish_campaign_inception(
+                precommit_locator=locator,
+                store=store,
+                source_spec=spec,
+            )
+    finally:
+        if had_own_equality:
+            setattr(Path, "__eq__", original_own_equality)
+        else:
+            delattr(Path, "__eq__")
+
+    assert hostile_calls == []
+    assert (
+        store._collector_schedule_start_gate_status(
+            source_id=spec.source_id,
+            run_id=spec.run_id,
+        )
+        is None
+    )
+
+
 def test_inception_rejects_helper_rebind_before_state_mutation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

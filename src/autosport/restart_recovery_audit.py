@@ -55,6 +55,17 @@ def _safe_exception_detail(exc: Exception) -> str:
     return f"{exception_type}: {rendered}"
 
 
+def _phase_call(phase: str, callable_, *args, **kwargs):
+    try:
+        return callable_(*args, **kwargs)
+    except Exception as exc:
+        try:
+            exc.__dict__["_autosport_restart_phase"] = phase
+        except BaseException:
+            pass
+        raise
+
+
 def _fixture_dataset(root: Path) -> ReplayDataset:
     root.mkdir(parents=True, exist_ok=True)
     market = root / "market.jsonl"
@@ -76,9 +87,15 @@ def _audit_session_restart(root: Path) -> dict[str, object]:
     dataset = _fixture_dataset(root / "dataset")
     workspace = root / "session-workspace"
 
-    first = AutosportSession(workspace, initial_bankroll="100", strategy_id="baseline-v1")
+    first = _phase_call(
+        "session_restart:first_construct",
+        AutosportSession,
+        workspace,
+        initial_bankroll="100",
+        strategy_id="baseline-v1",
+    )
     try:
-        result = first.run_dataset(dataset)
+        result = _phase_call("session_restart:first_run", first.run_dataset, dataset)
         if not result.settled_ticket_ids:
             raise RuntimeError("restart audit did not produce a settled paper ticket")
         balance = result.balance
@@ -93,7 +110,13 @@ def _audit_session_restart(root: Path) -> dict[str, object]:
     book_hash_before = sha256_file(paper_path)
     ledger_hash_before = sha256_file(ledger_path)
 
-    reopened = AutosportSession(workspace, initial_bankroll="1", strategy_id="baseline-v1")
+    reopened = _phase_call(
+        "session_restart:reopen_construct",
+        AutosportSession,
+        workspace,
+        initial_bankroll="1",
+        strategy_id="baseline-v1",
+    )
     try:
         if reopened.book.balance != balance:
             raise RuntimeError("PaperBook balance changed across restart")
@@ -256,9 +279,13 @@ def run_restart_recovery_audit(output_path: str | Path) -> int:
             "nvda_verified": False,
         }
     except Exception as exc:
+        try:
+            failure_phase = exc.__dict__.get("_autosport_restart_phase", phase)
+        except BaseException:
+            failure_phase = phase
         payload = {
             "status": "FAIL",
-            "phase": phase,
+            "phase": failure_phase,
             "error": _safe_exception_detail(exc),
             "real_money_execution": False,
             "human_tested": False,

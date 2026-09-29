@@ -51,14 +51,13 @@
 
   function finishPendingStatus(message) {
     // Project the immediate backend result through the canonical status node before
-    // re-enabling ordinary durable-state convergence. Focusing that node gives the
-    // keyboard/screen-reader operator one bounded result handoff; subsequent polls may
-    // then replace it only with the actual durable STOP state.
+    // re-enabling ordinary durable-state convergence. The activation path then gives
+    // the keyboard/screen-reader operator one bounded result focus handoff; subsequent
+    // polls may replace it only with the actual durable STOP state.
     setStatus(message);
     status.hidden = false;
     status.setAttribute("aria-live", "assertive");
     status.setAttribute("aria-atomic", "true");
-    focusStatus();
     if (pendingStatus instanceof HTMLElement) pendingStatus.remove();
     pendingStatus = null;
   }
@@ -131,6 +130,7 @@
     // This is immediate backend-result confirmation. It is not a second state
     // authority: the existing poll loop will converge this readback to durable state.
     finishPendingStatus(resultMessage);
+    focusStatus();
   }
 
   button.addEventListener("click", activateEmergencyStop);

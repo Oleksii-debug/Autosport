@@ -573,6 +573,7 @@ def test_inception_rejects_canonical_alias_rebind_before_hostile_dispatch(
     (
         "_CANONICAL_PATH_EQUALITY",
         "_CANONICAL_PATH_FSPATH",
+        "_CANONICAL_OS_FSPATH",
         "_CANONICAL_ABSPATH",
     ),
 )
@@ -601,6 +602,39 @@ def test_inception_rejects_path_alias_rebind_before_prestart_dispatch(
         )
 
     assert calls == []
+    assert (
+        store._collector_schedule_start_gate_status(
+            source_id=spec.source_id,
+            run_id=spec.run_id,
+        )
+        is None
+    )
+
+
+def test_inception_rejects_os_fspath_rebind_before_path_canonicalization(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _manifest_value, locator, store, spec, _authority_root = _setup(tmp_path)
+    original = inception_module.os.fspath
+    hostile_calls: list[object] = []
+
+    def hostile(value: object) -> str:
+        hostile_calls.append(value)
+        return original(value)
+
+    monkeypatch.setattr(inception_module.os, "fspath", hostile)
+    with pytest.raises(
+        CampaignInceptionIntegrityError,
+        match="filesystem dispatch authority is rebound",
+    ):
+        establish_campaign_inception(
+            precommit_locator=locator,
+            store=store,
+            source_spec=spec,
+        )
+
+    assert hostile_calls == []
     assert (
         store._collector_schedule_start_gate_status(
             source_id=spec.source_id,

@@ -478,6 +478,7 @@ def run_packaged_restart_recovery_audit(output_path: str | Path) -> int:
         return 1
 
     phase = "process_kill_relaunch"
+    exit_code = 0
     try:
         existing = _decode_strict_json(
             destination,
@@ -517,18 +518,20 @@ def run_packaged_restart_recovery_audit(output_path: str | Path) -> int:
             or existing.get("nvda_verified") is not False
         ):
             raise RuntimeError("packaged restart/recovery truth labels are invalid")
-        atomic_write_json(destination, existing)
-        return 0
+        payload = existing
     except BaseException as exc:
-        atomic_write_json(
-            destination,
-            {
-                "status": "FAIL",
-                "phase": phase,
-                "error": _safe_exception_detail(exc),
-                "real_money_execution": False,
-                "human_tested": False,
-                "nvda_verified": False,
-            },
-        )
-        return 1
+        payload = {
+            "status": "FAIL",
+            "phase": phase,
+            "error": _safe_exception_detail(exc),
+            "real_money_execution": False,
+            "human_tested": False,
+            "nvda_verified": False,
+        }
+        exit_code = 1
+
+    # Publication is a separate durable boundary. A failed final replace must
+    # propagate without being reclassified as a semantic process/recovery FAIL
+    # or triggering a second write that could destroy last-known evidence.
+    atomic_write_json(destination, payload)
+    return exit_code

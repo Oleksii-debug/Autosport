@@ -203,5 +203,73 @@ class ReleasePackageInputSymlinkFenceTests(unittest.TestCase):
                 verify_portable_data_tool(package_link)
 
 
+    def test_portable_data_executable_regular_to_symlink_race_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paths = self._make_inputs(root)
+            self._build(paths)
+
+            data_path = root / "Autosport-Data.exe"
+            data_path.write_bytes(b"original-data-tool")
+            outside = root / "outside-data-tool.exe"
+            outside.write_bytes(b"must-not-be-read")
+            real_require = release_package._require_regular_source_file
+            swapped = False
+
+            def validate_then_swap(path: Path, *, label: str) -> None:
+                nonlocal swapped
+                real_require(path, label=label)
+                if Path(path) == data_path and not swapped:
+                    swapped = True
+                    data_path.unlink()
+                    self._symlink_or_skip(outside, data_path)
+
+            with patch.object(
+                release_package,
+                "_require_regular_source_file",
+                side_effect=validate_then_swap,
+            ):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "portable data tool executable input changed during open",
+                ):
+                    bind_portable_data_tool(paths["package"], data_path)
+
+            self.assertTrue(swapped)
+
+    def test_portable_base_package_regular_to_symlink_race_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paths = self._make_inputs(root)
+            self._build(paths)
+
+            outside = root / "outside-package.zip"
+            outside.write_bytes(paths["package"].read_bytes())
+            package_path = paths["package"]
+            real_require = release_package._require_regular_source_file
+            swapped = False
+
+            def validate_then_swap(path: Path, *, label: str) -> None:
+                nonlocal swapped
+                real_require(path, label=label)
+                if Path(path) == package_path and not swapped:
+                    swapped = True
+                    package_path.unlink()
+                    self._symlink_or_skip(outside, package_path)
+
+            with patch.object(
+                release_package,
+                "_require_regular_source_file",
+                side_effect=validate_then_swap,
+            ):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "base release package input changed during open",
+                ):
+                    verify_portable_data_tool(package_path)
+
+            self.assertTrue(swapped)
+
+
 if __name__ == "__main__":
     unittest.main()

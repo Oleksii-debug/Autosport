@@ -13,11 +13,12 @@ def _event(
     *,
     price: Decimal = Decimal("2.10"),
     market_last_update: str = "2026-09-23T13:00:00Z",
+    commence_time: str = "2026-09-23T15:00:00Z",
 ) -> dict[str, object]:
     return {
         "id": "0123456789abcdef0123456789abcdef",
         "sport_key": "soccer_epl",
-        "commence_time": "2026-09-23T15:00:00Z",
+        "commence_time": commence_time,
         "bookmakers": [
             {
                 "key": "book-a",
@@ -153,6 +154,62 @@ class TheOddsApiSequenceCanonicalityTests(unittest.TestCase):
         self.assertEqual(second_evidence.response_sha256, "4" * 64)
         self.assertEqual(first_batch.cursor, "3" * 64)
         self.assertEqual(second_batch.cursor, "4" * 64)
+
+        normalizer = CanonicalNormalizer()
+        first_event = normalizer.normalize(provider.source_id, first)
+        second_event = normalizer.normalize(provider.source_id, second)
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            try:
+                self.assertTrue(store.append(first_event))
+                self.assertFalse(store.append(second_event))
+                self.assertEqual(len(store.events()), 1)
+            finally:
+                store.close()
+
+    def test_equivalent_timestamp_spellings_dedupe_as_same_source_truth(self) -> None:
+        responses = iter(
+            [
+                HttpJsonResponse(
+                    [
+                        _event(
+                            market_last_update="2026-09-23T13:00:00Z",
+                            commence_time="2026-09-23T15:00:00Z",
+                        )
+                    ],
+                    200,
+                    {},
+                ),
+                HttpJsonResponse(
+                    [
+                        _event(
+                            market_last_update="2026-09-23T14:00:00+01:00",
+                            commence_time="2026-09-23T16:00:00+01:00",
+                        )
+                    ],
+                    200,
+                    {},
+                ),
+            ]
+        )
+        clocks = iter(("2026-09-23T14:00:00Z", "2026-09-23T14:01:00Z"))
+        provider = TheOddsApiProvider(
+            "synthetic-secret",
+            sport="soccer_epl",
+            transport=lambda *_: next(responses),
+            clock=lambda: next(clocks),
+        )
+
+        first = provider.read_batch().quotes[0]
+        second = provider.read_batch().quotes[0]
+
+        self.assertEqual(first.sequence, second.sequence)
+        self.assertEqual(first.source_ts, "2026-09-23T13:00:00Z")
+        self.assertEqual(second.source_ts, first.source_ts)
+        self.assertEqual(
+            second.metadata["commence_time"],
+            first.metadata["commence_time"],
+        )
 
         normalizer = CanonicalNormalizer()
         first_event = normalizer.normalize(provider.source_id, first)

@@ -107,7 +107,20 @@ def _guard_detached_consumer(
     inner_function_globals = function.__globals__
     if exact_type(inner_function_globals) is not dict_type:
         raise RuntimeError("RunTransaction guarded consumer Python globals are invalid")
-    frozen_function_globals_items = tuple_type(dict_items(inner_function_globals))
+    source_builtins = dict_get(inner_function_globals, "__builtins__")
+    if exact_type(source_builtins) is not dict_type:
+        raise RuntimeError("RunTransaction guarded consumer builtins mapping is invalid")
+    # ``dict(function.__globals__)`` is not enough: its ``__builtins__`` value is the
+    # same mutable process mapping.  Snapshot builtin bindings as inert items and build
+    # a fresh mapping per ephemeral delegate so later builtin rebinding cannot retarget
+    # supposedly detached execution without changing any globals-tuple identity.
+    frozen_builtin_items = tuple_type(dict_items(source_builtins))
+    frozen_builtin_items_anchor = (frozen_builtin_items,)
+    frozen_function_globals_items = tuple_type(
+        (name, value)
+        for name, value in dict_items(inner_function_globals)
+        if name != "__builtins__"
+    )
     frozen_function_globals_items_anchor = (frozen_function_globals_items,)
     inner_name = function.__name__
     inner_qualname = function.__qualname__
@@ -144,6 +157,7 @@ def _guard_detached_consumer(
     # replace both execution snapshots and the verifier's independent identity witnesses.
     inner_globals_anchor = (inner_globals,)
     identity_anchor_marker = "__AUTOSPORT_RUN_TRANSACTION_DETACHED_GLOBALS_IDENTITY_ANCHOR__"
+    builtin_items_anchor_marker = "__AUTOSPORT_RUN_TRANSACTION_BUILTINS_SNAPSHOT_ANCHOR__"
     function_globals_anchor_marker = "__AUTOSPORT_RUN_TRANSACTION_FUNCTION_GLOBALS_SNAPSHOT_ANCHOR__"
     closure_values_anchor_marker = "__AUTOSPORT_RUN_TRANSACTION_CLOSURE_SNAPSHOT_ANCHOR__"
     globals_items_anchor_marker = "__AUTOSPORT_RUN_TRANSACTION_GLOBALS_ITEMS_SNAPSHOT_ANCHOR__"
@@ -165,6 +179,7 @@ def _guard_detached_consumer(
                 "RunTransaction detached direct-dispatch globals cell is empty"
             ) from exc
         anchored_inner_globals = "__AUTOSPORT_RUN_TRANSACTION_DETACHED_GLOBALS_IDENTITY_ANCHOR__"
+        anchored_builtin_items = "__AUTOSPORT_RUN_TRANSACTION_BUILTINS_SNAPSHOT_ANCHOR__"
         anchored_function_globals_items = "__AUTOSPORT_RUN_TRANSACTION_FUNCTION_GLOBALS_SNAPSHOT_ANCHOR__"
         anchored_closure_values = "__AUTOSPORT_RUN_TRANSACTION_CLOSURE_SNAPSHOT_ANCHOR__"
         anchored_globals_items = "__AUTOSPORT_RUN_TRANSACTION_GLOBALS_ITEMS_SNAPSHOT_ANCHOR__"
@@ -177,6 +192,8 @@ def _guard_detached_consumer(
             raise ValueError(
                 "RunTransaction detached direct-dispatch globals identity changed"
             )
+        if frozen_builtin_items is not anchored_builtin_items:
+            raise ValueError("RunTransaction detached builtin snapshot identity changed")
         if frozen_function_globals_items is not anchored_function_globals_items:
             raise ValueError(
                 "RunTransaction detached function-globals snapshot identity changed"
@@ -203,6 +220,7 @@ def _guard_detached_consumer(
     anchor_constants = require_bindings.__code__.co_consts
     anchor_markers = (
         identity_anchor_marker,
+        builtin_items_anchor_marker,
         function_globals_anchor_marker,
         closure_values_anchor_marker,
         globals_items_anchor_marker,
@@ -213,6 +231,8 @@ def _guard_detached_consumer(
         co_consts=tuple_type(
             inner_globals
             if item == identity_anchor_marker
+            else frozen_builtin_items
+            if item == builtin_items_anchor_marker
             else frozen_function_globals_items
             if item == function_globals_anchor_marker
             else frozen_closure_values
@@ -247,6 +267,7 @@ def _guard_detached_consumer(
             exact_type(function) is not function_type
             or function.__code__ is not inner_code
             or function.__closure__ is not inner_closure
+            or frozen_builtin_items is not frozen_builtin_items_anchor[0]
             or frozen_function_globals_items is not frozen_function_globals_items_anchor[0]
             or frozen_closure_values is not frozen_closure_values_anchor[0]
             or frozen_globals_items is not frozen_globals_items_anchor[0]
@@ -264,6 +285,7 @@ def _guard_detached_consumer(
         require_surface()
 
         call_function_globals = dict_type(frozen_function_globals_items)
+        call_function_globals["__builtins__"] = dict_type(frozen_builtin_items)
         call_globals = dict_type(frozen_globals_items)
         call_closure_values = list_type(frozen_closure_values)
         call_closure_values[inner_globals_index] = call_globals
@@ -283,6 +305,7 @@ def _guard_detached_consumer(
                 exact_type(function) is not function_type
                 or function.__code__ is not inner_code
                 or function.__closure__ is not inner_closure
+                or frozen_builtin_items is not frozen_builtin_items_anchor[0]
                 or frozen_function_globals_items is not frozen_function_globals_items_anchor[0]
                 or frozen_closure_values is not frozen_closure_values_anchor[0]
                 or frozen_globals_items is not frozen_globals_items_anchor[0]

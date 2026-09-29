@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import timezone
 import hashlib
 import json
 from typing import Mapping, Sequence
@@ -12,6 +13,7 @@ from .betdaq_event_tree_wire import (
     parse_get_event_subtree_no_selections_response,
 )
 from .betdaq_rate_governor import BetdaqRateAdmission
+from .betdaq_readonly_market_wire import BetdaqSoapProtocolError
 from .betdaq_readonly_provider import (
     BetdaqMarketBinding,
     BetdaqResolvedMarketBinding,
@@ -123,14 +125,21 @@ class BetdaqLiveCatalogueResolver:
         transport: object,
         timeout_seconds: float,
         clock: Clock,
+        max_message_age_seconds: int | None = None,
     ) -> None:
         if not callable(getattr(transport, "get_event_subtree_no_selections", None)):
             raise TypeError(
                 "transport must expose get_event_subtree_no_selections"
             )
+        if max_message_age_seconds is not None and (
+            type(max_message_age_seconds) is not int
+            or max_message_age_seconds <= 0
+        ):
+            raise ValueError("max_message_age_seconds must be positive or None")
         self._transport = transport
         self._timeout_seconds = timeout_seconds
         self._clock = clock
+        self._max_message_age_seconds = max_message_age_seconds
 
     def resolve(
         self,
@@ -179,9 +188,27 @@ class BetdaqLiveCatalogueResolver:
         if admission.method != "GetEventSubTreeNoSelections":
             raise ValueError("BETDAQ event-tree acquisition bound wrong rate admission")
 
-        received_at = self._clock()
-        _time(received_at, "catalogue_received_at")
+        received, received_at = _time(
+            self._clock(),
+            "catalogue_received_at",
+        )
         parsed = parse_get_event_subtree_no_selections_response(payload)
+        if parsed.provider_created_at is not None:
+            age = (
+                received.astimezone(timezone.utc)
+                - parsed.provider_created_at.astimezone(timezone.utc)
+            ).total_seconds()
+            if age < 0:
+                raise BetdaqSoapProtocolError(
+                    "BETDAQ catalogue WS-Security Created is in the future"
+                )
+            if (
+                self._max_message_age_seconds is not None
+                and age > self._max_message_age_seconds
+            ):
+                raise BetdaqSoapProtocolError(
+                    "BETDAQ catalogue WS-Security message envelope is stale"
+                )
         located = _flatten_events(parsed.event_classifiers)
         response_sha256 = hashlib.sha256(payload).hexdigest()
 

@@ -310,6 +310,63 @@ def test_configured_secret_embedded_in_frozenset_value_is_redacted() -> None:
     assert secret not in repr(redacted)
 
 
+def test_self_referential_list_value_fails_closed() -> None:
+    payload: list[object] = []
+    payload.append(payload)
+
+    redacted = redact_operator_value(payload)
+
+    assert redacted == [REDACTED]
+
+
+def test_self_referential_mapping_value_fails_closed() -> None:
+    payload: dict[str, object] = {}
+    payload["self"] = payload
+
+    redacted = redact_operator_value(payload)
+
+    assert redacted == {"self": REDACTED}
+
+
+def test_secret_bearing_cyclic_list_redacts_secret_and_cycle() -> None:
+    secret = "AS-CYCLIC-VALUE-SECRET-61bd"
+    payload: list[object] = [f"provider-{secret}-error"]
+    payload.append(payload)
+
+    redacted = redact_operator_value(
+        payload,
+        extra_secret_values=(secret,),
+    )
+
+    assert redacted == [f"provider-{REDACTED}-error", REDACTED]
+    assert secret not in repr(redacted)
+
+
+def test_deep_list_value_exhausts_depth_budget_fail_closed() -> None:
+    payload: object = "ordinary-leaf"
+    for _ in range(release_depth := 80):
+        payload = [payload]
+
+    redacted = redact_operator_value(payload)
+
+    current = redacted
+    observed_depth = 0
+    while isinstance(current, list):
+        assert len(current) == 1
+        current = current[0]
+        observed_depth += 1
+    assert observed_depth < release_depth
+    assert current == REDACTED
+
+
+def test_wide_list_value_exhausts_node_budget_fail_closed() -> None:
+    payload = list(range(10_100))
+
+    redacted = redact_operator_value(payload)
+
+    assert redacted == REDACTED
+
+
 class _HostileMappingKey:
     def __hash__(self) -> int:
         return 17731

@@ -14,6 +14,8 @@ REDACTED = "[REDACTED]"
 # hostile diagnostic payload cannot turn redaction itself into an availability sink.
 _MAPPING_KEY_MAX_TUPLE_DEPTH = 32
 _MAPPING_KEY_MAX_NODES = 256
+_OPERATOR_VALUE_MAX_DEPTH = 64
+_OPERATOR_VALUE_MAX_NODES = 10_000
 
 _SENSITIVE_NORMALIZED_KEYS = frozenset(
     {
@@ -428,90 +430,148 @@ def redact_operator_value(
     *,
     extra_secret_values: Iterable[str] = (),
 ) -> Any:
-    """Return a redacted presentation copy of nested operator data."""
+    """Return a bounded redacted presentation copy of nested operator data."""
 
     secrets = tuple(extra_secret_values)
+    remaining_nodes = [_OPERATOR_VALUE_MAX_NODES]
+    active_container_ids: set[int] = set()
 
-    if isinstance(value, str):
-        return redact_operator_text(value, extra_secret_values=secrets)
-    if type(value) in (bytes, bytearray, memoryview):
-        if type(value) is bytes:
-            raw_binary = value
-        elif type(value) is bytearray:
-            raw_binary = bytes(value)
-        else:
-            raw_binary = value.tobytes()
-        try:
-            decoded = raw_binary.decode("utf-8", "strict")
-        except UnicodeDecodeError:
-            redacted_binary = REDACTED.encode("utf-8")
-        else:
-            redacted_binary = redact_operator_text(
-                decoded,
-                extra_secret_values=secrets,
-            ).encode("utf-8")
-        if type(value) is bytes:
-            return redacted_binary
-        if type(value) is bytearray:
-            return bytearray(redacted_binary)
-        return memoryview(redacted_binary)
-    if isinstance(value, Mapping):
-        redacted: dict[Any, Any] = {}
-        prepared: list[tuple[object, Any, bool, bool]] = []
-        reserved_keys: set[object] = set()
+    def redact(item: Any, *, depth: int) -> Any:
+        if depth > _OPERATOR_VALUE_MAX_DEPTH or remaining_nodes[0] <= 0:
+            return REDACTED
+        remaining_nodes[0] -= 1
 
-        # Transform first, then reserve only keys that are actually preserved. This
-        # keeps ordinary exact built-in keys authoritative over generated aliases
-        # without carrying unsupported/custom key objects into the output collision
-        # machinery.
-        for key, item in value.items():
-            safe_key, key_is_sensitive, key_was_transformed = (
-                _redact_operator_mapping_key(key, secrets=secrets)
-            )
-            prepared.append(
-                (safe_key, item, key_is_sensitive, key_was_transformed)
-            )
-            if not key_was_transformed:
-                reserved_keys.add(safe_key)
-
-        for safe_key, item, key_is_sensitive, key_was_transformed in prepared:
-            if key_was_transformed:
-                candidate = safe_key
-                suffix = 2
-                while candidate in reserved_keys or candidate in redacted:
-                    candidate = _mapping_key_collision_alias(safe_key, suffix)
-                    suffix += 1
-                safe_key = candidate
-
-            if key_is_sensitive:
-                redacted[safe_key] = REDACTED
+        if isinstance(item, str):
+            return redact_operator_text(item, extra_secret_values=secrets)
+        if type(item) in (bytes, bytearray, memoryview):
+            if type(item) is bytes:
+                raw_binary = item
+            elif type(item) is bytearray:
+                raw_binary = bytes(item)
             else:
-                redacted[safe_key] = redact_operator_value(
-                    item,
+                raw_binary = item.tobytes()
+            try:
+                decoded = raw_binary.decode("utf-8", "strict")
+            except UnicodeDecodeError:
+                redacted_binary = REDACTED.encode("utf-8")
+            else:
+                redacted_binary = redact_operator_text(
+                    decoded,
                     extra_secret_values=secrets,
-                )
-        return redacted
-    if isinstance(value, list):
-        return [
-            redact_operator_value(item, extra_secret_values=secrets)
-            for item in value
-        ]
-    if isinstance(value, tuple):
-        return tuple(
-            redact_operator_value(item, extra_secret_values=secrets)
-            for item in value
-        )
-    if type(value) is set:
-        return {
-            redact_operator_value(item, extra_secret_values=secrets)
-            for item in value
-        }
-    if type(value) is frozenset:
-        return frozenset(
-            redact_operator_value(item, extra_secret_values=secrets)
-            for item in value
-        )
-    return value
+                ).encode("utf-8")
+            if type(item) is bytes:
+                return redacted_binary
+            if type(item) is bytearray:
+                return bytearray(redacted_binary)
+            return memoryview(redacted_binary)
+
+        is_mapping = isinstance(item, Mapping)
+        is_list = isinstance(item, list)
+        is_tuple = isinstance(item, tuple)
+        is_set = type(item) is set
+        is_frozenset = type(item) is frozenset
+        if is_mapping or is_list or is_tuple or is_set or is_frozenset:
+            identity = id(item)
+            if identity in active_container_ids:
+                return REDACTED
+            active_container_ids.add(identity)
+            try:
+                if is_mapping:
+                    redacted: dict[Any, Any] = {}
+                    prepared: list[tuple[object, Any, bool, bool]] = []
+                    reserved_keys: set[object] = set()
+
+                    # Count each mapping entry before retaining it. If the global
+                    # presentation budget is exhausted, fail closed for the whole
+                    # container rather than materializing an unbounded partial copy.
+                    for key, child in item.items():
+                        if remaining_nodes[0] <= 0:
+                            return REDACTED
+                        remaining_nodes[0] -= 1
+                        safe_key, key_is_sensitive, key_was_transformed = (
+                            _redact_operator_mapping_key(
+                                key,
+                                secrets=secrets,
+                            )
+                        )
+                        prepared.append(
+                            (
+                                safe_key,
+                                child,
+                                key_is_sensitive,
+                                key_was_transformed,
+                            )
+                        )
+                        if not key_was_transformed:
+                            reserved_keys.add(safe_key)
+
+                    for (
+                        safe_key,
+                        child,
+                        key_is_sensitive,
+                        key_was_transformed,
+                    ) in prepared:
+                        if key_was_transformed:
+                            candidate = safe_key
+                            suffix = 2
+                            while (
+                                candidate in reserved_keys
+                                or candidate in redacted
+                            ):
+                                candidate = _mapping_key_collision_alias(
+                                    safe_key,
+                                    suffix,
+                                )
+                                suffix += 1
+                            safe_key = candidate
+
+                        if key_is_sensitive:
+                            redacted[safe_key] = REDACTED
+                        else:
+                            if remaining_nodes[0] <= 0:
+                                return REDACTED
+                            redacted[safe_key] = redact(
+                                child,
+                                depth=depth + 1,
+                            )
+                    return redacted
+
+                if is_list:
+                    output: list[Any] = []
+                    for child in item:
+                        if remaining_nodes[0] <= 0:
+                            return REDACTED
+                        output.append(redact(child, depth=depth + 1))
+                    return output
+
+                if is_tuple:
+                    output_tuple: list[Any] = []
+                    for child in item:
+                        if remaining_nodes[0] <= 0:
+                            return REDACTED
+                        output_tuple.append(redact(child, depth=depth + 1))
+                    return tuple(output_tuple)
+
+                if is_set:
+                    output_set: set[Any] = set()
+                    for child in item:
+                        if remaining_nodes[0] <= 0:
+                            return REDACTED
+                        output_set.add(redact(child, depth=depth + 1))
+                    return output_set
+
+                output_frozen: set[Any] = set()
+                for child in item:
+                    if remaining_nodes[0] <= 0:
+                        return REDACTED
+                    output_frozen.add(redact(child, depth=depth + 1))
+                return frozenset(output_frozen)
+            finally:
+                active_container_ids.remove(identity)
+
+        return item
+
+    return redact(value, depth=0)
 
 
 def safe_exception_detail(

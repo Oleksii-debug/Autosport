@@ -19,6 +19,7 @@ from autosport.betfair_commission_applicability import (
     BetfairCommissionApplicabilityStatus,
     assess_betfair_commission_applicability,
     require_product_betfair_commission_applicability,
+    validate_betfair_commission_applicability_assessment,
 )
 
 
@@ -98,7 +99,7 @@ def test_authenticated_fee_inputs_do_not_mint_prospective_commission_authority()
     client, transport = _client()
 
     assessment = assess_betfair_commission_applicability(client, market_id="1.234")
-    assert require_product_betfair_commission_applicability(assessment) is assessment
+    assert validate_betfair_commission_applicability_assessment(assessment) is assessment
 
     assert len(transport.calls) == 2
     assert assessment.status is BetfairCommissionApplicabilityStatus.UNPROVEN
@@ -170,22 +171,22 @@ def test_assessment_projection_never_persists_credentials_or_account_personal_fi
     assert assessment.account_id == "account-123"
 
 
-def test_public_constructor_cannot_mint_assessment():
+def test_public_constructor_does_not_claim_canonical_evaluation():
     with pytest.raises(
         BetfairCommissionApplicabilityError,
-        match="product-issued",
+        match="not canonical applicability evaluation",
     ):
         BetfairCommissionApplicabilityAssessment()
 
 
-def test_object_new_forgery_cannot_cross_product_issuance_boundary():
+def test_incomplete_object_new_value_cannot_masquerade_as_canonical_negative_evidence():
     forged = object.__new__(BetfairCommissionApplicabilityAssessment)
 
     with pytest.raises(
         BetfairCommissionApplicabilityError,
-        match="not product-issued",
+        match="incomplete canonical fail-closed applicability evidence",
     ):
-        require_product_betfair_commission_applicability(forged)
+        validate_betfair_commission_applicability_assessment(forged)
 
 
 def test_malformed_provider_input_fails_before_assessment_issuance():

@@ -274,7 +274,16 @@ def _build_product_boundary():
         cell.cell_contents for cell in (fee_input_reader_closure or ())
     )
     fee_payload_builder = _FEE_INPUT_SHA256_CAPABILITY
+    fee_payload_function = fee_payload_builder.func
+    fee_payload_function_code = fee_payload_function.__code__
+    fee_payload_function_globals = fee_payload_function.__globals__
+    fee_payload_args = fee_payload_builder.args
+    fee_input_payload_builder = fee_payload_args[0]
+    fee_input_payload_builder_code = fee_input_payload_builder.__code__
+    fee_input_payload_builder_globals = fee_input_payload_builder.__globals__
     canonical_json = _canonical_json
+    canonical_json_code = canonical_json.__code__
+    canonical_json_globals = canonical_json.__globals__
     hash_constructor = sha256
     assessment_type = BetfairCommissionApplicabilityAssessment
     error_type = BetfairCommissionApplicabilityError
@@ -286,6 +295,8 @@ def _build_product_boundary():
     schema = _SCHEMA
     schema_version = _SCHEMA_VERSION
     identity_payload_builder = _assessment_identity_payload
+    identity_payload_builder_code = identity_payload_builder.__code__
+    identity_payload_builder_globals = identity_payload_builder.__globals__
 
     issued_by_id: dict[
         int,
@@ -293,7 +304,7 @@ def _build_product_boundary():
     ] = {}
     issue_lock = RLock()
 
-    def require_reader_authority() -> None:
+    def require_executable_authority() -> None:
         if (
             fee_input_reader.__code__ is not fee_input_reader_code
             or fee_input_reader.__globals__ is not fee_input_reader_globals
@@ -311,19 +322,41 @@ def _build_product_boundary():
             if current is not expected:
                 raise error_type("fee input reader closure authority changed")
 
+        if (
+            fee_payload_builder.func is not fee_payload_function
+            or fee_payload_builder.args != fee_payload_args
+            or fee_payload_function.__code__ is not fee_payload_function_code
+            or fee_payload_function.__globals__ is not fee_payload_function_globals
+            or fee_input_payload_builder.__code__ is not fee_input_payload_builder_code
+            or fee_input_payload_builder.__globals__ is not fee_input_payload_builder_globals
+            or fee_payload_args[1] is not canonical_json
+            or fee_payload_args[2] is not hash_constructor
+        ):
+            raise error_type("fee input identity executable authority changed")
+
+        if (
+            canonical_json.__code__ is not canonical_json_code
+            or canonical_json.__globals__ is not canonical_json_globals
+            or identity_payload_builder.__code__ is not identity_payload_builder_code
+            or identity_payload_builder.__globals__ is not identity_payload_builder_globals
+        ):
+            raise error_type("assessment identity executable authority changed")
+
     def assess(
         client: BetfairReadOnlyClient,
         *,
         market_id: str,
     ) -> BetfairCommissionApplicabilityAssessment:
-        require_reader_authority()
+        require_executable_authority()
         observation = fee_input_reader(client, market_id=market_id)
-        require_reader_authority()
+        require_executable_authority()
         if type(observation) is not observation_type:
             raise error_type(
                 "fee inputs must be exact BetfairExecutionFeeInputsObservation"
             )
 
+        fee_input_sha256 = fee_payload_builder(observation)
+        require_executable_authority()
         payload = {
             "schema": schema,
             "schema_version": schema_version,
@@ -332,7 +365,7 @@ def _build_product_boundary():
             "market_id": observation.market_id,
             "currency_code": observation.currency_code,
             "region": observation.region,
-            "fee_input_sha256": fee_payload_builder(observation),
+            "fee_input_sha256": fee_input_sha256,
             "account_source_payload_sha256": (
                 observation.account_evidence.source_payload_sha256
             ),
@@ -349,6 +382,7 @@ def _build_product_boundary():
             "real_money_execution_authorized": False,
         }
         assessment_id = hash_constructor(canonical_json(payload)).hexdigest()
+        require_executable_authority()
         assessment = object.__new__(assessment_type)
         for name, value in (
             ("venue_id", observation.venue_id),
@@ -396,6 +430,7 @@ def _build_product_boundary():
     def require_product(
         assessment: BetfairCommissionApplicabilityAssessment,
     ) -> BetfairCommissionApplicabilityAssessment:
+        require_executable_authority()
         if type(assessment) is not assessment_type:
             raise error_type(
                 "assessment must be exact BetfairCommissionApplicabilityAssessment"
@@ -425,8 +460,10 @@ def _build_product_boundary():
             schema=schema,
             schema_version=schema_version,
         )
+        require_executable_authority()
         if assessment.assessment_id != hash_constructor(canonical_json(payload)).hexdigest():
             raise error_type("assessment identity is inconsistent")
+        require_executable_authority()
         return assessment
 
     return assess, require_product

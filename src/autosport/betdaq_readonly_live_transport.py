@@ -35,7 +35,13 @@ class BetdaqReadOnlyLiveTransport:
     explicit transient signal may enter BetdaqReadOnlyProvider's bounded retry loop.
     """
 
-    __slots__ = ("_credentials", "_transport", "_rate_governor", "_last_rate_admission")
+    __slots__ = (
+        "_credentials",
+        "_transport",
+        "_rate_governor",
+        "_last_rate_admission",
+        "_canonical_only",
+    )
 
     def __init__(
         self,
@@ -43,11 +49,14 @@ class BetdaqReadOnlyLiveTransport:
         credentials: BetdaqCredentials,
         rate_governor: BetdaqRateGovernor,
         transport: BetdaqSoapTransport | None = None,
+        canonical_only: bool = False,
     ) -> None:
         if type(credentials) is not BetdaqCredentials:
             raise TypeError("credentials must be canonical BetdaqCredentials")
         if type(rate_governor) is not BetdaqRateGovernor:
             raise TypeError("rate_governor must be canonical BetdaqRateGovernor")
+        if type(canonical_only) is not bool:
+            raise TypeError("canonical_only must be bool")
         selected: object = UrllibBetdaqSoapTransport() if transport is None else transport
         if not callable(getattr(selected, "post", None)):
             raise TypeError("transport must expose post")
@@ -55,6 +64,11 @@ class BetdaqReadOnlyLiveTransport:
         self._transport = selected
         self._rate_governor = rate_governor
         self._last_rate_admission: BetdaqRateAdmission | None = None
+        self._canonical_only = canonical_only
+        if self._canonical_only and not self.canonical_transport_selected:
+            raise TypeError(
+                "canonical-only BETDAQ transport requires product-owned HTTPS transport"
+            )
 
     @property
     def rate_governor(self) -> BetdaqRateGovernor:
@@ -83,17 +97,30 @@ class BetdaqReadOnlyLiveTransport:
         method: str,
         timeout_seconds: float,
     ) -> bytes:
-        # Admission is immediately adjacent to dispatch and outside the transport
-        # exception classifier: rate denial is scheduler-facing deferral, never a
-        # transient network retry.
+        # Validate exact dispatch authority before consuming provider budget. In
+        # canonical-only mode the captured class method is invoked unbound, so an
+        # instance-level post shadow cannot redirect canonical acquisition.
+        if self._canonical_only and not self.canonical_transport_selected:
+            raise ProviderUnavailableError(
+                "canonical BETDAQ HTTPS transport authority was replaced"
+            )
         self._last_rate_admission = self._rate_governor.admit(method)
         try:
-            payload = self._transport.post(
-                getattr(wire, "endpoint"),
-                headers=getattr(wire, "headers"),
-                body=getattr(wire, "body"),
-                timeout_seconds=timeout_seconds,
-            )
+            if self._canonical_only:
+                payload = _CANONICAL_POST(
+                    self._transport,
+                    getattr(wire, "endpoint"),
+                    headers=getattr(wire, "headers"),
+                    body=getattr(wire, "body"),
+                    timeout_seconds=timeout_seconds,
+                )
+            else:
+                payload = self._transport.post(
+                    getattr(wire, "endpoint"),
+                    headers=getattr(wire, "headers"),
+                    body=getattr(wire, "body"),
+                    timeout_seconds=timeout_seconds,
+                )
         except (BetdaqTransientTransportError, TimeoutError, ConnectionError):
             raise
         except BetdaqAccountReadOnlyError:
@@ -150,5 +177,6 @@ class BetdaqReadOnlyLiveTransport:
         return (
             "BetdaqReadOnlyLiveTransport("
             f"canonical_transport_selected={self.canonical_transport_selected}, "
+            f"canonical_only={self._canonical_only}, "
             "rate_governed=True)"
         )

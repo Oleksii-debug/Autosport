@@ -27,7 +27,14 @@ from . import run_transaction as _run_transaction
 
 
 _FROZEN_SURFACE = _member_freeze._FrozenSurface
-_SURFACE_ROOTS = ("__new__", "__iter__", "__getattr__", "__setattr__", "__delattr__")
+_SURFACE_ROOTS = (
+    "__new__",
+    "__getattribute__",
+    "__iter__",
+    "__getattr__",
+    "__setattr__",
+    "__delattr__",
+)
 
 
 def _fresh_cell(value: object):

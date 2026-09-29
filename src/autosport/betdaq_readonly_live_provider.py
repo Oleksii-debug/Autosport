@@ -9,6 +9,7 @@ from .betdaq_account_readonly import BetdaqCredentials, BetdaqSoapTransport
 from .betdaq_catalogue_binding import (
     BetdaqCatalogueEvidence,
     BetdaqLiveCatalogueResolver,
+    betdaq_event_scope_id,
 )
 from .betdaq_readonly_live_transport import BetdaqReadOnlyLiveTransport
 from .betdaq_readonly_market_wire import BetdaqSoapProtocolError
@@ -55,6 +56,10 @@ class BetdaqLiveReadOnlyProvider(BetdaqReadOnlyProvider):
         # composition accepts only the exact built-in Decimal authority type.
         if type(threshold_amount) is not Decimal:
             raise TypeError("threshold_amount must be exact Decimal")
+        bindings = tuple(market_bindings)
+        for binding in bindings:
+            if type(binding) is BetdaqMarketBinding:
+                betdaq_event_scope_id(binding.provider_event_id)
         live_transport = BetdaqReadOnlyLiveTransport(
             credentials=credentials,
             rate_governor=rate_governor,
@@ -62,7 +67,7 @@ class BetdaqLiveReadOnlyProvider(BetdaqReadOnlyProvider):
         )
         super().__init__(
             transport=live_transport,
-            market_bindings=market_bindings,
+            market_bindings=bindings,
             threshold_amount=threshold_amount,
             timeout_seconds=timeout_seconds,
             max_attempts=max_attempts,

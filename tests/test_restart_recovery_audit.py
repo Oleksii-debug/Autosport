@@ -169,6 +169,20 @@ class RestartRecoveryAuditTests(unittest.TestCase):
             self.assertFalse(payload["human_tested"])
             self.assertFalse(payload["nvda_verified"])
 
+    def test_safe_exception_trace_is_bounded_and_path_free(self):
+        def nested_failure():
+            raise ValueError("trace-canary")
+
+        try:
+            nested_failure()
+        except ValueError as exc:
+            trace = restart_audit._safe_exception_trace(exc, limit=1)
+
+        self.assertEqual(len(trace), 1)
+        self.assertIn(":nested_failure:", trace[0])
+        self.assertNotIn("/", trace[0])
+        self.assertNotIn("\\\\", trace[0])
+
     def test_safe_exception_site_reports_only_module_function_and_line(self):
         try:
             raise ValueError("site-canary")

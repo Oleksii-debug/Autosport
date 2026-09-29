@@ -342,7 +342,143 @@ def _build_load_expectations(
     return load_expectations
 
 
-_load_expectations = _build_load_expectations(
+def _build_public_entrypoints(*, load_expectations):
+    """Seal the positive resolver behind the exact composed authority callable."""
+
+    load_expectations_code = load_expectations.__code__
+
+    def _sealed_load_expectations(**kwargs):
+        if load_expectations.__code__ is not load_expectations_code:
+            raise ForwardEvaluationUniverseBindingError(
+                "forward source-universe resolver authority changed"
+            )
+        result = load_expectations(**kwargs)
+        if load_expectations.__code__ is not load_expectations_code:
+            raise ForwardEvaluationUniverseBindingError(
+                "forward source-universe resolver authority changed"
+            )
+        return result
+
+    def resolve_forward_universe_members(
+        *,
+        store: ProviderEvaluationUniverseStore,
+        protocol: ForwardEvidenceProtocolEnvelope,
+        precommit: ForwardUniversePrecommitLocator,
+    ) -> tuple[ForwardUniverseMemberExpectation, ...]:
+        """Project only the exact prospectively selected durable source universe."""
+    
+        expectations, _identity = _sealed_load_expectations(
+            store=store,
+            protocol=protocol,
+            precommit=precommit,
+        )
+        return expectations
+    
+    
+    def authorize_forward_source_receipts(
+        *,
+        store: ProviderEvaluationUniverseStore,
+        protocol: ForwardEvidenceProtocolEnvelope,
+        precommit: ForwardUniversePrecommitLocator,
+        opportunities: Sequence[ForwardOpportunityEnvelope],
+    ) -> tuple[AuthoritativeSourceReceipt, ...]:
+        """Re-resolve prospective + durable authority and authorize exact coverage only."""
+    
+        expectations, identity_before = _sealed_load_expectations(
+            store=store,
+            protocol=protocol,
+            precommit=precommit,
+        )
+        expected_by_receipt = {item.source_receipt_id: item for item in expectations}
+    
+        materialized = tuple(opportunities)
+        if not all(type(item) is ForwardOpportunityEnvelope for item in materialized):
+            raise TypeError("opportunities must contain exact ForwardOpportunityEnvelope values")
+        by_receipt: dict[str, ForwardOpportunityEnvelope] = {}
+        opportunity_ids: set[str] = set()
+        for item in materialized:
+            if item.source_receipt_id in by_receipt:
+                raise ForwardEvaluationUniverseBindingError(
+                    "forward opportunities duplicate an authoritative source receipt"
+                )
+            if item.opportunity_id in opportunity_ids:
+                raise ForwardEvaluationUniverseBindingError(
+                    "forward opportunities duplicate an opportunity identity"
+                )
+            by_receipt[item.source_receipt_id] = item
+            opportunity_ids.add(item.opportunity_id)
+    
+        if set(by_receipt) != set(expected_by_receipt):
+            missing = sorted(set(expected_by_receipt) - set(by_receipt))
+            invented = sorted(set(by_receipt) - set(expected_by_receipt))
+            raise ForwardEvaluationUniverseBindingError(
+                "forward opportunity inventory does not equal durable source membership "
+                f"(missing={missing!r}, invented={invented!r})"
+            )
+    
+        receipts: list[AuthoritativeSourceReceipt] = []
+        for receipt_id in sorted(expected_by_receipt):
+            expected = expected_by_receipt[receipt_id]
+            item = by_receipt[receipt_id]
+            if (
+                item.campaign_id != protocol.campaign_id
+                or item.protocol_sha256 != protocol.protocol_sha256
+                or item.runtime_identity_sha256 != protocol.runtime_identity_sha256
+            ):
+                raise ForwardEvaluationUniverseBindingError(
+                    "forward opportunity campaign/protocol/runtime identity drifted from precommit"
+                )
+            actual = (
+                item.opportunity_id,
+                item.source_receipt_sha256,
+                item.universe_rule_result,
+                item.universe_rule_reason_code,
+                item.provider_acquisition_state,
+                item.observed_lower,
+                item.observed_upper,
+                item.causal_cutoff,
+            )
+            required = (
+                expected.opportunity_id,
+                expected.source_receipt_sha256,
+                expected.universe_rule_result,
+                expected.universe_rule_reason_code,
+                expected.provider_acquisition_state,
+                expected.observed_lower,
+                expected.observed_upper,
+                expected.causal_cutoff,
+            )
+            if actual != required:
+                raise ForwardEvaluationUniverseBindingError(
+                    "forward opportunity does not exactly match durable source-universe projection"
+                )
+            receipts.append(
+                AuthoritativeSourceReceipt(
+                    receipt_id=expected.source_receipt_id,
+                    receipt_sha256=expected.source_receipt_sha256,
+                    campaign_id=protocol.campaign_id,
+                    opportunity_id=expected.opportunity_id,
+                    universe_rule_result=expected.universe_rule_result,
+                )
+            )
+    
+        _expectations_after, identity_after = _sealed_load_expectations(
+            store=store,
+            protocol=protocol,
+            precommit=precommit,
+        )
+        if identity_after != identity_before:
+            raise ForwardEvaluationUniverseBindingError(
+                "prospective or durable source-universe authority changed during receipt resolution"
+            )
+        return tuple(receipts)
+    
+
+    return resolve_forward_universe_members, authorize_forward_source_receipts
+
+
+resolve_forward_universe_members, authorize_forward_source_receipts = _build_public_entrypoints(
+    load_expectations=_build_load_expectations(
     store_type=ProviderEvaluationUniverseStore,
     precommit_locator_type=ForwardUniversePrecommitLocator,
     canonical_load=_CANONICAL_PROVIDER_UNIVERSE_LOAD,
@@ -350,123 +486,10 @@ _load_expectations = _build_load_expectations(
     precommit_resolver=resolve_forward_universe_precommit_authority,
     backing_error=ForwardUniverseBackingGuardError,
     precommit_error=ForwardUniversePrecommitAuthorityError,
+),
 )
-
-
-def resolve_forward_universe_members(
-    *,
-    store: ProviderEvaluationUniverseStore,
-    protocol: ForwardEvidenceProtocolEnvelope,
-    precommit: ForwardUniversePrecommitLocator,
-) -> tuple[ForwardUniverseMemberExpectation, ...]:
-    """Project only the exact prospectively selected durable source universe."""
-
-    expectations, _identity = _load_expectations(
-        store=store,
-        protocol=protocol,
-        precommit=precommit,
-    )
-    return expectations
-
-
-def authorize_forward_source_receipts(
-    *,
-    store: ProviderEvaluationUniverseStore,
-    protocol: ForwardEvidenceProtocolEnvelope,
-    precommit: ForwardUniversePrecommitLocator,
-    opportunities: Sequence[ForwardOpportunityEnvelope],
-) -> tuple[AuthoritativeSourceReceipt, ...]:
-    """Re-resolve prospective + durable authority and authorize exact coverage only."""
-
-    expectations, identity_before = _load_expectations(
-        store=store,
-        protocol=protocol,
-        precommit=precommit,
-    )
-    expected_by_receipt = {item.source_receipt_id: item for item in expectations}
-
-    materialized = tuple(opportunities)
-    if not all(type(item) is ForwardOpportunityEnvelope for item in materialized):
-        raise TypeError("opportunities must contain exact ForwardOpportunityEnvelope values")
-    by_receipt: dict[str, ForwardOpportunityEnvelope] = {}
-    opportunity_ids: set[str] = set()
-    for item in materialized:
-        if item.source_receipt_id in by_receipt:
-            raise ForwardEvaluationUniverseBindingError(
-                "forward opportunities duplicate an authoritative source receipt"
-            )
-        if item.opportunity_id in opportunity_ids:
-            raise ForwardEvaluationUniverseBindingError(
-                "forward opportunities duplicate an opportunity identity"
-            )
-        by_receipt[item.source_receipt_id] = item
-        opportunity_ids.add(item.opportunity_id)
-
-    if set(by_receipt) != set(expected_by_receipt):
-        missing = sorted(set(expected_by_receipt) - set(by_receipt))
-        invented = sorted(set(by_receipt) - set(expected_by_receipt))
-        raise ForwardEvaluationUniverseBindingError(
-            "forward opportunity inventory does not equal durable source membership "
-            f"(missing={missing!r}, invented={invented!r})"
-        )
-
-    receipts: list[AuthoritativeSourceReceipt] = []
-    for receipt_id in sorted(expected_by_receipt):
-        expected = expected_by_receipt[receipt_id]
-        item = by_receipt[receipt_id]
-        if (
-            item.campaign_id != protocol.campaign_id
-            or item.protocol_sha256 != protocol.protocol_sha256
-            or item.runtime_identity_sha256 != protocol.runtime_identity_sha256
-        ):
-            raise ForwardEvaluationUniverseBindingError(
-                "forward opportunity campaign/protocol/runtime identity drifted from precommit"
-            )
-        actual = (
-            item.opportunity_id,
-            item.source_receipt_sha256,
-            item.universe_rule_result,
-            item.universe_rule_reason_code,
-            item.provider_acquisition_state,
-            item.observed_lower,
-            item.observed_upper,
-            item.causal_cutoff,
-        )
-        required = (
-            expected.opportunity_id,
-            expected.source_receipt_sha256,
-            expected.universe_rule_result,
-            expected.universe_rule_reason_code,
-            expected.provider_acquisition_state,
-            expected.observed_lower,
-            expected.observed_upper,
-            expected.causal_cutoff,
-        )
-        if actual != required:
-            raise ForwardEvaluationUniverseBindingError(
-                "forward opportunity does not exactly match durable source-universe projection"
-            )
-        receipts.append(
-            AuthoritativeSourceReceipt(
-                receipt_id=expected.source_receipt_id,
-                receipt_sha256=expected.source_receipt_sha256,
-                campaign_id=protocol.campaign_id,
-                opportunity_id=expected.opportunity_id,
-                universe_rule_result=expected.universe_rule_result,
-            )
-        )
-
-    _expectations_after, identity_after = _load_expectations(
-        store=store,
-        protocol=protocol,
-        precommit=precommit,
-    )
-    if identity_after != identity_before:
-        raise ForwardEvaluationUniverseBindingError(
-            "prospective or durable source-universe authority changed during receipt resolution"
-        )
-    return tuple(receipts)
-
+del _build_load_expectations
+del _build_public_entrypoints
 
 __all__ = [
     "FORWARD_UNIVERSE_RULE_ID",

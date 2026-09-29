@@ -301,6 +301,15 @@ class MarketEvent:
     exchange_side: str | None = None
 
     def __post_init__(self) -> None:
+        _timezone_aware_iso8601_value(self.observed_ts, "observed_ts")
+        _timezone_aware_iso8601_value(self.ingest_ts, "ingest_ts")
+        if self.source_ts is not None:
+            _timezone_aware_iso8601_value(self.source_ts, "source_ts")
+        object.__setattr__(
+            self,
+            "metadata",
+            _serialized_metadata({"metadata": self.metadata}),
+        )
         if self.sport is not None:
             _canonical_sport_value(self.sport)
         for field_name in (
@@ -364,12 +373,15 @@ class MarketEvent:
         event_id = _required_canonical_string(raw, "event_id")
         market_id = _required_canonical_string(raw, "market_id")
         selection_id = _required_canonical_string(raw, "selection_id")
-        observed_ts = _required_canonical_string(raw, "observed_ts")
+        observed_ts = _timezone_aware_iso8601_value(raw.get("observed_ts"), "observed_ts")
         source_id = _required_canonical_string(raw, "source_id")
         sequence = _required_sequence(raw)
         decimal_odds = _required_decimal_odds(raw)
 
-        ingest_ts = _canonical_string_value(raw.get("ingest_ts", observed_ts), "ingest_ts")
+        ingest_ts = _timezone_aware_iso8601_value(
+            raw.get("ingest_ts", observed_ts),
+            "ingest_ts",
+        )
 
         market_type_raw = _canonical_string_value(raw.get("market_type", "other"), "market_type")
         try:
@@ -422,7 +434,7 @@ class MarketEvent:
             "source_ts": self.source_ts,
             "ingest_ts": self.ingest_ts,
             "score_state": self.score_state,
-            "metadata": self.metadata,
+            "metadata": _serialized_metadata({"metadata": self.metadata}),
         }
         if self.sport is not None:
             payload["sport"] = self.sport

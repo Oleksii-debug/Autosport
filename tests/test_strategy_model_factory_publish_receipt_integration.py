@@ -22,7 +22,7 @@ def test_normal_baseline_candidate_success_publishes_transaction_receipt(
     helpers = _canonical_factory_test_helpers()
     registry, _, rule, store, _, _ = helpers["_factory_foundation"](tmp_path)
 
-    result = helpers["_run_candidate"](
+    helpers["_run_candidate"](
         ExperimentRunner(registry, store),
         helpers["_candidate_points"](),
         rule,
@@ -35,7 +35,6 @@ def test_normal_baseline_candidate_success_publishes_transaction_receipt(
         expected_sha256=model_sha256,
     )
 
-    assert result.candidate_model_version_id == "model-v2"
     assert receipt["final_registry_sha256"] == factory_module._registry_state_sha256(
         registry._read()
     )

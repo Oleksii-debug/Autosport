@@ -1,0 +1,94 @@
+import hashlib
+import os
+import tempfile
+import unittest
+
+import autosport  # noqa: F401 - package composition installs the guard
+import autosport.run_transaction as run_transaction_module
+from autosport.paper import PaperBook
+from autosport.run_transaction import RunTransaction
+
+
+def _sealed_inner_globals(method):
+    closure = method.__closure__
+    if closure is None:
+        raise AssertionError("sealed RunTransaction consumer has no closure")
+    freevars = method.__code__.co_freevars
+    if "inner_globals" not in freevars:
+        raise AssertionError("sealed RunTransaction consumer has no inner_globals")
+    return closure[freevars.index("inner_globals")].cell_contents
+
+
+class RunTransactionPaperBookDirectDispatchGuardTests(unittest.TestCase):
+    def test_stage_and_promotion_are_detached_from_live_module_globals(self):
+        stage_globals = _sealed_inner_globals(
+            RunTransaction._stage_paper_book_snapshot
+        )
+        promotion_globals = _sealed_inner_globals(
+            RunTransaction._promote_paper_book_snapshot
+        )
+
+        self.assertIsNot(stage_globals, run_transaction_module.__dict__)
+        self.assertIsNot(promotion_globals, run_transaction_module.__dict__)
+        self.assertIs(stage_globals["RunTransaction"], RunTransaction)
+        self.assertIs(promotion_globals["RunTransaction"], RunTransaction)
+
+    def test_promotion_uses_frozen_direct_dispatch_members(self):
+        promotion_globals = _sealed_inner_globals(
+            RunTransaction._promote_paper_book_snapshot
+        )
+        frozen_os = promotion_globals["os"]
+        frozen_tempfile = promotion_globals["tempfile"]
+        frozen_hashlib = promotion_globals["hashlib"]
+        frozen_paper_book = promotion_globals["PaperBook"]
+
+        self.assertIsNot(frozen_os, os)
+        self.assertIs(frozen_os.close, os.close)
+        self.assertIs(frozen_os.fsync, os.fsync)
+        self.assertIs(frozen_os.replace, os.replace)
+        self.assertEqual(frozen_os.name, os.name)
+        self.assertIs(frozen_tempfile.mkstemp, tempfile.mkstemp)
+        self.assertIs(frozen_hashlib.sha256, hashlib.sha256)
+        self.assertEqual(frozen_paper_book.load_bytes, PaperBook.load_bytes)
+
+        with self.assertRaises(AttributeError):
+            frozen_os.replace = lambda *_args: None
+        with self.assertRaises(AttributeError):
+            del frozen_hashlib.sha256
+
+    def test_live_run_transaction_alias_retarget_cannot_change_detached_targets(self):
+        promotion_globals = _sealed_inner_globals(
+            RunTransaction._promote_paper_book_snapshot
+        )
+        frozen_replace = promotion_globals["os"].replace
+        frozen_mkstemp = promotion_globals["tempfile"].mkstemp
+        frozen_sha256 = promotion_globals["hashlib"].sha256
+        frozen_load_bytes = promotion_globals["PaperBook"].load_bytes
+
+        original_os = run_transaction_module.os
+        original_tempfile = run_transaction_module.tempfile
+        original_hashlib = run_transaction_module.hashlib
+        original_paper_book = run_transaction_module.PaperBook
+        hostile = object()
+        try:
+            run_transaction_module.os = hostile
+            run_transaction_module.tempfile = hostile
+            run_transaction_module.hashlib = hostile
+            run_transaction_module.PaperBook = hostile
+
+            self.assertIs(promotion_globals["os"].replace, frozen_replace)
+            self.assertIs(promotion_globals["tempfile"].mkstemp, frozen_mkstemp)
+            self.assertIs(promotion_globals["hashlib"].sha256, frozen_sha256)
+            self.assertEqual(
+                promotion_globals["PaperBook"].load_bytes,
+                frozen_load_bytes,
+            )
+        finally:
+            run_transaction_module.os = original_os
+            run_transaction_module.tempfile = original_tempfile
+            run_transaction_module.hashlib = original_hashlib
+            run_transaction_module.PaperBook = original_paper_book
+
+
+if __name__ == "__main__":
+    unittest.main()

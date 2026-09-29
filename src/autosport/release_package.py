@@ -291,22 +291,93 @@ def _copy_regular_source_tree(
     *,
     label: str,
 ) -> None:
-    """Copy a validated tree without handing directory traversal to shutil.copytree."""
+    """Copy one tree while validating each directory before and after its children."""
 
-    entries = _scan_regular_source_tree(source_root, label=label)
-    destination_root.mkdir(parents=True, exist_ok=True)
-    for source, relative, is_directory in entries:
-        destination = destination_root / relative
-        if is_directory:
-            destination.mkdir(parents=True, exist_ok=False)
-            continue
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        destination.write_bytes(
-            _read_regular_source_bytes(
-                source,
-                label=f"{label} file {relative.as_posix()}",
-            )
+    def copy_directory(
+        source_dir: Path,
+        destination_dir: Path,
+        *,
+        relative: Path,
+    ) -> None:
+        relative_text = relative.as_posix() if relative.parts else None
+        before = _require_source_tree_directory(
+            source_dir,
+            label=label,
+            relative=relative_text,
         )
+        try:
+            with os.scandir(source_dir) as iterator:
+                entries = sorted(iterator, key=lambda entry: entry.name)
+        except OSError as exc:
+            target = relative_text or str(source_dir)
+            raise ValueError(
+                f"{label} contains an inaccessible entry: {target}"
+            ) from exc
+
+        destination_dir.mkdir(parents=True, exist_ok=True)
+        for entry in entries:
+            source = source_dir / entry.name
+            child_relative = relative / entry.name
+            child_text = child_relative.as_posix()
+            try:
+                metadata = entry.stat(follow_symlinks=False)
+            except OSError as exc:
+                raise ValueError(
+                    f"{label} contains an inaccessible entry: {child_text}"
+                ) from exc
+            if stat.S_ISLNK(metadata.st_mode):
+                raise ValueError(
+                    f"{label} contains a symbolic link: {child_text}"
+                )
+            if _is_windows_reparse_point(metadata):
+                raise ValueError(
+                    f"{label} contains a Windows reparse point: {child_text}"
+                )
+
+            destination = destination_dir / entry.name
+            if stat.S_ISDIR(metadata.st_mode):
+                current = _require_source_tree_directory(
+                    source,
+                    label=label,
+                    relative=child_text,
+                )
+                if not os.path.samestat(metadata, current):
+                    raise ValueError(
+                        f"{label} directory changed during traversal: {child_text}"
+                    )
+                copy_directory(
+                    source,
+                    destination,
+                    relative=child_relative,
+                )
+            elif stat.S_ISREG(metadata.st_mode):
+                destination.write_bytes(
+                    _read_regular_source_bytes(
+                        source,
+                        label=f"{label} file {child_text}",
+                    )
+                )
+            else:
+                raise ValueError(
+                    f"{label} contains a non-regular entry: {child_text}"
+                )
+
+        after = _require_source_tree_directory(
+            source_dir,
+            label=label,
+            relative=relative_text,
+        )
+        if not os.path.samestat(before, after):
+            target = relative_text or "."
+            raise ValueError(
+                f"{label} directory changed during traversal: {target}"
+            )
+
+    copy_directory(
+        source_root,
+        destination_root,
+        relative=Path(),
+    )
 
 
 def _sorted_package_files(package_dir: Path) -> list[Path]:

@@ -115,8 +115,13 @@ def _sealed_callable(original_callable: FunctionType, *, label: str) -> Function
     global_source_marker = "__AUTOSPORT_RUN_TRANSACTION_RESOLVER_GLOBAL_SOURCE_ANCHOR__"
     builtin_source_marker = "__AUTOSPORT_RUN_TRANSACTION_RESOLVER_BUILTIN_SOURCE_ANCHOR__"
     missing_source_marker = "__AUTOSPORT_RUN_TRANSACTION_RESOLVER_MISSING_SOURCE_ANCHOR__"
+    failure_type_marker = "__AUTOSPORT_RUN_TRANSACTION_RESOLVER_FAILURE_TYPE_ANCHOR__"
 
     def sealed_resolver(*args, **kwargs):
+        # Every rejection below uses this local, code-constant-anchored exception
+        # class. A late module-global ``ValueError`` shadow therefore cannot execute
+        # attacker code on the verifier's fail-closed path.
+        ValueError = "__AUTOSPORT_RUN_TRANSACTION_RESOLVER_FAILURE_TYPE_ANCHOR__"  # noqa: N806
         anchored_callable = "__AUTOSPORT_RUN_TRANSACTION_RESOLVER_CALLABLE_ANCHOR__"
         anchored_code = "__AUTOSPORT_RUN_TRANSACTION_RESOLVER_CODE_ANCHOR__"
         anchored_graph = "__AUTOSPORT_RUN_TRANSACTION_RESOLVER_CLOSURE_GRAPH_ANCHOR__"
@@ -288,6 +293,7 @@ def _sealed_callable(original_callable: FunctionType, *, label: str) -> Function
         (global_source_marker, global_source),
         (builtin_source_marker, builtin_source),
         (missing_source_marker, missing_source),
+        (failure_type_marker, ValueError),
     )
     if any(sum(item == marker for item in constants) != 1 for marker, _ in anchors):
         raise RuntimeError("RunTransaction resolver closure anchor is ambiguous")

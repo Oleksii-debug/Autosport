@@ -27,13 +27,13 @@ def test_emergency_stop_pending_feedback_is_isolated_from_ordinary_state_poll() 
     assert 'node.setAttribute("aria-atomic", "true");' in begin_body
     assert "node.focus();" in begin_body
 
-    # Backend completion hands focus back to the canonical durable status projection;
-    # only then may subsequent ordinary polls converge the readback again.
+    # Backend completion restores the canonical durable status projection; the
+    # activation path performs the single explicit focus handoff after restoration.
     assert "setStatus(message);" in finish_body
     assert 'status.hidden = false;' in finish_body
     assert 'status.setAttribute("aria-live", "assertive");' in finish_body
-    assert "focusStatus();" in finish_body
     assert "pendingStatus.remove();" in finish_body
+    assert "focusStatus();" not in finish_body
 
 
 def test_emergency_stop_pending_fence_spans_the_backend_await() -> None:
@@ -43,8 +43,9 @@ def test_emergency_stop_pending_fence_spans_the_backend_await() -> None:
     pending = script.index("beginPendingStatus(", activation)
     awaited = script.index("const result = await dispatch(", pending)
     finished = script.index("finishPendingStatus(resultMessage);", awaited)
+    focused = script.index("focusStatus();", finished)
 
-    assert pending < awaited < finished
+    assert pending < awaited < finished < focused
     between = script[pending:finished]
     assert "postRefresh: false" in between
     assert "refreshState" not in between
@@ -70,8 +71,9 @@ def test_repeated_emergency_stop_activation_reuses_one_inflight_command() -> Non
     awaited = body.index("const result = await dispatch(", mark_inflight)
     clear_inflight = body.index("activationInFlight = false;", awaited)
     finished = body.index("finishPendingStatus(resultMessage);", clear_inflight)
+    focused = body.index("focusStatus();", finished)
 
-    assert guard < begin < mark_inflight < awaited < clear_inflight < finished
+    assert guard < begin < mark_inflight < awaited < clear_inflight < finished < focused
     guarded = body[guard:begin]
     assert "focusPendingStatus();" in guarded
     assert "return;" in guarded

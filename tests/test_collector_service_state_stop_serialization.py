@@ -132,6 +132,43 @@ class CollectorServiceStateStopSerializationTests(unittest.TestCase):
                 "2026-09-25T17:00:14+00:00",
             )
 
+    def test_resume_cannot_bundle_non_stop_state_rewrite(self) -> None:
+        """Clearing STOP cannot smuggle terminal counters through the same mutation."""
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "collector_state.json"
+            state, observer = self._state_pair(path)
+            state.stop(at=self.STOPPED_AT, reason="operator_stop")
+            stopped = observer.snapshot()
+
+            def hostile_resume(raw: dict[str, object]) -> None:
+                raw["stopped_at"] = None
+                raw["stop_reason"] = None
+                raw["provider_failures"] = int(raw["provider_failures"]) + 1
+                raw["last_error_code"] = "SMUGGLED_DURING_RESUME"
+
+            with self.assertRaises(CollectorServiceStoppedError):
+                state._update(hostile_resume)
+
+            self.assertEqual(observer.snapshot(), stopped)
+
+    def test_post_stop_mutation_cannot_publish_incomplete_stop_pair(self) -> None:
+        """A malformed STOP transition must fail before atomic publication."""
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "collector_state.json"
+            state, observer = self._state_pair(path)
+            state.stop(at=self.STOPPED_AT, reason="operator_stop")
+            stopped = observer.snapshot()
+
+            def half_resume(raw: dict[str, object]) -> None:
+                raw["stopped_at"] = None
+
+            with self.assertRaises(CollectorServiceStoppedError):
+                state._update(half_resume)
+
+            self.assertEqual(observer.snapshot(), stopped)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -4,12 +4,13 @@ The owning PaperBook persistence graph is already sealed and RunTransaction stag
 promotion already resolves that authority through the current-binding consumer seal.
 Those consumers nevertheless retained the live ``run_transaction`` globals mapping for
 non-authority direct dispatch such as ``os.replace``, ``tempfile.mkstemp``,
-``hashlib.sha256`` and ``PaperBook.load_bytes``.  A later module-alias/member retarget
+``hashlib.sha256`` and ``PaperBook.load_bytes``. A later module-alias/member retarget
 could therefore change the executable path around the sealed persistence facade.
 
-This module adds no persistence authority.  It detaches the already-installed guarded
-consumers from that live globals mapping and gives promotion minimal immutable surfaces
-for the direct stdlib/semantic call targets it already uses.
+This module adds no persistence authority. It detaches the already-installed guarded
+consumers from that live globals mapping and reuses the owning persistence graph's
+already-witnessed immutable surface type for the exact direct call targets promotion
+already consumes.
 """
 
 from __future__ import annotations
@@ -19,29 +20,12 @@ import os
 import tempfile
 from types import FunctionType
 
+from . import _paperbook_preload_module_member_freeze as _member_freeze
 from . import paper as _paper
 from . import run_transaction as _run_transaction
 
 
-class _FrozenSurface(tuple):
-    __slots__ = ()
-
-    def __new__(cls, **values: object):
-        return tuple.__new__(cls, tuple(values.items()))
-
-    def __getattr__(self, name: str) -> object:
-        for member_name, member_value in self:
-            if member_name == name:
-                return member_value
-        raise AttributeError(name)
-
-    def __setattr__(self, name: str, value: object) -> None:
-        del name, value
-        raise AttributeError("RunTransaction direct dispatch surface is frozen")
-
-    def __delattr__(self, name: str) -> None:
-        del name
-        raise AttributeError("RunTransaction direct dispatch surface is frozen")
+_FROZEN_SURFACE = _member_freeze._FrozenSurface
 
 
 def _fresh_cell(value: object):
@@ -79,15 +63,15 @@ def _detach_consumer(function: FunctionType) -> FunctionType:
         if inner_globals.get("PaperBook") is not _paper.PaperBook:
             raise RuntimeError("RunTransaction canonical PaperBook dispatch changed before sealing")
 
-        detached_globals["os"] = _FrozenSurface(
+        detached_globals["os"] = _FROZEN_SURFACE(
             close=os.close,
             fsync=os.fsync,
             replace=os.replace,
             name=os.name,
         )
-        detached_globals["tempfile"] = _FrozenSurface(mkstemp=tempfile.mkstemp)
-        detached_globals["hashlib"] = _FrozenSurface(sha256=hashlib.sha256)
-        detached_globals["PaperBook"] = _FrozenSurface(
+        detached_globals["tempfile"] = _FROZEN_SURFACE(mkstemp=tempfile.mkstemp)
+        detached_globals["hashlib"] = _FROZEN_SURFACE(sha256=hashlib.sha256)
+        detached_globals["PaperBook"] = _FROZEN_SURFACE(
             load_bytes=_paper.PaperBook.load_bytes,
         )
 

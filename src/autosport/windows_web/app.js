@@ -47,9 +47,11 @@
   }
 
   function setDisabledWithFocusFallback(node, disabled) {
+    const nextDisabled = Boolean(disabled);
+    if (node.disabled === nextDisabled) return;
     const wasFocused = document.activeElement === node;
-    node.disabled = Boolean(disabled);
-    if (wasFocused && node.disabled) {
+    node.disabled = nextDisabled;
+    if (wasFocused && nextDisabled) {
       const fallback = errorNode.hidden ? statusNode : errorNode;
       fallback.tabIndex = -1;
       fallback.focus();
@@ -93,11 +95,15 @@
 
   function syncRuntimeActionAvailability(startButton, stopButton, canStart, canStop) {
     const focused = document.activeElement;
-    startButton.disabled = canStart !== true;
-    stopButton.disabled = canStop !== true;
-    if (focused === startButton && startButton.disabled) {
+    const startDisabled = canStart !== true;
+    const stopDisabled = canStop !== true;
+    const startChanged = startButton.disabled !== startDisabled;
+    const stopChanged = stopButton.disabled !== stopDisabled;
+    if (startChanged) startButton.disabled = startDisabled;
+    if (stopChanged) stopButton.disabled = stopDisabled;
+    if (focused === startButton && startChanged && startDisabled) {
       focusOperatorTarget(stopButton);
-    } else if (focused === stopButton && stopButton.disabled) {
+    } else if (focused === stopButton && stopChanged && stopDisabled) {
       focusOperatorTarget(startButton);
     }
   }

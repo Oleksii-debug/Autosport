@@ -16,15 +16,24 @@ def _closure_value(function: FunctionType, name: str):
     return _closure_cell(function, name).cell_contents
 
 
+def _inner_binding_verifier(guarded: FunctionType) -> FunctionType:
+    require_bindings = _closure_value(guarded, "require_bindings")
+    assert isinstance(require_bindings, FunctionType)
+    if "original_require" in require_bindings.__code__.co_freevars:
+        original = _closure_value(require_bindings, "original_require")
+        assert isinstance(original, FunctionType)
+        return original
+    return require_bindings
+
+
 def test_binding_verifier_rejects_dict_get_helper_retarget_before_dispatch() -> None:
     """Mutable verifier lookup helpers must not become executable authority."""
 
     guarded = run_transaction._promote_paper_book_snapshot
     assert isinstance(guarded, FunctionType)
-    require_bindings = _closure_value(guarded, "require_bindings")
-    assert isinstance(require_bindings, FunctionType)
+    original_require = _inner_binding_verifier(guarded)
 
-    dict_get_cell = _closure_cell(require_bindings, "dict_get")
+    dict_get_cell = _closure_cell(original_require, "dict_get")
     original_dict_get = dict_get_cell.cell_contents
     assert original_dict_get is dict.get
 
@@ -53,3 +62,41 @@ def test_binding_verifier_rejects_dict_get_helper_retarget_before_dispatch() -> 
         dict_get_cell.cell_contents = original_dict_get
 
     assert dict_get_cell.cell_contents is original_dict_get
+
+
+def test_binding_verifier_rejects_dict_len_helper_retarget_before_dispatch() -> None:
+    """Verifier size checks must not dispatch through a retargeted helper cell."""
+
+    guarded = run_transaction._promote_paper_book_snapshot
+    assert isinstance(guarded, FunctionType)
+    original_require = _inner_binding_verifier(guarded)
+
+    dict_len_cell = _closure_cell(original_require, "dict_len")
+    original_dict_len = dict_len_cell.cell_contents
+    assert original_dict_len is dict.__len__
+
+    hostile_calls = 0
+
+    def hostile_dict_len(mapping):
+        nonlocal hostile_calls
+        hostile_calls += 1
+        return dict.__len__(mapping)
+
+    dict_len_cell.cell_contents = hostile_dict_len
+    try:
+        try:
+            guarded(object())
+        except Exception as exc:  # noqa: BLE001 - any fail-closed rejection is acceptable.
+            assert not isinstance(exc, TypeError), (
+                "mutable verifier dict_len helper executed far enough to delegate "
+                "argument binding instead of being rejected by identity authority"
+            )
+        else:
+            raise AssertionError(
+                "guard unexpectedly returned after verifier dict_len helper retargeting"
+            )
+        assert hostile_calls == 0, "hostile verifier dict_len helper was dispatched"
+    finally:
+        dict_len_cell.cell_contents = original_dict_len
+
+    assert dict_len_cell.cell_contents is original_dict_len

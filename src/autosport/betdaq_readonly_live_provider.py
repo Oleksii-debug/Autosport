@@ -64,6 +64,7 @@ class BetdaqLiveReadOnlyProvider(BetdaqReadOnlyProvider):
             credentials=credentials,
             rate_governor=rate_governor,
             transport=transport,
+            canonical_only=True,
         )
         super().__init__(
             transport=live_transport,

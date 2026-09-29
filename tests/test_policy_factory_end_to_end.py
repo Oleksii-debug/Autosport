@@ -6,6 +6,29 @@ import json
 from dataclasses import replace
 from decimal import Decimal
 
+import pytest
+
+from autosport.external_validity_baseline import (
+    BaselineDefinition,
+    BaselineKind,
+    EvaluationContractFamily,
+    FrozenBaselineProtocol,
+    FrozenEvidenceScope,
+    PolicyEvaluation as ExternalPolicyEvaluation,
+    canonical_evaluation_contract,
+)
+from autosport.external_validity_policy_issuance import (
+    IssuedPolicyEvaluationRef,
+    ProductPolicyEvaluationIssuanceError,
+    ProductPolicyEvaluationWorkspace,
+    canonical_product_policy_evaluation_bundle_sha256,
+    issue_product_policy_evaluation,
+    resolve_product_policy_evaluation,
+    verify_product_policy_evaluation,
+)
+from autosport.monotonic_workspace_binding import WorkspaceIdentityBinding
+from autosport.opportunity import StrategyClass
+
 from autosport.champion_policy import persist_policy_state
 from autosport.experiential_learning import PolicyRetestSpec
 from autosport.learning_environment import Action, EvidenceTruth, RewardEvidence, Transition
@@ -156,8 +179,8 @@ def _policy_successor(
     return predecessor.update(action=action, reward=reward, transition=transition)
 
 
-def _foundation(tmp_path):
-    artifact_root = tmp_path / "artifacts"
+def _foundation(tmp_path, *, artifact_directory: str = "artifacts"):
+    artifact_root = tmp_path / artifact_directory
     clock = _FixtureClock()
     store = FactoryArtifactStore(artifact_root, clock=clock)
     cases = _cases(store)
@@ -266,7 +289,7 @@ def _foundation(tmp_path):
     )
 
     registry_path = tmp_path / "scientific_registry.json"
-    artifact_root = tmp_path / "artifacts"
+    artifact_root = tmp_path / artifact_directory
     registry = ScientificRegistry.initialize_pristine(registry_path)
     for record in (question, hypothesis, feature):
         registry.append(record)
@@ -1017,3 +1040,256 @@ def test_second_policy_attempt_cannot_reuse_same_confirmation_holdout(tmp_path):
     assert evidence.payload["effect_interval_low"] == "1"
     assert evidence.payload["guardrails_passed"] is True
     assert evidence.payload["holdout_consumed"] is True
+
+
+def _external_validity_protocol_for_policy_factory(
+    *,
+    candidate_id: str,
+    candidate_artifact_sha256: str,
+    dataset_manifest_sha256: str,
+    cases: tuple[PolicyEvaluationCase, ...],
+) -> FrozenBaselineProtocol:
+    contract = canonical_evaluation_contract(
+        EvaluationContractFamily.PREDICTIVE_FORECAST_VALUE
+    )
+    scope = FrozenEvidenceScope(
+        dataset_sha256=dataset_manifest_sha256,
+        dataset_cutoff=CAUSAL_CUTOFF,
+        cohort_keys=tuple(sorted(case.sample_id for case in cases)),
+        market_evidence_sha256=_digest({"external-scope": "market-evidence"}),
+        outcome_evidence_sha256=_digest({"external-scope": "outcome-evidence"}),
+        cost_model_sha256=_digest({"external-scope": "cost-model"}),
+        execution_model_sha256=_digest({"external-scope": "execution-model"}),
+    )
+    baselines = tuple(
+        BaselineDefinition(
+            kind=kind,
+            baseline_id=f"fixture-baseline:{kind.value}",
+            implementation_sha256=_digest(
+                {"fixture-baseline": kind.value, "artifact": "implementation"}
+            ),
+            config_sha256=_digest(
+                {"fixture-baseline": kind.value, "artifact": "config"}
+            ),
+            supported=False,
+            unsupported_reason="candidate-only product-issuance acceptance fixture",
+        )
+        for kind in BaselineKind
+    )
+    return FrozenBaselineProtocol(
+        protocol_id="external-validity-policy-e2e-v1",
+        frozen_at=CHALLENGER_CREATED,
+        evidence_scope=scope,
+        candidate_id=candidate_id,
+        candidate_artifact_sha256=candidate_artifact_sha256,
+        strategy_class=StrategyClass.PREDICTIVE_EDGE,
+        evaluation_contract_family=EvaluationContractFamily.PREDICTIVE_FORECAST_VALUE,
+        evaluation_semantics=str(contract["evaluation_semantics"]),
+        evaluation_contract_sha256=str(contract["evaluation_contract_sha256"]),
+        primary_metric=str(contract["primary_metric"]),
+        uncertainty_method=str(contract["uncertainty_method"]),
+        baselines=baselines,
+    )
+
+
+def test_product_policy_evaluation_issue_restart_idempotency_and_fresh_mint_rejection(
+    tmp_path,
+    monkeypatch,
+):
+    """Exercise the real factory -> issuer -> restart path and the decisive mint attack."""
+
+    workspace = (tmp_path / "product-workspace").resolve()
+    authority_root = (tmp_path / "machine-authority").resolve()
+    monkeypatch.setenv("AUTOSPORT_MONOTONIC_AUTHORITY_ROOT", str(authority_root))
+    binding = WorkspaceIdentityBinding.resolve(
+        workspace=workspace,
+        authority_root=authority_root,
+        requested_workspace_instance_id=None,
+    )
+    binding.ensure_bound()
+
+    (
+        registry,
+        registry_path,
+        artifact_root,
+        store,
+        predecessor,
+        predecessor_model_id,
+        cases,
+        rule,
+    ) = _foundation(workspace, artifact_directory="factory-artifacts")
+    assert registry_path == workspace / "scientific_registry.json"
+    assert artifact_root == workspace / "factory-artifacts"
+
+    challenger, update = _policy_successor(
+        predecessor,
+        observation_id="5" * 64,
+        outcome_id="6" * 64,
+        episode_id="7" * 64,
+        decided_at="2026-09-19T09:33:00Z",
+        available_at="2026-09-19T09:34:00Z",
+        reward_value="2",
+    )
+    spec = _spec(
+        experiment_id="experiment-policy-issued-v2",
+        model_id="model-policy-issued-v2",
+        evaluation_id="evaluation-policy-issued-v2",
+        promotion_id="promotion-policy-issued-v2",
+        predecessor_policy_id=predecessor.policy_id,
+        predecessor_model_id=predecessor_model_id,
+        created_at=CHALLENGER_CREATED,
+        completed_at=CHALLENGER_COMPLETED,
+        decided_at=CHALLENGER_DECIDED,
+    )
+    result = _run_nongoverned_factory_retest(
+        ExperimentRunner(registry, store),
+        predecessor_policy=predecessor,
+        challenger_policy=challenger,
+        update_evidence=update,
+        spec=spec,
+        evaluation_cases=cases,
+        rule=rule,
+    )
+    assert result.strategy_version_id == challenger.policy_id
+
+    model_payload = store.read("model", spec.model_version_id)
+    candidate_artifact_sha256 = model_payload["policy_artifact_sha256"]
+    dataset_manifest_sha256 = registry.get(
+        "DatasetSnapshot", DATASET_ID
+    ).payload["manifest_sha256"]
+    protocol = _external_validity_protocol_for_policy_factory(
+        candidate_id=challenger.policy_id,
+        candidate_artifact_sha256=candidate_artifact_sha256,
+        dataset_manifest_sha256=dataset_manifest_sha256,
+        cases=cases,
+    )
+    authority = ProductPolicyEvaluationWorkspace.open(
+        workspace,
+        expected_workspace_instance_id=binding.workspace_instance_id,
+    )
+
+    reference = issue_product_policy_evaluation(
+        authority,
+        protocol,
+        source_evaluation_bundle_id=spec.evaluation_bundle_id,
+    )
+    issued = resolve_product_policy_evaluation(authority, protocol, reference)
+    assert issued.policy_id == challenger.policy_id
+    assert issued.policy_artifact_sha256 == candidate_artifact_sha256
+    assert issued.observed_count == len(cases)
+    assert Decimal(issued.metric_value) == Decimal("1")
+    assert canonical_product_policy_evaluation_bundle_sha256(issued) == (
+        reference.evaluation_bundle_sha256
+    )
+
+    # Restart from durable workspace identity + serialized public reference only.
+    reopened_authority = ProductPolicyEvaluationWorkspace.open(
+        workspace,
+        expected_workspace_instance_id=binding.workspace_instance_id,
+    )
+    restarted_reference = IssuedPolicyEvaluationRef.from_payload(
+        reference.to_payload()
+    )
+    restarted = resolve_product_policy_evaluation(
+        reopened_authority,
+        protocol,
+        restarted_reference,
+    )
+    assert restarted.to_payload() == issued.to_payload()
+
+    # Exact retry must converge to the same immutable result and registry row.
+    before_bundle = ScientificRegistry(registry_path).get(
+        "EvaluationBundle", reference.evaluation_bundle_id
+    )
+    retried_reference = issue_product_policy_evaluation(
+        reopened_authority,
+        protocol,
+        source_evaluation_bundle_id=spec.evaluation_bundle_id,
+    )
+    after_bundle = ScientificRegistry(registry_path).get(
+        "EvaluationBundle", reference.evaluation_bundle_id
+    )
+    assert retried_reference == reference
+    assert before_bundle is not None and after_bundle is not None
+    assert after_bundle.record_sha256 == before_bundle.record_sha256
+
+    # Decisive caller-mint attack: choose altered final values, recompute the public
+    # commitment, and append a matching public EvaluationBundleRef.  Neither the
+    # forged DTO nor the caller-created bundle can substitute for evaluator issuance.
+    forged = replace(
+        issued,
+        metric_value="999",
+        uncertainty_low="999",
+        uncertainty_high="999",
+        evaluation_bundle_sha256="0" * 64,
+    )
+    forged = replace(
+        forged,
+        evaluation_bundle_sha256=canonical_product_policy_evaluation_bundle_sha256(
+            forged
+        ),
+    )
+    attacker_bundle_id = "caller-minted-external-validity-bundle"
+    ScientificRegistry(registry_path).append(
+        EvaluationBundleRef(
+            attacker_bundle_id,
+            forged.evaluation_bundle_sha256,
+            EVALUATOR_SOURCE,
+            DATASET_ID,
+            protocol.identity_sha256,
+            (forged.evaluation_bundle_sha256,),
+            CHALLENGER_COMPLETED,
+            evaluated_strategy_version_id=challenger.policy_id,
+            evaluated_model_version_id=spec.model_version_id,
+        )
+    )
+    assert ScientificRegistry(registry_path).get(
+        "EvaluationBundle", attacker_bundle_id
+    ).payload["bundle_sha256"] == forged.evaluation_bundle_sha256
+
+    with pytest.raises(
+        ProductPolicyEvaluationIssuanceError,
+        match="differs from product-issued result",
+    ):
+        verify_product_policy_evaluation(
+            reopened_authority,
+            protocol,
+            restarted_reference,
+            forged,
+        )
+
+    forged_reference = replace(
+        restarted_reference,
+        evaluation_bundle_id=attacker_bundle_id,
+        evaluation_bundle_sha256=forged.evaluation_bundle_sha256,
+    )
+    with pytest.raises(
+        ProductPolicyEvaluationIssuanceError,
+        match="bundle identity mismatch",
+    ):
+        resolve_product_policy_evaluation(
+            reopened_authority,
+            protocol,
+            forged_reference,
+        )
+
+    rebound_protocol = replace(
+        protocol,
+        protocol_id="external-validity-policy-e2e-rebound",
+    )
+    with pytest.raises(
+        ProductPolicyEvaluationIssuanceError,
+        match="does not match frozen protocol slot",
+    ):
+        resolve_product_policy_evaluation(
+            reopened_authority,
+            rebound_protocol,
+            restarted_reference,
+        )
+
+    with pytest.raises(ProductPolicyEvaluationIssuanceError):
+        issue_product_policy_evaluation(
+            reopened_authority,
+            protocol,
+            source_evaluation_bundle_id="evaluation-policy-bootstrap",
+        )

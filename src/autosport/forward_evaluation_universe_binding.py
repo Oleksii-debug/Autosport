@@ -1,17 +1,18 @@
 from __future__ import annotations
 
-"""Bind forward-economic source receipts to the canonical durable evaluation universe.
+"""Bind forward source receipts to prospective + durable product authority.
 
-This module is a composition layer only. It does not create a second source-universe
-store and it never treats caller-supplied ``AuthoritativeSourceReceipt`` values as
-positive authority. Positive membership is reloaded from
-``ProviderEvaluationUniverseStore`` and compared against the forward opportunity
-sequence before receipts are emitted for ``forward_evidence_completeness``.
+Positive membership is never accepted from caller-created receipts or from whichever
+ProviderEvaluationUniverseStore happens to be supplied.  The resolver composes two
+existing authorities:
 
-Positive receipt identity also binds the durable backing locator derived from the
-existing workspace identity and monotonic evaluation-universe authority. This prevents
-an exact outer ProviderEvaluationUniverseStore object from being coherently retargeted
-to a different legitimate backing after authority has already been resolved.
+1. #1257 CampaignPrecommitManifest + monotonic publication witness selects the exact
+   evaluation-universe SHA prospectively, before source observation; and
+2. ProviderEvaluationUniverseStore re-resolves the exact durable rows, with guarded
+   backing identity/load semantics.
+
+No second universe store, scheduler, execution authority, or money permission exists
+here.
 """
 
 import hashlib
@@ -31,12 +32,16 @@ from .forward_evidence_completeness import (
     ForwardOpportunityEnvelope,
     UniverseResult,
 )
+from .forward_universe_precommit_authority import (
+    ForwardUniversePrecommitAuthorityError,
+    ForwardUniversePrecommitLocator,
+    resolve_forward_universe_precommit_authority,
+)
 from .provider_evaluation_universe import ProviderEvaluationUniverseStore
 
 
-# Kept inspectable for compatibility/debugging only. Positive authority below captures
-# this exact executable into a closure at import time and never late-dispatches through
-# the mutable module-global name.
+# Kept inspectable for compatibility/debugging.  Positive authority captures the exact
+# executable into a closure and fails closed if its code is changed in place.
 _CANONICAL_PROVIDER_UNIVERSE_LOAD = ProviderEvaluationUniverseStore.load
 
 
@@ -84,8 +89,11 @@ def _instant(value: str, name: str) -> datetime:
 
 _RULE_PAYLOAD = {
     "rule_id": FORWARD_UNIVERSE_RULE_ID,
-    "authority": "ProviderEvaluationUniverseStore",
-    "membership": "exact durable EvaluationUniverse rows",
+    "authority": "CampaignPrecommitManifest + ProviderEvaluationUniverseStore",
+    "membership": "exact prospectively selected durable EvaluationUniverse rows",
+    "expected_universe_authority": (
+        "CampaignPrecommitPublicationWitness + evaluation_universe_sha256"
+    ),
     "backing_authority": (
         "workspace identity + monotonic evaluation-universe namespace locator"
     ),
@@ -104,7 +112,8 @@ _RULE_PAYLOAD = {
     "observation_interval": "EvaluationRow.source_at..EvaluationRow.committed_at",
     "causal_cutoff": "EvaluationRow.committed_at",
     "receipt_payload": (
-        "forward protocol + durable backing locator + immutable universe + full canonical EvaluationRow"
+        "forward protocol + prospective precommit authority + durable backing locator + "
+        "immutable universe + full canonical EvaluationRow"
     ),
 }
 FORWARD_UNIVERSE_RULE_SHA256 = _digest(_RULE_PAYLOAD)
@@ -112,12 +121,13 @@ FORWARD_UNIVERSE_RULE_SHA256 = _digest(_RULE_PAYLOAD)
 
 @dataclass(frozen=True, slots=True)
 class ForwardUniverseMemberExpectation:
-    """Deterministic consumer projection; authority is established only by re-resolution."""
+    """Deterministic projection; authority is established only by re-resolution."""
 
     row_id: str
     opportunity_id: str
     source_receipt_id: str
     source_receipt_sha256: str
+    precommit_authority_sha256: str
     backing_locator_sha256: str
     universe_rule_result: UniverseResult
     universe_rule_reason_code: str
@@ -147,6 +157,7 @@ def _reason_code(row: EvaluationRow) -> str:
 def _member_expectation(
     *,
     protocol: ForwardEvidenceProtocolEnvelope,
+    precommit_authority_sha256: str,
     backing_locator_sha256: str,
     universe_sha256: str,
     membership_sha256: str,
@@ -166,6 +177,7 @@ def _member_expectation(
             "rule_sha256": FORWARD_UNIVERSE_RULE_SHA256,
             "forward_protocol_sha256": protocol.protocol_sha256,
             "campaign_id": protocol.campaign_id,
+            "precommit_authority_sha256": precommit_authority_sha256,
             "backing_locator_sha256": backing_locator_sha256,
             "universe_sha256": universe_sha256,
             "membership_sha256": membership_sha256,
@@ -181,6 +193,7 @@ def _member_expectation(
         opportunity_id=opportunity_id,
         source_receipt_id=source_receipt_id,
         source_receipt_sha256=receipt_sha256,
+        precommit_authority_sha256=precommit_authority_sha256,
         backing_locator_sha256=backing_locator_sha256,
         universe_rule_result=result,
         universe_rule_reason_code=reason,
@@ -194,27 +207,34 @@ def _member_expectation(
 def _build_load_expectations(
     *,
     store_type: type[ProviderEvaluationUniverseStore],
+    precommit_locator_type: type[ForwardUniversePrecommitLocator],
     canonical_load,
     guarded_load,
+    precommit_resolver,
     backing_error: type[BaseException],
+    precommit_error: type[BaseException],
 ):
-    """Capture executable/read authorities used by positive forward resolution."""
+    """Capture every executable/read authority used by positive forward resolution."""
 
     canonical_load_code = canonical_load.__code__
     guarded_load_code = guarded_load.__code__
+    precommit_resolver_code = precommit_resolver.__code__
 
     def load_expectations(
         *,
         store: ProviderEvaluationUniverseStore,
         protocol: ForwardEvidenceProtocolEnvelope,
+        precommit: ForwardUniversePrecommitLocator,
     ) -> tuple[
         tuple[ForwardUniverseMemberExpectation, ...],
-        tuple[str, str, str],
+        tuple[str, str, str, str],
     ]:
         if type(store) is not store_type:
             raise TypeError("store must be exact ProviderEvaluationUniverseStore")
         if type(protocol) is not ForwardEvidenceProtocolEnvelope:
             raise TypeError("protocol must be exact ForwardEvidenceProtocolEnvelope")
+        if type(precommit) is not precommit_locator_type:
+            raise TypeError("precommit must be exact ForwardUniversePrecommitLocator")
         if (
             protocol.candidate_universe_rule_id != FORWARD_UNIVERSE_RULE_ID
             or protocol.candidate_universe_rule_sha256 != FORWARD_UNIVERSE_RULE_SHA256
@@ -231,6 +251,10 @@ def _build_load_expectations(
             raise ForwardEvaluationUniverseBindingError(
                 "guarded provider evaluation-universe load authority changed"
             )
+        if precommit_resolver.__code__ is not precommit_resolver_code:
+            raise ForwardEvaluationUniverseBindingError(
+                "forward universe precommit resolver authority changed"
+            )
         try:
             ledger, backing_locator = guarded_load(store)
         except backing_error as exc:
@@ -245,6 +269,10 @@ def _build_load_expectations(
             raise ForwardEvaluationUniverseBindingError(
                 "guarded provider evaluation-universe load authority changed"
             )
+        if precommit_resolver.__code__ is not precommit_resolver_code:
+            raise ForwardEvaluationUniverseBindingError(
+                "forward universe precommit resolver authority changed"
+            )
         if ledger is None:
             raise ForwardEvaluationUniverseBindingError(
                 "canonical provider evaluation universe is not durably available"
@@ -258,12 +286,42 @@ def _build_load_expectations(
             raise ForwardEvaluationUniverseBindingError(
                 "forward scientific protocol does not match durable evaluation-universe protocol"
             )
+        if not universe.rows:
+            raise ForwardEvaluationUniverseBindingError(
+                "durable evaluation universe contains no source members"
+            )
+
+        earliest = min(_instant(row.source_at, "row source_at") for row in universe.rows)
+        latest = max(_instant(row.committed_at, "row committed_at") for row in universe.rows)
+        if protocol.precommit_anchor_upper >= earliest:
+            raise ForwardEvaluationUniverseBindingError(
+                "forward protocol must be anchored before the first authoritative source observation"
+            )
+
+        try:
+            precommit_resolution = precommit_resolver(
+                locator=precommit,
+                campaign_id=protocol.campaign_id,
+                source_id=store.source_id,
+                evaluation_universe_sha256=universe.universe_sha256,
+                earliest_source_observation=earliest,
+                latest_source_observation=latest,
+            )
+        except precommit_error as exc:
+            raise ForwardEvaluationUniverseBindingError(
+                "prospective campaign precommit does not authorize durable evaluation universe"
+            ) from exc
+        if precommit_resolver.__code__ is not precommit_resolver_code:
+            raise ForwardEvaluationUniverseBindingError(
+                "forward universe precommit resolver authority changed"
+            )
 
         expectations = tuple(
             sorted(
                 (
                     _member_expectation(
                         protocol=protocol,
+                        precommit_authority_sha256=precommit_resolution.authority_sha256,
                         backing_locator_sha256=backing_locator.locator_sha256,
                         universe_sha256=universe.universe_sha256,
                         membership_sha256=universe.membership_sha256,
@@ -274,16 +332,8 @@ def _build_load_expectations(
                 key=lambda item: item.source_receipt_id,
             )
         )
-        if not expectations:
-            raise ForwardEvaluationUniverseBindingError(
-                "durable evaluation universe contains no source members"
-            )
-        earliest = min(item.observed_lower for item in expectations)
-        if protocol.precommit_anchor_upper >= earliest:
-            raise ForwardEvaluationUniverseBindingError(
-                "forward protocol must be anchored before the first authoritative source observation"
-            )
         return expectations, (
+            precommit_resolution.authority_sha256,
             backing_locator.locator_sha256,
             universe.universe_sha256,
             universe.membership_sha256,
@@ -294,9 +344,12 @@ def _build_load_expectations(
 
 _load_expectations = _build_load_expectations(
     store_type=ProviderEvaluationUniverseStore,
+    precommit_locator_type=ForwardUniversePrecommitLocator,
     canonical_load=_CANONICAL_PROVIDER_UNIVERSE_LOAD,
     guarded_load=load_guarded_provider_evaluation_universe,
+    precommit_resolver=resolve_forward_universe_precommit_authority,
     backing_error=ForwardUniverseBackingGuardError,
+    precommit_error=ForwardUniversePrecommitAuthorityError,
 )
 
 
@@ -304,10 +357,15 @@ def resolve_forward_universe_members(
     *,
     store: ProviderEvaluationUniverseStore,
     protocol: ForwardEvidenceProtocolEnvelope,
+    precommit: ForwardUniversePrecommitLocator,
 ) -> tuple[ForwardUniverseMemberExpectation, ...]:
-    """Project the exact product-owned source universe for forward opportunity creation."""
+    """Project only the exact prospectively selected durable source universe."""
 
-    expectations, _identity = _load_expectations(store=store, protocol=protocol)
+    expectations, _identity = _load_expectations(
+        store=store,
+        protocol=protocol,
+        precommit=precommit,
+    )
     return expectations
 
 
@@ -315,16 +373,16 @@ def authorize_forward_source_receipts(
     *,
     store: ProviderEvaluationUniverseStore,
     protocol: ForwardEvidenceProtocolEnvelope,
+    precommit: ForwardUniversePrecommitLocator,
     opportunities: Sequence[ForwardOpportunityEnvelope],
 ) -> tuple[AuthoritativeSourceReceipt, ...]:
-    """Re-resolve durable membership and authorize only its exact forward projection.
+    """Re-resolve prospective + durable authority and authorize exact coverage only."""
 
-    This function is intentionally fail-closed and does not accept a caller-supplied
-    inventory of authoritative receipts. Every receipt is regenerated from the durable
-    product universe after exact opportunity coverage is verified.
-    """
-
-    expectations, identity_before = _load_expectations(store=store, protocol=protocol)
+    expectations, identity_before = _load_expectations(
+        store=store,
+        protocol=protocol,
+        precommit=precommit,
+    )
     expected_by_receipt = {item.source_receipt_id: item for item in expectations}
 
     materialized = tuple(opportunities)
@@ -401,10 +459,11 @@ def authorize_forward_source_receipts(
     _expectations_after, identity_after = _load_expectations(
         store=store,
         protocol=protocol,
+        precommit=precommit,
     )
     if identity_after != identity_before:
         raise ForwardEvaluationUniverseBindingError(
-            "durable source-universe backing or membership changed during forward receipt resolution"
+            "prospective or durable source-universe authority changed during receipt resolution"
         )
     return tuple(receipts)
 
@@ -414,6 +473,7 @@ __all__ = [
     "FORWARD_UNIVERSE_RULE_SHA256",
     "ForwardEvaluationUniverseBindingError",
     "ForwardUniverseMemberExpectation",
+    "ForwardUniversePrecommitLocator",
     "authorize_forward_source_receipts",
     "resolve_forward_universe_members",
 ]

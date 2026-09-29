@@ -206,7 +206,7 @@ def test_witness_journal_tamper_is_not_restart_authority(tmp_path, monkeypatch) 
         PaperBook.load(path)
 
 
-def test_exact_fresh_book_can_rebind_only_unchanged_witnessed_state(
+def test_unbound_fresh_book_cannot_adopt_existing_witnessed_state(
     tmp_path, monkeypatch
 ) -> None:
     monkeypatch.setenv("AUTOSPORT_PAPER_EXECUTION_WITNESS_DIR", _authority_root(tmp_path))
@@ -214,16 +214,30 @@ def test_exact_fresh_book_can_rebind_only_unchanged_witnessed_state(
     first = PaperBook("100")
     first.save(path)
 
-    # Existing adoption runtimes may reconstruct an independently authoritative
-    # empty PaperBook before comparing it with durable state. Exact canonical bytes
-    # are sufficient to bind that object to this lineage; changed economics are not.
+    import autosport._paperbook_preload_authority_guard as guard
+
+    snapshot_before = path.read_bytes()
+    witness_path = guard._witness_path(path)
+    witness_before = witness_path.read_bytes()
+
+    # Equality is structural evidence only. A fresh object was not issued the
+    # current path/generation authority and must not acquire it by a no-op save.
     equivalent = PaperBook("100")
-    equivalent.save(path)
-    assert PaperBook.load(path).balance == Decimal("100")
+    with pytest.raises(ValueError, match="verified path-bound authority"):
+        equivalent.save(path)
 
     changed = PaperBook("200")
     with pytest.raises(ValueError, match="verified path-bound authority"):
         changed.save(path)
+
+    assert path.read_bytes() == snapshot_before
+    assert witness_path.read_bytes() == witness_before
+
+    # The exact positive continuation remains a witnessed path load followed by
+    # same-path save; the repair must not block legitimate canonical progress.
+    current = PaperBook.load(path)
+    current.save(path)
+    assert PaperBook.load(path).balance == Decimal("100")
 
 
 def test_bound_book_rejects_authority_root_drift_and_fresh_overwrite(

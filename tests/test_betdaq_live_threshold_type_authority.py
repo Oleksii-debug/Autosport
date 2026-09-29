@@ -35,7 +35,7 @@ def _credentials() -> BetdaqCredentials:
 
 
 def _bindings() -> list[BetdaqMarketBinding]:
-    return [BetdaqMarketBinding(9001, "event-1", "football")]
+    return [BetdaqMarketBinding(9001, "100", "football")]
 
 
 def _governor(tmp_path):

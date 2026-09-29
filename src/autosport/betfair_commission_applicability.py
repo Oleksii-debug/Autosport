@@ -1,9 +1,15 @@
 """Fail-closed Betfair prospective commission applicability evidence.
 
 Authenticated Betfair fee inputs are necessary but not sufficient proof of the
-prospective commission tariff that applies to an account/market. This module issues
-only a product-owned negative prerequisite: applicability remains UNPROVEN until the
+prospective commission tariff that applies to an account/market. This module computes
+only a canonical negative prerequisite: applicability remains UNPROVEN until the
 missing tariff/event/additional-charge/terminal-net-win authorities exist.
+
+``assessment_id`` is an integrity checksum over that negative assessment. It is not an
+authenticity, provenance, or process-local issuance proof. In-process Python reflection
+can reach and mutate ordinary Python registries/closure cells, so this module does not
+pretend such mutable state is a security boundary. Positive commission/execution
+authority must come from future independently verifiable product authorities.
 """
 from __future__ import annotations
 
@@ -13,7 +19,7 @@ from functools import partial
 from hashlib import sha256
 import json
 from threading import RLock
-from weakref import ReferenceType, ref
+from weakref import ReferenceType
 
 from .betfair_account_readonly import BetfairReadOnlyClient
 from .betfair_execution_fee_inputs import (
@@ -30,7 +36,7 @@ _PROVIDER_MBR_SOURCE = "betfair-support.market-base-rate"
 
 
 class BetfairCommissionApplicabilityError(ValueError):
-    """Raised when commission applicability evidence is malformed or unissued."""
+    """Raised when commission applicability evidence is malformed or exceeds policy."""
 
 
 class BetfairCommissionApplicabilityStatus(StrEnum):
@@ -112,7 +118,13 @@ _FEE_INPUT_SHA256_CAPABILITY = partial(
 
 @dataclass(frozen=True, slots=True, weakref_slot=True, init=False)
 class BetfairCommissionApplicabilityAssessment:
-    """Product-issued negative prerequisite for prospective commission truth."""
+    """Canonical fail-closed negative prerequisite for prospective commission truth.
+
+    Instances returned by :func:`assess_betfair_commission_applicability` are derived
+    from the canonical read-only provider observation path. The value itself carries no
+    unforgeable provenance token; all four positive authority flags are necessarily
+    false and validation never upgrades them.
+    """
 
     venue_id: str
     account_id: str
@@ -134,7 +146,7 @@ class BetfairCommissionApplicabilityAssessment:
 
     def __init__(self, *_args: object, **_kwargs: object) -> None:
         raise BetfairCommissionApplicabilityError(
-            "Betfair commission applicability assessments are product-issued"
+            "direct assessment construction is not canonical applicability evaluation"
         )
 
     def to_dict(self) -> dict[str, object]:
@@ -212,15 +224,17 @@ _ASSESSMENT_PAYLOAD_CAPABILITY = partial(
 
 
 def _issue_assessment(*_args: object, **_kwargs: object):
-    """Reject direct module-level issuance; canonical issuance is provider-read only."""
+    """Compatibility rejection: no module-level bearer can mint positive authority."""
 
     raise BetfairCommissionApplicabilityError(
         "direct assessment issuance is not product authority"
     )
 
 
-# Compatibility names intentionally carry no product authority. Tests and legacy
-# diagnostics may rebind/mutate them without affecting canonical issuance.
+# Legacy diagnostic names intentionally carry no authority and are never consulted by
+# canonical validation. Keeping them temporarily avoids turning old instrumentation
+# into an accidental import break while making the absence of registry provenance
+# explicit and mechanically testable.
 _ISSUED_BY_ID: dict[
     int,
     tuple[ReferenceType[BetfairCommissionApplicabilityAssessment], str],
@@ -262,10 +276,10 @@ def _assessment_identity_payload(
 
 
 def _build_product_boundary():
-    # Capture the exact negative-authority graph once. Assessment construction and
-    # registration deliberately stay inside assess(): there is no nested callable that
-    # accepts a caller-supplied observation and can mint product issuance without the
-    # canonical provider read first.
+    # Capture the exact negative-authority graph once. Assessment construction stays
+    # inside assess() so the normal product path always starts with the canonical
+    # provider read. Validation deliberately proves only canonical negative structure
+    # and checksum consistency; it does not claim in-process issuance provenance.
     fee_input_reader = read_betfair_execution_fee_inputs
     if type(fee_input_reader) is not partial:
         raise BetfairCommissionApplicabilityError(
@@ -306,12 +320,6 @@ def _build_product_boundary():
     identity_payload_builder = _assessment_identity_payload
     identity_payload_builder_code = identity_payload_builder.__code__
     identity_payload_builder_globals = identity_payload_builder.__globals__
-
-    issued_by_id: dict[
-        int,
-        tuple[ReferenceType[BetfairCommissionApplicabilityAssessment], str],
-    ] = {}
-    issue_lock = RLock()
 
     executable_graph_witness_marker = (
         "__AUTOSPORT_BETFAIR_COMMISSION_EXECUTABLE_GRAPH_WITNESS__"
@@ -482,24 +490,9 @@ def _build_product_boundary():
             ("assessment_id", assessment_id),
         ):
             object.__setattr__(assessment, name, value)
-
-        object_id = id(assessment)
-        issued_assessment_id = assessment.assessment_id
-
-        def cleanup(
-            reference: ReferenceType[BetfairCommissionApplicabilityAssessment],
-        ) -> None:
-            with issue_lock:
-                record = issued_by_id.get(object_id)
-                if record is not None and record[0] is reference:
-                    issued_by_id.pop(object_id, None)
-
-        reference = ref(assessment, cleanup)
-        with issue_lock:
-            issued_by_id[object_id] = (reference, issued_assessment_id)
         return assessment
 
-    def require_product(
+    def validate(
         assessment: BetfairCommissionApplicabilityAssessment,
     ) -> BetfairCommissionApplicabilityAssessment:
         authority, authority_code = "__AUTOSPORT_BETFAIR_COMMISSION_AUTHORITY_GUARD_ANCHOR__"
@@ -510,31 +503,29 @@ def _build_product_boundary():
             raise error_type(
                 "assessment must be exact BetfairCommissionApplicabilityAssessment"
             )
-        with issue_lock:
-            record = issued_by_id.get(id(assessment))
-            if record is None or record[0]() is not assessment:
-                raise error_type("assessment is not product-issued in this process")
-            issued_assessment_id = record[1]
-        if assessment.assessment_id != issued_assessment_id:
-            raise error_type("assessment changed after product issuance")
-        if (
-            assessment.status is not unproven_status
-            or assessment.reasons != canonical_reasons
-            or assessment.ruleset_id != ruleset_id
-            or assessment.provider_rule_sources != provider_rule_sources
-            or assessment.prospective_commission_amount_authorized is not False
-            or assessment.complete_execution_fee_cost_authorized is not False
-            or assessment.provider_write_authorized is not False
-            or assessment.real_money_execution_authorized is not False
-        ):
-            raise error_type(
-                "assessment exceeds the canonical fail-closed applicability boundary"
+        try:
+            if (
+                assessment.status is not unproven_status
+                or assessment.reasons != canonical_reasons
+                or assessment.ruleset_id != ruleset_id
+                or assessment.provider_rule_sources != provider_rule_sources
+                or assessment.prospective_commission_amount_authorized is not False
+                or assessment.complete_execution_fee_cost_authorized is not False
+                or assessment.provider_write_authorized is not False
+                or assessment.real_money_execution_authorized is not False
+            ):
+                raise error_type(
+                    "assessment exceeds the canonical fail-closed applicability boundary"
+                )
+            payload = identity_payload_builder(
+                assessment,
+                schema=schema,
+                schema_version=schema_version,
             )
-        payload = identity_payload_builder(
-            assessment,
-            schema=schema,
-            schema_version=schema_version,
-        )
+        except AttributeError as exc:
+            raise error_type(
+                "assessment is incomplete canonical fail-closed applicability evidence"
+            ) from exc
         if authority.__code__ is not authority_code:
             raise error_type("commission applicability executable authority guard changed")
         authority()
@@ -549,7 +540,7 @@ def _build_product_boundary():
         require_executable_authority,
         require_executable_authority.__code__,
     )
-    for boundary in (assess, require_product):
+    for boundary in (assess, validate):
         constants = boundary.__code__.co_consts
         if sum(item == authority_guard_marker for item in constants) != 1:
             raise error_type("commission applicability guard anchor is ambiguous")
@@ -560,12 +551,12 @@ def _build_product_boundary():
             )
         )
 
-    return assess, require_product
+    return assess, validate
 
 
 (
     assess_betfair_commission_applicability,
-    require_product_betfair_commission_applicability,
+    validate_betfair_commission_applicability_assessment,
 ) = _build_product_boundary()
 
 assess_betfair_commission_applicability.__name__ = (
@@ -574,9 +565,17 @@ assess_betfair_commission_applicability.__name__ = (
 assess_betfair_commission_applicability.__qualname__ = (
     "assess_betfair_commission_applicability"
 )
-require_product_betfair_commission_applicability.__name__ = (
-    "require_product_betfair_commission_applicability"
+validate_betfair_commission_applicability_assessment.__name__ = (
+    "validate_betfair_commission_applicability_assessment"
 )
-require_product_betfair_commission_applicability.__qualname__ = (
-    "require_product_betfair_commission_applicability"
+validate_betfair_commission_applicability_assessment.__qualname__ = (
+    "validate_betfair_commission_applicability_assessment"
+)
+
+# Deprecated compatibility alias. This performs the same canonical negative structural
+# validation only; despite the historical name it does NOT establish product issuance,
+# authenticity, provenance, commission amount authority, provider-write authority, or
+# real-money authority. New code must use the explicit ``validate_...`` name.
+require_product_betfair_commission_applicability = (
+    validate_betfair_commission_applicability_assessment
 )

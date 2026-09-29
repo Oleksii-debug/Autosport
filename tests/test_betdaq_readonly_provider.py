@@ -54,6 +54,9 @@ class Transport:
             raise value
         return value
 
+class ForgedAdmissionTransport(Transport):
+    last_rate_admission = "caller-authored-forgery"
+
 def provider(transport, **kwargs):
     return BetdaqReadOnlyProvider(
         transport=transport,
@@ -203,6 +206,16 @@ def test_odds_at_or_below_one_fail_canonicalization():
     with pytest.raises(BetdaqSoapProtocolError, match="greater than 1"):
         p.read_batch()
 
+def test_caller_transport_cannot_forge_rate_admission_evidence():
+    p = provider(ForgedAdmissionTransport([response()]))
+    with pytest.raises(
+        TypeError,
+        match="canonical BetdaqRateAdmission",
+    ):
+        p.read_batch()
+    assert p.last_request_evidence is None
+
+
 def test_response_hash_and_message_evidence_are_durable_strings():
     payload=response()
     p=provider(Transport([payload]))
@@ -214,6 +227,7 @@ def test_response_hash_and_message_evidence_are_durable_strings():
     assert ev.requests[0].call_id == "call-123"
     assert len(ev.requests[0].request_fingerprint) == 64
     assert len(ev.requests[0].response_sha256) == 64
+    assert ev.requests[0].rate_admission_receipts == ()
     assert len(ev.aggregate_sha256) == 64
     assert batch.cursor is None
 

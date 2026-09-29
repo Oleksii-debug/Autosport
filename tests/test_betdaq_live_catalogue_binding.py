@@ -331,7 +331,10 @@ def test_caller_event_scope_must_contain_returned_market(
     assert provider.last_request_evidence is None
 
 
-@pytest.mark.parametrize("scope", ["event-100", "0100", "+100", " 100", ""])
+@pytest.mark.parametrize(
+    "scope",
+    ["event-100", "0100", "+100", " 100", "", str(1 << 63)],
+)
 def test_live_scope_assertion_requires_provider_decimal_event_id(
     tmp_path,
     monkeypatch,
@@ -353,6 +356,27 @@ def test_live_scope_assertion_requires_provider_decimal_event_id(
         ("2026-09-29T18:59:00Z", 30, "stale"),
     ],
 )
+def test_provider_catalogue_rejects_event_id_outside_xml_long_domain(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    provider = _provider(
+        tmp_path,
+        monkeypatch,
+        _CanonicalUrlopenRouter(
+            event_payload=_event_response(event_id=(1 << 63))
+        ),
+    )
+
+    with pytest.raises(
+        BetdaqSoapProtocolError,
+        match="outside provider long domain",
+    ):
+        provider.read_batch()
+
+    assert provider.last_request_evidence is None
+
+
 def test_catalogue_message_time_must_be_causally_valid(
     tmp_path,
     monkeypatch,

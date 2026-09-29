@@ -1209,6 +1209,8 @@ def _terminal_row_payload(row) -> dict[str, object] | None:
         raise BetfairCatalogCoverageError("coverage terminal JSON is malformed") from exc
     if type(payload) is not dict:
         raise BetfairCatalogCoverageError("coverage terminal must be object")
+    if payload.get("schema_version") != SCHEMA_VERSION:
+        raise BetfairCatalogCoverageError("coverage terminal schema version is invalid")
     if payload.get("status") not in _TERMINAL_STATUSES:
         raise BetfairCatalogCoverageError("coverage terminal status is invalid")
     return payload
@@ -1479,10 +1481,12 @@ def resolve_catalog_coverage(
         else:
             expected_status = "SUCCESS"
             expected_children = ()
+        expected_market_observations = _market_observation_payloads(batch.markets)
         if (
             terminal.get("status") != expected_status
             or terminal.get("result_count") != len(batch.markets)
             or tuple(terminal.get("child_leaf_ids", ())) != expected_children
+            or terminal.get("market_observations") != expected_market_observations
         ):
             raise BetfairCatalogCoverageError(
                 "live provider result does not match durable terminal semantics"

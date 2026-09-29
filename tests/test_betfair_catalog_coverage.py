@@ -65,6 +65,7 @@ def _market(market_id: str, event_id: str, start: str) -> dict[str, object]:
 class _CoverageOpener:
     def __init__(self) -> None:
         self.calls: list[dict[str, object]] = []
+        self.empty_e2 = False
 
     def open(self, request, data=None, timeout: float = 0):
         assert data is None
@@ -102,7 +103,11 @@ class _CoverageOpener:
                     _market("1.100", "e1", "2026-10-01T10:10:00Z"),
                 ]
             elif event_ids == ["e2"]:
-                result = []
+                result = (
+                    []
+                    if self.empty_e2
+                    else [_market("1.200", "e2", "2026-10-01T10:20:00Z")]
+                )
             elif event_ids == ["single"]:
                 result = [
                     _market("1.999", "single", "2026-10-01T10:00:00Z"),
@@ -148,7 +153,21 @@ def _successful_source_window(store: CollectorDeltaStore):
 
 def _client_and_scope(monkeypatch: pytest.MonkeyPatch):
     opener = _CoverageOpener()
-    monkeypatch.setattr(_urllib_request, "_opener", opener)
+
+    def fake_do_open(_self, _http_class, request, **_kwargs):
+        response = opener.open(
+            request,
+            timeout=getattr(request, "timeout", 0),
+        )
+        response.code = 200
+        response.msg = "OK"
+        return response
+
+    monkeypatch.setattr(
+        _urllib_request.AbstractHTTPHandler,
+        "do_open",
+        fake_do_open,
+    )
     client = build_betfair_authenticated_client(
         BetfairSessionCredentials("app-key", "session-token"),
         account_label="caller-label-not-authority",
@@ -174,7 +193,7 @@ def _root_request():
     )
 
 
-def test_saturated_root_expands_to_persisted_disjoint_children_and_live_completion(
+def test_saturated_root_expands_to_reconciled_categorical_children_and_live_completion(
     tmp_path,
     monkeypatch,
 ):
@@ -241,7 +260,7 @@ def test_saturated_root_expands_to_persisted_disjoint_children_and_live_completi
             acquisition=acquisition,
         )
         statuses.add(result.status)
-    assert statuses == {"SUCCESS", "EMPTY"}
+    assert statuses == {"SUCCESS"}
     assert pending_catalog_coverage_leaves(
         store,
         expected_store_path=store.path,
@@ -261,8 +280,8 @@ def test_saturated_root_expands_to_persisted_disjoint_children_and_live_completi
     assert live.provider_visible_scope_complete is True
     assert live.reason == "PROVIDER_VISIBLE_SCOPE_COMPLETE"
     assert live.saturated_split_count == 1
-    assert live.success_count == 1
-    assert live.empty_count == 1
+    assert live.success_count == 2
+    assert live.empty_count == 0
     assert live.promotion_ready is False
 
     restarted_truth = resolve_catalog_coverage(
@@ -282,7 +301,7 @@ def test_saturated_root_expands_to_persisted_disjoint_children_and_live_completi
     assert len(catalogue_calls) == 3
 
 
-def test_partition_prefers_provider_identity_before_time_and_has_no_overlap():
+def test_partition_prefers_provider_identity_and_time_only_scope_fails_closed():
     root = _root_request()
     split = split_catalog_coverage_request(root)
     assert split is not None
@@ -299,17 +318,74 @@ def test_partition_prefers_provider_identity_before_time_and_has_no_overlap():
         market_type_codes=("MATCH_ODDS",),
         max_results=2,
         market_start_from="2026-10-01T10:00:00.000000Z",
-        market_start_to="2026-10-01T10:00:00.000003Z",
+        market_start_to="2026-10-01T10:00:00.000010Z",
     )
-    time_split = split_catalog_coverage_request(one_event)
-    assert time_split is not None
-    earlier, later = time_split
-    earlier_range = earlier.rpc_params()["filter"]["marketStartTime"]
-    later_range = later.rpc_params()["filter"]["marketStartTime"]
-    assert earlier_range["from"] == "2026-10-01T10:00:00.000000Z"
-    assert earlier_range["to"] == "2026-10-01T10:00:00.000001Z"
-    assert later_range["from"] == "2026-10-01T10:00:00.000002Z"
-    assert later_range["to"] == "2026-10-01T10:00:00.000003Z"
+    # Betfair does not publish endpoint inclusion semantics for this filter.
+    # Until overlap-guarded market-identity reconciliation exists, inventing a
+    # half-open microsecond split would risk a silent boundary omission.
+    assert split_catalog_coverage_request(one_event) is None
+
+
+def test_parent_market_missing_from_categorical_child_fails_reconciliation(
+    tmp_path,
+    monkeypatch,
+):
+    store = CollectorDeltaStore(tmp_path / "collector.db")
+    source = _successful_source_window(store)
+    client, scope, opener = _client_and_scope(monkeypatch)
+    plan = create_catalog_coverage_plan(
+        store,
+        expected_store_path=store.path,
+        source_universe=source,
+        expected_source_id="source-x",
+        expected_start_cycle_seq=1,
+        expected_end_cycle_seq=1,
+        client=client,
+        visibility_scope=scope,
+        causal_cutoff=datetime(2099, 1, 1, tzinfo=timezone.utc),
+        root_request=_root_request(),
+    )
+    root = pending_catalog_coverage_leaves(
+        store,
+        expected_store_path=store.path,
+        plan_id=plan.plan_id,
+    )[0]
+    root_acquisition = acquire_authenticated_betfair_discovery(client, root.request)
+    record_catalog_coverage_acquisition(
+        store,
+        expected_store_path=store.path,
+        plan_id=plan.plan_id,
+        leaf_id=root.leaf_id,
+        acquisition=root_acquisition,
+    )
+
+    opener.empty_e2 = True
+    child_acquisitions = []
+    for child in pending_catalog_coverage_leaves(
+        store,
+        expected_store_path=store.path,
+        plan_id=plan.plan_id,
+    ):
+        acquisition = acquire_authenticated_betfair_discovery(client, child.request)
+        child_acquisitions.append(acquisition)
+        record_catalog_coverage_acquisition(
+            store,
+            expected_store_path=store.path,
+            plan_id=plan.plan_id,
+            leaf_id=child.leaf_id,
+            acquisition=acquisition,
+        )
+
+    with pytest.raises(
+        BetfairCatalogCoverageError,
+        match="parent observation is not reconciled",
+    ):
+        resolve_catalog_coverage(
+            store,
+            expected_store_path=store.path,
+            plan_id=plan.plan_id,
+            live_acquisitions=(root_acquisition, *child_acquisitions),
+        )
 
 
 def test_provider_failure_terminal_survives_and_blocks_completion(

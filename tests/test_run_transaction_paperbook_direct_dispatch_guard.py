@@ -5,6 +5,7 @@ import unittest
 
 import autosport  # noqa: F401 - package composition installs the guard
 import autosport._paperbook_preload_authority_guard as paper_guard
+import autosport._run_transaction_paperbook_direct_dispatch_guard as direct_guard
 import autosport.run_transaction as run_transaction_module
 from autosport.paper import PaperBook
 from autosport.run_transaction import RunTransaction
@@ -147,6 +148,42 @@ class RunTransactionPaperBookDirectDispatchGuardTests(unittest.TestCase):
             self.assertIsNot(snapshot["os"], promotion_globals["os"])
         finally:
             promotion_globals["os"] = original_os
+
+    def test_snapshot_reconstruction_ignores_post_composition_builtin_shadows(self):
+        """Module-global builtin aliases cannot retarget per-call snapshot creation."""
+
+        method = RunTransaction._promote_paper_book_snapshot
+        hostile_calls: list[tuple[object, ...]] = []
+
+        def hostile(*args, **kwargs):
+            hostile_calls.append(args + tuple(kwargs.items()))
+            raise AssertionError("hostile builtin shadow was dispatched")
+
+        names = ("dict", "list", "tuple", "len")
+        previous = {name: direct_guard.__dict__.get(name) for name in names}
+        present = {name: name in direct_guard.__dict__ for name in names}
+        try:
+            for name in names:
+                direct_guard.__dict__[name] = hostile
+            try:
+                method(object())
+            except (AttributeError, RuntimeError, TypeError, ValueError):
+                pass
+        finally:
+            for name in names:
+                if present[name]:
+                    direct_guard.__dict__[name] = previous[name]
+                else:
+                    direct_guard.__dict__.pop(name, None)
+
+        self.assertEqual(hostile_calls, [])
+        self.assertIn("dict_type", method.__code__.co_freevars)
+        self.assertIn("list_type", method.__code__.co_freevars)
+        self.assertIn("tuple_type", method.__code__.co_freevars)
+        self.assertNotIn("dict", method.__code__.co_names)
+        self.assertNotIn("list", method.__code__.co_names)
+        self.assertNotIn("tuple", method.__code__.co_names)
+        self.assertNotIn("len", method.__code__.co_names)
 
     def test_terminal_surface_witness_rejects_meta_meta_bypass_before_promotion(self):
         """Consumer witness remains fail-closed beyond any finite metaclass seal chain."""

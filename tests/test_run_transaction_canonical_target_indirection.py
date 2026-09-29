@@ -104,6 +104,27 @@ class RunTransactionCanonicalTargetIndirectionTests(unittest.TestCase):
 
             hostile_path_load.assert_not_called()
 
+    def test_canonical_paperbook_semantics_do_not_dispatch_mutable_load_bytes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "paper_book.json"
+            target.write_bytes(b"{}")
+
+            with patch.object(
+                PaperBook,
+                "load_bytes",
+                return_value=PaperBook("10000"),
+            ) as hostile_load_bytes:
+                with self.assertRaisesRegex(
+                    RunTransactionError,
+                    "canonical PaperBook semantic validation failed",
+                ):
+                    RunTransaction._verified_canonical_paper_book_snapshot(
+                        target,
+                        "PaperBook",
+                    )
+
+            hostile_load_bytes.assert_not_called()
+
     def test_canonical_snapshot_primary_open_does_not_follow_swap_to_symlink(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

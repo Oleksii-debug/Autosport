@@ -157,11 +157,15 @@ def test_runtime_start_stop_transition_keeps_focus_on_an_action_or_fallback() ->
 
     assert "function syncRuntimeActionAvailability(startButton, stopButton, canStart, canStop)" in source
     assert "const focused = document.activeElement;" in source
-    assert "startButton.disabled = canStart !== true;" in source
-    assert "stopButton.disabled = canStop !== true;" in source
-    assert "focused === startButton && startButton.disabled" in source
+    assert "const startDisabled = canStart !== true;" in source
+    assert "const stopDisabled = canStop !== true;" in source
+    assert "const startChanged = startButton.disabled !== startDisabled;" in source
+    assert "const stopChanged = stopButton.disabled !== stopDisabled;" in source
+    assert "if (startChanged) startButton.disabled = startDisabled;" in source
+    assert "if (stopChanged) stopButton.disabled = stopDisabled;" in source
+    assert "focused === startButton && startChanged && startDisabled" in source
     assert "focusOperatorTarget(stopButton);" in source
-    assert "focused === stopButton && stopButton.disabled" in source
+    assert "focused === stopButton && stopChanged && stopDisabled" in source
     assert "focusOperatorTarget(startButton);" in source
     assert "focused === startButton && startButton.disabled && !stopButton.disabled" not in source
     assert "focused === stopButton && stopButton.disabled && !startButton.disabled" not in source
@@ -178,8 +182,10 @@ def test_poll_driven_disable_moves_focus_to_status_or_error() -> None:
     source = _source()
 
     assert "function setDisabledWithFocusFallback(node, disabled)" in source
+    assert "const nextDisabled = Boolean(disabled);" in source
+    assert "if (node.disabled === nextDisabled) return;" in source
     assert "const wasFocused = document.activeElement === node;" in source
-    assert "node.disabled = Boolean(disabled);" in source
+    assert "node.disabled = nextDisabled;" in source
     assert "const fallback = errorNode.hidden ? statusNode : errorNode;" in source
     assert "fallback.tabIndex = -1;" in source
     assert "fallback.focus();" in source

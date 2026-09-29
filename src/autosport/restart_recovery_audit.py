@@ -41,7 +41,7 @@ def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def _safe_exception_detail(exc: Exception) -> str:
+def _safe_exception_detail(exc: BaseException) -> str:
     """Render semantic-audit failure evidence without trusting exception formatting."""
 
     try:

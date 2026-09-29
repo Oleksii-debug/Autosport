@@ -69,68 +69,134 @@ del _install
 
 # Raw risk executable specs remain reconstructible compatibility evidence. Complete
 # the existing evaluate witness before any generation/private wrapper snapshots that
-# raw function: _derived_risk_values dispatches through these three exact class
-# helpers, so first-level function identity alone is not sufficient authority.
+# raw function. First-level helper identity is not sufficient: those helpers dispatch
+# through additional mutable PaperRiskPolicy descriptors for concentration, durable
+# history, exact Decimal arithmetic, and ruin-evidence identity. Freeze the complete
+# class-helper graph reachable by raw evaluate outside the separately sealed _book_state
+# root so reconstructed historical specs cannot move an inner authority layer while
+# keeping the outer helper function identity/code unchanged.
 _policy_namespace = vars(_risk.PaperRiskPolicy)
 _fraction_limits = _policy_namespace.get("_effective_fraction_limits")
 _decimal_context = _policy_namespace.get("_decimal_context")
 _exact_positive_sum = _policy_namespace.get("_exact_positive_sum")
+_identity_concentration = _policy_namespace.get("_identity_concentration_decision")
+_fraction_exceeds = _policy_namespace.get("_fraction_exceeds")
+_historical_metrics = _policy_namespace.get("_historical_risk_metrics")
+_ruin_portfolio = _policy_namespace.get("risk_of_ruin_portfolio_sha256")
+_ruin_candidate = _policy_namespace.get("risk_of_ruin_candidate_sha256")
 if type(_fraction_limits) is not FunctionType:
     raise RuntimeError("canonical PaperRiskPolicy fraction-limit helper is unavailable")
-if (
-    type(_decimal_context) is not staticmethod
-    or type(_decimal_context.__func__) is not FunctionType
+for _helper_name, _helper_descriptor in (
+    ("_decimal_context", _decimal_context),
+    ("_exact_positive_sum", _exact_positive_sum),
+    ("_fraction_exceeds", _fraction_exceeds),
+    ("risk_of_ruin_candidate_sha256", _ruin_candidate),
 ):
-    raise RuntimeError("canonical PaperRiskPolicy decimal-context helper is unavailable")
-if (
-    type(_exact_positive_sum) is not staticmethod
-    or type(_exact_positive_sum.__func__) is not FunctionType
+    if (
+        type(_helper_descriptor) is not staticmethod
+        or type(_helper_descriptor.__func__) is not FunctionType
+    ):
+        raise RuntimeError(
+            f"canonical PaperRiskPolicy static helper is unavailable: {_helper_name}"
+        )
+for _helper_name, _helper_descriptor in (
+    ("_identity_concentration_decision", _identity_concentration),
+    ("_historical_risk_metrics", _historical_metrics),
+    ("risk_of_ruin_portfolio_sha256", _ruin_portfolio),
 ):
-    raise RuntimeError("canonical PaperRiskPolicy exact-sum helper is unavailable")
+    if (
+        type(_helper_descriptor) is not classmethod
+        or type(_helper_descriptor.__func__) is not FunctionType
+    ):
+        raise RuntimeError(
+            f"canonical PaperRiskPolicy class helper is unavailable: {_helper_name}"
+        )
 _evaluate_witnesses = _risk._PAPER_RISK_EVALUATE_HELPER_WITNESSES
 if type(_evaluate_witnesses) is not tuple:
     raise RuntimeError("canonical PaperRiskPolicy evaluate witness tuple is unavailable")
 _witness_names = tuple(item[0] for item in _evaluate_witnesses)
-_transitive_names = (
-    "_effective_fraction_limits",
-    "_decimal_context",
-    "_exact_positive_sum",
+_transitive_witnesses = (
+    (
+        "_effective_fraction_limits",
+        _fraction_limits,
+        _fraction_limits,
+        _fraction_limits.__code__,
+        False,
+    ),
+    (
+        "_decimal_context",
+        _decimal_context,
+        _decimal_context.__func__,
+        _decimal_context.__func__.__code__,
+        True,
+    ),
+    (
+        "_exact_positive_sum",
+        _exact_positive_sum,
+        _exact_positive_sum.__func__,
+        _exact_positive_sum.__func__.__code__,
+        True,
+    ),
+    (
+        "_identity_concentration_decision",
+        _identity_concentration,
+        _identity_concentration.__func__,
+        _identity_concentration.__func__.__code__,
+        True,
+    ),
+    (
+        "_fraction_exceeds",
+        _fraction_exceeds,
+        _fraction_exceeds.__func__,
+        _fraction_exceeds.__func__.__code__,
+        True,
+    ),
+    (
+        "_historical_risk_metrics",
+        _historical_metrics,
+        _historical_metrics.__func__,
+        _historical_metrics.__func__.__code__,
+        True,
+    ),
+    (
+        "risk_of_ruin_portfolio_sha256",
+        _ruin_portfolio,
+        _ruin_portfolio.__func__,
+        _ruin_portfolio.__func__.__code__,
+        True,
+    ),
+    (
+        "risk_of_ruin_candidate_sha256",
+        _ruin_candidate,
+        _ruin_candidate.__func__,
+        _ruin_candidate.__func__.__code__,
+        True,
+    ),
 )
+_transitive_names = tuple(item[0] for item in _transitive_witnesses)
 if any(name in _witness_names for name in _transitive_names):
     if not all(name in _witness_names for name in _transitive_names):
         raise RuntimeError("canonical PaperRiskPolicy transitive helper witness is partial")
 else:
-    _risk._PAPER_RISK_EVALUATE_HELPER_WITNESSES = _evaluate_witnesses + (
-        (
-            "_effective_fraction_limits",
-            _fraction_limits,
-            _fraction_limits,
-            _fraction_limits.__code__,
-            False,
-        ),
-        (
-            "_decimal_context",
-            _decimal_context,
-            _decimal_context.__func__,
-            _decimal_context.__func__.__code__,
-            True,
-        ),
-        (
-            "_exact_positive_sum",
-            _exact_positive_sum,
-            _exact_positive_sum.__func__,
-            _exact_positive_sum.__func__.__code__,
-            True,
-        ),
+    _risk._PAPER_RISK_EVALUATE_HELPER_WITNESSES = (
+        _evaluate_witnesses + _transitive_witnesses
     )
 
 del _policy_namespace
 del _fraction_limits
 del _decimal_context
 del _exact_positive_sum
+del _identity_concentration
+del _fraction_exceeds
+del _historical_metrics
+del _ruin_portfolio
+del _ruin_candidate
 del _evaluate_witnesses
 del _witness_names
+del _transitive_witnesses
 del _transitive_names
+del _helper_name
+del _helper_descriptor
 del _risk
 
 # Risk policy derives portfolio/equity evidence from direct PaperBook fields. Install

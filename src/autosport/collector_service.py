@@ -1,5 +1,15 @@
 from __future__ import annotations
 
+# ``python -m autosport.collector_service`` imports the autosport package first.
+# Package composition deliberately imports this module under its canonical name and
+# installs the collector state/cycle/backoff guards there.  runpy would otherwise
+# execute this file a second time as ``__main__`` and construct fresh, uncomposed
+# classes.  Delegate immediately to the already-composed canonical module instead.
+if __name__ == "__main__":
+    from . import collector_service as _canonical_collector_service
+
+    raise SystemExit(_canonical_collector_service.main())
+
 import argparse
 import importlib
 import json
@@ -479,7 +489,6 @@ class HeadlessCollectorService:
         random_value: Callable[[], float] | None = None,
         stop_requested: Callable[[], bool] | None = None,
         stop_reason: Callable[[], str] | None = None,
-        wait_for_stop: Callable[[float], bool] | None = None,
     ) -> None:
         if not isinstance(delta_store, CollectorDeltaStore):
             raise TypeError("delta_store must be CollectorDeltaStore")
@@ -506,9 +515,6 @@ class HeadlessCollectorService:
         self.random_value = random_value or random.random
         self.stop_requested = stop_requested or (lambda: False)
         self.stop_reason = stop_reason or (lambda: "stop_requested")
-        if wait_for_stop is not None and not callable(wait_for_stop):
-            raise TypeError("wait_for_stop must be callable or None")
-        self.wait_for_stop = wait_for_stop
         self._adapter = RemoteCollectorAdapter(self._append_admitted_delta)
         started_at = self.clock()
         _CollectorServiceState._instant(started_at, "started_at")
@@ -616,6 +622,7 @@ class HeadlessCollectorService:
         raise _StopRequested(reason)
 
     def _wait_or_stop(self, seconds: float) -> None:
+        """Wait for a scheduled due slot through the canonical signal STOP source."""
         if (
             isinstance(seconds, bool)
             or not isinstance(seconds, (int, float))
@@ -627,16 +634,24 @@ class HeadlessCollectorService:
             )
         self._stop_if_requested()
         duration = float(seconds)
-        if self.wait_for_stop is None:
-            self.sleep(duration)
-        else:
-            interrupted = self.wait_for_stop(duration)
-            if not isinstance(interrupted, bool):
-                raise CollectorServiceError("wait_for_stop must return bool")
-            if interrupted and not self.stop_requested():
+        stop_source = self.stop_requested
+        if isinstance(stop_source, _SignalStopRequest) and self.sleep is time.sleep:
+            signal_wait = getattr(_SignalStopRequest, "wait", None)
+            if not callable(signal_wait):
                 raise CollectorServiceError(
-                    "wait_for_stop reported STOP without stop_requested authority"
+                    "canonical signal STOP wait authority is unavailable"
                 )
+            interrupted = signal_wait(stop_source, duration)
+            if type(interrupted) is not bool:
+                raise CollectorServiceError(
+                    "canonical signal STOP wait must return bool"
+                )
+            if interrupted and not stop_source():
+                raise CollectorServiceError(
+                    "canonical signal STOP wait reported STOP without STOP authority"
+                )
+        else:
+            self.sleep(duration)
         self._stop_if_requested()
 
     def _bounded_provider_call(self, action: Callable[[], object]) -> object:
@@ -662,9 +677,7 @@ class HeadlessCollectorService:
                 jittered = delay * (
                     1 + self.config.jitter_fraction * float(random_value)
                 )
-                self._wait_or_stop(
-                    min(self.config.max_backoff_seconds, jittered)
-                )
+                self.sleep(min(self.config.max_backoff_seconds, jittered))
                 delay = min(self.config.max_backoff_seconds, delay * 2)
         raise AssertionError("unreachable retry loop")
 

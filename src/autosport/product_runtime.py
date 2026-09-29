@@ -23,6 +23,7 @@ from .collector_service import (
     CollectorServiceConfig,
     CollectorServiceSource,
     HeadlessCollectorService,
+    _SignalStopRequest,
 )
 from .continuous_session import (
     ContinuousSessionCoordinator,
@@ -524,13 +525,13 @@ def _settlement_authority_identity(
     return hashlib.sha256(encoded).hexdigest()
 
 
-class _ProductStopController:
-    """One in-process cooperative STOP signal shared by the product runtime graph."""
+class _ProductStopRequest(_SignalStopRequest):
+    """Product reason semantics over the canonical collector signal STOP event."""
 
     def __init__(self) -> None:
-        self._event = threading.Event()
-        self._lock = threading.Lock()
-        self._reason = "operator_stop"
+        super().__init__()
+        self._reason_lock = threading.Lock()
+        self._product_reason = "operator_stop"
 
     @staticmethod
     def _validated_reason(reason: str) -> str:
@@ -540,24 +541,18 @@ class _ProductStopController:
 
     def request(self, reason: str) -> None:
         resolved = self._validated_reason(reason)
-        with self._lock:
-            self._reason = resolved
+        with self._reason_lock:
+            self._product_reason = resolved
             self._event.set()
 
     def clear(self) -> None:
-        with self._lock:
-            self._reason = "operator_stop"
+        with self._reason_lock:
+            self._product_reason = "operator_stop"
             self._event.clear()
 
-    def is_requested(self) -> bool:
-        return self._event.is_set()
-
     def reason(self) -> str:
-        with self._lock:
-            return self._reason
-
-    def wait(self, timeout: float) -> bool:
-        return self._event.wait(timeout)
+        with self._reason_lock:
+            return self._product_reason
 
 
 @dataclass(slots=True)
@@ -575,8 +570,8 @@ class AutonomousProductRuntime:
     dependencies: FocusedMirrorDependencyIndex
     _runtime_lease: _ProductRuntimeLease
     _start_transition_store: _ProductStartTransitionStore
-    _stop_controller: _ProductStopController = field(
-        default_factory=_ProductStopController,
+    _stop_controller: _ProductStopRequest = field(
+        default_factory=_ProductStopRequest,
         repr=False,
         compare=False,
     )
@@ -593,6 +588,34 @@ class AutonomousProductRuntime:
             raise ProductCompositionError(
                 "product runtime is closed or no longer owns workspace authority"
             )
+
+    def _canonical_product_stop_source(self) -> _ProductStopRequest:
+        """Resolve the one STOP event that the canonical collector actually consumes."""
+
+        collector = self.collector
+        if type(collector) is HeadlessCollectorService:
+            stop_source = collector.stop_requested
+            if type(stop_source) is not _ProductStopRequest:
+                raise ProductCompositionError(
+                    "canonical product collector STOP source binding changed"
+                )
+            reason_callback = collector.stop_reason
+            if (
+                getattr(reason_callback, "__self__", None) is not stop_source
+                or getattr(reason_callback, "__func__", None)
+                is not _ProductStopRequest.reason
+            ):
+                raise ProductCompositionError(
+                    "canonical product collector STOP reason binding changed"
+                )
+            return stop_source
+
+        stop_source = self._stop_controller
+        if type(stop_source) is not _ProductStopRequest:
+            raise ProductCompositionError(
+                "product STOP compatibility source is invalid"
+            )
+        return stop_source
 
     @staticmethod
     def _state_value(status: ContinuousSessionStatus) -> str:
@@ -755,7 +778,7 @@ class AutonomousProductRuntime:
             session_pre_state=current_state,
         )
         try:
-            self._stop_controller.clear()
+            self._canonical_product_stop_source().clear()
             self.collector.resume()
             self.coordinator.resume()
             resolved = self._coherent_status(allow_pending_start=True)
@@ -793,7 +816,7 @@ class AutonomousProductRuntime:
         """Signal cooperative STOP immediately without waiting for the active tick."""
 
         self._require_runtime_authority()
-        self._stop_controller.request(reason)
+        self._canonical_product_stop_source().request(reason)
 
     def stop(self, reason: str = "operator_stop") -> ContinuousSessionStatus:
         # STOP must win the cooperative wait before waiting for the serialized lifecycle
@@ -962,7 +985,7 @@ def build_autonomous_product_runtime(
         )
 
         dependencies = FocusedMirrorDependencyIndex(mirror)
-        stop_controller = _ProductStopController()
+        stop_controller = _ProductStopRequest()
         collector_store = CollectorDeltaStore(root / "collector_deltas.json")
         collector = HeadlessCollectorService(
             delta_store=collector_store,
@@ -973,9 +996,8 @@ def build_autonomous_product_runtime(
             config=collector_config,
             clock=resolved_clock,
             sleep=sleep,
-            stop_requested=stop_controller.is_requested,
+            stop_requested=stop_controller,
             stop_reason=stop_controller.reason,
-            wait_for_stop=(stop_controller.wait if sleep is None else None),
         )
         desktop = DesktopDeltaConsumer(
             collector_store,

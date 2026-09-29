@@ -208,23 +208,54 @@ class ProductRuntimeProspectiveScheduleTests(unittest.TestCase):
                 clock=clock,
                 initial_bankroll="100",
             )
-            entered_wait = threading.Event()
-            original_wait = runtime.collector.wait_for_stop
-            self.assertIsNotNone(original_wait)
-
-            def observed_wait(seconds: float) -> bool:
-                self.assertEqual(seconds, 30.0)
-                entered_wait.set()
-                assert original_wait is not None
-                return original_wait(seconds)
-
-            runtime.collector.wait_for_stop = observed_wait
             errors: list[BaseException] = []
+            hostile_calls: list[str] = []
+            entered_wait = threading.Event()
+
+            class _ObservedEvent:
+                def __init__(self, delegate) -> None:
+                    self._delegate = delegate
+
+                def is_set(self) -> bool:
+                    return self._delegate.is_set()
+
+                def set(self) -> None:
+                    self._delegate.set()
+
+                def clear(self) -> None:
+                    self._delegate.clear()
+
+                def wait(self, timeout: float) -> bool:
+                    if timeout != 30.0:
+                        raise AssertionError(f"unexpected scheduled wait: {timeout}")
+                    entered_wait.set()
+                    return self._delegate.wait(timeout)
+
+            class _HostileCompatibilityController:
+                def request(self, _reason: str) -> None:
+                    hostile_calls.append("runtime-alias-request")
+                    raise AssertionError("mutable runtime compatibility alias is not STOP authority")
+
+                def clear(self) -> None:
+                    hostile_calls.append("runtime-alias-clear")
+                    raise AssertionError("mutable runtime compatibility alias is not STOP authority")
+
             try:
                 first = runtime.tick()
                 self.assertEqual(first.cycle_index, 1)
                 self.assertEqual(source.catalog_calls, 1)
                 self.assertEqual(source.delta_calls, 1)
+                self.assertFalse(hasattr(runtime.collector, "wait_for_stop"))
+
+                stop_source = runtime.collector.stop_requested
+                stop_source._event = _ObservedEvent(stop_source._event)
+
+                def hostile_wait(_seconds: float) -> bool:
+                    hostile_calls.append("instance-wait")
+                    raise AssertionError("instance wait shadow is not canonical STOP authority")
+
+                stop_source.wait = hostile_wait
+                runtime._stop_controller = _HostileCompatibilityController()
 
                 worker = threading.Thread(
                     target=lambda: self._capture_tick_error(runtime, errors),
@@ -237,6 +268,7 @@ class ProductRuntimeProspectiveScheduleTests(unittest.TestCase):
                 runtime.stop("operator_stop")
                 worker.join(2.0)
                 self.assertFalse(worker.is_alive())
+                self.assertEqual(hostile_calls, [])
                 self.assertEqual(len(errors), 1)
                 self.assertIsInstance(errors[0], SessionStoppedError)
                 self.assertEqual(source.catalog_calls, 1)

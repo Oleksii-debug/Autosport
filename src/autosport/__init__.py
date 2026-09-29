@@ -176,3 +176,8 @@ from . import _drift_decimal_resource_guard as _drift_decimal_resource_guard  # 
 # K07 authenticated account identity must acquire account details from a sealed
 # product-origin snapshot, not mutable live-client fields during provider I/O.
 from . import _betfair_account_identity_io_snapshot_guard as _betfair_account_identity_io_snapshot_guard  # noqa: F401,E402
+
+# Strategy-factory executable availability is positive only after the exact prepared
+# transaction reaches its durable final registry digest and independently protected
+# publication receipts bind the newly published artifact bytes.
+from . import _strategy_model_factory_publish_receipt_guard as _strategy_model_factory_publish_receipt_guard  # noqa: F401,E402

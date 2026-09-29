@@ -61,3 +61,32 @@ def test_supported_tick_ignores_instance_shadowed_authority_resolver(
         cycle.tick()
 
     assert forged_calls == []
+
+
+def test_supported_tick_rejects_class_level_registry_loader_rebind(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    cycle = _bare_cycle(tmp_path)
+    monkeypatch.setattr(
+        ProductPaperDecisionCycle,
+        "_load_current_scientific_registry",
+        lambda _self: object(),
+    )
+
+    with pytest.raises(
+        ProductPaperDecisionCycleError,
+        match="supported PAPER decision tick dispatch changed",
+    ):
+        cycle.tick()
+
+
+def test_supported_tick_rejects_instance_shadowed_registry_loader(tmp_path) -> None:
+    cycle = _bare_cycle(tmp_path)
+    cycle._load_current_scientific_registry = lambda: object()
+
+    with pytest.raises(
+        ProductPaperDecisionCycleError,
+        match="supported PAPER decision tick dispatch changed",
+    ):
+        cycle.tick()

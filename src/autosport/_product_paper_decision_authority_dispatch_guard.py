@@ -23,6 +23,7 @@ from .product_paper_decision_cycle import (
 def _install_product_paper_decision_authority_dispatch_guard() -> None:
     cycle_class = ProductPaperDecisionCycle
     canonical_resolver = cycle_class.__dict__.get("_resolve_product_authority")
+    canonical_registry_loader = cycle_class.__dict__.get("_load_current_scientific_registry")
     canonical_require_running = cycle_class.__dict__.get("_require_running_runtime")
     skip_descriptor = cycle_class.__dict__.get("_decision_skip_reason")
     canonical_skip_reason = (
@@ -31,16 +32,19 @@ def _install_product_paper_decision_authority_dispatch_guard() -> None:
     canonical_run_decision = cycle_class.__dict__.get("_run_decision_cycle")
 
     resolver_code = getattr(canonical_resolver, "__code__", None)
+    registry_loader_code = getattr(canonical_registry_loader, "__code__", None)
     require_running_code = getattr(canonical_require_running, "__code__", None)
     skip_reason_code = getattr(canonical_skip_reason, "__code__", None)
     run_decision_code = getattr(canonical_run_decision, "__code__", None)
 
     if (
         canonical_resolver is None
+        or canonical_registry_loader is None
         or canonical_require_running is None
         or canonical_skip_reason is None
         or canonical_run_decision is None
         or resolver_code is None
+        or registry_loader_code is None
         or require_running_code is None
         or skip_reason_code is None
         or run_decision_code is None
@@ -60,6 +64,11 @@ def _install_product_paper_decision_authority_dispatch_guard() -> None:
             or cycle_class.__dict__.get("_resolve_product_authority")
             is not canonical_resolver
             or getattr(canonical_resolver, "__code__", None) is not resolver_code
+            or cycle_class.__dict__.get("_load_current_scientific_registry")
+            is not canonical_registry_loader
+            or getattr(canonical_registry_loader, "__code__", None)
+            is not registry_loader_code
+            or "_load_current_scientific_registry" in vars(self)
             or cycle_class.__dict__.get("_require_running_runtime")
             is not canonical_require_running
             or getattr(canonical_require_running, "__code__", None)

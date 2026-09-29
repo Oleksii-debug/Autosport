@@ -169,6 +169,16 @@ class RestartRecoveryAuditTests(unittest.TestCase):
             self.assertFalse(payload["human_tested"])
             self.assertFalse(payload["nvda_verified"])
 
+    def test_safe_exception_site_reports_only_module_function_and_line(self):
+        try:
+            raise ValueError("site-canary")
+        except ValueError as exc:
+            site = restart_audit._safe_exception_site(exc)
+
+        self.assertTrue(site.startswith(__name__ + ":test_safe_exception_site_reports_only_module_function_and_line:"))
+        self.assertNotIn("/", site)
+        self.assertNotIn("\\\\", site)
+
     def test_phase_call_preserves_original_exception_and_records_subphase(self):
         def fail():
             raise ValueError("phase-canary")

@@ -433,5 +433,98 @@ class ScheduledSourceUniverseDispatchSealTests(unittest.TestCase):
                 getattr_static.__code__ = original_code
 
 
+    def test_source_staticmethod_read_seam_code_mutation_fails_before_dispatch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path, store, cycle_seq, _candidate = _ready_store(tmp)
+            descriptor = vars(CollectorDeltaStore)["_path_file_identity"]
+            path_identity = descriptor.__func__
+            original_code = path_identity.__code__
+
+            def hostile_path_identity(_path):
+                raise AssertionError("hostile store path identity executed")
+
+            path_identity.__code__ = hostile_path_identity.__code__
+            try:
+                with self.assertRaisesRegex(
+                    source_module.SourceUniverseCommitmentError,
+                    "canonical durable read seam drifted: _path_file_identity",
+                ):
+                    source_module.build_source_universe_commitment(
+                        store,
+                        expected_store_path=path,
+                        source_id=SOURCE_ID,
+                        start_cycle_seq=cycle_seq,
+                        end_cycle_seq=cycle_seq,
+                    )
+            finally:
+                path_identity.__code__ = original_code
+
+    def test_source_staticmethod_terminal_digest_code_mutation_fails_before_dispatch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path, store, cycle_seq, _candidate = _ready_store(tmp)
+            descriptor = vars(CollectorDeltaStore)["_cycle_terminal_payload_sha256"]
+            digest = descriptor.__func__
+            original_code = digest.__code__
+
+            def hostile_digest(_payload_json):
+                raise AssertionError("hostile terminal digest executed")
+
+            digest.__code__ = hostile_digest.__code__
+            try:
+                with self.assertRaisesRegex(
+                    source_module.SourceUniverseCommitmentError,
+                    "canonical durable read seam drifted: _cycle_terminal_payload_sha256",
+                ):
+                    source_module.build_source_universe_commitment(
+                        store,
+                        expected_store_path=path,
+                        source_id=SOURCE_ID,
+                        start_cycle_seq=cycle_seq,
+                        end_cycle_seq=cycle_seq,
+                    )
+            finally:
+                digest.__code__ = original_code
+
+    def test_schedule_staticmethod_due_at_code_mutation_fails_before_dispatch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path, store, _cycle_seq, candidate = _ready_store(tmp)
+            descriptor = vars(CollectorDeltaStore)["_collector_schedule_due_at"]
+            due_at = descriptor.__func__
+            original_code = due_at.__code__
+
+            def hostile_due_at(*_args, **_kwargs):
+                raise AssertionError("hostile schedule due_at executed")
+
+            due_at.__code__ = hostile_due_at.__code__
+            try:
+                with self.assertRaisesRegex(
+                    scheduled_module.ScheduledSourceUniverseError,
+                    "canonical read seam drifted: _collector_schedule_due_at",
+                ):
+                    _resolve(path, store, candidate)
+            finally:
+                due_at.__code__ = original_code
+
+    def test_schedule_classmethod_id_code_mutation_fails_before_dispatch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path, store, _cycle_seq, candidate = _ready_store(tmp)
+            descriptor = vars(CollectorDeltaStore)["_collector_schedule_id"]
+            schedule_id = descriptor.__func__
+            original_code = schedule_id.__code__
+
+            def hostile_schedule_id(_cls, *_args, **_kwargs):
+                raise AssertionError("hostile schedule id executed")
+
+            schedule_id.__code__ = hostile_schedule_id.__code__
+            try:
+                with self.assertRaisesRegex(
+                    scheduled_module.ScheduledSourceUniverseError,
+                    "canonical read seam drifted: _collector_schedule_id",
+                ):
+                    _resolve(path, store, candidate)
+            finally:
+                schedule_id.__code__ = original_code
+
+
 if __name__ == "__main__":
     unittest.main()

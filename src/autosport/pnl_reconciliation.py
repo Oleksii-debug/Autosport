@@ -76,7 +76,7 @@ class PnLReconciliationJournal:
         self._quantum = _decimal(self._quantum_text, "liability_quantum")
         if self._quantum <= 0 or self._quantum.as_tuple().digits != (1,) or self._quantum.as_tuple().exponent > 0:
             raise ValueError("liability_quantum must be a positive power of ten")
-        self._orders: dict[tuple[str, str], _Order] = {}
+        self._orders: dict[tuple[str, str | None, str], _Order] = {}
         self._events: dict[str, bytes] = {}
         self._revision_count = 0
         self._faulted = False
@@ -156,19 +156,31 @@ class PnLReconciliationJournal:
     def record_settlement_revision(
         self, *, event_id: str, provider_source_id: str, provider_order_id: str,
         revision_seq: int, cumulative_settled_stake: str, cumulative_realized_pnl: str,
+        provider_account_id: str | None = None,
     ) -> PnLReconciliationSnapshot:
         if type(revision_seq) is not int or revision_seq < 1:
             raise ValueError("revision_seq must be a positive integer")
         event = {
-            "schema_version": _SCHEMA, "event_type": "settlement_revision",
-            "event_id": _text(event_id, "event_id"), "currency": self.currency,
+            "schema_version": _SCHEMA,
+            "event_type": "settlement_revision",
+            "event_id": _text(event_id, "event_id"),
+            "currency": self.currency,
             "liability_quantum": self._quantum_text,
             "provider_source_id": _text(provider_source_id, "provider_source_id"),
             "provider_order_id": _text(provider_order_id, "provider_order_id"),
             "revision_seq": revision_seq,
-            "cumulative_settled_stake": _decimal_text(cumulative_settled_stake, "cumulative_settled_stake"),
-            "cumulative_realized_pnl": _decimal_text(cumulative_realized_pnl, "cumulative_realized_pnl"),
+            "cumulative_settled_stake": _decimal_text(
+                cumulative_settled_stake, "cumulative_settled_stake"
+            ),
+            "cumulative_realized_pnl": _decimal_text(
+                cumulative_realized_pnl, "cumulative_realized_pnl"
+            ),
         }
+        if provider_account_id is not None:
+            event["event_type"] = "account_scoped_settlement_revision"
+            event["provider_account_id"] = _text(
+                provider_account_id, "provider_account_id"
+            )
         return self._record(event)
 
     def _record(self, event: dict[str, object]) -> PnLReconciliationSnapshot:
@@ -307,7 +319,18 @@ class PnLReconciliationJournal:
                 "execution_ledger_sha256",
             }
         elif kind == "settlement_revision":
-            required = common | {"revision_seq", "cumulative_settled_stake", "cumulative_realized_pnl"}
+            required = common | {
+                "revision_seq",
+                "cumulative_settled_stake",
+                "cumulative_realized_pnl",
+            }
+        elif kind == "account_scoped_settlement_revision":
+            required = common | {
+                "provider_account_id",
+                "revision_seq",
+                "cumulative_settled_stake",
+                "cumulative_realized_pnl",
+            }
         else:
             raise ValueError("unsupported reconciliation journal event_type")
         if set(event) != required or event.get("schema_version") != _SCHEMA:
@@ -319,21 +342,22 @@ class PnLReconciliationJournal:
             raise ValueError("reconciliation journal currency does not match ledger scope")
         if event["liability_quantum"] != self._quantum_text:
             raise ValueError("reconciliation journal liability_quantum does not match ledger scope")
-        key = (source, order_id)
         if kind in {"accepted_order", "accepted_execution"}:
+            account_id: str | None = None
             stake = _decimal(event["accepted_stake"], "accepted_stake")
             odds = _decimal(event["accepted_odds"], "accepted_odds")
             _side(event["side"])
             if stake <= 0 or odds <= 1:
                 raise ValueError("accepted order requires positive stake and odds greater than one")
             if kind == "accepted_execution":
-                _text(event["execution_account_id"], "execution_account_id")
+                account_id = _text(event["execution_account_id"], "execution_account_id")
                 _text(event["execution_action_id"], "execution_action_id")
                 _text(event["execution_attempt_id"], "execution_attempt_id")
                 _sha256_text(
                     event["execution_ledger_sha256"],
                     "execution_ledger_sha256",
                 )
+            key = (source, account_id, order_id)
             if key in self._orders:
                 raise ValueError("provider order already has accepted-order evidence")
             return
@@ -342,9 +366,8 @@ class PnLReconciliationJournal:
             raise ValueError("revision_seq must be a positive integer")
         settled = _decimal(event["cumulative_settled_stake"], "cumulative_settled_stake")
         realized = _decimal(event["cumulative_realized_pnl"], "cumulative_realized_pnl")
-        order = self._orders.get(key)
-        if order is None:
-            raise ValueError("settlement revision references unknown provider order")
+        key = self._settlement_order_key(event)
+        order = self._orders[key]
         if seq != order.revision + 1:
             raise ValueError("settlement revision sequence must advance by exactly one")
         if settled < order.settled_stake:
@@ -363,18 +386,54 @@ class PnLReconciliationJournal:
                 "cumulative_realized_pnl exceeds accepted-order outcome bounds"
             )
 
+    def _settlement_order_key(
+        self,
+        event: dict[str, object],
+    ) -> tuple[str, str | None, str]:
+        source = event["provider_source_id"]
+        order_id = event["provider_order_id"]
+        if event["event_type"] == "account_scoped_settlement_revision":
+            account_id = _text(event["provider_account_id"], "provider_account_id")
+            key = (source, account_id, order_id)
+            if key not in self._orders:
+                raise ValueError("settlement revision references unknown provider order")
+            return key
+        matches = [
+            key
+            for key in self._orders
+            if key[0] == source and key[2] == order_id
+        ]
+        if not matches:
+            raise ValueError("settlement revision references unknown provider order")
+        if len(matches) != 1:
+            raise ValueError(
+                "settlement revision provider order is ambiguous across provider accounts"
+            )
+        return matches[0]
+
     def _apply(self, event: dict[str, object], encoded: bytes) -> None:
-        key = (event["provider_source_id"], event["provider_order_id"])
-        if event["event_type"] in {"accepted_order", "accepted_execution"}:
+        kind = event["event_type"]
+        if kind in {"accepted_order", "accepted_execution"}:
+            account_id = (
+                event["execution_account_id"]
+                if kind == "accepted_execution"
+                else None
+            )
+            key = (
+                event["provider_source_id"],
+                account_id,
+                event["provider_order_id"],
+            )
             self._orders[key] = _Order(
                 key[0],
-                key[1],
+                key[2],
                 event["side"],
                 _decimal(event["accepted_stake"], "accepted_stake"),
                 _decimal(event["accepted_odds"], "accepted_odds"),
                 False,
             )
         else:
+            key = self._settlement_order_key(event)
             current = self._orders[key]
             self._orders[key] = replace(
                 current, revision=event["revision_seq"],

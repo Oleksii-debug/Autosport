@@ -190,7 +190,7 @@ def test_back_won_projects_selection_win_without_claiming_finality(tmp_path) -> 
     assert evidence.settlement_content_sha256 == revision.content_sha256
     assert evidence.permanent_final is False
     assert evidence.training_label_authorized is False
-    assert require_current_binary_selection_outcome(store, evidence) is evidence
+    assert require_current_binary_selection_outcome(store, evidence) == evidence
 
 
 @pytest.mark.parametrize(

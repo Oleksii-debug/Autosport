@@ -17,6 +17,7 @@ from .decision_ledger import (
 from .integrity import atomic_write_json, ensure_durable_file, sha256_file
 from .paper import PaperBook
 from . import _paperbook_preload_authority_guard as _paperbook_authority
+from .workspace_lock import _open_read_only_descriptor
 
 
 _WINDOWS_MAX_COMPONENT_UTF16_CODE_UNITS = 255
@@ -957,14 +958,15 @@ class RunTransaction:
             ):
                 return False
             try:
-                verification = path.open("rb")
+                verification_descriptor = _open_read_only_descriptor(path)
             except OSError:
                 return False
-            with verification:
+            close_failed = False
+            try:
                 try:
                     same_file = os.path.sameopenfile(
                         handle.fileno(),
-                        verification.fileno(),
+                        verification_descriptor,
                     )
                     current_after_open = os.stat(path, follow_symlinks=False)
                 except OSError:
@@ -975,6 +977,13 @@ class RunTransaction:
                     and current_after_open.st_nlink == 1
                     and stable_metadata(expected_path_stat, current_after_open)
                 )
+            finally:
+                try:
+                    os.close(verification_descriptor)
+                except OSError:
+                    close_failed = True
+                if close_failed:
+                    return False
 
         try:
             path_before = os.stat(path, follow_symlinks=False)
@@ -996,14 +1005,23 @@ class RunTransaction:
             if path_before.st_size > max_bytes:
                 raise RunTransactionError(f"{label} exceeds bounded size")
 
+        descriptor: int | None = None
         try:
-            handle = path.open("rb")
+            descriptor = _open_read_only_descriptor(path)
+            handle = os.fdopen(descriptor, "rb", closefd=True)
+            descriptor = None
         except FileNotFoundError as exc:
             raise RunTransactionError(
                 f"{label} canonical path changed while validating"
             ) from exc
         except OSError as exc:
             raise RunTransactionError(f"{label} canonical file is unreadable") from exc
+        finally:
+            if descriptor is not None:
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
 
         with handle:
             try:

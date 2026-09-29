@@ -260,6 +260,56 @@ def test_invalid_utf8_memoryview_value_fails_closed_without_raw_bytes() -> None:
     assert b"\xff" not in bytes(redacted["provider_detail"])
 
 
+def test_configured_secret_embedded_in_set_value_is_redacted() -> None:
+    secret = "AS-MAPPING-SET-VALUE-SECRET-26b1"
+    payload = {
+        "provider_detail": {
+            "ordinary",
+            f"provider-{secret}-error",
+        },
+    }
+
+    redacted = redact_operator_value(
+        payload,
+        extra_secret_values=(secret,),
+    )
+
+    assert redacted == {
+        "provider_detail": {
+            "ordinary",
+            f"provider-{REDACTED}-error",
+        },
+    }
+    assert secret not in repr(redacted)
+
+
+def test_configured_secret_embedded_in_frozenset_value_is_redacted() -> None:
+    secret = "AS-MAPPING-FROZENSET-VALUE-SECRET-1e44"
+    payload = {
+        "provider_detail": frozenset(
+            {
+                "ordinary",
+                f"provider-{secret}-error",
+            }
+        ),
+    }
+
+    redacted = redact_operator_value(
+        payload,
+        extra_secret_values=(secret,),
+    )
+
+    assert redacted == {
+        "provider_detail": frozenset(
+            {
+                "ordinary",
+                f"provider-{REDACTED}-error",
+            }
+        ),
+    }
+    assert secret not in repr(redacted)
+
+
 class _HostileMappingKey:
     def __hash__(self) -> int:
         return 17731

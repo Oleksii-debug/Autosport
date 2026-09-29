@@ -501,6 +501,16 @@ def redact_operator_value(
             redact_operator_value(item, extra_secret_values=secrets)
             for item in value
         )
+    if type(value) is set:
+        return {
+            redact_operator_value(item, extra_secret_values=secrets)
+            for item in value
+        }
+    if type(value) is frozenset:
+        return frozenset(
+            redact_operator_value(item, extra_secret_values=secrets)
+            for item in value
+        )
     return value
 
 

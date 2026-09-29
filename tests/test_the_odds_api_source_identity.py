@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+import tempfile
+from pathlib import Path
+
+from autosport.providers import CanonicalNormalizer
+from autosport.storage import SQLiteMarketStore
 from autosport.the_odds_api_provider import HttpJsonResponse, TheOddsApiProvider
 
 
@@ -87,6 +92,85 @@ def test_equivalent_scope_order_and_api_key_rotation_share_identity() -> None:
     assert ":current:" in first.source_id
     assert "secret-a" not in first.source_id
     assert "secret-b" not in second.source_id
+
+
+def test_equivalent_effective_scope_has_identical_url_evidence_and_durable_quote() -> None:
+    payload = [
+        {
+            "id": "event-a",
+            "sport_key": "soccer_epl",
+            "commence_time": "2026-09-23T15:00:00Z",
+            "bookmakers": [
+                {
+                    "key": "betfair",
+                    "markets": [
+                        {
+                            "key": "h2h",
+                            "last_update": "2026-09-23T11:55:00Z",
+                            "outcomes": [{"name": "Draw", "price": "3.10"}],
+                        }
+                    ],
+                }
+            ],
+        }
+    ]
+    first_urls: list[str] = []
+    second_urls: list[str] = []
+
+    def first_transport(url: str, _timeout: float) -> HttpJsonResponse:
+        first_urls.append(url)
+        return HttpJsonResponse(payload, 200, {})
+
+    def second_transport(url: str, _timeout: float) -> HttpJsonResponse:
+        second_urls.append(url)
+        return HttpJsonResponse(payload, 200, {})
+
+    first = TheOddsApiProvider(
+        "same-secret",
+        sport="soccer_epl",
+        regions=("eu",),
+        bookmakers=("pinnacle", "betfair"),
+        markets=("totals", "h2h"),
+        event_ids=("event-b", "event-a"),
+        transport=first_transport,
+        clock=_clock,
+    )
+    second = TheOddsApiProvider(
+        "same-secret",
+        sport="soccer_epl",
+        regions=("us", "eu"),
+        bookmakers=("betfair", "pinnacle"),
+        markets=("h2h", "totals"),
+        event_ids=("event-a", "event-b"),
+        transport=second_transport,
+        clock=_clock,
+    )
+
+    first_quote = first.read_batch().quotes[0]
+    second_quote = second.read_batch().quotes[0]
+    assert first.source_id == second.source_id
+    assert first_urls == second_urls
+    assert first.last_request_evidence is not None
+    assert second.last_request_evidence is not None
+    assert first.last_request_evidence.regions == ()
+    assert second.last_request_evidence.regions == ()
+    assert (
+        first.last_request_evidence.source_metadata()
+        == second.last_request_evidence.source_metadata()
+    )
+    assert first_quote.metadata["request"] == second_quote.metadata["request"]
+
+    normalizer = CanonicalNormalizer()
+    first_event = normalizer.normalize(first.source_id, first_quote)
+    second_event = normalizer.normalize(second.source_id, second_quote)
+    with tempfile.TemporaryDirectory() as directory:
+        store = SQLiteMarketStore(Path(directory) / "market.db")
+        try:
+            assert store.append(first_event) is True
+            assert store.append(second_event) is False
+            assert len(store.events()) == 1
+        finally:
+            store.close()
 
 
 def test_historical_stream_is_distinct_and_binds_requested_cutoff() -> None:

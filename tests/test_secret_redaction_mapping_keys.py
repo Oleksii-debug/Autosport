@@ -209,3 +209,31 @@ def test_tuple_with_unsupported_component_fails_closed_without_rendering_compone
     assert redacted == {("provider", REDACTED): REDACTED}
     assert "provider-secret" not in repr(redacted)
 
+
+
+def test_deep_tuple_mapping_key_exhausts_depth_budget_fail_closed() -> None:
+    key: object = "ordinary-leaf"
+    for _ in range(1_500):
+        key = (key,)
+
+    redacted = redact_operator_value({key: "provider-secret"})
+
+    assert redacted == {REDACTED: REDACTED}
+    assert "provider-secret" not in repr(redacted)
+
+
+def test_wide_tuple_mapping_key_exhausts_node_budget_fail_closed() -> None:
+    key = tuple(range(300))
+
+    redacted = redact_operator_value({key: "provider-secret"})
+
+    assert redacted == {REDACTED: REDACTED}
+    assert "provider-secret" not in repr(redacted)
+
+
+def test_shallow_builtin_tuple_mapping_key_preserves_structure() -> None:
+    payload = {("market", 7, None, True, 1.5, 2 + 3j): "ordinary-value"}
+
+    redacted = redact_operator_value(payload)
+
+    assert redacted == payload

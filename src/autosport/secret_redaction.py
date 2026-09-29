@@ -9,6 +9,12 @@ from typing import Any
 
 REDACTED = "[REDACTED]"
 
+# Structured Mapping keys are presentation input. Bound recursive composite-key
+# sanitization well below Python recursion limits and cap total key nodes so a
+# hostile diagnostic payload cannot turn redaction itself into an availability sink.
+_MAPPING_KEY_MAX_TUPLE_DEPTH = 32
+_MAPPING_KEY_MAX_NODES = 256
+
 _SENSITIVE_NORMALIZED_KEYS = frozenset(
     {
         "apikey",
@@ -336,13 +342,25 @@ def _redact_operator_mapping_key(
     key: object,
     *,
     secrets: tuple[str, ...],
+    _depth: int = 0,
+    _remaining_nodes: list[int] | None = None,
 ) -> tuple[object, bool, bool]:
     """Return one safe hashable presentation key plus sensitivity/transform flags.
 
     Only exact built-in key domains are trusted for structural preservation. Unknown
     hashable classes are presentation input too; never call their __str__/__repr__ or
     publish them unchanged because either surface may carry credential material.
+
+    Tuple recursion is explicitly bounded. Exhausting either the depth or total-node
+    budget fails closed to the ordinary redaction marker and makes the associated value
+    sensitive as well.
     """
+
+    if _remaining_nodes is None:
+        _remaining_nodes = [_MAPPING_KEY_MAX_NODES]
+    if _depth > _MAPPING_KEY_MAX_TUPLE_DEPTH or _remaining_nodes[0] <= 0:
+        return REDACTED, True, True
+    _remaining_nodes[0] -= 1
 
     if type(key) is str:
         safe_key = redact_operator_text(key, extra_secret_values=secrets)
@@ -362,12 +380,22 @@ def _redact_operator_mapping_key(
         return safe_key, is_sensitive_key(decoded_key), True
 
     if type(key) is tuple:
+        if (
+            _depth >= _MAPPING_KEY_MAX_TUPLE_DEPTH
+            or len(key) > _remaining_nodes[0]
+        ):
+            return REDACTED, True, True
         safe_parts: list[object] = []
         key_is_sensitive = False
         key_was_transformed = False
         for part in key:
             safe_part, part_is_sensitive, part_was_transformed = (
-                _redact_operator_mapping_key(part, secrets=secrets)
+                _redact_operator_mapping_key(
+                    part,
+                    secrets=secrets,
+                    _depth=_depth + 1,
+                    _remaining_nodes=_remaining_nodes,
+                )
             )
             safe_parts.append(safe_part)
             key_is_sensitive = key_is_sensitive or part_is_sensitive

@@ -133,6 +133,17 @@ class _ExplicitTransientPostTransport:
         raise TimeoutError("explicit transient fixture")
 
 
+class _TransientThenSuccessPostTransport:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def post(self, url, *, headers, body, timeout_seconds):
+        self.calls += 1
+        if self.calls == 1:
+            raise TimeoutError("first attempt is explicitly transient")
+        return _response()
+
+
 def _request() -> BetdaqGetPricesRequest:
     return BetdaqGetPricesRequest(17, (9001,), Decimal("1.50"))
 
@@ -261,6 +272,31 @@ def test_provider_retries_only_preserved_explicit_transient_signal(tmp_path) -> 
     assert provider.last_request_evidence is None
 
 
+def test_retry_then_success_binds_both_rate_admissions_to_request_evidence(tmp_path) -> None:
+    post = _TransientThenSuccessPostTransport()
+    governor, _ = _rate_governor(tmp_path)
+    provider = _provider(post, max_attempts=2, rate_governor=governor)
+
+    batch = provider.read_batch()
+
+    assert len(batch.quotes) == 2
+    assert post.calls == 2
+    evidence = provider.last_request_evidence
+    assert evidence is not None
+    request = evidence.requests[0]
+    assert request.attempts == 2
+    assert len(request.rate_admission_receipts) == 2
+    assert request.rate_admission_receipts[0] != request.rate_admission_receipts[1]
+    admission = provider.live_transport.last_rate_admission
+    assert admission is not None
+    assert request.rate_admission_receipts[-1] == admission.receipt_sha256
+    assert admission.sequence == 2
+    assert admission.grants_execution_authority is False
+    assert admission.grants_write_permission is False
+    assert admission.grants_freshness is False
+    assert admission.multi_process_safe is False
+
+
 def test_rate_cold_start_denial_occurs_before_http_dispatch(tmp_path) -> None:
     post = _PostTransport()
     governor, _ = _rate_governor(tmp_path, release_cold_start=False)
@@ -310,6 +346,12 @@ def test_live_provider_keeps_origin_unverified_after_valid_snapshot(tmp_path) ->
     assert evidence is not None
     assert evidence.provider_origin_verified is False
     assert evidence.live_entitlement_verified is False
+    assert len(evidence.requests[0].rate_admission_receipts) == 1
+    admission = provider.live_transport.last_rate_admission
+    assert admission is not None
+    assert evidence.requests[0].rate_admission_receipts == (
+        admission.receipt_sha256,
+    )
 
 
 def test_default_live_provider_composes_canonical_transport_without_origin_promotion(tmp_path) -> None:

@@ -332,6 +332,12 @@ def test_authenticated_app_active_must_be_exact_bool(monkeypatch, active):
         _canonical_network_capture(monkeypatch, active=active)
 
 
+@pytest.mark.parametrize("owner_managed", [0, 1, "true", None, [], {}])
+def test_authenticated_owner_managed_must_be_exact_bool(monkeypatch, owner_managed):
+    with pytest.raises(BetfairMarketBookFreshnessError, match="ownerManaged must be bool"):
+        _canonical_network_capture(monkeypatch, owner_managed=owner_managed)
+
+
 def test_credential_rotation_between_capture_and_authority_registration_fails(monkeypatch):
     client = BetfairReadOnlyClient(
         BetfairSessionCredentials("app-secret", "session-secret"),

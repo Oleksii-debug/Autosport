@@ -148,9 +148,12 @@ def _authenticated_application_key_context(
             version_id = _positive_int(
                 version.get("versionId"), "application_version_id"
             )
-            delay_data = _base._provider_bool(version, "delayData")
-            active = _base._provider_bool(version, "active")
-            owner_managed = _base._provider_bool(version, "ownerManaged")
+            try:
+                delay_data = _base._provider_bool(version, "delayData")
+                active = _base._provider_bool(version, "active")
+                owner_managed = _base._provider_bool(version, "ownerManaged")
+            except _base.BetfairReadOnlyError as exc:
+                raise BetfairMarketBookFreshnessError(str(exc)) from exc
             matches.append(
                 (app_id, version_id, delay_data, active, owner_managed)
             )

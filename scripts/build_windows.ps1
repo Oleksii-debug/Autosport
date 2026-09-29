@@ -914,6 +914,10 @@ if ($LASTEXITCODE -ne 0) { throw "Packaged Autosport-Data.exe build-corpus --hel
 if ($LASTEXITCODE -ne 0) { throw "Packaged Autosport-Data.exe build-corpus-from-bundle --help exited $LASTEXITCODE" }
 & $dataExe import-betfair-historical --help | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "Packaged Autosport-Data.exe import-betfair-historical --help exited $LASTEXITCODE" }
+& $dataExe run-product --help | Out-Null
+if ($LASTEXITCODE -ne 0) { throw "Packaged Autosport-Data.exe run-product --help exited $LASTEXITCODE" }
+& $dataExe observe-continuous --help | Out-Null
+if ($LASTEXITCODE -ne 0) { throw "Packaged Autosport-Data.exe observe-continuous --help exited $LASTEXITCODE" }
 & $dataExe verify-dataset examples/tt_demo | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "Packaged Autosport-Data.exe verify-dataset exited $LASTEXITCODE" }
 
@@ -1096,6 +1100,10 @@ if ($LASTEXITCODE -ne 0) { throw "Fresh-extracted Autosport-Data.exe build-corpu
 if ($LASTEXITCODE -ne 0) { throw "Fresh-extracted Autosport-Data.exe build-corpus-from-bundle --help exited $LASTEXITCODE" }
 & $extractedDataExe import-betfair-historical --help | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "Fresh-extracted Autosport-Data.exe import-betfair-historical --help exited $LASTEXITCODE" }
+& $extractedDataExe run-product --help | Out-Null
+if ($LASTEXITCODE -ne 0) { throw "Fresh-extracted Autosport-Data.exe run-product --help exited $LASTEXITCODE" }
+& $extractedDataExe observe-continuous --help | Out-Null
+if ($LASTEXITCODE -ne 0) { throw "Fresh-extracted Autosport-Data.exe observe-continuous --help exited $LASTEXITCODE" }
 & $extractedDataExe verify-dataset (Join-Path $packageRoot 'examples/tt_demo') | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "Fresh-extracted Autosport-Data.exe verify-dataset exited $LASTEXITCODE" }
 

@@ -36,7 +36,7 @@ class _ClearedOrderWithProviderRowDigest(_BASE_ORDER):
     provider_row_sha256: str = ""
 
     def __post_init__(self) -> None:
-        super().__post_init__()
+        _BASE_ORDER.__post_init__(self)
         _settlement._sha(self.provider_row_sha256, "provider_row_sha256")
 
 

@@ -38,6 +38,7 @@ from .causal_collector import CollectorDeltaStore
 from .forward_universe_precommit_authority import ForwardUniversePrecommitLocator
 from .json_integrity import strict_json_loads
 from .monotonic_workspace_authority import (
+    AuthorityPhase,
     AuthorityRecord,
     MonotonicWorkspaceAuthority,
     MonotonicWorkspaceAuthorityError,
@@ -62,6 +63,8 @@ _CANONICAL_PRESTART_PREPARER = prepare_scheduled_source_universe
 _CANONICAL_NEXT_SLOT = CollectorDeltaStore._next_collector_schedule_slot
 _CANONICAL_GATE_STATUS = CollectorDeltaStore._collector_schedule_start_gate_status
 _CANONICAL_GATE_AUTHORIZE = CollectorDeltaStore._authorize_collector_schedule_start_gate
+_CANONICAL_SCHEDULE_ID = CollectorDeltaStore._collector_schedule_id
+_CANONICAL_SCHEDULE_DUE_AT = CollectorDeltaStore._collector_schedule_due_at
 _CANONICAL_STORE_SEAMS = frozenset(
     {
         "_next_collector_schedule_slot",
@@ -364,15 +367,7 @@ class CampaignInceptionReceipt:
 def _require_store_seams(store: CollectorDeltaStore) -> None:
     if type(store) is not CollectorDeltaStore:
         raise TypeError("store must be the exact canonical CollectorDeltaStore")
-    rebound = sorted(
-        name
-        for name, expected in _CANONICAL_STORE_CLASS_SEAMS.items()
-        if inspect.getattr_static(CollectorDeltaStore, name, None) is not expected
-    )
-    if rebound:
-        raise CampaignInceptionIntegrityError(
-            "collector store campaign seam is class-rebound: " + ", ".join(rebound)
-        )
+    _require_store_seams_class_only()
     instance_state = vars(store)
     rebound = sorted(name for name in _CANONICAL_STORE_SEAMS if name in instance_state)
     if rebound:
@@ -652,6 +647,107 @@ def _record_for_recovery(recovery: object) -> AuthorityRecord:
     return record
 
 
+def _expected_schedule_id(spec: CampaignInceptionSourceSpec) -> str:
+    _require_store_seams_class_only()
+    try:
+        result = _CANONICAL_SCHEDULE_ID(
+            source_id=spec.source_id,
+            run_id=spec.run_id,
+            stream_epoch=spec.stream_epoch,
+            anchor_at=spec.anchor_at,
+            interval_seconds=repr(spec.interval_seconds),
+            max_items=spec.max_items,
+            evaluation_start_slot_ordinal=spec.evaluation_start_slot_ordinal,
+            evaluation_end_slot_ordinal=spec.evaluation_end_slot_ordinal,
+        )
+    except (TypeError, ValueError) as exc:
+        raise CampaignInceptionIntegrityError(
+            "cannot compute canonical collector schedule identity"
+        ) from exc
+    return _sha256(result, "expected schedule_id")
+
+
+def _prepared_payload_from_existing_gate(
+    *,
+    store: CollectorDeltaStore,
+    spec: CampaignInceptionSourceSpec,
+    gate_binding_sha256: str,
+) -> dict[str, object]:
+    """Reconstruct the original slot-zero preparation without creating authority."""
+
+    _require_store_seams(store)
+    if Path(os.path.abspath(store.path)) != spec.expected_store_path:
+        raise CampaignInceptionIntegrityError(
+            "collector store path changed from campaign receipt"
+        )
+    try:
+        slot = _CANONICAL_NEXT_SLOT(
+            store,
+            source_id=spec.source_id,
+            run_id=spec.run_id,
+        )
+        gate = _CANONICAL_GATE_STATUS(
+            store,
+            source_id=spec.source_id,
+            run_id=spec.run_id,
+        )
+        due_zero = _CANONICAL_SCHEDULE_DUE_AT(
+            anchor_at=spec.anchor_at,
+            interval_seconds=repr(spec.interval_seconds),
+            slot_ordinal=0,
+        )
+    except (TypeError, ValueError) as exc:
+        raise CampaignInceptionIntegrityError(
+            "committed campaign schedule/gate cannot be re-resolved"
+        ) from exc
+    _require_store_seams(store)
+    if type(slot) is not dict or type(gate) is not dict:
+        raise CampaignInceptionIntegrityError(
+            "committed campaign schedule/gate evidence is missing"
+        )
+    expected_id = _expected_schedule_id(spec)
+    if (
+        slot.get("schedule_id") != expected_id
+        or slot.get("stream_epoch") != spec.stream_epoch
+        or slot.get("max_items") != spec.max_items
+        or gate.get("schedule_id") != expected_id
+        or gate.get("gate_binding_sha256") != gate_binding_sha256
+    ):
+        raise CampaignInceptionIntegrityError(
+            "committed campaign schedule/gate identity changed"
+        )
+    payload: dict[str, object] = {
+        "schema_version": 1,
+        "source_id": spec.source_id,
+        "run_id": spec.run_id,
+        "stream_epoch": spec.stream_epoch,
+        "schedule_id": expected_id,
+        "schedule_policy": "fixed_interval_v1",
+        "anchor_at": spec.anchor_at,
+        "interval_seconds": repr(spec.interval_seconds),
+        "max_items": spec.max_items,
+        "evaluation_start_slot_ordinal": spec.evaluation_start_slot_ordinal,
+        "evaluation_end_slot_ordinal": spec.evaluation_end_slot_ordinal,
+        "next_slot_ordinal": 0,
+        "next_due_at": due_zero,
+        "gate_binding_sha256": gate_binding_sha256,
+    }
+    payload["prestart_sha256"] = _digest(payload)
+    return payload
+
+
+def _require_store_seams_class_only() -> None:
+    rebound = sorted(
+        name
+        for name, expected in _CANONICAL_STORE_CLASS_SEAMS.items()
+        if inspect.getattr_static(CollectorDeltaStore, name, None) is not expected
+    )
+    if rebound:
+        raise CampaignInceptionIntegrityError(
+            "collector store campaign seam is class-rebound: " + ", ".join(rebound)
+        )
+
+
 def _resolve_gate_and_authorize(
     *,
     store: CollectorDeltaStore,
@@ -689,8 +785,10 @@ def _resolve_gate_and_authorize(
         prepared.get("gate_binding_sha256"),
         "gate_binding_sha256",
     )
+    expected_schedule_id = _expected_schedule_id(spec)
     if (
-        slot.get("schedule_id") != schedule_id
+        schedule_id != expected_schedule_id
+        or slot.get("schedule_id") != schedule_id
         or slot.get("stream_epoch") != spec.stream_epoch
         or slot.get("max_items") != spec.max_items
         or gate.get("schedule_id") != schedule_id
@@ -834,6 +932,81 @@ def establish_campaign_inception(
             return _issue_receipt(
                 precommit=precommit,
                 prepared=prepared,
+                spec=source_spec,
+                semantic_binding_sha256=semantic,
+                state_sha256=state_sha256,
+                record=record,
+            )
+
+        try:
+            history = authority.read_history()
+        except MonotonicWorkspaceAuthorityError as exc:
+            raise CampaignInceptionIntegrityError(
+                "cannot read campaign inception independent authority"
+            ) from exc
+        latest_commit = next(
+            (
+                record
+                for record in reversed(history)
+                if record.phase is AuthorityPhase.COMMIT
+            ),
+            None,
+        )
+        if latest_commit is not None:
+            if history[-1].phase is AuthorityPhase.PREPARE:
+                raise CampaignInceptionIntegrityError(
+                    "campaign inception authority has pending state but local receipt is missing"
+                )
+            prepared_payload = _prepared_payload_from_existing_gate(
+                store=store,
+                spec=source_spec,
+                gate_binding_sha256=gate_binding,
+            )
+            semantic = _semantic_binding_sha256(
+                precommit=precommit,
+                spec=source_spec,
+                prepared=prepared_payload,
+            )
+            reconstructed = {
+                "schema": SCHEMA,
+                "schema_version": SCHEMA_VERSION,
+                "tx_id": latest_commit.tx_id,
+                "semantic_binding_sha256": semantic,
+                "precommit": dict(precommit),
+                "source_spec": source_spec.payload(),
+                "prepared_schedule": prepared_payload,
+            }
+            state_sha256 = _digest(reconstructed)
+            if (
+                latest_commit.intended_state_sha256 != state_sha256
+                or latest_commit.semantic_binding_sha256 != semantic
+            ):
+                raise CampaignInceptionIntegrityError(
+                    "missing local receipt cannot be reconstructed from committed authority"
+                )
+            _write_state(state_path, reconstructed)
+            try:
+                recovery = authority.recover(
+                    observed_state_sha256=state_sha256,
+                )
+            except MonotonicWorkspaceAuthorityError as exc:
+                raise CampaignInceptionIntegrityError(
+                    "reconstructed campaign inception receipt is not current"
+                ) from exc
+            record = _record_for_recovery(recovery)
+            if record.record_sha256 != latest_commit.record_sha256:
+                raise CampaignInceptionIntegrityError(
+                    "reconstructed campaign receipt authority tip changed"
+                )
+            _resolve_gate_and_authorize(
+                store=store,
+                spec=source_spec,
+                prepared=prepared_payload,
+                authority_record_sha256=record.record_sha256,
+            )
+            return _issue_receipt(
+                precommit=precommit,
+                prepared=prepared_payload,
                 spec=source_spec,
                 semantic_binding_sha256=semantic,
                 state_sha256=state_sha256,

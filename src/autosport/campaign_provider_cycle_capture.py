@@ -37,7 +37,6 @@ _HEX = frozenset("0123456789abcdef")
 
 _CAPTURE = capture_parlay_complete_game_board
 _EVIDENCE_SAVE = CompleteGameBoardEvidenceStore.save
-_EVIDENCE_LOAD = CompleteGameBoardEvidenceStore.load
 _NEXT_SLOT = CollectorDeltaStore._next_collector_schedule_slot
 _BEGIN_SCHEDULED = CollectorDeltaStore._begin_scheduled_collector_cycle
 _RECORD_ARTIFACT = CollectorDeltaStore._record_collector_cycle_observation_artifact
@@ -63,7 +62,6 @@ _STORE_CLASS_SEAMS = {
 }
 _EVIDENCE_CLASS_SEAMS = {
     "save": inspect.getattr_static(CompleteGameBoardEvidenceStore, "save"),
-    "load": inspect.getattr_static(CompleteGameBoardEvidenceStore, "load"),
 }
 
 
@@ -171,7 +169,7 @@ def _require_canonical_seams(
         )
     evidence_state = vars(evidence_store)
     rebound = sorted(
-        name for name in ("save", "load") if name in evidence_state
+        name for name in ("save",) if name in evidence_state
     )
     if rebound:
         raise CampaignProviderCycleCaptureIntegrityError(
@@ -327,14 +325,13 @@ def capture_campaign_complete_game_board(
             raise CampaignProviderCycleCaptureIntegrityError(
                 "provider capture returned noncanonical snapshot type"
             )
-        _EVIDENCE_SAVE(evidence_store, snapshot)
-        proven = _EVIDENCE_LOAD(evidence_store, snapshot.evidence_sha256)
-        if (
-            type(proven) is not CompleteGameBoardSnapshot
-            or proven.to_payload() != snapshot.to_payload()
+        evidence_path = _EVIDENCE_SAVE(evidence_store, snapshot)
+        repeated_path = _EVIDENCE_SAVE(evidence_store, snapshot)
+        if evidence_path != repeated_path or evidence_path.name != (
+            snapshot.evidence_sha256 + ".json"
         ):
             raise CampaignProviderCycleCaptureIntegrityError(
-                "provider evidence store did not re-resolve exact captured snapshot"
+                "provider evidence store did not retain exact captured identity"
             )
         artifact = _RECORD_ARTIFACT(
             store,

@@ -318,6 +318,15 @@ class BetfairExecutionReadbackEnvelope:
     _authority_capture_fingerprint: str | None = field(
         default=None, init=False, repr=False, compare=False
     )
+    _authority_capture_started_at: str | None = field(
+        default=None, init=False, repr=False, compare=False
+    )
+    _authority_capture_started_monotonic_ns: int | None = field(
+        default=None, init=False, repr=False, compare=False
+    )
+    _authority_capture_start_fingerprint: str | None = field(
+        default=None, init=False, repr=False, compare=False
+    )
 
     def __post_init__(self) -> None:
         self._validate()
@@ -1253,9 +1262,11 @@ def _install_execution_readback_authority() -> None:
     require_identity = account_identity.require_authoritative_betfair_account_identity
 
     def require_executable_authority() -> None:
+        # read_execution_readback is intentionally composed by the timeout
+        # capture-start authority later in package import. Pin this lower callable's
+        # own code and the envelope assertion, not the mutable class dispatch slot.
         if (
-            client_type.read_execution_readback is not authoritative_read
-            or authoritative_read.__code__ is not authoritative_read_code
+            authoritative_read.__code__ is not authoritative_read_code
             or envelope_type.assert_authoritative is not assert_authoritative
             or assert_authoritative.__code__ is not assert_authoritative_code
             or raw_read.__code__ is not raw_read_code

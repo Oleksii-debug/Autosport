@@ -230,6 +230,21 @@ def _sealed(function: FunctionType, label: str) -> FunctionType:
     return _clone_function(sealed, trusted_globals=trusted_globals)
 
 
+def _require_store_append_surface(store) -> None:
+    """Require exact class dispatch and no instance shadow for canonical append."""
+
+    if type(store) is not _TRUSTED_STORE_TYPE:
+        raise RuntimeError("factory publish store type changed after composition")
+    instance_state = getattr(store, "__dict__", None)
+    if type(instance_state) is dict and "_append_publish_commit_record" in instance_state:
+        raise RuntimeError("factory publish append instance dispatch changed")
+    if (
+        vars(_TRUSTED_STORE_TYPE).get("_append_publish_commit_record")
+        is not _TRUSTED_APPEND_DISPATCH
+    ):
+        raise RuntimeError("factory publish append class dispatch changed")
+
+
 def _install() -> None:
     store_type = _factory.FactoryArtifactStore
     runner_type = _factory.ExperimentRunner
@@ -242,8 +257,8 @@ def _install() -> None:
         raise RuntimeError("canonical factory publish issuer authority changed before sealing")
 
     # The low-level append implementation deliberately does not reread ScientificRegistry:
-    # that check belongs to the existing canonical issuer.  Keep append private in fact,
-    # not merely by naming convention, through a closure-owned per-context capability.
+    # that check belongs to the existing canonical issuer. Keep append private in fact,
+    # not merely by naming convention, through a product-owned per-context capability.
     append_capability = object()
     active_append: ContextVar[object | None] = ContextVar(
         "autosport_factory_publish_append_capability_v1",
@@ -253,21 +268,51 @@ def _install() -> None:
     sealed_record = _sealed(original_record, "factory publish issuer")
 
     def gated_append(self, transaction):
-        if active_append.get() is not append_capability:
+        if _TRUSTED_ACTIVE_APPEND.get() is not _TRUSTED_APPEND_CAPABILITY:
             raise ValueError(
                 "factory publish append requires the canonical transaction issuer"
             )
-        return sealed_append(self, transaction)
+        return _TRUSTED_SEALED_APPEND(self, transaction)
+
+    gated_globals: dict[str, object] = dict(gated_append.__globals__)
+    gated_globals["_TRUSTED_ACTIVE_APPEND"] = active_append
+    gated_globals["_TRUSTED_APPEND_CAPABILITY"] = append_capability
+    gated_globals["_TRUSTED_SEALED_APPEND"] = sealed_append
+    gated_append = _clone_function(gated_append, trusted_globals=gated_globals)
+
+    append_surface_globals: dict[str, object] = dict(
+        _require_store_append_surface.__globals__
+    )
+    append_surface_globals["_TRUSTED_STORE_TYPE"] = store_type
+    append_surface_globals["_TRUSTED_APPEND_DISPATCH"] = gated_append
+    require_append_surface = _clone_function(
+        _require_store_append_surface,
+        trusted_globals=append_surface_globals,
+    )
 
     def canonical_record(registry, store):
-        token = active_append.set(append_capability)
+        # Keep this closure identity as an additional mutation witness. The actual
+        # authority-bearing target and append-surface verifier live in private globals.
+        if sealed_record is not _TRUSTED_SEALED_RECORD:
+            raise RuntimeError("factory publish issuer closure changed after composition")
+        _TRUSTED_REQUIRE_APPEND_SURFACE(store)
+        token = _TRUSTED_ACTIVE_APPEND.set(_TRUSTED_APPEND_CAPABILITY)
         try:
-            return sealed_record(registry, store)
+            result = _TRUSTED_SEALED_RECORD(registry, store)
+            _TRUSTED_REQUIRE_APPEND_SURFACE(store)
+            return result
         finally:
-            active_append.reset(token)
+            _TRUSTED_ACTIVE_APPEND.reset(token)
+
+    record_globals: dict[str, object] = dict(canonical_record.__globals__)
+    record_globals["_TRUSTED_SEALED_RECORD"] = sealed_record
+    record_globals["_TRUSTED_REQUIRE_APPEND_SURFACE"] = require_append_surface
+    record_globals["_TRUSTED_ACTIVE_APPEND"] = active_append
+    record_globals["_TRUSTED_APPEND_CAPABILITY"] = append_capability
+    canonical_record = _clone_function(canonical_record, trusted_globals=record_globals)
 
     # Route both public composition names and the owning guard's internal recovery
-    # aliases through the same private capability.  A caller must not bypass the
+    # aliases through the same private capability. A caller must not bypass the
     # class gate by invoking the guard module's original append function directly.
     store_type._append_publish_commit_record = gated_append
     _guard._append_publish_commit_record = gated_append

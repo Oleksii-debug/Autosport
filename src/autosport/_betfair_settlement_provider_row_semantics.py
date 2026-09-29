@@ -1,21 +1,23 @@
-"""Preserve correction-relevant Betfair cleared-order row semantics in #1272.
+"""Preserve correction-relevant Betfair cleared-order facts in #1272.
 
-The canonical read-only adapter binds every order to the exact JSON-RPC response hash,
-but that response hash also includes the per-request JSON-RPC id and therefore changes
-on an otherwise identical re-read. Conversely, the normalized settlement projection
-historically discarded provider fields such as ``betOutcome`` before revision identity
-was computed.
+The read-only adapter intentionally normalizes provider rows into a small stable DTO.
+Betfair ``betOutcome`` is correction-relevant settlement truth, however, and was being
+discarded before the append-only settlement revision authority computed content
+identity.  Raw JSON-RPC response hashes cannot substitute for this fact because their
+request/response ids change on otherwise identical rereads.
 
-This composition layer keeps the existing adapter and settlement store as the sole
-authorities. It fingerprints the canonical validated BET-level provider facts plus the
-provider ``betOutcome`` fact before that fact is discarded, carries that digest only as
-an internal observation subtype, and persists it in the settlement revision's existing
-``source_payload_sha256`` slot. Revision content identity includes the same digest.
-Thus a betOutcome-only provider correction creates a new immutable revision, while an
-identical provider row observed through a later JSON-RPC request id remains idempotent.
+This composition layer keeps the existing adapter, capture issuance registry and
+settlement store as the sole authorities.  The canonical parser carries the validated
+optional provider ``betOutcome`` through one private observation subtype.  The existing
+settlement revision type is extended in-place at package composition with a persisted,
+readable ``bet_outcome`` fact; revision content identity includes that fact while the
+existing raw response and capture evidence hashes keep their original meaning.
+
+No provider write, settlement-finality or real-money capability is introduced.
 """
 from __future__ import annotations
 
+from contextvars import ContextVar
 from dataclasses import dataclass
 
 from . import betfair_account_readonly as _adapter
@@ -25,45 +27,103 @@ from . import betfair_settlement_revisions as _settlement
 _BASE_ORDER = _adapter.BetfairClearedOrderObservation
 _BASE_EVIDENCE = _adapter.BetfairEvidence
 _ORIGINAL_PARSE = _adapter._parse_cleared_order
-_ORIGINAL_MATCH = _settlement._match_order
-_ORIGINAL_INGEST_PAYLOAD = _settlement._semantic_payload
-_REVISION_TYPE = _settlement.BetfairSettlementRevision
-_ORIGINAL_REVISION_PAYLOAD = _REVISION_TYPE.semantic_payload
+_ORIGINAL_SEMANTIC_PAYLOAD = _settlement._semantic_payload
+_BASE_REVISION = _settlement.BetfairSettlementRevision
+_STORE_TYPE = _settlement.BetfairSettlementRevisionStore
+_ORIGINAL_INGEST = _STORE_TYPE.ingest
+_NO_OUTCOME_CONTEXT = object()
+_MISSING_OUTCOME = object()
+_OUTCOME_CONTEXT: ContextVar[object] = ContextVar(
+    "autosport_betfair_settlement_outcome",
+    default=_NO_OUTCOME_CONTEXT,
+)
 
 
 @dataclass(frozen=True, slots=True)
-class _ClearedOrderWithProviderRowDigest(_BASE_ORDER):
-    provider_row_sha256: str = ""
+class _ClearedOrderWithOutcome(_BASE_ORDER):
+    bet_outcome: str | None = None
 
     def __post_init__(self) -> None:
         _BASE_ORDER.__post_init__(self)
-        _settlement._sha(self.provider_row_sha256, "provider_row_sha256")
+        _adapter._optional_text(self.bet_outcome, "bet_outcome")
 
 
-def _provider_row_digest(order: _BASE_ORDER, raw) -> str:
-    bet_outcome = _adapter._provider_optional_text(raw, "betOutcome", "bet_outcome")
-    return _settlement._digest(
-        {
-            "bet_id": order.bet_id,
-            "market_id": order.market_id,
-            "event_id": order.event_id,
-            "selection_id": order.selection_id,
-            "side": order.side,
-            "bet_status": order.bet_status,
-            "placed_date": order.placed_date,
-            "settled_date": order.settled_date,
-            "price_requested": format(order.price_requested, "f"),
-            "price_matched": format(order.price_matched, "f"),
-            "size_settled": format(order.size_settled, "f"),
-            "profit": format(order.profit, "f"),
-            "customer_order_ref": order.customer_order_ref,
-            "customer_strategy_ref": order.customer_strategy_ref,
-            "bet_outcome": bet_outcome,
+@dataclass(frozen=True, slots=True)
+class _SettlementRevisionWithOutcome(_BASE_REVISION):
+    bet_outcome: object = _MISSING_OUTCOME
+
+    def __post_init__(self) -> None:
+        outcome = self.bet_outcome
+        if outcome is _MISSING_OUTCOME:
+            outcome = _OUTCOME_CONTEXT.get()
+            if outcome is _NO_OUTCOME_CONTEXT:
+                raise _settlement.BetfairSettlementRevisionError(
+                    "settlement revision lacks provider betOutcome context"
+                )
+            object.__setattr__(self, "bet_outcome", outcome)
+        if outcome is not None:
+            _settlement._text(outcome, "bet_outcome")
+        _BASE_REVISION.__post_init__(self)
+
+    def semantic_payload(self) -> dict[str, str | None]:
+        payload = _BASE_REVISION.semantic_payload(self)
+        payload["bet_outcome"] = self.bet_outcome  # type: ignore[assignment]
+        return payload
+
+    @classmethod
+    def from_dict(cls, raw: object) -> "_SettlementRevisionWithOutcome":
+        if type(raw) is not dict:
+            raise _settlement.BetfairSettlementRevisionError(
+                "revision must be JSON object"
+            )
+        required = {
+            "revision_id",
+            "previous_revision_id",
+            "revision_number",
+            "bookmaker_id",
+            "account_id",
+            "adapter_id",
+            "adapter_version",
+            "plan_id",
+            "action_id",
+            "attempt_id",
+            "external_bet_id",
+            "event_id",
+            "market_id",
+            "selection_id",
+            "side",
+            "provider_status",
+            "placed_date",
+            "settled_date",
+            "price_requested",
+            "price_matched",
+            "size_settled",
+            "provider_profit",
+            "available_at",
+            "source_payload_sha256",
+            "capture_evidence_sha256",
+            "content_sha256",
+            "bet_outcome",
         }
-    )
+        if set(raw) != required:
+            raise _settlement.BetfairSettlementRevisionError(
+                "revision fields are not canonical"
+            )
+        values = dict(raw)
+        for field in (
+            "price_requested",
+            "price_matched",
+            "size_settled",
+            "provider_profit",
+        ):
+            values[field] = _settlement._dec(values[field], field)
+        outcome = values["bet_outcome"]
+        if outcome is not None:
+            _settlement._text(outcome, "bet_outcome")
+        return cls(**values)
 
 
-def _parse_cleared_order_with_provider_row_digest(
+def _parse_cleared_order_with_outcome(
     value: object,
     evidence: _BASE_EVIDENCE,
     index: int,
@@ -71,8 +131,8 @@ def _parse_cleared_order_with_provider_row_digest(
 ) -> _BASE_ORDER:
     order = _ORIGINAL_PARSE(value, evidence, index, bet_status)
     raw = _adapter._mapping(value, f"clearedOrders[{index}]")
-    row_sha256 = _provider_row_digest(order, raw)
-    return _ClearedOrderWithProviderRowDigest(
+    outcome = _adapter._provider_optional_text(raw, "betOutcome", "bet_outcome")
+    return _ClearedOrderWithOutcome(
         bet_id=order.bet_id,
         market_id=order.market_id,
         selection_id=order.selection_id,
@@ -88,81 +148,69 @@ def _parse_cleared_order_with_provider_row_digest(
         customer_strategy_ref=order.customer_strategy_ref,
         evidence=order.evidence,
         event_id=order.event_id,
-        provider_row_sha256=row_sha256,
+        bet_outcome=outcome,
     )
 
 
-def _match_order_with_provider_row_digest(action, capture):
-    order = _ORIGINAL_MATCH(action, capture)
-    if type(order) is not _ClearedOrderWithProviderRowDigest:
-        raise _settlement.BetfairSettlementRevisionError(
-            "settlement cleared row lacks canonical provider-row identity"
-        )
-    row_evidence = _BASE_EVIDENCE(
-        observed_at=order.evidence.observed_at,
-        source_payload_sha256=order.provider_row_sha256,
-    )
-    return _BASE_ORDER(
-        bet_id=order.bet_id,
-        market_id=order.market_id,
-        selection_id=order.selection_id,
-        side=order.side,
-        bet_status=order.bet_status,
-        placed_date=order.placed_date,
-        settled_date=order.settled_date,
-        price_requested=order.price_requested,
-        price_matched=order.price_matched,
-        size_settled=order.size_settled,
-        profit=order.profit,
-        customer_order_ref=order.customer_order_ref,
-        customer_strategy_ref=order.customer_strategy_ref,
-        evidence=row_evidence,
-        event_id=order.event_id,
-    )
-
-
-def _semantic_payload_with_provider_row(
+def _semantic_payload_with_outcome(
     action,
     capture,
     order,
     plan_id: str,
     attempt_id: str,
 ):
-    payload = _ORIGINAL_INGEST_PAYLOAD(
+    if type(order) is not _ClearedOrderWithOutcome:
+        raise _settlement.BetfairSettlementRevisionError(
+            "settlement cleared row lacks canonical provider betOutcome semantics"
+        )
+    outcome = order.bet_outcome
+    _OUTCOME_CONTEXT.set(outcome)
+    payload = _ORIGINAL_SEMANTIC_PAYLOAD(
         action,
         capture,
         order,
         plan_id,
         attempt_id,
     )
-    payload["source_payload_sha256"] = _settlement._sha(
-        order.evidence.source_payload_sha256,
-        "source_payload_sha256",
-    )
+    payload["bet_outcome"] = outcome
     return payload
 
 
-def _revision_semantic_payload_with_provider_row(self):
-    payload = _ORIGINAL_REVISION_PAYLOAD(self)
-    payload["source_payload_sha256"] = _settlement._sha(
-        self.source_payload_sha256,
-        "source_payload_sha256",
-    )
-    return payload
+def _ingest_with_outcome_context(
+    self,
+    ledger,
+    *,
+    plan_id: str,
+    attempt_id: str,
+    action,
+    capture,
+):
+    token = _OUTCOME_CONTEXT.set(_NO_OUTCOME_CONTEXT)
+    try:
+        return _ORIGINAL_INGEST(
+            self,
+            ledger,
+            plan_id=plan_id,
+            attempt_id=attempt_id,
+            action=action,
+            capture=capture,
+        )
+    finally:
+        _OUTCOME_CONTEXT.reset(token)
 
 
 if _adapter._parse_cleared_order is not _ORIGINAL_PARSE:
-    raise RuntimeError("Betfair cleared-order parser changed before row-semantics install")
-if _settlement._match_order is not _ORIGINAL_MATCH:
-    raise RuntimeError("Betfair settlement match dispatch changed before row-semantics install")
-if _settlement._semantic_payload is not _ORIGINAL_INGEST_PAYLOAD:
-    raise RuntimeError("Betfair settlement semantic payload changed before row-semantics install")
-if _REVISION_TYPE.semantic_payload is not _ORIGINAL_REVISION_PAYLOAD:
-    raise RuntimeError("Betfair settlement revision payload changed before row-semantics install")
+    raise RuntimeError("Betfair cleared-order parser changed before outcome install")
+if _settlement._semantic_payload is not _ORIGINAL_SEMANTIC_PAYLOAD:
+    raise RuntimeError("Betfair settlement semantic payload changed before outcome install")
+if _settlement.BetfairSettlementRevision is not _BASE_REVISION:
+    raise RuntimeError("Betfair settlement revision type changed before outcome install")
+if _STORE_TYPE.ingest is not _ORIGINAL_INGEST:
+    raise RuntimeError("Betfair settlement ingest changed before outcome install")
 
-_adapter._parse_cleared_order = _parse_cleared_order_with_provider_row_digest
-_settlement._match_order = _match_order_with_provider_row_digest
-_settlement._semantic_payload = _semantic_payload_with_provider_row
-_REVISION_TYPE.semantic_payload = _revision_semantic_payload_with_provider_row
+_adapter._parse_cleared_order = _parse_cleared_order_with_outcome
+_settlement._semantic_payload = _semantic_payload_with_outcome
+_settlement.BetfairSettlementRevision = _SettlementRevisionWithOutcome
+_STORE_TYPE.ingest = _ingest_with_outcome_context
 
 __all__: list[str] = []

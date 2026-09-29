@@ -179,6 +179,9 @@ class ResolvedFixedNIidSamplingStructure:
     risk_scope: str = _SCOPE
     stopping_rule: str = _STOPPING_RULE
 
+    def __init_subclass__(cls, **kwargs: object) -> None:
+        raise TypeError("ResolvedFixedNIidSamplingStructure must not be subclassed")
+
     @property
     def planned_n(self) -> int:
         return len(self.planned_member_ids)
@@ -213,6 +216,9 @@ class ResolvedFixedNIidOccurrenceSet:
     occurrence_root_sha256: str
     manifest_sha256: str
     complete: bool = True
+
+    def __init_subclass__(cls, **kwargs: object) -> None:
+        raise TypeError("ResolvedFixedNIidOccurrenceSet must not be subclassed")
 
     @property
     def iid_qualified(self) -> bool:

@@ -78,10 +78,13 @@ class _FrozenSurface(tuple, metaclass=_FrozenSurfaceMeta):
     def __new__(cls, **values: object):
         return tuple.__new__(cls, tuple(values.items()))
 
-    # Make the inherited primary attribute-lookup root explicit so the metaclass seal
-    # below can protect it. Otherwise a caller can add ``__getattribute__`` after
-    # composition, bypass ``__getattr__`` entirely, and retarget every frozen member.
-    __getattribute__ = object.__getattribute__
+    # Keep the primary lookup root explicit so executable-surface witnesses can prove
+    # its exact descriptor/code before any frozen member is consumed. It is deliberately
+    # not installed as a same-named metaclass data descriptor: doing that would replace
+    # the metaclass's own tp_getattro slot rather than merely sealing an instance root.
+    def __getattribute__(self, name: str) -> object:
+        return object.__getattribute__(self, name)
+
     __iter__ = tuple.__iter__
 
     def __getattr__(self, name: str) -> object:
@@ -114,14 +117,9 @@ def _seal_surface_type() -> None:
         raise RuntimeError("canonical PaperBook frozen-surface metaclass changed before sealing")
 
     namespace = type.__getattribute__(surface_type, "__dict__")
-    protected = (
-        "__new__",
-        "__getattribute__",
-        "__iter__",
-        "__getattr__",
-        "__setattr__",
-        "__delattr__",
-    )
+    # __getattribute__ is intentionally witnessed by the executable graph rather than
+    # represented as a same-named metaclass descriptor; see the class-level comment.
+    protected = ("__new__", "__iter__", "__getattr__", "__setattr__", "__delattr__")
     descriptors: dict[str, object] = {}
     for name in protected:
         descriptor = namespace.get(name)

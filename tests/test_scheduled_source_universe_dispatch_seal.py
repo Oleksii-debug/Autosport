@@ -320,5 +320,73 @@ class ScheduledSourceUniverseDispatchSealTests(unittest.TestCase):
                 issue_function.__code__ = original_code
 
 
+    def test_source_result_field_descriptor_rebind_fails_before_spoofed_read(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path, store, cycle_seq, _candidate = _ready_store(tmp)
+            field_name = "provider_observation_complete"
+            original = vars(source_module.SourceUniverseCommitment)[field_name]
+
+            class SpoofedField:
+                def __get__(self, instance, owner=None):
+                    if instance is None:
+                        return self
+                    return True
+
+                def __set__(self, instance, value):
+                    original.__set__(instance, value)
+
+            setattr(source_module.SourceUniverseCommitment, field_name, SpoofedField())
+            try:
+                with self.assertRaisesRegex(
+                    source_module.SourceUniverseCommitmentError,
+                    "result field surface is rebound: provider_observation_complete",
+                ):
+                    source_module.build_source_universe_commitment(
+                        store,
+                        expected_store_path=path,
+                        source_id=SOURCE_ID,
+                        start_cycle_seq=cycle_seq,
+                        end_cycle_seq=cycle_seq,
+                    )
+            finally:
+                setattr(source_module.SourceUniverseCommitment, field_name, original)
+
+    def test_scheduled_result_field_descriptor_rebind_fails_before_spoofed_read(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path, store, _cycle_seq, candidate = _ready_store(tmp)
+            field_name = "scheduled_provider_observation_complete"
+            original = vars(
+                scheduled_module.ScheduledSourceUniverseResolution
+            )[field_name]
+
+            class SpoofedField:
+                def __get__(self, instance, owner=None):
+                    if instance is None:
+                        return self
+                    return True
+
+                def __set__(self, instance, value):
+                    original.__set__(instance, value)
+
+            setattr(
+                scheduled_module.ScheduledSourceUniverseResolution,
+                field_name,
+                SpoofedField(),
+            )
+            try:
+                with self.assertRaisesRegex(
+                    scheduled_module.ScheduledSourceUniverseError,
+                    "result field surface is rebound: "
+                    "scheduled_provider_observation_complete",
+                ):
+                    _resolve(path, store, candidate)
+            finally:
+                setattr(
+                    scheduled_module.ScheduledSourceUniverseResolution,
+                    field_name,
+                    original,
+                )
+
+
 if __name__ == "__main__":
     unittest.main()

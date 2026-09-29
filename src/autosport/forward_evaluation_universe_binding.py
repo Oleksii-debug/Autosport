@@ -34,6 +34,9 @@ from .forward_evidence_completeness import (
 from .provider_evaluation_universe import ProviderEvaluationUniverseStore
 
 
+# Kept inspectable for compatibility/debugging only. Positive authority below captures
+# this exact executable into a closure at import time and never late-dispatches through
+# the mutable module-global name.
 _CANONICAL_PROVIDER_UNIVERSE_LOAD = ProviderEvaluationUniverseStore.load
 
 
@@ -188,77 +191,106 @@ def _member_expectation(
     )
 
 
-def _load_expectations(
+def _build_load_expectations(
     *,
-    store: ProviderEvaluationUniverseStore,
-    protocol: ForwardEvidenceProtocolEnvelope,
-) -> tuple[
-    tuple[ForwardUniverseMemberExpectation, ...],
-    tuple[str, str, str],
-]:
-    if type(store) is not ProviderEvaluationUniverseStore:
-        raise TypeError("store must be exact ProviderEvaluationUniverseStore")
-    if type(protocol) is not ForwardEvidenceProtocolEnvelope:
-        raise TypeError("protocol must be exact ForwardEvidenceProtocolEnvelope")
-    if (
-        protocol.candidate_universe_rule_id != FORWARD_UNIVERSE_RULE_ID
-        or protocol.candidate_universe_rule_sha256 != FORWARD_UNIVERSE_RULE_SHA256
-    ):
-        raise ForwardEvaluationUniverseBindingError(
-            "forward protocol does not precommit the canonical provider evaluation-universe rule"
+    store_type: type[ProviderEvaluationUniverseStore],
+    canonical_load,
+    backing_resolver,
+    backing_error: type[BaseException],
+):
+    """Capture the executable/read authorities used by positive forward resolution."""
+
+    canonical_load_code = canonical_load.__code__
+
+    def load_expectations(
+        *,
+        store: ProviderEvaluationUniverseStore,
+        protocol: ForwardEvidenceProtocolEnvelope,
+    ) -> tuple[
+        tuple[ForwardUniverseMemberExpectation, ...],
+        tuple[str, str, str],
+    ]:
+        if type(store) is not store_type:
+            raise TypeError("store must be exact ProviderEvaluationUniverseStore")
+        if type(protocol) is not ForwardEvidenceProtocolEnvelope:
+            raise TypeError("protocol must be exact ForwardEvidenceProtocolEnvelope")
+        if (
+            protocol.candidate_universe_rule_id != FORWARD_UNIVERSE_RULE_ID
+            or protocol.candidate_universe_rule_sha256 != FORWARD_UNIVERSE_RULE_SHA256
+        ):
+            raise ForwardEvaluationUniverseBindingError(
+                "forward protocol does not precommit the canonical provider evaluation-universe rule"
+            )
+
+        try:
+            backing_locator = backing_resolver(store)
+        except backing_error as exc:
+            raise ForwardEvaluationUniverseBindingError(
+                "provider evaluation-universe backing locator authority changed"
+            ) from exc
+
+        if canonical_load.__code__ is not canonical_load_code:
+            raise ForwardEvaluationUniverseBindingError(
+                "canonical provider evaluation-universe load authority changed"
+            )
+        ledger = canonical_load(store)
+        if canonical_load.__code__ is not canonical_load_code:
+            raise ForwardEvaluationUniverseBindingError(
+                "canonical provider evaluation-universe load authority changed"
+            )
+        if ledger is None:
+            raise ForwardEvaluationUniverseBindingError(
+                "canonical provider evaluation universe is not durably available"
+            )
+        universe = ledger.universe
+        if protocol.campaign_id != universe.campaign_id:
+            raise ForwardEvaluationUniverseBindingError(
+                "forward campaign does not match durable evaluation-universe campaign"
+            )
+        if protocol.scientific_protocol_sha256 != universe.protocol_sha256:
+            raise ForwardEvaluationUniverseBindingError(
+                "forward scientific protocol does not match durable evaluation-universe protocol"
+            )
+
+        expectations = tuple(
+            sorted(
+                (
+                    _member_expectation(
+                        protocol=protocol,
+                        backing_locator_sha256=backing_locator.locator_sha256,
+                        universe_sha256=universe.universe_sha256,
+                        membership_sha256=universe.membership_sha256,
+                        row=row,
+                    )
+                    for row in universe.rows
+                ),
+                key=lambda item: item.source_receipt_id,
+            )
+        )
+        if not expectations:
+            raise ForwardEvaluationUniverseBindingError(
+                "durable evaluation universe contains no source members"
+            )
+        earliest = min(item.observed_lower for item in expectations)
+        if protocol.precommit_anchor_upper >= earliest:
+            raise ForwardEvaluationUniverseBindingError(
+                "forward protocol must be anchored before the first authoritative source observation"
+            )
+        return expectations, (
+            backing_locator.locator_sha256,
+            universe.universe_sha256,
+            universe.membership_sha256,
         )
 
-    try:
-        backing_locator = resolve_forward_universe_backing_locator(store)
-    except ForwardUniverseBackingGuardError as exc:
-        raise ForwardEvaluationUniverseBindingError(
-            "provider evaluation-universe backing locator authority changed"
-        ) from exc
+    return load_expectations
 
-    ledger = _CANONICAL_PROVIDER_UNIVERSE_LOAD(store)
-    if ledger is None:
-        raise ForwardEvaluationUniverseBindingError(
-            "canonical provider evaluation universe is not durably available"
-        )
-    universe = ledger.universe
-    if protocol.campaign_id != universe.campaign_id:
-        raise ForwardEvaluationUniverseBindingError(
-            "forward campaign does not match durable evaluation-universe campaign"
-        )
-    if protocol.scientific_protocol_sha256 != universe.protocol_sha256:
-        raise ForwardEvaluationUniverseBindingError(
-            "forward scientific protocol does not match durable evaluation-universe protocol"
-        )
 
-    expectations = tuple(
-        sorted(
-            (
-                _member_expectation(
-                    protocol=protocol,
-                    backing_locator_sha256=backing_locator.locator_sha256,
-                    universe_sha256=universe.universe_sha256,
-                    membership_sha256=universe.membership_sha256,
-                    row=row,
-                )
-                for row in universe.rows
-            ),
-            key=lambda item: item.source_receipt_id,
-        )
-    )
-    if not expectations:
-        raise ForwardEvaluationUniverseBindingError(
-            "durable evaluation universe contains no source members"
-        )
-    earliest = min(item.observed_lower for item in expectations)
-    if protocol.precommit_anchor_upper >= earliest:
-        raise ForwardEvaluationUniverseBindingError(
-            "forward protocol must be anchored before the first authoritative source observation"
-        )
-    return expectations, (
-        backing_locator.locator_sha256,
-        universe.universe_sha256,
-        universe.membership_sha256,
-    )
+_load_expectations = _build_load_expectations(
+    store_type=ProviderEvaluationUniverseStore,
+    canonical_load=_CANONICAL_PROVIDER_UNIVERSE_LOAD,
+    backing_resolver=resolve_forward_universe_backing_locator,
+    backing_error=ForwardUniverseBackingGuardError,
+)
 
 
 def resolve_forward_universe_members(

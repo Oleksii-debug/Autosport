@@ -169,7 +169,14 @@ class PnLReconciliationJournal:
         lock = WorkspaceEconomicLock(self.path.parent)
         try:
             with lock:
-                self._reload()
+                try:
+                    self._reload()
+                except ValueError:
+                    # ValueError from durable replay is not a caller-validation error.
+                    # The last proven in-memory projection was restored by _reload();
+                    # fault this writer so no retry can reinterpret a corrupt tail.
+                    self._faulted = True
+                    raise
                 event_id = event["event_id"]
                 previous = self._events.get(event_id)
                 if previous is not None:
@@ -196,9 +203,17 @@ class PnLReconciliationJournal:
         # Reopen is the recovery boundary for a possibly durable ambiguous tail.
         if self._faulted:
             return self._snapshot_loaded()
-        with WorkspaceEconomicLock(self.path.parent):
-            self._reload()
-            return self._snapshot_loaded()
+        try:
+            with WorkspaceEconomicLock(self.path.parent):
+                self._reload()
+        except WorkspaceEconomicLockBusyError:
+            raise
+        except BaseException:
+            # _reload() restores the previous publication before propagating. Preserve
+            # that exact proven snapshot for subsequent reads until explicit reopen.
+            self._faulted = True
+            raise
+        return self._snapshot_loaded()
 
     def _snapshot_loaded(self) -> PnLReconciliationSnapshot:
         with localcontext(_CTX):

@@ -250,7 +250,7 @@ def _audit_corrupt_manifest_rejection(root: Path) -> dict[str, object]:
         raise RuntimeError("corrupt-manifest recovery changed canonical economic BASE bytes")
     if not registry.in_progress():
         raise RuntimeError("corrupt-manifest recovery silently resolved registry ownership")
-    if registry.get(experiment_key).get("status") != "running":
+    if registry.get(experiment_key).get("status") != "in_progress":
         raise RuntimeError("corrupt-manifest recovery changed registry disposition")
 
     return {

@@ -6,6 +6,10 @@ from .betdaq_account_readonly import (
     BetdaqSoapTransport,
     UrllibBetdaqSoapTransport,
 )
+from .betdaq_event_tree_request_wire import (
+    BetdaqEventSubTreeRequest,
+    build_get_event_subtree_no_selections_soap11_request,
+)
 from .betdaq_readonly_provider import (
     BetdaqGetPricesRequest,
     BetdaqTransientTransportError,
@@ -72,6 +76,40 @@ class BetdaqReadOnlyLiveTransport:
             and getattr(bound_post, "__func__", None) is _CANONICAL_POST
         )
 
+    def _post_readonly(
+        self,
+        wire: object,
+        *,
+        method: str,
+        timeout_seconds: float,
+    ) -> bytes:
+        # Admission is immediately adjacent to dispatch and outside the transport
+        # exception classifier: rate denial is scheduler-facing deferral, never a
+        # transient network retry.
+        self._last_rate_admission = self._rate_governor.admit(method)
+        try:
+            payload = self._transport.post(
+                getattr(wire, "endpoint"),
+                headers=getattr(wire, "headers"),
+                body=getattr(wire, "body"),
+                timeout_seconds=timeout_seconds,
+            )
+        except (BetdaqTransientTransportError, TimeoutError, ConnectionError):
+            raise
+        except BetdaqAccountReadOnlyError:
+            raise ProviderUnavailableError(
+                f"BETDAQ {method} transport failed without retryable classification"
+            ) from None
+        except Exception:
+            raise ProviderUnavailableError(
+                f"BETDAQ {method} transport failed without retryable classification"
+            ) from None
+        if type(payload) is not bytes:
+            raise ProviderUnavailableError(
+                f"BETDAQ {method} transport returned non-bytes payload"
+            )
+        return payload
+
     def get_prices(
         self,
         request: BetdaqGetPricesRequest,
@@ -82,37 +120,31 @@ class BetdaqReadOnlyLiveTransport:
             raise TypeError("request must be BetdaqGetPricesRequest")
         wire = build_get_prices_soap11_request(self._credentials, request)
         # Serialize/validate first so malformed local input cannot burn provider budget.
-        # Admission is immediately adjacent to dispatch and lives outside the transport
-        # exception classifier: a rate denial is scheduler-facing deferral, not a
-        # transient network error to spin through the provider's bounded retry loop.
-        self._last_rate_admission = self._rate_governor.admit("GetPrices")
-        try:
-            payload = self._transport.post(
-                wire.endpoint,
-                headers=wire.headers,
-                body=wire.body,
-                timeout_seconds=timeout_seconds,
-            )
-        except (BetdaqTransientTransportError, TimeoutError, ConnectionError):
-            # These are the only currently preserved signals whose retryability is
-            # explicit enough for the provider's bounded retry authority.
-            raise
-        except BetdaqAccountReadOnlyError:
-            # #1610 currently collapses HTTPError, URLError, OSError and TimeoutError
-            # into this one secret-safe type. Do not guess which member was transient.
-            raise ProviderUnavailableError(
-                "BETDAQ GetPrices transport failed without retryable classification"
-            ) from None
-        except Exception:
-            # Unknown custom-transport failures are not silently upgraded to transient.
-            raise ProviderUnavailableError(
-                "BETDAQ GetPrices transport failed without retryable classification"
-            ) from None
-        if type(payload) is not bytes:
-            raise ProviderUnavailableError(
-                "BETDAQ GetPrices transport returned non-bytes payload"
-            )
-        return payload
+        return self._post_readonly(
+            wire,
+            method="GetPrices",
+            timeout_seconds=timeout_seconds,
+        )
+
+    def get_event_subtree_no_selections(
+        self,
+        request: BetdaqEventSubTreeRequest,
+        *,
+        timeout_seconds: float,
+    ) -> bytes:
+        if type(request) is not BetdaqEventSubTreeRequest:
+            raise TypeError("request must be BetdaqEventSubTreeRequest")
+        wire = build_get_event_subtree_no_selections_soap11_request(
+            self._credentials,
+            request,
+        )
+        # The same product-owned transport/governor stack is reused; no discovery
+        # scheduler or second request-budget authority is introduced.
+        return self._post_readonly(
+            wire,
+            method="GetEventSubTreeNoSelections",
+            timeout_seconds=timeout_seconds,
+        )
 
     def __repr__(self) -> str:
         return (

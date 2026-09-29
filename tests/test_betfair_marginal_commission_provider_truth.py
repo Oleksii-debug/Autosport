@@ -63,3 +63,22 @@ def test_valid_caller_evidence_cannot_forge_provider_truth_fields():
 
     with pytest.raises(TypeError):
         replace(result, commission_rate_basis="SETTLEMENT_AUTHORITATIVE")
+
+def test_projection_cannot_be_subclassed_to_override_false_authority():
+    with pytest.raises(
+        TypeError,
+        match="BetfairMarginalCommissionEVProjection must not be subclassed",
+    ):
+        class ForgedProjection(type(projection())):
+            @property
+            def provider_applicability_proven(self):
+                return True
+
+            @property
+            def execution_authorized(self):
+                return True
+
+            @property
+            def decision_authorized(self):
+                return True
+

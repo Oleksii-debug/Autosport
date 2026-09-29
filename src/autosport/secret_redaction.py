@@ -434,15 +434,27 @@ def redact_operator_value(
 
     if isinstance(value, str):
         return redact_operator_text(value, extra_secret_values=secrets)
-    if type(value) is bytes:
+    if type(value) in (bytes, bytearray, memoryview):
+        if type(value) is bytes:
+            raw_binary = value
+        elif type(value) is bytearray:
+            raw_binary = bytes(value)
+        else:
+            raw_binary = value.tobytes()
         try:
-            decoded = bytes.decode(value, "utf-8", "strict")
+            decoded = raw_binary.decode("utf-8", "strict")
         except UnicodeDecodeError:
-            return REDACTED.encode("utf-8")
-        return redact_operator_text(
-            decoded,
-            extra_secret_values=secrets,
-        ).encode("utf-8")
+            redacted_binary = REDACTED.encode("utf-8")
+        else:
+            redacted_binary = redact_operator_text(
+                decoded,
+                extra_secret_values=secrets,
+            ).encode("utf-8")
+        if type(value) is bytes:
+            return redacted_binary
+        if type(value) is bytearray:
+            return bytearray(redacted_binary)
+        return memoryview(redacted_binary)
     if isinstance(value, Mapping):
         redacted: dict[Any, Any] = {}
         prepared: list[tuple[object, Any, bool, bool]] = []

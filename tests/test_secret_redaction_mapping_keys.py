@@ -207,6 +207,59 @@ def test_invalid_utf8_bytes_value_fails_closed_without_raw_bytes() -> None:
     assert b"\xff" not in redacted["provider_detail"]
 
 
+def test_configured_secret_embedded_in_bytearray_value_is_redacted() -> None:
+    secret = "AS-MAPPING-BYTEARRAY-VALUE-SECRET-7c21"
+    payload = {
+        "provider_detail": bytearray(f"provider-{secret}-error".encode("utf-8")),
+    }
+
+    redacted = redact_operator_value(
+        payload,
+        extra_secret_values=(secret,),
+    )
+
+    assert redacted == {
+        "provider_detail": bytearray(f"provider-{REDACTED}-error".encode("utf-8")),
+    }
+    assert secret.encode("utf-8") not in bytes(redacted["provider_detail"])
+
+
+def test_invalid_utf8_bytearray_value_fails_closed_without_raw_bytes() -> None:
+    payload = {"provider_detail": bytearray(b"prefix-\xff-secret")}
+
+    redacted = redact_operator_value(payload)
+
+    assert redacted == {
+        "provider_detail": bytearray(REDACTED.encode("utf-8")),
+    }
+    assert b"\xff" not in bytes(redacted["provider_detail"])
+
+
+def test_configured_secret_embedded_in_memoryview_value_is_redacted() -> None:
+    secret = "AS-MAPPING-MEMORYVIEW-VALUE-SECRET-90af"
+    payload = {
+        "provider_detail": memoryview(f"provider-{secret}-error".encode("utf-8")),
+    }
+
+    redacted = redact_operator_value(
+        payload,
+        extra_secret_values=(secret,),
+    )
+
+    rendered = bytes(redacted["provider_detail"])
+    assert rendered == f"provider-{REDACTED}-error".encode("utf-8")
+    assert secret.encode("utf-8") not in rendered
+
+
+def test_invalid_utf8_memoryview_value_fails_closed_without_raw_bytes() -> None:
+    payload = {"provider_detail": memoryview(b"prefix-\xff-secret")}
+
+    redacted = redact_operator_value(payload)
+
+    assert bytes(redacted["provider_detail"]) == REDACTED.encode("utf-8")
+    assert b"\xff" not in bytes(redacted["provider_detail"])
+
+
 class _HostileMappingKey:
     def __hash__(self) -> int:
         return 17731

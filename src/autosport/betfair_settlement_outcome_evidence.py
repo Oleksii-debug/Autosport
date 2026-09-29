@@ -62,11 +62,16 @@ def _digest(value: object) -> str:
 
 def _require_dispatch() -> None:
     current = vars(_STORE_TYPE).get("current")
+    project = globals().get("_project")
+    evidence_type = globals().get("BetfairBinarySelectionOutcomeEvidence")
     if (
         _settlement.BetfairSettlementRevisionStore is not _STORE_TYPE
         or _settlement.BetfairSettlementRevision is not _REVISION_TYPE
         or current is not _CURRENT
         or getattr(current, "__code__", None) is not _CURRENT_CODE
+        or project is not _PROJECT
+        or getattr(project, "__code__", None) is not _PROJECT_CODE
+        or evidence_type is not _EVIDENCE_TYPE
     ):
         raise BetfairOutcomeEvidenceError(
             "Betfair settlement outcome authority dispatch changed"
@@ -147,6 +152,9 @@ class BetfairBinarySelectionOutcomeEvidence:
             raise BetfairOutcomeEvidenceError("outcome evidence identity mismatch")
 
 
+_EVIDENCE_TYPE = BetfairBinarySelectionOutcomeEvidence
+
+
 def _project(revision: object) -> BetfairBinarySelectionOutcomeEvidence:
     if type(revision) is not _REVISION_TYPE:
         raise BetfairOutcomeEvidenceError(
@@ -200,10 +208,16 @@ def _project(revision: object) -> BetfairBinarySelectionOutcomeEvidence:
         "source_payload_sha256": revision.source_payload_sha256,
         "capture_evidence_sha256": revision.capture_evidence_sha256,
     }
-    return BetfairBinarySelectionOutcomeEvidence(
+    return _EVIDENCE_TYPE(
         evidence_id=_digest(payload),
         **{key: value for key, value in payload.items() if key not in {"schema", "schema_version"}},
     )
+
+
+_PROJECT = _project
+_PROJECT_CODE = getattr(_PROJECT, "__code__", None)
+if _PROJECT_CODE is None:
+    raise RuntimeError("Betfair settlement outcome projection code is unavailable")
 
 
 def resolve_current_binary_selection_outcome(
@@ -231,7 +245,7 @@ def resolve_current_binary_selection_outcome(
     )
     if revision is None:
         raise BetfairOutcomeEvidenceError("current settlement revision is absent")
-    evidence = _project(revision)
+    evidence = _PROJECT(revision)
 
     _require_dispatch()
     current = _CURRENT(
@@ -253,7 +267,7 @@ def require_current_binary_selection_outcome(
     evidence: BetfairBinarySelectionOutcomeEvidence,
 ) -> BetfairBinarySelectionOutcomeEvidence:
     """Revalidate revision-bound evidence immediately before downstream use."""
-    if type(evidence) is not BetfairBinarySelectionOutcomeEvidence:
+    if type(evidence) is not _EVIDENCE_TYPE:
         raise BetfairOutcomeEvidenceError("outcome evidence type is not canonical")
     current = resolve_current_binary_selection_outcome(
         store,

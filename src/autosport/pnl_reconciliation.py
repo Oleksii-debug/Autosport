@@ -76,6 +76,10 @@ class PnLReconciliationJournal:
         self._revision_count = 0
         self._faulted = False
         self._loaded_file_identity: tuple[int, int, int, int] | None = None
+        # Process-local witness that exact event bytes were minted only after a fresh
+        # canonical RealExecutionLedger resolution. Durable JSONL alone cannot mint
+        # provenance authority on restart because its fields are caller-editable.
+        self._verified_execution_events: dict[str, bytes] = {}
         with WorkspaceEconomicLock(self.path.parent):
             self._reload()
 
@@ -142,7 +146,7 @@ class PnLReconciliationJournal:
                 verified.ledger_sha256, "execution_ledger_sha256"
             ),
         }
-        return self._record(event)
+        return self._record(event, execution_provenance_verified=True)
 
     def record_settlement_revision(
         self, *, event_id: str, provider_source_id: str, provider_order_id: str,
@@ -162,9 +166,18 @@ class PnLReconciliationJournal:
         }
         return self._record(event)
 
-    def _record(self, event: dict[str, object]) -> PnLReconciliationSnapshot:
+    def _record(
+        self,
+        event: dict[str, object],
+        *,
+        execution_provenance_verified: bool = False,
+    ) -> PnLReconciliationSnapshot:
         if self._faulted:
             raise RuntimeError("reconciliation journal is faulted; reopen before retry")
+        if type(execution_provenance_verified) is not bool:
+            raise TypeError("execution_provenance_verified must be bool")
+        if execution_provenance_verified and event.get("event_type") != "accepted_execution":
+            raise ValueError("execution provenance may bind only accepted_execution events")
         encoded = _encode(event)
         lock = WorkspaceEconomicLock(self.path.parent)
         try:
@@ -182,10 +195,23 @@ class PnLReconciliationJournal:
                 if previous is not None:
                     if previous != encoded:
                         raise ValueError("event_id already exists with different reconciliation payload")
+                    if execution_provenance_verified:
+                        self._verified_execution_events[event_id] = encoded
+                        key = (event["provider_source_id"], event["provider_order_id"])
+                        current = self._orders[key]
+                        self._orders[key] = replace(
+                            current, execution_provenance_bound=True
+                        )
                     return self._snapshot_loaded()
                 self._validate(event)
                 self._append(encoded)
-                self._apply(event, encoded)
+                self._apply(
+                    event,
+                    encoded,
+                    execution_provenance_bound=execution_provenance_verified,
+                )
+                if execution_provenance_verified:
+                    self._verified_execution_events[event_id] = encoded
         except ValueError:
             raise
         except WorkspaceEconomicLockBusyError:
@@ -276,7 +302,14 @@ class PnLReconciliationJournal:
                             raise ValueError("reconciliation journal reuses event_id with different payload")
                         continue
                     self._validate(event)
-                    self._apply(event, encoded)
+                    self._apply(
+                        event,
+                        encoded,
+                        execution_provenance_bound=(
+                            type(event_id) is str
+                            and self._verified_execution_events.get(event_id) == encoded
+                        ),
+                    )
         except BaseException:
             self._orders = previous_orders
             self._events = previous_events
@@ -346,7 +379,15 @@ class PnLReconciliationJournal:
         if settled > order.stake:
             raise ValueError("cumulative_settled_stake exceeds accepted_stake")
 
-    def _apply(self, event: dict[str, object], encoded: bytes) -> None:
+    def _apply(
+        self,
+        event: dict[str, object],
+        encoded: bytes,
+        *,
+        execution_provenance_bound: bool = False,
+    ) -> None:
+        if type(execution_provenance_bound) is not bool:
+            raise TypeError("execution_provenance_bound must be bool")
         key = (event["provider_source_id"], event["provider_order_id"])
         if event["event_type"] in {"accepted_order", "accepted_execution"}:
             self._orders[key] = _Order(
@@ -355,7 +396,7 @@ class PnLReconciliationJournal:
                 event["side"],
                 _decimal(event["accepted_stake"], "accepted_stake"),
                 _decimal(event["accepted_odds"], "accepted_odds"),
-                event["event_type"] == "accepted_execution",
+                execution_provenance_bound,
             )
         else:
             current = self._orders[key]

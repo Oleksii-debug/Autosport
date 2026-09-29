@@ -20,9 +20,11 @@ from .betdaq_readonly_market_wire import BetdaqSoapProtocolError
 from .betdaq_readonly_provider import (
     BetdaqMarketBinding,
     BetdaqResolvedMarketBinding,
+    BetdaqTransientTransportError,
     Clock,
     _time,
 )
+from .providers import ProviderUnavailableError
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,7 +35,7 @@ class BetdaqCatalogueEvidence:
     response_sha256: str
     provider_call_id: str | None
     provider_created_at: str | None
-    rate_admission_receipt: str
+    rate_admission_receipts: tuple[str, ...]
     provider_origin_verified: bool = False
     grants_execution_authority: bool = False
     grants_write_permission: bool = False
@@ -56,7 +58,6 @@ class BetdaqCatalogueEvidence:
         for value, field in (
             (self.request_fingerprint, "catalogue request_fingerprint"),
             (self.response_sha256, "catalogue response_sha256"),
-            (self.rate_admission_receipt, "catalogue rate_admission_receipt"),
         ):
             if (
                 type(value) is not str
@@ -64,6 +65,19 @@ class BetdaqCatalogueEvidence:
                 or any(ch not in "0123456789abcdef" for ch in value)
             ):
                 raise ValueError(f"{field} must be lowercase SHA-256")
+        if (
+            type(self.rate_admission_receipts) is not tuple
+            or not self.rate_admission_receipts
+            or any(
+                type(value) is not str
+                or len(value) != 64
+                or any(ch not in "0123456789abcdef" for ch in value)
+                for value in self.rate_admission_receipts
+            )
+        ):
+            raise ValueError(
+                "catalogue rate_admission_receipts must be non-empty SHA-256 tuple"
+            )
         if self.grants_execution_authority is not False:
             raise ValueError("catalogue evidence cannot grant execution authority")
         if self.grants_write_permission is not False:
@@ -139,12 +153,15 @@ class BetdaqLiveCatalogueResolver:
         transport: object,
         timeout_seconds: float,
         clock: Clock,
+        max_attempts: int,
         max_message_age_seconds: int | None = None,
     ) -> None:
         if not callable(getattr(transport, "get_event_subtree_no_selections", None)):
             raise TypeError(
                 "transport must expose get_event_subtree_no_selections"
             )
+        if type(max_attempts) is not int or max_attempts <= 0:
+            raise ValueError("max_attempts must be positive")
         if max_message_age_seconds is not None and (
             type(max_message_age_seconds) is not int
             or max_message_age_seconds <= 0
@@ -153,6 +170,7 @@ class BetdaqLiveCatalogueResolver:
         self._transport = transport
         self._timeout_seconds = timeout_seconds
         self._clock = clock
+        self._max_attempts = max_attempts
         self._max_message_age_seconds = max_message_age_seconds
 
     def resolve(
@@ -187,20 +205,55 @@ class BetdaqLiveCatalogueResolver:
                 separators=(",", ":"),
             ).encode("utf-8")
         ).hexdigest()
-        payload = self._transport.get_event_subtree_no_selections(
-            request,
-            timeout_seconds=self._timeout_seconds,
-        )
-        if type(payload) is not bytes:
-            raise TypeError("BETDAQ event-tree transport must return bytes")
+        receipts: list[str] = []
+        payload: bytes | None = None
+        for attempt in range(1, self._max_attempts + 1):
+            try:
+                candidate = self._transport.get_event_subtree_no_selections(
+                    request,
+                    timeout_seconds=self._timeout_seconds,
+                )
+            except (
+                BetdaqTransientTransportError,
+                TimeoutError,
+                ConnectionError,
+            ) as exc:
+                admission = getattr(self._transport, "last_rate_admission", None)
+                if type(admission) is BetdaqRateAdmission:
+                    if admission.method != "GetEventSubTreeNoSelections":
+                        raise ValueError(
+                            "BETDAQ event-tree acquisition bound wrong rate admission"
+                        ) from exc
+                    if (
+                        not receipts
+                        or receipts[-1] != admission.receipt_sha256
+                    ):
+                        receipts.append(admission.receipt_sha256)
+                if attempt == self._max_attempts:
+                    raise ProviderUnavailableError(
+                        "BETDAQ event catalogue unavailable after "
+                        f"{attempt} bounded attempts"
+                    ) from exc
+                continue
 
-        admission = getattr(self._transport, "last_rate_admission", None)
-        if type(admission) is not BetdaqRateAdmission:
-            raise TypeError(
-                "BETDAQ event-tree acquisition requires canonical BetdaqRateAdmission"
-            )
-        if admission.method != "GetEventSubTreeNoSelections":
-            raise ValueError("BETDAQ event-tree acquisition bound wrong rate admission")
+            if type(candidate) is not bytes:
+                raise TypeError("BETDAQ event-tree transport must return bytes")
+            admission = getattr(self._transport, "last_rate_admission", None)
+            if type(admission) is not BetdaqRateAdmission:
+                raise TypeError(
+                    "BETDAQ event-tree acquisition requires canonical BetdaqRateAdmission"
+                )
+            if admission.method != "GetEventSubTreeNoSelections":
+                raise ValueError(
+                    "BETDAQ event-tree acquisition bound wrong rate admission"
+                )
+            if not receipts or receipts[-1] != admission.receipt_sha256:
+                receipts.append(admission.receipt_sha256)
+            payload = candidate
+            break
+
+        if payload is None:
+            raise AssertionError("event-tree retry loop terminated without payload")
 
         received, received_at = _time(
             self._clock(),
@@ -255,6 +308,6 @@ class BetdaqLiveCatalogueResolver:
             response_sha256=response_sha256,
             provider_call_id=parsed.call_id,
             provider_created_at=parsed.provider_created_at_text,
-            rate_admission_receipt=admission.receipt_sha256,
+            rate_admission_receipts=tuple(receipts),
         )
         return resolved, evidence

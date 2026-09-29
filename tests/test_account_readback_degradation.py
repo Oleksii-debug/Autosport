@@ -79,13 +79,33 @@ def test_transient_http_failures_never_mean_empty(status: int) -> None:
     _assert_never_positive(result)
 
 
-@pytest.mark.parametrize("status", [401, 403])
-def test_auth_http_failures_are_explicit_not_empty(status: int) -> None:
+def test_http_401_is_session_or_auth_failure_not_empty() -> None:
     result = classify_account_readback_degradation(
-        _signal(provider_id="betdaq", provider_code=None, http_status=status)
+        _signal(provider_id="betdaq", provider_code=None, http_status=401)
     )
     assert result.state is ReadbackDegradationState.UNAUTHORIZED_OR_SESSION_EXPIRED
     _assert_never_positive(result)
+
+
+def test_http_403_is_configuration_or_access_denial_not_session_expiry() -> None:
+    result = classify_account_readback_degradation(
+        _signal(provider_id="betdaq", provider_code=None, http_status=403)
+    )
+    assert result.state is ReadbackDegradationState.CONFIGURATION_DENIED
+    _assert_never_positive(result)
+
+
+def test_betfair_provider_code_precedence_survives_conflicting_http_status() -> None:
+    session = classify_account_readback_degradation(
+        _signal(provider_code="NO_SESSION", http_status=403)
+    )
+    denied = classify_account_readback_degradation(
+        _signal(provider_code="ACCESS_DENIED", http_status=401)
+    )
+    assert session.state is ReadbackDegradationState.UNAUTHORIZED_OR_SESSION_EXPIRED
+    assert denied.state is ReadbackDegradationState.CONFIGURATION_DENIED
+    _assert_never_positive(session)
+    _assert_never_positive(denied)
 
 
 def test_mid_pagination_failure_preserves_partial_observation_without_completeness() -> None:

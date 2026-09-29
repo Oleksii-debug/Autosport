@@ -81,6 +81,7 @@ class BetdaqLiveReadOnlyProvider(BetdaqReadOnlyProvider):
             transport=live_transport,
             timeout_seconds=self.timeout_seconds,
             clock=clock,
+            max_message_age_seconds=max_message_age_seconds,
         )
         self._catalogue_bindings: dict[int, BetdaqResolvedMarketBinding] = {}
         self._last_catalogue_evidence: BetdaqCatalogueEvidence | None = None

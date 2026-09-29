@@ -4,6 +4,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import autosport.release_package as release_package
@@ -134,6 +135,66 @@ class ReleasePackageInputSymlinkFenceTests(unittest.TestCase):
                 self._build(paths)
 
             self.assertTrue(marker.exists())
+            self.assertFalse(paths["package"].exists())
+
+
+    def test_top_level_windows_reparse_file_fails_before_existing_staging_is_deleted(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paths = self._make_inputs(root)
+            executable = paths["exe"]
+            real_lstat = Path.lstat
+
+            staging = root / "Autosport-V1"
+            staging.mkdir()
+            marker = staging / "keep.txt"
+            marker.write_text("preserve-on-preflight-failure", encoding="utf-8")
+
+            def lstat_with_reparse(path: Path):
+                metadata = real_lstat(path)
+                if path == executable:
+                    return SimpleNamespace(
+                        st_mode=metadata.st_mode,
+                        st_file_attributes=release_package._WINDOWS_REPARSE_POINT_FLAG,
+                    )
+                return metadata
+
+            with patch.object(Path, "lstat", new=lstat_with_reparse):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "Autosport executable input must not be a Windows reparse point",
+                ):
+                    self._build(paths)
+
+            self.assertEqual(
+                marker.read_text(encoding="utf-8"),
+                "preserve-on-preflight-failure",
+            )
+            self.assertFalse(paths["package"].exists())
+
+    def test_nested_example_windows_reparse_entry_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paths = self._make_inputs(root)
+            example_entry = paths["example"] / "market.jsonl"
+            real_lstat = Path.lstat
+
+            def lstat_with_reparse(path: Path):
+                metadata = real_lstat(path)
+                if path == example_entry:
+                    return SimpleNamespace(
+                        st_mode=metadata.st_mode,
+                        st_file_attributes=release_package._WINDOWS_REPARSE_POINT_FLAG,
+                    )
+                return metadata
+
+            with patch.object(Path, "lstat", new=lstat_with_reparse):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "release example tree contains a Windows reparse point: market.jsonl",
+                ):
+                    self._build(paths)
+
             self.assertFalse(paths["package"].exists())
 
     def test_regular_to_symlink_swap_during_copy_is_preserved_then_rejected(self) -> None:

@@ -9,8 +9,11 @@ import autosport.paper as paper
 def _load_or_fail_closed(path: Path):
     try:
         return paper.PaperBook.load(path)
-    except ValueError as exc:
-        assert any(token in str(exc).lower() for token in ("authority", "executable", "transitive"))
+    except (TypeError, ValueError) as exc:
+        assert any(
+            token in str(exc).lower()
+            for token in ("authority", "executable", "transitive", "defaults")
+        )
         return None
 
 

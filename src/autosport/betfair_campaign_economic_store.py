@@ -132,10 +132,11 @@ class BetfairCampaignEconomicEvidenceStore(CampaignEconomicEvidenceStore):
         record_sha256: str,
         as_of: datetime,
         previous: CampaignEconomicEvidenceVersion | None,
+        _issue_commission=issue_betfair_commission_cost_evidence,
     ) -> CampaignEconomicEvidenceVersion:
         inherited = self._durably_source_qualified_target_costs(previous)
         try:
-            commission = issue_betfair_commission_cost_evidence(
+            commission = _issue_commission(
                 source=self._betfair_source,
                 campaign=self.campaign,
                 provider_scope=self._provider_scope,
@@ -152,7 +153,7 @@ class BetfairCampaignEconomicEvidenceStore(CampaignEconomicEvidenceStore):
             corrections: dict[str, CostEvidence] = {}
             for predecessor in inherited:
                 try:
-                    candidate = issue_betfair_commission_cost_evidence(
+                    candidate = _issue_commission(
                         source=self._betfair_source,
                         campaign=self.campaign,
                         provider_scope=self._provider_scope,

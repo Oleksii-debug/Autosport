@@ -24,8 +24,8 @@ from .forecasting import parse_iso_timestamp
 _PAPER_DECIMAL_PRECISION = 28
 _PAPER_DECIMAL_EMIN = -999999
 _PAPER_DECIMAL_EMAX = 999999
-_PAPER_SNAPSHOT_SCHEMA_VERSION = 6
-_SUPPORTED_PAPER_SNAPSHOT_SCHEMA_VERSIONS = frozenset({2, 3, 4, 5, 6})
+_PAPER_SNAPSHOT_SCHEMA_VERSION = 7
+_SUPPORTED_PAPER_SNAPSHOT_SCHEMA_VERSIONS = frozenset({2, 3, 4, 5, 6, 7})
 _SCHEMA_MISSING = object()
 
 _LifecycleEntry = tuple[str, str, tuple[str, ...], tuple[str, ...]]
@@ -307,6 +307,7 @@ class PaperBook:
                             "selection_id": leg.selection_id,
                             "locked_odds": str(leg.locked_odds),
                             "sport": leg.sport,
+                            "exchange_side": leg.exchange_side,
                         }
                         for leg in t.legs
                     ],
@@ -511,6 +512,16 @@ class PaperBook:
             ):
                 raise ValueError(
                     "PaperBook ticket sport must be a lowercase canonical sport identity"
+                )
+        if leg.exchange_side is not None:
+            exchange_side = cls._require_canonical_text(
+                leg.exchange_side,
+                f"exchange_side{suffix}",
+                forbid_quote_key_delimiter=True,
+            )
+            if exchange_side not in {"back", "lay"}:
+                raise ValueError(
+                    "PaperBook ticket exchange_side must be canonical 'back' or 'lay'"
                 )
         cls._require_finite(leg.locked_odds, f"locked_odds{suffix}")
         if leg.locked_odds <= 1:
@@ -791,7 +802,12 @@ class PaperBook:
                 )
             sport = (
                 cls._required_snapshot_field(raw_leg, "sport", "ticket leg")
-                if schema_version == _PAPER_SNAPSHOT_SCHEMA_VERSION
+                if schema_version is not None and schema_version >= 6
+                else None
+            )
+            exchange_side = (
+                cls._required_snapshot_field(raw_leg, "exchange_side", "ticket leg")
+                if schema_version is not None and schema_version >= 7
                 else None
             )
             if sport is not None:
@@ -810,6 +826,7 @@ class PaperBook:
                         f"locked_odds for ticket {ticket_id}",
                     ),
                     sport=sport,
+                    exchange_side=exchange_side,
                 )
             )
         return tuple(legs)
@@ -889,7 +906,7 @@ class PaperBook:
             if ticket_id in seen_ticket_ids:
                 raise ValueError("PaperBook snapshot contains duplicate ticket_id")
             seen_ticket_ids.add(ticket_id)
-            if schema_version in {3, 4, 5, 6}:
+            if schema_version in {3, 4, 5, 6, 7}:
                 provider_source_ids_raw = cls._required_snapshot_field(
                     item, "provider_source_ids", f"ticket {ticket_id}"
                 )
@@ -905,7 +922,7 @@ class PaperBook:
                         ),
                         ticket_id,
                     )
-                    if schema_version in {4, 5, 6}
+                    if schema_version in {4, 5, 6, 7}
                     else ()
                 )
                 bankroll_id = cls._required_snapshot_field(
@@ -938,7 +955,7 @@ class PaperBook:
                     cls._required_snapshot_field(
                         item, "settled_at", f"ticket {ticket_id}"
                     )
-                    if schema_version in {5, 6}
+                    if schema_version in {5, 6, 7}
                     else None
                 ),
                 status=cls._parse_snapshot_status(

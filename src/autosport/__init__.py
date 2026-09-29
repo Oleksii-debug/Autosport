@@ -227,3 +227,11 @@ from . import _dataset_shard_manifest_authority_guard as _dataset_shard_manifest
 # The canonical PAPER product loop must cross the same non-virtual Wave M session
 # entry authority rather than returning to mutable coordinator method lookup.
 from . import _product_runtime_continuous_session_entry_guard as _product_runtime_continuous_session_entry_guard  # noqa: F401,E402
+# Seal the transitive OS/thread lock graph before product curation captures the
+# existing durable_path_lock as its sole publication/read serialization authority.
+from . import _provider_sport_mapping_durable_lock_guard as _provider_sport_mapping_durable_lock_guard  # noqa: F401,E402
+
+# Provider-sport exact bytes are structural evidence only. Admit positive mappings
+# through an explicit product-owned curation table while reusing the canonical
+# registry for parsing, chronology, locking, persistence and overlap semantics.
+from . import _provider_sport_mapping_curation_guard as _provider_sport_mapping_curation_guard  # noqa: F401,E402

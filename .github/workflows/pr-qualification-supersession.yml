@@ -2,7 +2,7 @@ name: PR qualification supersession controller
 
 on:
   workflow_run:
-    workflows: [CI, Windows candidate]
+    workflows: [CI, Windows candidate, Endurance]
     types: [requested]
 
 # This workflow is deliberately trusted/default-branch-owned. PR-head workflows keep
@@ -12,9 +12,9 @@ permissions:
   contents: read
   pull-requests: read
 
-# Serialize cancellation decisions for one PR. The source CI/Windows workflows retain
-# their own per-run scheduler isolation, so a stale rerun can never evict a current run
-# before live-head admission.
+# Serialize cancellation decisions for one PR. The source qualification workflows
+# retain their own per-run scheduler isolation, so a stale lifecycle event can never
+# evict a current run before live-head/admission truth is re-resolved.
 concurrency:
   group: pr-qualification-supersession-${{ github.event.workflow_run.pull_requests[0].number || github.event.workflow_run.id }}
   cancel-in-progress: false

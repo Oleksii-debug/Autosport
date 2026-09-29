@@ -138,12 +138,15 @@ def _guard_detached_consumer(
     frozen_globals_items = tuple_type(dict_items(inner_globals))
     frozen_globals_items_anchor = (frozen_globals_items,)
     frozen_globals_size = dict_len(inner_globals)
-    # Retain the writable tuple only as non-authoritative tamper evidence for focused
-    # regressions. The actual composition-time identity root is injected below into the
-    # immutable require_bindings code constants, so coordinated closure-cell retargeting
-    # cannot replace both the executable mapping and the verifier's identity witness.
+    # Retain writable tuple anchors only as non-authoritative tamper evidence for focused
+    # regressions. The actual composition-time roots are injected below into the immutable
+    # require_bindings code constants, so coordinated closure-cell retargeting cannot
+    # replace both execution snapshots and the verifier's independent identity witnesses.
     inner_globals_anchor = (inner_globals,)
     identity_anchor_marker = "__AUTOSPORT_RUN_TRANSACTION_DETACHED_GLOBALS_IDENTITY_ANCHOR__"
+    function_globals_anchor_marker = "__AUTOSPORT_RUN_TRANSACTION_FUNCTION_GLOBALS_SNAPSHOT_ANCHOR__"
+    closure_values_anchor_marker = "__AUTOSPORT_RUN_TRANSACTION_CLOSURE_SNAPSHOT_ANCHOR__"
+    globals_items_anchor_marker = "__AUTOSPORT_RUN_TRANSACTION_GLOBALS_ITEMS_SNAPSHOT_ANCHOR__"
     missing = object()
 
     def require_bindings() -> None:
@@ -162,6 +165,9 @@ def _guard_detached_consumer(
                 "RunTransaction detached direct-dispatch globals cell is empty"
             ) from exc
         anchored_inner_globals = "__AUTOSPORT_RUN_TRANSACTION_DETACHED_GLOBALS_IDENTITY_ANCHOR__"
+        anchored_function_globals_items = "__AUTOSPORT_RUN_TRANSACTION_FUNCTION_GLOBALS_SNAPSHOT_ANCHOR__"
+        anchored_closure_values = "__AUTOSPORT_RUN_TRANSACTION_CLOSURE_SNAPSHOT_ANCHOR__"
+        anchored_globals_items = "__AUTOSPORT_RUN_TRANSACTION_GLOBALS_ITEMS_SNAPSHOT_ANCHOR__"
         if exact_type(inner_globals_anchor) is not tuple_type:
             raise ValueError("RunTransaction detached direct-dispatch anchor changed")
         if (
@@ -171,6 +177,14 @@ def _guard_detached_consumer(
             raise ValueError(
                 "RunTransaction detached direct-dispatch globals identity changed"
             )
+        if frozen_function_globals_items is not anchored_function_globals_items:
+            raise ValueError(
+                "RunTransaction detached function-globals snapshot identity changed"
+            )
+        if frozen_closure_values is not anchored_closure_values:
+            raise ValueError("RunTransaction detached closure snapshot identity changed")
+        if frozen_globals_items is not anchored_globals_items:
+            raise ValueError("RunTransaction detached globals snapshot identity changed")
         if exact_type(inner_globals) is not dict_type:
             raise ValueError("RunTransaction detached direct-dispatch globals changed")
         if dict_len(inner_globals) != frozen_globals_size:
@@ -187,11 +201,25 @@ def _guard_detached_consumer(
                 )
 
     anchor_constants = require_bindings.__code__.co_consts
-    if sum(item == identity_anchor_marker for item in anchor_constants) != 1:
-        raise RuntimeError("RunTransaction detached globals identity anchor is ambiguous")
+    anchor_markers = (
+        identity_anchor_marker,
+        function_globals_anchor_marker,
+        closure_values_anchor_marker,
+        globals_items_anchor_marker,
+    )
+    if any(sum(item == marker for item in anchor_constants) != 1 for marker in anchor_markers):
+        raise RuntimeError("RunTransaction detached snapshot identity anchor is ambiguous")
     require_bindings.__code__ = require_bindings.__code__.replace(
         co_consts=tuple_type(
-            inner_globals if item == identity_anchor_marker else item
+            inner_globals
+            if item == identity_anchor_marker
+            else frozen_function_globals_items
+            if item == function_globals_anchor_marker
+            else frozen_closure_values
+            if item == closure_values_anchor_marker
+            else frozen_globals_items
+            if item == globals_items_anchor_marker
+            else item
             for item in anchor_constants
         )
     )

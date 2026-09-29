@@ -239,6 +239,36 @@ class WorkflowScopedGitHubApi(GitHubApi):
         return tuple(runs)
 
 
+def _cancel_triggering_run_if_nonqualifying(
+    api: WorkflowScopedGitHubApi,
+    *,
+    pr_number: int,
+    event_head_sha: str,
+    current_run_id: int,
+    qualification,
+) -> bool:
+    """Cancel the exact source run when trusted live PR truth cannot qualify it.
+
+    This controller executes from default-branch bytes.  A fork/draft/closed source
+    workflow cannot protect itself by altering its own pull_request YAML or helper:
+    the trusted workflow_run controller rechecks the live qualification immediately
+    before cancelling that source run.  A head/lifecycle transition revokes the
+    cancellation rather than racing a newly integration-capable run.
+    """
+
+    event_head_sha = _require_sha(event_head_sha, field="event head sha")
+    current_run_id = _require_positive_int(current_run_id, field="current run id")
+    if (
+        qualification.head_sha != event_head_sha
+        or qualification.integration_capable
+    ):
+        return False
+    if api.live_pr_qualification(pr_number) != qualification:
+        return False
+    api.cancel(current_run_id)
+    return True
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--pr-number", type=int, required=True)
@@ -283,6 +313,13 @@ def main(argv: list[str] | None = None) -> int:
             event_head_sha=event_head_sha,
             workflow_name=args.workflow_name,
             current_run_id=args.current_run_id,
+        )
+        _cancel_triggering_run_if_nonqualifying(
+            api,
+            pr_number=pr_number,
+            event_head_sha=event_head_sha,
+            current_run_id=args.current_run_id,
+            qualification=qualification,
         )
     except CancellationError as exc:
         print(f"superseded-run cancellation failed: {exc}", file=sys.stderr)

@@ -71,7 +71,7 @@ def test_ci_heavy_matrix_is_deferred_for_stale_draft_or_closed_pull_request() ->
     assert "os: [ubuntu-latest, windows-latest]" in workflow
     assert "python-version: ['3.11', '3.12']" in workflow
     assert "cancel-in-progress: true" in workflow
-    assert "timeout-minutes: 90" in workflow
+    assert "timeout-minutes: 60" in workflow
     assert "python -m pytest -v tests" in workflow
     assert "python -m autosport demo" in workflow
 

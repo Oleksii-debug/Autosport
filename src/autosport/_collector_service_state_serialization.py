@@ -173,7 +173,7 @@ def _make_interruptible_provider_call(
                 backoff = min_fn(self.config.max_backoff_seconds, jittered)
                 stop_source = self.stop_requested
                 if isinstance_fn(stop_source, signal_type):
-                    wait_result = stop_source.wait(backoff)
+                    wait_result = signal_wait(stop_source, backoff)
                     if type_fn(wait_result) is not bool_type:
                         raise collector_error_type(
                             "canonical signal STOP wait must return bool"

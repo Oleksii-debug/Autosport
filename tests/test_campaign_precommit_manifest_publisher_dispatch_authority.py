@@ -42,11 +42,11 @@ def _manifest() -> CampaignPrecommitManifest:
     )
 
 
-def test_installed_publisher_does_not_late_dispatch_publication_authority(
+def test_installed_publisher_fails_closed_before_rebound_publication_authority(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Module rebinding must not retarget the already-installed positive publisher."""
+    """Module rebinding must be rejected before the hostile target can dispatch."""
 
     workspace = tmp_path / "workspace"
     evidence = workspace / "evidence"
@@ -67,18 +67,14 @@ def test_installed_publisher_does_not_late_dispatch_publication_authority(
         hostile_publication_authority,
     )
 
-    witness = publish_campaign_precommit_manifest(
-        target,
-        _manifest(),
-        workspace=workspace,
-        authority_root=authority_root,
-    )
+    with pytest.raises(RuntimeError, match="global dispatch authority changed"):
+        publish_campaign_precommit_manifest(
+            target,
+            _manifest(),
+            workspace=workspace,
+            authority_root=authority_root,
+        )
 
     assert hostile_called is False
-    assert witness.campaign_id == "paper-forward-dispatch-seal"
-    assert target.exists()
-
-    # Keep the canonical helper reachable only as a test sanity witness. The
-    # installed publisher above must have retained this exact authority rather
-    # than resolving the mutable module name at call time.
+    assert not target.exists()
     assert original_authority_factory is not hostile_publication_authority

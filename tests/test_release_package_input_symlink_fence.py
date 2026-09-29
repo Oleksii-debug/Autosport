@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -194,6 +196,48 @@ class ReleasePackageInputSymlinkFenceTests(unittest.TestCase):
                     "release example tree contains a Windows reparse point: market.jsonl",
                 ):
                     self._build(paths)
+
+            self.assertFalse(paths["package"].exists())
+
+    def test_real_windows_nested_junction_is_rejected(self) -> None:
+        if os.name != "nt":
+            self.skipTest("Windows junction semantics require an NT runner")
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paths = self._make_inputs(root)
+            outside = root / "outside-tree"
+            outside.mkdir()
+            (outside / "outside-secret.json").write_text(
+                '{"secret":true}\n',
+                encoding="utf-8",
+            )
+            junction = paths["example"] / "external-junction"
+            created = subprocess.run(
+                [
+                    "cmd.exe",
+                    "/d",
+                    "/c",
+                    "mklink",
+                    "/J",
+                    str(junction),
+                    str(outside),
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if created.returncode != 0:
+                self.skipTest(
+                    "Windows runner cannot create a directory junction: "
+                    + (created.stderr or created.stdout).strip()
+                )
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "release example tree contains a Windows reparse point: external-junction",
+            ):
+                self._build(paths)
 
             self.assertFalse(paths["package"].exists())
 

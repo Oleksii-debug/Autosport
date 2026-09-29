@@ -137,6 +137,36 @@ class ForwardUniverseMemberExpectation:
     causal_cutoff: datetime
 
 
+@dataclass(frozen=True, slots=True)
+class ForwardUniverseAuthorityIdentity:
+    """Read-only identity projected from the exact #1185 positive resolver.
+
+    Possession of this value is not authority.  Every public issuance re-runs the
+    guarded durable-universe load and prospective precommit resolver before and after
+    projection, then rejects any identity drift across those reads.
+    """
+
+    precommit_authority_sha256: str
+    backing_locator_sha256: str
+    universe_sha256: str
+    membership_sha256: str
+    member_count: int
+
+    @property
+    def authority_sha256(self) -> str:
+        return _digest(
+            {
+                "rule_id": FORWARD_UNIVERSE_RULE_ID,
+                "rule_sha256": FORWARD_UNIVERSE_RULE_SHA256,
+                "precommit_authority_sha256": self.precommit_authority_sha256,
+                "backing_locator_sha256": self.backing_locator_sha256,
+                "universe_sha256": self.universe_sha256,
+                "membership_sha256": self.membership_sha256,
+                "member_count": self.member_count,
+            }
+        )
+
+
 def _rule_result(row: EvaluationRow) -> UniverseResult:
     if row.slot_state is SlotState.CANDIDATE:
         return UniverseResult.ADMITTED
@@ -385,6 +415,49 @@ def _build_public_entrypoints(*, load_expectations):
         return expectations
     
     
+    def resolve_forward_universe_authority_identity(
+        *,
+        store: ProviderEvaluationUniverseStore,
+        protocol: ForwardEvidenceProtocolEnvelope,
+        precommit: ForwardUniversePrecommitLocator,
+    ) -> ForwardUniverseAuthorityIdentity:
+        """Re-resolve the exact post-observation universe identity without receipts."""
+
+        if _sealed_load_expectations.__code__ is not sealed_load_expectations_code:
+            raise ForwardEvaluationUniverseBindingError(
+                "forward source-universe public resolver dispatch changed"
+            )
+        expectations, identity_before = _sealed_load_expectations(
+            store=store,
+            protocol=protocol,
+            precommit=precommit,
+        )
+        if _sealed_load_expectations.__code__ is not sealed_load_expectations_code:
+            raise ForwardEvaluationUniverseBindingError(
+                "forward source-universe public resolver dispatch changed"
+            )
+        _expectations_after, identity_after = _sealed_load_expectations(
+            store=store,
+            protocol=protocol,
+            precommit=precommit,
+        )
+        if _sealed_load_expectations.__code__ is not sealed_load_expectations_code:
+            raise ForwardEvaluationUniverseBindingError(
+                "forward source-universe public resolver dispatch changed"
+            )
+        if identity_after != identity_before:
+            raise ForwardEvaluationUniverseBindingError(
+                "prospective or durable source-universe authority changed during identity resolution"
+            )
+        return ForwardUniverseAuthorityIdentity(
+            precommit_authority_sha256=identity_before[0],
+            backing_locator_sha256=identity_before[1],
+            universe_sha256=identity_before[2],
+            membership_sha256=identity_before[3],
+            member_count=len(expectations),
+        )
+
+
     def authorize_forward_source_receipts(
         *,
         store: ProviderEvaluationUniverseStore,
@@ -500,10 +573,18 @@ def _build_public_entrypoints(*, load_expectations):
         return tuple(receipts)
     
 
-    return resolve_forward_universe_members, authorize_forward_source_receipts
+    return (
+        resolve_forward_universe_members,
+        resolve_forward_universe_authority_identity,
+        authorize_forward_source_receipts,
+    )
 
 
-resolve_forward_universe_members, authorize_forward_source_receipts = _build_public_entrypoints(
+(
+    resolve_forward_universe_members,
+    resolve_forward_universe_authority_identity,
+    authorize_forward_source_receipts,
+) = _build_public_entrypoints(
     load_expectations=_build_load_expectations(
     store_type=ProviderEvaluationUniverseStore,
     precommit_locator_type=ForwardUniversePrecommitLocator,
@@ -521,8 +602,10 @@ __all__ = [
     "FORWARD_UNIVERSE_RULE_ID",
     "FORWARD_UNIVERSE_RULE_SHA256",
     "ForwardEvaluationUniverseBindingError",
+    "ForwardUniverseAuthorityIdentity",
     "ForwardUniverseMemberExpectation",
     "ForwardUniversePrecommitLocator",
     "authorize_forward_source_receipts",
+    "resolve_forward_universe_authority_identity",
     "resolve_forward_universe_members",
 ]

@@ -29,7 +29,7 @@ permissions:
 # Re-runs are isolated by exact event head SHA. Live-head admission remains authoritative
 # before the expensive build.
 concurrency:
-  group: windows-candidate-${{ github.event_name == 'pull_request' && format('pr-{0}-{1}', github.event.number, (github.event.action == 'converted_to_draft' || github.event.action == 'closed') && 'lifecycle' || (github.run_attempt != 1 && format('rerun-{0}', github.event.pull_request.head.sha) || format('qualify-{0}', github.event.pull_request.head.sha))) || github.ref }}
+  group: windows-candidate-${{ github.event_name == 'pull_request' && format('pr-{0}-{1}', github.event.number, (github.event.action == 'converted_to_draft' || github.event.action == 'closed' || github.event.pull_request.draft == true) && 'lifecycle' || (github.run_attempt != 1 && format('rerun-{0}', github.event.pull_request.head.sha) || format('qualify-{0}', github.event.pull_request.head.sha))) || github.ref }}
   cancel-in-progress: true
 
 jobs:

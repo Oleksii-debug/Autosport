@@ -26,16 +26,22 @@ def _assert_head_partitioned_pr_scheduler(path: str) -> None:
     assert "format('qualify-{0}', github.event.pull_request.head.sha)" in concurrency_block
     assert "github.event.action == 'converted_to_draft'" in concurrency_block
     assert "github.event.action == 'closed'" in concurrency_block
+    assert "github.event.pull_request.draft == true" in concurrency_block
     assert "'lifecycle'" in concurrency_block
     assert "github.run_id" not in concurrency_block
     assert "format('pr-{0}-run-{1}'" not in concurrency_block
 
-    # A rerun of a closed/converted-to-draft event must stay in the lifecycle lane.
-    # This is also what makes a merged closed event safe when pull_request is empty:
-    # lifecycle identity uses top-level event.number and never reaches head.sha.
+    # Closed, converted-to-draft, and any already-draft PR activity must coalesce
+    # before exact-head rerun/qualification classification. This prevents each
+    # synchronize commit on a draft PR from allocating another runner-side admission
+    # run while preserving exact-head isolation as soon as the PR becomes ready.
     lifecycle_index = concurrency_block.index("github.event.action == 'converted_to_draft'")
+    draft_index = concurrency_block.index("github.event.pull_request.draft == true")
     rerun_index = concurrency_block.index("github.run_attempt != 1")
+    qualify_index = concurrency_block.index("format('qualify-{0}', github.event.pull_request.head.sha)")
     assert lifecycle_index < rerun_index
+    assert draft_index < rerun_index
+    assert draft_index < qualify_index
 
 
 def test_ci_heavy_matrix_is_deferred_for_stale_draft_or_closed_pull_request() -> None:
@@ -84,15 +90,15 @@ def test_endurance_matrix_is_deferred_only_while_pull_request_is_draft() -> None
     assert "Upload endurance evidence" in workflow
 
 
-def test_ci_pr_scheduler_coalesces_only_same_head_qualification() -> None:
+def test_ci_pr_scheduler_coalesces_safe_qualification_and_draft_classes() -> None:
     _assert_head_partitioned_pr_scheduler(".github/workflows/ci.yml")
 
 
-def test_windows_pr_scheduler_coalesces_only_same_head_qualification() -> None:
+def test_windows_pr_scheduler_coalesces_safe_qualification_and_draft_classes() -> None:
     _assert_head_partitioned_pr_scheduler(".github/workflows/windows-build.yml")
 
 
-def test_endurance_pr_scheduler_coalesces_only_same_head_qualification() -> None:
+def test_endurance_pr_scheduler_coalesces_safe_qualification_and_draft_classes() -> None:
     _assert_head_partitioned_pr_scheduler(".github/workflows/endurance.yml")
 
 

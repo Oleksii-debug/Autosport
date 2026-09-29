@@ -75,6 +75,28 @@ def _safe_exception_site(exc: Exception) -> str:
         return "unknown"
 
 
+def _safe_exception_trace(exc: Exception, *, limit: int = 8) -> list[str]:
+    """Return the bounded innermost call chain without paths, locals, or source text."""
+
+    try:
+        traceback = BaseException.__getattribute__(exc, "__traceback__")
+        frames: list[str] = []
+        while traceback is not None:
+            frame = traceback.tb_frame
+            module_name = frame.f_globals.get("__name__", "unknown")
+            function_name = frame.f_code.co_name
+            line_number = traceback.tb_lineno
+            if type(module_name) is not str or type(function_name) is not str:
+                return ["unknown"]
+            frames.append(f"{module_name}:{function_name}:{line_number}")
+            traceback = traceback.tb_next
+        if not frames:
+            return ["unknown"]
+        return frames[-limit:]
+    except BaseException:
+        return ["unknown"]
+
+
 def _phase_call(phase: str, callable_, *args, **kwargs):
     try:
         return callable_(*args, **kwargs)
@@ -308,6 +330,7 @@ def run_restart_recovery_audit(output_path: str | Path) -> int:
             "phase": failure_phase,
             "error": _safe_exception_detail(exc),
             "failure_site": _safe_exception_site(exc),
+            "failure_trace": _safe_exception_trace(exc),
             "real_money_execution": False,
             "human_tested": False,
             "nvda_verified": False,

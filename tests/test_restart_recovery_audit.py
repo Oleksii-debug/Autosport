@@ -138,6 +138,7 @@ class RestartRecoveryAuditTests(unittest.TestCase):
 
             payload = json.loads(output.read_text(encoding="utf-8"))
             self.assertEqual(payload["status"], "FAIL")
+            self.assertEqual(payload["phase"], "session_restart")
             self.assertEqual(
                 payload["error"],
                 "_BrokenStringError: exception details unavailable",
@@ -164,6 +165,31 @@ class RestartRecoveryAuditTests(unittest.TestCase):
                 payload["error"],
                 "_BrokenMetadataError: exception details unavailable",
             )
+            self.assertFalse(payload["real_money_execution"])
+            self.assertFalse(payload["human_tested"])
+            self.assertFalse(payload["nvda_verified"])
+
+    def test_transaction_recovery_failure_is_attributed_to_recovery_phase(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "restart-recovery-audit.json"
+            with (
+                patch.object(
+                    restart_audit,
+                    "_audit_session_restart",
+                    return_value=self._restart_stub(),
+                ),
+                patch.object(
+                    restart_audit,
+                    "_audit_uncommitted_recovery",
+                    side_effect=ValueError("recovery-canary"),
+                ),
+            ):
+                self.assertEqual(restart_audit.run_restart_recovery_audit(output), 1)
+
+            payload = json.loads(output.read_text(encoding="utf-8"))
+            self.assertEqual(payload["status"], "FAIL")
+            self.assertEqual(payload["phase"], "transaction_recovery")
+            self.assertEqual(payload["error"], "ValueError: recovery-canary")
             self.assertFalse(payload["real_money_execution"])
             self.assertFalse(payload["human_tested"])
             self.assertFalse(payload["nvda_verified"])

@@ -79,12 +79,12 @@ class _FrozenSurface(tuple, metaclass=_FrozenSurfaceMeta):
         return tuple.__new__(cls, tuple(values.items()))
 
     # Keep the primary lookup root explicit so executable-surface witnesses can prove
-    # its exact descriptor/code before any frozen member is consumed. The actual C-level
-    # lookup primitive is injected into this code object below, avoiding a late builtin
-    # or module-global lookup during positive authority dispatch.
+    # its exact descriptor/code before any frozen member is consumed. Resolve the
+    # immutable ``object`` root through a literal tuple's C-owned type ancestry, avoiding
+    # mutable globals, builtins, defaults and closure cells while keeping this code object
+    # fully marshalable for py_compile/.pyc and packaged Windows builds.
     def __getattribute__(self, name: str) -> object:
-        anchored_getattribute = "__AUTOSPORT_FROZEN_SURFACE_GETATTRIBUTE_ANCHOR__"
-        return anchored_getattribute(self, name)
+        return ().__class__.__mro__[1].__getattribute__(self, name)
 
     __iter__ = tuple.__iter__
 
@@ -107,26 +107,6 @@ class _FrozenSurface(tuple, metaclass=_FrozenSurfaceMeta):
     def __delattr__(self, name: str) -> None:
         del name
         raise AttributeError("PaperBook persistence module surface is frozen")
-
-
-# ``__getattribute__`` must remain a normal class executable so the positive-path and
-# RunTransaction surface witnesses can inspect descriptor/code identity. Embed its only
-# authority-bearing primitive as an immutable code constant rather than a mutable global,
-# builtin mapping entry, default, or closure cell.
-_getattribute_descriptor = type.__getattribute__(_FrozenSurface, "__dict__")["__getattribute__"]
-_getattribute_marker = "__AUTOSPORT_FROZEN_SURFACE_GETATTRIBUTE_ANCHOR__"
-_getattribute_constants = _getattribute_descriptor.__code__.co_consts
-if sum(item == _getattribute_marker for item in _getattribute_constants) != 1:
-    raise RuntimeError("canonical PaperBook frozen-surface getattribute anchor is ambiguous")
-_getattribute_descriptor.__code__ = _getattribute_descriptor.__code__.replace(
-    co_consts=tuple(
-        object.__getattribute__ if item == _getattribute_marker else item
-        for item in _getattribute_constants
-    )
-)
-del _getattribute_constants
-del _getattribute_marker
-del _getattribute_descriptor
 
 
 def _seal_surface_type() -> None:

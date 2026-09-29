@@ -3,8 +3,10 @@ from __future__ import annotations
 from decimal import Decimal
 from types import FunctionType
 
+from autosport.domain import MarketEvent, TicketLeg
+from autosport.economic_goal import EconomicGoalContract
 from autosport.paper import PaperBook
-from autosport.risk import PaperRiskPolicy
+from autosport.risk import PaperRiskPolicy, ProposedTicketRiskContext
 
 
 def _reconstruct_pre_wrapper_evaluate() -> FunctionType:
@@ -43,6 +45,57 @@ def _bounded_policy() -> PaperRiskPolicy:
 def _permissive_fraction_limits(self) -> tuple[Decimal, Decimal]:
     del self
     return Decimal("1"), Decimal("1")
+
+
+def _concentration_policy_and_context() -> tuple[
+    PaperRiskPolicy,
+    PaperBook,
+    ProposedTicketRiskContext,
+]:
+    goal = EconomicGoalContract(
+        goal_id="goal",
+        revision=1,
+        bankroll_id="bankroll",
+        currency="USD",
+        max_stake_fraction=Decimal("1"),
+        max_session_loss_fraction=Decimal("1"),
+        max_day_loss_fraction=Decimal("1"),
+        max_drawdown_fraction=Decimal("1"),
+        max_capital_at_risk_fraction=Decimal("1"),
+        max_event_concentration_fraction=Decimal("0.5"),
+        max_turnover_fraction=Decimal("10"),
+        max_risk_of_ruin=Decimal("1"),
+        max_execution_slippage_fraction=Decimal("1"),
+        max_quote_age_seconds=Decimal("60"),
+        max_concurrent_positions=10,
+    )
+    policy = PaperRiskPolicy(
+        max_ticket_fraction=Decimal("1"),
+        max_committed_fraction=Decimal("1"),
+        minimum_cash_reserve_fraction=Decimal("0"),
+        economic_goal=goal,
+    )
+    observed_at = "2026-09-29T00:00:00+00:00"
+    leg = TicketLeg("event", "market", "selection", Decimal("2"))
+    quote = MarketEvent(
+        event_id="event",
+        market_id="market",
+        selection_id="selection",
+        decimal_odds=Decimal("2"),
+        observed_ts=observed_at,
+        source_id="provider",
+        sequence=1,
+        ingest_ts=observed_at,
+    )
+    context = ProposedTicketRiskContext(
+        legs=(leg,),
+        quotes=(quote,),
+        provider_accounts=(("provider", "account"),),
+        bankroll_id="bankroll",
+        currency="USD",
+        proposal_ts=observed_at,
+    )
+    return policy, PaperBook("100"), context
 
 
 def test_reconstructed_evaluate_rejects_transitive_fraction_limit_descriptor_retarget() -> None:
@@ -90,3 +143,53 @@ def test_reconstructed_evaluate_rejects_transitive_fraction_limit_code_retarget(
         )
     finally:
         helper.__code__ = original_code
+
+
+def test_reconstructed_evaluate_rejects_transitive_concentration_helper_before_dispatch() -> None:
+    """First-level proposal witness must cover its nested concentration authority."""
+
+    reconstructed = _reconstruct_pre_wrapper_evaluate()
+    policy, book, context = _concentration_policy_and_context()
+    amount = Decimal("10")
+
+    baseline = reconstructed(policy, book, amount, context=context)
+    assert baseline.allowed is False
+    assert baseline.reason == "owner event concentration limit exceeded"
+
+    descriptor = vars(PaperRiskPolicy)["_identity_concentration_decision"]
+    assert type(descriptor) is classmethod
+    original = descriptor.__func__
+    hostile_calls = 0
+
+    def hostile_identity_concentration_decision(
+        cls,
+        book,
+        amount,
+        context,
+        *,
+        dimension,
+        limit,
+    ):
+        nonlocal hostile_calls
+        del cls, book, amount, context, dimension, limit
+        hostile_calls += 1
+        return None
+
+    type.__setattr__(
+        PaperRiskPolicy,
+        "_identity_concentration_decision",
+        classmethod(hostile_identity_concentration_decision),
+    )
+    try:
+        decision = reconstructed(policy, book, amount, context=context)
+        assert decision.allowed is False
+        assert hostile_calls == 0, (
+            "reconstructed evaluate dispatched a retargeted transitive "
+            "concentration helper"
+        )
+    finally:
+        type.__setattr__(
+            PaperRiskPolicy,
+            "_identity_concentration_decision",
+            classmethod(original),
+        )

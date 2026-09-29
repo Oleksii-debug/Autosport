@@ -38,18 +38,18 @@ def test_in_place_fee_input_reader_code_retarget_fails_before_provider_ingress()
         reader.__code__ = original_code
 
 
-def test_assessment_boundary_witnesses_reader_before_and_after_provider_call() -> None:
+def test_assessment_boundary_witnesses_executable_graph_around_provider_call() -> None:
     public_assess = applicability.assess_betfair_commission_applicability
-    authority = _closure_value(public_assess, "require_reader_authority")
+    authority = _closure_value(public_assess, "require_executable_authority")
 
     assert type(authority) is FunctionType
     calls = [
         instruction
         for instruction in dis.get_instructions(public_assess)
         if instruction.opname == "LOAD_DEREF"
-        and instruction.argval == "require_reader_authority"
+        and instruction.argval == "require_executable_authority"
     ]
-    # The verifier is loaded for calls on both sides of the provider read. This freezes
-    # both pre-call retargeting and a hostile/self-restoring mutation during the read.
-    assert len(calls) == 2
+    # Four guards cover pre-read, post-read, post fee-input identity derivation and
+    # post assessment-id derivation. This makes self-restoring mutations fail closed.
+    assert len(calls) == 4
     authority()

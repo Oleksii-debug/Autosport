@@ -1,7 +1,7 @@
 """Fail-closed Betfair prospective commission applicability evidence.
 
 Authenticated Betfair fee inputs are necessary but not sufficient proof of the
-prospective commission tariff that applies to an account/market.  This module issues
+prospective commission tariff that applies to an account/market. This module issues
 only a product-owned negative prerequisite: applicability remains UNPROVEN until the
 missing tariff/event/additional-charge/terminal-net-win authorities exist.
 """
@@ -20,7 +20,6 @@ from .betfair_execution_fee_inputs import (
     BetfairExecutionFeeInputsObservation,
     read_betfair_execution_fee_inputs,
 )
-
 
 _SCHEMA = "autosport.betfair_commission_applicability"
 _SCHEMA_VERSION = 1
@@ -90,9 +89,7 @@ def _fee_input_payload(
             observation.account_evidence.source_payload_sha256
         ),
         "market_observed_at": observation.market_evidence.observed_at,
-        "market_source_payload_sha256": (
-            observation.market_evidence.source_payload_sha256
-        ),
+        "market_source_payload_sha256": observation.market_evidence.source_payload_sha256,
     }
 
 
@@ -190,9 +187,7 @@ def _assessment_payload(
         "account_source_payload_sha256": (
             observation.account_evidence.source_payload_sha256
         ),
-        "market_source_payload_sha256": (
-            observation.market_evidence.source_payload_sha256
-        ),
+        "market_source_payload_sha256": observation.market_evidence.source_payload_sha256,
         "status": unproven_status.value,
         "reasons": [reason.value for reason in canonical_reasons],
         "ruleset_id": ruleset_id,
@@ -216,56 +211,29 @@ _ASSESSMENT_PAYLOAD_CAPABILITY = partial(
 )
 
 
-def _issue_assessment(
-    payload_builder,
-    canonical_json,
-    hash_constructor,
-    assessment_type,
-    unproven_status,
-    canonical_reasons,
-    ruleset_id,
-    provider_rule_sources,
-    register_issued,
-    observation: BetfairExecutionFeeInputsObservation,
-) -> BetfairCommissionApplicabilityAssessment:
-    """Compatibility helper; production issuance captures a private registrar."""
+def _issue_assessment(*_args: object, **_kwargs: object):
+    """Reject direct module-level issuance; canonical issuance is closure-local."""
 
-    payload = payload_builder(observation)
-    assessment_id = hash_constructor(canonical_json(payload)).hexdigest()
-    assessment = object.__new__(assessment_type)
-    object.__setattr__(assessment, "venue_id", observation.venue_id)
-    object.__setattr__(assessment, "account_id", observation.account_id)
-    object.__setattr__(assessment, "market_id", observation.market_id)
-    object.__setattr__(assessment, "currency_code", observation.currency_code)
-    object.__setattr__(assessment, "region", observation.region)
-    object.__setattr__(assessment, "fee_input_sha256", payload["fee_input_sha256"])
-    object.__setattr__(
-        assessment,
-        "account_source_payload_sha256",
-        observation.account_evidence.source_payload_sha256,
+    raise BetfairCommissionApplicabilityError(
+        "direct assessment issuance is not product authority"
     )
-    object.__setattr__(
-        assessment,
-        "market_source_payload_sha256",
-        observation.market_evidence.source_payload_sha256,
-    )
-    object.__setattr__(assessment, "status", unproven_status)
-    object.__setattr__(assessment, "reasons", canonical_reasons)
-    object.__setattr__(assessment, "ruleset_id", ruleset_id)
-    object.__setattr__(assessment, "provider_rule_sources", provider_rule_sources)
-    object.__setattr__(assessment, "prospective_commission_amount_authorized", False)
-    object.__setattr__(assessment, "complete_execution_fee_cost_authorized", False)
-    object.__setattr__(assessment, "provider_write_authorized", False)
-    object.__setattr__(assessment, "real_money_execution_authorized", False)
-    object.__setattr__(assessment, "assessment_id", assessment_id)
-    register_issued(assessment)
-    return assessment
+
+
+# Compatibility names intentionally carry no product authority. Tests and legacy
+# diagnostics may rebind/mutate them without affecting canonical issuance.
+_ISSUED_BY_ID: dict[
+    int,
+    tuple[ReferenceType[BetfairCommissionApplicabilityAssessment], str],
+] = {}
+_ISSUE_LOCK = RLock()
+_ISSUE_ASSESSMENT_CAPABILITY = _issue_assessment
 
 
 def _assessment_identity_payload(
-    schema,
-    schema_version,
     assessment: BetfairCommissionApplicabilityAssessment,
+    *,
+    schema: str,
+    schema_version: int,
 ) -> dict[str, object]:
     return {
         "schema": schema,
@@ -293,30 +261,11 @@ def _assessment_identity_payload(
     }
 
 
-# Compatibility names deliberately carry no product authority. Older focused tests may
-# rebind or mutate them, but canonical issuance and verification below own a separate
-# closure-local registry and lock that are not reachable through these module names.
-_ISSUED_BY_ID: dict[
-    int,
-    tuple[ReferenceType[BetfairCommissionApplicabilityAssessment], str],
-] = {}
-_ISSUE_LOCK = RLock()
-
-
-def _register_issued(_assessment: BetfairCommissionApplicabilityAssessment) -> None:
-    """Non-authoritative compatibility hook; production does not call this."""
-
-    raise BetfairCommissionApplicabilityError(
-        "module-level assessment registration is not product authority"
-    )
-
-
 def _build_product_boundary():
-    # Capture the exact authority graph once. Module-global rebinding after import
-    # cannot substitute provider reads, identity builders, issuance state or verifier
-    # roots. Registry state is intentionally closure-local.
+    # Capture the exact negative-authority graph once. The only mutable issuance state
+    # lives in this factory scope; no module-global dict/lock/issuer is authoritative.
     fee_input_reader = read_betfair_execution_fee_inputs
-    payload_builder = _ASSESSMENT_PAYLOAD_CAPABILITY
+    fee_payload_builder = _FEE_INPUT_SHA256_CAPABILITY
     canonical_json = _canonical_json
     hash_constructor = sha256
     assessment_type = BetfairCommissionApplicabilityAssessment
@@ -353,26 +302,74 @@ def _build_product_boundary():
         with issue_lock:
             issued_by_id[object_id] = (reference, issued_assessment_id)
 
-    issue_assessment = partial(
-        _issue_assessment,
-        payload_builder,
-        canonical_json,
-        hash_constructor,
-        assessment_type,
-        unproven_status,
-        canonical_reasons,
-        ruleset_id,
-        provider_rule_sources,
-        register_issued,
-    )
+    def issue(
+        observation: BetfairExecutionFeeInputsObservation,
+    ) -> BetfairCommissionApplicabilityAssessment:
+        if type(observation) is not BetfairExecutionFeeInputsObservation:
+            raise error_type(
+                "fee inputs must be exact BetfairExecutionFeeInputsObservation"
+            )
+        payload = {
+            "schema": schema,
+            "schema_version": schema_version,
+            "venue_id": observation.venue_id,
+            "account_id": observation.account_id,
+            "market_id": observation.market_id,
+            "currency_code": observation.currency_code,
+            "region": observation.region,
+            "fee_input_sha256": fee_payload_builder(observation),
+            "account_source_payload_sha256": (
+                observation.account_evidence.source_payload_sha256
+            ),
+            "market_source_payload_sha256": (
+                observation.market_evidence.source_payload_sha256
+            ),
+            "status": unproven_status.value,
+            "reasons": [reason.value for reason in canonical_reasons],
+            "ruleset_id": ruleset_id,
+            "provider_rule_sources": list(provider_rule_sources),
+            "prospective_commission_amount_authorized": False,
+            "complete_execution_fee_cost_authorized": False,
+            "provider_write_authorized": False,
+            "real_money_execution_authorized": False,
+        }
+        assessment_id = hash_constructor(canonical_json(payload)).hexdigest()
+        assessment = object.__new__(assessment_type)
+        for name, value in (
+            ("venue_id", observation.venue_id),
+            ("account_id", observation.account_id),
+            ("market_id", observation.market_id),
+            ("currency_code", observation.currency_code),
+            ("region", observation.region),
+            ("fee_input_sha256", payload["fee_input_sha256"]),
+            (
+                "account_source_payload_sha256",
+                observation.account_evidence.source_payload_sha256,
+            ),
+            (
+                "market_source_payload_sha256",
+                observation.market_evidence.source_payload_sha256,
+            ),
+            ("status", unproven_status),
+            ("reasons", canonical_reasons),
+            ("ruleset_id", ruleset_id),
+            ("provider_rule_sources", provider_rule_sources),
+            ("prospective_commission_amount_authorized", False),
+            ("complete_execution_fee_cost_authorized", False),
+            ("provider_write_authorized", False),
+            ("real_money_execution_authorized", False),
+            ("assessment_id", assessment_id),
+        ):
+            object.__setattr__(assessment, name, value)
+        register_issued(assessment)
+        return assessment
 
     def assess(
         client: BetfairReadOnlyClient,
         *,
         market_id: str,
     ) -> BetfairCommissionApplicabilityAssessment:
-        observation = fee_input_reader(client, market_id=market_id)
-        return issue_assessment(observation)
+        return issue(fee_input_reader(client, market_id=market_id))
 
     def require_product(
         assessment: BetfairCommissionApplicabilityAssessment,
@@ -386,7 +383,6 @@ def _build_product_boundary():
             if record is None or record[0]() is not assessment:
                 raise error_type("assessment is not product-issued in this process")
             issued_assessment_id = record[1]
-
         if assessment.assessment_id != issued_assessment_id:
             raise error_type("assessment changed after product issuance")
         if (
@@ -402,20 +398,21 @@ def _build_product_boundary():
             raise error_type(
                 "assessment exceeds the canonical fail-closed applicability boundary"
             )
-
-        payload = identity_payload_builder(schema, schema_version, assessment)
-        expected_id = hash_constructor(canonical_json(payload)).hexdigest()
-        if assessment.assessment_id != expected_id:
+        payload = identity_payload_builder(
+            assessment,
+            schema=schema,
+            schema_version=schema_version,
+        )
+        if assessment.assessment_id != hash_constructor(canonical_json(payload)).hexdigest():
             raise error_type("assessment identity is inconsistent")
         return assessment
 
-    return assess, require_product, issue_assessment
+    return assess, require_product
 
 
 (
     assess_betfair_commission_applicability,
     require_product_betfair_commission_applicability,
-    _ISSUE_ASSESSMENT_CAPABILITY,
 ) = _build_product_boundary()
 
 assess_betfair_commission_applicability.__name__ = (
@@ -424,16 +421,9 @@ assess_betfair_commission_applicability.__name__ = (
 assess_betfair_commission_applicability.__qualname__ = (
     "assess_betfair_commission_applicability"
 )
-assess_betfair_commission_applicability.__doc__ = (
-    "Re-read canonical authenticated fee inputs and issue bounded UNPROVEN truth."
-)
-
 require_product_betfair_commission_applicability.__name__ = (
     "require_product_betfair_commission_applicability"
 )
 require_product_betfair_commission_applicability.__qualname__ = (
     "require_product_betfair_commission_applicability"
-)
-require_product_betfair_commission_applicability.__doc__ = (
-    "Require exact closure-local product issuance and unchanged fail-closed identity."
 )

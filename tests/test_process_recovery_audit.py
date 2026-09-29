@@ -5,6 +5,8 @@ import os
 import tempfile
 from pathlib import Path
 
+import pytest
+
 import autosport.process_recovery_audit as process_audit
 from autosport.process_recovery_audit import audit_process_kill_relaunch
 
@@ -129,3 +131,54 @@ def test_packaged_audit_broken_exception_string_still_publishes_fail_evidence(tm
     assert payload["real_money_execution"] is False
     assert payload["human_tested"] is False
     assert payload["nvda_verified"] is False
+
+
+def test_packaged_publication_failure_propagates_and_preserves_base_evidence(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    output = tmp_path / "restart-recovery-audit.json"
+    base_payload = {
+        "status": "PASS",
+        "real_money_execution": False,
+        "human_tested": False,
+        "nvda_verified": False,
+    }
+    base_bytes = (json.dumps(base_payload, sort_keys=True) + "\n").encode("utf-8")
+    publication_attempts = 0
+
+    def pass_base_audit(destination) -> int:
+        Path(destination).write_bytes(base_bytes)
+        return 0
+
+    def pass_process_kill(_root):
+        return {
+            "status": "PASS",
+            "stage_pid": 101,
+            "killed_return_code": -15,
+            "recovery_pid": 202,
+            "run_id": process_audit._PROCESS_RUN_ID,
+            "disposition": "committed",
+            "registry_status": "completed",
+            "manifest_phase": "completed",
+            "base_paper_book_sha256": "a" * 64,
+            "base_decision_ledger_sha256": "b" * 64,
+            "new_paper_book_sha256": "c" * 64,
+            "new_decision_ledger_sha256": "d" * 64,
+            "real_money_execution": False,
+        }
+
+    def fail_publication(_destination, _payload):
+        nonlocal publication_attempts
+        publication_attempts += 1
+        raise OSError("injected packaged publication failure")
+
+    monkeypatch.setattr(process_audit, "run_restart_recovery_audit", pass_base_audit)
+    monkeypatch.setattr(process_audit, "audit_process_kill_relaunch", pass_process_kill)
+    monkeypatch.setattr(process_audit, "atomic_write_json", fail_publication)
+
+    with pytest.raises(OSError, match="injected packaged publication failure"):
+        process_audit.run_packaged_restart_recovery_audit(output)
+
+    assert publication_attempts == 1
+    assert output.read_bytes() == base_bytes

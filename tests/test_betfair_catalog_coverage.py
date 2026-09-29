@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from hashlib import sha256
 import json
 import sqlite3
 import urllib.request as _urllib_request
@@ -379,6 +380,114 @@ def test_parent_market_missing_from_categorical_child_fails_reconciliation(
     with pytest.raises(
         BetfairCatalogCoverageError,
         match="parent observation is not reconciled",
+    ):
+        resolve_catalog_coverage(
+            store,
+            expected_store_path=store.path,
+            plan_id=plan.plan_id,
+            live_acquisitions=(root_acquisition, *child_acquisitions),
+        )
+
+
+def test_live_reacquisition_rejects_consistently_rewritten_durable_market_identity(
+    tmp_path,
+    monkeypatch,
+):
+    store = CollectorDeltaStore(tmp_path / "collector.db")
+    source = _successful_source_window(store)
+    client, scope, _opener = _client_and_scope(monkeypatch)
+    plan = create_catalog_coverage_plan(
+        store,
+        expected_store_path=store.path,
+        source_universe=source,
+        expected_source_id="source-x",
+        expected_start_cycle_seq=1,
+        expected_end_cycle_seq=1,
+        client=client,
+        visibility_scope=scope,
+        causal_cutoff=datetime(2099, 1, 1, tzinfo=timezone.utc),
+        root_request=_root_request(),
+    )
+    root = pending_catalog_coverage_leaves(
+        store,
+        expected_store_path=store.path,
+        plan_id=plan.plan_id,
+    )[0]
+    root_acquisition = acquire_authenticated_betfair_discovery(client, root.request)
+    record_catalog_coverage_acquisition(
+        store,
+        expected_store_path=store.path,
+        plan_id=plan.plan_id,
+        leaf_id=root.leaf_id,
+        acquisition=root_acquisition,
+    )
+
+    children = pending_catalog_coverage_leaves(
+        store,
+        expected_store_path=store.path,
+        plan_id=plan.plan_id,
+    )
+    child_acquisitions = []
+    e1_child = None
+    for child in children:
+        acquisition = acquire_authenticated_betfair_discovery(client, child.request)
+        child_acquisitions.append(acquisition)
+        record_catalog_coverage_acquisition(
+            store,
+            expected_store_path=store.path,
+            plan_id=plan.plan_id,
+            leaf_id=child.leaf_id,
+            acquisition=acquisition,
+        )
+        if child.request.rpc_params()["filter"]["eventIds"] == ["e1"]:
+            e1_child = child
+    assert e1_child is not None
+
+    connection = sqlite3.connect(store.path)
+    connection.row_factory = sqlite3.Row
+    try:
+        connection.execute(
+            "DROP TRIGGER betfair_catalog_coverage_leaf_terminal_no_update_v1"
+        )
+        for leaf_id in (root.leaf_id, e1_child.leaf_id):
+            row = connection.execute(
+                "SELECT payload_json FROM betfair_catalog_coverage_leaf_terminals_v1 "
+                "WHERE plan_id=? AND leaf_id=?",
+                (plan.plan_id, leaf_id),
+            ).fetchone()
+            assert row is not None
+            payload = json.loads(row["payload_json"])
+            target = next(
+                item
+                for item in payload["market_observations"]
+                if item["market_id"] == "1.100"
+            )
+            target["market_start_time"] = "2026-10-01T10:11:00Z"
+            payload_json = json.dumps(
+                payload,
+                ensure_ascii=False,
+                allow_nan=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            connection.execute(
+                "UPDATE betfair_catalog_coverage_leaf_terminals_v1 "
+                "SET payload_sha256=?, payload_json=? "
+                "WHERE plan_id=? AND leaf_id=?",
+                (
+                    sha256(payload_json.encode("utf-8")).hexdigest(),
+                    payload_json,
+                    plan.plan_id,
+                    leaf_id,
+                ),
+            )
+        connection.commit()
+    finally:
+        connection.close()
+
+    with pytest.raises(
+        BetfairCatalogCoverageError,
+        match="live provider result does not match durable terminal semantics",
     ):
         resolve_catalog_coverage(
             store,

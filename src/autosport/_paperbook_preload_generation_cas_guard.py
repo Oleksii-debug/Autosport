@@ -220,6 +220,12 @@ def _generation_guarded_save(self, path):
             has_binding = _BOOK_BINDINGS.get(self) is not None
         if has_binding:
             _require_bound_book(self, destination)
+        else:
+            generation, snapshot_sha = _durable_binding_state(destination)
+            if generation != 0 or snapshot_sha != "":
+                raise ValueError(
+                    "existing PaperBook snapshot lineage requires verified path-bound authority"
+                )
         _GENERATION_ORIGINAL_TRUSTED_SAVE(self, path)
         _advance_book_binding(self, destination)
     finally:

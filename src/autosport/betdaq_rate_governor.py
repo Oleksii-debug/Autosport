@@ -850,6 +850,20 @@ class _BlacklistStore:
 class BetdaqRateGovernor:
     """Shared process-local request budget plus durable blacklist fence."""
 
+    # The governor is an authority-bearing resolved object.  Keep method dispatch on
+    # the canonical class surface: a normal instance __dict__ would let a caller
+    # shadow admit() or one of its transitive helpers after exact-type resolution,
+    # bypassing the shared request budget while retaining the same object identity.
+    __slots__ = (
+        "workspace",
+        "policy",
+        "_runtime",
+        "_blacklist_store",
+        "policy_fingerprint",
+        "_method_policies",
+        "governor_id",
+    )
+
     def __init__(
         self,
         workspace: Path,

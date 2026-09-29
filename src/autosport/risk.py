@@ -1024,6 +1024,14 @@ class PaperRiskPolicy:
                             and settlement_time > causal_cutoff
                         ):
                             return None
+                    elif causal_cutoff is not None and payout > ticket.stake:
+                        # A legacy settlement without durable time provenance may be
+                        # conservatively counted when it is loss/void-equivalent, but
+                        # a profitable payout would raise replay equity and possibly
+                        # the drawdown high-watermark using facts that cannot be proven
+                        # available by the proposal cutoff. Fail closed rather than
+                        # granting risk capacity from an unknown-time win.
+                        return None
 
                     include_loss = True
                     if realized_loss_window is not None and settlement_time is not None:

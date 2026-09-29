@@ -383,6 +383,49 @@ class EconomicGoalRiskBindingTests(unittest.TestCase):
             "economic goal conservative day loss limit exceeded",
         )
 
+    def test_legacy_unknown_profitable_settlement_cannot_expand_causal_risk_capacity(self) -> None:
+        book = PaperBook("100")
+        winner = book.open_ticket(
+            [self._leg()],
+            Decimal("4"),
+            placed_at="2026-09-16T12:00:00+00:00",
+        )
+        book.settle(
+            winner.ticket_id,
+            {winner.legs[0].quote_key},
+            settled_at="2026-09-16T12:30:00+00:00",
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "paper.json"
+            book.save(path)
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            payload["schema_version"] = 4
+            for ticket in payload["tickets"]:
+                ticket.pop("settled_at")
+            for entry in payload["lifecycle"]:
+                if entry["action"] == "settle":
+                    entry.pop("settled_at")
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            restarted = PaperBook.load(path)
+
+        self.assertIsNone(restarted.tickets[winner.ticket_id].settled_at)
+        policy = self._policy(
+            self._goal(max_drawdown_fraction=Decimal("0.50"))
+        )
+
+        decision = policy.evaluate(
+            restarted,
+            Decimal("1"),
+            context=self._context(),
+        )
+
+        self.assertFalse(decision.allowed)
+        self.assertEqual(
+            decision.reason,
+            "virtual bankroll risk history is invalid",
+        )
+
     def test_unanchored_measurement_window_cannot_narrow_historical_loss(self) -> None:
         book = PaperBook("100")
         lost = book.open_ticket(

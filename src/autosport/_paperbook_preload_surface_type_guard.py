@@ -4,10 +4,14 @@ The module-member freeze replaces mutable stdlib modules with narrow tuple-backe
 facades and detaches the top-level Python callables used by canonical persistence.
 A top-level clone is still insufficient when that callable reaches a shared mutable
 Python class, nested Python helper, module member, or a name that could later be
-shadowed in its globals mapping.  This module composes one more witness into the
-already-installed positive load/save verifier.  It snapshots the transitive Python
+shadowed in its globals mapping. This module composes one more witness into the
+already-installed positive load/save verifier. It snapshots the transitive Python
 executable graph reachable from the frozen persistence surfaces and verifies that
 same graph before and after each positive persistence dispatch.
+
+Mutable non-executable stdlib state (for example tempfile's lazy candidate-name state)
+is deliberately not frozen by this verifier. The invariant is executable dispatch,
+not incidental library cache identity.
 
 No parser, serializer, store, journal, witness root, or economic authority is added.
 The canonical parser/serializer and independent witness protocol remain unchanged.
@@ -38,7 +42,7 @@ _EXT_FAILURE = ValueError
 _EXT_EMPTY = object()
 
 # Populated exactly once by _install before the wrapper-helper seal snapshots this
-# module's verifier graph.  Later replacement is therefore tamper evidence.
+# module's verifier graph. Later replacement is therefore tamper evidence.
 _ORIGINAL_VALUE_TYPE_VERIFIER: FunctionType | None = None
 _EXTERNAL_EXECUTABLE_GRAPH_WITNESSES: tuple[object, ...] = ()
 
@@ -136,6 +140,17 @@ def _capture_surface_witnesses(
     return tuple(witnesses)
 
 
+def _capture_is_executable(value: object) -> bool:
+    """Return whether a binding can directly redirect executable dispatch."""
+
+    return (
+        type(value) is FunctionType
+        or type(value) is ModuleType
+        or isinstance(value, type)
+        or callable(value)
+    )
+
+
 def _capture_external_executable_graph(
     roots: tuple[object, ...],
     *,
@@ -182,6 +197,10 @@ def _capture_external_executable_graph(
             for name in function.__code__.co_names:
                 if name in globals_mapping:
                     expected = globals_mapping[name]
+                    if not _capture_is_executable(expected):
+                        # tempfile and a few other stdlib modules legitimately mutate
+                        # lazy data/cache globals during normal positive operation.
+                        continue
                     expected_code = (
                         expected.__code__ if type(expected) is FunctionType else None
                     )
@@ -197,6 +216,8 @@ def _capture_external_executable_graph(
                             if member_name not in module_namespace:
                                 continue
                             member = module_namespace[member_name]
+                            if not _capture_is_executable(member):
+                                continue
                             member_code = (
                                 member.__code__ if type(member) is FunctionType else None
                             )
@@ -229,31 +250,30 @@ def _capture_external_executable_graph(
 
                 builtin_value = dict.get(builtins_mapping, name, empty_cell)
                 if builtin_value is empty_cell:
-                    name_witnesses.append(
-                        (name, "missing", empty_cell, None, None, ())
+                    # Attribute names also occur in co_names. A missing global/builtin
+                    # therefore is not itself an execution dependency and is ignored.
+                    continue
+                builtin_code = (
+                    builtin_value.__code__
+                    if type(builtin_value) is FunctionType
+                    else None
+                )
+                builtin_closure = (
+                    _closure_values(builtin_value, empty_cell=empty_cell)
+                    if type(builtin_value) is FunctionType
+                    else None
+                )
+                enqueue(builtin_value)
+                name_witnesses.append(
+                    (
+                        name,
+                        "builtin",
+                        builtin_value,
+                        builtin_code,
+                        builtin_closure,
+                        (),
                     )
-                else:
-                    builtin_code = (
-                        builtin_value.__code__
-                        if type(builtin_value) is FunctionType
-                        else None
-                    )
-                    builtin_closure = (
-                        _closure_values(builtin_value, empty_cell=empty_cell)
-                        if type(builtin_value) is FunctionType
-                        else None
-                    )
-                    enqueue(builtin_value)
-                    name_witnesses.append(
-                        (
-                            name,
-                            "builtin",
-                            builtin_value,
-                            builtin_code,
-                            builtin_closure,
-                            (),
-                        )
-                    )
+                )
 
             function_nodes.append(
                 (
@@ -375,21 +395,13 @@ def _require_external_executable_graph(graph: tuple[object, ...]) -> None:
                     raise _EXT_FAILURE(
                         "PaperBook persistence transitive global authority changed"
                     )
-            elif source == "builtin":
+            else:
                 if (
                     current_global is not _EXT_EMPTY
                     or _EXT_DICT_GET(builtins_mapping, name, _EXT_EMPTY) is not expected
                 ):
                     raise _EXT_FAILURE(
                         "PaperBook persistence transitive builtin authority changed"
-                    )
-            else:
-                if (
-                    current_global is not _EXT_EMPTY
-                    or _EXT_DICT_GET(builtins_mapping, name, _EXT_EMPTY) is not _EXT_EMPTY
-                ):
-                    raise _EXT_FAILURE(
-                        "PaperBook persistence transitive name authority changed"
                     )
 
             _require_external_function_state(

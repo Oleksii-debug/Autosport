@@ -6,6 +6,7 @@ import hashlib
 
 import pytest
 
+import autosport.betdaq_account_readonly as betdaq_account_readonly_module
 from autosport.betdaq_account_readonly import BetdaqCredentials
 from autosport.betdaq_readonly_live_provider import BetdaqLiveReadOnlyProvider
 from autosport.betdaq_readonly_market_wire import (
@@ -138,7 +139,21 @@ def _prices_response(*, market_id: int = 9001, market_type: int = 1) -> bytes:
     </soap:Envelope>""".encode()
 
 
-class _ActionTransport:
+class _FakeHttpResponse:
+    def __init__(self, payload: bytes) -> None:
+        self._payload = payload
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        return None
+
+    def read(self) -> bytes:
+        return self._payload
+
+
+class _CanonicalUrlopenRouter:
     def __init__(
         self,
         *,
@@ -147,30 +162,32 @@ class _ActionTransport:
     ) -> None:
         self.event_payload = _event_response() if event_payload is None else event_payload
         self.prices_payload = _prices_response() if prices_payload is None else prices_payload
-        self.calls: list[str] = []
+        self.calls: list[bytes] = []
 
-    def post(self, url, *, headers, body, timeout_seconds):
-        action = headers.get("SOAPAction", "")
-        self.calls.append(action)
-        if "GetEventSubTreeNoSelections" in action:
-            return self.event_payload
-        if "GetPrices" in action:
-            return self.prices_payload
+    def __call__(self, request, *, timeout):
+        body = request.data
+        assert type(body) is bytes
+        self.calls.append(body)
+        if b"GetEventSubTreeNoSelections" in body:
+            return _FakeHttpResponse(self.event_payload)
+        if b"GetPrices" in body:
+            return _FakeHttpResponse(self.prices_payload)
         raise AssertionError("unexpected BETDAQ operation")
 
 
 def _provider(
     tmp_path,
-    transport: _ActionTransport,
+    monkeypatch,
+    router: _CanonicalUrlopenRouter,
     *,
     root: str = "100",
     sport: str = "football",
     market_type: MarketType = MarketType.WINNER,
 ) -> BetdaqLiveReadOnlyProvider:
+    monkeypatch.setattr(betdaq_account_readonly_module, "urlopen", router)
     return BetdaqLiveReadOnlyProvider(
         credentials=_credentials(),
         rate_governor=_governor(tmp_path),
-        transport=transport,
         market_bindings=[
             BetdaqMarketBinding(
                 9001,
@@ -185,11 +202,15 @@ def _provider(
     )
 
 
-def test_live_canonical_identity_comes_from_catalogue_not_caller_semantics(tmp_path) -> None:
-    transport = _ActionTransport()
+def test_live_canonical_identity_comes_from_catalogue_not_caller_semantics(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    router = _CanonicalUrlopenRouter()
     provider = _provider(
         tmp_path,
-        transport,
+        monkeypatch,
+        router,
         sport="tennis",
         market_type=MarketType.TOTAL,
     )
@@ -210,22 +231,32 @@ def test_live_canonical_identity_comes_from_catalogue_not_caller_semantics(tmp_p
         "Fixture A",
     ]
     assert "CATALOGUE_BOUND_EVENT_IDENTITY" in batch.quality_flags
-    assert len(transport.calls) == 2
+    assert len(router.calls) == 2
 
 
-def test_same_prices_with_different_provider_event_tree_changes_causal_identity(tmp_path) -> None:
+def test_same_prices_with_different_provider_event_tree_changes_causal_identity(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    first_root = tmp_path / "first"
+    second_root = tmp_path / "second"
+    first_root.mkdir()
+    second_root.mkdir()
+
     first = _provider(
-        tmp_path / "first",
-        _ActionTransport(event_payload=_event_response(event_id=101)),
+        first_root,
+        monkeypatch,
+        _CanonicalUrlopenRouter(event_payload=_event_response(event_id=101)),
     )
-    second = _provider(
-        tmp_path / "second",
-        _ActionTransport(event_payload=_event_response(event_id=102)),
-    )
-
     first_batch = first.read_batch()
-    second_batch = second.read_batch()
     first_evidence = first.last_request_evidence
+
+    second = _provider(
+        second_root,
+        monkeypatch,
+        _CanonicalUrlopenRouter(event_payload=_event_response(event_id=102)),
+    )
+    second_batch = second.read_batch()
     second_evidence = second.last_request_evidence
 
     assert first_batch.quotes[0].provider_event_id == "101"
@@ -240,10 +271,14 @@ def test_same_prices_with_different_provider_event_tree_changes_causal_identity(
     assert first_evidence.aggregate_sha256 != second_evidence.aggregate_sha256
 
 
-def test_catalogue_market_type_must_match_getprices_provider_type(tmp_path) -> None:
+def test_catalogue_market_type_must_match_getprices_provider_type(
+    tmp_path,
+    monkeypatch,
+) -> None:
     provider = _provider(
         tmp_path,
-        _ActionTransport(
+        monkeypatch,
+        _CanonicalUrlopenRouter(
             event_payload=_event_response(market_type=2),
             prices_payload=_prices_response(market_type=1),
         ),
@@ -258,10 +293,14 @@ def test_catalogue_market_type_must_match_getprices_provider_type(tmp_path) -> N
     assert provider.last_request_evidence is None
 
 
-def test_caller_event_scope_must_contain_returned_market(tmp_path) -> None:
+def test_caller_event_scope_must_contain_returned_market(
+    tmp_path,
+    monkeypatch,
+) -> None:
     provider = _provider(
         tmp_path,
-        _ActionTransport(event_payload=_event_response(root_id=100)),
+        monkeypatch,
+        _CanonicalUrlopenRouter(event_payload=_event_response(root_id=100)),
         root="999",
     )
 
@@ -272,22 +311,29 @@ def test_caller_event_scope_must_contain_returned_market(tmp_path) -> None:
 
 
 @pytest.mark.parametrize("scope", ["event-100", "0100", "+100", " 100", ""])
-def test_live_scope_assertion_requires_provider_decimal_event_id(tmp_path, scope) -> None:
-    provider = _provider(
-        tmp_path,
-        _ActionTransport(),
-        root=scope,
-    )
-
+def test_live_scope_assertion_requires_provider_decimal_event_id(
+    tmp_path,
+    monkeypatch,
+    scope,
+) -> None:
     with pytest.raises(ValueError, match="event-classifier id"):
-        provider.read_batch()
+        _provider(
+            tmp_path,
+            monkeypatch,
+            _CanonicalUrlopenRouter(),
+            root=scope,
+        )
 
 
-def test_catalogue_acquisition_is_bound_into_snapshot_evidence(tmp_path) -> None:
+def test_catalogue_acquisition_is_bound_into_snapshot_evidence(
+    tmp_path,
+    monkeypatch,
+) -> None:
     event_payload = _event_response()
     provider = _provider(
         tmp_path,
-        _ActionTransport(event_payload=event_payload),
+        monkeypatch,
+        _CanonicalUrlopenRouter(event_payload=event_payload),
     )
 
     provider.read_batch()
@@ -297,6 +343,7 @@ def test_catalogue_acquisition_is_bound_into_snapshot_evidence(tmp_path) -> None
     assert evidence is not None
     assert catalogue is not None
     assert catalogue.response_sha256 == hashlib.sha256(event_payload).hexdigest()
+    assert evidence.catalogue_request_fingerprint == catalogue.request_fingerprint
     assert evidence.catalogue_response_sha256 == catalogue.response_sha256
     assert evidence.catalogue_event_classifier_ids == (100,)
     assert evidence.catalogue_rate_admission_receipt == catalogue.rate_admission_receipt

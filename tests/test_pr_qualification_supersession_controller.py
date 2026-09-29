@@ -31,8 +31,10 @@ def test_current_head_request_cancels_only_obsolete_same_pr_workflow_runs() -> N
     assert "github.event.workflow_run.pull_requests[0].number" in workflow
     assert "github.event.workflow_run.head_sha" in workflow
     assert "github.event.workflow_run.name" in workflow
+    assert "github.event.workflow_run.workflow_id" in workflow
     assert "github.event.workflow_run.id" in workflow
-    assert "python scripts/cancel_superseded_pr_workflow_runs.py" in workflow
+    assert "python scripts/cancel_superseded_pr_workflow_runs_scoped.py" in workflow
+    assert '--workflow-id "${{ github.event.workflow_run.workflow_id }}"' in workflow
     assert "--admission-only" not in workflow
 
 
@@ -64,3 +66,4 @@ def test_controller_does_not_cross_cancel_other_source_workflow_controllers() ->
 
     assert "Controllers for CI, Windows candidate, and Endurance must not preempt one another" in workflow
     assert "each invocation cancels only obsolete runs of its own source workflow" in workflow
+    assert "exact workflow_id carried by workflow_run" in workflow

@@ -5,6 +5,7 @@ from typing import Sequence
 
 from .betdaq_account_readonly import BetdaqCredentials, BetdaqSoapTransport
 from .betdaq_readonly_live_transport import BetdaqReadOnlyLiveTransport
+from .betdaq_rate_governor import BetdaqRateGovernor
 from .betdaq_readonly_provider import (
     BetdaqMarketBinding,
     BetdaqReadOnlyProvider,
@@ -30,6 +31,7 @@ class BetdaqLiveReadOnlyProvider(BetdaqReadOnlyProvider):
         credentials: BetdaqCredentials,
         market_bindings: Sequence[BetdaqMarketBinding],
         threshold_amount: Decimal,
+        rate_governor: BetdaqRateGovernor,
         transport: BetdaqSoapTransport | None = None,
         timeout_seconds: float = 10.0,
         max_attempts: int = 2,
@@ -47,6 +49,7 @@ class BetdaqLiveReadOnlyProvider(BetdaqReadOnlyProvider):
             raise TypeError("threshold_amount must be exact Decimal")
         live_transport = BetdaqReadOnlyLiveTransport(
             credentials=credentials,
+            rate_governor=rate_governor,
             transport=transport,
         )
         super().__init__(

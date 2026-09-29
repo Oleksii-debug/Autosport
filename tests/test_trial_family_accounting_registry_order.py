@@ -177,7 +177,7 @@ def _foundation(tmp_path):
         registry,
         plan,
         workspace_root=workspace,
-        authority_root=tmp_path / "machine-authority",
+        authority_root=tmp_path.parent / f"{tmp_path.name}-machine-authority",
     )
     return registry, protocol, candidate, member, store
 

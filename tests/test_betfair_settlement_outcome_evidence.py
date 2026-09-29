@@ -87,7 +87,7 @@ class _Transport:
                     "betOutcome": self.bet_outcome,
                 }
                 if self.handicap is not None:
-                    row["handicap"] = str(self.handicap)
+                    row["handicap"] = float(self.handicap)
                 if self.voided_date is not None:
                     row["voidedDate"] = self.voided_date
                 rows.append(row)

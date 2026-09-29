@@ -291,6 +291,8 @@ def _build_product_boundary():
     canonical_json = _canonical_json
     canonical_json_code = canonical_json.__code__
     canonical_json_globals = canonical_json.__globals__
+    json_module = json
+    json_dumps = json.dumps
     hash_constructor = sha256
     assessment_type = BetfairCommissionApplicabilityAssessment
     error_type = BetfairCommissionApplicabilityError
@@ -373,6 +375,8 @@ def _build_product_boundary():
         if (
             canonical_json.__code__ is not canonical_json_code_witness
             or canonical_json.__globals__ is not canonical_json_globals
+            or canonical_json_globals.get("json") is not json_module
+            or getattr(json_module, "dumps", None) is not json_dumps
             or identity_payload_builder.__code__ is not identity_payload_code_witness
             or identity_payload_builder.__globals__ is not identity_payload_builder_globals
         ):

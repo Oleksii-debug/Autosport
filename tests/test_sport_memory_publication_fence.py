@@ -128,7 +128,11 @@ def test_explicit_public_base_dispatch_cannot_skip_bound_refresh(tmp_path):
             raise AssertionError("caller-supplied authority must not be reached")
 
     poison = _PoisonAuthority()
-    runtime.opponent_authority = poison
+    with pytest.raises(
+        SportMemoryCheckpointError,
+        match="binding is immutable: opponent_authority",
+    ):
+        runtime.opponent_authority = poison
 
     with pytest.raises(SportMemoryError, match="canonical bound authority"):
         SportMemoryRuntime.materialize(

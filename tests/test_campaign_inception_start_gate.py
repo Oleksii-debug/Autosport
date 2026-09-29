@@ -127,60 +127,35 @@ def _state_file(locator: ForwardUniversePrecommitLocator) -> Path:
     return paths[0]
 
 
-def test_receipt_commit_precedes_exact_gate_authorization(
+def test_gate_authorization_is_exact_committed_authority_record(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manifest, locator, store, spec, authority_root = _setup(tmp_path)
-    original_authorize = inception_module._CANONICAL_GATE_AUTHORIZE
-    observed_commit_tips: list[str] = []
 
-    def checked_authorize(
-        target: CollectorDeltaStore,
-        **kwargs: object,
-    ) -> dict[str, object]:
-        authority = MonotonicWorkspaceAuthority(
-            workspace=locator.workspace,
-            domain=AUTHORITY_DOMAIN,
-            key=manifest.campaign_id,
-            authority_root=authority_root,
-        )
-        history = authority.read_history()
-        assert history
-        assert history[-1].phase is AuthorityPhase.COMMIT
-        observed_commit_tips.append(history[-1].record_sha256)
-        return original_authorize(target, **kwargs)
-
-    monkeypatch.setattr(
-        inception_module,
-        "_CANONICAL_GATE_AUTHORIZE",
-        checked_authorize,
-    )
     receipt = establish_campaign_inception(
         precommit_locator=locator,
         store=store,
         source_spec=spec,
     )
 
-    assert observed_commit_tips == [receipt.authority_record_sha256]
     assert receipt.evaluation_universe_sha256 == manifest.evaluation_universe_sha256
-    status = store._collector_schedule_start_gate_status(
-        source_id=spec.source_id,
-        run_id=spec.run_id,
-    )
-    assert status is not None
-    assert status["authorization_sha256"] == receipt.authority_record_sha256
-
     authority = _inception_authority(
         locator=locator,
         receipt=receipt,
         authority_root=authority_root,
     )
     history = authority.read_history()
+    assert history
     assert history[-1].phase is AuthorityPhase.COMMIT
     assert history[-1].record_sha256 == receipt.authority_record_sha256
     assert history[-1].intended_state_sha256 == receipt.receipt_sha256
 
+    status = store._collector_schedule_start_gate_status(
+        source_id=spec.source_id,
+        run_id=spec.run_id,
+    )
+    assert status is not None
+    assert status["authorization_sha256"] == history[-1].record_sha256
 
 def test_receipt_is_resolver_issued_not_caller_constructible() -> None:
     with pytest.raises(TypeError, match="resolver-issued"):
@@ -503,6 +478,97 @@ def test_source_mismatch_is_rejected_before_schedule_mutation(
     assert (
         store._collector_schedule_start_gate_status(
             source_id="another:source",
+            run_id=spec.run_id,
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize(
+    "alias_name",
+    (
+        "_CANONICAL_WITNESS_RESOLVER",
+        "_CANONICAL_MANIFEST_LOADER",
+        "_CANONICAL_PRESTART_PREPARER",
+        "_CANONICAL_NEXT_SLOT",
+        "_CANONICAL_GATE_STATUS",
+        "_CANONICAL_GATE_AUTHORIZE",
+        "_CANONICAL_SCHEDULE_ID",
+        "_CANONICAL_SCHEDULE_DUE_AT",
+    ),
+)
+def test_inception_rejects_canonical_alias_rebind_before_hostile_dispatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    alias_name: str,
+) -> None:
+    _manifest_value, locator, store, spec, _authority_root = _setup(tmp_path)
+    original = getattr(inception_module, alias_name)
+    calls: list[str] = []
+
+    def hostile(*args: object, **kwargs: object):
+        calls.append(alias_name)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(inception_module, alias_name, hostile)
+    with pytest.raises(
+        CampaignInceptionIntegrityError,
+        match="canonical dispatch authority is rebound",
+    ):
+        establish_campaign_inception(
+            precommit_locator=locator,
+            store=store,
+            source_spec=spec,
+        )
+
+    assert calls == []
+    assert (
+        store._collector_schedule_start_gate_status(
+            source_id=spec.source_id,
+            run_id=spec.run_id,
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize(
+    "helper_name",
+    (
+        "_resolve_precommit",
+        "_write_state",
+        "_prepared_payload_from_existing_gate",
+        "_resolve_gate_and_authorize",
+        "_issue_receipt",
+    ),
+)
+def test_inception_rejects_helper_rebind_before_state_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    helper_name: str,
+) -> None:
+    _manifest_value, locator, store, spec, _authority_root = _setup(tmp_path)
+    original = getattr(inception_module, helper_name)
+    calls: list[str] = []
+
+    def hostile(*args: object, **kwargs: object):
+        calls.append(helper_name)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(inception_module, helper_name, hostile)
+    with pytest.raises(
+        CampaignInceptionIntegrityError,
+        match="helper dispatch authority is rebound",
+    ):
+        establish_campaign_inception(
+            precommit_locator=locator,
+            store=store,
+            source_spec=spec,
+        )
+
+    assert calls == []
+    assert (
+        store._collector_schedule_start_gate_status(
+            source_id=spec.source_id,
             run_id=spec.run_id,
         )
         is None

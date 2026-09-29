@@ -377,6 +377,79 @@ def test_root_seal_preserves_dataclass_replace_and_instance_dispatch() -> None:
     assert decision.allowed is True
 
 
+def _hostile_book_state_code_with_matching_closure(function):
+    closure_count = len(function.__closure__ or ())
+    lines = ["def build():"]
+    for index in range(closure_count):
+        lines.append(f"    cell_{index} = object()")
+    lines.append("    def hostile(cls, book):")
+    if closure_count:
+        names = ", ".join(f"cell_{index}" for index in range(closure_count))
+        lines.append(f"        _ = ({names},)")
+    else:
+        lines.append("        _ = None")
+    lines.append("        del cls, book, _")
+    lines.append("        return ('HOSTILE', 'HOSTILE', 'HOSTILE', 0)")
+    lines.append("    return hostile")
+    namespace: dict[str, object] = {}
+    exec("\n".join(lines), {}, namespace)
+    hostile = namespace["build"]()
+    assert callable(hostile)
+    assert len(hostile.__closure__ or ()) == closure_count
+    return hostile.__code__
+
+
+def test_instance_book_state_rejects_in_place_code_mutation() -> None:
+    """Instance lookup must enforce the existing transitive root seal."""
+
+    book = PaperBook("100")
+    policy = PaperRiskPolicy(
+        max_ticket_fraction=Decimal("1"),
+        max_committed_fraction=Decimal("1"),
+        minimum_cash_reserve_fraction=Decimal("0"),
+    )
+    descriptor = vars(PaperRiskPolicy)["_book_state"]
+    assert type(descriptor) is classmethod
+    root = descriptor.__func__
+    original_code = root.__code__
+    hostile_code = _hostile_book_state_code_with_matching_closure(root)
+
+    try:
+        root.__code__ = hostile_code
+        with pytest.raises(
+            TypeError,
+            match="canonical PaperRiskPolicy executable root changed: _book_state",
+        ):
+            policy._book_state(book)
+    finally:
+        root.__code__ = original_code
+
+
+def test_instance_evaluate_cannot_consume_mutated_book_state_root() -> None:
+    """Positive risk authority must not dispatch through mutated _book_state code."""
+
+    book = PaperBook("100")
+    policy = PaperRiskPolicy(
+        max_ticket_fraction=Decimal("1"),
+        max_committed_fraction=Decimal("1"),
+        minimum_cash_reserve_fraction=Decimal("0"),
+    )
+    descriptor = vars(PaperRiskPolicy)["_book_state"]
+    root = descriptor.__func__
+    original_code = root.__code__
+    hostile_code = _hostile_book_state_code_with_matching_closure(root)
+
+    try:
+        root.__code__ = hostile_code
+        with pytest.raises(
+            TypeError,
+            match="canonical PaperRiskPolicy executable root changed: _book_state",
+        ):
+            policy.evaluate(book, Decimal("1"))
+    finally:
+        root.__code__ = original_code
+
+
 def test_book_state_root_cannot_be_retargeted_or_deleted() -> None:
     """Reconstructed delegates must not bypass admission by replacing _book_state."""
 

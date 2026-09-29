@@ -198,6 +198,51 @@ def _make_instance_root_getattribute(
         )
     frozen_witnesses = tuple(witnesses)
 
+    descriptor_witnesses: list[tuple[object, ...]] = []
+    for descriptor_name, descriptor in root_descriptors.items():
+        if type(descriptor) is FunctionType:
+            descriptor_type = FunctionType
+            function = descriptor
+        elif type(descriptor) in (classmethod, staticmethod):
+            descriptor_type = type(descriptor)
+            function = descriptor.__func__
+        else:
+            raise RuntimeError(
+                f"canonical PaperRiskPolicy protected descriptor is invalid: {descriptor_name}"
+            )
+        closure = function.__closure__
+        if closure is None:
+            closure_witnesses: tuple[tuple[object, object], ...] = ()
+        else:
+            values: list[tuple[object, object]] = []
+            for cell in closure:
+                try:
+                    value = cell.cell_contents
+                except ValueError:
+                    value = empty_cell
+                values.append((cell, value))
+            closure_witnesses = tuple(values)
+        kwdefaults = (
+            None
+            if function.__kwdefaults__ is None
+            else tuple(function.__kwdefaults__.items())
+        )
+        descriptor_witnesses.append(
+            (
+                descriptor_name,
+                descriptor,
+                descriptor_type,
+                function,
+                function.__code__,
+                function.__globals__,
+                function.__defaults__,
+                kwdefaults,
+                closure,
+                closure_witnesses,
+            )
+        )
+    frozen_descriptor_witnesses = tuple(descriptor_witnesses)
+
     def validate_instance_root(
         witness,
         owner,
@@ -258,6 +303,95 @@ def _make_instance_root_getattribute(
                 )
 
         current_kwdefaults = current.__kwdefaults__
+        if kwdefaults is None:
+            if current_kwdefaults is not None:
+                raise failure_type_arg(
+                    f"canonical PaperRiskPolicy executable root changed: {name}"
+                )
+        else:
+            if (
+                exact_type_arg(current_kwdefaults) is not dict_type_arg
+                or len_fn_arg(current_kwdefaults) != len_fn_arg(kwdefaults)
+            ):
+                raise failure_type_arg(
+                    f"canonical PaperRiskPolicy executable root changed: {name}"
+                )
+            for key, expected_value in kwdefaults:
+                if (
+                    key not in current_kwdefaults
+                    or current_kwdefaults[key] is not expected_value
+                ):
+                    raise failure_type_arg(
+                        f"canonical PaperRiskPolicy executable root changed: {name}"
+                    )
+
+        if closure is None:
+            if closure_witnesses:
+                raise failure_type_arg(
+                    f"canonical PaperRiskPolicy executable root changed: {name}"
+                )
+        else:
+            if len_fn_arg(closure) != len_fn_arg(closure_witnesses):
+                raise failure_type_arg(
+                    f"canonical PaperRiskPolicy executable root changed: {name}"
+                )
+            for cell, expected_value in closure_witnesses:
+                try:
+                    current_value = cell.cell_contents
+                except value_error_type_arg:
+                    current_value = empty_cell_arg
+                if current_value is not expected_value:
+                    raise failure_type_arg(
+                        f"canonical PaperRiskPolicy executable root changed: {name}"
+                    )
+        return witness
+
+    def validate_instance_descriptor_root(
+        witness,
+        owner,
+        exact_type_arg,
+        function_type_arg,
+        dict_type_arg,
+        type_getattribute_arg,
+        failure_type_arg,
+        value_error_type_arg,
+        len_fn_arg,
+        empty_cell_arg,
+    ):
+        (
+            name,
+            descriptor,
+            descriptor_type,
+            function,
+            code,
+            globals_mapping,
+            defaults,
+            kwdefaults,
+            closure,
+            closure_witnesses,
+        ) = witness
+        namespace = type_getattribute_arg(owner, "__dict__")
+        current = namespace.get(name, empty_cell_arg)
+        if current is not descriptor or exact_type_arg(current) is not descriptor_type:
+            raise failure_type_arg(
+                f"canonical PaperRiskPolicy root changed: {name}"
+            )
+        if descriptor_type is function_type_arg:
+            current_function = current
+        else:
+            current_function = current.__func__
+        if (
+            current_function is not function
+            or current_function.__code__ is not code
+            or current_function.__globals__ is not globals_mapping
+            or current_function.__defaults__ is not defaults
+            or current_function.__closure__ is not closure
+        ):
+            raise failure_type_arg(
+                f"canonical PaperRiskPolicy executable root changed: {name}"
+            )
+
+        current_kwdefaults = current_function.__kwdefaults__
         if kwdefaults is None:
             if current_kwdefaults is not None:
                 raise failure_type_arg(
@@ -392,6 +526,8 @@ def _make_instance_root_getattribute(
         value_error_type_arg=None,
         len_fn_arg=None,
         empty_cell_arg=None,
+        descriptor_roots=None,
+        descriptor_validator=None,
     ):
         for witness in roots:
             if name != witness[0]:
@@ -427,6 +563,24 @@ def _make_instance_root_getattribute(
                 empty_cell_arg,
                 self,
             )
+        for descriptor_witness in descriptor_roots:
+            if name != descriptor_witness[0]:
+                continue
+            descriptor_validator(
+                descriptor_witness,
+                owner,
+                exact_type_arg,
+                function_type_arg,
+                dict_type_arg,
+                type_getattribute_arg,
+                failure_type_arg,
+                value_error_type_arg,
+                len_fn_arg,
+                empty_cell_arg,
+            )
+            descriptor = descriptor_witness[1]
+            getter = descriptor.__get__
+            return getter(self, owner)
         return object_getattribute_arg(self, name)
 
     sealed_instance_getattribute.__defaults__ = (
@@ -444,6 +598,8 @@ def _make_instance_root_getattribute(
         value_error_type,
         len_fn,
         empty_cell,
+        frozen_descriptor_witnesses,
+        validate_instance_descriptor_root,
     )
 
     def reject_guard_metadata_mutation(
@@ -474,6 +630,7 @@ def _make_instance_root_getattribute(
 
     protected = (
         validate_instance_root,
+        validate_instance_descriptor_root,
         guarded_instance_root_call,
         sealed_instance_getattribute,
         reject_guard_metadata_mutation,

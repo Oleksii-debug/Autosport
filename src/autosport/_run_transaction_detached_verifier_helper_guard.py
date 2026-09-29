@@ -52,6 +52,7 @@ def _seal_method(method: FunctionType) -> None:
     # independent expected identities into immutable code constants below.
     dict_get = dict.get
     dict_len = dict.__len__
+    failure_type = ValueError
 
     require_marker = "__AUTOSPORT_RUN_TRANSACTION_INNER_BINDING_VERIFIER_ANCHOR__"
     require_code_marker = "__AUTOSPORT_RUN_TRANSACTION_INNER_BINDING_CODE_ANCHOR__"
@@ -59,8 +60,10 @@ def _seal_method(method: FunctionType) -> None:
     dict_len_marker = "__AUTOSPORT_RUN_TRANSACTION_VERIFIER_DICT_LEN_ANCHOR__"
     dict_get_cell_marker = "__AUTOSPORT_RUN_TRANSACTION_VERIFIER_DICT_GET_CELL_ANCHOR__"
     dict_len_cell_marker = "__AUTOSPORT_RUN_TRANSACTION_VERIFIER_DICT_LEN_CELL_ANCHOR__"
+    failure_type_marker = "__AUTOSPORT_RUN_TRANSACTION_VERIFIER_FAILURE_TYPE_ANCHOR__"
 
     def sealed_require_bindings() -> None:
+        ValueError = "__AUTOSPORT_RUN_TRANSACTION_VERIFIER_FAILURE_TYPE_ANCHOR__"  # noqa: N806
         anchored_require = "__AUTOSPORT_RUN_TRANSACTION_INNER_BINDING_VERIFIER_ANCHOR__"
         anchored_require_code = "__AUTOSPORT_RUN_TRANSACTION_INNER_BINDING_CODE_ANCHOR__"
         anchored_dict_get = "__AUTOSPORT_RUN_TRANSACTION_VERIFIER_DICT_GET_ANCHOR__"
@@ -108,6 +111,7 @@ def _seal_method(method: FunctionType) -> None:
         (dict_len_marker, dict_len),
         (dict_get_cell_marker, original_dict_get_cell),
         (dict_len_cell_marker, original_dict_len_cell),
+        (failure_type_marker, failure_type),
     )
     if any(sum(item == marker for item in constants) != 1 for marker, _ in anchors):
         raise RuntimeError("RunTransaction detached verifier helper anchor is ambiguous")

@@ -22,17 +22,22 @@ def test_endurance_pr_runs_are_head_partitioned_until_live_admission() -> None:
     assert "needs.superseded_run_admission.outputs.current_head == 'true'" in text
     assert "github.event.pull_request.draft == false" in text
 
-    # Scheduler-level coalescing is safe only within the same exact event head and
+    # Scheduler-level coalescing is safe only within the same exact PR/event head and
     # lifecycle class. A delayed stale-head event cannot share a qualification key with
     # current head, while converted_to_draft/closed cannot evict useful qualification.
     concurrency_block = text.split("concurrency:", 1)[1].split("jobs:", 1)[0]
+    assert "format('pr-{0}-{1}', github.event.number" in concurrency_block
     assert "format('qualify-{0}', github.event.pull_request.head.sha)" in concurrency_block
     assert "format('rerun-{0}', github.event.pull_request.head.sha)" in concurrency_block
     assert "github.event.action == 'converted_to_draft'" in concurrency_block
     assert "github.event.action == 'closed'" in concurrency_block
     assert "'lifecycle'" in concurrency_block
-    assert "github.run_id" not in concurrency_block
-    assert "github.event.pull_request.number || github.ref" not in concurrency_block
+    assert "format('pr-{0}-run-{1}'" not in concurrency_block
+
+    # Non-PR endurance dispatches are intentionally run-unique. Coalescing on github.ref
+    # would allow a newer same-ref dispatch to suppress an older run before execution.
+    assert "|| format('run-{0}', github.run_id)" in concurrency_block
+    assert "github.ref" not in concurrency_block
 
 
 def test_trusted_supersession_controller_covers_endurance_without_cross_workflow_preemption() -> None:

@@ -27,7 +27,7 @@
 
   function setValueIfChanged(node, value) {
     const text = String(value ?? "");
-    if (node.value !== text) node.value = text;
+    if (document.activeElement !== node && node.value !== text) node.value = text;
   }
 
   function setValueUnlessFocused(node, value) {

@@ -20,6 +20,9 @@ from autosport.external_validity_registry import (
     build_registered_external_validity_report,
     canonical_policy_evaluation_bundle_sha256,
 )
+from autosport._external_validity_registry_core import (
+    _build_registered_external_validity_report_from_verified_evaluations as _build_verified_registered_external_validity_report,
+)
 from autosport.opportunity import StrategyClass
 from autosport.scientific_registry import (
     DatasetSnapshot,
@@ -219,7 +222,7 @@ def test_registered_report_accepts_durable_same_origin_bundles(tmp_path):
         tmp_path, protocol, candidate, baselines
     )
 
-    report = build_registered_external_validity_report(
+    report = _build_verified_registered_external_validity_report(
         registry,
         protocol,
         candidate,
@@ -234,6 +237,29 @@ def test_registered_report_accepts_durable_same_origin_bundles(tmp_path):
     assert report.to_payload()["truth"]["promotion_authority"] is False
 
 
+
+def test_public_registered_report_rejects_registry_only_origin_without_issued_reference(
+    tmp_path,
+):
+    protocol = _protocol()
+    candidate, baselines = _evaluations(protocol)
+    registry, candidate_bundle_id, baseline_ids = _seed_happy_registry(
+        tmp_path, protocol, candidate, baselines
+    )
+
+    with pytest.raises(
+        ExternalValidityRegistryError,
+        match="product-issued evaluation authority is required",
+    ):
+        build_registered_external_validity_report(
+            registry,
+            protocol,
+            candidate,
+            baselines,
+            candidate_evaluation_bundle_id=candidate_bundle_id,
+            baseline_evaluation_bundle_ids=baseline_ids,
+        )
+
 def test_unregistered_or_tampered_candidate_bundle_fails_closed(tmp_path):
     protocol = _protocol()
     candidate, baselines = _evaluations(protocol)
@@ -242,7 +268,7 @@ def test_unregistered_or_tampered_candidate_bundle_fails_closed(tmp_path):
     )
 
     with pytest.raises(ExternalValidityRegistryError, match="EvaluationBundle is missing"):
-        build_registered_external_validity_report(
+        _build_verified_registered_external_validity_report(
             registry,
             protocol,
             candidate,
@@ -253,7 +279,7 @@ def test_unregistered_or_tampered_candidate_bundle_fails_closed(tmp_path):
 
     tampered = replace(candidate, evaluation_bundle_sha256=_hash("tampered"))
     with pytest.raises(ExternalValidityRegistryError, match="bundle SHA"):
-        build_registered_external_validity_report(
+        _build_verified_registered_external_validity_report(
             registry,
             protocol,
             tampered,
@@ -281,7 +307,7 @@ def test_fresh_matching_opaque_bundle_cannot_bless_changed_metric(tmp_path):
         ExternalValidityRegistryError,
         match="does not commit to canonical evaluation payload",
     ):
-        build_registered_external_validity_report(
+        _build_verified_registered_external_validity_report(
             registry,
             protocol,
             changed,
@@ -305,7 +331,7 @@ def test_registry_dataset_manifest_and_cutoff_must_match_frozen_scope(tmp_path):
     )
     _append_bundle(manifest_registry, candidate, bundle_id="bundle-id:candidate")
     with pytest.raises(ExternalValidityRegistryError, match="dataset manifest"):
-        build_registered_external_validity_report(
+        _build_verified_registered_external_validity_report(
             manifest_registry,
             protocol,
             candidate,
@@ -327,7 +353,7 @@ def test_registry_dataset_manifest_and_cutoff_must_match_frozen_scope(tmp_path):
     )
     _append_bundle(cutoff_registry, candidate, bundle_id="bundle-id:candidate")
     with pytest.raises(ExternalValidityRegistryError, match="dataset cutoff"):
-        build_registered_external_validity_report(
+        _build_verified_registered_external_validity_report(
             cutoff_registry,
             protocol,
             candidate,
@@ -367,7 +393,7 @@ def test_all_registry_bundles_must_bind_exact_frozen_protocol(tmp_path):
         ExternalValidityRegistryError,
         match="protocol SHA does not match frozen protocol",
     ):
-        build_registered_external_validity_report(
+        _build_verified_registered_external_validity_report(
             registry,
             protocol,
             candidate,
@@ -404,7 +430,7 @@ def test_supported_baselines_must_share_registry_dataset_and_protocol(tmp_path):
         )
 
     with pytest.raises(ExternalValidityRegistryError, match="dataset snapshot differs"):
-        build_registered_external_validity_report(
+        _build_verified_registered_external_validity_report(
             registry,
             protocol,
             candidate,
@@ -438,7 +464,7 @@ def test_supported_baselines_must_share_registry_dataset_and_protocol(tmp_path):
         )
 
     with pytest.raises(ExternalValidityRegistryError, match="frozen protocol"):
-        build_registered_external_validity_report(
+        _build_verified_registered_external_validity_report(
             protocol_registry,
             protocol,
             candidate,
@@ -460,7 +486,7 @@ def test_unsupported_baselines_need_no_registered_bundle_and_cannot_get_one(tmp_
         for definition in protocol.baselines
         if not definition.supported
     )
-    report = build_registered_external_validity_report(
+    report = _build_verified_registered_external_validity_report(
         registry,
         protocol,
         candidate,
@@ -474,7 +500,7 @@ def test_unsupported_baselines_need_no_registered_bundle_and_cannot_get_one(tmp_
     )
 
     with pytest.raises(ExternalValidityRegistryError, match="unexpected"):
-        build_registered_external_validity_report(
+        _build_verified_registered_external_validity_report(
             registry,
             protocol,
             candidate,

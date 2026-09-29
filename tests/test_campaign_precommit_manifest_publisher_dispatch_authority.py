@@ -78,3 +78,41 @@ def test_installed_publisher_fails_closed_before_rebound_publication_authority(
     assert hostile_called is False
     assert not target.exists()
     assert original_authority_factory is not hostile_publication_authority
+
+
+def test_installed_publisher_fails_closed_before_rebound_monotonic_commit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Class-method rebinding must not bypass the captured authority class identity."""
+
+    workspace = tmp_path / "workspace"
+    evidence = workspace / "evidence"
+    evidence.mkdir(parents=True)
+    target = evidence / "precommit.json"
+    authority_root = tmp_path / "machine-authority"
+    original_commit = precommit_module.MonotonicWorkspaceAuthority.commit
+    hostile_called = False
+
+    def hostile_commit(self: object, *args: object, **kwargs: object) -> object:
+        nonlocal hostile_called
+        hostile_called = True
+        raise AssertionError("monotonic commit dispatch intercepted")
+
+    monkeypatch.setattr(
+        precommit_module.MonotonicWorkspaceAuthority,
+        "commit",
+        hostile_commit,
+    )
+
+    with pytest.raises(RuntimeError, match="method dispatch authority changed: commit"):
+        publish_campaign_precommit_manifest(
+            target,
+            _manifest(),
+            workspace=workspace,
+            authority_root=authority_root,
+        )
+
+    assert hostile_called is False
+    assert not target.exists()
+    assert original_commit is not hostile_commit

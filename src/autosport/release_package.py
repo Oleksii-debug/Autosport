@@ -42,6 +42,7 @@ _ZIP_VOLUME = 0
 _ZIP_UTF8_FLAG = 0x800
 _ZIP_LOCAL_HEADER = struct.Struct("<IHHHHHIIIHH")
 _ZIP_LOCAL_HEADER_SIGNATURE = 0x04034B50
+_WINDOWS_REPARSE_POINT_FLAG = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
 
 
 class _DuplicateJsonKeyError(ValueError):
@@ -89,6 +90,13 @@ def _canonical_json_bytes(payload: dict[str, Any]) -> bytes:
     ).encode("utf-8")
 
 
+def _is_windows_reparse_point(metadata: object) -> bool:
+    return bool(
+        int(getattr(metadata, "st_file_attributes", 0))
+        & _WINDOWS_REPARSE_POINT_FLAG
+    )
+
+
 def _require_regular_source_file(path: Path, *, label: str) -> None:
     try:
         metadata = path.lstat()
@@ -96,6 +104,8 @@ def _require_regular_source_file(path: Path, *, label: str) -> None:
         raise ValueError(f"{label} is not an accessible regular file: {path}") from exc
     if stat.S_ISLNK(metadata.st_mode):
         raise ValueError(f"{label} must not be a symbolic link: {path}")
+    if _is_windows_reparse_point(metadata):
+        raise ValueError(f"{label} must not be a Windows reparse point: {path}")
     if not stat.S_ISREG(metadata.st_mode):
         raise ValueError(f"{label} must be a regular file: {path}")
 
@@ -110,6 +120,7 @@ def _read_regular_source_bytes(path: Path, *, label: str) -> bytes:
             current = path.lstat()
             if (
                 stat.S_ISLNK(current.st_mode)
+                or _is_windows_reparse_point(current)
                 or not stat.S_ISREG(current.st_mode)
                 or not os.path.samestat(opened, current)
             ):
@@ -118,6 +129,7 @@ def _read_regular_source_bytes(path: Path, *, label: str) -> bytes:
             after = path.lstat()
             if (
                 stat.S_ISLNK(after.st_mode)
+                or _is_windows_reparse_point(after)
                 or not stat.S_ISREG(after.st_mode)
                 or not os.path.samestat(opened, after)
             ):
@@ -136,6 +148,8 @@ def _require_regular_source_tree(path: Path, *, label: str) -> None:
         raise ValueError(f"{label} is not an accessible directory: {path}") from exc
     if stat.S_ISLNK(root_metadata.st_mode):
         raise ValueError(f"{label} must not be a symbolic link: {path}")
+    if _is_windows_reparse_point(root_metadata):
+        raise ValueError(f"{label} must not be a Windows reparse point: {path}")
     if not stat.S_ISDIR(root_metadata.st_mode):
         raise ValueError(f"{label} must be a directory: {path}")
 
@@ -147,6 +161,8 @@ def _require_regular_source_tree(path: Path, *, label: str) -> None:
         relative = item.relative_to(path).as_posix()
         if stat.S_ISLNK(metadata.st_mode):
             raise ValueError(f"{label} contains a symbolic link: {relative}")
+        if _is_windows_reparse_point(metadata):
+            raise ValueError(f"{label} contains a Windows reparse point: {relative}")
         if not (stat.S_ISDIR(metadata.st_mode) or stat.S_ISREG(metadata.st_mode)):
             raise ValueError(f"{label} contains a non-regular entry: {relative}")
 

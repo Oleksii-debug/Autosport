@@ -327,6 +327,55 @@ def test_partition_prefers_provider_identity_and_time_only_scope_fails_closed():
     assert split_catalog_coverage_request(one_event) is None
 
 
+def test_mutated_current_exchange_bytes_cannot_reuse_authenticated_receipt(
+    tmp_path,
+    monkeypatch,
+):
+    store = CollectorDeltaStore(tmp_path / "collector.db")
+    source = _successful_source_window(store)
+    client, scope, _opener = _client_and_scope(monkeypatch)
+    plan = create_catalog_coverage_plan(
+        store,
+        expected_store_path=store.path,
+        source_universe=source,
+        expected_source_id="source-x",
+        expected_start_cycle_seq=1,
+        expected_end_cycle_seq=1,
+        client=client,
+        visibility_scope=scope,
+        causal_cutoff=datetime(2099, 1, 1, tzinfo=timezone.utc),
+        root_request=_root_request(),
+    )
+    root = pending_catalog_coverage_leaves(
+        store,
+        expected_store_path=store.path,
+        plan_id=plan.plan_id,
+    )[0]
+    acquisition = acquire_authenticated_betfair_discovery(client, root.request)
+
+    forged_envelope = json.loads(acquisition.exchange.raw_response.decode("utf-8"))
+    forged_envelope["result"] = []
+    forged_raw = json.dumps(
+        forged_envelope,
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    object.__setattr__(acquisition.exchange, "raw_response", forged_raw)
+
+    with pytest.raises(
+        BetfairCatalogCoverageError,
+        match="receipt does not bind the current exchange state",
+    ):
+        record_catalog_coverage_acquisition(
+            store,
+            expected_store_path=store.path,
+            plan_id=plan.plan_id,
+            leaf_id=root.leaf_id,
+            acquisition=acquisition,
+        )
+
+
 def test_parent_market_missing_from_categorical_child_fails_reconciliation(
     tmp_path,
     monkeypatch,

@@ -85,6 +85,11 @@ class CollectorScheduleStartGateServiceIntegrationTests(unittest.TestCase):
                 random_value=lambda: 0,
             )
 
+            with self.assertRaisesRegex(
+                ValueError,
+                "requires canonical scheduled START authority",
+            ):
+                service.run_cycle()
             with self.assertRaisesRegex(ValueError, "not durably authorized"):
                 service.run(max_cycles=1)
 
@@ -105,6 +110,14 @@ class CollectorScheduleStartGateServiceIntegrationTests(unittest.TestCase):
                 gate_binding_sha256=GATE,
                 authorization_sha256=AUTH,
             )
+            with self.assertRaisesRegex(
+                ValueError,
+                "requires canonical scheduled START authority",
+            ):
+                service.run_cycle()
+            self.assertEqual(source.catalog_calls, 0)
+            self.assertEqual(source.delta_calls, 0)
+
             result = service.run(max_cycles=1)
 
             self.assertEqual(result.cycles_executed, 1)

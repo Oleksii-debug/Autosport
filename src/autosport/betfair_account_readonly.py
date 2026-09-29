@@ -40,6 +40,63 @@ _READ_METHOD_ENDPOINT = MappingProxyType({
 class BetfairReadOnlyError(RuntimeError):
     """Raised when provider read evidence cannot be accepted safely."""
 
+    def __init__(
+        self,
+        *args: object,
+        json_rpc_code: int | None = None,
+        provider_error_code: str | None = None,
+        request_id: int | None = None,
+        operation: str | None = None,
+        response_payload_sha256: str | None = None,
+    ) -> None:
+        super().__init__(*args)
+        if request_id is not None and (
+            not isinstance(request_id, int)
+            or isinstance(request_id, bool)
+            or request_id <= 0
+        ):
+            raise ValueError("request_id must be a positive integer when set")
+        if operation is not None and operation not in _READ_METHOD_ENDPOINT:
+            raise ValueError("operation must be a canonical read-only Betfair RPC method")
+        if response_payload_sha256 is not None:
+            _sha256_hex(response_payload_sha256, "response_payload_sha256")
+        self.json_rpc_code = json_rpc_code
+        self.provider_error_code = provider_error_code
+        self.request_id = request_id
+        self.operation = operation
+        self.response_payload_sha256 = response_payload_sha256
+
+    @property
+    def rpc_error_evidence_sha256(self) -> str | None:
+        """Return safe canonical identity for a fully correlated provider error."""
+
+        if (
+            self.request_id is None
+            or self.operation is None
+            or self.response_payload_sha256 is None
+            or self.json_rpc_code is None
+        ):
+            return None
+        payload = {
+            "schema": "autosport.betfair_jsonrpc_error_evidence",
+            "schema_version": 1,
+            "adapter_id": ADAPTER_ID,
+            "adapter_version": ADAPTER_VERSION,
+            "operation": self.operation,
+            "request_id": self.request_id,
+            "response_payload_sha256": self.response_payload_sha256,
+            "json_rpc_code": self.json_rpc_code,
+            "provider_error_code": self.provider_error_code,
+        }
+        return sha256(
+            json.dumps(
+                payload,
+                ensure_ascii=True,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+
 
 @dataclass(frozen=True, slots=True, repr=False)
 class BetfairSessionCredentials:
@@ -852,16 +909,32 @@ class BetfairReadOnlyClient:
             if "result" in envelope:
                 raise BetfairReadOnlyError("Betfair response contains both error and result")
             error = envelope["error"]
-            code = error.get("code") if isinstance(error, Mapping) else None
-            message = error.get("message") if isinstance(error, Mapping) else None
-            detail = "Betfair JSON-RPC returned an error"
-            if code is not None:
-                if not isinstance(code, int) or isinstance(code, bool):
-                    raise BetfairReadOnlyError("Betfair JSON-RPC returned a malformed error")
-                detail += f" code={code}"
-            if isinstance(message, str) and message.strip():
-                detail += f" message={self._redact_provider_message(message)[:160]}"
-            raise BetfairReadOnlyError(detail)
+            if not isinstance(error, Mapping):
+                raise BetfairReadOnlyError("Betfair JSON-RPC returned a malformed error")
+            if "code" not in error or "message" not in error:
+                raise BetfairReadOnlyError("Betfair JSON-RPC returned a malformed error")
+            code = error["code"]
+            message = error["message"]
+            if not isinstance(code, int) or isinstance(code, bool):
+                raise BetfairReadOnlyError("Betfair JSON-RPC returned a malformed error")
+            if not isinstance(message, str) or not message.strip():
+                raise BetfairReadOnlyError("Betfair JSON-RPC returned a malformed error")
+            provider_error_code = None
+            detail = f"Betfair JSON-RPC returned an error code={code}"
+            if code == -32099:
+                provider_error_code = _provider_error_code(
+                    error.get("data"),
+                    method=method,
+                )
+            detail += f" message={self._redact_provider_message(message)[:160]}"
+            raise BetfairReadOnlyError(
+                detail,
+                json_rpc_code=code,
+                provider_error_code=provider_error_code,
+                request_id=request_id,
+                operation=method,
+                response_payload_sha256=evidence.source_payload_sha256,
+            )
         if "result" not in envelope:
             raise BetfairReadOnlyError("Betfair response is missing result")
         return _RpcResult(envelope["result"], evidence)
@@ -883,6 +956,44 @@ class BetfairReadOnlyClient:
         if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
             raise BetfairReadOnlyError("clock must return timezone-aware datetime")
         return value.isoformat()
+
+
+def _provider_error_code(data: object, *, method: str) -> str | None:
+    """Extract only the canonical semantic error for the exact Betfair service."""
+
+    if not isinstance(data, Mapping):
+        return None
+    if method in {_GET_ACCOUNT_FUNDS, _GET_ACCOUNT_DETAILS}:
+        expected_exception = "AccountAPINGException"
+    elif method in {
+        _LIST_CURRENT_ORDERS,
+        _LIST_CLEARED_ORDERS,
+        _LIST_MARKET_CATALOGUE,
+    }:
+        expected_exception = "APINGException"
+    else:
+        return None
+    exception_keys = ("APINGException", "AccountAPINGException")
+    present = [key for key in exception_keys if key in data]
+    if present != [expected_exception]:
+        return None
+    exception_key = expected_exception
+    if "exceptionname" in data and data["exceptionname"] != exception_key:
+        return None
+    exception = data[exception_key]
+    if not isinstance(exception, Mapping):
+        return None
+    code = exception.get("errorCode")
+    if (
+        not isinstance(code, str)
+        or not code
+        or code != code.strip()
+        or not code.isascii()
+        or code != code.upper()
+        or any(character not in "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_" for character in code)
+    ):
+        return None
+    return code
 
 
 def _decode_json(payload: bytes) -> object:

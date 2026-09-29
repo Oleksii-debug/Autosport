@@ -12,8 +12,11 @@ from __future__ import annotations
 
 from types import FunctionType
 
-from . import betfair_timeout_reconciliation as _timeout
+# supervised_execution owns the cold-import ordering for Betfair timeout authority.
+# Import the consumer first; it legally composes timeout/provider dependencies before
+# this final witness layer observes their already-installed public entrypoints.
 from . import supervised_execution as _execution
+from . import betfair_timeout_reconciliation as _timeout
 from . import supervised_provider_evidence as _provider
 
 

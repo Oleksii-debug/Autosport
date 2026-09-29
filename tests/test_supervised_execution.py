@@ -9,6 +9,8 @@ from pathlib import Path
 
 import pytest
 
+from betfair_execution_readback_test_support import authoritative_execution_readback
+
 import autosport.supervised_execution as supervised_execution_module
 import autosport.supervised_provider_evidence as provider_evidence
 from autosport.betfair_account_readonly import (
@@ -512,19 +514,14 @@ def _provider_capture(
             )
             request_id += 1
 
-    transport = _ExecutionReadbackTransport(responses)
-    client = BetfairReadOnlyClient(
-        BetfairSessionCredentials("app-secret", "session-secret"),
-        transport=transport,
-        clock=lambda: datetime.fromisoformat(READBACK_AT),
-        venue_id="betfair",
-        account_id=account_id,
-    )
-    capture = client.read_execution_readback(
+    capture = authoritative_execution_readback(
+        responses,
         action_id=action.action_id,
         market_id=action.market_id,
+        provider_order_ref=None,
+        account_id=account_id,
     )
-    return capture, transport
+    return capture, None
 
 
 def _verified_state(bound, action, *, matched_stake: Decimal | None, **kwargs):

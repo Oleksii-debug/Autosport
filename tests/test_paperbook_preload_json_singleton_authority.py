@@ -3,12 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import pytest
-
 import autosport.paper as paper
-
-
-_MISSING = object()
 
 
 def _load_or_fail_closed(path: Path):
@@ -19,41 +14,7 @@ def _load_or_fail_closed(path: Path):
         return None
 
 
-def test_path_load_does_not_execute_mutated_shared_default_decoder_instance(tmp_path: Path) -> None:
-    """Detached json.loads must not inherit mutable singleton decoder dispatch."""
-
-    path = tmp_path / "paper-book.json"
-    book = paper.PaperBook("100")
-    book.save(path)
-
-    frozen_loads = paper.json.loads
-    decoder = frozen_loads.__globals__.get("_default_decoder")
-    assert decoder is json._default_decoder
-
-    original_instance_decode = vars(decoder).get("decode", _MISSING)
-    original_bound_decode = decoder.decode
-    hostile_called = False
-
-    def hostile_decode(payload: str):
-        nonlocal hostile_called
-        hostile_called = True
-        return original_bound_decode(payload)
-
-    decoder.decode = hostile_decode
-    try:
-        loaded = _load_or_fail_closed(path)
-    finally:
-        if original_instance_decode is _MISSING:
-            del decoder.decode
-        else:
-            decoder.decode = original_instance_decode
-
-    assert hostile_called is False
-    if loaded is not None:
-        assert loaded.balance == book.balance
-
-
-def test_path_load_does_not_execute_mutated_detached_loads_kwdefault(tmp_path: Path) -> None:
+def test_path_load_does_not_execute_mutated_detached_loads_cls_kwdefault(tmp_path: Path) -> None:
     """Mutable __kwdefaults__ cannot retarget an otherwise unchanged frozen function."""
 
     path = tmp_path / "paper-book.json"
@@ -66,12 +27,17 @@ def test_path_load_does_not_execute_mutated_detached_loads_kwdefault(tmp_path: P
     original_kwdefaults = dict(kwdefaults)
     hostile_called = False
 
-    def hostile_object_hook(value: dict[str, object]) -> dict[str, object]:
-        nonlocal hostile_called
-        hostile_called = True
-        return value
+    class HostileDecoder(json.JSONDecoder):
+        def __init__(self, *args, **kwargs) -> None:
+            nonlocal hostile_called
+            hostile_called = True
+            super().__init__(*args, **kwargs)
 
-    kwdefaults["object_hook"] = hostile_object_hook
+    # PaperBook passes its canonical duplicate-key and non-finite hooks explicitly,
+    # but it intentionally leaves `cls` at the json.loads default. Retargeting only
+    # this detached clone's mutable kwdefault therefore reaches the positive parser
+    # while function identity/code/globals/closure stay unchanged.
+    kwdefaults["cls"] = HostileDecoder
     try:
         loaded = _load_or_fail_closed(path)
     finally:

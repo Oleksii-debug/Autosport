@@ -177,6 +177,10 @@ from . import _drift_decimal_resource_guard as _drift_decimal_resource_guard  # 
 # product-origin snapshot, not mutable live-client fields during provider I/O.
 from . import _betfair_account_identity_io_snapshot_guard as _betfair_account_identity_io_snapshot_guard  # noqa: F401,E402
 
+# Seal the transitive OS/thread lock graph before product curation captures the
+# existing durable_path_lock as its sole publication/read serialization authority.
+from . import _provider_sport_mapping_durable_lock_guard as _provider_sport_mapping_durable_lock_guard  # noqa: F401,E402
+
 # Provider-sport exact bytes are structural evidence only. Admit positive mappings
 # through an explicit product-owned curation table while reusing the canonical
 # registry for parsing, chronology, locking, persistence and overlap semantics.

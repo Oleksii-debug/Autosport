@@ -8,7 +8,9 @@ import pytest
 
 import autosport.betdaq_account_readonly as betdaq_account_readonly_module
 from autosport.betdaq_account_readonly import BetdaqCredentials
+from autosport.betdaq_catalogue_binding import BetdaqLiveCatalogueResolver
 from autosport.betdaq_readonly_live_provider import BetdaqLiveReadOnlyProvider
+from autosport.betdaq_readonly_live_transport import BetdaqReadOnlyLiveTransport
 from autosport.betdaq_readonly_market_wire import (
     EXTERNAL_API_NS,
     SOAP11_NS,
@@ -20,7 +22,7 @@ from autosport.betdaq_rate_governor import (
 )
 from autosport.betdaq_readonly_provider import BetdaqMarketBinding
 from autosport.domain import MarketType
-from autosport.providers import CanonicalNormalizer
+from autosport.providers import CanonicalNormalizer, ProviderUnavailableError
 
 
 def _credentials() -> BetdaqCredentials:
@@ -400,6 +402,73 @@ def test_catalogue_message_time_must_be_causally_valid(
     assert provider.last_catalogue_evidence is None
 
 
+class _TransientCataloguePost:
+    def __init__(self, *, opaque: bool = False) -> None:
+        self.calls = 0
+        self.opaque = opaque
+
+    def post(self, url, *, headers, body, timeout_seconds):
+        self.calls += 1
+        if self.opaque:
+            raise RuntimeError("opaque catalogue failure")
+        if self.calls == 1:
+            raise TimeoutError("explicit catalogue transient")
+        return _event_response()
+
+
+def test_catalogue_retry_consumes_one_rate_admission_per_attempt(tmp_path) -> None:
+    post = _TransientCataloguePost()
+    bridge = BetdaqReadOnlyLiveTransport(
+        credentials=_credentials(),
+        rate_governor=_governor(tmp_path),
+        transport=post,
+    )
+    resolver = BetdaqLiveCatalogueResolver(
+        transport=bridge,
+        timeout_seconds=1.0,
+        clock=lambda: "2026-09-29T19:00:00Z",
+        max_attempts=2,
+    )
+
+    resolved, evidence = resolver.resolve(
+        [BetdaqMarketBinding(9001, "100", "football", MarketType.WINNER)]
+    )
+
+    assert resolved[9001].provider_event_id == "101"
+    assert post.calls == 2
+    assert len(evidence.rate_admission_receipts) == 2
+    assert evidence.rate_admission_receipts[0] != evidence.rate_admission_receipts[1]
+    admission = bridge.last_rate_admission
+    assert admission is not None
+    assert admission.sequence == 2
+    assert evidence.rate_admission_receipts[-1] == admission.receipt_sha256
+
+
+def test_catalogue_opaque_transport_failure_is_not_retried(tmp_path) -> None:
+    post = _TransientCataloguePost(opaque=True)
+    bridge = BetdaqReadOnlyLiveTransport(
+        credentials=_credentials(),
+        rate_governor=_governor(tmp_path),
+        transport=post,
+    )
+    resolver = BetdaqLiveCatalogueResolver(
+        transport=bridge,
+        timeout_seconds=1.0,
+        clock=lambda: "2026-09-29T19:00:00Z",
+        max_attempts=4,
+    )
+
+    with pytest.raises(
+        ProviderUnavailableError,
+        match="without retryable classification",
+    ):
+        resolver.resolve(
+            [BetdaqMarketBinding(9001, "100", "football", MarketType.WINNER)]
+        )
+
+    assert post.calls == 1
+
+
 def test_catalogue_acquisition_is_bound_into_snapshot_evidence(
     tmp_path,
     monkeypatch,
@@ -421,7 +490,11 @@ def test_catalogue_acquisition_is_bound_into_snapshot_evidence(
     assert evidence.catalogue_request_fingerprint == catalogue.request_fingerprint
     assert evidence.catalogue_response_sha256 == catalogue.response_sha256
     assert evidence.catalogue_event_classifier_ids == (100,)
-    assert evidence.catalogue_rate_admission_receipt == catalogue.rate_admission_receipt
+    assert (
+        evidence.catalogue_rate_admission_receipts
+        == catalogue.rate_admission_receipts
+    )
+    assert len(catalogue.rate_admission_receipts) == 1
     assert catalogue.provider_origin_verified is False
     assert catalogue.grants_execution_authority is False
     assert catalogue.grants_write_permission is False

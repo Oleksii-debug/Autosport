@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from types import FunctionType
 
+import autosport._run_transaction_detached_verifier_helper_guard as helper_guard
 import autosport.run_transaction as run_transaction
 
 
@@ -100,3 +101,11 @@ def test_binding_verifier_rejects_dict_len_helper_retarget_before_dispatch() -> 
         dict_len_cell.cell_contents = original_dict_len
 
     assert dict_len_cell.cell_contents is original_dict_len
+
+
+def test_install_mutators_are_not_runtime_module_capabilities() -> None:
+    """One-shot composition helpers must not remain caller-reachable after import."""
+
+    assert not hasattr(helper_guard, "_install")
+    assert not hasattr(helper_guard, "_seal_method")
+    assert not hasattr(helper_guard, "_closure_cell")

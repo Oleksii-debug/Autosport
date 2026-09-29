@@ -11,6 +11,7 @@ BETDAQ_EVENT_SUBTREE_ENDPOINT = "https://api.betdaq.com/v2.0/ReadOnlyService.asm
 BETDAQ_EVENT_SUBTREE_SOAP_ACTION = (
     "http://www.GlobalBettingExchange.com/ExternalAPI/GetEventSubTreeNoSelections"
 )
+BETDAQ_PROVIDER_LONG_MAX = (1 << 63) - 1
 
 
 def _tag(namespace: str, local_name: str) -> str:
@@ -28,13 +29,15 @@ class BetdaqEventSubTreeRequest:
             type(self.event_classifier_ids) is not tuple
             or not self.event_classifier_ids
             or any(
-                type(value) is not int or value < 0
+                type(value) is not int
+                or value < 0
+                or value > BETDAQ_PROVIDER_LONG_MAX
                 for value in self.event_classifier_ids
             )
             or len(set(self.event_classifier_ids)) != len(self.event_classifier_ids)
         ):
             raise ValueError(
-                "event_classifier_ids must be non-empty unique non-negative integers"
+                "event_classifier_ids must be unique provider long integers in 0..2^63-1"
             )
         if type(self.want_direct_descendents_only) is not bool:
             raise TypeError("want_direct_descendents_only must be bool")

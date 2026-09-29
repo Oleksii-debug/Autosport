@@ -129,7 +129,6 @@ def _make_interruptible_provider_call(
     float_fn = float
     min_fn = min
     isfinite_fn = math.isfinite
-    wait_function_type = type_fn(signal_wait)
     original_code = getattr_fn(original_provider_call, "__code__", None)
     stop_code = getattr_fn(stop_check, "__code__", None)
     wait_code = getattr_fn(signal_wait, "__code__", None)
@@ -174,20 +173,13 @@ def _make_interruptible_provider_call(
                 backoff = min_fn(self.config.max_backoff_seconds, jittered)
                 stop_source = self.stop_requested
                 if isinstance_fn(stop_source, signal_type):
-                    wait_dispatch = getattr_fn(type_fn(stop_source), "wait", None)
-                    wait_dispatch_code = getattr_fn(wait_dispatch, "__code__", None)
-                    if (
-                        type_fn(wait_dispatch) is not wait_function_type
-                        or wait_dispatch_code is None
-                    ):
-                        raise collector_error_type(
-                            "canonical signal STOP wait dispatch is invalid"
-                        )
-                    wait_result = wait_dispatch(stop_source, backoff)
-                    if getattr_fn(wait_dispatch, "__code__", None) is not wait_dispatch_code:
-                        raise collector_error_type(
-                            "canonical signal STOP wait dispatch changed during use"
-                        )
+                    # `_SignalStopRequest` subclasses are accepted for compatibility,
+                    # but their virtual `wait` overrides are not authority.  Invoke
+                    # the exact captured canonical wait non-virtually so a subclass
+                    # cannot intercept, suppress, or distort provider backoff STOP.
+                    require_surfaces()
+                    wait_result = signal_wait(stop_source, backoff)
+                    require_surfaces()
                     if type_fn(wait_result) is not bool_type:
                         raise collector_error_type(
                             "canonical signal STOP wait must return bool"

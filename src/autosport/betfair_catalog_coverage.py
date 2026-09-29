@@ -21,6 +21,8 @@ import json
 from pathlib import Path
 from typing import Mapping, Sequence
 
+from . import betfair_multisport_catalog as _catalog
+
 from .betfair_account_identity import (
     require_authoritative_betfair_account_identity,
     resolve_betfair_authenticated_account_identity,
@@ -37,7 +39,6 @@ from .betfair_discovery_transport_origin import (
 from .betfair_multisport_catalog import (
     LIST_MARKET_CATALOGUE,
     BetfairCatalogRequest,
-    parse_market_catalogue_result_for_request,
 )
 from .causal_collector import CollectorDeltaStore
 from .source_universe_commitment import (
@@ -1129,13 +1130,14 @@ def _persist_terminal_and_children(
         connection.close()
 
 
-def record_catalog_coverage_acquisition(
+def _record_catalog_coverage_acquisition_impl(
     store: CollectorDeltaStore,
     *,
     expected_store_path: str | Path,
     plan_id: str,
     leaf_id: str,
     acquisition: BetfairAuthenticatedDiscoveryAcquisition,
+    _parse_catalogue_result,
 ) -> CatalogCoverageRecordResult:
     """Bind one live authenticated response and expand saturated leaves deterministically."""
 
@@ -1187,7 +1189,7 @@ def record_catalog_coverage_acquisition(
         )
 
     try:
-        batch = parse_market_catalogue_result_for_request(
+        batch = _parse_catalogue_result(
             provider_result,
             request=acquisition.exchange.request,
         )
@@ -1308,12 +1310,13 @@ def _terminal_row_payload(row) -> dict[str, object] | None:
     return payload
 
 
-def resolve_catalog_coverage(
+def _resolve_catalog_coverage_impl(
     store: CollectorDeltaStore,
     *,
     expected_store_path: str | Path,
     plan_id: str,
     live_acquisitions: Sequence[BetfairAuthenticatedDiscoveryAcquisition] = (),
+    _parse_catalogue_result,
 ) -> CatalogCoverageResolution:
     """Verify the durable partition graph and current-process provider-origin receipts."""
 
@@ -1540,7 +1543,7 @@ def resolve_catalog_coverage(
             continue
         leaf, terminal = required
         try:
-            batch = parse_market_catalogue_result_for_request(
+            batch = _parse_catalogue_result(
                 provider_result,
                 request=leaf.request,
             )
@@ -1612,3 +1615,79 @@ def resolve_catalog_coverage(
         reason=reason,
         promotion_ready=False,
     )
+
+
+def _make_catalogue_coverage_runtime():
+    """Seal the canonical catalogue parser behind the public coverage operations."""
+
+    catalog_module = _catalog
+    parser = catalog_module.parse_market_catalogue_result_for_request
+    parser_code = parser.__code__
+    record_impl = _record_catalog_coverage_acquisition_impl
+    resolve_impl = _resolve_catalog_coverage_impl
+
+    def parse_catalogue_result(result: object, *, request: BetfairCatalogRequest):
+        if (
+            catalog_module.parse_market_catalogue_result_for_request is not parser
+            or parser.__code__ is not parser_code
+        ):
+            raise BetfairCatalogCoverageError(
+                "canonical Betfair catalogue parser dispatch changed"
+            )
+        try:
+            parsed = parser(result, request=request)
+        except (TypeError, ValueError) as exc:
+            raise BetfairCatalogCoverageError(
+                "canonical Betfair catalogue result cannot be parsed"
+            ) from exc
+        if (
+            catalog_module.parse_market_catalogue_result_for_request is not parser
+            or parser.__code__ is not parser_code
+        ):
+            raise BetfairCatalogCoverageError(
+                "canonical Betfair catalogue parser dispatch changed"
+            )
+        return parsed
+
+    def record_catalog_coverage_acquisition(
+        store: CollectorDeltaStore,
+        *,
+        expected_store_path: str | Path,
+        plan_id: str,
+        leaf_id: str,
+        acquisition: BetfairAuthenticatedDiscoveryAcquisition,
+    ) -> CatalogCoverageRecordResult:
+        return record_impl(
+            store,
+            expected_store_path=expected_store_path,
+            plan_id=plan_id,
+            leaf_id=leaf_id,
+            acquisition=acquisition,
+            _parse_catalogue_result=parse_catalogue_result,
+        )
+
+    def resolve_catalog_coverage(
+        store: CollectorDeltaStore,
+        *,
+        expected_store_path: str | Path,
+        plan_id: str,
+        live_acquisitions: Sequence[BetfairAuthenticatedDiscoveryAcquisition] = (),
+    ) -> CatalogCoverageResolution:
+        return resolve_impl(
+            store,
+            expected_store_path=expected_store_path,
+            plan_id=plan_id,
+            live_acquisitions=live_acquisitions,
+            _parse_catalogue_result=parse_catalogue_result,
+        )
+
+    return record_catalog_coverage_acquisition, resolve_catalog_coverage
+
+
+(
+    record_catalog_coverage_acquisition,
+    resolve_catalog_coverage,
+) = _make_catalogue_coverage_runtime()
+del _make_catalogue_coverage_runtime
+del _record_catalog_coverage_acquisition_impl
+del _resolve_catalog_coverage_impl

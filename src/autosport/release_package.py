@@ -178,34 +178,135 @@ def _read_regular_source_bytes(path: Path, *, label: str) -> bytes:
         return stream.read()
 
 
-def _require_regular_source_tree(path: Path, *, label: str) -> None:
+def _require_source_tree_directory(
+    path: Path,
+    *,
+    label: str,
+    relative: str | None,
+) -> os.stat_result:
     try:
-        root_metadata = path.lstat()
+        metadata = path.lstat()
     except OSError as exc:
-        raise ValueError(f"{label} is not an accessible directory: {path}") from exc
-    if stat.S_ISLNK(root_metadata.st_mode):
-        raise ValueError(f"{label} must not be a symbolic link: {path}")
-    if _is_windows_reparse_point(root_metadata):
-        raise ValueError(f"{label} must not be a Windows reparse point: {path}")
-    if not stat.S_ISDIR(root_metadata.st_mode):
-        raise ValueError(f"{label} must be a directory: {path}")
+        if relative is None:
+            raise ValueError(f"{label} is not an accessible directory: {path}") from exc
+        raise ValueError(f"{label} contains an inaccessible entry: {relative}") from exc
+    if stat.S_ISLNK(metadata.st_mode):
+        if relative is None:
+            raise ValueError(f"{label} must not be a symbolic link: {path}")
+        raise ValueError(f"{label} contains a symbolic link: {relative}")
+    if _is_windows_reparse_point(metadata):
+        if relative is None:
+            raise ValueError(f"{label} must not be a Windows reparse point: {path}")
+        raise ValueError(f"{label} contains a Windows reparse point: {relative}")
+    if not stat.S_ISDIR(metadata.st_mode):
+        if relative is None:
+            raise ValueError(f"{label} must be a directory: {path}")
+        raise ValueError(f"{label} contains a non-regular entry: {relative}")
+    return metadata
 
-    for item in path.rglob("*"):
+
+def _scan_regular_source_tree(
+    path: Path,
+    *,
+    label: str,
+    relative: Path = Path(),
+) -> list[tuple[Path, Path, bool]]:
+    """Enumerate one tree without descending through symlink/reparse directories."""
+
+    relative_text = relative.as_posix() if relative.parts else None
+    before = _require_source_tree_directory(
+        path,
+        label=label,
+        relative=relative_text,
+    )
+    try:
+        with os.scandir(path) as iterator:
+            entries = sorted(iterator, key=lambda entry: entry.name)
+    except OSError as exc:
+        target = relative_text or str(path)
+        raise ValueError(f"{label} contains an inaccessible entry: {target}") from exc
+
+    discovered: list[tuple[Path, Path, bool]] = []
+    for entry in entries:
+        source = path / entry.name
+        child_relative = relative / entry.name
+        child_text = child_relative.as_posix()
         try:
-            metadata = item.lstat()
+            metadata = entry.stat(follow_symlinks=False)
         except OSError as exc:
-            raise ValueError(f"{label} contains an inaccessible entry: {item}") from exc
-        relative = item.relative_to(path).as_posix()
+            raise ValueError(
+                f"{label} contains an inaccessible entry: {child_text}"
+            ) from exc
         if stat.S_ISLNK(metadata.st_mode):
-            raise ValueError(f"{label} contains a symbolic link: {relative}")
+            raise ValueError(f"{label} contains a symbolic link: {child_text}")
         if _is_windows_reparse_point(metadata):
-            raise ValueError(f"{label} contains a Windows reparse point: {relative}")
-        if not (stat.S_ISDIR(metadata.st_mode) or stat.S_ISREG(metadata.st_mode)):
-            raise ValueError(f"{label} contains a non-regular entry: {relative}")
+            raise ValueError(
+                f"{label} contains a Windows reparse point: {child_text}"
+            )
+        if stat.S_ISDIR(metadata.st_mode):
+            current = _require_source_tree_directory(
+                source,
+                label=label,
+                relative=child_text,
+            )
+            if not os.path.samestat(metadata, current):
+                raise ValueError(
+                    f"{label} directory changed during traversal: {child_text}"
+                )
+            discovered.append((source, child_relative, True))
+            discovered.extend(
+                _scan_regular_source_tree(
+                    source,
+                    label=label,
+                    relative=child_relative,
+                )
+            )
+        elif stat.S_ISREG(metadata.st_mode):
+            discovered.append((source, child_relative, False))
+        else:
+            raise ValueError(f"{label} contains a non-regular entry: {child_text}")
+
+    after = _require_source_tree_directory(
+        path,
+        label=label,
+        relative=relative_text,
+    )
+    if not os.path.samestat(before, after):
+        target = relative_text or "."
+        raise ValueError(f"{label} directory changed during traversal: {target}")
+    return discovered
+
+
+def _require_regular_source_tree(path: Path, *, label: str) -> None:
+    _scan_regular_source_tree(path, label=label)
 
 
 def _copy2_no_follow(source: str | Path, destination: str | Path) -> str:
     return shutil.copy2(source, destination, follow_symlinks=False)
+
+
+def _copy_regular_source_tree(
+    source_root: Path,
+    destination_root: Path,
+    *,
+    label: str,
+) -> None:
+    """Copy a validated tree without handing directory traversal to shutil.copytree."""
+
+    entries = _scan_regular_source_tree(source_root, label=label)
+    destination_root.mkdir(parents=True, exist_ok=True)
+    for source, relative, is_directory in entries:
+        destination = destination_root / relative
+        if is_directory:
+            destination.mkdir(parents=True, exist_ok=False)
+            continue
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(
+            _read_regular_source_bytes(
+                source,
+                label=f"{label} file {relative.as_posix()}",
+            )
+        )
 
 
 def _sorted_package_files(package_dir: Path) -> list[Path]:
@@ -592,11 +693,10 @@ def build_windows_package(
         restart_recovery_path,
         package_dir / "restart-recovery-audit.json",
     )
-    shutil.copytree(
+    _copy_regular_source_tree(
         example_dir,
         package_dir / "examples" / example_dir.name,
-        symlinks=True,
-        copy_function=_copy2_no_follow,
+        label="release example tree",
     )
     _require_regular_source_tree(package_dir, label="release package staging tree")
 

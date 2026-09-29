@@ -241,6 +241,129 @@ class ReleasePackageInputSymlinkFenceTests(unittest.TestCase):
 
             self.assertFalse(paths["package"].exists())
 
+    def test_reparse_directory_added_after_preflight_is_rejected_before_file_read(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paths = self._make_inputs(root)
+            late = paths["example"] / "late-reparse"
+            secret = late / "outside-secret.json"
+            real_require = release_package._require_regular_source_tree
+            real_lstat = Path.lstat
+            real_read = release_package._read_regular_source_bytes
+            injected = False
+            secret_read = False
+
+            def validate_then_inject(path: Path, *, label: str) -> None:
+                nonlocal injected
+                real_require(path, label=label)
+                if path == paths["example"] and not injected:
+                    injected = True
+                    late.mkdir()
+                    secret.write_text('{"secret":true}\n', encoding="utf-8")
+
+            def lstat_with_reparse(path: Path):
+                metadata = real_lstat(path)
+                if path == late:
+                    return SimpleNamespace(
+                        st_mode=metadata.st_mode,
+                        st_file_attributes=release_package._WINDOWS_REPARSE_POINT_FLAG,
+                    )
+                return metadata
+
+            def read_without_secret(path: Path, *, label: str) -> bytes:
+                nonlocal secret_read
+                if path == secret:
+                    secret_read = True
+                    raise AssertionError("late reparse target file must never be read")
+                return real_read(path, label=label)
+
+            with (
+                patch.object(
+                    release_package,
+                    "_require_regular_source_tree",
+                    side_effect=validate_then_inject,
+                ),
+                patch.object(Path, "lstat", new=lstat_with_reparse),
+                patch.object(
+                    release_package,
+                    "_read_regular_source_bytes",
+                    side_effect=read_without_secret,
+                ),
+            ):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "release example tree contains a Windows reparse point: late-reparse",
+                ):
+                    self._build(paths)
+
+            self.assertTrue(injected)
+            self.assertFalse(secret_read)
+            self.assertFalse(paths["package"].exists())
+
+    def test_real_windows_junction_added_after_preflight_is_not_traversed(self) -> None:
+        if os.name != "nt":
+            self.skipTest("Windows junction semantics require an NT runner")
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paths = self._make_inputs(root)
+            outside = root / "outside-tree"
+            outside.mkdir()
+            outside_secret = outside / "outside-secret.json"
+            outside_secret.write_text('{"secret":true}\n', encoding="utf-8")
+            junction = paths["example"] / "late-junction"
+            real_require = release_package._require_regular_source_tree
+            injected = False
+
+            def validate_then_inject(path: Path, *, label: str) -> None:
+                nonlocal injected
+                real_require(path, label=label)
+                if path != paths["example"] or injected:
+                    return
+                created = subprocess.run(
+                    [
+                        "cmd.exe",
+                        "/d",
+                        "/c",
+                        "mklink",
+                        "/J",
+                        str(junction),
+                        str(outside),
+                    ],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                if created.returncode != 0:
+                    self.skipTest(
+                        "Windows runner cannot create a directory junction: "
+                        + (created.stderr or created.stdout).strip()
+                    )
+                injected = True
+
+            with patch.object(
+                release_package,
+                "_require_regular_source_tree",
+                side_effect=validate_then_inject,
+            ):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "release example tree contains a Windows reparse point: late-junction",
+                ):
+                    self._build(paths)
+
+            self.assertTrue(injected)
+            staged_secret = (
+                root
+                / "Autosport-V1"
+                / "examples"
+                / paths["example"].name
+                / "late-junction"
+                / outside_secret.name
+            )
+            self.assertFalse(staged_secret.exists())
+            self.assertFalse(paths["package"].exists())
+
     def test_regular_to_symlink_swap_during_copy_is_preserved_then_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

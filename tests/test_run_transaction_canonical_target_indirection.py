@@ -83,6 +83,27 @@ class RunTransactionCanonicalTargetIndirectionTests(unittest.TestCase):
         except (OSError, NotImplementedError) as exc:
             self.skipTest(f"file symlinks are unavailable on this platform: {exc}")
 
+    def test_canonical_paperbook_semantics_are_checked_on_captured_bytes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "paper_book.json"
+            target.write_bytes(b"{}")
+
+            with patch.object(
+                PaperBook,
+                "load",
+                return_value=PaperBook("10000"),
+            ) as hostile_path_load:
+                with self.assertRaisesRegex(
+                    RunTransactionError,
+                    "canonical PaperBook semantic validation failed",
+                ):
+                    RunTransaction._verified_canonical_paper_book_snapshot(
+                        target,
+                        "PaperBook",
+                    )
+
+            hostile_path_load.assert_not_called()
+
     def test_canonical_snapshot_primary_open_does_not_follow_swap_to_symlink(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

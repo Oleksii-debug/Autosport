@@ -1172,15 +1172,11 @@ class RunTransaction:
         label: str,
     ) -> VerifiedFileSnapshot:
         snapshot = cls._read_canonical_file_snapshot(path, label)
-        try:
-            PaperBook.load(path)
-        except Exception as exc:
-            raise RunTransactionError(
-                f"canonical {label} semantic validation failed: {exc}"
-            ) from exc
-        verification_after = cls._read_canonical_file_snapshot(path, label)
-        if verification_after.sha256 != snapshot.sha256 or verification_after.payload != snapshot.payload:
-            raise RunTransactionError(f"canonical {label} changed during semantic validation")
+        cls._validate_paper_book_snapshot(
+            snapshot,
+            path,
+            f"canonical {label}",
+        )
         return snapshot
 
     @staticmethod

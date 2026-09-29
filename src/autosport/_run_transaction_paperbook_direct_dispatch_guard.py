@@ -94,6 +94,12 @@ def _guard_surface_consumer(
     require_surface_authority_code = require_surface_authority.__code__
     exact_type = type
     function_type = FunctionType
+    dict_type = dict
+    list_type = list
+    tuple_type = tuple
+    dict_get = dict.get
+    dict_items = dict.items
+    dict_len = dict.__len__
     fresh_cell = _fresh_cell
     fresh_cell_code = fresh_cell.__code__
     inner_code = function.__code__
@@ -101,10 +107,12 @@ def _guard_surface_consumer(
     inner_name = function.__name__
     inner_qualname = function.__qualname__
     inner_doc = function.__doc__
-    inner_annotations = dict(function.__annotations__)
+    inner_annotations = dict_type(function.__annotations__)
     inner_defaults = function.__defaults__
     inner_kwdefaults = (
-        None if function.__kwdefaults__ is None else dict(function.__kwdefaults__)
+        None
+        if function.__kwdefaults__ is None
+        else dict_type(function.__kwdefaults__)
     )
     inner_closure = function.__closure__
     inner_freevars = inner_code.co_freevars
@@ -119,23 +127,23 @@ def _guard_surface_consumer(
             raise RuntimeError("RunTransaction guarded consumer closure is empty") from exc
     if closure_values[inner_globals_index] is not inner_globals:
         raise RuntimeError("RunTransaction guarded consumer globals changed before sealing")
-    frozen_closure_values = tuple(closure_values)
-    frozen_globals_items = tuple(inner_globals.items())
-    frozen_globals_size = len(frozen_globals_items)
+    frozen_closure_values = tuple_type(closure_values)
+    frozen_globals_items = tuple_type(dict_items(inner_globals))
+    frozen_globals_size = dict_len(inner_globals)
     missing = object()
 
     def require_bindings() -> None:
-        if exact_type(inner_globals) is not dict:
+        if exact_type(inner_globals) is not dict_type:
             raise ValueError("RunTransaction detached direct-dispatch globals changed")
-        if len(inner_globals) != frozen_globals_size:
+        if dict_len(inner_globals) != frozen_globals_size:
             raise ValueError("RunTransaction detached direct-dispatch globals changed")
         for name, expected in frozen_globals_items:
-            if inner_globals.get(name, missing) is not expected:
+            if dict_get(inner_globals, name, missing) is not expected:
                 raise ValueError(
                     f"RunTransaction detached direct-dispatch binding changed: {name}"
                 )
         for name, expected in expected_bindings:
-            if inner_globals.get(name, missing) is not expected:
+            if dict_get(inner_globals, name, missing) is not expected:
                 raise ValueError(
                     f"RunTransaction detached direct-dispatch binding changed: {name}"
                 )
@@ -165,18 +173,18 @@ def _guard_surface_consumer(
         require_bindings()
         require_surface_authority()
 
-        call_globals = dict(frozen_globals_items)
-        call_closure_values = list(frozen_closure_values)
+        call_globals = dict_type(frozen_globals_items)
+        call_closure_values = list_type(frozen_closure_values)
         call_closure_values[inner_globals_index] = call_globals
         delegate = function_type(
             inner_code,
             inner_function_globals,
             name=inner_name,
             argdefs=inner_defaults,
-            closure=tuple(fresh_cell(value) for value in call_closure_values),
+            closure=tuple_type(fresh_cell(value) for value in call_closure_values),
         )
         if inner_kwdefaults is not None:
-            delegate.__kwdefaults__ = dict(inner_kwdefaults)
+            delegate.__kwdefaults__ = dict_type(inner_kwdefaults)
         try:
             return delegate(*args, **kwargs)
         finally:

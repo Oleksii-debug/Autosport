@@ -208,6 +208,53 @@ def _unwrap_name_resolution_guard(function: FunctionType) -> FunctionType:
     return current
 
 
+def _reachable_closure_values(function: FunctionType) -> dict[str, list[object]]:
+    found: dict[str, list[object]] = {}
+    pending = [function]
+    seen: set[int] = set()
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        closure = current.__closure__ or ()
+        for name, cell in zip(current.__code__.co_freevars, closure, strict=True):
+            try:
+                value = cell.cell_contents
+            except ValueError:
+                continue
+            found.setdefault(name, []).append(value)
+            if isinstance(value, FunctionType):
+                pending.append(value)
+    return found
+
+
+def test_provider_authority_expectations_are_immutable_closure_witnesses() -> None:
+    roots = (
+        _unwrap_name_resolution_guard(provider_evidence.verify_betfair_provider_state),
+        _unwrap_name_resolution_guard(
+            provider_evidence.assert_verified_provider_evidence_authoritative
+        ),
+    )
+    found: dict[str, list[object]] = {}
+    for root_function in roots:
+        for name, values in _reachable_closure_values(root_function).items():
+            found.setdefault(name, []).extend(values)
+
+    expected_names = (
+        "sealed_verify_graph",
+        "sealed_fingerprint_graph",
+        "sealed_wrapper_bindings",
+        "sealed_profile_descriptors",
+        "sealed_evidence_descriptors",
+    )
+    for name in expected_names:
+        assert name in found, f"missing provider authority witness: {name}"
+        assert all(type(value) is tuple for value in found[name]), (
+            f"provider authority witness remains caller-mutable: {name}"
+        )
+
+
 def test_equal_caller_copy_cannot_mint_provider_evidence_authority() -> None:
     action = _action()
     profile = _profile()
@@ -288,4 +335,4 @@ def test_reachable_closure_dict_injection_cannot_mint_provider_authority() -> No
     # expose none. Either way the caller-created equal object is never authoritative.
     with pytest.raises(ProviderEvidenceError):
         provider_evidence.assert_verified_provider_evidence_authoritative(forged)
-    assert attacked >= 0
+    assert attacked == 0

@@ -231,14 +231,14 @@ class BetfairMarginalCommissionEVProjection:
             "market_id": market,
             "currency": self.currency,
             "effective_commission_rate": _decimal_text(rate),
-            "commission_rate_basis": COMMISSION_RATE_BASIS,
+            "commission_rate_basis": "DECISION_SNAPSHOT_CONDITIONAL",
             "commission_quantum": _decimal_text(COMMISSION_QUANTUM),
             "commission_rounding": COMMISSION_ROUNDING,
-            "provider_applicability_proven": PROVIDER_APPLICABILITY_PROVEN,
-            "provider_posted_exact": PROVIDER_POSTED_EXACT,
-            "settlement_rate_authoritative": SETTLEMENT_RATE_AUTHORITATIVE,
-            "execution_authorized": EXECUTION_AUTHORIZED,
-            "real_money_execution": REAL_MONEY_EXECUTION,
+            "provider_applicability_proven": False,
+            "provider_posted_exact": False,
+            "settlement_rate_authoritative": False,
+            "execution_authorized": False,
+            "real_money_execution": False,
             "decision_authorized": False,
             **evidence,
             "outcomes": [
@@ -283,27 +283,27 @@ class BetfairMarginalCommissionEVProjection:
 
     @property
     def commission_rate_basis(self) -> str:
-        return COMMISSION_RATE_BASIS
+        return "DECISION_SNAPSHOT_CONDITIONAL"
 
     @property
     def provider_applicability_proven(self) -> bool:
-        return PROVIDER_APPLICABILITY_PROVEN
+        return False
 
     @property
     def provider_posted_exact(self) -> bool:
-        return PROVIDER_POSTED_EXACT
+        return False
 
     @property
     def settlement_rate_authoritative(self) -> bool:
-        return SETTLEMENT_RATE_AUTHORITATIVE
+        return False
 
     @property
     def execution_authorized(self) -> bool:
-        return EXECUTION_AUTHORIZED
+        return False
 
     @property
     def real_money_execution(self) -> bool:
-        return REAL_MONEY_EXECUTION
+        return False
 
     @property
     def decision_authorized(self) -> bool:

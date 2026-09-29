@@ -168,6 +168,41 @@ def test_persistence_resolvers_reject_late_builtin_global_shadow_before_dispatch
         assert hostile_calls == 0
 
 
+def test_resolvers_reject_late_len_global_shadow_before_dispatch() -> None:
+    """Both resolver families must reject a late global shadow of builtin len."""
+
+    for method in (
+        RunTransaction._stage_paper_book_snapshot,
+        RunTransaction._promote_paper_book_snapshot,
+    ):
+        assert isinstance(method, FunctionType)
+        for resolver_name in ("resolver", "persistence_resolver"):
+            entrypoint = _resolver_entrypoint(method, resolver_name)
+            original = _original_callable(entrypoint)
+            globals_mapping = original.__globals__
+            assert "len" not in globals_mapping
+            hostile_calls = 0
+
+            def hostile_len(value):
+                nonlocal hostile_calls
+                hostile_calls += 1
+                return builtins.len(value)
+
+            globals_mapping["len"] = hostile_len
+            try:
+                try:
+                    entrypoint()
+                except Exception:  # noqa: BLE001 - fail closed is required.
+                    pass
+                else:
+                    raise AssertionError(
+                        f"{resolver_name} accepted a late global shadow of builtin len"
+                    )
+            finally:
+                del globals_mapping["len"]
+            assert hostile_calls == 0
+
+
 def test_resolver_wrapper_rejects_shadowed_failure_constructor_before_dispatch() -> None:
     """Fail-closed verification must not execute a late module-global ValueError hook."""
 

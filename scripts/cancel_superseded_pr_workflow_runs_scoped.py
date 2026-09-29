@@ -20,10 +20,10 @@ from scripts.cancel_superseded_pr_workflow_runs import (
 class WorkflowScopedGitHubApi(GitHubApi):
     """Trusted controller API narrowed to one exact source workflow id.
 
-    The workflow_run trigger already identifies the source workflow.  Querying the
+    The workflow_run trigger already identifies the source workflow. Querying the
     repository-wide Actions run collection for every active status makes each trusted
     cancellation decision scale with unrelated queue pressure and increases the chance
-    that pagination races while the queue is changing.  Keep the existing cancellation
+    that pagination races while the queue is changing. Keep the existing cancellation
     authority and live-PR rechecks, but enumerate only runs belonging to the exact source
     workflow that triggered this controller invocation.
     """
@@ -65,12 +65,17 @@ class WorkflowScopedGitHubApi(GitHubApi):
             page_runs = payload["workflow_runs"]
             runs.extend(parse_run(item) for item in page_runs)
             total_count = payload["total_count"]
-            if not page_runs or len(runs) >= total_count:
+            # Active-run collections are inherently moving while a controller scans
+            # them. A short page is therefore a safe terminal snapshot even when the
+            # earlier total_count was larger. Missing a concurrently transitioned run
+            # can only defer cleanup; it cannot grant cancellation authority. Do not
+            # turn harmless queue shrinkage into a failed controller invocation.
+            if (
+                not page_runs
+                or len(page_runs) < _RUNS_PER_PAGE
+                or len(runs) >= total_count
+            ):
                 break
-            if len(page_runs) < _RUNS_PER_PAGE:
-                raise CancellationError(
-                    "workflow-runs pagination ended before reported total_count"
-                )
             page += 1
         return tuple(runs)
 

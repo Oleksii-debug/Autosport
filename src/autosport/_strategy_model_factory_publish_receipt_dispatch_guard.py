@@ -214,10 +214,11 @@ def _install() -> None:
         finally:
             active_append.reset(token)
 
-    # Route both the public composition name and the owning guard's internal recovery
-    # call through the same private capability.  Capture later wrappers only after this
-    # rebinding so their global witness expects this exact canonical issuer.
+    # Route both public composition names and the owning guard's internal recovery
+    # aliases through the same private capability.  A caller must not bypass the
+    # class gate by invoking the guard module's original append function directly.
     store_type._append_publish_commit_record = gated_append
+    _guard._append_publish_commit_record = gated_append
     _guard._record_committed_factory_publish = canonical_record
     _factory._record_committed_factory_publish = canonical_record
 

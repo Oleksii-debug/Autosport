@@ -1342,7 +1342,7 @@ class BookmakerAccountReconciliationStore:
         try:
             raw = raw_bytes.decode("utf-8")
             document = strict_json_loads(raw)
-        except (UnicodeError, ValueError) as exc:
+        except (UnicodeError, ValueError, RecursionError) as exc:
             raise AccountReconciliationIntegrityError(
                 "account reconciliation store is unreadable or corrupt"
             ) from exc

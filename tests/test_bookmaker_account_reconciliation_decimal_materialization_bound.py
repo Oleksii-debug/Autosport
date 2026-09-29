@@ -733,3 +733,21 @@ def test_stable_reconciliation_reader_returns_exact_persisted_bytes(tmp_path) ->
 
     expected = path.read_bytes()
     assert reconciliation_module._read_stable_reconciliation_bytes(path) == expected
+
+
+def test_reconciliation_read_normalizes_deep_json_recursion(tmp_path) -> None:
+    path = tmp_path / "account.json"
+    path.write_text(
+        ("[" * 10_000) + ("]" * 10_000),
+        encoding="utf-8",
+    )
+    store = BookmakerAccountReconciliationStore(
+        path,
+        authority_root=tmp_path / "authority",
+    )
+
+    with pytest.raises(
+        AccountReconciliationIntegrityError,
+        match="unreadable or corrupt",
+    ):
+        store.latest_snapshot()

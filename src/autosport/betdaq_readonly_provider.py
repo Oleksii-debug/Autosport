@@ -18,7 +18,7 @@ from .providers import ProviderBatch, ProviderQuote, ProviderUnavailableError
 
 BETDAQ_GET_PRICES_ENDPOINT = "https://api.betdaq.com/v2.0/ReadOnlyService.asmx"
 BETDAQ_GET_PRICES_SOAP_ACTION = "http://www.GlobalBettingExchange.com/ExternalAPI/GetPrices"
-BETDAQ_GET_PRICES_MAX_MARKETS = 500
+BETDAQ_GET_PRICES_MAX_MARKETS = 50
 _MAX_FIXED_DECIMAL_CHARS = 512
 
 

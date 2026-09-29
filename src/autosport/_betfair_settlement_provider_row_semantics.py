@@ -2,24 +2,24 @@
 
 Current main still omits documented cleared-order ``betOutcome``, ``handicap`` and
 ``voidedDate`` fields while active canonical successor #1496/#1324 already carries
-those fields natively.  This composition consumes the native DTO when present and,
+those fields natively. This composition consumes the native DTO when present and,
 only on today's older adapter surface, carries the same validated facts through one
-private observation subtype.  It never creates a second provider client/parser stack.
+private observation subtype. It never creates a second provider client/parser stack.
 
-Betfair cleared-order ``profit`` is a provider number, but it is not exact money until
-an authenticated account-details read proves the account currency.  The adapter already
-owns both read seams.  ``read_currency_qualified_execution_readback`` performs those two
-existing canonical reads on the exact same client, binds the account-details result to
-the exact adapter-issued execution capture in a private single-capture registry, and
-returns only that capture.  Settlement semantic projection fails closed when a capture
-was not issued through this currency-qualified seam.  Caller-created account-detail
-DTOs, post-hoc reads, account labels and locale cannot mint currency authority.
+Betfair cleared-order ``profit`` is a provider numeric observation, but it is not exact
+money until authenticated account-details evidence proves the account currency. The
+adapter already owns both read seams. ``read_currency_qualified_execution_readback``
+performs those two existing canonical reads on the exact same client and binds the
+account-details result to the exact adapter-issued execution capture in a private
+registry. Ordinary execution readback remains valid raw settlement evidence, but its
+persisted ``provider_profit_currency`` is ``None`` and ``provider_profit_money`` fails
+closed. Caller-created account-detail DTOs, account labels and locale cannot upgrade it.
 
 The persisted revision exposes ``bet_outcome``, ``provider_handicap``,
-``provider_voided_date`` and ``provider_profit_currency`` as separate normalized facts.
+``provider_voided_date`` and optional ``provider_profit_currency`` as separate facts.
 Those facts participate in immutable content identity while raw response/capture hashes
-retain their original evidence meaning.  No provider write, settlement-finality or
-real-money capability is introduced.
+retain their original evidence meaning. No provider write, bankroll mutation,
+settlement-finality or real-money capability is introduced.
 """
 from __future__ import annotations
 
@@ -58,7 +58,7 @@ class _ProviderCorrectionFacts:
     bet_outcome: str | None
     provider_handicap: Decimal | None
     provider_voided_date: str | None
-    provider_profit_currency: str
+    provider_profit_currency: str | None
 
 
 _FACT_CONTEXT: ContextVar[object] = ContextVar(
@@ -202,17 +202,13 @@ def _install_currency_bridge():
             )
         return capture
 
-    def currency_for_capture(capture) -> str:
+    def currency_for_capture(capture) -> str | None:
         if type(capture) is not _CAPTURE_TYPE:
-            raise _settlement.BetfairSettlementRevisionError(
-                "settlement currency authority requires exact execution capture"
-            )
+            return None
         with lock:
             record = issued.get(id(capture))
         if record is None or record[0]() is not capture:
-            raise _settlement.BetfairSettlementRevisionError(
-                "settlement provider profit lacks authenticated currency authority"
-            )
+            return None
         details = record[1]
         if _details_fingerprint(details) != record[2]:
             raise _settlement.BetfairSettlementRevisionError(
@@ -280,8 +276,21 @@ class _SettlementRevisionWithCorrectionFacts(_BASE_REVISION):
             _settlement._dec(self.provider_handicap, "provider_handicap")
         if self.provider_voided_date is not None:
             _settlement._time(self.provider_voided_date, "provider_voided_date")
-        _currency_code(self.provider_profit_currency)
+        if self.provider_profit_currency is not None:
+            _currency_code(self.provider_profit_currency)
         _BASE_REVISION.__post_init__(self)
+
+    @property
+    def provider_profit_currency_qualified(self) -> bool:
+        return self.provider_profit_currency is not None
+
+    @property
+    def provider_profit_money(self) -> tuple[Decimal, str]:
+        if self.provider_profit_currency is None:
+            raise _settlement.BetfairSettlementRevisionError(
+                "provider profit has no authenticated currency authority"
+            )
+        return self.provider_profit, _currency_code(self.provider_profit_currency)
 
     def semantic_payload(self) -> dict[str, object]:
         payload: dict[str, object] = dict(_BASE_REVISION.semantic_payload(self))
@@ -357,9 +366,10 @@ class _SettlementRevisionWithCorrectionFacts(_BASE_REVISION):
                 values["provider_voided_date"],
                 "provider_voided_date",
             )
-        values["provider_profit_currency"] = _currency_code(
-            values["provider_profit_currency"]
-        )
+        if values["provider_profit_currency"] is not None:
+            values["provider_profit_currency"] = _currency_code(
+                values["provider_profit_currency"]
+            )
         return cls(**values)
 
 

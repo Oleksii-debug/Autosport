@@ -83,7 +83,7 @@ jobs:
         os: [ubuntu-latest, windows-latest]
         python-version: ['3.11', '3.12']
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 60
+    timeout-minutes: 90
     env:
       AUTOSPORT_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
     steps:

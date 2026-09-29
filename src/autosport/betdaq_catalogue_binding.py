@@ -39,7 +39,7 @@ class _LocatedMarket:
     event_path_names: tuple[str, ...]
 
 
-def _scope_event_id(value: str) -> int:
+def betdaq_event_scope_id(value: str) -> int:
     if type(value) is not str or not value or not value.isascii() or not value.isdigit():
         raise ValueError(
             "live BETDAQ provider_event_id scope assertion must be a decimal event-classifier id"
@@ -108,7 +108,7 @@ class BetdaqLiveCatalogueResolver:
             raise ValueError("bindings must be non-empty BetdaqMarketBinding values")
 
         scope_by_market = {
-            item.market_id: _scope_event_id(item.provider_event_id)
+            item.market_id: betdaq_event_scope_id(item.provider_event_id)
             for item in values
         }
         requested_roots = tuple(sorted(set(scope_by_market.values())))

@@ -12,11 +12,13 @@ permissions:
   contents: read
   pull-requests: read
 
-# Keep only the newest trusted cancellation decision for one PR + source workflow.
-# GitHub can omit workflow_run.pull_requests on close/merge lifecycle runs, so the
-# exact source head is the fallback scheduler identity. The trusted helper resolves
-# a missing PR number from commit association and fails closed unless exactly one PR
-# still names that exact head.
+# Keep only the newest trusted cancellation decision for one known PR + source workflow.
+# GitHub can omit workflow_run.pull_requests on close/merge lifecycle runs. Before a job
+# starts there is no scheduler-safe PR identity in that case: two distinct PRs may point
+# at the same exact commit, so head_sha must not be used as a surrogate PR key. Keep an
+# empty-reference controller run-unique until the trusted helper resolves the missing PR
+# number from commit association and fails closed unless exactly one PR still names that
+# exact head. Controllers with an explicit PR number retain latest-wins coalescing.
 # Controllers for CI, Windows candidate, and Endurance must not preempt one another,
 # because each invocation cancels only obsolete runs of its own source workflow.
 # Replacing an older same-workflow controller cannot grant cancellation authority:
@@ -25,7 +27,7 @@ permissions:
 # inside the exact workflow_id carried by workflow_run, avoiding repository-wide queue
 # scans while preserving the existing workflow-name and PR/head cancellation filters.
 concurrency:
-  group: pr-qualification-supersession-${{ github.event.workflow_run.pull_requests[0].number || github.event.workflow_run.head_sha }}-${{ github.event.workflow_run.workflow_id }}
+  group: pr-qualification-supersession-${{ github.event.workflow_run.pull_requests[0].number || format('unresolved-run-{0}', github.event.workflow_run.id) }}-${{ github.event.workflow_run.workflow_id }}
   cancel-in-progress: true
 
 jobs:

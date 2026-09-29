@@ -44,11 +44,19 @@ def test_controller_keeps_only_latest_same_pr_same_workflow_cancellation_decisio
     concurrency = workflow.split("concurrency:", 1)[1].split("jobs:", 1)[0]
     assert "group: pr-qualification-supersession-" in concurrency
     assert "github.event.workflow_run.pull_requests[0].number" in concurrency
-    assert "github.event.workflow_run.head_sha" in concurrency
     assert "github.event.workflow_run.workflow_id" in concurrency
-    assert "github.event.workflow_run.id" not in concurrency
     assert "cancel-in-progress: true" in concurrency
     assert "fresh live head/state/draft" in workflow
+
+
+def test_empty_ref_controller_is_run_unique_until_pr_identity_is_resolved() -> None:
+    workflow = _text()
+
+    concurrency = workflow.split("concurrency:", 1)[1].split("jobs:", 1)[0]
+    assert "format('unresolved-run-{0}', github.event.workflow_run.id)" in concurrency
+    assert "github.event.workflow_run.head_sha" not in concurrency
+    assert "two distinct PRs may point" in workflow
+    assert "empty-reference controller run-unique" in workflow
 
 
 def test_controller_does_not_skip_close_merge_run_when_nested_pr_list_is_empty() -> None:
@@ -58,7 +66,8 @@ def test_controller_does_not_skip_close_merge_run_when_nested_pr_list_is_empty()
     assert "if: github.event.workflow_run.event == 'pull_request'" in job
     assert "pull_requests[0].number != null" not in job
     assert '--pr-number "${{ github.event.workflow_run.pull_requests[0].number || 0 }}"' in job
-    assert "missing PR number from commit association" in workflow
+    assert "missing PR" in workflow
+    assert "commit association" in workflow
 
 
 def test_controller_does_not_cross_cancel_other_source_workflow_controllers() -> None:

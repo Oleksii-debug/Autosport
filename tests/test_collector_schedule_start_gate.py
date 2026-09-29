@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
@@ -93,6 +94,105 @@ class CollectorScheduleStartGateTests(unittest.TestCase):
             )
             self.assertEqual(authorized["authorization_sha256"], AUTH_A)
             self.assertEqual(self._begin_slot_zero(store), 1)
+
+    def test_gate_install_serializes_against_concurrent_scheduled_start(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = self._store(tmp)
+            schedule = self._ensure(store, gate=None)
+            slot = store._next_collector_schedule_slot(
+                source_id="source-x",
+                run_id="run-1",
+            )
+
+            gate_insert_entered = threading.Event()
+            release_gate_insert = threading.Event()
+            starter_connected = threading.Event()
+            original_connect = store._connect
+
+            def gate_barrier() -> int:
+                gate_insert_entered.set()
+                if not release_gate_insert.wait(timeout=10):
+                    raise RuntimeError("test gate barrier timed out")
+                return 0
+
+            def hooked_connect():
+                connection = original_connect()
+                connection.create_function(
+                    "autosport_test_gate_barrier",
+                    0,
+                    gate_barrier,
+                )
+                if threading.current_thread().name == "starter":
+                    starter_connected.set()
+                return connection
+
+            store._connect = hooked_connect
+            setup = original_connect()
+            try:
+                setup.execute(
+                    "CREATE TRIGGER test_block_gate_insert "
+                    "BEFORE INSERT ON collector_schedule_start_gates_v1 "
+                    "BEGIN SELECT autosport_test_gate_barrier(); END"
+                )
+                setup.commit()
+            finally:
+                setup.close()
+
+            gate_result: list[object] = []
+            start_result: list[object] = []
+
+            def install_gate() -> None:
+                try:
+                    gate_result.append(self._ensure(store, gate=GATE_A))
+                except BaseException as exc:
+                    gate_result.append(exc)
+
+            def start_cycle() -> None:
+                try:
+                    start_result.append(
+                        store._begin_scheduled_collector_cycle(
+                            source_id="source-x",
+                            run_id="run-1",
+                            stream_epoch="epoch-1",
+                            max_items=250,
+                            slot_ordinal=slot["slot_ordinal"],
+                            due_at=slot["due_at"],
+                            attempted_at=slot["due_at"],
+                        )
+                    )
+                except BaseException as exc:
+                    start_result.append(exc)
+
+            gate_thread = threading.Thread(target=install_gate, name="gate-installer")
+            gate_thread.start()
+            self.assertTrue(gate_insert_entered.wait(timeout=10))
+
+            start_thread = threading.Thread(target=start_cycle, name="starter")
+            start_thread.start()
+            self.assertTrue(starter_connected.wait(timeout=10))
+            release_gate_insert.set()
+
+            gate_thread.join(timeout=10)
+            start_thread.join(timeout=10)
+            self.assertFalse(gate_thread.is_alive())
+            self.assertFalse(start_thread.is_alive())
+            self.assertEqual(len(gate_result), 1)
+            self.assertIsInstance(gate_result[0], dict)
+            self.assertEqual(gate_result[0]["schedule_id"], schedule["schedule_id"])
+            self.assertEqual(len(start_result), 1)
+            self.assertIsInstance(start_result[0], ValueError)
+            self.assertIn("not durably authorized", str(start_result[0]))
+
+            check = original_connect()
+            try:
+                self.assertEqual(
+                    check.execute(
+                        "SELECT COUNT(*) FROM collector_cycle_starts_v1"
+                    ).fetchone()[0],
+                    0,
+                )
+            finally:
+                check.close()
 
     def test_gate_install_is_rejected_after_any_collector_start(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -165,27 +165,53 @@ class ProductRuntimeProspectiveScheduleTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             clock = _Clock()
-            sleeps: list[float] = []
+            waits: list[float] = []
 
-            def advance_to_due(seconds: float) -> None:
-                sleeps.append(seconds)
-                self.assertEqual(seconds, 30.0)
-                clock.value = "2026-09-20T13:58:30+00:00"
+            def forbidden_sleep(_seconds: float) -> None:
+                raise AssertionError(
+                    "product scheduled wait must use canonical signal STOP authority"
+                )
 
             runtime = build_autonomous_product_runtime(
                 workspace=root,
                 source=_Source(),
                 clock=clock,
-                sleep=advance_to_due,
+                sleep=forbidden_sleep,
                 initial_bankroll="100",
             )
+
+            class _AdvanceClockEvent:
+                def __init__(self) -> None:
+                    self._set = False
+
+                def is_set(self) -> bool:
+                    return self._set
+
+                def set(self) -> None:
+                    self._set = True
+
+                def clear(self) -> None:
+                    self._set = False
+
+                def wait(self, seconds: float) -> bool:
+                    waits.append(seconds)
+                    self.assert_due_wait(seconds)
+                    clock.value = "2026-09-20T13:58:30+00:00"
+                    return self._set
+
+                @staticmethod
+                def assert_due_wait(seconds: float) -> None:
+                    if seconds != 30.0:
+                        raise AssertionError(f"unexpected due-slot wait: {seconds}")
+
             try:
+                runtime.collector.stop_requested._event = _AdvanceClockEvent()
                 first = runtime.tick()
                 self.assertEqual(first.last_success_at, "2026-09-20T13:58:00+00:00")
-                self.assertEqual(sleeps, [])
+                self.assertEqual(waits, [])
 
                 second = runtime.tick()
-                self.assertEqual(sleeps, [30.0])
+                self.assertEqual(waits, [30.0])
                 self.assertEqual(
                     second.last_success_at,
                     "2026-09-20T13:58:30+00:00",

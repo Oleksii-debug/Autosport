@@ -635,7 +635,7 @@ class HeadlessCollectorService:
         self._stop_if_requested()
         duration = float(seconds)
         stop_source = self.stop_requested
-        if isinstance(stop_source, _SignalStopRequest) and self.sleep is time.sleep:
+        if isinstance(stop_source, _SignalStopRequest):
             signal_wait = getattr(_SignalStopRequest, "wait", None)
             if not callable(signal_wait):
                 raise CollectorServiceError(

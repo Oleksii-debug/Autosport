@@ -4,7 +4,7 @@ import pytest
 
 from autosport.domain import TicketLeg
 from autosport.economic_admission import admit_paper_ticket
-from autosport.integrity import sha256_file
+from autosport.integrity import atomic_write_json, sha256_file
 from autosport.paper import PaperBook
 from autosport.risk import PaperRiskPolicy, ProposedTicketRiskContext
 from autosport.run_registry import RunRegistry, UnresolvedExperimentError
@@ -145,6 +145,48 @@ def test_nonterminal_transaction_history_blocks_paper_admission_without_mutation
     persisted = PaperBook.load(book_path)
     assert persisted.balance == Decimal("1000")
     assert persisted.tickets == {}
+
+def test_missing_registry_with_terminal_transaction_history_blocks_admission(tmp_path):
+    book_path = tmp_path / "paper_book.json"
+    ledger_path = tmp_path / "decisions.jsonl"
+    book = PaperBook("1000")
+    book.save(book_path)
+    ledger_path.write_bytes(b"")
+    before = book_path.read_bytes()
+
+    transaction = RunTransaction.start(
+        tmp_path,
+        run_id="terminal-history-without-registry",
+        experiment_key="terminal-history-experiment",
+        market_sha256="5" * 64,
+        results_sha256="6" * 64,
+        strategy_id="strategy-v1",
+        base_paper_book_sha256=sha256_file(book_path),
+        base_decision_ledger_sha256=sha256_file(ledger_path),
+    )
+    manifest = transaction._read_manifest()
+    manifest["phase"] = "aborted"
+    atomic_write_json(transaction.manifest_path, manifest)
+
+    with pytest.raises(
+        UnresolvedExperimentError,
+        match="run registry is missing while transaction history exists",
+    ):
+        admit_paper_ticket(
+            workspace=tmp_path,
+            book=book,
+            risk_policy=PaperRiskPolicy(),
+            stake=Decimal("10"),
+            legs=(_leg(),),
+            reason="must not cross registry-loss boundary",
+            placed_at="2026-09-24T16:00:00Z",
+        )
+
+    assert book_path.read_bytes() == before
+    persisted = PaperBook.load(book_path)
+    assert persisted.balance == Decimal("1000")
+    assert persisted.tickets == {}
+
 
 def test_denied_admission_does_not_mutate_paper_book(tmp_path):
     book = PaperBook("1000")

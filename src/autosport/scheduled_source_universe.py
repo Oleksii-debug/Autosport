@@ -560,6 +560,12 @@ def _seal_scheduled_source_universe_dispatch() -> None:
     expected_resolution_issue_surface = expected_getattr_static(
         expected_resolution_type, "_issue"
     )
+    expected_resolution_issue_function = getattr(
+        expected_resolution_issue_surface, "__func__", None
+    )
+    expected_resolution_issue_function_code = getattr(
+        expected_resolution_issue_function, "__code__", None
+    )
     helper_witnesses = tuple(
         (
             name,
@@ -695,12 +701,18 @@ def _seal_scheduled_source_universe_dispatch() -> None:
             raise expected_error_type(
                 "scheduled source-universe verifier authority is rebound"
             )
+        current_resolution_issue_surface = expected_getattr_static(
+            expected_resolution_type, "_issue", None
+        )
         if (
-            expected_getattr_static(expected_resolution_type, "_issue", None)
-            is not expected_resolution_issue_surface
+            current_resolution_issue_surface is not expected_resolution_issue_surface
+            or getattr(current_resolution_issue_surface, "__func__", None)
+            is not expected_resolution_issue_function
+            or getattr(expected_resolution_issue_function, "__code__", None)
+            is not expected_resolution_issue_function_code
         ):
             raise expected_error_type(
-                "scheduled source-universe result issuance surface is rebound"
+                "scheduled source-universe result issuance surface is rebound or mutated"
             )
         for name, expected_helper, expected_code in helper_witnesses:
             current_helper = module_globals.get(name)

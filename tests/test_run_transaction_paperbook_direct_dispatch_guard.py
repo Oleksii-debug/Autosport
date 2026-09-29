@@ -90,7 +90,9 @@ class RunTransactionPaperBookDirectDispatchGuardTests(unittest.TestCase):
         self.assertIs(frozen_os.fsync, os.fsync)
         self.assertIs(frozen_os.replace, os.replace)
         self.assertEqual(frozen_os.name, os.name)
-        self.assertIs(frozen_tempfile.mkstemp, tempfile.mkstemp)
+        self.assertIs(frozen_tempfile.mkstemp, paper_guard.tempfile.mkstemp)
+        self.assertIsNot(frozen_tempfile.mkstemp, tempfile.mkstemp)
+        self.assertIsNot(frozen_tempfile.mkstemp.__globals__, tempfile.mkstemp.__globals__)
         self.assertIs(frozen_hashlib.sha256, hashlib.sha256)
         self.assertEqual(frozen_paper_book.load_bytes, PaperBook.load_bytes)
 

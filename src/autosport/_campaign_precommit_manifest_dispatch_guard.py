@@ -3,8 +3,9 @@
 The owning :mod:`campaign_precommit_manifest` module remains the sole manifest and
 publication-witness authority.  This guard does not copy its persistence protocol or
 create another trust root.  It snapshots the already-built positive publisher's
-ordinary Python executable/global/closure graph and refuses to dispatch if that graph
-is later retargeted through normal module rebinding.
+ordinary Python executable/global/closure graph and the exact monotonic-authority
+methods it dispatches through, refusing to dispatch if either surface is later
+retargeted through ordinary Python rebinding.
 
 This is a TRUSTED_PRODUCT_INTERPRETER composition fence, not a sandbox against code
 that already controls arbitrary closure cells, code objects, or interpreter internals.
@@ -19,6 +20,14 @@ from . import campaign_precommit_manifest as _precommit
 
 _EMPTY = object()
 _FUNCTION_TYPE = FunctionType
+_AUTHORITY_METHOD_NAMES = (
+    "__init__",
+    "abort",
+    "commit",
+    "prepare",
+    "read_history",
+    "recover",
+)
 
 
 def _closure_values(function: FunctionType) -> tuple[object, ...] | None:
@@ -159,17 +168,71 @@ def _require_function_graph(
                 )
 
 
+def _capture_class_method_graph(
+    owner: object,
+    method_names: tuple[str, ...],
+    label: str,
+) -> tuple[tuple[object, str, FunctionType, tuple[tuple[object, ...], ...]], ...]:
+    namespace = getattr(owner, "__dict__", None)
+    if namespace is None:
+        raise RuntimeError(f"canonical {label} has no class namespace")
+
+    captured: list[
+        tuple[object, str, FunctionType, tuple[tuple[object, ...], ...]]
+    ] = []
+    for name in method_names:
+        method = namespace.get(name, _EMPTY)
+        if type(method) is not _FUNCTION_TYPE:
+            raise RuntimeError(f"canonical {label}.{name} is not a Python function")
+        captured.append(
+            (
+                owner,
+                name,
+                method,
+                _capture_function_graph(method, f"{label}.{name}"),
+            )
+        )
+    return tuple(captured)
+
+
+def _require_class_method_graph(
+    graph: tuple[
+        tuple[object, str, FunctionType, tuple[tuple[object, ...], ...]], ...
+    ],
+    label: str,
+) -> None:
+    for owner, name, expected_method, function_graph in graph:
+        namespace = getattr(owner, "__dict__", None)
+        if namespace is None or namespace.get(name, _EMPTY) is not expected_method:
+            raise RuntimeError(f"{label} method dispatch authority changed: {name}")
+        _require_function_graph(function_graph, f"{label}.{name}")
+
+
 def _install() -> None:
     original = _precommit.publish_campaign_precommit_manifest
     graph = _capture_function_graph(original, "campaign precommit publisher")
+    authority_methods = _capture_class_method_graph(
+        _precommit.MonotonicWorkspaceAuthority,
+        _AUTHORITY_METHOD_NAMES,
+        "campaign precommit monotonic authority",
+    )
     require = _require_function_graph
+    require_authority = _require_class_method_graph
 
     def guarded_publish(*args, **kwargs):
         require(graph, "campaign precommit publisher")
+        require_authority(
+            authority_methods,
+            "campaign precommit monotonic authority",
+        )
         try:
             return original(*args, **kwargs)
         finally:
             require(graph, "campaign precommit publisher")
+            require_authority(
+                authority_methods,
+                "campaign precommit monotonic authority",
+            )
 
     guarded_publish.__name__ = original.__name__
     guarded_publish.__qualname__ = original.__qualname__

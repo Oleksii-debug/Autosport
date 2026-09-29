@@ -65,6 +65,26 @@ def _fixed_decimal_text(
     return format(value, "f")
 
 
+def _evidence_sha256(value: object, field: str) -> str:
+    if (
+        type(value) is not str
+        or len(value) != 64
+        or any(ch not in "0123456789abcdef" for ch in value)
+    ):
+        raise ValueError(f"{field} must be lowercase SHA-256")
+    return value
+
+
+def _evidence_receipts(value: object, field: str) -> tuple[str, ...]:
+    if type(value) is not tuple:
+        raise ValueError(f"{field} must be a tuple")
+    if len(set(value)) != len(value):
+        raise ValueError(f"{field} must not contain duplicate receipts")
+    for receipt in value:
+        _evidence_sha256(receipt, field)
+    return value
+
+
 @dataclass(frozen=True, slots=True)
 class BetdaqGetPricesRequest:
     request_id: int
@@ -206,6 +226,64 @@ class BetdaqRequestEvidence:
     unavailable_market_ids: tuple[int, ...] = ()
     rate_admission_receipts: tuple[str, ...] = ()
 
+    def __post_init__(self) -> None:
+        if type(self.request_id) is not int or self.request_id < 0:
+            raise ValueError("evidence request_id must be non-negative int")
+        if (
+            type(self.market_ids) is not tuple
+            or not self.market_ids
+            or len(self.market_ids) > BETDAQ_GET_PRICES_MAX_MARKETS
+            or any(type(value) is not int or value < 0 for value in self.market_ids)
+            or len(set(self.market_ids)) != len(self.market_ids)
+        ):
+            raise ValueError("evidence market_ids are not canonical")
+        if type(self.attempts) is not int or self.attempts <= 0:
+            raise ValueError("evidence attempts must be positive int")
+        received, _ = _time(
+            self.response_received_at,
+            "evidence response_received_at",
+        )
+        _evidence_sha256(self.request_fingerprint, "evidence request_fingerprint")
+        _evidence_sha256(self.response_sha256, "evidence response_sha256")
+        if self.call_id is not None and (
+            type(self.call_id) is not str
+            or not self.call_id
+            or self.call_id != self.call_id.strip()
+        ):
+            raise ValueError("evidence call_id must be trimmed non-empty str or None")
+        if self.message_created_at is not None:
+            created, _ = _time(
+                self.message_created_at,
+                "evidence message_created_at",
+            )
+            if (
+                created.astimezone(timezone.utc)
+                > received.astimezone(timezone.utc)
+            ):
+                raise ValueError(
+                    "evidence message_created_at cannot follow response receipt"
+                )
+        if (
+            type(self.unavailable_market_ids) is not tuple
+            or len(set(self.unavailable_market_ids))
+            != len(self.unavailable_market_ids)
+            or any(
+                type(value) is not int
+                or value < 0
+                or value not in self.market_ids
+                for value in self.unavailable_market_ids
+            )
+        ):
+            raise ValueError("evidence unavailable_market_ids are not canonical")
+        receipts = _evidence_receipts(
+            self.rate_admission_receipts,
+            "evidence rate_admission_receipts",
+        )
+        if receipts and len(receipts) != self.attempts:
+            raise ValueError(
+                "rate admission evidence must account for every transport attempt"
+            )
+
 
 @dataclass(frozen=True, slots=True)
 class BetdaqSnapshotEvidence:
@@ -221,6 +299,107 @@ class BetdaqSnapshotEvidence:
     catalogue_response_sha256: str | None = None
     catalogue_rate_admission_receipts: tuple[str, ...] = ()
     catalogue_event_classifier_ids: tuple[int, ...] = ()
+
+    def __post_init__(self) -> None:
+        observed, _ = _time(self.observed_at, "evidence observed_at")
+        if (
+            type(self.requests) is not tuple
+            or not self.requests
+            or any(type(item) is not BetdaqRequestEvidence for item in self.requests)
+        ):
+            raise ValueError(
+                "snapshot requests must be a non-empty BetdaqRequestEvidence tuple"
+            )
+        for request in self.requests:
+            received, _ = _time(
+                request.response_received_at,
+                "evidence response_received_at",
+            )
+            if (
+                received.astimezone(timezone.utc)
+                > observed.astimezone(timezone.utc)
+            ):
+                raise ValueError(
+                    "snapshot observed_at cannot precede response receipt"
+                )
+        _evidence_sha256(self.aggregate_sha256, "evidence aggregate_sha256")
+        for field in (
+            "quote_source_timestamp_available",
+            "live_entitlement_verified",
+            "provider_origin_verified",
+            "receipt_clock_verified",
+        ):
+            if type(getattr(self, field)) is not bool:
+                raise TypeError(f"{field} must be bool")
+        unavailable = tuple(
+            sorted(
+                {
+                    market_id
+                    for request in self.requests
+                    for market_id in request.unavailable_market_ids
+                }
+            )
+        )
+        if (
+            type(self.unavailable_market_ids) is not tuple
+            or self.unavailable_market_ids != unavailable
+        ):
+            raise ValueError(
+                "snapshot unavailable_market_ids must equal request evidence"
+            )
+
+        catalogue_present = any(
+            (
+                self.catalogue_request_fingerprint is not None,
+                self.catalogue_response_sha256 is not None,
+                bool(self.catalogue_rate_admission_receipts),
+                bool(self.catalogue_event_classifier_ids),
+            )
+        )
+        if not catalogue_present:
+            if (
+                self.catalogue_request_fingerprint is not None
+                or self.catalogue_response_sha256 is not None
+                or self.catalogue_rate_admission_receipts != ()
+                or self.catalogue_event_classifier_ids != ()
+            ):
+                raise ValueError("catalogue evidence must be all absent or all present")
+            return
+
+        if (
+            self.catalogue_request_fingerprint is None
+            or self.catalogue_response_sha256 is None
+        ):
+            raise ValueError("catalogue evidence must be all absent or all present")
+        _evidence_sha256(
+            self.catalogue_request_fingerprint,
+            "evidence catalogue_request_fingerprint",
+        )
+        _evidence_sha256(
+            self.catalogue_response_sha256,
+            "evidence catalogue_response_sha256",
+        )
+        receipts = _evidence_receipts(
+            self.catalogue_rate_admission_receipts,
+            "evidence catalogue_rate_admission_receipts",
+        )
+        if not receipts:
+            raise ValueError("catalogue rate admission evidence cannot be empty")
+        if (
+            type(self.catalogue_event_classifier_ids) is not tuple
+            or not self.catalogue_event_classifier_ids
+            or tuple(sorted(set(self.catalogue_event_classifier_ids)))
+            != self.catalogue_event_classifier_ids
+            or any(
+                type(value) is not int
+                or value < 0
+                or value > (1 << 63) - 1
+                for value in self.catalogue_event_classifier_ids
+            )
+        ):
+            raise ValueError(
+                "catalogue_event_classifier_ids must be sorted unique provider longs"
+            )
 
 
 Clock = Callable[[], str]

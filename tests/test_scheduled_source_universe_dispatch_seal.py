@@ -639,5 +639,64 @@ class ScheduledSourceUniverseDispatchSealTests(unittest.TestCase):
                 equality.__code__ = original_code
 
 
+    def test_source_string_expected_path_cannot_dispatch_path_constructor(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path, store, cycle_seq, _candidate = _ready_store(tmp)
+            original_new = Path.__new__
+            hostile_calls = []
+
+            def hostile_new(cls, *args, **kwargs):
+                hostile_calls.append((args, kwargs))
+                return original_new(cls, *args, **kwargs)
+
+            Path.__new__ = hostile_new
+            try:
+                with self.assertRaisesRegex(
+                    TypeError,
+                    "expected_store_path must be the exact canonical Path type",
+                ):
+                    source_module.build_source_universe_commitment(
+                        store,
+                        expected_store_path=str(path),
+                        source_id=SOURCE_ID,
+                        start_cycle_seq=cycle_seq,
+                        end_cycle_seq=cycle_seq,
+                    )
+            finally:
+                Path.__new__ = original_new
+
+            self.assertEqual(hostile_calls, [])
+
+    def test_scheduled_string_expected_path_cannot_dispatch_path_constructor(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path, store, _cycle_seq, candidate = _ready_store(tmp)
+            original_new = Path.__new__
+            hostile_calls = []
+
+            def hostile_new(cls, *args, **kwargs):
+                hostile_calls.append((args, kwargs))
+                return original_new(cls, *args, **kwargs)
+
+            Path.__new__ = hostile_new
+            try:
+                with self.assertRaisesRegex(
+                    TypeError,
+                    "expected_store_path must be the exact canonical Path type",
+                ):
+                    scheduled_module.resolve_scheduled_source_universe(
+                        store,
+                        candidate,
+                        expected_store_path=str(path),
+                        expected_source_id=SOURCE_ID,
+                        expected_run_id=RUN_ID,
+                        expected_start_slot_ordinal=0,
+                        expected_end_slot_ordinal=0,
+                    )
+            finally:
+                Path.__new__ = original_new
+
+            self.assertEqual(hostile_calls, [])
+
+
 if __name__ == "__main__":
     unittest.main()

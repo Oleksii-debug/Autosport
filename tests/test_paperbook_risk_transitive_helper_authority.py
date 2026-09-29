@@ -116,7 +116,7 @@ def _concentration_policy_and_context() -> tuple[
 
 
 def test_reconstructed_evaluate_rejects_transitive_fraction_limit_descriptor_retarget() -> None:
-    """First-level _derived_risk_values witness must cover its class dispatch graph."""
+    """Stable transitive helper replacement must fail closed before authority can move."""
 
     reconstructed = _reconstruct_pre_wrapper_evaluate()
     policy = _bounded_policy()
@@ -127,15 +127,23 @@ def test_reconstructed_evaluate_rejects_transitive_fraction_limit_descriptor_ret
 
     original = vars(PaperRiskPolicy)["_effective_fraction_limits"]
     assert type(original) is FunctionType
-    type.__setattr__(PaperRiskPolicy, "_effective_fraction_limits", _permissive_fraction_limits)
     try:
-        decision = reconstructed(policy, book, amount)
-        assert decision.allowed is False, (
-            "reconstructed evaluate accepted a stake after transitive risk-helper "
-            "descriptor retargeting"
+        type.__setattr__(
+            PaperRiskPolicy,
+            "_effective_fraction_limits",
+            _permissive_fraction_limits,
         )
-    finally:
-        type.__setattr__(PaperRiskPolicy, "_effective_fraction_limits", original)
+    except TypeError:
+        assert vars(PaperRiskPolicy)["_effective_fraction_limits"] is original
+    else:
+        try:
+            decision = reconstructed(policy, book, amount)
+            assert decision.allowed is False, (
+                "reconstructed evaluate accepted a stake after transitive risk-helper "
+                "descriptor retargeting"
+            )
+        finally:
+            type.__setattr__(PaperRiskPolicy, "_effective_fraction_limits", original)
 
 
 def test_reconstructed_evaluate_rejects_transitive_fraction_limit_code_retarget() -> None:

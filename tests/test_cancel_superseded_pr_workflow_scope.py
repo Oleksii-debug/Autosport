@@ -6,7 +6,11 @@ from pathlib import Path
 
 import pytest
 
-from scripts.cancel_superseded_pr_workflow_runs import CancellationError, WorkflowRun
+from scripts.cancel_superseded_pr_workflow_runs import (
+    CancellationError,
+    WorkflowRun,
+    select_superseded_runs,
+)
 from scripts.cancel_superseded_pr_workflow_runs_scoped import WorkflowScopedGitHubApi
 
 
@@ -50,13 +54,14 @@ class FakeScopedApi(WorkflowScopedGitHubApi):
 def _run(
     run_id: int,
     *,
+    head_sha: str = HEAD,
     status: str = "queued",
     pull_requests: list[dict[str, object]] | None = None,
     workflow_name: str = "CI",
 ) -> dict[str, object]:
     return {
         "id": run_id,
-        "head_sha": HEAD,
+        "head_sha": head_sha,
         "name": workflow_name,
         "status": status,
         "pull_requests": (
@@ -131,6 +136,39 @@ def test_exact_workflow_id_membership_survives_historical_display_name_drift() -
     assert len(runs) == 1
     assert runs[0].run_id == 91
     assert runs[0].workflow_name == "CI"
+    assert api.paths == [
+        "/actions/workflows/356678400/runs?event=pull_request&status=queued&per_page=100&page=1"
+    ]
+
+
+def test_historical_display_name_drift_does_not_hide_stale_run_from_selector() -> None:
+    api = FakeScopedApi(
+        356678400,
+        [
+            {
+                "total_count": 1,
+                "workflow_runs": [
+                    _run(
+                        91,
+                        head_sha=STALE_HEAD,
+                        workflow_name="CI before workflow rename",
+                    )
+                ],
+            }
+        ],
+        workflow_name="CI",
+    )
+
+    runs = api._active_runs_for_status("queued")
+    selected = select_superseded_runs(
+        runs,
+        pr_number=2022,
+        live_head_sha=HEAD,
+        workflow_name="CI",
+        current_run_id=100,
+    )
+
+    assert selected == (91,)
     assert api.paths == [
         "/actions/workflows/356678400/runs?event=pull_request&status=queued&per_page=100&page=1"
     ]

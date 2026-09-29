@@ -245,10 +245,26 @@ def _response_for_markets(market_ids: tuple[int, ...]) -> str:
       </GetPricesResult></GetPricesResponse></soap:Body>
     </soap:Envelope>'''
 
-def test_51_markets_are_partitioned_50_plus_1_without_scope_expansion():
+
+def test_getprices_request_capacity_matches_documented_500_market_limit():
+    accepted = BetdaqGetPricesRequest(
+        1,
+        tuple(range(1, 501)),
+        Decimal("1"),
+    )
+    assert len(accepted.market_ids) == 500
+
+    with pytest.raises(ValueError, match="1..500"):
+        BetdaqGetPricesRequest(
+            2,
+            tuple(range(1, 502)),
+            Decimal("1"),
+        )
+
+def test_501_markets_are_partitioned_500_plus_1_without_scope_expansion():
     bindings=[
         BetdaqMarketBinding(i, f"event-{i}", "football", MarketType.WINNER)
-        for i in range(1, 52)
+        for i in range(1, 502)
     ]
     request_ids=iter((100, 101))
     class DynamicTransport:
@@ -265,17 +281,17 @@ def test_51_markets_are_partitioned_50_plus_1_without_scope_expansion():
         clock=lambda: "2026-09-23T00:00:01Z",
         request_id_factory=lambda: next(request_ids),
     )
-    batch=p.read_batch(max_items=1000)
-    assert [len(call.market_ids) for call in t.calls] == [50, 1]
-    assert t.calls[0].market_ids == tuple(range(1, 51))
-    assert t.calls[1].market_ids == (51,)
-    assert len(batch.quotes) == 102
+    batch=p.read_batch(max_items=2000)
+    assert [len(call.market_ids) for call in t.calls] == [500, 1]
+    assert t.calls[0].market_ids == tuple(range(1, 501))
+    assert t.calls[1].market_ids == (501,)
+    assert len(batch.quotes) == 1002
     assert len(p.last_request_evidence.requests) == 2
 
 def test_second_chunk_failure_leaks_no_partial_snapshot():
     bindings=[
         BetdaqMarketBinding(i, f"event-{i}", "football", MarketType.WINNER)
-        for i in range(1, 52)
+        for i in range(1, 502)
     ]
     class FailingSecondChunk:
         def __init__(self):
@@ -293,11 +309,11 @@ def test_second_chunk_failure_leaks_no_partial_snapshot():
         clock=lambda: "2026-09-23T00:00:01Z",
     )
     with pytest.raises(BetdaqSoapProtocolError):
-        p.read_batch(max_items=1000)
+        p.read_batch(max_items=2000)
     assert p.last_request_evidence is None
-    batch=p.read_batch(max_items=1000)
-    assert [len(call.market_ids) for call in t.calls] == [50, 1, 50, 1]
-    assert len(batch.quotes) == 102
+    batch=p.read_batch(max_items=2000)
+    assert [len(call.market_ids) for call in t.calls] == [500, 1, 500, 1]
+    assert len(batch.quotes) == 1002
 
 def test_live_entitlement_is_never_inferred_from_successful_public_response():
     p=provider(Transport([response()]))

@@ -181,6 +181,32 @@ def test_colliding_redacted_tuple_keys_preserve_both_records_without_secret() ->
     assert second not in repr(redacted)
 
 
+def test_configured_secret_embedded_in_bytes_value_is_redacted() -> None:
+    secret = "AS-MAPPING-BYTES-VALUE-SECRET-4a12"
+    payload = {
+        "provider_detail": f"provider-{secret}-error".encode("utf-8"),
+    }
+
+    redacted = redact_operator_value(
+        payload,
+        extra_secret_values=(secret,),
+    )
+
+    assert redacted == {
+        "provider_detail": f"provider-{REDACTED}-error".encode("utf-8"),
+    }
+    assert secret.encode("utf-8") not in redacted["provider_detail"]
+
+
+def test_invalid_utf8_bytes_value_fails_closed_without_raw_bytes() -> None:
+    payload = {"provider_detail": b"prefix-\xff-secret"}
+
+    redacted = redact_operator_value(payload)
+
+    assert redacted == {"provider_detail": REDACTED.encode("utf-8")}
+    assert b"\xff" not in redacted["provider_detail"]
+
+
 class _HostileMappingKey:
     def __hash__(self) -> int:
         return 17731

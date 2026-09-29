@@ -245,5 +245,31 @@ class ScheduledSourceUniverseDispatchSealTests(unittest.TestCase):
                 setattr(result_type, "_issue", original)
 
 
+    def test_source_result_issue_surface_rebind_fails_before_build(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path, store, cycle_seq, _candidate = _ready_store(tmp)
+            result_type = source_module.SourceUniverseCommitment
+            original = vars(result_type)["_issue"]
+
+            def hostile_issue(cls, payload):
+                raise AssertionError("hostile source-universe issuer executed")
+
+            setattr(result_type, "_issue", classmethod(hostile_issue))
+            try:
+                with self.assertRaisesRegex(
+                    source_module.SourceUniverseCommitmentError,
+                    "result issuance surface is rebound",
+                ):
+                    source_module.build_source_universe_commitment(
+                        store,
+                        expected_store_path=path,
+                        source_id=SOURCE_ID,
+                        start_cycle_seq=cycle_seq,
+                        end_cycle_seq=cycle_seq,
+                    )
+            finally:
+                setattr(result_type, "_issue", original)
+
+
 if __name__ == "__main__":
     unittest.main()

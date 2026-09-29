@@ -477,6 +477,7 @@ def run_packaged_restart_recovery_audit(output_path: str | Path) -> int:
     if run_restart_recovery_audit(destination) != 0:
         return 1
 
+    phase = "process_kill_relaunch"
     try:
         existing = _decode_strict_json(
             destination,
@@ -523,6 +524,7 @@ def run_packaged_restart_recovery_audit(output_path: str | Path) -> int:
             destination,
             {
                 "status": "FAIL",
+                "phase": phase,
                 "error": f"{type(exc).__name__}: {exc}",
                 "real_money_execution": False,
                 "human_tested": False,

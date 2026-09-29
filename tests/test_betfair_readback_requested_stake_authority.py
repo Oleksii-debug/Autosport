@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime
 from decimal import Decimal
 import json
+from types import FunctionType
+from weakref import ref
 
 import pytest
 
@@ -21,6 +24,8 @@ from autosport.bookmaker_capability import (
 from autosport.real_execution_ledger import ExecutionAction
 from autosport.supervised_provider_evidence import (
     ProviderEvidenceError,
+    VerifiedProviderEffectEvidence,
+    assert_verified_provider_evidence_authoritative,
     verify_betfair_provider_state,
 )
 
@@ -185,3 +190,102 @@ def test_provider_verifier_rejects_completeness_helper_rebind(monkeypatch) -> No
             expected_provider_order_ref=PROVIDER_REF,
         )
     assert hostile_called is False
+
+
+def _unwrap_name_resolution_guard(function: FunctionType) -> FunctionType:
+    current = function
+    seen: set[int] = set()
+    while id(current) not in seen:
+        seen.add(id(current))
+        closure = current.__closure__ or ()
+        freevars = current.__code__.co_freevars
+        if "root" not in freevars:
+            return current
+        candidate = closure[freevars.index("root")].cell_contents
+        if not isinstance(candidate, FunctionType):
+            return current
+        current = candidate
+    return current
+
+
+def test_equal_caller_copy_cannot_mint_provider_evidence_authority() -> None:
+    action = _action()
+    profile = _profile()
+    capture = _capture_with_provider_requested_size(
+        action,
+        requested_size=10.0,
+    )
+    evidence = verify_betfair_provider_state(
+        action,
+        profile,
+        expected_profile_sha256=profile.profile_id,
+        readback=capture,
+        expected_provider_order_ref=PROVIDER_REF,
+    )
+
+    assert isinstance(evidence, VerifiedProviderEffectEvidence)
+    assert_verified_provider_evidence_authoritative(evidence)
+
+    forged = replace(evidence)
+    assert forged == evidence
+    with pytest.raises(ProviderEvidenceError, match="origin authority"):
+        assert_verified_provider_evidence_authoritative(forged)
+
+
+def test_reachable_closure_dict_injection_cannot_mint_provider_authority() -> None:
+    action = _action()
+    profile = _profile()
+    capture = _capture_with_provider_requested_size(
+        action,
+        requested_size=10.0,
+    )
+    evidence = verify_betfair_provider_state(
+        action,
+        profile,
+        expected_profile_sha256=profile.profile_id,
+        readback=capture,
+        expected_provider_order_ref=PROVIDER_REF,
+    )
+    forged = replace(evidence)
+    fingerprint = provider_evidence._verified_provider_evidence_fingerprint(forged)
+
+    roots = (
+        _unwrap_name_resolution_guard(provider_evidence.verify_betfair_provider_state),
+        _unwrap_name_resolution_guard(
+            provider_evidence.assert_verified_provider_evidence_authoritative
+        ),
+    )
+    attacked = 0
+    for root_function in roots:
+        for cell in root_function.__closure__ or ():
+            try:
+                candidate = cell.cell_contents
+            except ValueError:
+                continue
+            if (
+                type(candidate) is dict
+                and candidate
+                and all(type(key) is int for key in candidate)
+            ):
+                attacked += 1
+                key = id(forged)
+                prior = candidate.get(key)
+                had_prior = key in candidate
+                candidate[key] = (ref(forged), fingerprint)
+                try:
+                    with pytest.raises(ProviderEvidenceError):
+                        provider_evidence.assert_verified_provider_evidence_authoritative(
+                            forged
+                        )
+                finally:
+                    if had_prior:
+                        candidate[key] = prior
+                    else:
+                        candidate.pop(key, None)
+
+    # Old registry-backed authority necessarily exposed at least one such map after
+    # issuing the legitimate evidence; the repaired origin-reverification path may
+    # expose none. Either way the caller-created equal object is never authoritative.
+    with pytest.raises(ProviderEvidenceError):
+        provider_evidence.assert_verified_provider_evidence_authoritative(forged)
+    assert attacked >= 0

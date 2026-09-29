@@ -1341,6 +1341,9 @@ class TheOddsApiProvider:
                     seen.add(exact_identity)
 
                     market_identity = _identity_digest(
+                        event_id,
+                        event_sport,
+                        bookmaker_event_sid,
                         bookmaker_key,
                         market_key,
                         market_sid,

@@ -301,8 +301,10 @@ def _build_product_boundary():
     # unchanged. Capture that already-canonical graph once so the applicability layer
     # cannot bind provider payload hashes to values produced by a retargeted parser.
     function_type = type(fee_input_reader_function)
-    reader_partial_witnesses: list[tuple[object, object, object, dict[str, object]]] = []
-    reader_function_witnesses: list[
+    reader_partial_witness_list: list[
+        tuple[object, object, object, tuple[tuple[str, object], ...]]
+    ] = []
+    reader_function_witness_list: list[
         tuple[object, object, object, object, tuple[object, ...]]
     ] = []
     seen_reader_dependencies: set[int] = set()
@@ -313,12 +315,14 @@ def _build_product_boundary():
             return
         if type(value) is partial:
             seen_reader_dependencies.add(identity)
-            keywords = dict(value.keywords or {})
-            reader_partial_witnesses.append((value, value.func, value.args, keywords))
+            keyword_items = tuple((value.keywords or {}).items())
+            reader_partial_witness_list.append(
+                (value, value.func, value.args, keyword_items)
+            )
             capture_reader_dependency(value.func)
             for nested in value.args:
                 capture_reader_dependency(nested)
-            for nested in keywords.values():
+            for _key, nested in keyword_items:
                 capture_reader_dependency(nested)
             return
         if type(value) is function_type:
@@ -327,15 +331,15 @@ def _build_product_boundary():
             closure_values = tuple(
                 cell.cell_contents for cell in (closure or ())
             )
-            reader_function_witnesses.append(
+            reader_function_witness_list.append(
                 (value, value.__code__, value.__globals__, closure, closure_values)
             )
             for nested in closure_values:
                 capture_reader_dependency(nested)
 
     capture_reader_dependency(fee_input_reader)
-    reader_partial_witnesses = list(reader_partial_witnesses)
-    reader_function_witnesses = list(reader_function_witnesses)
+    reader_partial_witnesses = tuple(reader_partial_witness_list)
+    reader_function_witnesses = tuple(reader_function_witness_list)
 
     fee_payload_builder = _FEE_INPUT_SHA256_CAPABILITY
     fee_payload_function = fee_payload_builder.func
@@ -367,6 +371,9 @@ def _build_product_boundary():
     executable_graph_witness_marker = (
         "__AUTOSPORT_BETFAIR_COMMISSION_EXECUTABLE_GRAPH_WITNESS__"
     )
+    nested_reader_graph_witness_marker = (
+        "__AUTOSPORT_BETFAIR_COMMISSION_NESTED_READER_GRAPH_WITNESS__"
+    )
 
     def require_executable_authority() -> None:
         (
@@ -376,6 +383,10 @@ def _build_product_boundary():
             canonical_json_code_witness,
             identity_payload_code_witness,
         ) = "__AUTOSPORT_BETFAIR_COMMISSION_EXECUTABLE_GRAPH_WITNESS__"
+        (
+            nested_partial_witnesses,
+            nested_function_witnesses,
+        ) = "__AUTOSPORT_BETFAIR_COMMISSION_NESTED_READER_GRAPH_WITNESS__"
 
         # Keep the historical expected-code cells inspectable for diagnostics and
         # adversarial tests, but never use those mutable cells as authority.
@@ -385,6 +396,8 @@ def _build_product_boundary():
             fee_input_payload_builder_code,
             canonical_json_code,
             identity_payload_builder_code,
+            reader_partial_witnesses,
+            reader_function_witnesses,
         )
 
         if (
@@ -411,23 +424,37 @@ def _build_product_boundary():
             if current is not expected:
                 raise error_type("fee input reader closure authority changed")
 
-        for nested, expected_func, expected_args, expected_keywords in reader_partial_witnesses:
+        for (
+            nested,
+            expected_func,
+            expected_args,
+            expected_keyword_items,
+        ) in nested_partial_witnesses:
             if (
                 type(nested) is not partial
                 or nested.func is not expected_func
                 or nested.args is not expected_args
-                or nested.keywords != expected_keywords
             ):
                 raise error_type(
                     "fee input reader nested executable authority changed"
                 )
+            current_keywords = nested.keywords or {}
+            if len(current_keywords) != len(expected_keyword_items):
+                raise error_type(
+                    "fee input reader nested executable authority changed"
+                )
+            for key, expected in expected_keyword_items:
+                if key not in current_keywords or current_keywords[key] is not expected:
+                    raise error_type(
+                        "fee input reader nested executable authority changed"
+                    )
         for (
             nested_function,
             expected_code,
             expected_globals,
             expected_closure,
             expected_closure_values,
-        ) in reader_function_witnesses:
+        ) in nested_function_witnesses:
             if (
                 type(nested_function) is not function_type
                 or nested_function.__code__ is not expected_code
@@ -482,6 +509,8 @@ def _build_product_boundary():
     guard_constants = require_executable_authority.__code__.co_consts
     if sum(item == executable_graph_witness_marker for item in guard_constants) != 1:
         raise error_type("commission applicability executable graph anchor is ambiguous")
+    if sum(item == nested_reader_graph_witness_marker for item in guard_constants) != 1:
+        raise error_type("commission applicability nested reader graph anchor is ambiguous")
     immutable_code_witnesses = (
         fee_input_reader_function_code,
         fee_payload_function_code,
@@ -489,11 +518,17 @@ def _build_product_boundary():
         canonical_json_code,
         identity_payload_builder_code,
     )
+    immutable_nested_reader_witnesses = (
+        reader_partial_witnesses,
+        reader_function_witnesses,
+    )
     require_executable_authority.__code__ = (
         require_executable_authority.__code__.replace(
             co_consts=tuple(
                 immutable_code_witnesses
                 if item == executable_graph_witness_marker
+                else immutable_nested_reader_witnesses
+                if item == nested_reader_graph_witness_marker
                 else item
                 for item in guard_constants
             )

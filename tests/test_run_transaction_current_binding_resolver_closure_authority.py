@@ -168,6 +168,40 @@ def test_persistence_resolvers_reject_late_builtin_global_shadow_before_dispatch
         assert hostile_calls == 0
 
 
+def test_resolver_wrapper_rejects_shadowed_failure_constructor_before_dispatch() -> None:
+    """Fail-closed verification must not execute a late module-global ValueError hook."""
+
+    entrypoint = _resolver_entrypoint(
+        RunTransaction._stage_paper_book_snapshot,
+        "resolver",
+    )
+    original = _original_callable(entrypoint)
+    globals_mapping = original.__globals__
+    assert "zip" not in globals_mapping
+    assert "ValueError" not in resolver_guard.__dict__
+    hostile_calls = 0
+
+    def hostile_value_error(*args, **kwargs):
+        nonlocal hostile_calls
+        hostile_calls += 1
+        return builtins.ValueError(*args, **kwargs)
+
+    globals_mapping["zip"] = object()
+    resolver_guard.ValueError = hostile_value_error
+    try:
+        try:
+            entrypoint()
+        except Exception:  # noqa: BLE001 - fail closed is required.
+            pass
+        else:
+            raise AssertionError("resolver accepted mutated Python name-resolution authority")
+    finally:
+        del globals_mapping["zip"]
+        del resolver_guard.ValueError
+
+    assert hostile_calls == 0, "resolver wrapper dispatched a shadowed ValueError hook"
+
+
 def test_resolver_guard_install_mutators_are_not_runtime_capabilities() -> None:
     """One-shot resolver composition helpers must disappear after package import."""
 

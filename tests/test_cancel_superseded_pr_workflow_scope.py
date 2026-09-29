@@ -40,13 +40,20 @@ class FakeScopedApi(WorkflowScopedGitHubApi):
         return self.responses.pop(0)
 
 
-def _run(run_id: int, *, status: str = "queued") -> dict[str, object]:
+def _run(
+    run_id: int,
+    *,
+    status: str = "queued",
+    pull_requests: list[dict[str, object]] | None = None,
+) -> dict[str, object]:
     return {
         "id": run_id,
         "head_sha": HEAD,
         "name": "CI",
         "status": status,
-        "pull_requests": [{"number": 2022}],
+        "pull_requests": (
+            [{"number": 2022}] if pull_requests is None else pull_requests
+        ),
     }
 
 
@@ -139,6 +146,32 @@ def test_same_head_empty_candidate_ref_recovers_only_after_unique_target_associa
 
     assert recovered.pr_numbers == (2022,)
     assert api.paths == [f"/commits/{HEAD}/pulls?per_page=100&page=1"]
+
+
+def test_scoped_scan_applies_authorized_same_head_empty_reference_recovery() -> None:
+    api = FakeScopedApi(
+        356678400,
+        [
+            [_associated_pr(2022)],
+            {"total_count": 1, "workflow_runs": [_run(99, pull_requests=[])]},
+        ],
+    )
+    api.configure_same_head_candidate_recovery(
+        pr_number=2022,
+        event_head_sha=HEAD,
+        workflow_name="CI",
+        current_run_id=100,
+    )
+
+    runs = api._active_runs_for_status("queued")
+
+    assert len(runs) == 1
+    assert runs[0].run_id == 99
+    assert runs[0].pr_numbers == (2022,)
+    assert api.paths == [
+        f"/commits/{HEAD}/pulls?per_page=100&page=1",
+        "/actions/workflows/356678400/runs?event=pull_request&status=queued&per_page=100&page=1",
+    ]
 
 
 @pytest.mark.parametrize(

@@ -29,6 +29,34 @@ def _authority_witness(function: FunctionType) -> tuple[FunctionType, object]:
     return authority, authority_code
 
 
+def _compatible_hostile_guard_code(function: FunctionType):
+    """Build hostile code assignable to a closure-bearing target function.
+
+    CPython rejects ``function.__code__`` replacement when the replacement code's
+    freevar count differs from the target closure size. The adversarial fixture must
+    therefore preserve the exact freevar topology or it only tests the interpreter's
+    setter guard rather than Autosport's executable-authority boundary.
+    """
+
+    freevars = function.__code__.co_freevars
+    assignments = "\n".join(f"    {name} = None" for name in freevars)
+    references = ", ".join(freevars)
+    source = (
+        "def factory():\n"
+        f"{assignments}\n"
+        "    def hostile():\n"
+        f"        _ = ({references},)\n"
+        "        raise RuntimeError('hostile executable authority guard reached')\n"
+        "    return hostile\n"
+    )
+    namespace: dict[str, object] = {}
+    exec(source, namespace)  # noqa: S102 - deterministic adversarial test fixture.
+    hostile = namespace["factory"]()
+    assert type(hostile) is FunctionType
+    assert hostile.__code__.co_freevars == freevars
+    return hostile.__code__
+
+
 def _hostile_canonical_json(_payload: object) -> bytes:
     return b"hostile-constant-identity"
 
@@ -39,10 +67,6 @@ def _hostile_identity_payload(_assessment, *, schema: str, schema_version: int):
 
 def _hostile_fee_payload(_observation):
     return {"market_id": "caller-retargeted"}
-
-
-def _hostile_authority_noop() -> None:
-    return None
 
 
 @pytest.mark.parametrize(
@@ -101,8 +125,9 @@ def test_reachable_executable_guard_is_code_constant_anchored_and_retarget_fails
     assert authority.__code__ is authority_code
 
     original_code = authority.__code__
+    hostile_code = _compatible_hostile_guard_code(authority)
     try:
-        authority.__code__ = _hostile_authority_noop.__code__
+        authority.__code__ = hostile_code
         with pytest.raises(
             applicability.BetfairCommissionApplicabilityError,
             match="commission applicability executable authority guard changed",

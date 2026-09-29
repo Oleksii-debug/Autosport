@@ -281,8 +281,15 @@ def _require_regular_source_tree(path: Path, *, label: str) -> None:
     _scan_regular_source_tree(path, label=label)
 
 
-def _copy2_no_follow(source: str | Path, destination: str | Path) -> str:
-    return shutil.copy2(source, destination, follow_symlinks=False)
+def _copy_regular_source_file(
+    source: str | Path,
+    destination: str | Path,
+    *,
+    label: str,
+) -> None:
+    Path(destination).write_bytes(
+        _read_regular_source_bytes(Path(source), label=label)
+    )
 
 
 def _copy_regular_source_tree(
@@ -759,14 +766,35 @@ def build_windows_package(
     if package_dir.exists():
         shutil.rmtree(package_dir)
     package_dir.mkdir(parents=True)
-    _copy2_no_follow(exe_path, package_dir / "Autosport.exe")
-    _copy2_no_follow(start_file, package_dir / "WINDOWS_START_HERE.txt")
-    _copy2_no_follow(diagnostic_path, package_dir / "packaged-diagnostic.json")
-    _copy2_no_follow(accessibility_path, package_dir / "accessibility-audit.json")
-    _copy2_no_follow(keyboard_path, package_dir / "keyboard-audit.json")
-    _copy2_no_follow(
+    _copy_regular_source_file(
+        exe_path,
+        package_dir / "Autosport.exe",
+        label="Autosport executable input",
+    )
+    _copy_regular_source_file(
+        start_file,
+        package_dir / "WINDOWS_START_HERE.txt",
+        label="Windows start-file input",
+    )
+    _copy_regular_source_file(
+        diagnostic_path,
+        package_dir / "packaged-diagnostic.json",
+        label="packaged diagnostic input",
+    )
+    _copy_regular_source_file(
+        accessibility_path,
+        package_dir / "accessibility-audit.json",
+        label="accessibility audit input",
+    )
+    _copy_regular_source_file(
+        keyboard_path,
+        package_dir / "keyboard-audit.json",
+        label="keyboard audit input",
+    )
+    _copy_regular_source_file(
         restart_recovery_path,
         package_dir / "restart-recovery-audit.json",
+        label="restart/recovery audit input",
     )
     _copy_regular_source_tree(
         example_dir,

@@ -390,7 +390,7 @@ class ReleasePackageInputSymlinkFenceTests(unittest.TestCase):
             self.assertFalse(staged_secret.exists())
             self.assertFalse(paths["package"].exists())
 
-    def test_regular_to_symlink_swap_during_copy_is_preserved_then_rejected(self) -> None:
+    def test_regular_to_symlink_swap_before_top_level_read_fails_before_staging(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             paths = self._make_inputs(root)
@@ -398,30 +398,30 @@ class ReleasePackageInputSymlinkFenceTests(unittest.TestCase):
             secret.write_bytes(b"must-not-be-followed")
             executable = paths["exe"]
 
-            real_copy = release_package._copy2_no_follow
+            real_read = release_package._read_regular_source_bytes
             swapped = False
 
-            def swap_then_copy(source: str | Path, destination: str | Path) -> str:
+            def swap_then_read(path: Path, *, label: str) -> bytes:
                 nonlocal swapped
-                source_path = Path(source)
-                if source_path == executable and not swapped:
+                if path == executable and not swapped:
                     swapped = True
                     executable.unlink()
                     self._symlink_or_skip(secret, executable)
-                return real_copy(source, destination)
+                return real_read(path, label=label)
 
             with patch.object(
                 release_package,
-                "_copy2_no_follow",
-                side_effect=swap_then_copy,
+                "_read_regular_source_bytes",
+                side_effect=swap_then_read,
             ):
                 with self.assertRaisesRegex(
                     ValueError,
-                    "release package staging tree contains a symbolic link: Autosport.exe",
+                    "Autosport executable input changed during open",
                 ):
                     self._build(paths)
 
             self.assertTrue(swapped)
+            self.assertFalse((root / "Autosport-V1" / "Autosport.exe").exists())
             self.assertFalse(paths["package"].exists())
 
     def test_release_verifier_package_symlink_is_rejected_before_read(self) -> None:

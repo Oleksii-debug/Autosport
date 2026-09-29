@@ -30,7 +30,6 @@ from .betfair_account_readonly import BetfairReadOnlyClient
 from .betfair_discovery_provenance import BetfairDiscoveryVisibilityScope
 from .betfair_discovery_transport_origin import (
     BetfairAuthenticatedDiscoveryAcquisition,
-    BetfairDiscoveryTransportOriginReceipt,
     is_authoritative_betfair_discovery_transport_receipt,
 )
 from .betfair_multisport_catalog import (

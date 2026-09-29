@@ -162,6 +162,8 @@ def test_supported_dispatch_rejects_class_surface_replacement(
 @pytest.mark.parametrize(
     "attribute",
     (
+        "__setattr__",
+        "__delattr__",
         "admit",
         "_assert_policy_integrity",
         "_blacklist_state",

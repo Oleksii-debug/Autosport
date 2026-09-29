@@ -50,6 +50,23 @@ class FakeCollectorSource:
         return self.batches[index]
 
 
+class ArchivingCollectorSource(FakeCollectorSource):
+    def __init__(self, pages, batches):
+        super().__init__(pages, batches)
+        self.bound_store = None
+
+    def bind_collector_store(self, store):
+        self.bound_store = store
+
+    def resolve_event(self, delta):
+        return MarketEvent.from_dict(
+            market_payload(
+                delta.event_id,
+                sequence=max(delta.cursor_position, 1),
+            )
+        )
+
+
 class UnavailableCatalogSource(FakeCollectorSource):
     def __init__(self, page, failures):
         super().__init__([page], [()])
@@ -712,6 +729,22 @@ class HeadlessCollectorServiceTests(unittest.TestCase):
                 service.run_cycle()
             self.assertEqual(service.status()["cycles_succeeded"], 0)
             self.assertIsNone(service.delta_store.get("d1"))
+
+    def test_bound_source_event_is_archived_with_committed_delta(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            page = catalog_page(1, "source-x:event-1")
+            delta = make_delta(delta_id="d1", position=1)
+            source = ArchivingCollectorSource([page], [(delta,)])
+            service = self.make_service(tmp, source)
+
+            result = service.run_cycle()
+
+            self.assertEqual(result.committed_delta_ids, ("d1",))
+            self.assertIs(source.bound_store, service.delta_store)
+            self.assertEqual(
+                service.delta_store.resolve_event(delta),
+                source.resolve_event(delta),
+            )
 
     def test_delta_for_undiscovered_event_fails_closed(self):
         with tempfile.TemporaryDirectory() as tmp:

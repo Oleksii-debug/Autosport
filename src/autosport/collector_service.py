@@ -576,7 +576,7 @@ class HeadlessCollectorService:
         if not isinstance(delta, CollectorDelta):
             raise TypeError("delta must be CollectorDelta")
         delta.validate()
-        self._require_source_identity(
+        source = self._require_source_identity(
             expected_stream_epoch=delta.stream_epoch
         )
         if delta.source_id != self._source_id:

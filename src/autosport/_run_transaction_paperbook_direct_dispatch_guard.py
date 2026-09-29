@@ -11,8 +11,9 @@ This module adds no persistence authority. It detaches the already-installed gua
 consumers from that live globals mapping and reuses the owning persistence graph's
 already-witnessed immutable surface type for the exact direct call targets promotion
 already consumes. Promotion also keeps closure-private exact witnesses of that shared
-surface's executable roots and of every detached direct-dispatch binding, so either
-class retargeting or closure-dict replacement fails closed before irreversible publish.
+surface's executable roots and of every detached direct-dispatch binding. Execution is
+reconstructed from the composition-time snapshot for every call, so the reachable
+closure dict is tamper evidence only and cannot become a check/use dispatch race.
 """
 
 from __future__ import annotations
@@ -87,22 +88,54 @@ def _guard_surface_consumer(
     inner_globals: dict[str, object],
     expected_bindings: tuple[tuple[str, object], ...],
 ) -> FunctionType:
-    """Require exact frozen surface and exact detached bindings around promotion."""
+    """Require exact frozen surface/bindings and execute from a private snapshot."""
 
     require_surface_authority = _make_surface_authority_checker()
     require_surface_authority_code = require_surface_authority.__code__
     exact_type = type
     function_type = FunctionType
+    fresh_cell = _fresh_cell
+    fresh_cell_code = fresh_cell.__code__
+    inner_code = function.__code__
+    inner_function_globals = function.__globals__
     inner_name = function.__name__
     inner_qualname = function.__qualname__
     inner_doc = function.__doc__
     inner_annotations = dict(function.__annotations__)
+    inner_defaults = function.__defaults__
+    inner_kwdefaults = (
+        None if function.__kwdefaults__ is None else dict(function.__kwdefaults__)
+    )
+    inner_closure = function.__closure__
+    inner_freevars = inner_code.co_freevars
+    if inner_closure is None or "inner_globals" not in inner_freevars:
+        raise RuntimeError("RunTransaction guarded consumer globals are unavailable")
+    inner_globals_index = inner_freevars.index("inner_globals")
+    closure_values: list[object] = []
+    for cell in inner_closure:
+        try:
+            closure_values.append(cell.cell_contents)
+        except ValueError as exc:
+            raise RuntimeError("RunTransaction guarded consumer closure is empty") from exc
+    if closure_values[inner_globals_index] is not inner_globals:
+        raise RuntimeError("RunTransaction guarded consumer globals changed before sealing")
+    frozen_closure_values = tuple(closure_values)
+    frozen_globals_items = tuple(inner_globals.items())
+    frozen_globals_size = len(frozen_globals_items)
+    missing = object()
 
     def require_bindings() -> None:
         if exact_type(inner_globals) is not dict:
             raise ValueError("RunTransaction detached direct-dispatch globals changed")
+        if len(inner_globals) != frozen_globals_size:
+            raise ValueError("RunTransaction detached direct-dispatch globals changed")
+        for name, expected in frozen_globals_items:
+            if inner_globals.get(name, missing) is not expected:
+                raise ValueError(
+                    f"RunTransaction detached direct-dispatch binding changed: {name}"
+                )
         for name, expected in expected_bindings:
-            if inner_globals.get(name) is not expected:
+            if inner_globals.get(name, missing) is not expected:
                 raise ValueError(
                     f"RunTransaction detached direct-dispatch binding changed: {name}"
                 )
@@ -112,6 +145,7 @@ def _guard_surface_consumer(
     def guarded_consumer(*args, **kwargs):
         # Intentionally retain the real detached globals in this closure. Existing
         # diagnostics/tests use that exact handle to prove the consumer is detached.
+        # It is never used as the execution mapping after composition.
         if (
             exact_type(require_surface_authority) is not function_type
             or require_surface_authority.__code__ is not require_surface_authority_code
@@ -122,14 +156,29 @@ def _guard_surface_consumer(
         if (
             exact_type(require_bindings) is not function_type
             or require_bindings.__code__ is not require_bindings_code
+            or exact_type(fresh_cell) is not function_type
+            or fresh_cell.__code__ is not fresh_cell_code
         ):
             raise ValueError(
                 "RunTransaction detached direct-dispatch binding verifier changed"
             )
         require_bindings()
         require_surface_authority()
+
+        call_globals = dict(frozen_globals_items)
+        call_closure_values = list(frozen_closure_values)
+        call_closure_values[inner_globals_index] = call_globals
+        delegate = function_type(
+            inner_code,
+            inner_function_globals,
+            name=inner_name,
+            argdefs=inner_defaults,
+            closure=tuple(fresh_cell(value) for value in call_closure_values),
+        )
+        if inner_kwdefaults is not None:
+            delegate.__kwdefaults__ = dict(inner_kwdefaults)
         try:
-            return function(*args, **kwargs)
+            return delegate(*args, **kwargs)
         finally:
             if (
                 exact_type(require_surface_authority) is not function_type
@@ -141,6 +190,8 @@ def _guard_surface_consumer(
             if (
                 exact_type(require_bindings) is not function_type
                 or require_bindings.__code__ is not require_bindings_code
+                or exact_type(fresh_cell) is not function_type
+                or fresh_cell.__code__ is not fresh_cell_code
             ):
                 raise ValueError(
                     "RunTransaction detached direct-dispatch binding verifier changed"

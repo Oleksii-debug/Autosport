@@ -873,7 +873,6 @@ def _market_observation_payloads(markets: Sequence[object]) -> list[dict[str, ob
                 "market_id": market.market_id,
                 "event_type_id": market.event_type_id,
                 "event_id": market.event_id,
-                "market_name": market.market_name,
                 "market_start_time": market.market_start_time,
                 "market_type_code": market.market_type_code,
                 "competition_id": market.competition_id,
@@ -915,7 +914,6 @@ def _terminal_market_map(
         "market_id",
         "event_type_id",
         "event_id",
-        "market_name",
         "market_start_time",
         "market_type_code",
         "competition_id",
@@ -929,7 +927,6 @@ def _terminal_market_map(
         for field in (
             "event_type_id",
             "event_id",
-            "market_name",
             "market_start_time",
         ):
             _text(item.get(field), f"market_observations.{field}")

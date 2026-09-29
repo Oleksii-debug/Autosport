@@ -820,9 +820,17 @@ class _BlacklistStore:
             new_body: dict[str, object] = {
                 "schema": _BLACKLIST_SCHEMA,
                 "version": 2,
-                "observations": [
-                    rows[name] for name in sorted(rows)
-                ],
+                # Persist in the exact canonical order enforced by _read().
+                # Sorting by the synthetic identity key diverges for unmapped APIs
+                # ("UNMAPPED:...") versus mapped operation IDs and makes the stored
+                # state digest fail its own readback validation.
+                "observations": sorted(
+                    rows.values(),
+                    key=lambda item: (
+                        str(item["operation_id"] or ""),
+                        str(item["api_name"]),
+                    ),
+                ),
             }
             intended = _digest(new_body)
             binding = self._binding(observed, intended)

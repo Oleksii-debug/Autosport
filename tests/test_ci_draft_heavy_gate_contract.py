@@ -16,6 +16,8 @@ _RUNNER_FREE_PR_ADMISSION = (
     "      github.event_name != 'pull_request' ||\n"
     "      (github.event.action != 'closed' &&\n"
     "      github.event.pull_request.head.sha &&\n"
+    "      github.event.pull_request.head.repo.full_name == github.repository &&\n"
+    "      github.event.pull_request.base.repo.full_name == github.repository &&\n"
     "      github.event.pull_request.draft == false)\n"
     "    runs-on: ubuntu-latest"
 )

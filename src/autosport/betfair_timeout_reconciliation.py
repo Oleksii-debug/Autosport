@@ -167,75 +167,91 @@ _install_betfair_readback_capture_start_authority()
 del _install_betfair_readback_capture_start_authority
 
 
-_timeout_elapsed_visibility_lock = threading.RLock()
-_timeout_elapsed_visibility_anchors: dict[
-    tuple[int, str], tuple[object, int]
-] = {}
+def _install_timeout_elapsed_visibility_authority() -> None:
+    """Keep elapsed-time anchors closure-local instead of caller-writable globals.
 
-
-def _timeout_elapsed_visibility_ready(
-    ledger: RealExecutionLedger,
-    attempt_id: str,
-    capture_started_monotonic_ns: int | None,
-) -> bool:
-    """Require one full in-process monotonic horizon before negative absence.
-
-    Durable UTC timestamps remain the audit chronology, but a wall clock can jump
-    forward.  The first canonical negative capture seen for one exact live ledger
-    instance/attempt therefore establishes a process-local monotonic anchor and is
-    never enough by itself.  Only a later fresh capture whose sealed request start is
-    at least the provider visibility horizon after that anchor may contribute
-    negative absence authority.
-
-    The anchor is intentionally process-local.  Reopening the durable ledger after a
-    restart creates a new object and therefore requires a fresh full monotonic
-    horizon instead of pretending that monotonic time survived the process boundary.
+    The monotonic horizon exists specifically to prevent a UTC clock discontinuity
+    from manufacturing Betfair negative-absence authority.  Exposing the live anchor
+    registry in module globals would let ordinary imports seed an older anchor and
+    manufacture the same authority without actually waiting.  Keep both the lock and
+    anchor registry behind the two installed callables instead.
     """
 
-    if type(attempt_id) is not str or not attempt_id or attempt_id != attempt_id.strip():
-        raise BetfairTimeoutResolutionError(
-            "elapsed visibility requires canonical attempt_id"
-        )
-    if (
-        type(capture_started_monotonic_ns) is not int
-        or capture_started_monotonic_ns < 0
-    ):
-        return False
+    anchor_lock = threading.RLock()
+    anchors: dict[tuple[int, str], tuple[object, int]] = {}
 
-    key = (id(ledger), attempt_id)
-    with _timeout_elapsed_visibility_lock:
-        record = _timeout_elapsed_visibility_anchors.get(key)
-        if record is None or record[0]() is not ledger:
-            def forget(_weakref: object, *, anchor_key: tuple[int, str] = key) -> None:
-                with _timeout_elapsed_visibility_lock:
-                    _timeout_elapsed_visibility_anchors.pop(anchor_key, None)
+    def timeout_elapsed_visibility_ready(
+        ledger: RealExecutionLedger,
+        attempt_id: str,
+        capture_started_monotonic_ns: int | None,
+    ) -> bool:
+        """Require one full in-process monotonic horizon before negative absence."""
 
-            _timeout_elapsed_visibility_anchors[key] = (
-                ref(ledger, forget),
-                capture_started_monotonic_ns,
+        if (
+            type(attempt_id) is not str
+            or not attempt_id
+            or attempt_id != attempt_id.strip()
+        ):
+            raise BetfairTimeoutResolutionError(
+                "elapsed visibility requires canonical attempt_id"
             )
+        if (
+            type(capture_started_monotonic_ns) is not int
+            or capture_started_monotonic_ns < 0
+        ):
             return False
 
-        anchor_ns = record[1]
-        if capture_started_monotonic_ns < anchor_ns:
-            raise BetfairTimeoutResolutionError(
-                "monotonic capture clock regressed within one process"
+        key = (id(ledger), attempt_id)
+        with anchor_lock:
+            record = anchors.get(key)
+            if record is None or record[0]() is not ledger:
+
+                def forget(
+                    _weakref: object,
+                    *,
+                    anchor_key: tuple[int, str] = key,
+                ) -> None:
+                    with anchor_lock:
+                        anchors.pop(anchor_key, None)
+
+                anchors[key] = (
+                    ref(ledger, forget),
+                    capture_started_monotonic_ns,
+                )
+                return False
+
+            anchor_ns = record[1]
+            if capture_started_monotonic_ns < anchor_ns:
+                raise BetfairTimeoutResolutionError(
+                    "monotonic capture clock regressed within one process"
+                )
+            required_ns = (
+                BETFAIR_TIMEOUT_VISIBILITY_HORIZON_SECONDS * 1_000_000_000
             )
-        required_ns = BETFAIR_TIMEOUT_VISIBILITY_HORIZON_SECONDS * 1_000_000_000
-        return capture_started_monotonic_ns - anchor_ns >= required_ns
+            return capture_started_monotonic_ns - anchor_ns >= required_ns
+
+    def retire_timeout_elapsed_visibility_anchor(
+        ledger: RealExecutionLedger,
+        attempt_id: str,
+    ) -> None:
+        """Release one process-local anchor after its authority is terminal."""
+
+        key = (id(ledger), attempt_id)
+        with anchor_lock:
+            record = anchors.get(key)
+            if record is not None and record[0]() is ledger:
+                anchors.pop(key, None)
+
+    globals()[
+        "_timeout_elapsed_visibility_ready"
+    ] = timeout_elapsed_visibility_ready
+    globals()[
+        "_retire_timeout_elapsed_visibility_anchor"
+    ] = retire_timeout_elapsed_visibility_anchor
 
 
-def _retire_timeout_elapsed_visibility_anchor(
-    ledger: RealExecutionLedger,
-    attempt_id: str,
-) -> None:
-    """Release one process-local elapsed-time anchor after its authority is terminal."""
-
-    key = (id(ledger), attempt_id)
-    with _timeout_elapsed_visibility_lock:
-        record = _timeout_elapsed_visibility_anchors.get(key)
-        if record is not None and record[0]() is ledger:
-            _timeout_elapsed_visibility_anchors.pop(key, None)
+_install_timeout_elapsed_visibility_authority()
+del _install_timeout_elapsed_visibility_authority
 
 
 def _absence_capture_page_times(

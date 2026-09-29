@@ -22,7 +22,7 @@ from typing import Any, Mapping, Sequence
 
 from ._forward_universe_backing_guard import (
     ForwardUniverseBackingGuardError,
-    resolve_forward_universe_backing_locator,
+    load_guarded_provider_evaluation_universe,
 )
 from .evaluation_universe import AttritionReason, EvaluationRow, SlotState
 from .forward_evidence_completeness import (
@@ -195,12 +195,13 @@ def _build_load_expectations(
     *,
     store_type: type[ProviderEvaluationUniverseStore],
     canonical_load,
-    backing_resolver,
+    guarded_load,
     backing_error: type[BaseException],
 ):
-    """Capture the executable/read authorities used by positive forward resolution."""
+    """Capture executable/read authorities used by positive forward resolution."""
 
     canonical_load_code = canonical_load.__code__
+    guarded_load_code = guarded_load.__code__
 
     def load_expectations(
         *,
@@ -222,21 +223,27 @@ def _build_load_expectations(
                 "forward protocol does not precommit the canonical provider evaluation-universe rule"
             )
 
-        try:
-            backing_locator = backing_resolver(store)
-        except backing_error as exc:
-            raise ForwardEvaluationUniverseBindingError(
-                "provider evaluation-universe backing locator authority changed"
-            ) from exc
-
         if canonical_load.__code__ is not canonical_load_code:
             raise ForwardEvaluationUniverseBindingError(
                 "canonical provider evaluation-universe load authority changed"
             )
-        ledger = canonical_load(store)
+        if guarded_load.__code__ is not guarded_load_code:
+            raise ForwardEvaluationUniverseBindingError(
+                "guarded provider evaluation-universe load authority changed"
+            )
+        try:
+            ledger, backing_locator = guarded_load(store)
+        except backing_error as exc:
+            raise ForwardEvaluationUniverseBindingError(
+                "provider evaluation-universe backing locator authority changed"
+            ) from exc
         if canonical_load.__code__ is not canonical_load_code:
             raise ForwardEvaluationUniverseBindingError(
                 "canonical provider evaluation-universe load authority changed"
+            )
+        if guarded_load.__code__ is not guarded_load_code:
+            raise ForwardEvaluationUniverseBindingError(
+                "guarded provider evaluation-universe load authority changed"
             )
         if ledger is None:
             raise ForwardEvaluationUniverseBindingError(
@@ -288,7 +295,7 @@ def _build_load_expectations(
 _load_expectations = _build_load_expectations(
     store_type=ProviderEvaluationUniverseStore,
     canonical_load=_CANONICAL_PROVIDER_UNIVERSE_LOAD,
-    backing_resolver=resolve_forward_universe_backing_locator,
+    guarded_load=load_guarded_provider_evaluation_universe,
     backing_error=ForwardUniverseBackingGuardError,
 )
 

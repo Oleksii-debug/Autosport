@@ -160,22 +160,29 @@ class BetfairCommissionApplicabilityAssessment:
 
 
 # Exact-object issuance without permanent retention. The key cannot be reused while
-# the referent is alive; the callback removes it as soon as that exact assessment dies.
-_ISSUED_BY_ID: dict[int, ReferenceType[BetfairCommissionApplicabilityAssessment]] = {}
+# the referent is alive. Store the exact issued digest beside the weak reference so a
+# caller cannot mutate a legitimately-issued frozen dataclass through object.__setattr__,
+# recompute the public digest, and relabel that same object after issuance.
+_ISSUED_BY_ID: dict[
+    int,
+    tuple[ReferenceType[BetfairCommissionApplicabilityAssessment], str],
+] = {}
 _ISSUE_LOCK = RLock()
 
 
 def _register_issued(assessment: BetfairCommissionApplicabilityAssessment) -> None:
     object_id = id(assessment)
+    issued_assessment_id = assessment.assessment_id
 
     def cleanup(reference: ReferenceType[BetfairCommissionApplicabilityAssessment]) -> None:
         with _ISSUE_LOCK:
-            if _ISSUED_BY_ID.get(object_id) is reference:
+            record = _ISSUED_BY_ID.get(object_id)
+            if record is not None and record[0] is reference:
                 _ISSUED_BY_ID.pop(object_id, None)
 
     reference = ref(assessment, cleanup)
     with _ISSUE_LOCK:
-        _ISSUED_BY_ID[object_id] = reference
+        _ISSUED_BY_ID[object_id] = (reference, issued_assessment_id)
 
 
 def _assessment_payload(
@@ -341,9 +348,12 @@ def _require_product_betfair_commission_applicability(
             "assessment must be exact BetfairCommissionApplicabilityAssessment"
         )
     with issue_lock:
-        reference = issued_by_id.get(id(assessment))
-        if reference is None or reference() is not assessment:
+        record = issued_by_id.get(id(assessment))
+        if record is None or record[0]() is not assessment:
             raise error_type("assessment is not product-issued in this process")
+        issued_assessment_id = record[1]
+    if assessment.assessment_id != issued_assessment_id:
+        raise error_type("assessment changed after product issuance")
     if (
         assessment.status is not unproven_status
         or assessment.reasons != canonical_reasons

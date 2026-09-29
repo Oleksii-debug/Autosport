@@ -11,6 +11,8 @@ import zipfile
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from .workspace_lock import _open_read_only_descriptor
+
 _FIXED_ZIP_TIME = (1980, 1, 1, 0, 0, 0)
 _PACKAGE_PREFIX = "Autosport-V1/"
 _WINDOWS_RESERVED_NAMES = {
@@ -111,11 +113,34 @@ def _require_regular_source_file(path: Path, *, label: str) -> None:
 
 
 def _read_regular_source_bytes(path: Path, *, label: str) -> bytes:
-    """Read one source only when the opened file is the preflighted regular file."""
+    """Read one source without following a final-component pathname alias."""
 
     _require_regular_source_file(path, label=label)
     try:
-        with path.open("rb") as stream:
+        try:
+            descriptor = _open_read_only_descriptor(path)
+        except OSError as exc:
+            try:
+                current = path.lstat()
+            except OSError:
+                raise ValueError(
+                    f"{label} could not be read safely: {path}"
+                ) from exc
+            if (
+                stat.S_ISLNK(current.st_mode)
+                or _is_windows_reparse_point(current)
+                or not stat.S_ISREG(current.st_mode)
+            ):
+                raise ValueError(f"{label} changed during open: {path}") from exc
+            raise
+
+        try:
+            stream = os.fdopen(descriptor, "rb", closefd=True)
+        except BaseException:
+            os.close(descriptor)
+            raise
+
+        with stream:
             opened = os.fstat(stream.fileno())
             current = path.lstat()
             if (

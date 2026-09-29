@@ -319,7 +319,9 @@ class ReleasePackageInputSymlinkFenceTests(unittest.TestCase):
             outside = root / "outside-data-tool.exe"
             outside.write_bytes(b"must-not-be-read")
             real_require = release_package._require_regular_source_file
+            real_path_open = Path.open
             swapped = False
+            follow_open_attempted = False
 
             def validate_then_swap(path: Path, *, label: str) -> None:
                 nonlocal swapped
@@ -329,10 +331,22 @@ class ReleasePackageInputSymlinkFenceTests(unittest.TestCase):
                     data_path.unlink()
                     self._symlink_or_skip(outside, data_path)
 
-            with patch.object(
-                release_package,
-                "_require_regular_source_file",
-                side_effect=validate_then_swap,
+            def forbid_following_path_open(path: Path, *args, **kwargs):
+                nonlocal follow_open_attempted
+                if Path(path) == data_path:
+                    follow_open_attempted = True
+                    raise AssertionError(
+                        "portable data tool input must use the canonical no-follow descriptor"
+                    )
+                return real_path_open(path, *args, **kwargs)
+
+            with (
+                patch.object(
+                    release_package,
+                    "_require_regular_source_file",
+                    side_effect=validate_then_swap,
+                ),
+                patch.object(Path, "open", new=forbid_following_path_open),
             ):
                 with self.assertRaisesRegex(
                     ValueError,
@@ -341,6 +355,7 @@ class ReleasePackageInputSymlinkFenceTests(unittest.TestCase):
                     bind_portable_data_tool(paths["package"], data_path)
 
             self.assertTrue(swapped)
+            self.assertFalse(follow_open_attempted)
 
     def test_portable_base_package_regular_to_symlink_race_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

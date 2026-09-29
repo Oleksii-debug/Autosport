@@ -9,6 +9,8 @@ from pathlib import Path
 
 import pytest
 
+from betfair_execution_readback_test_support import canonical_authenticated_readback_client
+
 from autosport.betfair_account_readonly import (
     BetfairReadOnlyClient,
     BetfairReadOnlyError,
@@ -998,19 +1000,16 @@ def test_transport_timeout_readback_stays_non_authoritative_for_retry(
             provider_order_ref=provider_ref,
             action=action,
         )
-        read_client = BetfairReadOnlyClient(
-            BetfairSessionCredentials("app-key", "session-token"),
-            transport=read_transport,
-            clock=lambda: datetime.fromisoformat(READBACK_AT),
-            venue_id="betfair",
+        with canonical_authenticated_readback_client(
+            read_transport,
             account_id="acct-1",
-        )
-        envelope = read_betfair_supervised_action_readback(
-            read_client,
-            restarted,
-            bound,
-            attempt_id="attempt-timeout",
-        )
+        ) as read_client:
+            envelope = read_betfair_supervised_action_readback(
+                read_client,
+                restarted,
+                bound,
+                attempt_id="attempt-timeout",
+            )
         assert envelope.action_id == action.action_id
         assert envelope.provider_order_ref == provider_ref
         assert all(
@@ -1102,18 +1101,15 @@ def test_foreign_provider_order_ref_cannot_verify_or_reconcile_effect() -> None:
             action=action,
             include_effect=True,
         )
-        client = BetfairReadOnlyClient(
-            BetfairSessionCredentials("app-key", "session-token"),
-            transport=transport,
-            clock=lambda: datetime.fromisoformat(READBACK_AT),
-            venue_id="betfair",
+        with canonical_authenticated_readback_client(
+            transport,
             account_id="acct-1",
-        )
-        envelope = client.read_execution_readback(
-            action_id=action.action_id,
-            provider_order_ref=foreign_ref,
-            market_id=action.market_id,
-        )
+        ) as client:
+            envelope = client.read_execution_readback(
+                action_id=action.action_id,
+                provider_order_ref=foreign_ref,
+                market_id=action.market_id,
+            )
 
         with pytest.raises(
             ProviderEvidenceError,
@@ -1176,18 +1172,15 @@ def test_foreign_empty_provider_order_ref_cannot_release_retry() -> None:
             provider_order_ref=foreign_ref,
             action=action,
         )
-        client = BetfairReadOnlyClient(
-            BetfairSessionCredentials("app-key", "session-token"),
-            transport=transport,
-            clock=lambda: datetime.fromisoformat(READBACK_AT),
-            venue_id="betfair",
+        with canonical_authenticated_readback_client(
+            transport,
             account_id="acct-1",
-        )
-        envelope = client.read_execution_readback(
-            action_id=action.action_id,
-            provider_order_ref=foreign_ref,
-            market_id=action.market_id,
-        )
+        ) as client:
+            envelope = client.read_execution_readback(
+                action_id=action.action_id,
+                provider_order_ref=foreign_ref,
+                market_id=action.market_id,
+            )
         foreign_absence = verify_betfair_provider_state(
             action,
             profile,

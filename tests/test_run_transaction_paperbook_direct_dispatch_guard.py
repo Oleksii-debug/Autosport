@@ -20,6 +20,16 @@ def _sealed_inner_globals(method):
     return closure[freevars.index("inner_globals")].cell_contents
 
 
+def _closure_value(method, name):
+    closure = method.__closure__
+    if closure is None:
+        raise AssertionError("sealed RunTransaction consumer has no closure")
+    freevars = method.__code__.co_freevars
+    if name not in freevars:
+        raise AssertionError(f"sealed RunTransaction consumer has no {name}")
+    return closure[freevars.index(name)].cell_contents
+
+
 class RunTransactionPaperBookDirectDispatchGuardTests(unittest.TestCase):
     def test_stage_and_promotion_are_detached_from_live_module_globals(self):
         stage_globals = _sealed_inner_globals(
@@ -115,6 +125,28 @@ class RunTransactionPaperBookDirectDispatchGuardTests(unittest.TestCase):
 
         self.assertIs(promotion_globals["os"], original_os)
         self.assertIs(original_os.replace, os.replace)
+
+    def test_promotion_execution_uses_composition_snapshot_not_live_closure_dict(self):
+        """Reachable diagnostics are tamper evidence, never the execution mapping."""
+
+        method = RunTransaction._promote_paper_book_snapshot
+        promotion_globals = _sealed_inner_globals(method)
+        frozen_items = _closure_value(method, "frozen_globals_items")
+        snapshot = dict(frozen_items)
+
+        self.assertNotIn("function", method.__code__.co_freevars)
+        self.assertIs(snapshot["os"], promotion_globals["os"])
+        self.assertIs(snapshot["tempfile"], promotion_globals["tempfile"])
+        self.assertIs(snapshot["hashlib"], promotion_globals["hashlib"])
+        self.assertIs(snapshot["PaperBook"], promotion_globals["PaperBook"])
+
+        original_os = promotion_globals["os"]
+        try:
+            promotion_globals["os"] = object()
+            self.assertIs(snapshot["os"], original_os)
+            self.assertIsNot(snapshot["os"], promotion_globals["os"])
+        finally:
+            promotion_globals["os"] = original_os
 
     def test_terminal_surface_witness_rejects_meta_meta_bypass_before_promotion(self):
         """Consumer witness remains fail-closed beyond any finite metaclass seal chain."""

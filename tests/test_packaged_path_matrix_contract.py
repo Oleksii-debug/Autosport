@@ -98,6 +98,7 @@ def test_matrix_passes_identical_exit_zero_program_under_all_paths(tmp_path: Pat
     assert [r.name for r in report.scenarios] == [s[0] for s in m.SCENARIOS]
     assert all(r.status == "PASS" for r in report.scenarios)
     assert all(r.copied_bytes_equal for r in report.scenarios)
+    assert all(not r.window_witnessed for r in report.scenarios)
     assert report.human_tested is False
     assert report.nvda_verified is False
     assert report.real_money_execution is False
@@ -106,7 +107,7 @@ def test_matrix_passes_identical_exit_zero_program_under_all_paths(tmp_path: Pat
     assert payload["matrix_status"] == "PASS"
 
 
-def test_persistent_mode_accepts_program_alive_for_probe_window(tmp_path: Path) -> None:
+def test_persistent_mode_rejects_alive_process_without_visible_window(tmp_path: Path) -> None:
     artifact = _artifact(tmp_path, sleep_seconds=2.0)
     report = m.run_matrix(
         artifact_root=artifact,
@@ -119,8 +120,42 @@ def test_persistent_mode_accepts_program_alive_for_probe_window(tmp_path: Path) 
         timeout_seconds=2,
         keep_copies=False,
     )
-    assert report.matrix_status == "PASS"
+    assert report.matrix_status == "INCONCLUSIVE_CONTROL_FAILED"
     assert all(r.startup_stable for r in report.scenarios)
+    assert all(not r.window_witnessed for r in report.scenarios)
+    assert all(r.status == "FAIL_NO_VISIBLE_WINDOW" for r in report.scenarios)
+
+
+def test_persistent_mode_requires_visible_window_witness_for_pass(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact = _artifact(tmp_path, sleep_seconds=2.0)
+    observed_pids: list[int] = []
+
+    def visible_window(process_id: int) -> bool:
+        observed_pids.append(process_id)
+        return True
+
+    monkeypatch.setattr(m, "_has_visible_top_level_window", visible_window)
+    report = m.run_matrix(
+        artifact_root=artifact,
+        executable_relative_path=Path("app.py"),
+        output_dir=tmp_path / "out",
+        arguments=(),
+        launcher=(sys.executable,),
+        mode="persistent",
+        startup_seconds=0.1,
+        timeout_seconds=2,
+        keep_copies=False,
+    )
+
+    assert report.matrix_status == "PASS"
+    assert len(observed_pids) == len(m.SCENARIOS)
+    assert all(pid > 0 for pid in observed_pids)
+    assert all(r.startup_stable for r in report.scenarios)
+    assert all(r.window_witnessed for r in report.scenarios)
+    assert all(r.status == "PASS" for r in report.scenarios)
 
 
 def test_ascii_control_failure_is_inconclusive_not_path_failure(tmp_path: Path) -> None:
@@ -137,7 +172,6 @@ def test_ascii_control_failure_is_inconclusive_not_path_failure(tmp_path: Path) 
         keep_copies=False,
     )
     assert report.matrix_status == "INCONCLUSIVE_CONTROL_FAILED"
-
 
 
 def test_stale_report_and_logs_are_removed_before_validation(tmp_path: Path) -> None:
@@ -260,7 +294,6 @@ def test_output_capture_is_opt_in(tmp_path: Path) -> None:
     assert (captured_out / "logs" / "ascii_control.log").is_file()
 
 
-
 def test_no_raw_arguments_are_serialized_in_report(tmp_path: Path) -> None:
     artifact = _artifact(tmp_path)
     secret_marker = "DO_NOT_PERSIST_ME"
@@ -278,6 +311,7 @@ def test_no_raw_arguments_are_serialized_in_report(tmp_path: Path) -> None:
     report_text = (tmp_path / "out" / "path-matrix-report.json").read_text(encoding="utf-8")
     assert secret_marker not in report_text
 
+
 def test_matrix_uses_unrelated_cwd_and_isolated_absolute_workspace(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -291,11 +325,11 @@ def test_matrix_uses_unrelated_cwd_and_isolated_absolute_workspace(
         cwd: Path,
         environment: dict[str, str] | None = None,
         **_kwargs: object,
-    ) -> tuple[bool, bool, int | None, float, str, str | None]:
+    ) -> tuple[bool, bool, bool, int | None, float, str, str | None]:
         assert command
         assert environment is not None
         observed.append((Path(cwd), environment["AUTOSPORT_WORKSPACE"]))
-        return True, True, 0, 0.001, "PASS", None
+        return True, True, False, 0, 0.001, "PASS", None
 
     monkeypatch.setattr(m, "probe_process", fake_probe)
     monkeypatch.setattr(m, "detect_privilege_context", lambda: "ADMINISTRATOR")
@@ -313,7 +347,7 @@ def test_matrix_uses_unrelated_cwd_and_isolated_absolute_workspace(
         keep_copies=True,
     )
 
-    assert report.schema_version == 2
+    assert report.schema_version == 3
     assert report.launch_cwd_policy == m.LAUNCH_CWD_POLICY
     assert report.workspace_policy == m.WORKSPACE_POLICY
     assert report.privilege_context == "ADMINISTRATOR"
@@ -360,4 +394,3 @@ def test_non_admin_verification_requires_observed_standard_user(
 
     assert report.privilege_context == "STANDARD_USER"
     assert report.non_admin_verified is True
-

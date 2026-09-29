@@ -97,6 +97,54 @@ class CollectorInterruptibleProviderBackoffTests(unittest.TestCase):
             self.assertEqual(service.status()["stop_reason"], "stop_requested")
             self.assertIsNotNone(service.status()["stopped_at"])
 
+    def test_signal_wait_instance_shadow_cannot_intercept_provider_backoff(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = _UnavailableSource()
+            stop = _SignalStopRequest()
+            fake_event = _TripDuringWaitEvent()
+            stop._event = fake_event
+            hostile_wait_calls: list[float] = []
+
+            def hostile_wait(timeout: float) -> bool:
+                hostile_wait_calls.append(timeout)
+                raise AssertionError(
+                    "instance wait shadow must not become canonical STOP authority"
+                )
+
+            stop.wait = hostile_wait
+            sleep_calls: list[float] = []
+            service = HeadlessCollectorService(
+                delta_store=CollectorDeltaStore(root / "collector.db"),
+                lifecycle=ContinuousEventLifecycle(root / "catalog.json"),
+                source=source,
+                state_path=root / "service.json",
+                run_id="run-interruptible-shadow",
+                config=CollectorServiceConfig(
+                    poll_interval_seconds=1,
+                    retry_attempts=3,
+                    initial_backoff_seconds=7,
+                    max_backoff_seconds=7,
+                    jitter_fraction=0,
+                ),
+                clock=lambda: "2026-09-29T06:16:00+00:00",
+                sleep=sleep_calls.append,
+                random_value=lambda: 0,
+                stop_requested=stop,
+                stop_reason=stop.reason,
+            )
+
+            result = service.run(max_cycles=3)
+
+            self.assertEqual(result.cycles_executed, 0)
+            self.assertIsNone(result.last_cycle)
+            self.assertEqual(source.catalog_calls, 1)
+            self.assertEqual(fake_event.waits, [7])
+            self.assertEqual(hostile_wait_calls, [])
+            self.assertEqual(sleep_calls, [])
+            self.assertEqual(service.status()["stop_reason"], "stop_requested")
+            self.assertIsNotNone(service.status()["stopped_at"])
+
 
 if __name__ == "__main__":
     unittest.main()

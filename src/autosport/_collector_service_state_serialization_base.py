@@ -118,8 +118,12 @@ def _make_post_stop_fence(*, stopped_error_type, stop_fields):
                     "collector run is durably STOPPED; terminal mutation is forbidden until explicit resume"
                 )
 
-            stopped_after = raw.get("stopped_at") is not None
-            reason_after = raw.get("stop_reason") is not None
+            if not frozen_stop_fields.issubset(raw):
+                raise stopped_error_type(
+                    "collector run STOP fields cannot be removed during mutation"
+                )
+            stopped_after = raw["stopped_at"] is not None
+            reason_after = raw["stop_reason"] is not None
             if stopped_after != reason_after:
                 raise stopped_error_type(
                     "collector run STOP state cannot become incomplete during mutation"

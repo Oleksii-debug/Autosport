@@ -616,7 +616,7 @@ class _BlacklistStore:
                 "BETDAQ blacklist observations must be a list"
             )
         seen: set[str] = set()
-        canonical: list[dict[str, object]] = []
+        canonical: list[tuple[str, dict[str, object]]] = []
         for item in observations:
             if type(item) is not dict or set(item) != {
                 "api_name",
@@ -643,17 +643,12 @@ class _BlacklistStore:
                     "BETDAQ blacklist canonical API identity is duplicated"
                 )
             seen.add(identity)
-            canonical.append(observation.payload())
-        canonical.sort(
-            key=lambda item: (
-                str(item["operation_id"] or ""),
-                str(item["api_name"]),
-            )
-        )
+            canonical.append((identity, observation.payload()))
+        canonical.sort(key=lambda item: item[0])
         body: dict[str, object] = {
             "schema": _BLACKLIST_SCHEMA,
             "version": 2,
-            "observations": canonical,
+            "observations": [payload for _, payload in canonical],
         }
         state_sha = _sha256(raw.get("state_sha256"), "state_sha256")
         if state_sha != _digest(body):

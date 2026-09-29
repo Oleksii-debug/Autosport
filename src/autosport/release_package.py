@@ -100,6 +100,35 @@ def _require_regular_source_file(path: Path, *, label: str) -> None:
         raise ValueError(f"{label} must be a regular file: {path}")
 
 
+def _read_regular_source_bytes(path: Path, *, label: str) -> bytes:
+    """Read one source only when the opened file is the preflighted regular file."""
+
+    _require_regular_source_file(path, label=label)
+    try:
+        with path.open("rb") as stream:
+            opened = os.fstat(stream.fileno())
+            current = path.lstat()
+            if (
+                stat.S_ISLNK(current.st_mode)
+                or not stat.S_ISREG(current.st_mode)
+                or not os.path.samestat(opened, current)
+            ):
+                raise ValueError(f"{label} changed during open: {path}")
+            payload = stream.read()
+            after = path.lstat()
+            if (
+                stat.S_ISLNK(after.st_mode)
+                or not stat.S_ISREG(after.st_mode)
+                or not os.path.samestat(opened, after)
+            ):
+                raise ValueError(f"{label} changed during read: {path}")
+    except ValueError:
+        raise
+    except OSError as exc:
+        raise ValueError(f"{label} could not be read safely: {path}") from exc
+    return payload
+
+
 def _require_regular_source_tree(path: Path, *, label: str) -> None:
     try:
         root_metadata = path.lstat()

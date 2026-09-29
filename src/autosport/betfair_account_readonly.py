@@ -26,6 +26,10 @@ _GET_ACCOUNT_FUNDS = "AccountAPING/v1.0/getAccountFunds"
 _GET_ACCOUNT_DETAILS = "AccountAPING/v1.0/getAccountDetails"
 _LIST_CURRENT_ORDERS = "SportsAPING/v1.0/listCurrentOrders"
 _LIST_CLEARED_ORDERS = "SportsAPING/v1.0/listClearedOrders"
+_LIST_EVENT_TYPES = "SportsAPING/v1.0/listEventTypes"
+_LIST_COMPETITIONS = "SportsAPING/v1.0/listCompetitions"
+_LIST_EVENTS = "SportsAPING/v1.0/listEvents"
+_LIST_MARKET_TYPES = "SportsAPING/v1.0/listMarketTypes"
 _LIST_MARKET_CATALOGUE = "SportsAPING/v1.0/listMarketCatalogue"
 _EXECUTION_CLEARED_STATUSES = ("SETTLED", "VOIDED", "LAPSED", "CANCELLED")
 _READ_METHOD_ENDPOINT = MappingProxyType({
@@ -33,6 +37,10 @@ _READ_METHOD_ENDPOINT = MappingProxyType({
     _GET_ACCOUNT_DETAILS: ACCOUNT_JSON_RPC_ENDPOINT,
     _LIST_CURRENT_ORDERS: BETTING_JSON_RPC_ENDPOINT,
     _LIST_CLEARED_ORDERS: BETTING_JSON_RPC_ENDPOINT,
+    _LIST_EVENT_TYPES: BETTING_JSON_RPC_ENDPOINT,
+    _LIST_COMPETITIONS: BETTING_JSON_RPC_ENDPOINT,
+    _LIST_EVENTS: BETTING_JSON_RPC_ENDPOINT,
+    _LIST_MARKET_TYPES: BETTING_JSON_RPC_ENDPOINT,
     _LIST_MARKET_CATALOGUE: BETTING_JSON_RPC_ENDPOINT,
 })
 
@@ -504,6 +512,13 @@ def _execution_evidence_payload(
 class _RpcResult:
     result: object
     evidence: BetfairEvidence
+    raw_response: bytes
+
+    def __post_init__(self) -> None:
+        if type(self.raw_response) is not bytes or not self.raw_response:
+            raise BetfairReadOnlyError("Betfair RPC raw response must be non-empty immutable bytes")
+        if sha256(self.raw_response).hexdigest() != self.evidence.source_payload_sha256:
+            raise BetfairReadOnlyError("Betfair RPC raw response digest does not match evidence")
 
 
 class BetfairReadOnlyClient:
@@ -937,7 +952,7 @@ class BetfairReadOnlyClient:
             )
         if "result" not in envelope:
             raise BetfairReadOnlyError("Betfair response is missing result")
-        return _RpcResult(envelope["result"], evidence)
+        return _RpcResult(envelope["result"], evidence, payload)
 
     def _redact_provider_message(self, message: str) -> str:
         text = message.strip()
@@ -968,6 +983,10 @@ def _provider_error_code(data: object, *, method: str) -> str | None:
     elif method in {
         _LIST_CURRENT_ORDERS,
         _LIST_CLEARED_ORDERS,
+        _LIST_EVENT_TYPES,
+        _LIST_COMPETITIONS,
+        _LIST_EVENTS,
+        _LIST_MARKET_TYPES,
         _LIST_MARKET_CATALOGUE,
     }:
         expected_exception = "APINGException"

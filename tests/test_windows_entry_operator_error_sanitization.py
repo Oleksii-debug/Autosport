@@ -8,6 +8,23 @@ from unittest.mock import MagicMock, patch
 from autosport import windows_entry
 
 
+def test_workspace_configuration_dialog_does_not_announce_internal_detail() -> None:
+    secret = "secret-bearing-workspace-configuration-detail"
+    user32 = MagicMock()
+    fake_windll = types.SimpleNamespace(user32=user32)
+
+    with patch("ctypes.windll", fake_windll, create=True):
+        windows_entry._show_workspace_configuration_error(secret)
+
+    user32.MessageBoxW.assert_called_once()
+    _hwnd, message, _title, _flags = user32.MessageBoxW.call_args.args
+    assert "AUTOSPORT_WORKSPACE" in message
+    assert "LOCALAPPDATA" in message
+    assert "Economic і live state не змінено" in message
+    assert secret not in message
+    assert "ValueError" not in message
+
+
 def test_workspace_access_message_does_not_announce_exception_detail(tmp_path: Path) -> None:
     secret = "secret-bearing-filesystem-detail"
     message = windows_entry._workspace_access_error_message(

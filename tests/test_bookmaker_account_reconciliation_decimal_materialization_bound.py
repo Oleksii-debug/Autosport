@@ -534,3 +534,38 @@ def test_balance_subclass_cannot_bypass_nested_evidence_validation(tmp_path) -> 
 
     assert not path.exists()
 
+def test_exact_snapshot_mutation_is_revalidated_before_publication(tmp_path) -> None:
+    forged = _snapshot(Decimal("10"))
+    assert forged.balance is not None
+
+    # Frozen dataclasses can still be altered through object.__setattr__. The
+    # persistence boundary must validate current state, not only constructor history.
+    object.__setattr__(forged.balance, "source_payload_sha256", "not-a-sha256")
+    path = tmp_path / "account.json"
+    store = BookmakerAccountReconciliationStore(path)
+
+    with pytest.raises(
+        AccountReconciliationIntegrityError,
+        match="failed current-state revalidation",
+    ):
+        store.append_snapshot(forged)
+
+    assert not path.exists()
+
+
+def test_exact_snapshot_cross_field_mutation_is_revalidated_before_publication(
+    tmp_path,
+) -> None:
+    forged = _snapshot(Decimal("10"))
+    object.__setattr__(forged, "observed_capabilities", frozenset())
+    path = tmp_path / "account.json"
+    store = BookmakerAccountReconciliationStore(path)
+
+    with pytest.raises(
+        AccountReconciliationIntegrityError,
+        match="failed current-state revalidation",
+    ):
+        store.append_snapshot(forged)
+
+    assert not path.exists()
+

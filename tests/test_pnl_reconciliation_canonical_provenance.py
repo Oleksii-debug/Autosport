@@ -102,6 +102,8 @@ def test_canonical_accepted_execution_re_resolves_ledger_economics(tmp_path: Pat
     assert snapshot.execution_provenance_bound is True
     assert snapshot.execution_evidence_verified is False
     assert snapshot.positive_authority_verified is False
+    # Same-process reload keeps the exact-byte witness minted by the canonical resolver.
+    assert journal.snapshot().execution_provenance_bound is True
 
     event = json.loads(journal_path.read_text(encoding="utf-8"))
     assert event["event_type"] == "accepted_execution"
@@ -177,21 +179,49 @@ def test_forged_settlement_values_cannot_promote_positive_authority(tmp_path: Pa
     assert snapshot.positive_authority_verified is False
 
 
-
-def test_replayed_provenance_binding_never_mints_verified_authority(tmp_path: Path) -> None:
+def test_replayed_jsonl_does_not_mint_execution_provenance_authority(tmp_path: Path) -> None:
     execution = _accepted_execution_ledger(tmp_path / "execution.jsonl")
     journal_path = tmp_path / "pnl.jsonl"
     journal = _journal(journal_path)
-    journal.record_accepted_execution(
+    issued = journal.record_accepted_execution(
         event_id="accepted-1",
         execution_ledger=execution,
         bookmaker_id="betfair",
         account_id="acct-1",
         external_receipt_id="receipt-1",
     )
+    assert issued.execution_provenance_bound is True
 
     reopened = _journal(journal_path).snapshot()
 
-    assert reopened.execution_provenance_bound is True
+    # The durable event remains useful as derived P&L, but a fresh process has not
+    # re-resolved its receipt against the canonical execution ledger. JSON fields and
+    # a syntactically valid ledger hash cannot self-issue provenance authority.
+    assert reopened.accepted_order_count == 1
+    assert reopened.open_back_stake == Decimal("4.25")
+    assert reopened.execution_provenance_bound is False
     assert reopened.execution_evidence_verified is False
     assert reopened.positive_authority_verified is False
+
+
+def test_copied_canonical_accepted_execution_bytes_do_not_mint_provenance(tmp_path: Path) -> None:
+    execution = _accepted_execution_ledger(tmp_path / "execution.jsonl")
+    source_path = tmp_path / "source-pnl.jsonl"
+    source = _journal(source_path)
+    assert source.record_accepted_execution(
+        event_id="accepted-1",
+        execution_ledger=execution,
+        bookmaker_id="betfair",
+        account_id="acct-1",
+        external_receipt_id="receipt-1",
+    ).execution_provenance_bound
+
+    forged_path = tmp_path / "copied-pnl.jsonl"
+    forged_path.write_bytes(source_path.read_bytes())
+    copied = _journal(forged_path).snapshot()
+
+    assert copied.accepted_order_count == 1
+    assert copied.open_back_stake == Decimal("4.25")
+    assert copied.execution_provenance_bound is False
+    assert copied.execution_evidence_verified is False
+    assert copied.positive_authority_verified is False

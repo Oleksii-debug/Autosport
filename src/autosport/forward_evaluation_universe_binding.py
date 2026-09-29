@@ -359,6 +359,8 @@ def _build_public_entrypoints(*, load_expectations):
             )
         return result
 
+    sealed_load_expectations_code = _sealed_load_expectations.__code__
+
     def resolve_forward_universe_members(
         *,
         store: ProviderEvaluationUniverseStore,
@@ -367,11 +369,19 @@ def _build_public_entrypoints(*, load_expectations):
     ) -> tuple[ForwardUniverseMemberExpectation, ...]:
         """Project only the exact prospectively selected durable source universe."""
     
+        if _sealed_load_expectations.__code__ is not sealed_load_expectations_code:
+            raise ForwardEvaluationUniverseBindingError(
+                "forward source-universe public resolver dispatch changed"
+            )
         expectations, _identity = _sealed_load_expectations(
             store=store,
             protocol=protocol,
             precommit=precommit,
         )
+        if _sealed_load_expectations.__code__ is not sealed_load_expectations_code:
+            raise ForwardEvaluationUniverseBindingError(
+                "forward source-universe public resolver dispatch changed"
+            )
         return expectations
     
     
@@ -384,11 +394,19 @@ def _build_public_entrypoints(*, load_expectations):
     ) -> tuple[AuthoritativeSourceReceipt, ...]:
         """Re-resolve prospective + durable authority and authorize exact coverage only."""
     
+        if _sealed_load_expectations.__code__ is not sealed_load_expectations_code:
+            raise ForwardEvaluationUniverseBindingError(
+                "forward source-universe public resolver dispatch changed"
+            )
         expectations, identity_before = _sealed_load_expectations(
             store=store,
             protocol=protocol,
             precommit=precommit,
         )
+        if _sealed_load_expectations.__code__ is not sealed_load_expectations_code:
+            raise ForwardEvaluationUniverseBindingError(
+                "forward source-universe public resolver dispatch changed"
+            )
         expected_by_receipt = {item.source_receipt_id: item for item in expectations}
     
         materialized = tuple(opportunities)
@@ -462,11 +480,19 @@ def _build_public_entrypoints(*, load_expectations):
                 )
             )
     
+        if _sealed_load_expectations.__code__ is not sealed_load_expectations_code:
+            raise ForwardEvaluationUniverseBindingError(
+                "forward source-universe public resolver dispatch changed"
+            )
         _expectations_after, identity_after = _sealed_load_expectations(
             store=store,
             protocol=protocol,
             precommit=precommit,
         )
+        if _sealed_load_expectations.__code__ is not sealed_load_expectations_code:
+            raise ForwardEvaluationUniverseBindingError(
+                "forward source-universe public resolver dispatch changed"
+            )
         if identity_after != identity_before:
             raise ForwardEvaluationUniverseBindingError(
                 "prospective or durable source-universe authority changed during receipt resolution"

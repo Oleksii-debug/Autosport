@@ -9,7 +9,7 @@ account-snapshot authorities.
 
 from __future__ import annotations
 
-from dataclasses import InitVar, dataclass
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
 import hashlib
@@ -75,7 +75,6 @@ _BETFAIR_TRANSIENT_CODES = frozenset(
 )
 _TRANSIENT_HTTP_STATUSES = frozenset({408, 429, 500, 502, 503, 504})
 _UNAUTHORIZED_HTTP_STATUSES = frozenset({401, 403})
-_ISSUANCE_TOKEN = object()
 
 
 def _require_token(value: object, *, field: str) -> str:
@@ -223,10 +222,13 @@ class ReadbackFailureSignal:
 
 @dataclass(frozen=True, slots=True)
 class AccountReadbackDegradationEvidence:
-    """Conservative product result for a degraded account-readback attempt.
+    """Conservative non-positive result for a degraded account-readback attempt.
 
-    Every authority-bearing property is intentionally restrictive. This type is
-    not a substitute for canonical account snapshot/acquisition evidence.
+    This DTO is intentionally *not* an issuer/authenticity object. Callers can
+    construct equivalent negative evidence, so consumers must never treat instance
+    provenance as provider or acquisition authority. Its authority-bearing properties
+    are hard-false; positive account truth belongs to canonical acquisition/snapshot
+    authorities instead.
     """
 
     state: ReadbackDegradationState
@@ -241,13 +243,6 @@ class AccountReadbackDegradationEvidence:
     partial_observation_present: bool
     prior_snapshot_id: str | None
     evidence_sha256: str
-    _issuance_token: InitVar[object] = None
-
-    def __post_init__(self, _issuance_token: object) -> None:
-        if _issuance_token is not _ISSUANCE_TOKEN:
-            raise ReadbackDegradationError(
-                "degradation evidence must be issued by the classifier"
-            )
 
     @property
     def freshness_proven(self) -> bool:
@@ -364,5 +359,4 @@ def classify_account_readback_degradation(
         partial_observation_present=signal.pages_completed > 0,
         prior_snapshot_id=signal.prior_snapshot_id,
         evidence_sha256=hashlib.sha256(canonical).hexdigest(),
-        _issuance_token=_ISSUANCE_TOKEN,
     )

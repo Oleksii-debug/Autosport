@@ -4,11 +4,16 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 import json
 
+import pytest
+
 from autosport.betfair_account_readonly import (
     BetfairReadOnlyClient,
     BetfairSessionCredentials,
 )
-from autosport.betfair_settlement_revisions import BetfairSettlementRevisionStore
+from autosport.betfair_settlement_revisions import (
+    BetfairSettlementRevisionError,
+    BetfairSettlementRevisionStore,
+)
 from autosport.real_execution_ledger import (
     AcknowledgementStatus,
     ExecutionAction,
@@ -139,32 +144,30 @@ def _capture(client: BetfairReadOnlyClient, provider_ref: str):
     )
 
 
+def _ingest(store, ledger, plan, action, capture):
+    return store.ingest(
+        ledger,
+        plan_id=plan.plan_id,
+        attempt_id="attempt-1",
+        action=action,
+        capture=capture,
+    )
+
+
 def test_bet_outcome_only_provider_correction_creates_new_revision(tmp_path) -> None:
     ledger, plan, action, provider_ref, transport, client = _context(tmp_path)
     path = tmp_path / "settlement.jsonl"
     store = BetfairSettlementRevisionStore(path)
 
     first_capture = _capture(client, provider_ref)
-    first = store.ingest(
-        ledger,
-        plan_id=plan.plan_id,
-        attempt_id="attempt-1",
-        action=action,
-        capture=first_capture,
-    )
+    first = _ingest(store, ledger, plan, action, first_capture)
     assert first.revision.bet_outcome == "WON"
 
     transport.bet_outcome = "LOST"
     second_capture = _capture(client, provider_ref)
     assert second_capture.evidence_sha256 != first_capture.evidence_sha256
 
-    second = store.ingest(
-        ledger,
-        plan_id=plan.plan_id,
-        attempt_id="attempt-1",
-        action=action,
-        capture=second_capture,
-    )
+    second = _ingest(store, ledger, plan, action, second_capture)
 
     assert second.created is True
     assert second.revision.revision_number == 2
@@ -185,26 +188,43 @@ def test_identical_provider_row_with_new_rpc_ids_remains_idempotent(tmp_path) ->
     store = BetfairSettlementRevisionStore(tmp_path / "settlement.jsonl")
 
     first_capture = _capture(client, provider_ref)
-    first = store.ingest(
-        ledger,
-        plan_id=plan.plan_id,
-        attempt_id="attempt-1",
-        action=action,
-        capture=first_capture,
-    )
+    first = _ingest(store, ledger, plan, action, first_capture)
     second_capture = _capture(client, provider_ref)
     assert second_capture.evidence_sha256 != first_capture.evidence_sha256
 
-    second = store.ingest(
-        ledger,
-        plan_id=plan.plan_id,
-        attempt_id="attempt-1",
-        action=action,
-        capture=second_capture,
-    )
+    second = _ingest(store, ledger, plan, action, second_capture)
 
     assert second.created is False
     assert second.revision.revision_id == first.revision.revision_id
     assert second.revision.bet_outcome == "WON"
     assert second.revision.source_payload_sha256 == first.revision.source_payload_sha256
     assert len(store.revisions) == 1
+
+
+def test_superseded_bet_outcome_semantics_cannot_reappear(tmp_path) -> None:
+    ledger, plan, action, provider_ref, transport, client = _context(tmp_path)
+    store = BetfairSettlementRevisionStore(tmp_path / "settlement.jsonl")
+
+    first = _ingest(store, ledger, plan, action, _capture(client, provider_ref)).revision
+    assert first.bet_outcome == "WON"
+
+    transport.bet_outcome = "LOST"
+    corrected = _ingest(
+        store,
+        ledger,
+        plan,
+        action,
+        _capture(client, provider_ref),
+    ).revision
+    assert corrected.bet_outcome == "LOST"
+    assert corrected.revision_number == 2
+
+    transport.bet_outcome = "WON"
+    with pytest.raises(
+        BetfairSettlementRevisionError,
+        match="superseded semantic revision",
+    ):
+        _ingest(store, ledger, plan, action, _capture(client, provider_ref))
+
+    assert store.revisions == (first, corrected)
+    assert store.current("betfair", "acct-1", "bet-777") == corrected

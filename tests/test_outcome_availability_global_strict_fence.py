@@ -5,6 +5,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import autosport._outcome_availability_clock_dispatch_guard as availability_guard
 import autosport.outcome_trust as outcome_trust
@@ -41,6 +42,18 @@ class OutcomeAvailabilityGlobalStrictFenceTests(unittest.TestCase):
             revisions=(revision,),
         )
 
+    def _new_registry(self, root: str) -> RunRegistry:
+        return RunRegistry.initialize_pristine(Path(root) / "run_registry.json")
+
+    def _begin(self, registry: RunRegistry, binding: OutcomeLineageBinding, run_id: str) -> str:
+        return registry.begin(
+            self._sha(f"market:{run_id}"),
+            self._sha(f"results:{run_id}"),
+            "baseline-v1",
+            run_id,
+            outcome_lineage=binding,
+        )
+
     def test_equal_representable_tick_is_not_strictly_after_established_history(self) -> None:
         fence = "2026-01-01T10:00:00Z"
 
@@ -70,19 +83,13 @@ class OutcomeAvailabilityGlobalStrictFenceTests(unittest.TestCase):
     def test_cross_lineage_clock_rollback_leaves_new_identity_unknown(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "run_registry.json"
-            registry = RunRegistry.initialize_pristine(path)
+            registry = self._new_registry(tmp)
             first = self._binding(
                 source_identity="official-results:first",
                 record_id="event:first",
                 label="first",
             )
-            first_key = registry.begin(
-                self._sha("market-first"),
-                self._sha("results-first"),
-                "baseline-v1",
-                "run-first",
-                outcome_lineage=first,
-            )
+            first_key = self._begin(registry, first, "run-first")
             registry.complete(first_key)
 
             # Model a legitimate previously-established product timestamp followed
@@ -111,13 +118,7 @@ class OutcomeAvailabilityGlobalStrictFenceTests(unittest.TestCase):
                 OutcomeLineageTrustError,
                 "strictly later than registry-wide established",
             ):
-                reopened.begin(
-                    self._sha("market-second"),
-                    self._sha("results-second"),
-                    "baseline-v1",
-                    "run-second",
-                    outcome_lineage=second,
-                )
+                self._begin(reopened, second, "run-second")
 
             durable = json.loads(path.read_text(encoding="utf-8"))
             by_identity = {
@@ -130,6 +131,58 @@ class OutcomeAvailabilityGlobalStrictFenceTests(unittest.TestCase):
                 "run-second",
                 {entry["run_id"] for entry in durable["runs"].values()},
             )
+
+    def test_rebound_registry_read_fails_before_attacker_dispatch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            registry = self._new_registry(tmp)
+            binding = self._binding(
+                source_identity="official-results:read-rebind",
+                record_id="event:read-rebind",
+                label="read-rebind",
+            )
+            hostile_calls = 0
+
+            def hostile_read(_registry):
+                nonlocal hostile_calls
+                hostile_calls += 1
+                raise AssertionError("rebound RunRegistry._read must not execute")
+
+            with patch.object(RunRegistry, "_read", new=hostile_read):
+                with self.assertRaisesRegex(
+                    OutcomeLineageTrustError,
+                    "read authority dispatch was rebound",
+                ):
+                    self._begin(registry, binding, "run-read-rebind")
+
+            self.assertEqual(hostile_calls, 0)
+
+    def test_rebound_registry_trust_parser_fails_before_attacker_dispatch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            registry = self._new_registry(tmp)
+            binding = self._binding(
+                source_identity="official-results:parser-rebind",
+                record_id="event:parser-rebind",
+                label="parser-rebind",
+            )
+            hostile_calls = 0
+
+            def hostile_bindings(_state):
+                nonlocal hostile_calls
+                hostile_calls += 1
+                raise AssertionError("rebound trust parser must not execute")
+
+            with patch.object(
+                RunRegistry,
+                "_outcome_lineage_trust_bindings",
+                new=staticmethod(hostile_bindings),
+            ):
+                with self.assertRaisesRegex(
+                    OutcomeLineageTrustError,
+                    "outcome trust parser dispatch was rebound",
+                ):
+                    self._begin(registry, binding, "run-parser-rebind")
+
+            self.assertEqual(hostile_calls, 0)
 
 
 if __name__ == "__main__":

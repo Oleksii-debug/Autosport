@@ -96,6 +96,26 @@ class RunTransactionPaperBookDirectDispatchGuardTests(unittest.TestCase):
             run_transaction_module.hashlib = original_hashlib
             run_transaction_module.PaperBook = original_paper_book
 
+    def test_reachable_detached_globals_cannot_retarget_direct_dispatch(self):
+        """The exposed diagnostic closure dict cannot replace a direct binding."""
+
+        promotion_globals = _sealed_inner_globals(
+            RunTransaction._promote_paper_book_snapshot
+        )
+        original_os = promotion_globals["os"]
+        try:
+            promotion_globals["os"] = object()
+            with self.assertRaisesRegex(
+                ValueError,
+                "detached direct-dispatch binding changed: os",
+            ):
+                RunTransaction._promote_paper_book_snapshot(object())
+        finally:
+            promotion_globals["os"] = original_os
+
+        self.assertIs(promotion_globals["os"], original_os)
+        self.assertIs(original_os.replace, os.replace)
+
     def test_terminal_surface_witness_rejects_meta_meta_bypass_before_promotion(self):
         """Consumer witness remains fail-closed beyond any finite metaclass seal chain."""
 

@@ -388,3 +388,253 @@ def verify_source_universe_commitment(
             "source-universe commitment is structurally incomplete"
         ) from exc
     return rebuilt
+
+def _seal_source_universe_dispatch() -> None:
+    """Seal positive source-universe dispatch against ordinary runtime rebinding.
+
+    This keeps the existing evidence algorithm/schema unchanged.  The public builder
+    and verifier fail closed when their canonical module/class helper graph is
+    replaced after import instead of silently trusting the replacement.
+    """
+
+    module_globals = globals()
+    expected_store_type = CollectorDeltaStore
+    expected_commitment_type = SourceUniverseCommitment
+    expected_error_type = SourceUniverseCommitmentError
+    expected_path_type = Path
+    expected_hashlib = hashlib
+    expected_sha256 = hashlib.sha256
+    expected_json = json
+    expected_json_dumps = json.dumps
+    expected_inspect = inspect
+    expected_getattr_static = inspect.getattr_static
+    expected_cycle_evidence = _CANONICAL_COLLECTOR_CYCLE_EVIDENCE
+    expected_cycle_evidence_code = getattr(expected_cycle_evidence, "__code__", None)
+    expected_read_names = _CANONICAL_READ_SEAM_NAMES
+    expected_class_seams = _CANONICAL_CLASS_READ_SEAMS
+    expected_class_seam_witnesses = tuple(
+        (
+            name,
+            expected,
+            getattr(expected, "__code__", None),
+        )
+        for name, expected in sorted(expected_class_seams.items())
+    )
+    expected_field_names = _COMMITMENT_FIELD_NAMES
+    expected_issue_surface = expected_getattr_static(
+        expected_commitment_type, "_issue"
+    )
+    helper_witnesses = tuple(
+        (
+            name,
+            helper,
+            getattr(helper, "__code__", None),
+        )
+        for name, helper in (
+            (
+                "_require_canonical_class_read_seams",
+                _require_canonical_class_read_seams,
+            ),
+            (
+                "_require_product_expected_store_path",
+                _require_product_expected_store_path,
+            ),
+            ("_canonical_json", _canonical_json),
+        )
+    )
+    original_build = build_source_universe_commitment
+    original_build_code = original_build.__code__
+    original_verify = verify_source_universe_commitment
+    original_verify_code = original_verify.__code__
+
+    def require_dispatch_integrity() -> None:
+        if module_globals.get("CollectorDeltaStore") is not expected_store_type:
+            raise expected_error_type(
+                "source-universe collector type authority is rebound"
+            )
+        if module_globals.get("SourceUniverseCommitment") is not expected_commitment_type:
+            raise expected_error_type(
+                "source-universe commitment type authority is rebound"
+            )
+        if module_globals.get("SourceUniverseCommitmentError") is not expected_error_type:
+            raise expected_error_type(
+                "source-universe error authority is rebound"
+            )
+        if module_globals.get("Path") is not expected_path_type:
+            raise expected_error_type("source-universe path authority is rebound")
+        if (
+            module_globals.get("hashlib") is not expected_hashlib
+            or expected_hashlib.sha256 is not expected_sha256
+        ):
+            raise expected_error_type("source-universe digest authority is rebound")
+        if (
+            module_globals.get("json") is not expected_json
+            or expected_json.dumps is not expected_json_dumps
+        ):
+            raise expected_error_type(
+                "source-universe canonical JSON authority is rebound"
+            )
+        if (
+            module_globals.get("inspect") is not expected_inspect
+            or expected_inspect.getattr_static is not expected_getattr_static
+        ):
+            raise expected_error_type(
+                "source-universe reflection authority is rebound"
+            )
+        if (
+            module_globals.get("_CANONICAL_COLLECTOR_CYCLE_EVIDENCE")
+            is not expected_cycle_evidence
+            or getattr(expected_cycle_evidence, "__code__", None)
+            is not expected_cycle_evidence_code
+        ):
+            raise expected_error_type(
+                "source-universe collector-cycle evidence authority is rebound"
+            )
+        if module_globals.get("_CANONICAL_READ_SEAM_NAMES") is not expected_read_names:
+            raise expected_error_type(
+                "source-universe durable read-seam identity is rebound"
+            )
+        current_class_seams = module_globals.get("_CANONICAL_CLASS_READ_SEAMS")
+        if (
+            current_class_seams is not expected_class_seams
+            or type(current_class_seams) is not dict
+        ):
+            raise expected_error_type(
+                "source-universe class read-seam witness map is rebound"
+            )
+        for name, expected_surface, expected_code in expected_class_seam_witnesses:
+            current_surface = expected_getattr_static(
+                expected_store_type, name, None
+            )
+            if (
+                current_class_seams.get(name) is not expected_surface
+                or current_surface is not expected_surface
+                or getattr(expected_surface, "__code__", None) is not expected_code
+            ):
+                raise expected_error_type(
+                    "source-universe canonical durable read seam drifted: " + name
+                )
+        if module_globals.get("_COMMITMENT_FIELD_NAMES") is not expected_field_names:
+            raise expected_error_type(
+                "source-universe verification field authority is rebound"
+            )
+        if (
+            expected_getattr_static(expected_commitment_type, "_issue", None)
+            is not expected_issue_surface
+        ):
+            raise expected_error_type(
+                "source-universe result issuance surface is rebound"
+            )
+        for name, expected_helper, expected_code in helper_witnesses:
+            current_helper = module_globals.get(name)
+            if (
+                current_helper is not expected_helper
+                or getattr(expected_helper, "__code__", None) is not expected_code
+            ):
+                raise expected_error_type(
+                    "source-universe helper authority is rebound: " + name
+                )
+        if original_build.__code__ is not original_build_code:
+            raise expected_error_type(
+                "source-universe builder implementation drifted"
+            )
+        if original_verify.__code__ is not original_verify_code:
+            raise expected_error_type(
+                "source-universe verifier implementation drifted"
+            )
+
+    def sealed_build_source_universe_commitment(
+        store: CollectorDeltaStore,
+        *,
+        expected_store_path: str | Path,
+        source_id: str,
+        start_cycle_seq: int,
+        end_cycle_seq: int,
+    ) -> SourceUniverseCommitment:
+        if (
+            module_globals.get("build_source_universe_commitment")
+            is not sealed_build_source_universe_commitment
+        ):
+            raise expected_error_type(
+                "source-universe public builder authority is rebound"
+            )
+        require_dispatch_integrity()
+        result = original_build(
+            store,
+            expected_store_path=expected_store_path,
+            source_id=source_id,
+            start_cycle_seq=start_cycle_seq,
+            end_cycle_seq=end_cycle_seq,
+        )
+        require_dispatch_integrity()
+        if type(result) is not expected_commitment_type:
+            raise expected_error_type(
+                "source-universe builder returned non-canonical result type"
+            )
+        return result
+
+    def sealed_verify_source_universe_commitment(
+        store: CollectorDeltaStore,
+        candidate: SourceUniverseCommitment,
+        *,
+        expected_store_path: str | Path,
+        expected_source_id: str,
+        expected_start_cycle_seq: int,
+        expected_end_cycle_seq: int,
+    ) -> SourceUniverseCommitment:
+        if (
+            module_globals.get("verify_source_universe_commitment")
+            is not sealed_verify_source_universe_commitment
+        ):
+            raise expected_error_type(
+                "source-universe public verifier authority is rebound"
+            )
+        if (
+            module_globals.get("build_source_universe_commitment")
+            is not sealed_build_source_universe_commitment
+        ):
+            raise expected_error_type(
+                "source-universe verifier builder authority is rebound"
+            )
+        require_dispatch_integrity()
+        result = original_verify(
+            store,
+            candidate,
+            expected_store_path=expected_store_path,
+            expected_source_id=expected_source_id,
+            expected_start_cycle_seq=expected_start_cycle_seq,
+            expected_end_cycle_seq=expected_end_cycle_seq,
+        )
+        require_dispatch_integrity()
+        if type(result) is not expected_commitment_type:
+            raise expected_error_type(
+                "source-universe verifier returned non-canonical result type"
+            )
+        return result
+
+    sealed_build_source_universe_commitment.__name__ = original_build.__name__
+    sealed_build_source_universe_commitment.__qualname__ = original_build.__qualname__
+    sealed_build_source_universe_commitment.__doc__ = original_build.__doc__
+    sealed_build_source_universe_commitment.__module__ = original_build.__module__
+    sealed_build_source_universe_commitment.__annotations__ = dict(
+        original_build.__annotations__
+    )
+    sealed_verify_source_universe_commitment.__name__ = original_verify.__name__
+    sealed_verify_source_universe_commitment.__qualname__ = original_verify.__qualname__
+    sealed_verify_source_universe_commitment.__doc__ = original_verify.__doc__
+    sealed_verify_source_universe_commitment.__module__ = original_verify.__module__
+    sealed_verify_source_universe_commitment.__annotations__ = dict(
+        original_verify.__annotations__
+    )
+
+    module_globals["build_source_universe_commitment"] = (
+        sealed_build_source_universe_commitment
+    )
+    module_globals["verify_source_universe_commitment"] = (
+        sealed_verify_source_universe_commitment
+    )
+
+
+_seal_source_universe_dispatch()
+del _seal_source_universe_dispatch
+

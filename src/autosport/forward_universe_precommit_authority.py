@@ -47,10 +47,10 @@ class ForwardUniversePrecommitLocator:
     authority_root: Path | None = None
 
     def __post_init__(self) -> None:
-        if type(self.manifest_path) is not Path:
-            raise TypeError("manifest_path must be exact pathlib.Path")
-        if type(self.workspace) is not Path:
-            raise TypeError("workspace must be exact pathlib.Path")
+        if not isinstance(self.manifest_path, Path):
+            raise TypeError("manifest_path must be pathlib.Path")
+        if not isinstance(self.workspace, Path):
+            raise TypeError("workspace must be pathlib.Path")
         if not self.workspace.is_absolute():
             raise ForwardUniversePrecommitAuthorityError(
                 "campaign precommit workspace must be absolute"
@@ -64,8 +64,8 @@ class ForwardUniversePrecommitLocator:
                 "workspace_instance_id must be non-empty canonical text when supplied"
             )
         if self.authority_root is not None:
-            if type(self.authority_root) is not Path:
-                raise TypeError("authority_root must be exact pathlib.Path when supplied")
+            if not isinstance(self.authority_root, Path):
+                raise TypeError("authority_root must be pathlib.Path when supplied")
             if not self.authority_root.is_absolute():
                 raise ForwardUniversePrecommitAuthorityError(
                     "campaign precommit authority_root must be absolute"

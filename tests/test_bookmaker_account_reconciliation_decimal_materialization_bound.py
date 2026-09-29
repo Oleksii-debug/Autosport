@@ -751,3 +751,32 @@ def test_reconciliation_read_normalizes_deep_json_recursion(tmp_path) -> None:
         match="unreadable or corrupt",
     ):
         store.latest_snapshot()
+
+
+def test_reconciliation_parent_alias_retarget_cannot_move_state_path(tmp_path) -> None:
+    workspace_a = tmp_path / "workspace-a"
+    workspace_b = tmp_path / "workspace-b"
+    workspace_a.mkdir()
+    workspace_b.mkdir()
+    alias = tmp_path / "workspace-link"
+    try:
+        alias.symlink_to(workspace_a, target_is_directory=True)
+    except (NotImplementedError, OSError):
+        pytest.skip("directory symlink creation is unavailable on this test runner")
+
+    requested_path = alias / "account.json"
+    store = BookmakerAccountReconciliationStore(
+        requested_path,
+        authority_root=tmp_path / "authority",
+    )
+    canonical_path = workspace_a.resolve() / "account.json"
+    assert store.path == canonical_path
+    assert store._workspace == workspace_a.resolve()
+
+    alias.unlink()
+    alias.symlink_to(workspace_b, target_is_directory=True)
+
+    assert store.append_snapshot(_snapshot(Decimal("10")))
+    assert canonical_path.exists()
+    assert not (workspace_b / "account.json").exists()
+    assert store.latest_snapshot() == _snapshot(Decimal("10"))

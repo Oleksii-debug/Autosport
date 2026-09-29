@@ -930,8 +930,9 @@ class BookmakerAccountReconciliationStore:
         *,
         authority_root: str | Path | None = None,
     ) -> None:
-        self.path = Path(path)
-        self._workspace = self.path.parent.resolve(strict=False)
+        requested_path = Path(path)
+        self._workspace = requested_path.parent.resolve(strict=False)
+        self.path = self._workspace / requested_path.name
         if MonotonicWorkspaceAuthority is not _CANONICAL_AUTHORITY_CLASS:
             raise AccountReconciliationIntegrityError(
                 "account reconciliation monotonic authority class identity changed"

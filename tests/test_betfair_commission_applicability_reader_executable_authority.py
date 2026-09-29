@@ -37,10 +37,12 @@ def _hostile_fee_input_reader(_client, *, market_id: str):
 
 def test_in_place_fee_input_reader_code_retarget_fails_before_provider_ingress() -> None:
     public_assess = applicability.assess_betfair_commission_applicability
+    authority, authority_code = _authority_witness(public_assess)
     reader = _closure_value(public_assess, "fee_input_reader")
-    captured_function = _closure_value(public_assess, "fee_input_reader_function")
-    captured_code = _closure_value(public_assess, "fee_input_reader_function_code")
+    captured_function = reader.func
+    captured_code = _closure_value(authority, "fee_input_reader_function_code")
 
+    assert authority.__code__ is authority_code
     assert type(reader) is partial
     assert reader.func is captured_function
     assert captured_function.__code__ is captured_code

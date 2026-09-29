@@ -46,6 +46,28 @@ class RunTransactionPaperBookDirectDispatchGuardTests(unittest.TestCase):
         self.assertIs(stage_globals["RunTransaction"], RunTransaction)
         self.assertIs(promotion_globals["RunTransaction"], RunTransaction)
 
+    def test_stage_execution_uses_composition_snapshot_not_live_closure_dict(self):
+        """Staging is detached from its reachable diagnostic mapping too."""
+
+        method = RunTransaction._stage_paper_book_snapshot
+        stage_globals = _sealed_inner_globals(method)
+        frozen_items = _closure_value(method, "frozen_globals_items")
+        snapshot = dict(frozen_items)
+        original_owner = stage_globals["RunTransaction"]
+
+        self.assertNotIn("function", method.__code__.co_freevars)
+        self.assertIs(snapshot["RunTransaction"], original_owner)
+        try:
+            stage_globals["RunTransaction"] = object()
+            self.assertIs(snapshot["RunTransaction"], original_owner)
+            with self.assertRaisesRegex(
+                ValueError,
+                "detached direct-dispatch binding changed: RunTransaction",
+            ):
+                method(object())
+        finally:
+            stage_globals["RunTransaction"] = original_owner
+
     def test_promotion_reuses_witnessed_frozen_direct_dispatch_surface(self):
         promotion_globals = _sealed_inner_globals(
             RunTransaction._promote_paper_book_snapshot

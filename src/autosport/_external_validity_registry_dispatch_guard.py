@@ -43,6 +43,9 @@ def _install_guard() -> None:
     original_workspace_type = adapter.ProductPolicyEvaluationWorkspace
     original_reference_type = adapter.IssuedPolicyEvaluationRef
     original_product_verify = adapter.verify_product_policy_evaluation
+    original_product_bundle_hash = (
+        adapter.canonical_product_policy_evaluation_bundle_sha256
+    )
     original_product_error = adapter.ProductPolicyEvaluationIssuanceError
     original_core_verify_claim = adapter._verify_product_issued_claim
 
@@ -106,6 +109,8 @@ def _install_guard() -> None:
             or adapter.IssuedPolicyEvaluationRef is not original_reference_type
             or adapter.ProductPolicyEvaluationIssuanceError is not original_product_error
             or adapter.verify_product_policy_evaluation is not original_product_verify
+            or adapter.canonical_product_policy_evaluation_bundle_sha256
+            is not original_product_bundle_hash
             or adapter._verify_product_issued_claim is not original_core_verify_claim
             or issuance_module.ProductPolicyEvaluationWorkspace
             is not original_workspace_type
@@ -114,6 +119,8 @@ def _install_guard() -> None:
             is not original_product_error
             or issuance_module.verify_product_policy_evaluation
             is not original_product_verify
+            or issuance_module.canonical_product_policy_evaluation_bundle_sha256
+            is not original_product_bundle_hash
         ):
             raise adapter_error(
                 "external-validity registry adapter dispatch changed"

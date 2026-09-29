@@ -1222,6 +1222,8 @@ _CANONICAL_GOVERNOR_CLASS_SURFACE: Final = tuple(
         "policy_fingerprint",
         "_method_policies",
         "governor_id",
+        "__new__",
+        "__init__",
         "__setattr__",
         "__delattr__",
         "__getattribute__",

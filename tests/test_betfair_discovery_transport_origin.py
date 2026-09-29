@@ -238,6 +238,64 @@ def test_authenticated_origin_rejects_relabelled_account_scope(monkeypatch):
         )
 
 
+def test_captured_requirement_ignores_rebound_public_assessment(monkeypatch):
+    _client_obj, _opener, evidence, _event_acq, _market_acq = _live_evidence(
+        monkeypatch
+    )
+    captured_requirement = origin.require_betfair_authenticated_transport_origin
+    monkeypatch.setattr(
+        origin,
+        "assess_betfair_discovery_transport_origin",
+        lambda *args, **kwargs: origin.BetfairDiscoveryTransportOriginAssessment(
+            True,
+            "FORGED",
+            0,
+            0,
+            (),
+        ),
+    )
+
+    with pytest.raises(
+        BetfairDiscoveryProvenanceError,
+        match="NO_AUTHENTICATED_TRANSPORT_RECEIPTS",
+    ):
+        captured_requirement(evidence)
+
+
+def test_captured_assessment_ignores_rebound_public_receipt_verifier(monkeypatch):
+    _client_obj, _opener, evidence, event_acq, market_acq = _live_evidence(
+        monkeypatch
+    )
+    rebuilt_event = origin.BetfairDiscoveryTransportOriginReceipt._issue(
+        transport_authority_ref=event_acq.receipt.transport_authority_ref,
+        method=event_acq.receipt.method,
+        request_sha256=event_acq.receipt.request_sha256,
+        raw_response_sha256=event_acq.receipt.raw_response_sha256,
+        observed_at_utc=event_acq.receipt.observed_at_utc,
+    )
+    rebuilt_market = origin.BetfairDiscoveryTransportOriginReceipt._issue(
+        transport_authority_ref=market_acq.receipt.transport_authority_ref,
+        method=market_acq.receipt.method,
+        request_sha256=market_acq.receipt.request_sha256,
+        raw_response_sha256=market_acq.receipt.raw_response_sha256,
+        observed_at_utc=market_acq.receipt.observed_at_utc,
+    )
+    captured_assessment = origin.assess_betfair_discovery_transport_origin
+    monkeypatch.setattr(
+        origin,
+        "is_authoritative_betfair_discovery_transport_receipt",
+        lambda receipt: True,
+    )
+
+    assessment = captured_assessment(
+        evidence,
+        receipts=(rebuilt_event, rebuilt_market),
+    )
+
+    assert assessment.grants_authenticated_transport_origin_authority is False
+    assert assessment.reason == "UNISSUED_OR_STALE_AUTHENTICATED_TRANSPORT_RECEIPT"
+
+
 def test_receipt_constructor_and_matching_copy_cannot_mint_origin(monkeypatch):
     _client_obj, _opener, _evidence, event_acq, _market_acq = _live_evidence(
         monkeypatch

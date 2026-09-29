@@ -23,6 +23,7 @@ _CANONICAL_CLASS_READ_SEAMS = {
     name: inspect.getattr_static(CollectorDeltaStore, name)
     for name in _CANONICAL_READ_SEAM_NAMES
 }
+_CANONICAL_PATH_EQUALITY = Path.__eq__
 
 
 class SourceUniverseCommitmentError(ValueError):
@@ -66,7 +67,7 @@ def _require_product_expected_store_path(
         raise SourceUniverseCommitmentError(
             "canonical collector store path identity is unavailable"
         )
-    if current != expected:
+    if _CANONICAL_PATH_EQUALITY(current, expected) is not True:
         raise SourceUniverseCommitmentError(
             "canonical collector store path does not match product-expected authority path"
         )
@@ -412,6 +413,10 @@ def _seal_source_universe_dispatch() -> None:
     expected_getattr_static_code = getattr(
         expected_getattr_static, "__code__", None
     )
+    expected_path_equality = _CANONICAL_PATH_EQUALITY
+    expected_path_equality_code = getattr(
+        expected_path_equality, "__code__", None
+    )
     expected_cycle_evidence = _CANONICAL_COLLECTOR_CYCLE_EVIDENCE
     expected_cycle_evidence_code = getattr(expected_cycle_evidence, "__code__", None)
     expected_read_names = _CANONICAL_READ_SEAM_NAMES
@@ -482,6 +487,15 @@ def _seal_source_universe_dispatch() -> None:
             )
         if module_globals.get("Path") is not expected_path_type:
             raise expected_error_type("source-universe path authority is rebound")
+        if (
+            module_globals.get("_CANONICAL_PATH_EQUALITY")
+            is not expected_path_equality
+            or getattr(expected_path_equality, "__code__", None)
+            is not expected_path_equality_code
+        ):
+            raise expected_error_type(
+                "source-universe path comparison authority is rebound or mutated"
+            )
         if (
             module_globals.get("hashlib") is not expected_hashlib
             or expected_hashlib.sha256 is not expected_sha256

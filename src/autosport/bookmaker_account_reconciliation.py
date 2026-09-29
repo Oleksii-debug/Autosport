@@ -522,6 +522,23 @@ def _require_canonical_snapshot_graph(snapshot: object) -> BookmakerAccountSnaps
                 f"snapshot {field} must contain exact canonical BookmakerPositionObservation values"
             )
 
+    # frozen dataclasses are still mutable through object.__setattr__. Re-run the
+    # canonical constructors' semantic validators over the exact graph so a DTO
+    # that was valid at issuance cannot be changed into irreloadable durable state.
+    try:
+        for fact in profile.facts:
+            BookmakerCapabilityFact.__post_init__(fact)
+        BookmakerCapabilityProfile.__post_init__(profile)
+        if snapshot.balance is not None:
+            BookmakerBalanceObservation.__post_init__(snapshot.balance)
+        for position in (*snapshot.open_positions, *snapshot.settled_positions):
+            BookmakerPositionObservation.__post_init__(position, None)
+        BookmakerAccountSnapshot.__post_init__(snapshot)
+    except (TypeError, ValueError) as exc:
+        raise AccountReconciliationIntegrityError(
+            "snapshot canonical DTO graph failed current-state revalidation"
+        ) from exc
+
     return snapshot
 
 

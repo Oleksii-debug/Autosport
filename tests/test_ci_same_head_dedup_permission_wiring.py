@@ -25,8 +25,7 @@ def test_ci_same_head_qualification_is_bounded_before_read_only_admission() -> N
     assert "github.event.action == 'converted_to_draft'" in concurrency
     assert "github.event.action == 'closed'" in concurrency
     assert "'lifecycle'" in concurrency
-    assert "github.event.pull_request.head.sha &&" in concurrency
-    assert "format('payload-empty-run-{0}', github.run_id)" in concurrency
+    assert "format('pr-{0}-run-{1}'" not in concurrency
 
     # Non-PR events have no stable PR/head identity and must not coalesce on github.ref.
     # Each workflow run gets a unique fallback so a newer same-ref push/dispatch cannot

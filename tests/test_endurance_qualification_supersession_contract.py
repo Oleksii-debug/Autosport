@@ -32,8 +32,7 @@ def test_endurance_pr_runs_are_head_partitioned_until_live_admission() -> None:
     assert "github.event.action == 'converted_to_draft'" in concurrency_block
     assert "github.event.action == 'closed'" in concurrency_block
     assert "'lifecycle'" in concurrency_block
-    assert "github.event.pull_request.head.sha &&" in concurrency_block
-    assert "format('payload-empty-run-{0}', github.run_id)" in concurrency_block
+    assert "format('pr-{0}-run-{1}'" not in concurrency_block
 
     # Non-PR endurance dispatches are intentionally run-unique. Coalescing on github.ref
     # would allow a newer same-ref dispatch to suppress an older run before execution.

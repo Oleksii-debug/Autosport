@@ -54,7 +54,7 @@ permissions:
 # newer same-ref dispatch cannot pre-cancel an older one before execution. The trusted
 # supersession controller and read-only admission helper retain live truth authority.
 concurrency:
-  group: endurance-${{ github.event_name == 'pull_request' && format('pr-{0}-{1}', github.event.number, (github.event.action == 'converted_to_draft' || github.event.action == 'closed') && 'lifecycle' || (github.event.pull_request.head.sha && (github.event.pull_request.draft == true && 'lifecycle' || (github.run_attempt != 1 && format('rerun-{0}', github.event.pull_request.head.sha) || format('qualify-{0}', github.event.pull_request.head.sha))) || format('payload-empty-run-{0}', github.run_id))) || format('run-{0}', github.run_id) }}
+  group: endurance-${{ github.event_name == 'pull_request' && format('pr-{0}-{1}', github.event.number, (github.event.action == 'converted_to_draft' || github.event.action == 'closed' || github.event.pull_request.draft == true) && 'lifecycle' || (github.run_attempt != 1 && format('rerun-{0}', github.event.pull_request.head.sha) || format('qualify-{0}', github.event.pull_request.head.sha))) || format('run-{0}', github.run_id) }}
   cancel-in-progress: true
 
 jobs:
@@ -64,9 +64,7 @@ jobs:
     # ready_for_review has draft=false and still executes exact-head admission.
     if: >-
       github.event_name != 'pull_request' ||
-      (github.event.action != 'closed' &&
-       github.event.action != 'converted_to_draft' &&
-       (!github.event.pull_request.head.sha || github.event.pull_request.draft == false))
+      (github.event.action != 'closed' && github.event.pull_request.draft == false)
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
@@ -80,36 +78,18 @@ jobs:
         if: github.event_name == 'pull_request' && github.event.action != 'closed'
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
-          fetch-depth: 2
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 1
           persist-credentials: false
-      - name: Resolve exact PR head for read-only admission
-        if: github.event_name == 'pull_request' && github.event.action != 'closed' && github.event.action != 'converted_to_draft'
-        id: event_head
-        shell: bash
-        env:
-          EVENT_PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        run: |
-          if [[ -n "$EVENT_PR_HEAD_SHA" ]]; then
-            candidate_head="$EVENT_PR_HEAD_SHA"
-          else
-            candidate_head="$(git rev-parse HEAD^2)"
-          fi
-          if [[ ! "$candidate_head" =~ ^[0-9a-fA-F]{40}$ ]]; then
-            echo "Unable to resolve exact pull request head" >&2
-            exit 2
-          fi
-          echo "candidate_head=$candidate_head" >> "$GITHUB_OUTPUT"
-
       - name: Reject stale or non-integration-capable PR head before endurance allocation
-        if: github.event_name == 'pull_request' && github.event.action != 'closed' && github.event.action != 'converted_to_draft'
+        if: github.event_name == 'pull_request' && github.event.action != 'closed'
         id: admission
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: >-
           python scripts/cancel_superseded_pr_workflow_runs.py
-          --pr-number "${{ github.event.number }}"
-          --event-head-sha "${{ steps.event_head.outputs.candidate_head }}"
+          --pr-number "${{ github.event.pull_request.number }}"
+          --event-head-sha "${{ github.event.pull_request.head.sha }}"
           --workflow-name "${{ github.workflow }}"
           --current-run-id "${{ github.run_id }}"
           --admission-only
@@ -119,7 +99,10 @@ jobs:
     # Draft/closed/stale PR runs do not qualify. Scheduler partitioning only coalesces
     # equivalent qualification or lifecycle work; admission still re-resolves exact
     # live PR state/head before the matrix can allocate.
-    if: needs.superseded_run_admission.outputs.current_head == 'true'
+    if: >-
+      needs.superseded_run_admission.outputs.current_head == 'true' &&
+      (github.event_name != 'pull_request' ||
+      (github.event.action != 'closed' && github.event.pull_request.draft == false))
     name: endurance (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20

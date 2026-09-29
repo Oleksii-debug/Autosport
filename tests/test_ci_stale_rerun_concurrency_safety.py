@@ -53,8 +53,6 @@ def test_stale_rerun_cannot_share_symmetric_pr_group_with_current_head(
     assert "github.event.action == 'converted_to_draft'" in group
     assert "github.event.action == 'closed'" in group
     assert "'lifecycle'" in group
-    assert "github.event.pull_request.head.sha &&" in group
-    assert "format('payload-empty-run-{0}', github.run_id)" in group
 
     # Non-PR events have no PR/head lifecycle identity. They must be unique per run;
     # using github.ref here lets a newer same-ref push or workflow_dispatch suppress

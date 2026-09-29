@@ -212,7 +212,7 @@ _ASSESSMENT_PAYLOAD_CAPABILITY = partial(
 
 
 def _issue_assessment(*_args: object, **_kwargs: object):
-    """Reject direct module-level issuance; canonical issuance is closure-local."""
+    """Reject direct module-level issuance; canonical issuance is provider-read only."""
 
     raise BetfairCommissionApplicabilityError(
         "direct assessment issuance is not product authority"
@@ -262,14 +262,17 @@ def _assessment_identity_payload(
 
 
 def _build_product_boundary():
-    # Capture the exact negative-authority graph once. The only mutable issuance state
-    # lives in this factory scope; no module-global dict/lock/issuer is authoritative.
+    # Capture the exact negative-authority graph once. Assessment construction and
+    # registration deliberately stay inside assess(): there is no nested callable that
+    # accepts a caller-supplied observation and can mint product issuance without the
+    # canonical provider read first.
     fee_input_reader = read_betfair_execution_fee_inputs
     fee_payload_builder = _FEE_INPUT_SHA256_CAPABILITY
     canonical_json = _canonical_json
     hash_constructor = sha256
     assessment_type = BetfairCommissionApplicabilityAssessment
     error_type = BetfairCommissionApplicabilityError
+    observation_type = BetfairExecutionFeeInputsObservation
     unproven_status = BetfairCommissionApplicabilityStatus.UNPROVEN
     canonical_reasons = _CANONICAL_REASONS
     ruleset_id = _RULESET_ID
@@ -284,31 +287,17 @@ def _build_product_boundary():
     ] = {}
     issue_lock = RLock()
 
-    def register_issued(
-        assessment: BetfairCommissionApplicabilityAssessment,
-    ) -> None:
-        object_id = id(assessment)
-        issued_assessment_id = assessment.assessment_id
-
-        def cleanup(
-            reference: ReferenceType[BetfairCommissionApplicabilityAssessment],
-        ) -> None:
-            with issue_lock:
-                record = issued_by_id.get(object_id)
-                if record is not None and record[0] is reference:
-                    issued_by_id.pop(object_id, None)
-
-        reference = ref(assessment, cleanup)
-        with issue_lock:
-            issued_by_id[object_id] = (reference, issued_assessment_id)
-
-    def issue(
-        observation: BetfairExecutionFeeInputsObservation,
+    def assess(
+        client: BetfairReadOnlyClient,
+        *,
+        market_id: str,
     ) -> BetfairCommissionApplicabilityAssessment:
-        if type(observation) is not BetfairExecutionFeeInputsObservation:
+        observation = fee_input_reader(client, market_id=market_id)
+        if type(observation) is not observation_type:
             raise error_type(
                 "fee inputs must be exact BetfairExecutionFeeInputsObservation"
             )
+
         payload = {
             "schema": schema,
             "schema_version": schema_version,
@@ -361,15 +350,22 @@ def _build_product_boundary():
             ("assessment_id", assessment_id),
         ):
             object.__setattr__(assessment, name, value)
-        register_issued(assessment)
-        return assessment
 
-    def assess(
-        client: BetfairReadOnlyClient,
-        *,
-        market_id: str,
-    ) -> BetfairCommissionApplicabilityAssessment:
-        return issue(fee_input_reader(client, market_id=market_id))
+        object_id = id(assessment)
+        issued_assessment_id = assessment.assessment_id
+
+        def cleanup(
+            reference: ReferenceType[BetfairCommissionApplicabilityAssessment],
+        ) -> None:
+            with issue_lock:
+                record = issued_by_id.get(object_id)
+                if record is not None and record[0] is reference:
+                    issued_by_id.pop(object_id, None)
+
+        reference = ref(assessment, cleanup)
+        with issue_lock:
+            issued_by_id[object_id] = (reference, issued_assessment_id)
+        return assessment
 
     def require_product(
         assessment: BetfairCommissionApplicabilityAssessment,

@@ -181,7 +181,7 @@ class RunTransactionCanonicalTargetIndirectionTests(unittest.TestCase):
                 ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns),
             )
             canonical_open = run_transaction_module._open_read_only_descriptor
-            canonical_samestat = os.path.samestat
+            hostile_samestat_executed = False
             calls = 0
 
             def swap_regular_then_open(path: Path) -> int:
@@ -192,6 +192,12 @@ class RunTransactionCanonicalTargetIndirectionTests(unittest.TestCase):
                     replacement.replace(target)
                 return canonical_open(path)
 
+            def hostile_samestat(left: os.stat_result, right: os.stat_result) -> bool:
+                del left, right
+                nonlocal hostile_samestat_executed
+                hostile_samestat_executed = True
+                return True
+
             with patch.object(
                 run_transaction_module,
                 "_open_read_only_descriptor",
@@ -199,8 +205,8 @@ class RunTransactionCanonicalTargetIndirectionTests(unittest.TestCase):
             ), patch.object(
                 run_transaction_module.os.path,
                 "samestat",
-                wraps=canonical_samestat,
-            ) as identity_check:
+                side_effect=hostile_samestat,
+            ):
                 with self.assertRaisesRegex(
                     RunTransactionError,
                     "canonical path must be a stable regular non-symlink file",
@@ -211,9 +217,7 @@ class RunTransactionCanonicalTargetIndirectionTests(unittest.TestCase):
                     )
 
             self.assertEqual(calls, 1)
-            self.assertGreaterEqual(identity_check.call_count, 1)
-            first_left, first_right = identity_check.call_args_list[0].args
-            self.assertFalse(canonical_samestat(first_left, first_right))
+            self.assertFalse(hostile_samestat_executed)
             self.assertEqual(backup.read_bytes(), b'{"canonical":1}')
             self.assertEqual(target.read_bytes(), b'{"replacement":1}')
 

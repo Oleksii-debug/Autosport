@@ -1041,7 +1041,8 @@ class RunTransaction:
             if (
                 not stat.S_ISREG(opened_before.st_mode)
                 or opened_before.st_nlink != 1
-                or not os.path.samestat(path_before, opened_before)
+                or opened_before.st_dev != path_before.st_dev
+                or opened_before.st_ino != path_before.st_ino
                 or not path_matches_open_handle(handle, path_before)
             ):
                 raise RunTransactionError(

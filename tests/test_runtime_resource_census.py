@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import errno
 import json
+import os
+import runpy
 from pathlib import Path
 import tempfile
 import threading
@@ -277,6 +280,44 @@ class RuntimeResourceWorkspaceProbeTests(unittest.TestCase):
 
         self.assertEqual(result.status, "FAIL")
         self.assertEqual(result.error_type, "FileNotFoundError")
+
+    def test_endurance_evidence_writer_closes_raw_fd_when_fdopen_fails(self) -> None:
+        namespace = runpy.run_path(
+            str(
+                Path(__file__).resolve().parents[1]
+                / "scripts"
+                / "run_runtime_resource_endurance.py"
+            )
+        )
+        writer = namespace["_write_json_atomic"]
+        runner_tempfile = namespace["tempfile"]
+        runner_os = namespace["os"]
+
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "report.json"
+            captured: dict[str, object] = {}
+            real_mkstemp = runner_tempfile.mkstemp
+
+            def capture_mkstemp(*args, **kwargs):
+                fd, temporary = real_mkstemp(*args, **kwargs)
+                captured["fd"] = fd
+                captured["temporary"] = temporary
+                return fd, temporary
+
+            failure = OSError(errno.EMFILE, "injected fdopen failure")
+            with patch.object(runner_tempfile, "mkstemp", side_effect=capture_mkstemp):
+                with patch.object(runner_os, "fdopen", side_effect=failure):
+                    with self.assertRaises(OSError) as raised:
+                        writer(output, {"status": "FAIL"})
+
+            self.assertIs(raised.exception, failure)
+            fd = captured["fd"]
+            self.assertIsInstance(fd, int)
+            with self.assertRaises(OSError) as closed:
+                os.fstat(fd)
+            self.assertEqual(closed.exception.errno, errno.EBADF)
+            self.assertFalse(Path(captured["temporary"]).exists())
+            self.assertFalse(output.exists())
 
     def test_evidence_digest_is_canonical_and_order_independent(self) -> None:
         first = {"b": 2, "a": ["x", 1]}

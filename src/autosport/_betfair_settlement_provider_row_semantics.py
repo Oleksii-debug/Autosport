@@ -1,18 +1,19 @@
 """Preserve correction-relevant Betfair cleared-order facts in #1272.
 
-The read-only adapter intentionally normalizes provider rows into a small stable DTO.
-For settlement revision authority, however, documented BET-level ``betOutcome``,
-``handicap`` and ``voidedDate`` facts are correction-relevant and must not disappear
-before immutable content identity is computed. Raw JSON-RPC response hashes cannot
-substitute for normalized provider facts because request/response ids change on
-otherwise identical rereads.
+The current-main read-only adapter intentionally normalizes provider rows into a small
+stable DTO and still omits documented BET-level ``betOutcome``, ``handicap`` and
+``voidedDate`` fields.  The active canonical readback successor (#1496/#1324 lineage)
+already adds those three fields natively.  Settlement revision authority must work on
+both sides of that integration boundary without creating a competing provider client or
+second provider-truth schema.
 
-This composition layer keeps the existing adapter, capture issuance registry and
-settlement store as the sole authorities. The canonical parser carries the validated
-optional provider correction facts through one private observation subtype. The
-existing settlement revision type is extended at package composition with persisted,
-readable fields; revision content identity includes those facts while existing raw
-response and capture evidence hashes retain their original meaning.
+On an adapter that already exposes the native correction fields this composition layer
+consumes that exact DTO unchanged.  On today's main, it temporarily carries the same
+validated fields through one private subtype at the existing parser seam.  In both
+cases the settlement revision persists readable normalized correction facts and hashes
+them into immutable revision content identity.  Existing raw response/capture evidence
+hashes retain their original meaning; JSON-RPC request ids therefore cannot manufacture
+semantic revisions.
 
 No provider write, settlement-finality or real-money capability is introduced.
 """
@@ -35,6 +36,10 @@ _STORE_TYPE = _settlement.BetfairSettlementRevisionStore
 _ORIGINAL_INGEST = _STORE_TYPE.ingest
 _NO_FACT_CONTEXT = object()
 _MISSING_FACT = object()
+_NATIVE_CORRECTION_FIELDS = all(
+    name in getattr(_BASE_ORDER, "__dataclass_fields__", {})
+    for name in ("bet_outcome", "handicap", "voided_date")
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,19 +55,25 @@ _FACT_CONTEXT: ContextVar[object] = ContextVar(
 )
 
 
-@dataclass(frozen=True, slots=True)
-class _ClearedOrderWithCorrectionFacts(_BASE_ORDER):
-    bet_outcome: str | None = None
-    provider_handicap: Decimal | None = None
-    provider_voided_date: str | None = None
+if _NATIVE_CORRECTION_FIELDS:
+    _ORDER_WITH_FACTS_TYPE = _BASE_ORDER
+else:
 
-    def __post_init__(self) -> None:
-        _BASE_ORDER.__post_init__(self)
-        _adapter._optional_text(self.bet_outcome, "bet_outcome")
-        if self.provider_handicap is not None:
-            _adapter._decimal(self.provider_handicap, "provider_handicap")
-        if self.provider_voided_date is not None:
-            _adapter._iso_timestamp(self.provider_voided_date, "provider_voided_date")
+    @dataclass(frozen=True, slots=True)
+    class _ClearedOrderWithCorrectionFacts(_BASE_ORDER):
+        bet_outcome: str | None = None
+        handicap: Decimal | None = None
+        voided_date: str | None = None
+
+        def __post_init__(self) -> None:
+            _BASE_ORDER.__post_init__(self)
+            _adapter._optional_text(self.bet_outcome, "bet_outcome")
+            if self.handicap is not None:
+                _adapter._decimal(self.handicap, "handicap")
+            if self.voided_date is not None:
+                _adapter._iso_timestamp(self.voided_date, "voided_date")
+
+    _ORDER_WITH_FACTS_TYPE = _ClearedOrderWithCorrectionFacts
 
 
 @dataclass(frozen=True, slots=True)
@@ -186,19 +197,22 @@ def _parse_cleared_order_with_correction_facts(
     bet_status: str,
 ) -> _BASE_ORDER:
     order = _ORIGINAL_PARSE(value, evidence, index, bet_status)
+    if _NATIVE_CORRECTION_FIELDS:
+        return order
+
     raw = _adapter._mapping(value, f"clearedOrders[{index}]")
     outcome = _adapter._provider_optional_text(raw, "betOutcome", "bet_outcome")
     handicap = None
     if raw.get("handicap") is not None:
-        handicap = _adapter._number(raw, "handicap", "provider_handicap")
+        handicap = _adapter._number(raw, "handicap", "handicap")
     voided_date = _adapter._provider_optional_text(
         raw,
         "voidedDate",
-        "provider_voided_date",
+        "voided_date",
     )
     if voided_date is not None:
-        _adapter._iso_timestamp(voided_date, "provider_voided_date")
-    return _ClearedOrderWithCorrectionFacts(
+        _adapter._iso_timestamp(voided_date, "voided_date")
+    return _ORDER_WITH_FACTS_TYPE(
         bet_id=order.bet_id,
         market_id=order.market_id,
         selection_id=order.selection_id,
@@ -215,8 +229,20 @@ def _parse_cleared_order_with_correction_facts(
         evidence=order.evidence,
         event_id=order.event_id,
         bet_outcome=outcome,
-        provider_handicap=handicap,
-        provider_voided_date=voided_date,
+        handicap=handicap,
+        voided_date=voided_date,
+    )
+
+
+def _correction_facts(order) -> _ProviderCorrectionFacts:
+    if type(order) is not _ORDER_WITH_FACTS_TYPE:
+        raise _settlement.BetfairSettlementRevisionError(
+            "settlement cleared row lacks canonical provider correction facts"
+        )
+    return _ProviderCorrectionFacts(
+        bet_outcome=order.bet_outcome,
+        provider_handicap=order.handicap,
+        provider_voided_date=order.voided_date,
     )
 
 
@@ -227,15 +253,7 @@ def _semantic_payload_with_correction_facts(
     plan_id: str,
     attempt_id: str,
 ):
-    if type(order) is not _ClearedOrderWithCorrectionFacts:
-        raise _settlement.BetfairSettlementRevisionError(
-            "settlement cleared row lacks canonical provider correction facts"
-        )
-    facts = _ProviderCorrectionFacts(
-        bet_outcome=order.bet_outcome,
-        provider_handicap=order.provider_handicap,
-        provider_voided_date=order.provider_voided_date,
-    )
+    facts = _correction_facts(order)
     _FACT_CONTEXT.set(facts)
     payload = _ORIGINAL_SEMANTIC_PAYLOAD(
         action,
@@ -286,7 +304,8 @@ if _settlement.BetfairSettlementRevision is not _BASE_REVISION:
 if _STORE_TYPE.ingest is not _ORIGINAL_INGEST:
     raise RuntimeError("Betfair settlement ingest changed before correction-fact install")
 
-_adapter._parse_cleared_order = _parse_cleared_order_with_correction_facts
+if not _NATIVE_CORRECTION_FIELDS:
+    _adapter._parse_cleared_order = _parse_cleared_order_with_correction_facts
 _settlement._semantic_payload = _semantic_payload_with_correction_facts
 _settlement.BetfairSettlementRevision = _SettlementRevisionWithCorrectionFacts
 _STORE_TYPE.ingest = _ingest_with_correction_fact_context

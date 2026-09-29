@@ -46,9 +46,9 @@ from .source_universe_commitment import (
 )
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 PROVIDER_ID = "BETFAIR"
-PARTITION_ALGORITHM_VERSION = "betfair-catalog-partition-v1"
+PARTITION_ALGORITHM_VERSION = "betfair-catalog-categorical-partition-v2"
 _TERMINAL_STATUSES = frozenset(
     {
         "SUCCESS",
@@ -271,7 +271,14 @@ def _clone_request_with_filter(
 def split_catalog_coverage_request(
     request: BetfairCatalogRequest,
 ) -> tuple[BetfairCatalogRequest, BetfairCatalogRequest] | None:
-    """Split one saturated request into two exact, deterministic, disjoint children."""
+    """Split a saturated request only across explicit categorical selectors.
+
+    Betfair does not document listMarketCatalogue marketStartTime endpoint
+    inclusivity/exclusivity. A disjoint time split would therefore invent
+    provider semantics and could silently omit boundary markets. Until an
+    overlap-guarded split also persists and reconciles exact market identities,
+    time-only saturation is deliberately unsplittable.
+    """
 
     _request_payload(request)
     params = request.rpc_params()
@@ -305,29 +312,7 @@ def split_catalog_coverage_request(
                 _clone_request_with_filter(request, right_filter),
             )
 
-    start, end = _bounded_market_time(request)
-    if start == end:
-        return None
-    midpoint = start + (end - start) // 2
-    right_start = midpoint + timedelta(microseconds=1)
-    if right_start > end:
-        return None
-
-    left_filter = dict(market_filter)
-    right_filter = dict(market_filter)
-    left_filter["marketStartTime"] = {
-        "from": _utc_text(start),
-        "to": _utc_text(midpoint),
-    }
-    right_filter["marketStartTime"] = {
-        "from": _utc_text(right_start),
-        "to": _utc_text(end),
-    }
-    return (
-        _clone_request_with_filter(request, left_filter),
-        _clone_request_with_filter(request, right_filter),
-    )
-
+    return None
 
 @dataclass(frozen=True, slots=True)
 class CatalogCoveragePlan:
@@ -877,6 +862,90 @@ def pending_catalog_coverage_leaves(
     return tuple(items)
 
 
+def _market_observation_payloads(markets: Sequence[object]) -> list[dict[str, object]]:
+    """Freeze exact catalogue identities needed to reconcile split observations."""
+
+    payloads: list[dict[str, object]] = []
+    seen: set[str] = set()
+    for market in markets:
+        try:
+            payload = {
+                "market_id": market.market_id,
+                "event_type_id": market.event_type_id,
+                "event_id": market.event_id,
+                "market_name": market.market_name,
+                "market_start_time": market.market_start_time,
+                "market_type_code": market.market_type_code,
+                "competition_id": market.competition_id,
+            }
+        except AttributeError as exc:
+            raise BetfairCatalogCoverageError(
+                "catalogue market observation is not canonical"
+            ) from exc
+        market_id = _text(payload["market_id"], "market_id")
+        if market_id in seen:
+            raise BetfairCatalogCoverageError(
+                "catalogue market observation contains duplicate market_id"
+            )
+        seen.add(market_id)
+        payloads.append(payload)
+    payloads.sort(key=lambda item: item["market_id"])
+    return payloads
+
+
+def _terminal_market_map(
+    terminal: Mapping[str, object],
+) -> dict[str, str]:
+    raw = terminal.get("market_observations")
+    if type(raw) is not list:
+        raise BetfairCatalogCoverageError(
+            "coverage terminal market observations are malformed"
+        )
+    result_count = terminal.get("result_count")
+    if type(result_count) is not int or isinstance(result_count, bool):
+        raise BetfairCatalogCoverageError(
+            "positive coverage terminal result_count is malformed"
+        )
+    if result_count != len(raw):
+        raise BetfairCatalogCoverageError(
+            "coverage terminal result_count disagrees with market observations"
+        )
+    mapped: dict[str, str] = {}
+    required = {
+        "market_id",
+        "event_type_id",
+        "event_id",
+        "market_name",
+        "market_start_time",
+        "market_type_code",
+        "competition_id",
+    }
+    for item in raw:
+        if type(item) is not dict or set(item) != required:
+            raise BetfairCatalogCoverageError(
+                "coverage terminal market identity payload is malformed"
+            )
+        market_id = _text(item.get("market_id"), "market_id")
+        for field in (
+            "event_type_id",
+            "event_id",
+            "market_name",
+            "market_start_time",
+        ):
+            _text(item.get(field), f"market_observations.{field}")
+        for field in ("market_type_code", "competition_id"):
+            value = item.get(field)
+            if value is not None:
+                _text(value, f"market_observations.{field}")
+        identity = _canonical_json(item)
+        if market_id in mapped:
+            raise BetfairCatalogCoverageError(
+                "coverage terminal repeats market_id"
+            )
+        mapped[market_id] = identity
+    return mapped
+
+
 def _terminal_payload(
     *,
     plan: CatalogCoveragePlan,
@@ -888,6 +957,7 @@ def _terminal_payload(
     transport_authority_ref: str | None,
     child_leaf_ids: Sequence[str],
     error_code: str | None,
+    market_observations: Sequence[Mapping[str, object]] = (),
 ) -> dict[str, object]:
     if status not in _TERMINAL_STATUSES:
         raise BetfairCatalogCoverageError("unsupported coverage terminal status")
@@ -903,6 +973,7 @@ def _terminal_payload(
         "transport_authority_ref": transport_authority_ref,
         "child_leaf_ids": list(child_leaf_ids),
         "error_code": error_code,
+        "market_observations": [dict(item) for item in market_observations],
     }
 
 
@@ -1036,6 +1107,7 @@ def record_catalog_coverage_acquisition(
             "coverage acquisition cannot be parsed against exact request scope"
         ) from exc
 
+    market_observations = _market_observation_payloads(batch.markets)
     children: tuple[BetfairCatalogRequest, ...] = ()
     if batch.continuation_required:
         split = split_catalog_coverage_request(leaf.request)
@@ -1072,6 +1144,7 @@ def record_catalog_coverage_acquisition(
             if status == "SATURATED_UNSPLITTABLE"
             else None
         ),
+        market_observations=market_observations,
     )
     durable_children = _persist_terminal_and_children(
         store,
@@ -1309,11 +1382,45 @@ def resolve_catalog_coverage(
                 )
             required_terminals[key] = (leaf, terminal)
 
+    def reconcile_subtree(leaf_id: str) -> dict[str, str] | None:
+        leaf, terminal = starts[leaf_id]
+        del leaf
+        if terminal is None:
+            return None
+        status = terminal["status"]
+        if status in {"SUCCESS", "EMPTY"}:
+            return _terminal_market_map(terminal)
+        if status != "SATURATED_SPLIT":
+            return None
+
+        parent_observations = _terminal_market_map(terminal)
+        child_ids = terminal["child_leaf_ids"]
+        combined: dict[str, str] = {}
+        for child_id in child_ids:
+            child_observations = reconcile_subtree(child_id)
+            if child_observations is None:
+                return None
+            for market_id, identity in child_observations.items():
+                if market_id in combined:
+                    raise BetfairCatalogCoverageError(
+                        "categorical split child observations overlap by market_id"
+                    )
+                combined[market_id] = identity
+
+        for market_id, identity in parent_observations.items():
+            if combined.get(market_id) != identity:
+                raise BetfairCatalogCoverageError(
+                    "saturated parent observation is not reconciled by child coverage"
+                )
+        return combined
+
+    reconciled_root = reconcile_subtree(roots[0].leaf_id)
     durable_complete = (
         pending_count == 0
         and counts["FAILURE"] == 0
         and counts["SATURATED_UNSPLITTABLE"] == 0
         and counts["AFTER_CAUSAL_CUTOFF"] == 0
+        and reconciled_root is not None
     )
 
     live_by_key: dict[

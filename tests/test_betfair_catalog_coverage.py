@@ -252,9 +252,9 @@ def test_saturated_root_expands_to_persisted_disjoint_children_and_live_completi
         store,
         expected_store_path=store.path,
         plan_id=plan.plan_id,
-        live_receipts=(
-            root_acquisition.receipt,
-            *(item.receipt for item in child_acquisitions),
+        live_acquisitions=(
+            root_acquisition,
+            *child_acquisitions,
         ),
     )
     assert live.durable_partition_complete is True
@@ -402,7 +402,7 @@ def test_unsplittable_saturation_is_explicit_not_false_complete(
         store,
         expected_store_path=store.path,
         plan_id=plan.plan_id,
-        live_receipts=(acquisition.receipt,),
+        live_acquisitions=(acquisition,),
     )
     assert truth.unsplittable_count == 1
     assert truth.provider_visible_scope_complete is False

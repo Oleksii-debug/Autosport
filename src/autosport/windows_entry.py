@@ -25,10 +25,12 @@ def _show_workspace_configuration_error(detail: str) -> None:
 
     import ctypes
 
+    # ValueError text is implementation diagnostics, not bounded operator copy.  The
+    # recovery instruction below is complete without announcing Python-origin text.
+    del detail
     title = "Автоспорт — помилка конфігурації workspace"
     message = (
         "Автоспорт не відкрив interactive workspace через недійсну конфігурацію.\n\n"
-        f"{detail}\n\n"
         "Вкажіть абсолютний шлях у AUTOSPORT_WORKSPACE або виправте LOCALAPPDATA, "
         "потім перезапустіть Автоспорт. Economic і live state не змінено."
     )

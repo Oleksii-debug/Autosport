@@ -6,7 +6,10 @@ import hashlib
 import json
 from typing import Mapping, Sequence
 
-from .betdaq_event_tree_request_wire import BetdaqEventSubTreeRequest
+from .betdaq_event_tree_request_wire import (
+    BETDAQ_PROVIDER_LONG_MAX,
+    BetdaqEventSubTreeRequest,
+)
 from .betdaq_event_tree_wire import (
     BetdaqDiscoveryMarket,
     BetdaqEventClassifier,
@@ -80,11 +83,20 @@ def betdaq_event_scope_id(value: str) -> int:
             "live BETDAQ provider_event_id scope assertion must be a decimal event-classifier id"
         )
     result = int(value, 10)
-    if str(result) != value:
+    if str(result) != value or result > BETDAQ_PROVIDER_LONG_MAX:
         raise ValueError(
-            "live BETDAQ provider_event_id scope assertion must use canonical decimal text"
+            "live BETDAQ provider_event_id scope assertion must use canonical provider long text"
         )
     return result
+
+
+def _provider_event_id(value: int) -> int:
+    try:
+        return betdaq_event_scope_id(str(value))
+    except ValueError as exc:
+        raise BetdaqSoapProtocolError(
+            "BETDAQ catalogue event identity is outside provider long domain"
+        ) from exc
 
 
 def _flatten_events(
@@ -97,9 +109,11 @@ def _flatten_events(
         path_ids: tuple[int, ...],
         path_names: tuple[str, ...],
     ) -> None:
-        ids = (*path_ids, event.event_classifier_id)
+        event_id = _provider_event_id(event.event_classifier_id)
+        ids = (*path_ids, event_id)
         names = (*path_names, event.name)
         for market in event.markets:
+            _provider_event_id(market.event_classifier_id)
             if market.market_id in located:
                 raise ValueError("BETDAQ catalogue contains duplicate market identity")
             located[market.market_id] = _LocatedMarket(market, ids, names)

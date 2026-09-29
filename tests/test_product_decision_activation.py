@@ -386,6 +386,7 @@ class ProductDecisionActivationTests(unittest.TestCase):
     def test_store_workspace_rebind_cannot_cross_sign_foreign_start_authority(
         self,
     ) -> None:
+        canonical_workspace = self.store.workspace
         alternate_workspace = self.test_root / "workspace-b"
         alternate_workspace.mkdir()
         for source in self.workspace.iterdir():
@@ -427,7 +428,7 @@ class ProductDecisionActivationTests(unittest.TestCase):
         canonical_path = self.workspace / "product_decision_activation.json"
         self.assertFalse(canonical_path.exists())
 
-        object.__setattr__(self.store, "workspace", self.workspace)
+        object.__setattr__(self.store, "workspace", canonical_workspace)
         canonical = self._initialize()
         self.assertEqual(canonical.product_source_id, "provider-a")
 
@@ -449,7 +450,7 @@ class ProductDecisionActivationTests(unittest.TestCase):
                 execution_config=self.execution,
             )
 
-        object.__setattr__(self.store, "workspace", self.workspace)
+        object.__setattr__(self.store, "workspace", canonical_workspace)
         self.assertEqual(self.store.load(), canonical)
 
     def test_nested_authority_instance_dispatch_shadow_fails_before_start_publication(
@@ -1086,7 +1087,7 @@ class ProductDecisionActivationTests(unittest.TestCase):
         self.assertEqual(forged_calls, [])
         with self.assertRaisesRegex(
             ProductDecisionActivationError,
-            "no longer matches exact durable authority owner bytes",
+            "supported START activation evidence no longer matches durable authority",
         ):
             self._verify()
 
@@ -1636,7 +1637,7 @@ class ProductDecisionActivationTests(unittest.TestCase):
 
         with self.assertRaisesRegex(
             ProductDecisionActivationError,
-            "no longer matches durable authority",
+            "economic_goal no longer matches exact durable authority owner bytes",
         ):
             self._verify(
                 economic_goal=changed_goal,
@@ -2065,6 +2066,18 @@ class ProductDecisionActivationTests(unittest.TestCase):
         with self.assertRaisesRegex(
             ProductDecisionActivationError,
             "strict UTF-8 JSON",
+        ):
+            self.store.load()
+
+    def test_oversized_activation_state_fails_before_json_decode(self) -> None:
+        self._initialize()
+        self.store.path.write_bytes(
+            b"{" + (b"x" * activation_module._MAX_ACTIVATION_STATE_BYTES)
+        )
+
+        with self.assertRaisesRegex(
+            ProductDecisionActivationError,
+            "exceeds bounded durable-state size",
         ):
             self.store.load()
 

@@ -39,7 +39,8 @@ def _resolver_cycle(tmp_path: Path, authority) -> ProductPaperDecisionCycle:
     cycle.runtime = SimpleNamespace(workspace=tmp_path)
     cycle.authority = authority
     cycle.intent_factory = _IntentFactory()
-    cycle.scientific_registry = object()
+    cycle._test_scientific_registry = object()
+    cycle._scientific_registry_loader = lambda: cycle._test_scientific_registry
     cycle.execution_config = object()
     cycle.max_quote_age = timedelta(seconds=4)
     return cycle
@@ -137,7 +138,7 @@ def test_resolver_reconstructs_fresh_authority_from_durable_start(
         "expected_policy_provenance_sha256": "b" * 64,
     }
     verify = calls["activation_verify"]
-    assert verify["scientific_registry"] is cycle.scientific_registry
+    assert verify["scientific_registry"] is cycle._test_scientific_registry
     assert verify["strategy_version_id"] == "strategy-v1"
     assert verify["economic_goal"] is goal
     assert verify["risk_policy"] is risk_policy

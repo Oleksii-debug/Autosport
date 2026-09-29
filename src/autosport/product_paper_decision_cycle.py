@@ -7,6 +7,7 @@ from pathlib import Path
 from threading import Lock
 from typing import Callable
 
+from .causal_collector import SyncState
 from .decision_ledger import EconomicDecisionAuthority, JsonlDecisionLedger
 from .economic_goal_provenance import provenance_for
 from .economic_goal_store import EconomicGoalStore
@@ -59,6 +60,58 @@ def _canonical_selector(value: _Selector, field: str) -> _Selector:
     if len(set(value)) != len(value) or value != tuple(sorted(value)):
         raise ValueError(f"{field} must be sorted and unique")
     return value
+
+
+def _bind_scientific_registry_loader(
+    canonical_registry_type: type,
+    registry_path: Path,
+    workspace_provider: Callable[[], Path],
+) -> Callable[[], ScientificRegistry]:
+    """Bind canonical registry reconstruction without late public dispatch.
+
+    The product intentionally supports dependency substitution only while composing a
+    cycle (the existing focused tests use that seam). Once composition succeeds, the
+    registry constructor that passed the exact-type/workspace checks becomes part of the
+    product authority. Later mutation of the module-global dispatch or in-place mutation
+    of that constructor executable must therefore fail closed before caller code runs.
+    """
+
+    canonical_init = canonical_registry_type.__init__
+    canonical_init_code = getattr(canonical_init, "__code__", None)
+
+    def load_current_scientific_registry() -> ScientificRegistry:
+        if ScientificRegistry is not canonical_registry_type:
+            raise ProductPaperDecisionCycleError(
+                "canonical ScientificRegistry authority changed after composition"
+            )
+        current_init = canonical_registry_type.__init__
+        if current_init is not canonical_init or (
+            canonical_init_code is not None
+            and getattr(canonical_init, "__code__", None) is not canonical_init_code
+        ):
+            raise ProductPaperDecisionCycleError(
+                "canonical ScientificRegistry constructor authority changed"
+            )
+        try:
+            registry = canonical_registry_type(registry_path)
+        except Exception as exc:
+            raise ProductPaperDecisionCycleError(
+                "canonical product scientific registry cannot be reconstructed"
+            ) from exc
+        if type(registry) is not canonical_registry_type:
+            raise ProductPaperDecisionCycleError(
+                "scientific registry reconstruction returned a non-canonical type"
+            )
+        resolved = Path(registry.path).resolve(strict=False)
+        workspace = Path(workspace_provider()).resolve(strict=False)
+        if resolved != registry_path or resolved.parent != workspace:
+            raise ProductPaperDecisionCycleError(
+                "scientific registry reconstruction escaped the product workspace"
+            )
+        return registry
+
+    return load_current_scientific_registry
+
 
 
 def _verified_live_recovery_cursor(workspace: Path) -> _Progress | None:
@@ -200,7 +253,7 @@ def _make_product_authority_resolver(
             )
             verified_activation = activation_store_verify(
                 activation_store,
-                scientific_registry=self.scientific_registry,
+                scientific_registry=self._load_current_scientific_registry(),
                 strategy_version_id=self.intent_factory.strategy_version_id,
                 economic_goal=economic_goal,
                 risk_policy=risk_policy,
@@ -340,12 +393,13 @@ class ProductPaperDecisionCycle:
         bounds: LiveLoopBounds | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
+        canonical_scientific_registry_type = ScientificRegistry
         if type(runtime) is not AutonomousProductRuntime:
             raise TypeError("runtime must be the canonical AutonomousProductRuntime")
         if type(loop_id) is not str or not loop_id or loop_id.strip() != loop_id:
             raise ValueError("loop_id must be non-empty trimmed text")
-        if not isinstance(authority, EconomicDecisionAuthority):
-            raise TypeError("authority must be EconomicDecisionAuthority")
+        if type(authority) is not EconomicDecisionAuthority:
+            raise TypeError("authority must be the canonical EconomicDecisionAuthority")
         if not callable(intent_factory):
             raise TypeError("intent_factory must be callable")
         strategy_version_id = getattr(intent_factory, "strategy_version_id", None)
@@ -357,8 +411,8 @@ class ProductPaperDecisionCycle:
             raise TypeError(
                 "intent_factory must expose canonical strategy_version_id"
             )
-        if not isinstance(scientific_registry, ScientificRegistry):
-            raise TypeError("scientific_registry must be ScientificRegistry")
+        if type(scientific_registry) is not canonical_scientific_registry_type:
+            raise TypeError("scientific_registry must be the canonical ScientificRegistry")
         if not isinstance(execution_config, PaperExecutionModelConfig):
             raise TypeError("execution_config must be PaperExecutionModelConfig")
         if not isinstance(max_quote_age, timedelta) or max_quote_age <= timedelta(0):
@@ -393,9 +447,9 @@ class ProductPaperDecisionCycle:
         if clock is not None and not callable(clock):
             raise TypeError("clock must be callable or None")
 
-        workspace = Path(runtime.workspace)
-        registry_path = Path(scientific_registry.path)
-        if registry_path.parent.resolve() != workspace.resolve():
+        workspace = Path(runtime.workspace).resolve(strict=False)
+        registry_path = Path(scientific_registry.path).resolve(strict=False)
+        if registry_path.parent != workspace:
             raise ProductPaperDecisionCycleError(
                 "scientific registry must belong to the product runtime workspace"
             )
@@ -404,7 +458,12 @@ class ProductPaperDecisionCycle:
         self.loop_id = loop_id
         self.authority = authority
         self.intent_factory = intent_factory
-        self.scientific_registry = scientific_registry
+        self._scientific_registry_path = registry_path
+        self._scientific_registry_loader = _bind_scientific_registry_loader(
+            canonical_scientific_registry_type,
+            registry_path,
+            lambda: Path(self.runtime.workspace),
+        )
         self.execution_config = execution_config
         self.max_quote_age = max_quote_age
         self.inputs = inputs
@@ -415,6 +474,11 @@ class ProductPaperDecisionCycle:
     @property
     def workspace(self) -> Path:
         return Path(self.runtime.workspace)
+
+    def _load_current_scientific_registry(self) -> ScientificRegistry:
+        """Reconstruct current product scientific authority from the bound path."""
+
+        return self._scientific_registry_loader()
 
     _resolve_product_authority = _CANONICAL_PRODUCT_AUTHORITY_RESOLVER
 
@@ -441,6 +505,8 @@ class ProductPaperDecisionCycle:
             return "market_invalidation_backlog"
         if getattr(status, "source_provider_unavailable", None) is True:
             return "source_provider_unavailable"
+        if getattr(status, "source_sync_state", None) == SyncState.RETRY_REQUIRED.value:
+            return "source_retry_required"
         unresolved = getattr(status, "source_unresolved_gap_delta_ids", None)
         if unresolved:
             return "source_gap_unresolved"
@@ -527,13 +593,14 @@ class ProductPaperDecisionCycle:
     ) -> LiveCycleResult:
         self._require_running_runtime()
         effective_authority = self.authority if authority is None else authority
-        if not isinstance(effective_authority, EconomicDecisionAuthority):
-            raise TypeError("decision authority must be EconomicDecisionAuthority")
+        if type(effective_authority) is not EconomicDecisionAuthority:
+            raise TypeError("decision authority must be the canonical EconomicDecisionAuthority")
+        scientific_registry = self._load_current_scientific_registry()
         provenance_now = (
             self.clock() if self.clock is not None else datetime.now(timezone.utc)
         )
         LiveIntentProvenance.from_registry(
-            self.scientific_registry,
+            scientific_registry,
             self.intent_factory.strategy_version_id,
             as_of=provenance_now,
         )
@@ -556,7 +623,7 @@ class ProductPaperDecisionCycle:
             book=book,
             authority=effective_authority,
             intent_factory=self.intent_factory,
-            scientific_registry=self.scientific_registry,
+            scientific_registry=scientific_registry,
             decision_ledger=decision_ledger,
             paper_execution=execution,
             max_quote_age=self.max_quote_age,

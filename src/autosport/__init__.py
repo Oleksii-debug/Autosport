@@ -150,10 +150,39 @@ from . import _trial_family_witness_mint_guard as _trial_family_witness_mint_gua
 # so a class/module rebind cannot inject forged bytes beneath that trusted surface.
 from . import _policy_evaluation_canonical_reader_authority as _policy_evaluation_canonical_reader_authority  # noqa: F401,E402
 
+# Robust portfolio stakes are monetary grid values, not Decimal exponent values.
+# Install the exact arbitrary-quantum floor after the owning proposal implementation.
+from . import _robust_portfolio_quantum_grid as _robust_portfolio_quantum_grid  # noqa: F401,E402
+
+# Caller-owned market-filter containers cannot remain authority-bearing after the
+# authenticated Betfair subscription starts. Snapshot once, then let the canonical
+# existing issuer hash and send only that detached product-owned value.
+from . import _betfair_authenticated_stream_filter_snapshot as _betfair_authenticated_stream_filter_snapshot  # noqa: F401,E402
+
+# Resolve the product-owned selector location through platform callables captured
+# before the broader executable-dispatch composition freezes the selection chain.
+from . import _monotonic_root_selection_os_resolver_guard as _monotonic_root_selection_os_resolver_guard  # noqa: F401,E402
+
+# The machine-state root selector is only an independent trust root if its executable
+# store resolver cannot be replaced after package import. Freeze that dispatch and
+# MonotonicWorkspaceAuthority construction over the exact canonical selector entrypoints.
+from . import _monotonic_root_selection_dispatch_guard as _monotonic_root_selection_dispatch_guard  # noqa: F401,E402
+
 # A supported START is not caller-visible until the exact durable activation bytes
-# have been re-read against the already-committed monotonic witness.
+# have been re-read against the already-committed monotonic witness. Compose this only
+# after the root-selection guard freezes MonotonicWorkspaceAuthority construction so
+# activation freezes the final product-owned constructor identity, not its precursor.
 from . import _product_decision_activation_commit_return_guard as _product_decision_activation_commit_return_guard  # noqa: F401,E402
 
 # The supported PAPER tick must consume the exact durable decision-authority resolver;
 # caller/instance/class rebinding of that private seam cannot mint START authority.
 from . import _product_paper_decision_authority_dispatch_guard as _product_paper_decision_authority_dispatch_guard  # noqa: F401,E402
+
+# Drift metric values are exact fixed-point scientific metadata. Reject noncanonical
+# exponent forms and oversized text before Decimal fixed-point materialization so
+# tiny hostile inputs cannot amplify into attacker-sized evidence strings.
+from . import _drift_decimal_resource_guard as _drift_decimal_resource_guard  # noqa: F401,E402
+
+# K07 authenticated account identity must acquire account details from a sealed
+# product-origin snapshot, not mutable live-client fields during provider I/O.
+from . import _betfair_account_identity_io_snapshot_guard as _betfair_account_identity_io_snapshot_guard  # noqa: F401,E402

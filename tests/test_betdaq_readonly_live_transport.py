@@ -514,8 +514,8 @@ def test_live_provider_keeps_origin_unverified_after_valid_snapshot(
     assert catalogue is not None
     assert evidence.catalogue_response_sha256 == catalogue.response_sha256
     assert (
-        evidence.catalogue_rate_admission_receipt
-        == catalogue.rate_admission_receipt
+        evidence.catalogue_rate_admission_receipts
+        == catalogue.rate_admission_receipts
     )
     assert evidence.catalogue_event_classifier_ids == (100,)
     admission = provider.live_transport.last_rate_admission

@@ -532,9 +532,6 @@ def test_source_mismatch_is_rejected_before_schedule_mutation(
         "_CANONICAL_GATE_AUTHORIZE",
         "_CANONICAL_SCHEDULE_ID",
         "_CANONICAL_SCHEDULE_DUE_AT",
-        "_CANONICAL_PATH_EQUALITY",
-        "_CANONICAL_PATH_FSPATH",
-        "_CANONICAL_ABSPATH",
     ),
 )
 def test_inception_rejects_canonical_alias_rebind_before_hostile_dispatch(
@@ -554,6 +551,48 @@ def test_inception_rejects_canonical_alias_rebind_before_hostile_dispatch(
     with pytest.raises(
         CampaignInceptionIntegrityError,
         match="canonical dispatch authority is rebound",
+    ):
+        establish_campaign_inception(
+            precommit_locator=locator,
+            store=store,
+            source_spec=spec,
+        )
+
+    assert calls == []
+    assert (
+        store._collector_schedule_start_gate_status(
+            source_id=spec.source_id,
+            run_id=spec.run_id,
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize(
+    "alias_name",
+    (
+        "_CANONICAL_PATH_EQUALITY",
+        "_CANONICAL_PATH_FSPATH",
+        "_CANONICAL_ABSPATH",
+    ),
+)
+def test_inception_rejects_path_alias_rebind_before_prestart_dispatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    alias_name: str,
+) -> None:
+    _manifest_value, locator, store, spec, _authority_root = _setup(tmp_path)
+    original = getattr(inception_module, alias_name)
+    calls: list[str] = []
+
+    def hostile(*args: object, **kwargs: object):
+        calls.append(alias_name)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(inception_module, alias_name, hostile)
+    with pytest.raises(
+        CampaignInceptionIntegrityError,
+        match="path dispatch authority is rebound or mutated",
     ):
         establish_campaign_inception(
             precommit_locator=locator,

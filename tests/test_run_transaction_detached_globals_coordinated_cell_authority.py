@@ -66,3 +66,44 @@ def test_binding_checker_rejects_coordinated_clone_verifier_and_anchor_retarget(
     assert executed_globals_cell.cell_contents is original_executed_globals
     assert verifier_globals_cell.cell_contents is original_verifier_globals
     assert anchor_cell.cell_contents is original_anchor
+
+
+def test_guard_rejects_coordinated_execution_snapshot_and_anchor_retarget() -> None:
+    """Execution snapshot and its writable tuple anchor cannot move together."""
+
+    guarded = run_transaction._promote_paper_book_snapshot
+    assert isinstance(guarded, FunctionType)
+
+    snapshot_cell = _closure_cell(guarded, "frozen_globals_items")
+    anchor_cell = _closure_cell(guarded, "frozen_globals_items_anchor")
+    original_snapshot = snapshot_cell.cell_contents
+    original_anchor = anchor_cell.cell_contents
+    assert type(original_snapshot) is tuple
+    assert type(original_anchor) is tuple
+    assert len(original_anchor) == 1
+    assert original_anchor[0] is original_snapshot
+
+    replacement_snapshot = tuple(list(original_snapshot))
+    assert replacement_snapshot == original_snapshot
+    assert replacement_snapshot is not original_snapshot
+
+    snapshot_cell.cell_contents = replacement_snapshot
+    anchor_cell.cell_contents = (replacement_snapshot,)
+    try:
+        try:
+            guarded()
+        except Exception as exc:  # noqa: BLE001 - rejection must happen before delegate binding.
+            assert not isinstance(exc, TypeError), (
+                "guard admitted coordinated execution-snapshot and anchor retargeting "
+                "far enough to invoke delegated argument binding"
+            )
+        else:
+            raise AssertionError(
+                "guard unexpectedly returned after coordinated execution-snapshot retargeting"
+            )
+    finally:
+        anchor_cell.cell_contents = original_anchor
+        snapshot_cell.cell_contents = original_snapshot
+
+    assert snapshot_cell.cell_contents is original_snapshot
+    assert anchor_cell.cell_contents is original_anchor

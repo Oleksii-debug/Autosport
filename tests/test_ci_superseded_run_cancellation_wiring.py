@@ -75,7 +75,11 @@ def test_closed_pr_lifecycle_never_requires_head_checkout(
     # Server-side job admission rejects closed or draft PR activity, while non-PR
     # activity remains admitted. This makes closed/converted-to-draft cleanup runner-free.
     assert "github.event_name != 'pull_request' ||" in admission
-    assert "github.event.action != 'closed' && github.event.pull_request.draft == false" in admission
+    assert "github.event.action != 'closed' &&" in admission
+    assert "github.event.pull_request.head.sha &&" in admission
+    assert "github.event.pull_request.head.repo.full_name == github.repository &&" in admission
+    assert "github.event.pull_request.base.repo.full_name == github.repository &&" in admission
+    assert "github.event.pull_request.draft == false)" in admission
 
     # Any PR checkout/admission step that remains is explicitly non-closed and therefore
     # cannot dereference a deleted source branch for a closed lifecycle event.

@@ -38,8 +38,13 @@ def _assert_head_partitioned_pr_scheduler(path: str) -> None:
     assert "github.event.action == 'closed'" in concurrency_block
     assert "github.event.pull_request.draft == true" in concurrency_block
     assert "'lifecycle'" in concurrency_block
-    assert "github.run_id" not in concurrency_block
     assert "format('pr-{0}-run-{1}'" not in concurrency_block
+
+    # Non-PR workflow activity has no trustworthy PR/head identity. Keep it run-unique
+    # rather than coalescing on github.ref, which could pre-cancel same-ref work before
+    # admission or product qualification executes.
+    assert "|| format('run-{0}', github.run_id)" in concurrency_block
+    assert "github.ref" not in concurrency_block
 
     # Closed, converted-to-draft, and any already-draft PR activity must coalesce
     # before exact-head rerun/qualification classification. This prevents each

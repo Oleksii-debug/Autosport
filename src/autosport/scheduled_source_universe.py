@@ -40,6 +40,7 @@ _CANONICAL_SCHEDULE_CLASS_READ_SEAMS = {
     name: inspect.getattr_static(CollectorDeltaStore, name)
     for name in _CANONICAL_SCHEDULE_READ_SEAMS
 }
+_CANONICAL_PATH_EQUALITY = Path.__eq__
 _SCHEDULE_KEYS = frozenset(
     {
         "schema_version",
@@ -160,7 +161,7 @@ def _require_expected_store_path(
         raise ScheduledSourceUniverseError(
             "canonical collector store path identity is unavailable"
         )
-    if current != expected:
+    if _CANONICAL_PATH_EQUALITY(current, expected) is not True:
         raise ScheduledSourceUniverseError(
             "collector store path does not match product-expected authority path"
         )
@@ -543,6 +544,10 @@ def _seal_scheduled_source_universe_dispatch() -> None:
     expected_getattr_static_code = getattr(
         expected_getattr_static, "__code__", None
     )
+    expected_path_equality = _CANONICAL_PATH_EQUALITY
+    expected_path_equality_code = getattr(
+        expected_path_equality, "__code__", None
+    )
     expected_schedule_evidence = _CANONICAL_SCHEDULE_EVIDENCE
     expected_schedule_evidence_code = getattr(
         expected_schedule_evidence, "__code__", None
@@ -638,6 +643,15 @@ def _seal_scheduled_source_universe_dispatch() -> None:
         if module_globals.get("Path") is not expected_path_type:
             raise expected_error_type(
                 "scheduled source-universe path authority is rebound"
+            )
+        if (
+            module_globals.get("_CANONICAL_PATH_EQUALITY")
+            is not expected_path_equality
+            or getattr(expected_path_equality, "__code__", None)
+            is not expected_path_equality_code
+        ):
+            raise expected_error_type(
+                "scheduled source-universe path comparison authority is rebound or mutated"
             )
         if (
             module_globals.get("hashlib") is not expected_hashlib

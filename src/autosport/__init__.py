@@ -181,3 +181,7 @@ from . import _betfair_account_identity_io_snapshot_guard as _betfair_account_id
 # factory manifest precommits the exact durable registry envelope and the resolver
 # re-reads that envelope through source-owned ScientificRegistry read authority.
 from . import _predictive_target_protocol_envelope_authority as _predictive_target_protocol_envelope_authority  # noqa: F401,E402
+
+# A frozen target population must not acquire a new identity merely because the
+# same causal instant is written with an equivalent ISO-8601 offset spelling.
+from . import _predictive_target_timestamp_canonicalization as _predictive_target_timestamp_canonicalization  # noqa: F401,E402

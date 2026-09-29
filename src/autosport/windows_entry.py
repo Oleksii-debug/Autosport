@@ -88,11 +88,14 @@ def _probe_workspace_writable(workspace: Path) -> None:
 
 
 def _workspace_access_error_message(workspace: Path, exc: OSError) -> str:
-    detail = " ".join(str(exc).splitlines()).strip() or "невідома помилка файлової системи"
+    # The exception remains useful to the internal caller for failure classification,
+    # but raw filesystem detail and Python exception class names are not operator UI.
+    # They may contain account names, host paths, locale-dependent OS text or other
+    # implementation detail that should not be announced by the native dialog/NVDA.
+    del exc
     return (
         "Автоспорт не може підготувати workspace для запису.\n\n"
-        f"Workspace: {workspace}\n"
-        f"Помилка: {type(exc).__name__}: {detail}\n\n"
+        f"Workspace: {workspace}\n\n"
         "Вкажіть AUTOSPORT_WORKSPACE як абсолютний шлях до папки вашого користувача, "
         "доступної для запису, і перезапустіть Автоспорт. "
         "Права адміністратора не потрібні. Economic і live state не змінено."
@@ -170,8 +173,8 @@ def _run_interactive_gui() -> int:
     try:
         controller = EmergencyStopWebController(workspace)
         return launch_windows_shell(AutosportWebBridge(controller))
-    except WindowsWebViewUnavailable as exc:
-        _show_startup_error(_WEBVIEW2_STARTUP_ERROR + "\n\n" + str(exc))
+    except WindowsWebViewUnavailable:
+        _show_startup_error(_WEBVIEW2_STARTUP_ERROR)
         return 3
 
 

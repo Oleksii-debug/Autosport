@@ -144,28 +144,22 @@ def _canonical_json(value: object) -> bytes:
 
 def _require_expected_store_path(
     store: CollectorDeltaStore,
-    expected_store_path: str | Path,
+    expected_store_path: Path,
 ) -> Path:
-    if isinstance(expected_store_path, str):
-        if not expected_store_path or expected_store_path.strip() != expected_store_path:
-            raise ScheduledSourceUniverseError(
-                "expected_store_path must be a non-empty trimmed path"
-            )
-        expected = Path(expected_store_path)
-    elif isinstance(expected_store_path, Path):
-        expected = expected_store_path
-    else:
-        raise TypeError("expected_store_path must be str or Path")
     current = getattr(store, "path", None)
     if not isinstance(current, Path):
         raise ScheduledSourceUniverseError(
             "canonical collector store path identity is unavailable"
         )
-    if _CANONICAL_PATH_EQUALITY(current, expected) is not True:
+    if type(expected_store_path) is not type(current):
+        raise TypeError(
+            "expected_store_path must be the exact canonical Path type"
+        )
+    if _CANONICAL_PATH_EQUALITY(current, expected_store_path) is not True:
         raise ScheduledSourceUniverseError(
             "collector store path does not match product-expected authority path"
         )
-    return expected
+    return expected_store_path
 
 
 @dataclass(frozen=True, slots=True, init=False)
@@ -278,7 +272,7 @@ def resolve_scheduled_source_universe(
     store: CollectorDeltaStore,
     candidate_source_universe: SourceUniverseCommitment,
     *,
-    expected_store_path: str | Path,
+    expected_store_path: Path,
     expected_source_id: str,
     expected_run_id: str,
     expected_start_slot_ordinal: int,
@@ -787,7 +781,7 @@ def _seal_scheduled_source_universe_dispatch() -> None:
         store: CollectorDeltaStore,
         candidate_source_universe: SourceUniverseCommitment,
         *,
-        expected_store_path: str | Path,
+        expected_store_path: Path,
         expected_source_id: str,
         expected_run_id: str,
         expected_start_slot_ordinal: int,

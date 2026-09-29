@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import subprocess
+import sys
+from pathlib import Path
+
 import pytest
 
 from scripts.cancel_superseded_pr_workflow_runs import CancellationError
@@ -7,6 +11,7 @@ from scripts.cancel_superseded_pr_workflow_runs_scoped import WorkflowScopedGitH
 
 
 HEAD = "a" * 40
+_SCRIPT = Path("scripts/cancel_superseded_pr_workflow_runs_scoped.py")
 
 
 class FakeScopedApi(WorkflowScopedGitHubApi):
@@ -42,6 +47,18 @@ def _run(run_id: int, *, status: str = "queued") -> dict[str, object]:
         "status": status,
         "pull_requests": [{"number": 2022}],
     }
+
+
+def test_controller_entrypoint_executes_with_actions_script_path() -> None:
+    result = subprocess.run(
+        [sys.executable, str(_SCRIPT), "--help"],
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "--workflow-id" in result.stdout
 
 
 def test_active_status_scan_is_scoped_to_exact_source_workflow_id() -> None:

@@ -13,12 +13,14 @@ SOURCE_ID = "source-dispatch-seal"
 RUN_ID = "run-dispatch-seal"
 STREAM_EPOCH = "epoch-dispatch-seal"
 ANCHOR = "2026-09-29T12:00:00+00:00"
+GATE_BINDING = "d" * 64
+START_AUTHORIZATION = "e" * 64
 
 
 def _ready_store(tmp: str):
     path = Path(tmp) / "collector.db"
     store = CollectorDeltaStore(path)
-    store._ensure_collector_schedule(
+    schedule = store._ensure_collector_schedule(
         source_id=SOURCE_ID,
         run_id=RUN_ID,
         stream_epoch=STREAM_EPOCH,
@@ -27,6 +29,14 @@ def _ready_store(tmp: str):
         max_items=25,
         evaluation_start_slot_ordinal=0,
         evaluation_end_slot_ordinal=0,
+        start_gate_binding_sha256=GATE_BINDING,
+    )
+    store._authorize_collector_schedule_start_gate(
+        source_id=SOURCE_ID,
+        run_id=RUN_ID,
+        schedule_id=schedule["schedule_id"],
+        gate_binding_sha256=GATE_BINDING,
+        authorization_sha256=START_AUTHORIZATION,
     )
     slot = store._next_collector_schedule_slot(
         source_id=SOURCE_ID,

@@ -183,6 +183,19 @@ class RestartRecoveryAuditTests(unittest.TestCase):
         self.assertNotIn("/", trace[0])
         self.assertNotIn("\\\\", trace[0])
 
+    def test_safe_exception_trace_nonpositive_limit_returns_no_frames(self):
+        try:
+            raise ValueError("trace-canary")
+        except ValueError as exc:
+            self.assertEqual(restart_audit._safe_exception_trace(exc, limit=0), [])
+            self.assertEqual(restart_audit._safe_exception_trace(exc, limit=-1), [])
+
+    def test_safe_exception_trace_rejects_boolean_limit(self):
+        try:
+            raise ValueError("trace-canary")
+        except ValueError as exc:
+            self.assertEqual(restart_audit._safe_exception_trace(exc, limit=True), [])
+
     def test_safe_exception_site_reports_only_module_function_and_line(self):
         try:
             raise ValueError("site-canary")

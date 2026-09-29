@@ -647,3 +647,89 @@ def test_runtime_profile_serializer_rebind_cannot_change_snapshot_fingerprint(
     )
 
     assert snapshot_fingerprint(snapshot) == baseline
+
+
+def test_reconciliation_read_rejects_preexisting_symlink_alias(tmp_path) -> None:
+    target = tmp_path / "target.json"
+    target_store = BookmakerAccountReconciliationStore(
+        target,
+        authority_root=tmp_path / "target-authority",
+    )
+    assert target_store.append_snapshot(_snapshot(Decimal("10")))
+
+    alias = tmp_path / "alias.json"
+    try:
+        alias.symlink_to(target)
+    except (NotImplementedError, OSError):
+        pytest.skip("symlink creation is unavailable on this test runner")
+
+    alias_store = BookmakerAccountReconciliationStore(
+        alias,
+        authority_root=tmp_path / "alias-authority",
+    )
+    with pytest.raises(
+        AccountReconciliationIntegrityError,
+        match="must be one regular file",
+    ):
+        alias_store.latest_snapshot()
+
+
+def test_reconciliation_read_rejects_regular_file_swap_during_open(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    path = tmp_path / "account.json"
+    store = BookmakerAccountReconciliationStore(
+        path,
+        authority_root=tmp_path / "authority-a",
+    )
+    assert store.append_snapshot(_snapshot(Decimal("10")))
+
+    replacement = tmp_path / "replacement.json"
+    replacement_store = BookmakerAccountReconciliationStore(
+        replacement,
+        authority_root=tmp_path / "authority-b",
+    )
+    assert replacement_store.append_snapshot(
+        _snapshot(
+            Decimal("20"),
+            observation_id="balance-replacement",
+            observed_at="2026-09-23T00:00:01+00:00",
+        )
+    )
+
+    canonical_open = reconciliation_module._open_read_only_descriptor
+    swapped = False
+
+    def swap_before_open(candidate):
+        nonlocal swapped
+        if not swapped and candidate == path:
+            replacement.replace(path)
+            swapped = True
+        return canonical_open(candidate)
+
+    monkeypatch.setattr(
+        reconciliation_module,
+        "_open_read_only_descriptor",
+        swap_before_open,
+    )
+
+    with pytest.raises(
+        AccountReconciliationIntegrityError,
+        match="changed during open",
+    ):
+        store.latest_snapshot()
+
+    assert swapped is True
+
+
+def test_stable_reconciliation_reader_returns_exact_persisted_bytes(tmp_path) -> None:
+    path = tmp_path / "account.json"
+    store = BookmakerAccountReconciliationStore(
+        path,
+        authority_root=tmp_path / "authority",
+    )
+    assert store.append_snapshot(_snapshot(Decimal("10")))
+
+    expected = path.read_bytes()
+    assert reconciliation_module._read_stable_reconciliation_bytes(path) == expected

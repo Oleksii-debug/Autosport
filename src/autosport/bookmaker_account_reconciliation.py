@@ -16,6 +16,7 @@ from enum import Enum
 from hashlib import sha256
 import json
 import os
+import stat
 from pathlib import Path
 import tempfile
 from threading import RLock
@@ -37,6 +38,7 @@ from .monotonic_workspace_authority import (
     MonotonicWorkspaceAuthority,
     MonotonicWorkspaceAuthorityError,
 )
+from .workspace_lock import _open_read_only_descriptor
 
 _RECONCILIATION_AUTHORITY_DOMAIN = "provider.account-snapshot-reconciliation-v1"
 _RECONCILIATION_TRANSITION_SCHEMA = (
@@ -78,6 +80,110 @@ _WINDOWS_PRODUCT_AUTHORITY_ROOT_RELATIVE = (
     Path("Autosport") / "application-state" / "monotonic-authority-v1"
 )
 _POSIX_PRODUCT_AUTHORITY_ROOT_RELATIVE = Path("autosport") / "monotonic-authority-v1"
+
+
+
+def _read_stable_reconciliation_bytes(path: Path) -> bytes | None:
+    """Read one stable regular state-file identity without following its final alias.
+
+    Reconciliation history is structurally unbounded today, so this helper does not
+    invent a fixed retention/byte ceiling.  It does bound each individual read to
+    the size observed before opening (+1 byte to detect growth) and rejects path or
+    descriptor identity/metadata changes across the read.
+    """
+
+    try:
+        before = os.stat(path, follow_symlinks=False)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise AccountReconciliationIntegrityError(
+            "account reconciliation store cannot be inspected"
+        ) from exc
+
+    if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+        raise AccountReconciliationIntegrityError(
+            "account reconciliation store must be one regular file"
+        )
+
+    descriptor: int | None = None
+    primary_error: BaseException | None = None
+    try:
+        descriptor = _open_read_only_descriptor(path)
+        opened = os.fstat(descriptor)
+        if (
+            opened.st_dev != before.st_dev
+            or opened.st_ino != before.st_ino
+            or not stat.S_ISREG(opened.st_mode)
+            or opened.st_nlink != 1
+        ):
+            raise AccountReconciliationIntegrityError(
+                "account reconciliation store changed during open"
+            )
+
+        chunks: list[bytes] = []
+        remaining = before.st_size + 1
+        while remaining > 0:
+            chunk = os.read(descriptor, min(1024 * 1024, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        raw_bytes = b"".join(chunks)
+
+        after_open = os.fstat(descriptor)
+        after = os.stat(path, follow_symlinks=False)
+    except AccountReconciliationIntegrityError as exc:
+        primary_error = exc
+        raise
+    except OSError as exc:
+        primary_error = exc
+        raise AccountReconciliationIntegrityError(
+            "account reconciliation store is unreadable or changed"
+        ) from exc
+    finally:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError as close_error:
+                if primary_error is None:
+                    raise AccountReconciliationIntegrityError(
+                        "account reconciliation read descriptor cleanup failed"
+                    ) from close_error
+                try:
+                    primary_error.add_note(
+                        "account reconciliation read descriptor cleanup also failed"
+                    )
+                except BaseException:
+                    pass
+
+    if len(raw_bytes) > before.st_size:
+        raise AccountReconciliationIntegrityError(
+            "account reconciliation store grew during stable read"
+        )
+
+    def identity(
+        value: os.stat_result,
+    ) -> tuple[int, int, int, int, int, int, int]:
+        return (
+            value.st_dev,
+            value.st_ino,
+            value.st_mode,
+            value.st_size,
+            value.st_mtime_ns,
+            value.st_ctime_ns,
+            value.st_nlink,
+        )
+
+    if (
+        len(raw_bytes) != before.st_size
+        or identity(before) != identity(after)
+        or identity(opened) != identity(after_open)
+    ):
+        raise AccountReconciliationIntegrityError(
+            "account reconciliation store changed during stable read"
+        )
+    return raw_bytes
 
 
 def _product_account_reconciliation_authority_root() -> Path:
@@ -1229,14 +1335,14 @@ class BookmakerAccountReconciliationStore:
         return f"{prefix}{max(attempts, default=0) + 1}"
 
     def _load_history(self) -> list[BookmakerAccountSnapshot]:
-        if not self.path.exists():
+        raw_bytes = _read_stable_reconciliation_bytes(self.path)
+        if raw_bytes is None:
             self._recover_authority(None)
             return []
         try:
-            raw_bytes = self.path.read_bytes()
             raw = raw_bytes.decode("utf-8")
             document = strict_json_loads(raw)
-        except (OSError, UnicodeError, ValueError) as exc:
+        except (UnicodeError, ValueError) as exc:
             raise AccountReconciliationIntegrityError(
                 "account reconciliation store is unreadable or corrupt"
             ) from exc
@@ -1344,14 +1450,12 @@ class BookmakerAccountReconciliationStore:
         authority = _authority_guard(self)
         encoded = self._encode_history(history)
         intended_state_sha256 = sha256(encoded).hexdigest()
-        previous_state_sha256: str | None = None
-        if self.path.exists():
-            try:
-                previous_state_sha256 = sha256(self.path.read_bytes()).hexdigest()
-            except OSError as exc:
-                raise AccountReconciliationIntegrityError(
-                    "cannot read current account reconciliation state before publication"
-                ) from exc
+        previous_bytes = _read_stable_reconciliation_bytes(self.path)
+        previous_state_sha256 = (
+            None
+            if previous_bytes is None
+            else sha256(previous_bytes).hexdigest()
+        )
 
         latest_snapshot_id = snapshot_fingerprint(history[-1])
         tx_id = self._next_authority_tx_id(latest_snapshot_id)

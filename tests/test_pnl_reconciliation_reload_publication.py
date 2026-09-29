@@ -103,3 +103,22 @@ def test_snapshot_reload_validation_failure_faults_then_publishes_last_proven_st
     assert journal.faulted
     # Faulted snapshots never touch the now-untrusted durable tail again.
     assert journal.snapshot() == proven
+
+
+def test_caller_validation_value_error_does_not_fault_healthy_journal(
+    tmp_path: Path,
+) -> None:
+    journal, proven = _proven_journal(tmp_path)
+
+    with pytest.raises(ValueError, match="positive stake"):
+        journal.record_accepted_order(
+            event_id="bad-caller-event",
+            provider_source_id="betdaq",
+            provider_order_id="bad-order",
+            side="BACK",
+            accepted_stake="0.00",
+            accepted_odds="2.00",
+        )
+
+    assert not journal.faulted
+    assert journal.snapshot() == proven

@@ -583,6 +583,18 @@ class AutonomousProductRuntime:
         compare=False,
     )
 
+    def __setattr__(self, name: str, value: object) -> None:
+        if name == "_stop_controller":
+            try:
+                object.__getattribute__(self, "_stop_controller")
+            except AttributeError:
+                pass
+            else:
+                raise ProductCompositionError(
+                    "canonical product STOP source binding is immutable"
+                )
+        object.__setattr__(self, name, value)
+
     def _require_runtime_authority(self) -> None:
         if self._closed or not self._runtime_lease.authority_active:
             raise ProductCompositionError(
@@ -590,12 +602,18 @@ class AutonomousProductRuntime:
             )
 
     def _canonical_product_stop_source(self) -> _ProductStopRequest:
-        """Resolve the one STOP event that the canonical collector actually consumes."""
+        """Resolve the exact construction-time STOP event consumed by the collector."""
+
+        expected_stop_source = self._stop_controller
+        if type(expected_stop_source) is not _ProductStopRequest:
+            raise ProductCompositionError(
+                "canonical product STOP source binding changed"
+            )
 
         collector = self.collector
         if type(collector) is HeadlessCollectorService:
             stop_source = collector.stop_requested
-            if type(stop_source) is not _ProductStopRequest:
+            if stop_source is not expected_stop_source:
                 raise ProductCompositionError(
                     "canonical product collector STOP source binding changed"
                 )
@@ -610,12 +628,7 @@ class AutonomousProductRuntime:
                 )
             return stop_source
 
-        stop_source = self._stop_controller
-        if type(stop_source) is not _ProductStopRequest:
-            raise ProductCompositionError(
-                "product STOP compatibility source is invalid"
-            )
-        return stop_source
+        return expected_stop_source
 
     @staticmethod
     def _state_value(status: ContinuousSessionStatus) -> str:
@@ -645,6 +658,7 @@ class AutonomousProductRuntime:
         """Project lifecycle truth only when collector and session durable state agree."""
 
         self._require_runtime_authority()
+        self._canonical_product_stop_source()
         if not allow_pending_start:
             self._require_start_transition_resolved()
         coordinator_status = self.coordinator.status()
@@ -816,7 +830,13 @@ class AutonomousProductRuntime:
         """Signal cooperative STOP immediately without waiting for the active tick."""
 
         self._require_runtime_authority()
-        self._canonical_product_stop_source().request(reason)
+        stop_source = self._stop_controller
+        if type(stop_source) is not _ProductStopRequest:
+            raise ProductCompositionError(
+                "canonical product STOP source binding changed"
+            )
+        stop_source.request(reason)
+        self._canonical_product_stop_source()
 
     def stop(self, reason: str = "operator_stop") -> ContinuousSessionStatus:
         # STOP must win the cooperative wait before waiting for the serialized lifecycle

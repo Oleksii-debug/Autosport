@@ -8,7 +8,11 @@ from pathlib import Path
 from autosport.collector_service import CollectorServiceConfig
 from autosport.continuous_session import SessionState, SessionStoppedError
 from autosport.event_lifecycle import CatalogPage
-from autosport.product_runtime import build_autonomous_product_runtime
+from autosport.product_runtime import (
+    ProductCompositionError,
+    _ProductStopRequest,
+    build_autonomous_product_runtime,
+)
 
 
 class _Clock:
@@ -281,7 +285,11 @@ class ProductRuntimeProspectiveScheduleTests(unittest.TestCase):
                     raise AssertionError("instance wait shadow is not canonical STOP authority")
 
                 stop_source.wait = hostile_wait
-                runtime._stop_controller = _HostileCompatibilityController()
+                with self.assertRaisesRegex(
+                    ProductCompositionError,
+                    "STOP source binding is immutable",
+                ):
+                    runtime._stop_controller = _HostileCompatibilityController()
 
                 worker = threading.Thread(
                     target=lambda: self._capture_tick_error(runtime, errors),
@@ -299,6 +307,88 @@ class ProductRuntimeProspectiveScheduleTests(unittest.TestCase):
                 self.assertIsInstance(errors[0], SessionStoppedError)
                 self.assertEqual(source.catalog_calls, 1)
                 self.assertEqual(source.delta_calls, 1)
+
+                status = runtime.status()
+                self.assertEqual(status.state, SessionState.STOPPED)
+                self.assertEqual(status.last_error_code, "operator_stop")
+                evidence = runtime.collector.delta_store.collector_schedule_evidence(
+                    source_id="provider-a",
+                    run_id="product:provider-a",
+                    start_slot_ordinal=0,
+                    end_slot_ordinal=1,
+                )
+                self.assertEqual(evidence["bound_start_count"], 1)
+                self.assertEqual(evidence["missing_start_count"], 1)
+                self.assertIsNone(evidence["slots"][1]["cycle_seq"])
+            finally:
+                runtime.close()
+
+
+    def test_stop_pair_retarget_during_wait_wakes_original_and_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            source = _Source()
+            runtime = build_autonomous_product_runtime(
+                workspace=root,
+                source=source,
+                clock=clock,
+                initial_bankroll="100",
+            )
+            errors: list[BaseException] = []
+            entered_wait = threading.Event()
+
+            class _ObservedEvent:
+                def __init__(self, delegate) -> None:
+                    self._delegate = delegate
+
+                def is_set(self) -> bool:
+                    return self._delegate.is_set()
+
+                def set(self) -> None:
+                    self._delegate.set()
+
+                def clear(self) -> None:
+                    self._delegate.clear()
+
+                def wait(self, timeout: float) -> bool:
+                    if timeout != 30.0:
+                        raise AssertionError(f"unexpected scheduled wait: {timeout}")
+                    entered_wait.set()
+                    return self._delegate.wait(timeout)
+
+            try:
+                runtime.tick()
+                canonical_stop = runtime.collector.stop_requested
+                canonical_reason = runtime.collector.stop_reason
+                canonical_stop._event = _ObservedEvent(canonical_stop._event)
+
+                worker = threading.Thread(
+                    target=lambda: self._capture_tick_error(runtime, errors),
+                    daemon=True,
+                )
+                worker.start()
+                self.assertTrue(entered_wait.wait(2.0))
+                self.assertTrue(worker.is_alive())
+
+                replacement = _ProductStopRequest()
+                runtime.collector.stop_requested = replacement
+                runtime.collector.stop_reason = replacement.reason
+                try:
+                    with self.assertRaisesRegex(
+                        ProductCompositionError,
+                        "collector STOP source binding changed",
+                    ):
+                        runtime.stop("operator_stop")
+                    worker.join(2.0)
+                    self.assertFalse(worker.is_alive())
+                    self.assertEqual(len(errors), 1)
+                    self.assertIsInstance(errors[0], SessionStoppedError)
+                    self.assertEqual(source.catalog_calls, 1)
+                    self.assertEqual(source.delta_calls, 1)
+                finally:
+                    runtime.collector.stop_requested = canonical_stop
+                    runtime.collector.stop_reason = canonical_reason
 
                 status = runtime.status()
                 self.assertEqual(status.state, SessionState.STOPPED)

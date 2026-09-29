@@ -635,6 +635,7 @@ class HeadlessCollectorService:
         self._stop_if_requested()
         duration = float(seconds)
         stop_source = self.stop_requested
+        stop_reason = self.stop_reason
         if isinstance(stop_source, _SignalStopRequest):
             signal_wait = getattr(_SignalStopRequest, "wait", None)
             if not callable(signal_wait):
@@ -646,12 +647,24 @@ class HeadlessCollectorService:
                 raise CollectorServiceError(
                     "canonical signal STOP wait must return bool"
                 )
-            if interrupted and not stop_source():
-                raise CollectorServiceError(
-                    "canonical signal STOP wait reported STOP without STOP authority"
-                )
+            if interrupted:
+                if not stop_source():
+                    raise CollectorServiceError(
+                        "canonical signal STOP wait reported STOP without STOP authority"
+                    )
+                reason = stop_reason()
+                if not isinstance(reason, str) or not reason.strip():
+                    raise CollectorServiceError(
+                        "captured stop_reason must return a non-empty string"
+                    )
+                self.stop(reason)
+                raise _StopRequested(reason)
         else:
             self.sleep(duration)
+        if self.stop_requested is not stop_source or self.stop_reason is not stop_reason:
+            raise CollectorServiceError(
+                "collector STOP authority changed during wait"
+            )
         self._stop_if_requested()
 
     def _bounded_provider_call(self, action: Callable[[], object]) -> object:

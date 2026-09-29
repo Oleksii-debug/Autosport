@@ -135,6 +135,12 @@ def _guard_detached_consumer(
     frozen_closure_values = tuple_type(closure_values)
     frozen_globals_items = tuple_type(dict_items(inner_globals))
     frozen_globals_size = dict_len(inner_globals)
+    # Keep a separate immutable composition-time identity anchor. The executable clone
+    # and the verifier deliberately hold different writable closure cells, so comparing
+    # those two cells only to one another is insufficient: an attacker can coherently
+    # retarget both to the same copied dictionary. This tuple is not an execution
+    # mapping; it is independent tamper evidence for the exact detached mapping object.
+    inner_globals_anchor = (inner_globals,)
     missing = object()
 
     def require_bindings() -> None:
@@ -152,9 +158,13 @@ def _guard_detached_consumer(
             raise ValueError(
                 "RunTransaction detached direct-dispatch globals cell is empty"
             ) from exc
-        if current_inner_globals is not inner_globals:
+        anchored_inner_globals = inner_globals_anchor[0]
+        if (
+            current_inner_globals is not anchored_inner_globals
+            or inner_globals is not anchored_inner_globals
+        ):
             raise ValueError(
-                "RunTransaction detached direct-dispatch globals cell changed"
+                "RunTransaction detached direct-dispatch globals identity changed"
             )
         if exact_type(inner_globals) is not dict_type:
             raise ValueError("RunTransaction detached direct-dispatch globals changed")

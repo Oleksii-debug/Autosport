@@ -356,13 +356,19 @@ def _build_product_boundary():
         ):
             raise error_type("assessment identity executable authority changed")
 
+    require_executable_authority_code = require_executable_authority.__code__
+
     def assess(
         client: BetfairReadOnlyClient,
         *,
         market_id: str,
     ) -> BetfairCommissionApplicabilityAssessment:
+        if require_executable_authority.__code__ is not require_executable_authority_code:
+            raise error_type("commission applicability executable authority guard changed")
         require_executable_authority()
         observation = fee_input_reader(client, market_id=market_id)
+        if require_executable_authority.__code__ is not require_executable_authority_code:
+            raise error_type("commission applicability executable authority guard changed")
         require_executable_authority()
         if type(observation) is not observation_type:
             raise error_type(
@@ -370,6 +376,8 @@ def _build_product_boundary():
             )
 
         fee_input_sha256 = fee_payload_builder(observation)
+        if require_executable_authority.__code__ is not require_executable_authority_code:
+            raise error_type("commission applicability executable authority guard changed")
         require_executable_authority()
         payload = {
             "schema": schema,
@@ -396,6 +404,8 @@ def _build_product_boundary():
             "real_money_execution_authorized": False,
         }
         assessment_id = hash_constructor(canonical_json(payload)).hexdigest()
+        if require_executable_authority.__code__ is not require_executable_authority_code:
+            raise error_type("commission applicability executable authority guard changed")
         require_executable_authority()
         assessment = object.__new__(assessment_type)
         for name, value in (
@@ -444,6 +454,8 @@ def _build_product_boundary():
     def require_product(
         assessment: BetfairCommissionApplicabilityAssessment,
     ) -> BetfairCommissionApplicabilityAssessment:
+        if require_executable_authority.__code__ is not require_executable_authority_code:
+            raise error_type("commission applicability executable authority guard changed")
         require_executable_authority()
         if type(assessment) is not assessment_type:
             raise error_type(
@@ -474,9 +486,13 @@ def _build_product_boundary():
             schema=schema,
             schema_version=schema_version,
         )
+        if require_executable_authority.__code__ is not require_executable_authority_code:
+            raise error_type("commission applicability executable authority guard changed")
         require_executable_authority()
         if assessment.assessment_id != hash_constructor(canonical_json(payload)).hexdigest():
             raise error_type("assessment identity is inconsistent")
+        if require_executable_authority.__code__ is not require_executable_authority_code:
+            raise error_type("commission applicability executable authority guard changed")
         require_executable_authority()
         return assessment
 

@@ -2,11 +2,16 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import UTC, datetime
+from pathlib import Path
 
 import pytest
 
 from autosport._provider_evaluation_semantic_gate import (
     _set_legacy_provider_semantic_bypass_for_tests,
+)
+from autosport.campaign_precommit_manifest import (
+    CampaignPrecommitManifest,
+    publish_campaign_precommit_manifest,
 )
 import autosport.provider_observation_authority as provider_module
 from autosport.evaluation_universe import (
@@ -21,8 +26,9 @@ from autosport.forward_evaluation_universe_binding import (
     FORWARD_UNIVERSE_RULE_ID,
     FORWARD_UNIVERSE_RULE_SHA256,
     ForwardEvaluationUniverseBindingError,
-    authorize_forward_source_receipts,
-    resolve_forward_universe_members,
+    ForwardUniversePrecommitLocator,
+    authorize_forward_source_receipts as _authorize_forward_source_receipts,
+    resolve_forward_universe_members as _resolve_forward_universe_members,
 )
 from autosport.forward_evidence_completeness import (
     CampaignEvidence,
@@ -45,16 +51,40 @@ from autosport.provider_observation_authority import (
 )
 
 
-CAPTURED_AT = "2026-09-20T08:00:00Z"
-EVALUATION_NOT_BEFORE = "2026-09-20T08:00:01Z"
-FROZEN_AT = "2026-09-20T08:00:02Z"
-REVEAL_NOT_BEFORE = "2026-09-20T09:00:00Z"
+# These source observations are deliberately future-dated so the #1257 product clock
+# can issue a real prospective publication witness during the test run.  The tests
+# exercise causal ordering, not wall-clock 2026 fixtures.
+CAPTURED_AT = "2100-01-02T08:00:00Z"
+EVALUATION_NOT_BEFORE = "2100-01-02T08:00:01Z"
+FROZEN_AT = "2100-01-02T08:00:02Z"
+REVEAL_NOT_BEFORE = "2100-01-02T09:00:00Z"
 PROTOCOL_SHA = "1" * 64
 QUOTE_SHA = "2" * 64
 FRESHNESS_SHA = "3" * 64
 CONFIG_SHA = "4" * 64
 COST_SHA = "5" * 64
 RUNTIME_SHA = "6" * 64
+
+
+# Test-only convenience.  Production has no fallback: the #1185 APIs require the
+# independent locator explicitly.  Each real ProviderEvaluationUniverseStore fixture
+# receives a locator issued from a separate precommit workspace after exact universe
+# construction, and the wrappers forward it unchanged.
+def resolve_forward_universe_members(*, store, protocol):
+    return _resolve_forward_universe_members(
+        store=store,
+        protocol=protocol,
+        precommit=getattr(store, "_test_forward_precommit_locator", object()),
+    )
+
+
+def authorize_forward_source_receipts(*, store, protocol, opportunities):
+    return _authorize_forward_source_receipts(
+        store=store,
+        protocol=protocol,
+        precommit=getattr(store, "_test_forward_precommit_locator", object()),
+        opportunities=opportunities,
+    )
 
 
 def _request() -> CompleteGameBoardRequest:
@@ -78,7 +108,7 @@ def _frame(*, empty: bool) -> dict[str, object]:
                 "market_key": "h2h",
                 "home_ml": -110,
                 "away_ml": 105,
-                "last_update": "2026-09-20T07:59:55Z",
+                "last_update": "2100-01-02T07:59:55Z",
             }
         )
     return {
@@ -93,7 +123,7 @@ def _frame(*, empty: bool) -> dict[str, object]:
         "truncated_books": [],
         "snapshot_partial_reasons": [],
         "count": len(data),
-        "timestamp": 1789891200,
+        "timestamp": 4102560000,
         "data": data,
     }
 
@@ -197,6 +227,50 @@ def _empty_row(snapshot, member) -> EvaluationRow:
     )
 
 
+def _prospective_precommit(
+    tmp_path: Path,
+    *,
+    source_id: str,
+    evaluation_universe_sha256: str,
+) -> ForwardUniversePrecommitLocator:
+    workspace = (tmp_path / "precommit-workspace").resolve()
+    evidence = workspace / "evidence"
+    evidence.mkdir(parents=True)
+    authority_root = (tmp_path / "precommit-authority").resolve()
+    authority_root.mkdir(parents=True, exist_ok=True)
+    target = evidence / "campaign-precommit.json"
+    manifest = CampaignPrecommitManifest(
+        campaign_id="campaign-1",
+        source_id=source_id,
+        source_snapshot_sha256="b" * 64,
+        committed_at="2020-01-01T00:00:00Z",
+        observation_not_before="2100-01-02T07:00:00Z",
+        observation_not_after="2100-01-03T00:00:00Z",
+        evaluation_universe_sha256=evaluation_universe_sha256,
+        strategy_version_id="strategy-1",
+        champion_version_id="model-1",
+        baseline_version_id="baseline-1",
+        cost_contract_sha256=COST_SHA,
+        multiplicity_policy_sha256="c" * 64,
+        stopping_policy_sha256="d" * 64,
+        restart_policy_sha256="e" * 64,
+        causal_evidence_policy_sha256="f" * 64,
+        config_sha256=CONFIG_SHA,
+    )
+    witness = publish_campaign_precommit_manifest(
+        target,
+        manifest,
+        workspace=workspace,
+        authority_root=authority_root,
+    )
+    return ForwardUniversePrecommitLocator(
+        manifest_path=target,
+        workspace=workspace,
+        workspace_instance_id=witness.workspace_instance_id,
+        authority_root=authority_root,
+    )
+
+
 def _stored_universe(tmp_path, monkeypatch, *, empty: bool) -> ProviderEvaluationUniverseStore:
     snapshot = _capture(monkeypatch, empty=empty)
     lifecycle = None if empty else ContinuousEventLifecycle(tmp_path / "events.json")
@@ -206,7 +280,7 @@ def _stored_universe(tmp_path, monkeypatch, *, empty: bool) -> ProviderEvaluatio
         for member in members
     )
     # #1185 tests the forward receipt/store binding, not the independent #662
-    # product-semantic origin gate.  Use that gate's explicit legacy-fixture
+    # product-semantic origin gate. Use that gate's explicit legacy-fixture
     # compatibility hook only while constructing this provider-universe fixture.
     _set_legacy_provider_semantic_bypass_for_tests(True)
     try:
@@ -234,12 +308,18 @@ def _stored_universe(tmp_path, monkeypatch, *, empty: bool) -> ProviderEvaluatio
         authority_root=authority_root,
     )
     store.save(EvaluationUniverseLedger(universe))
-    return ProviderEvaluationUniverseStore(
+    reopened = ProviderEvaluationUniverseStore(
         workspace,
         authority_id="provider-intake-1",
         source_id=snapshot.request.source_id,
         authority_root=authority_root,
     )
+    reopened._test_forward_precommit_locator = _prospective_precommit(
+        tmp_path,
+        source_id=snapshot.request.source_id,
+        evaluation_universe_sha256=universe.universe_sha256,
+    )
+    return reopened
 
 
 def _protocol(**changes) -> ForwardEvidenceProtocolEnvelope:
@@ -299,6 +379,7 @@ def test_empty_complete_board_becomes_authoritative_excluded_receipt_after_resta
     assert expectations[0].universe_rule_result is UniverseResult.EXCLUDED
     assert expectations[0].universe_rule_reason_code == "NO_EVENT"
     assert expectations[0].provider_acquisition_state == "NO_EVENT"
+    assert len(expectations[0].precommit_authority_sha256) == 64
     opportunities = _opportunities(protocol, expectations)
     receipts = authorize_forward_source_receipts(
         store=store,
@@ -383,8 +464,8 @@ def test_forward_protocol_must_precommit_before_durable_source_observation(
 ):
     store = _stored_universe(tmp_path, monkeypatch, empty=True)
     protocol = _protocol(
-        precommit_anchor_lower=datetime(2026, 9, 20, 8, 0, tzinfo=UTC),
-        precommit_anchor_upper=datetime(2026, 9, 20, 8, 0, tzinfo=UTC),
+        precommit_anchor_lower=datetime(2100, 1, 2, 8, 0, tzinfo=UTC),
+        precommit_anchor_upper=datetime(2100, 1, 2, 8, 0, tzinfo=UTC),
     )
 
     with pytest.raises(ForwardEvaluationUniverseBindingError, match="anchored before"):
@@ -446,6 +527,7 @@ def test_wrong_candidate_rule_or_fake_store_cannot_mint_authority(tmp_path, monk
     with pytest.raises(TypeError, match="exact ProviderEvaluationUniverseStore"):
         resolve_forward_universe_members(store=FakeStore(), protocol=_protocol())
 
+
 def test_exact_store_instance_load_rebinding_cannot_replace_durable_authority(
     tmp_path, monkeypatch
 ):
@@ -474,4 +556,3 @@ def test_exact_store_instance_load_rebinding_cannot_replace_durable_authority(
             protocol=protocol,
             opportunities=opportunities,
         )
-

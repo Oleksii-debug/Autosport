@@ -93,6 +93,88 @@ def _hostile_root_code_with_matching_closure(function):
     return hostile.__code__
 
 
+def _hostile_instance_dispatch(self, name):
+    del self, name
+    return lambda *args, **kwargs: "HOSTILE_INSTANCE_DISPATCH"
+
+
+def _hostile_guard_function(*args, **kwargs):
+    del args, kwargs
+    return "HOSTILE_GUARD"
+
+
+def test_instance_getattribute_root_rejects_in_place_code_mutation() -> None:
+    """Special-method dispatch must reject mutation before hostile code can run."""
+
+    policy = PaperRiskPolicy(
+        max_ticket_fraction=Decimal("1"),
+        max_committed_fraction=Decimal("1"),
+        minimum_cash_reserve_fraction=Decimal("0"),
+    )
+    book = PaperBook("100")
+    root = vars(PaperRiskPolicy)["__getattribute__"]
+    original_code = root.__code__
+
+    assert root.__closure__ is None
+    try:
+        with pytest.raises(
+            TypeError,
+            match="canonical PaperRiskPolicy instance dispatch executable is sealed",
+        ):
+            root.__code__ = _hostile_instance_dispatch.__code__
+        assert root.__code__ is original_code
+        decision = policy.evaluate(book, Decimal("1"))
+        assert decision.allowed is True
+    finally:
+        if root.__code__ is not original_code:
+            root.__code__ = original_code
+
+
+def test_instance_getattribute_defaults_are_sealed_before_retarget() -> None:
+    """Immutable authority inputs must not be replaceable on the special-method root."""
+
+    root = vars(PaperRiskPolicy)["__getattribute__"]
+    original_defaults = root.__defaults__
+    assert original_defaults is not None
+
+    replacement = original_defaults + (object(),)
+    try:
+        with pytest.raises(
+            TypeError,
+            match="canonical PaperRiskPolicy instance dispatch executable is sealed",
+        ):
+            root.__defaults__ = replacement
+        assert root.__defaults__ is original_defaults
+    finally:
+        if root.__defaults__ is not original_defaults:
+            root.__defaults__ = original_defaults
+
+
+def test_reachable_instance_guard_helpers_reject_code_retarget() -> None:
+    """Traversing root defaults must not expose a mutable verifier/executor bearer."""
+
+    root = vars(PaperRiskPolicy)["__getattribute__"]
+    defaults = root.__defaults__
+    assert defaults is not None
+    validator = defaults[1]
+    guarded_call = defaults[2]
+
+    for helper in (validator, guarded_call):
+        assert callable(helper)
+        assert helper.__closure__ is None
+        original_code = helper.__code__
+        try:
+            with pytest.raises(
+                TypeError,
+                match="canonical PaperRiskPolicy instance dispatch executable is sealed",
+            ):
+                helper.__code__ = _hostile_guard_function.__code__
+            assert helper.__code__ is original_code
+        finally:
+            if helper.__code__ is not original_code:
+                helper.__code__ = original_code
+
+
 def test_instance_evaluate_rejects_in_place_root_code_mutation() -> None:
     """Normal instance lookup must not bypass the metaclass root seal."""
 

@@ -18,6 +18,7 @@ from types import FunctionType
 
 from . import _paperbook_preload_authority_guard as _guard
 from . import paper as _paper
+from . import risk as _risk
 
 
 _OBSOLETE_HANDLES = (
@@ -66,12 +67,77 @@ def _install() -> None:
 _install()
 del _install
 
+# Raw risk executable specs remain reconstructible compatibility evidence. Complete
+# the existing evaluate witness before any generation/private wrapper snapshots that
+# raw function: _derived_risk_values dispatches through these three exact class
+# helpers, so first-level function identity alone is not sufficient authority.
+_policy_namespace = vars(_risk.PaperRiskPolicy)
+_fraction_limits = _policy_namespace.get("_effective_fraction_limits")
+_decimal_context = _policy_namespace.get("_decimal_context")
+_exact_positive_sum = _policy_namespace.get("_exact_positive_sum")
+if type(_fraction_limits) is not FunctionType:
+    raise RuntimeError("canonical PaperRiskPolicy fraction-limit helper is unavailable")
+if (
+    type(_decimal_context) is not staticmethod
+    or type(_decimal_context.__func__) is not FunctionType
+):
+    raise RuntimeError("canonical PaperRiskPolicy decimal-context helper is unavailable")
+if (
+    type(_exact_positive_sum) is not staticmethod
+    or type(_exact_positive_sum.__func__) is not FunctionType
+):
+    raise RuntimeError("canonical PaperRiskPolicy exact-sum helper is unavailable")
+_evaluate_witnesses = _risk._PAPER_RISK_EVALUATE_HELPER_WITNESSES
+if type(_evaluate_witnesses) is not tuple:
+    raise RuntimeError("canonical PaperRiskPolicy evaluate witness tuple is unavailable")
+_witness_names = tuple(item[0] for item in _evaluate_witnesses)
+_transitive_names = (
+    "_effective_fraction_limits",
+    "_decimal_context",
+    "_exact_positive_sum",
+)
+if any(name in _witness_names for name in _transitive_names):
+    if not all(name in _witness_names for name in _transitive_names):
+        raise RuntimeError("canonical PaperRiskPolicy transitive helper witness is partial")
+else:
+    _risk._PAPER_RISK_EVALUATE_HELPER_WITNESSES = _evaluate_witnesses + (
+        (
+            "_effective_fraction_limits",
+            _fraction_limits,
+            _fraction_limits,
+            _fraction_limits.__code__,
+            False,
+        ),
+        (
+            "_decimal_context",
+            _decimal_context,
+            _decimal_context.__func__,
+            _decimal_context.__func__.__code__,
+            True,
+        ),
+        (
+            "_exact_positive_sum",
+            _exact_positive_sum,
+            _exact_positive_sum.__func__,
+            _exact_positive_sum.__func__.__code__,
+            True,
+        ),
+    )
+
+del _policy_namespace
+del _fraction_limits
+del _decimal_context
+del _exact_positive_sum
+del _evaluate_witnesses
+del _witness_names
+del _transitive_names
+del _risk
+
 # Risk policy derives portfolio/equity evidence from direct PaperBook fields. Install
 # its generation-stable read wrapper only after the canonical persistence graph has
 # been sealed, so the wrapper can reuse that detached authority rather than mutable
-# guard-module helpers. That guard already witnesses PaperRiskPolicy's reachable class
-# helper graph before and after each decision; do not add a second helper-dispatch
-# authority on top of it.
+# guard-module helpers. The raw evaluator now independently witnesses the transitive
+# class helpers it dispatches through before this wrapper captures its executable spec.
 from . import _paperbook_risk_generation_guard as _paperbook_risk_generation_guard  # noqa: E402,F401
 
 # Structural replay alone cannot prove that caller-visible ticket economics still

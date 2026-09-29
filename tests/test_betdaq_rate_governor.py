@@ -646,15 +646,17 @@ def test_mixed_blacklist_identity_order_survives_restart_without_migration(
     ]
 
     simulate_process_restart(workspace)
+    restart_clock = FakeClock()
     reopened = resolve_betdaq_rate_governor(
         workspace,
         configured,
-        clock=FakeClock(),
+        clock=restart_clock,
         wall_clock=wall,
         authority_root=authority_root,
     )
 
     assert reopened.blacklist_status("GetPrices") is BetdaqBlacklistStatus.BLACKLISTED
+    restart_clock.advance(float(configured.cold_start_seconds))
     with pytest.raises(BetdaqRateDeferred) as denied:
         reopened.admit("GetPrices")
     assert denied.value.reason == "provider_api_blacklisted"

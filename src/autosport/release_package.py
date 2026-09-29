@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import shutil
+import stat
 import struct
 import tempfile
 import zipfile
@@ -86,6 +87,43 @@ def _canonical_json_bytes(payload: dict[str, Any]) -> bytes:
         )
         + "\n"
     ).encode("utf-8")
+
+
+def _require_regular_source_file(path: Path, *, label: str) -> None:
+    try:
+        metadata = path.lstat()
+    except OSError as exc:
+        raise ValueError(f"{label} is not an accessible regular file: {path}") from exc
+    if stat.S_ISLNK(metadata.st_mode):
+        raise ValueError(f"{label} must not be a symbolic link: {path}")
+    if not stat.S_ISREG(metadata.st_mode):
+        raise ValueError(f"{label} must be a regular file: {path}")
+
+
+def _require_regular_source_tree(path: Path, *, label: str) -> None:
+    try:
+        root_metadata = path.lstat()
+    except OSError as exc:
+        raise ValueError(f"{label} is not an accessible directory: {path}") from exc
+    if stat.S_ISLNK(root_metadata.st_mode):
+        raise ValueError(f"{label} must not be a symbolic link: {path}")
+    if not stat.S_ISDIR(root_metadata.st_mode):
+        raise ValueError(f"{label} must be a directory: {path}")
+
+    for item in path.rglob("*"):
+        try:
+            metadata = item.lstat()
+        except OSError as exc:
+            raise ValueError(f"{label} contains an inaccessible entry: {item}") from exc
+        relative = item.relative_to(path).as_posix()
+        if stat.S_ISLNK(metadata.st_mode):
+            raise ValueError(f"{label} contains a symbolic link: {relative}")
+        if not (stat.S_ISDIR(metadata.st_mode) or stat.S_ISREG(metadata.st_mode)):
+            raise ValueError(f"{label} contains a non-regular entry: {relative}")
+
+
+def _copy2_no_follow(source: str | Path, destination: str | Path) -> str:
+    return shutil.copy2(source, destination, follow_symlinks=False)
 
 
 def _sorted_package_files(package_dir: Path) -> list[Path]:
@@ -447,17 +485,38 @@ def build_windows_package(
     keyboard_path = Path(keyboard_path)
     restart_recovery_path = Path(restart_recovery_path)
     output_zip = Path(output_zip)
+
+    _require_regular_source_file(exe_path, label="Autosport executable input")
+    _require_regular_source_file(start_file, label="Windows start-file input")
+    _require_regular_source_tree(example_dir, label="release example tree")
+    _require_regular_source_file(diagnostic_path, label="packaged diagnostic input")
+    _require_regular_source_file(accessibility_path, label="accessibility audit input")
+    _require_regular_source_file(keyboard_path, label="keyboard audit input")
+    _require_regular_source_file(
+        restart_recovery_path,
+        label="restart/recovery audit input",
+    )
+
     package_dir = output_zip.parent / "Autosport-V1"
     if package_dir.exists():
         shutil.rmtree(package_dir)
     package_dir.mkdir(parents=True)
-    shutil.copy2(exe_path, package_dir / "Autosport.exe")
-    shutil.copy2(start_file, package_dir / "WINDOWS_START_HERE.txt")
-    shutil.copy2(diagnostic_path, package_dir / "packaged-diagnostic.json")
-    shutil.copy2(accessibility_path, package_dir / "accessibility-audit.json")
-    shutil.copy2(keyboard_path, package_dir / "keyboard-audit.json")
-    shutil.copy2(restart_recovery_path, package_dir / "restart-recovery-audit.json")
-    shutil.copytree(example_dir, package_dir / "examples" / example_dir.name)
+    _copy2_no_follow(exe_path, package_dir / "Autosport.exe")
+    _copy2_no_follow(start_file, package_dir / "WINDOWS_START_HERE.txt")
+    _copy2_no_follow(diagnostic_path, package_dir / "packaged-diagnostic.json")
+    _copy2_no_follow(accessibility_path, package_dir / "accessibility-audit.json")
+    _copy2_no_follow(keyboard_path, package_dir / "keyboard-audit.json")
+    _copy2_no_follow(
+        restart_recovery_path,
+        package_dir / "restart-recovery-audit.json",
+    )
+    shutil.copytree(
+        example_dir,
+        package_dir / "examples" / example_dir.name,
+        symlinks=True,
+        copy_function=_copy2_no_follow,
+    )
+    _require_regular_source_tree(package_dir, label="release package staging tree")
 
     build_info = {
         "product": "Autosport",

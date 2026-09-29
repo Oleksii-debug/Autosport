@@ -562,6 +562,38 @@ def test_canonical_only_bridge_rejects_instance_post_shadow_before_admission(
     assert bridge.last_rate_admission is None
 
 
+def test_bridge_authority_references_are_immutable_after_construction(tmp_path) -> None:
+    governor, _ = _rate_governor(tmp_path)
+    bridge = BetdaqReadOnlyLiveTransport(
+        credentials=_credentials(),
+        rate_governor=governor,
+        transport=_PostTransport(),
+    )
+
+    for name, value in (
+        ("_credentials", _credentials()),
+        ("_transport", _PostTransport()),
+        ("_rate_governor", governor),
+        ("_canonical_only", True),
+        ("_last_rate_admission", None),
+    ):
+        with pytest.raises(
+            AttributeError,
+            match="composition is immutable",
+        ):
+            setattr(bridge, name, value)
+
+
+def test_canonical_only_requires_exact_bool(tmp_path) -> None:
+    governor, _ = _rate_governor(tmp_path)
+    with pytest.raises(TypeError, match="canonical_only must be bool"):
+        BetdaqReadOnlyLiveTransport(
+            credentials=_credentials(),
+            rate_governor=governor,
+            canonical_only=1,
+        )
+
+
 def test_default_live_provider_composes_canonical_transport_without_origin_promotion(tmp_path) -> None:
     governor, _ = _rate_governor(tmp_path)
     provider = BetdaqLiveReadOnlyProvider(

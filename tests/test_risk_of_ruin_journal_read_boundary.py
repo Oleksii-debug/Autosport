@@ -60,6 +60,23 @@ def test_oversized_journal_fails_before_materialization(tmp_path: Path) -> None:
         risk_module._read_stable_journal_bytes(journal)
 
 
+def test_deep_json_nesting_fails_closed_at_durable_read_boundary(
+    tmp_path: Path,
+) -> None:
+    evaluator = _evaluator(tmp_path)
+    depth = 10_000
+    evaluator.journal_path.write_text(
+        ("[" * depth) + "0" + ("]" * depth),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        RiskOfRuinIssuanceError,
+        match="risk-of-ruin journal is unreadable",
+    ):
+        evaluator._read_state_under_lock()
+
+
 def test_swap_to_symlink_at_open_is_rejected_by_no_follow_descriptor(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

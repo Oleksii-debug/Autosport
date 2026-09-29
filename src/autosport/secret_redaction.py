@@ -332,6 +332,69 @@ def redact_operator_text(
     return _KEY_VALUE_RE.sub(redact_key_value, rendered)
 
 
+def _redact_operator_mapping_key(
+    key: object,
+    *,
+    secrets: tuple[str, ...],
+) -> tuple[object, bool, bool]:
+    """Return one safe hashable presentation key plus sensitivity/transform flags.
+
+    Only exact built-in key domains are trusted for structural preservation. Unknown
+    hashable classes are presentation input too; never call their __str__/__repr__ or
+    publish them unchanged because either surface may carry credential material.
+    """
+
+    if type(key) is str:
+        safe_key = redact_operator_text(key, extra_secret_values=secrets)
+        return safe_key, is_sensitive_key(key), safe_key != key
+
+    if type(key) is bytes:
+        try:
+            decoded_key = bytes.decode(key, "utf-8", "strict")
+        except UnicodeDecodeError:
+            # Undecodable structured keys cannot be classified safely. Redact both
+            # the presentation key and its associated value.
+            return REDACTED, True, True
+        safe_key = redact_operator_text(
+            decoded_key,
+            extra_secret_values=secrets,
+        )
+        return safe_key, is_sensitive_key(decoded_key), True
+
+    if type(key) is tuple:
+        safe_parts: list[object] = []
+        key_is_sensitive = False
+        key_was_transformed = False
+        for part in key:
+            safe_part, part_is_sensitive, part_was_transformed = (
+                _redact_operator_mapping_key(part, secrets=secrets)
+            )
+            safe_parts.append(safe_part)
+            key_is_sensitive = key_is_sensitive or part_is_sensitive
+            key_was_transformed = key_was_transformed or part_was_transformed
+        return tuple(safe_parts), key_is_sensitive, key_was_transformed
+
+    # These exact scalar built-ins cannot carry hidden string/object presentation
+    # state. Preserve them so ordinary numeric/boolean/None structured keys remain
+    # stable. Complex is included because its exact built-in representation contains
+    # only numeric components.
+    if key is None or type(key) in (bool, int, float, complex):
+        return key, False, False
+
+    # Unknown hashable key classes (including str/bytes subclasses and containers
+    # such as frozenset) are not presentation authority. Fail closed without invoking
+    # arbitrary conversion methods and redact the associated value as well.
+    return REDACTED, True, True
+
+
+def _mapping_key_collision_alias(safe_key: object, suffix: int) -> object:
+    """Return a deterministic safe alias without rendering composite key objects."""
+
+    if type(safe_key) is str:
+        return f"{safe_key}#{suffix}"
+    return (safe_key, suffix)
+
+
 def redact_operator_value(
     value: Any,
     *,
@@ -345,44 +408,29 @@ def redact_operator_value(
         return redact_operator_text(value, extra_secret_values=secrets)
     if isinstance(value, Mapping):
         redacted: dict[Any, Any] = {}
-        # Original string keys have priority over generated presentation aliases.
-        # Bytes keys are presentation data too: normalize exact bytes through a
-        # strict UTF-8 boundary so configured secrets and credential labels cannot
-        # bypass the same canonical string redaction/classification engine.
-        reserved_keys = set(value.keys())
-        for key, item in value.items():
-            if type(key) is bytes:
-                try:
-                    decoded_key = bytes.decode(key, "utf-8", "strict")
-                except UnicodeDecodeError:
-                    # An undecodable structured key cannot be classified safely.
-                    # Fail closed: publish no original bytes and redact its value.
-                    safe_key = REDACTED
-                    key_is_sensitive = True
-                else:
-                    safe_key = redact_operator_text(
-                        decoded_key,
-                        extra_secret_values=secrets,
-                    )
-                    key_is_sensitive = is_sensitive_key(decoded_key)
-                key_was_transformed = True
-            elif isinstance(key, str):
-                safe_key = redact_operator_text(
-                    key,
-                    extra_secret_values=secrets,
-                )
-                key_is_sensitive = is_sensitive_key(key)
-                key_was_transformed = safe_key != key
-            else:
-                safe_key = key
-                key_is_sensitive = False
-                key_was_transformed = False
+        prepared: list[tuple[object, Any, bool, bool]] = []
+        reserved_keys: set[object] = set()
 
+        # Transform first, then reserve only keys that are actually preserved. This
+        # keeps ordinary exact built-in keys authoritative over generated aliases
+        # without carrying unsupported/custom key objects into the output collision
+        # machinery.
+        for key, item in value.items():
+            safe_key, key_is_sensitive, key_was_transformed = (
+                _redact_operator_mapping_key(key, secrets=secrets)
+            )
+            prepared.append(
+                (safe_key, item, key_is_sensitive, key_was_transformed)
+            )
+            if not key_was_transformed:
+                reserved_keys.add(safe_key)
+
+        for safe_key, item, key_is_sensitive, key_was_transformed in prepared:
             if key_was_transformed:
                 candidate = safe_key
                 suffix = 2
                 while candidate in reserved_keys or candidate in redacted:
-                    candidate = f"{safe_key}#{suffix}"
+                    candidate = _mapping_key_collision_alias(safe_key, suffix)
                     suffix += 1
                 safe_key = candidate
 

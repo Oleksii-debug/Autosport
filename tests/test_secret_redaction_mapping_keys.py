@@ -135,3 +135,77 @@ def test_bytes_presentation_key_cannot_overwrite_ordinary_string_key() -> None:
         f"{REDACTED}#2": "bytes-record",
     }
     assert len(redacted) == 2
+
+def test_configured_secret_inside_tuple_mapping_key_is_redacted() -> None:
+    secret = "AS-MAPPING-TUPLE-SECRET-91d7"
+
+    redacted = redact_operator_value(
+        {(secret,): "provider-error"},
+        extra_secret_values=(secret,),
+    )
+
+    assert redacted == {(REDACTED,): "provider-error"}
+    assert secret not in repr(redacted)
+
+
+def test_tuple_mapping_key_recursively_redacts_bytes_and_sensitive_labels() -> None:
+    secret = "AS-MAPPING-TUPLE-BYTES-a771"
+    key = (f"provider-{secret}".encode("utf-8"), "api_key")
+
+    redacted = redact_operator_value(
+        {key: "provider-secret"},
+        extra_secret_values=(secret,),
+    )
+
+    assert redacted == {(f"provider-{REDACTED}", "api_key"): REDACTED}
+    assert secret not in repr(redacted)
+    assert "provider-secret" not in repr(redacted)
+
+
+def test_colliding_redacted_tuple_keys_preserve_both_records_without_secret() -> None:
+    first = "AS-TUPLE-COLLISION-FIRST-c881"
+    second = "AS-TUPLE-COLLISION-SECOND-e272"
+
+    redacted = redact_operator_value(
+        {
+            (first,): "first-record",
+            (second,): "second-record",
+        },
+        extra_secret_values=(first, second),
+    )
+
+    assert redacted[(REDACTED,)] == "first-record"
+    assert redacted[((REDACTED,), 2)] == "second-record"
+    assert len(redacted) == 2
+    assert first not in repr(redacted)
+    assert second not in repr(redacted)
+
+
+class _HostileMappingKey:
+    def __hash__(self) -> int:
+        return 17731
+
+    def __str__(self) -> str:
+        raise AssertionError("custom mapping key __str__ must not run")
+
+    def __repr__(self) -> str:
+        raise AssertionError("custom mapping key __repr__ must not run")
+
+
+def test_unsupported_hashable_mapping_key_fails_closed_without_rendering_it() -> None:
+    hostile_key = _HostileMappingKey()
+
+    redacted = redact_operator_value({hostile_key: "provider-secret"})
+
+    assert redacted == {REDACTED: REDACTED}
+    assert "provider-secret" not in repr(redacted)
+
+
+def test_tuple_with_unsupported_component_fails_closed_without_rendering_component() -> None:
+    hostile_key = _HostileMappingKey()
+
+    redacted = redact_operator_value({("provider", hostile_key): "provider-secret"})
+
+    assert redacted == {("provider", REDACTED): REDACTED}
+    assert "provider-secret" not in repr(redacted)
+

@@ -21,11 +21,12 @@ import json
 from pathlib import Path
 from typing import Mapping, Sequence
 
+from . import betfair_account_readonly as _readonly
 from .betfair_account_identity import (
-    BetfairReadOnlyClient,
     require_authoritative_betfair_account_identity,
     resolve_betfair_authenticated_account_identity,
 )
+from .betfair_account_readonly import BetfairReadOnlyClient
 from .betfair_discovery_provenance import BetfairDiscoveryVisibilityScope
 from .betfair_discovery_transport_origin import (
     BetfairAuthenticatedDiscoveryAcquisition,
@@ -69,6 +70,7 @@ _SCOPE_SPLIT_FIELDS = (
     "marketTypeCodes",
 )
 _CANONICAL_CONNECT = CollectorDeltaStore._connect
+_CANONICAL_DECODE_JSON = _readonly._decode_json
 
 
 class BetfairCatalogCoverageError(RuntimeError):
@@ -152,6 +154,63 @@ def _request_payload(request: BetfairCatalogRequest) -> dict[str, object]:
 
 def _request_sha256(request: BetfairCatalogRequest) -> str:
     return _sha_payload(_request_payload(request))
+
+
+def _provider_result_from_acquisition(
+    acquisition: BetfairAuthenticatedDiscoveryAcquisition,
+) -> object:
+    """Re-decode provider semantics from exact receipt-bound raw bytes."""
+
+    if type(acquisition) is not BetfairAuthenticatedDiscoveryAcquisition:
+        raise TypeError(
+            "acquisition must be exact BetfairAuthenticatedDiscoveryAcquisition"
+        )
+    receipt = acquisition.receipt
+    if not is_authoritative_betfair_discovery_transport_receipt(receipt):
+        raise BetfairCatalogCoverageError(
+            "coverage acquisition lacks current authenticated transport origin"
+        )
+    try:
+        require_authoritative_betfair_account_identity(
+            acquisition.account_identity
+        )
+    except Exception as exc:
+        raise BetfairCatalogCoverageError(
+            "coverage acquisition lacks current authenticated account authority"
+        ) from exc
+    exchange = acquisition.exchange
+    if (
+        receipt.method != exchange.method
+        or receipt.request_sha256 != exchange.request_sha256
+        or receipt.raw_response_sha256 != exchange.raw_response_sha256
+        or receipt.observed_at_utc != exchange.observed_at_utc
+    ):
+        raise BetfairCatalogCoverageError(
+            "coverage acquisition receipt does not bind the exact exchange"
+        )
+    if _readonly._decode_json is not _CANONICAL_DECODE_JSON:
+        raise BetfairCatalogCoverageError(
+            "canonical Betfair JSON decoder changed"
+        )
+    try:
+        envelope = _CANONICAL_DECODE_JSON(exchange.raw_response)
+    except Exception as exc:
+        raise BetfairCatalogCoverageError(
+            "receipt-bound Betfair raw response cannot be decoded canonically"
+        ) from exc
+    if type(envelope) is not dict or envelope.get("jsonrpc") != "2.0":
+        raise BetfairCatalogCoverageError(
+            "receipt-bound Betfair JSON-RPC envelope is invalid"
+        )
+    if "error" in envelope and envelope["error"] is not None:
+        raise BetfairCatalogCoverageError(
+            "receipt-bound Betfair exchange contains provider error"
+        )
+    if "result" not in envelope:
+        raise BetfairCatalogCoverageError(
+            "receipt-bound Betfair exchange is missing result"
+        )
+    return envelope["result"]
 
 
 def _decode_request(request_json: str) -> BetfairCatalogRequest:
@@ -927,15 +986,8 @@ def record_catalog_coverage_acquisition(
         plan_id=plan_id,
     )
     leaf = _load_leaf(store, plan_id=plan.plan_id, leaf_id=leaf_id)
-    if type(acquisition) is not BetfairAuthenticatedDiscoveryAcquisition:
-        raise TypeError(
-            "acquisition must be exact BetfairAuthenticatedDiscoveryAcquisition"
-        )
+    provider_result = _provider_result_from_acquisition(acquisition)
     receipt = acquisition.receipt
-    if not is_authoritative_betfair_discovery_transport_receipt(receipt):
-        raise BetfairCatalogCoverageError(
-            "coverage acquisition lacks current authenticated transport origin"
-        )
     if receipt.transport_authority_ref != plan.session_context_id:
         raise BetfairCatalogCoverageError(
             "coverage acquisition escaped the frozen session context"
@@ -977,7 +1029,7 @@ def record_catalog_coverage_acquisition(
 
     try:
         batch = parse_market_catalogue_result_for_request(
-            acquisition.result,
+            provider_result,
             request=acquisition.exchange.request,
         )
     except (TypeError, ValueError) as exc:
@@ -1098,7 +1150,7 @@ def resolve_catalog_coverage(
     *,
     expected_store_path: str | Path,
     plan_id: str,
-    live_receipts: Sequence[BetfairDiscoveryTransportOriginReceipt] = (),
+    live_acquisitions: Sequence[BetfairAuthenticatedDiscoveryAcquisition] = (),
 ) -> CatalogCoverageResolution:
     """Verify the durable partition graph and current-process provider-origin receipts."""
 
@@ -1183,7 +1235,10 @@ def resolve_catalog_coverage(
 
     counts = {status: 0 for status in _TERMINAL_STATUSES}
     pending_count = 0
-    required_receipt_keys: set[tuple[str, str, str]] = set()
+    required_terminals: dict[
+        tuple[str, str, str],
+        tuple[CatalogCoverageLeaf, dict[str, object]],
+    ] = {}
     for leaf, terminal in starts.values():
         if terminal is None:
             pending_count += 1
@@ -1248,7 +1303,12 @@ def resolve_catalog_coverage(
                 raise BetfairCatalogCoverageError(
                     "coverage terminal escaped frozen session context"
                 )
-            required_receipt_keys.add((request_sha, raw_sha, observed))
+            key = (request_sha, raw_sha, observed)
+            if key in required_terminals:
+                raise BetfairCatalogCoverageError(
+                    "coverage graph reuses one provider observation across leaves"
+                )
+            required_terminals[key] = (leaf, terminal)
 
     durable_complete = (
         pending_count == 0
@@ -1257,26 +1317,77 @@ def resolve_catalog_coverage(
         and counts["AFTER_CAUSAL_CUTOFF"] == 0
     )
 
-    live_keys: set[tuple[str, str, str]] = set()
-    for receipt in live_receipts:
-        if type(receipt) is not BetfairDiscoveryTransportOriginReceipt:
-            raise TypeError(
-                "live_receipts must contain exact BetfairDiscoveryTransportOriginReceipt"
-            )
-        if not is_authoritative_betfair_discovery_transport_receipt(receipt):
-            continue
+    live_by_key: dict[
+        tuple[str, str, str],
+        BetfairAuthenticatedDiscoveryAcquisition,
+    ] = {}
+    for acquisition in live_acquisitions:
+        provider_result = _provider_result_from_acquisition(acquisition)
+        receipt = acquisition.receipt
         if receipt.transport_authority_ref != plan.session_context_id:
             continue
-        live_keys.add(
-            (
-                receipt.request_sha256,
-                receipt.raw_response_sha256,
-                receipt.observed_at_utc,
-            )
+        key = (
+            receipt.request_sha256,
+            receipt.raw_response_sha256,
+            receipt.observed_at_utc,
         )
+        if key in live_by_key:
+            raise BetfairCatalogCoverageError(
+                "duplicate live acquisition for one coverage observation"
+            )
+        live_by_key[key] = acquisition
 
-    live_bound_count = len(required_receipt_keys & live_keys)
-    provider_complete = durable_complete and required_receipt_keys <= live_keys
+        required = required_terminals.get(key)
+        if required is None:
+            continue
+        leaf, terminal = required
+        try:
+            batch = parse_market_catalogue_result_for_request(
+                provider_result,
+                request=leaf.request,
+            )
+        except (TypeError, ValueError) as exc:
+            raise BetfairCatalogCoverageError(
+                "live authenticated result cannot revalidate durable coverage terminal"
+            ) from exc
+        observed = _utc(receipt.observed_at_utc, "live receipt observed_at_utc")
+        if observed > _utc(plan.causal_cutoff_utc, "causal_cutoff_utc"):
+            expected_status = "AFTER_CAUSAL_CUTOFF"
+            expected_children: tuple[str, ...] = ()
+        elif batch.continuation_required:
+            split = split_catalog_coverage_request(leaf.request)
+            if split is None:
+                expected_status = "SATURATED_UNSPLITTABLE"
+                expected_children = ()
+            else:
+                expected_status = "SATURATED_SPLIT"
+                expected_children = tuple(
+                    _leaf_id(
+                        plan.plan_id,
+                        parent_leaf_id=leaf.leaf_id,
+                        depth=leaf.depth + 1,
+                        request_sha256=_request_sha256(child),
+                    )
+                    for child in split
+                )
+        elif not batch.markets:
+            expected_status = "EMPTY"
+            expected_children = ()
+        else:
+            expected_status = "SUCCESS"
+            expected_children = ()
+        if (
+            terminal.get("status") != expected_status
+            or terminal.get("result_count") != len(batch.markets)
+            or tuple(terminal.get("child_leaf_ids", ())) != expected_children
+        ):
+            raise BetfairCatalogCoverageError(
+                "live provider result does not match durable terminal semantics"
+            )
+
+    required_keys = set(required_terminals)
+    live_bound_count = len(required_keys & set(live_by_key))
+    provider_complete = durable_complete and required_keys <= set(live_by_key)
     if provider_complete:
         reason = "PROVIDER_VISIBLE_SCOPE_COMPLETE"
     elif durable_complete:

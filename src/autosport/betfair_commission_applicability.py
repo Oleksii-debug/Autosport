@@ -294,6 +294,49 @@ def _build_product_boundary():
     )
     fee_input_reader_args = fee_input_reader.args
     fee_input_reader_keywords = dict(fee_input_reader.keywords)
+
+    # The sealed fee-input reader is itself a partial graph. `partial.args` identity
+    # alone does not freeze the Python function objects reachable through those args:
+    # their `__code__` can be replaced in-place while every outer identity remains
+    # unchanged. Capture that already-canonical graph once so the applicability layer
+    # cannot bind provider payload hashes to values produced by a retargeted parser.
+    function_type = type(fee_input_reader_function)
+    reader_partial_witnesses: list[tuple[object, object, object, dict[str, object]]] = []
+    reader_function_witnesses: list[
+        tuple[object, object, object, object, tuple[object, ...]]
+    ] = []
+    seen_reader_dependencies: set[int] = set()
+
+    def capture_reader_dependency(value: object) -> None:
+        identity = id(value)
+        if identity in seen_reader_dependencies:
+            return
+        if type(value) is partial:
+            seen_reader_dependencies.add(identity)
+            keywords = dict(value.keywords or {})
+            reader_partial_witnesses.append((value, value.func, value.args, keywords))
+            capture_reader_dependency(value.func)
+            for nested in value.args:
+                capture_reader_dependency(nested)
+            for nested in keywords.values():
+                capture_reader_dependency(nested)
+            return
+        if type(value) is function_type:
+            seen_reader_dependencies.add(identity)
+            closure = value.__closure__
+            closure_values = tuple(
+                cell.cell_contents for cell in (closure or ())
+            )
+            reader_function_witnesses.append(
+                (value, value.__code__, value.__globals__, closure, closure_values)
+            )
+            for nested in closure_values:
+                capture_reader_dependency(nested)
+
+    capture_reader_dependency(fee_input_reader)
+    reader_partial_witnesses = list(reader_partial_witnesses)
+    reader_function_witnesses = list(reader_function_witnesses)
+
     fee_payload_builder = _FEE_INPUT_SHA256_CAPABILITY
     fee_payload_function = fee_payload_builder.func
     fee_payload_function_code = fee_payload_function.__code__
@@ -367,6 +410,52 @@ def _build_product_boundary():
                 raise error_type("fee input reader closure authority changed") from exc
             if current is not expected:
                 raise error_type("fee input reader closure authority changed")
+
+        for nested, expected_func, expected_args, expected_keywords in reader_partial_witnesses:
+            if (
+                type(nested) is not partial
+                or nested.func is not expected_func
+                or nested.args is not expected_args
+                or nested.keywords != expected_keywords
+            ):
+                raise error_type(
+                    "fee input reader nested executable authority changed"
+                )
+        for (
+            nested_function,
+            expected_code,
+            expected_globals,
+            expected_closure,
+            expected_closure_values,
+        ) in reader_function_witnesses:
+            if (
+                type(nested_function) is not function_type
+                or nested_function.__code__ is not expected_code
+                or nested_function.__globals__ is not expected_globals
+                or nested_function.__closure__ is not expected_closure
+            ):
+                raise error_type(
+                    "fee input reader nested executable authority changed"
+                )
+            current_nested_closure = nested_function.__closure__ or ()
+            if len(current_nested_closure) != len(expected_closure_values):
+                raise error_type(
+                    "fee input reader nested executable authority changed"
+                )
+            for cell, expected in zip(
+                current_nested_closure,
+                expected_closure_values,
+            ):
+                try:
+                    current = cell.cell_contents
+                except ValueError as exc:
+                    raise error_type(
+                        "fee input reader nested executable authority changed"
+                    ) from exc
+                if current is not expected:
+                    raise error_type(
+                        "fee input reader nested executable authority changed"
+                    )
 
         if (
             fee_payload_builder.func is not fee_payload_function

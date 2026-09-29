@@ -354,7 +354,7 @@ def _scan_file(
     post_metadata = path.lstat()
     post_identity = _identity_from_stat(post_metadata)
     if (
-        post_identity != expected_identity
+        not _same_object_identity(post_identity, expected_identity)
         or stat.S_ISLNK(post_metadata.st_mode)
         or _metadata_is_reparse_point(post_metadata)
         or not stat.S_ISREG(post_metadata.st_mode)
@@ -424,7 +424,7 @@ def _scan_directory(
     pre_metadata = path.lstat()
     pre_identity = _identity_from_stat(pre_metadata)
     if (
-        pre_identity != expected_identity
+        not _same_object_identity(pre_identity, expected_identity)
         or stat.S_ISLNK(pre_metadata.st_mode)
         or _metadata_is_reparse_point(pre_metadata)
         or not stat.S_ISDIR(pre_metadata.st_mode)

@@ -820,13 +820,9 @@ class _BlacklistStore:
             new_body: dict[str, object] = {
                 "schema": _BLACKLIST_SCHEMA,
                 "version": 2,
-                "observations": sorted(
-                    rows.values(),
-                    key=lambda item: (
-                        str(item["operation_id"] or ""),
-                        str(item["api_name"]),
-                    ),
-                ),
+                "observations": [
+                    rows[name] for name in sorted(rows)
+                ],
             }
             intended = _digest(new_body)
             binding = self._binding(observed, intended)

@@ -26,11 +26,25 @@ _DECIMAL_FIELDS = (
 _ERROR = _settlement.BetfairSettlementRevisionError
 _REVISION_TYPE = _settlement.BetfairSettlementRevision
 _ORIGINAL_DEC = _settlement._dec
-_ORIGINAL_SEMANTIC_PAYLOAD = _REVISION_TYPE.semantic_payload
+_ORIGINAL_REVISION_SEMANTIC_PAYLOAD = _REVISION_TYPE.semantic_payload
+_ORIGINAL_INGEST_SEMANTIC_PAYLOAD = _settlement._semantic_payload
 _ORIGINAL_DEC_CODE = getattr(_ORIGINAL_DEC, "__code__", None)
-_ORIGINAL_SEMANTIC_CODE = getattr(_ORIGINAL_SEMANTIC_PAYLOAD, "__code__", None)
+_ORIGINAL_REVISION_SEMANTIC_CODE = getattr(
+    _ORIGINAL_REVISION_SEMANTIC_PAYLOAD,
+    "__code__",
+    None,
+)
+_ORIGINAL_INGEST_SEMANTIC_CODE = getattr(
+    _ORIGINAL_INGEST_SEMANTIC_PAYLOAD,
+    "__code__",
+    None,
+)
 
-if _ORIGINAL_DEC_CODE is None or _ORIGINAL_SEMANTIC_CODE is None:
+if (
+    _ORIGINAL_DEC_CODE is None
+    or _ORIGINAL_REVISION_SEMANTIC_CODE is None
+    or _ORIGINAL_INGEST_SEMANTIC_CODE is None
+):
     raise RuntimeError("Betfair settlement Decimal materialization surface is unavailable")
 
 
@@ -65,37 +79,63 @@ def _require_bounded_decimal(value: Decimal, field: str) -> Decimal:
     return value
 
 
-def _bounded_dec(value: object, field: str) -> Decimal:
+def _require_original_surfaces() -> None:
     if (
         getattr(_ORIGINAL_DEC, "__code__", None) is not _ORIGINAL_DEC_CODE
-        or getattr(_ORIGINAL_SEMANTIC_PAYLOAD, "__code__", None)
-        is not _ORIGINAL_SEMANTIC_CODE
+        or getattr(_ORIGINAL_REVISION_SEMANTIC_PAYLOAD, "__code__", None)
+        is not _ORIGINAL_REVISION_SEMANTIC_CODE
+        or getattr(_ORIGINAL_INGEST_SEMANTIC_PAYLOAD, "__code__", None)
+        is not _ORIGINAL_INGEST_SEMANTIC_CODE
     ):
         raise _ERROR("settlement Decimal materialization dispatch changed")
+
+
+def _bounded_dec(value: object, field: str) -> Decimal:
+    _require_original_surfaces()
     parsed = _ORIGINAL_DEC(value, field)
     return _require_bounded_decimal(parsed, field)
 
 
-def _bounded_semantic_payload(self) -> dict[str, str]:
-    if type(self) is not _REVISION_TYPE:
-        raise _ERROR("settlement revision must be the canonical concrete type")
-    if (
-        getattr(_ORIGINAL_DEC, "__code__", None) is not _ORIGINAL_DEC_CODE
-        or getattr(_ORIGINAL_SEMANTIC_PAYLOAD, "__code__", None)
-        is not _ORIGINAL_SEMANTIC_CODE
-    ):
-        raise _ERROR("settlement Decimal materialization dispatch changed")
+def _bounded_revision_semantic_payload(self) -> dict[str, str]:
+    _require_original_surfaces()
     for field in _DECIMAL_FIELDS:
         _require_bounded_decimal(getattr(self, field), field)
-    return _ORIGINAL_SEMANTIC_PAYLOAD(self)
+    return _ORIGINAL_REVISION_SEMANTIC_PAYLOAD(self)
+
+
+def _bounded_ingest_semantic_payload(
+    action,
+    capture,
+    order,
+    plan_id: str,
+    attempt_id: str,
+):
+    _require_original_surfaces()
+    for attribute, field in (
+        ("price_requested", "price_requested"),
+        ("price_matched", "price_matched"),
+        ("size_settled", "size_settled"),
+        ("profit", "provider_profit"),
+    ):
+        _require_bounded_decimal(getattr(order, attribute), field)
+    return _ORIGINAL_INGEST_SEMANTIC_PAYLOAD(
+        action,
+        capture,
+        order,
+        plan_id,
+        attempt_id,
+    )
 
 
 if _settlement._dec is not _ORIGINAL_DEC:
     raise RuntimeError("Betfair settlement Decimal parser changed before resource guard")
-if _REVISION_TYPE.semantic_payload is not _ORIGINAL_SEMANTIC_PAYLOAD:
-    raise RuntimeError("Betfair settlement semantic payload changed before resource guard")
+if _REVISION_TYPE.semantic_payload is not _ORIGINAL_REVISION_SEMANTIC_PAYLOAD:
+    raise RuntimeError("Betfair settlement revision payload changed before resource guard")
+if _settlement._semantic_payload is not _ORIGINAL_INGEST_SEMANTIC_PAYLOAD:
+    raise RuntimeError("Betfair settlement ingest payload changed before resource guard")
 
 _settlement._dec = _bounded_dec
-_REVISION_TYPE.semantic_payload = _bounded_semantic_payload
+_REVISION_TYPE.semantic_payload = _bounded_revision_semantic_payload
+_settlement._semantic_payload = _bounded_ingest_semantic_payload
 
-__all__: list[str] = []
+__all__ = ["_require_bounded_decimal"]

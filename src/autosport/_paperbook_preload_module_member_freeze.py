@@ -210,24 +210,30 @@ def _install() -> None:
     if _paper.tempfile is not tempfile:
         raise RuntimeError("canonical PaperBook serializer tempfile module authority changed")
 
-    # The owning witness protocol already used frozen member facades. Extend that same
-    # composition boundary to the canonical parser/serializer delegates themselves.
-    # Python stdlib functions are detached from their public FunctionType objects, so
-    # an identity-preserving public ``__code__`` mutation cannot reach positive load/save.
-    detached_json_loads = _clone_module_function_graph(json.loads, "json.loads")
-    detached_json_dump = _clone_module_function_graph(json.dump, "json.dump")
-    detached_named_temporary_file = _clone_module_function_graph(
+    # Freeze Python members on both sides of the same persistence boundary.  The
+    # witness protocol itself parses/digests/creates stage files, while canonical
+    # PaperBook load/save parses/serializes the snapshot.  Each Python callable gets a
+    # private composition-time module-function graph; public same-object ``__code__``
+    # mutation therefore cannot retarget either side through preserved object identity.
+    guard_json_loads = _clone_module_function_graph(json.loads, "witness json.loads")
+    guard_json_dumps = _clone_module_function_graph(json.dumps, "witness json.dumps")
+    guard_mkstemp = _clone_module_function_graph(tempfile.mkstemp, "witness tempfile.mkstemp")
+    guard_normcase = _clone_module_function_graph(os.path.normcase, "witness os.path.normcase")
+    guard_abspath = _clone_module_function_graph(os.path.abspath, "witness os.path.abspath")
+    paper_json_loads = _clone_module_function_graph(json.loads, "parser json.loads")
+    paper_json_dump = _clone_module_function_graph(json.dump, "serializer json.dump")
+    paper_named_temporary_file = _clone_module_function_graph(
         tempfile.NamedTemporaryFile,
-        "tempfile.NamedTemporaryFile",
+        "serializer tempfile.NamedTemporaryFile",
     )
 
     frozen_path = _FrozenSurface(
-        normcase=os.path.normcase,
-        abspath=os.path.abspath,
+        normcase=guard_normcase,
+        abspath=guard_abspath,
     )
     _guard.json = _FrozenSurface(
-        loads=json.loads,
-        dumps=json.dumps,
+        loads=guard_json_loads,
+        dumps=guard_json_dumps,
         JSONDecodeError=json.JSONDecodeError,
     )
     _guard.hashlib = _FrozenSurface(sha256=hashlib.sha256)
@@ -238,18 +244,18 @@ def _install() -> None:
         close=os.close,
         name=os.name,
     )
-    _guard.tempfile = _FrozenSurface(mkstemp=tempfile.mkstemp)
+    _guard.tempfile = _FrozenSurface(mkstemp=guard_mkstemp)
 
     _paper.json = _FrozenSurface(
-        loads=detached_json_loads,
-        dump=detached_json_dump,
+        loads=paper_json_loads,
+        dump=paper_json_dump,
     )
     _paper.os = _FrozenSurface(
         fsync=os.fsync,
         replace=os.replace,
     )
     _paper.tempfile = _FrozenSurface(
-        NamedTemporaryFile=detached_named_temporary_file,
+        NamedTemporaryFile=paper_named_temporary_file,
     )
 
     # The original delegate witnesses were captured before composition and therefore
@@ -268,3 +274,4 @@ def _install() -> None:
 
 _install()
 del _install
+del _clone_module_function_graph

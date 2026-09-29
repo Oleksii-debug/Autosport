@@ -238,11 +238,23 @@ def _guard_detached_consumer(
         surface_authority()
 
     require_surface_code = require_surface.__code__
+    binding_function_marker = "__AUTOSPORT_RUN_TRANSACTION_BINDING_VERIFIER_FUNCTION_ANCHOR__"
+    binding_code_marker = "__AUTOSPORT_RUN_TRANSACTION_BINDING_VERIFIER_CODE_ANCHOR__"
+    surface_function_marker = "__AUTOSPORT_RUN_TRANSACTION_SURFACE_VERIFIER_FUNCTION_ANCHOR__"
+    surface_code_marker = "__AUTOSPORT_RUN_TRANSACTION_SURFACE_VERIFIER_CODE_ANCHOR__"
+    fresh_cell_function_marker = "__AUTOSPORT_RUN_TRANSACTION_FRESH_CELL_FUNCTION_ANCHOR__"
+    fresh_cell_code_marker = "__AUTOSPORT_RUN_TRANSACTION_FRESH_CELL_CODE_ANCHOR__"
 
     def guarded_consumer(*args, **kwargs):
         # Intentionally retain the real detached globals in this closure. Existing
         # diagnostics/tests use that exact handle to prove the consumer is detached.
         # Neither it nor the owning guard module globals are execution mappings now.
+        anchored_require_bindings = "__AUTOSPORT_RUN_TRANSACTION_BINDING_VERIFIER_FUNCTION_ANCHOR__"
+        anchored_require_bindings_code = "__AUTOSPORT_RUN_TRANSACTION_BINDING_VERIFIER_CODE_ANCHOR__"
+        anchored_require_surface = "__AUTOSPORT_RUN_TRANSACTION_SURFACE_VERIFIER_FUNCTION_ANCHOR__"
+        anchored_require_surface_code = "__AUTOSPORT_RUN_TRANSACTION_SURFACE_VERIFIER_CODE_ANCHOR__"
+        anchored_fresh_cell = "__AUTOSPORT_RUN_TRANSACTION_FRESH_CELL_FUNCTION_ANCHOR__"
+        anchored_fresh_cell_code = "__AUTOSPORT_RUN_TRANSACTION_FRESH_CELL_CODE_ANCHOR__"
         if (
             exact_type(function) is not function_type
             or function.__code__ is not inner_code
@@ -250,11 +262,17 @@ def _guard_detached_consumer(
             or frozen_function_globals_items is not frozen_function_globals_items_anchor[0]
             or frozen_closure_values is not frozen_closure_values_anchor[0]
             or frozen_globals_items is not frozen_globals_items_anchor[0]
+            or require_surface is not anchored_require_surface
             or exact_type(require_surface) is not function_type
+            or require_surface.__code__ is not anchored_require_surface_code
             or require_surface.__code__ is not require_surface_code
+            or require_bindings is not anchored_require_bindings
             or exact_type(require_bindings) is not function_type
+            or require_bindings.__code__ is not anchored_require_bindings_code
             or require_bindings.__code__ is not require_bindings_code
+            or fresh_cell is not anchored_fresh_cell
             or exact_type(fresh_cell) is not function_type
+            or fresh_cell.__code__ is not anchored_fresh_cell_code
             or fresh_cell.__code__ is not fresh_cell_code
         ):
             raise ValueError(
@@ -286,11 +304,17 @@ def _guard_detached_consumer(
                 or frozen_function_globals_items is not frozen_function_globals_items_anchor[0]
                 or frozen_closure_values is not frozen_closure_values_anchor[0]
                 or frozen_globals_items is not frozen_globals_items_anchor[0]
+                or require_surface is not anchored_require_surface
                 or exact_type(require_surface) is not function_type
+                or require_surface.__code__ is not anchored_require_surface_code
                 or require_surface.__code__ is not require_surface_code
+                or require_bindings is not anchored_require_bindings
                 or exact_type(require_bindings) is not function_type
+                or require_bindings.__code__ is not anchored_require_bindings_code
                 or require_bindings.__code__ is not require_bindings_code
+                or fresh_cell is not anchored_fresh_cell
                 or exact_type(fresh_cell) is not function_type
+                or fresh_cell.__code__ is not anchored_fresh_cell_code
                 or fresh_cell.__code__ is not fresh_cell_code
             ):
                 raise ValueError(
@@ -298,6 +322,27 @@ def _guard_detached_consumer(
                 )
             require_bindings()
             require_surface()
+
+    guarded_constants = guarded_consumer.__code__.co_consts
+    guarded_anchors = (
+        (binding_function_marker, require_bindings),
+        (binding_code_marker, require_bindings_code),
+        (surface_function_marker, require_surface),
+        (surface_code_marker, require_surface_code),
+        (fresh_cell_function_marker, fresh_cell),
+        (fresh_cell_code_marker, fresh_cell_code),
+    )
+    if any(sum(item == marker for item in guarded_constants) != 1 for marker, _ in guarded_anchors):
+        raise RuntimeError("RunTransaction detached verifier identity anchor is ambiguous")
+    guarded_consumer.__code__ = guarded_consumer.__code__.replace(
+        co_consts=tuple_type(
+            next(
+                (anchored for marker, anchored in guarded_anchors if item == marker),
+                item,
+            )
+            for item in guarded_constants
+        )
+    )
 
     guarded_consumer.__name__ = inner_name
     guarded_consumer.__qualname__ = inner_qualname

@@ -1,13 +1,15 @@
 """Seal StrategyModelFactory publish-receipt dispatch after composition.
 
 The owning publish-receipt guard remains the only receipt/transaction authority.  This
-module adds two fail-closed composition properties around that existing implementation:
+module adds fail-closed composition properties around that existing implementation:
 
 * the low-level ledger append method is not a caller capability; it may execute only
-  while the canonical manifest + final-ScientificRegistry issuer is active; and
+  while the canonical manifest + final-ScientificRegistry issuer is active;
 * already-installed issuer/recovery/runner/store functions retain the exact Python
-  executable/global graph captured at composition, so later module-global rebinding
-  cannot retarget a positive publication path while keeping the public wrapper object.
+  executable/global graph captured at composition; and
+* authority-bearing project class methods used below those functions retain their
+  exact post-composition dispatch, so an unchanged class identity cannot hide a
+  replaced artifact-hash, machine-authority, or workspace-lock implementation.
 
 No registry, artifact store, transaction protocol, lock, clock, or machine authority is
 created here.  As with the merged trusted-runtime code-profile prerequisite, this is a
@@ -163,6 +165,131 @@ def _require_function_graph(
                 )
 
 
+def _descriptor_functions(raw: object) -> tuple[FunctionType, ...]:
+    if type(raw) is _FUNCTION_TYPE:
+        return (raw,)
+    if type(raw) in (staticmethod, classmethod):
+        function = raw.__func__
+        return (function,) if type(function) is _FUNCTION_TYPE else ()
+    if type(raw) is property:
+        return tuple(
+            function
+            for function in (raw.fget, raw.fset, raw.fdel)
+            if type(function) is _FUNCTION_TYPE
+        )
+    return ()
+
+
+def _capture_type_executable_surface(
+    owner: type,
+    label: str,
+) -> tuple[tuple[object, ...], ...]:
+    """Freeze every executable descriptor defined by one project class/MRO."""
+
+    if type(owner) is not type:
+        raise RuntimeError(f"canonical {label} is not an exact class")
+    captured: list[tuple[object, ...]] = []
+    for defining_type in owner.__mro__:
+        if defining_type is object:
+            continue
+        executable_names = frozenset(
+            name
+            for name, raw in vars(defining_type).items()
+            if _descriptor_functions(raw)
+        )
+        entries: list[tuple[object, ...]] = []
+        for name in sorted(executable_names):
+            raw = vars(defining_type)[name]
+            functions = _descriptor_functions(raw)
+            entries.append(
+                (
+                    name,
+                    raw,
+                    tuple((function, function.__code__) for function in functions),
+                )
+            )
+        captured.append((defining_type, executable_names, tuple(entries)))
+    return tuple(captured)
+
+
+def _require_type_executable_surface(
+    surface: tuple[tuple[object, ...], ...],
+    label: str,
+) -> None:
+    for defining_type, expected_names, entries in surface:
+        current_names = frozenset(
+            name
+            for name, raw in vars(defining_type).items()
+            if _descriptor_functions(raw)
+        )
+        if current_names != expected_names:
+            raise RuntimeError(f"{label} class dispatch authority changed")
+        for name, expected_raw, functions in entries:
+            if vars(defining_type).get(name, _EMPTY) is not expected_raw:
+                raise RuntimeError(f"{label} class dispatch authority changed: {name}")
+            for function, expected_code in functions:
+                if (
+                    type(function) is not _FUNCTION_TYPE
+                    or function.__code__ is not expected_code
+                ):
+                    raise RuntimeError(
+                        f"{label} class executable authority changed: {name}"
+                    )
+
+
+def _capture_named_class_surface(
+    owner: type,
+    names: tuple[str, ...],
+    label: str,
+) -> tuple[tuple[object, ...], ...]:
+    """Freeze selected resolved methods, including inherited store primitives."""
+
+    captured: list[tuple[object, ...]] = []
+    for name in names:
+        expected_resolved = getattr(owner, name, _EMPTY)
+        if expected_resolved is _EMPTY:
+            raise RuntimeError(f"canonical {label} is missing class surface {name}")
+        defining_type = next(
+            (
+                base
+                for base in owner.__mro__
+                if name in vars(base)
+            ),
+            None,
+        )
+        if defining_type is None:
+            raise RuntimeError(f"canonical {label} cannot resolve class surface {name}")
+        raw = vars(defining_type)[name]
+        functions = _descriptor_functions(raw)
+        if not functions:
+            raise RuntimeError(f"canonical {label} surface is not executable: {name}")
+        captured.append(
+            (
+                name,
+                defining_type,
+                raw,
+                expected_resolved,
+                tuple((function, function.__code__) for function in functions),
+            )
+        )
+    return tuple(captured)
+
+
+def _require_named_class_surface(
+    owner: type,
+    surface: tuple[tuple[object, ...], ...],
+    label: str,
+) -> None:
+    for name, defining_type, expected_raw, expected_resolved, functions in surface:
+        if vars(defining_type).get(name, _EMPTY) is not expected_raw:
+            raise RuntimeError(f"{label} class dispatch authority changed: {name}")
+        if getattr(owner, name, _EMPTY) is not expected_resolved:
+            raise RuntimeError(f"{label} resolved dispatch authority changed: {name}")
+        for function, expected_code in functions:
+            if type(function) is not _FUNCTION_TYPE or function.__code__ is not expected_code:
+                raise RuntimeError(f"{label} class executable authority changed: {name}")
+
+
 def _clone_function(
     function: FunctionType,
     *,
@@ -230,6 +357,26 @@ def _sealed(function: FunctionType, label: str) -> FunctionType:
     return _clone_function(sealed, trusted_globals=trusted_globals)
 
 
+def _class_surface_sealed(
+    function: FunctionType,
+    label: str,
+    require_class_surface: FunctionType,
+) -> FunctionType:
+    sealed_function = _sealed(function, label)
+
+    def guarded(self, *args, **kwargs):
+        _TRUSTED_REQUIRE_CLASS_SURFACE(self)
+        try:
+            return _TRUSTED_SEALED_FUNCTION(self, *args, **kwargs)
+        finally:
+            _TRUSTED_REQUIRE_CLASS_SURFACE(self)
+
+    trusted_globals: dict[str, object] = dict(guarded.__globals__)
+    trusted_globals["_TRUSTED_REQUIRE_CLASS_SURFACE"] = require_class_surface
+    trusted_globals["_TRUSTED_SEALED_FUNCTION"] = sealed_function
+    return _clone_function(guarded, trusted_globals=trusted_globals)
+
+
 def _require_store_append_surface(store) -> None:
     """Require exact class dispatch and no instance shadow for canonical append."""
 
@@ -248,6 +395,8 @@ def _require_store_append_surface(store) -> None:
 def _install() -> None:
     store_type = _factory.FactoryArtifactStore
     runner_type = _factory.ExperimentRunner
+    authority_type = _guard.MonotonicWorkspaceAuthority
+    lock_type = _guard.WorkspaceEconomicLock
 
     original_append = vars(store_type).get("_append_publish_commit_record")
     original_record = getattr(_factory, "_record_committed_factory_publish", None)
@@ -255,6 +404,49 @@ def _install() -> None:
         raise RuntimeError("canonical factory publish append authority changed before sealing")
     if original_record is not _guard._record_committed_factory_publish:
         raise RuntimeError("canonical factory publish issuer authority changed before sealing")
+
+    store_core_surface = _capture_named_class_surface(
+        store_type,
+        ("sha256", "_stable_snapshot", "_path", "path_for_testing"),
+        "factory artifact store core",
+    )
+    authority_surface = _capture_type_executable_surface(
+        authority_type,
+        "monotonic workspace authority",
+    )
+    lock_surface = _capture_type_executable_surface(
+        lock_type,
+        "workspace economic lock",
+    )
+
+    def require_class_surface(store):
+        if type(store) is not store_type:
+            raise RuntimeError("factory publish store type changed after composition")
+        instance_state = getattr(store, "__dict__", None)
+        if type(instance_state) is dict:
+            for name in ("sha256", "_stable_snapshot", "_path", "path_for_testing"):
+                if name in instance_state:
+                    raise RuntimeError(
+                        f"factory artifact store instance dispatch changed: {name}"
+                    )
+        _require_named_class_surface(
+            store_type,
+            store_core_surface,
+            "factory artifact store core",
+        )
+        _require_type_executable_surface(
+            authority_surface,
+            "monotonic workspace authority",
+        )
+        _require_type_executable_surface(
+            lock_surface,
+            "workspace economic lock",
+        )
+
+    require_class_surface = _sealed(
+        require_class_surface,
+        "factory publish authority class-surface verifier",
+    )
 
     # The low-level append implementation deliberately does not reread ScientificRegistry:
     # that check belongs to the existing canonical issuer. Keep append private in fact,
@@ -272,11 +464,16 @@ def _install() -> None:
             raise ValueError(
                 "factory publish append requires the canonical transaction issuer"
             )
-        return _TRUSTED_SEALED_APPEND(self, transaction)
+        _TRUSTED_REQUIRE_CLASS_SURFACE(self)
+        try:
+            return _TRUSTED_SEALED_APPEND(self, transaction)
+        finally:
+            _TRUSTED_REQUIRE_CLASS_SURFACE(self)
 
     gated_globals: dict[str, object] = dict(gated_append.__globals__)
     gated_globals["_TRUSTED_ACTIVE_APPEND"] = active_append
     gated_globals["_TRUSTED_APPEND_CAPABILITY"] = append_capability
+    gated_globals["_TRUSTED_REQUIRE_CLASS_SURFACE"] = require_class_surface
     gated_globals["_TRUSTED_SEALED_APPEND"] = sealed_append
     gated_append = _clone_function(gated_append, trusted_globals=gated_globals)
 
@@ -295,10 +492,12 @@ def _install() -> None:
         # authority-bearing target and append-surface verifier live in private globals.
         if sealed_record is not _TRUSTED_SEALED_RECORD:
             raise RuntimeError("factory publish issuer closure changed after composition")
+        _TRUSTED_REQUIRE_CLASS_SURFACE(store)
         _TRUSTED_REQUIRE_APPEND_SURFACE(store)
         token = _TRUSTED_ACTIVE_APPEND.set(_TRUSTED_APPEND_CAPABILITY)
         try:
             result = _TRUSTED_SEALED_RECORD(registry, store)
+            _TRUSTED_REQUIRE_CLASS_SURFACE(store)
             _TRUSTED_REQUIRE_APPEND_SURFACE(store)
             return result
         finally:
@@ -306,6 +505,7 @@ def _install() -> None:
 
     record_globals: dict[str, object] = dict(canonical_record.__globals__)
     record_globals["_TRUSTED_SEALED_RECORD"] = sealed_record
+    record_globals["_TRUSTED_REQUIRE_CLASS_SURFACE"] = require_class_surface
     record_globals["_TRUSTED_REQUIRE_APPEND_SURFACE"] = require_append_surface
     record_globals["_TRUSTED_ACTIVE_APPEND"] = active_append
     record_globals["_TRUSTED_APPEND_CAPABILITY"] = append_capability
@@ -333,7 +533,15 @@ def _install() -> None:
         current = vars(store_type).get(name)
         if current is not expected:
             raise RuntimeError(f"canonical factory receipt store surface changed: {name}")
-        setattr(store_type, name, _sealed(current, f"factory receipt store {name}"))
+        setattr(
+            store_type,
+            name,
+            _class_surface_sealed(
+                current,
+                f"factory receipt store {name}",
+                require_class_surface,
+            ),
+        )
 
     factory_surfaces = (
         (

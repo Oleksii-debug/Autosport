@@ -78,6 +78,8 @@ class BetdaqCatalogueEvidence:
             raise ValueError(
                 "catalogue rate_admission_receipts must be non-empty SHA-256 tuple"
             )
+        if self.provider_origin_verified is not False:
+            raise ValueError("catalogue evidence cannot claim provider-origin verification")
         if self.grants_execution_authority is not False:
             raise ValueError("catalogue evidence cannot grant execution authority")
         if self.grants_write_permission is not False:

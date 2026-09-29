@@ -516,3 +516,69 @@ def test_admission_rejects_decimal_subclass_before_virtual_dispatch(tmp_path):
         )
     assert book.balance == Decimal("1000")
     assert not (tmp_path / "paper_book.json").exists()
+
+def _hostile_instance_getattribute_code_with_matching_closure(function):
+    closure_count = len(function.__closure__ or ())
+    lines = ["def build():"]
+    for index in range(closure_count):
+        lines.append(f"    cell_{index} = object()")
+    lines.append("    def hostile(self, name):")
+    if closure_count:
+        names = ", ".join(f"cell_{index}" for index in range(closure_count))
+        lines.append(f"        _ = ({names},)")
+    else:
+        lines.append("        _ = None")
+    lines.append("        if name == 'evaluate':")
+    lines.append("            def fake(candidate_book, stake, *, context=None):")
+    lines.append("                del candidate_book, stake, context")
+    lines.append("                decision_type = __import__('autosport.risk', fromlist=['RiskDecision']).RiskDecision")
+    lines.append("                return decision_type(True, 'hostile instance dispatch')")
+    lines.append("            return fake")
+    lines.append("        return object.__getattribute__(self, name)")
+    lines.append("    return hostile")
+    namespace: dict[str, object] = {}
+    exec("\n".join(lines), {}, namespace)
+    hostile = namespace["build"]()
+    assert callable(hostile)
+    assert len(hostile.__closure__ or ()) == closure_count
+    return hostile.__code__
+
+
+def test_admission_rejects_in_place_mutated_policy_instance_dispatch_root(tmp_path):
+    """Product admission must validate the instance-dispatch root before lookup."""
+
+    book_path = tmp_path / "paper_book.json"
+    book = PaperBook("1000")
+    book.save(book_path)
+    before = book_path.read_bytes()
+    policy = PaperRiskPolicy(
+        max_ticket_fraction=Decimal("1"),
+        max_committed_fraction=Decimal("1"),
+        minimum_cash_reserve_fraction=Decimal("0"),
+    )
+    root = vars(PaperRiskPolicy)["__getattribute__"]
+    original_code = root.__code__
+    hostile_code = _hostile_instance_getattribute_code_with_matching_closure(root)
+
+    try:
+        root.__code__ = hostile_code
+        with pytest.raises(
+            TypeError,
+            match="canonical PaperRiskPolicy executable root changed: __getattribute__",
+        ):
+            admit_paper_ticket(
+                workspace=tmp_path,
+                book=book,
+                risk_policy=policy,
+                stake=Decimal("10"),
+                legs=(_leg(),),
+                reason="mutated instance dispatch must not authorize PAPER",
+                placed_at="2026-09-24T16:00:00Z",
+            )
+    finally:
+        root.__code__ = original_code
+
+    assert book_path.read_bytes() == before
+    persisted = PaperBook.load(book_path)
+    assert persisted.balance == Decimal("1000")
+    assert persisted.tickets == {}

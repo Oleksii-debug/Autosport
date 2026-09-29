@@ -2,11 +2,16 @@ from __future__ import annotations
 
 """Bind forward-economic source receipts to the canonical durable evaluation universe.
 
-This module is a composition layer only.  It does not create a second source-universe
+This module is a composition layer only. It does not create a second source-universe
 store and it never treats caller-supplied ``AuthoritativeSourceReceipt`` values as
-positive authority.  Positive membership is reloaded from
+positive authority. Positive membership is reloaded from
 ``ProviderEvaluationUniverseStore`` and compared against the forward opportunity
 sequence before receipts are emitted for ``forward_evidence_completeness``.
+
+Positive receipt identity also binds the durable backing locator derived from the
+existing workspace identity and monotonic evaluation-universe authority. This prevents
+an exact outer ProviderEvaluationUniverseStore object from being coherently retargeted
+to a different legitimate backing after authority has already been resolved.
 """
 
 import hashlib
@@ -15,6 +20,10 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Mapping, Sequence
 
+from ._forward_universe_backing_guard import (
+    ForwardUniverseBackingGuardError,
+    resolve_forward_universe_backing_locator,
+)
 from .evaluation_universe import AttritionReason, EvaluationRow, SlotState
 from .forward_evidence_completeness import (
     AuthoritativeSourceReceipt,
@@ -64,13 +73,9 @@ def _instant(value: str, name: str) -> datetime:
     try:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError as exc:
-        raise ForwardEvaluationUniverseBindingError(
-            f"{name} must be ISO-8601"
-        ) from exc
+        raise ForwardEvaluationUniverseBindingError(f"{name} must be ISO-8601") from exc
     if parsed.tzinfo is None or parsed.utcoffset() is None:
-        raise ForwardEvaluationUniverseBindingError(
-            f"{name} must include a timezone"
-        )
+        raise ForwardEvaluationUniverseBindingError(f"{name} must include a timezone")
     return parsed.astimezone(UTC)
 
 
@@ -78,6 +83,9 @@ _RULE_PAYLOAD = {
     "rule_id": FORWARD_UNIVERSE_RULE_ID,
     "authority": "ProviderEvaluationUniverseStore",
     "membership": "exact durable EvaluationUniverse rows",
+    "backing_authority": (
+        "workspace identity + monotonic evaluation-universe namespace locator"
+    ),
     "result_by_slot_state": {
         SlotState.CANDIDATE.value: UniverseResult.ADMITTED.value,
         SlotState.NO_EVENT.value: UniverseResult.EXCLUDED.value,
@@ -92,7 +100,9 @@ _RULE_PAYLOAD = {
     "receipt_identity": "evaluation-universe-receipt:<EvaluationRow.row_id>",
     "observation_interval": "EvaluationRow.source_at..EvaluationRow.committed_at",
     "causal_cutoff": "EvaluationRow.committed_at",
-    "receipt_payload": "forward protocol + immutable universe + full canonical EvaluationRow",
+    "receipt_payload": (
+        "forward protocol + durable backing locator + immutable universe + full canonical EvaluationRow"
+    ),
 }
 FORWARD_UNIVERSE_RULE_SHA256 = _digest(_RULE_PAYLOAD)
 
@@ -105,6 +115,7 @@ class ForwardUniverseMemberExpectation:
     opportunity_id: str
     source_receipt_id: str
     source_receipt_sha256: str
+    backing_locator_sha256: str
     universe_rule_result: UniverseResult
     universe_rule_reason_code: str
     provider_acquisition_state: str
@@ -133,6 +144,7 @@ def _reason_code(row: EvaluationRow) -> str:
 def _member_expectation(
     *,
     protocol: ForwardEvidenceProtocolEnvelope,
+    backing_locator_sha256: str,
     universe_sha256: str,
     membership_sha256: str,
     row: EvaluationRow,
@@ -151,6 +163,7 @@ def _member_expectation(
             "rule_sha256": FORWARD_UNIVERSE_RULE_SHA256,
             "forward_protocol_sha256": protocol.protocol_sha256,
             "campaign_id": protocol.campaign_id,
+            "backing_locator_sha256": backing_locator_sha256,
             "universe_sha256": universe_sha256,
             "membership_sha256": membership_sha256,
             "row_id": row_id,
@@ -165,6 +178,7 @@ def _member_expectation(
         opportunity_id=opportunity_id,
         source_receipt_id=source_receipt_id,
         source_receipt_sha256=receipt_sha256,
+        backing_locator_sha256=backing_locator_sha256,
         universe_rule_result=result,
         universe_rule_reason_code=reason,
         provider_acquisition_state=acquisition,
@@ -178,7 +192,10 @@ def _load_expectations(
     *,
     store: ProviderEvaluationUniverseStore,
     protocol: ForwardEvidenceProtocolEnvelope,
-) -> tuple[tuple[ForwardUniverseMemberExpectation, ...], tuple[str, str]]:
+) -> tuple[
+    tuple[ForwardUniverseMemberExpectation, ...],
+    tuple[str, str, str],
+]:
     if type(store) is not ProviderEvaluationUniverseStore:
         raise TypeError("store must be exact ProviderEvaluationUniverseStore")
     if type(protocol) is not ForwardEvidenceProtocolEnvelope:
@@ -190,6 +207,13 @@ def _load_expectations(
         raise ForwardEvaluationUniverseBindingError(
             "forward protocol does not precommit the canonical provider evaluation-universe rule"
         )
+
+    try:
+        backing_locator = resolve_forward_universe_backing_locator(store)
+    except ForwardUniverseBackingGuardError as exc:
+        raise ForwardEvaluationUniverseBindingError(
+            "provider evaluation-universe backing locator authority changed"
+        ) from exc
 
     ledger = _CANONICAL_PROVIDER_UNIVERSE_LOAD(store)
     if ledger is None:
@@ -211,6 +235,7 @@ def _load_expectations(
             (
                 _member_expectation(
                     protocol=protocol,
+                    backing_locator_sha256=backing_locator.locator_sha256,
                     universe_sha256=universe.universe_sha256,
                     membership_sha256=universe.membership_sha256,
                     row=row,
@@ -229,7 +254,11 @@ def _load_expectations(
         raise ForwardEvaluationUniverseBindingError(
             "forward protocol must be anchored before the first authoritative source observation"
         )
-    return expectations, (universe.universe_sha256, universe.membership_sha256)
+    return expectations, (
+        backing_locator.locator_sha256,
+        universe.universe_sha256,
+        universe.membership_sha256,
+    )
 
 
 def resolve_forward_universe_members(
@@ -252,8 +281,8 @@ def authorize_forward_source_receipts(
     """Re-resolve durable membership and authorize only its exact forward projection.
 
     This function is intentionally fail-closed and does not accept a caller-supplied
-    inventory of authoritative receipts.  Every receipt is regenerated from the
-    durable product universe after exact opportunity coverage is verified.
+    inventory of authoritative receipts. Every receipt is regenerated from the durable
+    product universe after exact opportunity coverage is verified.
     """
 
     expectations, identity_before = _load_expectations(store=store, protocol=protocol)
@@ -330,10 +359,13 @@ def authorize_forward_source_receipts(
             )
         )
 
-    _expectations_after, identity_after = _load_expectations(store=store, protocol=protocol)
+    _expectations_after, identity_after = _load_expectations(
+        store=store,
+        protocol=protocol,
+    )
     if identity_after != identity_before:
         raise ForwardEvaluationUniverseBindingError(
-            "durable source-universe identity changed during forward receipt resolution"
+            "durable source-universe backing or membership changed during forward receipt resolution"
         )
     return tuple(receipts)
 

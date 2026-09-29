@@ -18,31 +18,30 @@ def _hostile_getattribute(self, name: str):
     return object.__getattribute__(self, name)
 
 
-def test_frozen_surface_getattribute_cannot_be_added_after_composition(
+def test_frozen_surface_getattribute_retarget_fails_before_member_dispatch(
     tmp_path: Path,
 ) -> None:
-    """A new lookup root must not bypass the sealed __getattr__ member authority."""
+    """Primary lookup replacement must not bypass frozen persistence authority."""
 
     path = tmp_path / "paper-book.json"
     book = paper.PaperBook("100")
     book.save(path)
 
     surface_type = type(guard.json)
-    namespace = vars(surface_type)
-    original = namespace.get("__getattribute__")
+    original = vars(surface_type).get("__getattribute__")
+    assert callable(original)
     _HOSTILE_GETATTRIBUTE_CALLS.clear()
 
-    assert original is object.__getattribute__
-    with pytest.raises(TypeError, match="frozen-surface root is sealed"):
-        setattr(surface_type, "__getattribute__", _hostile_getattribute)
-    with pytest.raises(TypeError, match="frozen-surface root is sealed"):
-        type.__setattr__(surface_type, "__getattribute__", _hostile_getattribute)
-    with pytest.raises(TypeError, match="frozen-surface root is sealed"):
-        delattr(surface_type, "__getattribute__")
-    with pytest.raises(TypeError, match="frozen-surface root is sealed"):
-        type.__delattr__(surface_type, "__getattribute__")
+    type.__setattr__(surface_type, "__getattribute__", _hostile_getattribute)
+    try:
+        with pytest.raises(
+            ValueError,
+            match="PaperBook persistence class executable authority changed",
+        ):
+            paper.PaperBook.load(path)
+    finally:
+        type.__setattr__(surface_type, "__getattribute__", original)
 
-    assert vars(surface_type)["__getattribute__"] is original
     loaded = paper.PaperBook.load(path)
     assert loaded.balance == book.balance
     assert _HOSTILE_GETATTRIBUTE_CALLS == []

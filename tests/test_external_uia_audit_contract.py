@@ -176,3 +176,22 @@ def test_windows_candidate_external_uia_uses_system32_as_hostile_child_cwd() -> 
     assert "External UIA hostile CWD unexpectedly aliases the repository checkout" in step
     assert "External UIA evidence did not preserve the hostile child working directory" in step
     assert "extracted_external_uia_hostile_cwd_status" in step
+
+
+
+def test_windows_candidate_external_uia_fences_package_root_against_writes() -> None:
+    workflow = _windows_workflow()
+    step_start = workflow.index("- name: External UIA fresh-extraction gate")
+    step_end = workflow.index("- name: Upload external UIA failure evidence", step_start)
+    step = workflow[step_start:step_end]
+
+    deny = '& icacls $packageRoot /deny "*${currentSid}:(OI)(CI)(WD,AD,WEA,WA,DE,DC)" /T /C'
+    cleanup = '& icacls $packageRoot /remove:d "*${currentSid}" /T /C'
+    assert deny in step
+    assert cleanup in step
+    assert step.index("try {") < step.index(deny) < step.index("} finally {") < step.index(cleanup)
+    assert "External UIA package write fence exited $LASTEXITCODE" in step
+    assert "External UIA package write-fence cleanup exited $LASTEXITCODE" in step
+    assert "extracted_external_uia_read_only_package_status" in step
+    assert "-Exe (Join-Path $packageRoot 'Autosport.exe')" in step
+    assert "-WorkingDirectory $hostileCwd" in step

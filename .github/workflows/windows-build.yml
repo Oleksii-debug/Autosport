@@ -258,18 +258,39 @@ jobs:
       - name: External UIA fresh-extraction gate
         shell: pwsh
         run: |
+          $ErrorActionPreference = 'Stop'
           $evidence = Join-Path $PWD 'dist/fresh-extraction-external-uia-audit.json'
+          $packageRoot = (Resolve-Path -LiteralPath (Join-Path $PWD '.build-fresh-extraction/Autosport-V1')).Path
           $hostileCwd = (Resolve-Path -LiteralPath (Join-Path $env:SystemRoot 'System32')).Path
           $checkoutCwd = (Resolve-Path -LiteralPath $PWD.Path).Path
           if ([string]::Equals($hostileCwd, $checkoutCwd, [System.StringComparison]::OrdinalIgnoreCase)) {
             throw 'External UIA hostile CWD unexpectedly aliases the repository checkout'
           }
-          ./scripts/external_uia_audit.ps1 `
-            -Exe (Join-Path $PWD '.build-fresh-extraction/Autosport-V1/Autosport.exe') `
-            -Output $evidence `
-            -WorkingDirectory $hostileCwd
-          $external = Get-Content $evidence -Raw | ConvertFrom-Json
-          if ($external.status -ne 'PASS') { throw 'External UIA fresh-extraction audit did not PASS' }
+
+          $currentSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+          if ([string]::IsNullOrWhiteSpace($currentSid) -or $currentSid -notmatch '^S-') {
+            throw 'External UIA package write fence could not resolve the runner SID'
+          }
+          $packageWriteFenceApplied = $false
+          $external = $null
+          try {
+            & icacls $packageRoot /deny "*${currentSid}:(OI)(CI)(WD,AD,WEA,WA,DE,DC)" /T /C | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw "External UIA package write fence exited $LASTEXITCODE" }
+            $packageWriteFenceApplied = $true
+
+            ./scripts/external_uia_audit.ps1 `
+              -Exe (Join-Path $packageRoot 'Autosport.exe') `
+              -Output $evidence `
+              -WorkingDirectory $hostileCwd
+            $external = Get-Content $evidence -Raw | ConvertFrom-Json
+          } finally {
+            if ($packageWriteFenceApplied) {
+              & icacls $packageRoot /remove:d "*${currentSid}" /T /C | Out-Null
+              if ($LASTEXITCODE -ne 0) { throw "External UIA package write-fence cleanup exited $LASTEXITCODE" }
+            }
+          }
+
+          if ($null -eq $external -or $external.status -ne 'PASS') { throw 'External UIA fresh-extraction audit did not PASS' }
           if (-not [string]::Equals([string]$external.launch_working_directory, $hostileCwd, [System.StringComparison]::OrdinalIgnoreCase)) {
             throw 'External UIA evidence did not preserve the hostile child working directory'
           }
@@ -280,6 +301,7 @@ jobs:
           $verification = Get-Content $verificationPath -Raw | ConvertFrom-Json
           $verification | Add-Member -NotePropertyName extracted_external_uia_status -NotePropertyValue $external.status -Force
           $verification | Add-Member -NotePropertyName extracted_external_uia_hostile_cwd_status -NotePropertyValue 'PASS' -Force
+          $verification | Add-Member -NotePropertyName extracted_external_uia_read_only_package_status -NotePropertyValue 'PASS' -Force
           $verification | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $verificationPath -Encoding utf8
       - name: Upload external UIA failure evidence
         if: failure()

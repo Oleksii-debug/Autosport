@@ -35,11 +35,14 @@ def test_focused_operator_controls_are_not_overwritten_by_state_poll() -> None:
         assert projection not in source
 
 
-def test_readonly_readbacks_are_not_rewritten_on_semantic_noop_poll() -> None:
+def test_readonly_readbacks_preserve_focused_review_position_and_noop_stability() -> None:
     source = _source()
 
     assert "function setValueIfChanged(node, value)" in source
-    assert "if (node.value !== text) node.value = text;" in source
+    assert (
+        "if (document.activeElement !== node && node.value !== text) node.value = text;"
+        in source
+    )
 
     stable_readbacks = (
         'setValueIfChanged(byId(205), state.bank || "");',
@@ -47,6 +50,7 @@ def test_readonly_readbacks_are_not_rewritten_on_semantic_noop_poll() -> None:
         'setValueIfChanged(byId(302), surfaceDetails[0] || "СТАН: невідомий");',
         'setValueIfChanged(byId(306), state.owner.summary || "");',
         'setValueIfChanged(byId(334), state.manual.result || "");',
+        'byId("product-source-status"),',
         'byId("product-runtime-status"),',
     )
     for projection in stable_readbacks:
@@ -58,6 +62,7 @@ def test_readonly_readbacks_are_not_rewritten_on_semantic_noop_poll() -> None:
         'byId(302).value = surfaceDetails[0] || "СТАН: невідомий";',
         'byId(306).value = state.owner.summary || "";',
         'byId(334).value = state.manual.result || "";',
+        'byId("product-source-status").value =',
         'byId("product-runtime-status").value =',
     )
     for projection in stale_unconditional_readbacks:

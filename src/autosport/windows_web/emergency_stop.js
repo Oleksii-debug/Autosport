@@ -6,6 +6,7 @@
   if (!(button instanceof HTMLButtonElement) || !(status instanceof HTMLElement)) return;
 
   let pendingStatus = null;
+  let activationInFlight = false;
 
   function setStatus(message) {
     const value = String(message || "Аварійний STOP: стан недоступний.");
@@ -40,6 +41,14 @@
     node.focus();
   }
 
+  function focusPendingStatus() {
+    if (pendingStatus instanceof HTMLElement) {
+      pendingStatus.focus();
+      return;
+    }
+    focusStatus();
+  }
+
   function finishPendingStatus(message) {
     // Project the immediate backend result through the canonical status node before
     // re-enabling ordinary durable-state convergence. Focusing that node gives the
@@ -62,6 +71,16 @@
       return;
     }
 
+    // Never disable the safety control, but also never emit two overlapping backend
+    // commands from rapid Enter/Space/click activation. A repeated activation while
+    // the command is in flight simply returns the operator to the existing pending
+    // announcement. This prevents out-of-order completions from projecting stale
+    // success/failure text while preserving immediate keyboard reachability.
+    if (activationInFlight) {
+      focusPendingStatus();
+      return;
+    }
+
     // Emergency backend dispatch is an independent safety lane. Give a
     // blind/keyboard operator immediate, explicitly non-final feedback before
     // awaiting the backend result. The shared dispatcher skips only its synchronous
@@ -73,6 +92,7 @@
       "Аварійний STOP: запит передано. "
       + "Очікується підтвердження стійкого журналу заборони.",
     );
+    activationInFlight = true;
 
     let resultMessage;
     try {
@@ -105,6 +125,8 @@
         "АВАРІЙНИЙ STOP НЕ ПІДТВЕРДЖЕНО. "
         + "Нові виконання мають залишатися заблокованими; перевірте журнал STOP."
       );
+    } finally {
+      activationInFlight = false;
     }
     // This is immediate backend-result confirmation. It is not a second state
     // authority: the existing poll loop will converge this readback to durable state.

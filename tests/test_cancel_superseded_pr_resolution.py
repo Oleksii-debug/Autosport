@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import pytest
 
-from scripts.cancel_superseded_pr_workflow_runs import CancellationError, GitHubApi
+from scripts.cancel_superseded_pr_workflow_runs import (
+    CancellationError,
+    GitHubApi,
+    PullRequestQualification,
+)
 
 
 HEAD_A = "a" * 40
@@ -59,3 +63,62 @@ def test_missing_workflow_run_pr_number_fails_closed_without_exact_head() -> Non
 
     with pytest.raises(CancellationError, match="exactly one associated pull request"):
         api.associated_pr_number(HEAD_A)
+
+
+class FakeQualificationApi(GitHubApi):
+    def __init__(self, payload: dict[str, object]) -> None:
+        self._repository = "Oleksii-debug/Autosport"
+        self._payload = payload
+
+    def _pull_request(self, pr_number: int) -> dict[str, object]:
+        assert pr_number == 2022
+        return self._payload
+
+
+def _qualification_pr(
+    *,
+    head_repo: str = "Oleksii-debug/Autosport",
+    base_repo: str = "Oleksii-debug/Autosport",
+    state: str = "open",
+    draft: bool = False,
+) -> dict[str, object]:
+    return {
+        "state": state,
+        "draft": draft,
+        "head": {
+            "sha": HEAD_A,
+            "repo": {"full_name": head_repo},
+        },
+        "base": {
+            "repo": {"full_name": base_repo},
+        },
+    }
+
+
+def test_live_qualification_accepts_open_nondraft_same_repository_head() -> None:
+    api = FakeQualificationApi(_qualification_pr())
+
+    assert api.live_pr_qualification(2022) == PullRequestQualification(
+        head_sha=HEAD_A,
+        integration_capable=True,
+    )
+
+
+def test_live_qualification_fails_closed_for_fork_head() -> None:
+    api = FakeQualificationApi(
+        _qualification_pr(head_repo="external-contributor/Autosport")
+    )
+
+    assert api.live_pr_qualification(2022) == PullRequestQualification(
+        head_sha=HEAD_A,
+        integration_capable=False,
+    )
+
+
+def test_live_qualification_rejects_foreign_base_repository() -> None:
+    api = FakeQualificationApi(
+        _qualification_pr(base_repo="external-owner/Autosport")
+    )
+
+    with pytest.raises(CancellationError, match="base repository is not canonical"):
+        api.live_pr_qualification(2022)

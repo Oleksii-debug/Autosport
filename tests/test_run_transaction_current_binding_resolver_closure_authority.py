@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from types import FunctionType
 
+import autosport._run_transaction_current_binding_resolver_closure_guard as resolver_guard
 from autosport.run_transaction import RunTransaction
 
 
@@ -80,3 +81,13 @@ def test_current_binding_resolver_rejects_coordinated_closure_graph_retarget() -
 
     for name, value in originals.items():
         assert cells[name].cell_contents is value
+
+
+def test_resolver_guard_install_mutators_are_not_runtime_capabilities() -> None:
+    """One-shot resolver composition helpers must disappear after package import."""
+
+    assert not hasattr(resolver_guard, "_install")
+    assert not hasattr(resolver_guard, "_seal_method")
+    assert not hasattr(resolver_guard, "_sealed_callable")
+    assert not hasattr(resolver_guard, "_capture_closure_graph")
+    assert not hasattr(resolver_guard, "_closure_cell")

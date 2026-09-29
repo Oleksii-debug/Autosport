@@ -56,12 +56,23 @@ class _Collector:
     def __init__(self) -> None:
         self.stop_called = threading.Event()
         self.stop_reasons: list[str] = []
+        self.stopped = False
+        self.stop_reason: str | None = None
+
+    def status(self) -> dict[str, object]:
+        return {
+            "stopped_at": "2026-09-29T05:15:00+00:00" if self.stopped else None,
+            "stop_reason": self.stop_reason if self.stopped else None,
+        }
 
     def resume(self) -> None:
-        return None
+        self.stopped = False
+        self.stop_reason = None
 
     def stop(self, reason: str) -> None:
         self.stop_reasons.append(reason)
+        self.stopped = True
+        self.stop_reason = reason
         self.stop_called.set()
 
 
@@ -70,8 +81,20 @@ class _MarketStore:
         return None
 
 
+class _RuntimeLease:
+    authority_active = True
+
+    def release(self) -> None:
+        self.authority_active = False
+
+
+class _StartTransitionStore:
+    def pending(self):
+        return None
+
+
 class ProductOperatorInflightStopPreemptionTests(unittest.TestCase):
-    def test_stop_reaches_canonical_runtime_before_blocked_tick_is_released(self) -> None:
+    def test_stop_intent_preempts_tick_but_durable_stop_waits_for_quiescence(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             collector = _Collector()
             coordinator = _BlockingCoordinator()
@@ -88,6 +111,8 @@ class ProductOperatorInflightStopPreemptionTests(unittest.TestCase):
                 mirror=object(),  # type: ignore[arg-type]
                 invalidations=object(),  # type: ignore[arg-type]
                 dependencies=object(),  # type: ignore[arg-type]
+                _runtime_lease=_RuntimeLease(),  # type: ignore[arg-type]
+                _start_transition_store=_StartTransitionStore(),  # type: ignore[arg-type]
             )
             operator = ProductOperatorController(runtime)
 
@@ -121,27 +146,39 @@ class ProductOperatorInflightStopPreemptionTests(unittest.TestCase):
             stop_thread.start()
 
             try:
-                stop_preempted_tick = collector.stop_called.wait(1)
+                # ProductOperatorController wires its event-backed request object into
+                # the collector's existing cancellation port. Intent must be observable
+                # promptly even though runtime.status()/stop() are correctly waiting on
+                # AutonomousProductRuntime._operation_fence behind this active tick.
+                stop_intent_preempted_tick = collector.stop_requested.wait(1)  # type: ignore[attr-defined]
                 tick_was_still_inflight = not tick_done.is_set()
+                durable_stop_waited_for_quiescence = not collector.stop_called.is_set()
+                stop_reason = collector.stop_reason()  # type: ignore[operator]
             finally:
                 coordinator.release_tick.set()
                 tick_thread.join(2)
                 stop_thread.join(2)
 
             self.assertTrue(
-                stop_preempted_tick,
-                "operator STOP was serialized behind an in-flight runtime tick",
+                stop_intent_preempted_tick,
+                "operator STOP intent was serialized behind an in-flight runtime tick",
             )
             self.assertTrue(
                 tick_was_still_inflight,
-                "STOP must become observable before the blocked tick completes",
+                "STOP intent must become observable before the blocked tick completes",
             )
+            self.assertTrue(
+                durable_stop_waited_for_quiescence,
+                "durable collector STOP must not race an active runtime mutation",
+            )
+            self.assertEqual(stop_reason, "operator_requested_stop")
             self.assertFalse(tick_thread.is_alive())
             self.assertFalse(stop_thread.is_alive())
             self.assertTrue(stop_done.is_set())
             self.assertEqual(thread_errors, [])
             self.assertEqual(collector.stop_reasons, ["operator_requested_stop"])
             self.assertEqual(coordinator.stop_reasons, ["operator_requested_stop"])
+            self.assertFalse(collector.stop_requested())  # type: ignore[attr-defined]
 
 
 if __name__ == "__main__":

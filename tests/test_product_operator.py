@@ -202,6 +202,7 @@ class ProductOperatorControllerTests(unittest.TestCase):
             self.assertEqual(collector.stop_reasons, ["operator_requested_stop"])
             self.assertEqual(coordinator.stop_reasons, ["operator_requested_stop"])
             self.assertEqual(operator.status().state, "STOPPED")
+            self.assertFalse(collector.stop_requested())  # type: ignore[attr-defined]
 
             operator.stop("operator_requested_stop")
             self.assertEqual(collector.stop_reasons, ["operator_requested_stop"])
@@ -275,7 +276,7 @@ class ProductOperatorControllerTests(unittest.TestCase):
             self.assertEqual(coordinator.stop_reasons, ["external_surface_stop"])
             operator.close()
 
-    def test_partial_start_failure_is_compensated_to_canonical_stop(self) -> None:
+    def test_partial_start_failure_uses_only_canonical_runtime_compensation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             runtime, collector, coordinator, _ = self._runtime(directory)
             operator = ProductOperatorController(runtime)
@@ -286,21 +287,11 @@ class ProductOperatorControllerTests(unittest.TestCase):
 
             self.assertEqual(collector.resume_calls, 1)
             self.assertEqual(coordinator.resume_calls, 1)
-            self.assertEqual(collector.stop_reasons[-1], "operator_start_failed")
-            self.assertEqual(coordinator.stop_reasons[-1], "operator_start_failed")
-            self.assertTrue(
-                set(collector.stop_reasons).issubset(
-                    {"runtime_start_failed", "operator_start_failed"}
-                )
-            )
-            self.assertTrue(
-                set(coordinator.stop_reasons).issubset(
-                    {"runtime_start_failed", "operator_start_failed"}
-                )
-            )
+            self.assertEqual(collector.stop_reasons, ["runtime_start_failed"])
+            self.assertEqual(coordinator.stop_reasons, ["runtime_start_failed"])
             snapshot = operator.status()
             self.assertEqual(snapshot.state, "STOPPED")
-            self.assertEqual(snapshot.canonical_status.stop_reason, "operator_start_failed")
+            self.assertEqual(snapshot.canonical_status.stop_reason, "runtime_start_failed")
             operator.close()
 
     def test_tick_before_start_and_invalid_stop_reason_have_zero_effect(self) -> None:
@@ -354,6 +345,39 @@ class ProductOperatorControllerTests(unittest.TestCase):
             for operation in (operator.start, operator.tick, operator.stop):
                 with self.assertRaisesRegex(ProductOperatorError, "closed"):
                     operation()
+
+    def test_failed_stop_keeps_intent_asserted_and_blocks_positive_operations(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime, collector, coordinator, _ = self._runtime(directory)
+            operator = ProductOperatorController(runtime)
+            operator.start()
+
+            original_stop = coordinator.stop
+
+            def failing_stop(reason: str) -> None:
+                raise RuntimeError(f"injected STOP failure: {reason}")
+
+            coordinator.stop = failing_stop  # type: ignore[method-assign]
+            try:
+                with self.assertRaisesRegex(RuntimeError, "injected STOP failure"):
+                    operator.stop("operator_requested_stop")
+                self.assertTrue(collector.stop_requested())  # type: ignore[attr-defined]
+                self.assertTrue(collector.stopped)
+                with self.assertRaises((ProductOperatorError, RuntimeError)):
+                    operator.tick()
+                with self.assertRaises((ProductOperatorError, RuntimeError)):
+                    operator.start()
+            finally:
+                coordinator.stop = original_stop  # type: ignore[method-assign]
+
+            # Canonical STOP is the recovery path; after coherent STOP succeeds the
+            # process-local intent is cleared and ordinary restart may proceed.
+            recovered = operator.stop("operator_requested_stop")
+            self.assertEqual(recovered.state, "STOPPED")
+            self.assertFalse(collector.stop_requested())  # type: ignore[attr-defined]
+            operator.start()
+            operator.stop()
+            operator.close()
 
     def test_concurrent_tick_requests_are_serialized_without_background_work(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

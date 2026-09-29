@@ -4,7 +4,7 @@ import hashlib
 import json
 from dataclasses import dataclass, field, replace
 from datetime import datetime
-from decimal import Decimal, InvalidOperation
+from decimal import Context, Decimal, DecimalException, InvalidOperation, ROUND_DOWN, localcontext
 from enum import Enum
 
 from .decision_ledger import (
@@ -523,9 +523,18 @@ class PortfolioDependencyEvidence:
             for index, left in enumerate(self.candidate_sha256s)
             for right in self.candidate_sha256s[index + 1:]
         }
+        if type(self.pairwise_dependency_upper_bounds) is not tuple:
+            raise ValueError(
+                "dependency evidence pair bounds must be a canonical tuple"
+            )
         seen: set[tuple[str, str]] = set()
         previous: tuple[str, str, Decimal] | None = None
-        for left, right, bound in self.pairwise_dependency_upper_bounds:
+        for item in self.pairwise_dependency_upper_bounds:
+            if type(item) is not tuple or len(item) != 3:
+                raise ValueError(
+                    "dependency evidence pair bound must be a canonical tuple"
+                )
+            left, right, bound = item
             left = _canonical_sha256("dependency evidence pair candidate", left)
             right = _canonical_sha256("dependency evidence pair candidate", right)
             if left == right:
@@ -635,8 +644,21 @@ class PortfolioDependencyEvidence:
         return as_of <= decision <= valid_until
 
 
+_ROBUST_STRESS_DECIMAL_CONTEXT = Context(
+    prec=28,
+    rounding=ROUND_DOWN,
+)
+
+
 @dataclass(frozen=True, slots=True)
 class RobustPortfolioProposal:
+    """Canonical correlated-exposure stress result.
+
+    Arithmetic is isolated from the caller's ambient Decimal context.  The
+    proposal remains bound to exact dependency evidence by PortfolioPlan, which
+    recomputes the derivation on durable readback.
+    """
+
     base_stakes: tuple[Decimal, ...]
     proposed_stakes: tuple[Decimal, ...]
     dependency_haircut_fraction: Decimal
@@ -645,23 +667,124 @@ class RobustPortfolioProposal:
     partial_fill_stress_fraction: Decimal
     robust_scale: Decimal
 
+    def __post_init__(self) -> None:
+        if type(self.base_stakes) is not tuple or type(self.proposed_stakes) is not tuple:
+            raise ValueError("robust proposal stake vectors must be canonical tuples")
+        if len(self.base_stakes) != len(self.proposed_stakes):
+            raise ValueError("robust proposal stake vectors must have matching cardinality")
+        for name, stakes in (
+            ("base_stakes", self.base_stakes),
+            ("proposed_stakes", self.proposed_stakes),
+        ):
+            for stake in stakes:
+                if (
+                    not isinstance(stake, Decimal)
+                    or not stake.is_finite()
+                    or stake < 0
+                ):
+                    raise ValueError(
+                        f"robust proposal {name} must contain non-negative finite exact Decimals"
+                    )
+        for name, value in (
+            ("dependency_haircut_fraction", self.dependency_haircut_fraction),
+            ("uncertainty_fraction", self.uncertainty_fraction),
+            ("fee_fraction", self.fee_fraction),
+            ("partial_fill_stress_fraction", self.partial_fill_stress_fraction),
+        ):
+            if (
+                not isinstance(value, Decimal)
+                or not value.is_finite()
+                or value < 0
+                or value > 1
+            ):
+                raise ValueError(
+                    f"robust proposal {name} must be an exact Decimal between 0 and 1"
+                )
+        if (
+            not isinstance(self.robust_scale, Decimal)
+            or not self.robust_scale.is_finite()
+        ):
+            raise ValueError("robust proposal scale must be a finite exact Decimal")
+        try:
+            with localcontext(_ROBUST_STRESS_DECIMAL_CONTEXT):
+                expected_scale = (
+                    (Decimal("1") - self.dependency_haircut_fraction)
+                    * (Decimal("1") - self.uncertainty_fraction)
+                    * (Decimal("1") - self.fee_fraction)
+                    * (Decimal("1") - self.partial_fill_stress_fraction)
+                )
+        except DecimalException as exc:
+            raise ValueError("robust proposal scale is not representable") from exc
+        if self.robust_scale != expected_scale:
+            raise ValueError("robust proposal scale must exactly match stress factors")
+        try:
+            with localcontext(_ROBUST_STRESS_DECIMAL_CONTEXT):
+                stressed_limits = tuple(
+                    base_stake * self.robust_scale
+                    for base_stake in self.base_stakes
+                )
+        except DecimalException as exc:
+            raise ValueError(
+                "robust proposal stressed stake limits are not representable"
+            ) from exc
+        if any(
+            proposed_stake > stressed_limit
+            for proposed_stake, stressed_limit in zip(
+                self.proposed_stakes,
+                stressed_limits,
+                strict=True,
+            )
+        ):
+            raise ValueError(
+                "robust proposal stake cannot exceed its conservative stressed base stake"
+            )
+
     @classmethod
-    def derive(cls, base_stakes: tuple[Decimal, ...], evidence: PortfolioDependencyEvidence, *, quantum: Decimal = Decimal("0.01")) -> "RobustPortfolioProposal":
+    def derive(
+        cls,
+        base_stakes: tuple[Decimal, ...],
+        evidence: PortfolioDependencyEvidence,
+        *,
+        quantum: Decimal = Decimal("0.01"),
+    ) -> "RobustPortfolioProposal":
         if type(base_stakes) is not tuple or len(base_stakes) != len(evidence.candidate_sha256s):
             raise ValueError("robust proposal stake/evidence cardinality mismatch")
         if not isinstance(quantum, Decimal) or not quantum.is_finite() or quantum <= 0:
             raise ValueError("robust proposal quantum must be positive")
-        if any(not isinstance(stake, Decimal) or not stake.is_finite() or stake < 0 for stake in base_stakes):
+        if any(
+            not isinstance(stake, Decimal) or not stake.is_finite() or stake < 0
+            for stake in base_stakes
+        ):
             raise ValueError("robust proposal stakes must be non-negative finite Decimals")
-        dependency_haircut = max((bound for _, _, bound in evidence.pairwise_dependency_upper_bounds), default=Decimal("0"))
-        scale = (
-            (Decimal("1") - dependency_haircut)
-            * (Decimal("1") - evidence.uncertainty_fraction)
-            * (Decimal("1") - evidence.fee_fraction)
-            * (Decimal("1") - evidence.partial_fill_stress_fraction)
+        dependency_haircut = max(
+            (bound for _, _, bound in evidence.pairwise_dependency_upper_bounds),
+            default=Decimal("0"),
         )
-        proposed = tuple((stake * scale).quantize(quantum) for stake in base_stakes)
-        return cls(base_stakes, proposed, dependency_haircut, evidence.uncertainty_fraction, evidence.fee_fraction, evidence.partial_fill_stress_fraction, scale)
+        try:
+            with localcontext(_ROBUST_STRESS_DECIMAL_CONTEXT):
+                scale = (
+                    (Decimal("1") - dependency_haircut)
+                    * (Decimal("1") - evidence.uncertainty_fraction)
+                    * (Decimal("1") - evidence.fee_fraction)
+                    * (Decimal("1") - evidence.partial_fill_stress_fraction)
+                )
+                proposed = tuple(
+                    (stake * scale).quantize(quantum)
+                    for stake in base_stakes
+                )
+        except DecimalException as exc:
+            raise ValueError(
+                "robust proposal arithmetic is not representable"
+            ) from exc
+        return cls(
+            base_stakes,
+            proposed,
+            dependency_haircut,
+            evidence.uncertainty_fraction,
+            evidence.fee_fraction,
+            evidence.partial_fill_stress_fraction,
+            scale,
+        )
 
     @property
     def proposal_sha256(self) -> str:
@@ -669,32 +792,81 @@ class RobustPortfolioProposal:
 
     def to_dict(self) -> dict[str, object]:
         return {
-            "schema":"autosport.robust_portfolio_proposal",
-            "schema_version":1,
-            "base_stakes":[_semantic_decimal_string("robust base stake", v) for v in self.base_stakes],
-            "proposed_stakes":[_semantic_decimal_string("robust proposed stake", v) for v in self.proposed_stakes],
-            "dependency_haircut_fraction":_semantic_decimal_string("robust dependency haircut", self.dependency_haircut_fraction),
-            "uncertainty_fraction":_semantic_decimal_string("robust uncertainty", self.uncertainty_fraction),
-            "fee_fraction":_semantic_decimal_string("robust fee", self.fee_fraction),
-            "partial_fill_stress_fraction":_semantic_decimal_string("robust partial fill stress", self.partial_fill_stress_fraction),
-            "robust_scale":_semantic_decimal_string("robust scale", self.robust_scale),
+            "schema": "autosport.robust_portfolio_proposal",
+            "schema_version": 1,
+            "base_stakes": [
+                _semantic_decimal_string("robust base stake", value)
+                for value in self.base_stakes
+            ],
+            "proposed_stakes": [
+                _semantic_decimal_string("robust proposed stake", value)
+                for value in self.proposed_stakes
+            ],
+            "dependency_haircut_fraction": _semantic_decimal_string(
+                "robust dependency haircut", self.dependency_haircut_fraction
+            ),
+            "uncertainty_fraction": _semantic_decimal_string(
+                "robust uncertainty", self.uncertainty_fraction
+            ),
+            "fee_fraction": _semantic_decimal_string(
+                "robust fee", self.fee_fraction
+            ),
+            "partial_fill_stress_fraction": _semantic_decimal_string(
+                "robust partial fill stress", self.partial_fill_stress_fraction
+            ),
+            "robust_scale": _semantic_decimal_string(
+                "robust scale", self.robust_scale
+            ),
         }
 
     @classmethod
     def from_dict(cls, raw: object) -> "RobustPortfolioProposal":
-        expected={"schema","schema_version","base_stakes","proposed_stakes","dependency_haircut_fraction","uncertainty_fraction","fee_fraction","partial_fill_stress_fraction","robust_scale"}
-        if type(raw) is not dict or set(raw)!=expected:
+        expected = {
+            "schema",
+            "schema_version",
+            "base_stakes",
+            "proposed_stakes",
+            "dependency_haircut_fraction",
+            "uncertainty_fraction",
+            "fee_fraction",
+            "partial_fill_stress_fraction",
+            "robust_scale",
+        }
+        if type(raw) is not dict or set(raw) != expected:
             raise ValueError("serialized robust proposal fields mismatch")
-        if raw["schema"]!="autosport.robust_portfolio_proposal" or raw["schema_version"]!=1:
+        if (
+            raw["schema"] != "autosport.robust_portfolio_proposal"
+            or type(raw["schema_version"]) is not int
+            or raw["schema_version"] != 1
+        ):
             raise ValueError("unsupported robust proposal schema")
+        if type(raw["base_stakes"]) is not list or type(raw["proposed_stakes"]) is not list:
+            raise ValueError("serialized robust proposal stake vectors must be lists")
         return cls(
-            base_stakes=tuple(_decimal_from_serialized("robust base stake",v) for v in raw["base_stakes"]),
-            proposed_stakes=tuple(_decimal_from_serialized("robust proposed stake",v) for v in raw["proposed_stakes"]),
-            dependency_haircut_fraction=_decimal_from_serialized("robust dependency haircut",raw["dependency_haircut_fraction"]),
-            uncertainty_fraction=_decimal_from_serialized("robust uncertainty",raw["uncertainty_fraction"]),
-            fee_fraction=_decimal_from_serialized("robust fee",raw["fee_fraction"]),
-            partial_fill_stress_fraction=_decimal_from_serialized("robust partial fill stress",raw["partial_fill_stress_fraction"]),
-            robust_scale=_decimal_from_serialized("robust scale",raw["robust_scale"]),
+            base_stakes=tuple(
+                _decimal_from_serialized("robust base stake", value)
+                for value in raw["base_stakes"]
+            ),
+            proposed_stakes=tuple(
+                _decimal_from_serialized("robust proposed stake", value)
+                for value in raw["proposed_stakes"]
+            ),
+            dependency_haircut_fraction=_decimal_from_serialized(
+                "robust dependency haircut", raw["dependency_haircut_fraction"]
+            ),
+            uncertainty_fraction=_decimal_from_serialized(
+                "robust uncertainty", raw["uncertainty_fraction"]
+            ),
+            fee_fraction=_decimal_from_serialized(
+                "robust fee", raw["fee_fraction"]
+            ),
+            partial_fill_stress_fraction=_decimal_from_serialized(
+                "robust partial fill stress",
+                raw["partial_fill_stress_fraction"],
+            ),
+            robust_scale=_decimal_from_serialized(
+                "robust scale", raw["robust_scale"]
+            ),
         )
 
 

@@ -93,7 +93,6 @@ class _CollectorServiceCycleMutationLock(_CollectorServiceStateMutationLock):
 def _make_post_stop_fence(*, stopped_error_type, stop_fields):
     frozen_stop_fields = frozenset(stop_fields)
     dict_type = dict
-    any_fn = any
 
     def fence(mutate):
         def guarded(raw) -> None:
@@ -104,12 +103,17 @@ def _make_post_stop_fence(*, stopped_error_type, stop_fields):
                 return
 
             assert before is not None
-            changed_non_stop = any_fn(
-                raw.get(name) != value
+            before_non_stop = {
+                name: value
                 for name, value in before.items()
                 if name not in frozen_stop_fields
-            )
-            if changed_non_stop:
+            }
+            after_non_stop = {
+                name: value
+                for name, value in raw.items()
+                if name not in frozen_stop_fields
+            }
+            if after_non_stop != before_non_stop:
                 raise stopped_error_type(
                     "collector run is durably STOPPED; terminal mutation is forbidden until explicit resume"
                 )
@@ -121,9 +125,8 @@ def _make_post_stop_fence(*, stopped_error_type, stop_fields):
                     "collector run STOP state cannot become incomplete during mutation"
                 )
 
-            # Explicit resume may clear only the STOP pair. The non-STOP equality
-            # check above prevents a caller from using resume as an umbrella for
-            # counter/error/timestamp rewrites in the same durable transaction.
+            # Explicit resume may clear only the STOP pair. Exact non-STOP mapping
+            # equality above also rejects added/deleted fields before durable publish.
             if not stopped_after:
                 return
 

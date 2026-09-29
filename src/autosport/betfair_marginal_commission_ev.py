@@ -123,6 +123,9 @@ class BetfairMarginalCommissionEVProjection:
     candidate_standalone_after_commission_ev: Decimal = field(init=False)
     calculation_sha256: str = field(init=False)
 
+    def __init_subclass__(cls, **kwargs: object) -> None:
+        raise TypeError("BetfairMarginalCommissionEVProjection must not be subclassed")
+
     def __post_init__(self) -> None:
         account = _text(self.account_id, "account_id")
         market = _text(self.market_id, "market_id")

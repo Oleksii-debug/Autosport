@@ -311,13 +311,35 @@ def _build_product_boundary():
     ] = {}
     issue_lock = RLock()
 
+    executable_graph_witness_marker = (
+        "__AUTOSPORT_BETFAIR_COMMISSION_EXECUTABLE_GRAPH_WITNESS__"
+    )
+
     def require_executable_authority() -> None:
+        (
+            reader_code_witness,
+            fee_payload_code_witness,
+            fee_input_payload_code_witness,
+            canonical_json_code_witness,
+            identity_payload_code_witness,
+        ) = "__AUTOSPORT_BETFAIR_COMMISSION_EXECUTABLE_GRAPH_WITNESS__"
+
+        # Keep the historical expected-code cells inspectable for diagnostics and
+        # adversarial tests, but never use those mutable cells as authority.
+        _ = (
+            fee_input_reader_function_code,
+            fee_payload_function_code,
+            fee_input_payload_builder_code,
+            canonical_json_code,
+            identity_payload_builder_code,
+        )
+
         if (
             type(fee_input_reader) is not partial
             or fee_input_reader.func is not fee_input_reader_function
             or fee_input_reader.args is not fee_input_reader_args
             or fee_input_reader.keywords != fee_input_reader_keywords
-            or fee_input_reader_function.__code__ is not fee_input_reader_function_code
+            or fee_input_reader_function.__code__ is not reader_code_witness
             or fee_input_reader_function.__globals__ is not fee_input_reader_function_globals
             or fee_input_reader_function.__closure__ is not fee_input_reader_function_closure
         ):
@@ -339,9 +361,9 @@ def _build_product_boundary():
         if (
             fee_payload_builder.func is not fee_payload_function
             or fee_payload_builder.args != fee_payload_args
-            or fee_payload_function.__code__ is not fee_payload_function_code
+            or fee_payload_function.__code__ is not fee_payload_code_witness
             or fee_payload_function.__globals__ is not fee_payload_function_globals
-            or fee_input_payload_builder.__code__ is not fee_input_payload_builder_code
+            or fee_input_payload_builder.__code__ is not fee_input_payload_code_witness
             or fee_input_payload_builder.__globals__ is not fee_input_payload_builder_globals
             or fee_payload_args[1] is not canonical_json
             or fee_payload_args[2] is not hash_constructor
@@ -349,12 +371,33 @@ def _build_product_boundary():
             raise error_type("fee input identity executable authority changed")
 
         if (
-            canonical_json.__code__ is not canonical_json_code
+            canonical_json.__code__ is not canonical_json_code_witness
             or canonical_json.__globals__ is not canonical_json_globals
-            or identity_payload_builder.__code__ is not identity_payload_builder_code
+            or identity_payload_builder.__code__ is not identity_payload_code_witness
             or identity_payload_builder.__globals__ is not identity_payload_builder_globals
         ):
             raise error_type("assessment identity executable authority changed")
+
+    guard_constants = require_executable_authority.__code__.co_consts
+    if sum(item == executable_graph_witness_marker for item in guard_constants) != 1:
+        raise error_type("commission applicability executable graph anchor is ambiguous")
+    immutable_code_witnesses = (
+        fee_input_reader_function_code,
+        fee_payload_function_code,
+        fee_input_payload_builder_code,
+        canonical_json_code,
+        identity_payload_builder_code,
+    )
+    require_executable_authority.__code__ = (
+        require_executable_authority.__code__.replace(
+            co_consts=tuple(
+                immutable_code_witnesses
+                if item == executable_graph_witness_marker
+                else item
+                for item in guard_constants
+            )
+        )
+    )
 
     authority_guard_marker = "__AUTOSPORT_BETFAIR_COMMISSION_AUTHORITY_GUARD_ANCHOR__"
 

@@ -98,10 +98,19 @@ class CollectorInterruptibleProviderBackoffTests(unittest.TestCase):
             self.assertIsNotNone(service.status()["stopped_at"])
 
     def test_signal_wait_instance_shadow_cannot_intercept_provider_backoff(self):
+        class _SubclassSignalStopRequest(_SignalStopRequest):
+            def __init__(self) -> None:
+                super().__init__()
+                self.class_wait_calls: list[float] = []
+
+            def wait(self, timeout: float) -> bool:
+                self.class_wait_calls.append(timeout)
+                return super().wait(timeout)
+
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             source = _UnavailableSource()
-            stop = _SignalStopRequest()
+            stop = _SubclassSignalStopRequest()
             fake_event = _TripDuringWaitEvent()
             stop._event = fake_event
             hostile_wait_calls: list[float] = []
@@ -140,6 +149,7 @@ class CollectorInterruptibleProviderBackoffTests(unittest.TestCase):
             self.assertIsNone(result.last_cycle)
             self.assertEqual(source.catalog_calls, 1)
             self.assertEqual(fake_event.waits, [7])
+            self.assertEqual(stop.class_wait_calls, [7])
             self.assertEqual(hostile_wait_calls, [])
             self.assertEqual(sleep_calls, [])
             self.assertEqual(service.status()["stop_reason"], "stop_requested")

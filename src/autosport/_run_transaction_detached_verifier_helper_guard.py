@@ -158,3 +158,7 @@ def _install() -> None:
 
 _install()
 del _install
+# Install-time mutation helpers are not runtime capabilities. Their work is already
+# captured in the exact stage/promotion closures, so remove the public module handles.
+del _seal_method
+del _closure_cell

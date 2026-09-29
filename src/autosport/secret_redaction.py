@@ -434,6 +434,15 @@ def redact_operator_value(
 
     if isinstance(value, str):
         return redact_operator_text(value, extra_secret_values=secrets)
+    if type(value) is bytes:
+        try:
+            decoded = bytes.decode(value, "utf-8", "strict")
+        except UnicodeDecodeError:
+            return REDACTED.encode("utf-8")
+        return redact_operator_text(
+            decoded,
+            extra_secret_values=secrets,
+        ).encode("utf-8")
     if isinstance(value, Mapping):
         redacted: dict[Any, Any] = {}
         prepared: list[tuple[object, Any, bool, bool]] = []

@@ -573,9 +573,13 @@ class AutonomousProductRuntime:
     mirror: MarketMirror
     invalidations: BoundedMirrorInvalidationBuffer
     dependencies: FocusedMirrorDependencyIndex
-    _stop_controller: _ProductStopController
     _runtime_lease: _ProductRuntimeLease
     _start_transition_store: _ProductStartTransitionStore
+    _stop_controller: _ProductStopController = field(
+        default_factory=_ProductStopController,
+        repr=False,
+        compare=False,
+    )
     _closed: bool = False
     _operation_fence: RLock = field(
         default_factory=RLock,

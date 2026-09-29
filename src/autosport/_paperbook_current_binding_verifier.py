@@ -366,7 +366,26 @@ def seal_current_binding_consumer(function: FunctionType) -> FunctionType:
     inner_defaults = function.__defaults__
     inner_kwdefaults = None if function.__kwdefaults__ is None else dict(function.__kwdefaults__)
     inner_closure = function.__closure__
-    inner_globals = function.__globals__
+    source_globals = function.__globals__
+    if inner_qualname in {
+        "RunTransaction._stage_paper_book_snapshot",
+        "RunTransaction._promote_paper_book_snapshot",
+    }:
+        # RunTransaction persistence methods are reconstructed from this mapping and
+        # then independently sealed by the direct-dispatch guard. Keep only bytecode-
+        # reachable module bindings plus the builtins root. Import-system metadata such
+        # as __package__/__spec__/__loader__ is not executable authority for these
+        # methods and may legitimately be rebound by package/module launch machinery.
+        # Letting that metadata into the detached tamper-evidence map can therefore
+        # fail a valid Windows ``python -m autosport`` run before any PAPER economics.
+        referenced_names = inner_code.co_names
+        inner_globals = {
+            name: value
+            for name, value in source_globals.items()
+            if name == "__builtins__" or name in referenced_names
+        }
+    else:
+        inner_globals = source_globals
     exact_type = type
     function_type = FunctionType
 

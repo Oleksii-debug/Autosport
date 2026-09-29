@@ -4,9 +4,9 @@ from __future__ import annotations
 
 The provider universe already persists its denominator under EvaluationUniverseStore,
 which is protected by MonotonicWorkspaceAuthority and a durable workspace identity.
-This guard does not create another store or chronology.  It derives one stable locator
+This guard does not create another store or chronology. It derives one stable locator
 from those existing product-owned bindings and pins the first locator observed for an
-exact ProviderEvaluationUniverseStore object.  The locator digest is also carried by
+exact ProviderEvaluationUniverseStore object. The locator digest is also carried by
 forward source receipts so restart/reconstruction evidence remains bound to the same
 workspace authority rather than only to Python object identity.
 """
@@ -17,9 +17,12 @@ from dataclasses import dataclass
 from threading import RLock
 from weakref import WeakKeyDictionary
 
-from .evaluation_universe import EvaluationUniverseStore
+from .evaluation_universe import EvaluationUniverseLedger, EvaluationUniverseStore
 from .monotonic_workspace_authority import MonotonicWorkspaceAuthority
 from .provider_evaluation_universe import ProviderEvaluationUniverseStore
+
+
+_CANONICAL_EVALUATION_UNIVERSE_LOAD = EvaluationUniverseStore.load
 
 
 class ForwardUniverseBackingGuardError(RuntimeError):
@@ -123,13 +126,13 @@ def _current_locator(
 def resolve_forward_universe_backing_locator(
     store: ProviderEvaluationUniverseStore,
 ) -> ForwardUniverseBackingLocator:
-    """Resolve and pin the exact existing durable backing locator for ``store``.
+    """Resolve and pin the existing durable backing locator for ``store``.
 
     The durable components (workspace instance/path binding and monotonic namespace)
-    are restart-stable.  The per-object pin prevents coherent in-process replacement of
+    are restart-stable. The per-object pin prevents coherent in-process replacement of
     both private backing members after positive authority has already been resolved.
-    Downstream receipt hashes must include ``locator_sha256`` so restart evidence keeps
-    the same durable locator commitment.
+    Downstream receipt hashes include ``locator_sha256`` so restart evidence keeps the
+    same durable locator commitment.
     """
 
     current = _current_locator(store)
@@ -145,8 +148,42 @@ def resolve_forward_universe_backing_locator(
         return origin
 
 
+def load_guarded_provider_evaluation_universe(
+    store: ProviderEvaluationUniverseStore,
+) -> tuple[EvaluationUniverseLedger | None, ForwardUniverseBackingLocator]:
+    """Load through one captured canonical backing with before/after locator checks.
+
+    Calling ``ProviderEvaluationUniverseStore.load`` after a separate locator check
+    would leave a TOCTOU window because that method dereferences mutable ``_store``.
+    Instead this function pins the origin, captures the exact current backing, verifies
+    the pin again, invokes the import-time sealed unbound EvaluationUniverseStore.load
+    on that captured object, and verifies the outer store still has the same locator
+    before releasing positive evidence.
+    """
+
+    origin = resolve_forward_universe_backing_locator(store)
+    backing = getattr(store, "_store", None)
+    if type(backing) is not EvaluationUniverseStore:
+        raise ForwardUniverseBackingGuardError(
+            "provider-universe backing store changed during guarded load"
+        )
+    if resolve_forward_universe_backing_locator(store) != origin:
+        raise ForwardUniverseBackingGuardError(
+            "provider-universe backing locator changed before durable load"
+        )
+
+    ledger = _CANONICAL_EVALUATION_UNIVERSE_LOAD(backing)
+
+    if resolve_forward_universe_backing_locator(store) != origin:
+        raise ForwardUniverseBackingGuardError(
+            "provider-universe backing locator changed during durable load"
+        )
+    return ledger, origin
+
+
 __all__ = [
     "ForwardUniverseBackingGuardError",
     "ForwardUniverseBackingLocator",
+    "load_guarded_provider_evaluation_universe",
     "resolve_forward_universe_backing_locator",
 ]

@@ -1,17 +1,18 @@
 """Preserve correction-relevant Betfair cleared-order facts in #1272.
 
 The read-only adapter intentionally normalizes provider rows into a small stable DTO.
-Betfair ``betOutcome`` is correction-relevant settlement truth, however, and was being
-discarded before the append-only settlement revision authority computed content
-identity.  Raw JSON-RPC response hashes cannot substitute for this fact because their
-request/response ids change on otherwise identical rereads.
+For settlement revision authority, however, documented BET-level ``betOutcome``,
+``handicap`` and ``voidedDate`` facts are correction-relevant and must not disappear
+before immutable content identity is computed. Raw JSON-RPC response hashes cannot
+substitute for normalized provider facts because request/response ids change on
+otherwise identical rereads.
 
 This composition layer keeps the existing adapter, capture issuance registry and
-settlement store as the sole authorities.  The canonical parser carries the validated
-optional provider ``betOutcome`` through one private observation subtype.  The existing
-settlement revision type is extended in-place at package composition with a persisted,
-readable ``bet_outcome`` fact; revision content identity includes that fact while the
-existing raw response and capture evidence hashes keep their original meaning.
+settlement store as the sole authorities. The canonical parser carries the validated
+optional provider correction facts through one private observation subtype. The
+existing settlement revision type is extended at package composition with persisted,
+readable fields; revision content identity includes those facts while existing raw
+response and capture evidence hashes retain their original meaning.
 
 No provider write, settlement-finality or real-money capability is introduced.
 """
@@ -19,6 +20,7 @@ from __future__ import annotations
 
 from contextvars import ContextVar
 from dataclasses import dataclass
+from decimal import Decimal
 
 from . import betfair_account_readonly as _adapter
 from . import betfair_settlement_revisions as _settlement
@@ -31,47 +33,90 @@ _ORIGINAL_SEMANTIC_PAYLOAD = _settlement._semantic_payload
 _BASE_REVISION = _settlement.BetfairSettlementRevision
 _STORE_TYPE = _settlement.BetfairSettlementRevisionStore
 _ORIGINAL_INGEST = _STORE_TYPE.ingest
-_NO_OUTCOME_CONTEXT = object()
-_MISSING_OUTCOME = object()
-_OUTCOME_CONTEXT: ContextVar[object] = ContextVar(
-    "autosport_betfair_settlement_outcome",
-    default=_NO_OUTCOME_CONTEXT,
+_NO_FACT_CONTEXT = object()
+_MISSING_FACT = object()
+
+
+@dataclass(frozen=True, slots=True)
+class _ProviderCorrectionFacts:
+    bet_outcome: str | None
+    provider_handicap: Decimal | None
+    provider_voided_date: str | None
+
+
+_FACT_CONTEXT: ContextVar[object] = ContextVar(
+    "autosport_betfair_settlement_provider_correction_facts",
+    default=_NO_FACT_CONTEXT,
 )
 
 
 @dataclass(frozen=True, slots=True)
-class _ClearedOrderWithOutcome(_BASE_ORDER):
+class _ClearedOrderWithCorrectionFacts(_BASE_ORDER):
     bet_outcome: str | None = None
+    provider_handicap: Decimal | None = None
+    provider_voided_date: str | None = None
 
     def __post_init__(self) -> None:
         _BASE_ORDER.__post_init__(self)
         _adapter._optional_text(self.bet_outcome, "bet_outcome")
+        if self.provider_handicap is not None:
+            _adapter._decimal(self.provider_handicap, "provider_handicap")
+        if self.provider_voided_date is not None:
+            _adapter._iso_timestamp(self.provider_voided_date, "provider_voided_date")
 
 
 @dataclass(frozen=True, slots=True)
-class _SettlementRevisionWithOutcome(_BASE_REVISION):
-    bet_outcome: object = _MISSING_OUTCOME
+class _SettlementRevisionWithCorrectionFacts(_BASE_REVISION):
+    bet_outcome: object = _MISSING_FACT
+    provider_handicap: object = _MISSING_FACT
+    provider_voided_date: object = _MISSING_FACT
 
     def __post_init__(self) -> None:
-        outcome = self.bet_outcome
-        if outcome is _MISSING_OUTCOME:
-            outcome = _OUTCOME_CONTEXT.get()
-            if outcome is _NO_OUTCOME_CONTEXT:
+        values = (
+            self.bet_outcome,
+            self.provider_handicap,
+            self.provider_voided_date,
+        )
+        missing = tuple(value is _MISSING_FACT for value in values)
+        if any(missing):
+            if not all(missing):
                 raise _settlement.BetfairSettlementRevisionError(
-                    "settlement revision lacks provider betOutcome context"
+                    "settlement revision provider correction facts are incomplete"
                 )
-            object.__setattr__(self, "bet_outcome", outcome)
-        if outcome is not None:
-            _settlement._text(outcome, "bet_outcome")
+            context = _FACT_CONTEXT.get()
+            if type(context) is not _ProviderCorrectionFacts:
+                raise _settlement.BetfairSettlementRevisionError(
+                    "settlement revision lacks provider correction-fact context"
+                )
+            object.__setattr__(self, "bet_outcome", context.bet_outcome)
+            object.__setattr__(self, "provider_handicap", context.provider_handicap)
+            object.__setattr__(
+                self,
+                "provider_voided_date",
+                context.provider_voided_date,
+            )
+
+        if self.bet_outcome is not None:
+            _settlement._text(self.bet_outcome, "bet_outcome")
+        if self.provider_handicap is not None:
+            _settlement._dec(self.provider_handicap, "provider_handicap")
+        if self.provider_voided_date is not None:
+            _settlement._time(self.provider_voided_date, "provider_voided_date")
         _BASE_REVISION.__post_init__(self)
 
-    def semantic_payload(self) -> dict[str, str | None]:
-        payload = _BASE_REVISION.semantic_payload(self)
-        payload["bet_outcome"] = self.bet_outcome  # type: ignore[assignment]
+    def semantic_payload(self) -> dict[str, object]:
+        payload: dict[str, object] = dict(_BASE_REVISION.semantic_payload(self))
+        payload["bet_outcome"] = self.bet_outcome
+        payload["provider_handicap"] = (
+            None
+            if self.provider_handicap is None
+            else format(self.provider_handicap, "f")
+        )
+        payload["provider_voided_date"] = self.provider_voided_date
         return payload
 
     @classmethod
-    def from_dict(cls, raw: object) -> "_SettlementRevisionWithOutcome":
+    def from_dict(cls, raw: object) -> "_SettlementRevisionWithCorrectionFacts":
         if type(raw) is not dict:
             raise _settlement.BetfairSettlementRevisionError(
                 "revision must be JSON object"
@@ -104,6 +149,8 @@ class _SettlementRevisionWithOutcome(_BASE_REVISION):
             "capture_evidence_sha256",
             "content_sha256",
             "bet_outcome",
+            "provider_handicap",
+            "provider_voided_date",
         }
         if set(raw) != required:
             raise _settlement.BetfairSettlementRevisionError(
@@ -117,13 +164,22 @@ class _SettlementRevisionWithOutcome(_BASE_REVISION):
             "provider_profit",
         ):
             values[field] = _settlement._dec(values[field], field)
-        outcome = values["bet_outcome"]
-        if outcome is not None:
-            _settlement._text(outcome, "bet_outcome")
+        if values["provider_handicap"] is not None:
+            values["provider_handicap"] = _settlement._dec(
+                values["provider_handicap"],
+                "provider_handicap",
+            )
+        if values["bet_outcome"] is not None:
+            _settlement._text(values["bet_outcome"], "bet_outcome")
+        if values["provider_voided_date"] is not None:
+            _settlement._time(
+                values["provider_voided_date"],
+                "provider_voided_date",
+            )
         return cls(**values)
 
 
-def _parse_cleared_order_with_outcome(
+def _parse_cleared_order_with_correction_facts(
     value: object,
     evidence: _BASE_EVIDENCE,
     index: int,
@@ -132,7 +188,17 @@ def _parse_cleared_order_with_outcome(
     order = _ORIGINAL_PARSE(value, evidence, index, bet_status)
     raw = _adapter._mapping(value, f"clearedOrders[{index}]")
     outcome = _adapter._provider_optional_text(raw, "betOutcome", "bet_outcome")
-    return _ClearedOrderWithOutcome(
+    handicap = None
+    if raw.get("handicap") is not None:
+        handicap = _adapter._number(raw, "handicap", "provider_handicap")
+    voided_date = _adapter._provider_optional_text(
+        raw,
+        "voidedDate",
+        "provider_voided_date",
+    )
+    if voided_date is not None:
+        _adapter._iso_timestamp(voided_date, "provider_voided_date")
+    return _ClearedOrderWithCorrectionFacts(
         bet_id=order.bet_id,
         market_id=order.market_id,
         selection_id=order.selection_id,
@@ -149,22 +215,28 @@ def _parse_cleared_order_with_outcome(
         evidence=order.evidence,
         event_id=order.event_id,
         bet_outcome=outcome,
+        provider_handicap=handicap,
+        provider_voided_date=voided_date,
     )
 
 
-def _semantic_payload_with_outcome(
+def _semantic_payload_with_correction_facts(
     action,
     capture,
     order,
     plan_id: str,
     attempt_id: str,
 ):
-    if type(order) is not _ClearedOrderWithOutcome:
+    if type(order) is not _ClearedOrderWithCorrectionFacts:
         raise _settlement.BetfairSettlementRevisionError(
-            "settlement cleared row lacks canonical provider betOutcome semantics"
+            "settlement cleared row lacks canonical provider correction facts"
         )
-    outcome = order.bet_outcome
-    _OUTCOME_CONTEXT.set(outcome)
+    facts = _ProviderCorrectionFacts(
+        bet_outcome=order.bet_outcome,
+        provider_handicap=order.provider_handicap,
+        provider_voided_date=order.provider_voided_date,
+    )
+    _FACT_CONTEXT.set(facts)
     payload = _ORIGINAL_SEMANTIC_PAYLOAD(
         action,
         capture,
@@ -172,11 +244,17 @@ def _semantic_payload_with_outcome(
         plan_id,
         attempt_id,
     )
-    payload["bet_outcome"] = outcome
+    payload["bet_outcome"] = facts.bet_outcome
+    payload["provider_handicap"] = (
+        None
+        if facts.provider_handicap is None
+        else format(facts.provider_handicap, "f")
+    )
+    payload["provider_voided_date"] = facts.provider_voided_date
     return payload
 
 
-def _ingest_with_outcome_context(
+def _ingest_with_correction_fact_context(
     self,
     ledger,
     *,
@@ -185,7 +263,7 @@ def _ingest_with_outcome_context(
     action,
     capture,
 ):
-    token = _OUTCOME_CONTEXT.set(_NO_OUTCOME_CONTEXT)
+    token = _FACT_CONTEXT.set(_NO_FACT_CONTEXT)
     try:
         return _ORIGINAL_INGEST(
             self,
@@ -196,21 +274,21 @@ def _ingest_with_outcome_context(
             capture=capture,
         )
     finally:
-        _OUTCOME_CONTEXT.reset(token)
+        _FACT_CONTEXT.reset(token)
 
 
 if _adapter._parse_cleared_order is not _ORIGINAL_PARSE:
-    raise RuntimeError("Betfair cleared-order parser changed before outcome install")
+    raise RuntimeError("Betfair cleared-order parser changed before correction-fact install")
 if _settlement._semantic_payload is not _ORIGINAL_SEMANTIC_PAYLOAD:
-    raise RuntimeError("Betfair settlement semantic payload changed before outcome install")
+    raise RuntimeError("Betfair settlement semantic payload changed before correction-fact install")
 if _settlement.BetfairSettlementRevision is not _BASE_REVISION:
-    raise RuntimeError("Betfair settlement revision type changed before outcome install")
+    raise RuntimeError("Betfair settlement revision type changed before correction-fact install")
 if _STORE_TYPE.ingest is not _ORIGINAL_INGEST:
-    raise RuntimeError("Betfair settlement ingest changed before outcome install")
+    raise RuntimeError("Betfair settlement ingest changed before correction-fact install")
 
-_adapter._parse_cleared_order = _parse_cleared_order_with_outcome
-_settlement._semantic_payload = _semantic_payload_with_outcome
-_settlement.BetfairSettlementRevision = _SettlementRevisionWithOutcome
-_STORE_TYPE.ingest = _ingest_with_outcome_context
+_adapter._parse_cleared_order = _parse_cleared_order_with_correction_facts
+_settlement._semantic_payload = _semantic_payload_with_correction_facts
+_settlement.BetfairSettlementRevision = _SettlementRevisionWithCorrectionFacts
+_STORE_TYPE.ingest = _ingest_with_correction_fact_context
 
 __all__: list[str] = []

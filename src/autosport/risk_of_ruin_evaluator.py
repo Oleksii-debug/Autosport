@@ -41,7 +41,7 @@ from .monotonic_workspace_authority import (
     MonotonicWorkspaceAuthority,
     MonotonicWorkspaceAuthorityError,
 )
-from .workspace_lock import WorkspaceEconomicLock
+from .workspace_lock import WorkspaceEconomicLock, _open_read_only_descriptor
 
 
 _SCHEMA = "autosport.risk-of-ruin-product-evaluator.v1"
@@ -283,37 +283,68 @@ def _read_stable_journal_bytes(path: Path) -> bytes | None:
             "risk-of-ruin journal exceeds supported size"
         )
 
+    descriptor: int | None = None
+    primary_error: BaseException | None = None
     try:
-        with path.open("rb") as handle:
-            opened = os.fstat(handle.fileno())
-            if (
-                opened.st_dev != before.st_dev
-                or opened.st_ino != before.st_ino
-                or not stat.S_ISREG(opened.st_mode)
-                or opened.st_nlink != 1
-            ):
-                raise RiskOfRuinIssuanceError(
-                    "risk-of-ruin journal changed during open"
-                )
-            payload = handle.read(_MAX_JOURNAL_BYTES + 1)
-            after_open = os.fstat(handle.fileno())
+        descriptor = _open_read_only_descriptor(path)
+        opened = os.fstat(descriptor)
+        if (
+            opened.st_dev != before.st_dev
+            or opened.st_ino != before.st_ino
+            or not stat.S_ISREG(opened.st_mode)
+            or opened.st_nlink != 1
+        ):
+            raise RiskOfRuinIssuanceError(
+                "risk-of-ruin journal changed during open"
+            )
+
+        chunks: list[bytes] = []
+        remaining = _MAX_JOURNAL_BYTES + 1
+        while remaining:
+            chunk = os.read(descriptor, min(1024 * 1024, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        payload = b"".join(chunks)
+        after_open = os.fstat(descriptor)
         after = os.stat(path, follow_symlinks=False)
-    except RiskOfRuinIssuanceError:
+    except RiskOfRuinIssuanceError as exc:
+        primary_error = exc
         raise
     except OSError as exc:
+        primary_error = exc
         raise RiskOfRuinIssuanceError(
             "risk-of-ruin journal is unreadable"
         ) from exc
+    finally:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError as close_error:
+                if primary_error is None:
+                    raise RiskOfRuinIssuanceError(
+                        "risk-of-ruin journal descriptor cleanup failed"
+                    ) from close_error
+                try:
+                    primary_error.add_note(
+                        "risk-of-ruin journal descriptor cleanup also failed"
+                    )
+                except BaseException:
+                    pass
 
     if len(payload) > _MAX_JOURNAL_BYTES:
         raise RiskOfRuinIssuanceError(
             "risk-of-ruin journal exceeds supported size"
         )
 
-    def identity(value: os.stat_result) -> tuple[int, int, int, int, int, int]:
+    def identity(
+        value: os.stat_result,
+    ) -> tuple[int, int, int, int, int, int, int]:
         return (
             value.st_dev,
             value.st_ino,
+            value.st_mode,
             value.st_size,
             value.st_mtime_ns,
             value.st_ctime_ns,

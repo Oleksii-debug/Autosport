@@ -86,7 +86,7 @@ def _hostile_root_code_with_matching_closure(function):
     lines.append("        return 'HOSTILE_RISK_ROOT'")
     lines.append("    return hostile")
     namespace: dict[str, object] = {}
-    exec("\\n".join(lines), {}, namespace)
+    exec("\n".join(lines), {}, namespace)
     hostile = namespace["build"]()
     assert callable(hostile)
     assert len(hostile.__closure__ or ()) == closure_count

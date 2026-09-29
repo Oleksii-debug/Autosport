@@ -436,3 +436,101 @@ def test_default_authority_root_switch_cannot_pristine_rebootstrap_after_restart
     assert not caller_root_a.exists()
     assert not caller_root_b.exists()
 
+def test_snapshot_subclass_cannot_bypass_canonical_ingress_or_publish(tmp_path) -> None:
+    canonical = _snapshot(Decimal("10"))
+
+    class ForgedSnapshot(BookmakerAccountSnapshot):
+        def __post_init__(self) -> None:
+            # Deliberately bypass every canonical snapshot invariant.
+            pass
+
+    forged = ForgedSnapshot(
+        profile=canonical.profile,
+        observed_capabilities=frozenset(),
+        observed_at=canonical.observed_at,
+        balance=canonical.balance,
+    )
+    assert isinstance(forged, BookmakerAccountSnapshot)
+    path = tmp_path / "account.json"
+    store = BookmakerAccountReconciliationStore(path)
+
+    with pytest.raises(
+        AccountReconciliationIntegrityError,
+        match="exact canonical BookmakerAccountSnapshot",
+    ):
+        store.append_snapshot(forged)
+
+    assert not path.exists()
+
+
+def test_profile_subclass_cannot_enter_exact_snapshot_graph(tmp_path) -> None:
+    canonical = _snapshot(Decimal("10"))
+
+    class ForgedProfile(BookmakerCapabilityProfile):
+        def __post_init__(self) -> None:
+            # Empty venue would be rejected by the canonical profile constructor.
+            pass
+
+    forged_profile = ForgedProfile(
+        venue_id="",
+        account_id=canonical.profile.account_id,
+        adapter_id=canonical.profile.adapter_id,
+        adapter_version=canonical.profile.adapter_version,
+        profile_version=canonical.profile.profile_version,
+        facts=canonical.profile.facts,
+        observed_at=canonical.profile.observed_at,
+        source_ref=canonical.profile.source_ref,
+        source_payload_sha256=canonical.profile.source_payload_sha256,
+    )
+    forged = BookmakerAccountSnapshot(
+        profile=forged_profile,
+        observed_capabilities=frozenset(),
+        observed_at=canonical.observed_at,
+    )
+    path = tmp_path / "account.json"
+    store = BookmakerAccountReconciliationStore(path)
+
+    with pytest.raises(
+        AccountReconciliationIntegrityError,
+        match="exact canonical BookmakerCapabilityProfile",
+    ):
+        store.append_snapshot(forged)
+
+    assert not path.exists()
+
+
+def test_balance_subclass_cannot_bypass_nested_evidence_validation(tmp_path) -> None:
+    canonical = _snapshot(Decimal("10"))
+
+    class ForgedBalance(BookmakerBalanceObservation):
+        def __post_init__(self) -> None:
+            # The non-SHA source identity is intentionally invalid canonical evidence.
+            pass
+
+    forged_balance = ForgedBalance(
+        venue_id=canonical.balance.venue_id,
+        account_id=canonical.balance.account_id,
+        adapter_id=canonical.balance.adapter_id,
+        observation_id=canonical.balance.observation_id,
+        currency=canonical.balance.currency,
+        available_balance=canonical.balance.available_balance,
+        observed_at=canonical.balance.observed_at,
+        source_payload_sha256="not-a-sha256",
+    )
+    forged = BookmakerAccountSnapshot(
+        profile=canonical.profile,
+        observed_capabilities=canonical.observed_capabilities,
+        observed_at=canonical.observed_at,
+        balance=forged_balance,
+    )
+    path = tmp_path / "account.json"
+    store = BookmakerAccountReconciliationStore(path)
+
+    with pytest.raises(
+        AccountReconciliationIntegrityError,
+        match="exact canonical BookmakerBalanceObservation",
+    ):
+        store.append_snapshot(forged)
+
+    assert not path.exists()
+

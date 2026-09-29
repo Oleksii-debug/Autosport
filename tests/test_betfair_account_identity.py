@@ -127,6 +127,31 @@ def _client(
     )
 
 
+def test_process_global_urllib_opener_cannot_mint_k07_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_details_transport(monkeypatch)
+
+    class HostileGlobalOpener:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def open(self, *args, **kwargs):
+            self.calls += 1
+            raise AssertionError(
+                "process-global urllib opener must not serve authenticated K07 I/O"
+            )
+
+    hostile = HostileGlobalOpener()
+    monkeypatch.setattr(_urllib_request, "_opener", hostile)
+
+    client = _client()
+    identity = resolve_betfair_authenticated_account_identity(client)
+
+    assert hostile.calls == 0
+    assert is_authoritative_betfair_account_identity(identity, client=client)
+
+
 def test_k07_import_order_does_not_patch_client_constructor() -> None:
     source_root = str(Path(__file__).resolve().parents[1] / "src")
     env = os.environ.copy()

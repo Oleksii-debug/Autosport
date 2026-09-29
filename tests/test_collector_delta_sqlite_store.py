@@ -140,6 +140,22 @@ class CollectorSQLiteStoreTests(unittest.TestCase):
             )
             self.assertEqual(store.resolve_event(delta), event)
 
+    def test_event_payload_migration_allows_only_explicit_pending_missing_ids(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = CollectorDeltaStore(Path(tmp) / "collector.json")
+            event = MarketEvent.from_dict(event_payload())
+            missing = "pending-not-yet-committed"
+
+            self.assertEqual(
+                store.migrate_event_payloads(
+                    {missing: event},
+                    allow_missing_delta_ids=(missing,),
+                ),
+                0,
+            )
+            with self.assertRaisesRegex(ValueError, "is not retained"):
+                store.migrate_event_payloads({"unexpected-missing": event})
+
     def test_event_payload_conflict_rolls_back_new_delta(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = CollectorDeltaStore(Path(tmp) / "collector.json")

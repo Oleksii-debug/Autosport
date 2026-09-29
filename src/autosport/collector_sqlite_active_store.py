@@ -494,9 +494,17 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
     def migrate_event_payloads(
         self,
         events_by_delta_id: Mapping[str, MarketEvent],
+        *,
+        allow_missing_delta_ids: Sequence[str] = (),
     ) -> int:
         if not isinstance(events_by_delta_id, Mapping):
             raise TypeError("events_by_delta_id must be a mapping")
+        allowed_missing = set(
+            self._bounded_identity_keys(
+                allow_missing_delta_ids,
+                "allow_missing_delta_id",
+            )
+        )
         connection = self._connect()
         migrated = 0
         try:
@@ -505,6 +513,8 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
                 delta_id = _text(delta_id, "delta_id")
                 delta = self._delta_by_id(connection, delta_id)
                 if delta is None:
+                    if delta_id in allowed_missing:
+                        continue
                     raise ValueError(
                         f"event payload migration target {delta_id} is not retained"
                     )

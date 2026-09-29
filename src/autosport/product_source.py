@@ -65,6 +65,7 @@ class ParlayApiProductSource:
     _READ_BATCH_ITEMS = 1000
     _MAX_SNAPSHOT_ITEMS = 50_000
     _MAX_STATE_BYTES = 512 * 1024 * 1024
+    _LEGACY_HISTORY_VERIFY_CHUNK = 10_000
     _STATE_FIELDS = {
         "schema",
         "schema_version",
@@ -626,59 +627,52 @@ class ParlayApiProductSource:
 
         migrate: dict[str, MarketEvent] = {}
         for delta_id, event_raw in cache.items():
-            retained = store.get(delta_id)
-            if retained is None:
-                if delta_id in pending_delta_ids:
-                    continue
-                raise ProductSourceStateError(
-                    "legacy historical event cache is absent from canonical collector retention"
-                )
-            if (
-                retained.source_id != self.source_id
-                or retained.stream_epoch != self.stream_epoch
-            ):
-                raise ProductSourceStateError(
-                    "legacy historical event belongs to another collector identity"
-                )
             try:
-                event = MarketEvent.from_dict(event_raw)
+                migrate[delta_id] = MarketEvent.from_dict(event_raw)
             except (TypeError, ValueError) as exc:
                 raise ProductSourceStateError(
                     "legacy historical event cache is invalid"
                 ) from exc
-            if (
-                event.event_id != retained.event_id
-                or event.dedupe_key != retained.event_dedupe_key
-                or canonical_event_digest(event) != retained.canonical_event_digest
-            ):
-                raise ProductSourceStateError(
-                    "legacy historical event conflicts with retained collector delta"
-                )
-            migrate[delta_id] = event
-
-        if migrate:
-            store.migrate_event_payloads(migrate)
-
-        quote_map, dedupe_map = store.event_digest_maps(
-            source_id=self.source_id,
-            stream_epoch=self.stream_epoch,
-            quote_keys=tuple(quote_history),
-            dedupe_keys=tuple(dedupe_history),
-        )
-        if any(
-            quote_map.get(key) != digest
-            for key, digest in quote_history.items()
-        ):
-            raise ProductSourceStateError(
-                "legacy quote history conflicts with canonical collector history"
+        try:
+            store.migrate_event_payloads(
+                migrate,
+                allow_missing_delta_ids=tuple(sorted(pending_delta_ids)),
             )
-        if any(
-            dedupe_map.get(key) != digest
-            for key, digest in dedupe_history.items()
-        ):
+        except (TypeError, ValueError) as exc:
             raise ProductSourceStateError(
-                "legacy dedupe history conflicts with canonical collector history"
-            )
+                "legacy historical event cache conflicts with canonical collector retention"
+            ) from exc
+
+        def verify_history(
+            history: dict[str, object],
+            *,
+            quote: bool,
+        ) -> None:
+            items = list(history.items())
+            for offset in range(0, len(items), self._LEGACY_HISTORY_VERIFY_CHUNK):
+                chunk = items[offset : offset + self._LEGACY_HISTORY_VERIFY_CHUNK]
+                keys = tuple(str(key) for key, _ in chunk)
+                try:
+                    quote_map, dedupe_map = store.event_digest_maps(
+                        source_id=self.source_id,
+                        stream_epoch=self.stream_epoch,
+                        quote_keys=keys if quote else (),
+                        dedupe_keys=() if quote else keys,
+                    )
+                except (TypeError, ValueError) as exc:
+                    raise ProductSourceStateError(
+                        "legacy digest history cannot be verified against collector retention"
+                    ) from exc
+                observed = quote_map if quote else dedupe_map
+                for key, digest in chunk:
+                    if observed.get(key) != digest:
+                        kind = "quote" if quote else "dedupe"
+                        raise ProductSourceStateError(
+                            f"legacy {kind} history conflicts with canonical collector history"
+                        )
+
+        verify_history(quote_history, quote=True)
+        verify_history(dedupe_history, quote=False)
 
         state["last_committed_quote_digests"] = {}
         state["last_committed_dedupe_digests"] = {}

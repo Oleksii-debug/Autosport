@@ -243,6 +243,48 @@ class ParlayApiProductSourceTests(unittest.TestCase):
             self.assertEqual(delta.lawful_terms_ref, "terms:parlayapi:before-io")
             self.assertEqual(delta.retention_ref, "retention:parlayapi:before-io")
 
+    def test_legacy_digest_migration_verifies_in_bounded_chunks(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            source = ParlayApiProductSource(
+                _Provider([]),
+                workspace=Path(directory) / "workspace",
+                authority_root=Path(directory) / "authority",
+                lawful_terms_ref="terms:parlayapi:v1",
+                retention_ref="retention:parlayapi:v1",
+            )
+            state = source._read_state()
+            digest = "a" * 64
+            state["last_committed_quote_digests"] = {
+                "quote-1": digest,
+                "quote-2": digest,
+                "quote-3": digest,
+            }
+            source._write_state(state)
+            store = source._require_collector_store()
+            calls = []
+
+            def fake_maps(*, source_id, stream_epoch, quote_keys, dedupe_keys):
+                calls.append((quote_keys, dedupe_keys))
+                return (
+                    {key: digest for key in quote_keys},
+                    {key: digest for key in dedupe_keys},
+                )
+
+            with (
+                patch.object(source, "_LEGACY_HISTORY_VERIFY_CHUNK", 2),
+                patch.object(store, "event_digest_maps", side_effect=fake_maps),
+            ):
+                source._migrate_legacy_history_to_collector_store()
+
+            self.assertEqual(
+                [len(quote_keys) for quote_keys, _ in calls],
+                [2, 1],
+            )
+            migrated = source._read_state()
+            self.assertEqual(migrated["last_committed_quote_digests"], {})
+            self.assertEqual(migrated["last_committed_dedupe_digests"], {})
+            self.assertEqual(migrated["event_cache"], {})
+
     def test_legacy_unassigned_pending_without_provenance_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             source = ParlayApiProductSource(

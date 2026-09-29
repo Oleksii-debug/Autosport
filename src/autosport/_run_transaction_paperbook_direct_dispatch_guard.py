@@ -60,23 +60,68 @@ def _make_surface_authority_checker() -> FunctionType:
         witnesses.append((name, descriptor, code))
     frozen_witnesses = tuple(witnesses)
 
+    surface_type_marker = "__AUTOSPORT_RUN_TRANSACTION_SURFACE_TARGET_TYPE_ANCHOR__"
+    surface_bases_marker = "__AUTOSPORT_RUN_TRANSACTION_SURFACE_BASES_ANCHOR__"
+    surface_witnesses_marker = "__AUTOSPORT_RUN_TRANSACTION_SURFACE_WITNESSES_ANCHOR__"
+    type_getattribute_marker = "__AUTOSPORT_RUN_TRANSACTION_TYPE_GETATTRIBUTE_ANCHOR__"
+    exact_type_marker = "__AUTOSPORT_RUN_TRANSACTION_SURFACE_EXACT_TYPE_ANCHOR__"
+    function_type_marker = "__AUTOSPORT_RUN_TRANSACTION_SURFACE_FUNCTION_TYPE_ANCHOR__"
+
     def require_surface_authority() -> None:
-        if type_getattribute(surface_type, "__bases__") != surface_bases:
+        anchored_surface_type = "__AUTOSPORT_RUN_TRANSACTION_SURFACE_TARGET_TYPE_ANCHOR__"
+        anchored_surface_bases = "__AUTOSPORT_RUN_TRANSACTION_SURFACE_BASES_ANCHOR__"
+        anchored_frozen_witnesses = "__AUTOSPORT_RUN_TRANSACTION_SURFACE_WITNESSES_ANCHOR__"
+        anchored_type_getattribute = "__AUTOSPORT_RUN_TRANSACTION_TYPE_GETATTRIBUTE_ANCHOR__"
+        anchored_exact_type = "__AUTOSPORT_RUN_TRANSACTION_SURFACE_EXACT_TYPE_ANCHOR__"
+        anchored_function_type = "__AUTOSPORT_RUN_TRANSACTION_SURFACE_FUNCTION_TYPE_ANCHOR__"
+        if (
+            surface_type is not anchored_surface_type
+            or surface_bases is not anchored_surface_bases
+            or frozen_witnesses is not anchored_frozen_witnesses
+            or type_getattribute is not anchored_type_getattribute
+            or exact_type is not anchored_exact_type
+            or function_type is not anchored_function_type
+        ):
+            raise ValueError("RunTransaction frozen direct-dispatch surface witness changed")
+        if anchored_type_getattribute(anchored_surface_type, "__bases__") != anchored_surface_bases:
             raise ValueError("RunTransaction frozen direct-dispatch surface type changed")
-        current = type_getattribute(surface_type, "__dict__")
-        for name, expected, expected_code in frozen_witnesses:
+        current = anchored_type_getattribute(anchored_surface_type, "__dict__")
+        for name, expected, expected_code in anchored_frozen_witnesses:
             if current.get(name) is not expected:
                 raise ValueError(
                     f"RunTransaction frozen direct-dispatch surface root changed: {name}"
                 )
             if expected_code is not None and (
-                exact_type(expected) is not function_type
+                anchored_exact_type(expected) is not anchored_function_type
                 or expected.__code__ is not expected_code
             ):
                 raise ValueError(
                     f"RunTransaction frozen direct-dispatch surface executable changed: {name}"
                 )
 
+    surface_constants = require_surface_authority.__code__.co_consts
+    surface_anchors = (
+        (surface_type_marker, surface_type),
+        (surface_bases_marker, surface_bases),
+        (surface_witnesses_marker, frozen_witnesses),
+        (type_getattribute_marker, type_getattribute),
+        (exact_type_marker, exact_type),
+        (function_type_marker, function_type),
+    )
+    if any(
+        sum(item == marker for item in surface_constants) != 1
+        for marker, _ in surface_anchors
+    ):
+        raise RuntimeError("RunTransaction surface authority anchor is ambiguous")
+    require_surface_authority.__code__ = require_surface_authority.__code__.replace(
+        co_consts=tuple(
+            next(
+                (anchored for marker, anchored in surface_anchors if item == marker),
+                item,
+            )
+            for item in surface_constants
+        )
+    )
     return require_surface_authority
 
 

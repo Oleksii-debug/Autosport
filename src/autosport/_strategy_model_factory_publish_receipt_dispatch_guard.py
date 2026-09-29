@@ -10,7 +10,9 @@ module adds two fail-closed composition properties around that existing implemen
   cannot retarget a positive publication path while keeping the public wrapper object.
 
 No registry, artifact store, transaction protocol, lock, clock, or machine authority is
-created here.
+created here.  As with the merged trusted-runtime code-profile prerequisite, this is a
+TRUSTED_PRODUCT_INTERPRETER composition fence, not a sandbox against arbitrary hostile
+code already controlling every object inside the Python interpreter.
 """
 
 from __future__ import annotations
@@ -161,21 +163,71 @@ def _require_function_graph(
                 )
 
 
+def _clone_function(
+    function: FunctionType,
+    *,
+    trusted_globals: dict[str, object],
+) -> FunctionType:
+    """Clone one Python function over a private globals snapshot, as #1891 does."""
+
+    clone = FunctionType(
+        function.__code__,
+        trusted_globals,
+        name=function.__name__,
+        argdefs=function.__defaults__,
+        closure=function.__closure__,
+    )
+    if function.__kwdefaults__ is not None:
+        clone.__kwdefaults__ = dict(function.__kwdefaults__)
+    clone.__annotations__ = dict(function.__annotations__)
+    clone.__doc__ = function.__doc__
+    clone.__qualname__ = function.__qualname__
+    return clone
+
+
+def _frozen_graph_verifier() -> FunctionType:
+    """Build an independent verifier not dispatched through writable module globals."""
+
+    trusted_globals: dict[str, object] = dict(globals())
+    frozen_closure_values = _clone_function(
+        _closure_values,
+        trusted_globals=trusted_globals,
+    )
+    trusted_globals["_closure_values"] = frozen_closure_values
+    return _clone_function(
+        _require_function_graph,
+        trusted_globals=trusted_globals,
+    )
+
+
+_FROZEN_REQUIRE_FUNCTION_GRAPH = _frozen_graph_verifier()
+
+
 def _sealed(function: FunctionType, label: str) -> FunctionType:
     graph = _capture_function_graph(function, label)
+    # Keep the ordinary verifier as a second line of defense and for readable failure
+    # locality, but do not make that writable closure cell the sole trust root.
     require = _require_function_graph
 
     def sealed(*args, **kwargs):
         require(graph, label)
+        _TRUSTED_REQUIRE(_TRUSTED_GRAPH, _TRUSTED_LABEL)
         try:
-            return function(*args, **kwargs)
+            return _TRUSTED_FUNCTION(*args, **kwargs)
         finally:
+            _TRUSTED_REQUIRE(_TRUSTED_GRAPH, _TRUSTED_LABEL)
             require(graph, label)
 
-    sealed.__name__ = function.__name__
-    sealed.__qualname__ = function.__qualname__
-    sealed.__doc__ = function.__doc__
-    return sealed
+    # Reuse the exact frozen-dispatch pattern landed by #1891: the authority-bearing
+    # verifier, graph and target live in a private globals snapshot of the installed
+    # clone.  Mutating the ordinary `require` closure cell therefore cannot disable
+    # the independent pre/post graph check exercised by the canonical path.
+    trusted_globals: dict[str, object] = dict(sealed.__globals__)
+    trusted_globals["_TRUSTED_REQUIRE"] = _FROZEN_REQUIRE_FUNCTION_GRAPH
+    trusted_globals["_TRUSTED_GRAPH"] = graph
+    trusted_globals["_TRUSTED_LABEL"] = label
+    trusted_globals["_TRUSTED_FUNCTION"] = function
+    return _clone_function(sealed, trusted_globals=trusted_globals)
 
 
 def _install() -> None:

@@ -76,6 +76,7 @@ def test_windows_candidate_is_deferred_for_stale_draft_or_closed_pull_request() 
 
     assert _ACTIVITY_TYPES in workflow
     assert _PR_INTEGRATION_GATE in workflow
+    assert _RUNNER_FREE_PR_ADMISSION in workflow
     assert "needs.superseded_run_admission.outputs.current_head == 'true'" in workflow
     assert "--admission-only" in workflow
     assert "name: Windows candidate" in workflow

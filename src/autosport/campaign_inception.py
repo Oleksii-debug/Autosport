@@ -1,0 +1,923 @@
+from __future__ import annotations
+
+"""Durable pre-observation campaign inception over existing product authorities.
+
+This module creates no second scheduler, universe store, observation ledger, or money
+authority. Before any collector START it composes:
+
+1. the exact #1257 CampaignPrecommitPublicationWitness + manifest;
+2. one exact #1180 scheduled source/run prepared with the durable START gate; and
+3. the integrated MonotonicWorkspaceAuthority as independent rollback fencing.
+
+Only after the inception state is durably COMMITTED in the monotonic authority is the
+exact schedule gate authorized. The later #1185 provider-universe resolver remains a
+post-observation validation step: this receipt binds the prospectively selected
+evaluation_universe_sha256 from #1257, never fabricates a post-observation universe
+receipt before its rows exist.
+"""
+
+import hashlib
+import inspect
+import json
+import math
+import os
+import uuid
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from typing import Mapping
+
+from .campaign_precommit_manifest import (
+    CampaignPrecommitManifest,
+    CampaignPrecommitManifestError,
+    CampaignPrecommitPublicationWitness,
+    load_campaign_precommit_manifest,
+    resolve_campaign_precommit_publication_witness,
+)
+from .causal_collector import CollectorDeltaStore
+from .forward_universe_precommit_authority import ForwardUniversePrecommitLocator
+from .json_integrity import strict_json_loads
+from .monotonic_workspace_authority import (
+    AuthorityRecord,
+    MonotonicWorkspaceAuthority,
+    MonotonicWorkspaceAuthorityError,
+)
+from .scheduled_source_universe import (
+    PreparedScheduledSourceUniverse,
+    ScheduledSourceUniverseError,
+    prepare_scheduled_source_universe,
+)
+from .workspace_lock import WorkspaceEconomicLock
+
+
+SCHEMA = "autosport.campaign_inception_receipt"
+SCHEMA_VERSION = 1
+AUTHORITY_DOMAIN = "research.forward-campaign-inception-causality"
+_STATE_DIR = "campaign-inception-v1"
+_HEX = frozenset("0123456789abcdef")
+
+_CANONICAL_WITNESS_RESOLVER = resolve_campaign_precommit_publication_witness
+_CANONICAL_MANIFEST_LOADER = load_campaign_precommit_manifest
+_CANONICAL_PRESTART_PREPARER = prepare_scheduled_source_universe
+_CANONICAL_NEXT_SLOT = CollectorDeltaStore._next_collector_schedule_slot
+_CANONICAL_GATE_STATUS = CollectorDeltaStore._collector_schedule_start_gate_status
+_CANONICAL_GATE_AUTHORIZE = CollectorDeltaStore._authorize_collector_schedule_start_gate
+_CANONICAL_STORE_SEAMS = frozenset(
+    {
+        "_next_collector_schedule_slot",
+        "_collector_schedule_start_gate_status",
+        "_authorize_collector_schedule_start_gate",
+        "_connect",
+        "_connect_path",
+        "_path_file_identity",
+        "_collector_schedule_id",
+        "_collector_schedule_due_at",
+        "_schedule_max_items",
+        "_schedule_authority_sha256",
+    }
+)
+_CANONICAL_STORE_CLASS_SEAMS = {
+    name: inspect.getattr_static(CollectorDeltaStore, name)
+    for name in _CANONICAL_STORE_SEAMS
+}
+
+
+class CampaignInceptionError(RuntimeError):
+    """Campaign inception cannot be established from exact prospective authority."""
+
+
+class CampaignInceptionConflictError(CampaignInceptionError):
+    """Existing campaign/gate state conflicts with the requested inception identity."""
+
+
+class CampaignInceptionIntegrityError(CampaignInceptionError):
+    """Persisted campaign inception evidence is malformed, rolled back, or corrupt."""
+
+
+def _text(value: object, name: str, *, max_length: int = 1024) -> str:
+    if (
+        type(value) is not str
+        or not value
+        or value != value.strip()
+        or "\x00" in value
+        or len(value) > max_length
+        or any(ord(character) < 32 for character in value)
+    ):
+        raise CampaignInceptionIntegrityError(
+            f"{name} must be non-empty canonical text"
+        )
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise CampaignInceptionIntegrityError(
+            f"{name} contains invalid Unicode"
+        ) from exc
+    return value
+
+
+def _sha256(value: object, name: str) -> str:
+    raw = _text(value, name, max_length=64)
+    if (
+        len(raw) != 64
+        or raw != raw.lower()
+        or any(character not in _HEX for character in raw)
+    ):
+        raise CampaignInceptionIntegrityError(
+            f"{name} must be lowercase SHA-256 hex"
+        )
+    return raw
+
+
+def _instant(value: object, name: str) -> datetime:
+    raw = _text(value, name, max_length=128)
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise CampaignInceptionIntegrityError(f"{name} must be ISO-8601") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise CampaignInceptionIntegrityError(f"{name} must include timezone")
+    return parsed.astimezone(UTC)
+
+
+def _canonical_bytes(value: object) -> bytes:
+    try:
+        return json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    except (TypeError, ValueError) as exc:
+        raise CampaignInceptionIntegrityError(
+            "campaign inception state is outside canonical JSON"
+        ) from exc
+
+
+def _digest(value: object) -> str:
+    return hashlib.sha256(_canonical_bytes(value)).hexdigest()
+
+
+def _campaign_key(campaign_id: str) -> str:
+    return hashlib.sha256(
+        ("campaign-inception-v1\x00" + campaign_id).encode("utf-8")
+    ).hexdigest()
+
+
+def _state_path(workspace: Path, campaign_id: str) -> Path:
+    return workspace / _STATE_DIR / f"{_campaign_key(campaign_id)}.json"
+
+
+def _fsync_directory(path: Path) -> None:
+    if os.name == "nt":
+        return
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    descriptor = os.open(path, flags)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _write_state(path: Path, payload: Mapping[str, object]) -> None:
+    """Atomically publish one local receipt image under the campaign writer lock."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    encoded = _canonical_bytes(dict(payload)) + b"\n"
+    temporary = path.parent / f".{path.name}.{uuid.uuid4().hex}.tmp"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
+    if os.name != "nt":
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+    descriptor: int | None = None
+    created = False
+    try:
+        descriptor = os.open(temporary, flags, 0o600)
+        created = True
+        with os.fdopen(descriptor, "wb", closefd=True) as handle:
+            descriptor = None
+            handle.write(encoded)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        created = False
+        _fsync_directory(path.parent)
+    except BaseException:
+        if descriptor is not None:
+            os.close(descriptor)
+        if created:
+            try:
+                temporary.unlink()
+            except OSError:
+                pass
+        raise
+
+
+def _read_state(path: Path) -> dict[str, object] | None:
+    try:
+        raw = path.read_bytes()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise CampaignInceptionIntegrityError(
+            "cannot read campaign inception state"
+        ) from exc
+    try:
+        text = raw.decode("utf-8", errors="strict")
+        payload = strict_json_loads(text)
+    except (UnicodeError, ValueError, TypeError) as exc:
+        raise CampaignInceptionIntegrityError(
+            "campaign inception state is invalid JSON"
+        ) from exc
+    if type(payload) is not dict:
+        raise CampaignInceptionIntegrityError(
+            "campaign inception state must be an exact JSON object"
+        )
+    if raw != _canonical_bytes(payload) + b"\n":
+        raise CampaignInceptionIntegrityError(
+            "campaign inception state bytes are not canonical"
+        )
+    return payload
+
+
+@dataclass(frozen=True, slots=True)
+class CampaignInceptionSourceSpec:
+    """Caller routing only; positive authority is re-resolved from product stores."""
+
+    expected_store_path: Path
+    source_id: str
+    run_id: str
+    stream_epoch: str
+    anchor_at: str
+    interval_seconds: float
+    max_items: int
+    evaluation_start_slot_ordinal: int
+    evaluation_end_slot_ordinal: int
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.expected_store_path, Path):
+            raise TypeError("expected_store_path must be pathlib.Path")
+        if not self.expected_store_path.is_absolute():
+            raise CampaignInceptionIntegrityError(
+                "expected_store_path must be absolute"
+            )
+        object.__setattr__(
+            self,
+            "expected_store_path",
+            Path(os.path.abspath(self.expected_store_path)),
+        )
+        for field_name in ("source_id", "run_id", "stream_epoch"):
+            object.__setattr__(
+                self,
+                field_name,
+                _text(getattr(self, field_name), field_name, max_length=512),
+            )
+        canonical_anchor = _instant(self.anchor_at, "anchor_at").isoformat()
+        object.__setattr__(self, "anchor_at", canonical_anchor)
+        if (
+            isinstance(self.interval_seconds, bool)
+            or not isinstance(self.interval_seconds, (int, float))
+            or not math.isfinite(float(self.interval_seconds))
+            or float(self.interval_seconds) <= 0
+        ):
+            raise CampaignInceptionIntegrityError(
+                "interval_seconds must be positive and finite"
+            )
+        object.__setattr__(self, "interval_seconds", float(self.interval_seconds))
+        if type(self.max_items) is not int or self.max_items <= 0:
+            raise CampaignInceptionIntegrityError(
+                "max_items must be a positive integer"
+            )
+        if self.evaluation_start_slot_ordinal != 0:
+            raise CampaignInceptionIntegrityError(
+                "campaign inception currently requires evaluation slot zero as first slot"
+            )
+        if (
+            type(self.evaluation_end_slot_ordinal) is not int
+            or self.evaluation_end_slot_ordinal < 0
+        ):
+            raise CampaignInceptionIntegrityError(
+                "evaluation_end_slot_ordinal must be a non-negative integer"
+            )
+
+    def payload(self) -> dict[str, object]:
+        return {
+            "expected_store_path": str(self.expected_store_path),
+            "source_id": self.source_id,
+            "run_id": self.run_id,
+            "stream_epoch": self.stream_epoch,
+            "anchor_at": self.anchor_at,
+            "interval_seconds": repr(self.interval_seconds),
+            "max_items": self.max_items,
+            "evaluation_start_slot_ordinal": self.evaluation_start_slot_ordinal,
+            "evaluation_end_slot_ordinal": self.evaluation_end_slot_ordinal,
+        }
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class CampaignInceptionReceipt:
+    """Resolver-issued receipt proving durable inception before gated START."""
+
+    schema_version: int
+    campaign_id: str
+    manifest_sha256: str
+    evaluation_universe_sha256: str
+    source_snapshot_sha256: str
+    source_id: str
+    publication_authority_id: str
+    publication_authority_generation: int
+    publication_authority_record_sha256: str
+    publication_semantic_binding_sha256: str
+    workspace_instance_id: str
+    post_publish_observed_at: str
+    expected_store_path: str
+    run_id: str
+    stream_epoch: str
+    schedule_id: str
+    gate_binding_sha256: str
+    prestart_sha256: str
+    authority_generation: int
+    authority_record_sha256: str
+    semantic_binding_sha256: str
+    receipt_sha256: str
+
+    def __new__(cls, *args: object, **kwargs: object) -> "CampaignInceptionReceipt":
+        raise TypeError(
+            "CampaignInceptionReceipt is resolver-issued; "
+            "call establish_campaign_inception"
+        )
+
+    @classmethod
+    def _issue(cls, values: Mapping[str, object]) -> "CampaignInceptionReceipt":
+        instance = object.__new__(cls)
+        for name in cls.__dataclass_fields__:
+            object.__setattr__(instance, name, values[name])
+        return instance
+
+    @property
+    def start_authorization_sha256(self) -> str:
+        return self.authority_record_sha256
+
+    def to_dict(self) -> dict[str, object]:
+        return {name: getattr(self, name) for name in self.__dataclass_fields__}
+
+
+def _require_store_seams(store: CollectorDeltaStore) -> None:
+    if type(store) is not CollectorDeltaStore:
+        raise TypeError("store must be the exact canonical CollectorDeltaStore")
+    rebound = sorted(
+        name
+        for name, expected in _CANONICAL_STORE_CLASS_SEAMS.items()
+        if inspect.getattr_static(CollectorDeltaStore, name, None) is not expected
+    )
+    if rebound:
+        raise CampaignInceptionIntegrityError(
+            "collector store campaign seam is class-rebound: " + ", ".join(rebound)
+        )
+    instance_state = vars(store)
+    rebound = sorted(name for name in _CANONICAL_STORE_SEAMS if name in instance_state)
+    if rebound:
+        raise CampaignInceptionIntegrityError(
+            "collector store campaign seam is instance-rebound: " + ", ".join(rebound)
+        )
+
+
+def _resolve_precommit(
+    locator: ForwardUniversePrecommitLocator,
+) -> tuple[CampaignPrecommitManifest, CampaignPrecommitPublicationWitness]:
+    if type(locator) is not ForwardUniversePrecommitLocator:
+        raise TypeError("precommit locator must be exact ForwardUniversePrecommitLocator")
+    resolver_code = _CANONICAL_WITNESS_RESOLVER.__code__
+    loader_code = _CANONICAL_MANIFEST_LOADER.__code__
+    try:
+        witness = _CANONICAL_WITNESS_RESOLVER(
+            locator.absolute_manifest_path,
+            workspace=locator.workspace,
+            workspace_instance_id=locator.workspace_instance_id,
+            authority_root=locator.authority_root,
+        )
+        manifest = _CANONICAL_MANIFEST_LOADER(locator.absolute_manifest_path)
+    except CampaignPrecommitManifestError as exc:
+        raise CampaignInceptionIntegrityError(
+            "campaign precommit authority cannot be resolved"
+        ) from exc
+    if (
+        _CANONICAL_WITNESS_RESOLVER.__code__ is not resolver_code
+        or _CANONICAL_MANIFEST_LOADER.__code__ is not loader_code
+    ):
+        raise CampaignInceptionIntegrityError(
+            "campaign precommit executable changed during inception resolution"
+        )
+    if type(manifest) is not CampaignPrecommitManifest:
+        raise CampaignInceptionIntegrityError("precommit manifest type is noncanonical")
+    if type(witness) is not CampaignPrecommitPublicationWitness:
+        raise CampaignInceptionIntegrityError(
+            "precommit publication witness type is noncanonical"
+        )
+    if (
+        witness.campaign_id != manifest.campaign_id
+        or witness.manifest_sha256 != manifest.manifest_sha256
+    ):
+        raise CampaignInceptionIntegrityError(
+            "publication witness does not bind current precommit manifest"
+        )
+    if (
+        locator.workspace_instance_id is not None
+        and witness.workspace_instance_id != locator.workspace_instance_id
+    ):
+        raise CampaignInceptionIntegrityError(
+            "publication witness workspace identity changed"
+        )
+    return manifest, witness
+
+
+def _precommit_payload(
+    manifest: CampaignPrecommitManifest,
+    witness: CampaignPrecommitPublicationWitness,
+) -> dict[str, object]:
+    return {
+        "campaign_id": manifest.campaign_id,
+        "manifest_sha256": manifest.manifest_sha256,
+        "evaluation_universe_sha256": manifest.evaluation_universe_sha256,
+        "source_snapshot_sha256": manifest.source_snapshot_sha256,
+        "source_id": manifest.source_id,
+        "config_sha256": manifest.config_sha256,
+        "causal_evidence_policy_sha256": manifest.causal_evidence_policy_sha256,
+        "observation_not_before": manifest.observation_not_before,
+        "observation_not_after": manifest.observation_not_after,
+        "publication_authority_id": witness.authority_id,
+        "publication_authority_generation": witness.authority_generation,
+        "publication_authority_record_sha256": witness.authority_record_sha256,
+        "publication_semantic_binding_sha256": witness.semantic_binding_sha256,
+        "workspace_instance_id": witness.workspace_instance_id,
+        "post_publish_observed_at": witness.post_publish_observed_at,
+        "target_relative_path": witness.target_relative_path,
+    }
+
+
+def _validate_schedule_window(
+    manifest: CampaignPrecommitManifest,
+    spec: CampaignInceptionSourceSpec,
+) -> None:
+    if spec.source_id != manifest.source_id:
+        raise CampaignInceptionConflictError(
+            "campaign source does not match prospective precommit source"
+        )
+    anchor = _instant(spec.anchor_at, "anchor_at")
+    not_before = _instant(manifest.observation_not_before, "observation_not_before")
+    not_after = _instant(manifest.observation_not_after, "observation_not_after")
+    last_due = anchor + timedelta(
+        seconds=spec.interval_seconds * spec.evaluation_end_slot_ordinal
+    )
+    if anchor < not_before or last_due > not_after:
+        raise CampaignInceptionConflictError(
+            "collector evaluation schedule falls outside precommitted observation window"
+        )
+
+
+def _gate_binding_sha256(
+    *,
+    precommit: Mapping[str, object],
+    spec: CampaignInceptionSourceSpec,
+) -> str:
+    return _digest(
+        {
+            "domain": "autosport.campaign-inception-start-gate.v1",
+            "precommit": dict(precommit),
+            "source_spec": spec.payload(),
+        }
+    )
+
+
+def _semantic_binding_sha256(
+    *,
+    precommit: Mapping[str, object],
+    spec: CampaignInceptionSourceSpec,
+    prepared: Mapping[str, object],
+) -> str:
+    return _digest(
+        {
+            "domain": "autosport.campaign-inception-receipt-binding.v1",
+            "precommit": dict(precommit),
+            "source_spec": spec.payload(),
+            "prepared_schedule": dict(prepared),
+            "admission_rule": (
+                "exact campaign receipt COMMIT before exact gated scheduled START; "
+                "post-observation universe must re-resolve to prospectively frozen digest"
+            ),
+        }
+    )
+
+
+def _new_state_payload(
+    *,
+    precommit: Mapping[str, object],
+    spec: CampaignInceptionSourceSpec,
+    prepared: PreparedScheduledSourceUniverse,
+) -> dict[str, object]:
+    prepared_payload = prepared.to_dict()
+    semantic = _semantic_binding_sha256(
+        precommit=precommit,
+        spec=spec,
+        prepared=prepared_payload,
+    )
+    return {
+        "schema": SCHEMA,
+        "schema_version": SCHEMA_VERSION,
+        "tx_id": f"campaign-inception:{uuid.uuid4().hex}",
+        "semantic_binding_sha256": semantic,
+        "precommit": dict(precommit),
+        "source_spec": spec.payload(),
+        "prepared_schedule": prepared_payload,
+    }
+
+
+def _validate_state(
+    payload: Mapping[str, object],
+    *,
+    precommit: Mapping[str, object],
+    spec: CampaignInceptionSourceSpec,
+) -> tuple[str, str, dict[str, object]]:
+    expected = {
+        "schema",
+        "schema_version",
+        "tx_id",
+        "semantic_binding_sha256",
+        "precommit",
+        "source_spec",
+        "prepared_schedule",
+    }
+    if (
+        set(payload) != expected
+        or payload.get("schema") != SCHEMA
+        or payload.get("schema_version") != SCHEMA_VERSION
+    ):
+        raise CampaignInceptionIntegrityError(
+            "campaign inception state schema is noncanonical"
+        )
+    if payload.get("precommit") != dict(precommit):
+        raise CampaignInceptionConflictError(
+            "campaign identity is already bound to different precommit authority"
+        )
+    if payload.get("source_spec") != spec.payload():
+        raise CampaignInceptionConflictError(
+            "campaign identity is already bound to a different collector source/run"
+        )
+    prepared = payload.get("prepared_schedule")
+    if type(prepared) is not dict:
+        raise CampaignInceptionIntegrityError(
+            "prepared schedule payload must be an exact object"
+        )
+    expected_prepared_fields = {
+        "schema_version",
+        "source_id",
+        "run_id",
+        "stream_epoch",
+        "schedule_id",
+        "schedule_policy",
+        "anchor_at",
+        "interval_seconds",
+        "max_items",
+        "evaluation_start_slot_ordinal",
+        "evaluation_end_slot_ordinal",
+        "next_slot_ordinal",
+        "next_due_at",
+        "gate_binding_sha256",
+        "prestart_sha256",
+    }
+    if set(prepared) != expected_prepared_fields:
+        raise CampaignInceptionIntegrityError(
+            "prepared schedule payload schema is noncanonical"
+        )
+    if (
+        prepared.get("source_id") != spec.source_id
+        or prepared.get("run_id") != spec.run_id
+        or prepared.get("stream_epoch") != spec.stream_epoch
+        or prepared.get("schedule_policy") != "fixed_interval_v1"
+        or prepared.get("evaluation_start_slot_ordinal")
+        != spec.evaluation_start_slot_ordinal
+        or prepared.get("evaluation_end_slot_ordinal")
+        != spec.evaluation_end_slot_ordinal
+        or prepared.get("next_slot_ordinal") != 0
+        or prepared.get("gate_binding_sha256")
+        != _gate_binding_sha256(precommit=precommit, spec=spec)
+    ):
+        raise CampaignInceptionIntegrityError(
+            "prepared schedule does not match exact inception source specification"
+        )
+    _sha256(prepared.get("schedule_id"), "schedule_id")
+    _sha256(prepared.get("prestart_sha256"), "prestart_sha256")
+    tx_id = _text(payload.get("tx_id"), "tx_id", max_length=256)
+    semantic = _sha256(
+        payload.get("semantic_binding_sha256"),
+        "semantic_binding_sha256",
+    )
+    expected_semantic = _semantic_binding_sha256(
+        precommit=precommit,
+        spec=spec,
+        prepared=prepared,
+    )
+    if semantic != expected_semantic:
+        raise CampaignInceptionIntegrityError(
+            "campaign inception semantic binding digest mismatch"
+        )
+    return tx_id, semantic, prepared
+
+
+def _authority(
+    *,
+    locator: ForwardUniversePrecommitLocator,
+    witness: CampaignPrecommitPublicationWitness,
+    campaign_id: str,
+) -> MonotonicWorkspaceAuthority:
+    try:
+        return MonotonicWorkspaceAuthority(
+            workspace=locator.workspace,
+            workspace_instance_id=witness.workspace_instance_id,
+            domain=AUTHORITY_DOMAIN,
+            key=campaign_id,
+            authority_root=locator.authority_root,
+        )
+    except MonotonicWorkspaceAuthorityError as exc:
+        raise CampaignInceptionIntegrityError(
+            "cannot resolve independent campaign inception authority"
+        ) from exc
+
+
+def _record_for_recovery(recovery: object) -> AuthorityRecord:
+    record = getattr(recovery, "record", None)
+    if type(record) is not AuthorityRecord:
+        raise CampaignInceptionIntegrityError(
+            "campaign inception authority has no committed record"
+        )
+    return record
+
+
+def _resolve_gate_and_authorize(
+    *,
+    store: CollectorDeltaStore,
+    spec: CampaignInceptionSourceSpec,
+    prepared: Mapping[str, object],
+    authority_record_sha256: str,
+) -> None:
+    _require_store_seams(store)
+    if Path(os.path.abspath(store.path)) != spec.expected_store_path:
+        raise CampaignInceptionIntegrityError(
+            "collector store path changed from campaign receipt"
+        )
+    try:
+        slot = _CANONICAL_NEXT_SLOT(
+            store,
+            source_id=spec.source_id,
+            run_id=spec.run_id,
+        )
+        gate = _CANONICAL_GATE_STATUS(
+            store,
+            source_id=spec.source_id,
+            run_id=spec.run_id,
+        )
+    except (TypeError, ValueError) as exc:
+        raise CampaignInceptionIntegrityError(
+            "campaign collector schedule/gate cannot be re-resolved"
+        ) from exc
+    _require_store_seams(store)
+    if type(slot) is not dict or type(gate) is not dict:
+        raise CampaignInceptionIntegrityError(
+            "campaign collector gate evidence is noncanonical"
+        )
+    schedule_id = _sha256(prepared.get("schedule_id"), "schedule_id")
+    gate_binding = _sha256(
+        prepared.get("gate_binding_sha256"),
+        "gate_binding_sha256",
+    )
+    if (
+        slot.get("schedule_id") != schedule_id
+        or slot.get("stream_epoch") != spec.stream_epoch
+        or slot.get("max_items") != spec.max_items
+        or gate.get("schedule_id") != schedule_id
+        or gate.get("gate_binding_sha256") != gate_binding
+    ):
+        raise CampaignInceptionIntegrityError(
+            "campaign collector schedule/gate identity changed"
+        )
+    current_authorization = gate.get("authorization_sha256")
+    if current_authorization is None:
+        if slot.get("slot_ordinal") != 0:
+            raise CampaignInceptionIntegrityError(
+                "collector START exists before campaign gate authorization"
+            )
+        try:
+            result = _CANONICAL_GATE_AUTHORIZE(
+                store,
+                source_id=spec.source_id,
+                run_id=spec.run_id,
+                schedule_id=schedule_id,
+                gate_binding_sha256=gate_binding,
+                authorization_sha256=authority_record_sha256,
+            )
+        except (TypeError, ValueError) as exc:
+            raise CampaignInceptionIntegrityError(
+                "cannot authorize campaign collector START gate"
+            ) from exc
+        if (
+            type(result) is not dict
+            or result.get("schedule_id") != schedule_id
+            or result.get("gate_binding_sha256") != gate_binding
+            or result.get("authorization_sha256") != authority_record_sha256
+        ):
+            raise CampaignInceptionIntegrityError(
+                "collector START gate authorization result is noncanonical"
+            )
+    elif current_authorization != authority_record_sha256:
+        raise CampaignInceptionIntegrityError(
+            "collector START gate is authorized by different campaign authority"
+        )
+    _require_store_seams(store)
+
+
+def _issue_receipt(
+    *,
+    precommit: Mapping[str, object],
+    prepared: Mapping[str, object],
+    spec: CampaignInceptionSourceSpec,
+    semantic_binding_sha256: str,
+    state_sha256: str,
+    record: AuthorityRecord,
+) -> CampaignInceptionReceipt:
+    values = {
+        "schema_version": SCHEMA_VERSION,
+        "campaign_id": precommit["campaign_id"],
+        "manifest_sha256": precommit["manifest_sha256"],
+        "evaluation_universe_sha256": precommit["evaluation_universe_sha256"],
+        "source_snapshot_sha256": precommit["source_snapshot_sha256"],
+        "source_id": precommit["source_id"],
+        "publication_authority_id": precommit["publication_authority_id"],
+        "publication_authority_generation": precommit[
+            "publication_authority_generation"
+        ],
+        "publication_authority_record_sha256": precommit[
+            "publication_authority_record_sha256"
+        ],
+        "publication_semantic_binding_sha256": precommit[
+            "publication_semantic_binding_sha256"
+        ],
+        "workspace_instance_id": precommit["workspace_instance_id"],
+        "post_publish_observed_at": precommit["post_publish_observed_at"],
+        "expected_store_path": str(spec.expected_store_path),
+        "run_id": spec.run_id,
+        "stream_epoch": spec.stream_epoch,
+        "schedule_id": prepared["schedule_id"],
+        "gate_binding_sha256": prepared["gate_binding_sha256"],
+        "prestart_sha256": prepared["prestart_sha256"],
+        "authority_generation": record.generation,
+        "authority_record_sha256": record.record_sha256,
+        "semantic_binding_sha256": semantic_binding_sha256,
+        "receipt_sha256": state_sha256,
+    }
+    return CampaignInceptionReceipt._issue(values)
+
+
+def establish_campaign_inception(
+    *,
+    precommit_locator: ForwardUniversePrecommitLocator,
+    store: CollectorDeltaStore,
+    source_spec: CampaignInceptionSourceSpec,
+) -> CampaignInceptionReceipt:
+    """Commit/reopen one exact campaign receipt, then authorize its START gate."""
+
+    if type(source_spec) is not CampaignInceptionSourceSpec:
+        raise TypeError("source_spec must be exact CampaignInceptionSourceSpec")
+    _require_store_seams(store)
+    manifest, witness = _resolve_precommit(precommit_locator)
+    _validate_schedule_window(manifest, source_spec)
+    precommit = _precommit_payload(manifest, witness)
+    gate_binding = _gate_binding_sha256(precommit=precommit, spec=source_spec)
+    state_path = _state_path(precommit_locator.workspace, manifest.campaign_id)
+    authority = _authority(
+        locator=precommit_locator,
+        witness=witness,
+        campaign_id=manifest.campaign_id,
+    )
+
+    with WorkspaceEconomicLock(state_path.parent):
+        existing = _read_state(state_path)
+        if existing is not None:
+            tx_id, semantic, prepared = _validate_state(
+                existing,
+                precommit=precommit,
+                spec=source_spec,
+            )
+            state_sha256 = _digest(existing)
+            try:
+                recovery = authority.recover(
+                    observed_state_sha256=state_sha256,
+                    tx_id=tx_id,
+                    semantic_binding_sha256=semantic,
+                )
+            except MonotonicWorkspaceAuthorityError as exc:
+                raise CampaignInceptionIntegrityError(
+                    "campaign inception receipt is not current in independent authority"
+                ) from exc
+            record = _record_for_recovery(recovery)
+            if (
+                record.intended_state_sha256 != state_sha256
+                or record.semantic_binding_sha256 != semantic
+            ):
+                raise CampaignInceptionIntegrityError(
+                    "campaign inception authority record does not bind receipt bytes"
+                )
+            _resolve_gate_and_authorize(
+                store=store,
+                spec=source_spec,
+                prepared=prepared,
+                authority_record_sha256=record.record_sha256,
+            )
+            return _issue_receipt(
+                precommit=precommit,
+                prepared=prepared,
+                spec=source_spec,
+                semantic_binding_sha256=semantic,
+                state_sha256=state_sha256,
+                record=record,
+            )
+
+        try:
+            authority.recover(observed_state_sha256=None)
+        except MonotonicWorkspaceAuthorityError as exc:
+            raise CampaignInceptionIntegrityError(
+                "campaign inception local state is missing or rolled back"
+            ) from exc
+
+        try:
+            prepared = _CANONICAL_PRESTART_PREPARER(
+                store,
+                expected_store_path=source_spec.expected_store_path,
+                expected_source_id=source_spec.source_id,
+                expected_run_id=source_spec.run_id,
+                expected_stream_epoch=source_spec.stream_epoch,
+                anchor_at=source_spec.anchor_at,
+                interval_seconds=source_spec.interval_seconds,
+                max_items=source_spec.max_items,
+                evaluation_start_slot_ordinal=source_spec.evaluation_start_slot_ordinal,
+                evaluation_end_slot_ordinal=source_spec.evaluation_end_slot_ordinal,
+                gate_binding_sha256=gate_binding,
+            )
+        except ScheduledSourceUniverseError as exc:
+            raise CampaignInceptionIntegrityError(
+                "cannot prepare collector START barrier for campaign inception"
+            ) from exc
+        if type(prepared) is not PreparedScheduledSourceUniverse:
+            raise CampaignInceptionIntegrityError(
+                "pre-START schedule resolver returned noncanonical type"
+            )
+        payload = _new_state_payload(
+            precommit=precommit,
+            spec=source_spec,
+            prepared=prepared,
+        )
+        tx_id, semantic, prepared_payload = _validate_state(
+            payload,
+            precommit=precommit,
+            spec=source_spec,
+        )
+        state_sha256 = _digest(payload)
+        try:
+            authority.prepare(
+                tx_id=tx_id,
+                observed_state_sha256=None,
+                intended_state_sha256=state_sha256,
+                semantic_binding_sha256=semantic,
+            )
+            _write_state(state_path, payload)
+            record = authority.commit(
+                tx_id=tx_id,
+                observed_state_sha256=state_sha256,
+                semantic_binding_sha256=semantic,
+            )
+        except MonotonicWorkspaceAuthorityError as exc:
+            raise CampaignInceptionIntegrityError(
+                "cannot durably commit campaign inception authority"
+            ) from exc
+        _resolve_gate_and_authorize(
+            store=store,
+            spec=source_spec,
+            prepared=prepared_payload,
+            authority_record_sha256=record.record_sha256,
+        )
+        return _issue_receipt(
+            precommit=precommit,
+            prepared=prepared_payload,
+            spec=source_spec,
+            semantic_binding_sha256=semantic,
+            state_sha256=state_sha256,
+            record=record,
+        )
+
+
+__all__ = [
+    "CampaignInceptionConflictError",
+    "CampaignInceptionError",
+    "CampaignInceptionIntegrityError",
+    "CampaignInceptionReceipt",
+    "CampaignInceptionSourceSpec",
+    "establish_campaign_inception",
+]

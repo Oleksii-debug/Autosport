@@ -7,6 +7,8 @@ from autosport.betdaq_readonly_market_wire import BetdaqSoapProtocolError
 from autosport.betdaq_readonly_provider import (
     BetdaqMarketBinding,
     BetdaqReadOnlyProvider,
+    BetdaqRequestEvidence,
+    BetdaqSnapshotEvidence,
     BetdaqTransientTransportError,
 )
 from autosport.domain import MarketType
@@ -73,6 +75,79 @@ def provider(transport, **kwargs):
         request_id_factory=lambda: 42,
         **kwargs,
     )
+
+def _valid_request_evidence(**overrides):
+    values = {
+        "request_id": 1,
+        "market_ids": (9001,),
+        "attempts": 1,
+        "response_received_at": "2026-09-23T00:00:01Z",
+        "request_fingerprint": "a" * 64,
+        "response_sha256": "b" * 64,
+        "call_id": "call-1",
+        "message_created_at": "2026-09-23T00:00:00Z",
+        "unavailable_market_ids": (),
+        "rate_admission_receipts": (),
+    }
+    values.update(overrides)
+    return BetdaqRequestEvidence(**values)
+
+
+def test_request_evidence_rejects_malformed_hash():
+    with pytest.raises(ValueError, match="request_fingerprint"):
+        _valid_request_evidence(request_fingerprint="not-a-digest")
+
+
+def test_request_evidence_rejects_future_message_time():
+    with pytest.raises(ValueError, match="cannot follow response receipt"):
+        _valid_request_evidence(
+            message_created_at="2026-09-23T00:00:02Z",
+        )
+
+
+def test_request_evidence_rate_receipts_account_for_every_retry():
+    with pytest.raises(ValueError, match="every transport attempt"):
+        _valid_request_evidence(
+            attempts=2,
+            rate_admission_receipts=("c" * 64,),
+        )
+
+
+def test_snapshot_evidence_unavailable_scope_must_equal_request_evidence():
+    request = _valid_request_evidence(unavailable_market_ids=(9001,))
+    with pytest.raises(ValueError, match="must equal request evidence"):
+        BetdaqSnapshotEvidence(
+            observed_at="2026-09-23T00:00:02Z",
+            requests=(request,),
+            aggregate_sha256="d" * 64,
+            unavailable_market_ids=(),
+        )
+
+
+def test_snapshot_evidence_catalogue_provenance_is_all_or_none():
+    request = _valid_request_evidence()
+    with pytest.raises(ValueError, match="all absent or all present"):
+        BetdaqSnapshotEvidence(
+            observed_at="2026-09-23T00:00:02Z",
+            requests=(request,),
+            aggregate_sha256="d" * 64,
+            catalogue_request_fingerprint="e" * 64,
+        )
+
+
+def test_snapshot_evidence_accepts_complete_catalogue_provenance():
+    request = _valid_request_evidence()
+    evidence = BetdaqSnapshotEvidence(
+        observed_at="2026-09-23T00:00:02Z",
+        requests=(request,),
+        aggregate_sha256="d" * 64,
+        catalogue_request_fingerprint="e" * 64,
+        catalogue_response_sha256="f" * 64,
+        catalogue_rate_admission_receipts=("1" * 64,),
+        catalogue_event_classifier_ids=(100,),
+    )
+    assert evidence.catalogue_event_classifier_ids == (100,)
+
 
 def test_maps_for_and_against_to_distinct_canonical_exchange_sides_exactly():
     p=provider(Transport([response()]))

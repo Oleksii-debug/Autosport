@@ -531,7 +531,7 @@ class HistoricalSnapshotTests(unittest.TestCase):
             evidence_path = Path(temp) / "evidence.json"
             with self.assertRaisesRegex(
                 ProviderPayloadError,
-                "TLS verifier is invalid",
+                "canonical Parlay historical network dispatch changed before construction",
             ):
                 capture_product_owned_historical_snapshot(
                     api_key="secret-key-must-not-leak",
@@ -542,7 +542,10 @@ class HistoricalSnapshotTests(unittest.TestCase):
             self.assertFalse(output_path.exists())
             self.assertFalse(evidence_path.exists())
 
-        self.assertEqual(shadow_calls, ["https-handler"])
+        # The strengthened opener-construction guard now rejects the patched
+        # add_handler dispatch before private opener/TLS construction starts.
+        # Keep this predecessor-red path as a zero-hostile-dispatch falsifier.
+        self.assertEqual(shadow_calls, [])
         self.assertEqual(forged_wrap_calls, [])
 
     def test_product_owned_capture_rejects_https_connection_method_drift(self) -> None:

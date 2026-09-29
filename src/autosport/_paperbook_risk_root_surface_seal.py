@@ -15,7 +15,9 @@ state, store or second risk authority is created.
 
 from __future__ import annotations
 
-from types import FunctionType, MethodType
+from functools import partial
+import sys
+from types import FunctionType
 
 from . import risk as _risk
 
@@ -96,25 +98,30 @@ def _make_instance_root_getattribute(
     policy: type,
     root_descriptors: dict[str, object],
 ) -> FunctionType:
-    """Guard normal instance dispatch against in-place root executable mutation.
+    """Build a fail-closed instance dispatch gate with no mutable closure authority.
 
-    Metaclass data descriptors protect class-level root replacement/deletion, but
-    Python instance lookup reads plain functions directly from the class dictionary.
-    A caller retaining a bound evaluate call could otherwise bypass the metaclass
-    seal if that exact function object's code were changed.
+    Instance special-method lookup executes __getattribute__ directly from the class
+    slot, so a self-check inside that same mutable Python function cannot defend an
+    in-place __code__ replacement. Keep the special-method function closureless,
+    retain authority inputs in an immutable defaults tuple, and use one narrowly
+    scoped process audit hook to reject executable/default metadata replacement on
+    the closureless gate/validator/executor before mutation takes effect.
 
-    Return a narrow instance attribute gate that wraps only positive owner-facing
-    risk calls. Each returned bound call revalidates identity/code/default/closure
-    state before and after execution and executes a fresh FunctionType from the
-    witnessed code object. Ordinary dataclass/field access continues through the
-    builtin object attribute path unchanged.
+    Owner-facing risk roots remain the canonical Python functions. Their exact
+    identity/code/globals/defaults/kwdefaults/closure values are revalidated on each
+    lookup and retained call. Calls execute a fresh delegate from that witnessed
+    state, so mutation after obtaining a callable also fails closed.
     """
 
     exact_type = type
     function_type = FunctionType
-    method_type = MethodType
+    dict_type = dict
+    failure_type = TypeError
+    value_error_type = ValueError
+    len_fn = len
     object_getattribute = object.__getattribute__
     type_getattribute = type.__getattribute__
+    partial_type = partial
     empty_cell = object()
 
     witnesses: list[tuple[object, ...]] = []
@@ -125,17 +132,18 @@ def _make_instance_root_getattribute(
                 f"canonical PaperRiskPolicy instance root is unavailable: {name}"
             )
         closure = function.__closure__
-        closure_values: tuple[object, ...] | None
+        closure_witnesses: tuple[tuple[object, object], ...]
         if closure is None:
-            closure_values = None
+            closure_witnesses = ()
         else:
-            values: list[object] = []
+            values: list[tuple[object, object]] = []
             for cell in closure:
                 try:
-                    values.append(cell.cell_contents)
+                    value = cell.cell_contents
                 except ValueError:
-                    values.append(empty_cell)
-            closure_values = tuple(values)
+                    value = empty_cell
+                values.append((cell, value))
+            closure_witnesses = tuple(values)
         kwdefaults = (
             None
             if function.__kwdefaults__ is None
@@ -150,160 +158,277 @@ def _make_instance_root_getattribute(
                 function.__defaults__,
                 kwdefaults,
                 closure,
-                closure_values,
+                closure_witnesses,
             )
         )
     frozen_witnesses = tuple(witnesses)
 
-    def require_instance_root(name: str):
-        if exact_type(name) is not str:
-            return None
-        expected = None
-        for witness in frozen_witnesses:
-            if witness[0] == name:
-                expected = witness
-                break
-        if expected is None:
-            return None
-
+    def validate_instance_root(
+        witness,
+        owner,
+        exact_type_arg,
+        function_type_arg,
+        dict_type_arg,
+        type_getattribute_arg,
+        failure_type_arg,
+        value_error_type_arg,
+        len_fn_arg,
+        empty_cell_arg,
+    ):
         (
-            _root_name,
+            name,
             function,
             code,
             globals_mapping,
             defaults,
             kwdefaults,
             closure,
-            closure_values,
-        ) = expected
-        namespace = type_getattribute(policy, "__dict__")
-        current = namespace.get(name, empty_cell)
+            closure_witnesses,
+        ) = witness
+        namespace = type_getattribute_arg(owner, "__dict__")
+        current = namespace.get(name, empty_cell_arg)
         if (
-            exact_type(current) is not function_type
+            exact_type_arg(current) is not function_type_arg
             or current is not function
             or current.__code__ is not code
             or current.__globals__ is not globals_mapping
             or current.__defaults__ is not defaults
             or current.__closure__ is not closure
         ):
-            raise TypeError(
+            raise failure_type_arg(
                 f"canonical PaperRiskPolicy executable root changed: {name}"
             )
 
         current_kwdefaults = current.__kwdefaults__
         if kwdefaults is None:
             if current_kwdefaults is not None:
-                raise TypeError(
+                raise failure_type_arg(
                     f"canonical PaperRiskPolicy executable root changed: {name}"
                 )
         else:
             if (
-                exact_type(current_kwdefaults) is not dict
-                or len(current_kwdefaults) != len(kwdefaults)
-                or any(
-                    key not in current_kwdefaults
-                    or current_kwdefaults[key] is not expected_value
-                    for key, expected_value in kwdefaults
-                )
+                exact_type_arg(current_kwdefaults) is not dict_type_arg
+                or len_fn_arg(current_kwdefaults) != len_fn_arg(kwdefaults)
             ):
-                raise TypeError(
+                raise failure_type_arg(
                     f"canonical PaperRiskPolicy executable root changed: {name}"
                 )
+            for key, expected_value in kwdefaults:
+                if (
+                    key not in current_kwdefaults
+                    or current_kwdefaults[key] is not expected_value
+                ):
+                    raise failure_type_arg(
+                        f"canonical PaperRiskPolicy executable root changed: {name}"
+                    )
 
-        if closure_values is None:
-            if closure is not None:
-                raise TypeError(
+        if closure is None:
+            if closure_witnesses:
+                raise failure_type_arg(
                     f"canonical PaperRiskPolicy executable root changed: {name}"
                 )
         else:
-            if closure is None or len(closure) != len(closure_values):
-                raise TypeError(
+            if len_fn_arg(closure) != len_fn_arg(closure_witnesses):
+                raise failure_type_arg(
                     f"canonical PaperRiskPolicy executable root changed: {name}"
                 )
-            for cell, expected_value in zip(closure, closure_values):
+            for cell, expected_value in closure_witnesses:
                 try:
                     current_value = cell.cell_contents
-                except ValueError:
-                    current_value = empty_cell
+                except value_error_type_arg:
+                    current_value = empty_cell_arg
                 if current_value is not expected_value:
-                    raise TypeError(
+                    raise failure_type_arg(
                         f"canonical PaperRiskPolicy executable root changed: {name}"
                     )
-        return expected
+        return witness
 
-    require_instance_root_code = require_instance_root.__code__
-
-    def sealed_instance_getattribute(self, name: str):
-        if (
-            exact_type(require_instance_root) is not function_type
-            or require_instance_root.__code__ is not require_instance_root_code
-        ):
-            raise TypeError(
-                "canonical PaperRiskPolicy instance-root verifier changed"
-            )
-        witness = require_instance_root(name)
-        if witness is None:
-            return object_getattribute(self, name)
-        if exact_type(self) is not policy:
-            raise TypeError("canonical PaperRiskPolicy instance identity changed")
-
+    def guarded_instance_root_call(
+        witness,
+        validator,
+        owner,
+        exact_type_arg,
+        function_type_arg,
+        dict_type_arg,
+        type_getattribute_arg,
+        failure_type_arg,
+        value_error_type_arg,
+        len_fn_arg,
+        empty_cell_arg,
+        bound_self,
+        *args,
+        **kwargs,
+    ):
+        current = validator(
+            witness,
+            owner,
+            exact_type_arg,
+            function_type_arg,
+            dict_type_arg,
+            type_getattribute_arg,
+            failure_type_arg,
+            value_error_type_arg,
+            len_fn_arg,
+            empty_cell_arg,
+        )
+        if current is not witness or exact_type_arg(bound_self) is not owner:
+            raise failure_type_arg("canonical PaperRiskPolicy instance identity changed")
         (
-            _root_name,
-            function,
+            name,
+            _function,
             code,
             globals_mapping,
             defaults,
             kwdefaults,
             closure,
-            _closure_values,
+            _closure_witnesses,
         ) = witness
-
-        def guarded_root(bound_self, *args, **kwargs):
-            if (
-                exact_type(require_instance_root) is not function_type
-                or require_instance_root.__code__ is not require_instance_root_code
-            ):
-                raise TypeError(
-                    "canonical PaperRiskPolicy instance-root verifier changed"
-                )
-            current = require_instance_root(name)
-            if current is not witness:
-                raise TypeError(
+        delegate = function_type_arg(
+            code,
+            globals_mapping,
+            name=name,
+            argdefs=defaults,
+            closure=closure,
+        )
+        if kwdefaults is not None:
+            delegate.__kwdefaults__ = dict_type_arg(kwdefaults)
+        try:
+            return delegate(bound_self, *args, **kwargs)
+        finally:
+            current_after = validator(
+                witness,
+                owner,
+                exact_type_arg,
+                function_type_arg,
+                dict_type_arg,
+                type_getattribute_arg,
+                failure_type_arg,
+                value_error_type_arg,
+                len_fn_arg,
+                empty_cell_arg,
+            )
+            if current_after is not witness:
+                raise failure_type_arg(
                     f"canonical PaperRiskPolicy executable root changed: {name}"
                 )
-            delegate = function_type(
-                code,
-                globals_mapping,
-                name=function.__name__,
-                argdefs=defaults,
-                closure=closure,
+
+    def sealed_instance_getattribute(
+        self,
+        name,
+        roots=None,
+        validator=None,
+        guarded_call=None,
+        owner=None,
+        exact_type_arg=None,
+        function_type_arg=None,
+        dict_type_arg=None,
+        type_getattribute_arg=None,
+        object_getattribute_arg=None,
+        partial_type_arg=None,
+        failure_type_arg=None,
+        value_error_type_arg=None,
+        len_fn_arg=None,
+        empty_cell_arg=None,
+    ):
+        for witness in roots:
+            if name != witness[0]:
+                continue
+            validator(
+                witness,
+                owner,
+                exact_type_arg,
+                function_type_arg,
+                dict_type_arg,
+                type_getattribute_arg,
+                failure_type_arg,
+                value_error_type_arg,
+                len_fn_arg,
+                empty_cell_arg,
             )
-            if kwdefaults is not None:
-                delegate.__kwdefaults__ = dict(kwdefaults)
-            try:
-                return delegate(bound_self, *args, **kwargs)
-            finally:
-                if (
-                    exact_type(require_instance_root) is not function_type
-                    or require_instance_root.__code__ is not require_instance_root_code
-                ):
-                    raise TypeError(
-                        "canonical PaperRiskPolicy instance-root verifier changed"
-                    )
-                current_after = require_instance_root(name)
-                if current_after is not witness:
-                    raise TypeError(
-                        f"canonical PaperRiskPolicy executable root changed: {name}"
-                    )
+            if exact_type_arg(self) is not owner:
+                raise failure_type_arg(
+                    "canonical PaperRiskPolicy instance identity changed"
+                )
+            return partial_type_arg(
+                guarded_call,
+                witness,
+                validator,
+                owner,
+                exact_type_arg,
+                function_type_arg,
+                dict_type_arg,
+                type_getattribute_arg,
+                failure_type_arg,
+                value_error_type_arg,
+                len_fn_arg,
+                empty_cell_arg,
+                self,
+            )
+        return object_getattribute_arg(self, name)
 
-        guarded_root.__name__ = function.__name__
-        guarded_root.__qualname__ = function.__qualname__
-        guarded_root.__doc__ = function.__doc__
-        guarded_root.__annotations__ = dict(function.__annotations__)
-        return method_type(guarded_root, self)
+    sealed_instance_getattribute.__defaults__ = (
+        frozen_witnesses,
+        validate_instance_root,
+        guarded_instance_root_call,
+        policy,
+        exact_type,
+        function_type,
+        dict_type,
+        type_getattribute,
+        object_getattribute,
+        partial_type,
+        failure_type,
+        value_error_type,
+        len_fn,
+        empty_cell,
+    )
 
+    def reject_guard_metadata_mutation(
+        event,
+        args,
+        protected=None,
+        failure_type_arg=None,
+    ):
+        if event != "object.__setattr__":
+            return
+        target, name, value = args
+        if name not in ("__code__", "__defaults__", "__kwdefaults__"):
+            return
+        for guarded in protected:
+            if target is not guarded:
+                continue
+            if name == "__code__":
+                current = guarded.__code__
+            elif name == "__defaults__":
+                current = guarded.__defaults__
+            else:
+                current = guarded.__kwdefaults__
+            if value is not current:
+                raise failure_type_arg(
+                    "canonical PaperRiskPolicy instance dispatch executable is sealed"
+                )
+            return
+
+    protected = (
+        validate_instance_root,
+        guarded_instance_root_call,
+        sealed_instance_getattribute,
+        reject_guard_metadata_mutation,
+    )
+    reject_guard_metadata_mutation.__defaults__ = (protected, failure_type)
+
+    for guarded in protected:
+        if guarded.__closure__ is not None:
+            raise RuntimeError(
+                "canonical PaperRiskPolicy instance dispatch guard retained closure state"
+            )
+
+    # CPython emits object.__setattr__ before replacing function executable/default
+    # metadata. The hook recognizes only the four exact guard function identities
+    # above; unrelated mutation stays outside this authority. The hook also protects
+    # its own code/default tuple.
+    sys.addaudithook(reject_guard_metadata_mutation)
     return sealed_instance_getattribute
-
 
 def _install() -> None:
     policy = _risk.PaperRiskPolicy

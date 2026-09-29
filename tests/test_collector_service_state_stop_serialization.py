@@ -133,7 +133,7 @@ class CollectorServiceStateStopSerializationTests(unittest.TestCase):
             )
 
     def test_resume_cannot_bundle_non_stop_state_rewrite(self) -> None:
-        """Clearing STOP cannot smuggle terminal counters through the same mutation."""
+        """Clearing STOP cannot smuggle terminal counters or schema edits."""
 
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "collector_state.json"
@@ -149,11 +149,19 @@ class CollectorServiceStateStopSerializationTests(unittest.TestCase):
 
             with self.assertRaises(CollectorServiceStoppedError):
                 state._update(hostile_resume)
-
             self.assertEqual(observer.snapshot(), stopped)
 
-    def test_post_stop_mutation_cannot_publish_incomplete_stop_pair(self) -> None:
-        """A malformed STOP transition must fail before atomic publication."""
+            def schema_smuggling_resume(raw: dict[str, object]) -> None:
+                raw["stopped_at"] = None
+                raw["stop_reason"] = None
+                raw["unexpected_field"] = "SMUGGLED_DURING_RESUME"
+
+            with self.assertRaises(CollectorServiceStoppedError):
+                state._update(schema_smuggling_resume)
+            self.assertEqual(observer.snapshot(), stopped)
+
+    def test_post_stop_mutation_cannot_publish_incomplete_or_missing_stop_pair(self) -> None:
+        """Malformed STOP transitions must fail before atomic publication."""
 
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "collector_state.json"
@@ -166,7 +174,14 @@ class CollectorServiceStateStopSerializationTests(unittest.TestCase):
 
             with self.assertRaises(CollectorServiceStoppedError):
                 state._update(half_resume)
+            self.assertEqual(observer.snapshot(), stopped)
 
+            def delete_stop_pair(raw: dict[str, object]) -> None:
+                raw.pop("stopped_at")
+                raw.pop("stop_reason")
+
+            with self.assertRaises(CollectorServiceStoppedError):
+                state._update(delete_stop_pair)
             self.assertEqual(observer.snapshot(), stopped)
 
 

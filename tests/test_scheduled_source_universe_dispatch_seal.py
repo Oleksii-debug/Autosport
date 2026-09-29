@@ -526,5 +526,118 @@ class ScheduledSourceUniverseDispatchSealTests(unittest.TestCase):
                 schedule_id.__code__ = original_code
 
 
+    def test_source_path_equality_rebind_cannot_admit_wrong_store_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path, store, cycle_seq, _candidate = _ready_store(tmp)
+            wrong_path = Path(tmp) / "wrong-collector.db"
+            had_own_equality = "__eq__" in vars(Path)
+            original_own_equality = vars(Path).get("__eq__")
+            hostile_calls = []
+
+            def hostile_equality(_left, _right):
+                hostile_calls.append(True)
+                return True
+
+            setattr(Path, "__eq__", hostile_equality)
+            try:
+                with self.assertRaisesRegex(
+                    source_module.SourceUniverseCommitmentError,
+                    "does not match product-expected authority path",
+                ):
+                    source_module.build_source_universe_commitment(
+                        store,
+                        expected_store_path=wrong_path,
+                        source_id=SOURCE_ID,
+                        start_cycle_seq=cycle_seq,
+                        end_cycle_seq=cycle_seq,
+                    )
+            finally:
+                if had_own_equality:
+                    setattr(Path, "__eq__", original_own_equality)
+                else:
+                    delattr(Path, "__eq__")
+
+            self.assertEqual(hostile_calls, [])
+
+    def test_scheduled_path_equality_rebind_cannot_admit_wrong_store_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path, store, _cycle_seq, candidate = _ready_store(tmp)
+            wrong_path = Path(tmp) / "wrong-collector.db"
+            had_own_equality = "__eq__" in vars(Path)
+            original_own_equality = vars(Path).get("__eq__")
+            hostile_calls = []
+
+            def hostile_equality(_left, _right):
+                hostile_calls.append(True)
+                return True
+
+            setattr(Path, "__eq__", hostile_equality)
+            try:
+                with self.assertRaisesRegex(
+                    scheduled_module.ScheduledSourceUniverseError,
+                    "does not match product-expected authority path",
+                ):
+                    scheduled_module.resolve_scheduled_source_universe(
+                        store,
+                        candidate,
+                        expected_store_path=wrong_path,
+                        expected_source_id=SOURCE_ID,
+                        expected_run_id=RUN_ID,
+                        expected_start_slot_ordinal=0,
+                        expected_end_slot_ordinal=0,
+                    )
+            finally:
+                if had_own_equality:
+                    setattr(Path, "__eq__", original_own_equality)
+                else:
+                    delattr(Path, "__eq__")
+
+            self.assertEqual(hostile_calls, [])
+
+    def test_source_canonical_path_equality_code_mutation_fails_before_dispatch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path, store, cycle_seq, _candidate = _ready_store(tmp)
+            equality = source_module._CANONICAL_PATH_EQUALITY
+            original_code = equality.__code__
+
+            def hostile_equality(_left, _right):
+                raise AssertionError("hostile source path equality executed")
+
+            equality.__code__ = hostile_equality.__code__
+            try:
+                with self.assertRaisesRegex(
+                    source_module.SourceUniverseCommitmentError,
+                    "path comparison authority is rebound or mutated",
+                ):
+                    source_module.build_source_universe_commitment(
+                        store,
+                        expected_store_path=path,
+                        source_id=SOURCE_ID,
+                        start_cycle_seq=cycle_seq,
+                        end_cycle_seq=cycle_seq,
+                    )
+            finally:
+                equality.__code__ = original_code
+
+    def test_scheduled_canonical_path_equality_code_mutation_fails_before_dispatch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path, store, _cycle_seq, candidate = _ready_store(tmp)
+            equality = scheduled_module._CANONICAL_PATH_EQUALITY
+            original_code = equality.__code__
+
+            def hostile_equality(_left, _right):
+                raise AssertionError("hostile scheduled path equality executed")
+
+            equality.__code__ = hostile_equality.__code__
+            try:
+                with self.assertRaisesRegex(
+                    scheduled_module.ScheduledSourceUniverseError,
+                    "path comparison authority is rebound or mutated",
+                ):
+                    _resolve(path, store, candidate)
+            finally:
+                equality.__code__ = original_code
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -8,6 +8,7 @@ import json
 import math
 from typing import Callable, Protocol, Sequence
 
+from .betdaq_rate_governor import BetdaqRateAdmission
 from .betdaq_readonly_market_wire import (
     BetdaqGetPricesWireResponse,
     BetdaqSoapProtocolError,
@@ -150,6 +151,7 @@ class BetdaqRequestEvidence:
     call_id: str | None
     message_created_at: str | None
     unavailable_market_ids: tuple[int, ...] = ()
+    rate_admission_receipts: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -291,14 +293,38 @@ class BetdaqReadOnlyProvider:
             raise ValueError("request_id_factory returned invalid value")
         return value
 
-    def _fetch(self, request: BetdaqGetPricesRequest) -> tuple[bytes | str, int]:
+    def _rate_admission_receipt(self) -> str | None:
+        if not hasattr(self.transport, "last_rate_admission"):
+            return None
+        admission = getattr(self.transport, "last_rate_admission")
+        if admission is None:
+            return None
+        if type(admission) is not BetdaqRateAdmission:
+            raise TypeError(
+                "transport last_rate_admission must be canonical BetdaqRateAdmission"
+            )
+        return admission.receipt_sha256
+
+    def _fetch(
+        self, request: BetdaqGetPricesRequest
+    ) -> tuple[bytes | str, int, tuple[str, ...]]:
+        receipts: list[str] = []
         for attempt in range(1, self.max_attempts + 1):
             try:
-                payload = self.transport.get_prices(request, timeout_seconds=self.timeout_seconds)
+                payload = self.transport.get_prices(
+                    request,
+                    timeout_seconds=self.timeout_seconds,
+                )
+                receipt = self._rate_admission_receipt()
+                if receipt is not None and (not receipts or receipts[-1] != receipt):
+                    receipts.append(receipt)
                 if not isinstance(payload, (bytes, str)):
                     raise TypeError("transport must return bytes or str")
-                return payload, attempt
+                return payload, attempt, tuple(receipts)
             except (BetdaqTransientTransportError, TimeoutError, ConnectionError) as exc:
+                receipt = self._rate_admission_receipt()
+                if receipt is not None and (not receipts or receipts[-1] != receipt):
+                    receipts.append(receipt)
                 if attempt == self.max_attempts:
                     raise ProviderUnavailableError(
                         f"BETDAQ unavailable after {attempt} bounded attempts"
@@ -430,11 +456,12 @@ class BetdaqReadOnlyProvider:
                 datetime,
                 str,
                 tuple[int, ...],
+                tuple[str, ...],
             ]
         ] = []
         for market_ids in chunks:
             request = BetdaqGetPricesRequest(self._id(), market_ids, self.threshold_amount)
-            payload, attempts = self._fetch(request)
+            payload, attempts, rate_admission_receipts = self._fetch(request)
             received, received_text = _time(self.clock(), "response_received_at")
             response = parse_get_prices_response(payload)
             self._check_message_time(response, received)
@@ -449,6 +476,7 @@ class BetdaqReadOnlyProvider:
                     received,
                     received_text,
                     unavailable_ids,
+                    rate_admission_receipts,
                 )
             )
 
@@ -471,6 +499,7 @@ class BetdaqReadOnlyProvider:
             _,
             received_text,
             request_unavailable_ids,
+            rate_admission_receipts,
         ) in parsed:
             quotes.extend(self._map(response, request.market_ids, observed_text, sequence))
             request_hash = _fingerprint(request)
@@ -490,6 +519,7 @@ class BetdaqReadOnlyProvider:
                     response.call_id,
                     response.provider_created_at_text,
                     request_unavailable_ids,
+                    rate_admission_receipts,
                 )
             )
 

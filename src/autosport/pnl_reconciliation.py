@@ -450,13 +450,24 @@ def _journal_file_identity(info: os.stat_result) -> tuple[int, int, int, int]:
     return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns)
 
 
-def _require_path_references_open_journal(path: Path, fd: int) -> None:
+def _require_path_references_open_journal(
+    path: Path,
+    fd: int,
+    *,
+    phase: str = "append",
+    expected_identity: tuple[int, int, int, int] | None = None,
+) -> None:
     current = _lstat_regular_journal(path)
     if current is None:
-        raise ValueError("reconciliation journal path disappeared during append")
+        raise ValueError(f"reconciliation journal path disappeared during {phase}")
     opened = os.fstat(fd)
     if (current.st_dev, current.st_ino) != (opened.st_dev, opened.st_ino):
-        raise ValueError("reconciliation journal path changed during append")
+        raise ValueError(f"reconciliation journal path changed during {phase}")
+    if expected_identity is not None and (
+        _journal_file_identity(current) != expected_identity
+        or _journal_file_identity(opened) != expected_identity
+    ):
+        raise ValueError(f"reconciliation journal changed during {phase}")
 
 
 def _open_existing_regular_journal(
@@ -522,7 +533,14 @@ def _read_regular_journal(
             or len(raw) != after.st_size
         ):
             raise ValueError("reconciliation journal changed during bounded replay")
-        return bytes(raw), _journal_file_identity(after)
+        final_identity = _journal_file_identity(after)
+        _require_path_references_open_journal(
+            path,
+            fd,
+            phase="bounded replay",
+            expected_identity=final_identity,
+        )
+        return bytes(raw), final_identity
     finally:
         os.close(fd)
 

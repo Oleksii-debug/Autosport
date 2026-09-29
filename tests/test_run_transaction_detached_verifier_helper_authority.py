@@ -28,8 +28,8 @@ def _inner_binding_verifier(guarded: FunctionType) -> FunctionType:
 
 
 def _guarded_methods() -> tuple[FunctionType, FunctionType]:
-    stage = run_transaction._stage_paper_book_snapshot
-    promotion = run_transaction._promote_paper_book_snapshot
+    stage = run_transaction.RunTransaction._stage_paper_book_snapshot
+    promotion = run_transaction.RunTransaction._promote_paper_book_snapshot
     assert isinstance(stage, FunctionType)
     assert isinstance(promotion, FunctionType)
     return stage, promotion

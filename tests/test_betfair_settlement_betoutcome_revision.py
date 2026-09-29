@@ -35,7 +35,10 @@ class _Clock:
 
 class _Transport:
     def __init__(self) -> None:
+        self.provider_status = "SETTLED"
         self.bet_outcome = "WON"
+        self.handicap: float | None = None
+        self.voided_date: str | None = None
         self.customer_order_ref: str | None = None
 
     def post(self, url: str, *, headers, body: bytes, timeout_seconds: float) -> bytes:
@@ -48,24 +51,27 @@ class _Transport:
             result = {"currentOrders": [], "moreAvailable": False}
         elif method.endswith("listClearedOrders"):
             rows = []
-            if request["params"]["betStatus"] == "SETTLED":
-                rows.append(
-                    {
-                        "betId": "bet-777",
-                        "marketId": "1.234",
-                        "eventId": "event-1",
-                        "selectionId": 10,
-                        "side": "BACK",
-                        "placedDate": "2026-09-21T18:00:00+00:00",
-                        "settledDate": "2026-09-21T19:00:00+00:00",
-                        "priceRequested": 2,
-                        "priceMatched": 2,
-                        "sizeSettled": 5,
-                        "profit": 4,
-                        "customerOrderRef": self.customer_order_ref,
-                        "betOutcome": self.bet_outcome,
-                    }
-                )
+            if request["params"]["betStatus"] == self.provider_status:
+                row = {
+                    "betId": "bet-777",
+                    "marketId": "1.234",
+                    "eventId": "event-1",
+                    "selectionId": 10,
+                    "side": "BACK",
+                    "placedDate": "2026-09-21T18:00:00+00:00",
+                    "settledDate": "2026-09-21T19:00:00+00:00",
+                    "priceRequested": 2,
+                    "priceMatched": 2,
+                    "sizeSettled": 5,
+                    "profit": 4,
+                    "customerOrderRef": self.customer_order_ref,
+                    "betOutcome": self.bet_outcome,
+                }
+                if self.handicap is not None:
+                    row["handicap"] = self.handicap
+                if self.voided_date is not None:
+                    row["voidedDate"] = self.voided_date
+                rows.append(row)
             result = {"clearedOrders": rows, "moreAvailable": False}
         else:  # pragma: no cover
             raise AssertionError(method)
@@ -162,6 +168,8 @@ def test_bet_outcome_only_provider_correction_creates_new_revision(tmp_path) -> 
     first_capture = _capture(client, provider_ref)
     first = _ingest(store, ledger, plan, action, first_capture)
     assert first.revision.bet_outcome == "WON"
+    assert first.revision.provider_handicap is None
+    assert first.revision.provider_voided_date is None
 
     transport.bet_outcome = "LOST"
     second_capture = _capture(client, provider_ref)
@@ -181,6 +189,42 @@ def test_bet_outcome_only_provider_correction_creates_new_revision(tmp_path) -> 
     assert persisted is not None
     assert persisted.revision_id == second.revision.revision_id
     assert persisted.bet_outcome == "LOST"
+
+
+def test_handicap_only_provider_correction_creates_revision(tmp_path) -> None:
+    ledger, plan, action, provider_ref, transport, client = _context(tmp_path)
+    store = BetfairSettlementRevisionStore(tmp_path / "settlement.jsonl")
+
+    first = _ingest(store, ledger, plan, action, _capture(client, provider_ref)).revision
+    assert first.provider_handicap is None
+
+    transport.handicap = 0.5
+    second = _ingest(store, ledger, plan, action, _capture(client, provider_ref))
+
+    assert second.created is True
+    assert second.revision.revision_number == 2
+    assert second.revision.provider_handicap == Decimal("0.5")
+    assert second.revision.bet_outcome == first.bet_outcome
+
+
+def test_voided_date_only_provider_correction_creates_revision(tmp_path) -> None:
+    ledger, plan, action, provider_ref, transport, client = _context(tmp_path)
+    transport.provider_status = "VOIDED"
+    transport.bet_outcome = "LOST"
+    transport.voided_date = "2026-09-21T19:05:00+00:00"
+    store = BetfairSettlementRevisionStore(tmp_path / "settlement.jsonl")
+
+    first = _ingest(store, ledger, plan, action, _capture(client, provider_ref)).revision
+    assert first.provider_status == "VOIDED"
+    assert first.provider_voided_date == "2026-09-21T19:05:00+00:00"
+
+    transport.voided_date = "2026-09-21T19:06:00+00:00"
+    second = _ingest(store, ledger, plan, action, _capture(client, provider_ref))
+
+    assert second.created is True
+    assert second.revision.revision_number == 2
+    assert second.revision.provider_voided_date == "2026-09-21T19:06:00+00:00"
+    assert second.revision.provider_status == first.provider_status
 
 
 def test_identical_provider_row_with_new_rpc_ids_remains_idempotent(tmp_path) -> None:

@@ -37,6 +37,14 @@ class BetdaqLiveReadOnlyProvider(BetdaqReadOnlyProvider):
         clock: Clock = utc_now_iso,
         request_id_factory: RequestIdFactory | None = None,
     ) -> None:
+        # ThresholdAmount is economic request content and participates in request
+        # identity.  The product live path must not dispatch comparison/as_tuple/
+        # formatting through a caller-defined Decimal subclass before the request is
+        # fingerprinted or serialized.  Injected base-provider test paths remain
+        # explicitly non-authoritative for provider origin; the canonical live
+        # composition accepts only the exact built-in Decimal authority type.
+        if type(threshold_amount) is not Decimal:
+            raise TypeError("threshold_amount must be exact Decimal")
         live_transport = BetdaqReadOnlyLiveTransport(
             credentials=credentials,
             transport=transport,

@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import autosport.product_source as product_source_module
-from autosport.causal_collector import StreamCheckpoint
+from autosport.causal_collector import CollectorDeltaStore, StreamCheckpoint
 from autosport.domain import MarketType
 from autosport.event_lifecycle import CatalogCheckpoint, EventPhase
 from autosport.parlayapi_provider import ParlayApiTableTennisProvider
@@ -90,6 +90,16 @@ def _stream_checkpoint(delta) -> StreamCheckpoint:
     )
 
 
+def _archive_pending_delta(source: ParlayApiProductSource, delta) -> None:
+    event = source.resolve_event(delta)
+    store = source._require_collector_store()
+    store._append_with_runtime_stream_epoch(
+        delta,
+        activated_at=delta.collector_committed_at,
+        event=event,
+    )
+
+
 class ParlayApiProductSourceTests(unittest.TestCase):
     def test_snapshot_becomes_restart_safe_catalog_delta_and_event(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -122,6 +132,7 @@ class ParlayApiProductSourceTests(unittest.TestCase):
             self.assertEqual(event.decimal_odds, Decimal("1.80"))
             self.assertEqual(event.event_id, delta.event_id)
 
+            _archive_pending_delta(source, delta)
             collector_checkpoint = _stream_checkpoint(delta)
             self.assertEqual(source.fetch_deltas(collector_checkpoint, (), 10), ())
 
@@ -362,6 +373,7 @@ class ParlayApiProductSourceTests(unittest.TestCase):
             )
             page = source.fetch_catalog_page(None)
             delta = source.fetch_deltas(None, (), 1)[0]
+            _archive_pending_delta(source, delta)
             checkpoint = _stream_checkpoint(delta)
             source.fetch_deltas(checkpoint, (), 1)
 
@@ -379,28 +391,72 @@ class ParlayApiProductSourceTests(unittest.TestCase):
             ):
                 restored.fetch_catalog_page(_catalog_checkpoint(page))
 
-    def test_missing_durable_event_cache_fails_closed(self) -> None:
+    def test_missing_retained_collector_event_payload_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory) / "workspace"
             authority_root = Path(directory) / "authority"
             source = ParlayApiProductSource(
-                _Provider([_batch(cursor="snapshot-1")]),
+                _Provider(
+                    [
+                        _batch(cursor="snapshot-1"),
+                        _batch(cursor="snapshot-2", odds="1.90", sequence=2),
+                    ]
+                ),
                 workspace=workspace,
                 authority_root=authority_root,
                 lawful_terms_ref="terms:parlayapi:v1",
                 retention_ref="retention:parlayapi:v1",
                 clock=lambda: "2026-09-20T17:34:02+00:00",
             )
-            source.fetch_catalog_page(None)
+            page = source.fetch_catalog_page(None)
             delta = source.fetch_deltas(None, (), 1)[0]
-            state_path = source.state_path
-            raw = state_path.read_text(encoding="utf-8")
-            state_path.write_text(
-                raw.replace(f'"{delta.delta_id}":', '"missing-delta":', 1),
-                encoding="utf-8",
-            )
+            _archive_pending_delta(source, delta)
+            source.fetch_deltas(_stream_checkpoint(delta), (), 1)
+            source.fetch_catalog_page(_catalog_checkpoint(page))
+
+            store = source._require_collector_store()
+            connection = store._connect()
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                connection.execute(
+                    "DELETE FROM collector_event_payloads_v1 WHERE delta_id=?",
+                    (delta.delta_id,),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
             with self.assertRaises(ProductSourceStateError):
                 source.resolve_event(delta)
+
+    def test_state_reader_rejects_symlink_and_byte_bound_before_parse(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory) / "workspace"
+            authority_root = Path(directory) / "authority"
+            source = ParlayApiProductSource(
+                _Provider([]),
+                workspace=workspace,
+                authority_root=authority_root,
+                lawful_terms_ref="terms:parlayapi:v1",
+                retention_ref="retention:parlayapi:v1",
+            )
+            original = source.state_path.read_bytes()
+            oversized = source.state_path.with_name("oversized.json")
+            oversized.write_bytes(b"x" * 65)
+            old_path = source.state_path
+            source.state_path = oversized
+            old_bound = source._MAX_STATE_BYTES
+            source._MAX_STATE_BYTES = 64
+            try:
+                with self.assertRaisesRegex(
+                    ProductSourceStateError,
+                    "bounded canonical file",
+                ):
+                    source._read_state_unlocked()
+            finally:
+                source._MAX_STATE_BYTES = old_bound
+                source.state_path = old_path
+            self.assertEqual(source.state_path.read_bytes(), original)
 
     def test_two_instances_cannot_last_writer_win_pending_snapshot(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

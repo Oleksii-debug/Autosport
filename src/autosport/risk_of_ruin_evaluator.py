@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import stat
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import (
@@ -34,6 +36,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from .integrity import atomic_write_json
+from .json_integrity import strict_json_loads
 from .monotonic_workspace_authority import (
     MonotonicWorkspaceAuthority,
     MonotonicWorkspaceAuthorityError,
@@ -52,6 +55,7 @@ _AUTHORITY_KEY = "issued-results-v1"
 _JOURNAL_NAME = "risk-of-ruin-evaluator-v1.json"
 _HEX = frozenset("0123456789abcdef")
 _MAX_FIXED_POINT_MATERIALIZATION_LENGTH = 512
+_MAX_JOURNAL_BYTES = 16 * 1024 * 1024
 # Operational implementation support budget, not a statistical max-N or
 # sample-adequacy rule. The current exact CP implementation performs 240
 # high-precision bisection evaluations with O(k) recurrence work per step.
@@ -257,6 +261,70 @@ def _file_sha256(path: Path) -> str | None:
     if not path.exists():
         return None
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _read_stable_journal_bytes(path: Path) -> bytes | None:
+    """Read one bounded regular journal file from one stable path identity."""
+
+    try:
+        before = os.stat(path, follow_symlinks=False)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise RiskOfRuinIssuanceError(
+            "risk-of-ruin journal cannot be inspected"
+        ) from exc
+    if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+        raise RiskOfRuinIssuanceError(
+            "risk-of-ruin journal must be one regular file"
+        )
+    if before.st_size > _MAX_JOURNAL_BYTES:
+        raise RiskOfRuinIssuanceError(
+            "risk-of-ruin journal exceeds supported size"
+        )
+
+    try:
+        with path.open("rb") as handle:
+            opened = os.fstat(handle.fileno())
+            if (
+                opened.st_dev != before.st_dev
+                or opened.st_ino != before.st_ino
+                or not stat.S_ISREG(opened.st_mode)
+                or opened.st_nlink != 1
+            ):
+                raise RiskOfRuinIssuanceError(
+                    "risk-of-ruin journal changed during open"
+                )
+            payload = handle.read(_MAX_JOURNAL_BYTES + 1)
+            after_open = os.fstat(handle.fileno())
+        after = os.stat(path, follow_symlinks=False)
+    except RiskOfRuinIssuanceError:
+        raise
+    except OSError as exc:
+        raise RiskOfRuinIssuanceError(
+            "risk-of-ruin journal is unreadable"
+        ) from exc
+
+    if len(payload) > _MAX_JOURNAL_BYTES:
+        raise RiskOfRuinIssuanceError(
+            "risk-of-ruin journal exceeds supported size"
+        )
+
+    def identity(value: os.stat_result) -> tuple[int, int, int, int, int, int]:
+        return (
+            value.st_dev,
+            value.st_ino,
+            value.st_size,
+            value.st_mtime_ns,
+            value.st_ctime_ns,
+            value.st_nlink,
+        )
+
+    if identity(before) != identity(after) or identity(opened) != identity(after_open):
+        raise RiskOfRuinIssuanceError(
+            "risk-of-ruin journal changed during stable read"
+        )
+    return payload
 
 
 def evaluator_source_sha256() -> str:
@@ -1006,14 +1074,16 @@ class ProductRiskOfRuinEvaluator:
         }
 
     def _read_state_under_lock(self) -> tuple[dict[str, object], tuple[dict[str, object], ...]]:
-        observed = _file_sha256(self.journal_path)
-        if observed is None:
+        payload = _read_stable_journal_bytes(self.journal_path)
+        if payload is None:
+            observed = None
             state = self._empty_state()
             records: tuple[dict[str, object], ...] = ()
         else:
+            observed = hashlib.sha256(payload).hexdigest()
             try:
-                state = json.loads(self.journal_path.read_text(encoding="utf-8"))
-            except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+                state = strict_json_loads(payload.decode("utf-8"))
+            except (UnicodeError, ValueError) as exc:
                 raise RiskOfRuinIssuanceError(
                     "risk-of-ruin journal is unreadable"
                 ) from exc

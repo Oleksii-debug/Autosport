@@ -96,6 +96,49 @@ class RunTransactionPaperBookDirectDispatchGuardTests(unittest.TestCase):
             run_transaction_module.hashlib = original_hashlib
             run_transaction_module.PaperBook = original_paper_book
 
+    def test_terminal_surface_witness_rejects_meta_meta_bypass_before_promotion(self):
+        """Consumer witness remains fail-closed beyond any finite metaclass seal chain."""
+
+        promotion_globals = _sealed_inner_globals(
+            RunTransaction._promote_paper_book_snapshot
+        )
+        frozen_os = promotion_globals["os"]
+        surface_type = type(frozen_os)
+        surface_meta = type(surface_type)
+        surface_meta_meta = type(surface_meta)
+        original_surface_root = vars(surface_type)["__getattr__"]
+        original_meta_root = vars(surface_meta)["__getattr__"]
+        original_meta_meta_root = vars(surface_meta_meta)["__getattr__"]
+        hostile_replace = lambda *_args: None
+
+        def hostile_getattr(_surface, name):
+            if name == "replace":
+                return hostile_replace
+            raise AttributeError(name)
+
+        try:
+            # The current two-level class seal correctly blocks mutation of the facade
+            # and its descriptor-bearing metaclass. Its own meta-metaclass is still a
+            # normal mutable type, however, so an explicit base-type write can peel the
+            # hierarchy from the outside in. The consumer witness must remain terminal.
+            type.__setattr__(surface_meta_meta, "__getattr__", object())
+            type.__setattr__(surface_meta, "__getattr__", object())
+            type.__setattr__(surface_type, "__getattr__", hostile_getattr)
+            self.assertIs(frozen_os.replace, hostile_replace)
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "RunTransaction frozen direct-dispatch surface root changed",
+            ):
+                RunTransaction._promote_paper_book_snapshot(object())
+        finally:
+            # Restore from the governed class outward while each upper seal is inert.
+            type.__setattr__(surface_type, "__getattr__", original_surface_root)
+            type.__setattr__(surface_meta, "__getattr__", original_meta_root)
+            type.__setattr__(surface_meta_meta, "__getattr__", original_meta_meta_root)
+
+        self.assertIs(frozen_os.replace, os.replace)
+
 
 if __name__ == "__main__":
     unittest.main()

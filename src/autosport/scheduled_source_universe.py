@@ -553,7 +553,12 @@ def _seal_scheduled_source_universe_dispatch() -> None:
         (
             name,
             expected,
-            getattr(expected, "__code__", None),
+            getattr(expected, "__func__", expected),
+            getattr(
+                getattr(expected, "__func__", expected),
+                "__code__",
+                None,
+            ),
         )
         for name, expected in sorted(expected_schedule_class_seams.items())
     )
@@ -685,14 +690,25 @@ def _seal_scheduled_source_universe_dispatch() -> None:
             raise expected_error_type(
                 "scheduled source-universe class read-seam witness map is rebound"
             )
-        for name, expected_surface, expected_code in expected_schedule_class_witnesses:
+        for (
+            name,
+            expected_surface,
+            expected_callable,
+            expected_code,
+        ) in expected_schedule_class_witnesses:
             current_surface = expected_getattr_static(
                 expected_store_type, name, None
+            )
+            current_callable = getattr(
+                current_surface,
+                "__func__",
+                current_surface,
             )
             if (
                 current_class_seams.get(name) is not expected_surface
                 or current_surface is not expected_surface
-                or getattr(expected_surface, "__code__", None) is not expected_code
+                or current_callable is not expected_callable
+                or getattr(current_callable, "__code__", None) is not expected_code
             ):
                 raise expected_error_type(
                     "scheduled source-universe canonical read seam drifted: " + name

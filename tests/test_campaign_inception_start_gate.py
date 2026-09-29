@@ -25,7 +25,6 @@ from autosport.forward_universe_precommit_authority import (
 from autosport.monotonic_workspace_authority import (
     AuthorityPhase,
     MonotonicWorkspaceAuthority,
-    MonotonicWorkspaceAuthorityError,
 )
 
 
@@ -127,6 +126,64 @@ def _state_file(locator: ForwardUniversePrecommitLocator) -> Path:
     return paths[0]
 
 
+def _stage_pending_inception(
+    *,
+    locator: ForwardUniversePrecommitLocator,
+    store: CollectorDeltaStore,
+    spec: CampaignInceptionSourceSpec,
+    publish_local_state: bool,
+) -> None:
+    """Model a process crash after durable PREPARE without rebinding product code."""
+
+    manifest, witness = inception_module._resolve_precommit(locator)
+    inception_module._validate_schedule_window(manifest, spec)
+    precommit = inception_module._precommit_payload(manifest, witness)
+    gate_binding = inception_module._gate_binding_sha256(
+        precommit=precommit,
+        spec=spec,
+    )
+    prepared = inception_module._CANONICAL_PRESTART_PREPARER(
+        store,
+        expected_store_path=spec.expected_store_path,
+        expected_source_id=spec.source_id,
+        expected_run_id=spec.run_id,
+        expected_stream_epoch=spec.stream_epoch,
+        anchor_at=spec.anchor_at,
+        interval_seconds=spec.interval_seconds,
+        max_items=spec.max_items,
+        evaluation_start_slot_ordinal=spec.evaluation_start_slot_ordinal,
+        evaluation_end_slot_ordinal=spec.evaluation_end_slot_ordinal,
+        gate_binding_sha256=gate_binding,
+    )
+    payload = inception_module._new_state_payload(
+        precommit=precommit,
+        spec=spec,
+        prepared=prepared,
+    )
+    tx_id, semantic, _prepared_payload = inception_module._validate_state(
+        payload,
+        precommit=precommit,
+        spec=spec,
+    )
+    state_sha256 = inception_module._digest(payload)
+    authority = inception_module._authority(
+        locator=locator,
+        witness=witness,
+        campaign_id=manifest.campaign_id,
+    )
+    authority.prepare(
+        tx_id=tx_id,
+        observed_state_sha256=None,
+        intended_state_sha256=state_sha256,
+        semantic_binding_sha256=semantic,
+    )
+    if publish_local_state:
+        inception_module._write_state(
+            inception_module._state_path(locator.workspace, manifest.campaign_id),
+            payload,
+        )
+
+
 def test_gate_authorization_is_exact_committed_authority_record(
     tmp_path: Path,
 ) -> None:
@@ -205,26 +262,14 @@ def test_exact_retry_after_first_start_reopens_same_receipt(
 
 def test_crash_after_prepare_before_local_receipt_keeps_start_blocked_and_recovers(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _manifest_value, locator, store, spec, _authority_root = _setup(tmp_path)
-    original_write = inception_module._write_state
-    writes = 0
-
-    def fail_first_write(path: Path, payload: object) -> None:
-        nonlocal writes
-        writes += 1
-        if writes == 1:
-            raise OSError("forced state publication crash")
-        original_write(path, payload)
-
-    monkeypatch.setattr(inception_module, "_write_state", fail_first_write)
-    with pytest.raises(OSError, match="forced state publication crash"):
-        establish_campaign_inception(
-            precommit_locator=locator,
-            store=store,
-            source_spec=spec,
-        )
+    _stage_pending_inception(
+        locator=locator,
+        store=store,
+        spec=spec,
+        publish_local_state=False,
+    )
 
     status = store._collector_schedule_start_gate_status(
         source_id=spec.source_id,
@@ -261,32 +306,16 @@ def test_crash_after_prepare_before_local_receipt_keeps_start_blocked_and_recove
         == receipt.authority_record_sha256
     )
 
-
 def test_crash_after_local_receipt_before_commit_recovers_exact_pending_generation(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _manifest_value, locator, store, spec, _authority_root = _setup(tmp_path)
-    original_commit = MonotonicWorkspaceAuthority.commit
-    calls = 0
-
-    def fail_first_commit(self: MonotonicWorkspaceAuthority, **kwargs: object):
-        nonlocal calls
-        calls += 1
-        if calls == 1:
-            raise MonotonicWorkspaceAuthorityError("forced commit crash")
-        return original_commit(self, **kwargs)
-
-    monkeypatch.setattr(MonotonicWorkspaceAuthority, "commit", fail_first_commit)
-    with pytest.raises(
-        CampaignInceptionIntegrityError,
-        match="cannot durably commit campaign inception authority",
-    ):
-        establish_campaign_inception(
-            precommit_locator=locator,
-            store=store,
-            source_spec=spec,
-        )
+    _manifest_value, locator, store, spec, authority_root = _setup(tmp_path)
+    _stage_pending_inception(
+        locator=locator,
+        store=store,
+        spec=spec,
+        publish_local_state=True,
+    )
 
     assert _state_file(locator).is_file()
     status = store._collector_schedule_start_gate_status(
@@ -295,6 +324,14 @@ def test_crash_after_local_receipt_before_commit_recovers_exact_pending_generati
     )
     assert status is not None
     assert status["authorization_sha256"] is None
+
+    pending_authority = MonotonicWorkspaceAuthority(
+        workspace=locator.workspace,
+        domain=AUTHORITY_DOMAIN,
+        key=_manifest().campaign_id,
+        authority_root=authority_root,
+    )
+    assert pending_authority.read_history()[-1].phase is AuthorityPhase.PREPARE
 
     receipt = establish_campaign_inception(
         precommit_locator=locator,
@@ -308,7 +345,7 @@ def test_crash_after_local_receipt_before_commit_recovers_exact_pending_generati
         )["authorization_sha256"]
         == receipt.authority_record_sha256
     )
-
+    assert pending_authority.read_history()[-1].phase is AuthorityPhase.COMMIT
 
 def test_deleted_local_receipt_is_reconstructed_from_exact_committed_authority(
     tmp_path: Path,

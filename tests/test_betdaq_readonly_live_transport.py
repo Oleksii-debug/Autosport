@@ -6,6 +6,7 @@ import xml.etree.ElementTree as ET
 
 import pytest
 
+import autosport.betdaq_account_readonly as betdaq_account_readonly_module
 from autosport.betdaq_account_readonly import (
     BetdaqAccountReadOnlyError,
     BetdaqCredentials,
@@ -27,6 +28,7 @@ from autosport.betdaq_readonly_provider import (
     BETDAQ_GET_PRICES_SOAP_ACTION,
     BetdaqGetPricesRequest,
     BetdaqMarketBinding,
+    BetdaqReadOnlyProvider,
 )
 from autosport.domain import MarketType
 from autosport.providers import ProviderUnavailableError
@@ -220,16 +222,56 @@ def _request() -> BetdaqGetPricesRequest:
     return BetdaqGetPricesRequest(17, (9001,), Decimal("1.50"))
 
 
-def _provider(transport, *, max_attempts: int, rate_governor) -> BetdaqLiveReadOnlyProvider:
-    return BetdaqLiveReadOnlyProvider(
+class _BridgeProvider(BetdaqReadOnlyProvider):
+    @property
+    def live_transport(self) -> BetdaqReadOnlyLiveTransport:
+        return self.transport
+
+
+def _provider(transport, *, max_attempts: int, rate_governor) -> _BridgeProvider:
+    bridge = BetdaqReadOnlyLiveTransport(
         credentials=_credentials(),
         rate_governor=rate_governor,
         transport=transport,
-        market_bindings=[BetdaqMarketBinding(9001, "100", "football", MarketType.WINNER)],
+    )
+    return _BridgeProvider(
+        transport=bridge,
+        market_bindings=[
+            BetdaqMarketBinding(9001, "event-1", "football", MarketType.WINNER)
+        ],
         threshold_amount=Decimal("1.50"),
         max_attempts=max_attempts,
         clock=lambda: "2026-09-23T19:00:00Z",
     )
+
+
+class _FakeHttpResponse:
+    def __init__(self, payload: bytes) -> None:
+        self._payload = payload
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        return None
+
+    def read(self) -> bytes:
+        return self._payload
+
+
+class _CanonicalUrlopenRouter:
+    def __init__(self) -> None:
+        self.calls: list[bytes] = []
+
+    def __call__(self, request, *, timeout):
+        body = request.data
+        assert type(body) is bytes
+        self.calls.append(body)
+        if b"GetEventSubTreeNoSelections" in body:
+            return _FakeHttpResponse(_event_response())
+        if b"GetPrices" in body:
+            return _FakeHttpResponse(_response())
+        raise AssertionError("unexpected BETDAQ request")
 
 
 def test_bridge_delegates_exactly_one_getprices_post_without_own_retry(tmp_path) -> None:
@@ -342,7 +384,7 @@ def test_provider_does_not_retry_unclassified_custom_failure(tmp_path) -> None:
         match="without retryable classification",
     ):
         provider.read_batch()
-    assert post.calls == 2
+    assert post.calls == 1
     assert provider.last_request_evidence is None
 
 
@@ -355,7 +397,7 @@ def test_provider_does_not_retry_opaque_canonical_transport_error(tmp_path) -> N
         match="without retryable classification",
     ) as raised:
         provider.read_batch()
-    assert post.calls == 2
+    assert post.calls == 1
     assert "fixture-password" not in str(raised.value)
     assert provider.last_request_evidence is None
 
@@ -366,10 +408,10 @@ def test_provider_retries_only_preserved_explicit_transient_signal(tmp_path) -> 
     provider = _provider(post, max_attempts=2, rate_governor=governor)
     with pytest.raises(ProviderUnavailableError, match="after 2 bounded attempts"):
         provider.read_batch()
-    assert post.calls == 3
+    assert post.calls == 2
     admission = provider.live_transport.last_rate_admission
     assert admission is not None
-    assert admission.sequence == 3
+    assert admission.sequence == 2
     assert provider.last_request_evidence is None
 
 
@@ -381,7 +423,7 @@ def test_retry_then_success_binds_both_rate_admissions_to_request_evidence(tmp_p
     batch = provider.read_batch()
 
     assert len(batch.quotes) == 2
-    assert post.calls == 3
+    assert post.calls == 2
     evidence = provider.last_request_evidence
     assert evidence is not None
     request = evidence.requests[0]
@@ -391,7 +433,7 @@ def test_retry_then_success_binds_both_rate_admissions_to_request_evidence(tmp_p
     admission = provider.live_transport.last_rate_admission
     assert admission is not None
     assert request.rate_admission_receipts[-1] == admission.receipt_sha256
-    assert admission.sequence == 3
+    assert admission.sequence == 2
     assert admission.grants_execution_authority is False
     assert admission.grants_write_permission is False
     assert admission.grants_freshness is False
@@ -429,17 +471,31 @@ def test_non_bytes_transport_contract_failure_is_not_retried(tmp_path) -> None:
     provider = _provider(post, max_attempts=4, rate_governor=governor)
     with pytest.raises(ProviderUnavailableError, match="non-bytes payload"):
         provider.read_batch()
-    assert len(post.calls) == 2
+    assert len(post.calls) == 1
     assert provider.last_request_evidence is None
 
 
-def test_live_provider_keeps_origin_unverified_after_valid_snapshot(tmp_path) -> None:
-    post = _PostTransport()
+def test_live_provider_keeps_origin_unverified_after_valid_snapshot(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    router = _CanonicalUrlopenRouter()
+    monkeypatch.setattr(betdaq_account_readonly_module, "urlopen", router)
     governor, _ = _rate_governor(tmp_path)
-    provider = _provider(post, max_attempts=1, rate_governor=governor)
+    provider = BetdaqLiveReadOnlyProvider(
+        credentials=_credentials(),
+        rate_governor=governor,
+        market_bindings=[
+            BetdaqMarketBinding(9001, "100", "football", MarketType.WINNER)
+        ],
+        threshold_amount=Decimal("1.50"),
+        max_attempts=1,
+        clock=lambda: "2026-09-23T19:00:00Z",
+    )
 
     batch = provider.read_batch()
 
+    assert len(router.calls) == 2
     assert len(batch.quotes) == 2
     assert batch.quotes[0].provider_event_id == "101"
     assert batch.quotes[0].sport is None
@@ -467,6 +523,43 @@ def test_live_provider_keeps_origin_unverified_after_valid_snapshot(tmp_path) ->
     assert evidence.requests[0].rate_admission_receipts == (
         admission.receipt_sha256,
     )
+
+
+def test_live_provider_rejects_injected_http_transport(tmp_path) -> None:
+    governor, _ = _rate_governor(tmp_path)
+    with pytest.raises(
+        TypeError,
+        match="canonical-only BETDAQ transport requires product-owned HTTPS transport",
+    ):
+        BetdaqLiveReadOnlyProvider(
+            credentials=_credentials(),
+            rate_governor=governor,
+            transport=_PostTransport(),
+            market_bindings=[
+                BetdaqMarketBinding(9001, "100", "football", MarketType.WINNER)
+            ],
+            threshold_amount=Decimal("1.50"),
+        )
+
+
+def test_canonical_only_bridge_rejects_instance_post_shadow_before_admission(
+    tmp_path,
+) -> None:
+    governor, _ = _rate_governor(tmp_path)
+    bridge = BetdaqReadOnlyLiveTransport(
+        credentials=_credentials(),
+        rate_governor=governor,
+        canonical_only=True,
+    )
+    bridge._transport.post = lambda *args, **kwargs: _response()
+
+    with pytest.raises(
+        ProviderUnavailableError,
+        match="canonical BETDAQ HTTPS transport authority was replaced",
+    ):
+        bridge.get_prices(_request(), timeout_seconds=1.0)
+
+    assert bridge.last_rate_admission is None
 
 
 def test_default_live_provider_composes_canonical_transport_without_origin_promotion(tmp_path) -> None:

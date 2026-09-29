@@ -47,6 +47,8 @@ _CYCLE_START_IMMUTABLE_UPDATE_TRIGGER = "collector_cycle_starts_immutable_update
 _CYCLE_START_IMMUTABLE_DELETE_TRIGGER = "collector_cycle_starts_immutable_delete_v1"
 _CYCLE_TERMINAL_IMMUTABLE_UPDATE_TRIGGER = "collector_cycle_terminals_immutable_update_v1"
 _CYCLE_TERMINAL_IMMUTABLE_DELETE_TRIGGER = "collector_cycle_terminals_immutable_delete_v1"
+_CYCLE_ARTIFACT_IMMUTABLE_UPDATE_TRIGGER = "collector_cycle_artifacts_immutable_update_v1"
+_CYCLE_ARTIFACT_IMMUTABLE_DELETE_TRIGGER = "collector_cycle_artifacts_immutable_delete_v1"
 _SCHEDULE_POLICY = "fixed_interval_v1"
 _SCHEDULE_IMMUTABLE_UPDATE_TRIGGER = "collector_schedules_immutable_update_v1"
 _SCHEDULE_IMMUTABLE_DELETE_TRIGGER = "collector_schedules_immutable_delete_v1"
@@ -204,6 +206,18 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
                 "REFERENCES collector_cycle_starts_v1(source_id, cycle_seq))"
             )
             connection.execute(
+                "CREATE TABLE IF NOT EXISTS collector_cycle_artifacts_v1 ("
+                "source_id TEXT NOT NULL,"
+                "cycle_seq INTEGER NOT NULL CHECK(cycle_seq > 0),"
+                "artifact_id TEXT NOT NULL,"
+                "artifact_kind TEXT NOT NULL,"
+                "artifact_sha256 TEXT NOT NULL,"
+                "PRIMARY KEY(source_id, cycle_seq, artifact_id),"
+                "UNIQUE(artifact_id),"
+                "FOREIGN KEY(source_id, cycle_seq) "
+                "REFERENCES collector_cycle_starts_v1(source_id, cycle_seq))"
+            )
+            connection.execute(
                 "CREATE TABLE IF NOT EXISTS collector_schedules_v1 ("
                 "source_id TEXT NOT NULL,"
                 "run_id TEXT NOT NULL,"
@@ -342,6 +356,15 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
                     f"CREATE TRIGGER IF NOT EXISTS {trigger_name} "
                     f"BEFORE {timing} ON collector_cycle_terminals_v1 BEGIN "
                     "SELECT RAISE(ABORT, 'collector cycle terminals are immutable'); END"
+                )
+            for trigger_name, timing in (
+                (_CYCLE_ARTIFACT_IMMUTABLE_UPDATE_TRIGGER, "UPDATE"),
+                (_CYCLE_ARTIFACT_IMMUTABLE_DELETE_TRIGGER, "DELETE"),
+            ):
+                connection.execute(
+                    f"CREATE TRIGGER IF NOT EXISTS {trigger_name} "
+                    f"BEFORE {timing} ON collector_cycle_artifacts_v1 BEGIN "
+                    "SELECT RAISE(ABORT, 'collector cycle artifacts are immutable'); END"
                 )
             connection.execute(
                 "CREATE TABLE IF NOT EXISTS collector_delta_tombstones_v1 ("
@@ -1425,6 +1448,105 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
         finally:
             connection.close()
 
+    def _record_collector_cycle_observation_artifact(
+        self,
+        *,
+        source_id: str,
+        cycle_seq: int,
+        artifact_kind: str,
+        artifact_sha256: str,
+    ) -> dict[str, object]:
+        """Append one immutable non-market observation artifact to an open cycle.
+
+        This surface is intentionally separate from CollectorDelta: a complete-board
+        provider snapshot is source-observation evidence, not a synthetic desktop
+        MarketEvent.  The artifact becomes positive campaign evidence only after the
+        same cycle receives a SUCCESS terminal that cryptographically includes it.
+        """
+
+        source_id = _text(source_id, "source_id")
+        artifact_kind = _text(artifact_kind, "artifact_kind")
+        artifact_sha256 = self._schedule_authority_sha256(
+            artifact_sha256,
+            "artifact_sha256",
+        )
+        if isinstance(cycle_seq, bool) or not isinstance(cycle_seq, int) or cycle_seq <= 0:
+            raise ValueError("cycle_seq must be a positive integer")
+        artifact_id = hashlib.sha256(
+            self._cycle_terminal_payload_json(
+                {
+                    "schema": "autosport.collector_cycle_observation_artifact",
+                    "schema_version": 1,
+                    "source_id": source_id,
+                    "cycle_seq": cycle_seq,
+                    "artifact_kind": artifact_kind,
+                    "artifact_sha256": artifact_sha256,
+                }
+            ).encode("utf-8")
+        ).hexdigest()
+
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            start = connection.execute(
+                "SELECT 1 FROM collector_cycle_starts_v1 "
+                "WHERE source_id=? AND cycle_seq=?",
+                (source_id, cycle_seq),
+            ).fetchone()
+            if start is None:
+                raise ValueError("collector cycle START evidence is missing")
+            terminal = connection.execute(
+                "SELECT 1 FROM collector_cycle_terminals_v1 "
+                "WHERE source_id=? AND cycle_seq=?",
+                (source_id, cycle_seq),
+            ).fetchone()
+            if terminal is not None:
+                raise ValueError(
+                    "collector cycle observation artifact cannot follow terminal evidence"
+                )
+            existing = connection.execute(
+                "SELECT artifact_kind, artifact_sha256 "
+                "FROM collector_cycle_artifacts_v1 "
+                "WHERE source_id=? AND cycle_seq=? AND artifact_id=?",
+                (source_id, cycle_seq, artifact_id),
+            ).fetchone()
+            if existing is None:
+                connection.execute(
+                    "INSERT INTO collector_cycle_artifacts_v1("
+                    "source_id, cycle_seq, artifact_id, artifact_kind, artifact_sha256"
+                    ") VALUES(?,?,?,?,?)",
+                    (
+                        source_id,
+                        cycle_seq,
+                        artifact_id,
+                        artifact_kind,
+                        artifact_sha256,
+                    ),
+                )
+            elif (
+                existing["artifact_kind"] != artifact_kind
+                or existing["artifact_sha256"] != artifact_sha256
+            ):
+                raise ValueError("collector cycle observation artifact conflicts")
+            connection.commit()
+            return {
+                "artifact_id": artifact_id,
+                "artifact_kind": artifact_kind,
+                "artifact_sha256": artifact_sha256,
+            }
+        except sqlite3.DatabaseError as exc:
+            if connection.in_transaction:
+                connection.rollback()
+            raise ValueError(
+                "cannot append collector cycle observation artifact"
+            ) from exc
+        except Exception:
+            if connection.in_transaction:
+                connection.rollback()
+            raise
+        finally:
+            connection.close()
+
     def _finish_collector_cycle(
         self,
         *,
@@ -1527,6 +1649,34 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
                     {"delta_id": delta_id, "payload_sha256": digest}
                 )
 
+            artifact_rows = connection.execute(
+                "SELECT artifact_id, artifact_kind, artifact_sha256 "
+                "FROM collector_cycle_artifacts_v1 "
+                "WHERE source_id=? AND cycle_seq=? ORDER BY artifact_id",
+                (source_id, cycle_seq),
+            ).fetchall()
+            observed_artifacts: list[dict[str, str]] = []
+            for artifact in artifact_rows:
+                artifact_id = self._schedule_authority_sha256(
+                    artifact["artifact_id"],
+                    "artifact_id",
+                )
+                artifact_kind = _text(
+                    artifact["artifact_kind"],
+                    "artifact_kind",
+                )
+                artifact_sha256 = self._schedule_authority_sha256(
+                    artifact["artifact_sha256"],
+                    "artifact_sha256",
+                )
+                observed_artifacts.append(
+                    {
+                        "artifact_id": artifact_id,
+                        "artifact_kind": artifact_kind,
+                        "artifact_sha256": artifact_sha256,
+                    }
+                )
+
             payload: dict[str, object] = {
                 "schema": "autosport.collector_cycle_terminal",
                 "schema_version": 1,
@@ -1543,6 +1693,8 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
                 "duplicate_delta_ids": list(duplicate_delta_ids),
                 "error_code": error_code,
             }
+            if observed_artifacts:
+                payload["observed_artifacts"] = observed_artifacts
             payload_json = self._cycle_terminal_payload_json(payload)
             payload_sha256 = self._cycle_terminal_payload_sha256(payload_json)
             connection.execute(
@@ -1560,6 +1712,125 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
             if connection.in_transaction:
                 connection.rollback()
             raise
+        finally:
+            connection.close()
+
+    def collector_cycle_observation_artifact_evidence(
+        self,
+        *,
+        source_id: str,
+        cycle_seq: int,
+        artifact_kind: str,
+        artifact_sha256: str,
+    ) -> dict[str, object]:
+        """Resolve one exact artifact only from a SUCCESS terminal-bound cycle."""
+
+        source_id = _text(source_id, "source_id")
+        artifact_kind = _text(artifact_kind, "artifact_kind")
+        artifact_sha256 = self._schedule_authority_sha256(
+            artifact_sha256,
+            "artifact_sha256",
+        )
+        if isinstance(cycle_seq, bool) or not isinstance(cycle_seq, int) or cycle_seq <= 0:
+            raise ValueError("cycle_seq must be a positive integer")
+
+        connection = self._connect()
+        try:
+            row = connection.execute(
+                "SELECT a.artifact_id, a.artifact_kind, a.artifact_sha256, "
+                "s.run_id, s.stream_epoch, s.attempted_at, "
+                "t.payload_sha256, t.payload_json, "
+                "slots.slot_ordinal, slots.due_at, schedules.schedule_id, "
+                "auth.authorization_sha256 "
+                "FROM collector_cycle_artifacts_v1 AS a "
+                "JOIN collector_cycle_starts_v1 AS s "
+                "ON s.source_id=a.source_id AND s.cycle_seq=a.cycle_seq "
+                "JOIN collector_cycle_terminals_v1 AS t "
+                "ON t.source_id=a.source_id AND t.cycle_seq=a.cycle_seq "
+                "LEFT JOIN collector_schedule_slots_v1 AS slots "
+                "ON slots.source_id=a.source_id AND slots.cycle_seq=a.cycle_seq "
+                "LEFT JOIN collector_schedules_v1 AS schedules "
+                "ON schedules.source_id=slots.source_id AND schedules.run_id=slots.run_id "
+                "LEFT JOIN collector_schedule_start_authorizations_v1 AS auth "
+                "ON auth.source_id=s.source_id AND auth.run_id=s.run_id "
+                "WHERE a.source_id=? AND a.cycle_seq=? "
+                "AND a.artifact_kind=? AND a.artifact_sha256=?",
+                (source_id, cycle_seq, artifact_kind, artifact_sha256),
+            ).fetchone()
+            if row is None:
+                raise ValueError(
+                    "collector cycle observation artifact evidence is unavailable"
+                )
+            terminal_json = row["payload_json"]
+            terminal_sha256 = self._schedule_authority_sha256(
+                row["payload_sha256"],
+                "terminal payload_sha256",
+            )
+            if self._cycle_terminal_payload_sha256(terminal_json) != terminal_sha256:
+                raise ValueError("collector cycle terminal digest mismatch")
+            try:
+                terminal = json.loads(terminal_json)
+            except (TypeError, json.JSONDecodeError) as exc:
+                raise ValueError("collector cycle terminal payload is invalid") from exc
+            if type(terminal) is not dict or terminal.get("status") != "SUCCESS":
+                raise ValueError(
+                    "collector cycle observation artifact is not SUCCESS-terminal evidence"
+                )
+            artifact_id = self._schedule_authority_sha256(
+                row["artifact_id"],
+                "artifact_id",
+            )
+            expected_artifact = {
+                "artifact_id": artifact_id,
+                "artifact_kind": artifact_kind,
+                "artifact_sha256": artifact_sha256,
+            }
+            artifacts = terminal.get("observed_artifacts")
+            if type(artifacts) is not list or expected_artifact not in artifacts:
+                raise ValueError(
+                    "collector cycle terminal does not bind observation artifact"
+                )
+            if (
+                row["schedule_id"] is None
+                or row["slot_ordinal"] is None
+                or row["due_at"] is None
+                or row["authorization_sha256"] is None
+            ):
+                raise ValueError(
+                    "collector cycle observation artifact is not bound to authorized schedule"
+                )
+            schedule_id = self._schedule_authority_sha256(
+                row["schedule_id"],
+                "schedule_id",
+            )
+            authorization_sha256 = self._schedule_authority_sha256(
+                row["authorization_sha256"],
+                "authorization_sha256",
+            )
+            payload: dict[str, object] = {
+                "schema_version": 1,
+                "source_id": source_id,
+                "cycle_seq": cycle_seq,
+                "run_id": _text(row["run_id"], "run_id"),
+                "stream_epoch": _text(row["stream_epoch"], "stream_epoch"),
+                "attempted_at": _instant(row["attempted_at"], "attempted_at").isoformat(),
+                "schedule_id": schedule_id,
+                "slot_ordinal": int(row["slot_ordinal"]),
+                "due_at": _instant(row["due_at"], "due_at").isoformat(),
+                "authorization_sha256": authorization_sha256,
+                "artifact_id": artifact_id,
+                "artifact_kind": artifact_kind,
+                "artifact_sha256": artifact_sha256,
+                "terminal_sha256": terminal_sha256,
+            }
+            payload["evidence_sha256"] = hashlib.sha256(
+                self._cycle_terminal_payload_json(payload).encode("utf-8")
+            ).hexdigest()
+            return payload
+        except sqlite3.DatabaseError as exc:
+            raise ValueError(
+                "cannot resolve collector cycle observation artifact evidence"
+            ) from exc
         finally:
             connection.close()
 

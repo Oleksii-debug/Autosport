@@ -15,7 +15,7 @@ from .decision_ledger import DecisionRecord, JsonlDecisionLedger
 from .domain import TicketLeg
 from .integrity import atomic_write_json, ensure_durable_file, sha256_file
 from .paper import PaperBook
-from .restart_recovery_audit import run_restart_recovery_audit
+from .restart_recovery_audit import _safe_exception_detail, run_restart_recovery_audit
 from .run_registry import RunRegistry
 from .run_transaction import RunTransaction
 
@@ -185,7 +185,7 @@ def run_process_kill_stage_child(workspace_path: str | Path, ready_path: str | P
                 {
                     "status": "FAIL",
                     "pid": os.getpid(),
-                    "error": f"{type(exc).__name__}: {exc}",
+                    "error": _safe_exception_detail(exc),
                     "real_money_execution": False,
                 },
             )
@@ -291,7 +291,7 @@ def run_process_kill_recovery_child(
             {
                 "status": "FAIL",
                 "pid": os.getpid(),
-                "error": f"{type(exc).__name__}: {exc}",
+                "error": _safe_exception_detail(exc),
                 "real_money_execution": False,
             },
         )
@@ -525,7 +525,7 @@ def run_packaged_restart_recovery_audit(output_path: str | Path) -> int:
             {
                 "status": "FAIL",
                 "phase": phase,
-                "error": f"{type(exc).__name__}: {exc}",
+                "error": _safe_exception_detail(exc),
                 "real_money_execution": False,
                 "human_tested": False,
                 "nvda_verified": False,

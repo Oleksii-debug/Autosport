@@ -79,3 +79,12 @@ def test_caller_cannot_mint_product_issuance_by_mutating_reachable_registry() ->
             applicability.require_product_betfair_commission_applicability(forged)
     finally:
         applicability._ISSUED_BY_ID.pop(object_id, None)
+
+
+def test_module_level_issuer_bearer_cannot_mint_product_issuance() -> None:
+    assert applicability._ISSUE_ASSESSMENT_CAPABILITY is applicability._issue_assessment
+    with pytest.raises(
+        applicability.BetfairCommissionApplicabilityError,
+        match="not product authority",
+    ):
+        applicability._ISSUE_ASSESSMENT_CAPABILITY(object())

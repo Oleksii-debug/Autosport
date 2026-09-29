@@ -6,7 +6,9 @@ from pathlib import Path
 
 from .domain import PaperTicket, TicketLeg
 from .paper import PaperBook
+from .recovery import transaction_history_requires_recovery
 from .risk import PaperRiskPolicy, ProposedTicketRiskContext, RiskDecision
+from .run_registry import RunRegistry, UnresolvedExperimentError
 from .workspace_lock import WorkspaceEconomicLock
 
 
@@ -139,6 +141,25 @@ def admit_paper_ticket(
     book_path = root / "paper_book.json"
 
     with WorkspaceEconomicLock(root):
+        # No independent PAPER writer may advance the canonical book while an older
+        # transaction is unresolved. AutosportSession applies the same two durable
+        # start gates before beginning economic work; reuse those authorities here
+        # while already holding the canonical workspace lock.
+        registry_path = root / "run_registry.json"
+        try:
+            registry_path.lstat()
+        except FileNotFoundError:
+            pass
+        else:
+            if RunRegistry(registry_path).in_progress():
+                raise UnresolvedExperimentError(
+                    "Workspace has an unresolved economic run; repair it before PAPER admission."
+                )
+        if transaction_history_requires_recovery(root):
+            raise UnresolvedExperimentError(
+                "Workspace has unresolved transaction history; repair it before PAPER admission."
+            )
+
         # The lock alone is insufficient if this caller was constructed before a
         # different process committed a newer PaperBook. Re-read the one durable
         # workspace book only after owning the economic writer lock.

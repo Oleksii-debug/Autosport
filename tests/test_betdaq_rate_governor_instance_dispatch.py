@@ -156,3 +156,26 @@ def test_supported_dispatch_rejects_class_surface_replacement(
         type.__setattr__(BetdaqRateGovernor, attribute, original)
 
     assert hostile_calls == []
+
+
+
+def test_supported_dispatch_rejects_class_getattribute_injection(tmp_path):
+    governor = _resolved_governor(tmp_path)
+    assert "__getattribute__" not in vars(BetdaqRateGovernor)
+    hostile_calls = []
+
+    def hostile(*args, **kwargs):
+        hostile_calls.append((args, kwargs))
+        raise AssertionError("hostile __getattribute__ executed")
+
+    type.__setattr__(BetdaqRateGovernor, "__getattribute__", hostile)
+    try:
+        with pytest.raises(
+            BetdaqRateGovernorError,
+            match="canonical rate governor class dispatch was replaced",
+        ):
+            admit_betdaq_rate_request(governor, "GetPrices")
+    finally:
+        type.__delattr__(BetdaqRateGovernor, "__getattribute__")
+
+    assert hostile_calls == []

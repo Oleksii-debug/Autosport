@@ -1220,6 +1220,7 @@ _CANONICAL_GOVERNOR_CLASS_SURFACE: Final = tuple(
         "governor_id",
         "__setattr__",
         "__delattr__",
+        "__getattribute__",
         "_assert_policy_integrity",
         "_blacklist_state",
         "_now",

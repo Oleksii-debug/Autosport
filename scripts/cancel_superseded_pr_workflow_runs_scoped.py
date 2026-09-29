@@ -171,6 +171,19 @@ class WorkflowScopedGitHubApi(GitHubApi):
                 raise CancellationError(
                     "recovered workflow run pull request association changed"
                 )
+            # The association read above is itself an external round trip. Same-head
+            # lifecycle cancellation authority can disappear during that interval if
+            # the PR becomes integration-capable. Re-resolve the atomic live
+            # head/state/draft snapshot after association validation and immediately
+            # before the irreversible cancellation POST.
+            qualification = self.live_pr_qualification(pr_number)
+            if (
+                qualification.head_sha != head_sha
+                or qualification.integration_capable
+            ):
+                raise CancellationError(
+                    "recovered workflow run live qualification changed"
+                )
         super().cancel(run_id)
 
     def _active_runs_for_status(self, status: str) -> tuple[WorkflowRun, ...]:

@@ -315,6 +315,46 @@ def test_recovered_candidate_rejects_historical_cross_pr_reuse_at_cancel_boundar
 
 
 @pytest.mark.parametrize(
+    "live_payload",
+    (
+        {"head": {"sha": HEAD}, "state": "open", "draft": False},
+        {"head": {"sha": STALE_HEAD}, "state": "closed", "draft": False},
+    ),
+)
+def test_recovered_candidate_rechecks_live_lifecycle_after_association_before_post(
+    live_payload: dict[str, object],
+) -> None:
+    api = FakeScopedApi(
+        356678400,
+        [
+            [_associated_pr(2022)],
+            [_associated_pr(2022)],
+            live_payload,
+        ],
+    )
+    api.configure_same_head_candidate_recovery(
+        pr_number=2022,
+        event_head_sha=HEAD,
+        workflow_name="CI",
+        current_run_id=100,
+    )
+    recovered = api._recover_candidate_run_reference(_candidate(99))
+    assert recovered.pr_numbers == (2022,)
+
+    with pytest.raises(
+        CancellationError,
+        match="live qualification changed",
+    ):
+        api.cancel(99)
+
+    assert api.paths == [
+        f"/commits/{HEAD}/pulls?per_page=100&page=1",
+        f"/commits/{HEAD}/pulls?per_page=100&page=1",
+        "/pulls/2022",
+    ]
+
+
+@pytest.mark.parametrize(
     "candidate",
     (
         _candidate(100),

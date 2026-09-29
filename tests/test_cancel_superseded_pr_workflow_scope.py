@@ -16,11 +16,18 @@ _SCRIPT = Path("scripts/cancel_superseded_pr_workflow_runs_scoped.py")
 
 
 class FakeScopedApi(WorkflowScopedGitHubApi):
-    def __init__(self, workflow_id: int, responses: list[object]) -> None:
+    def __init__(
+        self,
+        workflow_id: int,
+        responses: list[object],
+        *,
+        workflow_name: str = "CI",
+    ) -> None:
         super().__init__(
             repository="Oleksii-debug/Autosport",
             token="test-token",
             workflow_id=workflow_id,
+            workflow_name=workflow_name,
         )
         self.responses = list(responses)
         self.paths: list[str] = []
@@ -45,11 +52,12 @@ def _run(
     *,
     status: str = "queued",
     pull_requests: list[dict[str, object]] | None = None,
+    workflow_name: str = "CI",
 ) -> dict[str, object]:
     return {
         "id": run_id,
         "head_sha": HEAD,
-        "name": "CI",
+        "name": workflow_name,
         "status": status,
         "pull_requests": (
             [{"number": 2022}] if pull_requests is None else pull_requests
@@ -104,6 +112,30 @@ def test_active_status_scan_is_scoped_to_exact_source_workflow_id() -> None:
     assert all(path != "/actions/runs" for path in api.paths)
 
 
+def test_exact_workflow_id_membership_survives_historical_display_name_drift() -> None:
+    api = FakeScopedApi(
+        356678400,
+        [
+            {
+                "total_count": 1,
+                "workflow_runs": [
+                    _run(91, workflow_name="CI before workflow rename")
+                ],
+            }
+        ],
+        workflow_name="CI",
+    )
+
+    runs = api._active_runs_for_status("queued")
+
+    assert len(runs) == 1
+    assert runs[0].run_id == 91
+    assert runs[0].workflow_name == "CI"
+    assert api.paths == [
+        "/actions/workflows/356678400/runs?event=pull_request&status=queued&per_page=100&page=1"
+    ]
+
+
 def test_shrinking_active_collection_ends_on_short_page_without_failing() -> None:
     api = FakeScopedApi(
         356678400,
@@ -121,6 +153,23 @@ def test_workflow_scope_is_positive_exact_integer() -> None:
         FakeScopedApi(0, [])
     with pytest.raises(CancellationError, match="invalid workflow id"):
         FakeScopedApi(True, [])
+
+
+def test_workflow_name_must_match_configured_exact_workflow_identity() -> None:
+    api = FakeScopedApi(356678400, [], workflow_name="CI")
+
+    with pytest.raises(
+        CancellationError,
+        match="workflow name does not match exact workflow id",
+    ):
+        api.configure_same_head_candidate_recovery(
+            pr_number=2022,
+            event_head_sha=HEAD,
+            workflow_name="Windows candidate",
+            current_run_id=100,
+        )
+
+    assert api.paths == []
 
 
 def test_scoped_scan_keeps_strict_active_status_validation() -> None:

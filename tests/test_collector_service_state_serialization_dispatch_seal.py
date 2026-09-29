@@ -7,6 +7,7 @@ from pathlib import Path
 import autosport._collector_service_state_serialization as serialization
 from autosport.causal_collector import CollectorDeltaStore
 from autosport.collector_service import (
+    CollectorServiceError,
     CollectorServiceStoppedError,
     HeadlessCollectorService,
 )
@@ -131,6 +132,40 @@ class CollectorServiceSerializationDispatchSealTests(unittest.TestCase):
             self.assertEqual(hostile_calls, [])
             self.assertEqual(service.status()["cycles_succeeded"], 1)
             self.assertEqual(service.status()["stop_reason"], "operator_stop")
+
+    def test_original_run_cycle_code_mutation_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._service(Path(tmp), "run-cycle-code")
+            original = serialization._ORIGINAL_RUN_CYCLE
+            original_code = original.__code__
+
+            def hostile(_service):
+                raise AssertionError("mutated original executable must never run")
+
+            original.__code__ = hostile.__code__
+            try:
+                with self.assertRaises(CollectorServiceError):
+                    service.run_cycle()
+            finally:
+                original.__code__ = original_code
+
+            self.assertEqual(service.status()["cycles_attempted"], 0)
+            self.assertEqual(service.status()["cycles_succeeded"], 0)
+
+    def test_captured_cycle_lock_surface_mutation_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._service(Path(tmp), "lock-surface")
+            lock_type = serialization._CollectorServiceCycleMutationLock
+            original_file_name = lock_type.FILE_NAME
+            lock_type.FILE_NAME = ".retargeted-collector-cycle.lock"
+            try:
+                with self.assertRaises(CollectorServiceError):
+                    service.run_cycle()
+            finally:
+                lock_type.FILE_NAME = original_file_name
+
+            self.assertEqual(service.status()["cycles_attempted"], 0)
+            self.assertEqual(service.status()["cycles_succeeded"], 0)
 
 
 if __name__ == "__main__":

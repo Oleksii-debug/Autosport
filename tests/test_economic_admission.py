@@ -545,7 +545,7 @@ def _hostile_instance_getattribute_code_with_matching_closure(function):
 
 
 def test_admission_rejects_in_place_mutated_policy_instance_dispatch_root(tmp_path):
-    """Product admission must validate the instance-dispatch root before lookup."""
+    """Product admission must consume the sealed canonical instance-dispatch root."""
 
     book_path = tmp_path / "paper_book.json"
     book = PaperBook("1000")
@@ -561,22 +561,28 @@ def test_admission_rejects_in_place_mutated_policy_instance_dispatch_root(tmp_pa
     hostile_code = _hostile_instance_getattribute_code_with_matching_closure(root)
 
     try:
-        root.__code__ = hostile_code
         with pytest.raises(
             TypeError,
-            match="canonical PaperRiskPolicy executable root changed: __getattribute__",
+            match="canonical PaperRiskPolicy instance dispatch executable is sealed",
         ):
-            admit_paper_ticket(
-                workspace=tmp_path,
-                book=book,
-                risk_policy=policy,
-                stake=Decimal("10"),
-                legs=(_leg(),),
-                reason="mutated instance dispatch must not authorize PAPER",
-                placed_at="2026-09-24T16:00:00Z",
-            )
+            root.__code__ = hostile_code
+        assert root.__code__ is original_code
+
+        result = admit_paper_ticket(
+            workspace=tmp_path,
+            book=book,
+            risk_policy=policy,
+            stake=Decimal("1001"),
+            legs=(_leg(),),
+            reason="failed dispatch attack must leave canonical risk active",
+            placed_at="2026-09-24T16:00:00Z",
+        )
+        assert result.admitted is False
+        assert result.risk.allowed is False
+        assert result.ticket is None
     finally:
-        root.__code__ = original_code
+        if root.__code__ is not original_code:
+            root.__code__ = original_code
 
     assert book_path.read_bytes() == before
     persisted = PaperBook.load(book_path)

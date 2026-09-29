@@ -18,6 +18,8 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, build_opener
 from weakref import ref
 
+from .secret_redaction import redact_operator_text
+
 ACCOUNT_JSON_RPC_ENDPOINT = "https://api.betfair.com/exchange/account/json-rpc/v1"
 BETTING_JSON_RPC_ENDPOINT = "https://api.betfair.com/exchange/betting/json-rpc/v1"
 ADAPTER_ID = "betfair-exchange-jsonrpc-readonly"
@@ -960,11 +962,13 @@ class BetfairReadOnlyClient:
         return _RpcResult(envelope["result"], evidence, payload)
 
     def _redact_provider_message(self, message: str) -> str:
-        text = message.strip()
-        secrets = {self._credentials.application_key, self._credentials.session_token}
-        for secret in sorted(secrets, key=len, reverse=True):
-            text = text.replace(secret, "<redacted>")
-        return text
+        return redact_operator_text(
+            message.strip(),
+            extra_secret_values=(
+                self._credentials.application_key,
+                self._credentials.session_token,
+            ),
+        )
 
     def _next_request_id(self) -> int:
         with self._request_lock:

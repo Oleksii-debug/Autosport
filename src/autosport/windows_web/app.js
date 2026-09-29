@@ -9,6 +9,7 @@
   let latestState = null;
   let pollHandle = null;
   let ownerDefaultsApplied = false;
+  const ownerEditedFields = new WeakSet();
   let ownerReviewFresh = false;
   let ownerReviewEpoch = 0;
   let refreshInFlight = null;
@@ -117,6 +118,12 @@
       byId("owner-confirm"),
       reviewDisabled || checkbox.checked !== true,
     );
+  }
+
+  function markOwnerFieldEdited(event) {
+    const node = event.currentTarget;
+    if (node instanceof HTMLElement) ownerEditedFields.add(node);
+    invalidateOwnerReview();
   }
 
   function invalidateOwnerReview() {
@@ -246,13 +253,23 @@
 
   function applyOwnerDefaults(defaults) {
     if (ownerDefaultsApplied || !defaults) return;
+    let pendingFocusedDefault = false;
     document.querySelectorAll("[data-owner-field]").forEach((node) => {
       const key = node.dataset.ownerField;
-      if (Object.prototype.hasOwnProperty.call(defaults, key)) {
-        node.value = String(defaults[key]);
+      if (
+        !Object.prototype.hasOwnProperty.call(defaults, key)
+        || ownerEditedFields.has(node)
+        || node.value !== ""
+      ) {
+        return;
       }
+      if (document.activeElement === node) {
+        pendingFocusedDefault = true;
+        return;
+      }
+      node.value = String(defaults[key]);
     });
-    ownerDefaultsApplied = true;
+    ownerDefaultsApplied = !pendingFocusedDefault;
   }
 
   function focusResult(result) {
@@ -524,8 +541,8 @@
     byId(305).focus();
   });
   document.querySelectorAll("[data-owner-field]").forEach((node) => {
-    node.addEventListener("input", invalidateOwnerReview);
-    node.addEventListener("change", invalidateOwnerReview);
+    node.addEventListener("input", markOwnerFieldEdited);
+    node.addEventListener("change", markOwnerFieldEdited);
   });
   byId(327).addEventListener("change", invalidateOwnerReview);
   byId("owner-confirm-checkbox").addEventListener("change", () => {

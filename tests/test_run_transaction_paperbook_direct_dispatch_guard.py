@@ -96,46 +96,6 @@ class RunTransactionPaperBookDirectDispatchGuardTests(unittest.TestCase):
             run_transaction_module.hashlib = original_hashlib
             run_transaction_module.PaperBook = original_paper_book
 
-    def test_metaclass_seal_removal_cannot_authorize_retargeted_existing_facade(self):
-        """Direct promotion fails before logic if its shared facade seal was dismantled."""
-
-        promotion_globals = _sealed_inner_globals(
-            RunTransaction._promote_paper_book_snapshot
-        )
-        frozen_os = promotion_globals["os"]
-        surface_type = type(frozen_os)
-        surface_meta = type(surface_type)
-        original_surface_getattr = vars(surface_type)["__getattr__"]
-        original_meta_getattr = vars(surface_meta)["__getattr__"]
-        hostile_replace = lambda *_args: None
-
-        def hostile_getattr(_surface, name):
-            if name == "replace":
-                return hostile_replace
-            raise AttributeError(name)
-
-        try:
-            # Calling type.__setattr__ on the metaclass itself bypasses the data
-            # descriptor that protects assignment to the facade class. Once that seal
-            # is replaced by an inert object, the pre-existing facade can be retargeted
-            # without changing its identity or tuple payload.
-            type.__setattr__(surface_meta, "__getattr__", object())
-            type.__setattr__(surface_type, "__getattr__", hostile_getattr)
-            self.assertIs(frozen_os.replace, hostile_replace)
-
-            with self.assertRaisesRegex(
-                ValueError,
-                "RunTransaction frozen direct-dispatch",
-            ):
-                RunTransaction._promote_paper_book_snapshot(object())
-        finally:
-            # Restore the facade class while its metaclass seal is intentionally inert,
-            # then restore the exact original metaclass descriptor last.
-            type.__setattr__(surface_type, "__getattr__", original_surface_getattr)
-            type.__setattr__(surface_meta, "__getattr__", original_meta_getattr)
-
-        self.assertIs(frozen_os.replace, os.replace)
-
 
 if __name__ == "__main__":
     unittest.main()

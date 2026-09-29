@@ -37,7 +37,8 @@ def test_stale_rerun_cannot_share_symmetric_pr_group_with_current_head(
     qualification may therefore coalesce only when the exact event head SHA matches;
     a stale rerun must retain that exact-head identity too, and draft/closed lifecycle
     work must use a separate lane. The top-level event number keeps lifecycle identity
-    stable even when a merged closed event has an empty pull_request object.
+    stable even when a merged closed event has an empty pull_request object. Non-PR
+    runs must stay run-unique so same-ref push/dispatch work cannot pre-cancel.
     """
 
     text = workflow_path.read_text(encoding="utf-8")
@@ -52,7 +53,12 @@ def test_stale_rerun_cannot_share_symmetric_pr_group_with_current_head(
     assert "github.event.action == 'converted_to_draft'" in group
     assert "github.event.action == 'closed'" in group
     assert "'lifecycle'" in group
-    assert "github.run_id" not in group
+
+    # Non-PR events have no PR/head lifecycle identity. They must be unique per run;
+    # using github.ref here lets a newer same-ref push or workflow_dispatch suppress
+    # an older run before any admission or product qualification actually executes.
+    assert "|| format('run-{0}', github.run_id)" in group
+    assert "github.ref" not in group
 
     # Lifecycle must win over rerun. Otherwise a rerun of a merged closed event can
     # evaluate a missing pull_request.head.sha instead of the stable lifecycle key.

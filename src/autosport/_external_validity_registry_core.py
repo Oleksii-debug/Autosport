@@ -21,6 +21,12 @@ from .external_validity_baseline import (
     PolicyEvaluation,
     build_external_validity_report,
 )
+from .external_validity_policy_issuance import (
+    IssuedPolicyEvaluationRef,
+    ProductPolicyEvaluationIssuanceError,
+    ProductPolicyEvaluationWorkspace,
+    verify_product_policy_evaluation,
+)
 from .scientific_registry import ScientificRegistry
 
 
@@ -239,7 +245,7 @@ def _resolve_registered_origin(
     )
 
 
-def build_registered_external_validity_report(
+def _build_registered_external_validity_report_from_verified_evaluations(
     registry: ScientificRegistry,
     protocol: FrozenBaselineProtocol,
     candidate: PolicyEvaluation,
@@ -330,3 +336,192 @@ def build_registered_external_validity_report(
             )
 
     return build_external_validity_report(protocol, candidate, baseline_results)
+
+
+def _verify_product_issued_claim(
+    authority: ProductPolicyEvaluationWorkspace,
+    protocol: FrozenBaselineProtocol,
+    reference: IssuedPolicyEvaluationRef,
+    claimed: PolicyEvaluation,
+) -> PolicyEvaluation:
+    """Resolve one product-issued result and treat the caller DTO as assertion only."""
+
+    try:
+        return verify_product_policy_evaluation(
+            authority,
+            protocol,
+            reference,
+            claimed,
+        )
+    except ProductPolicyEvaluationIssuanceError as exc:
+        raise ExternalValidityRegistryError(
+            f"{getattr(claimed, 'policy_id', '<unknown>')}: "
+            "evaluation is not exact product-issued evaluator truth"
+        ) from exc
+
+
+def build_registered_external_validity_report(
+    registry: ScientificRegistry,
+    protocol: FrozenBaselineProtocol,
+    candidate: PolicyEvaluation,
+    baseline_results: Sequence[PolicyEvaluation],
+    *,
+    authority: ProductPolicyEvaluationWorkspace | None = None,
+    candidate_issued_reference: IssuedPolicyEvaluationRef | None = None,
+    baseline_issued_references: Mapping[str, IssuedPolicyEvaluationRef] | None = None,
+    candidate_evaluation_bundle_id: str | None = None,
+    baseline_evaluation_bundle_ids: Mapping[str, str] | None = None,
+) -> ExternalValidityReport:
+    """Build only after exact product-issued evaluation re-resolution.
+
+    Caller-carried PolicyEvaluation values are assertions, never issuance authority.
+    The older explicit bundle-id arguments are optional assertions against bundle ids
+    carried by the required issued references.
+    """
+
+    canonical_registry = _require_exact_registry_authority(registry)
+    if type(protocol) is not FrozenBaselineProtocol:
+        raise ExternalValidityRegistryError(
+            "protocol must be an exact FrozenBaselineProtocol value"
+        )
+    if type(candidate) is not PolicyEvaluation:
+        raise ExternalValidityRegistryError(
+            "candidate must be an exact PolicyEvaluation value"
+        )
+    if type(authority) is not ProductPolicyEvaluationWorkspace:
+        raise ExternalValidityRegistryError(
+            "product-issued evaluation authority is required"
+        )
+    expected_registry_path = authority.workspace / "scientific_registry.json"
+    if canonical_registry.path != expected_registry_path:
+        raise ExternalValidityRegistryError(
+            "registry must be the canonical registry of the product evaluator workspace"
+        )
+    if type(candidate_issued_reference) is not IssuedPolicyEvaluationRef:
+        raise ExternalValidityRegistryError(
+            "candidate product-issued evaluation reference is required"
+        )
+    if candidate_issued_reference.baseline_kind is not None:
+        raise ExternalValidityRegistryError(
+            "candidate issued reference must target the candidate protocol slot"
+        )
+    if not isinstance(baseline_issued_references, Mapping):
+        raise ExternalValidityRegistryError(
+            "baseline_issued_references must be a mapping"
+        )
+
+    supported_ids = {
+        definition.baseline_id
+        for definition in protocol.baselines
+        if definition.supported
+    }
+    supplied_reference_ids = set(baseline_issued_references)
+    if supplied_reference_ids != supported_ids:
+        missing = sorted(supported_ids - supplied_reference_ids)
+        unexpected = sorted(supplied_reference_ids - supported_ids)
+        detail: list[str] = []
+        if missing:
+            detail.append("missing=" + ",".join(missing))
+        if unexpected:
+            detail.append("unexpected=" + ",".join(unexpected))
+        raise ExternalValidityRegistryError(
+            "baseline issued references must match supported frozen baselines"
+            + (": " + "; ".join(detail) if detail else "")
+        )
+
+    by_id: dict[str, PolicyEvaluation] = {}
+    ordered_baseline_ids: list[str] = []
+    for result in baseline_results:
+        if type(result) is not PolicyEvaluation:
+            raise ExternalValidityRegistryError(
+                "baseline_results must contain exact PolicyEvaluation values"
+            )
+        if result.policy_id in by_id:
+            raise ExternalValidityRegistryError(
+                f"duplicate baseline result for policy_id: {result.policy_id}"
+            )
+        by_id[result.policy_id] = result
+        ordered_baseline_ids.append(result.policy_id)
+    if set(by_id) != supported_ids:
+        missing = sorted(supported_ids - set(by_id))
+        unexpected = sorted(set(by_id) - supported_ids)
+        detail: list[str] = []
+        if missing:
+            detail.append("missing=" + ",".join(missing))
+        if unexpected:
+            detail.append("unexpected=" + ",".join(unexpected))
+        raise ExternalValidityRegistryError(
+            "baseline results must match supported frozen baselines"
+            + (": " + "; ".join(detail) if detail else "")
+        )
+
+    verified_candidate = _verify_product_issued_claim(
+        authority,
+        protocol,
+        candidate_issued_reference,
+        candidate,
+    )
+    effective_candidate_bundle_id = candidate_issued_reference.evaluation_bundle_id
+    if (
+        candidate_evaluation_bundle_id is not None
+        and candidate_evaluation_bundle_id != effective_candidate_bundle_id
+    ):
+        raise ExternalValidityRegistryError(
+            "candidate bundle-id assertion does not match product-issued reference"
+        )
+
+    verified_by_id: dict[str, PolicyEvaluation] = {}
+    effective_baseline_bundle_ids: dict[str, str] = {}
+    for baseline_id in sorted(supported_ids):
+        reference = baseline_issued_references[baseline_id]
+        if type(reference) is not IssuedPolicyEvaluationRef:
+            raise ExternalValidityRegistryError(
+                f"{baseline_id}: exact product-issued evaluation reference is required"
+            )
+        if reference.baseline_kind is None:
+            raise ExternalValidityRegistryError(
+                f"{baseline_id}: issued reference does not target a baseline protocol slot"
+            )
+        claimed = by_id[baseline_id]
+        verified = _verify_product_issued_claim(
+            authority,
+            protocol,
+            reference,
+            claimed,
+        )
+        if verified.policy_id != baseline_id:
+            raise ExternalValidityRegistryError(
+                f"{baseline_id}: product-issued evaluation policy identity mismatch"
+            )
+        verified_by_id[baseline_id] = verified
+        effective_baseline_bundle_ids[baseline_id] = reference.evaluation_bundle_id
+
+    if baseline_evaluation_bundle_ids is not None:
+        if not isinstance(baseline_evaluation_bundle_ids, Mapping):
+            raise ExternalValidityRegistryError(
+                "baseline_evaluation_bundle_ids must be a mapping"
+            )
+        if set(baseline_evaluation_bundle_ids) != supported_ids:
+            raise ExternalValidityRegistryError(
+                "baseline bundle-id assertions must match supported frozen baselines"
+            )
+        for baseline_id in supported_ids:
+            if (
+                baseline_evaluation_bundle_ids[baseline_id]
+                != effective_baseline_bundle_ids[baseline_id]
+            ):
+                raise ExternalValidityRegistryError(
+                    f"{baseline_id}: bundle-id assertion does not match product-issued reference"
+                )
+
+    verified_baselines = tuple(
+        verified_by_id[baseline_id] for baseline_id in ordered_baseline_ids
+    )
+    return _build_registered_external_validity_report_from_verified_evaluations(
+        canonical_registry,
+        protocol,
+        verified_candidate,
+        verified_baselines,
+        candidate_evaluation_bundle_id=effective_candidate_bundle_id,
+        baseline_evaluation_bundle_ids=effective_baseline_bundle_ids,
+    )

@@ -74,7 +74,8 @@ _BETFAIR_TRANSIENT_CODES = frozenset(
     }
 )
 _TRANSIENT_HTTP_STATUSES = frozenset({408, 429, 500, 502, 503, 504})
-_UNAUTHORIZED_HTTP_STATUSES = frozenset({401, 403})
+_UNAUTHORIZED_HTTP_STATUSES = frozenset({401})
+_CONFIGURATION_DENIED_HTTP_STATUSES = frozenset({403})
 
 
 def _require_token(value: object, *, field: str) -> str:
@@ -297,6 +298,8 @@ def _classify_state(signal: ReadbackFailureSignal) -> ReadbackDegradationState:
     status = signal.http_status
     if status in _UNAUTHORIZED_HTTP_STATUSES:
         return ReadbackDegradationState.UNAUTHORIZED_OR_SESSION_EXPIRED
+    if status in _CONFIGURATION_DENIED_HTTP_STATUSES:
+        return ReadbackDegradationState.CONFIGURATION_DENIED
     if status in _TRANSIENT_HTTP_STATUSES:
         return ReadbackDegradationState.UNAVAILABLE_TRANSIENT
     if signal.kind is ReadbackFailureKind.INCOMPLETE_PAGINATION:

@@ -406,8 +406,12 @@ def _seal_source_universe_dispatch() -> None:
     expected_sha256 = hashlib.sha256
     expected_json = json
     expected_json_dumps = json.dumps
+    expected_json_dumps_code = getattr(expected_json_dumps, "__code__", None)
     expected_inspect = inspect
     expected_getattr_static = inspect.getattr_static
+    expected_getattr_static_code = getattr(
+        expected_getattr_static, "__code__", None
+    )
     expected_cycle_evidence = _CANONICAL_COLLECTOR_CYCLE_EVIDENCE
     expected_cycle_evidence_code = getattr(expected_cycle_evidence, "__code__", None)
     expected_read_names = _CANONICAL_READ_SEAM_NAMES
@@ -481,6 +485,8 @@ def _seal_source_universe_dispatch() -> None:
         if (
             module_globals.get("json") is not expected_json
             or expected_json.dumps is not expected_json_dumps
+            or getattr(expected_json_dumps, "__code__", None)
+            is not expected_json_dumps_code
         ):
             raise expected_error_type(
                 "source-universe canonical JSON authority is rebound"
@@ -488,6 +494,8 @@ def _seal_source_universe_dispatch() -> None:
         if (
             module_globals.get("inspect") is not expected_inspect
             or expected_inspect.getattr_static is not expected_getattr_static
+            or getattr(expected_getattr_static, "__code__", None)
+            is not expected_getattr_static_code
         ):
             raise expected_error_type(
                 "source-universe reflection authority is rebound"

@@ -8,8 +8,9 @@ import stat
 import struct
 import tempfile
 import zipfile
+from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, BinaryIO, Iterator
 
 from .workspace_lock import _open_read_only_descriptor
 
@@ -112,8 +113,13 @@ def _require_regular_source_file(path: Path, *, label: str) -> None:
         raise ValueError(f"{label} must be a regular file: {path}")
 
 
-def _read_regular_source_bytes(path: Path, *, label: str) -> bytes:
-    """Read one source without following a final-component pathname alias."""
+@contextmanager
+def _open_regular_source_stream(
+    path: Path,
+    *,
+    label: str,
+) -> Iterator[BinaryIO]:
+    """Open one stable regular source without following its final pathname alias."""
 
     _require_regular_source_file(path, label=label)
     try:
@@ -150,7 +156,7 @@ def _read_regular_source_bytes(path: Path, *, label: str) -> bytes:
                 or not os.path.samestat(opened, current)
             ):
                 raise ValueError(f"{label} changed during open: {path}")
-            payload = stream.read()
+            yield stream
             after = path.lstat()
             if (
                 stat.S_ISLNK(after.st_mode)
@@ -163,7 +169,13 @@ def _read_regular_source_bytes(path: Path, *, label: str) -> bytes:
         raise
     except OSError as exc:
         raise ValueError(f"{label} could not be read safely: {path}") from exc
-    return payload
+
+
+def _read_regular_source_bytes(path: Path, *, label: str) -> bytes:
+    """Read one source through the canonical stable no-follow stream boundary."""
+
+    with _open_regular_source_stream(path, label=label) as stream:
+        return stream.read()
 
 
 def _require_regular_source_tree(path: Path, *, label: str) -> None:
@@ -638,13 +650,17 @@ def verify_windows_package(
     _require_git_commit_sha(expected_source_sha, field="expected_source_sha")
     package_zip = Path(package_zip)
     digest = hashlib.sha256()
-    with package_zip.open("rb") as source, tempfile.SpooledTemporaryFile(
+    with tempfile.SpooledTemporaryFile(
         max_size=_PACKAGE_SNAPSHOT_MEMORY_LIMIT,
         mode="w+b",
     ) as snapshot:
-        for chunk in iter(lambda: source.read(1024 * 1024), b""):
-            digest.update(chunk)
-            snapshot.write(chunk)
+        with _open_regular_source_stream(
+            package_zip,
+            label="release package input",
+        ) as source:
+            for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                digest.update(chunk)
+                snapshot.write(chunk)
         package_sha = digest.hexdigest()
         snapshot.seek(0)
         with zipfile.ZipFile(snapshot, "r") as archive:

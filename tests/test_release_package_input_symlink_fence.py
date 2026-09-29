@@ -275,6 +275,75 @@ class ReleasePackageInputSymlinkFenceTests(unittest.TestCase):
             self.assertTrue(swapped)
             self.assertFalse(paths["package"].exists())
 
+    def test_release_verifier_package_symlink_is_rejected_before_read(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paths = self._make_inputs(root)
+            self._build(paths)
+
+            package_link = root / "verify-link.zip"
+            self._symlink_or_skip(paths["package"], package_link)
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "release package input must not be a symbolic link",
+            ):
+                release_package.verify_windows_package(
+                    package_link,
+                    expected_source_sha=self.SOURCE_SHA,
+                )
+
+    def test_release_verifier_regular_to_symlink_race_never_uses_path_open(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paths = self._make_inputs(root)
+            self._build(paths)
+
+            package_path = paths["package"]
+            outside = root / "outside-package.zip"
+            outside.write_bytes(package_path.read_bytes())
+            real_require = release_package._require_regular_source_file
+            real_path_open = Path.open
+            swapped = False
+            follow_open_attempted = False
+
+            def validate_then_swap(path: Path, *, label: str) -> None:
+                nonlocal swapped
+                real_require(path, label=label)
+                if Path(path) == package_path and not swapped:
+                    swapped = True
+                    package_path.unlink()
+                    self._symlink_or_skip(outside, package_path)
+
+            def forbid_following_path_open(path: Path, *args, **kwargs):
+                nonlocal follow_open_attempted
+                if Path(path) == package_path:
+                    follow_open_attempted = True
+                    raise AssertionError(
+                        "release verifier input must use the canonical no-follow descriptor"
+                    )
+                return real_path_open(path, *args, **kwargs)
+
+            with (
+                patch.object(
+                    release_package,
+                    "_require_regular_source_file",
+                    side_effect=validate_then_swap,
+                ),
+                patch.object(Path, "open", new=forbid_following_path_open),
+            ):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "release package input changed during open",
+                ):
+                    release_package.verify_windows_package(
+                        package_path,
+                        expected_source_sha=self.SOURCE_SHA,
+                    )
+
+            self.assertTrue(swapped)
+            self.assertFalse(follow_open_attempted)
+
     def test_portable_data_executable_symlink_is_rejected_before_read(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

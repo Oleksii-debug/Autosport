@@ -333,3 +333,23 @@ def test_default_product_clock_is_not_marked_unverified_but_origin_still_is():
         threshold_amount=Decimal("1"),
     )
     assert p._receipt_clock_verified is True
+
+
+def test_zero_top_liquidity_fails_closed_before_batch_publication():
+    zero_liquidity = response().replace(
+        'Stake="12.3400"',
+        'Stake="0"',
+        1,
+    )
+    t = Transport([zero_liquidity, response()])
+    p = provider(t)
+
+    with pytest.raises(
+        BetdaqSoapProtocolError,
+        match="positive available liquidity",
+    ):
+        p.read_batch()
+
+    assert p.last_request_evidence is None
+    recovered = p.read_batch()
+    assert len(recovered.quotes) == 2

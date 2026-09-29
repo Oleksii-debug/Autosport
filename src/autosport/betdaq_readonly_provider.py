@@ -382,6 +382,10 @@ class BetdaqReadOnlyProvider:
                         raise BetdaqSoapProtocolError(
                             "canonical decimal odds must be greater than 1"
                         )
+                    if level.stake <= 0:
+                        raise BetdaqSoapProtocolError(
+                            "canonical top-of-book requires positive available liquidity"
+                        )
                     _fixed_decimal_text(
                         level.price,
                         "BETDAQ decimal odds",

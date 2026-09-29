@@ -205,6 +205,39 @@ def test_product_owned_authenticated_discovery_mints_exact_live_origin(monkeypat
     )
 
 
+def test_authenticated_origin_rejects_relabelled_account_scope(monkeypatch):
+    _client_obj, _opener, evidence, event_acq, market_acq = _live_evidence(
+        monkeypatch
+    )
+    relabelled = replace(
+        evidence,
+        visibility_scope=replace(
+            evidence.visibility_scope,
+            account_scope_ref="betfair-session-context:" + ("0" * 64),
+        ),
+    )
+
+    assessment = origin.assess_betfair_discovery_transport_origin(
+        relabelled,
+        receipts=(event_acq.receipt, market_acq.receipt),
+    )
+
+    assert assessment.grants_authenticated_transport_origin_authority is False
+    assert (
+        assessment.reason
+        == "AUTHENTICATED_TRANSPORT_ACCOUNT_SCOPE_MISMATCH"
+    )
+    assert assessment.bound_exchange_count == 0
+    with pytest.raises(
+        BetfairDiscoveryProvenanceError,
+        match="AUTHENTICATED_TRANSPORT_ACCOUNT_SCOPE_MISMATCH",
+    ):
+        origin.require_betfair_authenticated_transport_origin(
+            relabelled,
+            receipts=(event_acq.receipt, market_acq.receipt),
+        )
+
+
 def test_receipt_constructor_and_matching_copy_cannot_mint_origin(monkeypatch):
     _client_obj, _opener, _evidence, event_acq, _market_acq = _live_evidence(
         monkeypatch

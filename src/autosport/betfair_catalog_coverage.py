@@ -943,6 +943,136 @@ def _terminal_market_map(
     return mapped
 
 
+def _validate_terminal_semantics(
+    plan: CatalogCoveragePlan,
+    leaf: CatalogCoverageLeaf,
+    terminal: Mapping[str, object],
+) -> None:
+    """Reject status/count/evidence combinations that canonical writers never emit."""
+
+    status = terminal.get("status")
+    observations = terminal.get("market_observations")
+    child_ids = terminal.get("child_leaf_ids")
+    if type(observations) is not list or type(child_ids) is not list:
+        raise BetfairCatalogCoverageError(
+            "coverage terminal collections are malformed"
+        )
+
+    params = leaf.request.rpc_params()
+    max_results = params.get("maxResults")
+    if type(max_results) is not int or isinstance(max_results, bool) or max_results <= 0:
+        raise BetfairCatalogCoverageError(
+            "coverage terminal leaf maxResults is invalid"
+        )
+
+    provider_observed_statuses = {
+        "SUCCESS",
+        "EMPTY",
+        "SATURATED_SPLIT",
+        "SATURATED_UNSPLITTABLE",
+    }
+    if status in provider_observed_statuses:
+        market_map = _terminal_market_map(terminal)
+        result_count = terminal.get("result_count")
+        if result_count != len(market_map):
+            raise BetfairCatalogCoverageError(
+                "coverage terminal market identity cardinality is inconsistent"
+            )
+        _sha(
+            terminal.get("raw_response_sha256"),
+            "terminal.raw_response_sha256",
+        )
+        observed = _utc(
+            terminal.get("observed_at_utc"),
+            "terminal.observed_at_utc",
+        )
+        if observed > _utc(plan.causal_cutoff_utc, "causal_cutoff_utc"):
+            raise BetfairCatalogCoverageError(
+                "provider-observed coverage terminal escaped causal cutoff"
+            )
+        if terminal.get("transport_authority_ref") != plan.session_context_id:
+            raise BetfairCatalogCoverageError(
+                "provider-observed coverage terminal escaped frozen session context"
+            )
+
+        if status == "EMPTY":
+            if result_count != 0 or observations:
+                raise BetfairCatalogCoverageError(
+                    "EMPTY coverage terminal must contain zero markets"
+                )
+        elif status == "SUCCESS":
+            if result_count <= 0 or result_count >= max_results:
+                raise BetfairCatalogCoverageError(
+                    "SUCCESS coverage terminal must be positive and unsaturated"
+                )
+        else:
+            if result_count != max_results:
+                raise BetfairCatalogCoverageError(
+                    "saturated coverage terminal must equal requested maxResults"
+                )
+
+        if status == "SATURATED_SPLIT":
+            if not child_ids or terminal.get("error_code") is not None:
+                raise BetfairCatalogCoverageError(
+                    "SATURATED_SPLIT terminal requires children and no error"
+                )
+        elif status == "SATURATED_UNSPLITTABLE":
+            if child_ids or terminal.get("error_code") != "SATURATED_LEAF_CANNOT_SPLIT":
+                raise BetfairCatalogCoverageError(
+                    "SATURATED_UNSPLITTABLE terminal semantics are invalid"
+                )
+        elif child_ids or terminal.get("error_code") is not None:
+            raise BetfairCatalogCoverageError(
+                "unsaturated coverage terminal cannot own children or an error"
+            )
+        return
+
+    if status == "FAILURE":
+        if (
+            terminal.get("result_count") is not None
+            or terminal.get("raw_response_sha256") is not None
+            or terminal.get("observed_at_utc") is not None
+            or terminal.get("transport_authority_ref") is not None
+            or observations
+            or child_ids
+        ):
+            raise BetfairCatalogCoverageError(
+                "FAILURE coverage terminal carries impossible provider evidence"
+            )
+        _text(terminal.get("error_code"), "terminal.error_code")
+        return
+
+    if status == "AFTER_CAUSAL_CUTOFF":
+        if (
+            terminal.get("result_count") is not None
+            or observations
+            or child_ids
+            or terminal.get("error_code") != "OBSERVED_AFTER_CAUSAL_CUTOFF"
+        ):
+            raise BetfairCatalogCoverageError(
+                "AFTER_CAUSAL_CUTOFF terminal semantics are invalid"
+            )
+        _sha(
+            terminal.get("raw_response_sha256"),
+            "terminal.raw_response_sha256",
+        )
+        observed = _utc(
+            terminal.get("observed_at_utc"),
+            "terminal.observed_at_utc",
+        )
+        if observed <= _utc(plan.causal_cutoff_utc, "causal_cutoff_utc"):
+            raise BetfairCatalogCoverageError(
+                "AFTER_CAUSAL_CUTOFF terminal does not cross causal cutoff"
+            )
+        if terminal.get("transport_authority_ref") != plan.session_context_id:
+            raise BetfairCatalogCoverageError(
+                "AFTER_CAUSAL_CUTOFF terminal escaped frozen session context"
+            )
+        return
+
+    raise BetfairCatalogCoverageError("unsupported coverage terminal status")
+
+
 def _terminal_payload(
     *,
     plan: CatalogCoveragePlan,
@@ -1322,6 +1452,7 @@ def resolve_catalog_coverage(
             raise BetfairCatalogCoverageError(
                 "coverage terminal conflicts with immutable START"
             )
+        _validate_terminal_semantics(plan, leaf, terminal)
         status = terminal["status"]
         counts[status] += 1
         child_ids = terminal.get("child_leaf_ids")

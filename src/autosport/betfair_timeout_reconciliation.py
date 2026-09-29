@@ -102,19 +102,33 @@ def _install_betfair_readback_capture_start_authority() -> None:
     raw_read = BetfairReadOnlyClient.read_execution_readback
     raw_read_code = raw_read.__code__
     envelope_type = BetfairExecutionReadbackEnvelope
+    sealed_readback_fingerprint = envelope_type._authority_fingerprint
+    sealed_readback_fingerprint_code = sealed_readback_fingerprint.__code__
     capture_datetime = datetime
     capture_timezone_utc = timezone.utc
     capture_monotonic_ns = monotonic_ns
     json_dumps = json.dumps
     sha256_fn = sha256
 
+    def require_readback_fingerprint_authority() -> None:
+        current = getattr(envelope_type, "_authority_fingerprint", None)
+        if (
+            current is not sealed_readback_fingerprint
+            or getattr(current, "__code__", None) is not sealed_readback_fingerprint_code
+            or sealed_readback_fingerprint.__code__ is not sealed_readback_fingerprint_code
+        ):
+            raise BetfairTimeoutResolutionError(
+                "Betfair readback fingerprint authority changed"
+            )
+
     def timing_fingerprint(
         readback: BetfairExecutionReadbackEnvelope,
         started_at: str,
         started_monotonic_ns: int,
     ) -> str:
+        require_readback_fingerprint_authority()
         payload = {
-            "readback_fingerprint": readback._authority_fingerprint(),
+            "readback_fingerprint": sealed_readback_fingerprint(readback),
             "capture_started_at": started_at,
             "capture_started_monotonic_ns": started_monotonic_ns,
         }

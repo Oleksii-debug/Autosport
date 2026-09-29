@@ -8,6 +8,7 @@ from urllib.parse import urlencode
 if __package__:
     from scripts.cancel_superseded_pr_workflow_runs import (
         _ACTIVE_STATUSES,
+        _PULLS_PER_PAGE,
         _RUNS_PER_PAGE,
         CancellationError,
         GitHubApi,
@@ -24,6 +25,7 @@ else:
     # Import the canonical sibling module without requiring package resolution.
     from cancel_superseded_pr_workflow_runs import (
         _ACTIVE_STATUSES,
+        _PULLS_PER_PAGE,
         _RUNS_PER_PAGE,
         CancellationError,
         GitHubApi,
@@ -75,7 +77,10 @@ class WorkflowScopedGitHubApi(GitHubApi):
         self._recovery_head_sha: str | None = None
         self._recovery_workflow_name: str | None = None
         self._recovery_current_run_id: int | None = None
-        self._recovered_run_ids: set[int] = set()
+        self._historical_recovery_pr_number: int | None = None
+        self._historical_recovery_workflow_name: str | None = None
+        self._historical_recovery_current_run_id: int | None = None
+        self._recovered_runs: dict[int, tuple[int, str]] = {}
 
     def configure_same_head_candidate_recovery(
         self,
@@ -103,7 +108,7 @@ class WorkflowScopedGitHubApi(GitHubApi):
         self._recovery_head_sha = None
         self._recovery_workflow_name = None
         self._recovery_current_run_id = None
-        self._recovered_run_ids.clear()
+        self._recovered_runs.clear()
         try:
             associated_pr_number = self.associated_pr_number(event_head_sha)
         except CancellationError:
@@ -115,6 +120,72 @@ class WorkflowScopedGitHubApi(GitHubApi):
         self._recovery_head_sha = event_head_sha
         self._recovery_workflow_name = workflow_name
         self._recovery_current_run_id = current_run_id
+
+    def _historical_associated_pr_number(self, head_sha: str) -> int:
+        """Resolve one historical commit association without requiring current-head equality.
+
+        This resolver is cleanup-only.  It never admits current/event authority: callers
+        may use it only after the target PR has already been identified by the canonical
+        current authority path.  Every page must identify exactly one distinct PR number.
+        """
+
+        head_sha = _require_sha(head_sha, field="historical workflow head sha")
+        associated_numbers: set[int] = set()
+        page = 1
+        while True:
+            query = urlencode({"per_page": _PULLS_PER_PAGE, "page": page})
+            payload = self._request(f"/commits/{head_sha}/pulls?{query}")
+            if not isinstance(payload, list):
+                raise CancellationError(
+                    "invalid historical commit pull-requests response"
+                )
+            for item in payload:
+                if not isinstance(item, dict):
+                    raise CancellationError(
+                        "invalid historical associated pull request"
+                    )
+                head = item.get("head")
+                if not isinstance(head, dict):
+                    raise CancellationError(
+                        "invalid historical associated pull request head"
+                    )
+                _require_sha(
+                    head.get("sha"),
+                    field="historical associated pull request head",
+                )
+                associated_numbers.add(
+                    _require_positive_int(
+                        item.get("number"),
+                        field="historical associated pull request number",
+                    )
+                )
+            if len(payload) < _PULLS_PER_PAGE:
+                break
+            page += 1
+        if len(associated_numbers) != 1:
+            raise CancellationError(
+                "historical workflow head does not resolve to exactly one "
+                "associated pull request"
+            )
+        return next(iter(associated_numbers))
+
+    def configure_historical_candidate_recovery(
+        self,
+        *,
+        pr_number: int,
+        workflow_name: str,
+        current_run_id: int,
+    ) -> None:
+        """Allow fail-closed identity recovery for stale empty-reference candidates."""
+
+        pr_number = _require_positive_int(pr_number, field="pull request number")
+        current_run_id = _require_positive_int(current_run_id, field="current run id")
+        if workflow_name != self._workflow_name:
+            raise CancellationError("workflow name does not match exact workflow id")
+        self._historical_recovery_pr_number = pr_number
+        self._historical_recovery_workflow_name = workflow_name
+        self._historical_recovery_current_run_id = current_run_id
+        self._recovered_runs.clear()
 
     def _canonicalize_workflow_identity(self, run: WorkflowRun) -> WorkflowRun:
         if run.workflow_name == self._workflow_name:
@@ -128,22 +199,40 @@ class WorkflowScopedGitHubApi(GitHubApi):
         )
 
     def _recover_candidate_run_reference(self, run: WorkflowRun) -> WorkflowRun:
-        pr_number = self._recovery_pr_number
-        head_sha = self._recovery_head_sha
-        workflow_name = self._recovery_workflow_name
-        current_run_id = self._recovery_current_run_id
-        if (
-            pr_number is None
-            or head_sha is None
-            or workflow_name is None
-            or current_run_id is None
-            or run.pr_numbers
-            or run.run_id == current_run_id
-            or run.workflow_name != workflow_name
-            or run.head_sha != head_sha
-        ):
+        if run.pr_numbers:
             return run
-        self._recovered_run_ids.add(run.run_id)
+
+        pr_number: int | None = None
+        if (
+            self._recovery_pr_number is not None
+            and self._recovery_head_sha is not None
+            and self._recovery_workflow_name is not None
+            and self._recovery_current_run_id is not None
+            and run.run_id != self._recovery_current_run_id
+            and run.workflow_name == self._recovery_workflow_name
+            and run.head_sha == self._recovery_head_sha
+        ):
+            pr_number = self._recovery_pr_number
+        elif (
+            self._historical_recovery_pr_number is not None
+            and self._historical_recovery_workflow_name is not None
+            and self._historical_recovery_current_run_id is not None
+            and run.run_id != self._historical_recovery_current_run_id
+            and run.workflow_name == self._historical_recovery_workflow_name
+        ):
+            try:
+                historical_pr_number = self._historical_associated_pr_number(
+                    run.head_sha
+                )
+            except CancellationError:
+                return run
+            if historical_pr_number != self._historical_recovery_pr_number:
+                return run
+            pr_number = historical_pr_number
+
+        if pr_number is None:
+            return run
+        self._recovered_runs[run.run_id] = (pr_number, run.head_sha)
         return WorkflowRun(
             run_id=run.run_id,
             head_sha=run.head_sha,
@@ -156,13 +245,13 @@ class WorkflowScopedGitHubApi(GitHubApi):
         """Revalidate synthetic candidate identity at the irreversible boundary."""
 
         run_id = _require_positive_int(run_id, field="run id")
-        if run_id in self._recovered_run_ids:
-            pr_number = self._recovery_pr_number
-            head_sha = self._recovery_head_sha
-            if pr_number is None or head_sha is None:
-                raise CancellationError("recovered workflow run identity is unavailable")
+        recovered = self._recovered_runs.get(run_id)
+        if recovered is not None:
+            pr_number, candidate_head_sha = recovered
             try:
-                associated_pr_number = self.associated_pr_number(head_sha)
+                associated_pr_number = self._historical_associated_pr_number(
+                    candidate_head_sha
+                )
             except CancellationError as exc:
                 raise CancellationError(
                     "recovered workflow run pull request association is no longer unique"
@@ -171,15 +260,15 @@ class WorkflowScopedGitHubApi(GitHubApi):
                 raise CancellationError(
                     "recovered workflow run pull request association changed"
                 )
-            # The association read above is itself an external round trip. Same-head
-            # lifecycle cancellation authority can disappear during that interval if
-            # the PR becomes integration-capable. Re-resolve the atomic live
-            # head/state/draft snapshot after association validation and immediately
-            # before the irreversible cancellation POST.
+
+            # Association validation is an external round trip. Re-resolve current PR
+            # truth immediately afterward.  A historical candidate may be cancelled
+            # while the PR has advanced, but if the PR rolls back to that exact head,
+            # same-head cancellation again requires a non-integration-capable lifecycle.
             qualification = self.live_pr_qualification(pr_number)
             if (
-                qualification.head_sha != head_sha
-                or qualification.integration_capable
+                qualification.head_sha == candidate_head_sha
+                and qualification.integration_capable
             ):
                 raise CancellationError(
                     "recovered workflow run live qualification changed"
@@ -296,6 +385,11 @@ def main(argv: list[str] | None = None) -> int:
         # disabled there; if its head changes, canonical cancellation returns stale.
         qualification = api.live_pr_qualification(pr_number)
         event_head_sha = _require_sha(args.event_head_sha, field="event head sha")
+        api.configure_historical_candidate_recovery(
+            pr_number=pr_number,
+            workflow_name=args.workflow_name,
+            current_run_id=args.current_run_id,
+        )
         if (
             qualification.head_sha == event_head_sha
             and not qualification.integration_capable

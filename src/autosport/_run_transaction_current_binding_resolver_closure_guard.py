@@ -192,3 +192,8 @@ def _install() -> None:
 
 _install()
 del _install
+# Composition mutators are one-shot setup capabilities, not runtime product API.
+del _seal_method
+del _sealed_callable
+del _capture_closure_graph
+del _closure_cell

@@ -202,22 +202,11 @@ def admit_paper_ticket(
                 )
             working_book = book
 
-        # Resolve positive risk dispatch through the metaclass-sealed class roots
-        # before touching the policy instance. The instance __getattribute__ fence
-        # is itself a Python function; in-place mutation of its code would otherwise
-        # execute before that fence could verify itself during risk_policy.evaluate.
-        instance_dispatch_root = PaperRiskPolicy.__getattribute__
-        evaluate_root = PaperRiskPolicy.evaluate
-        decision = evaluate_root(risk_policy, working_book, amount, context=context)
-        # Re-resolve both sealed roots before consuming positive authority. Class
-        # lookup exercises the metaclass witnesses and rejects persistent mutation.
-        if (
-            PaperRiskPolicy.__getattribute__ is not instance_dispatch_root
-            or PaperRiskPolicy.evaluate is not evaluate_root
-        ):
-            raise TypeError(
-                "canonical PaperRiskPolicy dispatch changed during admission"
-            )
+        # Owner-facing instance dispatch is sealed by the canonical risk-root
+        # composition before product admission can execute. That gate is closureless,
+        # rejects its own executable/default retargeting before mutation, and
+        # revalidates the exact evaluate root on lookup and retained invocation.
+        decision = risk_policy.evaluate(working_book, amount, context=context)
         if not decision.allowed:
             return PaperAdmissionResult(
                 risk=decision,

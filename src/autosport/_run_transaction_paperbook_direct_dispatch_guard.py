@@ -2,18 +2,16 @@
 
 The owning PaperBook persistence graph is already sealed and RunTransaction stage/
 promotion already resolves that authority through the current-binding consumer seal.
-Those consumers nevertheless retained the live ``run_transaction`` globals mapping for
-non-authority direct dispatch such as ``os.replace``, ``tempfile.mkstemp``,
-``hashlib.sha256`` and ``PaperBook.load_bytes``. A later module-alias/member retarget
-could therefore change the executable path around the sealed persistence facade.
+Those consumers nevertheless retained live Python globals mappings around the sealed
+persistence capability. A later alias/member or builtin-shadow retarget could therefore
+change executable dispatch without changing the already-witnessed PaperBook graph.
 
 This module adds no persistence authority. It detaches the already-installed guarded
-consumers from that live globals mapping and reuses the owning persistence graph's
-already-witnessed immutable surface type for the exact direct call targets promotion
-already consumes. Promotion also keeps closure-private exact witnesses of that shared
-surface's executable roots and of every detached direct-dispatch binding. Execution is
-reconstructed from the composition-time snapshot for every call, so the reachable
-closure dict is tamper evidence only and cannot become a check/use dispatch race.
+consumers, reuses the owning persistence graph's witnessed immutable surface type for
+promotion's exact direct call targets, and snapshots both the guarded consumer closure
+mapping and its Python globals at composition. Each call reconstructs fresh ephemeral
+mappings from those snapshots. Reachable live mappings remain tamper evidence only and
+cannot become a check/use dispatch race.
 """
 
 from __future__ import annotations
@@ -88,7 +86,7 @@ def _guard_surface_consumer(
     inner_globals: dict[str, object],
     expected_bindings: tuple[tuple[str, object], ...],
 ) -> FunctionType:
-    """Require exact frozen surface/bindings and execute from a private snapshot."""
+    """Require exact frozen surface/bindings and execute from private snapshots."""
 
     require_surface_authority = _make_surface_authority_checker()
     require_surface_authority_code = require_surface_authority.__code__
@@ -104,6 +102,9 @@ def _guard_surface_consumer(
     fresh_cell_code = fresh_cell.__code__
     inner_code = function.__code__
     inner_function_globals = function.__globals__
+    if exact_type(inner_function_globals) is not dict_type:
+        raise RuntimeError("RunTransaction guarded consumer Python globals are invalid")
+    frozen_function_globals_items = tuple_type(dict_items(inner_function_globals))
     inner_name = function.__name__
     inner_qualname = function.__qualname__
     inner_doc = function.__doc__
@@ -153,7 +154,7 @@ def _guard_surface_consumer(
     def guarded_consumer(*args, **kwargs):
         # Intentionally retain the real detached globals in this closure. Existing
         # diagnostics/tests use that exact handle to prove the consumer is detached.
-        # It is never used as the execution mapping after composition.
+        # Neither it nor the owning guard module globals are execution mappings now.
         if (
             exact_type(require_surface_authority) is not function_type
             or require_surface_authority.__code__ is not require_surface_authority_code
@@ -173,12 +174,13 @@ def _guard_surface_consumer(
         require_bindings()
         require_surface_authority()
 
+        call_function_globals = dict_type(frozen_function_globals_items)
         call_globals = dict_type(frozen_globals_items)
         call_closure_values = list_type(frozen_closure_values)
         call_closure_values[inner_globals_index] = call_globals
         delegate = function_type(
             inner_code,
-            inner_function_globals,
+            call_function_globals,
             name=inner_name,
             argdefs=inner_defaults,
             closure=tuple_type(fresh_cell(value) for value in call_closure_values),

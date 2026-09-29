@@ -6,6 +6,7 @@ import pytest
 
 from autosport._forward_universe_backing_guard import (
     ForwardUniverseBackingGuardError,
+    load_guarded_provider_evaluation_universe,
     resolve_forward_universe_backing_locator,
 )
 from autosport.forward_evaluation_universe_binding import (
@@ -111,3 +112,35 @@ def test_public_forward_resolver_rejects_coherent_backing_substitution(tmp_path)
             store=canonical,
             protocol=_protocol(),
         )
+
+
+def test_guarded_load_ignores_outer_instance_load_rebinding(tmp_path):
+    store = _store(tmp_path, "instance-load-rebind")
+    expected_locator = resolve_forward_universe_backing_locator(store)
+    store.load = lambda: object()
+
+    ledger, locator = load_guarded_provider_evaluation_universe(store)
+
+    assert ledger is None
+    assert locator == expected_locator
+
+
+def test_guarded_load_rechecks_locator_after_inner_read(tmp_path):
+    canonical = _store(tmp_path, "during-read-canonical")
+    alternate = _store(tmp_path, "during-read-alternate")
+    resolve_forward_universe_backing_locator(canonical)
+    backing = canonical._store
+    original_read = backing._read_unlocked
+
+    def swap_during_read():
+        canonical._store = alternate._store
+        canonical._intake = alternate._intake
+        return original_read()
+
+    backing._read_unlocked = swap_during_read
+
+    with pytest.raises(
+        ForwardUniverseBackingGuardError,
+        match="changed during durable load",
+    ):
+        load_guarded_provider_evaluation_universe(canonical)

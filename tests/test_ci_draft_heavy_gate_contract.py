@@ -92,6 +92,7 @@ def test_endurance_matrix_is_deferred_only_while_pull_request_is_draft() -> None
 
     assert _ACTIVITY_TYPES in workflow
     assert _PR_INTEGRATION_GATE in workflow
+    assert _RUNNER_FREE_PR_ADMISSION in workflow
     assert "name: Endurance" in workflow
     assert "os: [ubuntu-latest, windows-latest]" in workflow
     assert "cancel-in-progress: true" in workflow

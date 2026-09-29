@@ -317,12 +317,8 @@
     setTextIfChanged(byId("active-workspace-value"), state.active_workspace || "—");
     setValueIfChanged(byId(205), state.bank || "");
     setTextIfChanged(byId("dataset-summary"), state.dataset_summary || "");
-    if (document.activeElement !== byId("dataset-path")) {
-      byId("dataset-path").value = state.dataset_path || "";
-    }
-    if (document.activeElement !== byId("research-plan-path")) {
-      byId("research-plan-path").value = state.research_plan_path || "";
-    }
+    setValueUnlessFocused(byId("dataset-path"), state.dataset_path || "");
+    setValueUnlessFocused(byId("research-plan-path"), state.research_plan_path || "");
     setTextIfChanged(byId("research-plan-summary"), state.research_plan_summary || "");
 
     const strategy = byId(106);
@@ -373,8 +369,8 @@
     const productSource = state.product_source || {};
     const sourceSelect = byId("product-source-select");
     setSelectOptions(sourceSelect, productSource.choices || []);
-    if (document.activeElement !== sourceSelect && productSource.selected_id) {
-      sourceSelect.value = productSource.selected_id;
+    if (productSource.selected_id) {
+      setValueUnlessFocused(sourceSelect, productSource.selected_id);
     }
     setValueIfChanged(
       byId("product-source-status"),

@@ -569,3 +569,81 @@ def test_exact_snapshot_cross_field_mutation_is_revalidated_before_publication(
 
     assert not path.exists()
 
+
+def test_module_snapshot_class_rebind_cannot_redefine_canonical_ingress(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    canonical = _snapshot(Decimal("10"))
+
+    class ForgedSnapshot(BookmakerAccountSnapshot):
+        def __post_init__(self) -> None:
+            # Same bypass shape as the predecessor subclass attack.
+            pass
+
+    forged = ForgedSnapshot(
+        profile=canonical.profile,
+        observed_capabilities=frozenset(),
+        observed_at=canonical.observed_at,
+        balance=canonical.balance,
+    )
+    assert isinstance(forged, BookmakerAccountSnapshot)
+
+    # The reconciliation module's imported class name is caller-mutable. Rebinding
+    # it must not redefine which concrete type the durable boundary trusts.
+    monkeypatch.setattr(
+        reconciliation_module,
+        "BookmakerAccountSnapshot",
+        ForgedSnapshot,
+    )
+    path = tmp_path / "account.json"
+    store = BookmakerAccountReconciliationStore(path)
+
+    with pytest.raises(
+        AccountReconciliationIntegrityError,
+        match="exact canonical BookmakerAccountSnapshot",
+    ):
+        store.append_snapshot(forged)
+
+    assert not path.exists()
+
+
+def test_runtime_snapshot_validator_rebind_cannot_suppress_revalidation(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    forged = _snapshot(Decimal("10"))
+    object.__setattr__(forged, "observed_capabilities", frozenset())
+
+    # Preserve the exact canonical object type while replacing the live class
+    # validator. The reconciliation boundary must call its import-time capture.
+    monkeypatch.setattr(
+        BookmakerAccountSnapshot,
+        "__post_init__",
+        lambda self: None,
+    )
+    path = tmp_path / "account.json"
+    store = BookmakerAccountReconciliationStore(path)
+
+    with pytest.raises(
+        AccountReconciliationIntegrityError,
+        match="failed current-state revalidation",
+    ):
+        store.append_snapshot(forged)
+
+    assert not path.exists()
+
+
+def test_runtime_profile_serializer_rebind_cannot_change_snapshot_fingerprint(
+    monkeypatch,
+) -> None:
+    snapshot = _snapshot(Decimal("10"))
+    baseline = snapshot_fingerprint(snapshot)
+
+    monkeypatch.setattr(
+        BookmakerCapabilityProfile,
+        "to_canonical_dict",
+        lambda self: {"forged": True},
+    )
+
+    assert snapshot_fingerprint(snapshot) == baseline

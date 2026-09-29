@@ -53,6 +53,26 @@ _CANONICAL_AUTHORITY_METHOD_CODES = {
     name: getattr(method, "__code__", None)
     for name, method in _CANONICAL_AUTHORITY_METHODS.items()
 }
+
+# The reconciliation boundary treats these DTO definitions as product authority.
+# Keep their exact identities and validation/serialization entrypoints independent
+# of the module globals that callers can rebind after import. This mirrors the
+# existing canonical MonotonicWorkspaceAuthority binding above: a forged subclass
+# must not become "canonical" merely because a live imported name was replaced.
+_CANONICAL_ACCOUNT_SNAPSHOT_CLASS = BookmakerAccountSnapshot
+_CANONICAL_CAPABILITY_PROFILE_CLASS = BookmakerCapabilityProfile
+_CANONICAL_CAPABILITY_FACT_CLASS = BookmakerCapabilityFact
+_CANONICAL_BALANCE_OBSERVATION_CLASS = BookmakerBalanceObservation
+_CANONICAL_POSITION_OBSERVATION_CLASS = BookmakerPositionObservation
+_CANONICAL_CAPABILITY_CLASS = BookmakerCapability
+
+_CANONICAL_CAPABILITY_FACT_VALIDATE = BookmakerCapabilityFact.__post_init__
+_CANONICAL_CAPABILITY_PROFILE_VALIDATE = BookmakerCapabilityProfile.__post_init__
+_CANONICAL_BALANCE_OBSERVATION_VALIDATE = BookmakerBalanceObservation.__post_init__
+_CANONICAL_POSITION_OBSERVATION_VALIDATE = BookmakerPositionObservation.__post_init__
+_CANONICAL_ACCOUNT_SNAPSHOT_VALIDATE = BookmakerAccountSnapshot.__post_init__
+_CANONICAL_CAPABILITY_PROFILE_TO_DICT = BookmakerCapabilityProfile.to_canonical_dict
+
 _MAX_CANONICAL_DECIMAL_TEXT_LENGTH = 4096
 _WINDOWS_PRODUCT_AUTHORITY_ROOT_RELATIVE = (
     Path("Autosport") / "application-state" / "monotonic-authority-v1"
@@ -477,25 +497,25 @@ def _require_canonical_snapshot_graph(snapshot: object) -> BookmakerAccountSnaps
     reconciliation accepts only the exact product DTO graph.
     """
 
-    if type(snapshot) is not BookmakerAccountSnapshot:
+    if type(snapshot) is not _CANONICAL_ACCOUNT_SNAPSHOT_CLASS:
         raise AccountReconciliationIntegrityError(
             "snapshot must be the exact canonical BookmakerAccountSnapshot"
         )
 
     profile = snapshot.profile
-    if type(profile) is not BookmakerCapabilityProfile:
+    if type(profile) is not _CANONICAL_CAPABILITY_PROFILE_CLASS:
         raise AccountReconciliationIntegrityError(
             "snapshot profile must be the exact canonical BookmakerCapabilityProfile"
         )
     if type(profile.facts) is not tuple or any(
-        type(fact) is not BookmakerCapabilityFact for fact in profile.facts
+        type(fact) is not _CANONICAL_CAPABILITY_FACT_CLASS for fact in profile.facts
     ):
         raise AccountReconciliationIntegrityError(
             "snapshot profile facts must be exact canonical BookmakerCapabilityFact values"
         )
 
     if type(snapshot.observed_capabilities) is not frozenset or any(
-        type(capability) is not BookmakerCapability
+        type(capability) is not _CANONICAL_CAPABILITY_CLASS
         for capability in snapshot.observed_capabilities
     ):
         raise AccountReconciliationIntegrityError(
@@ -504,7 +524,7 @@ def _require_canonical_snapshot_graph(snapshot: object) -> BookmakerAccountSnaps
 
     if (
         snapshot.balance is not None
-        and type(snapshot.balance) is not BookmakerBalanceObservation
+        and type(snapshot.balance) is not _CANONICAL_BALANCE_OBSERVATION_CLASS
     ):
         raise AccountReconciliationIntegrityError(
             "snapshot balance must be the exact canonical BookmakerBalanceObservation"
@@ -515,7 +535,7 @@ def _require_canonical_snapshot_graph(snapshot: object) -> BookmakerAccountSnaps
         ("settled_positions", snapshot.settled_positions),
     ):
         if type(positions) is not tuple or any(
-            type(position) is not BookmakerPositionObservation
+            type(position) is not _CANONICAL_POSITION_OBSERVATION_CLASS
             for position in positions
         ):
             raise AccountReconciliationIntegrityError(
@@ -525,15 +545,18 @@ def _require_canonical_snapshot_graph(snapshot: object) -> BookmakerAccountSnaps
     # frozen dataclasses are still mutable through object.__setattr__. Re-run the
     # canonical constructors' semantic validators over the exact graph so a DTO
     # that was valid at issuance cannot be changed into irreloadable durable state.
+    # Invoke the import-time captured functions directly: replacing an imported
+    # class or its __post_init__ attribute after composition must not weaken this
+    # durable evidence boundary.
     try:
         for fact in profile.facts:
-            BookmakerCapabilityFact.__post_init__(fact)
-        BookmakerCapabilityProfile.__post_init__(profile)
+            _CANONICAL_CAPABILITY_FACT_VALIDATE(fact)
+        _CANONICAL_CAPABILITY_PROFILE_VALIDATE(profile)
         if snapshot.balance is not None:
-            BookmakerBalanceObservation.__post_init__(snapshot.balance)
+            _CANONICAL_BALANCE_OBSERVATION_VALIDATE(snapshot.balance)
         for position in (*snapshot.open_positions, *snapshot.settled_positions):
-            BookmakerPositionObservation.__post_init__(position, None)
-        BookmakerAccountSnapshot.__post_init__(snapshot)
+            _CANONICAL_POSITION_OBSERVATION_VALIDATE(position, None)
+        _CANONICAL_ACCOUNT_SNAPSHOT_VALIDATE(snapshot)
     except (TypeError, ValueError) as exc:
         raise AccountReconciliationIntegrityError(
             "snapshot canonical DTO graph failed current-state revalidation"
@@ -545,7 +568,7 @@ def _require_canonical_snapshot_graph(snapshot: object) -> BookmakerAccountSnaps
 def snapshot_to_canonical_dict(snapshot: BookmakerAccountSnapshot) -> dict[str, object]:
     snapshot = _require_canonical_snapshot_graph(snapshot)
     return {
-        "profile": snapshot.profile.to_canonical_dict(),
+        "profile": _CANONICAL_CAPABILITY_PROFILE_TO_DICT(snapshot.profile),
         "observed_capabilities": sorted(
             capability.value for capability in snapshot.observed_capabilities
         ),

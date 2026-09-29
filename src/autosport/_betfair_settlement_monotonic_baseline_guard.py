@@ -83,3 +83,7 @@ _store_type._ensure_monotonic_current = (
     _ensure_monotonic_current_without_unanchored_adoption
 )
 _ensure_monotonic_current_without_unanchored_adoption._autosport_unanchored_baseline_guard = True
+
+# Install the bounded Decimal materialization fence before the provider-row semantics
+# layer captures BetfairSettlementRevision.semantic_payload as its canonical delegate.
+from . import _betfair_settlement_decimal_resource_guard as _decimal_resource_guard  # noqa: E402,F401

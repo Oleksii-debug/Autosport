@@ -134,6 +134,45 @@ def test_frozen_surface_class_dispatch_rejects_post_composition_retarget(
     assert _HOSTILE_TUPLE_ITER_CALLS == []
 
 
+@pytest.mark.parametrize(
+    ("root_name", "hostile"),
+    (("__getattr__", _hostile_surface_getattr), ("__iter__", _hostile_surface_iter)),
+)
+def test_frozen_surface_metaclass_descriptor_cannot_be_removed_before_retarget(
+    tmp_path: Path,
+    root_name: str,
+    hostile: object,
+) -> None:
+    """Deleting the protecting metaclass root cannot unlock the facade class."""
+
+    path, book = _saved_book(tmp_path)
+    surface_type = type(guard.json)
+    surface_meta = type(surface_type)
+    original_meta_root = vars(surface_meta)[root_name]
+    original_surface_root = vars(surface_type)[root_name]
+    _HOSTILE_GETATTR_CALLS.clear()
+    _HOSTILE_TUPLE_ITER_CALLS.clear()
+
+    with pytest.raises(TypeError, match="frozen-surface root is sealed"):
+        delattr(surface_meta, root_name)
+    with pytest.raises(TypeError, match="frozen-surface root is sealed"):
+        type.__delattr__(surface_meta, root_name)
+    with pytest.raises(TypeError, match="frozen-surface root is sealed"):
+        setattr(surface_meta, root_name, hostile)
+    with pytest.raises(TypeError, match="frozen-surface root is sealed"):
+        type.__setattr__(surface_meta, root_name, hostile)
+
+    assert vars(surface_meta)[root_name] is original_meta_root
+    assert vars(surface_type)[root_name] is original_surface_root
+    with pytest.raises(TypeError, match="frozen-surface root is sealed"):
+        type.__setattr__(surface_type, root_name, hostile)
+
+    loaded = paper.PaperBook.load(path)
+    assert loaded.balance == book.balance
+    assert _HOSTILE_GETATTR_CALLS == []
+    assert _HOSTILE_TUPLE_ITER_CALLS == []
+
+
 def test_frozen_module_surface_getattr_code_substitution_fails_before_dispatch(
     tmp_path: Path,
 ) -> None:

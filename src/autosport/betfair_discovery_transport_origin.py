@@ -9,8 +9,9 @@ origin after restart.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from hashlib import sha256
+import json
 from typing import Sequence
 from weakref import ReferenceType, ref
 
@@ -163,15 +164,23 @@ def _make_transport_origin_authority():
         )
     }
     account_scope_field = visibility_scope_type.__dict__["account_scope_ref"]
-    exchange_getters = {
-        name: exchange_type.__dict__[name].fget
+    request_method_field = request_type.__dict__["method"]
+    exchange_core_fields = {
+        name: exchange_type.__dict__[name]
+        for name in ("request", "raw_response", "observed_at")
+    }
+    exchange_snapshot_fields = {
+        name: exchange_type.__dict__[name]
         for name in (
-            "method",
-            "request_sha256",
-            "raw_response_sha256",
-            "observed_at_utc",
+            "_method_snapshot",
+            "_canonical_request_json_snapshot",
+            "_raw_response_sha256_snapshot",
+            "_raw_response_size_bytes_snapshot",
+            "_observed_at_utc_snapshot",
         )
     }
+    json_dumps = json.dumps
+    sha256_fn = sha256
 
     def receipt_snapshot(
         receipt: BetfairDiscoveryTransportOriginReceipt,
@@ -188,11 +197,98 @@ def _make_transport_origin_authority():
             raise provenance_error_type(
                 "discovery evidence contains non-canonical exchange"
             )
+        try:
+            request = exchange_core_fields["request"].__get__(
+                exchange, exchange_type
+            )
+            raw_response = exchange_core_fields["raw_response"].__get__(
+                exchange, exchange_type
+            )
+            observed_at = exchange_core_fields["observed_at"].__get__(
+                exchange, exchange_type
+            )
+            if type(request) is not request_type:
+                raise provenance_error_type(
+                    "discovery exchange request changed after authenticated acquisition"
+                )
+            if type(raw_response) is not bytes or not raw_response:
+                raise provenance_error_type(
+                    "discovery exchange response changed after authenticated acquisition"
+                )
+            if (
+                type(observed_at) is not datetime
+                or observed_at.tzinfo is None
+                or observed_at.utcoffset() is None
+                or observed_at.utcoffset() != timedelta(0)
+            ):
+                raise provenance_error_type(
+                    "discovery exchange observation time changed after authenticated acquisition"
+                )
+
+            current_method = request_method_field.__get__(request, request_type)
+            current_params = canonical_rpc_params(request)
+            current_request_json = json_dumps(
+                {"method": current_method, "params": current_params},
+                ensure_ascii=False,
+                allow_nan=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            current_request_sha256 = sha256_fn(
+                current_request_json.encode("utf-8")
+            ).hexdigest()
+            current_raw_sha256 = sha256_fn(raw_response).hexdigest()
+            current_raw_size = len(raw_response)
+            current_observed_at_utc = (
+                observed_at.isoformat(timespec="microseconds")
+                .replace("+00:00", "Z")
+            )
+
+            stored_method = exchange_snapshot_fields[
+                "_method_snapshot"
+            ].__get__(exchange, exchange_type)
+            stored_request_json = exchange_snapshot_fields[
+                "_canonical_request_json_snapshot"
+            ].__get__(exchange, exchange_type)
+            stored_raw_sha256 = exchange_snapshot_fields[
+                "_raw_response_sha256_snapshot"
+            ].__get__(exchange, exchange_type)
+            stored_raw_size = exchange_snapshot_fields[
+                "_raw_response_size_bytes_snapshot"
+            ].__get__(exchange, exchange_type)
+            stored_observed_at_utc = exchange_snapshot_fields[
+                "_observed_at_utc_snapshot"
+            ].__get__(exchange, exchange_type)
+            if type(stored_request_json) is not str:
+                raise provenance_error_type(
+                    "discovery exchange request snapshot is not canonical"
+                )
+            stored_request_sha256 = sha256_fn(
+                stored_request_json.encode("utf-8")
+            ).hexdigest()
+        except provenance_error_type:
+            raise
+        except (AttributeError, TypeError, ValueError, UnicodeEncodeError) as exc:
+            raise provenance_error_type(
+                "discovery exchange cannot be revalidated"
+            ) from exc
+
+        if (
+            current_method != stored_method
+            or current_request_json != stored_request_json
+            or current_request_sha256 != stored_request_sha256
+            or current_raw_sha256 != stored_raw_sha256
+            or current_raw_size != stored_raw_size
+            or current_observed_at_utc != stored_observed_at_utc
+        ):
+            raise provenance_error_type(
+                "discovery exchange changed after authenticated acquisition"
+            )
         return (
-            exchange_getters["method"](exchange),
-            exchange_getters["request_sha256"](exchange),
-            exchange_getters["raw_response_sha256"](exchange),
-            exchange_getters["observed_at_utc"](exchange),
+            current_method,
+            current_request_sha256,
+            current_raw_sha256,
+            current_observed_at_utc,
         )
 
     def forget(receipt_id: int, dead: ReferenceType) -> None:

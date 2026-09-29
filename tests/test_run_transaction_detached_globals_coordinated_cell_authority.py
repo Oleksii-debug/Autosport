@@ -107,3 +107,59 @@ def test_guard_rejects_coordinated_execution_snapshot_and_anchor_retarget() -> N
 
     assert snapshot_cell.cell_contents is original_snapshot
     assert anchor_cell.cell_contents is original_anchor
+
+
+def test_guard_rejects_coordinated_binding_verifier_and_snapshot_retarget() -> None:
+    """The verifier function/code pair cannot move with the execution snapshot."""
+
+    guarded = run_transaction._promote_paper_book_snapshot
+    assert isinstance(guarded, FunctionType)
+
+    verifier_cell = _closure_cell(guarded, "require_bindings")
+    verifier_code_cell = _closure_cell(guarded, "require_bindings_code")
+    snapshot_cell = _closure_cell(guarded, "frozen_globals_items")
+    anchor_cell = _closure_cell(guarded, "frozen_globals_items_anchor")
+
+    original_verifier = verifier_cell.cell_contents
+    original_verifier_code = verifier_code_cell.cell_contents
+    original_snapshot = snapshot_cell.cell_contents
+    original_anchor = anchor_cell.cell_contents
+    assert isinstance(original_verifier, FunctionType)
+    assert original_verifier.__code__ is original_verifier_code
+    assert type(original_snapshot) is tuple
+    assert type(original_anchor) is tuple
+    assert original_anchor == (original_snapshot,)
+
+    replacement_snapshot = tuple(list(original_snapshot))
+    assert replacement_snapshot == original_snapshot
+    assert replacement_snapshot is not original_snapshot
+
+    def bypass_bindings() -> None:
+        return None
+
+    verifier_cell.cell_contents = bypass_bindings
+    verifier_code_cell.cell_contents = bypass_bindings.__code__
+    snapshot_cell.cell_contents = replacement_snapshot
+    anchor_cell.cell_contents = (replacement_snapshot,)
+    try:
+        try:
+            guarded()
+        except Exception as exc:  # noqa: BLE001 - rejection must precede delegate binding.
+            assert not isinstance(exc, TypeError), (
+                "guard admitted coordinated verifier/code and execution-snapshot retargeting "
+                "far enough to invoke delegated argument binding"
+            )
+        else:
+            raise AssertionError(
+                "guard unexpectedly returned after coordinated verifier/code retargeting"
+            )
+    finally:
+        anchor_cell.cell_contents = original_anchor
+        snapshot_cell.cell_contents = original_snapshot
+        verifier_code_cell.cell_contents = original_verifier_code
+        verifier_cell.cell_contents = original_verifier
+
+    assert verifier_cell.cell_contents is original_verifier
+    assert verifier_code_cell.cell_contents is original_verifier_code
+    assert snapshot_cell.cell_contents is original_snapshot
+    assert anchor_cell.cell_contents is original_anchor

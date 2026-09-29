@@ -9,6 +9,7 @@ from .paper import PaperBook
 from .recovery import transaction_history_requires_recovery
 from .risk import PaperRiskPolicy, ProposedTicketRiskContext, RiskDecision
 from .run_registry import RunRegistry, UnresolvedExperimentError
+from .run_transaction import RunTransaction
 from .workspace_lock import WorkspaceEconomicLock
 
 
@@ -146,10 +147,11 @@ def admit_paper_ticket(
         # start gates before beginning economic work; reuse those authorities here
         # while already holding the canonical workspace lock.
         registry_path = root / "run_registry.json"
+        registry_missing = False
         try:
             registry_path.lstat()
         except FileNotFoundError:
-            pass
+            registry_missing = True
         else:
             if RunRegistry(registry_path).in_progress():
                 raise UnresolvedExperimentError(
@@ -159,6 +161,20 @@ def admit_paper_ticket(
             raise UnresolvedExperimentError(
                 "Workspace has unresolved transaction history; repair it before PAPER admission."
             )
+        if registry_missing:
+            transaction_root = root / RunTransaction.ROOT_NAME
+            try:
+                first_transaction = next(transaction_root.iterdir())
+            except FileNotFoundError:
+                pass
+            except StopIteration:
+                pass
+            else:
+                del first_transaction
+                raise UnresolvedExperimentError(
+                    "Workspace run registry is missing while transaction history exists; "
+                    "repair it before PAPER admission."
+                )
 
         # The lock alone is insufficient if this caller was constructed before a
         # different process committed a newer PaperBook. Re-read the one durable

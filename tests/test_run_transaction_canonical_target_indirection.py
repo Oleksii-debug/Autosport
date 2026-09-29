@@ -167,6 +167,61 @@ class RunTransactionCanonicalTargetIndirectionTests(unittest.TestCase):
             self.assertEqual(calls, 2)
             self.assertEqual(external.read_bytes(), b'{"external":true}')
 
+
+    def test_canonical_snapshot_verification_regular_replacement_ignores_hostile_sameopenfile(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "canonical.json"
+            replacement = root / "replacement.json"
+            backup = root / "canonical.backup.json"
+            target.write_bytes(b'{"canonical":1}')
+            replacement.write_bytes(b'{"replace___":1}')
+            original_stat = os.stat(target, follow_symlinks=False)
+            os.utime(
+                replacement,
+                ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns),
+            )
+            canonical_open = run_transaction_module._open_read_only_descriptor
+            hostile_sameopenfile_executed = False
+            calls = 0
+
+            def swap_on_verification_open(path: Path) -> int:
+                nonlocal calls
+                calls += 1
+                if calls == 2:
+                    target.replace(backup)
+                    replacement.replace(target)
+                return canonical_open(path)
+
+            def hostile_sameopenfile(left: int, right: int) -> bool:
+                del left, right
+                nonlocal hostile_sameopenfile_executed
+                hostile_sameopenfile_executed = True
+                return True
+
+            with patch.object(
+                run_transaction_module,
+                "_open_read_only_descriptor",
+                side_effect=swap_on_verification_open,
+            ), patch.object(
+                run_transaction_module.os.path,
+                "sameopenfile",
+                side_effect=hostile_sameopenfile,
+            ):
+                with self.assertRaisesRegex(
+                    RunTransactionError,
+                    "canonical path must be a stable regular non-symlink file",
+                ):
+                    RunTransaction._read_canonical_file_snapshot(
+                        target,
+                        "fixture",
+                    )
+
+            self.assertEqual(calls, 2)
+            self.assertFalse(hostile_sameopenfile_executed)
+            self.assertEqual(backup.read_bytes(), b'{"canonical":1}')
+            self.assertEqual(target.read_bytes(), b'{"replace___":1}')
+
     def test_canonical_snapshot_primary_open_binds_initial_regular_file_identity(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

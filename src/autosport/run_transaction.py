@@ -962,9 +962,10 @@ class RunTransaction:
             except OSError:
                 return False
             try:
-                same_file = os.path.sameopenfile(
-                    handle.fileno(),
-                    verification_descriptor,
+                verification_stat = os.fstat(verification_descriptor)
+                same_file = (
+                    verification_stat.st_dev == expected_path_stat.st_dev
+                    and verification_stat.st_ino == expected_path_stat.st_ino
                 )
                 current_after_open = os.stat(path, follow_symlinks=False)
                 result = (

@@ -167,6 +167,56 @@ class RunTransactionCanonicalTargetIndirectionTests(unittest.TestCase):
             self.assertEqual(calls, 2)
             self.assertEqual(external.read_bytes(), b'{"external":true}')
 
+    def test_canonical_snapshot_primary_open_binds_initial_regular_file_identity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "canonical.json"
+            replacement = root / "replacement.json"
+            backup = root / "canonical.backup.json"
+            target.write_bytes(b'{"canonical":1}')
+            replacement.write_bytes(b'{"replacement":1}')
+            original_stat = os.stat(target, follow_symlinks=False)
+            os.utime(
+                replacement,
+                ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns),
+            )
+            canonical_open = run_transaction_module._open_read_only_descriptor
+            canonical_samestat = os.path.samestat
+            calls = 0
+
+            def swap_regular_then_open(path: Path) -> int:
+                nonlocal calls
+                calls += 1
+                if calls == 1:
+                    target.replace(backup)
+                    replacement.replace(target)
+                return canonical_open(path)
+
+            with patch.object(
+                run_transaction_module,
+                "_open_read_only_descriptor",
+                side_effect=swap_regular_then_open,
+            ), patch.object(
+                run_transaction_module.os.path,
+                "samestat",
+                wraps=canonical_samestat,
+            ) as identity_check:
+                with self.assertRaisesRegex(
+                    RunTransactionError,
+                    "canonical path must be a stable regular non-symlink file",
+                ):
+                    RunTransaction._read_canonical_file_snapshot(
+                        target,
+                        "fixture",
+                    )
+
+            self.assertEqual(calls, 1)
+            self.assertGreaterEqual(identity_check.call_count, 1)
+            first_left, first_right = identity_check.call_args_list[0].args
+            self.assertFalse(canonical_samestat(first_left, first_right))
+            self.assertEqual(backup.read_bytes(), b'{"canonical":1}')
+            self.assertEqual(target.read_bytes(), b'{"replacement":1}')
+
     def test_commit_rejects_symlinked_paper_book_even_when_target_has_exact_new_bytes(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

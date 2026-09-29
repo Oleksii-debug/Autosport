@@ -33,6 +33,25 @@ from autosport.betfair_account_readonly import (
 )
 
 
+def _install_https_test_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+    fake_open,
+) -> None:
+    """Intercept below a freshly-built urllib opener without using global _opener."""
+
+    def fake_do_open(_self, _http_class, request, **_kwargs):
+        response = fake_open(request, getattr(request, "timeout", 0))
+        response.code = 200
+        response.msg = "OK"
+        return response
+
+    monkeypatch.setattr(
+        _urllib_request.AbstractHTTPHandler,
+        "do_open",
+        fake_do_open,
+    )
+
+
 def _details_result(*, currency_code: str = "EUR") -> dict[str, object]:
     return {
         "currencyCode": currency_code,
@@ -91,15 +110,9 @@ def _install_details_transport(
         ).encode("utf-8")
         return Response(raw)
 
-    class Opener:
-        def open(self, request, data=None, timeout: float = 0):
-            assert data is None
-            return fake_open(request, timeout)
-
-    # Preserve the exact autosport.betfair_account_readonly.urlopen function that
-    # K07 treats as part of the canonical provider-origin dependency. Replace only
-    # stdlib's process opener below that function for deterministic unit I/O.
-    monkeypatch.setattr(_urllib_request, "_opener", Opener())
+    # Keep the authority-bearing fresh opener intact; intercept only the
+    # lower HTTPS test seam so deterministic unit I/O cannot become origin authority.
+    _install_https_test_dispatch(monkeypatch, fake_open)
 
 
 def _client(
@@ -112,6 +125,31 @@ def _client(
         BetfairSessionCredentials(application_key, session_token),
         account_label=account_label,
     )
+
+
+def test_process_global_urllib_opener_cannot_mint_k07_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_details_transport(monkeypatch)
+
+    class HostileGlobalOpener:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def open(self, *args, **kwargs):
+            self.calls += 1
+            raise AssertionError(
+                "process-global urllib opener must not serve authenticated K07 I/O"
+            )
+
+    hostile = HostileGlobalOpener()
+    monkeypatch.setattr(_urllib_request, "_opener", hostile)
+
+    client = _client()
+    identity = resolve_betfair_authenticated_account_identity(client)
+
+    assert hostile.calls == 0
+    assert is_authoritative_betfair_account_identity(identity, client=client)
 
 
 def test_k07_import_order_does_not_patch_client_constructor() -> None:

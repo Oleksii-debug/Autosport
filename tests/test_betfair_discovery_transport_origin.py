@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import copy
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import json
 import urllib.request as _urllib_request
 
@@ -100,7 +100,21 @@ class _DiscoveryOpener:
 
 def _client(monkeypatch: pytest.MonkeyPatch):
     opener = _DiscoveryOpener()
-    monkeypatch.setattr(_urllib_request, "_opener", opener)
+
+    def fake_do_open(_self, _http_class, request, **_kwargs):
+        response = opener.open(
+            request,
+            timeout=getattr(request, "timeout", 0),
+        )
+        response.code = 200
+        response.msg = "OK"
+        return response
+
+    monkeypatch.setattr(
+        _urllib_request.AbstractHTTPHandler,
+        "do_open",
+        fake_do_open,
+    )
     client = build_betfair_authenticated_client(
         BetfairSessionCredentials("app-key", "session-token"),
         account_label="caller-label-must-not-be-authority",
@@ -176,6 +190,29 @@ def test_caller_supplied_acquisition_does_not_mint_authenticated_transport_origi
     assert assessment.reason == "NO_AUTHENTICATED_TRANSPORT_RECEIPTS"
 
 
+def test_process_global_urllib_opener_cannot_mint_authenticated_origin(monkeypatch):
+    client, canonical_io = _client(monkeypatch)
+    hostile_opener = _DiscoveryOpener()
+    monkeypatch.setattr(_urllib_request, "_opener", hostile_opener)
+
+    acquisition = origin.acquire_authenticated_betfair_discovery(
+        client,
+        build_list_event_types_request(),
+    )
+
+    assert acquisition.receipt.raw_response_sha256 == (
+        acquisition.exchange.raw_response_sha256
+    )
+    assert origin.is_authoritative_betfair_discovery_transport_receipt(
+        acquisition.receipt
+    )
+    assert hostile_opener.calls == []
+    assert [call["method"] for call in canonical_io.calls] == [
+        "AccountAPING/v1.0/getAccountDetails",
+        "SportsAPING/v1.0/listEventTypes",
+    ]
+
+
 def test_product_owned_authenticated_discovery_mints_exact_live_origin(monkeypatch):
     _client_obj, opener, evidence, event_acq, market_acq = _live_evidence(monkeypatch)
 
@@ -234,6 +271,124 @@ def test_authenticated_origin_rejects_relabelled_account_scope(monkeypatch):
     ):
         origin.require_betfair_authenticated_transport_origin(
             relabelled,
+            receipts=(event_acq.receipt, market_acq.receipt),
+        )
+
+
+def test_captured_requirement_ignores_rebound_public_assessment(monkeypatch):
+    _client_obj, _opener, evidence, _event_acq, _market_acq = _live_evidence(
+        monkeypatch
+    )
+    captured_requirement = origin.require_betfair_authenticated_transport_origin
+    monkeypatch.setattr(
+        origin,
+        "assess_betfair_discovery_transport_origin",
+        lambda *args, **kwargs: origin.BetfairDiscoveryTransportOriginAssessment(
+            True,
+            "FORGED",
+            0,
+            0,
+            (),
+        ),
+    )
+
+    with pytest.raises(
+        BetfairDiscoveryProvenanceError,
+        match="NO_AUTHENTICATED_TRANSPORT_RECEIPTS",
+    ):
+        captured_requirement(evidence)
+
+
+def test_captured_assessment_ignores_rebound_public_receipt_verifier(monkeypatch):
+    _client_obj, _opener, evidence, event_acq, market_acq = _live_evidence(
+        monkeypatch
+    )
+    rebuilt_event = origin.BetfairDiscoveryTransportOriginReceipt._issue(
+        transport_authority_ref=event_acq.receipt.transport_authority_ref,
+        method=event_acq.receipt.method,
+        request_sha256=event_acq.receipt.request_sha256,
+        raw_response_sha256=event_acq.receipt.raw_response_sha256,
+        observed_at_utc=event_acq.receipt.observed_at_utc,
+    )
+    rebuilt_market = origin.BetfairDiscoveryTransportOriginReceipt._issue(
+        transport_authority_ref=market_acq.receipt.transport_authority_ref,
+        method=market_acq.receipt.method,
+        request_sha256=market_acq.receipt.request_sha256,
+        raw_response_sha256=market_acq.receipt.raw_response_sha256,
+        observed_at_utc=market_acq.receipt.observed_at_utc,
+    )
+    captured_assessment = origin.assess_betfair_discovery_transport_origin
+    monkeypatch.setattr(
+        origin,
+        "is_authoritative_betfair_discovery_transport_receipt",
+        lambda receipt: True,
+    )
+
+    assessment = captured_assessment(
+        evidence,
+        receipts=(rebuilt_event, rebuilt_market),
+    )
+
+    assert assessment.grants_authenticated_transport_origin_authority is False
+    assert assessment.reason == "UNISSUED_OR_STALE_AUTHENTICATED_TRANSPORT_RECEIPT"
+
+
+def test_authenticated_origin_rejects_post_issuance_raw_response_mutation(monkeypatch):
+    _client_obj, _opener, evidence, event_acq, market_acq = _live_evidence(
+        monkeypatch
+    )
+    object.__setattr__(
+        evidence.event_type_exchange,
+        "raw_response",
+        b'{"jsonrpc":"2.0","id":999,"result":[]}',
+    )
+
+    with pytest.raises(
+        BetfairDiscoveryProvenanceError,
+        match="changed after authenticated acquisition",
+    ):
+        origin.assess_betfair_discovery_transport_origin(
+            evidence,
+            receipts=(event_acq.receipt, market_acq.receipt),
+        )
+
+
+def test_authenticated_origin_rejects_post_issuance_request_mutation(monkeypatch):
+    _client_obj, _opener, evidence, event_acq, market_acq = _live_evidence(
+        monkeypatch
+    )
+    object.__setattr__(
+        evidence.event_type_exchange,
+        "request",
+        build_list_market_types_request(event_type_ids=("1",)),
+    )
+
+    with pytest.raises(
+        BetfairDiscoveryProvenanceError,
+        match="changed after authenticated acquisition",
+    ):
+        origin.assess_betfair_discovery_transport_origin(
+            evidence,
+            receipts=(event_acq.receipt, market_acq.receipt),
+        )
+
+
+def test_authenticated_origin_rejects_post_issuance_observed_at_mutation(monkeypatch):
+    _client_obj, _opener, evidence, event_acq, market_acq = _live_evidence(
+        monkeypatch
+    )
+    object.__setattr__(
+        evidence.event_type_exchange,
+        "observed_at",
+        evidence.event_type_exchange.observed_at + timedelta(microseconds=1),
+    )
+
+    with pytest.raises(
+        BetfairDiscoveryProvenanceError,
+        match="changed after authenticated acquisition",
+    ):
+        origin.assess_betfair_discovery_transport_origin(
+            evidence,
             receipts=(event_acq.receipt, market_acq.receipt),
         )
 

@@ -123,6 +123,7 @@ def _guard_detached_consumer(
     if inner_closure is None or "inner_globals" not in inner_freevars:
         raise RuntimeError("RunTransaction guarded consumer globals are unavailable")
     inner_globals_index = inner_freevars.index("inner_globals")
+    inner_globals_cell = inner_closure[inner_globals_index]
     closure_values: list[object] = []
     for cell in inner_closure:
         try:
@@ -137,6 +138,24 @@ def _guard_detached_consumer(
     missing = object()
 
     def require_bindings() -> None:
+        current_closure = function.__closure__
+        if (
+            exact_type(function) is not function_type
+            or function.__code__ is not inner_code
+            or current_closure is None
+            or current_closure[inner_globals_index] is not inner_globals_cell
+        ):
+            raise ValueError("RunTransaction detached direct-dispatch executable changed")
+        try:
+            current_inner_globals = inner_globals_cell.cell_contents
+        except ValueError as exc:
+            raise ValueError(
+                "RunTransaction detached direct-dispatch globals cell is empty"
+            ) from exc
+        if current_inner_globals is not inner_globals:
+            raise ValueError(
+                "RunTransaction detached direct-dispatch globals cell changed"
+            )
         if exact_type(inner_globals) is not dict_type:
             raise ValueError("RunTransaction detached direct-dispatch globals changed")
         if dict_len(inner_globals) != frozen_globals_size:
@@ -173,7 +192,10 @@ def _guard_detached_consumer(
         # diagnostics/tests use that exact handle to prove the consumer is detached.
         # Neither it nor the owning guard module globals are execution mappings now.
         if (
-            exact_type(require_surface) is not function_type
+            exact_type(function) is not function_type
+            or function.__code__ is not inner_code
+            or function.__closure__ is not inner_closure
+            or exact_type(require_surface) is not function_type
             or require_surface.__code__ is not require_surface_code
             or exact_type(require_bindings) is not function_type
             or require_bindings.__code__ is not require_bindings_code
@@ -203,7 +225,10 @@ def _guard_detached_consumer(
             return delegate(*args, **kwargs)
         finally:
             if (
-                exact_type(require_surface) is not function_type
+                exact_type(function) is not function_type
+                or function.__code__ is not inner_code
+                or function.__closure__ is not inner_closure
+                or exact_type(require_surface) is not function_type
                 or require_surface.__code__ is not require_surface_code
                 or exact_type(require_bindings) is not function_type
                 or require_bindings.__code__ is not require_bindings_code

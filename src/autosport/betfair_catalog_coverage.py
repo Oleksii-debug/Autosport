@@ -27,7 +27,10 @@ from .betfair_account_identity import (
     resolve_betfair_authenticated_account_identity,
 )
 from .betfair_account_readonly import BetfairReadOnlyClient
-from .betfair_discovery_provenance import BetfairDiscoveryVisibilityScope
+from .betfair_discovery_provenance import (
+    BetfairDiscoveryExchange,
+    BetfairDiscoveryVisibilityScope,
+)
 from .betfair_discovery_transport_origin import (
     BetfairAuthenticatedDiscoveryAcquisition,
     is_authoritative_betfair_discovery_transport_receipt,
@@ -178,21 +181,41 @@ def _provider_result_from_acquisition(
             "coverage acquisition lacks current authenticated account authority"
         ) from exc
     exchange = acquisition.exchange
+    if type(exchange) is not BetfairDiscoveryExchange:
+        raise BetfairCatalogCoverageError(
+            "coverage acquisition exchange is not canonical"
+        )
+    try:
+        current_request_sha256 = _request_sha256(exchange.request)
+        current_raw_response = exchange.raw_response
+        if type(current_raw_response) is not bytes or not current_raw_response:
+            raise BetfairCatalogCoverageError(
+                "coverage acquisition current raw response is invalid"
+            )
+        current_raw_response_sha256 = sha256(current_raw_response).hexdigest()
+        current_observed_at_utc = _utc_text(exchange.observed_at)
+        current_method = exchange.request.method
+    except BetfairCatalogCoverageError:
+        raise
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise BetfairCatalogCoverageError(
+            "coverage acquisition current exchange cannot be revalidated"
+        ) from exc
     if (
-        receipt.method != exchange.method
-        or receipt.request_sha256 != exchange.request_sha256
-        or receipt.raw_response_sha256 != exchange.raw_response_sha256
-        or receipt.observed_at_utc != exchange.observed_at_utc
+        receipt.method != current_method
+        or receipt.request_sha256 != current_request_sha256
+        or receipt.raw_response_sha256 != current_raw_response_sha256
+        or receipt.observed_at_utc != current_observed_at_utc
     ):
         raise BetfairCatalogCoverageError(
-            "coverage acquisition receipt does not bind the exact exchange"
+            "coverage acquisition receipt does not bind the current exchange state"
         )
     if _readonly._decode_json is not _CANONICAL_DECODE_JSON:
         raise BetfairCatalogCoverageError(
             "canonical Betfair JSON decoder changed"
         )
     try:
-        envelope = _CANONICAL_DECODE_JSON(exchange.raw_response)
+        envelope = _CANONICAL_DECODE_JSON(current_raw_response)
     except Exception as exc:
         raise BetfairCatalogCoverageError(
             "receipt-bound Betfair raw response cannot be decoded canonically"

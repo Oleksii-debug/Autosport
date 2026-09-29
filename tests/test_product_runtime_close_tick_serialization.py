@@ -34,24 +34,22 @@ class _Source:
         raise AssertionError("no market delta should be resolved in this test")
 
 
-class _BlockingCoordinator:
-    """Expose the check-then-act window after runtime authority preflight."""
+class _BlockingCollector:
+    """Expose the serialized window from inside a canonical admitted tick."""
 
     def __init__(self, inner, *, tick_entered: Event, allow_tick_return: Event) -> None:
         self._inner = inner
         self._tick_entered = tick_entered
         self._allow_tick_return = allow_tick_return
-        self.tick_effects = 0
+        self.cycle_effects = 0
 
-    def status(self):
-        return self._inner.status()
-
-    def tick(self):
+    def run_cycle(self):
         self._tick_entered.set()
         if not self._allow_tick_return.wait(timeout=5):
             raise AssertionError("test did not release the in-flight runtime tick")
-        self.tick_effects += 1
-        return object()
+        result = self._inner.run_cycle()
+        self.cycle_effects += 1
+        return result
 
     def __getattr__(self, name):
         return getattr(self._inner, name)
@@ -73,8 +71,8 @@ class ProductRuntimeCloseTickSerializationTests(unittest.TestCase):
             tick_errors: list[BaseException] = []
             close_errors: list[BaseException] = []
 
-            runtime.coordinator = _BlockingCoordinator(
-                runtime.coordinator,
+            runtime.coordinator.collector = _BlockingCollector(
+                runtime.coordinator.collector,
                 tick_entered=tick_entered,
                 allow_tick_return=allow_tick_return,
             )
@@ -108,7 +106,7 @@ class ProductRuntimeCloseTickSerializationTests(unittest.TestCase):
                 self.assertFalse(
                     release_entered.wait(timeout=1),
                     "close released product runtime authority while an admitted tick "
-                    "was still inside its coordinator effect",
+                    "was still inside its collector effect",
                 )
             finally:
                 allow_tick_return.set()
@@ -119,7 +117,7 @@ class ProductRuntimeCloseTickSerializationTests(unittest.TestCase):
             self.assertFalse(close_thread.is_alive())
             self.assertEqual(tick_errors, [])
             self.assertEqual(close_errors, [])
-            self.assertEqual(runtime.coordinator.tick_effects, 1)
+            self.assertEqual(runtime.coordinator.collector.cycle_effects, 1)
             self.assertTrue(release_entered.is_set())
 
 

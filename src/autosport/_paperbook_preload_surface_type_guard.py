@@ -31,6 +31,9 @@ _EXT_OBJECT_GETATTRIBUTE = object.__getattribute__
 _EXT_TYPE_GETATTRIBUTE = type.__getattribute__
 _EXT_MODULE_GETATTRIBUTE = ModuleType.__getattribute__
 _EXT_TUPLE = tuple
+_EXT_LEN = len
+_EXT_ZIP = zip
+_EXT_VALUE_ERROR = ValueError
 _EXT_FAILURE = ValueError
 _EXT_EMPTY = object()
 
@@ -156,7 +159,7 @@ def _capture_external_executable_graph(
                 pending.append(value)
             return
         if isinstance(value, tuple):
-            # FrozenSurface is a tuple of (name, value) pairs.  Recurse through nested
+            # FrozenSurface is a tuple of (name, value) pairs. Recurse through nested
             # surfaces without invoking its mutable Python-level iterator override.
             for item in tuple.__iter__(value):
                 if (
@@ -297,18 +300,18 @@ def _same_external_closure_values(
     function: FunctionType,
     expected: tuple[object, ...] | None,
 ) -> bool:
-    current = function.__closure__
+    current = _EXT_OBJECT_GETATTRIBUTE(function, "__closure__")
     if current is None or expected is None:
         return current is None and expected is None
     current_values: list[object] = []
     for cell in current:
         try:
             current_values.append(cell.cell_contents)
-        except ValueError:
+        except _EXT_VALUE_ERROR:
             current_values.append(_EXT_EMPTY)
-    if len(current_values) != len(expected):
+    if _EXT_LEN(current_values) != _EXT_LEN(expected):
         return False
-    for current_value, expected_value in zip(current_values, expected):
+    for current_value, expected_value in _EXT_ZIP(current_values, expected):
         if current_value is not expected_value:
             return False
     return True

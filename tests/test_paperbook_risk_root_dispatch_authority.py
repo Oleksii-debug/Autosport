@@ -71,6 +71,77 @@ def test_root_dispatch_seal_preserves_canonical_policy_class_identity() -> None:
     assert PaperRiskPolicy.__bases__ == (object,)
 
 
+def _hostile_root_code_with_matching_closure(function):
+    closure_count = len(function.__closure__ or ())
+    lines = ["def build():"]
+    for index in range(closure_count):
+        lines.append(f"    cell_{index} = object()")
+    lines.append("    def hostile(self, book, stake, *, context=None):")
+    if closure_count:
+        names = ", ".join(f"cell_{index}" for index in range(closure_count))
+        lines.append(f"        _ = ({names},)")
+    else:
+        lines.append("        _ = None")
+    lines.append("        del self, book, stake, context, _")
+    lines.append("        return 'HOSTILE_RISK_ROOT'")
+    lines.append("    return hostile")
+    namespace: dict[str, object] = {}
+    exec("\\n".join(lines), {}, namespace)
+    hostile = namespace["build"]()
+    assert callable(hostile)
+    assert len(hostile.__closure__ or ()) == closure_count
+    return hostile.__code__
+
+
+def test_instance_evaluate_rejects_in_place_root_code_mutation() -> None:
+    """Normal instance lookup must not bypass the metaclass root seal."""
+
+    book = PaperBook("100")
+    policy = PaperRiskPolicy(
+        max_ticket_fraction=Decimal("1"),
+        max_committed_fraction=Decimal("1"),
+        minimum_cash_reserve_fraction=Decimal("0"),
+    )
+    root = vars(PaperRiskPolicy)["evaluate"]
+    original_code = root.__code__
+    hostile_code = _hostile_root_code_with_matching_closure(root)
+
+    try:
+        root.__code__ = hostile_code
+        with pytest.raises(
+            TypeError,
+            match="canonical PaperRiskPolicy executable root changed: evaluate",
+        ):
+            policy.evaluate(book, Decimal("1"))
+    finally:
+        root.__code__ = original_code
+
+
+def test_retained_instance_evaluate_rechecks_root_code_before_call() -> None:
+    """A bound risk call obtained before mutation must still fail closed."""
+
+    book = PaperBook("100")
+    policy = PaperRiskPolicy(
+        max_ticket_fraction=Decimal("1"),
+        max_committed_fraction=Decimal("1"),
+        minimum_cash_reserve_fraction=Decimal("0"),
+    )
+    retained = policy.evaluate
+    root = vars(PaperRiskPolicy)["evaluate"]
+    original_code = root.__code__
+    hostile_code = _hostile_root_code_with_matching_closure(root)
+
+    try:
+        root.__code__ = hostile_code
+        with pytest.raises(
+            TypeError,
+            match="canonical PaperRiskPolicy executable root changed: evaluate",
+        ):
+            retained(book, Decimal("1"))
+    finally:
+        root.__code__ = original_code
+
+
 def test_owner_facing_root_cannot_be_replaced_via_base_type_api() -> None:
     """Metaclass data descriptors must close explicit type.__setattr__ bypass."""
 

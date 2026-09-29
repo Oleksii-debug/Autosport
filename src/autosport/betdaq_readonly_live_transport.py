@@ -22,7 +22,7 @@ _CANONICAL_POST = UrllibBetdaqSoapTransport.post
 
 
 class BetdaqReadOnlyLiveTransport:
-    """Thin GetPrices bridge over Autosport's existing BETDAQ HTTPS transport.
+    """Read-only BETDAQ bridge over Autosport's existing HTTPS transport.
 
     This object owns no retry policy, entitlement, account, origin-proof or write
     authority. It consumes one admission from the product-owned shared BETDAQ rate
@@ -42,6 +42,16 @@ class BetdaqReadOnlyLiveTransport:
         "_last_rate_admission",
         "_canonical_only",
     )
+
+    def __setattr__(self, name: str, value: object) -> None:
+        # Authority-bearing composition references are immutable after construction.
+        # The one intentionally changing observation slot is updated internally via
+        # object.__setattr__, so normal caller assignment cannot forge evidence.
+        if hasattr(self, name):
+            raise AttributeError(
+                "BETDAQ live transport composition is immutable after construction"
+            )
+        object.__setattr__(self, name, value)
 
     def __init__(
         self,
@@ -104,7 +114,11 @@ class BetdaqReadOnlyLiveTransport:
             raise ProviderUnavailableError(
                 "canonical BETDAQ HTTPS transport authority was replaced"
             )
-        self._last_rate_admission = self._rate_governor.admit(method)
+        object.__setattr__(
+            self,
+            "_last_rate_admission",
+            self._rate_governor.admit(method),
+        )
         try:
             if self._canonical_only:
                 payload = _CANONICAL_POST(

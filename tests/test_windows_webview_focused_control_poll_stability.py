@@ -35,6 +35,22 @@ def test_focused_operator_controls_are_not_overwritten_by_state_poll() -> None:
         assert projection not in source
 
 
+def test_focused_select_options_are_not_rebuilt_by_state_poll() -> None:
+    source = _source()
+
+    helper_start = source.index("function setSelectOptions(node, options")
+    helper_end = source.index("\n  function ownerValues", helper_start)
+    helper = source[helper_start:helper_end]
+
+    assert "if (document.activeElement === node) return;" in helper
+    assert "while (node.options.length > projected.length)" in helper
+    assert "node.appendChild(element);" in helper
+
+    assert "setSelectOptions(strategy, state.strategy_choices || []);" in source
+    assert 'setSelectOptions(nav, state.surfaces || [], "key", "title");' in source
+    assert "setSelectOptions(sourceSelect, productSource.choices || []);" in source
+
+
 def test_readonly_readbacks_preserve_focused_review_position_and_noop_stability() -> None:
     source = _source()
 

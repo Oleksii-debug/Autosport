@@ -21,19 +21,18 @@ import json
 from pathlib import Path
 from typing import Mapping, Sequence
 
-from . import betfair_account_readonly as _readonly
 from .betfair_account_identity import (
     require_authoritative_betfair_account_identity,
     resolve_betfair_authenticated_account_identity,
 )
 from .betfair_account_readonly import BetfairReadOnlyClient
 from .betfair_discovery_provenance import (
-    BetfairDiscoveryExchange,
+    BetfairDiscoveryProvenanceError,
     BetfairDiscoveryVisibilityScope,
 )
 from .betfair_discovery_transport_origin import (
     BetfairAuthenticatedDiscoveryAcquisition,
-    is_authoritative_betfair_discovery_transport_receipt,
+    resolve_authoritative_betfair_authenticated_discovery_result,
 )
 from .betfair_multisport_catalog import (
     LIST_MARKET_CATALOGUE,
@@ -72,7 +71,6 @@ _SCOPE_SPLIT_FIELDS = (
     "marketTypeCodes",
 )
 _CANONICAL_CONNECT = CollectorDeltaStore._connect
-_CANONICAL_DECODE_JSON = _readonly._decode_json
 
 
 class BetfairCatalogCoverageError(RuntimeError):
@@ -161,79 +159,20 @@ def _request_sha256(request: BetfairCatalogRequest) -> str:
 def _provider_result_from_acquisition(
     acquisition: BetfairAuthenticatedDiscoveryAcquisition,
 ) -> object:
-    """Re-decode provider semantics from exact receipt-bound raw bytes."""
+    """Resolve semantics only through the producer-owned authenticated authority."""
 
     if type(acquisition) is not BetfairAuthenticatedDiscoveryAcquisition:
         raise TypeError(
             "acquisition must be exact BetfairAuthenticatedDiscoveryAcquisition"
         )
-    receipt = acquisition.receipt
-    if not is_authoritative_betfair_discovery_transport_receipt(receipt):
-        raise BetfairCatalogCoverageError(
-            "coverage acquisition lacks current authenticated transport origin"
-        )
     try:
-        require_authoritative_betfair_account_identity(
-            acquisition.account_identity
+        return resolve_authoritative_betfair_authenticated_discovery_result(
+            acquisition
         )
-    except Exception as exc:
+    except BetfairDiscoveryProvenanceError as exc:
         raise BetfairCatalogCoverageError(
-            "coverage acquisition lacks current authenticated account authority"
+            "coverage acquisition provider result is not authoritative"
         ) from exc
-    exchange = acquisition.exchange
-    if type(exchange) is not BetfairDiscoveryExchange:
-        raise BetfairCatalogCoverageError(
-            "coverage acquisition exchange is not canonical"
-        )
-    try:
-        current_request_sha256 = _request_sha256(exchange.request)
-        current_raw_response = exchange.raw_response
-        if type(current_raw_response) is not bytes or not current_raw_response:
-            raise BetfairCatalogCoverageError(
-                "coverage acquisition current raw response is invalid"
-            )
-        current_raw_response_sha256 = sha256(current_raw_response).hexdigest()
-        current_observed_at_utc = _utc_text(exchange.observed_at)
-        current_method = exchange.request.method
-    except BetfairCatalogCoverageError:
-        raise
-    except (AttributeError, TypeError, ValueError) as exc:
-        raise BetfairCatalogCoverageError(
-            "coverage acquisition current exchange cannot be revalidated"
-        ) from exc
-    if (
-        receipt.method != current_method
-        or receipt.request_sha256 != current_request_sha256
-        or receipt.raw_response_sha256 != current_raw_response_sha256
-        or receipt.observed_at_utc != current_observed_at_utc
-    ):
-        raise BetfairCatalogCoverageError(
-            "coverage acquisition receipt does not bind the current exchange state"
-        )
-    if _readonly._decode_json is not _CANONICAL_DECODE_JSON:
-        raise BetfairCatalogCoverageError(
-            "canonical Betfair JSON decoder changed"
-        )
-    try:
-        envelope = _CANONICAL_DECODE_JSON(current_raw_response)
-    except Exception as exc:
-        raise BetfairCatalogCoverageError(
-            "receipt-bound Betfair raw response cannot be decoded canonically"
-        ) from exc
-    if type(envelope) is not dict or envelope.get("jsonrpc") != "2.0":
-        raise BetfairCatalogCoverageError(
-            "receipt-bound Betfair JSON-RPC envelope is invalid"
-        )
-    if "error" in envelope and envelope["error"] is not None:
-        raise BetfairCatalogCoverageError(
-            "receipt-bound Betfair exchange contains provider error"
-        )
-    if "result" not in envelope:
-        raise BetfairCatalogCoverageError(
-            "receipt-bound Betfair exchange is missing result"
-        )
-    return envelope["result"]
-
 
 def _decode_request(request_json: str) -> BetfairCatalogRequest:
     try:

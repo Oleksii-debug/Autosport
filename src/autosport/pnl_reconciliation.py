@@ -231,33 +231,44 @@ class PnLReconciliationJournal:
         )
 
     def _reload(self) -> None:
+        previous_orders = self._orders
+        previous_events = self._events
+        previous_revision_count = self._revision_count
+        previous_file_identity = self._loaded_file_identity
         self._orders = {}
         self._events = {}
         self._revision_count = 0
-        raw, self._loaded_file_identity = _read_regular_journal(self.path)
-        if raw is None or not raw:
-            return
-        if not raw.endswith(b"\n"):
-            raise ValueError("reconciliation journal has a truncated final record")
-        for number, line in enumerate(raw.splitlines(), 1):
-            if not line or len(line) > _MAX_LINE_BYTES:
-                raise ValueError(f"reconciliation journal line {number} has invalid bounded length")
-            try:
-                event = json.loads(line.decode("utf-8"), object_pairs_hook=_no_duplicate_keys, parse_constant=_no_constant)
-            except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as exc:
-                raise ValueError(f"reconciliation journal line {number} is invalid") from exc
-            if type(event) is not dict:
-                raise ValueError(f"reconciliation journal line {number} must be an object")
-            encoded = _encode(event)
-            if encoded != line:
-                raise ValueError(f"reconciliation journal line {number} is not canonical JSON")
-            event_id = event.get("event_id")
-            if type(event_id) is str and event_id in self._events:
-                if self._events[event_id] != encoded:
-                    raise ValueError("reconciliation journal reuses event_id with different payload")
-                continue
-            self._validate(event)
-            self._apply(event, encoded)
+        try:
+            raw, loaded_file_identity = _read_regular_journal(self.path)
+            if raw is not None and raw:
+                if not raw.endswith(b"\n"):
+                    raise ValueError("reconciliation journal has a truncated final record")
+                for number, line in enumerate(raw.splitlines(), 1):
+                    if not line or len(line) > _MAX_LINE_BYTES:
+                        raise ValueError(f"reconciliation journal line {number} has invalid bounded length")
+                    try:
+                        event = json.loads(line.decode("utf-8"), object_pairs_hook=_no_duplicate_keys, parse_constant=_no_constant)
+                    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as exc:
+                        raise ValueError(f"reconciliation journal line {number} is invalid") from exc
+                    if type(event) is not dict:
+                        raise ValueError(f"reconciliation journal line {number} must be an object")
+                    encoded = _encode(event)
+                    if encoded != line:
+                        raise ValueError(f"reconciliation journal line {number} is not canonical JSON")
+                    event_id = event.get("event_id")
+                    if type(event_id) is str and event_id in self._events:
+                        if self._events[event_id] != encoded:
+                            raise ValueError("reconciliation journal reuses event_id with different payload")
+                        continue
+                    self._validate(event)
+                    self._apply(event, encoded)
+        except BaseException:
+            self._orders = previous_orders
+            self._events = previous_events
+            self._revision_count = previous_revision_count
+            self._loaded_file_identity = previous_file_identity
+            raise
+        self._loaded_file_identity = loaded_file_identity
 
     def _validate(self, event: dict[str, object]) -> None:
         common = {"schema_version", "event_type", "event_id", "currency", "liability_quantum", "provider_source_id", "provider_order_id"}

@@ -45,7 +45,9 @@ class BetdaqCatalogueEvidence:
             type(self.requested_event_classifier_ids) is not tuple
             or not self.requested_event_classifier_ids
             or any(
-                type(value) is not int or value < 0
+                type(value) is not int
+                or value < 0
+                or value > BETDAQ_PROVIDER_LONG_MAX
                 for value in self.requested_event_classifier_ids
             )
             or len(set(self.requested_event_classifier_ids))
@@ -74,10 +76,18 @@ class BetdaqCatalogueEvidence:
                 or any(ch not in "0123456789abcdef" for ch in value)
                 for value in self.rate_admission_receipts
             )
+            or len(set(self.rate_admission_receipts))
+            != len(self.rate_admission_receipts)
         ):
             raise ValueError(
                 "catalogue rate_admission_receipts must be non-empty SHA-256 tuple"
             )
+        if self.provider_call_id is not None and (
+            type(self.provider_call_id) is not str or not self.provider_call_id
+        ):
+            raise ValueError("catalogue provider_call_id must be non-empty str or None")
+        if self.provider_created_at is not None:
+            _time(self.provider_created_at, "catalogue provider_created_at")
         if self.provider_origin_verified is not False:
             raise ValueError("catalogue evidence cannot claim provider-origin verification")
         if self.grants_execution_authority is not False:

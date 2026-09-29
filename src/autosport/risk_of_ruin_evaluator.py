@@ -1114,7 +1114,7 @@ class ProductRiskOfRuinEvaluator:
             observed = hashlib.sha256(payload).hexdigest()
             try:
                 state = strict_json_loads(payload.decode("utf-8"))
-            except (UnicodeError, ValueError) as exc:
+            except (UnicodeError, ValueError, RecursionError) as exc:
                 raise RiskOfRuinIssuanceError(
                     "risk-of-ruin journal is unreadable"
                 ) from exc

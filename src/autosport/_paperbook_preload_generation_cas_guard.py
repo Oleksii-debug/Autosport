@@ -111,12 +111,22 @@ def _release_snapshot_publication_lock(lock):
 def _binding(snapshot_path):
     witness = _witness_path(snapshot_path)
     try:
+        # Preserve the exact lexical absolute spelling that selected the durable
+        # snapshot/witness lineage, while independently pinning its resolved targets.
+        # Guarded operations must round-trip through the lexical spelling because
+        # _snapshot_identity() and _witness_path() intentionally derive authority
+        # from that spelling.  The resolved components remain part of the binding so
+        # a symlink/junction retarget still invalidates already-issued authority.
+        lexical_snapshot = _LOCK_NORMCASE(
+            _LOCK_ABSPATH(_LOCK_FSPATH(snapshot_path))
+        )
         resolved_witness = witness.resolve(strict=False)
         resolved_snapshot = snapshot_path.resolve(strict=False)
     except OSError as exc:
         raise ValueError("cannot resolve PaperBook independent witness path") from exc
     return (
         _snapshot_identity(snapshot_path),
+        lexical_snapshot,
         _LOCK_NORMCASE(_LOCK_ABSPATH(_LOCK_FSPATH(resolved_snapshot))),
         _LOCK_NORMCASE(_LOCK_ABSPATH(_LOCK_FSPATH(resolved_witness))),
     )
@@ -146,7 +156,7 @@ def _bind_book(book, snapshot_path):
         if existing is None:
             _BOOK_BINDINGS[book] = next_binding
             return
-        if existing[:3] != target:
+        if existing[:4] != target:
             raise ValueError(
                 "PaperBook durable authority is already bound to another path or authority root"
             )
@@ -158,12 +168,12 @@ def _require_bound_book(book, snapshot_path):
     target = _binding(snapshot_path)
     with _BINDING_LOCK:
         existing = _BOOK_BINDINGS.get(book)
-    if existing is None or existing[:3] != target:
+    if existing is None or existing[:4] != target:
         raise ValueError(
             "existing PaperBook snapshot lineage requires verified path-bound authority"
         )
     generation, snapshot_sha = _durable_binding_state(snapshot_path)
-    if existing[3:] != (generation, snapshot_sha):
+    if existing[4:] != (generation, snapshot_sha):
         raise ValueError(_SNAPSHOT_AUTHORITY_STALE_ERROR)
 
 
@@ -172,11 +182,11 @@ def _advance_book_binding(book, snapshot_path):
     generation, snapshot_sha = _durable_binding_state(snapshot_path)
     with _BINDING_LOCK:
         existing = _BOOK_BINDINGS.get(book)
-        if existing is None or existing[:3] != target:
+        if existing is None or existing[:4] != target:
             raise ValueError(
                 "PaperBook snapshot authority changed before durable generation advance"
             )
-        old_generation = existing[3]
+        old_generation = existing[4]
         if generation <= old_generation:
             raise ValueError("PaperBook snapshot authority generation did not advance")
         _BOOK_BINDINGS[book] = (*target, generation, snapshot_sha)

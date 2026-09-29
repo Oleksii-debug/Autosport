@@ -350,3 +350,81 @@ def test_bound_book_cannot_mint_fresh_path_authority(
     assert not unrelated.exists()
     assert not guard._witness_path(unrelated).exists()
     assert PaperBook.load(canonical).balance == Decimal("100")
+
+def _symlink_directory_or_skip(alias, target) -> None:
+    try:
+        alias.symlink_to(target, target_is_directory=True)
+    except (NotImplementedError, OSError) as exc:
+        pytest.skip(f"directory symlink unavailable: {exc}")
+
+
+def test_alias_bound_book_round_trips_one_witness_lineage(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """Generation guards must reuse the lexical path that minted witness identity."""
+
+    _bind_authority_root(tmp_path, monkeypatch)
+    real_root = tmp_path / "real"
+    alias_root = tmp_path / "alias"
+    real_root.mkdir()
+    _symlink_directory_or_skip(alias_root, real_root)
+
+    alias_path = alias_root / "paper-book.json"
+    resolved_path = real_root / "paper-book.json"
+
+    PaperBook("100").save(alias_path)
+    alias_witness = guard._witness_path(alias_path)
+    resolved_witness = guard._witness_path(resolved_path)
+    assert alias_witness != resolved_witness
+    assert alias_witness.exists()
+    assert not resolved_witness.exists()
+
+    working = PaperBook.load(alias_path)
+    opened = working.open_ticket(
+        [_leg("alias-selection")],
+        "10",
+        placed_at=_BASE_TS,
+    )
+    working.save(alias_path)
+
+    assert alias_witness.exists()
+    assert not resolved_witness.exists()
+    reloaded = PaperBook.load(alias_path)
+    assert opened.ticket_id in reloaded.tickets
+    assert reloaded.balance == Decimal("90")
+
+
+def test_alias_retarget_invalidates_existing_generation_authority(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """Keeping lexical round-trip must not permit an alias to retarget silently."""
+
+    _bind_authority_root(tmp_path, monkeypatch)
+    first_root = tmp_path / "first"
+    second_root = tmp_path / "second"
+    alias_root = tmp_path / "alias"
+    first_root.mkdir()
+    second_root.mkdir()
+    _symlink_directory_or_skip(alias_root, first_root)
+
+    alias_path = alias_root / "paper-book.json"
+    PaperBook("100").save(alias_path)
+    working = PaperBook.load(alias_path)
+    balance_before = working.balance
+    tickets_before = tuple(working.tickets)
+
+    alias_root.unlink()
+    _symlink_directory_or_skip(alias_root, second_root)
+
+    with pytest.raises(ValueError, match="verified path-bound authority"):
+        working.open_ticket(
+            [_leg("retargeted-selection")],
+            "10",
+            placed_at=_BASE_TS,
+        )
+
+    assert working.balance == balance_before
+    assert tuple(working.tickets) == tickets_before
+

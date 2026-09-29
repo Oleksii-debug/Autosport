@@ -25,8 +25,13 @@ def test_current_binding_resolver_rejects_coordinated_closure_graph_retarget() -
 
     inner_consumer = _closure_value(guarded, "function")
     assert isinstance(inner_consumer, FunctionType)
-    resolver = _closure_value(inner_consumer, "resolver")
-    assert isinstance(resolver, FunctionType)
+    resolver_entrypoint = _closure_value(inner_consumer, "resolver")
+    assert isinstance(resolver_entrypoint, FunctionType)
+
+    resolver = resolver_entrypoint
+    if "original_callable" in resolver_entrypoint.__code__.co_freevars:
+        resolver = _closure_value(resolver_entrypoint, "original_callable")
+        assert isinstance(resolver, FunctionType)
 
     names = (
         "trusted_globals",
@@ -61,7 +66,7 @@ def test_current_binding_resolver_rejects_coordinated_closure_graph_retarget() -
     cells["graph"].cell_contents = ()
     try:
         try:
-            resolved = resolver()
+            resolved = resolver_entrypoint()
         except Exception:  # noqa: BLE001 - any fail-closed rejection satisfies the oracle.
             pass
         else:

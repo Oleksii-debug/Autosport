@@ -150,6 +150,12 @@ from . import _paperbook_risk_private_authority_guard as _paperbook_risk_private
 # reject normal and base-type class mutation without replacing PaperRiskPolicy identity.
 from . import _paperbook_risk_root_surface_seal as _paperbook_risk_root_surface_seal  # noqa: E402,F401
 
+# RunTransaction current-binding wrappers exist before direct-dispatch detachment.
+# Seal their exact resolver FunctionTypes and transitive FunctionType closure graphs
+# now, so direct-dispatch cannot freeze a resolver whose identity/code stays stable
+# while captured binding/persistence authority cells have been retargeted.
+from . import _run_transaction_current_binding_resolver_closure_guard as _run_transaction_current_binding_resolver_closure_guard  # noqa: E402,F401
+
 # RunTransaction is first imported only after the canonical PaperBook persistence
 # graph above is fully composed. Detach its already-installed stage/promotion wrappers
 # from live module-global stdlib/PaperBook dispatch before later product surfaces can

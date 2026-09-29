@@ -55,7 +55,9 @@ class RunTransactionPaperBookDirectDispatchGuardTests(unittest.TestCase):
         snapshot = dict(frozen_items)
         original_owner = stage_globals["RunTransaction"]
 
-        self.assertNotIn("function", method.__code__.co_freevars)
+        # The exact detached clone is intentionally retained as tamper evidence.
+        # Per-call execution still rebuilds a delegate from frozen composition data.
+        self.assertIn("function", method.__code__.co_freevars)
         self.assertIs(snapshot["RunTransaction"], original_owner)
         try:
             stage_globals["RunTransaction"] = object()
@@ -158,7 +160,9 @@ class RunTransactionPaperBookDirectDispatchGuardTests(unittest.TestCase):
         frozen_items = _closure_value(method, "frozen_globals_items")
         snapshot = dict(frozen_items)
 
-        self.assertNotIn("function", method.__code__.co_freevars)
+        # The exact detached clone is intentionally retained so the outer guard can
+        # witness its code and closure identity before and after delegated execution.
+        self.assertIn("function", method.__code__.co_freevars)
         self.assertIs(snapshot["os"], promotion_globals["os"])
         self.assertIs(snapshot["tempfile"], promotion_globals["tempfile"])
         self.assertIs(snapshot["hashlib"], promotion_globals["hashlib"])

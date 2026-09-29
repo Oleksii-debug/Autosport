@@ -1382,6 +1382,24 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
         connection = self._connect()
         try:
             connection.execute("BEGIN IMMEDIATE")
+            gate = connection.execute(
+                "SELECT schedule_id, gate_binding_sha256 "
+                "FROM collector_schedule_start_gates_v1 "
+                "WHERE source_id=? AND run_id=?",
+                (source_id, run_id),
+            ).fetchone()
+            if gate is not None:
+                self._schedule_authority_sha256(
+                    gate["schedule_id"],
+                    "stored schedule_id",
+                )
+                self._schedule_authority_sha256(
+                    gate["gate_binding_sha256"],
+                    "stored gate_binding_sha256",
+                )
+                raise ValueError(
+                    "gated collector run requires canonical scheduled START authority"
+                )
             row = connection.execute(
                 "SELECT MAX(cycle_seq) FROM collector_cycle_starts_v1 "
                 "WHERE source_id=?",

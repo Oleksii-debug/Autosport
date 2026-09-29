@@ -116,3 +116,33 @@ def test_nested_fee_reader_partial_keyword_mutation_fails_before_provider_ingres
             public_assess(object(), market_id="1.234")
     finally:
         assert provider_number.keywords.pop("hostile") is hostile
+
+
+def test_coherent_outer_reader_closure_retarget_cannot_switch_ingress_capability() -> None:
+    public_assess = applicability.assess_betfair_commission_applicability
+    authority, authority_code = _authority_witness(public_assess)
+    assert authority.__code__ is authority_code
+
+    reader_cell = _closure_cell(public_assess, "fee_input_reader")
+    args_cell = _closure_cell(authority, "fee_input_reader_args")
+    original_reader = reader_cell.cell_contents
+    original_args = args_cell.cell_contents
+    assert type(original_reader) is partial
+
+    forged_args = list(original_reader.args)
+    # Keep the same top-level function/code while replacing one nested parser bearer.
+    forged_args[9] = partial(_hostile_provider_number, applicability.BetfairCommissionApplicabilityError)
+    forged_reader = partial(original_reader.func, *forged_args)
+    try:
+        # The historical mutable expected-args cell is coherently retargeted too. An
+        # object-identity witness embedded in code constants must still reject it.
+        reader_cell.cell_contents = forged_reader
+        args_cell.cell_contents = forged_reader.args
+        with pytest.raises(
+            applicability.BetfairCommissionApplicabilityError,
+            match="fee input reader executable authority changed",
+        ):
+            public_assess(object(), market_id="1.234")
+    finally:
+        args_cell.cell_contents = original_args
+        reader_cell.cell_contents = original_reader

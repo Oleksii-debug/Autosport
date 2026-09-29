@@ -159,6 +159,42 @@ def test_supported_dispatch_rejects_class_surface_replacement(
 
 
 
+@pytest.mark.parametrize(
+    "attribute",
+    (
+        "admit",
+        "_assert_policy_integrity",
+        "_blacklist_state",
+        "_now",
+        "_prune",
+    ),
+)
+def test_supported_dispatch_rejects_in_place_class_method_code_replacement(
+    tmp_path,
+    attribute,
+):
+    governor = _resolved_governor(tmp_path)
+    target = vars(BetdaqRateGovernor)[attribute]
+    original_code = target.__code__
+    hostile_calls = []
+
+    def hostile(*args, **kwargs):
+        hostile_calls.append((args, kwargs))
+        raise AssertionError("hostile class method code executed")
+
+    target.__code__ = hostile.__code__
+    try:
+        with pytest.raises(
+            BetdaqRateGovernorError,
+            match="canonical rate governor class dispatch was replaced",
+        ):
+            admit_betdaq_rate_request(governor, "GetPrices")
+    finally:
+        target.__code__ = original_code
+
+    assert hostile_calls == []
+
+
 def test_supported_dispatch_rejects_class_getattribute_injection(tmp_path):
     governor = _resolved_governor(tmp_path)
     assert "__getattribute__" not in vars(BetdaqRateGovernor)

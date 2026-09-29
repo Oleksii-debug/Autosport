@@ -44,7 +44,10 @@ class _FakeExecutionConfig:
 class _FakeRuntime:
     def __init__(self, workspace: Path, *, initial_bankroll: str = "100") -> None:
         self.workspace = workspace
-        self.manifest = SimpleNamespace(initial_bankroll=initial_bankroll)
+        self.manifest = SimpleNamespace(
+            initial_bankroll=initial_bankroll,
+            source_id="provider-a",
+        )
         self.log: list[str] = []
         self._product_tick = SimpleNamespace(
             source_provider_unavailable=False,
@@ -400,7 +403,7 @@ class ProductPaperDecisionCycleTests(unittest.TestCase):
                     ),
                     execution_config=_FakeExecutionConfig(),
                     max_quote_age=timedelta(seconds=5),
-                    inputs=(ProductDecisionInput("input-a"),),
+                    inputs=(ProductDecisionInput("input-a", source_ids=("provider-a",)),),
                 )
 
     def test_economic_authority_subclass_is_rejected_before_cycle(self) -> None:
@@ -423,7 +426,7 @@ class ProductPaperDecisionCycleTests(unittest.TestCase):
                     ),
                     execution_config=_FakeExecutionConfig(),
                     max_quote_age=timedelta(seconds=5),
-                    inputs=(ProductDecisionInput("input-a"),),
+                    inputs=(ProductDecisionInput("input-a", source_ids=("provider-a",)),),
                 )
 
     def test_runtime_lookalike_is_rejected_before_any_other_validation(self) -> None:
@@ -439,7 +442,7 @@ class ProductPaperDecisionCycleTests(unittest.TestCase):
                 scientific_registry=object(),
                 execution_config=object(),
                 max_quote_age=timedelta(seconds=1),
-                inputs=(ProductDecisionInput("input-a"),),
+                inputs=(ProductDecisionInput("input-a", source_ids=("provider-a",)),),
             )
 
 

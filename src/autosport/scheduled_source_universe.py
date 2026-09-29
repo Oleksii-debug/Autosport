@@ -40,6 +40,32 @@ _CANONICAL_SCHEDULE_CLASS_READ_SEAMS = {
     name: inspect.getattr_static(CollectorDeltaStore, name)
     for name in _CANONICAL_SCHEDULE_READ_SEAMS
 }
+_CANONICAL_PRESTART_ENSURE = CollectorDeltaStore._ensure_collector_schedule
+_CANONICAL_PRESTART_NEXT_SLOT = CollectorDeltaStore._next_collector_schedule_slot
+_CANONICAL_PRESTART_GATE_STATUS = (
+    CollectorDeltaStore._collector_schedule_start_gate_status
+)
+_CANONICAL_PRESTART_SEAMS = frozenset(
+    {
+        "_ensure_collector_schedule",
+        "_next_collector_schedule_slot",
+        "_collector_schedule_start_gate_status",
+        "_connect",
+        "_connect_path",
+        "_path_file_identity",
+        "_collector_schedule_id",
+        "_collector_schedule_due_at",
+        "_schedule_interval_text",
+        "_schedule_max_items",
+        "_schedule_evaluation_window",
+        "_schedule_authority_sha256",
+        "_cycle_terminal_payload_json",
+    }
+)
+_CANONICAL_PRESTART_CLASS_SEAMS = {
+    name: inspect.getattr_static(CollectorDeltaStore, name)
+    for name in _CANONICAL_PRESTART_SEAMS
+}
 _SCHEDULE_KEYS = frozenset(
     {
         "schema_version",
@@ -93,6 +119,21 @@ def _require_canonical_schedule_class_read_seams() -> None:
     if rebound:
         raise ScheduledSourceUniverseError(
             "store canonical schedule read seam is class-rebound: "
+            + ", ".join(rebound)
+        )
+
+
+def _require_canonical_prestart_class_seams() -> None:
+    """Reject runtime replacement of schedule preparation/gate authority."""
+
+    rebound = sorted(
+        name
+        for name, expected in _CANONICAL_PRESTART_CLASS_SEAMS.items()
+        if inspect.getattr_static(CollectorDeltaStore, name, None) is not expected
+    )
+    if rebound:
+        raise ScheduledSourceUniverseError(
+            "store canonical pre-START seam is class-rebound: "
             + ", ".join(rebound)
         )
 
@@ -165,6 +206,238 @@ def _require_expected_store_path(
             "collector store path does not match product-expected authority path"
         )
     return expected
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class PreparedScheduledSourceUniverse:
+    """Resolver-issued durable schedule boundary proven before collector START."""
+
+    schema_version: int
+    source_id: str
+    run_id: str
+    stream_epoch: str
+    schedule_id: str
+    schedule_policy: str
+    anchor_at: str
+    interval_seconds: str
+    max_items: int
+    evaluation_start_slot_ordinal: int
+    evaluation_end_slot_ordinal: int
+    next_slot_ordinal: int
+    next_due_at: str
+    gate_binding_sha256: str
+    prestart_sha256: str
+
+    def __new__(
+        cls, *args: object, **kwargs: object
+    ) -> "PreparedScheduledSourceUniverse":
+        raise TypeError(
+            "PreparedScheduledSourceUniverse is resolver-issued; "
+            "call prepare_scheduled_source_universe"
+        )
+
+    @classmethod
+    def _issue(
+        cls, payload: dict[str, object]
+    ) -> "PreparedScheduledSourceUniverse":
+        instance = object.__new__(cls)
+        for field_name, value in payload.items():
+            object.__setattr__(instance, field_name, value)
+        return instance
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "schema_version": self.schema_version,
+            "source_id": self.source_id,
+            "run_id": self.run_id,
+            "stream_epoch": self.stream_epoch,
+            "schedule_id": self.schedule_id,
+            "schedule_policy": self.schedule_policy,
+            "anchor_at": self.anchor_at,
+            "interval_seconds": self.interval_seconds,
+            "max_items": self.max_items,
+            "evaluation_start_slot_ordinal": self.evaluation_start_slot_ordinal,
+            "evaluation_end_slot_ordinal": self.evaluation_end_slot_ordinal,
+            "next_slot_ordinal": self.next_slot_ordinal,
+            "next_due_at": self.next_due_at,
+            "gate_binding_sha256": self.gate_binding_sha256,
+            "prestart_sha256": self.prestart_sha256,
+        }
+
+
+def prepare_scheduled_source_universe(
+    store: CollectorDeltaStore,
+    *,
+    expected_store_path: str | Path,
+    expected_source_id: str,
+    expected_run_id: str,
+    expected_stream_epoch: str,
+    anchor_at: str,
+    interval_seconds: float,
+    max_items: int,
+    evaluation_start_slot_ordinal: int,
+    evaluation_end_slot_ordinal: int,
+    gate_binding_sha256: str,
+) -> PreparedScheduledSourceUniverse:
+    """Install/re-resolve an immutable schedule gate before any canonical START.
+
+    The gate is installed atomically by the existing collector store authority. This
+    function never authorizes the gate and therefore cannot itself permit provider
+    observation. It fails closed if any START already exists for the durable run.
+    """
+
+    if type(store) is not CollectorDeltaStore:
+        raise TypeError("store must be the exact canonical CollectorDeltaStore")
+    expected_path = _require_expected_store_path(store, expected_store_path)
+    source_id = _text(expected_source_id, "expected_source_id")
+    run_id = _text(expected_run_id, "expected_run_id")
+    stream_epoch = _text(expected_stream_epoch, "expected_stream_epoch")
+    canonical_gate = _sha256(gate_binding_sha256, "gate_binding_sha256")
+    start_slot = _ordinal(
+        evaluation_start_slot_ordinal,
+        "evaluation_start_slot_ordinal",
+    )
+    end_slot = _ordinal(
+        evaluation_end_slot_ordinal,
+        "evaluation_end_slot_ordinal",
+    )
+    if end_slot < start_slot:
+        raise ScheduledSourceUniverseError(
+            "evaluation_end_slot_ordinal cannot precede evaluation_start_slot_ordinal"
+        )
+
+    _require_canonical_prestart_class_seams()
+    instance_state = vars(store)
+    rebound = sorted(
+        name for name in _CANONICAL_PRESTART_SEAMS if name in instance_state
+    )
+    if rebound:
+        raise ScheduledSourceUniverseError(
+            "store canonical pre-START seam is instance-rebound: "
+            + ", ".join(rebound)
+        )
+
+    try:
+        schedule = _CANONICAL_PRESTART_ENSURE(
+            store,
+            source_id=source_id,
+            run_id=run_id,
+            stream_epoch=stream_epoch,
+            anchor_at=anchor_at,
+            interval_seconds=interval_seconds,
+            max_items=max_items,
+            evaluation_start_slot_ordinal=start_slot,
+            evaluation_end_slot_ordinal=end_slot,
+            start_gate_binding_sha256=canonical_gate,
+        )
+        gate = _CANONICAL_PRESTART_GATE_STATUS(
+            store,
+            source_id=source_id,
+            run_id=run_id,
+        )
+        slot = _CANONICAL_PRESTART_NEXT_SLOT(
+            store,
+            source_id=source_id,
+            run_id=run_id,
+        )
+    except (TypeError, ValueError) as exc:
+        raise ScheduledSourceUniverseError(
+            "cannot establish canonical pre-START schedule gate"
+        ) from exc
+
+    _require_canonical_prestart_class_seams()
+    if type(schedule) is not dict:
+        raise ScheduledSourceUniverseError(
+            "collector schedule preparation returned noncanonical evidence"
+        )
+    required_schedule = {
+        "schema_version",
+        "schedule_id",
+        "policy",
+        "source_id",
+        "run_id",
+        "stream_epoch",
+        "anchor_at",
+        "interval_seconds",
+        "max_items",
+        "evaluation_start_slot_ordinal",
+        "evaluation_end_slot_ordinal",
+    }
+    if set(schedule) != required_schedule:
+        raise ScheduledSourceUniverseError(
+            "collector schedule preparation schema is not canonical"
+        )
+    if type(gate) is not dict or set(gate) != {
+        "schedule_id",
+        "gate_binding_sha256",
+        "authorization_sha256",
+    }:
+        raise ScheduledSourceUniverseError(
+            "collector schedule START gate evidence is not canonical"
+        )
+    if type(slot) is not dict or set(slot) != {
+        "schedule_id",
+        "stream_epoch",
+        "max_items",
+        "slot_ordinal",
+        "due_at",
+    }:
+        raise ScheduledSourceUniverseError(
+            "collector next-slot evidence is not canonical"
+        )
+
+    schedule_id = _sha256(schedule["schedule_id"], "schedule_id")
+    if (
+        schedule["schema_version"] != 4
+        or schedule["policy"] != "fixed_interval_v1"
+        or schedule["source_id"] != source_id
+        or schedule["run_id"] != run_id
+        or schedule["stream_epoch"] != stream_epoch
+        or schedule["evaluation_start_slot_ordinal"] != start_slot
+        or schedule["evaluation_end_slot_ordinal"] != end_slot
+        or gate["schedule_id"] != schedule_id
+        or gate["gate_binding_sha256"] != canonical_gate
+        or gate["authorization_sha256"] is not None
+        or slot["schedule_id"] != schedule_id
+        or slot["stream_epoch"] != stream_epoch
+        or slot["max_items"] != schedule["max_items"]
+        or slot["slot_ordinal"] != 0
+    ):
+        raise ScheduledSourceUniverseError(
+            "collector schedule is not a pristine unauthorized pre-START boundary"
+        )
+
+    interval_text = _text(schedule["interval_seconds"], "interval_seconds")
+    anchor_text = _text(schedule["anchor_at"], "anchor_at")
+    next_due_at = _text(slot["due_at"], "next_due_at")
+    if type(schedule["max_items"]) is not int or schedule["max_items"] <= 0:
+        raise ScheduledSourceUniverseError("max_items is not canonical")
+
+    payload: dict[str, object] = {
+        "schema_version": 1,
+        "source_id": source_id,
+        "run_id": run_id,
+        "stream_epoch": stream_epoch,
+        "schedule_id": schedule_id,
+        "schedule_policy": "fixed_interval_v1",
+        "anchor_at": anchor_text,
+        "interval_seconds": interval_text,
+        "max_items": schedule["max_items"],
+        "evaluation_start_slot_ordinal": start_slot,
+        "evaluation_end_slot_ordinal": end_slot,
+        "next_slot_ordinal": 0,
+        "next_due_at": next_due_at,
+        "gate_binding_sha256": canonical_gate,
+    }
+    payload["prestart_sha256"] = hashlib.sha256(
+        _canonical_json(payload)
+    ).hexdigest()
+    if getattr(store, "path", None) != expected_path:
+        raise ScheduledSourceUniverseError(
+            "collector store path changed during pre-START preparation"
+        )
+    _require_canonical_prestart_class_seams()
+    return PreparedScheduledSourceUniverse._issue(payload)
 
 
 @dataclass(frozen=True, slots=True, init=False)

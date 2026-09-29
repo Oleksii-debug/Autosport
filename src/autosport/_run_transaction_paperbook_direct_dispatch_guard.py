@@ -21,6 +21,7 @@ import os
 import tempfile
 from types import FunctionType
 
+from . import _paperbook_preload_authority_guard as _preload_guard
 from . import _paperbook_preload_module_member_freeze as _member_freeze
 from . import paper as _paper
 from . import run_transaction as _run_transaction
@@ -559,6 +560,15 @@ def _detach_consumer(function: FunctionType) -> FunctionType:
             raise RuntimeError("RunTransaction canonical digest dispatch changed before sealing")
         if inner_globals.get("PaperBook") is not _paper.PaperBook:
             raise RuntimeError("RunTransaction canonical PaperBook dispatch changed before sealing")
+        if type(_preload_guard.tempfile) is not _FROZEN_SURFACE:
+            raise RuntimeError(
+                "RunTransaction canonical witnessed tempfile surface changed before sealing"
+            )
+        witnessed_mkstemp = _preload_guard.tempfile.mkstemp
+        if type(witnessed_mkstemp) is not FunctionType:
+            raise RuntimeError(
+                "RunTransaction canonical witnessed tempfile.mkstemp changed before sealing"
+            )
 
         frozen_os = _FROZEN_SURFACE(
             close=os.close,
@@ -566,7 +576,7 @@ def _detach_consumer(function: FunctionType) -> FunctionType:
             replace=os.replace,
             name=os.name,
         )
-        frozen_tempfile = _FROZEN_SURFACE(mkstemp=tempfile.mkstemp)
+        frozen_tempfile = _FROZEN_SURFACE(mkstemp=witnessed_mkstemp)
         frozen_hashlib = _FROZEN_SURFACE(sha256=hashlib.sha256)
         frozen_paper_book = _FROZEN_SURFACE(
             load_bytes=_paper.PaperBook.load_bytes,

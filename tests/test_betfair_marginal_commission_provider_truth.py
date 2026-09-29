@@ -3,6 +3,8 @@ from decimal import Decimal
 
 import pytest
 
+import autosport.betfair_marginal_commission_ev as commission_ev
+
 from autosport.betfair_marginal_commission_ev import (
     BetfairMarketOutcomeEconomicInput,
     calculate_betfair_marginal_commission_ev,
@@ -81,4 +83,29 @@ def test_projection_cannot_be_subclassed_to_override_false_authority():
             @property
             def decision_authorized(self):
                 return True
+
+def test_module_rebinding_cannot_mint_provider_or_execution_truth(monkeypatch):
+    baseline = projection()
+
+    monkeypatch.setattr(
+        commission_ev,
+        "COMMISSION_RATE_BASIS",
+        "SETTLEMENT_AUTHORITATIVE",
+    )
+    monkeypatch.setattr(commission_ev, "PROVIDER_APPLICABILITY_PROVEN", True)
+    monkeypatch.setattr(commission_ev, "PROVIDER_POSTED_EXACT", True)
+    monkeypatch.setattr(commission_ev, "SETTLEMENT_RATE_AUTHORITATIVE", True)
+    monkeypatch.setattr(commission_ev, "EXECUTION_AUTHORIZED", True)
+    monkeypatch.setattr(commission_ev, "REAL_MONEY_EXECUTION", True)
+
+    rebound = projection()
+
+    assert rebound.commission_rate_basis == "DECISION_SNAPSHOT_CONDITIONAL"
+    assert rebound.provider_applicability_proven is False
+    assert rebound.provider_posted_exact is False
+    assert rebound.settlement_rate_authoritative is False
+    assert rebound.execution_authorized is False
+    assert rebound.real_money_execution is False
+    assert rebound.decision_authorized is False
+    assert rebound.calculation_sha256 == baseline.calculation_sha256
 

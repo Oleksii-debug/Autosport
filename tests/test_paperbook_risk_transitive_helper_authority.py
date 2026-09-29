@@ -47,6 +47,23 @@ def _permissive_fraction_limits(self) -> tuple[Decimal, Decimal]:
     return Decimal("1"), Decimal("1")
 
 
+def _hostile_five_freevar_code():
+    one = object()
+    two = object()
+    three = object()
+    four = object()
+    five = object()
+
+    def hostile(*_args, **_kwargs):
+        # Match the finalized private concentration wrapper's five closure slots so
+        # its FunctionType accepts this code object without replacing the function.
+        del _args, _kwargs
+        _ = (one, two, three, four, five)
+        raise AssertionError("retargeted concentration helper code executed")
+
+    return hostile.__code__
+
+
 def _concentration_policy_and_context() -> tuple[
     PaperRiskPolicy,
     PaperBook,
@@ -145,8 +162,8 @@ def test_reconstructed_evaluate_rejects_transitive_fraction_limit_code_retarget(
         helper.__code__ = original_code
 
 
-def test_reconstructed_evaluate_rejects_transitive_concentration_helper_before_dispatch() -> None:
-    """First-level proposal witness must cover its nested concentration authority."""
+def test_finalized_concentration_helper_descriptor_is_sealed() -> None:
+    """Generation/private helper replacement is rejected after final composition."""
 
     reconstructed = _reconstruct_pre_wrapper_evaluate()
     policy, book, context = _concentration_policy_and_context()
@@ -158,7 +175,6 @@ def test_reconstructed_evaluate_rejects_transitive_concentration_helper_before_d
 
     descriptor = vars(PaperRiskPolicy)["_identity_concentration_decision"]
     assert type(descriptor) is classmethod
-    hostile_calls = 0
 
     def hostile_identity_concentration_decision(
         cls,
@@ -169,26 +185,48 @@ def test_reconstructed_evaluate_rejects_transitive_concentration_helper_before_d
         dimension,
         limit,
     ):
-        nonlocal hostile_calls
         del cls, book, amount, context, dimension, limit
-        hostile_calls += 1
         return None
 
-    type.__setattr__(
-        PaperRiskPolicy,
-        "_identity_concentration_decision",
-        classmethod(hostile_identity_concentration_decision),
-    )
     try:
-        decision = reconstructed(policy, book, amount, context=context)
-        assert decision.allowed is False
-        assert hostile_calls == 0, (
-            "reconstructed evaluate dispatched a retargeted transitive "
-            "concentration helper"
-        )
-    finally:
         type.__setattr__(
             PaperRiskPolicy,
             "_identity_concentration_decision",
-            descriptor,
+            classmethod(hostile_identity_concentration_decision),
         )
+    except TypeError:
+        pass
+    else:
+        type.__setattr__(PaperRiskPolicy, "_identity_concentration_decision", descriptor)
+        raise AssertionError("finalized concentration helper descriptor was replaceable")
+
+    assert vars(PaperRiskPolicy)["_identity_concentration_decision"] is descriptor
+
+
+def test_finalized_concentration_helper_code_retarget_fails_before_dispatch() -> None:
+    """Exact post-private helper code is witnessed even when function identity survives."""
+
+    reconstructed = _reconstruct_pre_wrapper_evaluate()
+    policy, book, context = _concentration_policy_and_context()
+    amount = Decimal("10")
+
+    descriptor = vars(PaperRiskPolicy)["_identity_concentration_decision"]
+    assert type(descriptor) is classmethod
+    helper = descriptor.__func__
+    original_code = helper.__code__
+    hostile_code = _hostile_five_freevar_code()
+    assert len(hostile_code.co_freevars) == len(original_code.co_freevars) == 5
+
+    helper.__code__ = hostile_code
+    try:
+        try:
+            reconstructed(policy, book, amount, context=context)
+        except TypeError as exc:
+            assert "canonical PaperRiskPolicy executable root changed" in str(exc)
+        else:
+            raise AssertionError(
+                "reconstructed evaluate dispatched after finalized concentration "
+                "helper code retargeting"
+            )
+    finally:
+        helper.__code__ = original_code

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import builtins
 from types import FunctionType
 
 import autosport._run_transaction_current_binding_resolver_closure_guard as resolver_guard
@@ -16,6 +17,22 @@ def _closure_cell(function: FunctionType, name: str):
 
 def _closure_value(function: FunctionType, name: str):
     return _closure_cell(function, name).cell_contents
+
+
+def _resolver_entrypoint(method: FunctionType, name: str) -> FunctionType:
+    inner_consumer = _closure_value(method, "function")
+    assert isinstance(inner_consumer, FunctionType)
+    entrypoint = _closure_value(inner_consumer, name)
+    assert isinstance(entrypoint, FunctionType)
+    return entrypoint
+
+
+def _original_callable(entrypoint: FunctionType) -> FunctionType:
+    if "original_callable" not in entrypoint.__code__.co_freevars:
+        return entrypoint
+    original = _closure_value(entrypoint, "original_callable")
+    assert isinstance(original, FunctionType)
+    return original
 
 
 def test_current_binding_resolver_rejects_coordinated_closure_graph_retarget() -> None:
@@ -81,6 +98,74 @@ def test_current_binding_resolver_rejects_coordinated_closure_graph_retarget() -
 
     for name, value in originals.items():
         assert cells[name].cell_contents is value
+
+
+def test_current_binding_resolvers_reject_late_builtin_global_shadow_before_dispatch() -> None:
+    """Late globals must not replace builtins used by the transitive resolver graph."""
+
+    for method in (
+        RunTransaction._stage_paper_book_snapshot,
+        RunTransaction._promote_paper_book_snapshot,
+    ):
+        assert isinstance(method, FunctionType)
+        entrypoint = _resolver_entrypoint(method, "resolver")
+        original = _original_callable(entrypoint)
+        globals_mapping = original.__globals__
+        assert "zip" not in globals_mapping
+        hostile_calls = 0
+
+        def hostile_zip(*args):
+            nonlocal hostile_calls
+            hostile_calls += 1
+            return builtins.zip(*args)
+
+        globals_mapping["zip"] = hostile_zip
+        try:
+            try:
+                entrypoint()
+            except Exception:  # noqa: BLE001 - fail closed is the required behavior.
+                pass
+            else:
+                raise AssertionError(
+                    "current-binding resolver accepted a late global shadow of builtin zip"
+                )
+        finally:
+            del globals_mapping["zip"]
+        assert hostile_calls == 0
+
+
+def test_persistence_resolvers_reject_late_builtin_global_shadow_before_dispatch() -> None:
+    """Ephemeral persistence reconstruction must not execute a shadowed builtin dict."""
+
+    for method in (
+        RunTransaction._stage_paper_book_snapshot,
+        RunTransaction._promote_paper_book_snapshot,
+    ):
+        assert isinstance(method, FunctionType)
+        entrypoint = _resolver_entrypoint(method, "persistence_resolver")
+        original = _original_callable(entrypoint)
+        globals_mapping = original.__globals__
+        assert "dict" not in globals_mapping
+        hostile_calls = 0
+
+        def hostile_dict(*args, **kwargs):
+            nonlocal hostile_calls
+            hostile_calls += 1
+            return builtins.dict(*args, **kwargs)
+
+        globals_mapping["dict"] = hostile_dict
+        try:
+            try:
+                entrypoint()
+            except Exception:  # noqa: BLE001 - fail closed is the required behavior.
+                pass
+            else:
+                raise AssertionError(
+                    "persistence resolver accepted a late global shadow of builtin dict"
+                )
+        finally:
+            del globals_mapping["dict"]
+        assert hostile_calls == 0
 
 
 def test_resolver_guard_install_mutators_are_not_runtime_capabilities() -> None:

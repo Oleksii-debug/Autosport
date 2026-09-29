@@ -77,6 +77,11 @@ def test_direct_publish_append_cannot_mint_receipt_without_canonical_issuer(
         match="requires the canonical transaction issuer",
     ):
         store._append_publish_commit_record(transaction)
+    with pytest.raises(
+        ValueError,
+        match="requires the canonical transaction issuer",
+    ):
+        receipt_guard._append_publish_commit_record(store, transaction)
 
     assert not store._publish_commit_ledger_path().exists()
 

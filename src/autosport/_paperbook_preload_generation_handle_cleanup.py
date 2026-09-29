@@ -162,6 +162,28 @@ from . import _run_transaction_current_binding_resolver_closure_guard as _run_tr
 # import and capture the transaction class.
 from . import _run_transaction_paperbook_direct_dispatch_guard as _run_transaction_paperbook_direct_dispatch_guard  # noqa: E402,F401
 
+# Direct-dispatch composition is also one-shot. Its factory/rebuild helpers can create
+# authority-bearing detached FunctionTypes and are not runtime product API. Remove
+# those handles only after the canonical stage/promotion methods have captured their
+# exact snapshots; downstream verifier sealing consumes the installed methods, not
+# these composition utilities.
+_direct_dispatch_namespace = _run_transaction_paperbook_direct_dispatch_guard.__dict__
+for _direct_dispatch_name in (
+    "_detach_consumer",
+    "_guard_detached_consumer",
+    "_make_surface_authority_checker",
+    "_fresh_cell",
+):
+    _direct_dispatch_value = _direct_dispatch_namespace.get(_direct_dispatch_name)
+    if type(_direct_dispatch_value) is not FunctionType:
+        raise RuntimeError(
+            f"RunTransaction direct-dispatch setup handle is unavailable: {_direct_dispatch_name}"
+        )
+    del _direct_dispatch_namespace[_direct_dispatch_name]
+del _direct_dispatch_namespace
+del _direct_dispatch_name
+del _direct_dispatch_value
+
 # The detached binding verifier itself still exposes closure cells for exact lookup
 # primitives as tamper evidence. Seal those helpers immediately after direct-dispatch
 # composition so a later retarget is rejected before the verifier can execute it.

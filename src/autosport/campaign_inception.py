@@ -65,6 +65,9 @@ _CANONICAL_GATE_STATUS = CollectorDeltaStore._collector_schedule_start_gate_stat
 _CANONICAL_GATE_AUTHORIZE = CollectorDeltaStore._authorize_collector_schedule_start_gate
 _CANONICAL_SCHEDULE_ID = CollectorDeltaStore._collector_schedule_id
 _CANONICAL_SCHEDULE_DUE_AT = CollectorDeltaStore._collector_schedule_due_at
+_CANONICAL_PATH_EQUALITY = Path.__eq__
+_CANONICAL_PATH_FSPATH = Path.__fspath__
+_CANONICAL_ABSPATH = os.path.abspath
 _CANONICAL_STORE_SEAMS = frozenset(
     {
         "_next_collector_schedule_slot",
@@ -667,6 +670,27 @@ def _expected_schedule_id(spec: CampaignInceptionSourceSpec) -> str:
     return _sha256(result, "expected schedule_id")
 
 
+def _canonical_absolute_path_text(value: object) -> str:
+    """Resolve a Path through import-time captured path/filesystem dispatch only."""
+
+    if not isinstance(value, Path):
+        raise CampaignInceptionIntegrityError(
+            "campaign inception path identity is unavailable"
+        )
+    try:
+        raw = _CANONICAL_PATH_FSPATH(value)
+        canonical = _CANONICAL_ABSPATH(raw)
+    except (OSError, TypeError, ValueError) as exc:
+        raise CampaignInceptionIntegrityError(
+            "campaign inception path identity cannot be canonicalized"
+        ) from exc
+    if type(raw) is not str or type(canonical) is not str:
+        raise CampaignInceptionIntegrityError(
+            "campaign inception path identity is noncanonical"
+        )
+    return canonical
+
+
 def _prepared_payload_from_existing_gate(
     *,
     store: CollectorDeltaStore,
@@ -676,7 +700,10 @@ def _prepared_payload_from_existing_gate(
     """Reconstruct the original slot-zero preparation without creating authority."""
 
     _require_store_seams(store)
-    if Path(os.path.abspath(store.path)) != spec.expected_store_path:
+    if (
+        _canonical_absolute_path_text(store.path)
+        != _canonical_absolute_path_text(spec.expected_store_path)
+    ):
         raise CampaignInceptionIntegrityError(
             "collector store path changed from campaign receipt"
         )
@@ -756,7 +783,10 @@ def _resolve_gate_and_authorize(
     authority_record_sha256: str,
 ) -> None:
     _require_store_seams(store)
-    if Path(os.path.abspath(store.path)) != spec.expected_store_path:
+    if (
+        _canonical_absolute_path_text(store.path)
+        != _canonical_absolute_path_text(spec.expected_store_path)
+    ):
         raise CampaignInceptionIntegrityError(
             "collector store path changed from campaign receipt"
         )
@@ -1115,6 +1145,14 @@ def _seal_campaign_inception_dispatch() -> None:
     expected_authority_type = MonotonicWorkspaceAuthority
     expected_lock_type = WorkspaceEconomicLock
     expected_path_type = Path
+    expected_path_equality = _CANONICAL_PATH_EQUALITY
+    expected_path_equality_code = getattr(expected_path_equality, "__code__", None)
+    expected_path_fspath = _CANONICAL_PATH_FSPATH
+    expected_path_fspath_code = getattr(expected_path_fspath, "__code__", None)
+    expected_canonical_abspath = _CANONICAL_ABSPATH
+    expected_canonical_abspath_code = getattr(
+        expected_canonical_abspath, "__code__", None
+    )
     expected_inspect = inspect
     expected_getattr_static = inspect.getattr_static
     expected_getattr_static_code = getattr(expected_getattr_static, "__code__", None)
@@ -1166,6 +1204,9 @@ def _seal_campaign_inception_dispatch() -> None:
             ("_CANONICAL_GATE_AUTHORIZE", _CANONICAL_GATE_AUTHORIZE),
             ("_CANONICAL_SCHEDULE_ID", _CANONICAL_SCHEDULE_ID),
             ("_CANONICAL_SCHEDULE_DUE_AT", _CANONICAL_SCHEDULE_DUE_AT),
+            ("_CANONICAL_PATH_EQUALITY", _CANONICAL_PATH_EQUALITY),
+            ("_CANONICAL_PATH_FSPATH", _CANONICAL_PATH_FSPATH),
+            ("_CANONICAL_ABSPATH", _CANONICAL_ABSPATH),
         )
     )
     helper_witnesses = tuple(
@@ -1192,6 +1233,10 @@ def _seal_campaign_inception_dispatch() -> None:
             ("_authority", _authority),
             ("_record_for_recovery", _record_for_recovery),
             ("_expected_schedule_id", _expected_schedule_id),
+            (
+                "_canonical_absolute_path_text",
+                _canonical_absolute_path_text,
+            ),
             (
                 "_prepared_payload_from_existing_gate",
                 _prepared_payload_from_existing_gate,
@@ -1223,6 +1268,10 @@ def _seal_campaign_inception_dispatch() -> None:
     dynamic_surface_witnesses = tuple(
         class_surface_witness(owner, name)
         for owner, names in (
+            (
+                expected_path_type,
+                ("__new__", "__eq__", "__fspath__"),
+            ),
             (
                 expected_authority_type,
                 ("__init__", "prepare", "commit", "recover", "read_history"),
@@ -1281,6 +1330,24 @@ def _seal_campaign_inception_dispatch() -> None:
             or module_globals.get("_HEX") is not expected_hex
         ):
             raise expected_error_type("campaign inception schema/domain authority is rebound")
+
+        if (
+            module_globals.get("_CANONICAL_PATH_EQUALITY")
+            is not expected_path_equality
+            or getattr(expected_path_equality, "__code__", None)
+            is not expected_path_equality_code
+            or module_globals.get("_CANONICAL_PATH_FSPATH")
+            is not expected_path_fspath
+            or getattr(expected_path_fspath, "__code__", None)
+            is not expected_path_fspath_code
+            or module_globals.get("_CANONICAL_ABSPATH")
+            is not expected_canonical_abspath
+            or getattr(expected_canonical_abspath, "__code__", None)
+            is not expected_canonical_abspath_code
+        ):
+            raise expected_error_type(
+                "campaign inception path dispatch authority is rebound or mutated"
+            )
 
         if (
             module_globals.get("inspect") is not expected_inspect

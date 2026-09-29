@@ -57,22 +57,22 @@ class _Collector:
         self.stop_called = threading.Event()
         self.stop_reasons: list[str] = []
         self.stopped = False
-        self.stop_reason: str | None = None
+        self._durable_stop_reason: str | None = None
 
     def status(self) -> dict[str, object]:
         return {
             "stopped_at": "2026-09-29T05:15:00+00:00" if self.stopped else None,
-            "stop_reason": self.stop_reason if self.stopped else None,
+            "stop_reason": self._durable_stop_reason if self.stopped else None,
         }
 
     def resume(self) -> None:
         self.stopped = False
-        self.stop_reason = None
+        self._durable_stop_reason = None
 
     def stop(self, reason: str) -> None:
         self.stop_reasons.append(reason)
         self.stopped = True
-        self.stop_reason = reason
+        self._durable_stop_reason = reason
         self.stop_called.set()
 
 
@@ -153,7 +153,7 @@ class ProductOperatorInflightStopPreemptionTests(unittest.TestCase):
                 stop_intent_preempted_tick = collector.stop_requested.wait(1)  # type: ignore[attr-defined]
                 tick_was_still_inflight = not tick_done.is_set()
                 durable_stop_waited_for_quiescence = not collector.stop_called.is_set()
-                stop_reason = collector.stop_reason()  # type: ignore[operator]
+                stop_reason = collector.stop_reason()  # type: ignore[attr-defined]
             finally:
                 coordinator.release_tick.set()
                 tick_thread.join(2)

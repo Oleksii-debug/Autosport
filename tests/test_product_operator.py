@@ -26,23 +26,23 @@ class _Collector:
         self.resume_calls = 0
         self.stop_reasons: list[str] = []
         self.stopped = True
-        self.stop_reason: str | None = "fixture_initial_stop"
+        self._durable_stop_reason: str | None = "fixture_initial_stop"
 
     def status(self) -> dict[str, object]:
         return {
             "stopped_at": "2026-09-22T14:15:00+00:00" if self.stopped else None,
-            "stop_reason": self.stop_reason if self.stopped else None,
+            "stop_reason": self._durable_stop_reason if self.stopped else None,
         }
 
     def resume(self) -> None:
         self.resume_calls += 1
         self.stopped = False
-        self.stop_reason = None
+        self._durable_stop_reason = None
 
     def stop(self, reason: str) -> None:
         self.stop_reasons.append(reason)
         self.stopped = True
-        self.stop_reason = reason
+        self._durable_stop_reason = reason
 
 
 class _Coordinator:
@@ -223,7 +223,7 @@ class ProductOperatorControllerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             runtime, collector, coordinator, _ = self._runtime(directory)
             coordinator.stop_reason = "durable_prior_stop"
-            collector.stop_reason = "durable_prior_stop"
+            collector._durable_stop_reason = "durable_prior_stop"
 
             operator = ProductOperatorController(runtime)
 
@@ -363,9 +363,9 @@ class ProductOperatorControllerTests(unittest.TestCase):
                     operator.stop("operator_requested_stop")
                 self.assertTrue(collector.stop_requested())  # type: ignore[attr-defined]
                 self.assertTrue(collector.stopped)
-                with self.assertRaises((ProductOperatorError, RuntimeError)):
+                with self.assertRaises(ProductOperatorError):
                     operator.tick()
-                with self.assertRaises((ProductOperatorError, RuntimeError)):
+                with self.assertRaises(ProductOperatorError):
                     operator.start()
             finally:
                 coordinator.stop = original_stop  # type: ignore[method-assign]

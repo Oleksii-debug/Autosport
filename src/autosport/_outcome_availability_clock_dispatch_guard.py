@@ -147,6 +147,7 @@ def _install_guard() -> None:
             "_fence_context",
             "_canonical_timestamp",
             "_parse_timestamp",
+            "_strict_check",
             "_error_type",
         )
 
@@ -159,6 +160,7 @@ def _install_guard() -> None:
             fence_context,
             canonicalize,
             parse,
+            strict_check,
             error,
         ) -> None:
             self._function = function
@@ -168,6 +170,7 @@ def _install_guard() -> None:
             self._fence_context = fence_context
             self._canonical_timestamp = canonicalize
             self._parse_timestamp = parse
+            self._strict_check = strict_check
             self._error_type = error
 
         def __call__(self) -> str:
@@ -179,7 +182,7 @@ def _install_guard() -> None:
                     raise self._error_type(
                         f"frozen product UTC clock global {name!r} was rebound"
                     )
-            return _strictly_after_registry_fence(
+            return self._strict_check(
                 self._function(),
                 self._fence_context.get(),
                 canonical_timestamp=self._canonical_timestamp,
@@ -199,6 +202,7 @@ def _install_guard() -> None:
         _REGISTRY_AVAILABILITY_FENCE,
         canonical_timestamp,
         parse_timestamp,
+        _strictly_after_registry_fence,
         error_type,
     )
     del clock_clone
@@ -227,6 +231,7 @@ def _install_guard() -> None:
             "_fence_context",
             "_canonical_timestamp",
             "_parse_timestamp",
+            "_fence_reader",
             "_error_type",
             "_public_wrapper",
         )
@@ -245,6 +250,7 @@ def _install_guard() -> None:
             fence_context,
             canonicalize,
             parse,
+            fence_reader,
             error,
         ) -> None:
             self._function = function
@@ -259,6 +265,7 @@ def _install_guard() -> None:
             self._fence_context = fence_context
             self._canonical_timestamp = canonicalize
             self._parse_timestamp = parse
+            self._fence_reader = fence_reader
             self._error_type = error
             self._public_wrapper = None
 
@@ -297,7 +304,7 @@ def _install_guard() -> None:
             # lock again, so no stale writer can advance established history between
             # the fence snapshot and the two-phase UNKNOWN -> available transition.
             with self._path_lock(registry.path):
-                fence = _registry_availability_fence(
+                fence = self._fence_reader(
                     registry,
                     canonical_timestamp=self._canonical_timestamp,
                     parse_timestamp=self._parse_timestamp,
@@ -332,6 +339,7 @@ def _install_guard() -> None:
         _REGISTRY_AVAILABILITY_FENCE,
         canonical_timestamp,
         parse_timestamp,
+        _registry_availability_fence,
         error_type,
     )
     del begin_clone

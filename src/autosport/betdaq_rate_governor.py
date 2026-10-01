@@ -1197,6 +1197,8 @@ _CANONICAL_BLACKLIST_STATE: Final = BetdaqRateGovernor._blacklist_state
 _CANONICAL_NOW: Final = BetdaqRateGovernor._now
 _CANONICAL_PRUNE: Final = BetdaqRateGovernor._prune
 _CANONICAL_ADMIT: Final = BetdaqRateGovernor.admit
+_CANONICAL_GOVERNOR_INIT: Final = BetdaqRateGovernor.__init__
+_CANONICAL_OBJECT_NEW: Final = object.__new__
 _MISSING_CLASS_SLOT: Final = object()
 _CANONICAL_GOVERNOR_CLASS_SURFACE: Final = tuple(
     (
@@ -1482,7 +1484,14 @@ def resolve_betdaq_rate_governor(
                 runtime.blacklist_blocked_until[
                     observation.operation_id
                 ] = now + restart_remaining
-        governor = BetdaqRateGovernor(
+        # Do not re-enter the mutable class __new__ dispatch slot here.  A
+        # hostile __new__ injection is rejected by the class-surface witness above,
+        # and even a later removal can leave CPython's cached tp_new slot altered for
+        # the lifetime of this type.  Allocate through the captured canonical
+        # object.__new__ primitive, then invoke the exact witnessed initializer.
+        governor = _CANONICAL_OBJECT_NEW(_CANONICAL_GOVERNOR_TYPE)
+        _CANONICAL_GOVERNOR_INIT(
+            governor,
             root,
             policy,
             runtime=runtime,

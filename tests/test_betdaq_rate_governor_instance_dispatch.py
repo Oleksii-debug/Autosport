@@ -225,12 +225,17 @@ def test_supported_dispatch_rejects_in_place_class_method_code_replacement(
     governor = _resolved_governor(tmp_path)
     target = vars(BetdaqRateGovernor)[attribute]
     original_code = target.__code__
-    hostile_calls = []
 
+    # Keep this replacement code closure-free.  Assigning __code__ requires the
+    # replacement and target to have the same free-variable arity; the canonical
+    # governor methods intentionally have none.  If hostile code executes, the
+    # AssertionError below is itself the regression signal.
     def hostile(*args, **kwargs):
-        hostile_calls.append((args, kwargs))
+        del args, kwargs
         raise AssertionError("hostile class method code executed")
 
+    assert hostile.__code__.co_freevars == ()
+    assert original_code.co_freevars == ()
     target.__code__ = hostile.__code__
     try:
         with pytest.raises(
@@ -240,8 +245,6 @@ def test_supported_dispatch_rejects_in_place_class_method_code_replacement(
             admit_betdaq_rate_request(governor, "GetPrices")
     finally:
         target.__code__ = original_code
-
-    assert hostile_calls == []
 
 
 @pytest.mark.parametrize(

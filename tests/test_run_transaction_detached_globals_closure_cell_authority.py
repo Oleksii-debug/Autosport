@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from types import FunctionType
 
-import autosport.run_transaction as run_transaction
+from autosport.run_transaction import RunTransaction
 
 
 def _closure_cell(function: FunctionType, name: str):
@@ -27,7 +27,7 @@ def test_guarded_promotion_rejects_replaced_executed_globals_cell_before_delegat
     the mutated clone far enough to invoke the delegated function.
     """
 
-    guarded = run_transaction._promote_paper_book_snapshot
+    guarded = RunTransaction._promote_paper_book_snapshot
     assert isinstance(guarded, FunctionType)
 
     clone = _closure_value(guarded, "function")

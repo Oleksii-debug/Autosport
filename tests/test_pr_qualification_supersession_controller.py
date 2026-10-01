@@ -4,7 +4,7 @@ from pathlib import Path
 
 from scripts.cancel_superseded_pr_workflow_runs import PullRequestQualification
 from scripts.cancel_superseded_pr_workflow_runs_scoped import (
-    _cancel_triggering_run_if_nonqualifying,
+    _cancel_triggering_run_if_stale_or_nonqualifying,
 )
 
 
@@ -43,26 +43,27 @@ def test_current_head_request_cancels_only_obsolete_same_pr_workflow_runs() -> N
     assert "--admission-only" not in workflow
 
 
-def test_controller_coalesces_only_same_pr_same_head_same_workflow_decision() -> None:
+def test_controller_bounds_pending_work_per_pr_and_source_workflow() -> None:
     workflow = _text()
 
     concurrency = workflow.split("concurrency:", 1)[1].split("jobs:", 1)[0]
     assert "group: pr-qualification-supersession-" in concurrency
-    assert "github.event.workflow_run.pull_requests[0].number" in concurrency
-    assert "github.event.workflow_run.head_sha" in concurrency
+    assert "format('pr-{0}', github.event.workflow_run.pull_requests[0].number)" in concurrency
     assert "github.event.workflow_run.workflow_id" in concurrency
-    assert "cancel-in-progress: true" in concurrency
-    assert "fresh" in workflow
-    assert "head/state/draft" in workflow
+    assert "github.event.workflow_run.head_sha" not in concurrency
+    assert "cancel-in-progress: false" in concurrency
+    assert "freshly read live head" in workflow
+    assert "bounding backlog" in workflow
 
 
-def test_delayed_stale_head_controller_cannot_preempt_current_head_controller() -> None:
+def test_delayed_stale_head_controller_reconciles_live_head_without_killing_running_controller() -> None:
     workflow = _text()
 
     concurrency = workflow.split("concurrency:", 1)[1].split("jobs:", 1)[0]
-    assert "github.event.workflow_run.head_sha" in concurrency
-    assert "delayed stale-head workflow_run event must never evict" in workflow
-    assert "latest-wins" in workflow
+    assert "github.event.workflow_run.head_sha" not in concurrency
+    assert "delayed stale-head event" in workflow
+    assert "reconciles its source workflow" in workflow
+    assert "cancel-in-progress: false" in concurrency
 
 
 def test_explicit_pr_identity_is_used_only_for_a_singleton_event_reference() -> None:
@@ -82,16 +83,17 @@ def test_explicit_pr_identity_is_used_only_for_a_singleton_event_reference() -> 
     assert "arbitrary first array member" in workflow
 
 
-def test_empty_or_ambiguous_ref_controller_is_run_unique_until_identity_is_resolved() -> None:
+def test_empty_or_ambiguous_ref_controller_is_bounded_without_gaining_pr_authority() -> None:
     workflow = _text()
 
     concurrency = workflow.split("concurrency:", 1)[1].split("jobs:", 1)[0]
-    assert "format('unresolved-run-{0}', github.event.workflow_run.id)" in concurrency
+    assert "|| 'unresolved'" in concurrency
     assert "github.event.workflow_run.pull_requests[1].number" in concurrency
-    assert "github.event.workflow_run.head_sha" in concurrency
-    assert "two distinct PRs may point" in workflow
-    assert "empty or multi-reference payload is unresolved" in workflow
-    assert "run-unique" in workflow
+    assert "github.event.workflow_run.workflow_id" in concurrency
+    assert "github.event.workflow_run.id" not in concurrency
+    assert "Different PRs sharing one commit" in workflow
+    assert "Empty or multi-reference payloads have no PR scheduler" in workflow
+    assert "cannot grant cancellation authority" in workflow
 
 
 def test_controller_does_not_skip_close_merge_run_when_pr_identity_is_unresolved() -> None:
@@ -138,7 +140,7 @@ def test_trusted_controller_cancels_stable_same_head_nonqualifying_source_run() 
     )
     api = FakeTriggeringRunApi([qualification])
 
-    assert _cancel_triggering_run_if_nonqualifying(
+    assert _cancel_triggering_run_if_stale_or_nonqualifying(
         api,
         pr_number=2022,
         event_head_sha="a" * 40,
@@ -162,7 +164,7 @@ def test_trusted_controller_does_not_cancel_after_live_qualification_becomes_cap
         ]
     )
 
-    assert not _cancel_triggering_run_if_nonqualifying(
+    assert not _cancel_triggering_run_if_stale_or_nonqualifying(
         api,
         pr_number=2022,
         event_head_sha="a" * 40,
@@ -172,18 +174,42 @@ def test_trusted_controller_does_not_cancel_after_live_qualification_becomes_cap
     assert api.cancelled == []
 
 
-def test_trusted_controller_does_not_cancel_stale_event_head() -> None:
+def test_trusted_controller_cancels_stale_trigger_after_live_qualification_reread() -> None:
     qualification = PullRequestQualification(
         head_sha="b" * 40,
-        integration_capable=False,
+        integration_capable=True,
     )
-    api = FakeTriggeringRunApi([])
+    api = FakeTriggeringRunApi([qualification])
 
-    assert not _cancel_triggering_run_if_nonqualifying(
+    assert _cancel_triggering_run_if_stale_or_nonqualifying(
         api,
         pr_number=2022,
         event_head_sha="a" * 40,
         current_run_id=7003,
+        qualification=qualification,
+    )
+    assert api.cancelled == [7003]
+
+
+def test_stale_trigger_cancellation_is_revoked_if_live_qualification_moves_again() -> None:
+    qualification = PullRequestQualification(
+        head_sha="b" * 40,
+        integration_capable=True,
+    )
+    api = FakeTriggeringRunApi(
+        [
+            PullRequestQualification(
+                head_sha="c" * 40,
+                integration_capable=True,
+            )
+        ]
+    )
+
+    assert not _cancel_triggering_run_if_stale_or_nonqualifying(
+        api,
+        pr_number=2022,
+        event_head_sha="a" * 40,
+        current_run_id=7004,
         qualification=qualification,
     )
     assert api.cancelled == []

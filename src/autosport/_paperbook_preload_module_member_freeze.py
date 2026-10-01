@@ -302,6 +302,7 @@ def _install() -> None:
     guard_mkstemp = _clone_module_function_graph(tempfile.mkstemp, "witness tempfile.mkstemp")
     guard_normcase = _clone_module_function_graph(os.path.normcase, "witness os.path.normcase")
     guard_abspath = _clone_module_function_graph(os.path.abspath, "witness os.path.abspath")
+    guard_realpath = _clone_module_function_graph(os.path.realpath, "witness os.path.realpath")
     paper_json_loads = _clone_module_function_graph(json.loads, "parser json.loads")
     paper_json_dump = _clone_module_function_graph(json.dump, "serializer json.dump")
     paper_named_temporary_file = _clone_module_function_graph(
@@ -315,6 +316,7 @@ def _install() -> None:
         guard_mkstemp,
         guard_normcase,
         guard_abspath,
+        guard_realpath,
         paper_json_loads,
         paper_json_dump,
         paper_named_temporary_file,
@@ -350,10 +352,13 @@ def _install() -> None:
         _guard._LOCK_NORMCASE = guard_normcase
     if "_LOCK_ABSPATH" in _guard.__dict__:
         _guard._LOCK_ABSPATH = guard_abspath
+    if "_LOCK_REALPATH" in _guard.__dict__:
+        _guard._LOCK_REALPATH = guard_realpath
 
     frozen_path = _FrozenSurface(
         normcase=guard_normcase,
         abspath=guard_abspath,
+        realpath=guard_realpath,
     )
     _guard.json = _FrozenSurface(
         loads=guard_json_loads,

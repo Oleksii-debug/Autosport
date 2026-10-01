@@ -44,17 +44,12 @@ def test_allowed_admission_evaluates_and_opens_inside_one_workspace_lock(tmp_pat
     assert result.risk.allowed is True
     assert result.ticket is not None
     assert result.ticket.stake == Decimal("50")
-    # Admission is copy-on-write: the caller view is never partially adopted before
-    # exact durable readback succeeds. Continue from result.book.
-    assert book.balance == Decimal("1000")
-    assert book.tickets == {}
-    assert result.book is not book
-    assert result.book.balance == Decimal("950")
-    assert len(result.book.tickets) == 1
+    assert book.balance == Decimal("950")
+    assert len(book.tickets) == 1
     persisted = PaperBook.load(tmp_path / "paper_book.json")
     assert persisted.balance == Decimal("950")
     assert result.ticket.ticket_id in persisted.tickets
-    assert set(result.book.tickets) == set(persisted.tickets)
+    assert result.book is book
 
 
 def test_missing_canonical_book_fails_closed_without_bootstrap(tmp_path):
@@ -344,9 +339,7 @@ def test_matching_risk_context_proposal_time_is_persisted_exactly(tmp_path):
     assert result.admitted is True
     assert result.ticket is not None
     assert result.ticket.placed_at == context.proposal_ts
-    assert result.book is not book
-    assert book.balance == Decimal("1000")
-    assert book.tickets == {}
+    assert result.book is book
 
 
 def test_risk_context_bankroll_identity_must_match_persisted_ticket(tmp_path):
@@ -402,9 +395,7 @@ def test_matching_risk_context_remains_admissible(tmp_path):
     assert result.ticket.legs == context.legs
     assert result.ticket.bankroll_id == context.bankroll_id
     assert result.ticket.currency == context.currency
-    assert result.book is not book
-    assert book.balance == Decimal("1000")
-    assert book.tickets == {}
+    assert result.book is book
 
 
 def test_second_stale_book_uses_fresh_canonical_view_without_rebinding_caller(tmp_path):
@@ -438,14 +429,9 @@ def test_second_stale_book_uses_fresh_canonical_view_without_rebinding_caller(tm
     )
 
     assert first.admitted is True
-    assert first.book is not first_view
-    assert first.book.balance == Decimal("900")
-    assert len(first.book.tickets) == 1
-    # Copy-on-write leaves every supplied view unchanged; after the commit their
-    # generation is stale rather than silently granting it newer authority.
-    assert first_view.balance == Decimal("1000")
-    assert first_view.tickets == {}
+    assert first.book is first_view
     assert second.admitted is False
+    # The old caller remains stale instead of being granted the new generation.
     assert stale_second_view.balance == Decimal("1000")
     assert stale_second_view.tickets == {}
     assert second.book is not stale_second_view

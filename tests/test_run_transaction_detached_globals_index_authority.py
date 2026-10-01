@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from types import FunctionType
 
-import autosport.run_transaction as run_transaction
+from autosport.run_transaction import RunTransaction
 
 
 def _closure_cell(function: FunctionType, name: str):
@@ -19,7 +19,7 @@ def _closure_value(function: FunctionType, name: str):
 def test_guard_rejects_coordinated_inner_globals_index_and_cell_retarget() -> None:
     """The verifier cannot move the slot that receives fresh per-call globals."""
 
-    guarded = run_transaction._promote_paper_book_snapshot
+    guarded = RunTransaction._promote_paper_book_snapshot
     assert isinstance(guarded, FunctionType)
     clone = _closure_value(guarded, "function")
     require_bindings = _closure_value(guarded, "require_bindings")

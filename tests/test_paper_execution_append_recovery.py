@@ -200,7 +200,7 @@ class PaperExecutionAppendRecoveryTests(unittest.TestCase):
                 model = _config(**override)
                 book = PaperBook("100.00")
                 runtime = _runtime(root, book, model=model)
-                    action = _action()
+                action = _action()
                 trigger_id = f"live-append-recovery-{outcome.value.lower()}"
 
                 result = runtime.execute(

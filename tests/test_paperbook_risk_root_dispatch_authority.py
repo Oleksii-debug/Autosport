@@ -431,7 +431,8 @@ def test_instance_evaluate_cannot_consume_mutated_book_state_root() -> None:
     try:
         root.__code__ = hostile_code
         decision = policy.evaluate(book, Decimal("1"))
-        assert decision.allowed is True
+        assert decision.allowed is False
+        assert decision.reason == "virtual bankroll generation authority is invalid"
     finally:
         root.__code__ = original_code
 

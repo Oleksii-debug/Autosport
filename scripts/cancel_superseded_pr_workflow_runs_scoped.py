@@ -263,11 +263,12 @@ class WorkflowScopedGitHubApi(GitHubApi):
                     raise CancellationError(
                         "invalid historical associated pull request"
                     )
-                _require_positive_int(
-                    item.get("number"),
-                    field="historical associated pull request number",
+                associated_numbers.add(
+                    _require_positive_int(
+                        item.get("number"),
+                        field="historical associated pull request number",
+                    )
                 )
-                associated_numbers.add(item["number"])
             if len(payload) < _PULLS_PER_PAGE:
                 break
             page += 1

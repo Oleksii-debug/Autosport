@@ -16,20 +16,29 @@ def _closure_value(function: FunctionType, name: str):
     return _closure_cell(function, name).cell_contents
 
 
+def _binding_verifiers(guarded: FunctionType) -> tuple[FunctionType, FunctionType]:
+    outer = _closure_value(guarded, "require_bindings")
+    assert isinstance(outer, FunctionType)
+    inner = outer
+    if "original_require" in outer.__code__.co_freevars:
+        inner = _closure_value(outer, "original_require")
+        assert isinstance(inner, FunctionType)
+    return outer, inner
+
+
 def test_guard_rejects_coordinated_inner_globals_index_and_cell_retarget() -> None:
     """The verifier cannot move the slot that receives fresh per-call globals."""
 
     guarded = RunTransaction._promote_paper_book_snapshot
     assert isinstance(guarded, FunctionType)
     clone = _closure_value(guarded, "function")
-    require_bindings = _closure_value(guarded, "require_bindings")
+    _require_bindings, binding_verifier = _binding_verifiers(guarded)
     assert isinstance(clone, FunctionType)
-    assert isinstance(require_bindings, FunctionType)
     assert clone.__closure__ is not None
 
     guard_index_cell = _closure_cell(guarded, "inner_globals_index")
-    checker_index_cell = _closure_cell(require_bindings, "inner_globals_index")
-    checker_globals_cell_cell = _closure_cell(require_bindings, "inner_globals_cell")
+    checker_index_cell = _closure_cell(binding_verifier, "inner_globals_index")
+    checker_globals_cell_cell = _closure_cell(binding_verifier, "inner_globals_cell")
 
     original_guard_index = guard_index_cell.cell_contents
     original_checker_index = checker_index_cell.cell_contents

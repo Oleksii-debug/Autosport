@@ -343,6 +343,14 @@ def _install() -> None:
         for function in frozen_graph_functions
     )
 
+    # Generation-CAS captured these callables before the module-member freeze.
+    # Retarget the raw aliases to the detached executable clones used by the frozen
+    # os.path facade so same-object stdlib code mutation cannot alter path identity.
+    if "_LOCK_NORMCASE" in _guard.__dict__:
+        _guard._LOCK_NORMCASE = guard_normcase
+    if "_LOCK_ABSPATH" in _guard.__dict__:
+        _guard._LOCK_ABSPATH = guard_abspath
+
     frozen_path = _FrozenSurface(
         normcase=guard_normcase,
         abspath=guard_abspath,

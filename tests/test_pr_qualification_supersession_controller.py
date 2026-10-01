@@ -105,7 +105,7 @@ def test_controller_does_not_skip_close_merge_run_when_pr_identity_is_unresolved
     assert '--pr-number "${{' in job
     assert "github.event.workflow_run.pull_requests[1].number" in job
     assert "|| 0 }}\"" in job
-    assert "unique" in workflow
+    assert "resolves identity" in workflow
 
 
 def test_controller_does_not_cross_coalesce_other_prs_or_source_workflows() -> None:

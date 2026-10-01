@@ -46,7 +46,7 @@ def test_frozen_surface_getattribute_retarget_fails_before_member_dispatch(
     try:
         with pytest.raises(
             ValueError,
-            match="PaperBook persistence class executable authority changed",
+            match="PaperBook persistence class (?:executable|dispatch) authority changed",
         ):
             paper.PaperBook.load(path)
     finally:

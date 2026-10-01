@@ -19,6 +19,30 @@ from .paper import PaperBook
 from . import _paperbook_preload_authority_guard as _paperbook_authority
 from .workspace_lock import _open_read_only_descriptor
 
+# Capture the already-composed canonical PaperBook authority once.  RunTransaction
+# must not redispatch through the mutable guard-module alias/member namespace after
+# product composition: those names are diagnostics/tamper evidence, not capability
+# selectors.
+_PAPERBOOK_WITNESS_PATH = _PAPERBOOK_WITNESS_PATH
+_PAPERBOOK_ACQUIRE_PUBLICATION_LOCK = _PAPERBOOK_ACQUIRE_PUBLICATION_LOCK
+_PAPERBOOK_RELEASE_PUBLICATION_LOCK = _PAPERBOOK_RELEASE_PUBLICATION_LOCK
+_PAPERBOOK_WITNESS_LOCK = _PAPERBOOK_WITNESS_LOCK
+_PAPERBOOK_CALL_WITNESSED_DELEGATE = _PAPERBOOK_CALL_WITNESSED_DELEGATE
+_PAPERBOOK_ORIGINAL_SAVE = _PAPERBOOK_ORIGINAL_SAVE
+_PAPERBOOK_ORIGINAL_SAVE_WITNESS = _PAPERBOOK_ORIGINAL_SAVE_WITNESS
+_PAPERBOOK_SNAPSHOT_IDENTITY = _PAPERBOOK_SNAPSHOT_IDENTITY
+_PAPERBOOK_FILE_SHA256 = _PAPERBOOK_FILE_SHA256
+_PAPERBOOK_RECOVER_PENDING = _PAPERBOOK_RECOVER_PENDING
+_PAPERBOOK_READ_WITNESSES = _PAPERBOOK_READ_WITNESSES
+_PAPERBOOK_APPEND_WITNESS = _PAPERBOOK_APPEND_WITNESS
+_PAPERBOOK_PREPARE = _PAPERBOOK_PREPARE
+_PAPERBOOK_COMMIT = _PAPERBOOK_COMMIT
+_PAPERBOOK_SYNC_AUTHORITY_DIRECTORY = _PAPERBOOK_SYNC_AUTHORITY_DIRECTORY
+_PAPERBOOK_VERIFY_SNAPSHOT_WITNESS = _PAPERBOOK_VERIFY_SNAPSHOT_WITNESS
+_PAPERBOOK_LOAD_BYTES = _PAPERBOOK_LOAD_BYTES
+_PAPERBOOK_LOAD_BYTES_WITNESS = _PAPERBOOK_LOAD_BYTES_WITNESS
+_PAPERBOOK_TYPE = _PAPERBOOK_TYPE
+
 
 _WINDOWS_MAX_COMPONENT_UTF16_CODE_UNITS = 255
 _RUN_SUMMARY_COMPONENT_OVERHEAD_UTF16_CODE_UNITS = len("run-.json".encode("utf-16-le")) // 2
@@ -171,23 +195,23 @@ class RunTransaction:
         staged = self.staged_book_path
         if staged.exists():
             raise RunTransactionError("transaction staged PaperBook artifact already exists")
-        staged_witness = _paperbook_authority._witness_path(staged)
+        staged_witness = _PAPERBOOK_WITNESS_PATH(staged)
         if staged_witness.exists():
             raise RunTransactionError(
                 "transaction staged PaperBook path unexpectedly carries restart authority"
             )
 
-        publication_lock = _paperbook_authority._acquire_snapshot_publication_lock(
-            _paperbook_authority._witness_path(canonical)
+        publication_lock = _PAPERBOOK_ACQUIRE_PUBLICATION_LOCK(
+            _PAPERBOOK_WITNESS_PATH(canonical)
         )
         try:
-            with _paperbook_authority._WITNESS_LOCK:
+            with _PAPERBOOK_WITNESS_LOCK:
                 # There is no unbound fallback: transaction NEW must descend from the
                 # exact currently-authoritative canonical generation.
                 _REQUIRE_CURRENT_BINDING(book, canonical)
-                _paperbook_authority._call_witnessed_delegate(
-                    _paperbook_authority._ORIGINAL_SAVE,
-                    _paperbook_authority._ORIGINAL_SAVE_WITNESS,
+                _PAPERBOOK_CALL_WITNESSED_DELEGATE(
+                    _PAPERBOOK_ORIGINAL_SAVE,
+                    _PAPERBOOK_ORIGINAL_SAVE_WITNESS,
                     "transaction PaperBook staging serializer",
                     book,
                     staged,
@@ -208,7 +232,7 @@ class RunTransaction:
                 f"staged PaperBook semantic validation failed: {exc}"
             ) from exc
         finally:
-            _paperbook_authority._release_snapshot_publication_lock(publication_lock)
+            _PAPERBOOK_RELEASE_PUBLICATION_LOCK(publication_lock)
 
     def _promote_paper_book_snapshot(self) -> None:
         """Advance canonical PaperBook only for this durable precommitted transaction."""
@@ -233,21 +257,21 @@ class RunTransaction:
         expected_base = self._hash_field(manifest, "base", "paper_book_sha256")
         expected_new = self._hash_field(manifest, "new", "paper_book_sha256")
         same_identity = expected_base == expected_new
-        if _paperbook_authority._snapshot_identity(staged) == _paperbook_authority._snapshot_identity(target):
+        if _PAPERBOOK_SNAPSHOT_IDENTITY(staged) == _PAPERBOOK_SNAPSHOT_IDENTITY(target):
             raise RunTransactionError("PaperBook staged and canonical promotion paths must differ")
-        if _paperbook_authority._witness_path(staged).exists():
+        if _PAPERBOOK_WITNESS_PATH(staged).exists():
             raise RunTransactionError("PaperBook staged promotion path must remain non-authoritative")
 
-        publication_lock = _paperbook_authority._acquire_snapshot_publication_lock(
-            _paperbook_authority._witness_path(target)
+        publication_lock = _PAPERBOOK_ACQUIRE_PUBLICATION_LOCK(
+            _PAPERBOOK_WITNESS_PATH(target)
         )
         temporary: Path | None = None
         try:
-            with _paperbook_authority._WITNESS_LOCK:
-                current_sha = _paperbook_authority._file_sha256(target)
-                _paperbook_authority._recover_pending(target, current_sha256=current_sha)
-                current_sha = _paperbook_authority._file_sha256(target)
-                target_records, committed, pending = _paperbook_authority._read_witnesses(target)
+            with _PAPERBOOK_WITNESS_LOCK:
+                current_sha = _PAPERBOOK_FILE_SHA256(target)
+                _PAPERBOOK_RECOVER_PENDING(target, current_sha256=current_sha)
+                current_sha = _PAPERBOOK_FILE_SHA256(target)
+                target_records, committed, pending = _PAPERBOOK_READ_WITNESSES(target)
                 if pending is not None:
                     raise RunTransactionError(
                         "PaperBook canonical witness recovery left pending state"
@@ -283,7 +307,7 @@ class RunTransaction:
                         f"PaperBook staged promotion semantic validation failed: {exc}"
                     ) from exc
 
-                records_now, committed_now, pending_now = _paperbook_authority._read_witnesses(
+                records_now, committed_now, pending_now = _PAPERBOOK_READ_WITNESSES(
                     target
                 )
                 if (
@@ -294,11 +318,11 @@ class RunTransaction:
                     raise RunTransactionError(
                         "PaperBook canonical witness changed during promotion"
                     )
-                if _paperbook_authority._file_sha256(target) != expected_base:
+                if _PAPERBOOK_FILE_SHA256(target) != expected_base:
                     raise RunTransactionError("PaperBook canonical BASE changed during promotion")
                 if (
-                    _paperbook_authority._witness_path(staged).exists()
-                    or _paperbook_authority._file_sha256(staged) != expected_new
+                    _PAPERBOOK_WITNESS_PATH(staged).exists()
+                    or _PAPERBOOK_FILE_SHA256(staged) != expected_new
                 ):
                     raise RunTransactionError("PaperBook staged snapshot changed during promotion")
 
@@ -322,35 +346,35 @@ class RunTransaction:
                     handle.write(staged_payload)
                     handle.flush()
                     os.fsync(handle.fileno())
-                if _paperbook_authority._file_sha256(temporary) != expected_new:
+                if _PAPERBOOK_FILE_SHA256(temporary) != expected_new:
                     raise RunTransactionError("PaperBook promotion copy hash mismatch")
-                if _paperbook_authority._file_sha256(staged) != expected_new:
+                if _PAPERBOOK_FILE_SHA256(staged) != expected_new:
                     raise RunTransactionError(
                         "PaperBook staged snapshot changed before promotion"
                     )
 
                 generation = int(records_now[-1]["generation"]) + 1
-                _paperbook_authority._append_witness(
+                _PAPERBOOK_APPEND_WITNESS(
                     target,
-                    event=_paperbook_authority._PREPARE,
+                    event=_PAPERBOOK_PREPARE,
                     generation=generation,
                     snapshot_sha256=expected_new,
                 )
                 os.replace(temporary, target)
                 temporary = None
                 if os.name != "nt":
-                    _paperbook_authority._sync_authority_directory(target.parent)
-                _paperbook_authority._append_witness(
+                    _PAPERBOOK_SYNC_AUTHORITY_DIRECTORY(target.parent)
+                _PAPERBOOK_APPEND_WITNESS(
                     target,
-                    event=_paperbook_authority._COMMIT,
+                    event=_PAPERBOOK_COMMIT,
                     generation=generation,
                     snapshot_sha256=expected_new,
                 )
-                if _paperbook_authority._file_sha256(target) != expected_new:
+                if _PAPERBOOK_FILE_SHA256(target) != expected_new:
                     raise RunTransactionError(
                         "PaperBook canonical promotion bytes changed after COMMIT"
                     )
-                _paperbook_authority._verify_snapshot_witness(
+                _PAPERBOOK_VERIFY_SNAPSHOT_WITNESS(
                     target,
                     target.read_bytes(),
                 )
@@ -360,7 +384,7 @@ class RunTransaction:
                     temporary.unlink()
                 except FileNotFoundError:
                     pass
-            _paperbook_authority._release_snapshot_publication_lock(publication_lock)
+            _PAPERBOOK_RELEASE_PUBLICATION_LOCK(publication_lock)
 
     def stage_outputs(self, book: PaperBook, canonical_ledger_path: str | Path) -> tuple[str, str]:
         self._require_complete_identity_anchor()
@@ -1160,11 +1184,11 @@ class RunTransaction:
     ) -> None:
         del cls, path
         try:
-            _paperbook_authority._call_witnessed_delegate(
-                _paperbook_authority._LOAD_BYTES,
-                _paperbook_authority._LOAD_BYTES_WITNESS,
+            _PAPERBOOK_CALL_WITNESSED_DELEGATE(
+                _PAPERBOOK_LOAD_BYTES,
+                _PAPERBOOK_LOAD_BYTES_WITNESS,
                 "canonical load_bytes",
-                _paperbook_authority._PAPER_BOOK,
+                _PAPERBOOK_TYPE,
                 snapshot.payload,
             )
         except Exception as exc:

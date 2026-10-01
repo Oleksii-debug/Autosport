@@ -31,5 +31,6 @@ def test_owner_facing_risk_denies_nested_policy_helper_rebind(
     )
 
     after = policy.evaluate(book, Decimal("1"))
-    assert after == baseline
+    assert after.allowed is False
+    assert after.reason == "virtual bankroll private economic authority is invalid"
     assert hostile_calls == []

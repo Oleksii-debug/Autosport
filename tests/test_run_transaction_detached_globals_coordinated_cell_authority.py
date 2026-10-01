@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from types import FunctionType
 
-import autosport.run_transaction as run_transaction
+from autosport.run_transaction import RunTransaction
 
 
 def _closure_cell(function: FunctionType, name: str):
@@ -19,7 +19,7 @@ def _closure_value(function: FunctionType, name: str):
 def test_binding_checker_rejects_coordinated_clone_verifier_and_anchor_retarget() -> None:
     """Clone execution, verifier expectation and identity anchor must not be jointly retargetable."""
 
-    guarded = run_transaction._promote_paper_book_snapshot
+    guarded = RunTransaction._promote_paper_book_snapshot
     assert isinstance(guarded, FunctionType)
 
     clone = _closure_value(guarded, "function")
@@ -71,7 +71,7 @@ def test_binding_checker_rejects_coordinated_clone_verifier_and_anchor_retarget(
 def test_guard_rejects_coordinated_execution_snapshot_and_anchor_retarget() -> None:
     """Execution snapshot and its writable tuple anchor cannot move together."""
 
-    guarded = run_transaction._promote_paper_book_snapshot
+    guarded = RunTransaction._promote_paper_book_snapshot
     assert isinstance(guarded, FunctionType)
 
     snapshot_cell = _closure_cell(guarded, "frozen_globals_items")
@@ -112,7 +112,7 @@ def test_guard_rejects_coordinated_execution_snapshot_and_anchor_retarget() -> N
 def test_guard_rejects_coordinated_binding_verifier_and_snapshot_retarget() -> None:
     """The verifier function/code pair cannot move with the execution snapshot."""
 
-    guarded = run_transaction._promote_paper_book_snapshot
+    guarded = RunTransaction._promote_paper_book_snapshot
     assert isinstance(guarded, FunctionType)
 
     verifier_cell = _closure_cell(guarded, "require_bindings")
@@ -168,7 +168,7 @@ def test_guard_rejects_coordinated_binding_verifier_and_snapshot_retarget() -> N
 def test_guard_rejects_coordinated_type_and_dict_primitive_retarget() -> None:
     """Type validation and execution-map construction cannot be retargeted together."""
 
-    guarded = run_transaction._promote_paper_book_snapshot
+    guarded = RunTransaction._promote_paper_book_snapshot
     assert isinstance(guarded, FunctionType)
 
     exact_type_cell = _closure_cell(guarded, "exact_type")

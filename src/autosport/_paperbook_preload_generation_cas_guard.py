@@ -120,8 +120,8 @@ def _binding(snapshot_path):
         lexical_snapshot = _LOCK_NORMCASE(
             _LOCK_ABSPATH(_LOCK_FSPATH(snapshot_path))
         )
-        resolved_witness = witness.resolve(strict=False)
-        resolved_snapshot = snapshot_path.resolve(strict=False)
+        resolved_witness = _PATH(_LOCK_REALPATH(_LOCK_FSPATH(witness)))
+        resolved_snapshot = _PATH(_LOCK_REALPATH(_LOCK_FSPATH(snapshot_path)))
     except OSError as exc:
         raise ValueError("cannot resolve PaperBook independent witness path") from exc
     return (
@@ -303,6 +303,7 @@ def _install() -> None:
 
     guard_namespace["_LOCK_NORMCASE"] = os.path.normcase
     guard_namespace["_LOCK_ABSPATH"] = os.path.abspath
+    guard_namespace["_LOCK_REALPATH"] = os.path.realpath
     guard_namespace["_LOCK_FSPATH"] = os.fspath
     guard_namespace["_LOCK_OS_OPEN"] = os.open
     guard_namespace["_LOCK_OS_CLOSE"] = os.close

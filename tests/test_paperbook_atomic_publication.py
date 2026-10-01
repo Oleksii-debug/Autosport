@@ -50,14 +50,20 @@ class PaperBookAtomicPublicationTests(unittest.TestCase):
         self.assertEqual(restored.balance, Decimal("90"))
         self.assertEqual(len(restored.tickets), 1)
 
-    def test_publish_failure_preserves_last_good_snapshot_and_cleans_unique_temp(self) -> None:
+    def test_late_replace_injection_is_rejected_without_durable_mutation(self) -> None:
         book = self._book()
         book.save(self.path)
         last_good = self.path.read_bytes()
 
-        with patch("autosport.paper.os.replace", side_effect=OSError("injected replace failure")):
-            with self.assertRaisesRegex(OSError, "injected replace failure"):
-                book.save(self.path)
+        with self.assertRaisesRegex(
+            AttributeError,
+            "PaperBook persistence module surface is frozen",
+        ):
+            with patch(
+                "autosport.paper.os.replace",
+                side_effect=OSError("injected replace failure"),
+            ):
+                pass
 
         self.assertEqual(self.path.read_bytes(), last_good)
         temporary_files = tuple(

@@ -334,29 +334,50 @@ class EconomicGoalRiskBindingTests(unittest.TestCase):
         )
 
     def test_legacy_unknown_settlement_time_remains_conservatively_in_window_after_restart(self) -> None:
-        book = PaperBook("100")
-        lost = book.open_ticket(
+        # Historical schema migration is a structural-parser contract. Rewriting
+        # witnessed path bytes must not mint trusted economic authority.
+        legacy_source = PaperBook("100")
+        legacy_lost = legacy_source.open_ticket(
             [self._leg()],
             Decimal("4"),
             placed_at="2026-09-16T12:00:00+00:00",
         )
-        book.settle(
-            lost.ticket_id,
+        legacy_source.settle(
+            legacy_lost.ticket_id,
             set(),
             settled_at="2026-09-16T12:30:00+00:00",
         )
-
         with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "paper.json"
-            book.save(path)
-            payload = json.loads(path.read_text(encoding="utf-8"))
+            legacy_path = Path(tmp) / "legacy-paper.json"
+            legacy_source.save(legacy_path)
+            payload = json.loads(legacy_path.read_text(encoding="utf-8"))
             payload["schema_version"] = 4
             for ticket in payload["tickets"]:
                 ticket.pop("settled_at")
             for entry in payload["lifecycle"]:
                 if entry["action"] == "settle":
                     entry.pop("settled_at")
-            path.write_text(json.dumps(payload), encoding="utf-8")
+            structural_legacy = PaperBook.load_bytes(
+                json.dumps(payload).encode("utf-8")
+            )
+
+        self.assertIsNone(
+            structural_legacy.tickets[legacy_lost.ticket_id].settled_at
+        )
+
+        # Executable conservative-risk behavior requires a trusted, witnessed
+        # PaperBook. A current snapshot can legitimately carry an unknown
+        # settlement time, and that uncertainty must survive restart.
+        book = PaperBook("100")
+        lost = book.open_ticket(
+            [self._leg()],
+            Decimal("4"),
+            placed_at="2026-09-16T12:00:00+00:00",
+        )
+        book.settle(lost.ticket_id, set(), settled_at=None)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "paper.json"
+            book.save(path)
             restarted = PaperBook.load(path)
 
         self.assertIsNone(restarted.tickets[lost.ticket_id].settled_at)

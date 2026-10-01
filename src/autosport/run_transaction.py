@@ -16,6 +16,8 @@ from .decision_ledger import (
 )
 from .integrity import atomic_write_json, ensure_durable_file, sha256_file
 from .paper import PaperBook
+from . import _paperbook_preload_authority_guard as _paperbook_authority
+from .workspace_lock import _open_read_only_descriptor
 
 
 _WINDOWS_MAX_COMPONENT_UTF16_CODE_UNITS = 255
@@ -34,6 +36,11 @@ _WINDOWS_RESERVED_DEVICE_NAMES = frozenset(
         *(f"LPT{suffix}" for suffix in (*range(1, 10), "¹", "²", "³")),
     }
 )
+
+
+# Match the repository's existing durable-replay file ceiling. Transaction manifests
+# are fixed-schema control records and must never force unbounded restart materialization.
+_MAX_TRANSACTION_MANIFEST_BYTES = 64 * 1024 * 1024
 
 
 class RunTransactionError(RuntimeError):
@@ -155,6 +162,206 @@ class RunTransaction:
         tx._require_complete_identity_anchor()
         return tx
 
+    def _stage_paper_book_snapshot(self, book: PaperBook) -> None:
+        """Write non-authoritative staging bytes from the exact current canonical book."""
+
+        if type(self) is not RunTransaction:
+            raise RunTransactionError("PaperBook staging requires the canonical RunTransaction class")
+        canonical = self.workspace / "paper_book.json"
+        staged = self.staged_book_path
+        if staged.exists():
+            raise RunTransactionError("transaction staged PaperBook artifact already exists")
+        staged_witness = _paperbook_authority._witness_path(staged)
+        if staged_witness.exists():
+            raise RunTransactionError(
+                "transaction staged PaperBook path unexpectedly carries restart authority"
+            )
+
+        publication_lock = _paperbook_authority._acquire_snapshot_publication_lock(
+            _paperbook_authority._witness_path(canonical)
+        )
+        try:
+            with _paperbook_authority._WITNESS_LOCK:
+                # There is no unbound fallback: transaction NEW must descend from the
+                # exact currently-authoritative canonical generation.
+                _REQUIRE_CURRENT_BINDING(book, canonical)
+                _paperbook_authority._call_witnessed_delegate(
+                    _paperbook_authority._ORIGINAL_SAVE,
+                    _paperbook_authority._ORIGINAL_SAVE_WITNESS,
+                    "transaction PaperBook staging serializer",
+                    book,
+                    staged,
+                )
+                if staged_witness.exists():
+                    raise RunTransactionError(
+                        "transaction staging unexpectedly minted PaperBook path authority"
+                    )
+                _REQUIRE_CURRENT_BINDING(book, canonical)
+        except RunTransactionError:
+            raise
+        except (OSError, TypeError, ValueError) as exc:
+            try:
+                staged.unlink()
+            except FileNotFoundError:
+                pass
+            raise RunTransactionError(
+                f"staged PaperBook semantic validation failed: {exc}"
+            ) from exc
+        finally:
+            _paperbook_authority._release_snapshot_publication_lock(publication_lock)
+
+    def _promote_paper_book_snapshot(self) -> None:
+        """Advance canonical PaperBook only for this durable precommitted transaction."""
+
+        if type(self) is not RunTransaction:
+            raise RunTransactionError("PaperBook promotion requires the canonical RunTransaction class")
+
+        # This method is intentionally safe even if called directly: unlike the retired
+        # path+hash helper, it first re-resolves the existing product RunRegistry truth
+        # and revalidates all durable precommit evidence.
+        self._ensure_commit_identity_anchor()
+        manifest = self._read_manifest()
+        if manifest["phase"] not in {"precommitted", "canonical_committed", "completed"}:
+            raise RunTransactionError("transaction lacks durable precommit evidence")
+        self._validate_manifest_paths(manifest)
+        self._validate_precommit_evidence(manifest)
+        self._validate_paper_book_commit_state(manifest)
+        self._validate_decision_ledger_commit_state(manifest)
+
+        staged = self.staged_book_path
+        target = self.workspace / "paper_book.json"
+        expected_base = self._hash_field(manifest, "base", "paper_book_sha256")
+        expected_new = self._hash_field(manifest, "new", "paper_book_sha256")
+        same_identity = expected_base == expected_new
+        if _paperbook_authority._snapshot_identity(staged) == _paperbook_authority._snapshot_identity(target):
+            raise RunTransactionError("PaperBook staged and canonical promotion paths must differ")
+        if _paperbook_authority._witness_path(staged).exists():
+            raise RunTransactionError("PaperBook staged promotion path must remain non-authoritative")
+
+        publication_lock = _paperbook_authority._acquire_snapshot_publication_lock(
+            _paperbook_authority._witness_path(target)
+        )
+        temporary: Path | None = None
+        try:
+            with _paperbook_authority._WITNESS_LOCK:
+                current_sha = _paperbook_authority._file_sha256(target)
+                _paperbook_authority._recover_pending(target, current_sha256=current_sha)
+                current_sha = _paperbook_authority._file_sha256(target)
+                target_records, committed, pending = _paperbook_authority._read_witnesses(target)
+                if pending is not None:
+                    raise RunTransactionError(
+                        "PaperBook canonical witness recovery left pending state"
+                    )
+
+                if current_sha == expected_new and not same_identity:
+                    if committed is None or committed[1] != expected_new:
+                        raise RunTransactionError(
+                            "PaperBook canonical NEW bytes lack matching durable authority"
+                        )
+                    return
+                if current_sha != expected_base:
+                    raise RunTransactionError(
+                        "PaperBook canonical promotion source is neither BASE nor NEW"
+                    )
+                if committed is None or committed[1] != expected_base:
+                    raise RunTransactionError(
+                        "PaperBook canonical BASE lacks matching durable authority"
+                    )
+
+                try:
+                    staged_payload = staged.read_bytes()
+                except OSError as exc:
+                    raise RunTransactionError(
+                        "PaperBook staged promotion snapshot is unreadable"
+                    ) from exc
+                if hashlib.sha256(staged_payload).hexdigest() != expected_new:
+                    raise RunTransactionError("PaperBook staged promotion snapshot hash mismatch")
+                try:
+                    PaperBook.load_bytes(staged_payload)
+                except Exception as exc:
+                    raise RunTransactionError(
+                        f"PaperBook staged promotion semantic validation failed: {exc}"
+                    ) from exc
+
+                records_now, committed_now, pending_now = _paperbook_authority._read_witnesses(
+                    target
+                )
+                if (
+                    pending_now is not None
+                    or committed_now != committed
+                    or len(records_now) != len(target_records)
+                ):
+                    raise RunTransactionError(
+                        "PaperBook canonical witness changed during promotion"
+                    )
+                if _paperbook_authority._file_sha256(target) != expected_base:
+                    raise RunTransactionError("PaperBook canonical BASE changed during promotion")
+                if (
+                    _paperbook_authority._witness_path(staged).exists()
+                    or _paperbook_authority._file_sha256(staged) != expected_new
+                ):
+                    raise RunTransactionError("PaperBook staged snapshot changed during promotion")
+
+                # A valid observation/NO-BET transaction can advance durable ledger and
+                # summary evidence without changing PaperBook economics.  BASE==NEW is
+                # therefore an authenticated no-op only after both canonical witness
+                # state and the exact non-authoritative staged bytes have been rechecked
+                # under the canonical publication lock.  Do not mint a witness generation
+                # merely because another transaction artifact is committing.
+                if same_identity:
+                    return
+
+                fd, temporary_name = tempfile.mkstemp(
+                    dir=target.parent,
+                    prefix=f".{target.name}.promote-authority-",
+                    suffix=".tmp",
+                )
+                os.close(fd)
+                temporary = Path(temporary_name)
+                with temporary.open("wb") as handle:
+                    handle.write(staged_payload)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                if _paperbook_authority._file_sha256(temporary) != expected_new:
+                    raise RunTransactionError("PaperBook promotion copy hash mismatch")
+                if _paperbook_authority._file_sha256(staged) != expected_new:
+                    raise RunTransactionError(
+                        "PaperBook staged snapshot changed before promotion"
+                    )
+
+                generation = int(records_now[-1]["generation"]) + 1
+                _paperbook_authority._append_witness(
+                    target,
+                    event=_paperbook_authority._PREPARE,
+                    generation=generation,
+                    snapshot_sha256=expected_new,
+                )
+                os.replace(temporary, target)
+                temporary = None
+                if os.name != "nt":
+                    _paperbook_authority._sync_authority_directory(target.parent)
+                _paperbook_authority._append_witness(
+                    target,
+                    event=_paperbook_authority._COMMIT,
+                    generation=generation,
+                    snapshot_sha256=expected_new,
+                )
+                if _paperbook_authority._file_sha256(target) != expected_new:
+                    raise RunTransactionError(
+                        "PaperBook canonical promotion bytes changed after COMMIT"
+                    )
+                _paperbook_authority._verify_snapshot_witness(
+                    target,
+                    target.read_bytes(),
+                )
+        finally:
+            if temporary is not None:
+                try:
+                    temporary.unlink()
+                except FileNotFoundError:
+                    pass
+            _paperbook_authority._release_snapshot_publication_lock(publication_lock)
+
     def stage_outputs(self, book: PaperBook, canonical_ledger_path: str | Path) -> tuple[str, str]:
         self._require_complete_identity_anchor()
         manifest = self._read_manifest()
@@ -174,12 +381,7 @@ class RunTransaction:
             self._hash_field(manifest, "base", "decision_ledger_sha256"),
             "Decision Ledger",
         )
-        try:
-            book.save(self.staged_book_path)
-        except ValueError as exc:
-            raise RunTransactionError(
-                f"staged PaperBook semantic validation failed: {exc}"
-            ) from exc
+        self._stage_paper_book_snapshot(book)
         book_snapshot = self._verified_paper_book_snapshot(
             self.staged_book_path,
             "staged PaperBook",
@@ -326,13 +528,7 @@ class RunTransaction:
         self._validate_precommit_evidence(manifest)
         self._validate_paper_book_commit_state(manifest)
         self._validate_decision_ledger_commit_state(manifest)
-        self._promote_base_or_new(
-            target=self.workspace / "paper_book.json",
-            staged=self.staged_book_path,
-            base_hash=self._hash_field(manifest, "base", "paper_book_sha256"),
-            new_hash=self._hash_field(manifest, "new", "paper_book_sha256"),
-            label="PaperBook",
-        )
+        self._promote_paper_book_snapshot()
         self._promote_base_or_new(
             target=self.workspace / "decisions.jsonl",
             staged=self.staged_ledger_path,
@@ -460,9 +656,14 @@ class RunTransaction:
 
     @classmethod
     def _read_strict_json_file(cls, path: Path, *, label: str) -> Any:
+        snapshot = cls._read_canonical_file_snapshot(
+            path,
+            label,
+            max_bytes=_MAX_TRANSACTION_MANIFEST_BYTES,
+        )
         try:
-            text = path.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError) as exc:
+            text = snapshot.payload.decode("utf-8")
+        except UnicodeDecodeError as exc:
             raise RunTransactionError(f"{label} is unreadable or invalid UTF-8") from exc
         return cls._decode_strict_json(text, label=label)
 
@@ -726,7 +927,12 @@ class RunTransaction:
         )
 
     @staticmethod
-    def _read_canonical_file_snapshot(path: Path, label: str) -> VerifiedFileSnapshot:
+    def _read_canonical_file_snapshot(
+        path: Path,
+        label: str,
+        *,
+        max_bytes: int | None = None,
+    ) -> VerifiedFileSnapshot:
         """Read exact canonical bytes while rejecting pathname indirection/replacement."""
 
         def stable_metadata(left: os.stat_result, right: os.stat_result) -> bool:
@@ -752,24 +958,41 @@ class RunTransaction:
             ):
                 return False
             try:
-                verification = path.open("rb")
+                verification_descriptor = _open_read_only_descriptor(path)
             except OSError:
                 return False
-            with verification:
-                try:
-                    same_file = os.path.sameopenfile(
-                        handle.fileno(),
-                        verification.fileno(),
-                    )
-                    current_after_open = os.stat(path, follow_symlinks=False)
-                except OSError:
-                    return False
-                return (
+            try:
+                verification_stat = os.fstat(verification_descriptor)
+                same_file = (
+                    verification_stat.st_dev == expected_path_stat.st_dev
+                    and verification_stat.st_ino == expected_path_stat.st_ino
+                )
+                current_after_open = os.stat(path, follow_symlinks=False)
+                result = (
                     same_file
                     and stat.S_ISREG(current_after_open.st_mode)
                     and current_after_open.st_nlink == 1
                     and stable_metadata(expected_path_stat, current_after_open)
                 )
+            except OSError:
+                result = False
+            except BaseException as primary_error:
+                try:
+                    os.close(verification_descriptor)
+                except OSError as close_error:
+                    try:
+                        primary_error.add_note(
+                            "transaction verification descriptor cleanup also failed: "
+                            f"{type(close_error).__name__}: {close_error}"
+                        )
+                    except BaseException:
+                        pass
+                raise
+            try:
+                os.close(verification_descriptor)
+            except OSError:
+                return False
+            return result
 
         try:
             path_before = os.stat(path, follow_symlinks=False)
@@ -785,15 +1008,29 @@ class RunTransaction:
             raise RunTransactionError(
                 f"{label} canonical path must not have hard-link aliases"
             )
+        if max_bytes is not None:
+            if type(max_bytes) is not int or max_bytes <= 0:
+                raise RunTransactionError(f"{label} byte limit is invalid")
+            if path_before.st_size > max_bytes:
+                raise RunTransactionError(f"{label} exceeds bounded size")
 
+        descriptor: int | None = None
         try:
-            handle = path.open("rb")
+            descriptor = _open_read_only_descriptor(path)
+            handle = os.fdopen(descriptor, "rb", closefd=True)
+            descriptor = None
         except FileNotFoundError as exc:
             raise RunTransactionError(
                 f"{label} canonical path changed while validating"
             ) from exc
         except OSError as exc:
             raise RunTransactionError(f"{label} canonical file is unreadable") from exc
+        finally:
+            if descriptor is not None:
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
 
         with handle:
             try:
@@ -805,14 +1042,23 @@ class RunTransaction:
             if (
                 not stat.S_ISREG(opened_before.st_mode)
                 or opened_before.st_nlink != 1
+                or opened_before.st_dev != path_before.st_dev
+                or opened_before.st_ino != path_before.st_ino
                 or not path_matches_open_handle(handle, path_before)
             ):
                 raise RunTransactionError(
                     f"{label} canonical path must be a stable regular non-symlink file"
                 )
+            if max_bytes is not None and opened_before.st_size > max_bytes:
+                raise RunTransactionError(f"{label} exceeds bounded size")
 
             try:
-                payload = handle.read()
+                if max_bytes is None:
+                    payload = handle.read()
+                else:
+                    payload = handle.read(max_bytes + 1)
+                    if len(payload) > max_bytes:
+                        raise RunTransactionError(f"{label} exceeds bounded size")
                 opened_after = os.fstat(handle.fileno())
             except OSError as exc:
                 raise RunTransactionError(
@@ -903,42 +1149,17 @@ class RunTransaction:
         path: Path,
         label: str,
     ) -> None:
-        temporary: Path | None = None
+        del cls, path
         try:
-            with tempfile.NamedTemporaryFile(
-                "wb",
-                dir=path.parent,
-                prefix=f".{path.name}.verify-",
-                suffix=".tmp",
-                delete=False,
-            ) as handle:
-                temporary = Path(handle.name)
-                handle.write(snapshot.payload)
-                handle.flush()
-                os.fsync(handle.fileno())
-            verification_copy = cls._read_file_snapshot(
-                temporary,
-                f"{label} verification copy",
+            _paperbook_authority._call_witnessed_delegate(
+                _paperbook_authority._LOAD_BYTES,
+                _paperbook_authority._LOAD_BYTES_WITNESS,
+                "canonical load_bytes",
+                _paperbook_authority._PAPER_BOOK,
+                snapshot.payload,
             )
-            if verification_copy.sha256 != snapshot.sha256:
-                raise RunTransactionError(f"{label} exact snapshot copy mismatch")
-            PaperBook.load(temporary)
-            verification_after = cls._read_file_snapshot(
-                temporary,
-                f"{label} verification copy",
-            )
-            if verification_after.sha256 != snapshot.sha256:
-                raise RunTransactionError(f"{label} changed during semantic validation")
-        except RunTransactionError:
-            raise
         except Exception as exc:
             raise RunTransactionError(f"{label} semantic validation failed: {exc}") from exc
-        finally:
-            if temporary is not None:
-                try:
-                    temporary.unlink()
-                except FileNotFoundError:
-                    pass
 
     @classmethod
     def _verified_paper_book_snapshot(
@@ -957,7 +1178,11 @@ class RunTransaction:
         label: str,
     ) -> VerifiedFileSnapshot:
         snapshot = cls._read_canonical_file_snapshot(path, label)
-        cls._validate_paper_book_snapshot(snapshot, path, f"canonical {label}")
+        cls._validate_paper_book_snapshot(
+            snapshot,
+            path,
+            f"canonical {label}",
+        )
         return snapshot
 
     @staticmethod
@@ -1262,3 +1487,14 @@ class RunTransaction:
             output.flush()
             os.fsync(output.fileno())
         os.replace(temporary, destination)
+
+# Stage binding checks use an inert-globals trampoline. The canonical verifier is
+# resolved from the sealed PaperBook persistence graph for each staging invocation.
+from ._paperbook_current_binding_verifier import (
+    seal_current_binding_consumer as _seal_current_binding_consumer,
+)
+
+RunTransaction._stage_paper_book_snapshot = _seal_current_binding_consumer(
+    RunTransaction._stage_paper_book_snapshot
+)
+del _seal_current_binding_consumer

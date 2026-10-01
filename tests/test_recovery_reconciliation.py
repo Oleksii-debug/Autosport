@@ -240,7 +240,10 @@ class RecoveryReconciliationTests(unittest.TestCase):
             _dataset, key, _item, _summary = self._create_late_crash(tmp)
             book_path = Path(tmp) / "paper_book.json"
             book_path.write_text(book_path.read_text(encoding="utf-8") + " ", encoding="utf-8")
-            with self.assertRaisesRegex(ReconciliationError, "PaperBook SHA-256"):
+            with self.assertRaisesRegex(
+                ReconciliationError,
+                "independent durable opening witness",
+            ):
                 reconcile_late_crashes(tmp)
             self.assertEqual(RunRegistry(Path(tmp) / "run_registry.json").get(key)["status"], "in_progress")
 

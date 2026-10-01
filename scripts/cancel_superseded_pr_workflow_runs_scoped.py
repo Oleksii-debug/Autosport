@@ -473,7 +473,7 @@ class WorkflowScopedGitHubApi(GitHubApi):
             cancelled.append(run_id)
         return tuple(cancelled)
 
-def _cancel_triggering_run_if_nonqualifying(
+def _cancel_triggering_run_if_stale_or_nonqualifying(
     api: WorkflowScopedGitHubApi,
     *,
     pr_number: int,
@@ -481,21 +481,23 @@ def _cancel_triggering_run_if_nonqualifying(
     current_run_id: int,
     qualification,
 ) -> bool:
-    """Cancel the exact source run when trusted live PR truth cannot qualify it.
+    """Cancel a source run proven stale or same-head non-integration-capable.
 
-    This controller executes from default-branch bytes.  A fork/draft/closed source
-    workflow cannot protect itself by altering its own pull_request YAML or helper:
-    the trusted workflow_run controller rechecks the live qualification immediately
-    before cancelling that source run.  A head/lifecycle transition revokes the
-    cancellation rather than racing a newly integration-capable run.
+    Controller concurrency may intentionally coalesce multiple source-head events for
+    the same explicit PR + workflow.  Therefore the surviving controller must remain
+    useful even when its triggering source run is stale.  The irreversible POST is
+    allowed only after a fresh live qualification snapshot still matches the snapshot
+    used for the decision.
     """
 
     event_head_sha = _require_sha(event_head_sha, field="event head sha")
     current_run_id = _require_positive_int(current_run_id, field="current run id")
-    if (
-        qualification.head_sha != event_head_sha
-        or qualification.integration_capable
-    ):
+    stale = qualification.head_sha != event_head_sha
+    same_head_nonqualifying = (
+        qualification.head_sha == event_head_sha
+        and not qualification.integration_capable
+    )
+    if not stale and not same_head_nonqualifying:
         return False
     if api.live_pr_qualification(pr_number) != qualification:
         return False
@@ -546,17 +548,22 @@ def main(argv: list[str] | None = None) -> int:
                 current_run_id=args.current_run_id,
             )
 
+        # Reconcile against live PR truth rather than the triggering event head. This
+        # makes one surviving PR+workflow controller sufficient after scheduler-side
+        # coalescing: even a delayed stale-head workflow_run event can cancel obsolete
+        # source runs relative to the exact current live head. The canonical helper
+        # still repeats the live qualification snapshot before every irreversible POST.
         result = cancel_superseded(
             api=api,
             pr_number=pr_number,
-            event_head_sha=event_head_sha,
+            event_head_sha=qualification.head_sha,
             workflow_name=args.workflow_name,
             current_run_id=args.current_run_id,
         )
         orphan_cancelled = api.cancel_historical_unbound_runs(
             exclude_run_ids=(args.current_run_id, *result.cancelled_run_ids),
         )
-        _cancel_triggering_run_if_nonqualifying(
+        _cancel_triggering_run_if_stale_or_nonqualifying(
             api,
             pr_number=pr_number,
             event_head_sha=event_head_sha,

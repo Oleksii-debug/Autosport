@@ -68,7 +68,7 @@ def test_committed_exposure_cannot_be_retargeted_by_live_policy_helper(
         TypeError,
         match="canonical PaperRiskPolicy root is sealed: _exact_positive_sum",
     ):
-        monkeypatch.setattr(
+        setattr(
             PaperRiskPolicy,
             "_exact_positive_sum",
             staticmethod(lambda _values: Decimal("0")),

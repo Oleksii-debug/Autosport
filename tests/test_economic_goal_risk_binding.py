@@ -379,31 +379,31 @@ class EconomicGoalRiskBindingTests(unittest.TestCase):
             path = Path(tmp) / "paper.json"
             book.save(path)
             restarted = PaperBook.load(path)
-
-            self.assertIsNone(restarted.tickets[lost.ticket_id].settled_at)
-            policy = self._policy(
-                self._goal(max_day_loss_fraction=Decimal("0.05"))
-            )
-            context = replace(
-                self._context(),
-                measurement_window_start="2026-09-16T14:00:00+00:00",
-                measurement_window_end="2026-09-16T15:00:00+00:00",
-            )
-
-            self.assertTrue(
-                policy.evaluate(restarted, Decimal("1"), context=context).allowed
-            )
-            blocked = policy.evaluate(
-                restarted,
-                Decimal("1.01"),
-                context=context,
-            )
-            self.assertFalse(blocked.allowed)
-            self.assertEqual(
-                blocked.reason,
-                "economic goal conservative day loss limit exceeded",
-            )
-
+    
+                self.assertIsNone(restarted.tickets[lost.ticket_id].settled_at)
+                policy = self._policy(
+                    self._goal(max_day_loss_fraction=Decimal("0.05"))
+                )
+                context = replace(
+                    self._context(),
+                    measurement_window_start="2026-09-16T14:00:00+00:00",
+                    measurement_window_end="2026-09-16T15:00:00+00:00",
+                )
+    
+                self.assertTrue(
+                    policy.evaluate(restarted, Decimal("1"), context=context).allowed
+                )
+                blocked = policy.evaluate(
+                    restarted,
+                    Decimal("1.01"),
+                    context=context,
+                )
+                self.assertFalse(blocked.allowed)
+                self.assertEqual(
+                    blocked.reason,
+                    "economic goal conservative day loss limit exceeded",
+                )
+    
     def test_unanchored_measurement_window_cannot_narrow_historical_loss(self) -> None:
         book = PaperBook("100")
         lost = book.open_ticket(
@@ -638,10 +638,10 @@ class EconomicGoalRiskBindingTests(unittest.TestCase):
             path = Path(tmp) / "paper.json"
             book.save(path)
             restarted = PaperBook.load(path)
-
-            decision = policy.evaluate(restarted, Decimal("1"), context=bound)
-            self.assertTrue(decision.allowed)
-
+    
+                decision = policy.evaluate(restarted, Decimal("1"), context=bound)
+                self.assertTrue(decision.allowed)
+    
     def test_owner_concurrent_position_limit_counts_only_canonical_open_tickets(self) -> None:
         book = PaperBook("100")
         ticket = book.open_ticket([self._leg()], Decimal("10"))

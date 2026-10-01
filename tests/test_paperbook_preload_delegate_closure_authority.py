@@ -82,7 +82,7 @@ def test_positive_path_load_rejects_opening_registry_closure_retarget_before_dis
     assert hostile.calls == 0
 
 
-def test_positive_path_load_ignores_delegate_global_retarget_before_dispatch(
+def test_positive_path_load_rejects_delegate_global_retarget_before_dispatch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     path = _witnessed_book(tmp_path, monkeypatch)
@@ -98,8 +98,7 @@ def test_positive_path_load_ignores_delegate_global_retarget_before_dispatch(
     # the captured delegate.
     monkeypatch.setattr(paper_module, "_ticket_opening_commitment", hostile_commitment)
 
-    loaded = PaperBook.load(path)
+    with pytest.raises(ValueError, match="global|executable|authority"):
+        PaperBook.load(path)
 
     assert hostile_calls == 0
-    assert loaded.balance == Decimal("90")
-    assert len(loaded.tickets) == 1

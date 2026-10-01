@@ -95,6 +95,48 @@ class _SealedClassRoot:
         raise TypeError(f"canonical PaperRiskPolicy root is sealed: {self._name}")
 
 
+class _SealedClassGetattributeRoot:
+    """Protect the instance __getattribute__ class slot without corrupting metaclass lookup.
+
+    A generic _SealedClassRoot cannot be installed on the metaclass under the
+    special name __getattribute__: CPython then uses that descriptor as the
+    metaclass\'s own attribute-dispatch implementation. Keep the data-descriptor
+    replacement/deletion fence, but have special-method lookup resolve to the
+    canonical C-level type.__getattribute__ dispatcher instead.
+    """
+
+    __slots__ = ("_owner", "_descriptor", "_code")
+
+    def __init__(self, owner: type, descriptor: FunctionType) -> None:
+        self._owner = owner
+        self._descriptor = descriptor
+        self._code = descriptor.__code__
+
+    def __get__(self, instance: object, owner: type | None = None):
+        del owner
+        if instance is None:
+            return self
+        if instance is not self._owner:
+            raise TypeError("canonical PaperRiskPolicy metaclass dispatch owner changed")
+        namespace = type.__getattribute__(self._owner, "__dict__")
+        current = namespace.get("__getattribute__")
+        if (
+            current is not self._descriptor
+            or type(current) is not FunctionType
+            or current.__code__ is not self._code
+        ):
+            raise TypeError("canonical PaperRiskPolicy root changed: __getattribute__")
+        return type.__getattribute__.__get__(instance, type(instance))
+
+    def __set__(self, instance: object, value: object) -> None:
+        del instance, value
+        raise TypeError("canonical PaperRiskPolicy root is sealed: __getattribute__")
+
+    def __delete__(self, instance: object) -> None:
+        del instance
+        raise TypeError("canonical PaperRiskPolicy root is sealed: __getattribute__")
+
+
 def _make_instance_root_getattribute(
     policy: type,
     root_descriptors: dict[str, object],
@@ -870,6 +912,7 @@ def _install() -> None:
     sealed = {
         name: _SealedClassRoot(name, descriptor, policy)
         for name, descriptor in root_descriptors.items()
+        if name != "__getattribute__"
     }
     sealed["__init_subclass__"] = _SealedClassRoot(
         "__init_subclass__",
@@ -879,13 +922,32 @@ def _install() -> None:
     for name, descriptor in sealed.items():
         type.__setattr__(meta, name, descriptor)
 
+    # __getattribute__ is itself the metaclass attribute-dispatch special method.
+    # Installing the generic owner-root descriptor at that exact name makes CPython
+    # call the instance-dispatch function as the metaclass dispatcher and breaks
+    # class lookup. The dedicated descriptor remains a data descriptor, so even
+    # direct type.__setattr__/__delattr__ cannot replace the policy class slot, while
+    # special lookup resolves to the C-level type dispatcher.
+    class_getattribute_guard = _SealedClassGetattributeRoot(
+        policy,
+        instance_getattribute,
+    )
+    type.__setattr__(meta, "__getattribute__", class_getattribute_guard)
+
     # Refuse a partially installed seal. Class access exercises metaclass descriptor
     # lookup while vars(policy) proves the finalized class-dict descriptor identity
     # stayed untouched. The _SealedClassRoot lookup also validates exact function/code.
     current_namespace = type.__getattribute__(policy, "__dict__")
+    meta_namespace = type.__getattribute__(meta, "__dict__")
+    if meta_namespace.get("__getattribute__") is not class_getattribute_guard:
+        raise RuntimeError(
+            "canonical PaperRiskPolicy metaclass dispatch fence was not installed"
+        )
     for name, expected in root_descriptors.items():
         if current_namespace.get(name) is not expected:
             raise RuntimeError(f"canonical PaperRiskPolicy root moved during sealing: {name}")
+        if name == "__getattribute__":
+            continue
         resolved = getattr(policy, name)
         expected_type = root_types[name]
         if expected_type is classmethod:

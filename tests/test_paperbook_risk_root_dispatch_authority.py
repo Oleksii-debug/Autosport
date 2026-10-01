@@ -130,6 +130,27 @@ def test_instance_getattribute_root_rejects_in_place_code_mutation() -> None:
             root.__code__ = original_code
 
 
+def test_instance_getattribute_root_cannot_be_replaced_or_deleted_via_base_type_api() -> None:
+    """The special-method class slot stays sealed without owning metaclass dispatch."""
+
+    original = vars(PaperRiskPolicy)["__getattribute__"]
+    policy = PaperRiskPolicy(
+        max_ticket_fraction=Decimal("1"),
+        max_committed_fraction=Decimal("1"),
+        minimum_cash_reserve_fraction=Decimal("0"),
+    )
+    book = PaperBook("100")
+
+    with pytest.raises(TypeError, match="canonical PaperRiskPolicy root is sealed: __getattribute__"):
+        type.__setattr__(PaperRiskPolicy, "__getattribute__", _hostile_instance_dispatch)
+    with pytest.raises(TypeError, match="canonical PaperRiskPolicy root is sealed: __getattribute__"):
+        type.__delattr__(PaperRiskPolicy, "__getattribute__")
+
+    assert vars(PaperRiskPolicy)["__getattribute__"] is original
+    decision = policy.evaluate(book, Decimal("1"))
+    assert decision.allowed is True
+
+
 def test_instance_getattribute_defaults_are_sealed_before_retarget() -> None:
     """Immutable authority inputs must not be replaceable on the special-method root."""
 

@@ -350,8 +350,64 @@ def _install() -> None:
         raise RuntimeError("canonical independent PaperBook authority root changed")
     frozen_root_selector = _clone_module_function_graph(root_selector)
 
+    # Freeze the canonical structural validator against its composition-time class
+    # helper graph.  The generation wrapper must not call back through mutable
+    # PaperBook._validate_* descriptors after this persistence graph is sealed.
+    original_validate_loaded_state = guard_namespace.get(
+        "_GENERATION_ORIGINAL_VALIDATE_LOADED_STATE"
+    )
+    if type(original_validate_loaded_state) is not FunctionType:
+        raise RuntimeError("canonical PaperBook loaded-state validator is unavailable")
+    validation_globals: dict[str, object] = dict(
+        original_validate_loaded_state.__globals__
+    )
+    validation_proxy = type("_FrozenPaperBookValidation", (), {})
+    validation_namespace = vars(paper_book)
+    validation_clones: dict[FunctionType, FunctionType] = {}
+    pending_validation = [original_validate_loaded_state]
+    while pending_validation:
+        validation_function = pending_validation.pop()
+        for validation_name in validation_function.__code__.co_names:
+            validation_descriptor = validation_namespace.get(validation_name, _EMPTY_CELL)
+            nested_validation = _descriptor_function(validation_descriptor)
+            if (
+                nested_validation is None
+                or nested_validation.__globals__ is not original_validate_loaded_state.__globals__
+                or nested_validation in validation_clones
+            ):
+                continue
+            validation_clone = _clone_local_function(
+                nested_validation,
+                trusted_globals=validation_globals,
+            )
+            validation_clones[nested_validation] = validation_clone
+            pending_validation.append(nested_validation)
+    validation_globals["PaperBook"] = validation_proxy
+    for validation_name, validation_descriptor in validation_namespace.items():
+        nested_validation = _descriptor_function(validation_descriptor)
+        validation_clone = validation_clones.get(nested_validation)
+        if validation_clone is None:
+            continue
+        if type(validation_descriptor) is classmethod:
+            setattr(validation_proxy, validation_name, classmethod(validation_clone))
+        elif type(validation_descriptor) is staticmethod:
+            setattr(validation_proxy, validation_name, staticmethod(validation_clone))
+        else:
+            setattr(validation_proxy, validation_name, validation_clone)
+    frozen_structural_validate = _clone_local_function(
+        original_validate_loaded_state,
+        trusted_globals=validation_globals,
+    )
+
+    def frozen_generation_original_validate(_cls, book):
+        del _cls
+        return frozen_structural_validate(validation_proxy, book)
+
     trusted_globals: dict[str, object] = dict(guard_namespace)
     trusted_globals["_paper_authority_root"] = frozen_root_selector
+    trusted_globals["_GENERATION_ORIGINAL_VALIDATE_LOADED_STATE"] = (
+        frozen_generation_original_validate
+    )
     clones: dict[str, FunctionType] = {}
     for name, value in tuple(guard_namespace.items()):
         if type(value) is FunctionType and value.__globals__ is guard_namespace:

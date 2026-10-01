@@ -334,12 +334,20 @@ def _seal_method(method: FunctionType) -> None:
 
 def _install() -> None:
     owner = _run_transaction.RunTransaction
-    stage = vars(owner).get("_stage_paper_book_snapshot")
-    promotion = vars(owner).get("_promote_paper_book_snapshot")
-    if type(stage) is not FunctionType or type(promotion) is not FunctionType:
+    namespace = vars(owner)
+    stage = namespace.get("_stage_paper_book_snapshot")
+    promotion = namespace.get("_promote_paper_book_snapshot")
+    validator = namespace.get("_validate_paper_book_snapshot")
+    if (
+        type(stage) is not FunctionType
+        or type(promotion) is not FunctionType
+        or type(validator) is not classmethod
+        or type(validator.__func__) is not FunctionType
+    ):
         raise RuntimeError("canonical RunTransaction binding consumers are unavailable")
     _seal_method(stage)
     _seal_method(promotion)
+    _seal_method(validator.__func__)
 
 
 _install()

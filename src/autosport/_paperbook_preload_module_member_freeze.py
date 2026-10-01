@@ -70,6 +70,35 @@ class _SealedSurfaceRoot:
         raise TypeError(f"canonical PaperBook frozen-surface root is sealed: {self._name}")
 
 
+class _SealedSurfaceMutationRoot:
+    """Seal a facade mutation root without hijacking metaclass mutation dispatch."""
+
+    __slots__ = ("_name", "_descriptor", "_owner", "_dispatcher")
+
+    def __init__(self, name: str, descriptor: object, owner: type, dispatcher: object) -> None:
+        self._name = name
+        self._descriptor = descriptor
+        self._owner = owner
+        self._dispatcher = dispatcher
+
+    def __get__(self, instance: object, owner: type | None = None):
+        del owner
+        if instance is None:
+            return self
+        namespace = type.__getattribute__(self._owner, "__dict__")
+        if namespace.get(self._name) is not self._descriptor:
+            raise TypeError(f"canonical PaperBook frozen-surface root changed: {self._name}")
+        return self._dispatcher.__get__(instance, type(instance))
+
+    def __set__(self, instance: object, value: object) -> None:
+        del instance, value
+        raise TypeError(f"canonical PaperBook frozen-surface root is sealed: {self._name}")
+
+    def __delete__(self, instance: object) -> None:
+        del instance
+        raise TypeError(f"canonical PaperBook frozen-surface root is sealed: {self._name}")
+
+
 class _FrozenSurface(tuple, metaclass=_FrozenSurfaceMeta):
     """Structurally immutable persistence-member facade.
 
@@ -206,16 +235,24 @@ def _seal_surface_type() -> None:
 
     meta_roots: dict[str, object] = {}
     for name, descriptor in descriptors.items():
-        sealed = _SealedSurfaceRoot(name, descriptor, surface_type)
+        if name == "__setattr__":
+            sealed = _SealedSurfaceMutationRoot(
+                name, descriptor, surface_type, type.__setattr__
+            )
+        elif name == "__delattr__":
+            sealed = _SealedSurfaceMutationRoot(
+                name, descriptor, surface_type, type.__delattr__
+            )
+        else:
+            sealed = _SealedSurfaceRoot(name, descriptor, surface_type)
         type.__setattr__(surface_meta, name, sealed)
         meta_roots[name] = sealed
 
-    # Explicit ``type.__delattr__(surface_meta, name)`` bypasses surface_meta's own
-    # ordinary __delattr__ dispatch. Put matching data descriptors on its metaclass so
-    # the exact descriptor-removal-then-retarget route is rejected before the inner
-    # seal can be removed. This complements (rather than replaces) the positive-path
-    # executable witness that independently rejects a changed facade graph.
+    # Do not install the facade mutation guards as same-named roots on the
+    # meta-metaclass: those names are its own mutation dispatch slots.
     for name, descriptor in meta_roots.items():
+        if name in {"__setattr__", "__delattr__"}:
+            continue
         type.__setattr__(
             _FrozenSurfaceMetaMeta,
             name,

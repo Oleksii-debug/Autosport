@@ -619,13 +619,23 @@ def _detach_consumer(function: FunctionType) -> FunctionType:
 
 def _install() -> None:
     owner = _run_transaction.RunTransaction
-    stage = vars(owner).get("_stage_paper_book_snapshot")
-    promotion = vars(owner).get("_promote_paper_book_snapshot")
-    if type(stage) is not FunctionType or type(promotion) is not FunctionType:
+    namespace = vars(owner)
+    stage = namespace.get("_stage_paper_book_snapshot")
+    promotion = namespace.get("_promote_paper_book_snapshot")
+    validator = namespace.get("_validate_paper_book_snapshot")
+    if (
+        type(stage) is not FunctionType
+        or type(promotion) is not FunctionType
+        or type(validator) is not classmethod
+        or type(validator.__func__) is not FunctionType
+    ):
         raise RuntimeError("canonical RunTransaction PaperBook consumers are unavailable")
 
     owner._stage_paper_book_snapshot = _detach_consumer(stage)
     owner._promote_paper_book_snapshot = _detach_consumer(promotion)
+    owner._validate_paper_book_snapshot = classmethod(
+        _detach_consumer(validator.__func__)
+    )
 
 
 _install()

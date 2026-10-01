@@ -360,8 +360,23 @@ def _install() -> None:
 
     frozen_load = clones.get("_trusted_path_load")
     frozen_save = clones.get("_trusted_save")
-    if frozen_load is None or frozen_save is None:
+    frozen_validate_loaded_state = clones.get("_generation_guarded_validate_loaded_state")
+    if (
+        frozen_load is None
+        or frozen_save is None
+        or frozen_validate_loaded_state is None
+    ):
         raise RuntimeError("canonical PaperBook persistence clone is unavailable")
+
+    # Generation-CAS originally installs the loaded-state validator with the live
+    # guard-module globals mapping. Positive load/save are detached below, but the
+    # raw canonical serializer used by RunTransaction reaches this classmethod
+    # directly through self._validate_loaded_state. Install the matching clone
+    # from this same private persistence graph so a late guard-member rebind cannot
+    # retarget transaction staging, recovery, or risk validation.
+    frozen_validate_loaded_state.__name__ = "_validate_loaded_state"
+    frozen_validate_loaded_state.__qualname__ = "PaperBook._validate_loaded_state"
+    paper_book._validate_loaded_state = classmethod(frozen_validate_loaded_state)
 
     load_delegate_names = (
         "_LOAD_BYTES",

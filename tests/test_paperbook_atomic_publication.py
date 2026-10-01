@@ -112,6 +112,9 @@ class PaperBookAtomicPublicationTests(unittest.TestCase):
             if path.name.startswith(f".{self.path.name}.") and path.name.endswith(".tmp")
         )
         self.assertEqual(temporary_files, ())
+        restored = PaperBook.load(self.path)
+        self.assertEqual(restored.balance, Decimal("90"))
+        self.assertEqual(len(restored.tickets), 1)
 
 
 if __name__ == "__main__":

@@ -47,22 +47,31 @@ def _rebind_value_type_verifier_dependency(
     monkeypatch: pytest.MonkeyPatch,
     public_wrapper: FunctionType,
 ) -> None:
-    captured_globals = _captured_wrapper_globals(public_wrapper)
-    verifier = captured_globals["_require_value_type_callable_witnesses"]
-    assert type(verifier) is FunctionType
-    dependency_globals = verifier.__globals__
-    original = dependency_globals["_require_class_callable_graph_witnesses"]
-    assert type(original) is FunctionType
+    closure = public_wrapper.__closure__
+    assert closure is not None
+    freevars = public_wrapper.__code__.co_freevars
+    assert "witnesses" in freevars
+    witnesses = closure[freevars.index("witnesses")].cell_contents
 
-    def delegated(owner: type, witnesses: tuple[tuple[object, ...], ...]) -> None:
-        original(owner, witnesses)
+    value_graph = None
+    for name, _verifier, _expected_code, graph in witnesses:
+        if name == "_require_value_type_callable_witnesses":
+            value_graph = graph
+            break
+    assert value_graph is not None
 
-    assert delegated is not original
-    monkeypatch.setitem(
-        dependency_globals,
-        "_require_class_callable_graph_witnesses",
-        delegated,
-    )
+    for _function, _code, globals_mapping, _defaults, _kwdefaults, _closure, _values, bindings in value_graph:
+        for global_name, original in bindings:
+            if type(original) is not FunctionType:
+                continue
+
+            def delegated(*args, __original=original, **kwargs):
+                return __original(*args, **kwargs)
+
+            monkeypatch.setitem(globals_mapping, global_name, delegated)
+            return
+
+    raise AssertionError("captured verifier graph exposes no function dependency")
 
 
 def test_path_load_rejects_rebound_verifier_global_dependency(

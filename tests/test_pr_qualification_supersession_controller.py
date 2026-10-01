@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import scripts.cancel_superseded_pr_workflow_runs_scoped as scoped_controller
 from scripts.cancel_superseded_pr_workflow_runs import PullRequestQualification
 from scripts.cancel_superseded_pr_workflow_runs_scoped import (
     _cancel_triggering_run_if_stale_or_nonqualifying,
@@ -69,16 +70,20 @@ def test_delayed_stale_head_controller_reconciles_live_head_without_killing_runn
 def test_explicit_pr_identity_is_used_only_for_a_singleton_event_reference() -> None:
     workflow = _text()
 
-    singleton_guard = (
+    singleton_predicate = (
         "github.event.workflow_run.pull_requests[0].number && "
-        "!github.event.workflow_run.pull_requests[1].number && "
-        "github.event.workflow_run.pull_requests[0].number"
+        "!github.event.workflow_run.pull_requests[1].number"
+    )
+    direct_identity = (
+        singleton_predicate
+        + " && github.event.workflow_run.pull_requests[0].number"
     )
     concurrency = workflow.split("concurrency:", 1)[1].split("jobs:", 1)[0]
     job = workflow.split("jobs:", 1)[1]
 
-    assert singleton_guard in concurrency
-    assert singleton_guard in job
+    assert singleton_predicate in concurrency
+    assert "format('pr-{0}', github.event.workflow_run.pull_requests[0].number)" in concurrency
+    assert direct_identity in job
     assert "pull_requests reference" in workflow
     assert "Different PRs sharing one commit" in workflow
 
@@ -222,3 +227,72 @@ def test_stale_trigger_cancellation_is_revoked_if_live_qualification_moves_again
         qualification=qualification,
     )
     assert api.cancelled == []
+
+
+def test_main_reaches_triggering_run_check_after_orphan_authority_race_skip(
+    monkeypatch,
+) -> None:
+    events: list[str] = []
+    qualification = PullRequestQualification(
+        head_sha="b" * 40,
+        integration_capable=True,
+    )
+
+    class FakeScopedApi:
+        def __init__(self, **kwargs) -> None:
+            events.append("api")
+
+        def live_pr_qualification(self, pr_number: int) -> PullRequestQualification:
+            assert pr_number == 2022
+            return qualification
+
+        def configure_historical_candidate_recovery(self, **kwargs) -> None:
+            events.append("historical-recovery")
+
+        def configure_same_head_candidate_recovery(self, **kwargs) -> None:
+            raise AssertionError("stale trigger must not configure same-head recovery")
+
+        def cancel_historical_unbound_runs(self, **kwargs) -> tuple[int, ...]:
+            events.append("orphan-authority-race-skipped")
+            return ()
+
+    class Result:
+        cancelled_run_ids: tuple[int, ...] = ()
+
+    monkeypatch.setattr(scoped_controller, "WorkflowScopedGitHubApi", FakeScopedApi)
+    monkeypatch.setattr(
+        scoped_controller,
+        "cancel_superseded",
+        lambda **kwargs: Result(),
+    )
+
+    def trigger_check(*args, **kwargs) -> bool:
+        events.append("triggering-run-check")
+        return False
+
+    monkeypatch.setattr(
+        scoped_controller,
+        "_cancel_triggering_run_if_stale_or_nonqualifying",
+        trigger_check,
+    )
+    monkeypatch.setenv("GITHUB_REPOSITORY", "Oleksii-debug/Autosport")
+    monkeypatch.setenv("GITHUB_TOKEN", "test-token")
+
+    assert scoped_controller.main(
+        [
+            "--pr-number",
+            "2022",
+            "--event-head-sha",
+            "a" * 40,
+            "--workflow-name",
+            "CI",
+            "--workflow-id",
+            "356678400",
+            "--current-run-id",
+            "7005",
+        ]
+    ) == 0
+    assert events[-2:] == [
+        "orphan-authority-race-skipped",
+        "triggering-run-check",
+    ]

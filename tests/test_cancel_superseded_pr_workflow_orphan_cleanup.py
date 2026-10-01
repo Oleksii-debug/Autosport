@@ -12,6 +12,7 @@ from scripts.cancel_superseded_pr_workflow_runs_scoped import WorkflowScopedGitH
 
 CURRENT_HEAD = "a" * 40
 STALE_HEAD = "b" * 40
+OTHER_STALE_HEAD = "c" * 40
 
 
 def _associated_pr(number: int, *, head_sha: str) -> dict[str, object]:
@@ -132,31 +133,23 @@ def test_unbound_same_head_ready_run_is_preserved() -> None:
     ]
 
 
-@pytest.mark.parametrize(
-    "associated",
-    (
-        [],
-        [
-            _associated_pr(77, head_sha=CURRENT_HEAD),
-            _associated_pr(88, head_sha=CURRENT_HEAD),
-        ],
-    ),
-)
-def test_unbound_cleanup_fails_closed_for_missing_or_ambiguous_association(
-    associated: list[dict[str, object]],
-) -> None:
+def test_unbound_cleanup_preserves_ambiguous_association_without_branch_fallback() -> None:
     api = FakeApi(
         [
             {
                 "total_count": 1,
                 "workflow_runs": [_run(93, head_sha=STALE_HEAD, pull_requests=[])],
             },
-            associated,
+            [
+                _associated_pr(77, head_sha=CURRENT_HEAD),
+                _associated_pr(88, head_sha=CURRENT_HEAD),
+            ],
         ]
     )
     api._active_runs_for_status("queued")
 
     assert api.cancel_historical_unbound_runs() == ()
+    assert api.paths[-1] == f"/commits/{STALE_HEAD}/pulls?per_page=100&page=1"
 
 
 def test_unbound_cleanup_never_recancels_normal_supersession_result() -> None:
@@ -252,7 +245,7 @@ def test_zero_association_run_is_cancelled_when_canonical_branch_is_absent(
     assert cancelled == [98]
 
 
-def test_zero_association_branch_reappearance_at_boundary_fails_closed(
+def test_zero_association_branch_reappearance_at_boundary_preserves_candidate_without_aborting(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     api = FakeApi(
@@ -284,9 +277,83 @@ def test_zero_association_branch_reappearance_at_boundary_fails_closed(
         lambda self, run_id: cancelled.append(run_id),
     )
 
-    with pytest.raises(CancellationError, match="branch authority changed"):
-        api.cancel_historical_unbound_runs()
+    assert api.cancel_historical_unbound_runs() == ()
     assert cancelled == []
+
+
+def test_unique_association_boundary_race_skips_only_changed_candidate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api = FakeApi(
+        [
+            {
+                "total_count": 2,
+                "workflow_runs": [
+                    _run(101, head_sha=STALE_HEAD, pull_requests=[]),
+                    _run(102, head_sha=OTHER_STALE_HEAD, pull_requests=[]),
+                ],
+            },
+            [_associated_pr(77, head_sha=CURRENT_HEAD)],
+            _live_pr(CURRENT_HEAD),
+            [],
+            [_associated_pr(88, head_sha=CURRENT_HEAD)],
+            _live_pr(CURRENT_HEAD),
+            [_associated_pr(88, head_sha=CURRENT_HEAD)],
+            _live_pr(CURRENT_HEAD),
+        ]
+    )
+    api._active_runs_for_status("queued")
+
+    cancelled: list[int] = []
+    monkeypatch.setattr(
+        GitHubApi,
+        "cancel",
+        lambda self, run_id: cancelled.append(run_id),
+    )
+
+    assert api.cancel_historical_unbound_runs() == (102,)
+    assert cancelled == [102]
+
+
+def test_zero_association_boundary_race_does_not_block_later_candidate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api = FakeApi(
+        [
+            {
+                "total_count": 2,
+                "workflow_runs": [
+                    _run(
+                        103,
+                        head_sha=STALE_HEAD,
+                        head_branch="fix/race-a",
+                        pull_requests=[],
+                    ),
+                    _run(104, head_sha=OTHER_STALE_HEAD, pull_requests=[]),
+                ],
+            },
+            [],
+            [],
+            {"object": {"sha": CURRENT_HEAD}},
+            [],
+            {"object": {"sha": STALE_HEAD}},
+            [_associated_pr(88, head_sha=CURRENT_HEAD)],
+            _live_pr(CURRENT_HEAD),
+            [_associated_pr(88, head_sha=CURRENT_HEAD)],
+            _live_pr(CURRENT_HEAD),
+        ]
+    )
+    api._active_runs_for_status("queued")
+
+    cancelled: list[int] = []
+    monkeypatch.setattr(
+        GitHubApi,
+        "cancel",
+        lambda self, run_id: cancelled.append(run_id),
+    )
+
+    assert api.cancel_historical_unbound_runs() == (104,)
+    assert cancelled == [104]
 
 
 def test_zero_association_same_head_branch_is_preserved() -> None:

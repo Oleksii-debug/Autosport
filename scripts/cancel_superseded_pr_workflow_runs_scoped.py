@@ -39,6 +39,18 @@ else:
     )
 
 
+class _HistoricalAssociationAbsent(CancellationError):
+    """A well-formed historical commit lookup returned no associated PR."""
+
+
+class _HistoricalAssociationAmbiguous(CancellationError):
+    """A well-formed historical commit lookup returned multiple PRs."""
+
+
+class _CancellationAuthorityChanged(CancellationError):
+    """A valid candidate lost cancellation authority during the boundary reread."""
+
+
 class WorkflowScopedGitHubApi(GitHubApi):
     """Trusted controller API narrowed to one exact source workflow id.
 
@@ -166,10 +178,13 @@ class WorkflowScopedGitHubApi(GitHubApi):
             if len(payload) < _PULLS_PER_PAGE:
                 break
             page += 1
+        if not associated_numbers:
+            raise _HistoricalAssociationAbsent(
+                "historical workflow head has no associated pull request"
+            )
         if len(associated_numbers) != 1:
-            raise CancellationError(
-                "historical workflow head does not resolve to exactly one "
-                "associated pull request"
+            raise _HistoricalAssociationAmbiguous(
+                "historical workflow head resolves to multiple associated pull requests"
             )
         return next(iter(associated_numbers))
 
@@ -311,7 +326,7 @@ class WorkflowScopedGitHubApi(GitHubApi):
                     "unbound workflow run branch authority could not be revalidated"
                 ) from exc
             if not no_association or branch_head_sha == candidate_head_sha:
-                raise CancellationError(
+                raise _CancellationAuthorityChanged(
                     "unbound workflow run branch authority changed"
                 )
 
@@ -322,12 +337,15 @@ class WorkflowScopedGitHubApi(GitHubApi):
                 associated_pr_number = self._historical_associated_pr_number(
                     candidate_head_sha
                 )
-            except CancellationError as exc:
-                raise CancellationError(
+            except (
+                _HistoricalAssociationAbsent,
+                _HistoricalAssociationAmbiguous,
+            ) as exc:
+                raise _CancellationAuthorityChanged(
                     "recovered workflow run pull request association is no longer unique"
                 ) from exc
             if associated_pr_number != pr_number:
-                raise CancellationError(
+                raise _CancellationAuthorityChanged(
                     "recovered workflow run pull request association changed"
                 )
 
@@ -340,7 +358,7 @@ class WorkflowScopedGitHubApi(GitHubApi):
                 qualification.head_sha == candidate_head_sha
                 and qualification.integration_capable
             ):
-                raise CancellationError(
+                raise _CancellationAuthorityChanged(
                     "recovered workflow run live qualification changed"
                 )
         super().cancel(run_id)
@@ -438,7 +456,7 @@ class WorkflowScopedGitHubApi(GitHubApi):
             candidate_head_sha, head_branch = candidate
             try:
                 pr_number = self._historical_associated_pr_number(candidate_head_sha)
-            except CancellationError:
+            except _HistoricalAssociationAbsent:
                 if head_branch is None:
                     continue
                 try:
@@ -455,8 +473,17 @@ class WorkflowScopedGitHubApi(GitHubApi):
                     candidate_head_sha,
                     head_branch,
                 )
-                self.cancel(run_id)
+                try:
+                    self.cancel(run_id)
+                except _CancellationAuthorityChanged:
+                    self._zero_association_recovered_runs.pop(run_id, None)
+                    continue
+                self._zero_association_recovered_runs.pop(run_id, None)
                 cancelled.append(run_id)
+                continue
+            except _HistoricalAssociationAmbiguous:
+                continue
+            except CancellationError:
                 continue
 
             try:
@@ -469,7 +496,12 @@ class WorkflowScopedGitHubApi(GitHubApi):
             ):
                 continue
             self._recovered_runs[run_id] = (pr_number, candidate_head_sha)
-            self.cancel(run_id)
+            try:
+                self.cancel(run_id)
+            except _CancellationAuthorityChanged:
+                self._recovered_runs.pop(run_id, None)
+                continue
+            self._recovered_runs.pop(run_id, None)
             cancelled.append(run_id)
         return tuple(cancelled)
 

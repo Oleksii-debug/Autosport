@@ -26,10 +26,18 @@ def _live_pr(head_sha: str, *, state: str = "open", draft: bool = False) -> dict
     }
 
 
-def _run(run_id: int, *, head_sha: str, pull_requests: list[dict[str, object]]) -> dict[str, object]:
+def _run(
+    run_id: int,
+    *,
+    head_sha: str,
+    pull_requests: list[dict[str, object]],
+    head_branch: str = "feature/example",
+) -> dict[str, object]:
     return {
         "id": run_id,
         "head_sha": head_sha,
+        "head_branch": head_branch,
+        "head_repository": {"full_name": "Oleksii-debug/Autosport"},
         "name": "CI",
         "status": "queued",
         "pull_requests": pull_requests,
@@ -159,3 +167,91 @@ def test_unbound_cleanup_never_recancels_normal_supersession_result() -> None:
     assert api.paths == [
         "/actions/workflows/356678400/runs?event=pull_request&status=queued&per_page=100&page=1"
     ]
+
+
+def test_zero_association_run_is_cancelled_when_canonical_branch_has_advanced(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api = FakeApi(
+        [
+            {
+                "total_count": 1,
+                "workflow_runs": [
+                    _run(
+                        95,
+                        head_sha=STALE_HEAD,
+                        head_branch="fix/stale",
+                        pull_requests=[],
+                    )
+                ],
+            },
+            [],
+            [],
+            {
+                "object": {"sha": CURRENT_HEAD},
+            },
+            [],
+            {
+                "object": {"sha": CURRENT_HEAD},
+            },
+        ]
+    )
+    api._active_runs_for_status("queued")
+
+    cancelled: list[int] = []
+    monkeypatch.setattr(
+        GitHubApi,
+        "cancel",
+        lambda self, run_id: cancelled.append(run_id),
+    )
+
+    assert api.cancel_historical_unbound_runs() == (95,)
+    assert cancelled == [95]
+
+
+def test_zero_association_same_head_branch_is_preserved() -> None:
+    api = FakeApi(
+        [
+            {
+                "total_count": 1,
+                "workflow_runs": [
+                    _run(
+                        96,
+                        head_sha=CURRENT_HEAD,
+                        head_branch="fix/current",
+                        pull_requests=[],
+                    )
+                ],
+            },
+            [],
+            [],
+            {
+                "object": {"sha": CURRENT_HEAD},
+            },
+        ]
+    )
+    api._active_runs_for_status("queued")
+
+    assert api.cancel_historical_unbound_runs() == ()
+
+
+def test_zero_association_foreign_repository_run_never_gets_branch_fallback() -> None:
+    run = _run(
+        97,
+        head_sha=STALE_HEAD,
+        head_branch="fix/foreign",
+        pull_requests=[],
+    )
+    run["head_repository"] = {"full_name": "someone/fork"}
+    api = FakeApi(
+        [
+            {
+                "total_count": 1,
+                "workflow_runs": [run],
+            },
+            [],
+        ]
+    )
+    api._active_runs_for_status("queued")
+
+    assert api.cancel_historical_unbound_runs() == ()

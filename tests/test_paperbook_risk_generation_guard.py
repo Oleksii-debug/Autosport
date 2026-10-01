@@ -92,8 +92,11 @@ def test_risk_read_rejects_nested_paperbook_validator_rebind(
     loaded = PaperBook.load(path)
     _assert_risk_admitted(loaded)
 
+    hostile_calls: list[object] = []
+
     def bypass_lifecycle_reachability(cls, book) -> None:
-        del cls, book
+        del cls
+        hostile_calls.append(book)
 
     monkeypatch.setattr(
         PaperBook,
@@ -101,7 +104,8 @@ def test_risk_read_rejects_nested_paperbook_validator_rebind(
         classmethod(bypass_lifecycle_reachability),
     )
 
-    _assert_risk_rejected(loaded)
+    _assert_risk_admitted(loaded)
+    assert hostile_calls == []
 
 
 def test_generation_stable_risk_read_fails_closed_while_publication_lock_is_held(
@@ -149,7 +153,7 @@ def test_owner_facing_evaluate_holds_one_generation_and_denies_writer_conflict(
         guard._release_snapshot_publication_lock(publication_lock)
 
     assert blocked.allowed is False
-    assert blocked.reason == "virtual bankroll generation authority is invalid"
+    assert blocked.reason == "virtual bankroll private economic authority is invalid"
 
 
 def test_allocation_shadow_reinstalls_private_paperbook_authority() -> None:

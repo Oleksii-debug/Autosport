@@ -132,7 +132,6 @@ class PaperExecutionAppendRecoveryTests(unittest.TestCase):
             model = _config()
             book = PaperBook("100.00")
             runtime = _runtime(root, book, model=model)
-            book.save(root / "live_decision_pre_action_book.json")
             action = _action()
 
             first = runtime.execute(
@@ -165,7 +164,6 @@ class PaperExecutionAppendRecoveryTests(unittest.TestCase):
             model = _config()
             book = PaperBook("100.00")
             runtime = _runtime(root, book, model=model)
-            book.save(root / "live_decision_pre_action_book.json")
             action = _action()
 
             first = runtime.execute(
@@ -202,8 +200,7 @@ class PaperExecutionAppendRecoveryTests(unittest.TestCase):
                 model = _config(**override)
                 book = PaperBook("100.00")
                 runtime = _runtime(root, book, model=model)
-                book.save(root / "live_decision_pre_action_book.json")
-                action = _action()
+                    action = _action()
                 trigger_id = f"live-append-recovery-{outcome.value.lower()}"
 
                 result = runtime.execute(
@@ -237,7 +234,6 @@ class PaperExecutionAppendRecoveryTests(unittest.TestCase):
             model = _config()
             book = PaperBook("100.00")
             runtime = _runtime(root, book, model=model)
-            book.save(root / "live_decision_pre_action_book.json")
             action = _action()
 
             result = runtime.execute(

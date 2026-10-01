@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from types import FunctionType
 
-import autosport.run_transaction as run_transaction
+from autosport.run_transaction import RunTransaction
 
 
 def _closure_cell(function: FunctionType, name: str):
@@ -40,7 +40,7 @@ def _hostile_code_with_same_freevars(function: FunctionType):
 def test_guard_rejects_coordinated_executable_and_inner_code_retarget() -> None:
     """The executed clone code cannot move with its writable expected-code cell."""
 
-    guarded = run_transaction._promote_paper_book_snapshot
+    guarded = RunTransaction._promote_paper_book_snapshot
     assert isinstance(guarded, FunctionType)
 
     function_cell = _closure_cell(guarded, "function")

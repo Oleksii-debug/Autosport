@@ -16,6 +16,16 @@ def _closure_value(function: FunctionType, name: str):
     return _closure_cell(function, name).cell_contents
 
 
+def _binding_verifiers(guarded: FunctionType) -> tuple[FunctionType, FunctionType]:
+    outer = _closure_value(guarded, "require_bindings")
+    assert isinstance(outer, FunctionType)
+    inner = outer
+    if "original_require" in outer.__code__.co_freevars:
+        inner = _closure_value(outer, "original_require")
+        assert isinstance(inner, FunctionType)
+    return outer, inner
+
+
 def test_binding_checker_rejects_coordinated_clone_verifier_and_anchor_retarget() -> None:
     """Clone execution, verifier expectation and identity anchor must not be jointly retargetable."""
 
@@ -23,13 +33,12 @@ def test_binding_checker_rejects_coordinated_clone_verifier_and_anchor_retarget(
     assert isinstance(guarded, FunctionType)
 
     clone = _closure_value(guarded, "function")
-    require_bindings = _closure_value(guarded, "require_bindings")
+    require_bindings, binding_verifier = _binding_verifiers(guarded)
     assert isinstance(clone, FunctionType)
-    assert isinstance(require_bindings, FunctionType)
 
     executed_globals_cell = _closure_cell(clone, "inner_globals")
-    verifier_globals_cell = _closure_cell(require_bindings, "inner_globals")
-    anchor_cell = _closure_cell(require_bindings, "inner_globals_anchor")
+    verifier_globals_cell = _closure_cell(binding_verifier, "inner_globals")
+    anchor_cell = _closure_cell(binding_verifier, "inner_globals_anchor")
 
     original_executed_globals = executed_globals_cell.cell_contents
     original_verifier_globals = verifier_globals_cell.cell_contents

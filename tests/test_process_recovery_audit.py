@@ -88,7 +88,7 @@ def test_stage_child_broken_exception_string_still_publishes_fail_evidence(tmp_p
     def fail_initialize(_cls, _path):
         raise _BrokenStringError()
 
-    monkeypatch.setattr(process_audit.RunRegistry, "initialize_pristine", fail_initialize)
+    monkeypatch.setattr(process_audit.RunRegistry, "initialize_pristine", classmethod(fail_initialize))
 
     assert process_audit.run_process_kill_stage_child(tmp_path / "workspace", ready) == 1
     payload = json.loads(ready.read_text(encoding="utf-8"))
@@ -154,7 +154,7 @@ def test_stage_child_hostile_exception_type_metadata_still_publishes_fail_eviden
     def fail_initialize(_cls, _path):
         raise _BrokenMetadataError()
 
-    monkeypatch.setattr(process_audit.RunRegistry, "initialize_pristine", fail_initialize)
+    monkeypatch.setattr(process_audit.RunRegistry, "initialize_pristine", classmethod(fail_initialize))
 
     assert process_audit.run_process_kill_stage_child(tmp_path / "workspace", ready) == 1
     payload = json.loads(ready.read_text(encoding="utf-8"))

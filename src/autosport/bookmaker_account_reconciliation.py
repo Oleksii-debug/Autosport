@@ -1489,3 +1489,175 @@ class BookmakerAccountReconciliationStore:
             raise AccountReconciliationIntegrityError(
                 "account reconciliation publication did not preserve intended history"
             )
+
+
+def _install_canonical_store_dispatch_seal(
+    cls: type[BookmakerAccountReconciliationStore],
+) -> None:
+    """Freeze lower durable-store dispatch consumed by the public reconciliation API.
+
+    The store already seals its independent monotonic-authority object. The public
+    methods must also not dynamically trust caller-shadowable lower helpers such as
+    _load_history or _write_history: otherwise an exact store instance can retain
+    the canonical authority while bypassing durable publication entirely.
+
+    Keep canonical lower descriptors/functions in this closure, fail closed if
+    class bindings/code or instance resolution changes, and invoke the captured
+    functions non-virtually from closure-owned public entrypoints.
+    """
+
+    guarded_names = (
+        "_require_canonical_authority",
+        "_require_same_account",
+        "_require_nested_evidence_after",
+        "_reconcile",
+        "_recover_authority",
+        "_next_authority_tx_id",
+        "_load_history",
+        "_encode_history",
+        "_publish_history_bytes",
+        "_write_history",
+    )
+    entries: list[tuple[str, str, object, object, object]] = []
+    for name in guarded_names:
+        descriptor = cls.__dict__.get(name)
+        if isinstance(descriptor, staticmethod):
+            kind = "static"
+            function = descriptor.__func__
+        elif isinstance(descriptor, classmethod):
+            kind = "class"
+            function = descriptor.__func__
+        elif callable(descriptor):
+            kind = "instance"
+            function = descriptor
+        else:  # pragma: no cover - import-time product invariant
+            raise RuntimeError(f"missing canonical reconciliation helper {name!r}")
+        entries.append(
+            (
+                name,
+                kind,
+                descriptor,
+                function,
+                getattr(function, "__code__", None),
+            )
+        )
+    frozen_entries = tuple(entries)
+
+    write_lock = _write_lock
+    require_snapshot = _require_canonical_snapshot_graph
+    fingerprint = snapshot_fingerprint
+    parse_time = _time
+    integrity_error = AccountReconciliationIntegrityError
+    stale_error = AccountSnapshotStaleError
+
+    def _guard(store: BookmakerAccountReconciliationStore) -> None:
+        if type(store) is not cls:
+            raise integrity_error(
+                "account reconciliation store type changed at canonical dispatch boundary"
+            )
+        instance_dict = object.__getattribute__(store, "__dict__")
+        for name, _kind, descriptor, function, code in frozen_entries:
+            live_descriptor = cls.__dict__.get(name)
+            if live_descriptor is not descriptor or name in instance_dict:
+                raise integrity_error(
+                    "account reconciliation lower dispatch graph changed"
+                )
+            if isinstance(live_descriptor, (staticmethod, classmethod)):
+                live_function = live_descriptor.__func__
+            else:
+                live_function = live_descriptor
+            if (
+                live_function is not function
+                or getattr(live_function, "__code__", None) is not code
+            ):
+                raise integrity_error(
+                    "account reconciliation lower dispatch implementation changed"
+                )
+
+    def _invoke(
+        store: BookmakerAccountReconciliationStore,
+        name: str,
+        *args: object,
+        **kwargs: object,
+    ) -> object:
+        _guard(store)
+        for candidate, kind, _descriptor, function, _code in frozen_entries:
+            if candidate != name:
+                continue
+            if kind == "instance":
+                return function(store, *args, **kwargs)  # type: ignore[misc]
+            if kind == "class":
+                return function(cls, *args, **kwargs)  # type: ignore[misc]
+            return function(*args, **kwargs)  # type: ignore[misc]
+        raise integrity_error(
+            "unknown canonical account reconciliation lower dispatch"
+        )
+
+    def append_snapshot(
+        self: BookmakerAccountReconciliationStore,
+        snapshot: BookmakerAccountSnapshot,
+    ) -> bool:
+        snapshot = require_snapshot(snapshot)
+        with write_lock(self.path):
+            history = _invoke(self, "_load_history")
+            assert isinstance(history, list)
+            incoming_id = fingerprint(snapshot)
+            if any(fingerprint(existing) == incoming_id for existing in history):
+                return False
+            if history:
+                latest = history[-1]
+                _invoke(self, "_require_same_account", latest, snapshot)
+                incoming_at = parse_time(
+                    snapshot.observed_at, "snapshot.observed_at"
+                )
+                latest_at = parse_time(
+                    latest.observed_at, "checkpoint.observed_at"
+                )
+                if incoming_at < latest_at:
+                    raise stale_error(
+                        "older account snapshot cannot supersede the durable checkpoint"
+                    )
+                if incoming_at == latest_at:
+                    raise integrity_error(
+                        "conflicting account snapshot content at the same observed_at"
+                    )
+            candidate = (*history, snapshot)
+            _invoke(self, "_reconcile", candidate)
+            _invoke(self, "_write_history", candidate)
+            return True
+
+    def history(
+        self: BookmakerAccountReconciliationStore,
+    ) -> tuple[BookmakerAccountSnapshot, ...]:
+        with write_lock(self.path):
+            loaded = _invoke(self, "_load_history")
+            assert isinstance(loaded, list)
+            return tuple(loaded)
+
+    def latest_snapshot(
+        self: BookmakerAccountReconciliationStore,
+    ) -> BookmakerAccountSnapshot | None:
+        with write_lock(self.path):
+            loaded = _invoke(self, "_load_history")
+            assert isinstance(loaded, list)
+            return loaded[-1] if loaded else None
+
+    def latest_state(
+        self: BookmakerAccountReconciliationStore,
+    ) -> ReconciledAccountState | None:
+        with write_lock(self.path):
+            loaded = _invoke(self, "_load_history")
+            assert isinstance(loaded, list)
+            if not loaded:
+                return None
+            state = _invoke(self, "_reconcile", loaded)
+            assert isinstance(state, ReconciledAccountState)
+            return state
+
+    cls.append_snapshot = append_snapshot
+    cls.history = history
+    cls.latest_snapshot = latest_snapshot
+    cls.latest_state = latest_state
+
+
+_install_canonical_store_dispatch_seal(BookmakerAccountReconciliationStore)

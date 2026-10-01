@@ -186,21 +186,22 @@ def admit_paper_ticket(
             )
         canonical_book = PaperBook.load(book_path)
 
-        # A caller that still carries the exact current durable generation can remain
-        # the mutable working view. Its normal PaperBook.save() then advances the same
-        # generation binding after publication. A stale or unbound caller is never
-        # rebound by copying fields into it: use the freshly loaded canonical view and
-        # return that authority-bearing object to the caller instead.
+        # Never mutate a caller-owned view before the durable commit and exact
+        # post-save readback have both succeeded. PaperAdmissionResult.book is already
+        # the authority-carrying continuation surface for stale callers, so use that
+        # same copy-on-write rule for current callers too. If the supplied caller still
+        # owns the exact current generation, require semantic equality to reject an
+        # unpublished in-memory substitution; otherwise it remains an inert/stale view.
         try:
             _REQUIRE_CURRENT_BINDING(book, book_path)
         except (TypeError, ValueError):
-            working_book = canonical_book
+            pass
         else:
             if not _same_semantic_book_state(canonical_book, book):
                 raise ValueError(
                     "supplied current PaperBook does not match canonical durable state"
                 )
-            working_book = book
+        working_book = canonical_book
 
         # Owner-facing instance dispatch is sealed by the canonical risk-root
         # composition before product admission can execute. That gate is closureless,
@@ -238,11 +239,10 @@ def admit_paper_ticket(
             raise RuntimeError(
                 "persisted PaperBook state does not match the admitted mutation"
             )
-        result_book = book if working_book is book else persisted
         return PaperAdmissionResult(
             risk=decision,
-            ticket=result_book.tickets[persisted_ticket.ticket_id],
-            book=result_book,
+            ticket=persisted.tickets[persisted_ticket.ticket_id],
+            book=persisted,
         )
 
 

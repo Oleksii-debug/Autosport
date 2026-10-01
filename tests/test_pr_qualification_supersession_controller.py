@@ -79,8 +79,8 @@ def test_explicit_pr_identity_is_used_only_for_a_singleton_event_reference() -> 
 
     assert singleton_guard in concurrency
     assert singleton_guard in job
-    assert "array" in workflow
-    assert "arbitrary first array member" in workflow
+    assert "pull_requests reference" in workflow
+    assert "Different PRs sharing one commit" in workflow
 
 
 def test_empty_or_ambiguous_ref_controller_is_bounded_without_gaining_pr_authority() -> None:
@@ -108,14 +108,23 @@ def test_controller_does_not_skip_close_merge_run_when_pr_identity_is_unresolved
     assert "unique" in workflow
 
 
-def test_controller_does_not_cross_cancel_other_source_workflow_controllers() -> None:
+def test_controller_does_not_cross_coalesce_other_prs_or_source_workflows() -> None:
     workflow = _text()
+    concurrency = workflow.split("concurrency:", 1)[1].split("jobs:", 1)[0]
 
-    assert "Controllers for CI, Windows candidate, and Endurance must not" in workflow
-    assert "preempt one another" in workflow.replace("\n# ", " ")
-    assert "each invocation cancels only obsolete runs of its own" in workflow
-    assert "source workflow" in workflow
-    assert "exact workflow_id carried by workflow_run" in workflow
+    assert "format('pr-{0}', github.event.workflow_run.pull_requests[0].number)" in concurrency
+    assert "github.event.workflow_run.workflow_id" in concurrency
+    assert "Different PRs sharing one commit" in workflow
+    assert "CI/Windows/" in workflow
+    assert "Endurance remain isolated" in workflow
+
+
+def test_scoped_controller_reconciles_source_runs_against_fresh_live_head() -> None:
+    source = Path("scripts/cancel_superseded_pr_workflow_runs_scoped.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert "event_head_sha=qualification.head_sha" in source
 
 
 class FakeTriggeringRunApi:

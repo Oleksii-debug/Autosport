@@ -569,7 +569,13 @@ def redact_operator_value(
             finally:
                 active_container_ids.remove(identity)
 
-        return item
+        # Only exact inert built-in scalars may cross this presentation boundary
+        # unchanged. Arbitrary objects can carry credentials in fields or custom
+        # __str__/__repr__/serialization behavior; returning them intact would defer
+        # the leak to the next renderer. Fail closed without invoking user code.
+        if item is None or type(item) in (bool, int, float, complex):
+            return item
+        return REDACTED
 
     return redact(value, depth=0)
 

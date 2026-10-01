@@ -423,3 +423,58 @@ def test_shallow_builtin_tuple_mapping_key_preserves_structure() -> None:
     redacted = redact_operator_value(payload)
 
     assert redacted == payload
+
+
+class _HostileStructuredValue:
+    def __init__(self, secret: str) -> None:
+        self.secret = secret
+
+    def __str__(self) -> str:
+        raise AssertionError("custom structured value __str__ must not run")
+
+    def __repr__(self) -> str:
+        raise AssertionError("custom structured value __repr__ must not run")
+
+
+def test_unsupported_custom_mapping_value_fails_closed_without_rendering_it() -> None:
+    secret = "AS-CUSTOM-VALUE-SECRET-81ad"
+    value = _HostileStructuredValue(secret)
+
+    redacted = redact_operator_value({"provider_detail": value})
+
+    assert redacted == {"provider_detail": REDACTED}
+    assert secret not in repr(redacted)
+
+
+def test_unsupported_custom_values_fail_closed_inside_supported_containers() -> None:
+    secret = "AS-CUSTOM-CONTAINER-VALUE-SECRET-9b42"
+    value = _HostileStructuredValue(secret)
+
+    redacted = redact_operator_value(
+        {
+            "list": [value],
+            "tuple": (value,),
+            "set": {value},
+            "frozenset": frozenset({value}),
+        }
+    )
+
+    assert redacted == {
+        "list": [REDACTED],
+        "tuple": (REDACTED,),
+        "set": {REDACTED},
+        "frozenset": frozenset({REDACTED}),
+    }
+    assert secret not in repr(redacted)
+
+
+def test_exact_inert_builtin_scalar_values_remain_stable() -> None:
+    payload = {
+        "none": None,
+        "bool": True,
+        "int": 7,
+        "float": 1.25,
+        "complex": 2 + 3j,
+    }
+
+    assert redact_operator_value(payload) == payload

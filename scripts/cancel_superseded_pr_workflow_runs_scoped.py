@@ -8,6 +8,7 @@ from urllib.parse import quote, urlencode
 if __package__:
     from scripts.cancel_superseded_pr_workflow_runs import (
         _ACTIVE_STATUSES,
+        _AllowedHttpError,
         _PULLS_PER_PAGE,
         _RUNS_PER_PAGE,
         CancellationError,
@@ -25,6 +26,7 @@ else:
     # Import the canonical sibling module without requiring package resolution.
     from cancel_superseded_pr_workflow_runs import (
         _ACTIVE_STATUSES,
+        _AllowedHttpError,
         _PULLS_PER_PAGE,
         _RUNS_PER_PAGE,
         CancellationError,
@@ -281,8 +283,8 @@ class WorkflowScopedGitHubApi(GitHubApi):
             f"/git/ref/heads/{encoded}",
             allowed_http_errors=frozenset({404}),
         )
-        if isinstance(payload, object) and type(payload).__name__ == "_AllowedHttpError":
-            if getattr(payload, "status_code", None) == 404:
+        if isinstance(payload, _AllowedHttpError):
+            if payload.status_code == 404:
                 return None
         if not isinstance(payload, dict):
             raise CancellationError("invalid canonical branch response")

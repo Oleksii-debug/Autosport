@@ -946,6 +946,7 @@ class RunTransaction:
         def path_matches_open_handle(
             handle: Any,
             expected_path_stat: os.stat_result,
+            expected_open_stat: os.stat_result,
         ) -> bool:
             try:
                 current = os.stat(path, follow_symlinks=False)
@@ -964,8 +965,8 @@ class RunTransaction:
             try:
                 verification_stat = os.fstat(verification_descriptor)
                 same_file = (
-                    verification_stat.st_dev == expected_path_stat.st_dev
-                    and verification_stat.st_ino == expected_path_stat.st_ino
+                    verification_stat.st_dev == expected_open_stat.st_dev
+                    and verification_stat.st_ino == expected_open_stat.st_ino
                 )
                 current_after_open = os.stat(path, follow_symlinks=False)
                 result = (
@@ -1039,12 +1040,20 @@ class RunTransaction:
                 raise RunTransactionError(
                     f"{label} canonical path changed while validating"
                 ) from exc
+            path_identity_available = not (
+                path_before.st_dev == 0 and path_before.st_ino == 0
+            )
             if (
                 not stat.S_ISREG(opened_before.st_mode)
                 or opened_before.st_nlink != 1
-                or opened_before.st_dev != path_before.st_dev
-                or opened_before.st_ino != path_before.st_ino
-                or not path_matches_open_handle(handle, path_before)
+                or (
+                    path_identity_available
+                    and (
+                        opened_before.st_dev != path_before.st_dev
+                        or opened_before.st_ino != path_before.st_ino
+                    )
+                )
+                or not path_matches_open_handle(handle, path_before, opened_before)
             ):
                 raise RunTransactionError(
                     f"{label} canonical path must be a stable regular non-symlink file"
@@ -1068,7 +1077,7 @@ class RunTransaction:
                 not stat.S_ISREG(opened_after.st_mode)
                 or opened_after.st_nlink != 1
                 or not stable_metadata(opened_before, opened_after)
-                or not path_matches_open_handle(handle, path_before)
+                or not path_matches_open_handle(handle, path_before, opened_before)
             ):
                 raise RunTransactionError(
                     f"{label} canonical path changed while validating"

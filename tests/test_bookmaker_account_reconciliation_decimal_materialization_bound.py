@@ -780,3 +780,72 @@ def test_reconciliation_parent_alias_retarget_cannot_move_state_path(tmp_path) -
     assert canonical_path.exists()
     assert not (workspace_b / "account.json").exists()
     assert store.latest_snapshot() == _snapshot(Decimal("10"))
+
+
+@pytest.mark.parametrize(
+    "method_name",
+    ("_load_history", "_write_history", "_reconcile"),
+)
+def test_instance_lower_dispatch_shadow_cannot_bypass_durable_store(
+    tmp_path,
+    method_name: str,
+) -> None:
+    path = tmp_path / "account.json"
+    store = BookmakerAccountReconciliationStore(
+        path,
+        authority_root=tmp_path / "authority",
+    )
+    setattr(store, method_name, lambda *args, **kwargs: None)
+
+    with pytest.raises(
+        AccountReconciliationIntegrityError,
+        match="lower dispatch graph changed",
+    ):
+        store.append_snapshot(_snapshot(Decimal("10")))
+
+    assert not path.exists()
+
+
+def test_class_lower_dispatch_rebind_cannot_bypass_durable_store(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    path = tmp_path / "account.json"
+    store = BookmakerAccountReconciliationStore(
+        path,
+        authority_root=tmp_path / "authority",
+    )
+
+    monkeypatch.setattr(
+        BookmakerAccountReconciliationStore,
+        "_write_history",
+        lambda self, history: None,
+    )
+
+    with pytest.raises(
+        AccountReconciliationIntegrityError,
+        match="lower dispatch graph changed",
+    ):
+        store.append_snapshot(_snapshot(Decimal("10")))
+
+    assert not path.exists()
+
+
+def test_read_side_lower_dispatch_shadow_cannot_forge_empty_history(tmp_path) -> None:
+    path = tmp_path / "account.json"
+    store = BookmakerAccountReconciliationStore(
+        path,
+        authority_root=tmp_path / "authority",
+    )
+    expected = _snapshot(Decimal("10"))
+    assert store.append_snapshot(expected)
+
+    store._load_history = lambda: []
+
+    with pytest.raises(
+        AccountReconciliationIntegrityError,
+        match="lower dispatch graph changed",
+    ):
+        store.latest_snapshot()
+
+    assert path.exists()

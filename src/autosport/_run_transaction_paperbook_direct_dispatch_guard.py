@@ -402,6 +402,7 @@ def _guard_detached_consumer(
             or exact_type is not anchored_exact_type
             or function_type is not anchored_function_type
             or dict_type is not anchored_dict_type
+            or exact_type(inner_globals) is not dict_type
             or list_type is not anchored_list_type
             or tuple_type is not anchored_tuple_type
             or frozen_builtins_items is not anchored_builtins_items

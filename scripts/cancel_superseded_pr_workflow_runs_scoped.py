@@ -81,6 +81,7 @@ class WorkflowScopedGitHubApi(GitHubApi):
         self._historical_recovery_workflow_name: str | None = None
         self._historical_recovery_current_run_id: int | None = None
         self._recovered_runs: dict[int, tuple[int, str]] = {}
+        self._unbound_active_runs: dict[int, str] = {}
 
     def configure_same_head_candidate_recovery(
         self,
@@ -300,12 +301,11 @@ class WorkflowScopedGitHubApi(GitHubApi):
             ):
                 raise CancellationError("invalid workflow-runs response")
             page_runs = payload["workflow_runs"]
-            runs.extend(
-                self._recover_candidate_run_reference(
-                    self._canonicalize_workflow_identity(parse_run(item))
-                )
-                for item in page_runs
-            )
+            for item in page_runs:
+                run = self._canonicalize_workflow_identity(parse_run(item))
+                if not run.pr_numbers:
+                    self._unbound_active_runs[run.run_id] = run.head_sha
+                runs.append(self._recover_candidate_run_reference(run))
             total_count = payload["total_count"]
             # Active-run collections are inherently moving while a controller scans
             # them. A short page is therefore a safe terminal snapshot even when the
@@ -327,6 +327,45 @@ class WorkflowScopedGitHubApi(GitHubApi):
             runs.extend(self._active_runs_for_status(status))
         return tuple(runs)
 
+
+    def cancel_historical_unbound_runs(
+        self,
+        *,
+        exclude_run_ids: tuple[int, ...] = (),
+    ) -> tuple[int, ...]:
+        """Cancel uniquely-associated active runs whose PR metadata disappeared.
+
+        Some old pull_request workflow runs can remain active after GitHub clears the
+        run's embedded pull_requests references. Those runs are invisible to ordinary
+        PR-scoped supersession and can occupy the queue indefinitely. Cleanup is
+        deliberately fail-closed: each candidate must resolve to exactly one historical
+        PR, and a same-head integration-capable PR is always preserved. The recovered
+        identity is recorded so cancel() repeats both the commit association and live PR
+        qualification immediately before the irreversible POST.
+        """
+
+        excluded = {
+            _require_positive_int(run_id, field="excluded run id")
+            for run_id in exclude_run_ids
+        }
+        cancelled: list[int] = []
+        for run_id, candidate_head_sha in sorted(self._unbound_active_runs.items()):
+            if run_id in excluded:
+                continue
+            try:
+                pr_number = self._historical_associated_pr_number(candidate_head_sha)
+                qualification = self.live_pr_qualification(pr_number)
+            except CancellationError:
+                continue
+            if (
+                qualification.head_sha == candidate_head_sha
+                and qualification.integration_capable
+            ):
+                continue
+            self._recovered_runs[run_id] = (pr_number, candidate_head_sha)
+            self.cancel(run_id)
+            cancelled.append(run_id)
+        return tuple(cancelled)
 
 def _cancel_triggering_run_if_nonqualifying(
     api: WorkflowScopedGitHubApi,
@@ -408,6 +447,9 @@ def main(argv: list[str] | None = None) -> int:
             workflow_name=args.workflow_name,
             current_run_id=args.current_run_id,
         )
+        orphan_cancelled = api.cancel_historical_unbound_runs(
+            exclude_run_ids=(args.current_run_id, *result.cancelled_run_ids),
+        )
         _cancel_triggering_run_if_nonqualifying(
             api,
             pr_number=pr_number,
@@ -419,7 +461,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"superseded-run cancellation failed: {exc}", file=sys.stderr)
         return 2
     cancelled = ",".join(str(item) for item in result.cancelled_run_ids)
+    orphaned = ",".join(str(item) for item in orphan_cancelled)
     print("cancelled superseded workflow runs: " + cancelled)
+    print("cancelled historical unbound workflow runs: " + orphaned)
     return 0
 
 

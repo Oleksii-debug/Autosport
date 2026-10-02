@@ -863,6 +863,33 @@ def test_module_stable_reader_rebind_cannot_forge_empty_history(
     assert path.exists()
 
 
+def test_stable_reader_default_rebind_cannot_forge_empty_history(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    path = tmp_path / "account.json"
+    store = BookmakerAccountReconciliationStore(
+        path,
+        authority_root=_authority_root(tmp_path, "authority"),
+    )
+    expected = _snapshot(Decimal("10"))
+    assert store.append_snapshot(expected)
+
+    monkeypatch.setattr(
+        BookmakerAccountReconciliationStore._load_history,
+        "__kwdefaults__",
+        {"_stable_read": lambda candidate: None},
+    )
+
+    with pytest.raises(
+        AccountReconciliationIntegrityError,
+        match="lower dispatch implementation changed",
+    ):
+        store.latest_snapshot()
+
+    assert path.exists()
+
+
 def test_read_side_lower_dispatch_shadow_cannot_forge_empty_history(tmp_path) -> None:
     path = tmp_path / "account.json"
     store = BookmakerAccountReconciliationStore(

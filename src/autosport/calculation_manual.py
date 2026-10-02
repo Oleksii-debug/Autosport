@@ -99,9 +99,10 @@ class ManualCalculationService:
         ):
             raise ValueError("input_boundary must be an exact CalculationInputBoundary")
         boundary = input_boundary if input_boundary is not None else MANUAL_CALCULATION_INPUT
-        _validate_input_boundary_limits(boundary)
+        limits = boundary.limits
+        _validate_input_boundary_limits(limits)
         self._engine = engine if engine is not None else CalculationEngine()
-        self._input = CalculationInputBoundary(boundary.limits)
+        self._input = CalculationInputBoundary(limits)
 
     def odds_conversion(self, decimal_odds: object) -> ManualCalculationEvidence:
         odds = self._decimal(decimal_odds, "decimal_odds")
@@ -348,9 +349,11 @@ class ManualCalculationService:
         )
 
 
-def _validate_input_boundary_limits(boundary: CalculationInputBoundary) -> None:
+def _validate_input_boundary_limits(limits: object) -> None:
+    if type(limits) is not CalculationInputLimits:
+        raise ValueError("input_boundary limits must be an exact CalculationInputLimits value")
     for field in _LIMIT_FIELDS:
-        supplied = getattr(boundary.limits, field)
+        supplied = getattr(limits, field)
         maximum = getattr(_CANONICAL_INPUT_LIMITS, field)
         if supplied > maximum:
             raise ValueError(

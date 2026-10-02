@@ -474,7 +474,7 @@ class ParlayApiProductSource:
             ) from exc
 
     def _validate_pending(self, pending: object) -> None:
-        if type(pending) is not dict or set(pending) != {
+        base_fields = {
             "catalog_cursor",
             "catalog_position",
             "catalog_events",
@@ -482,7 +482,12 @@ class ParlayApiProductSource:
             "items",
             "assigned",
             "confirmed",
-        }:
+        }
+        provenance_fields = {"lawful_terms_ref", "retention_ref"}
+        if type(pending) is not dict:
+            raise ProductSourceStateError("pending product snapshot fields mismatch")
+        pending_fields = set(pending)
+        if pending_fields not in (base_fields, base_fields | provenance_fields):
             raise ProductSourceStateError("pending product snapshot fields mismatch")
         try:
             self._text(pending["catalog_cursor"], "pending.catalog_cursor")
@@ -492,6 +497,27 @@ class ParlayApiProductSource:
             raise ProductSourceStateError("pending catalog position must be non-negative")
         if type(pending["assigned"]) is not bool or type(pending["confirmed"]) is not bool:
             raise ProductSourceStateError("pending assignment flags must be booleans")
+        has_acquisition_provenance = provenance_fields.issubset(pending_fields)
+        acquisition_lawful_terms_ref: str | None = None
+        acquisition_retention_ref: str | None = None
+        if has_acquisition_provenance:
+            try:
+                acquisition_lawful_terms_ref = self._text(
+                    pending["lawful_terms_ref"],
+                    "pending.lawful_terms_ref",
+                )
+                acquisition_retention_ref = self._text(
+                    pending["retention_ref"],
+                    "pending.retention_ref",
+                )
+            except ValueError as exc:
+                raise ProductSourceStateError(
+                    "pending acquisition compliance provenance is invalid"
+                ) from exc
+        elif not pending["assigned"]:
+            raise ProductSourceStateError(
+                "unassigned pending source snapshot lacks acquisition compliance provenance"
+            )
         if pending["confirmed"] and not pending["assigned"]:
             raise ProductSourceStateError("pending snapshot cannot confirm before assignment")
         if type(pending["catalog_events"]) is not list:
@@ -546,6 +572,13 @@ class ParlayApiProductSource:
                     or delta.canonical_event_digest != item["canonical_digest"]
                     or delta.source_payload_digest != item["source_payload_digest"]
                     or delta.quality_flags != tuple(flags)
+                    or (
+                        has_acquisition_provenance
+                        and (
+                            delta.lawful_terms_ref != acquisition_lawful_terms_ref
+                            or delta.retention_ref != acquisition_retention_ref
+                        )
+                    )
                 ):
                     raise ProductSourceStateError("pending delta is not bound to source evidence")
                 if prior_position is not None and delta.cursor_position != prior_position + 1:
@@ -702,6 +735,19 @@ class ParlayApiProductSource:
         state = self._read_state()
         self._require_last_catalog_checkpoint(state, checkpoint)
         position = int(state["last_catalog_position"]) + 1
+        try:
+            acquisition_lawful_terms_ref = self._text(
+                self.lawful_terms_ref,
+                "lawful_terms_ref",
+            )
+            acquisition_retention_ref = self._text(
+                self.retention_ref,
+                "retention_ref",
+            )
+        except ValueError as exc:
+            raise ProductSourceStateError(
+                "product source acquisition compliance provenance is invalid"
+            ) from exc
         cursor, quotes, quality_flags = self._read_provider_snapshot()
         catalog_events = self._catalog_events(quotes)
         committed_quotes = state["last_committed_quote_digests"]
@@ -750,6 +796,8 @@ class ParlayApiProductSource:
         pending: dict[str, object] = {
             "catalog_cursor": cursor,
             "catalog_position": position,
+            "lawful_terms_ref": acquisition_lawful_terms_ref,
+            "retention_ref": acquisition_retention_ref,
             "catalog_events": [event.to_dict() for event in catalog_events],
             "quality_flags": list(quality_flags),
             "items": items,
@@ -829,6 +877,19 @@ class ParlayApiProductSource:
         assert isinstance(pending, dict)
         if pending["assigned"]:
             return
+        try:
+            acquisition_lawful_terms_ref = self._text(
+                pending.get("lawful_terms_ref"),
+                "pending.lawful_terms_ref",
+            )
+            acquisition_retention_ref = self._text(
+                pending.get("retention_ref"),
+                "pending.retention_ref",
+            )
+        except ValueError as exc:
+            raise ProductSourceStateError(
+                "pending source snapshot lacks acquisition compliance provenance"
+            ) from exc
         confirmed = int(state["last_confirmed_delta_position"])
         if checkpoint_position != confirmed:
             raise ProductSourceStateError(
@@ -865,8 +926,8 @@ class ParlayApiProductSource:
                 schema_version=1,
                 delta_id=delta_id,
                 source_id=self.source_id,
-                lawful_terms_ref=self.lawful_terms_ref,
-                retention_ref=self.retention_ref,
+                lawful_terms_ref=acquisition_lawful_terms_ref,
+                retention_ref=acquisition_retention_ref,
                 stream_epoch=self.stream_epoch,
                 source_cursor=str(pending["catalog_cursor"]),
                 cursor_position=position,

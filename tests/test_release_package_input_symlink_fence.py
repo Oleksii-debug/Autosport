@@ -91,6 +91,37 @@ class ReleasePackageInputSymlinkFenceTests(unittest.TestCase):
             self.SOURCE_SHA,
         )
 
+    def test_same_inode_input_mutation_is_rejected_before_bytes_are_accepted(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary) / "source.bin"
+            source.write_bytes(b"original")
+            real_fstat = release_package.os.fstat
+            mutated = False
+
+            def fstat_then_mutate(descriptor: int):
+                nonlocal mutated
+                metadata = real_fstat(descriptor)
+                if not mutated:
+                    mutated = True
+                    source.write_bytes(b"mutated-longer")
+                return metadata
+
+            with patch.object(
+                release_package.os,
+                "fstat",
+                side_effect=fstat_then_mutate,
+            ):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "test source changed during open",
+                ):
+                    release_package._read_regular_source_bytes(
+                        source,
+                        label="test source",
+                    )
+
+            self.assertTrue(mutated)
+
     def test_top_level_symlink_fails_before_existing_staging_is_deleted(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

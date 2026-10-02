@@ -1335,8 +1335,12 @@ class BookmakerAccountReconciliationStore:
                 attempts.append(int(suffix))
         return f"{prefix}{max(attempts, default=0) + 1}"
 
-    def _load_history(self) -> list[BookmakerAccountSnapshot]:
-        raw_bytes = _read_stable_reconciliation_bytes(self.path)
+    def _load_history(
+        self,
+        *,
+        _stable_read=_read_stable_reconciliation_bytes,
+    ) -> list[BookmakerAccountSnapshot]:
+        raw_bytes = _stable_read(self.path)
         if raw_bytes is None:
             self._recover_authority(None)
             return []
@@ -1447,11 +1451,12 @@ class BookmakerAccountReconciliationStore:
         history: tuple[BookmakerAccountSnapshot, ...] | list[BookmakerAccountSnapshot],
         *,
         _authority_guard=_require_canonical_authority,
+        _stable_read=_read_stable_reconciliation_bytes,
     ) -> None:
         authority = _authority_guard(self)
         encoded = self._encode_history(history)
         intended_state_sha256 = sha256(encoded).hexdigest()
-        previous_bytes = _read_stable_reconciliation_bytes(self.path)
+        previous_bytes = _stable_read(self.path)
         previous_state_sha256 = (
             None
             if previous_bytes is None
@@ -1539,9 +1544,13 @@ def _install_canonical_store_dispatch_seal(
                 descriptor,
                 function,
                 getattr(function, "__code__", None),
+                getattr(function, "__defaults__", None),
+                dict(getattr(function, "__kwdefaults__", None) or {}),
             )
         )
     frozen_entries = tuple(entries)
+    stable_reader = _read_stable_reconciliation_bytes
+    stable_reader_code = getattr(stable_reader, "__code__", None)
 
     write_lock = _write_lock
     require_snapshot = _require_canonical_snapshot_graph
@@ -1556,7 +1565,23 @@ def _install_canonical_store_dispatch_seal(
                 "account reconciliation store type changed at canonical dispatch boundary"
             )
         instance_dict = object.__getattribute__(store, "__dict__")
-        for name, _kind, descriptor, function, code in frozen_entries:
+        if (
+            _read_stable_reconciliation_bytes is not stable_reader
+            or getattr(_read_stable_reconciliation_bytes, "__code__", None)
+            is not stable_reader_code
+        ):
+            raise integrity_error(
+                "account reconciliation stable reader dispatch changed"
+            )
+        for (
+            name,
+            _kind,
+            descriptor,
+            function,
+            code,
+            defaults,
+            kwdefaults,
+        ) in frozen_entries:
             live_descriptor = cls.__dict__.get(name)
             if live_descriptor is not descriptor or name in instance_dict:
                 raise integrity_error(
@@ -1569,6 +1594,9 @@ def _install_canonical_store_dispatch_seal(
             if (
                 live_function is not function
                 or getattr(live_function, "__code__", None) is not code
+                or getattr(live_function, "__defaults__", None) != defaults
+                or dict(getattr(live_function, "__kwdefaults__", None) or {})
+                != kwdefaults
             ):
                 raise integrity_error(
                     "account reconciliation lower dispatch implementation changed"
@@ -1581,7 +1609,15 @@ def _install_canonical_store_dispatch_seal(
         **kwargs: object,
     ) -> object:
         _guard(store)
-        for candidate, kind, _descriptor, function, _code in frozen_entries:
+        for (
+            candidate,
+            kind,
+            _descriptor,
+            function,
+            _code,
+            _defaults,
+            _kwdefaults,
+        ) in frozen_entries:
             if candidate != name:
                 continue
             if kind == "instance":

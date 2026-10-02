@@ -774,19 +774,26 @@ def test_reader_cannot_abort_writer_pending_monotonic_transition(
     store = BookmakerAccountReconciliationStore(path)
     first = _snapshot(_T1)
     writer_prepared = Event()
-    allow_publish = Event()
+    allow_recovery = Event()
     reader_started = Event()
     reader_done = Event()
     writer_errors: list[BaseException] = []
     reader_errors: list[BaseException] = []
     reader_history: list[BookmakerAccountSnapshot] = []
-    original_publish = store._publish_history_bytes
+    canonical_read = reconciliation_module._read_stable_reconciliation_bytes
+    read_calls = 0
 
-    def held_publish(encoded: bytes) -> None:
-        writer_prepared.set()
-        if not allow_publish.wait(timeout=5):
-            raise RuntimeError("test timed out waiting to publish")
-        original_publish(encoded)
+    def held_post_publish_read(candidate):
+        nonlocal read_calls
+        read_calls += 1
+        # append_snapshot reads once before reconciliation and _write_history reads
+        # once before PREPARE. The third read occurs after durable local publication,
+        # while the authority PREPARE is still pending.
+        if read_calls == 3:
+            writer_prepared.set()
+            if not allow_recovery.wait(timeout=5):
+                raise RuntimeError("test timed out waiting to recover publication")
+        return canonical_read(candidate)
 
     def writer() -> None:
         try:
@@ -803,7 +810,11 @@ def test_reader_cannot_abort_writer_pending_monotonic_transition(
         finally:
             reader_done.set()
 
-    monkeypatch.setattr(store, "_publish_history_bytes", held_publish)
+    monkeypatch.setattr(
+        reconciliation_module,
+        "_read_stable_reconciliation_bytes",
+        held_post_publish_read,
+    )
     writer_thread = Thread(target=writer)
     writer_thread.start()
     assert writer_prepared.wait(timeout=5)
@@ -812,12 +823,11 @@ def test_reader_cannot_abort_writer_pending_monotonic_transition(
     reader_thread.start()
     assert reader_started.wait(timeout=5)
 
-    # Recovery is mutating: a reader must wait behind the same store lock while the
-    # writer has an authority PREPARE, otherwise it could observe old local bytes and
-    # abort the writer's pending transaction.
+    # Recovery is mutating: the reader must wait behind the same store lock while
+    # the writer owns a published state plus pending authority PREPARE.
     assert not reader_done.wait(timeout=0.2)
 
-    allow_publish.set()
+    allow_recovery.set()
     writer_thread.join(timeout=5)
     reader_thread.join(timeout=5)
 
@@ -826,7 +836,6 @@ def test_reader_cannot_abort_writer_pending_monotonic_transition(
     assert writer_errors == []
     assert reader_errors == []
     assert tuple(reader_history) == (first,)
-
 
 
 @pytest.mark.parametrize(

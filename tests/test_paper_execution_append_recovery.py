@@ -17,6 +17,8 @@ from autosport.paper_execution_adoption import (
 from autosport.paper_execution_reality import (
     EvidenceGrade,
     PaperAttemptOutcome,
+    PaperExecutionEvidenceRecord,
+    PaperExecutionEvidenceRegistry,
     PaperExecutionLedger,
     PaperExecutionModelConfig,
 )
@@ -107,6 +109,33 @@ def _runtime(
     )
 
 
+def _registered_observation(
+    ledger: PaperExecutionLedger,
+    source_action: ExecutionAction,
+):
+    record = PaperExecutionEvidenceRecord(
+        action_id=source_action.action_id,
+        bookmaker_id=source_action.bookmaker_id,
+        account_id=source_action.account_id,
+        event_id=source_action.event_id,
+        market_id=source_action.market_id,
+        selection_id=source_action.selection_id,
+        side=source_action.side,
+        quote_id=source_action.quote_id,
+        outcome=PaperAttemptOutcome.ACCEPTED,
+        observed_at="2026-09-20T06:00:00.250000+00:00",
+        evidence_grade=EvidenceGrade.EMPIRICAL,
+        evidence_source="append-recovery-observation-v1",
+        accepted_odds="2.40",
+        accepted_stake="10.00",
+        suspended=False,
+        reason="captured accepted PAPER execution",
+    )
+    registry = PaperExecutionEvidenceRegistry(ledger)
+    registry.register(record)
+    return record.as_observation(), registry
+
+
 def _persist_unrelated_ticket(book: PaperBook, path: Path) -> None:
     book.open_ticket(
         [
@@ -154,6 +183,45 @@ class PaperExecutionAppendRecoveryTests(unittest.TestCase):
             )
 
             self.assertEqual(resumed.run.run_id, first.run.run_id)
+            self.assertEqual(tuple(restarted_book.tickets), first_ticket_ids)
+            self.assertEqual(len(restarted_book.tickets), 1)
+            self.assertEqual(restarted_book.balance, Decimal("90.00"))
+
+    def test_live_retry_preserves_empirical_observation_identity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            model = _config()
+            book = PaperBook("100.00")
+            runtime = _runtime(root, book, model=model)
+            action = _action()
+            observation, registry = _registered_observation(runtime.ledger, action)
+
+            first = runtime.execute(
+                prepared=_prepared(runtime, action),
+                trigger_id="live-append-recovery-observed",
+                started_at=STARTED_AT,
+                materialize_exposure=True,
+                observations={action.action_id: observation},
+                evidence_registry=registry,
+            )
+            self.assertEqual(first.run.attempts[0].outcome, PaperAttemptOutcome.ACCEPTED)
+            self.assertEqual(first.run.attempts[0].evidence_id, observation.evidence_id)
+            first_ticket_ids = tuple(book.tickets)
+
+            restarted_book = PaperBook.load(root / "paper_book.json")
+            restarted = _runtime(root, restarted_book, model=model)
+            restarted_registry = PaperExecutionEvidenceRegistry(restarted.ledger)
+            resumed = restarted.execute(
+                prepared=_prepared(restarted, action),
+                trigger_id="live-append-recovery-observed",
+                started_at=STARTED_AT,
+                materialize_exposure=True,
+                observations={action.action_id: observation},
+                evidence_registry=restarted_registry,
+            )
+
+            self.assertEqual(resumed.run.run_id, first.run.run_id)
+            self.assertEqual(resumed.run.attempts[0].evidence_id, observation.evidence_id)
             self.assertEqual(tuple(restarted_book.tickets), first_ticket_ids)
             self.assertEqual(len(restarted_book.tickets), 1)
             self.assertEqual(restarted_book.balance, Decimal("90.00"))

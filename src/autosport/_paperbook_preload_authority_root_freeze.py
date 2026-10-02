@@ -101,14 +101,19 @@ def _install() -> None:
     namespace["_PBA_FSPATH"] = frozen_fspath
     namespace["_PBA_ERROR"] = _anti_rollback._impl.PaperExecutionIntegrityError
 
+    # The downstream canonical load-dispatch freezer indexes same-globals functions
+    # by their owning namespace key and then resolves the root selector by __name__.
+    # Keep both identities exactly `_paper_authority_root`; using the legacy external
+    # name `_authority_root` would make the already-fail-closed clone contract reject
+    # this composition before any tests execute.
     replacement = FunctionType(
         _frozen_authority_root.__code__,
         namespace,
-        name="_authority_root",
+        name="_paper_authority_root",
         argdefs=_frozen_authority_root.__defaults__,
         closure=_frozen_authority_root.__closure__,
     )
-    replacement.__qualname__ = _anti_rollback._authority_root.__qualname__
+    replacement.__qualname__ = "_paper_authority_root"
     replacement.__doc__ = _anti_rollback._authority_root.__doc__
     namespace["_paper_authority_root"] = replacement
     namespace["_autosport_paperbook_authority_root_freeze_installed"] = True

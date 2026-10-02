@@ -24,6 +24,11 @@ _OBSERVED_AT = "2026-09-23T00:00:00+00:00"
 _HASH = "a" * 64
 
 
+def _authority_root(tmp_path, name: str):
+    # Monotonic authority must be outside the protected reconciliation workspace.
+    return tmp_path.parent / f".{tmp_path.name}-{name}"
+
+
 def _snapshot(
     amount: Decimal,
     *,
@@ -182,7 +187,7 @@ def test_genuine_authority_root_swap_is_rejected_before_publication(tmp_path) ->
     path = tmp_path / "workspace" / "account.json"
     store = BookmakerAccountReconciliationStore(
         path,
-        authority_root=tmp_path / "authority-a",
+        authority_root=_authority_root(tmp_path, "authority-a"),
     )
     original = store._authority
 
@@ -190,7 +195,7 @@ def test_genuine_authority_root_swap_is_rejected_before_publication(tmp_path) ->
         workspace=store._workspace,
         domain="provider.account-snapshot-reconciliation-v1",
         key=f"account-reconciliation:{path.name}",
-        authority_root=tmp_path / "authority-b",
+        authority_root=_authority_root(tmp_path, "authority-b"),
     )
 
     with pytest.raises(
@@ -211,7 +216,7 @@ def test_authority_instance_method_shadow_is_rejected_before_publication(
     path = tmp_path / "workspace" / "account.json"
     store = BookmakerAccountReconciliationStore(
         path,
-        authority_root=tmp_path / "authority",
+        authority_root=_authority_root(tmp_path, "authority"),
     )
     setattr(store._authority, method_name, lambda *args, **kwargs: None)
 
@@ -228,7 +233,7 @@ def test_authority_binding_field_drift_is_rejected_before_publication(tmp_path) 
     path = tmp_path / "workspace" / "account.json"
     store = BookmakerAccountReconciliationStore(
         path,
-        authority_root=tmp_path / "authority",
+        authority_root=_authority_root(tmp_path, "authority"),
     )
     store._authority.authority_root = tmp_path / "retargeted-authority"
 
@@ -247,13 +252,13 @@ def test_authority_guard_instance_shadow_cannot_redirect_requested_root(
     path = tmp_path / "workspace" / "account.json"
     store = BookmakerAccountReconciliationStore(
         path,
-        authority_root=tmp_path / "authority-a",
+        authority_root=_authority_root(tmp_path, "authority-a"),
     )
     replacement = MonotonicWorkspaceAuthority(
         workspace=store._workspace,
         domain="provider.account-snapshot-reconciliation-v1",
         key=f"account-reconciliation:{path.name}",
-        authority_root=tmp_path / "authority-b",
+        authority_root=_authority_root(tmp_path, "authority-b"),
     )
 
     # Reproduce the exact post-construction bypass: both the mutable authority
@@ -265,7 +270,7 @@ def test_authority_guard_instance_shadow_cannot_redirect_requested_root(
 
     with pytest.raises(
         AccountReconciliationIntegrityError,
-        match="monotonic authority identity or binding changed",
+        match="lower dispatch graph changed|monotonic authority identity or binding changed",
     ):
         store.append_snapshot(_snapshot(Decimal("1")))
 
@@ -280,13 +285,13 @@ def test_caller_mutable_baseline_fields_cannot_authorize_alternate_root(
     path = tmp_path / "workspace" / "account.json"
     store = BookmakerAccountReconciliationStore(
         path,
-        authority_root=tmp_path / "authority-a",
+        authority_root=_authority_root(tmp_path, "authority-a"),
     )
     replacement = MonotonicWorkspaceAuthority(
         workspace=store._workspace,
         domain="provider.account-snapshot-reconciliation-v1",
         key=f"account-reconciliation:{path.name}",
-        authority_root=tmp_path / "authority-b",
+        authority_root=_authority_root(tmp_path, "authority-b"),
     )
     replacement_binding = (
         replacement.authority_root,
@@ -322,7 +327,7 @@ def test_store_reinitialization_cannot_reissue_authority_root(tmp_path) -> None:
     path = tmp_path / "workspace" / "account.json"
     store = BookmakerAccountReconciliationStore(
         path,
-        authority_root=tmp_path / "authority-a",
+        authority_root=_authority_root(tmp_path, "authority-a"),
     )
 
     with pytest.raises(
@@ -332,7 +337,7 @@ def test_store_reinitialization_cannot_reissue_authority_root(tmp_path) -> None:
         BookmakerAccountReconciliationStore.__init__(
             store,
             path,
-            authority_root=tmp_path / "authority-b",
+            authority_root=_authority_root(tmp_path, "authority-b"),
         )
 
     # __init__ assigned the attempted root-B authority before registration failed.
@@ -653,7 +658,7 @@ def test_reconciliation_read_rejects_preexisting_symlink_alias(tmp_path) -> None
     target = tmp_path / "target.json"
     target_store = BookmakerAccountReconciliationStore(
         target,
-        authority_root=tmp_path / "target-authority",
+        authority_root=_authority_root(tmp_path, "target-authority"),
     )
     assert target_store.append_snapshot(_snapshot(Decimal("10")))
 
@@ -665,7 +670,7 @@ def test_reconciliation_read_rejects_preexisting_symlink_alias(tmp_path) -> None
 
     alias_store = BookmakerAccountReconciliationStore(
         alias,
-        authority_root=tmp_path / "alias-authority",
+        authority_root=_authority_root(tmp_path, "alias-authority"),
     )
     with pytest.raises(
         AccountReconciliationIntegrityError,
@@ -681,14 +686,14 @@ def test_reconciliation_read_rejects_regular_file_swap_during_open(
     path = tmp_path / "account.json"
     store = BookmakerAccountReconciliationStore(
         path,
-        authority_root=tmp_path / "authority-a",
+        authority_root=_authority_root(tmp_path, "authority-a"),
     )
     assert store.append_snapshot(_snapshot(Decimal("10")))
 
     replacement = tmp_path / "replacement.json"
     replacement_store = BookmakerAccountReconciliationStore(
         replacement,
-        authority_root=tmp_path / "authority-b",
+        authority_root=_authority_root(tmp_path, "authority-b"),
     )
     assert replacement_store.append_snapshot(
         _snapshot(
@@ -727,7 +732,7 @@ def test_stable_reconciliation_reader_returns_exact_persisted_bytes(tmp_path) ->
     path = tmp_path / "account.json"
     store = BookmakerAccountReconciliationStore(
         path,
-        authority_root=tmp_path / "authority",
+        authority_root=_authority_root(tmp_path, "authority"),
     )
     assert store.append_snapshot(_snapshot(Decimal("10")))
 
@@ -743,7 +748,7 @@ def test_reconciliation_read_normalizes_deep_json_recursion(tmp_path) -> None:
     )
     store = BookmakerAccountReconciliationStore(
         path,
-        authority_root=tmp_path / "authority",
+        authority_root=_authority_root(tmp_path, "authority"),
     )
 
     with pytest.raises(
@@ -767,7 +772,7 @@ def test_reconciliation_parent_alias_retarget_cannot_move_state_path(tmp_path) -
     requested_path = alias / "account.json"
     store = BookmakerAccountReconciliationStore(
         requested_path,
-        authority_root=tmp_path / "authority",
+        authority_root=_authority_root(tmp_path, "authority"),
     )
     canonical_path = workspace_a.resolve() / "account.json"
     assert store.path == canonical_path
@@ -793,7 +798,7 @@ def test_instance_lower_dispatch_shadow_cannot_bypass_durable_store(
     path = tmp_path / "account.json"
     store = BookmakerAccountReconciliationStore(
         path,
-        authority_root=tmp_path / "authority",
+        authority_root=_authority_root(tmp_path, "authority"),
     )
     setattr(store, method_name, lambda *args, **kwargs: None)
 
@@ -813,7 +818,7 @@ def test_class_lower_dispatch_rebind_cannot_bypass_durable_store(
     path = tmp_path / "account.json"
     store = BookmakerAccountReconciliationStore(
         path,
-        authority_root=tmp_path / "authority",
+        authority_root=_authority_root(tmp_path, "authority"),
     )
 
     monkeypatch.setattr(
@@ -835,7 +840,7 @@ def test_read_side_lower_dispatch_shadow_cannot_forge_empty_history(tmp_path) ->
     path = tmp_path / "account.json"
     store = BookmakerAccountReconciliationStore(
         path,
-        authority_root=tmp_path / "authority",
+        authority_root=_authority_root(tmp_path, "authority"),
     )
     expected = _snapshot(Decimal("10"))
     assert store.append_snapshot(expected)

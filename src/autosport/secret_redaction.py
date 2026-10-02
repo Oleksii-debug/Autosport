@@ -3,7 +3,7 @@ from __future__ import annotations
 import builtins
 import os
 import re
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable
 from urllib.parse import unquote_plus
 from typing import Any
 
@@ -465,9 +465,12 @@ def redact_operator_value(
                 return bytearray(redacted_binary)
             return memoryview(redacted_binary)
 
-        is_mapping = isinstance(item, Mapping)
-        is_list = isinstance(item, list)
-        is_tuple = isinstance(item, tuple)
+        # Structural presentation is trusted only for exact built-in containers.
+        # Container subclasses can override items()/__iter__ and must not gain code
+        # execution inside this fail-closed redaction boundary.
+        is_mapping = type(item) is dict
+        is_list = type(item) is list
+        is_tuple = type(item) is tuple
         is_set = type(item) is set
         is_frozenset = type(item) is frozenset
         if is_mapping or is_list or is_tuple or is_set or is_frozenset:

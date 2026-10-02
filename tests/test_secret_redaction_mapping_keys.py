@@ -478,3 +478,33 @@ def test_exact_inert_builtin_scalar_values_remain_stable() -> None:
     }
 
     assert redact_operator_value(payload) == payload
+class _HostileDictValue(dict):
+    def items(self):
+        raise AssertionError("custom dict subclass items() must not run")
+
+
+class _HostileListValue(list):
+    def __iter__(self):
+        raise AssertionError("custom list subclass __iter__ must not run")
+
+
+class _HostileTupleValue(tuple):
+    def __iter__(self):
+        raise AssertionError("custom tuple subclass __iter__ must not run")
+
+
+def test_custom_container_subclasses_fail_closed_without_dispatching_user_code() -> None:
+    payload = {
+        "mapping": _HostileDictValue({"api_key": "provider-secret"}),
+        "list": _HostileListValue(["provider-secret"]),
+        "tuple": _HostileTupleValue(("provider-secret",)),
+    }
+
+    redacted = redact_operator_value(payload)
+
+    assert redacted == {
+        "mapping": REDACTED,
+        "list": REDACTED,
+        "tuple": REDACTED,
+    }
+    assert "provider-secret" not in repr(redacted)

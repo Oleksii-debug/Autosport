@@ -7,13 +7,14 @@ or infers economic causes from balance arithmetic.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 from enum import Enum
 from hashlib import sha256
+from itertools import chain
 import json
 import os
 import stat
@@ -80,6 +81,17 @@ _WINDOWS_PRODUCT_AUTHORITY_ROOT_RELATIVE = (
     Path("Autosport") / "application-state" / "monotonic-authority-v1"
 )
 _POSIX_PRODUCT_AUTHORITY_ROOT_RELATIVE = Path("autosport") / "monotonic-authority-v1"
+
+# v1 keeps complete history in one JSON document.  Once that document reaches a
+# bounded migration trigger, v2 retains the exact same canonical snapshots in an
+# immutable, hash-chained sidecar sequence and keeps only a constant-size root
+# manifest at the authority-bound state path.  Crossing these values migrates;
+# it never rejects or discards legitimate history.
+_SEGMENTED_STORE_SCHEMA_VERSION = 2
+_SEGMENT_SCHEMA = "autosport.account-reconciliation-snapshot-segment-v1"
+_SEGMENT_SCHEMA_VERSION = 1
+_SEGMENT_MIGRATION_SNAPSHOT_THRESHOLD = 64
+_SEGMENT_MIGRATION_BYTE_THRESHOLD = 1024 * 1024
 
 
 
@@ -1022,29 +1034,8 @@ class BookmakerAccountReconciliationStore:
         return authority
 
     def append_snapshot(self, snapshot: BookmakerAccountSnapshot) -> bool:
-        snapshot = _require_canonical_snapshot_graph(snapshot)
         with _write_lock(self.path):
-            history = self._load_history()
-            incoming_id = snapshot_fingerprint(snapshot)
-            if any(snapshot_fingerprint(existing) == incoming_id for existing in history):
-                return False
-            if history:
-                latest = history[-1]
-                self._require_same_account(latest, snapshot)
-                incoming_at = _time(snapshot.observed_at, "snapshot.observed_at")
-                latest_at = _time(latest.observed_at, "checkpoint.observed_at")
-                if incoming_at < latest_at:
-                    raise AccountSnapshotStaleError(
-                        "older account snapshot cannot supersede the durable checkpoint"
-                    )
-                if incoming_at == latest_at:
-                    raise AccountReconciliationIntegrityError(
-                        "conflicting account snapshot content at the same observed_at"
-                    )
-            candidate = (*history, snapshot)
-            self._reconcile(candidate)
-            self._write_history(candidate)
-            return True
+            return self._append_snapshot_bounded(snapshot)
 
     def history(self) -> tuple[BookmakerAccountSnapshot, ...]:
         with _write_lock(self.path):
@@ -1052,13 +1043,11 @@ class BookmakerAccountReconciliationStore:
 
     def latest_snapshot(self) -> BookmakerAccountSnapshot | None:
         with _write_lock(self.path):
-            history = self._load_history()
-            return history[-1] if history else None
+            return self._latest_snapshot_bounded()
 
     def latest_state(self) -> ReconciledAccountState | None:
         with _write_lock(self.path):
-            history = self._load_history()
-            return self._reconcile(history) if history else None
+            return self._latest_state_bounded()
 
     @staticmethod
     def _require_same_account(
@@ -1118,13 +1107,15 @@ class BookmakerAccountReconciliationStore:
 
     @classmethod
     def _reconcile(
-        cls, history: tuple[BookmakerAccountSnapshot, ...] | list[BookmakerAccountSnapshot]
+        cls, history: Iterable[BookmakerAccountSnapshot]
     ) -> ReconciledAccountState:
-        if not history:
+        iterator = iter(history)
+        try:
+            first = next(iterator)
+        except StopIteration as exc:
             raise AccountReconciliationIntegrityError(
                 "cannot reconcile empty account history"
-            )
-        first = history[0]
+            ) from exc
         previous_at: datetime | None = None
         positions: dict[str, ReconciledPosition] = {}
         latest_balance: BookmakerBalanceObservation | None = None
@@ -1132,7 +1123,9 @@ class BookmakerAccountReconciliationStore:
         balance_observations: dict[str, dict[str, object]] = {}
         position_observations: dict[str, dict[str, object]] = {}
 
-        for snapshot in history:
+        latest = first
+        for snapshot in chain((first,), iterator):
+            latest = snapshot
             cls._require_same_account(first, snapshot)
             current_at = _time(snapshot.observed_at, "snapshot.observed_at")
             if previous_at is not None:
@@ -1236,7 +1229,6 @@ class BookmakerAccountReconciliationStore:
                         )
                     latest_balance = snapshot.balance
 
-        latest = history[-1]
         return ReconciledAccountState(
             snapshot_id=snapshot_fingerprint(latest),
             venue_id=latest.profile.venue_id,
@@ -1256,7 +1248,8 @@ class BookmakerAccountReconciliationStore:
         self,
         observed_state_sha256: str | None,
         *,
-        history: list[BookmakerAccountSnapshot] | None = None,
+        history: Iterable[BookmakerAccountSnapshot] | None = None,
+        latest_snapshot_id: str | None = None,
         _authority_guard=_require_canonical_authority,
     ) -> None:
         # Capture the product-owned validator at class-definition time.  Resolving
@@ -1274,11 +1267,20 @@ class BookmakerAccountReconciliationStore:
                 pending is not None
                 and observed_state_sha256 == pending.intended_state_sha256
             ):
-                if not history:
-                    raise AccountReconciliationIntegrityError(
-                        "prepared account reconciliation state has no snapshot"
-                    )
-                snapshot_id = snapshot_fingerprint(history[-1])
+                snapshot_id = latest_snapshot_id
+                if snapshot_id is None:
+                    if history is None:
+                        raise AccountReconciliationIntegrityError(
+                            "prepared account reconciliation state has no snapshot"
+                        )
+                    last_snapshot: BookmakerAccountSnapshot | None = None
+                    for candidate in history:
+                        last_snapshot = candidate
+                    if last_snapshot is None:
+                        raise AccountReconciliationIntegrityError(
+                            "prepared account reconciliation state has no snapshot"
+                        )
+                    snapshot_id = snapshot_fingerprint(last_snapshot)
                 prefix = _authority_tx_prefix(snapshot_id)
                 if not pending.tx_id.startswith(prefix):
                     raise AccountReconciliationIntegrityError(
@@ -1335,6 +1337,624 @@ class BookmakerAccountReconciliationStore:
                 attempts.append(int(suffix))
         return f"{prefix}{max(attempts, default=0) + 1}"
 
+
+    def _segment_root(self) -> Path:
+        root = self._workspace / f".{self.path.name}.segments-v1"
+        if root.exists():
+            try:
+                resolved = root.resolve(strict=True)
+            except OSError as exc:
+                raise AccountReconciliationIntegrityError(
+                    "account reconciliation segment root is unreadable"
+                ) from exc
+            expected = root.absolute()
+            if (
+                os.path.normcase(os.path.normpath(str(resolved)))
+                != os.path.normcase(os.path.normpath(str(expected)))
+                or not resolved.is_dir()
+            ):
+                raise AccountReconciliationIntegrityError(
+                    "account reconciliation segment root must be a direct directory"
+                )
+        return root
+
+    def _segment_path(self, index: int) -> Path:
+        if type(index) is not int or index <= 0:
+            raise AccountReconciliationIntegrityError(
+                "account reconciliation segment index is invalid"
+            )
+        return self._segment_root() / f"segment-{index:020d}.json"
+
+    @classmethod
+    def _encode_segment(
+        cls,
+        *,
+        index: int,
+        previous_segment_sha256: str | None,
+        snapshot: BookmakerAccountSnapshot,
+    ) -> bytes:
+        if type(index) is not int or index <= 0:
+            raise AccountReconciliationIntegrityError(
+                "account reconciliation segment index is invalid"
+            )
+        if previous_segment_sha256 is not None and (
+            not isinstance(previous_segment_sha256, str)
+            or len(previous_segment_sha256) != 64
+            or any(ch not in "0123456789abcdef" for ch in previous_segment_sha256)
+        ):
+            raise AccountReconciliationIntegrityError(
+                "account reconciliation previous segment digest is invalid"
+            )
+        snapshot_id = snapshot_fingerprint(snapshot)
+        document = {
+            "schema": _SEGMENT_SCHEMA,
+            "schema_version": _SEGMENT_SCHEMA_VERSION,
+            "index": index,
+            "previous_segment_sha256": previous_segment_sha256,
+            "snapshot_id": snapshot_id,
+            "snapshot": snapshot_to_canonical_dict(snapshot),
+        }
+        return (
+            json.dumps(
+                document,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+            )
+            + "\n"
+        ).encode("utf-8")
+
+    @classmethod
+    def _decode_segment(
+        cls,
+        raw_bytes: bytes,
+        *,
+        expected_index: int,
+        expected_previous_segment_sha256: str | None,
+    ) -> tuple[BookmakerAccountSnapshot, str]:
+        try:
+            document = strict_json_loads(raw_bytes.decode("utf-8"))
+        except (UnicodeError, ValueError, RecursionError) as exc:
+            raise AccountReconciliationIntegrityError(
+                "account reconciliation segment is unreadable or corrupt"
+            ) from exc
+        payload = _exact_keys(
+            document,
+            {
+                "schema",
+                "schema_version",
+                "index",
+                "previous_segment_sha256",
+                "snapshot_id",
+                "snapshot",
+            },
+            "segment",
+        )
+        if payload["schema"] != _SEGMENT_SCHEMA:
+            raise AccountReconciliationIntegrityError(
+                "account reconciliation segment schema is invalid"
+            )
+        schema_version = payload["schema_version"]
+        if type(schema_version) is not int or schema_version != _SEGMENT_SCHEMA_VERSION:
+            raise AccountReconciliationIntegrityError(
+                "account reconciliation segment schema_version is invalid"
+            )
+        if type(payload["index"]) is not int or payload["index"] != expected_index:
+            raise AccountReconciliationIntegrityError(
+                "account reconciliation segment index mismatch"
+            )
+        if payload["previous_segment_sha256"] != expected_previous_segment_sha256:
+            raise AccountReconciliationIntegrityError(
+                "account reconciliation segment hash chain mismatch"
+            )
+        snapshot = _decode_snapshot(payload["snapshot"])
+        snapshot_id = snapshot_fingerprint(snapshot)
+        if payload["snapshot_id"] != snapshot_id:
+            raise AccountReconciliationIntegrityError(
+                "account reconciliation segment snapshot_id mismatch"
+            )
+        return snapshot, sha256(raw_bytes).hexdigest()
+
+    @classmethod
+    def _encode_segmented_manifest(
+        cls,
+        *,
+        snapshot_count: int,
+        head_snapshot_id: str,
+        head_segment_sha256: str,
+    ) -> bytes:
+        if type(snapshot_count) is not int or snapshot_count <= 0:
+            raise AccountReconciliationIntegrityError(
+                "account reconciliation segmented snapshot_count is invalid"
+            )
+        for label, digest in (
+            ("head_snapshot_id", head_snapshot_id),
+            ("head_segment_sha256", head_segment_sha256),
+        ):
+            if (
+                not isinstance(digest, str)
+                or len(digest) != 64
+                or any(ch not in "0123456789abcdef" for ch in digest)
+            ):
+                raise AccountReconciliationIntegrityError(
+                    f"account reconciliation segmented {label} is invalid"
+                )
+        document = {
+            "schema_version": _SEGMENTED_STORE_SCHEMA_VERSION,
+            "segmented_history": {
+                "segment_schema": _SEGMENT_SCHEMA,
+                "snapshot_count": snapshot_count,
+                "head_snapshot_id": head_snapshot_id,
+                "head_segment_sha256": head_segment_sha256,
+            },
+        }
+        return (
+            json.dumps(
+                document,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+            )
+            + "\n"
+        ).encode("utf-8")
+
+    @classmethod
+    def _decode_segmented_manifest(
+        cls,
+        document: object,
+    ) -> tuple[int, str, str]:
+        payload = _exact_keys(
+            document,
+            {"schema_version", "segmented_history"},
+            "segmented store",
+        )
+        schema_version = payload["schema_version"]
+        if type(schema_version) is not int or schema_version != _SEGMENTED_STORE_SCHEMA_VERSION:
+            raise AccountReconciliationIntegrityError(
+                "unsupported account reconciliation segmented schema_version"
+            )
+        segmented = _exact_keys(
+            payload["segmented_history"],
+            {
+                "segment_schema",
+                "snapshot_count",
+                "head_snapshot_id",
+                "head_segment_sha256",
+            },
+            "segmented_history",
+        )
+        if segmented["segment_schema"] != _SEGMENT_SCHEMA:
+            raise AccountReconciliationIntegrityError(
+                "account reconciliation segment schema authority mismatch"
+            )
+        snapshot_count = segmented["snapshot_count"]
+        if type(snapshot_count) is not int or snapshot_count <= 0:
+            raise AccountReconciliationIntegrityError(
+                "account reconciliation segmented snapshot_count is invalid"
+            )
+        for field in ("head_snapshot_id", "head_segment_sha256"):
+            digest = segmented[field]
+            if (
+                not isinstance(digest, str)
+                or len(digest) != 64
+                or any(ch not in "0123456789abcdef" for ch in digest)
+            ):
+                raise AccountReconciliationIntegrityError(
+                    f"account reconciliation segmented {field} is invalid"
+                )
+        return (
+            snapshot_count,
+            segmented["head_snapshot_id"],
+            segmented["head_segment_sha256"],
+        )
+
+    def _iter_segmented_history(
+        self,
+        manifest: tuple[int, str, str],
+        *,
+        _stable_read=_read_stable_reconciliation_bytes,
+    ) -> Iterator[BookmakerAccountSnapshot]:
+        snapshot_count, expected_head_snapshot_id, expected_head_segment_sha256 = manifest
+        previous_segment_sha256: str | None = None
+        last_snapshot_id: str | None = None
+        for index in range(1, snapshot_count + 1):
+            segment_path = self._segment_path(index)
+            raw_bytes = _stable_read(segment_path)
+            if raw_bytes is None:
+                raise AccountReconciliationIntegrityError(
+                    "account reconciliation segment is missing"
+                )
+            snapshot, segment_sha256 = self._decode_segment(
+                raw_bytes,
+                expected_index=index,
+                expected_previous_segment_sha256=previous_segment_sha256,
+            )
+            previous_segment_sha256 = segment_sha256
+            last_snapshot_id = snapshot_fingerprint(snapshot)
+            yield snapshot
+        if previous_segment_sha256 != expected_head_segment_sha256:
+            raise AccountReconciliationIntegrityError(
+                "account reconciliation segmented head digest mismatch"
+            )
+        if last_snapshot_id != expected_head_snapshot_id:
+            raise AccountReconciliationIntegrityError(
+                "account reconciliation segmented head snapshot mismatch"
+            )
+
+    def _publish_segment_bytes(self, index: int, encoded: bytes) -> str:
+        segment_root = self._segment_root()
+        try:
+            segment_root.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise AccountReconciliationIntegrityError(
+                "unable to create account reconciliation segment root"
+            ) from exc
+        # Re-resolve after mkdir so a pre-existing/replaced alias cannot become
+        # a parent traversal surface for immutable evidence.
+        self._segment_root()
+        segment_path = self._segment_path(index)
+        existing = _read_stable_reconciliation_bytes(segment_path)
+        if existing is not None:
+            if existing != encoded:
+                raise AccountReconciliationIntegrityError(
+                    "account reconciliation immutable segment conflicts with existing bytes"
+                )
+            return sha256(existing).hexdigest()
+
+        temp_name: str | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                "wb",
+                dir=segment_root,
+                prefix=f".segment-{index:020d}.",
+                suffix=".tmp",
+                delete=False,
+            ) as handle:
+                temp_name = handle.name
+                handle.write(encoded)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temp_name, segment_path)
+            temp_name = None
+            if os.name != "nt":
+                flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+                directory_fd = os.open(segment_root, flags)
+                try:
+                    os.fsync(directory_fd)
+                finally:
+                    os.close(directory_fd)
+        except OSError as exc:
+            raise AccountReconciliationIntegrityError(
+                "failed to durably publish account reconciliation segment"
+            ) from exc
+        finally:
+            if temp_name is not None:
+                try:
+                    Path(temp_name).unlink()
+                except FileNotFoundError:
+                    pass
+        persisted = _read_stable_reconciliation_bytes(segment_path)
+        if persisted != encoded:
+            raise AccountReconciliationIntegrityError(
+                "account reconciliation segment publication mismatch"
+            )
+        return sha256(encoded).hexdigest()
+
+    def _verify_segmented_root(
+        self,
+        *,
+        expected_manifest: tuple[int, str, str],
+        expected_state_sha256: str,
+        _stable_read=_read_stable_reconciliation_bytes,
+    ) -> None:
+        root_bytes = _stable_read(self.path)
+        if root_bytes is None or sha256(root_bytes).hexdigest() != expected_state_sha256:
+            raise AccountReconciliationIntegrityError(
+                "account reconciliation segmented root publication mismatch"
+            )
+        try:
+            document = strict_json_loads(root_bytes.decode("utf-8"))
+        except (UnicodeError, ValueError, RecursionError) as exc:
+            raise AccountReconciliationIntegrityError(
+                "account reconciliation segmented root is unreadable"
+            ) from exc
+        manifest = self._decode_segmented_manifest(document)
+        if manifest != expected_manifest:
+            raise AccountReconciliationIntegrityError(
+                "account reconciliation segmented manifest changed after publication"
+            )
+        self._reconcile(self._iter_segmented_history(manifest))
+        self._recover_authority(
+            expected_state_sha256,
+            latest_snapshot_id=manifest[1],
+        )
+
+    def _write_segmented_history(
+        self,
+        history: Iterable[BookmakerAccountSnapshot],
+        *,
+        previous_root_bytes: bytes,
+        _authority_guard=_require_canonical_authority,
+    ) -> None:
+        authority = _authority_guard(self)
+        previous_segment_sha256: str | None = None
+        head_snapshot_id: str | None = None
+        snapshot_count = 0
+        for snapshot_count, snapshot in enumerate(history, start=1):
+            encoded_segment = self._encode_segment(
+                index=snapshot_count,
+                previous_segment_sha256=previous_segment_sha256,
+                snapshot=snapshot,
+            )
+            previous_segment_sha256 = self._publish_segment_bytes(
+                snapshot_count,
+                encoded_segment,
+            )
+            head_snapshot_id = snapshot_fingerprint(snapshot)
+        if (
+            snapshot_count <= 0
+            or head_snapshot_id is None
+            or previous_segment_sha256 is None
+        ):
+            raise AccountReconciliationIntegrityError(
+                "cannot persist empty segmented account reconciliation history"
+            )
+        manifest = (
+            snapshot_count,
+            head_snapshot_id,
+            previous_segment_sha256,
+        )
+        encoded_root = self._encode_segmented_manifest(
+            snapshot_count=snapshot_count,
+            head_snapshot_id=head_snapshot_id,
+            head_segment_sha256=previous_segment_sha256,
+        )
+        intended_state_sha256 = sha256(encoded_root).hexdigest()
+        previous_state_sha256 = sha256(previous_root_bytes).hexdigest()
+        tx_id = self._next_authority_tx_id(head_snapshot_id)
+        semantic_binding = _authority_transition_binding(
+            previous_state_sha256=previous_state_sha256,
+            snapshot_id=head_snapshot_id,
+            tx_id=tx_id,
+        )
+        try:
+            authority.prepare(
+                tx_id=tx_id,
+                observed_state_sha256=previous_state_sha256,
+                intended_state_sha256=intended_state_sha256,
+                semantic_binding_sha256=semantic_binding,
+            )
+        except MonotonicWorkspaceAuthorityError as exc:
+            raise AccountReconciliationIntegrityError(
+                "account reconciliation segmented transition was rejected"
+            ) from exc
+        self._publish_history_bytes(encoded_root)
+        self._verify_segmented_root(
+            expected_manifest=manifest,
+            expected_state_sha256=intended_state_sha256,
+        )
+
+    def _append_segmented_snapshot(
+        self,
+        manifest: tuple[int, str, str],
+        snapshot: BookmakerAccountSnapshot,
+        *,
+        previous_root_bytes: bytes,
+        _authority_guard=_require_canonical_authority,
+    ) -> None:
+        authority = _authority_guard(self)
+        snapshot_count, _head_snapshot_id, head_segment_sha256 = manifest
+        next_index = snapshot_count + 1
+        encoded_segment = self._encode_segment(
+            index=next_index,
+            previous_segment_sha256=head_segment_sha256,
+            snapshot=snapshot,
+        )
+        next_segment_sha256 = self._publish_segment_bytes(next_index, encoded_segment)
+        next_snapshot_id = snapshot_fingerprint(snapshot)
+        next_manifest = (next_index, next_snapshot_id, next_segment_sha256)
+        encoded_root = self._encode_segmented_manifest(
+            snapshot_count=next_index,
+            head_snapshot_id=next_snapshot_id,
+            head_segment_sha256=next_segment_sha256,
+        )
+        intended_state_sha256 = sha256(encoded_root).hexdigest()
+        previous_state_sha256 = sha256(previous_root_bytes).hexdigest()
+        tx_id = self._next_authority_tx_id(next_snapshot_id)
+        semantic_binding = _authority_transition_binding(
+            previous_state_sha256=previous_state_sha256,
+            snapshot_id=next_snapshot_id,
+            tx_id=tx_id,
+        )
+        try:
+            authority.prepare(
+                tx_id=tx_id,
+                observed_state_sha256=previous_state_sha256,
+                intended_state_sha256=intended_state_sha256,
+                semantic_binding_sha256=semantic_binding,
+            )
+        except MonotonicWorkspaceAuthorityError as exc:
+            raise AccountReconciliationIntegrityError(
+                "account reconciliation segmented append transition was rejected"
+            ) from exc
+        self._publish_history_bytes(encoded_root)
+        self._verify_segmented_root(
+            expected_manifest=next_manifest,
+            expected_state_sha256=intended_state_sha256,
+        )
+
+    def _read_root_document(
+        self,
+        *,
+        _stable_read=_read_stable_reconciliation_bytes,
+    ) -> tuple[bytes, object] | None:
+        raw_bytes = _stable_read(self.path)
+        if raw_bytes is None:
+            return None
+        try:
+            return raw_bytes, strict_json_loads(raw_bytes.decode("utf-8"))
+        except (UnicodeError, ValueError, RecursionError) as exc:
+            raise AccountReconciliationIntegrityError(
+                "account reconciliation store is unreadable or corrupt"
+            ) from exc
+
+    def _append_snapshot_bounded(
+        self,
+        snapshot: BookmakerAccountSnapshot,
+        *,
+        _snapshot_threshold=_SEGMENT_MIGRATION_SNAPSHOT_THRESHOLD,
+        _byte_threshold=_SEGMENT_MIGRATION_BYTE_THRESHOLD,
+    ) -> bool:
+        snapshot = _require_canonical_snapshot_graph(snapshot)
+        root = self._read_root_document()
+        if root is None:
+            self._recover_authority(None)
+            self._write_history((snapshot,))
+            return True
+
+        root_bytes, document = root
+        if not isinstance(document, dict):
+            raise AccountReconciliationIntegrityError(
+                "account reconciliation store schema is invalid"
+            )
+        schema_version = document.get("schema_version")
+        if type(schema_version) is not int:
+            raise AccountReconciliationIntegrityError(
+                "unsupported account reconciliation schema_version"
+            )
+
+        incoming_id = snapshot_fingerprint(snapshot)
+        if schema_version == self.SCHEMA_VERSION:
+            history = self._load_history()
+            if any(snapshot_fingerprint(existing) == incoming_id for existing in history):
+                return False
+            if history:
+                latest = history[-1]
+                self._require_same_account(latest, snapshot)
+                incoming_at = _time(snapshot.observed_at, "snapshot.observed_at")
+                latest_at = _time(latest.observed_at, "checkpoint.observed_at")
+                if incoming_at < latest_at:
+                    raise AccountSnapshotStaleError(
+                        "older account snapshot cannot supersede the durable checkpoint"
+                    )
+                if incoming_at == latest_at:
+                    raise AccountReconciliationIntegrityError(
+                        "conflicting account snapshot content at the same observed_at"
+                    )
+            candidate = (*history, snapshot)
+            self._reconcile(candidate)
+            encoded_candidate = self._encode_history(candidate)
+            if (
+                len(candidate) > _snapshot_threshold
+                or len(encoded_candidate) > _byte_threshold
+            ):
+                self._write_segmented_history(
+                    candidate,
+                    previous_root_bytes=root_bytes,
+                )
+            else:
+                self._write_history(candidate)
+            return True
+
+        if schema_version != _SEGMENTED_STORE_SCHEMA_VERSION:
+            raise AccountReconciliationIntegrityError(
+                "unsupported account reconciliation schema_version"
+            )
+        manifest = self._decode_segmented_manifest(document)
+        # Verify root authority first, then exact chain/semantics.  The manifest
+        # binds the immutable chain head transitively through each previous hash.
+        state_sha256 = sha256(root_bytes).hexdigest()
+        duplicate = False
+        latest: BookmakerAccountSnapshot | None = None
+        for existing in self._iter_segmented_history(manifest):
+            if snapshot_fingerprint(existing) == incoming_id:
+                duplicate = True
+            latest = existing
+        self._reconcile(self._iter_segmented_history(manifest))
+        self._recover_authority(
+            state_sha256,
+            latest_snapshot_id=manifest[1],
+        )
+        if duplicate:
+            return False
+        if latest is None:
+            raise AccountReconciliationIntegrityError(
+                "segmented account reconciliation history is empty"
+            )
+        self._require_same_account(latest, snapshot)
+        incoming_at = _time(snapshot.observed_at, "snapshot.observed_at")
+        latest_at = _time(latest.observed_at, "checkpoint.observed_at")
+        if incoming_at < latest_at:
+            raise AccountSnapshotStaleError(
+                "older account snapshot cannot supersede the durable checkpoint"
+            )
+        if incoming_at == latest_at:
+            raise AccountReconciliationIntegrityError(
+                "conflicting account snapshot content at the same observed_at"
+            )
+        self._reconcile(chain(self._iter_segmented_history(manifest), (snapshot,)))
+        self._append_segmented_snapshot(
+            manifest,
+            snapshot,
+            previous_root_bytes=root_bytes,
+        )
+        return True
+
+    def _latest_snapshot_bounded(self) -> BookmakerAccountSnapshot | None:
+        root = self._read_root_document()
+        if root is None:
+            self._recover_authority(None)
+            return None
+        root_bytes, document = root
+        if not isinstance(document, dict):
+            raise AccountReconciliationIntegrityError(
+                "account reconciliation store schema is invalid"
+            )
+        schema_version = document.get("schema_version")
+        if schema_version == self.SCHEMA_VERSION and type(schema_version) is int:
+            history = self._load_history()
+            return history[-1] if history else None
+        if schema_version != _SEGMENTED_STORE_SCHEMA_VERSION or type(schema_version) is not int:
+            raise AccountReconciliationIntegrityError(
+                "unsupported account reconciliation schema_version"
+            )
+        manifest = self._decode_segmented_manifest(document)
+        self._reconcile(self._iter_segmented_history(manifest))
+        latest: BookmakerAccountSnapshot | None = None
+        for latest in self._iter_segmented_history(manifest):
+            pass
+        self._recover_authority(
+            sha256(root_bytes).hexdigest(),
+            latest_snapshot_id=manifest[1],
+        )
+        return latest
+
+    def _latest_state_bounded(self) -> ReconciledAccountState | None:
+        root = self._read_root_document()
+        if root is None:
+            self._recover_authority(None)
+            return None
+        root_bytes, document = root
+        if not isinstance(document, dict):
+            raise AccountReconciliationIntegrityError(
+                "account reconciliation store schema is invalid"
+            )
+        schema_version = document.get("schema_version")
+        if schema_version == self.SCHEMA_VERSION and type(schema_version) is int:
+            history = self._load_history()
+            return self._reconcile(history) if history else None
+        if schema_version != _SEGMENTED_STORE_SCHEMA_VERSION or type(schema_version) is not int:
+            raise AccountReconciliationIntegrityError(
+                "unsupported account reconciliation schema_version"
+            )
+        manifest = self._decode_segmented_manifest(document)
+        state = self._reconcile(self._iter_segmented_history(manifest))
+        self._recover_authority(
+            sha256(root_bytes).hexdigest(),
+            latest_snapshot_id=manifest[1],
+        )
+        return state
+
     def _load_history(
         self,
         *,
@@ -1351,9 +1971,26 @@ class BookmakerAccountReconciliationStore:
             raise AccountReconciliationIntegrityError(
                 "account reconciliation store is unreadable or corrupt"
             ) from exc
+        if not isinstance(document, dict):
+            raise AccountReconciliationIntegrityError(
+                "account reconciliation store schema is invalid"
+            )
+        schema_version = document.get("schema_version")
+        if type(schema_version) is not int:
+            raise AccountReconciliationIntegrityError(
+                "unsupported account reconciliation schema_version"
+            )
+        if schema_version == _SEGMENTED_STORE_SCHEMA_VERSION:
+            manifest = self._decode_segmented_manifest(document)
+            history = list(self._iter_segmented_history(manifest))
+            self._reconcile(history)
+            self._recover_authority(
+                sha256(raw_bytes).hexdigest(),
+                latest_snapshot_id=manifest[1],
+            )
+            return history
         payload = _exact_keys(document, {"schema_version", "snapshots"}, "store")
-        schema_version = payload["schema_version"]
-        if type(schema_version) is not int or schema_version != self.SCHEMA_VERSION:
+        if schema_version != self.SCHEMA_VERSION:
             raise AccountReconciliationIntegrityError(
                 "unsupported account reconciliation schema_version"
             )
@@ -1518,6 +2155,21 @@ def _install_canonical_store_dispatch_seal(
         "_reconcile",
         "_recover_authority",
         "_next_authority_tx_id",
+        "_segment_root",
+        "_segment_path",
+        "_encode_segment",
+        "_decode_segment",
+        "_encode_segmented_manifest",
+        "_decode_segmented_manifest",
+        "_iter_segmented_history",
+        "_publish_segment_bytes",
+        "_verify_segmented_root",
+        "_write_segmented_history",
+        "_append_segmented_snapshot",
+        "_read_root_document",
+        "_append_snapshot_bounded",
+        "_latest_snapshot_bounded",
+        "_latest_state_bounded",
         "_load_history",
         "_encode_history",
         "_publish_history_bytes",
@@ -1635,32 +2287,9 @@ def _install_canonical_store_dispatch_seal(
     ) -> bool:
         snapshot = require_snapshot(snapshot)
         with write_lock(self.path):
-            history = _invoke(self, "_load_history")
-            assert isinstance(history, list)
-            incoming_id = fingerprint(snapshot)
-            if any(fingerprint(existing) == incoming_id for existing in history):
-                return False
-            if history:
-                latest = history[-1]
-                _invoke(self, "_require_same_account", latest, snapshot)
-                incoming_at = parse_time(
-                    snapshot.observed_at, "snapshot.observed_at"
-                )
-                latest_at = parse_time(
-                    latest.observed_at, "checkpoint.observed_at"
-                )
-                if incoming_at < latest_at:
-                    raise stale_error(
-                        "older account snapshot cannot supersede the durable checkpoint"
-                    )
-                if incoming_at == latest_at:
-                    raise integrity_error(
-                        "conflicting account snapshot content at the same observed_at"
-                    )
-            candidate = (*history, snapshot)
-            _invoke(self, "_reconcile", candidate)
-            _invoke(self, "_write_history", candidate)
-            return True
+            result = _invoke(self, "_append_snapshot_bounded", snapshot)
+            assert isinstance(result, bool)
+            return result
 
     def history(
         self: BookmakerAccountReconciliationStore,
@@ -1674,20 +2303,16 @@ def _install_canonical_store_dispatch_seal(
         self: BookmakerAccountReconciliationStore,
     ) -> BookmakerAccountSnapshot | None:
         with write_lock(self.path):
-            loaded = _invoke(self, "_load_history")
-            assert isinstance(loaded, list)
-            return loaded[-1] if loaded else None
+            loaded = _invoke(self, "_latest_snapshot_bounded")
+            assert loaded is None or isinstance(loaded, BookmakerAccountSnapshot)
+            return loaded
 
     def latest_state(
         self: BookmakerAccountReconciliationStore,
     ) -> ReconciledAccountState | None:
         with write_lock(self.path):
-            loaded = _invoke(self, "_load_history")
-            assert isinstance(loaded, list)
-            if not loaded:
-                return None
-            state = _invoke(self, "_reconcile", loaded)
-            assert isinstance(state, ReconciledAccountState)
+            state = _invoke(self, "_latest_state_bounded")
+            assert state is None or isinstance(state, ReconciledAccountState)
             return state
 
     cls.append_snapshot = append_snapshot

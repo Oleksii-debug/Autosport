@@ -1304,9 +1304,12 @@ def _canonical_governor_binding(
         raise BetdaqRateGovernorError(
             "BETDAQ rate policy changed after governor resolution"
         ) from exc
+    if current_fingerprint != runtime.policy_fingerprint:
+        raise BetdaqRateGovernorError(
+            "BETDAQ rate policy changed after governor resolution"
+        )
     if (
-        current_fingerprint != runtime.policy_fingerprint
-        or policy_fingerprint != runtime.policy_fingerprint
+        policy_fingerprint != runtime.policy_fingerprint
         or type(method_policies) is not MappingProxyType
         or dict(method_policies) != expected_methods
     ):

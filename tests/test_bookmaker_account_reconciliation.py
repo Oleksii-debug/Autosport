@@ -766,10 +766,7 @@ def test_crash_after_local_publish_before_commit_recovers_exact_prepare(tmp_path
     assert restarted.append_snapshot(first) is False
 
 
-def test_reader_cannot_abort_writer_pending_monotonic_transition(
-    tmp_path,
-    monkeypatch,
-) -> None:
+def test_reader_cannot_abort_writer_pending_monotonic_transition(tmp_path) -> None:
     path = tmp_path / "account.json"
     store = BookmakerAccountReconciliationStore(path)
     first = _snapshot(_T1)
@@ -780,24 +777,29 @@ def test_reader_cannot_abort_writer_pending_monotonic_transition(
     writer_errors: list[BaseException] = []
     reader_errors: list[BaseException] = []
     reader_history: list[BookmakerAccountSnapshot] = []
-    canonical_read = reconciliation_module._read_stable_reconciliation_bytes
-    read_calls = 0
-
-    def held_post_publish_read(candidate):
-        nonlocal read_calls
-        read_calls += 1
-        # append_snapshot reads once before reconciliation and _write_history reads
-        # once before PREPARE. The third read occurs after durable local publication,
-        # while the authority PREPARE is still pending.
-        if read_calls == 3:
-            writer_prepared.set()
-            if not allow_recovery.wait(timeout=5):
-                raise RuntimeError("test timed out waiting to recover publication")
-        return canonical_read(candidate)
 
     def writer() -> None:
         try:
-            store.append_snapshot(first)
+            with reconciliation_module._write_lock(path):
+                encoded = store._encode_history((first,))
+                snapshot_id = snapshot_fingerprint(first)
+                tx_id = store._next_authority_tx_id(snapshot_id)
+                binding = reconciliation_module._authority_transition_binding(
+                    previous_state_sha256=None,
+                    snapshot_id=snapshot_id,
+                    tx_id=tx_id,
+                )
+                store._require_canonical_authority().prepare(
+                    tx_id=tx_id,
+                    observed_state_sha256=None,
+                    intended_state_sha256=reconciliation_module.sha256(encoded).hexdigest(),
+                    semantic_binding_sha256=binding,
+                )
+                store._publish_history_bytes(encoded)
+                writer_prepared.set()
+                if not allow_recovery.wait(timeout=5):
+                    raise RuntimeError("test timed out waiting to recover publication")
+                assert store._load_history() == [first]
         except BaseException as exc:
             writer_errors.append(exc)
 
@@ -810,11 +812,6 @@ def test_reader_cannot_abort_writer_pending_monotonic_transition(
         finally:
             reader_done.set()
 
-    monkeypatch.setattr(
-        reconciliation_module,
-        "_read_stable_reconciliation_bytes",
-        held_post_publish_read,
-    )
     writer_thread = Thread(target=writer)
     writer_thread.start()
     assert writer_prepared.wait(timeout=5)

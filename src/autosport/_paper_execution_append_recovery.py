@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import copy
+from collections.abc import Mapping
 from pathlib import Path
 
+from . import _paper_execution_reality_legacy as _paper_reality
 from . import paper as _paper
 from .paper import PaperBook
 from .paper_execution_adoption import (
@@ -10,7 +12,11 @@ from .paper_execution_adoption import (
     PaperExecutionAdoptionRuntime,
     PreparedPaperExecution,
 )
-from .paper_execution_reality import PaperAttemptOutcome
+from .paper_execution_reality import (
+    PaperAttemptOutcome,
+    PaperExecutionEvidenceRegistry,
+    PaperExecutionStateError,
+)
 
 
 _ORIGINAL_PREPARE = PaperExecutionAdoptionRuntime.prepare
@@ -35,6 +41,54 @@ def _load_live_pre_action_book(runtime: PaperExecutionAdoptionRuntime) -> PaperB
     """Return the exact durable pre-action witness for a persistent live decision."""
     path = Path(runtime.paper_book_path).parent / _PRE_ACTION_BOOK_FILE_NAME
     return _load_pre_action_path(path, label="live recovery")
+
+
+def _validated_observation_evidence_ids(
+    runtime: PaperExecutionAdoptionRuntime,
+    *,
+    prepared: PreparedPaperExecution,
+    observations,
+    evidence_registry,
+) -> dict[str, str]:
+    """Resolve the exact evidence identity that canonical execution will reserve.
+
+    Recovery must load the same durable #623 run identity that execute_paper_plan
+    reserves.  In particular, empirical/configured observations are part of that
+    identity and may not be replaced with an empty mapping on restart.
+    """
+    if not isinstance(prepared, PreparedPaperExecution):
+        raise TypeError("prepared must be PreparedPaperExecution")
+    runtime._require_minted(prepared)
+    if observations is None:
+        observations = {}
+    if not isinstance(observations, Mapping):
+        raise TypeError("observations must be a mapping")
+
+    action_by_id = {
+        action.action_id: action for action in prepared.execution_plan.actions
+    }
+    if set(observations) - set(action_by_id):
+        raise PaperExecutionStateError(
+            "observations contain action outside execution plan"
+        )
+    if observations and not isinstance(
+        evidence_registry,
+        PaperExecutionEvidenceRegistry,
+    ):
+        raise PaperExecutionStateError(
+            "configured/empirical observations require a durable evidence registry"
+        )
+
+    observation_evidence_ids: dict[str, str] = {}
+    for action_id, observation in observations.items():
+        assert evidence_registry is not None
+        _paper_reality._verify_observation_authority(
+            action=action_by_id[action_id],
+            observation=observation,
+            registry=evidence_registry,
+        )
+        observation_evidence_ids[action_id] = observation.evidence_id
+    return observation_evidence_ids
 
 
 def _detached_exact_snapshot(book: PaperBook) -> PaperBook:
@@ -65,6 +119,7 @@ def _ensure_live_pre_action_book(
     prepared: PreparedPaperExecution,
     trigger_id: str,
     started_at: str,
+    observation_evidence_ids: Mapping[str, str],
 ) -> PaperBook:
     """Publish the pre-action witness exactly once, before a first live run.
 
@@ -83,7 +138,7 @@ def _ensure_live_pre_action_book(
         plan=prepared.execution_plan,
         config=runtime.config,
         started_at=started_at,
-        observation_evidence_ids={},
+        observation_evidence_ids=observation_evidence_ids,
     )
     if existing is not None:
         raise PaperExecutionAdoptionError(
@@ -120,6 +175,7 @@ def _exact_assert_recoverable_book_state(
     trigger_id: str,
     started_at: str,
     materialize_exposure: bool,
+    observation_evidence_ids: Mapping[str, str],
 ) -> None:
     """Accept only baseline or the exact #623-authorized durable exposure delta.
 
@@ -135,6 +191,8 @@ def _exact_assert_recoverable_book_state(
     self._require_minted(prepared)
     if type(materialize_exposure) is not bool:
         raise TypeError("materialize_exposure must be bool")
+    if not isinstance(observation_evidence_ids, Mapping):
+        raise TypeError("observation_evidence_ids must be a mapping")
 
     if self._same_book_state(self.book, pre_action_book):
         return
@@ -150,7 +208,7 @@ def _exact_assert_recoverable_book_state(
         plan=prepared.execution_plan,
         config=self.config,
         started_at=started_at,
-        observation_evidence_ids={},
+        observation_evidence_ids=observation_evidence_ids,
     )
     if run is None:
         raise PaperExecutionAdoptionError(
@@ -294,6 +352,12 @@ def _guarded_execute(
 ):
     """Fence live replay against unrelated durable PaperBook drift before resume."""
     if type(trigger_id) is str and trigger_id.startswith(_LIVE_DECISION_PREFIX):
+        observation_evidence_ids = _validated_observation_evidence_ids(
+            self,
+            prepared=prepared,
+            observations=observations,
+            evidence_registry=evidence_registry,
+        )
         # Serialize first-witness publication with the same canonical runtime lock
         # that protects execution/materialization.  _ORIGINAL_EXECUTE re-enters this
         # RLock, so no second PaperBook state can interleave between witness and run.
@@ -303,6 +367,7 @@ def _guarded_execute(
                 prepared=prepared,
                 trigger_id=trigger_id,
                 started_at=started_at,
+                observation_evidence_ids=observation_evidence_ids,
             )
             self.assert_recoverable_book_state(
                 pre_action_book=pre_action_book,
@@ -310,6 +375,7 @@ def _guarded_execute(
                 trigger_id=trigger_id,
                 started_at=started_at,
                 materialize_exposure=materialize_exposure,
+                observation_evidence_ids=observation_evidence_ids,
             )
             return _ORIGINAL_EXECUTE(
                 self,

@@ -175,7 +175,7 @@ def _exact_assert_recoverable_book_state(
     trigger_id: str,
     started_at: str,
     materialize_exposure: bool,
-    observation_evidence_ids: Mapping[str, str],
+    observation_evidence_ids: Mapping[str, str] | None = None,
 ) -> None:
     """Accept only baseline or the exact #623-authorized durable exposure delta.
 
@@ -191,7 +191,9 @@ def _exact_assert_recoverable_book_state(
     self._require_minted(prepared)
     if type(materialize_exposure) is not bool:
         raise TypeError("materialize_exposure must be bool")
-    if not isinstance(observation_evidence_ids, Mapping):
+    if observation_evidence_ids is None:
+        observation_evidence_ids = {}
+    elif not isinstance(observation_evidence_ids, Mapping):
         raise TypeError("observation_evidence_ids must be a mapping")
 
     if self._same_book_state(self.book, pre_action_book):

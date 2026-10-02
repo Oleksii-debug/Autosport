@@ -122,6 +122,36 @@ class ReleasePackageInputSymlinkFenceTests(unittest.TestCase):
 
             self.assertTrue(mutated)
 
+    def test_same_inode_input_mutation_after_read_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary) / "source.bin"
+            source.write_bytes(b"original")
+            real_lstat = Path.lstat
+            source_lstat_calls = 0
+            mutated = False
+
+            def mutate_before_final_lstat(path: Path):
+                nonlocal source_lstat_calls, mutated
+                if Path(path) == source:
+                    source_lstat_calls += 1
+                    if source_lstat_calls == 3:
+                        source.write_bytes(b"mutated-after-read")
+                        mutated = True
+                return real_lstat(path)
+
+            with patch.object(Path, "lstat", new=mutate_before_final_lstat):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "test source changed during read",
+                ):
+                    release_package._read_regular_source_bytes(
+                        source,
+                        label="test source",
+                    )
+
+            self.assertTrue(mutated)
+            self.assertEqual(source_lstat_calls, 3)
+
     def test_top_level_symlink_fails_before_existing_staging_is_deleted(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

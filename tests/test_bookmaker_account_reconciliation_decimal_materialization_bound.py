@@ -836,6 +836,33 @@ def test_class_lower_dispatch_rebind_cannot_bypass_durable_store(
     assert not path.exists()
 
 
+def test_module_stable_reader_rebind_cannot_forge_empty_history(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    path = tmp_path / "account.json"
+    store = BookmakerAccountReconciliationStore(
+        path,
+        authority_root=_authority_root(tmp_path, "authority"),
+    )
+    expected = _snapshot(Decimal("10"))
+    assert store.append_snapshot(expected)
+
+    monkeypatch.setattr(
+        reconciliation_module,
+        "_read_stable_reconciliation_bytes",
+        lambda candidate: None,
+    )
+
+    with pytest.raises(
+        AccountReconciliationIntegrityError,
+        match="stable reader dispatch changed",
+    ):
+        store.latest_snapshot()
+
+    assert path.exists()
+
+
 def test_read_side_lower_dispatch_shadow_cannot_forge_empty_history(tmp_path) -> None:
     path = tmp_path / "account.json"
     store = BookmakerAccountReconciliationStore(

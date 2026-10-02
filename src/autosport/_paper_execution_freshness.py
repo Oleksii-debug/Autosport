@@ -152,6 +152,11 @@ from . import _paperbook_preload_generation_cas_guard as _paperbook_preload_gene
 # rebinding from retargeting the otherwise-frozen positive persistence path.
 from . import _paperbook_preload_module_member_freeze as _paperbook_preload_module_member_freeze  # noqa: E402,F401
 
+# Keep the reused PAPER monotonic-root policy exactly the same while detaching its
+# Python-3.11 path-resolution dispatch from mutable public os.path members. This must
+# run before the positive load/save graph clone below captures authority-root calls.
+from . import _paperbook_preload_authority_root_freeze as _paperbook_preload_authority_root_freeze  # noqa: E402,F401
+
 # Freeze the owning guard's positive load and durable-save dispatch graph after the
 # witness protocol is installed. This preserves one parser/serializer/authority while
 # making later guard-module or PaperBook helper retargeting non-authoritative.

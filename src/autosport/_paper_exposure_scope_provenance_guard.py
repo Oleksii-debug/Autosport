@@ -199,6 +199,19 @@ def bind_canonical_execute(execute_function):
     fsync = _ledger_impl.os.fsync
     sha256_digest = sha256
 
+    # The reserved publisher replicates the canonical append algorithm because the
+    # generic ledger seam intentionally rejects this event type.  Seal the concrete
+    # pathlib dispatch it must use; otherwise a late class-level open/exists rebind
+    # can redirect or fabricate the positive durability path while ledger helpers
+    # and fsync remain canonical.
+    ledger_path_type = type(_ledger_impl.Path("."))
+    ledger_path_exists = ledger_path_type.exists
+    ledger_path_exists_globals = _snapshot_function_globals(ledger_path_exists)
+    ledger_path_exists_metadata = _snapshot_function_metadata(ledger_path_exists)
+    ledger_path_open = ledger_path_type.open
+    ledger_path_open_globals = _snapshot_function_globals(ledger_path_open)
+    ledger_path_open_metadata = _snapshot_function_metadata(ledger_path_open)
+
     ledger_methods = {
         name: getattr(ledger_type, name)
         for name in (
@@ -390,6 +403,27 @@ def bind_canonical_execute(execute_function):
             raise PaperExecutionIntegrityError(
                 "canonical PAPER ledger durability dispatch was rebound"
             )
+        ledger_path = self.ledger.path
+        if (
+            type(ledger_path) is not ledger_path_type
+            or ledger_path_type.exists is not ledger_path_exists
+            or ledger_path_type.open is not ledger_path_open
+            or not _function_globals_match(
+                ledger_path_exists, ledger_path_exists_globals
+            )
+            or not _function_metadata_match(
+                ledger_path_exists, ledger_path_exists_metadata
+            )
+            or not _function_globals_match(
+                ledger_path_open, ledger_path_open_globals
+            )
+            or not _function_metadata_match(
+                ledger_path_open, ledger_path_open_metadata
+            )
+        ):
+            raise PaperExecutionIntegrityError(
+                "canonical PAPER ledger path dispatch was rebound"
+            )
         for name, expected_method in ledger_methods.items():
             if (
                 getattr(ledger_type, name) is not expected_method
@@ -495,9 +529,10 @@ def bind_canonical_execute(execute_function):
                 return
 
             encoded = checked_canonical_json(event) + "\n"
-            path_existed_before = self.ledger.path.exists()
+            path_existed_before = ledger_path_exists(ledger_path)
             try:
-                with self.ledger.path.open(
+                with ledger_path_open(
+                    ledger_path,
                     "a",
                     encoding="utf-8",
                     newline="\n",

@@ -374,6 +374,92 @@ class PaperExposureScopeProvenanceGuardTests(unittest.TestCase):
             self.assertEqual(forged_calls, [])
             self.assertEqual(runtime.ledger.events(), ())
 
+    def test_concrete_ledger_path_open_rebind_fails_before_reserved_publication(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger, runtime = self._runtime(Path(tmp))
+            prepared = runtime.prepare_paper_value_action(
+                event=_event(),
+                stake=Decimal("5.00"),
+                decision_id="path-open-dispatch",
+                account_id="paper-account",
+                bankroll_id="bankroll-eur",
+                currency="EUR",
+            )
+            runtime._exposure_scope_authorities[id(prepared)] = prepared
+            run_id = runtime.expected_run_id(
+                prepared,
+                prepared.execution_plan.decision_id,
+            )
+            path_type = type(ledger.path)
+            had_own_open = "open" in path_type.__dict__
+            original_open = path_type.__dict__.get("open")
+            forged_calls: list[str] = []
+
+            def forged_open(_path: object, *args: object, **kwargs: object):
+                forged_calls.append("open")
+                raise AssertionError("hostile ledger-path open executed")
+
+            setattr(path_type, "open", forged_open)
+            try:
+                with self.assertRaisesRegex(
+                    PaperExecutionIntegrityError,
+                    "ledger path dispatch was rebound",
+                ):
+                    runtime._publish_exposure_scope(
+                        prepared=prepared,
+                        run_id=run_id,
+                    )
+            finally:
+                if had_own_open:
+                    setattr(path_type, "open", original_open)
+                else:
+                    delattr(path_type, "open")
+            self.assertEqual(forged_calls, [])
+            self.assertEqual(ledger.events(), ())
+
+    def test_concrete_ledger_path_exists_rebind_fails_before_reserved_publication(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger, runtime = self._runtime(Path(tmp))
+            prepared = runtime.prepare_paper_value_action(
+                event=_event(),
+                stake=Decimal("5.00"),
+                decision_id="path-exists-dispatch",
+                account_id="paper-account",
+                bankroll_id="bankroll-eur",
+                currency="EUR",
+            )
+            runtime._exposure_scope_authorities[id(prepared)] = prepared
+            run_id = runtime.expected_run_id(
+                prepared,
+                prepared.execution_plan.decision_id,
+            )
+            path_type = type(ledger.path)
+            had_own_exists = "exists" in path_type.__dict__
+            original_exists = path_type.__dict__.get("exists")
+            forged_calls: list[str] = []
+
+            def forged_exists(_path: object) -> bool:
+                forged_calls.append("exists")
+                return True
+
+            setattr(path_type, "exists", forged_exists)
+            try:
+                with self.assertRaisesRegex(
+                    PaperExecutionIntegrityError,
+                    "ledger path dispatch was rebound",
+                ):
+                    runtime._publish_exposure_scope(
+                        prepared=prepared,
+                        run_id=run_id,
+                    )
+            finally:
+                if had_own_exists:
+                    setattr(path_type, "exists", original_exists)
+                else:
+                    delattr(path_type, "exists")
+            self.assertEqual(forged_calls, [])
+            self.assertEqual(ledger.events(), ())
+
     def test_lower_event_constructor_rebind_fails_before_reserved_publication(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             event, agent, context, runtime, _decision_ledger = _fixture(Path(tmp))

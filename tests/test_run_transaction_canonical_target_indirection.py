@@ -157,7 +157,7 @@ class RunTransactionCanonicalTargetIndirectionTests(unittest.TestCase):
             ):
                 with self.assertRaisesRegex(
                     RunTransactionError,
-                    "canonical file is unreadable|canonical path changed",
+                    "canonical file is unreadable|canonical path changed|canonical path must be a stable regular non-symlink file",
                 ):
                     RunTransaction._read_canonical_file_snapshot(
                         target,

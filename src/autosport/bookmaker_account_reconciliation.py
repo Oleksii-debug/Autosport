@@ -1523,7 +1523,7 @@ def _install_canonical_store_dispatch_seal(
         "_publish_history_bytes",
         "_write_history",
     )
-    entries: list[tuple[str, str, object, object, object]] = []
+    entries: list[tuple[str, str, object, object, object, object, dict[str, object]]] = []
     for name in guarded_names:
         descriptor = cls.__dict__.get(name)
         if isinstance(descriptor, staticmethod):

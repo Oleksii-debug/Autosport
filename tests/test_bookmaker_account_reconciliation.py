@@ -4,6 +4,7 @@ from threading import Event, Thread
 
 import pytest
 
+import autosport.bookmaker_account_reconciliation as reconciliation_module
 from autosport.bookmaker_account_reconciliation import (
     AccountReconciliationIntegrityError,
     AccountSnapshotStaleError,
@@ -709,24 +710,27 @@ def test_schema_version_bool_is_not_integer_schema_version(tmp_path) -> None:
         BookmakerAccountReconciliationStore(path).history()
 
 
-def test_crash_after_prepare_before_local_publish_aborts_safely(
-    tmp_path,
-    monkeypatch,
-) -> None:
+def test_crash_after_prepare_before_local_publish_aborts_safely(tmp_path) -> None:
     path = tmp_path / "account.json"
     store = BookmakerAccountReconciliationStore(path)
     first = _snapshot(_T1)
 
-    class SimulatedCrash(RuntimeError):
-        pass
+    encoded = store._encode_history((first,))
+    snapshot_id = snapshot_fingerprint(first)
+    tx_id = store._next_authority_tx_id(snapshot_id)
+    binding = reconciliation_module._authority_transition_binding(
+        previous_state_sha256=None,
+        snapshot_id=snapshot_id,
+        tx_id=tx_id,
+    )
+    store._require_canonical_authority().prepare(
+        tx_id=tx_id,
+        observed_state_sha256=None,
+        intended_state_sha256=reconciliation_module.sha256(encoded).hexdigest(),
+        semantic_binding_sha256=binding,
+    )
 
-    def crash_before_publish(_encoded: bytes) -> None:
-        raise SimulatedCrash("crash before local publish")
-
-    monkeypatch.setattr(store, "_publish_history_bytes", crash_before_publish)
-    with pytest.raises(SimulatedCrash, match="before local publish"):
-        store.append_snapshot(first)
-
+    # Crash prefix: PREPARE is durable, but local state was never published.
     assert not path.exists()
     restarted = BookmakerAccountReconciliationStore(path)
     assert restarted.history() == ()
@@ -734,31 +738,28 @@ def test_crash_after_prepare_before_local_publish_aborts_safely(
     assert restarted.history() == (first,)
 
 
-def test_crash_after_local_publish_before_commit_recovers_exact_prepare(
-    tmp_path,
-    monkeypatch,
-) -> None:
+def test_crash_after_local_publish_before_commit_recovers_exact_prepare(tmp_path) -> None:
     path = tmp_path / "account.json"
     store = BookmakerAccountReconciliationStore(path)
     first = _snapshot(_T1)
-    original_recover = store._recover_authority
 
-    class SimulatedCrash(RuntimeError):
-        pass
+    encoded = store._encode_history((first,))
+    snapshot_id = snapshot_fingerprint(first)
+    tx_id = store._next_authority_tx_id(snapshot_id)
+    binding = reconciliation_module._authority_transition_binding(
+        previous_state_sha256=None,
+        snapshot_id=snapshot_id,
+        tx_id=tx_id,
+    )
+    store._require_canonical_authority().prepare(
+        tx_id=tx_id,
+        observed_state_sha256=None,
+        intended_state_sha256=reconciliation_module.sha256(encoded).hexdigest(),
+        semantic_binding_sha256=binding,
+    )
+    store._publish_history_bytes(encoded)
 
-    def crash_before_commit(
-        observed_state_sha256: str | None,
-        *,
-        history: list[BookmakerAccountSnapshot] | None = None,
-    ) -> None:
-        if observed_state_sha256 is not None:
-            raise SimulatedCrash("crash after local publish")
-        original_recover(observed_state_sha256, history=history)
-
-    monkeypatch.setattr(store, "_recover_authority", crash_before_commit)
-    with pytest.raises(SimulatedCrash, match="after local publish"):
-        store.append_snapshot(first)
-
+    # Crash prefix: local publication exists while the matching PREPARE is pending.
     assert path.exists()
     restarted = BookmakerAccountReconciliationStore(path)
     assert restarted.history() == (first,)

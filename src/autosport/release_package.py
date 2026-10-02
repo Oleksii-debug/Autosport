@@ -114,6 +114,21 @@ def _require_regular_source_file(path: Path, *, label: str) -> None:
         raise ValueError(f"{label} must be a regular file: {path}")
 
 
+def _same_regular_source_snapshot(
+    left: os.stat_result,
+    right: os.stat_result,
+) -> bool:
+    """Require one pathname/descriptor identity and unchanged byte metadata."""
+
+    return (
+        os.path.samestat(left, right)
+        and left.st_size == right.st_size
+        and left.st_mtime_ns == right.st_mtime_ns
+        and left.st_ctime_ns == right.st_ctime_ns
+        and left.st_nlink == right.st_nlink
+    )
+
+
 @contextmanager
 def _open_regular_source_stream(
     path: Path,
@@ -154,16 +169,18 @@ def _open_regular_source_stream(
                 stat.S_ISLNK(current.st_mode)
                 or _is_windows_reparse_point(current)
                 or not stat.S_ISREG(current.st_mode)
-                or not os.path.samestat(opened, current)
+                or not _same_regular_source_snapshot(opened, current)
             ):
                 raise ValueError(f"{label} changed during open: {path}")
             yield stream
+            after_open = os.fstat(stream.fileno())
             after = path.lstat()
             if (
                 stat.S_ISLNK(after.st_mode)
                 or _is_windows_reparse_point(after)
                 or not stat.S_ISREG(after.st_mode)
-                or not os.path.samestat(opened, after)
+                or not _same_regular_source_snapshot(opened, after_open)
+                or not _same_regular_source_snapshot(after_open, after)
             ):
                 raise ValueError(f"{label} changed during read: {path}")
     except ValueError:

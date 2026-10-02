@@ -4,8 +4,11 @@ import pytest
 
 from autosport.domain import TicketLeg
 from autosport.economic_admission import admit_paper_ticket
+from autosport.integrity import atomic_write_json, sha256_file
 from autosport.paper import PaperBook
 from autosport.risk import PaperRiskPolicy, ProposedTicketRiskContext
+from autosport.run_registry import RunRegistry, UnresolvedExperimentError
+from autosport.run_transaction import RunTransaction
 from autosport.workspace_lock import WorkspaceEconomicLockBusyError
 
 
@@ -69,6 +72,120 @@ def test_missing_canonical_book_fails_closed_without_bootstrap(tmp_path):
     assert not (tmp_path / "paper_book.json").exists()
     assert book.balance == Decimal("1000")
     assert book.tickets == {}
+
+
+def test_registry_only_unresolved_run_blocks_paper_admission_without_mutation(tmp_path):
+    registry = RunRegistry.initialize_pristine(tmp_path / "run_registry.json")
+    book_path = tmp_path / "paper_book.json"
+    book = PaperBook("1000")
+    book.save(book_path)
+    before = book_path.read_bytes()
+
+    registry.begin(
+        "1" * 64,
+        "2" * 64,
+        "strategy-v1",
+        "run-before-manifest",
+    )
+
+    with pytest.raises(UnresolvedExperimentError, match="unresolved economic run"):
+        admit_paper_ticket(
+            workspace=tmp_path,
+            book=book,
+            risk_policy=PaperRiskPolicy(),
+            stake=Decimal("10"),
+            legs=(_leg(),),
+            reason="must not cross registry crash prefix",
+            placed_at="2026-09-24T16:00:00Z",
+        )
+
+    assert book_path.read_bytes() == before
+    persisted = PaperBook.load(book_path)
+    assert persisted.balance == Decimal("1000")
+    assert persisted.tickets == {}
+
+
+def test_nonterminal_transaction_history_blocks_paper_admission_without_mutation(tmp_path):
+    book_path = tmp_path / "paper_book.json"
+    ledger_path = tmp_path / "decisions.jsonl"
+    book = PaperBook("1000")
+    book.save(book_path)
+    ledger_path.write_bytes(b"")
+    before = book_path.read_bytes()
+
+    market_sha = "3" * 64
+    results_sha = "4" * 64
+    strategy_id = "strategy-v1"
+    run_id = "run-with-staging-manifest"
+    base_book_sha = sha256_file(book_path)
+    base_ledger_sha = sha256_file(ledger_path)
+    RunTransaction.start(
+        tmp_path,
+        run_id=run_id,
+        experiment_key="orphaned-experiment",
+        market_sha256=market_sha,
+        results_sha256=results_sha,
+        strategy_id=strategy_id,
+        base_paper_book_sha256=base_book_sha,
+        base_decision_ledger_sha256=base_ledger_sha,
+    )
+
+    with pytest.raises(UnresolvedExperimentError, match="unresolved transaction history"):
+        admit_paper_ticket(
+            workspace=tmp_path,
+            book=book,
+            risk_policy=PaperRiskPolicy(),
+            stake=Decimal("10"),
+            legs=(_leg(),),
+            reason="must not cross transaction crash prefix",
+            placed_at="2026-09-24T16:00:00Z",
+        )
+
+    assert book_path.read_bytes() == before
+    persisted = PaperBook.load(book_path)
+    assert persisted.balance == Decimal("1000")
+    assert persisted.tickets == {}
+
+def test_missing_registry_with_terminal_transaction_history_blocks_admission(tmp_path):
+    book_path = tmp_path / "paper_book.json"
+    ledger_path = tmp_path / "decisions.jsonl"
+    book = PaperBook("1000")
+    book.save(book_path)
+    ledger_path.write_bytes(b"")
+    before = book_path.read_bytes()
+
+    transaction = RunTransaction.start(
+        tmp_path,
+        run_id="terminal-history-without-registry",
+        experiment_key="terminal-history-experiment",
+        market_sha256="5" * 64,
+        results_sha256="6" * 64,
+        strategy_id="strategy-v1",
+        base_paper_book_sha256=sha256_file(book_path),
+        base_decision_ledger_sha256=sha256_file(ledger_path),
+    )
+    manifest = transaction._read_manifest()
+    manifest["phase"] = "aborted"
+    atomic_write_json(transaction.manifest_path, manifest)
+
+    with pytest.raises(
+        UnresolvedExperimentError,
+        match="run registry is missing while transaction history exists",
+    ):
+        admit_paper_ticket(
+            workspace=tmp_path,
+            book=book,
+            risk_policy=PaperRiskPolicy(),
+            stake=Decimal("10"),
+            legs=(_leg(),),
+            reason="must not cross registry-loss boundary",
+            placed_at="2026-09-24T16:00:00Z",
+        )
+
+    assert book_path.read_bytes() == before
+    persisted = PaperBook.load(book_path)
+    assert persisted.balance == Decimal("1000")
+    assert persisted.tickets == {}
 
 
 def test_denied_admission_does_not_mutate_paper_book(tmp_path):
@@ -399,3 +516,75 @@ def test_admission_rejects_decimal_subclass_before_virtual_dispatch(tmp_path):
         )
     assert book.balance == Decimal("1000")
     assert not (tmp_path / "paper_book.json").exists()
+
+def _hostile_instance_getattribute_code_with_matching_closure(function):
+    closure_count = len(function.__closure__ or ())
+    lines = ["def build():"]
+    for index in range(closure_count):
+        lines.append(f"    cell_{index} = object()")
+    lines.append("    def hostile(self, name):")
+    if closure_count:
+        names = ", ".join(f"cell_{index}" for index in range(closure_count))
+        lines.append(f"        _ = ({names},)")
+    else:
+        lines.append("        _ = None")
+    lines.append("        if name == 'evaluate':")
+    lines.append("            def fake(candidate_book, stake, *, context=None):")
+    lines.append("                del candidate_book, stake, context")
+    lines.append("                decision_type = __import__('autosport.risk', fromlist=['RiskDecision']).RiskDecision")
+    lines.append("                return decision_type(True, 'hostile instance dispatch')")
+    lines.append("            return fake")
+    lines.append("        return object.__getattribute__(self, name)")
+    lines.append("    return hostile")
+    namespace: dict[str, object] = {}
+    exec("\n".join(lines), {}, namespace)
+    hostile = namespace["build"]()
+    assert callable(hostile)
+    assert len(hostile.__closure__ or ()) == closure_count
+    return hostile.__code__
+
+
+def test_admission_rejects_in_place_mutated_policy_instance_dispatch_root(tmp_path):
+    """Product admission must consume the sealed canonical instance-dispatch root."""
+
+    book_path = tmp_path / "paper_book.json"
+    book = PaperBook("1000")
+    book.save(book_path)
+    before = book_path.read_bytes()
+    policy = PaperRiskPolicy(
+        max_ticket_fraction=Decimal("1"),
+        max_committed_fraction=Decimal("1"),
+        minimum_cash_reserve_fraction=Decimal("0"),
+    )
+    root = vars(PaperRiskPolicy)["__getattribute__"]
+    original_code = root.__code__
+    hostile_code = _hostile_instance_getattribute_code_with_matching_closure(root)
+
+    try:
+        with pytest.raises(
+            TypeError,
+            match="canonical PaperRiskPolicy instance dispatch executable is sealed",
+        ):
+            root.__code__ = hostile_code
+        assert root.__code__ is original_code
+
+        result = admit_paper_ticket(
+            workspace=tmp_path,
+            book=book,
+            risk_policy=policy,
+            stake=Decimal("1001"),
+            legs=(_leg(),),
+            reason="failed dispatch attack must leave canonical risk active",
+            placed_at="2026-09-24T16:00:00Z",
+        )
+        assert result.admitted is False
+        assert result.risk.allowed is False
+        assert result.ticket is None
+    finally:
+        if root.__code__ is not original_code:
+            root.__code__ = original_code
+
+    assert book_path.read_bytes() == before
+    persisted = PaperBook.load(book_path)
+    assert persisted.balance == Decimal("1000")
+    assert persisted.tickets == {}

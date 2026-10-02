@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from types import FunctionType
 
-import autosport.run_transaction as run_transaction
+from autosport.run_transaction import RunTransaction
 
 
 _HOSTILE_GETATTRIBUTE_CALLS: list[str] = []
@@ -49,7 +49,7 @@ def _hostile_getattribute(self, name: str):
 def test_surface_verifier_rejects_coordinated_checker_code_retarget() -> None:
     """The terminal frozen-surface checker cannot move with its expected-code cell."""
 
-    guarded = run_transaction._promote_paper_book_snapshot
+    guarded = RunTransaction._promote_paper_book_snapshot
     assert isinstance(guarded, FunctionType)
     require_surface = _closure_cell(guarded, "require_surface").cell_contents
     assert isinstance(require_surface, FunctionType)
@@ -86,7 +86,7 @@ def test_surface_verifier_rejects_coordinated_checker_code_retarget() -> None:
 def test_surface_verifier_rejects_primary_getattribute_root_retarget() -> None:
     """Detached promotion must witness the lookup root that runs before __getattr__."""
 
-    guarded = run_transaction._promote_paper_book_snapshot
+    guarded = RunTransaction._promote_paper_book_snapshot
     assert isinstance(guarded, FunctionType)
     require_surface = _closure_cell(guarded, "require_surface").cell_contents
     assert isinstance(require_surface, FunctionType)

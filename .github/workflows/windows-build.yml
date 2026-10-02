@@ -30,7 +30,7 @@ permissions:
 # so same-ref activity cannot pre-cancel before execution. Live-head admission remains
 # authoritative before the expensive build.
 concurrency:
-  group: windows-candidate-${{ github.event_name == 'pull_request' && format('pr-{0}-{1}', github.event.number, (github.event.action == 'converted_to_draft' || github.event.action == 'closed' || github.event.pull_request.draft == true) && 'lifecycle' || (github.run_attempt != 1 && format('rerun-{0}', github.event.pull_request.head.sha) || format('qualify-{0}', github.event.pull_request.head.sha))) || format('run-{0}', github.run_id) }}
+  group: windows-candidate-${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha && format('pr-{0}-{1}', github.event.number, (github.event.action == 'converted_to_draft' || github.event.action == 'closed' || github.event.pull_request.draft == true) && 'lifecycle' || (github.run_attempt != 1 && format('rerun-{0}', github.event.pull_request.head.sha) || format('qualify-{0}', github.event.pull_request.head.sha))) || format('run-{0}', github.run_id) }}
   cancel-in-progress: true
 
 jobs:
@@ -40,7 +40,11 @@ jobs:
     # ready_for_review has draft=false and still executes exact-head admission.
     if: >-
       github.event_name != 'pull_request' ||
-      (github.event.action != 'closed' && github.event.pull_request.draft == false)
+      (github.event.action != 'closed' &&
+      github.event.pull_request.head.sha &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.base.repo.full_name == github.repository &&
+      github.event.pull_request.draft == false)
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:

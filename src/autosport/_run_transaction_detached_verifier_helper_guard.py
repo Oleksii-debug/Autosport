@@ -152,17 +152,25 @@ def _seal_method(method: FunctionType) -> None:
 
 def _install() -> None:
     owner = _run_transaction.RunTransaction
-    stage = vars(owner).get("_stage_paper_book_snapshot")
-    promotion = vars(owner).get("_promote_paper_book_snapshot")
-    if type(stage) is not FunctionType or type(promotion) is not FunctionType:
+    namespace = vars(owner)
+    stage = namespace.get("_stage_paper_book_snapshot")
+    promotion = namespace.get("_promote_paper_book_snapshot")
+    validator = namespace.get("_validate_paper_book_snapshot")
+    if (
+        type(stage) is not FunctionType
+        or type(promotion) is not FunctionType
+        or type(validator) is not classmethod
+        or type(validator.__func__) is not FunctionType
+    ):
         raise RuntimeError("canonical RunTransaction detached consumers are unavailable")
     _seal_method(stage)
     _seal_method(promotion)
+    _seal_method(validator.__func__)
 
 
 _install()
 del _install
 # Install-time mutation helpers are not runtime capabilities. Their work is already
-# captured in the exact stage/promotion closures, so remove the public module handles.
+# captured in the exact stage/promotion/validator closures, so remove the public module handles.
 del _seal_method
 del _closure_cell

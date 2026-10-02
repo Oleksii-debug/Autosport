@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from types import FunctionType
 
-import autosport.run_transaction as run_transaction
+from autosport.run_transaction import RunTransaction
 
 
 def _closure_cell(function: FunctionType, name: str):
@@ -19,7 +19,7 @@ def _closure_value(function: FunctionType, name: str):
 def test_surface_checker_rejects_coordinated_root_and_witness_snapshot_retarget() -> None:
     """The terminal checker cannot approve a hostile surface via a moved expectation."""
 
-    guarded = run_transaction._promote_paper_book_snapshot
+    guarded = RunTransaction._promote_paper_book_snapshot
     assert isinstance(guarded, FunctionType)
     require_surface = _closure_value(guarded, "require_surface")
     assert isinstance(require_surface, FunctionType)

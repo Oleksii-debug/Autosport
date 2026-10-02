@@ -17,6 +17,7 @@ from .decision_ledger import (
 from .integrity import atomic_write_json, ensure_durable_file, sha256_file
 from .paper import PaperBook
 from . import _paperbook_preload_authority_guard as _paperbook_authority
+from .workspace_lock import _open_read_only_descriptor
 
 
 _WINDOWS_MAX_COMPONENT_UTF16_CODE_UNITS = 255
@@ -35,6 +36,11 @@ _WINDOWS_RESERVED_DEVICE_NAMES = frozenset(
         *(f"LPT{suffix}" for suffix in (*range(1, 10), "¹", "²", "³")),
     }
 )
+
+
+# Match the repository's existing durable-replay file ceiling. Transaction manifests
+# are fixed-schema control records and must never force unbounded restart materialization.
+_MAX_TRANSACTION_MANIFEST_BYTES = 64 * 1024 * 1024
 
 
 class RunTransactionError(RuntimeError):
@@ -650,9 +656,14 @@ class RunTransaction:
 
     @classmethod
     def _read_strict_json_file(cls, path: Path, *, label: str) -> Any:
+        snapshot = cls._read_canonical_file_snapshot(
+            path,
+            label,
+            max_bytes=_MAX_TRANSACTION_MANIFEST_BYTES,
+        )
         try:
-            text = path.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError) as exc:
+            text = snapshot.payload.decode("utf-8")
+        except UnicodeDecodeError as exc:
             raise RunTransactionError(f"{label} is unreadable or invalid UTF-8") from exc
         return cls._decode_strict_json(text, label=label)
 
@@ -916,7 +927,12 @@ class RunTransaction:
         )
 
     @staticmethod
-    def _read_canonical_file_snapshot(path: Path, label: str) -> VerifiedFileSnapshot:
+    def _read_canonical_file_snapshot(
+        path: Path,
+        label: str,
+        *,
+        max_bytes: int | None = None,
+    ) -> VerifiedFileSnapshot:
         """Read exact canonical bytes while rejecting pathname indirection/replacement."""
 
         def stable_metadata(left: os.stat_result, right: os.stat_result) -> bool:
@@ -930,6 +946,7 @@ class RunTransaction:
         def path_matches_open_handle(
             handle: Any,
             expected_path_stat: os.stat_result,
+            expected_open_stat: os.stat_result,
         ) -> bool:
             try:
                 current = os.stat(path, follow_symlinks=False)
@@ -942,24 +959,41 @@ class RunTransaction:
             ):
                 return False
             try:
-                verification = path.open("rb")
+                verification_descriptor = _open_read_only_descriptor(path)
             except OSError:
                 return False
-            with verification:
-                try:
-                    same_file = os.path.sameopenfile(
-                        handle.fileno(),
-                        verification.fileno(),
-                    )
-                    current_after_open = os.stat(path, follow_symlinks=False)
-                except OSError:
-                    return False
-                return (
+            try:
+                verification_stat = os.fstat(verification_descriptor)
+                same_file = (
+                    verification_stat.st_dev == expected_open_stat.st_dev
+                    and verification_stat.st_ino == expected_open_stat.st_ino
+                )
+                current_after_open = os.stat(path, follow_symlinks=False)
+                result = (
                     same_file
                     and stat.S_ISREG(current_after_open.st_mode)
                     and current_after_open.st_nlink == 1
                     and stable_metadata(expected_path_stat, current_after_open)
                 )
+            except OSError:
+                result = False
+            except BaseException as primary_error:
+                try:
+                    os.close(verification_descriptor)
+                except OSError as close_error:
+                    try:
+                        primary_error.add_note(
+                            "transaction verification descriptor cleanup also failed: "
+                            f"{type(close_error).__name__}: {close_error}"
+                        )
+                    except BaseException:
+                        pass
+                raise
+            try:
+                os.close(verification_descriptor)
+            except OSError:
+                return False
+            return result
 
         try:
             path_before = os.stat(path, follow_symlinks=False)
@@ -975,15 +1009,29 @@ class RunTransaction:
             raise RunTransactionError(
                 f"{label} canonical path must not have hard-link aliases"
             )
+        if max_bytes is not None:
+            if type(max_bytes) is not int or max_bytes <= 0:
+                raise RunTransactionError(f"{label} byte limit is invalid")
+            if path_before.st_size > max_bytes:
+                raise RunTransactionError(f"{label} exceeds bounded size")
 
+        descriptor: int | None = None
         try:
-            handle = path.open("rb")
+            descriptor = _open_read_only_descriptor(path)
+            handle = os.fdopen(descriptor, "rb", closefd=True)
+            descriptor = None
         except FileNotFoundError as exc:
             raise RunTransactionError(
                 f"{label} canonical path changed while validating"
             ) from exc
         except OSError as exc:
             raise RunTransactionError(f"{label} canonical file is unreadable") from exc
+        finally:
+            if descriptor is not None:
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
 
         with handle:
             try:
@@ -992,17 +1040,34 @@ class RunTransaction:
                 raise RunTransactionError(
                     f"{label} canonical path changed while validating"
                 ) from exc
+            path_identity_available = not (
+                path_before.st_dev == 0 and path_before.st_ino == 0
+            )
             if (
                 not stat.S_ISREG(opened_before.st_mode)
                 or opened_before.st_nlink != 1
-                or not path_matches_open_handle(handle, path_before)
+                or (
+                    path_identity_available
+                    and (
+                        opened_before.st_dev != path_before.st_dev
+                        or opened_before.st_ino != path_before.st_ino
+                    )
+                )
+                or not path_matches_open_handle(handle, path_before, opened_before)
             ):
                 raise RunTransactionError(
                     f"{label} canonical path must be a stable regular non-symlink file"
                 )
+            if max_bytes is not None and opened_before.st_size > max_bytes:
+                raise RunTransactionError(f"{label} exceeds bounded size")
 
             try:
-                payload = handle.read()
+                if max_bytes is None:
+                    payload = handle.read()
+                else:
+                    payload = handle.read(max_bytes + 1)
+                    if len(payload) > max_bytes:
+                        raise RunTransactionError(f"{label} exceeds bounded size")
                 opened_after = os.fstat(handle.fileno())
             except OSError as exc:
                 raise RunTransactionError(
@@ -1012,7 +1077,7 @@ class RunTransaction:
                 not stat.S_ISREG(opened_after.st_mode)
                 or opened_after.st_nlink != 1
                 or not stable_metadata(opened_before, opened_after)
-                or not path_matches_open_handle(handle, path_before)
+                or not path_matches_open_handle(handle, path_before, opened_before)
             ):
                 raise RunTransactionError(
                     f"{label} canonical path changed while validating"
@@ -1095,7 +1160,13 @@ class RunTransaction:
     ) -> None:
         del cls, path
         try:
-            PaperBook.load_bytes(snapshot.payload)
+            _paperbook_authority._call_witnessed_delegate(
+                _paperbook_authority._LOAD_BYTES,
+                _paperbook_authority._LOAD_BYTES_WITNESS,
+                "canonical load_bytes",
+                _paperbook_authority._PAPER_BOOK,
+                snapshot.payload,
+            )
         except Exception as exc:
             raise RunTransactionError(f"{label} semantic validation failed: {exc}") from exc
 
@@ -1116,15 +1187,11 @@ class RunTransaction:
         label: str,
     ) -> VerifiedFileSnapshot:
         snapshot = cls._read_canonical_file_snapshot(path, label)
-        try:
-            PaperBook.load(path)
-        except Exception as exc:
-            raise RunTransactionError(
-                f"canonical {label} semantic validation failed: {exc}"
-            ) from exc
-        verification_after = cls._read_canonical_file_snapshot(path, label)
-        if verification_after.sha256 != snapshot.sha256 or verification_after.payload != snapshot.payload:
-            raise RunTransactionError(f"canonical {label} changed during semantic validation")
+        cls._validate_paper_book_snapshot(
+            snapshot,
+            path,
+            f"canonical {label}",
+        )
         return snapshot
 
     @staticmethod
@@ -1439,4 +1506,13 @@ from ._paperbook_current_binding_verifier import (
 RunTransaction._stage_paper_book_snapshot = _seal_current_binding_consumer(
     RunTransaction._stage_paper_book_snapshot
 )
+_validate_paper_book_snapshot_descriptor = vars(RunTransaction).get(
+    "_validate_paper_book_snapshot"
+)
+if type(_validate_paper_book_snapshot_descriptor) is not classmethod:
+    raise RuntimeError("canonical RunTransaction PaperBook validator is unavailable")
+RunTransaction._validate_paper_book_snapshot = classmethod(
+    _seal_current_binding_consumer(_validate_paper_book_snapshot_descriptor.__func__)
+)
+del _validate_paper_book_snapshot_descriptor
 del _seal_current_binding_consumer

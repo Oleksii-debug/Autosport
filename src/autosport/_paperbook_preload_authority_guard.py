@@ -16,7 +16,7 @@ import os
 import tempfile
 import threading
 from pathlib import Path
-from types import FunctionType
+from types import CodeType, FunctionType
 from weakref import WeakKeyDictionary
 
 from . import paper as _paper
@@ -64,11 +64,30 @@ def _closure_contents(closure: tuple[object, ...] | None) -> tuple[object, ...] 
     return tuple(contents)
 
 
+def _code_global_names(code: CodeType) -> tuple[str, ...]:
+    """Return globals referenced by this code object and nested executable code."""
+
+    names: list[str] = []
+    seen: set[str] = set()
+
+    def collect(current: CodeType) -> None:
+        for name in current.co_names:
+            if name not in seen:
+                seen.add(name)
+                names.append(name)
+        for constant in current.co_consts:
+            if type(constant) is CodeType:
+                collect(constant)
+
+    collect(code)
+    return tuple(names)
+
+
 def _global_bindings(delegate: FunctionType) -> tuple[tuple[str, object], ...]:
     mapping = delegate.__globals__
     return tuple(
         (name, mapping[name])
-        for name in delegate.__code__.co_names
+        for name in _code_global_names(delegate.__code__)
         if name in mapping
     )
 

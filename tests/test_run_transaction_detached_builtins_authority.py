@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import tempfile
+
+import pytest
 from decimal import Decimal
 from pathlib import Path
 from types import FunctionType
@@ -111,18 +113,19 @@ def test_detached_consumer_does_not_execute_mutated_live_builtins_dict() -> None
 
         builtins_map["dict"] = hostile_dict
         try:
-            # This is deliberately a semantically valid direct promotion call, not an
-            # argument-binding oracle. It traverses durable identity/precommit checks,
-            # current-binding reconstruction, staged semantic validation and canonical
-            # PaperBook publication. On the vulnerable predecessor the reconstructed
-            # prior consumer executes builtin dict(inner_globals) from this reachable
-            # mapping and therefore invokes hostile_dict.
-            tx._promote_paper_book_snapshot()
+            # Reachable live builtins are tamper evidence only. The current-binding
+            # resolver witnesses this mapping and must fail closed before either the
+            # hostile dict or the detached promotion delegate can execute.
+            with pytest.raises(
+                ValueError,
+                match="current-binding resolver builtin authority changed",
+            ):
+                tx._promote_paper_book_snapshot()
         finally:
             builtins_map["dict"] = original_dict
 
         assert hostile_calls == 0, "mutated live builtins dict was used for execution"
-        assert sha256_file(book_path) == expected_new
-        assert sha256_file(book_path) != expected_base
+        assert sha256_file(book_path) == expected_base
+        assert sha256_file(book_path) != expected_new
 
     assert builtins_map.get("dict") is original_dict

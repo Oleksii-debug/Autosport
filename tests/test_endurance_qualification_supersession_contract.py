@@ -45,7 +45,8 @@ def test_trusted_supersession_controller_covers_endurance_without_cross_workflow
 
     assert "workflows: [CI, Windows candidate, Endurance]" in text
     assert "actions: write" in text
-    assert "cancel-in-progress: true" in text
-    assert "github.event.workflow_run.head_sha" in text
+    concurrency_block = text.split("concurrency:", 1)[1].split("jobs:", 1)[0]
+    assert "cancel-in-progress: false" in concurrency_block
+    assert "github.event.workflow_run.head_sha" not in concurrency_block
     assert "github.event.workflow_run.name" in text
-    assert "github.event.workflow_run.workflow_id" in text
+    assert "github.event.workflow_run.workflow_id" in concurrency_block

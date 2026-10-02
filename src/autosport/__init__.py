@@ -15,6 +15,7 @@ from . import _paper_execution_freshness as _paper_execution_freshness  # noqa: 
 from . import _paperbook_preload_authority_guard as _paperbook_preload_authority_guard  # noqa: F401,E402
 from . import _paperbook_preload_generation_cas_guard as _paperbook_preload_generation_cas_guard  # noqa: F401,E402
 from . import _paperbook_preload_module_member_freeze as _paperbook_preload_module_member_freeze  # noqa: F401,E402
+from . import _paperbook_preload_authority_root_freeze as _paperbook_preload_authority_root_freeze  # noqa: F401,E402
 from . import _paperbook_preload_load_dispatch_guard as _paperbook_preload_load_dispatch_guard  # noqa: F401,E402
 from . import _paperbook_preload_surface_type_guard as _paperbook_preload_surface_type_guard  # noqa: F401,E402
 from . import _paperbook_preload_wrapper_helper_guard as _paperbook_preload_wrapper_helper_guard  # noqa: F401,E402

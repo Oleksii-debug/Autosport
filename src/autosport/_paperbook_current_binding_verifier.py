@@ -370,6 +370,7 @@ def seal_current_binding_consumer(function: FunctionType) -> FunctionType:
     if inner_qualname in {
         "RunTransaction._stage_paper_book_snapshot",
         "RunTransaction._promote_paper_book_snapshot",
+        "RunTransaction._validate_paper_book_snapshot",
     }:
         # RunTransaction persistence methods are reconstructed from this mapping and
         # then independently sealed by the direct-dispatch guard. Keep only bytecode-

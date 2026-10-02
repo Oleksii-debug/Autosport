@@ -70,6 +70,35 @@ class _SealedSurfaceRoot:
         raise TypeError(f"canonical PaperBook frozen-surface root is sealed: {self._name}")
 
 
+class _SealedSurfaceMutationRoot:
+    """Seal a facade mutation root without hijacking metaclass mutation dispatch."""
+
+    __slots__ = ("_name", "_descriptor", "_owner", "_dispatcher")
+
+    def __init__(self, name: str, descriptor: object, owner: type, dispatcher: object) -> None:
+        self._name = name
+        self._descriptor = descriptor
+        self._owner = owner
+        self._dispatcher = dispatcher
+
+    def __get__(self, instance: object, owner: type | None = None):
+        del owner
+        if instance is None:
+            return self
+        namespace = type.__getattribute__(self._owner, "__dict__")
+        if namespace.get(self._name) is not self._descriptor:
+            raise TypeError(f"canonical PaperBook frozen-surface root changed: {self._name}")
+        return self._dispatcher.__get__(instance, type(instance))
+
+    def __set__(self, instance: object, value: object) -> None:
+        del instance, value
+        raise TypeError(f"canonical PaperBook frozen-surface root is sealed: {self._name}")
+
+    def __delete__(self, instance: object) -> None:
+        del instance
+        raise TypeError(f"canonical PaperBook frozen-surface root is sealed: {self._name}")
+
+
 class _FrozenSurface(tuple, metaclass=_FrozenSurfaceMeta):
     """Structurally immutable persistence-member facade.
 
@@ -206,16 +235,24 @@ def _seal_surface_type() -> None:
 
     meta_roots: dict[str, object] = {}
     for name, descriptor in descriptors.items():
-        sealed = _SealedSurfaceRoot(name, descriptor, surface_type)
+        if name == "__setattr__":
+            sealed = _SealedSurfaceMutationRoot(
+                name, descriptor, surface_type, type.__setattr__
+            )
+        elif name == "__delattr__":
+            sealed = _SealedSurfaceMutationRoot(
+                name, descriptor, surface_type, type.__delattr__
+            )
+        else:
+            sealed = _SealedSurfaceRoot(name, descriptor, surface_type)
         type.__setattr__(surface_meta, name, sealed)
         meta_roots[name] = sealed
 
-    # Explicit ``type.__delattr__(surface_meta, name)`` bypasses surface_meta's own
-    # ordinary __delattr__ dispatch. Put matching data descriptors on its metaclass so
-    # the exact descriptor-removal-then-retarget route is rejected before the inner
-    # seal can be removed. This complements (rather than replaces) the positive-path
-    # executable witness that independently rejects a changed facade graph.
+    # Do not install the facade mutation guards as same-named roots on the
+    # meta-metaclass: those names are its own mutation dispatch slots.
     for name, descriptor in meta_roots.items():
+        if name in {"__setattr__", "__delattr__"}:
+            continue
         type.__setattr__(
             _FrozenSurfaceMetaMeta,
             name,
@@ -265,6 +302,7 @@ def _install() -> None:
     guard_mkstemp = _clone_module_function_graph(tempfile.mkstemp, "witness tempfile.mkstemp")
     guard_normcase = _clone_module_function_graph(os.path.normcase, "witness os.path.normcase")
     guard_abspath = _clone_module_function_graph(os.path.abspath, "witness os.path.abspath")
+    guard_realpath = _clone_module_function_graph(os.path.realpath, "witness os.path.realpath")
     paper_json_loads = _clone_module_function_graph(json.loads, "parser json.loads")
     paper_json_dump = _clone_module_function_graph(json.dump, "serializer json.dump")
     paper_named_temporary_file = _clone_module_function_graph(
@@ -278,6 +316,7 @@ def _install() -> None:
         guard_mkstemp,
         guard_normcase,
         guard_abspath,
+        guard_realpath,
         paper_json_loads,
         paper_json_dump,
         paper_named_temporary_file,
@@ -306,9 +345,20 @@ def _install() -> None:
         for function in frozen_graph_functions
     )
 
+    # Generation-CAS captured these callables before the module-member freeze.
+    # Retarget the raw aliases to the detached executable clones used by the frozen
+    # os.path facade so same-object stdlib code mutation cannot alter path identity.
+    if "_LOCK_NORMCASE" in _guard.__dict__:
+        _guard._LOCK_NORMCASE = guard_normcase
+    if "_LOCK_ABSPATH" in _guard.__dict__:
+        _guard._LOCK_ABSPATH = guard_abspath
+    if "_LOCK_REALPATH" in _guard.__dict__:
+        _guard._LOCK_REALPATH = guard_realpath
+
     frozen_path = _FrozenSurface(
         normcase=guard_normcase,
         abspath=guard_abspath,
+        realpath=guard_realpath,
     )
     _guard.json = _FrozenSurface(
         loads=guard_json_loads,

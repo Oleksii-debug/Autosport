@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from types import FunctionType
 
-import autosport.run_transaction as run_transaction
+from autosport.run_transaction import RunTransaction
 
 
 def _closure_cell(function: FunctionType, name: str):
@@ -15,7 +15,7 @@ def _closure_cell(function: FunctionType, name: str):
 def test_guard_rejects_coordinated_clone_code_and_expected_code_retarget() -> None:
     """Executable code and its mutable expected-code cell cannot move together."""
 
-    guarded = run_transaction._promote_paper_book_snapshot
+    guarded = RunTransaction._promote_paper_book_snapshot
     assert isinstance(guarded, FunctionType)
 
     function_cell = _closure_cell(guarded, "function")

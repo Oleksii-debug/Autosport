@@ -11,6 +11,7 @@ from pathlib import Path
 from time import monotonic
 from typing import Callable, Protocol
 
+from . import _paperbook_preload_authority_guard as _paperbook_authority
 from .decision_ledger import (
     ECONOMIC_DECISION_KIND,
     MATERIAL_ACTION_ID_PAYLOAD_KEY,
@@ -1953,6 +1954,14 @@ class PersistentLiveDecisionLoop:
                     "pre-action PaperBook context changed before durability"
                 )
 
+            # A new detached shadow is created for every decision cycle so the live
+            # canonical PaperBook never acquires the recovery-artifact path authority.
+            # When a previous pre-action artifact already exists, explicitly adopt
+            # that artifact's *current* durable generation before replacement.  This
+            # is a product-owned capability resolved from the sealed persistence graph
+            # below; generic PaperBook.save() remains fail-closed for unbound/stale
+            # objects and for cross-path publication.
+            _paperbook_authority._bind_book(snapshot, self.pre_action_book_path)
             snapshot.save(self.pre_action_book_path)
             durable_pre_action = PaperBook.load(self.pre_action_book_path)
             durable_context_sha256 = self._decision_context_sha256_for_book(
@@ -2268,3 +2277,18 @@ class PersistentLiveDecisionLoop:
                 for input_id in self.dependencies.input_ids
             ]
         )
+
+
+# _write_pending is the only live-loop boundary allowed to adopt the existing
+# pre-action recovery snapshot generation for a freshly detached risk shadow.  Seal
+# that positive capability behind the already-frozen PaperBook persistence graph and
+# remove the mutable module alias afterwards.
+from ._paperbook_current_binding_verifier import (
+    seal_current_binding_consumer as _seal_current_binding_consumer,
+)
+
+PersistentLiveDecisionLoop._write_pending = _seal_current_binding_consumer(
+    PersistentLiveDecisionLoop._write_pending
+)
+del _seal_current_binding_consumer
+del _paperbook_authority

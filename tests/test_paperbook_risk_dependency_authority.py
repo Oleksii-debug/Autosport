@@ -64,11 +64,16 @@ def test_committed_exposure_cannot_be_retargeted_by_live_policy_helper(
     assert canonical is not None
     assert canonical[2] == Decimal("10")
 
-    monkeypatch.setattr(
-        PaperRiskPolicy,
-        "_exact_positive_sum",
-        staticmethod(lambda _values: Decimal("0")),
-    )
+    with pytest.raises(
+        TypeError,
+        match="canonical PaperRiskPolicy root is sealed: _exact_positive_sum",
+    ):
+        setattr(
+            PaperRiskPolicy,
+            "_exact_positive_sum",
+            staticmethod(lambda _values: Decimal("0")),
+        )
 
     after = PaperRiskPolicy._book_state(book)
-    assert after is None or after[2] == Decimal("10")
+    assert after is not None
+    assert after[2] == Decimal("10")

@@ -17,7 +17,11 @@ def test_owner_facing_risk_denies_nested_policy_helper_rebind(
     baseline = policy.evaluate(book, Decimal("1"))
     assert baseline.allowed is True
 
+    hostile_calls: list[tuple[object, ...]] = []
+
     def bypass_derived_risk_values(*args, **kwargs):
+        del kwargs
+        hostile_calls.append(args)
         raise AssertionError("rebound risk helper must never execute")
 
     monkeypatch.setattr(
@@ -26,6 +30,7 @@ def test_owner_facing_risk_denies_nested_policy_helper_rebind(
         bypass_derived_risk_values,
     )
 
-    blocked = policy.evaluate(book, Decimal("1"))
-    assert blocked.allowed is False
-    assert blocked.reason == "virtual bankroll generation authority is invalid"
+    after = policy.evaluate(book, Decimal("1"))
+    assert after.allowed is False
+    assert after.reason == "virtual bankroll private economic authority is invalid"
+    assert hostile_calls == []

@@ -57,6 +57,22 @@ def test_integration_capable_cleanup_preserves_older_same_head_run() -> None:
     ) == (100,)
 
 
+def _qualification_payload(
+    *,
+    state: str = "open",
+    draft: object = False,
+) -> dict[str, object]:
+    return {
+        "head": {
+            "sha": HEAD_B,
+            "repo": {"full_name": "owner/repo"},
+        },
+        "base": {"repo": {"full_name": "owner/repo"}},
+        "state": state,
+        "draft": draft,
+    }
+
+
 class _StateApi(GitHubApi):
     def __init__(self, payload: object) -> None:
         super().__init__(repository="owner/repo", token="token")
@@ -82,16 +98,23 @@ def test_pr_integration_capability_is_exact_state_and_draft(
     draft: bool,
     expected: bool,
 ) -> None:
-    api = _StateApi({"state": state, "draft": draft})
+    api = _StateApi(_qualification_payload(state=state, draft=draft))
     assert api.pr_is_integration_capable(2016) is expected
 
 
 @pytest.mark.parametrize(
     "payload",
     (
-        {"state": "open"},
-        {"state": "open", "draft": 0},
-        {"state": "merged", "draft": False},
+        {
+            "head": {
+                "sha": HEAD_B,
+                "repo": {"full_name": "owner/repo"},
+            },
+            "base": {"repo": {"full_name": "owner/repo"}},
+            "state": "open",
+        },
+        _qualification_payload(draft=0),
+        _qualification_payload(state="merged"),
         [],
     ),
 )

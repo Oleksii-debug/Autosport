@@ -40,6 +40,7 @@ _CANONICAL_SCHEDULE_CLASS_READ_SEAMS = {
     name: inspect.getattr_static(CollectorDeltaStore, name)
     for name in _CANONICAL_SCHEDULE_READ_SEAMS
 }
+_CANONICAL_PATH_EQUALITY = Path.__eq__
 _SCHEDULE_KEYS = frozenset(
     {
         "schema_version",
@@ -143,28 +144,22 @@ def _canonical_json(value: object) -> bytes:
 
 def _require_expected_store_path(
     store: CollectorDeltaStore,
-    expected_store_path: str | Path,
+    expected_store_path: Path,
 ) -> Path:
-    if isinstance(expected_store_path, str):
-        if not expected_store_path or expected_store_path.strip() != expected_store_path:
-            raise ScheduledSourceUniverseError(
-                "expected_store_path must be a non-empty trimmed path"
-            )
-        expected = Path(expected_store_path)
-    elif isinstance(expected_store_path, Path):
-        expected = expected_store_path
-    else:
-        raise TypeError("expected_store_path must be str or Path")
     current = getattr(store, "path", None)
     if not isinstance(current, Path):
         raise ScheduledSourceUniverseError(
             "canonical collector store path identity is unavailable"
         )
-    if current != expected:
+    if type(expected_store_path) is not type(current):
+        raise TypeError(
+            "expected_store_path must be the exact canonical Path type"
+        )
+    if _CANONICAL_PATH_EQUALITY(current, expected_store_path) is not True:
         raise ScheduledSourceUniverseError(
             "collector store path does not match product-expected authority path"
         )
-    return expected
+    return expected_store_path
 
 
 @dataclass(frozen=True, slots=True, init=False)
@@ -277,7 +272,7 @@ def resolve_scheduled_source_universe(
     store: CollectorDeltaStore,
     candidate_source_universe: SourceUniverseCommitment,
     *,
-    expected_store_path: str | Path,
+    expected_store_path: Path,
     expected_source_id: str,
     expected_run_id: str,
     expected_start_slot_ordinal: int,
@@ -521,3 +516,315 @@ def resolve_scheduled_source_universe(
             "resolution_sha256": resolution_sha256,
         }
     )
+
+def _seal_scheduled_source_universe_dispatch() -> None:
+    """Seal positive schedule-coverage dispatch against ordinary runtime rebinding."""
+
+    module_globals = globals()
+    expected_store_type = CollectorDeltaStore
+    expected_commitment_type = SourceUniverseCommitment
+    expected_source_error_type = SourceUniverseCommitmentError
+    expected_resolution_type = ScheduledSourceUniverseResolution
+    expected_resolution_field_names = tuple(expected_resolution_type.__slots__)
+    expected_error_type = ScheduledSourceUniverseError
+    expected_path_type = Path
+    expected_hashlib = hashlib
+    expected_sha256_fn = hashlib.sha256
+    expected_json = json
+    expected_json_dumps = json.dumps
+    expected_json_dumps_code = getattr(expected_json_dumps, "__code__", None)
+    expected_inspect = inspect
+    expected_getattr_static = inspect.getattr_static
+    expected_getattr_static_code = getattr(
+        expected_getattr_static, "__code__", None
+    )
+    expected_path_equality = _CANONICAL_PATH_EQUALITY
+    expected_path_equality_code = getattr(
+        expected_path_equality, "__code__", None
+    )
+    expected_schedule_evidence = _CANONICAL_SCHEDULE_EVIDENCE
+    expected_schedule_evidence_code = getattr(
+        expected_schedule_evidence, "__code__", None
+    )
+    expected_schedule_read_names = _CANONICAL_SCHEDULE_READ_SEAMS
+    expected_schedule_class_seams = _CANONICAL_SCHEDULE_CLASS_READ_SEAMS
+    expected_schedule_class_witnesses = tuple(
+        (
+            name,
+            expected,
+            getattr(expected, "__func__", expected),
+            getattr(
+                getattr(expected, "__func__", expected),
+                "__code__",
+                None,
+            ),
+        )
+        for name, expected in sorted(expected_schedule_class_seams.items())
+    )
+    expected_schedule_keys = _SCHEDULE_KEYS
+    expected_slot_keys = _SLOT_KEYS
+    expected_hex = _HEX
+    expected_verifier = verify_source_universe_commitment
+    expected_verifier_code = expected_verifier.__code__
+    expected_resolution_field_surfaces = tuple(
+        (
+            name,
+            expected_getattr_static(expected_resolution_type, name),
+        )
+        for name in expected_resolution_field_names
+    )
+    expected_resolution_issue_surface = expected_getattr_static(
+        expected_resolution_type, "_issue"
+    )
+    expected_resolution_issue_function = getattr(
+        expected_resolution_issue_surface, "__func__", None
+    )
+    expected_resolution_issue_function_code = getattr(
+        expected_resolution_issue_function, "__code__", None
+    )
+    helper_witnesses = tuple(
+        (
+            name,
+            helper,
+            getattr(helper, "__code__", None),
+        )
+        for name, helper in (
+            (
+                "_require_canonical_schedule_class_read_seams",
+                _require_canonical_schedule_class_read_seams,
+            ),
+            ("_text", _text),
+            ("_ordinal", _ordinal),
+            ("_sha256", _sha256),
+            ("_canonical_json", _canonical_json),
+            ("_require_expected_store_path", _require_expected_store_path),
+            ("_read_schedule_evidence", _read_schedule_evidence),
+        )
+    )
+    original_resolver = resolve_scheduled_source_universe
+    original_resolver_code = original_resolver.__code__
+
+    def require_dispatch_integrity() -> None:
+        if module_globals.get("CollectorDeltaStore") is not expected_store_type:
+            raise expected_error_type(
+                "scheduled source-universe collector type authority is rebound"
+            )
+        if (
+            module_globals.get("SourceUniverseCommitment")
+            is not expected_commitment_type
+        ):
+            raise expected_error_type(
+                "scheduled source-universe commitment type authority is rebound"
+            )
+        if (
+            module_globals.get("SourceUniverseCommitmentError")
+            is not expected_source_error_type
+        ):
+            raise expected_error_type(
+                "scheduled source-universe source error authority is rebound"
+            )
+        if (
+            module_globals.get("ScheduledSourceUniverseResolution")
+            is not expected_resolution_type
+        ):
+            raise expected_error_type(
+                "scheduled source-universe result type authority is rebound"
+            )
+        if module_globals.get("ScheduledSourceUniverseError") is not expected_error_type:
+            raise expected_error_type(
+                "scheduled source-universe error authority is rebound"
+            )
+        if module_globals.get("Path") is not expected_path_type:
+            raise expected_error_type(
+                "scheduled source-universe path authority is rebound"
+            )
+        if (
+            module_globals.get("_CANONICAL_PATH_EQUALITY")
+            is not expected_path_equality
+            or getattr(expected_path_equality, "__code__", None)
+            is not expected_path_equality_code
+        ):
+            raise expected_error_type(
+                "scheduled source-universe path comparison authority is rebound or mutated"
+            )
+        if (
+            module_globals.get("hashlib") is not expected_hashlib
+            or expected_hashlib.sha256 is not expected_sha256_fn
+        ):
+            raise expected_error_type(
+                "scheduled source-universe digest authority is rebound"
+            )
+        if (
+            module_globals.get("json") is not expected_json
+            or expected_json.dumps is not expected_json_dumps
+            or getattr(expected_json_dumps, "__code__", None)
+            is not expected_json_dumps_code
+        ):
+            raise expected_error_type(
+                "scheduled source-universe canonical JSON authority is rebound"
+            )
+        if (
+            module_globals.get("inspect") is not expected_inspect
+            or expected_inspect.getattr_static is not expected_getattr_static
+            or getattr(expected_getattr_static, "__code__", None)
+            is not expected_getattr_static_code
+        ):
+            raise expected_error_type(
+                "scheduled source-universe reflection authority is rebound"
+            )
+        if (
+            module_globals.get("_CANONICAL_SCHEDULE_EVIDENCE")
+            is not expected_schedule_evidence
+            or getattr(expected_schedule_evidence, "__code__", None)
+            is not expected_schedule_evidence_code
+        ):
+            raise expected_error_type(
+                "scheduled source-universe schedule evidence authority is rebound"
+            )
+        if (
+            module_globals.get("_CANONICAL_SCHEDULE_READ_SEAMS")
+            is not expected_schedule_read_names
+        ):
+            raise expected_error_type(
+                "scheduled source-universe read-seam identity is rebound"
+            )
+        current_class_seams = module_globals.get(
+            "_CANONICAL_SCHEDULE_CLASS_READ_SEAMS"
+        )
+        if (
+            current_class_seams is not expected_schedule_class_seams
+            or type(current_class_seams) is not dict
+        ):
+            raise expected_error_type(
+                "scheduled source-universe class read-seam witness map is rebound"
+            )
+        for (
+            name,
+            expected_surface,
+            expected_callable,
+            expected_code,
+        ) in expected_schedule_class_witnesses:
+            current_surface = expected_getattr_static(
+                expected_store_type, name, None
+            )
+            current_callable = getattr(
+                current_surface,
+                "__func__",
+                current_surface,
+            )
+            if (
+                current_class_seams.get(name) is not expected_surface
+                or current_surface is not expected_surface
+                or current_callable is not expected_callable
+                or getattr(current_callable, "__code__", None) is not expected_code
+            ):
+                raise expected_error_type(
+                    "scheduled source-universe canonical read seam drifted: " + name
+                )
+        if module_globals.get("_SCHEDULE_KEYS") is not expected_schedule_keys:
+            raise expected_error_type(
+                "scheduled source-universe schedule schema authority is rebound"
+            )
+        if module_globals.get("_SLOT_KEYS") is not expected_slot_keys:
+            raise expected_error_type(
+                "scheduled source-universe slot schema authority is rebound"
+            )
+        if module_globals.get("_HEX") is not expected_hex:
+            raise expected_error_type(
+                "scheduled source-universe digest alphabet authority is rebound"
+            )
+        if (
+            module_globals.get("verify_source_universe_commitment")
+            is not expected_verifier
+            or expected_verifier.__code__ is not expected_verifier_code
+        ):
+            raise expected_error_type(
+                "scheduled source-universe verifier authority is rebound"
+            )
+        for name, expected_surface in expected_resolution_field_surfaces:
+            if (
+                expected_getattr_static(expected_resolution_type, name, None)
+                is not expected_surface
+            ):
+                raise expected_error_type(
+                    "scheduled source-universe result field surface is rebound: "
+                    + name
+                )
+        current_resolution_issue_surface = expected_getattr_static(
+            expected_resolution_type, "_issue", None
+        )
+        if (
+            current_resolution_issue_surface is not expected_resolution_issue_surface
+            or getattr(current_resolution_issue_surface, "__func__", None)
+            is not expected_resolution_issue_function
+            or getattr(expected_resolution_issue_function, "__code__", None)
+            is not expected_resolution_issue_function_code
+        ):
+            raise expected_error_type(
+                "scheduled source-universe result issuance surface is rebound or mutated"
+            )
+        for name, expected_helper, expected_code in helper_witnesses:
+            current_helper = module_globals.get(name)
+            if (
+                current_helper is not expected_helper
+                or getattr(expected_helper, "__code__", None) is not expected_code
+            ):
+                raise expected_error_type(
+                    "scheduled source-universe helper authority is rebound: " + name
+                )
+        if original_resolver.__code__ is not original_resolver_code:
+            raise expected_error_type(
+                "scheduled source-universe resolver implementation drifted"
+            )
+
+    def sealed_resolve_scheduled_source_universe(
+        store: CollectorDeltaStore,
+        candidate_source_universe: SourceUniverseCommitment,
+        *,
+        expected_store_path: Path,
+        expected_source_id: str,
+        expected_run_id: str,
+        expected_start_slot_ordinal: int,
+        expected_end_slot_ordinal: int,
+    ) -> ScheduledSourceUniverseResolution:
+        if (
+            module_globals.get("resolve_scheduled_source_universe")
+            is not sealed_resolve_scheduled_source_universe
+        ):
+            raise expected_error_type(
+                "scheduled source-universe public resolver authority is rebound"
+            )
+        require_dispatch_integrity()
+        result = original_resolver(
+            store,
+            candidate_source_universe,
+            expected_store_path=expected_store_path,
+            expected_source_id=expected_source_id,
+            expected_run_id=expected_run_id,
+            expected_start_slot_ordinal=expected_start_slot_ordinal,
+            expected_end_slot_ordinal=expected_end_slot_ordinal,
+        )
+        require_dispatch_integrity()
+        if type(result) is not expected_resolution_type:
+            raise expected_error_type(
+                "scheduled source-universe resolver returned non-canonical result type"
+            )
+        return result
+
+    sealed_resolve_scheduled_source_universe.__name__ = original_resolver.__name__
+    sealed_resolve_scheduled_source_universe.__qualname__ = (
+        original_resolver.__qualname__
+    )
+    sealed_resolve_scheduled_source_universe.__doc__ = original_resolver.__doc__
+    sealed_resolve_scheduled_source_universe.__module__ = original_resolver.__module__
+    sealed_resolve_scheduled_source_universe.__annotations__ = dict(
+        original_resolver.__annotations__
+    )
+    module_globals["resolve_scheduled_source_universe"] = (
+        sealed_resolve_scheduled_source_universe
+    )
+
+
+_seal_scheduled_source_universe_dispatch()
+del _seal_scheduled_source_universe_dispatch
+

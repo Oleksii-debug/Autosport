@@ -12,7 +12,11 @@ from autosport.integrity import sha256_file
 from autosport.paper import PaperBook
 from autosport.recovery import reconcile_late_crashes
 from autosport.run_registry import ReconciliationError, RunRegistry
-from autosport.run_transaction import RunTransaction, RunTransactionError
+from autosport.run_transaction import (
+    RunTransaction,
+    RunTransactionError,
+    _MAX_TRANSACTION_MANIFEST_BYTES,
+)
 from autosport.session import AutosportSession
 
 
@@ -344,6 +348,40 @@ class TransactionRecoveryTests(unittest.TestCase):
                 tx.commit()
             self.assertEqual(PaperBook.load(root / "paper_book.json").balance, 10000)
             self.assertEqual((root / "decisions.jsonl").read_text(encoding="utf-8"), "")
+
+    def test_recovery_rejects_oversized_sparse_manifest_before_economic_mutation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            tx, _item = self._precommitted_transaction(root)
+            registry, key, _registry_item = self._in_progress(root)
+
+            paper_book_path = root / "paper_book.json"
+            decision_ledger_path = root / "decisions.jsonl"
+            registry_path = root / "run_registry.json"
+            book_before = paper_book_path.read_bytes()
+            ledger_before = decision_ledger_path.read_bytes()
+            registry_before = registry_path.read_bytes()
+
+            # Extend sparsely beyond the fixed manifest ceiling. The recovery reader
+            # must reject from bounded metadata/limit+1 evidence rather than materialize
+            # the full corrupt file before JSON/schema validation.
+            with tx.manifest_path.open("r+b") as handle:
+                handle.truncate(_MAX_TRANSACTION_MANIFEST_BYTES + 1)
+            self.assertEqual(
+                tx.manifest_path.stat().st_size,
+                _MAX_TRANSACTION_MANIFEST_BYTES + 1,
+            )
+
+            with self.assertRaisesRegex(
+                ReconciliationError,
+                "transaction manifest exceeds bounded size",
+            ):
+                reconcile_late_crashes(root)
+
+            self.assertEqual(paper_book_path.read_bytes(), book_before)
+            self.assertEqual(decision_ledger_path.read_bytes(), ledger_before)
+            self.assertEqual(registry_path.read_bytes(), registry_before)
+            self.assertEqual(registry.get(key)["status"], "in_progress")
 
     def test_commit_rejects_nonfinite_manifest_json_before_economic_promotion(self):
         with tempfile.TemporaryDirectory() as tmp:

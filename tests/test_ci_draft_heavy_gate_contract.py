@@ -14,7 +14,11 @@ _RUNNER_FREE_PR_ADMISSION = (
     "    # ready_for_review has draft=false and still executes exact-head admission.\n"
     "    if: >-\n"
     "      github.event_name != 'pull_request' ||\n"
-    "      (github.event.action != 'closed' && github.event.pull_request.draft == false)\n"
+    "      (github.event.action != 'closed' &&\n"
+    "      github.event.pull_request.head.sha &&\n"
+    "      github.event.pull_request.head.repo.full_name == github.repository &&\n"
+    "      github.event.pull_request.base.repo.full_name == github.repository &&\n"
+    "      github.event.pull_request.draft == false)\n"
     "    runs-on: ubuntu-latest"
 )
 
@@ -31,6 +35,7 @@ def _assert_head_partitioned_pr_scheduler(path: str) -> None:
     assert "format('pr-{0}-{1}'" in concurrency_block
     assert "github.event.number" in concurrency_block
     assert "github.event.pull_request.number" not in concurrency_block
+    assert "github.event_name == 'pull_request' && github.event.pull_request.head.sha && format(" in concurrency_block
     assert "github.run_attempt != 1" in concurrency_block
     assert "format('rerun-{0}', github.event.pull_request.head.sha)" in concurrency_block
     assert "format('qualify-{0}', github.event.pull_request.head.sha)" in concurrency_block
@@ -71,7 +76,9 @@ def test_ci_heavy_matrix_is_deferred_for_stale_draft_or_closed_pull_request() ->
     assert "os: [ubuntu-latest, windows-latest]" in workflow
     assert "python-version: ['3.11', '3.12']" in workflow
     assert "cancel-in-progress: true" in workflow
-    assert "timeout-minutes: 60" in workflow
+    # Full Windows/Python 3.12 qualification exceeded 60 minutes on exact-head #2035;
+    # keep the complete matrix and give it a bounded 90-minute execution ceiling.
+    assert "timeout-minutes: 90" in workflow
     assert "python -m pytest -v tests" in workflow
     assert "python -m autosport demo" in workflow
 

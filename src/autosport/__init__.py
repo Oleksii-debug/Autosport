@@ -15,6 +15,7 @@ from . import _paper_execution_freshness as _paper_execution_freshness  # noqa: 
 from . import _paperbook_preload_authority_guard as _paperbook_preload_authority_guard  # noqa: F401,E402
 from . import _paperbook_preload_generation_cas_guard as _paperbook_preload_generation_cas_guard  # noqa: F401,E402
 from . import _paperbook_preload_module_member_freeze as _paperbook_preload_module_member_freeze  # noqa: F401,E402
+from . import _paperbook_preload_authority_root_freeze as _paperbook_preload_authority_root_freeze  # noqa: F401,E402
 from . import _paperbook_preload_load_dispatch_guard as _paperbook_preload_load_dispatch_guard  # noqa: F401,E402
 from . import _paperbook_preload_surface_type_guard as _paperbook_preload_surface_type_guard  # noqa: F401,E402
 from . import _paperbook_preload_wrapper_helper_guard as _paperbook_preload_wrapper_helper_guard  # noqa: F401,E402
@@ -227,6 +228,7 @@ from . import _dataset_shard_manifest_authority_guard as _dataset_shard_manifest
 # The canonical PAPER product loop must cross the same non-virtual Wave M session
 # entry authority rather than returning to mutable coordinator method lookup.
 from . import _product_runtime_continuous_session_entry_guard as _product_runtime_continuous_session_entry_guard  # noqa: F401,E402
+
 # Seal the transitive OS/thread lock graph before product curation captures the
 # existing durable_path_lock as its sole publication/read serialization authority.
 from . import _provider_sport_mapping_durable_lock_guard as _provider_sport_mapping_durable_lock_guard  # noqa: F401,E402

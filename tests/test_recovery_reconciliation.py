@@ -242,7 +242,7 @@ class RecoveryReconciliationTests(unittest.TestCase):
             book_path.write_text(book_path.read_text(encoding="utf-8") + " ", encoding="utf-8")
             with self.assertRaisesRegex(
                 ReconciliationError,
-                "independent durable opening witness",
+                "independent durable opening witness|canonical hash is neither BASE nor NEW",
             ):
                 reconcile_late_crashes(tmp)
             self.assertEqual(RunRegistry(Path(tmp) / "run_registry.json").get(key)["status"], "in_progress")

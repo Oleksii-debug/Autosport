@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from types import FunctionType
 
-import autosport.run_transaction as run_transaction
+from autosport.run_transaction import RunTransaction
 
 
 def _closure_cell(function: FunctionType, name: str):
@@ -16,20 +16,29 @@ def _closure_value(function: FunctionType, name: str):
     return _closure_cell(function, name).cell_contents
 
 
+def _binding_verifiers(guarded: FunctionType) -> tuple[FunctionType, FunctionType]:
+    outer = _closure_value(guarded, "require_bindings")
+    assert isinstance(outer, FunctionType)
+    inner = outer
+    if "original_require" in outer.__code__.co_freevars:
+        inner = _closure_value(outer, "original_require")
+        assert isinstance(inner, FunctionType)
+    return outer, inner
+
+
 def test_binding_checker_rejects_coordinated_clone_verifier_and_anchor_retarget() -> None:
     """Clone execution, verifier expectation and identity anchor must not be jointly retargetable."""
 
-    guarded = run_transaction._promote_paper_book_snapshot
+    guarded = RunTransaction._promote_paper_book_snapshot
     assert isinstance(guarded, FunctionType)
 
     clone = _closure_value(guarded, "function")
-    require_bindings = _closure_value(guarded, "require_bindings")
+    require_bindings, binding_verifier = _binding_verifiers(guarded)
     assert isinstance(clone, FunctionType)
-    assert isinstance(require_bindings, FunctionType)
 
     executed_globals_cell = _closure_cell(clone, "inner_globals")
-    verifier_globals_cell = _closure_cell(require_bindings, "inner_globals")
-    anchor_cell = _closure_cell(require_bindings, "inner_globals_anchor")
+    verifier_globals_cell = _closure_cell(binding_verifier, "inner_globals")
+    anchor_cell = _closure_cell(binding_verifier, "inner_globals_anchor")
 
     original_executed_globals = executed_globals_cell.cell_contents
     original_verifier_globals = verifier_globals_cell.cell_contents
@@ -71,7 +80,7 @@ def test_binding_checker_rejects_coordinated_clone_verifier_and_anchor_retarget(
 def test_guard_rejects_coordinated_execution_snapshot_and_anchor_retarget() -> None:
     """Execution snapshot and its writable tuple anchor cannot move together."""
 
-    guarded = run_transaction._promote_paper_book_snapshot
+    guarded = RunTransaction._promote_paper_book_snapshot
     assert isinstance(guarded, FunctionType)
 
     snapshot_cell = _closure_cell(guarded, "frozen_globals_items")
@@ -112,7 +121,7 @@ def test_guard_rejects_coordinated_execution_snapshot_and_anchor_retarget() -> N
 def test_guard_rejects_coordinated_binding_verifier_and_snapshot_retarget() -> None:
     """The verifier function/code pair cannot move with the execution snapshot."""
 
-    guarded = run_transaction._promote_paper_book_snapshot
+    guarded = RunTransaction._promote_paper_book_snapshot
     assert isinstance(guarded, FunctionType)
 
     verifier_cell = _closure_cell(guarded, "require_bindings")
@@ -168,7 +177,7 @@ def test_guard_rejects_coordinated_binding_verifier_and_snapshot_retarget() -> N
 def test_guard_rejects_coordinated_type_and_dict_primitive_retarget() -> None:
     """Type validation and execution-map construction cannot be retargeted together."""
 
-    guarded = run_transaction._promote_paper_book_snapshot
+    guarded = RunTransaction._promote_paper_book_snapshot
     assert isinstance(guarded, FunctionType)
 
     exact_type_cell = _closure_cell(guarded, "exact_type")

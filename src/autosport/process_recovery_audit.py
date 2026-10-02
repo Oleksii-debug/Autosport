@@ -15,7 +15,7 @@ from .decision_ledger import DecisionRecord, JsonlDecisionLedger
 from .domain import TicketLeg
 from .integrity import atomic_write_json, ensure_durable_file, sha256_file
 from .paper import PaperBook
-from .restart_recovery_audit import run_restart_recovery_audit
+from .restart_recovery_audit import _safe_exception_detail, run_restart_recovery_audit
 from .run_registry import RunRegistry
 from .run_transaction import RunTransaction
 
@@ -185,7 +185,7 @@ def run_process_kill_stage_child(workspace_path: str | Path, ready_path: str | P
                 {
                     "status": "FAIL",
                     "pid": os.getpid(),
-                    "error": f"{type(exc).__name__}: {exc}",
+                    "error": _safe_exception_detail(exc),
                     "real_money_execution": False,
                 },
             )
@@ -291,7 +291,7 @@ def run_process_kill_recovery_child(
             {
                 "status": "FAIL",
                 "pid": os.getpid(),
-                "error": f"{type(exc).__name__}: {exc}",
+                "error": _safe_exception_detail(exc),
                 "real_money_execution": False,
             },
         )
@@ -477,6 +477,8 @@ def run_packaged_restart_recovery_audit(output_path: str | Path) -> int:
     if run_restart_recovery_audit(destination) != 0:
         return 1
 
+    phase = "process_kill_relaunch"
+    exit_code = 0
     try:
         existing = _decode_strict_json(
             destination,
@@ -516,17 +518,20 @@ def run_packaged_restart_recovery_audit(output_path: str | Path) -> int:
             or existing.get("nvda_verified") is not False
         ):
             raise RuntimeError("packaged restart/recovery truth labels are invalid")
-        atomic_write_json(destination, existing)
-        return 0
+        payload = existing
     except BaseException as exc:
-        atomic_write_json(
-            destination,
-            {
-                "status": "FAIL",
-                "error": f"{type(exc).__name__}: {exc}",
-                "real_money_execution": False,
-                "human_tested": False,
-                "nvda_verified": False,
-            },
-        )
-        return 1
+        payload = {
+            "status": "FAIL",
+            "phase": phase,
+            "error": _safe_exception_detail(exc),
+            "real_money_execution": False,
+            "human_tested": False,
+            "nvda_verified": False,
+        }
+        exit_code = 1
+
+    # Publication is a separate durable boundary. A failed final replace must
+    # propagate without being reclassified as a semantic process/recovery FAIL
+    # or triggering a second write that could destroy last-known evidence.
+    atomic_write_json(destination, payload)
+    return exit_code

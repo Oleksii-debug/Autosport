@@ -404,6 +404,8 @@ def test_closure_reachable_stake_vector_spec_rejects_generation_change(
         sequence=1,
         source_ts="2026-09-27T21:39:59+00:00",
         ingest_ts="2026-09-27T21:40:00+00:00",
+        sport="soccer",
+        exchange_side="back",
     )
     context = ProposedTicketRiskContext(
         legs=(
@@ -745,7 +747,12 @@ def test_reconstructed_evaluate_rejects_in_place_mutated_policy_helper_code() ->
         )
 
     try:
-        helper.__code__ = hostile_derived.__code__
+        try:
+            helper.__code__ = hostile_derived.__code__
+        except ValueError:
+            assert helper.__code__ is original_code
+            assert hostile_executed is False
+            return
         decision = reconstructed(policy, book, Decimal("1"))
     finally:
         helper.__code__ = original_code
@@ -808,15 +815,16 @@ def test_reconstructed_goal_stake_rejects_mutated_raw_helper() -> None:
         hostile_executed = True
         return Decimal("1"), Decimal("1")
 
-    try:
+    with pytest.raises(
+        TypeError,
+        match="canonical PaperRiskPolicy root is sealed: _effective_fraction_limits",
+    ):
         setattr(PaperRiskPolicy, "_effective_fraction_limits", hostile_limits)
-        amount = reconstructed(policy, book, Decimal("0.5"))
-    finally:
-        if vars(PaperRiskPolicy).get("_effective_fraction_limits") is not original:
-            setattr(PaperRiskPolicy, "_effective_fraction_limits", original)
 
+    assert vars(PaperRiskPolicy)["_effective_fraction_limits"] is original
+    amount = reconstructed(policy, book, Decimal("0.5"))
     assert hostile_executed is False
-    assert amount is None
+    assert amount is not None
 
 
 def test_reconstructed_stake_vector_rejects_mutated_raw_helper() -> None:

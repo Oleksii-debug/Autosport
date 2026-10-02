@@ -47,6 +47,7 @@ def test_stale_rerun_cannot_share_symmetric_pr_group_with_current_head(
     assert "cancel-in-progress: true" in text
     assert "github.event.number" in group
     assert "github.event.pull_request.number" not in group
+    assert "github.event_name == 'pull_request' && github.event.pull_request.head.sha && format(" in group
     assert "format('qualify-{0}', github.event.pull_request.head.sha)" in group
     assert "github.run_attempt != 1" in group
     assert "format('rerun-{0}', github.event.pull_request.head.sha)" in group

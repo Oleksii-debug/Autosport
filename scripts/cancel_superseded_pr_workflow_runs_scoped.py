@@ -3,11 +3,12 @@ from __future__ import annotations
 import argparse
 import os
 import sys
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 
 if __package__:
     from scripts.cancel_superseded_pr_workflow_runs import (
         _ACTIVE_STATUSES,
+        _AllowedHttpError,
         _PULLS_PER_PAGE,
         _RUNS_PER_PAGE,
         CancellationError,
@@ -25,6 +26,7 @@ else:
     # Import the canonical sibling module without requiring package resolution.
     from cancel_superseded_pr_workflow_runs import (
         _ACTIVE_STATUSES,
+        _AllowedHttpError,
         _PULLS_PER_PAGE,
         _RUNS_PER_PAGE,
         CancellationError,
@@ -35,6 +37,18 @@ else:
         cancel_superseded,
         parse_run,
     )
+
+
+class _HistoricalAssociationAbsent(CancellationError):
+    """A well-formed historical commit lookup returned no associated PR."""
+
+
+class _HistoricalAssociationAmbiguous(CancellationError):
+    """A well-formed historical commit lookup returned multiple PRs."""
+
+
+class _CancellationAuthorityChanged(CancellationError):
+    """A valid candidate lost cancellation authority during the boundary reread."""
 
 
 class WorkflowScopedGitHubApi(GitHubApi):
@@ -81,6 +95,8 @@ class WorkflowScopedGitHubApi(GitHubApi):
         self._historical_recovery_workflow_name: str | None = None
         self._historical_recovery_current_run_id: int | None = None
         self._recovered_runs: dict[int, tuple[int, str]] = {}
+        self._unbound_active_runs: dict[int, tuple[str, str | None]] = {}
+        self._zero_association_recovered_runs: dict[int, tuple[str, str]] = {}
 
     def configure_same_head_candidate_recovery(
         self,
@@ -162,10 +178,13 @@ class WorkflowScopedGitHubApi(GitHubApi):
             if len(payload) < _PULLS_PER_PAGE:
                 break
             page += 1
+        if not associated_numbers:
+            raise _HistoricalAssociationAbsent(
+                "historical workflow head has no associated pull request"
+            )
         if len(associated_numbers) != 1:
-            raise CancellationError(
-                "historical workflow head does not resolve to exactly one "
-                "associated pull request"
+            raise _HistoricalAssociationAmbiguous(
+                "historical workflow head resolves to multiple associated pull requests"
             )
         return next(iter(associated_numbers))
 
@@ -241,10 +260,76 @@ class WorkflowScopedGitHubApi(GitHubApi):
             status=run.status,
         )
 
+    def _historical_head_has_no_associated_prs(self, head_sha: str) -> bool:
+        """Return true only for a well-formed commit association response with zero PRs."""
+
+        head_sha = _require_sha(head_sha, field="historical workflow head sha")
+        page = 1
+        associated_numbers: set[int] = set()
+        while True:
+            query = urlencode({"per_page": _PULLS_PER_PAGE, "page": page})
+            payload = self._request(f"/commits/{head_sha}/pulls?{query}")
+            if not isinstance(payload, list):
+                raise CancellationError(
+                    "invalid historical commit pull-requests response"
+                )
+            for item in payload:
+                if not isinstance(item, dict):
+                    raise CancellationError(
+                        "invalid historical associated pull request"
+                    )
+                associated_numbers.add(
+                    _require_positive_int(
+                        item.get("number"),
+                        field="historical associated pull request number",
+                    )
+                )
+            if len(payload) < _PULLS_PER_PAGE:
+                break
+            page += 1
+        return not associated_numbers
+
+    def _canonical_branch_head(self, branch: str) -> str | None:
+        """Resolve one same-repository branch head; absence is authoritative."""
+
+        if not isinstance(branch, str) or not branch:
+            raise CancellationError("invalid canonical head branch")
+        encoded = quote(branch, safe="")
+        payload = self._request(
+            f"/git/ref/heads/{encoded}",
+            allowed_http_errors=frozenset({404}),
+        )
+        if isinstance(payload, _AllowedHttpError):
+            if payload.status_code == 404:
+                return None
+        if not isinstance(payload, dict):
+            raise CancellationError("invalid canonical branch response")
+        target = payload.get("object")
+        if not isinstance(target, dict):
+            raise CancellationError("invalid canonical branch target")
+        return _require_sha(target.get("sha"), field="canonical branch head")
+
     def cancel(self, run_id: int) -> None:
         """Revalidate synthetic candidate identity at the irreversible boundary."""
 
         run_id = _require_positive_int(run_id, field="run id")
+        zero_association = self._zero_association_recovered_runs.get(run_id)
+        if zero_association is not None:
+            candidate_head_sha, head_branch = zero_association
+            try:
+                no_association = self._historical_head_has_no_associated_prs(
+                    candidate_head_sha
+                )
+                branch_head_sha = self._canonical_branch_head(head_branch)
+            except CancellationError as exc:
+                raise CancellationError(
+                    "unbound workflow run branch authority could not be revalidated"
+                ) from exc
+            if not no_association or branch_head_sha == candidate_head_sha:
+                raise _CancellationAuthorityChanged(
+                    "unbound workflow run branch authority changed"
+                )
+
         recovered = self._recovered_runs.get(run_id)
         if recovered is not None:
             pr_number, candidate_head_sha = recovered
@@ -252,12 +337,15 @@ class WorkflowScopedGitHubApi(GitHubApi):
                 associated_pr_number = self._historical_associated_pr_number(
                     candidate_head_sha
                 )
-            except CancellationError as exc:
-                raise CancellationError(
+            except (
+                _HistoricalAssociationAbsent,
+                _HistoricalAssociationAmbiguous,
+            ) as exc:
+                raise _CancellationAuthorityChanged(
                     "recovered workflow run pull request association is no longer unique"
                 ) from exc
             if associated_pr_number != pr_number:
-                raise CancellationError(
+                raise _CancellationAuthorityChanged(
                     "recovered workflow run pull request association changed"
                 )
 
@@ -270,7 +358,7 @@ class WorkflowScopedGitHubApi(GitHubApi):
                 qualification.head_sha == candidate_head_sha
                 and qualification.integration_capable
             ):
-                raise CancellationError(
+                raise _CancellationAuthorityChanged(
                     "recovered workflow run live qualification changed"
                 )
         super().cancel(run_id)
@@ -300,12 +388,25 @@ class WorkflowScopedGitHubApi(GitHubApi):
             ):
                 raise CancellationError("invalid workflow-runs response")
             page_runs = payload["workflow_runs"]
-            runs.extend(
-                self._recover_candidate_run_reference(
-                    self._canonicalize_workflow_identity(parse_run(item))
-                )
-                for item in page_runs
-            )
+            for item in page_runs:
+                run = self._canonicalize_workflow_identity(parse_run(item))
+                if not run.pr_numbers:
+                    head_branch: str | None = None
+                    if isinstance(item, dict):
+                        raw_branch = item.get("head_branch")
+                        head_repository = item.get("head_repository")
+                        if (
+                            isinstance(raw_branch, str)
+                            and raw_branch
+                            and isinstance(head_repository, dict)
+                            and head_repository.get("full_name") == self._repository
+                        ):
+                            head_branch = raw_branch
+                    self._unbound_active_runs[run.run_id] = (
+                        run.head_sha,
+                        head_branch,
+                    )
+                runs.append(self._recover_candidate_run_reference(run))
             total_count = payload["total_count"]
             # Active-run collections are inherently moving while a controller scans
             # them. A short page is therefore a safe terminal snapshot even when the
@@ -328,7 +429,83 @@ class WorkflowScopedGitHubApi(GitHubApi):
         return tuple(runs)
 
 
-def _cancel_triggering_run_if_nonqualifying(
+    def cancel_historical_unbound_runs(
+        self,
+        *,
+        exclude_run_ids: tuple[int, ...] = (),
+    ) -> tuple[int, ...]:
+        """Cancel uniquely-associated active runs whose PR metadata disappeared.
+
+        Some old pull_request workflow runs can remain active after GitHub clears the
+        run's embedded pull_requests references. Those runs are invisible to ordinary
+        PR-scoped supersession and can occupy the queue indefinitely. Cleanup is
+        deliberately fail-closed: each candidate must resolve to exactly one historical
+        PR, and a same-head integration-capable PR is always preserved. The recovered
+        identity is recorded so cancel() repeats both the commit association and live PR
+        qualification immediately before the irreversible POST.
+        """
+
+        excluded = {
+            _require_positive_int(run_id, field="excluded run id")
+            for run_id in exclude_run_ids
+        }
+        cancelled: list[int] = []
+        for run_id, candidate in sorted(self._unbound_active_runs.items()):
+            if run_id in excluded:
+                continue
+            candidate_head_sha, head_branch = candidate
+            try:
+                pr_number = self._historical_associated_pr_number(candidate_head_sha)
+            except _HistoricalAssociationAbsent:
+                if head_branch is None:
+                    continue
+                try:
+                    if not self._historical_head_has_no_associated_prs(
+                        candidate_head_sha
+                    ):
+                        continue
+                    branch_head_sha = self._canonical_branch_head(head_branch)
+                except CancellationError:
+                    continue
+                if branch_head_sha == candidate_head_sha:
+                    continue
+                self._zero_association_recovered_runs[run_id] = (
+                    candidate_head_sha,
+                    head_branch,
+                )
+                try:
+                    self.cancel(run_id)
+                except _CancellationAuthorityChanged:
+                    self._zero_association_recovered_runs.pop(run_id, None)
+                    continue
+                self._zero_association_recovered_runs.pop(run_id, None)
+                cancelled.append(run_id)
+                continue
+            except _HistoricalAssociationAmbiguous:
+                continue
+            except CancellationError:
+                continue
+
+            try:
+                qualification = self.live_pr_qualification(pr_number)
+            except CancellationError:
+                continue
+            if (
+                qualification.head_sha == candidate_head_sha
+                and qualification.integration_capable
+            ):
+                continue
+            self._recovered_runs[run_id] = (pr_number, candidate_head_sha)
+            try:
+                self.cancel(run_id)
+            except _CancellationAuthorityChanged:
+                self._recovered_runs.pop(run_id, None)
+                continue
+            self._recovered_runs.pop(run_id, None)
+            cancelled.append(run_id)
+        return tuple(cancelled)
+
+def _cancel_triggering_run_if_stale_or_nonqualifying(
     api: WorkflowScopedGitHubApi,
     *,
     pr_number: int,
@@ -336,21 +513,23 @@ def _cancel_triggering_run_if_nonqualifying(
     current_run_id: int,
     qualification,
 ) -> bool:
-    """Cancel the exact source run when trusted live PR truth cannot qualify it.
+    """Cancel a source run proven stale or same-head non-integration-capable.
 
-    This controller executes from default-branch bytes.  A fork/draft/closed source
-    workflow cannot protect itself by altering its own pull_request YAML or helper:
-    the trusted workflow_run controller rechecks the live qualification immediately
-    before cancelling that source run.  A head/lifecycle transition revokes the
-    cancellation rather than racing a newly integration-capable run.
+    Controller concurrency may intentionally coalesce multiple source-head events for
+    the same explicit PR + workflow.  Therefore the surviving controller must remain
+    useful even when its triggering source run is stale.  The irreversible POST is
+    allowed only after a fresh live qualification snapshot still matches the snapshot
+    used for the decision.
     """
 
     event_head_sha = _require_sha(event_head_sha, field="event head sha")
     current_run_id = _require_positive_int(current_run_id, field="current run id")
-    if (
-        qualification.head_sha != event_head_sha
-        or qualification.integration_capable
-    ):
+    stale = qualification.head_sha != event_head_sha
+    same_head_nonqualifying = (
+        qualification.head_sha == event_head_sha
+        and not qualification.integration_capable
+    )
+    if not stale and not same_head_nonqualifying:
         return False
     if api.live_pr_qualification(pr_number) != qualification:
         return False
@@ -401,14 +580,22 @@ def main(argv: list[str] | None = None) -> int:
                 current_run_id=args.current_run_id,
             )
 
+        # Reconcile against live PR truth rather than the triggering event head. This
+        # makes one surviving PR+workflow controller sufficient after scheduler-side
+        # coalescing: even a delayed stale-head workflow_run event can cancel obsolete
+        # source runs relative to the exact current live head. The canonical helper
+        # still repeats the live qualification snapshot before every irreversible POST.
         result = cancel_superseded(
             api=api,
             pr_number=pr_number,
-            event_head_sha=event_head_sha,
+            event_head_sha=qualification.head_sha,
             workflow_name=args.workflow_name,
             current_run_id=args.current_run_id,
         )
-        _cancel_triggering_run_if_nonqualifying(
+        orphan_cancelled = api.cancel_historical_unbound_runs(
+            exclude_run_ids=(args.current_run_id, *result.cancelled_run_ids),
+        )
+        _cancel_triggering_run_if_stale_or_nonqualifying(
             api,
             pr_number=pr_number,
             event_head_sha=event_head_sha,
@@ -419,7 +606,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"superseded-run cancellation failed: {exc}", file=sys.stderr)
         return 2
     cancelled = ",".join(str(item) for item in result.cancelled_run_ids)
+    orphaned = ",".join(str(item) for item in orphan_cancelled)
     print("cancelled superseded workflow runs: " + cancelled)
+    print("cancelled historical unbound workflow runs: " + orphaned)
     return 0
 
 

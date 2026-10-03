@@ -19,6 +19,7 @@ from decimal import Decimal, InvalidOperation
 from enum import StrEnum
 import hashlib
 import json
+from operator import attrgetter
 from typing import Any, Mapping
 
 
@@ -118,6 +119,42 @@ def _digest(payload: object) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _exact_decimal_add(left: Decimal, right: Decimal) -> Decimal:
+    """Add finite Decimals exactly without consulting ambient Decimal context."""
+
+    if (
+        type(left) is not Decimal
+        or type(right) is not Decimal
+        or not left.is_finite()
+        or not right.is_finite()
+    ):
+        raise BetfairDecisionDepthError("exact decimal addition requires finite Decimals")
+
+    def _coefficient_and_exponent(value: Decimal) -> tuple[int, int]:
+        parts = value.as_tuple()
+        coefficient = 0
+        for digit in parts.digits:
+            coefficient = coefficient * 10 + digit
+        if parts.sign:
+            coefficient = -coefficient
+        return coefficient, int(parts.exponent)
+
+    left_coefficient, left_exponent = _coefficient_and_exponent(left)
+    right_coefficient, right_exponent = _coefficient_and_exponent(right)
+    exponent = min(left_exponent, right_exponent)
+    coefficient = (
+        left_coefficient * (10 ** (left_exponent - exponent))
+        + right_coefficient * (10 ** (right_exponent - exponent))
+    )
+    sign = 1 if coefficient < 0 else 0
+    digits = (
+        tuple(int(character) for character in str(abs(coefficient)))
+        if coefficient
+        else (0,)
+    )
+    return Decimal((sign, digits, exponent))
+
+
 @dataclass(frozen=True, slots=True)
 class BetfairDepthLevel:
     """One exact returned exchange price/size level."""
@@ -136,8 +173,62 @@ class BetfairDepthLevel:
         }
 
 
+def _build_decision_depth_snapshot_meta():
+    """Seal diagnostic hard-false claims away from Python instance slots/getters."""
+
+    sealed_classes: set[type] = set()
+    protected_names = frozenset(
+        {
+            "__dataclass_fields__",
+            "__init__",
+            "__post_init__",
+            "provider_snapshot_origin_proven",
+            "observation_time_proven",
+            "request_projection_proven",
+            "virtual_prices_included_proven",
+            "full_ladder_proven",
+            "provider_acceptance_proven",
+            "fill_proven",
+            "accepted_odds_proven",
+            "_provider_snapshot_origin_proven_constant",
+            "_observation_time_proven_constant",
+            "_request_projection_proven_constant",
+            "_virtual_prices_included_proven_constant",
+            "_full_ladder_proven_constant",
+            "_provider_acceptance_proven_constant",
+            "_fill_proven_constant",
+            "_accepted_odds_proven_constant",
+        }
+    )
+
+    class _BetfairDecisionDepthSnapshotMeta(type):
+        def __setattr__(cls, name: str, value: object) -> None:
+            if cls in sealed_classes and name in protected_names:
+                raise TypeError(
+                    "decision-depth diagnostic authority surface is sealed: " + name
+                )
+            super().__setattr__(name, value)
+
+        def __delattr__(cls, name: str) -> None:
+            if cls in sealed_classes and name in protected_names:
+                raise TypeError(
+                    "decision-depth diagnostic authority surface is sealed: " + name
+                )
+            super().__delattr__(name)
+
+        @classmethod
+        def seal(mcls, cls: type) -> None:
+            sealed_classes.add(cls)
+
+    return _BetfairDecisionDepthSnapshotMeta
+
+
+_BetfairDecisionDepthSnapshotMeta = _build_decision_depth_snapshot_meta()
+del _build_decision_depth_snapshot_meta
+
+
 @dataclass(frozen=True, slots=True)
-class BetfairDecisionDepthSnapshot:
+class BetfairDecisionDepthSnapshot(metaclass=_BetfairDecisionDepthSnapshotMeta):
     """Immutable returned-depth evidence for one exact decision-side ladder."""
 
     market_id: str
@@ -155,14 +246,37 @@ class BetfairDecisionDepthSnapshot:
         default=BetfairDecisionDepthStatus.PARSED_RETURNED_EXCHANGE_LADDER, init=False
     )
     provider_id: str = field(default=_PROVIDER_ID, init=False)
-    provider_snapshot_origin_proven: bool = field(default=False, init=False)
-    observation_time_proven: bool = field(default=False, init=False)
-    request_projection_proven: bool = field(default=False, init=False)
-    virtual_prices_included_proven: bool = field(default=False, init=False)
-    full_ladder_proven: bool = field(default=False, init=False)
-    provider_acceptance_proven: bool = field(default=False, init=False)
-    fill_proven: bool = field(default=False, init=False)
-    accepted_odds_proven: bool = field(default=False, init=False)
+    # These claims are deliberately hard-false. Backing values live only on the
+    # sealed class; properties use C-level attrgetter rather than mutable Python
+    # getter bytecode, and there are no instance slots that object.__setattr__
+    # can flip from False to True.
+    _provider_snapshot_origin_proven_constant = False
+    _observation_time_proven_constant = False
+    _request_projection_proven_constant = False
+    _virtual_prices_included_proven_constant = False
+    _full_ladder_proven_constant = False
+    _provider_acceptance_proven_constant = False
+    _fill_proven_constant = False
+    _accepted_odds_proven_constant = False
+
+    provider_snapshot_origin_proven = property(
+        attrgetter("_provider_snapshot_origin_proven_constant")
+    )
+    observation_time_proven = property(
+        attrgetter("_observation_time_proven_constant")
+    )
+    request_projection_proven = property(
+        attrgetter("_request_projection_proven_constant")
+    )
+    virtual_prices_included_proven = property(
+        attrgetter("_virtual_prices_included_proven_constant")
+    )
+    full_ladder_proven = property(attrgetter("_full_ladder_proven_constant"))
+    provider_acceptance_proven = property(
+        attrgetter("_provider_acceptance_proven_constant")
+    )
+    fill_proven = property(attrgetter("_fill_proven_constant"))
+    accepted_odds_proven = property(attrgetter("_accepted_odds_proven_constant"))
 
     def __post_init__(self) -> None:
         _canonical_text(self.market_id, "market_id")
@@ -214,11 +328,16 @@ class BetfairDecisionDepthSnapshot:
         """
 
         threshold = _positive_decimal(limit_price, "limit_price")
-        if self.side is BetfairOrderSide.BACK:
-            qualifying = (level for level in self.levels if level.price >= threshold)
-        else:
-            qualifying = (level for level in self.levels if level.price <= threshold)
-        return sum((level.size for level in qualifying), Decimal("0"))
+        total = Decimal("0")
+        for level in self.levels:
+            qualifies = (
+                level.price >= threshold
+                if self.side is BetfairOrderSide.BACK
+                else level.price <= threshold
+            )
+            if qualifies:
+                total = _exact_decimal_add(total, level.size)
+        return total
 
     def displayed_size_at_or_better(self, limit_price: Decimal) -> Decimal:
         """Compatibility alias for returned API levels only, not full market depth."""
@@ -261,7 +380,7 @@ class BetfairDecisionDepthSnapshot:
             )
             if not qualifies:
                 break
-            running += level.size
+            running = _exact_decimal_add(running, level.size)
             if running >= size:
                 return level.price
         return None
@@ -306,6 +425,9 @@ class BetfairDecisionDepthSnapshot:
         if include_evidence_id:
             payload["evidence_id"] = _digest(payload)
         return payload
+
+
+_BetfairDecisionDepthSnapshotMeta.seal(BetfairDecisionDepthSnapshot)
 
 
 def issue_betfair_decision_depth_snapshot(

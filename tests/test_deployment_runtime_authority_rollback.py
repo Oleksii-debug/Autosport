@@ -2769,26 +2769,39 @@ def test_runtime_authority_pristine_rejects_digest_rebinding_before_use(
 
 def test_runtime_authority_pristine_bypasses_replaced_store_new(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     hostile_calls: list[object] = []
+    original_new = vars(DeploymentRuntimeAuthorityStore).get("__new__")
 
     def hostile_new(cls: object, *args: object, **kwargs: object) -> object:
         hostile_calls.append((cls, args, kwargs))
         raise AssertionError("hostile store __new__ executed")
 
-    monkeypatch.setattr(
+    # The public metaclass surface intentionally rejects ordinary class mutation.
+    # Exercise the stronger low-level adversarial case without leaving pytest's
+    # monkeypatch finalizer unable to restore the protected root surface.
+    type.__setattr__(
         DeploymentRuntimeAuthorityStore,
         "__new__",
         staticmethod(hostile_new),
     )
-    store = DeploymentRuntimeAuthorityStore.initialize_pristine(
-        tmp_path / "deployment-runtime-authority.json",
-        authority_root=_authority_root(tmp_path),
-    )
+    try:
+        store = DeploymentRuntimeAuthorityStore.initialize_pristine(
+            tmp_path / "deployment-runtime-authority.json",
+            authority_root=_authority_root(tmp_path),
+        )
 
-    assert hostile_calls == []
-    assert store.records() == ()
+        assert hostile_calls == []
+        assert store.records() == ()
+    finally:
+        if original_new is None:
+            type.__delattr__(DeploymentRuntimeAuthorityStore, "__new__")
+        else:
+            type.__setattr__(
+                DeploymentRuntimeAuthorityStore,
+                "__new__",
+                original_new,
+            )
 
 
 def test_runtime_authority_rejects_path_read_descriptor_replacement(

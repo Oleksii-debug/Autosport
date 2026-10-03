@@ -2831,3 +2831,107 @@ def test_public_reserve_rejects_caller_supplied_issuance_assertion(
     with pytest.raises(KeyError):
         ledger.attempt_state("caller-assertion-bypass")
 
+def test_capital_attempt_risk_rebinding_cannot_erase_account_liability(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    acquired, _ = _acquire_balance(monkeypatch, tmp_path, "100")
+    target = _plan("target", _action("target-action", "10"))
+    liability = _plan("liability", _action("liability-action", "80"))
+    ledger = _ledger_with_plans(tmp_path, target, liability)
+    ledger.begin_attempt(
+        plan_id=_actual_plan_id(ledger, "liability"),
+        action_id=_actual_action_id(ledger, "liability", "liability-action"),
+        attempt_id="capital-helper-liability",
+    )
+    hostile_calls: list[object] = []
+
+    def hostile_attempt_risk(value):
+        hostile_calls.append(value)
+        raise AssertionError("hostile capital-at-risk helper executed")
+
+    monkeypatch.setattr(
+        headroom_module._capital_risk,
+        "_attempt_risk",
+        hostile_attempt_risk,
+    )
+
+    with pytest.raises(
+        ProviderAccountHeadroomError,
+        match="canonical capital-at-risk headroom authority changed",
+    ):
+        _assess(
+            ledger,
+            acquired,
+            plan_id="target",
+            action_id="target-action",
+        )
+
+    assert hostile_calls == []
+
+
+def test_capital_verified_view_alias_rebinding_cannot_erase_liability(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    acquired, _ = _acquire_balance(monkeypatch, tmp_path, "100")
+    target = _plan("target", _action("target-action", "10"))
+    ledger = _ledger_with_plans(tmp_path, target)
+    hostile_calls: list[object] = []
+
+    def hostile_view(*args, **kwargs):
+        hostile_calls.append((args, kwargs))
+        raise AssertionError("hostile capital verified view executed")
+
+    monkeypatch.setattr(
+        headroom_module._capital_risk,
+        "_VERIFIED_EXECUTION_VIEW",
+        hostile_view,
+    )
+
+    with pytest.raises(
+        ProviderAccountHeadroomError,
+        match="canonical capital-at-risk headroom authority changed",
+    ):
+        _assess(
+            ledger,
+            acquired,
+            plan_id="target",
+            action_id="target-action",
+        )
+
+    assert hostile_calls == []
+
+
+def test_capital_evidence_digest_rebinding_cannot_mint_zero_liability(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    acquired, _ = _acquire_balance(monkeypatch, tmp_path, "100")
+    target = _plan("target", _action("target-action", "10"))
+    ledger = _ledger_with_plans(tmp_path, target)
+    hostile_calls: list[object] = []
+
+    def hostile_digest(value):
+        hostile_calls.append(value)
+        return "0" * 64
+
+    monkeypatch.setattr(
+        headroom_module._capital_risk,
+        "_evidence_digest",
+        hostile_digest,
+    )
+
+    with pytest.raises(
+        ProviderAccountHeadroomError,
+        match="canonical capital-at-risk headroom authority changed",
+    ):
+        _assess(
+            ledger,
+            acquired,
+            plan_id="target",
+            action_id="target-action",
+        )
+
+    assert hostile_calls == []
+

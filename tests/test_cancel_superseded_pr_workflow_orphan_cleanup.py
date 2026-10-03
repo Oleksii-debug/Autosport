@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import json
+from urllib.error import HTTPError
+
 import pytest
 
+import scripts.cancel_superseded_pr_workflow_runs as controller_module
 from scripts.cancel_superseded_pr_workflow_runs import (
     CancellationError,
     GitHubApi,
@@ -49,6 +53,72 @@ def _run(
     }
 
 
+
+class _FakeSuccessResponse:
+    def __init__(self, status: int, body: bytes) -> None:
+        self.status = status
+        self._body = body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, traceback):
+        del exc_type, exc, traceback
+        return False
+
+    def read(self) -> bytes:
+        return self._body
+
+
+def _sealed_api(
+    monkeypatch: pytest.MonkeyPatch,
+    responses: list[object],
+) -> WorkflowScopedGitHubApi:
+    api = WorkflowScopedGitHubApi(
+        repository="Oleksii-debug/Autosport",
+        token="test-token",
+        workflow_id=356678400,
+        workflow_name="CI",
+    )
+    queue = list(responses)
+    api.paths = []
+    api.cancelled = []
+    prefix = "https://api.github.com/repos/Oleksii-debug/Autosport"
+
+    def fake_urlopen(request, *, timeout: int):
+        del timeout
+        url = request.full_url
+        method = request.get_method()
+        assert url.startswith(prefix)
+        path = url[len(prefix) :]
+        if method == "POST":
+            parts = path.split("/")
+            assert parts[:3] == ["", "actions", "runs"]
+            assert parts[-1] == "cancel"
+            api.cancelled.append(int(parts[3]))
+            return _FakeSuccessResponse(202, b'{"message":"accepted"}')
+        assert method == "GET"
+        api.paths.append(path)
+        if not queue:
+            raise AssertionError("unexpected API request")
+        response = queue.pop(0)
+        if isinstance(response, _AllowedHttpError):
+            raise HTTPError(
+                url,
+                response.status_code,
+                "fake HTTP error",
+                hdrs=None,
+                fp=None,
+            )
+        return _FakeSuccessResponse(
+            200,
+            json.dumps(response, separators=(",", ":")).encode("utf-8"),
+        )
+
+    monkeypatch.setattr(controller_module, "urlopen", fake_urlopen)
+    return api
+
+
 class FakeApi(WorkflowScopedGitHubApi):
     def __init__(self, responses: list[object]) -> None:
         super().__init__(
@@ -81,7 +151,7 @@ class FakeApi(WorkflowScopedGitHubApi):
 def test_unbound_stale_run_is_cancelled_only_after_unique_association_and_boundary_rechecks(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    api = FakeApi(
+    api = _sealed_api(monkeypatch, 
         [
             {
                 "total_count": 1,
@@ -95,15 +165,9 @@ def test_unbound_stale_run_is_cancelled_only_after_unique_association_and_bounda
     )
     api._active_runs_for_status("queued")
 
-    cancelled: list[int] = []
-    monkeypatch.setattr(
-        GitHubApi,
-        "cancel",
-        lambda self, run_id: cancelled.append(run_id),
-    )
 
     assert api.cancel_historical_unbound_runs() == (91,)
-    assert cancelled == [91]
+    assert api.cancelled == [91]
     assert api.paths == [
         "/actions/workflows/356678400/runs?event=pull_request&status=queued&per_page=100&page=1",
         f"/commits/{STALE_HEAD}/pulls?per_page=100&page=1",
@@ -172,7 +236,7 @@ def test_unbound_cleanup_never_recancels_normal_supersession_result() -> None:
 def test_zero_association_run_is_cancelled_when_canonical_branch_has_advanced(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    api = FakeApi(
+    api = _sealed_api(monkeypatch, 
         [
             {
                 "total_count": 1,
@@ -198,21 +262,15 @@ def test_zero_association_run_is_cancelled_when_canonical_branch_has_advanced(
     )
     api._active_runs_for_status("queued")
 
-    cancelled: list[int] = []
-    monkeypatch.setattr(
-        GitHubApi,
-        "cancel",
-        lambda self, run_id: cancelled.append(run_id),
-    )
 
     assert api.cancel_historical_unbound_runs() == (95,)
-    assert cancelled == [95]
+    assert api.cancelled == [95]
 
 
 def test_zero_association_run_is_cancelled_when_canonical_branch_is_absent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    api = FakeApi(
+    api = _sealed_api(monkeypatch, 
         [
             {
                 "total_count": 1,
@@ -234,21 +292,15 @@ def test_zero_association_run_is_cancelled_when_canonical_branch_is_absent(
     )
     api._active_runs_for_status("queued")
 
-    cancelled: list[int] = []
-    monkeypatch.setattr(
-        GitHubApi,
-        "cancel",
-        lambda self, run_id: cancelled.append(run_id),
-    )
 
     assert api.cancel_historical_unbound_runs() == (98,)
-    assert cancelled == [98]
+    assert api.cancelled == [98]
 
 
 def test_zero_association_branch_reappearance_at_boundary_preserves_candidate_without_aborting(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    api = FakeApi(
+    api = _sealed_api(monkeypatch, 
         [
             {
                 "total_count": 1,
@@ -270,21 +322,15 @@ def test_zero_association_branch_reappearance_at_boundary_preserves_candidate_wi
     )
     api._active_runs_for_status("queued")
 
-    cancelled: list[int] = []
-    monkeypatch.setattr(
-        GitHubApi,
-        "cancel",
-        lambda self, run_id: cancelled.append(run_id),
-    )
 
     assert api.cancel_historical_unbound_runs() == ()
-    assert cancelled == []
+    assert api.cancelled == []
 
 
 def test_unique_association_boundary_race_skips_only_changed_candidate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    api = FakeApi(
+    api = _sealed_api(monkeypatch, 
         [
             {
                 "total_count": 2,
@@ -304,21 +350,15 @@ def test_unique_association_boundary_race_skips_only_changed_candidate(
     )
     api._active_runs_for_status("queued")
 
-    cancelled: list[int] = []
-    monkeypatch.setattr(
-        GitHubApi,
-        "cancel",
-        lambda self, run_id: cancelled.append(run_id),
-    )
 
     assert api.cancel_historical_unbound_runs() == (102,)
-    assert cancelled == [102]
+    assert api.cancelled == [102]
 
 
 def test_zero_association_boundary_race_does_not_block_later_candidate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    api = FakeApi(
+    api = _sealed_api(monkeypatch, 
         [
             {
                 "total_count": 2,
@@ -345,15 +385,9 @@ def test_zero_association_boundary_race_does_not_block_later_candidate(
     )
     api._active_runs_for_status("queued")
 
-    cancelled: list[int] = []
-    monkeypatch.setattr(
-        GitHubApi,
-        "cancel",
-        lambda self, run_id: cancelled.append(run_id),
-    )
 
     assert api.cancel_historical_unbound_runs() == (104,)
-    assert cancelled == [104]
+    assert api.cancelled == [104]
 
 
 def test_zero_association_same_head_branch_is_preserved() -> None:

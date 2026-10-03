@@ -309,59 +309,173 @@ class WorkflowScopedGitHubApi(GitHubApi):
             raise CancellationError("invalid canonical branch target")
         return _require_sha(target.get("sha"), field="canonical branch head")
 
-    def cancel(self, run_id: int) -> None:
-        """Revalidate synthetic candidate identity at the irreversible boundary."""
+    def _build_cancel(
+        base_cancel,
+        request_impl,
+        historical_associated_pr_number,
+        historical_head_has_no_associated_prs,
+        canonical_branch_head,
+        live_pr_qualification,
+        pull_request,
+    ):
+        base_cancel_code = getattr(base_cancel, "__code__", None)
+        helper_dispatch = (
+            (
+                "_request",
+                request_impl,
+                getattr(request_impl, "__code__", None),
+            ),
+            (
+                "_historical_associated_pr_number",
+                historical_associated_pr_number,
+                getattr(historical_associated_pr_number, "__code__", None),
+            ),
+            (
+                "_historical_head_has_no_associated_prs",
+                historical_head_has_no_associated_prs,
+                getattr(historical_head_has_no_associated_prs, "__code__", None),
+            ),
+            (
+                "_canonical_branch_head",
+                canonical_branch_head,
+                getattr(canonical_branch_head, "__code__", None),
+            ),
+            (
+                "live_pr_qualification",
+                live_pr_qualification,
+                getattr(live_pr_qualification, "__code__", None),
+            ),
+            (
+                "_pull_request",
+                pull_request,
+                getattr(pull_request, "__code__", None),
+            ),
+        )
+        if any(
+            implementation_code is None
+            for _, _, implementation_code in helper_dispatch
+        ):
+            raise RuntimeError(
+                "canonical scoped cancellation executable is unavailable"
+            )
 
-        run_id = _require_positive_int(run_id, field="run id")
-        zero_association = self._zero_association_recovered_runs.get(run_id)
-        if zero_association is not None:
-            candidate_head_sha, head_branch = zero_association
-            try:
-                no_association = self._historical_head_has_no_associated_prs(
-                    candidate_head_sha
-                )
-                branch_head_sha = self._canonical_branch_head(head_branch)
-            except CancellationError as exc:
+        def cancel(self, run_id: int) -> None:
+            """Revalidate synthetic candidate identity at the irreversible boundary."""
+
+            if getattr(base_cancel, "__code__", None) is not base_cancel_code:
                 raise CancellationError(
-                    "unbound workflow run branch authority could not be revalidated"
-                ) from exc
-            if not no_association or branch_head_sha == candidate_head_sha:
-                raise _CancellationAuthorityChanged(
-                    "unbound workflow run branch authority changed"
+                    "canonical base cancellation authority changed"
                 )
 
-        recovered = self._recovered_runs.get(run_id)
-        if recovered is not None:
-            pr_number, candidate_head_sha = recovered
-            try:
-                associated_pr_number = self._historical_associated_pr_number(
-                    candidate_head_sha
-                )
-            except (
-                _HistoricalAssociationAbsent,
-                _HistoricalAssociationAmbiguous,
-            ) as exc:
-                raise _CancellationAuthorityChanged(
-                    "recovered workflow run pull request association is no longer unique"
-                ) from exc
-            if associated_pr_number != pr_number:
-                raise _CancellationAuthorityChanged(
-                    "recovered workflow run pull request association changed"
-                )
+            def require_helper_dispatch(name: str) -> None:
+                match = None
+                for helper_name, expected, expected_code in helper_dispatch:
+                    if helper_name != name:
+                        continue
+                    if match is not None:
+                        raise CancellationError(
+                            "scoped cancellation revalidation dispatch changed"
+                        )
+                    match = (expected, expected_code)
+                if match is None:
+                    raise CancellationError(
+                        "scoped cancellation revalidation dispatch changed"
+                    )
+                expected, expected_code = match
+                bound = getattr(self, name, None)
+                if (
+                    getattr(expected, "__code__", None) is not expected_code
+                    or getattr(bound, "__self__", None) is not self
+                    or getattr(bound, "__func__", None) is not expected
+                ):
+                    raise CancellationError(
+                        "scoped cancellation revalidation dispatch changed"
+                    )
 
-            # Association validation is an external round trip. Re-resolve current PR
-            # truth immediately afterward.  A historical candidate may be cancelled
-            # while the PR has advanced, but if the PR rolls back to that exact head,
-            # same-head cancellation again requires a non-integration-capable lifecycle.
-            qualification = self.live_pr_qualification(pr_number)
-            if (
-                qualification.head_sha == candidate_head_sha
-                and qualification.integration_capable
-            ):
-                raise _CancellationAuthorityChanged(
-                    "recovered workflow run live qualification changed"
+            for name, _, _ in helper_dispatch:
+                require_helper_dispatch(name)
+
+            run_id = _require_positive_int(run_id, field="run id")
+            zero_association = self._zero_association_recovered_runs.get(run_id)
+            if zero_association is not None:
+                candidate_head_sha, head_branch = zero_association
+                try:
+                    require_helper_dispatch("_request")
+                    require_helper_dispatch("_historical_head_has_no_associated_prs")
+                    no_association = historical_head_has_no_associated_prs(
+                        self, candidate_head_sha
+                    )
+                    require_helper_dispatch("_request")
+                    require_helper_dispatch("_canonical_branch_head")
+                    branch_head_sha = canonical_branch_head(self, head_branch)
+                    require_helper_dispatch("_request")
+                except CancellationError as exc:
+                    raise CancellationError(
+                        "unbound workflow run branch authority could not be revalidated"
+                    ) from exc
+                if not no_association or branch_head_sha == candidate_head_sha:
+                    raise _CancellationAuthorityChanged(
+                        "unbound workflow run branch authority changed"
+                    )
+    
+            recovered = self._recovered_runs.get(run_id)
+            if recovered is not None:
+                pr_number, candidate_head_sha = recovered
+                try:
+                    require_helper_dispatch("_request")
+                    require_helper_dispatch("_historical_associated_pr_number")
+                    associated_pr_number = historical_associated_pr_number(
+                        self, candidate_head_sha
+                    )
+                    require_helper_dispatch("_request")
+                except (
+                    _HistoricalAssociationAbsent,
+                    _HistoricalAssociationAmbiguous,
+                ) as exc:
+                    raise _CancellationAuthorityChanged(
+                        "recovered workflow run pull request association is no longer unique"
+                    ) from exc
+                if associated_pr_number != pr_number:
+                    raise _CancellationAuthorityChanged(
+                        "recovered workflow run pull request association changed"
+                    )
+    
+                # Association validation is an external round trip. Re-resolve current PR
+                # truth immediately afterward.  A historical candidate may be cancelled
+                # while the PR has advanced, but if the PR rolls back to that exact head,
+                # same-head cancellation again requires a non-integration-capable lifecycle.
+                require_helper_dispatch("_request")
+                require_helper_dispatch("live_pr_qualification")
+                require_helper_dispatch("_pull_request")
+                qualification = live_pr_qualification(self, pr_number)
+                require_helper_dispatch("_request")
+                require_helper_dispatch("live_pr_qualification")
+                require_helper_dispatch("_pull_request")
+                if (
+                    qualification.head_sha == candidate_head_sha
+                    and qualification.integration_capable
+                ):
+                    raise _CancellationAuthorityChanged(
+                        "recovered workflow run live qualification changed"
+                    )
+            if getattr(base_cancel, "__code__", None) is not base_cancel_code:
+                raise CancellationError(
+                    "canonical base cancellation authority changed"
                 )
-        super().cancel(run_id)
+            base_cancel(self, run_id)
+    
+        return cancel
+
+    cancel = _build_cancel(
+        GitHubApi.cancel,
+        GitHubApi._request,
+        _historical_associated_pr_number,
+        _historical_head_has_no_associated_prs,
+        _canonical_branch_head,
+        GitHubApi.live_pr_qualification,
+        GitHubApi._pull_request,
+    )
+    del _build_cancel
 
     def _active_runs_for_status(self, status: str) -> tuple[WorkflowRun, ...]:
         if status not in _ACTIVE_STATUSES:

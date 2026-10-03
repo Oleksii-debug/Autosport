@@ -1008,7 +1008,6 @@ def _authorize_descriptor(
             intent_evidence_json=descriptor.intent_evidence_json,
         )
     )
-    self._exposure_scope_authorities[id(prepared)] = prepared
     return prepared
 
 
@@ -1058,7 +1057,6 @@ def _execute(
                 suspended_action_ids=suspended_action_ids,
             )
         finally:
-            self._exposure_scope_authorities.pop(id(authorized), None)
             self._prepared_authorities.pop(id(authorized), None)
 
 

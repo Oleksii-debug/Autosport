@@ -4,6 +4,7 @@ from hashlib import sha256
 from typing import Any, Callable
 
 from . import _paper_execution_reality_legacy as _ledger_impl
+from . import _paper_value_execution_authority as _paper_value_authority
 from .paper_execution_adoption import (
     PaperExecutionAdoptionError,
     PaperExecutionAdoptionRuntime,
@@ -154,15 +155,95 @@ def bind_canonical_execute(execute_function):
             )
         return installed_execute
 
+    # Positive scope issuance is owned here, outside caller-writable runtime
+    # dictionaries. Immutable tuple replacement keeps the registry itself free of
+    # mutation methods. Reflected closure-cell/code-object mutation remains outside
+    # this project's TRUSTED_PRODUCT_INTERPRETER boundary.
+    runtime_origins: tuple[
+        tuple[PaperExecutionAdoptionRuntime, PaperExecutionLedger], ...
+    ] = ()
+    scope_authorities: tuple[
+        tuple[
+            PaperExecutionAdoptionRuntime,
+            PreparedPaperExecution,
+            PaperExecutionLedger,
+        ],
+        ...,
+    ] = ()
+
+    base_runtime_init = runtime_type.__init__
+    base_prepare = runtime_type.prepare
+    base_authorize_descriptor = _paper_value_authority._authorize_descriptor
+
+    def construct_with_origin(self, *args, **kwargs):
+        nonlocal runtime_origins
+        base_runtime_init(self, *args, **kwargs)
+        if type(self) is not runtime_type or type(self.ledger) is not ledger_type:
+            raise PaperExecutionIntegrityError(
+                "canonical PAPER runtime construction requires exact runtime and ledger"
+            )
+        runtime_origins = (*runtime_origins, (self, self.ledger))
+
+    def prepare_with_scope_authority(self, *args, **kwargs):
+        nonlocal scope_authorities
+        origin_ledger = next(
+            (ledger for runtime, ledger in runtime_origins if runtime is self),
+            None,
+        )
+        if origin_ledger is None or self.ledger is not origin_ledger:
+            raise PaperExecutionIntegrityError(
+                "canonical PAPER exposure-scope ledger origin changed before preparation"
+            )
+        prepared = base_prepare(self, *args, **kwargs)
+        if prepared is not None:
+            if type(prepared) is not prepared_type:
+                raise PaperExecutionIntegrityError(
+                    "canonical PAPER preparation returned non-canonical prepared execution"
+                )
+            scope_authorities = (
+                *scope_authorities,
+                (self, prepared, origin_ledger),
+            )
+        return prepared
+
+    def authorize_descriptor_with_scope_authority(self, *args, **kwargs):
+        nonlocal scope_authorities
+        origin_ledger = next(
+            (ledger for runtime, ledger in runtime_origins if runtime is self),
+            None,
+        )
+        if origin_ledger is None or self.ledger is not origin_ledger:
+            raise PaperExecutionIntegrityError(
+                "canonical PAPER exposure-scope ledger origin changed before authorization"
+            )
+        prepared = base_authorize_descriptor(self, *args, **kwargs)
+        if type(prepared) is not prepared_type:
+            raise PaperExecutionIntegrityError(
+                "canonical PaperValue authorization returned non-canonical prepared execution"
+            )
+        scope_authorities = (
+            *scope_authorities,
+            (self, prepared, origin_ledger),
+        )
+        return prepared
+
+    runtime_type.__init__ = construct_with_origin
+    runtime_type.prepare = prepare_with_scope_authority
+    _paper_value_authority._authorize_descriptor = (
+        authorize_descriptor_with_scope_authority
+    )
+
+    init_guard = construct_with_origin
+    init_guard_code = init_guard.__code__
     mint_guard = runtime_type._mint_prepared
-    prepare_guard = runtime_type.prepare
+    prepare_guard = prepare_with_scope_authority
+    prepare_guard_code = prepare_guard.__code__
+    authorize_guard = authorize_descriptor_with_scope_authority
+    authorize_guard_code = authorize_guard.__code__
     prepare_paper_value_guard = runtime_type.prepare_paper_value_action
     require_minted = runtime_type._require_minted
     require_minted_globals = _snapshot_function_globals(require_minted)
     require_minted_metadata = _snapshot_function_metadata(require_minted)
-    require_scope = runtime_type._require_exposure_scope_authority
-    require_scope_globals = _snapshot_function_globals(require_scope)
-    require_scope_metadata = _snapshot_function_metadata(require_scope)
 
     scope_descriptor = runtime_type.__dict__.get("_exposure_scope_payload")
     if not isinstance(scope_descriptor, classmethod):
@@ -331,11 +412,26 @@ def bind_canonical_execute(execute_function):
                 "canonical prepared-execution mint dispatch was rebound"
             )
         if (
+            runtime_type.__init__ is not init_guard
+            or init_guard.__code__ is not init_guard_code
+        ):
+            raise PaperExecutionIntegrityError(
+                "canonical PAPER runtime-origin authority was rebound"
+            )
+        if (
             runtime_type.prepare is not prepare_guard
+            or prepare_guard.__code__ is not prepare_guard_code
             or runtime_type.prepare_paper_value_action is not prepare_paper_value_guard
         ):
             raise PaperExecutionIntegrityError(
                 "canonical PAPER preparation dispatch was rebound"
+            )
+        if (
+            _paper_value_authority._authorize_descriptor is not authorize_guard
+            or authorize_guard.__code__ is not authorize_guard_code
+        ):
+            raise PaperExecutionIntegrityError(
+                "canonical PaperValue scope-issuance dispatch was rebound"
             )
         if runtime_type._require_minted is not require_minted:
             raise PaperExecutionIntegrityError(
@@ -347,17 +443,6 @@ def bind_canonical_execute(execute_function):
         ):
             raise PaperExecutionAdoptionError(
                 "canonical prepared-execution verification metadata was rebound"
-            )
-        if runtime_type._require_exposure_scope_authority is not require_scope:
-            raise PaperExecutionIntegrityError(
-                "canonical exposure-scope authority verification was rebound"
-            )
-        if (
-            not _function_globals_match(require_scope, require_scope_globals)
-            or not _function_metadata_match(require_scope, require_scope_metadata)
-        ):
-            raise PaperExecutionAdoptionError(
-                "canonical exposure-scope authority verification metadata was rebound"
             )
         if type(prepared) is not prepared_type:
             raise TypeError("prepared must be exact PreparedPaperExecution")
@@ -446,12 +531,21 @@ def bind_canonical_execute(execute_function):
             )
 
         require_minted(self, prepared)
-        try:
-            require_scope(self, prepared)
-        except PaperExecutionAdoptionError as exc:
+        origin_ledger = next(
+            (ledger for runtime, ledger in runtime_origins if runtime is self),
+            None,
+        )
+        if origin_ledger is None or self.ledger is not origin_ledger:
+            raise PaperExecutionIntegrityError(
+                "canonical PAPER exposure-scope ledger origin changed"
+            )
+        if not any(
+            runtime is self and candidate is prepared and ledger is origin_ledger
+            for runtime, candidate, ledger in scope_authorities
+        ):
             raise PaperExecutionIntegrityError(
                 "PAPER exposure-scope publication is reserved for canonical execution authority"
-            ) from exc
+            )
 
         trigger_id = prepared.execution_plan.decision_id
         if type(trigger_id) is not str or not trigger_id or trigger_id.strip() != trigger_id:

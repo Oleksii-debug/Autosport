@@ -173,10 +173,9 @@ class PaperExecutionAdoptionRuntime:
         # copied, reconstructed, or caller-authored PreparedPaperExecution values do
         # not carry execution authority. Restart re-mints from canonical inputs.
         self._prepared_authorities: dict[int, PreparedPaperExecution] = {}
-        # Scope publication has a stricter capability than generic execution minting.
-        # Only canonical preparation/verified PaperValue authorization may place an
-        # exact PreparedPaperExecution identity in this second registry.
-        self._exposure_scope_authorities: dict[int, PreparedPaperExecution] = {}
+        # Scope publication authority is intentionally NOT stored on the runtime.
+        # The package-composed exposure-scope provenance guard owns issuance outside
+        # caller-writable instance state and binds it to this runtime's origin ledger.
         self.paper_book_path = Path(paper_book_path)
         if self.paper_book_path.exists():
             durable_book = PaperBook.load(self.paper_book_path)
@@ -230,11 +229,16 @@ class PaperExecutionAdoptionRuntime:
         self,
         prepared: PreparedPaperExecution,
     ) -> None:
+        """Fail closed outside the package-composed provenance authority.
+
+        Generic execution minting is deliberately insufficient for reserved
+        PAPER exposure-scope publication. The installed provenance guard owns the
+        positive issuance registry and verifies exact runtime/prepared/ledger origin.
+        """
         self._require_minted(prepared)
-        if self._exposure_scope_authorities.get(id(prepared)) is not prepared:
-            raise PaperExecutionAdoptionError(
-                "prepared execution lacks canonical PAPER exposure-scope authority"
-            )
+        raise PaperExecutionAdoptionError(
+            "prepared execution lacks canonical PAPER exposure-scope authority"
+        )
 
     def prepare(
         self,
@@ -389,7 +393,6 @@ class PaperExecutionAdoptionRuntime:
                 intent_evidence_json=intent_evidence_json,
             )
         )
-        self._exposure_scope_authorities[id(prepared)] = prepared
         return prepared
 
     @staticmethod

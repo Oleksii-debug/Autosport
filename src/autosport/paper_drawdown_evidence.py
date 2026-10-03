@@ -85,6 +85,40 @@ def _exact_shape_sum(values: tuple[Decimal, ...]) -> Decimal:
         ) from exc
 
 
+def _shape_drawdown_fraction(drawdown: Decimal, peak: Decimal) -> Decimal:
+    """Match the resolver's canonical rounded ratio semantics for shape checks."""
+
+    if (
+        type(drawdown) is not Decimal
+        or not drawdown.is_finite()
+        or drawdown < 0
+        or type(peak) is not Decimal
+        or not peak.is_finite()
+        or peak <= 0
+    ):
+        raise PaperDrawdownEvidenceError(
+            "drawdown evidence fraction arithmetic is invalid"
+        )
+    context = Context(
+        prec=28,
+        rounding=ROUND_HALF_EVEN,
+        Emin=-999999,
+        Emax=999999,
+    )
+    context.traps[Inexact] = False
+    context.traps[InvalidOperation] = True
+    context.traps[Overflow] = True
+    context.traps[Underflow] = True
+    context.clear_flags()
+    try:
+        with localcontext(context):
+            return drawdown / peak
+    except ArithmeticError as exc:
+        raise PaperDrawdownEvidenceError(
+            "drawdown evidence fraction arithmetic is invalid"
+        ) from exc
+
+
 @dataclass(frozen=True, slots=True)
 class PaperRealizedEquityPoint:
     sequence: int
@@ -381,6 +415,7 @@ class PaperRealizedDrawdownEvidence:
 
         path_running_peak = self.points[0]
         path_maximum_drawdown = Decimal("0")
+        path_maximum_fraction = Decimal("0")
         path_maximum_peak_id: str | None = None
         path_maximum_trough_id: str | None = None
         for point in self.points[1:]:
@@ -390,6 +425,12 @@ class PaperRealizedDrawdownEvidence:
             drawdown = _exact_shape_sum(
                 (path_running_peak.equity, point.equity.copy_negate())
             )
+            drawdown_fraction = _shape_drawdown_fraction(
+                drawdown,
+                path_running_peak.equity,
+            )
+            if drawdown_fraction > path_maximum_fraction:
+                path_maximum_fraction = drawdown_fraction
             if drawdown > path_maximum_drawdown:
                 path_maximum_drawdown = drawdown
                 path_maximum_peak_id = path_running_peak.point_id
@@ -409,6 +450,10 @@ class PaperRealizedDrawdownEvidence:
         ):
             raise PaperDrawdownEvidenceError(
                 "drawdown evidence historical maximum drawdown does not match the path"
+            )
+        if self.historical_max_drawdown_fraction != path_maximum_fraction:
+            raise PaperDrawdownEvidenceError(
+                "drawdown evidence historical fraction does not match the path"
             )
 
         if min(point.equity for point in self.points) != self.minimum_equity:

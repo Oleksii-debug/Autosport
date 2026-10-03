@@ -492,6 +492,17 @@ def test_evidence_shape_rejects_lifecycle_and_path_claim_drift(tmp_path):
             + Decimal("1"),
         )
 
+    with pytest.raises(
+        PaperDrawdownEvidenceError,
+        match="historical fraction does not match the path",
+    ):
+        replace(
+            loss_evidence,
+            historical_max_drawdown_fraction=(
+                loss_evidence.historical_max_drawdown_fraction - Decimal("0.01")
+            ),
+        )
+
 
 def test_evidence_shape_rejects_equity_transition_drift(tmp_path):
     book = _initialize(tmp_path)

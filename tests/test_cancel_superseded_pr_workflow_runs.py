@@ -528,3 +528,133 @@ def test_invalid_sha_fails_closed() -> None:
             workflow_name="CI",
             current_run_id=1,
         )
+
+def test_parse_run_ignores_rebound_coordinate_validators(monkeypatch) -> None:
+    monkeypatch.setattr(
+        controller_module,
+        "_require_positive_int",
+        lambda _value, *, field: 999,
+    )
+    monkeypatch.setattr(
+        controller_module,
+        "_require_sha",
+        lambda _value, *, field: HEAD_C,
+    )
+    monkeypatch.setattr(
+        controller_module,
+        "_ACTIVE_STATUSES",
+        ("attacker",),
+    )
+
+    run = controller_module.parse_run(
+        {
+            "id": 77,
+            "head_sha": HEAD_A,
+            "name": "CI",
+            "status": "queued",
+            "pull_requests": [{"number": 2008}],
+        }
+    )
+
+    assert run == WorkflowRun(
+        run_id=77,
+        head_sha=HEAD_A,
+        workflow_name="CI",
+        pr_numbers=(2008,),
+        status="queued",
+    )
+
+
+def test_commit_association_page_bound_cannot_hide_second_pr(monkeypatch) -> None:
+    api = controller_module.GitHubApi(
+        repository="owner/repo",
+        token="token",
+    )
+    requested: list[str] = []
+    page_one = [
+        {"number": 2008, "head": {"sha": HEAD_A}}
+        for _ in range(100)
+    ]
+    page_two = [{"number": 2009, "head": {"sha": HEAD_A}}]
+
+    def fake_request(path: str, **_kwargs):
+        requested.append(path)
+        if "page=1" in path:
+            return page_one
+        if "page=2" in path:
+            return page_two
+        raise AssertionError(path)
+
+    monkeypatch.setattr(api, "_request", fake_request)
+    monkeypatch.setattr(controller_module, "_PULLS_PER_PAGE", 101)
+    monkeypatch.setattr(
+        controller_module,
+        "urlencode",
+        lambda _params: "per_page=999&page=1",
+    )
+
+    with pytest.raises(
+        CancellationError,
+        match="exactly one associated pull request",
+    ):
+        api.associated_pr_number(HEAD_A)
+
+    assert requested == [
+        f"/commits/{HEAD_A}/pulls?per_page=100&page=1",
+        f"/commits/{HEAD_A}/pulls?per_page=100&page=2",
+    ]
+
+
+def test_base_active_run_page_bound_and_parser_are_frozen(monkeypatch) -> None:
+    api = controller_module.GitHubApi(
+        repository="owner/repo",
+        token="token",
+    )
+    requested: list[str] = []
+
+    def run_payload(run_id: int) -> dict[str, object]:
+        return {
+            "id": run_id,
+            "head_sha": HEAD_A,
+            "name": "CI",
+            "status": "queued",
+            "pull_requests": [{"number": 2008}],
+        }
+
+    def fake_request(path: str, **_kwargs):
+        requested.append(path)
+        if "page=1" in path:
+            return {
+                "total_count": 101,
+                "workflow_runs": [run_payload(run_id) for run_id in range(1, 101)],
+            }
+        if "page=2" in path:
+            return {
+                "total_count": 101,
+                "workflow_runs": [run_payload(101)],
+            }
+        raise AssertionError(path)
+
+    monkeypatch.setattr(api, "_request", fake_request)
+    monkeypatch.setattr(controller_module, "_RUNS_PER_PAGE", 101)
+    monkeypatch.setattr(
+        controller_module,
+        "urlencode",
+        lambda _params: "event=attacker&per_page=999&page=1",
+    )
+    monkeypatch.setattr(
+        controller_module,
+        "parse_run",
+        lambda _payload: (_ for _ in ()).throw(
+            AssertionError("rebound parser must not execute")
+        ),
+    )
+
+    runs = api._active_runs_for_status("queued")
+
+    assert tuple(run.run_id for run in runs) == tuple(range(1, 102))
+    assert requested == [
+        "/actions/runs?event=pull_request&status=queued&per_page=100&page=1",
+        "/actions/runs?event=pull_request&status=queued&per_page=100&page=2",
+    ]
+

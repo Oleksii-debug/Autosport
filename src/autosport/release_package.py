@@ -1010,10 +1010,21 @@ def build_windows_package(
         ("\n".join(lines) + "\n").encode("utf-8")
     )
 
-    archive_members = {
-        (Path("Autosport-V1") / path.relative_to(package_dir)).as_posix(): path.read_bytes()
-        for path in _sorted_package_files(package_dir)
-    }
+    archive_members: dict[str, bytes] = {}
+    authored_windows_keys: dict[str, str] = {}
+    for path in _sorted_package_files(package_dir):
+        archive_name = (
+            Path("Autosport-V1") / path.relative_to(package_dir)
+        ).as_posix()
+        _, windows_key = _validate_windows_member(archive_name)
+        previous = authored_windows_keys.get(windows_key)
+        if previous is not None:
+            raise ValueError(
+                "release package contains Windows path collision: "
+                f"{previous} vs {archive_name}"
+            )
+        authored_windows_keys[windows_key] = archive_name
+        archive_members[archive_name] = path.read_bytes()
     writer_sha = _write_canonical_zip(output_zip, archive_members)
     return output_zip, writer_sha
 

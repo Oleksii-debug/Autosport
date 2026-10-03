@@ -447,10 +447,23 @@ class AutosportApp(tk.Tk):
         return None
 
     def _evidence_export_workspace(self) -> Path | None:
-        value = self.__dict__.get("_active_workspace")
-        if value is None:
-            value = self.__dict__.get("workspace")
-        return None if value is None else Path(value)
+        base_workspace = self.__dict__.get("workspace")
+        if base_workspace is None:
+            return None
+        try:
+            strategy_id, research_plan = self._selected_replay_configuration()
+            return Path(
+                workspace_for_strategy(
+                    Path(base_workspace),
+                    strategy_id,
+                    research_plan,
+                )
+            )
+        except Exception:
+            # Evidence export is identity-sensitive. If the currently selected
+            # strategy/research-plan configuration cannot be resolved, never
+            # fall back to a stale workspace from an earlier replay/recovery.
+            return None
 
     def _dataset_selection_blocker(self) -> str | None:
         if self._dataset_busy:

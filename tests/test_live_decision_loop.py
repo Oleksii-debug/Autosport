@@ -941,6 +941,107 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
                 ],
             )
 
+    def test_custom_observer_provider_gap_rejects_only_healthy_health_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            decision_time = self.START + timedelta(seconds=1)
+            health_store = SourceHealthStore(workspace / "source_health.json")
+            health_store.record_success(
+                "provider-a",
+                now=(self.START + timedelta(milliseconds=500)).isoformat(),
+                received=1,
+                accepted=1,
+                rejected=0,
+                cursor="1",
+                latest_source_ts=self.START.isoformat(),
+                quality_flags=(),
+            )
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(
+                    workspace,
+                    [ProviderUnavailableError("provider unavailable")],
+                ),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(decision_time),
+            )
+            loop.register_input(
+                "input-a",
+                source_ids="provider-a",
+                selection_ids="selection-a",
+            )
+
+            result = loop.run_cycle()
+
+            self.assertEqual(result.status, LiveCycleStatus.BACKPRESSURE)
+            self.assertIn("durable ineligible provider health evidence", result.detail)
+            self.assertFalse((workspace / "decisions.jsonl").exists())
+            self.assertFalse(
+                (workspace / PersistentLiveDecisionLoop.PROGRESS_FILE_NAME).exists()
+            )
+            self.assertEqual(health_store.get("provider-a").status, "healthy")
+
+    def test_default_provider_health_write_failure_cannot_mint_provider_gap_decision(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            decision_time = self.START + timedelta(seconds=1)
+            health_store = SourceHealthStore(workspace / "source_health.json")
+            health_store.record_success(
+                "provider-a",
+                now=(self.START + timedelta(milliseconds=500)).isoformat(),
+                received=1,
+                accepted=1,
+                rejected=0,
+                cursor="1",
+                latest_source_ts=self.START.isoformat(),
+                quality_flags=(),
+            )
+            registry = self._scientific_registry(
+                workspace,
+                self._strategy_version(),
+            )
+
+            class FailingProvider:
+                source_id = "provider-a"
+
+                def read_batch(self, max_items=1000):
+                    del max_items
+                    raise ProviderUnavailableError("provider offline")
+
+            loop = PersistentLiveDecisionLoop(
+                workspace,
+                loop_id="live-test-loop",
+                mode=LiveDecisionMode.PAPER,
+                book=PaperBook("1000"),
+                authority=self._authority(),
+                intent_factory=_EmptyIntentFactory(),
+                scientific_registry=registry,
+                provider=FailingProvider(),
+                max_quote_age=timedelta(seconds=5),
+                clock=_ManualClock(decision_time),
+            )
+            loop.register_input(
+                "input-a",
+                source_ids="provider-a",
+                selection_ids="selection-a",
+            )
+
+            with patch.object(
+                SourceHealthStore,
+                "record_failure",
+                side_effect=OSError("health failure publication failed"),
+            ):
+                result = loop.run_cycle()
+
+            self.assertEqual(result.status, LiveCycleStatus.BACKPRESSURE)
+            self.assertIn("durable ineligible provider health evidence", result.detail)
+            self.assertFalse((workspace / "decisions.jsonl").exists())
+            self.assertFalse(
+                (workspace / PersistentLiveDecisionLoop.PROGRESS_FILE_NAME).exists()
+            )
+            self.assertEqual(health_store.get("provider-a").status, "healthy")
+            loop.close()
+
     def test_custom_observer_corrupt_canonical_health_authority_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

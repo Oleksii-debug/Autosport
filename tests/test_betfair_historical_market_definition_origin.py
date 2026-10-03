@@ -569,5 +569,63 @@ class BetfairHistoricalMarketDefinitionOriginTests(unittest.TestCase):
                 )
 
 
+    def test_derivation_guard_root_rebinding_fails_before_parser_dispatch(
+        self,
+    ) -> None:
+        raw = _raw(_line(1000, self.MARKET_ID, self.definition(status="OPEN", version=1)))
+        witness = self.witness(raw)
+        guard_calls: list[bool] = []
+
+        def hostile_guard():
+            guard_calls.append(True)
+
+        with patch.object(
+            origin_module,
+            "_assert_canonical_origin_derivation_dispatch",
+            new=hostile_guard,
+        ), _upstream_authority_stub():
+            with self.assertRaisesRegex(
+                BetfairHistoricalMarketDefinitionOriginError,
+                "derivation guard was replaced",
+            ):
+                bind_betfair_historical_market_definition_origin(
+                    witness=witness,
+                    raw_bytes=raw,
+                    market_id=self.MARKET_ID,
+                    cutoff_pt_ms=1000,
+                    package_tier=HistoricalPackageTier.PRO,
+                )
+
+        self.assertEqual(guard_calls, [])
+
+    def test_child_upstream_verifier_alias_rebinding_fails_closed(self) -> None:
+        raw = _raw(_line(1000, self.MARKET_ID, self.definition(status="OPEN", version=1)))
+        witness = self.witness(raw)
+        hostile_calls: list[bool] = []
+
+        def hostile(witness_arg):
+            del witness_arg
+            hostile_calls.append(True)
+
+        with patch.object(
+            origin_module,
+            "_CANONICAL_UPSTREAM_WITNESS_ASSERT",
+            new=hostile,
+        ):
+            with self.assertRaisesRegex(
+                BetfairHistoricalMarketDefinitionOriginError,
+                "lacks live canonical provider-origin authority",
+            ):
+                bind_betfair_historical_market_definition_origin(
+                    witness=witness,
+                    raw_bytes=raw,
+                    market_id=self.MARKET_ID,
+                    cutoff_pt_ms=1000,
+                    package_tier=HistoricalPackageTier.PRO,
+                )
+
+        self.assertEqual(hostile_calls, [])
+
+
 if __name__ == "__main__":
     unittest.main()

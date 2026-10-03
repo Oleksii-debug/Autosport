@@ -264,6 +264,7 @@ def test_public_serialized_shape_never_mints_provider_authority() -> None:
     assert item.provider_origin_proven is False
     assert item.current_constraint_authority is False
     assert item.execution_authorized is False
+    assert item.real_money_execution is False
     assert result.provider_origin_proven is False
     assert result.current_constraint_authority is False
     assert result.execution_authorized is False
@@ -355,6 +356,7 @@ def test_hard_false_authority_surfaces_are_non_python_and_sealed() -> None:
                 "provider_origin_proven",
                 "current_constraint_authority",
                 "execution_authorized",
+                "real_money_execution",
             ),
         ),
         (

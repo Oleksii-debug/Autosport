@@ -325,12 +325,14 @@ class BetfairProviderConstraintObservation(metaclass=_BetfairConstraintEvidenceM
     _provider_origin_proven_constant = False
     _current_constraint_authority_constant = False
     _execution_authorized_constant = False
+    _real_money_execution_constant = False
 
     provider_origin_proven = property(attrgetter("_provider_origin_proven_constant"))
     current_constraint_authority = property(
         attrgetter("_current_constraint_authority_constant")
     )
     execution_authorized = property(attrgetter("_execution_authorized_constant"))
+    real_money_execution = property(attrgetter("_real_money_execution_constant"))
 
 
 _BetfairConstraintEvidenceMeta.seal(BetfairProviderConstraintObservation)

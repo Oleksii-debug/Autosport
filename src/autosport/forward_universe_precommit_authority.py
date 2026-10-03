@@ -4,8 +4,10 @@ from __future__ import annotations
 
 This module owns no persistence and mints no independent campaign authority.  It only
 re-resolves the existing #1257 CampaignPrecommitManifest + monotonic publication
-witness from an independently supplied product locator, then proves that the freshly
-loaded provider evaluation universe is the universe prospectively committed there.
+witness from an independently supplied product locator.  The manifest's legacy
+`evaluation_universe_sha256` slot is treated here as a prospective evaluation-plan
+identity: realized provider-derived universe bytes remain post-observation evidence and
+must be bound separately by the durable universe/cycle composition.
 """
 
 import hashlib
@@ -28,7 +30,7 @@ _DOMAIN = "autosport.forward-universe-precommit-authority.v1"
 
 
 class ForwardUniversePrecommitAuthorityError(RuntimeError):
-    """Prospective campaign authority does not authorize the loaded universe."""
+    """Prospective campaign plan authority cannot be re-resolved exactly."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -149,7 +151,6 @@ def _build_resolver(
         locator: ForwardUniversePrecommitLocator,
         campaign_id: str,
         source_id: str,
-        evaluation_universe_sha256: str,
         earliest_source_observation: datetime,
         latest_source_observation: datetime,
     ) -> ForwardUniversePrecommitResolution:
@@ -159,14 +160,6 @@ def _build_resolver(
             raise ForwardUniversePrecommitAuthorityError("campaign_id must be non-empty text")
         if type(source_id) is not str or not source_id:
             raise ForwardUniversePrecommitAuthorityError("source_id must be non-empty text")
-        if (
-            type(evaluation_universe_sha256) is not str
-            or len(evaluation_universe_sha256) != 64
-            or any(ch not in "0123456789abcdef" for ch in evaluation_universe_sha256)
-        ):
-            raise ForwardUniversePrecommitAuthorityError(
-                "evaluation_universe_sha256 must be lowercase SHA-256"
-            )
         if type(earliest_source_observation) is not datetime or (
             earliest_source_observation.tzinfo is None
             or earliest_source_observation.utcoffset() is None
@@ -247,11 +240,9 @@ def _build_resolver(
             raise ForwardUniversePrecommitAuthorityError(
                 "campaign precommit source does not match provider universe source"
             )
-        if manifest.evaluation_universe_sha256 != evaluation_universe_sha256:
-            raise ForwardUniversePrecommitAuthorityError(
-                "campaign precommit evaluation universe does not match durable universe"
-            )
-
+        # The precommit field is a prospective plan identity.  The exact realized
+        # provider-derived universe is intentionally unavailable before observation
+        # and is verified by the downstream durable universe/cycle authority.
         witness_observed = _instant(
             witness.post_publish_observed_at,
             "publication witness observation",

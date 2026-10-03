@@ -16,7 +16,11 @@ from dataclasses import dataclass
 from enum import Enum
 from hashlib import sha256
 import hmac
+import http.client as _http_client
 import json
+import socket as _socket
+import ssl as _ssl
+import urllib.request as _urllib_request
 from sys import _getframe
 from secrets import token_bytes, token_hex
 from threading import RLock
@@ -184,6 +188,54 @@ def _make_account_identity_authority():
     canonical_build_opener = readonly_module.build_opener
     canonical_identity_init = identity_type.__init__
     canonical_identity_post_init = identity_type.__post_init__
+
+    # Execution readback provider-origin authority is stricter than structural K07
+    # session identity.  Freeze the Python-visible HTTPS/TLS dispatch graph that a
+    # canonical urllib request traverses.  Deterministic tests may still replace
+    # these surfaces to exercise parsing, but such captures cannot mint live
+    # provider-origin proof.
+    network_dispatch_surfaces = (
+        (_urllib_request.OpenerDirector, "open", _urllib_request.OpenerDirector.open),
+        (_urllib_request.HTTPSHandler, "__init__", _urllib_request.HTTPSHandler.__init__),
+        (_urllib_request.HTTPSHandler, "https_open", _urllib_request.HTTPSHandler.https_open),
+        (
+            _urllib_request.AbstractHTTPHandler,
+            "do_open",
+            _urllib_request.AbstractHTTPHandler.do_open,
+        ),
+        (_http_client, "_create_https_context", _http_client._create_https_context),
+        (_http_client.HTTPSConnection, "__init__", _http_client.HTTPSConnection.__init__),
+        (_http_client.HTTPSConnection, "connect", _http_client.HTTPSConnection.connect),
+        (_http_client.HTTPConnection, "connect", _http_client.HTTPConnection.connect),
+        (_http_client.HTTPConnection, "request", _http_client.HTTPConnection.request),
+        (
+            _http_client.HTTPConnection,
+            "_send_request",
+            _http_client.HTTPConnection._send_request,
+        ),
+        (_http_client.HTTPConnection, "send", _http_client.HTTPConnection.send),
+        (
+            _http_client.HTTPConnection,
+            "getresponse",
+            _http_client.HTTPConnection.getresponse,
+        ),
+        (_ssl.SSLContext, "wrap_socket", _ssl.SSLContext.wrap_socket),
+        (_ssl.SSLSocket, "_create", _ssl.SSLSocket._create),
+        (_socket, "create_connection", _socket.create_connection),
+        (_socket, "getaddrinfo", _socket.getaddrinfo),
+        (_socket.socket, "connect", _socket.socket.connect),
+        (_socket.socket, "sendall", _socket.socket.sendall),
+        (_socket.socket, "makefile", _socket.socket.makefile),
+    )
+
+    def execution_readback_network_dispatch_is_current() -> bool:
+        try:
+            return all(
+                getattr(owner, name, missing_value) is expected
+                for owner, name, expected in network_dispatch_surfaces
+            )
+        except (AttributeError, TypeError):
+            return False
 
     lock = RLock()
     canonical_client_origins: WeakKeyDictionary = WeakKeyDictionary()
@@ -624,6 +676,10 @@ def _make_account_identity_authority():
                     raise identity_error_type(
                         "execution readback origin caller composition changed"
                     )
+            if not execution_readback_network_dispatch_is_current():
+                raise identity_error_type(
+                    "execution readback provider-network dispatch is not canonical"
+                )
             require_authoritative(identity, client=client)
             if (
                 exact_type(capture_identity) is not integer_type
@@ -677,6 +733,8 @@ def _make_account_identity_authority():
             capture_fingerprint: str,
         ) -> bool:
             try:
+                if not execution_readback_network_dispatch_is_current():
+                    return False
                 require_authoritative(identity, client=client)
                 if (
                     exact_type(proof) is not string_type

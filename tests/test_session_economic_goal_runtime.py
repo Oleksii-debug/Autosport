@@ -227,6 +227,34 @@ class SessionEconomicGoalRuntimeTests(unittest.TestCase):
             finally:
                 session.close()
 
+    def test_broken_goal_alias_fails_before_registry_or_paper_mutation(self) -> None:
+        dataset = load_dataset(Path("examples/tt_demo"))
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            session = AutosportSession(
+                workspace,
+                "1000",
+                strategy_id="observe-only-v1",
+            )
+            try:
+                goal_path = workspace / EconomicGoalStore.FILE_NAME
+                target = workspace / "missing-external-economic-goal.json"
+                try:
+                    goal_path.symlink_to(target)
+                except OSError as exc:
+                    self.skipTest(f"symlinks unavailable on this runner: {exc}")
+
+                with self.assertRaises(EconomicGoalContractError):
+                    session.run_dataset(dataset)
+
+                self.assertTrue(goal_path.is_symlink())
+                self.assertFalse(target.exists())
+                self.assertEqual(session.registry.strategy_ids(), ())
+                self.assertFalse(session.registry.in_progress())
+                self.assertFalse((workspace / "paper_book.json").exists())
+            finally:
+                session.close()
+
     def test_corrupt_goal_fails_before_registry_or_paper_mutation(self) -> None:
         dataset = load_dataset(Path("examples/tt_demo"))
         with tempfile.TemporaryDirectory() as tmp:

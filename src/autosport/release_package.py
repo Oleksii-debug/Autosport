@@ -129,6 +129,22 @@ def _same_regular_source_snapshot(
     )
 
 
+def _same_source_tree_directory_snapshot(
+    left: os.stat_result,
+    right: os.stat_result,
+) -> bool:
+    """Require one directory identity with unchanged entry-change metadata."""
+
+    return (
+        os.path.samestat(left, right)
+        and left.st_mode == right.st_mode
+        and left.st_size == right.st_size
+        and left.st_mtime_ns == right.st_mtime_ns
+        and left.st_ctime_ns == right.st_ctime_ns
+        and left.st_nlink == right.st_nlink
+    )
+
+
 @contextmanager
 def _open_regular_source_stream(
     path: Path,
@@ -270,7 +286,7 @@ def _scan_regular_source_tree(
         label=label,
         relative=relative_text,
     )
-    if not os.path.samestat(before, scanned):
+    if not _same_source_tree_directory_snapshot(before, scanned):
         target = relative_text or "."
         raise ValueError(
             f"{label} directory changed during traversal: {target}"
@@ -298,7 +314,7 @@ def _scan_regular_source_tree(
                 label=label,
                 relative=child_text,
             )
-            if not os.path.samestat(metadata, current):
+            if not _same_source_tree_directory_snapshot(metadata, current):
                 raise ValueError(
                     f"{label} directory changed during traversal: {child_text}"
                 )
@@ -317,7 +333,7 @@ def _scan_regular_source_tree(
         label=label,
         relative=relative_text,
     )
-    if not os.path.samestat(before, after):
+    if not _same_source_tree_directory_snapshot(before, after):
         target = relative_text or "."
         raise ValueError(f"{label} directory changed during traversal: {target}")
 
@@ -362,7 +378,7 @@ def _copy_regular_source_tree(
             label=label,
             relative=relative_text,
         )
-        if expected_snapshot is not None and not os.path.samestat(
+        if expected_snapshot is not None and not _same_source_tree_directory_snapshot(
             expected_snapshot,
             before,
         ):
@@ -384,7 +400,7 @@ def _copy_regular_source_tree(
             label=label,
             relative=relative_text,
         )
-        if not os.path.samestat(before, scanned):
+        if not _same_source_tree_directory_snapshot(before, scanned):
             target = relative_text or "."
             raise ValueError(
                 f"{label} directory changed during traversal: {target}"
@@ -417,7 +433,7 @@ def _copy_regular_source_tree(
                     label=label,
                     relative=child_text,
                 )
-                if not os.path.samestat(metadata, current):
+                if not _same_source_tree_directory_snapshot(metadata, current):
                     raise ValueError(
                         f"{label} directory changed during traversal: {child_text}"
                     )
@@ -445,7 +461,7 @@ def _copy_regular_source_tree(
             label=label,
             relative=relative_text,
         )
-        if not os.path.samestat(before, after):
+        if not _same_source_tree_directory_snapshot(before, after):
             target = relative_text or "."
             raise ValueError(
                 f"{label} directory changed during traversal: {target}"

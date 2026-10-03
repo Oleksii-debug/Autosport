@@ -73,6 +73,7 @@ _RESOLVE_ARTIFACT = CollectorDeltaStore.collector_cycle_observation_artifact_evi
 _SCHEDULE_DUE_AT = CollectorDeltaStore._collector_schedule_due_at
 _LOAD_PROVIDER_EVIDENCE = CompleteGameBoardEvidenceStore.load
 _PROVIDER_EVIDENCE_SCOPE = _require_provider_evidence_campaign_scope
+_PROVIDER_EVIDENCE_SCOPE_ERROR = CampaignProviderCycleCaptureIntegrityError
 _GUARDED_UNIVERSE_LOAD = load_guarded_provider_evaluation_universe
 _RESOLVE_FORWARD_IDENTITY = resolve_forward_universe_authority_identity
 _AUTHORIZE_FORWARD_RECEIPTS = authorize_forward_source_receipts
@@ -680,6 +681,10 @@ def _require_dispatch_integrity() -> None:
         or module_globals.get("_VERIFICATION_ISSUANCE_CAPABILITY")
         is not _CANONICAL_VERIFICATION_ISSUANCE_CAPABILITY
         or module_globals.get("ARTIFACT_KIND") != _CANONICAL_ARTIFACT_KIND
+        or module_globals.get("CampaignProviderCycleCaptureIntegrityError")
+        is not _PROVIDER_EVIDENCE_SCOPE_ERROR
+        or module_globals.get("_PROVIDER_EVIDENCE_SCOPE_ERROR")
+        is not _PROVIDER_EVIDENCE_SCOPE_ERROR
     ):
         raise CampaignForwardUniverseCycleBindingError(
             "campaign forward-cycle authority class or artifact kind changed"
@@ -969,6 +974,7 @@ def resolve_campaign_forward_universe_cycle_authority(
     expected_provider_evidence_loader = _CANONICAL_PROVIDER_EVIDENCE_LOADER
     expected_provider_evidence_scope = _PROVIDER_EVIDENCE_SCOPE
     expected_provider_evidence_scope_code = expected_provider_evidence_scope.__code__
+    expected_provider_evidence_scope_error = _PROVIDER_EVIDENCE_SCOPE_ERROR
     expected_issued_universes = _CANONICAL_ISSUED_UNIVERSES
     expected_provider_universe_module = _provider_universe_module
 
@@ -1040,7 +1046,7 @@ def resolve_campaign_forward_universe_cycle_authority(
                 precommit_locator,
                 provider_evidence_store,
             )
-        except CampaignProviderCycleCaptureIntegrityError as exc:
+        except expected_provider_evidence_scope_error as exc:
             raise CampaignForwardUniverseCycleBindingError(
                 "provider evidence routing does not match campaign precommit authority"
             ) from exc

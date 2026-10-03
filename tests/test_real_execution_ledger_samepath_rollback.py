@@ -272,21 +272,24 @@ def test_reader_cannot_abort_active_writer_prepare_window(
     path = _isolated_ledger_path(tmp_path, monkeypatch)
     ledger = RealExecutionLedger(path)
     current_plan = _plan()
-    original_prepare = ledger._monotonic_authority.prepare
+    original_append_record = ledger._monotonic_authority._append_record
     competing_read_was_fenced = False
+    append_calls = 0
 
-    def prepare_with_competing_read(**kwargs):
-        nonlocal competing_read_was_fenced
-        competing = RealExecutionLedger(path)
-        with pytest.raises(ExecutionLedgerBusyError):
-            competing.verified_snapshot()
-        competing_read_was_fenced = True
-        return original_prepare(**kwargs)
+    def append_record_with_competing_read(record, index) -> None:
+        nonlocal competing_read_was_fenced, append_calls
+        append_calls += 1
+        original_append_record(record, index)
+        if append_calls == 1:
+            competing = RealExecutionLedger(path)
+            with pytest.raises(ExecutionLedgerBusyError):
+                competing.verified_snapshot()
+            competing_read_was_fenced = True
 
     monkeypatch.setattr(
         ledger._monotonic_authority,
-        "prepare",
-        prepare_with_competing_read,
+        "_append_record",
+        append_record_with_competing_read,
     )
 
     assert ledger.reserve_plan(current_plan) == current_plan.fingerprint
@@ -324,3 +327,22 @@ def test_instance_recover_shadow_cannot_accept_rolled_back_bytes(
         match="rollback|monotonic|authority",
     ):
         reopened.verified_snapshot()
+
+
+
+def test_instance_prepare_and_commit_shadows_do_not_gain_transition_authority(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    path = _isolated_ledger_path(tmp_path, monkeypatch)
+    ledger = RealExecutionLedger(path)
+    current_plan = _plan()
+
+    def forbidden_shadow(**_kwargs):
+        raise AssertionError("instance transition shadow must not be invoked")
+
+    monkeypatch.setattr(ledger._monotonic_authority, "prepare", forbidden_shadow)
+    monkeypatch.setattr(ledger._monotonic_authority, "commit", forbidden_shadow)
+
+    assert ledger.reserve_plan(current_plan) == current_plan.fingerprint
+    assert ledger.verified_snapshot().event_count == 1

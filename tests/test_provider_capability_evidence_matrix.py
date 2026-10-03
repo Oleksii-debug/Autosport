@@ -955,3 +955,90 @@ def test_contract_has_no_secret_fields():
     }
     forbidden = ("password", "secret", "token", "cookie", "credential", "api_key")
     assert not {name for name in names if any(part in name for part in forbidden)}
+
+
+
+def test_forged_checker_globals_cannot_mint_copied_positive_fact(monkeypatch):
+    p = profile()
+    i = integration(p)
+    original_fact = evidence(
+        p,
+        BookmakerCapability.BALANCE_READ,
+        ProviderCapabilityTruthGrade.DECLARED_DOCUMENTED,
+        i=i,
+    )
+    original_matrix = matrix(p=p, facts=(original_fact,))
+    copied_fact = replace(original_fact)
+    forged_facts = tuple(
+        copied_fact
+        if fact.capability is BookmakerCapability.BALANCE_READ
+        else fact
+        for fact in original_matrix.facts
+    )
+
+    monkeypatch.setattr(
+        capability_module,
+        "_is_product_issued",
+        lambda _fact: True,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        capability_module,
+        "_is_product_issued_matrix",
+        lambda _matrix: True,
+        raising=False,
+    )
+
+    with pytest.raises(
+        ProviderCapabilityEvidenceMatrixError,
+        match="positive capability evidence must be product-issued exact object",
+    ):
+        replace(original_matrix, facts=forged_facts)
+
+
+def test_forged_matrix_checker_global_cannot_authorize_copied_matrix(monkeypatch):
+    original = matrix()
+    copied = replace(original)
+
+    monkeypatch.setattr(
+        capability_module,
+        "_is_product_issued_matrix",
+        lambda _matrix: True,
+        raising=False,
+    )
+
+    with pytest.raises(
+        ProviderCapabilityEvidenceMatrixError,
+        match="capability matrix must be product-issued exact object",
+    ):
+        copied.fact_for(BookmakerCapability.BALANCE_READ)
+
+    journal = ProviderCapabilityEvidenceMatrixJournal()
+    with pytest.raises(
+        ProviderCapabilityEvidenceMatrixError,
+        match="matrix journal requires product-issued exact matrix",
+    ):
+        journal.publish(copied)
+
+
+def test_forged_matrix_checker_global_cannot_validate_copied_successor(monkeypatch):
+    first = matrix(as_of=T3)
+    second = matrix(
+        version=2,
+        predecessor=first.matrix_id,
+        as_of=T4,
+    )
+    copied_second = replace(second)
+
+    monkeypatch.setattr(
+        capability_module,
+        "_is_product_issued_matrix",
+        lambda _matrix: True,
+        raising=False,
+    )
+
+    with pytest.raises(
+        ProviderCapabilityEvidenceMatrixError,
+        match="successor matrices must be product-issued exact objects",
+    ):
+        validate_capability_matrix_successor(first, copied_second)

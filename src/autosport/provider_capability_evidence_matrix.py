@@ -439,6 +439,8 @@ class ProviderCapabilityEvidenceMatrix:
             return False
         if requested_at > _time(self.as_of, "as_of"):
             return False
+        if requested_at < _time(self.integration.observed_at, "integration.observed_at"):
+            return False
         fact = self.fact_for(capability)
         # A weaker documentation/configuration fact may be retained for audit even
         # when the canonical capability profile is UNKNOWN/UNSUPPORTED, but it must
@@ -501,6 +503,8 @@ class ProviderCapabilityEvidenceMatrix:
         if not _is_product_issued_matrix(self):
             return False
         if requested_at > _time(self.as_of, "as_of"):
+            return False
+        if requested_at < _time(self.integration.observed_at, "integration.observed_at"):
             return False
         fact = self.fact_for(capability)
         # A weaker documentation/configuration fact may be retained for audit even

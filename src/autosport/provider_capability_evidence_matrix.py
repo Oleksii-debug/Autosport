@@ -1173,3 +1173,150 @@ def validate_capability_matrix_successor(
         raise ProviderCapabilityEvidenceMatrixError(
             "successor matrices must be product-issued exact objects with unchanged payload"
         )
+
+
+def _seal_provider_capability_provenance_dispatch(
+    evidence_checker,
+    matrix_checker,
+):
+    """Closure-bind positive provenance checks ahead of mutable module globals.
+
+    The original implementation performs the same checks for diagnostics and
+    compatibility. These guards are intentionally redundant: their purpose is to
+    make rebinding the module-global checker names incapable of minting authority.
+    """
+
+    matrix_type = ProviderCapabilityEvidenceMatrix
+    journal_type = ProviderCapabilityEvidenceMatrixJournal
+
+    raw_post_init = matrix_type.__post_init__
+    raw_fact_for = matrix_type.fact_for
+    raw_qualifies = matrix_type.qualifies
+    raw_qualifies_scoped = matrix_type.qualifies_scoped
+    raw_publish = journal_type.publish
+    raw_latest_for = journal_type.latest_for
+    raw_validate_successor = validate_capability_matrix_successor
+
+    def require_positive_fact_provenance(matrix) -> None:
+        facts = getattr(matrix, "facts", None)
+        if type(facts) is not tuple:
+            return
+        for fact in facts:
+            if (
+                type(fact) is ProviderCapabilityEvidence
+                and fact.grade is not ProviderCapabilityTruthGrade.UNKNOWN_UNPROVEN
+                and not evidence_checker(fact)
+            ):
+                raise ProviderCapabilityEvidenceMatrixError(
+                    "positive capability evidence must be product-issued exact object"
+                )
+
+    def sealed_post_init(self) -> None:
+        require_positive_fact_provenance(self)
+        raw_post_init(self)
+
+    def sealed_fact_for(self, capability):
+        if not matrix_checker(self):
+            raise ProviderCapabilityEvidenceMatrixError(
+                "capability matrix must be product-issued exact object with unchanged payload"
+            )
+        return raw_fact_for(self, capability)
+
+    def sealed_qualifies(
+        self,
+        capability,
+        *,
+        accepted_grades,
+        at_time,
+    ):
+        if not matrix_checker(self):
+            return False
+        require_positive_fact_provenance(self)
+        return raw_qualifies(
+            self,
+            capability,
+            accepted_grades=accepted_grades,
+            at_time=at_time,
+        )
+
+    def sealed_qualifies_scoped(
+        self,
+        capability,
+        *,
+        accepted_grades,
+        at_time,
+        sport=None,
+        market_family=None,
+    ):
+        if not matrix_checker(self):
+            return False
+        require_positive_fact_provenance(self)
+        return raw_qualifies_scoped(
+            self,
+            capability,
+            accepted_grades=accepted_grades,
+            at_time=at_time,
+            sport=sport,
+            market_family=market_family,
+        )
+
+    def sealed_publish(self, matrix):
+        if (
+            type(matrix) is ProviderCapabilityEvidenceMatrix
+            and not matrix_checker(matrix)
+        ):
+            raise ProviderCapabilityEvidenceMatrixError(
+                "matrix journal requires product-issued exact matrix"
+            )
+        latest_id = None
+        if type(matrix) is ProviderCapabilityEvidenceMatrix:
+            scope = _matrix_authority_scope(matrix)
+            latest_id = self._latest_by_scope.get(scope)
+        if latest_id is not None:
+            previous = self._matrices.get(latest_id)
+            if previous is not None and not matrix_checker(previous):
+                raise ProviderCapabilityEvidenceMatrixError(
+                    "journal latest matrix was mutated after publication"
+                )
+        return raw_publish(self, matrix)
+
+    def sealed_latest_for(self, anchor, *, as_of=None):
+        for stored_id, stored in self._matrices.items():
+            if not matrix_checker(stored) or stored.matrix_id != stored_id:
+                if stored is anchor:
+                    raise ProviderCapabilityEvidenceMatrixError(
+                        "journal anchor matrix was mutated after publication"
+                    )
+                raise ProviderCapabilityEvidenceMatrixError(
+                    "journal matrix was mutated after publication"
+                )
+        return raw_latest_for(self, anchor, as_of=as_of)
+
+    def sealed_validate_successor(previous, current) -> None:
+        if (
+            type(previous) is ProviderCapabilityEvidenceMatrix
+            and type(current) is ProviderCapabilityEvidenceMatrix
+            and (
+                not matrix_checker(previous)
+                or not matrix_checker(current)
+            )
+        ):
+            raise ProviderCapabilityEvidenceMatrixError(
+                "successor matrices must be product-issued exact objects with unchanged payload"
+            )
+        raw_validate_successor(previous, current)
+
+    matrix_type.__post_init__ = sealed_post_init
+    matrix_type.fact_for = sealed_fact_for
+    matrix_type.qualifies = sealed_qualifies
+    matrix_type.qualifies_scoped = sealed_qualifies_scoped
+    journal_type.publish = sealed_publish
+    journal_type.latest_for = sealed_latest_for
+    return sealed_validate_successor
+
+
+validate_capability_matrix_successor = _seal_provider_capability_provenance_dispatch(
+    _is_product_issued,
+    _is_product_issued_matrix,
+)
+del _seal_provider_capability_provenance_dispatch

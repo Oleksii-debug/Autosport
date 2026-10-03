@@ -2338,6 +2338,123 @@ def test_headroom_issuance_mutators_and_registries_are_not_module_globals() -> N
     assert not hasattr(headroom_module, "_RESERVATION_ISSUED_LOCK")
 
 
+def _headroom_authority_closure_values(*roots):
+    stack = list(roots)
+    seen: set[int] = set()
+    values: list[object] = []
+    while stack:
+        current = stack.pop()
+        identity = id(current)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        wrapped = getattr(current, "__wrapped__", None)
+        if callable(wrapped):
+            stack.append(wrapped)
+        for cell in getattr(current, "__closure__", None) or ():
+            value = cell.cell_contents
+            values.append(value)
+            if (
+                callable(value)
+                and getattr(value, "__module__", None) == headroom_module.__name__
+            ):
+                stack.append(value)
+    return tuple(values)
+
+
+def test_headroom_issuance_closure_graph_exposes_no_mutable_identity_registry(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    acquired, _ = _acquire_balance(monkeypatch, tmp_path, "100")
+    target = _plan("target", _action("target-action", "10"))
+    ledger = _ledger_with_plans(tmp_path, target)
+    assessment = _assess(
+        ledger,
+        acquired,
+        plan_id="target",
+        action_id="target-action",
+    )
+    reservation = _reserve(
+        ledger,
+        acquired,
+        assessment,
+        attempt_id="closure-registry-issued",
+    )
+    property_getter = (
+        ProductInternalHeadroomReservation.product_internal_reservation_proven.fget
+    )
+    assert property_getter is not None
+
+    values = _headroom_authority_closure_values(
+        headroom_module.assess_provider_account_headroom,
+        headroom_module.reserve_observed_provider_headroom,
+        property_getter,
+    )
+    issued_ids = {id(assessment), id(reservation)}
+    assert not any(
+        type(value) is dict and not issued_ids.isdisjoint(value)
+        for value in values
+    )
+    assert not any(
+        type(value) is dict
+        and any(
+            getattr(item, "__call__", None) is not None
+            for item in value.values()
+        )
+        for value in values
+    )
+
+
+def test_closure_exposed_issuance_cache_miss_cannot_self_mint_assessment(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    acquired, _ = _acquire_balance(monkeypatch, tmp_path, "100")
+    target = _plan("target", _action("target-action", "10"))
+    ledger = _ledger_with_plans(tmp_path, target)
+    issued = _assess(
+        ledger,
+        acquired,
+        plan_id="target",
+        action_id="target-action",
+    )
+    reconstructed = replace(issued)
+
+    values = _headroom_authority_closure_values(
+        headroom_module.reserve_observed_provider_headroom,
+    )
+    cache = next(
+        value
+        for value in values
+        if getattr(getattr(value, "__wrapped__", None), "__name__", None)
+        == "assessment_issuance"
+    )
+    identity_type = next(
+        value
+        for value in values
+        if isinstance(value, type) and value.__name__ == "_IdentityWeakRef"
+    )
+    state_reader = next(
+        value
+        for value in values
+        if callable(value) and getattr(value, "__name__", None) == "assessment_state"
+    )
+
+    assert cache(identity_type(reconstructed), state_reader(reconstructed)) is False
+    assert cache.cache_info().maxsize == 4096
+    with pytest.raises(
+        ProviderAccountHeadroomError,
+        match="not canonically issued",
+    ):
+        _reserve(
+            ledger,
+            acquired,
+            reconstructed,
+            attempt_id="closure-cache-self-mint",
+        )
+
+
 def test_reconstructed_assessment_cannot_self_mint_via_module_surface(
     monkeypatch,
     tmp_path,

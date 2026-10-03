@@ -172,6 +172,26 @@ _PROPOSED_RISK_CONTEXT_TYPE = ProposedTicketRiskContext
 _RISK_CONTEXT_BANKROLL_DESCRIPTOR = vars(ProposedTicketRiskContext).get("bankroll_id")
 _RISK_CONTEXT_CURRENCY_DESCRIPTOR = vars(ProposedTicketRiskContext).get("currency")
 _WORKSPACE_ECONOMIC_LOCK_TYPE = WorkspaceEconomicLock
+_WORKSPACE_ECONOMIC_LOCK_FILE_NAME = WorkspaceEconomicLock.FILE_NAME
+_WORKSPACE_ECONOMIC_LOCK_INIT = WorkspaceEconomicLock.__init__
+_WORKSPACE_ECONOMIC_LOCK_INIT_CODE = getattr(
+    _WORKSPACE_ECONOMIC_LOCK_INIT,
+    "__code__",
+    None,
+)
+_WORKSPACE_ECONOMIC_LOCK_ACQUIRE = WorkspaceEconomicLock.acquire
+_WORKSPACE_ECONOMIC_LOCK_ACQUIRE_CODE = getattr(
+    _WORKSPACE_ECONOMIC_LOCK_ACQUIRE,
+    "__code__",
+    None,
+)
+_WORKSPACE_ECONOMIC_LOCK_RELEASE = WorkspaceEconomicLock.release
+_WORKSPACE_ECONOMIC_LOCK_RELEASE_CODE = getattr(
+    _WORKSPACE_ECONOMIC_LOCK_RELEASE,
+    "__code__",
+    None,
+)
+_WORKSPACE_ECONOMIC_LOCK_PATH_FACTORY = getattr(_workspace_lock, "Path", None)
 _WORKSPACE_ECONOMIC_LOCK_ENTER = WorkspaceEconomicLock.__enter__
 _WORKSPACE_ECONOMIC_LOCK_ENTER_CODE = getattr(
     _WORKSPACE_ECONOMIC_LOCK_ENTER,
@@ -276,6 +296,14 @@ def _canonical_denomination_dispatch(
     _bound_assert=_ASSERT_BOUND_SUPERVISED_PLAN_AUTHORITY,
     _bound_assert_code=_ASSERT_BOUND_SUPERVISED_PLAN_AUTHORITY_CODE,
     _lock_type=_WORKSPACE_ECONOMIC_LOCK_TYPE,
+    _lock_file_name=_WORKSPACE_ECONOMIC_LOCK_FILE_NAME,
+    _lock_init=_WORKSPACE_ECONOMIC_LOCK_INIT,
+    _lock_init_code=_WORKSPACE_ECONOMIC_LOCK_INIT_CODE,
+    _lock_acquire=_WORKSPACE_ECONOMIC_LOCK_ACQUIRE,
+    _lock_acquire_code=_WORKSPACE_ECONOMIC_LOCK_ACQUIRE_CODE,
+    _lock_release=_WORKSPACE_ECONOMIC_LOCK_RELEASE,
+    _lock_release_code=_WORKSPACE_ECONOMIC_LOCK_RELEASE_CODE,
+    _lock_path_factory=_WORKSPACE_ECONOMIC_LOCK_PATH_FACTORY,
     _lock_enter=_WORKSPACE_ECONOMIC_LOCK_ENTER,
     _lock_enter_code=_WORKSPACE_ECONOMIC_LOCK_ENTER_CODE,
     _lock_exit=_WORKSPACE_ECONOMIC_LOCK_EXIT,
@@ -304,6 +332,15 @@ def _canonical_denomination_dispatch(
         None,
     )
     live_lock_type = getattr(_workspace_lock, "WorkspaceEconomicLock", None)
+    live_lock_init = (
+        vars(live_lock_type).get("__init__") if live_lock_type is _lock_type else None
+    )
+    live_lock_acquire = (
+        vars(live_lock_type).get("acquire") if live_lock_type is _lock_type else None
+    )
+    live_lock_release = (
+        vars(live_lock_type).get("release") if live_lock_type is _lock_type else None
+    )
     live_lock_enter = (
         vars(live_lock_type).get("__enter__") if live_lock_type is _lock_type else None
     )
@@ -331,6 +368,14 @@ def _canonical_denomination_dispatch(
         or getattr(_bound_assert, "__code__", None) is not _bound_assert_code
         or live_lock_type is not _lock_type
         or globals().get("WorkspaceEconomicLock") is not _lock_type
+        or vars(live_lock_type).get("FILE_NAME") != _lock_file_name
+        or live_lock_init is not _lock_init
+        or getattr(_lock_init, "__code__", None) is not _lock_init_code
+        or live_lock_acquire is not _lock_acquire
+        or getattr(_lock_acquire, "__code__", None) is not _lock_acquire_code
+        or live_lock_release is not _lock_release
+        or getattr(_lock_release, "__code__", None) is not _lock_release_code
+        or getattr(_workspace_lock, "Path", None) is not _lock_path_factory
         or live_lock_enter is not _lock_enter
         or getattr(_lock_enter, "__code__", None) is not _lock_enter_code
         or live_lock_exit is not _lock_exit

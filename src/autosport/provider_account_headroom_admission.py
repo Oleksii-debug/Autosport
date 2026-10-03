@@ -36,6 +36,10 @@ from .execution_capital_at_risk import (
     ExecutionCapitalAtRiskEvidence,
     resolve_execution_capital_at_risk,
 )
+from . import portfolio_plan as _portfolio_plan
+from .portfolio_plan import OpportunityIntent
+from . import risk as _risk
+from .risk import ProposedTicketRiskContext
 from .real_execution_ledger import (
     AttemptState,
     ExecutionAction,
@@ -103,6 +107,23 @@ _BOUND_SUPERVISED_PLAN_VERIFY_CODE = getattr(
     "__code__",
     None,
 )
+_OPPORTUNITY_INTENT_TYPE = OpportunityIntent
+_OPPORTUNITY_INTENT_ID_DESCRIPTOR = vars(OpportunityIntent).get("intent_id")
+_OPPORTUNITY_INTENT_CONTEXT_DESCRIPTOR = vars(OpportunityIntent).get("risk_context")
+_OPPORTUNITY_INTENT_SHA_DESCRIPTOR = vars(OpportunityIntent).get("intent_sha256")
+_OPPORTUNITY_INTENT_SHA_GETTER = getattr(
+    _OPPORTUNITY_INTENT_SHA_DESCRIPTOR,
+    "fget",
+    None,
+)
+_OPPORTUNITY_INTENT_SHA_GETTER_CODE = getattr(
+    _OPPORTUNITY_INTENT_SHA_GETTER,
+    "__code__",
+    None,
+)
+_PROPOSED_RISK_CONTEXT_TYPE = ProposedTicketRiskContext
+_RISK_CONTEXT_BANKROLL_DESCRIPTOR = vars(ProposedTicketRiskContext).get("bankroll_id")
+_RISK_CONTEXT_CURRENCY_DESCRIPTOR = vars(ProposedTicketRiskContext).get("currency")
 _WORKSPACE_ECONOMIC_LOCK_TYPE = WorkspaceEconomicLock
 _WORKSPACE_ECONOMIC_LOCK_ENTER = WorkspaceEconomicLock.__enter__
 _WORKSPACE_ECONOMIC_LOCK_ENTER_CODE = getattr(
@@ -265,6 +286,47 @@ def _canonical_denomination_dispatch(
         _bound_type,
         _bound_verify,
         _lock_type,
+    )
+
+
+def _canonical_intent_denomination_dispatch(
+    *,
+    _intent_type=_OPPORTUNITY_INTENT_TYPE,
+    _intent_id_descriptor=_OPPORTUNITY_INTENT_ID_DESCRIPTOR,
+    _intent_context_descriptor=_OPPORTUNITY_INTENT_CONTEXT_DESCRIPTOR,
+    _intent_sha_descriptor=_OPPORTUNITY_INTENT_SHA_DESCRIPTOR,
+    _intent_sha_getter=_OPPORTUNITY_INTENT_SHA_GETTER,
+    _intent_sha_getter_code=_OPPORTUNITY_INTENT_SHA_GETTER_CODE,
+    _context_type=_PROPOSED_RISK_CONTEXT_TYPE,
+    _bankroll_descriptor=_RISK_CONTEXT_BANKROLL_DESCRIPTOR,
+    _currency_descriptor=_RISK_CONTEXT_CURRENCY_DESCRIPTOR,
+):
+    live_intent_type = getattr(_portfolio_plan, "OpportunityIntent", None)
+    live_context_type = getattr(_risk, "ProposedTicketRiskContext", None)
+    if (
+        live_intent_type is not _intent_type
+        or globals().get("OpportunityIntent") is not _intent_type
+        or vars(_intent_type).get("intent_id") is not _intent_id_descriptor
+        or vars(_intent_type).get("risk_context") is not _intent_context_descriptor
+        or vars(_intent_type).get("intent_sha256") is not _intent_sha_descriptor
+        or getattr(_intent_sha_descriptor, "fget", None) is not _intent_sha_getter
+        or getattr(_intent_sha_getter, "__code__", None) is not _intent_sha_getter_code
+        or live_context_type is not _context_type
+        or globals().get("ProposedTicketRiskContext") is not _context_type
+        or vars(_context_type).get("bankroll_id") is not _bankroll_descriptor
+        or vars(_context_type).get("currency") is not _currency_descriptor
+    ):
+        raise ProviderAccountHeadroomError(
+            "canonical opportunity-intent denomination authority changed"
+        )
+    return (
+        _intent_type,
+        _intent_id_descriptor,
+        _intent_context_descriptor,
+        _intent_sha_descriptor,
+        _context_type,
+        _bankroll_descriptor,
+        _currency_descriptor,
     )
 
 
@@ -940,11 +1002,67 @@ def _validated_bound_plan_map(
     return result
 
 
+
+def _validated_intent_denomination_map(
+    intents: tuple[OpportunityIntent, ...],
+) -> dict[tuple[str, str], tuple[str, str]]:
+    (
+        intent_type,
+        intent_id_descriptor,
+        intent_context_descriptor,
+        intent_sha_descriptor,
+        context_type,
+        bankroll_descriptor,
+        currency_descriptor,
+    ) = _canonical_intent_denomination_dispatch()
+    if type(intents) is not tuple or not intents:
+        raise ProviderAccountHeadroomUnsupported(
+            "exact OpportunityIntent denomination evidence is required"
+        )
+    result: dict[tuple[str, str], tuple[str, str]] = {}
+    for intent in intents:
+        if type(intent) is not intent_type:
+            raise ProviderAccountHeadroomUnsupported(
+                "denomination evidence must contain exact OpportunityIntent values"
+            )
+        try:
+            intent_id = _text(
+                intent_id_descriptor.__get__(intent, intent_type),
+                "opportunity intent id",
+            )
+            intent_sha256 = _sha(
+                intent_sha_descriptor.__get__(intent, intent_type),
+                "opportunity intent sha256",
+            )
+            context = intent_context_descriptor.__get__(intent, intent_type)
+            if type(context) is not context_type:
+                raise TypeError("risk context is not canonical")
+            bankroll_id = _text(
+                bankroll_descriptor.__get__(context, context_type),
+                "opportunity intent bankroll_id",
+            )
+            currency = _text(
+                currency_descriptor.__get__(context, context_type),
+                "opportunity intent currency",
+            )
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise ProviderAccountHeadroomUnsupported(
+                "opportunity intent denomination evidence is invalid"
+            ) from exc
+        key = (intent_id, intent_sha256)
+        if key in result:
+            raise ProviderAccountHeadroomError(
+                "denomination evidence duplicated opportunity intent identity"
+            )
+        result[key] = (bankroll_id, currency)
+    return result
+
+
 def _current_economic_goal_denomination(
     ledger: RealExecutionLedger,
     *,
     provider_currency: str,
-) -> str:
+) -> tuple[str, str]:
     store_type, store_load, derive_provenance, _, _, _ = (
         _canonical_denomination_dispatch()
     )
@@ -961,15 +1079,18 @@ def _current_economic_goal_denomination(
         raise ProviderAccountHeadroomUnsupported(
             "provider balance currency mismatches durable economic-goal currency"
         )
-    return goal_sha256
+    return goal_sha256, _text(goal.bankroll_id, "economic goal bankroll_id")
 
 
 def _require_plan_denomination(
     view: VerifiedExecutionPlanView,
     *,
     bound_by_plan_id: dict[str, BoundSupervisedExecutionPlan],
+    intent_denomination_by_identity: dict[tuple[str, str], tuple[str, str]],
     economic_goal_contract_sha256: str,
-) -> tuple[str, str]:
+    economic_goal_bankroll_id: str,
+    provider_currency: str,
+) -> tuple[str, str, str, str, str, str]:
     bound = bound_by_plan_id.get(view.plan.plan_id)
     if bound is None:
         raise ProviderAccountHeadroomUnsupported(
@@ -994,14 +1115,36 @@ def _require_plan_denomination(
         raise ProviderAccountHeadroomUnsupported(
             "ledger execution plan does not match current durable denomination authority"
         )
-    return view.plan.plan_id, view.plan_fingerprint
+    intent_identity = (bound.intent_id, bound.intent_sha256)
+    intent_denomination = intent_denomination_by_identity.get(intent_identity)
+    if intent_denomination is None:
+        raise ProviderAccountHeadroomUnsupported(
+            "relevant supervised plan lacks exact OpportunityIntent denomination evidence"
+        )
+    intent_bankroll_id, intent_currency = intent_denomination
+    if (
+        intent_bankroll_id != economic_goal_bankroll_id
+        or intent_currency != provider_currency
+    ):
+        raise ProviderAccountHeadroomUnsupported(
+            "intent denomination does not match current durable economic goal"
+        )
+    return (
+        view.plan.plan_id,
+        view.plan_fingerprint,
+        bound.intent_id,
+        bound.intent_sha256,
+        intent_bankroll_id,
+        intent_currency,
+    )
 
 
 def _denomination_authority_sha256(
     *,
     currency: str,
     economic_goal_contract_sha256: str,
-    plan_bindings: tuple[tuple[str, str], ...],
+    economic_goal_bankroll_id: str,
+    plan_bindings: tuple[tuple[str, str, str, str, str, str], ...],
 ) -> str:
     ordered = tuple(sorted(set(plan_bindings)))
     if not ordered:
@@ -1011,18 +1154,31 @@ def _denomination_authority_sha256(
     return _canonical_digest(
         {
             "schema": "autosport.provider_account_headroom_denomination_authority",
-            "schema_version": 1,
+            "schema_version": 2,
             "currency": currency,
             "economic_goal_contract_sha256": economic_goal_contract_sha256,
+            "economic_goal_bankroll_id": economic_goal_bankroll_id,
             "plans": [
                 {
                     "plan_id": plan_id,
                     "plan_fingerprint": plan_fingerprint,
+                    "intent_id": intent_id,
+                    "intent_sha256": intent_sha256,
+                    "intent_bankroll_id": intent_bankroll_id,
+                    "intent_currency": intent_currency,
                 }
-                for plan_id, plan_fingerprint in ordered
+                for (
+                    plan_id,
+                    plan_fingerprint,
+                    intent_id,
+                    intent_sha256,
+                    intent_bankroll_id,
+                    intent_currency,
+                ) in ordered
             ],
         }
     )
+
 
 def _resolve_account_liability_lattice(
     ledger: RealExecutionLedger,

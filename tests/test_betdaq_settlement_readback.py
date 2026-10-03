@@ -1081,6 +1081,55 @@ def test_by_id_rejects_transaction_at_cursor(monkeypatch):
         client.read_account_postings_by_id(9001)
 
 
+@pytest.mark.parametrize(
+    "posted_at",
+    (
+        "2026-09-21T23:59:59Z",
+        "2026-09-23T00:00:01Z",
+    ),
+)
+def test_window_postings_reject_rows_outside_requested_bounds(
+    monkeypatch,
+    posted_at,
+):
+    client, _ = economic_client(
+        monkeypatch,
+        postings_window(posting(9001, posted_at=posted_at), complete="true"),
+    )
+
+    with pytest.raises(
+        BetdaqEconomicReadbackError,
+        match="outside requested window",
+    ):
+        client.read_account_postings(
+            datetime(2026, 9, 22, tzinfo=timezone.utc),
+            datetime(2026, 9, 23, tzinfo=timezone.utc),
+        )
+
+
+def test_window_readback_rejects_row_moved_outside_bounds_after_construction(
+    monkeypatch,
+):
+    client, _ = economic_client(
+        monkeypatch,
+        postings_window(posting(9001), complete="true"),
+    )
+    readback = client.read_account_postings(
+        datetime(2026, 9, 22, tzinfo=timezone.utc),
+        datetime(2026, 9, 23, tzinfo=timezone.utc),
+    )
+    forged = replace(
+        readback.postings[0],
+        posted_at="2026-09-23T00:00:01Z",
+    )
+
+    with pytest.raises(
+        BetdaqEconomicReadbackError,
+        match="outside requested window",
+    ):
+        replace(readback, postings=(forged,))
+
+
 def test_window_readback_rejects_reordered_rows_after_construction(monkeypatch):
     client, _ = economic_client(
         monkeypatch,

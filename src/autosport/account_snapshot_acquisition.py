@@ -679,8 +679,8 @@ class _AccountSnapshotStore:
                     or row[0] != acquisition_id
                 ):
                     raise AccountSnapshotAcquisitionError(
-                        "account snapshot is not the durable current canonical provider "
-                        f"acquisition for required capability {capability}"
+                        "account snapshot is not the current canonical provider acquisition "
+                        f"for required capability {capability}; durable generation differs"
                     )
             yield
 

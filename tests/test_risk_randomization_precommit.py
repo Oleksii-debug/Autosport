@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import hashlib
 import inspect
 import json
 
 import pytest
 
 from autosport.monotonic_workspace_authority import MonotonicWorkspaceAuthority
+from autosport.outcome_trust import OutcomeLineageBinding, TrustedOutcomeRevision
+from autosport.run_registry import RunRegistry
 import autosport.risk_membership_publication as publication
 from autosport.risk_sampling_membership import ResolvedFixedNRiskMembership
 import autosport.risk_randomization_precommit as precommit
@@ -34,6 +37,7 @@ def _paths(tmp_path):
     workspace.mkdir()
     registry = workspace / "scientific-registry.json"
     registry.write_text("{}\n", encoding="utf-8")
+    RunRegistry.initialize_pristine(workspace / "run_registry.json")
     authority_root = tmp_path / "machine-authority"
     return workspace, registry, authority_root
 
@@ -74,6 +78,32 @@ def _issue(tmp_path, monkeypatch, *, membership=None, experiment_id="experiment-
         authority_root=authority_root,
     )
     return issued, workspace, registry, authority_root, receipt
+
+
+def _accept_planned_run_outcome(workspace, *, run_id: str = "run-001") -> None:
+    registry = RunRegistry(workspace / "run_registry.json")
+    digest = hashlib.sha256(run_id.encode("utf-8")).hexdigest()
+    lineage = OutcomeLineageBinding(
+        source_identity="official-results:risk-precommit-test",
+        record_id=f"result:{run_id}",
+        root_revision_id=f"{run_id}-r1",
+        root_record_sha256=digest,
+        revisions=(
+            TrustedOutcomeRevision(
+                revision=1,
+                revision_id=f"{run_id}-r1",
+                record_sha256=digest,
+            ),
+        ),
+    )
+    key = registry.begin(
+        hashlib.sha256(f"market:{run_id}".encode("utf-8")).hexdigest(),
+        hashlib.sha256(f"results:{run_id}".encode("utf-8")).hexdigest(),
+        "risk-precommit-test",
+        run_id,
+        outcome_lineage=lineage,
+    )
+    registry.complete(key)
 
 
 def test_issuer_surface_accepts_no_caller_seed_or_root() -> None:
@@ -153,12 +183,69 @@ def test_issue_retry_restart_resolves_exact_same_product_root(
     assert resolved == first
     assert len(first.randomization_root_sha256) == 64
     assert first.product_randomization_root_issued is True
+    assert first.product_preoutcome_chronology_proven is True
     assert first.same_process_reflection_tamper_resistance_proven is False
     assert second.same_process_reflection_tamper_resistance_proven is False
     assert resolved.same_process_reflection_tamper_resistance_proven is False
     assert first.occurrence_ancestry_proven is False
     assert first.iid_qualified is False
     assert first.grants_real_money_authority is False
+
+
+def test_initial_issue_rejects_product_available_planned_run_outcome(
+    tmp_path, monkeypatch
+) -> None:
+    workspace, registry, authority_root = _paths(tmp_path)
+    membership = _membership()
+    receipt = _publish_membership(
+        monkeypatch, workspace, registry, authority_root, membership
+    )
+    _accept_planned_run_outcome(workspace, run_id="run-001")
+
+    with pytest.raises(
+        precommit.RiskRandomizationPrecommitError,
+        match="cannot be issued after a planned run outcome became product-available",
+    ):
+        precommit.issue_risk_randomization_precommit(
+            registry,
+            workspace=workspace,
+            research_protocol_id=receipt.research_protocol_id,
+            dataset_snapshot_id=receipt.dataset_snapshot_id,
+            experiment_id="experiment-post-outcome",
+            authority_root=authority_root,
+        )
+
+    assert not list(workspace.glob(".risk-randomization-precommit-*.json"))
+
+
+def test_retry_and_resolve_preserve_root_after_later_product_outcome(
+    tmp_path, monkeypatch
+) -> None:
+    first, workspace, registry, authority_root, membership = _issue(
+        tmp_path, monkeypatch
+    )
+    _accept_planned_run_outcome(workspace, run_id="run-001")
+
+    retry = precommit.issue_risk_randomization_precommit(
+        registry,
+        workspace=workspace,
+        research_protocol_id=membership.research_protocol_id,
+        dataset_snapshot_id=membership.dataset_snapshot_id,
+        experiment_id=first.experiment_id,
+        authority_root=authority_root,
+    )
+    resolved = precommit.resolve_risk_randomization_precommit(
+        registry,
+        workspace=workspace,
+        research_protocol_id=membership.research_protocol_id,
+        dataset_snapshot_id=membership.dataset_snapshot_id,
+        experiment_id=first.experiment_id,
+        authority_root=authority_root,
+    )
+
+    assert retry == first
+    assert resolved == first
+    assert resolved.product_preoutcome_chronology_proven is True
 
 
 def test_issue_retry_rejects_commit_with_wrong_semantic_binding(

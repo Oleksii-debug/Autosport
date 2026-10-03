@@ -629,6 +629,7 @@ def capture_campaign_complete_game_board(
     """Capture one provider board only after the exact campaign START is authorized."""
 
     integrity_error = CampaignProviderCycleCaptureIntegrityError
+    artifact_kind = ARTIFACT_KIND
     if _public_surface_guard is None:
         raise integrity_error(
             "campaign provider-cycle sealed public surface guard is required"
@@ -751,6 +752,7 @@ def capture_campaign_complete_game_board(
     expected_precommit_routing_seams = _PRECOMMIT_ROUTING_SEAMS
     expected_precommit_routing_items = _PRECOMMIT_ROUTING_SEAM_ITEMS
     expected_integrity_error = integrity_error
+    expected_artifact_kind = artifact_kind
     expected_type = _CANONICAL_TYPE
     expected_callable = _CANONICAL_CALLABLE
     expected_getattr = _CANONICAL_GETATTR
@@ -766,6 +768,10 @@ def capture_campaign_complete_game_board(
         ):
             raise integrity_error(
                 "campaign provider-cycle integrity error authority changed"
+            )
+        if module_globals.get("ARTIFACT_KIND") != expected_artifact_kind:
+            raise integrity_error(
+                "campaign provider-cycle artifact kind authority changed"
             )
         for builtin_name in expected_unshadowed_builtins:
             if builtin_name in module_globals:
@@ -1097,13 +1103,13 @@ def capture_campaign_complete_game_board(
             store,
             source_id=source_spec.source_id,
             cycle_seq=cycle_seq,
-            artifact_kind=ARTIFACT_KIND,
+            artifact_kind=artifact_kind,
             artifact_sha256=snapshot.evidence_sha256,
         )
         require_public_surface()
         if (
             _CANONICAL_TYPE(artifact) is not dict_type
-            or artifact.get("artifact_kind") != ARTIFACT_KIND
+            or artifact.get("artifact_kind") != artifact_kind
             or artifact.get("artifact_sha256") != snapshot.evidence_sha256
         ):
             raise integrity_error(
@@ -1127,7 +1133,7 @@ def capture_campaign_complete_game_board(
             store,
             source_id=source_spec.source_id,
             cycle_seq=cycle_seq,
-            artifact_kind=ARTIFACT_KIND,
+            artifact_kind=artifact_kind,
             artifact_sha256=snapshot.evidence_sha256,
         )
         require_public_surface()
@@ -1146,6 +1152,8 @@ def capture_campaign_complete_game_board(
             or collector_evidence.get("attempted_at") != attempted_at
             or collector_evidence.get("completed_at") != completed_at
             or collector_evidence.get("artifact_id") != artifact.get("artifact_id")
+            or collector_evidence.get("artifact_kind") != artifact_kind
+            or collector_evidence.get("artifact_sha256") != snapshot.evidence_sha256
         ):
             raise integrity_error(
                 "collector artifact evidence does not bind exact campaign authority"

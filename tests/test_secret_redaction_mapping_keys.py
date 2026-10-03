@@ -30,6 +30,28 @@ def test_known_secret_reversible_base64_spellings_are_redacted() -> None:
         assert REDACTED in rendered
 
 
+def test_known_secret_nested_base64_spellings_are_redacted() -> None:
+    secret = "AS-RUNTIME-NESTED-BASE64-SECRET-8c42"
+    first_standard = base64.b64encode(secret.encode("utf-8"))
+    second_standard = base64.b64encode(first_standard).decode("ascii")
+    first_urlsafe = base64.urlsafe_b64encode(secret.encode("utf-8"))
+    second_urlsafe = base64.urlsafe_b64encode(first_urlsafe).decode("ascii")
+
+    for encoded in (
+        second_standard,
+        second_standard.rstrip("="),
+        second_urlsafe,
+        second_urlsafe.rstrip("="),
+    ):
+        rendered = redact_operator_text(
+            f"provider_opaque={encoded}",
+            extra_secret_values=(secret,),
+        )
+        assert encoded not in rendered
+        assert secret not in rendered
+        assert REDACTED in rendered
+
+
 def test_known_secret_url_percent_spelling_is_redacted() -> None:
     secret = "AS+URL/SECRET=7f31"
     variants = (

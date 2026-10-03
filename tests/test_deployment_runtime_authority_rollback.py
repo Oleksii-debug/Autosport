@@ -119,6 +119,42 @@ def test_deleted_store_is_reported_as_rollback_after_authority_established(
         )
 
 
+def test_reopen_aborts_prepare_when_publish_never_happened(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "deployment-runtime-authority.json"
+    authority_root = _authority_root(tmp_path)
+    store = DeploymentRuntimeAuthorityStore.initialize_pristine(
+        path,
+        authority_root=authority_root,
+    )
+    first_id = _append(store, 0)
+    previous_bytes = path.read_bytes()
+
+    def crash_before_publish(
+        _path: Path,
+        _payload: object,
+    ) -> None:
+        raise RuntimeError("simulated crash before local publish")
+
+    monkeypatch.setattr(store, "_write_atomic_path", crash_before_publish)
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        _append(store, 1)
+
+    assert path.read_bytes() == previous_bytes
+    reopened = DeploymentRuntimeAuthorityStore(
+        path,
+        authority_root=authority_root,
+    )
+    records = reopened.records()
+    assert [record.runtime_authority_id for record in records] == [first_id]
+
+    second_id = _append(reopened, 1)
+    assert second_id != first_id
+    assert len(reopened.records()) == 2
+
+
 def test_reopen_commits_prepared_state_after_publish_before_commit_crash(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

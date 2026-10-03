@@ -3010,3 +3010,102 @@ def test_capture_does_not_dispatch_through_shadowed_vars(
 
     assert hostile_calls == []
     assert receipt.provider_evidence_sha256 == snapshot.evidence_sha256
+
+
+
+def test_capture_does_not_dispatch_through_shadowed_type_before_guard(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hostile_calls: list[str] = []
+
+    def hostile_type(_value):
+        hostile_calls.append("type")
+        raise AssertionError("hostile type executed")
+
+    monkeypatch.setattr(capture_module, "type", hostile_type, raising=False)
+
+    with pytest.raises(TypeError, match="source_spec must be exact"):
+        capture_module.capture_campaign_complete_game_board(
+            precommit_locator=None,
+            store=None,
+            source_spec=None,
+            evidence_store=None,
+            request=None,
+            api_key="secret-value",
+        )
+
+    assert hostile_calls == []
+
+
+def test_capture_does_not_dispatch_through_shadowed_callable_before_guard(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    locator, store, spec, provider_store = _setup(tmp_path)
+    hostile_calls: list[str] = []
+
+    def hostile_callable(_value):
+        hostile_calls.append("callable")
+        raise AssertionError("hostile callable executed")
+
+    monkeypatch.setattr(capture_module, "callable", hostile_callable, raising=False)
+
+    with pytest.raises(TypeError, match="clock must be callable"):
+        capture_module.capture_campaign_complete_game_board(
+            precommit_locator=locator,
+            store=store,
+            source_spec=spec,
+            evidence_store=provider_store,
+            request=_request(),
+            api_key="secret-value",
+            clock=object(),
+        )
+
+    assert hostile_calls == []
+
+
+def test_capture_does_not_dispatch_through_shadowed_getattr_before_guard(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    locator, store, spec, _provider_store = _setup(tmp_path)
+    hostile_calls: list[str] = []
+
+    def hostile_getattr(*_args, **_kwargs):
+        hostile_calls.append("getattr")
+        raise AssertionError("hostile getattr executed")
+
+    monkeypatch.setattr(capture_module, "getattr", hostile_getattr, raising=False)
+
+    with pytest.raises(TypeError, match="evidence_store must be the exact"):
+        capture_module.capture_campaign_complete_game_board(
+            precommit_locator=locator,
+            store=store,
+            source_spec=spec,
+            evidence_store=None,
+            request=_request(),
+            api_key="secret-value",
+            timeout_seconds=3.0,
+            clock=_clock(),
+        )
+
+    assert hostile_calls == []
+
+
+def test_imported_provider_scope_guard_captures_type_and_getattr_primitives(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    locator, _store, _spec, provider_store = _setup(tmp_path)
+    hostile_calls: list[str] = []
+
+    def hostile(*_args, **_kwargs):
+        hostile_calls.append("primitive")
+        raise AssertionError("hostile builtin executed")
+
+    monkeypatch.setattr(capture_module, "type", hostile, raising=False)
+    monkeypatch.setattr(capture_module, "getattr", hostile, raising=False)
+
+    binding_module._PROVIDER_EVIDENCE_SCOPE(locator, provider_store)
+
+    assert hostile_calls == []

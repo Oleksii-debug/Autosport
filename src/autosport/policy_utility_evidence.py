@@ -14,6 +14,7 @@ import threading
 from typing import Any, Mapping
 
 from .integrity import durable_path_lock
+from .json_integrity import strict_json_loads
 
 
 SCHEMA_VERSION = 1
@@ -518,8 +519,8 @@ class PolicyUtilityStore:
                         f"empty policy utility store record at line {line_number}"
                     )
                 try:
-                    raw = json.loads(line)
-                except (json.JSONDecodeError, UnicodeError) as exc:
+                    raw = strict_json_loads(line)
+                except (ValueError, UnicodeError) as exc:
                     raise PolicyUtilityError(
                         f"invalid policy utility store JSON at line {line_number}"
                     ) from exc

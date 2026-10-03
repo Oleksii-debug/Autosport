@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+import json
 
 import pytest
 
@@ -470,3 +471,30 @@ def test_repeated_hostile_utility_variants_cannot_activity_farm_policy_generatio
 
     assert len(gate_ids) == len(hostile_values)
     assert policy.generation == 0
+
+
+def test_durable_store_rejects_duplicate_authority_key_even_when_last_value_is_valid(tmp_path) -> None:
+    policy, action, reward, transition, _ = _scenario()
+    original = _utility(policy, action, reward, transition)
+    path = tmp_path / "policy-utility.json"
+    assert PolicyUtilityStore(path).append(original) is True
+
+    # Preserve the final, otherwise-valid authority value and its existing
+    # evidence digest, but prepend a conflicting duplicate key. Plain
+    # json.loads() is last-wins and would silently erase the hostile value,
+    # accepting ambiguous durable bytes as canonical reward/economic evidence.
+    raw = path.read_text(encoding="utf-8").rstrip("\n")
+    marker = json.dumps("risk_fingerprint") + ":" + json.dumps(RISK_SHA256)
+    hostile = "7" * 64
+    duplicated = (
+        json.dumps("risk_fingerprint")
+        + ":"
+        + json.dumps(hostile)
+        + ","
+        + marker
+    )
+    assert marker in raw
+    path.write_text(raw.replace(marker, duplicated, 1) + "\n", encoding="utf-8")
+
+    with pytest.raises(PolicyUtilityError, match="invalid policy utility store JSON"):
+        PolicyUtilityStore(path)

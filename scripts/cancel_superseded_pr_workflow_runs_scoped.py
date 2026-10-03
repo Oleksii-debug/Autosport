@@ -67,7 +67,11 @@ def _cancel_run_or_defer_active_conflict(api: GitHubApi, run_id: int) -> bool:
     later sweep, but preserve every other cancellation error as fatal/unknown.
     """
 
-    run_id = _require_positive_int(run_id, field="run id")
+    # This helper sits directly between exact run-identity proof and api.cancel().
+    # Preserve that proven primitive coordinate; a rebound compatibility validator
+    # must not be able to substitute another run after the proof has completed.
+    if type(run_id) is not int or run_id <= 0:
+        raise CancellationError("invalid run id")
     try:
         api.cancel(run_id)
     except CancellationError as exc:

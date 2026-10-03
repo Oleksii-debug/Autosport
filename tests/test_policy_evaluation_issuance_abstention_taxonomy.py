@@ -306,6 +306,29 @@ def test_no_action_baseline_rejects_custom_abstention_alias():
         )
 
 
+def test_no_action_baseline_rejects_policy_loss_mismatch_before_zeroing():
+    actions = (("case-a", "WAIT"), ("case-b", "NO_BET"))
+    protocol = _protocol(
+        ("case-a", "case-b"),
+        supported_baseline_kind=BaselineKind.NO_BET_WAIT,
+    )
+
+    with pytest.raises(
+        issuance.ProductPolicyEvaluationIssuanceError,
+        match="does not reconcile to canonical policy_loss",
+    ):
+        issuance._derive_policy_evaluation(
+            protocol,
+            issuance._target(protocol, BaselineKind.NO_BET_WAIT),
+            _source(
+                actions,
+                net_reward="0.75",
+                cost="0.25",
+                policy_loss="0",
+            ),
+        )
+
+
 def test_candidate_projection_keeps_reconciled_predictive_utility_semantics():
     actions = (("case-a", "WAIT"), ("case-b", "NO_BET"))
     protocol = _protocol(("case-a", "case-b"))

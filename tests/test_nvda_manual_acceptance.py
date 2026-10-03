@@ -377,6 +377,56 @@ def test_unrelated_candidate_successor_does_not_stale_current_resolution(tmp_pat
     )
 
 
+def test_resolution_verifier_rejects_issued_ledger_path_rebinding(tmp_path):
+    transcript = _transcript()
+    ledger = _ledger(tmp_path)
+    _record(ledger, transcript, reviewed_at=T0)
+    resolution = _resolve(ledger, transcript)
+    assert resolution is not None
+
+    ledger.path = tmp_path / "other-manual-nvda.jsonl"
+
+    with pytest.raises(
+        NvdaManualAcceptanceStateError,
+        match="ledger authority changed after issuance",
+    ):
+        verify_manual_nvda_acceptance_resolution(
+            resolution,
+            expected_artifact_sha256=ARTIFACT_SHA,
+            expected_source_sha=SOURCE_SHA,
+            expected_transcript_sha256=resolution.record.transcript_sha256,
+        )
+
+
+def test_resolution_verifier_rejects_instance_events_override(tmp_path):
+    transcript = _transcript()
+    ledger = _ledger(tmp_path)
+    _record(ledger, transcript, reviewed_at=T0)
+    resolution = _resolve(ledger, transcript)
+    assert resolution is not None
+    hostile_called = False
+
+    def hostile_events():
+        nonlocal hostile_called
+        hostile_called = True
+        return (resolution.record,)
+
+    ledger.events = hostile_events  # type: ignore[method-assign]
+
+    with pytest.raises(
+        NvdaManualAcceptanceStateError,
+        match="ledger authority changed after issuance",
+    ):
+        verify_manual_nvda_acceptance_resolution(
+            resolution,
+            expected_artifact_sha256=ARTIFACT_SHA,
+            expected_source_sha=SOURCE_SHA,
+            expected_transcript_sha256=resolution.record.transcript_sha256,
+        )
+
+    assert hostile_called is False
+
+
 def test_new_decision_must_not_backdate_or_reuse_timestamp(tmp_path):
     transcript = _transcript()
     ledger = _ledger(tmp_path)

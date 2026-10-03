@@ -623,11 +623,11 @@ def _product_clock_admission_timestamp(
     return instant.isoformat().replace("+00:00", "Z")
 
 
-def _context_with_product_admission_time(
+def _quote_context_with_product_admission_time(
     context: ProposedTicketRiskContext,
     admission_ts: str,
 ) -> ProposedTicketRiskContext:
-    """Preserve proposal evidence while replacing caller time with product time."""
+    """Build quote-only context using product time without rewriting other evidence."""
 
     return ProposedTicketRiskContext(
         legs=context.legs,
@@ -635,11 +635,7 @@ def _context_with_product_admission_time(
         provider_accounts=context.provider_accounts,
         bankroll_id=context.bankroll_id,
         currency=context.currency,
-        measurement_window_start=context.measurement_window_start,
-        measurement_window_end=context.measurement_window_end,
         proposal_ts=admission_ts,
-        risk_of_ruin_upper_bound=context.risk_of_ruin_upper_bound,
-        risk_of_ruin_evidence=context.risk_of_ruin_evidence,
     )
 
 
@@ -1099,7 +1095,6 @@ def admit_paper_ticket(
         pre_evaluation_state = risk_policy._book_state(working_book)
         goal = risk_policy.economic_goal
         day_authority: _ProductDayAdmissionAuthority | None = None
-        effective_context = context
         effective_placed_at = placed_at
         if goal is not None:
             day_authority = _revalidated_product_day_admission_authority(
@@ -1112,32 +1107,44 @@ def admit_paper_ticket(
             )
             if day_authority is not None:
                 effective_placed_at = day_authority.admission_ts
-                if context is not None:
-                    try:
-                        effective_context = _context_with_product_admission_time(
-                            context,
-                            day_authority.admission_ts,
-                        )
-                    except (TypeError, ValueError):
-                        day_authority = None
-                        effective_context = context
-                        effective_placed_at = placed_at
 
-        decision = risk_policy.evaluate(
-            working_book,
-            amount,
-            context=effective_context,
-        )
+        decision = risk_policy.evaluate(working_book, amount, context=context)
 
-        # Positive economic-goal risk must use the exact product-owned action instant.
-        # Caller proposal_ts remains input binding only: using it as causal cutoff can
-        # hide newer bankroll lifecycle events or make an actually stale quote appear
-        # fresh. Cross-day caller timestamps still fail the current-day membership
-        # check, while accepted tickets persist the product-owned instant.
+        # Quote freshness is admission-time truth, not caller-time truth. Keep the
+        # original context for provenance-bound risk-of-ruin/history semantics, but
+        # independently re-run the canonical quote gate against the product-owned
+        # action instant before any path can become positive.
+        if (
+            goal is not None
+            and day_authority is not None
+            and context is not None
+            and (
+                decision.allowed
+                or decision.reason == "economic goal turnover limit exceeded"
+            )
+        ):
+            try:
+                quote_context = _quote_context_with_product_admission_time(
+                    context,
+                    day_authority.admission_ts,
+                )
+            except (TypeError, ValueError):
+                decision = RiskDecision(
+                    False,
+                    "economic goal product-time quote evidence is invalid",
+                )
+            else:
+                authoritative_quote_decision = _RISK_QUOTE_FROZEN(
+                    goal,
+                    quote_context,
+                )
+                if authoritative_quote_decision is not None:
+                    decision = authoritative_quote_decision
+
         turnover_override_candidate = (
             not decision.allowed
             and decision.reason == "economic goal turnover limit exceeded"
-            and effective_context is not None
+            and context is not None
         )
         turnover_room = (
             None if day_authority is None else day_authority.turnover_room
@@ -1156,12 +1163,12 @@ def admit_paper_ticket(
                 )
         elif turnover_override_candidate:
             if turnover_room is not None and amount <= turnover_room:
-                assert effective_context is not None
+                assert context is not None
                 decision = _resume_after_product_day_turnover(
                     risk_policy=risk_policy,
                     book=working_book,
                     amount=amount,
-                    context=effective_context,
+                    context=context,
                     pre_evaluation_state=pre_evaluation_state,
                 )
         if not decision.allowed:

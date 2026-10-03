@@ -731,6 +731,7 @@ def capture_campaign_complete_game_board(
     expected_unshadowed_builtins = ("any", "len", "set", "sorted", "tuple")
 
     def require_stable_dispatch() -> None:
+        require_public_surface()
         for builtin_name in expected_unshadowed_builtins:
             if builtin_name in module_globals:
                 raise CampaignProviderCycleCaptureIntegrityError(

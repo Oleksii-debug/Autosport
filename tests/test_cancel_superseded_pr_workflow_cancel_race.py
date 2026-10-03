@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 
+import scripts.cancel_superseded_pr_workflow_runs as controller_module
 from scripts.cancel_superseded_pr_workflow_runs import (
     CancellationError,
     GitHubApi,
@@ -35,30 +36,58 @@ def test_cancel_conflict_is_benign_after_run_completed(monkeypatch) -> None:
     ]
 
 
-def test_cancel_accepts_nonempty_success_response_body(monkeypatch) -> None:
+class _FakeSuccessResponse:
+    def __init__(self, status: int, body: bytes) -> None:
+        self.status = status
+        self._body = body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, traceback):
+        return False
+
+    def read(self) -> bytes:
+        return self._body
+
+
+def test_cancel_accepts_nonempty_202_success_response_body(monkeypatch) -> None:
     api = GitHubApi(repository="owner/repo", token="token")
-    calls: list[tuple[str, str, frozenset[int]]] = []
+    calls: list[tuple[str, str, int]] = []
 
-    def fake_request(
-        path: str,
-        *,
-        method: str = "GET",
-        allowed_http_errors: frozenset[int] = frozenset(),
-    ) -> object:
-        calls.append((path, method, allowed_http_errors))
-        assert path == "/actions/runs/123/cancel"
-        assert method == "POST"
-        assert allowed_http_errors == frozenset({409})
-        # A successful HTTP response may carry JSON without changing the
-        # endpoint's 202 Accepted cancellation contract.
-        return {"message": "accepted"}
+    def fake_urlopen(request, *, timeout: int):
+        calls.append((request.full_url, request.get_method(), timeout))
+        return _FakeSuccessResponse(202, b'{"message":"accepted"}')
 
-    monkeypatch.setattr(api, "_request", fake_request)
+    monkeypatch.setattr(controller_module, "urlopen", fake_urlopen)
     api.cancel(123)
 
     assert calls == [
-        ("/actions/runs/123/cancel", "POST", frozenset({409})),
+        ("https://api.github.com/repos/owner/repo/actions/runs/123/cancel", "POST", 20),
     ]
+
+
+@pytest.mark.parametrize(
+    ("status", "body"),
+    [
+        (200, b'{"message":"ok"}'),
+        (204, b""),
+    ],
+)
+def test_cancel_rejects_undocumented_success_status(monkeypatch, status, body) -> None:
+    api = GitHubApi(repository="owner/repo", token="token")
+
+    monkeypatch.setattr(
+        controller_module,
+        "urlopen",
+        lambda *_args, **_kwargs: _FakeSuccessResponse(status, body),
+    )
+
+    with pytest.raises(
+        CancellationError,
+        match="cancellation returned unexpected HTTP status",
+    ):
+        api.cancel(123)
 
 
 def test_cancel_conflict_fails_closed_while_run_remains_active(monkeypatch) -> None:

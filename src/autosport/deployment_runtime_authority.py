@@ -248,7 +248,7 @@ _CANONICAL_MONOTONIC_AUTHORITY_CLASS_SURFACE: Final = tuple(
 # The instance dictionary is retained for explicit crash/fault injection seams, but
 # positive/read authority must never dispatch through caller-owned instance shadows.
 # These methods either expose validated durable truth or are part of its verification
-# graph; _write_atomic_path and _observed_now deliberately remain injectable.
+# graph; only _write_atomic_path deliberately remains injectable.
 _SEALED_STORE_DISPATCH_NAMES: Final = frozenset(
     {
         "append",
@@ -1343,6 +1343,7 @@ _IMMUTABLE_STORE_ROOT_SURFACE: Final = frozenset(
         "_WRITE_ONCE_AUTHORITY_BINDINGS",
         "_WRITE_ONCE_AUTHORITY_STORAGE_BINDINGS",
         "_CANONICAL_DISPATCH_EXPECTATIONS",
+        "_CANONICAL_SEALED_DISPATCH_NAMES",
     }
 )
 
@@ -1380,6 +1381,8 @@ class DeploymentRuntimeAuthorityStore(metaclass=_DeploymentRuntimeAuthorityStore
     therefore detects whole-file deletion or restoration of older, locally-valid
     bytes while its separate machine-state root survives.
     """
+
+    _CANONICAL_SEALED_DISPATCH_NAMES: Final = _SEALED_STORE_DISPATCH_NAMES
 
     # Keep an instance dictionary for deliberately injected crash/falsifier seams,
     # but never store authority-bearing bindings in it. Data descriptors backed by
@@ -1422,10 +1425,20 @@ class DeploymentRuntimeAuthorityStore(metaclass=_DeploymentRuntimeAuthorityStore
     )
 
     def __getattribute__(self, name: str) -> object:
-        if name in _SEALED_STORE_DISPATCH_NAMES:
-            if type(self) is not DeploymentRuntimeAuthorityStore:
-                raise TypeError(
-                    "runtime authority store must be exact DeploymentRuntimeAuthorityStore"
+        sealed_names = vars(DeploymentRuntimeAuthorityStore).get(
+            "_CANONICAL_SEALED_DISPATCH_NAMES"
+        )
+        if type(sealed_names) is not frozenset:
+            raise DeploymentRuntimeAuthorityError(
+                "runtime authority store sealed dispatch root was replaced"
+            )
+        if name in sealed_names:
+            if (
+                _SEALED_STORE_DISPATCH_NAMES is not sealed_names
+                or type(self) is not DeploymentRuntimeAuthorityStore
+            ):
+                raise DeploymentRuntimeAuthorityError(
+                    "runtime authority store sealed dispatch root was replaced"
                 )
             expectation_root = vars(DeploymentRuntimeAuthorityStore).get(
                 "_CANONICAL_DISPATCH_EXPECTATIONS"
@@ -2565,7 +2578,7 @@ class DeploymentRuntimeAuthorityStore(metaclass=_DeploymentRuntimeAuthorityStore
         str,
         tuple[object, object, object, tuple[tuple[str, object], ...]],
     ] = {}
-    for _dispatch_name in _SEALED_STORE_DISPATCH_NAMES:
+    for _dispatch_name in _CANONICAL_SEALED_DISPATCH_NAMES:
         _dispatch_descriptor = locals()[_dispatch_name]
         _dispatch_callable = getattr(
             _dispatch_descriptor,

@@ -2365,6 +2365,59 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             self.assertEqual(resumed_observer.calls, 0)
             self.assertFalse((workspace / "decisions.jsonl").exists())
 
+    def test_pending_recovery_rechecks_factory_provenance_before_promotion(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+
+            def fail_after_pending(input_id, snapshot):
+                raise RuntimeError("simulated process loss after pending cursor")
+
+            fail_after_pending.strategy_version_id = "live-test-strategy-v1"
+            fail_after_pending.source_sha256 = self.INTENT_SOURCE_SHA256
+            fail_after_pending.environment_sha256 = self.INTENT_ENVIRONMENT_SHA256
+            fail_after_pending.config_sha256 = self.INTENT_CONFIG_SHA256
+            first = self._loop(
+                workspace,
+                observer=_DurableObserver(
+                    workspace,
+                    [(self._event(selection="selection-a", sequence=1),)],
+                ),
+                factory=fail_after_pending,
+                clock=_ManualClock(self.START + timedelta(seconds=1)),
+            )
+            first.register_input("input-a", selection_ids="selection-a")
+            with self.assertRaisesRegex(RuntimeError, "simulated process loss"):
+                first.run_cycle()
+
+            resumed_observer = _DurableObserver(workspace, [()])
+            resumed_factory = _EmptyIntentFactory()
+            resumed = self._loop(
+                workspace,
+                observer=resumed_observer,
+                factory=resumed_factory,
+                clock=_ManualClock(self.START + timedelta(seconds=2)),
+            )
+            original_refresh = resumed._refresh_intents_from_replay
+
+            def refresh_then_mutate(*args, **kwargs):
+                original_refresh(*args, **kwargs)
+                resumed_factory.source_sha256 = "f" * 64
+
+            with patch.object(
+                resumed,
+                "_refresh_intents_from_replay",
+                side_effect=refresh_then_mutate,
+            ):
+                with self.assertRaisesRegex(
+                    LiveDecisionProgressError,
+                    "factory source_sha256 provenance changed",
+                ):
+                    resumed.run_cycle()
+
+            self.assertEqual(resumed_observer.calls, 0)
+            self.assertFalse((workspace / "decisions.jsonl").exists())
+            self.assertEqual(resumed._load_progress().phase, "pending")
+
     def test_pending_restart_rejects_changed_intent_provenance_before_poll(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

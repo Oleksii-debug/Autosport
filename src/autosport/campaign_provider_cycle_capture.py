@@ -260,15 +260,27 @@ class CampaignCompleteBoardCycleReceipt:
         cls, payload: dict[str, object]
     ) -> "CampaignCompleteBoardCycleReceipt":
         instance = object.__new__(cls)
-        for name in cls.__dataclass_fields__:
+        for name in _RECEIPT_FIELD_NAMES:
             object.__setattr__(instance, name, payload[name])
         return instance
 
     def to_dict(self) -> dict[str, object]:
         return {
             name: getattr(self, name)
-            for name in self.__dataclass_fields__
+            for name in _RECEIPT_FIELD_NAMES
         }
+
+
+_RECEIPT_FIELD_NAMES = tuple(
+    CampaignCompleteBoardCycleReceipt.__dataclass_fields__
+)
+_RECEIPT_FIELD_DESCRIPTORS = tuple(
+    (
+        name,
+        inspect.getattr_static(CampaignCompleteBoardCycleReceipt, name),
+    )
+    for name in _RECEIPT_FIELD_NAMES
+)
 
 
 def _issue_receipt(
@@ -354,6 +366,8 @@ def capture_campaign_complete_game_board(
     )
     expected_inspect = inspect
     expected_getattr_static = inspect.getattr_static
+    expected_receipt_field_names = _RECEIPT_FIELD_NAMES
+    expected_receipt_field_descriptors = _RECEIPT_FIELD_DESCRIPTORS
     expected_hashlib = hashlib
     expected_sha256 = hashlib.sha256
     expected_json = json
@@ -368,6 +382,23 @@ def capture_campaign_complete_game_board(
         ):
             raise CampaignProviderCycleCaptureIntegrityError(
                 "campaign provider-cycle reflection dispatch changed"
+            )
+        if (
+            module_globals.get("_RECEIPT_FIELD_NAMES")
+            is not expected_receipt_field_names
+            or module_globals.get("_RECEIPT_FIELD_DESCRIPTORS")
+            is not expected_receipt_field_descriptors
+            or any(
+                expected_getattr_static(
+                    CampaignCompleteBoardCycleReceipt,
+                    name,
+                )
+                is not descriptor
+                for name, descriptor in expected_receipt_field_descriptors
+            )
+        ):
+            raise CampaignProviderCycleCaptureIntegrityError(
+                "campaign provider-cycle receipt field authority changed"
             )
         if (
             module_globals.get("hashlib") is not expected_hashlib
@@ -649,6 +680,8 @@ def _seal_campaign_provider_cycle_capture_dispatch() -> None:
     expected_capture_code = expected_capture.__code__
     expected_inspect = inspect
     expected_getattr_static = inspect.getattr_static
+    expected_receipt_field_names = _RECEIPT_FIELD_NAMES
+    expected_receipt_field_descriptors = _RECEIPT_FIELD_DESCRIPTORS
     expected_hashlib = hashlib
     expected_sha256 = hashlib.sha256
     expected_json = json
@@ -670,6 +703,8 @@ def _seal_campaign_provider_cycle_capture_dispatch() -> None:
         "json": expected_json,
         "datetime": expected_datetime,
         "UTC": expected_utc,
+        "_RECEIPT_FIELD_NAMES": expected_receipt_field_names,
+        "_RECEIPT_FIELD_DESCRIPTORS": expected_receipt_field_descriptors,
         "ARTIFACT_KIND": ARTIFACT_KIND,
     }
     expected_callables = tuple(
@@ -715,6 +750,17 @@ def _seal_campaign_provider_cycle_capture_dispatch() -> None:
         if expected_inspect.getattr_static is not expected_getattr_static:
             raise expected_error(
                 "campaign provider-cycle reflection dispatch changed"
+            )
+        if any(
+            expected_getattr_static(
+                CampaignCompleteBoardCycleReceipt,
+                name,
+            )
+            is not descriptor
+            for name, descriptor in expected_receipt_field_descriptors
+        ):
+            raise expected_error(
+                "campaign provider-cycle receipt field authority changed"
             )
         if (
             expected_hashlib.sha256 is not expected_sha256

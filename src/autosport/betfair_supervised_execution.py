@@ -509,6 +509,7 @@ class BetfairPlaceExecutionReport:
                     "size_matched": str(
                         self.instruction.size_matched
                     ),
+                    "order_status": self.instruction.order_status,
                 },
             }
         )

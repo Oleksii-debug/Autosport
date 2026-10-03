@@ -750,22 +750,6 @@ def test_currentness_rejects_snapshot_class_replacement_before_dispatch(
         "verified_snapshot",
         fake_snapshot,
     )
-    monkeypatch.setattr(
-        capital_risk_module,
-        "_require_ledger_read_authority",
-        lambda: None,
-    )
-    monkeypatch.setattr(
-        capital_risk_module,
-        "_READ_VERIFIED_EXECUTION_VIEW",
-        fake_view,
-    )
-    monkeypatch.setattr(
-        capital_risk_module,
-        "_READ_VERIFIED_SNAPSHOT",
-        fake_snapshot,
-    )
-
     with pytest.raises(
         ExecutionCapitalAtRiskError,
         match="capital-risk ledger read dispatch changed",
@@ -921,12 +905,63 @@ def test_currentness_rejects_coordinated_snapshot_witness_rebinding(
         "verified_snapshot",
         fake_snapshot,
     )
+    monkeypatch.setattr(
+        capital_risk_module,
+        "_require_ledger_read_authority",
+        lambda: None,
+    )
+    monkeypatch.setattr(
+        capital_risk_module,
+        "_READ_VERIFIED_EXECUTION_VIEW",
+        fake_view,
+    )
+    monkeypatch.setattr(
+        capital_risk_module,
+        "_READ_VERIFIED_SNAPSHOT",
+        fake_snapshot,
+    )
 
     with pytest.raises(
         ExecutionCapitalAtRiskError,
-        match="canonical execution-ledger read authority changed",
+        match="capital-risk ledger read dispatch changed",
     ):
         evidence.assert_issued_current(ledger)
 
     assert called is False
+
+def test_public_issue_helper_cannot_mint_underreported_risk_authority(
+    tmp_path,
+) -> None:
+    ledger, plan = _ledger(tmp_path, _action(stake="10"))
+    evidence = resolve_execution_capital_at_risk(ledger, plan.plan_id)
+    original = evidence.attempts[0]
+
+    forged_attempt = replace(
+        original,
+        requested_stake=Decimal("1"),
+        requested_capital_at_limit=Decimal("1"),
+        contingent_unknown_capital=Decimal("1"),
+        max_plausible_capital_at_risk=Decimal("1"),
+    )
+    provisional = replace(
+        evidence,
+        attempts=(forged_attempt,),
+        contingent_unknown_capital=Decimal("1"),
+        max_plausible_capital_at_risk=Decimal("1"),
+        evidence_sha256="0" * 64,
+    )
+    forged = replace(
+        provisional,
+        evidence_sha256=capital_risk_module._evidence_digest(provisional),
+    )
+
+    # The legacy helper remains for compatibility with the raw resolver, but it
+    # is no longer sufficient to mint the closure-owned product issuance token.
+    capital_risk_module._issue(forged)
+
+    with pytest.raises(
+        ExecutionCapitalAtRiskError,
+        match="not current product-issued authority",
+    ):
+        forged.assert_issued_current(ledger)
 

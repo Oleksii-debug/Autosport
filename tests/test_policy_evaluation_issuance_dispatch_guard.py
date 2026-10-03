@@ -348,3 +348,44 @@ def test_policy_guard_fails_closed_on_internal_checker_class_rebind(monkeypatch)
             None,
             source_evaluation_bundle_id="caller-forged",
         )
+
+def test_policy_guard_fails_closed_on_no_action_source_identity_rebind(monkeypatch):
+    monkeypatch.setattr(
+        issuance,
+        "_NO_ACTION_ISSUER_SOURCE_SHA256",
+        "0" * 64,
+    )
+
+    with pytest.raises(
+        issuance.ProductPolicyEvaluationIssuanceError,
+        match="direct helper graph",
+    ):
+        issuance.issue_product_policy_evaluation(
+            None,
+            None,
+            source_evaluation_bundle_id="caller-forged",
+        )
+
+
+def test_policy_guard_fails_closed_on_issuer_source_selector_rebind(monkeypatch):
+    called = False
+
+    def forged_selector(_target):
+        nonlocal called
+        called = True
+        return "0" * 64
+
+    monkeypatch.setattr(issuance, "_issuer_source_sha256", forged_selector)
+
+    with pytest.raises(
+        issuance.ProductPolicyEvaluationIssuanceError,
+        match="direct helper graph",
+    ):
+        issuance.issue_product_policy_evaluation(
+            None,
+            None,
+            source_evaluation_bundle_id="caller-forged",
+        )
+
+    assert called is False
+

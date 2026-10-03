@@ -4,6 +4,7 @@ from datetime import timedelta
 from decimal import Decimal
 from threading import Event, Thread, current_thread
 from time import monotonic, sleep
+from types import MethodType
 
 from autosport.agents import AgentContext
 from autosport.decision_ledger import JsonlDecisionLedger
@@ -114,40 +115,38 @@ def _run_agent(
         done.set()
 
 
-class _PostWitnessBlockingPaperBook(PaperBook):
-    """Block target materialization after the canonical risk witness commits."""
+class _PostWitnessBlocker:
+    """Test-only blocker installed on one exact canonical PaperBook instance."""
 
-    def __init__(self, initial_balance: str, *, blocked: Event, release: Event) -> None:
-        super().__init__(initial_balance)
+    def __init__(self, book: PaperBook, *, blocked: Event, release: Event) -> None:
         self.blocked = blocked
         self.release = release
         self.blocking_thread: Thread | None = None
+        original_open_ticket = book.open_ticket
 
-    def open_ticket(self, *args, **kwargs):
-        # Canonical PaperValue execution reaches PaperBook materialization only
-        # after _issue_general_risk_admission has durably committed and while the
-        # runtime's execution RLock is still held.  Blocking here preserves the
-        # production authority graph and leaves the exact JsonlDecisionLedger in
-        # place for decision-origin verification.
-        if (
-            self.blocking_thread is not None
-            and current_thread() is self.blocking_thread
-        ):
-            self.blocked.set()
-            if not self.release.wait(timeout=5):
-                raise AssertionError("target execution was not released")
-        return super().open_ticket(*args, **kwargs)
+        def blocking_open_ticket(_book: PaperBook, *args, **kwargs):
+            # Install only after canonical runtime construction/durable binding.
+            # Production still receives the exact PaperBook class; this hook only
+            # coordinates the concurrency test at the final materialization seam.
+            if (
+                self.blocking_thread is not None
+                and current_thread() is self.blocking_thread
+            ):
+                self.blocked.set()
+                if not self.release.wait(timeout=5):
+                    raise AssertionError("target execution was not released")
+            return original_open_ticket(*args, **kwargs)
+
+        book.open_ticket = MethodType(blocking_open_ticket, book)
+
+
 
 def test_competing_canonical_execution_cannot_enter_after_general_risk_witness(
     tmp_path,
 ) -> None:
     target_post_witness = Event()
     release_target = Event()
-    book = _PostWitnessBlockingPaperBook(
-        "100.00",
-        blocked=target_post_witness,
-        release=release_target,
-    )
+    book = PaperBook("100.00")
     policy = PaperRiskPolicy(
         max_ticket_fraction=Decimal("0.02"),
         max_committed_fraction=Decimal("0.20"),
@@ -157,6 +156,11 @@ def test_competing_canonical_execution_cannot_enter_after_general_risk_witness(
     assert policy.evaluate(book, Decimal("1.00")).allowed
 
     runtime = _runtime(tmp_path, book)
+    blocker = _PostWitnessBlocker(
+        book,
+        blocked=target_post_witness,
+        release=release_target,
+    )
     target_event = _event("target")
     competitor_event = _event("competitor")
     target_agent = _agent(target_event, policy)
@@ -203,7 +207,7 @@ def test_competing_canonical_execution_cannot_enter_after_general_risk_witness(
         kwargs={"done": competitor_done, "errors": competitor_errors},
         daemon=True,
     )
-    book.blocking_thread = target_thread
+    blocker.blocking_thread = target_thread
 
     target_thread.start()
     try:

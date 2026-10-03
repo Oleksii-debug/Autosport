@@ -371,6 +371,35 @@ def test_open_event_changes_path_identity_without_minting_drawdown(tmp_path):
     assert after.current_equity == before.current_equity
 
 
+def test_evidence_shape_rejects_impossible_internal_metrics(tmp_path):
+    _initialize(tmp_path)
+    evidence = resolve_paper_drawdown_evidence(tmp_path)
+
+    with pytest.raises(
+        PaperDrawdownEvidenceError,
+        match="historical fraction cannot exceed one",
+    ):
+        replace(evidence, historical_max_drawdown_fraction=Decimal("1.01"))
+
+    with pytest.raises(PaperDrawdownEvidenceError, match="minimum equity is invalid"):
+        replace(evidence, minimum_equity=Decimal("101"))
+
+    with pytest.raises(PaperDrawdownEvidenceError, match="recovery flag is inconsistent"):
+        replace(evidence, recovered_to_peak=False)
+
+    with pytest.raises(
+        PaperDrawdownEvidenceError,
+        match="settlement availability flag is invalid",
+    ):
+        replace(evidence, settlement_availability_complete=1)
+
+    with pytest.raises(
+        PaperDrawdownEvidenceError,
+        match="initial/open equity point cannot carry realized P&L",
+    ):
+        replace(evidence.points[0], realized_delta=Decimal("1"))
+
+
 def test_missing_durable_sources_fail_closed(tmp_path):
     with pytest.raises(
         PaperDrawdownEvidenceError,

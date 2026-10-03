@@ -590,7 +590,7 @@ def test_renewal_is_single_flight_and_never_authorizes_login_fallback(tmp_path):
     assert blocked.login_authorized is False
 
 
-def test_successful_renewal_preserves_session_lineage_and_exact_new_expiry(tmp_path):
+def test_refresh_success_without_slot_contract_enters_conservative_wait(tmp_path):
     lifecycle = _lifecycle(tmp_path)
     active = _active(lifecycle)
     due_at = active.access_expires_at - timedelta(minutes=1)
@@ -604,20 +604,31 @@ def test_successful_renewal_preserves_session_lineage_and_exact_new_expiry(tmp_p
         refresh_token_lineage_id=active.session_lineage_id,
     )
 
+    completed_at = due_at + timedelta(seconds=1)
     renewed_expiry = due_at + timedelta(minutes=10)
-    renewed = lifecycle.complete_renewal_success(
+    refreshed = lifecycle.complete_renewal_success(
         attempt_id=started.attempt_id,
-        now=due_at + timedelta(seconds=1),
+        now=completed_at,
         access_expires_at=renewed_expiry,
-    provider_session_slot_preservation_proven=True,
     )
 
-    assert renewed.state is ProphetXSessionState.ACTIVE
-    assert renewed.session_lineage_id == active.session_lineage_id
-    assert renewed.access_expires_at == renewed_expiry
-    assert renewed.slot_hold_until == renewed_expiry
-    assert renewed.last_renewal_failure_class is None
+    assert refreshed.state is ProphetXSessionState.WAIT_FOR_PROVIDER_SESSION_EXPIRY
+    assert refreshed.session_lineage_id is None
+    assert refreshed.access_expires_at is None
+    assert refreshed.slot_hold_until == completed_at + CONSERVATIVE_SESSION_SLOT_HOLD
+    assert refreshed.transient_failures == 0
+    assert refreshed.last_renewal_failure_class is None
 
+    blocked = lifecycle.begin_login(
+        now=completed_at + timedelta(minutes=1),
+        access_token_available=True,
+        access_token_lineage_id=active.session_lineage_id,
+    )
+    assert (
+        blocked.action
+        is ProphetXLoginAdmissionAction.WAIT_FOR_PROVIDER_SESSION_EXPIRY
+    )
+    assert blocked.retry_at == refreshed.slot_hold_until
 
 def test_retryable_renewal_failure_retries_refresh_not_login(tmp_path):
     lifecycle = _lifecycle(tmp_path)
@@ -843,7 +854,7 @@ def test_renewal_before_lead_window_is_rejected(tmp_path):
         )
 
 
-def test_successful_renewal_resets_transient_failure_backoff(tmp_path):
+def test_refresh_success_clears_transient_backoff_without_minting_active(tmp_path):
     lifecycle = _lifecycle(tmp_path)
     active = _active(lifecycle)
     due_at = active.access_expires_at - timedelta(minutes=1)
@@ -864,42 +875,41 @@ def test_successful_renewal_resets_transient_failure_backoff(tmp_path):
         failure=ProphetXRenewalFailureClass.RETRYABLE,
     )
     assert first_failure.transient_failures == 1
-    first_retry_delay = first_failure.retry_not_before - first_failed_at
 
     retry_at = first_failure.retry_not_before
     second_attempt = lifecycle.begin_renewal(
         now=retry_at,
         refresh_token_lineage_id=active.session_lineage_id,
     )
-    renewed = lifecycle.complete_renewal_success(
+    completed_at = retry_at + timedelta(seconds=1)
+    refreshed = lifecycle.complete_renewal_success(
         attempt_id=second_attempt.attempt_id,
-        now=retry_at + timedelta(seconds=1),
-        access_expires_at=retry_at + timedelta(minutes=10),
-        provider_session_slot_preservation_proven=True,
-    )
-    assert renewed.transient_failures == 0
-    assert renewed.last_renewal_failure_class is None
-
-    next_due_at = renewed.access_expires_at - timedelta(minutes=1)
-    lifecycle.begin_login(
-        now=next_due_at,
-        access_token_available=True,
-        access_token_lineage_id=active.session_lineage_id,
-    )
-    third_attempt = lifecycle.begin_renewal(
-        now=next_due_at,
-        refresh_token_lineage_id=active.session_lineage_id,
-    )
-    third_failed_at = next_due_at + timedelta(seconds=1)
-    third_failure = lifecycle.complete_renewal_failure(
-        attempt_id=third_attempt.attempt_id,
-        now=third_failed_at,
-        failure=ProphetXRenewalFailureClass.RETRYABLE,
+        now=completed_at,
+        access_expires_at=completed_at + timedelta(minutes=30),
     )
 
-    assert third_failure.transient_failures == 1
-    assert third_failure.retry_not_before - third_failed_at == first_retry_delay
+    assert refreshed.state is ProphetXSessionState.WAIT_FOR_PROVIDER_SESSION_EXPIRY
+    assert refreshed.transient_failures == 0
+    assert refreshed.last_renewal_failure_class is None
+    assert refreshed.slot_hold_until == completed_at + timedelta(minutes=30)
 
+    restarted = _lifecycle(tmp_path)
+    blocked = restarted.begin_login(
+        now=completed_at + timedelta(minutes=21),
+        access_token_available=False,
+    )
+    assert (
+        blocked.action
+        is ProphetXLoginAdmissionAction.WAIT_FOR_PROVIDER_SESSION_EXPIRY
+    )
+    assert blocked.retry_at == refreshed.slot_hold_until
+
+    admitted = restarted.begin_login(
+        now=refreshed.slot_hold_until,
+        access_token_available=False,
+    )
+    assert admitted.action is ProphetXLoginAdmissionAction.CREATE_LOGIN
+    assert admitted.snapshot.transient_failures == 0
 
 def test_available_access_token_requires_exact_current_session_lineage(tmp_path):
     lifecycle = _lifecycle(tmp_path)
@@ -1222,7 +1232,7 @@ def test_retryable_state_rejects_nonfuture_retry_horizon(tmp_path, state):
         )
 
 
-def test_renewal_success_requires_provider_slot_preservation_proof(tmp_path):
+def test_raw_provider_slot_bool_cannot_authorize_refresh_promotion(tmp_path):
     lifecycle = _lifecycle(tmp_path)
     active = _active(lifecycle)
     due_at = active.access_expires_at - timedelta(minutes=1)
@@ -1236,32 +1246,17 @@ def test_renewal_success_requires_provider_slot_preservation_proof(tmp_path):
         refresh_token_lineage_id=active.session_lineage_id,
     )
 
-    with pytest.raises(
-        ProphetXSessionLifecycleError,
-        match="requires proven provider-session slot preservation",
-    ):
+    with pytest.raises(TypeError, match="unexpected keyword argument"):
         lifecycle.complete_renewal_success(
             attempt_id=started.attempt_id,
             now=due_at + timedelta(seconds=1),
             access_expires_at=due_at + timedelta(minutes=10),
-            provider_session_slot_preservation_proven=False,
+            provider_session_slot_preservation_proven=True,
         )
 
     still_renewing = lifecycle.read_snapshot()
     assert still_renewing.state is ProphetXSessionState.RENEWING
     assert still_renewing.attempt_id == started.attempt_id
-
-    with pytest.raises(
-        ProphetXSessionLifecycleError,
-        match="must be an exact bool",
-    ):
-        lifecycle.complete_renewal_success(
-            attempt_id=started.attempt_id,
-            now=due_at + timedelta(seconds=1),
-            access_expires_at=due_at + timedelta(minutes=10),
-            provider_session_slot_preservation_proven=1,
-        )
-
 
 def test_admission_cannot_forge_login_authority_without_reservation():
     with pytest.raises(

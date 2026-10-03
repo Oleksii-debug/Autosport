@@ -559,6 +559,7 @@ def test_quote_chain_authority_surfaces_reject_runtime_class_rebinding() -> None
         "submit_instruction_identity_bound",
         "provider_request_correlation_bound",
         "actual_submitted_instruction_bound",
+        "acknowledgement_binding_matches",
         "accepted_price_verified",
         "chain_complete",
         "evidence_sha256",
@@ -776,4 +777,23 @@ def test_quote_chain_evidence_constructor_and_field_descriptors_are_sealed() -> 
         ):
             setattr(evidence_type, name, object())
         assert evidence_type.__dict__[name] is original
+
+
+def test_issued_quote_chain_mutation_cannot_mint_acknowledgement_binding(
+    tmp_path,
+) -> None:
+    evidence = _project(_submitted(tmp_path))
+
+    assert evidence.acknowledgement_binding_matches is False
+    object.__setattr__(
+        evidence,
+        "_acknowledgement_binding_matches",
+        True,
+    )
+
+    with pytest.raises(
+        ExecutionQuoteChainError,
+        match="not issued by canonical ledger projection",
+    ):
+        _ = evidence.acknowledgement_binding_matches
 

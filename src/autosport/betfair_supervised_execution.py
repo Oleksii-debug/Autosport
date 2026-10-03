@@ -1881,8 +1881,8 @@ def execute_betfair_supervised_action(
                 attempt_id,
                 existing_attempt.state,
                 (
-                    provider_evidence_id
-                    or acknowledgement.reconciliation_evidence_id
+                    acknowledgement.reconciliation_evidence_id
+                    or provider_evidence_id
                 ),
                 acknowledgement.external_receipt_id,
             )

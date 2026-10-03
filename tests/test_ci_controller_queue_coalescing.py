@@ -168,6 +168,21 @@ def test_workflow_wide_sweep_cancels_stale_runs_for_multiple_ready_prs() -> None
     assert api.cancelled == [10, 20]
 
 
+def test_current_trigger_only_group_needs_no_sweep_qualification_read() -> None:
+    api = SweepApi(
+        (_run(29, "5" * 40, (303,)),),
+        {},
+    )
+
+    assert cancel_superseded_explicit_pr_runs(
+        api,  # type: ignore[arg-type]
+        workflow_name="CI",
+        current_run_id=29,
+    ) == ()
+    assert api.cancelled == []
+    assert api.reads == []
+
+
 def test_workflow_wide_sweep_cancels_same_head_for_nonqualifying_pr() -> None:
     head = "5" * 40
     qualification = PullRequestQualification(
@@ -240,4 +255,7 @@ def test_controller_main_uses_workflow_wide_sweep_and_trigger_boundary() -> None
     )
     assert "cancel_superseded_explicit_pr_runs(" in text
     assert "runs = api.active_runs()" in text
+    assert text.index("sweep_cancelled = cancel_superseded_explicit_pr_runs(") < text.index(
+        "trigger_qualification = api.live_pr_qualification(trigger_pr_number)"
+    )
     assert "_cancel_triggering_run_if_stale_or_nonqualifying(" in text

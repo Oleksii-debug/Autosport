@@ -94,6 +94,8 @@ def test_controller_scheduler_coalesces_all_prs_per_source_workflow() -> None:
     assert "github.event.workflow_run.workflow_id" in concurrency
     assert "github.event.workflow_run.pull_requests" not in concurrency
     assert "github.event.workflow_run.head_sha" not in concurrency
+    assert "github.event.workflow_run.event == 'pull_request'" in concurrency
+    assert "format('non-pr-{0}', github.event.workflow_run.id)" in concurrency
     assert "cancel-in-progress: false" in concurrency
 
 

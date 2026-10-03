@@ -53,6 +53,8 @@ def test_controller_bounds_pending_work_per_source_workflow() -> None:
     assert "github.event.workflow_run.pull_requests" not in concurrency
     assert "github.event.workflow_run.head_sha" not in concurrency
     assert "cancel-in-progress: false" in concurrency
+    assert "github.event.workflow_run.event == 'pull_request'" in concurrency
+    assert "format('non-pr-{0}', github.event.workflow_run.id)" in concurrency
     assert "O(source workflows)" in workflow
     assert "reconciles the whole workflow" in workflow
 
@@ -94,7 +96,8 @@ def test_empty_or_ambiguous_ref_controller_is_bounded_without_gaining_pr_authori
     concurrency = workflow.split("concurrency:", 1)[1].split("jobs:", 1)[0]
     assert "github.event.workflow_run.workflow_id" in concurrency
     assert "github.event.workflow_run.pull_requests" not in concurrency
-    assert "github.event.workflow_run.id" not in concurrency
+    assert "github.event.workflow_run.event == 'pull_request'" in concurrency
+    assert "format('non-pr-{0}', github.event.workflow_run.id)" in concurrency
     assert "Empty/multi-reference source" in workflow
     assert "cannot grant PR cancellation authority" in workflow
     assert "historical association/branch recovery" in workflow
@@ -347,3 +350,16 @@ def test_main_reaches_triggering_run_check_after_orphan_authority_race_skip(
         "orphan-authority-race-skipped",
         "triggering-run-check",
     ]
+
+
+
+def test_non_pr_source_events_cannot_evict_pending_pr_cleanup_controller() -> None:
+    workflow = _text()
+    concurrency = workflow.split("concurrency:", 1)[1].split("jobs:", 1)[0]
+
+    assert "github.event.workflow_run.workflow_id" in concurrency
+    assert "github.event.workflow_run.event == 'pull_request'" in concurrency
+    assert "&& 'pr'" in concurrency
+    assert "format('non-pr-{0}', github.event.workflow_run.id)" in concurrency
+    assert "concurrency is evaluated before the job-level pull_request guard" in workflow
+    assert "source run id is scheduler isolation only" in workflow

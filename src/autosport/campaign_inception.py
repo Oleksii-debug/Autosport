@@ -446,6 +446,8 @@ class CampaignInceptionReceipt:
     manifest_sha256: str
     evaluation_universe_sha256: str
     source_snapshot_sha256: str
+    observation_not_before: str
+    observation_not_after: str
     source_id: str
     publication_authority_id: str
     publication_authority_generation: int
@@ -1045,6 +1047,8 @@ def _issue_receipt(
         "manifest_sha256": precommit["manifest_sha256"],
         "evaluation_universe_sha256": precommit["evaluation_universe_sha256"],
         "source_snapshot_sha256": precommit["source_snapshot_sha256"],
+        "observation_not_before": precommit["observation_not_before"],
+        "observation_not_after": precommit["observation_not_after"],
         "source_id": precommit["source_id"],
         "publication_authority_id": precommit["publication_authority_id"],
         "publication_authority_generation": precommit[

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gc
 import json
 from types import FunctionType, MappingProxyType
 from weakref import ref
@@ -418,6 +419,7 @@ def test_durable_resolve_remains_non_authoritative_without_new_provider_read(
         )
     assert durable.source_authority_proven is False
 
+
 def test_closure_boundary_live_registry_rejects_mangled_slot_mint(
     tmp_path,
     monkeypatch,
@@ -567,4 +569,49 @@ def test_closure_boundary_registry_snapshots_are_read_only(
         issued[id(acquirer)] = issued[id(acquirer)]
     with pytest.raises(TypeError):
         live["forged"] = object()
+
+def test_closure_boundary_immutable_live_snapshot_preserves_weakref_expiry(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    database = tmp_path / "account.sqlite3"
+    calls = _install_transport(
+        monkeypatch,
+        [_DEVELOPER_APPS, _DETAILS, _FUNDS],
+    )
+    acquirer = BetfairAccountSnapshotAcquirer(
+        database,
+        _credentials("A"),
+        account_id="default-account",
+    )
+    live = acquirer.acquire(
+        _balance_capabilities(),
+        acquisition_id="weakref-expiry",
+    )
+    assert len(calls) == 3
+    live_ref = ref(live)
+    del live
+    gc.collect()
+    assert live_ref() is None
+
+    authority = _extract_inner_authority_boundary(
+        _extract_outer_guard_raw_acquire()
+    )
+    live_registry = getattr(
+        authority,
+        "_AccountSnapshotAuthorityBoundary__live",
+    )
+    assert type(live_registry) is MappingProxyType
+    assert "weakref-expiry" not in live_registry
+
+    retry_calls = _install_transport(monkeypatch, [])
+    with pytest.raises(
+        AccountSnapshotAcquisitionError,
+        match="durable acquisition cannot reissue provider-origin authority",
+    ):
+        acquirer.acquire(
+            _balance_capabilities(),
+            acquisition_id="weakref-expiry",
+        )
+    assert retry_calls == []
 

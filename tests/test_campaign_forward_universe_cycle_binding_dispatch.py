@@ -85,6 +85,47 @@ def test_composed_verification_receipt_fixes_nonpromotion_truth() -> None:
     assert len(receipt.receipt_sha256) == 64
 
 
+def test_composed_verification_receipt_preserves_negative_structural_verdict() -> None:
+    identity = ForwardUniverseAuthorityIdentity(
+        precommit_authority_sha256="a" * 64,
+        prospective_evaluation_plan_sha256="b" * 64,
+        backing_locator_sha256="c" * 64,
+        universe_sha256="d" * 64,
+        membership_sha256="e" * 64,
+        member_count=1,
+    )
+    authority = binding.CampaignForwardUniverseCycleAuthority._issue(
+        campaign_id="campaign-1",
+        source_id="parlayapi:table_tennis",
+        cycle_receipt_sha256="1" * 64,
+        campaign_receipt_sha256="2" * 64,
+        provider_evidence_sha256="3" * 64,
+        provider_frame_sha256="4" * 64,
+        collector_artifact_evidence_sha256="5" * 64,
+        forward_identity=identity,
+    )
+    structural = VerificationResult(
+        ok=False,
+        codes=(VerificationCode.ECONOMICS_INCOMPLETE,),
+        protocol_sha256="6" * 64,
+        terminal_root_sha256=None,
+        candidate_count=1,
+        details=(("missing_cost", "1"),),
+    )
+
+    receipt = binding.CampaignForwardEvidenceVerification._issue(
+        authority=authority,
+        structural_result=structural,
+    )
+
+    assert receipt.structural_ok is False
+    assert receipt.structural_codes == ("ECONOMICS_INCOMPLETE",)
+    assert receipt.provider_universe_authority_resolved is True
+    assert receipt.promotion_ready is False
+    assert receipt.real_money_ready is False
+    assert receipt.terminal_root_sha256 is None
+
+
 def test_composed_verification_receipt_is_not_caller_constructible() -> None:
     with pytest.raises(TypeError, match="resolver-issued"):
         binding.CampaignForwardEvidenceVerification(

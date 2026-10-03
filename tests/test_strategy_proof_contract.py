@@ -2,6 +2,8 @@ from dataclasses import FrozenInstanceError
 
 import pytest
 
+import autosport.strategy_proof_contract as strategy_proof_module
+
 from autosport.opportunity import OpportunityDecision, StrategyClass
 from autosport.strategy_proof_contract import (
     ProofRequirement,
@@ -367,3 +369,105 @@ def test_hostile_proof_container_subclasses_fail_before_virtual_dispatch() -> No
             execution_authorized=False,
         )
 
+
+
+
+class _ForgedStrategy:
+    pass
+
+
+class _ForgedProof:
+    def __init__(self, value: str) -> None:
+        self.value = value
+
+    def __hash__(self) -> int:
+        return hash(self.value)
+
+    def __eq__(self, other: object) -> bool:
+        return getattr(other, "value", None) == self.value
+
+
+def test_coordinated_module_global_rebind_cannot_replace_taxonomy_roots(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    canonical_required = _required(StrategyClass.ARBITRAGE)
+
+    fake_arbitrage = _ForgedStrategy()
+    _ForgedStrategy.PREDICTIVE_EDGE = _ForgedStrategy()
+    _ForgedStrategy.HYBRID = _ForgedStrategy()
+    fake_proof = _ForgedProof("caller-defined-proof")
+
+    def poison(*_args, **_kwargs):
+        raise AssertionError("rebound taxonomy authority executed")
+
+    class _PoisonContract:
+        def __init__(self, **_kwargs) -> None:
+            raise AssertionError("rebound StrategyProofContract executed")
+
+    class _PoisonEvaluation:
+        def __init__(self, **_kwargs) -> None:
+            raise AssertionError("rebound StrategyProofEvaluation executed")
+
+    monkeypatch.setattr(strategy_proof_module, "StrategyClass", _ForgedStrategy)
+    monkeypatch.setattr(strategy_proof_module, "ProofRequirement", _ForgedProof)
+    monkeypatch.setattr(
+        strategy_proof_module,
+        "_CLASS_REQUIREMENTS",
+        {fake_arbitrage: frozenset({fake_proof})},
+    )
+    monkeypatch.setattr(strategy_proof_module, "_PREDICTIVE", frozenset())
+    monkeypatch.setattr(strategy_proof_module, "_strategy_class", poison)
+    monkeypatch.setattr(strategy_proof_module, "_required_for", poison)
+    monkeypatch.setattr(strategy_proof_module, "_proofs", poison)
+    monkeypatch.setattr(
+        strategy_proof_module,
+        "StrategyProofContract",
+        _PoisonContract,
+    )
+    monkeypatch.setattr(
+        strategy_proof_module,
+        "StrategyProofEvaluation",
+        _PoisonEvaluation,
+    )
+    for name in ("tuple", "frozenset", "sorted", "type", "any", "bool"):
+        monkeypatch.setattr(
+            strategy_proof_module,
+            name,
+            poison,
+            raising=False,
+        )
+
+    contract = proof_contract_for(
+        StrategyClass.ARBITRAGE,
+        claims_probability_edge=False,
+    )
+    assert type(contract) is StrategyProofContract
+    assert frozenset(contract.required_proofs) == canonical_required
+
+    evaluation = evaluate_strategy_proofs(
+        StrategyClass.ARBITRAGE,
+        canonical_required,
+        claims_probability_edge=False,
+    )
+    assert type(evaluation) is StrategyProofEvaluation
+    assert evaluation.required_labels_present is True
+    assert evaluation.execution_authorized is False
+
+    with pytest.raises(
+        StrategyProofContractError,
+        match="strategy_class must be a StrategyClass",
+    ):
+        proof_contract_for(
+            fake_arbitrage,  # type: ignore[arg-type]
+            claims_probability_edge=False,
+        )
+
+    with pytest.raises(
+        StrategyProofContractError,
+        match="required_proofs must contain only ProofRequirement values",
+    ):
+        StrategyProofContract(
+            strategy_class=StrategyClass.ARBITRAGE,
+            claims_probability_edge=False,
+            required_proofs=(fake_proof,),  # type: ignore[arg-type]
+        )

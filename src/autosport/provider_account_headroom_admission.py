@@ -2231,7 +2231,10 @@ def reserve_observed_provider_headroom(
         bound_by_plan_id = _validated_bound_plan_map(bound_plans)
         intent_denomination_by_identity = _validated_intent_denomination_map(intents)
         workspace = _canonical_ledger_workspace(ledger)
-        with _canonical_economic_lock(workspace):
+        # New product-internal capital consumption must keep the exact provider
+        # BALANCE_READ generation current through the ledger CAS. The helper acquires
+        # the workspace economic lock first, then the provider-generation hold.
+        with _current_balance_generation_lock(workspace, acquired):
             (
                 current_goal_sha256,
                 current_goal_bankroll_id,

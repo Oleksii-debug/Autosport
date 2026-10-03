@@ -270,13 +270,15 @@ def run_endurance(
         restart_started = time.perf_counter()
         for _cycle in range(cfg.restart_cycles):
             restarted = SQLiteMarketStore(primary / "market.db")
-            restarted_history = restarted.events()
-            restart_hashes.append(ReplayEngine(restarted_history).dataset_hash)
-            restart_projection_counts.append(len(restarted.current()))
-            state = SourceHealthStore(primary / "source_health.json").get(cfg.source_id)
-            if state.latest_source_ts != quotes[-1].source_ts:
-                restart_hashes.append("SOURCE_HEALTH_HIGH_WATER_MISMATCH")
-            restarted.close()
+            try:
+                restarted_history = restarted.events()
+                restart_hashes.append(ReplayEngine(restarted_history).dataset_hash)
+                restart_projection_counts.append(len(restarted.current()))
+                state = SourceHealthStore(primary / "source_health.json").get(cfg.source_id)
+                if state.latest_source_ts != quotes[-1].source_ts:
+                    restart_hashes.append("SOURCE_HEALTH_HIGH_WATER_MISMATCH")
+            finally:
+                restarted.close()
         restart_elapsed = time.perf_counter() - restart_started
 
         mirror_started = time.perf_counter()

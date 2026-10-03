@@ -139,8 +139,9 @@ def _probability_claim(
     *,
     _error_type: type[StrategyProofContractError] = StrategyProofContractError,
     _type=type,
+    _bool_type=bool,
 ) -> bool:
-    if _type(value) is not bool:
+    if _type(value) is not _bool_type:
         raise _error_type("claims_probability_edge must be a bool")
     return value
 
@@ -228,6 +229,7 @@ class StrategyProofContract:
         _tuple_type=tuple,
         _frozenset_type=frozenset,
         _any=any,
+        _bool_type=bool,
     ) -> None:
         canonical_class = _strategy_validator(self.strategy_class)
         canonical_claim = _claim_validator(self.claims_probability_edge)
@@ -335,7 +337,7 @@ class StrategyProofEvaluation:
                 "required_labels_present does not match missing_proofs"
             )
 
-        if _type(self.execution_authorized) is not bool:
+        if _type(self.execution_authorized) is not _bool_type:
             raise _error_type("execution_authorized must be a bool")
         if self.execution_authorized:
             raise _error_type(

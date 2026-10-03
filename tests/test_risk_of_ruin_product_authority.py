@@ -530,6 +530,7 @@ def test_policy_authority_gate_preserves_current_main_root_identity() -> None:
         assert method.__closure__ is None
         assert "_PRODUCT_RISK_AUTHORITY_DISPATCH" not in method.__code__.co_names
 
+
 def test_vector_rebound_policy_authority_helper_cannot_grant_positive_stake(
     monkeypatch,
 ) -> None:

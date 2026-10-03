@@ -4276,3 +4276,77 @@ def test_runtime_authority_reopen_rejects_canonical_path_code_root_rebinding(
             path,
             authority_root=authority_root,
         )
+
+
+def test_runtime_authority_sealed_dispatch_root_is_class_immutable() -> None:
+    original = vars(DeploymentRuntimeAuthorityStore)[
+        "_CANONICAL_SEALED_DISPATCH_NAMES"
+    ]
+
+    with pytest.raises(
+        TypeError,
+        match="runtime authority store root surface is immutable",
+    ):
+        setattr(
+            DeploymentRuntimeAuthorityStore,
+            "_CANONICAL_SEALED_DISPATCH_NAMES",
+            frozenset(),
+        )
+
+    with pytest.raises(
+        TypeError,
+        match="runtime authority store root surface is immutable",
+    ):
+        delattr(
+            DeploymentRuntimeAuthorityStore,
+            "_CANONICAL_SEALED_DISPATCH_NAMES",
+        )
+
+    assert (
+        vars(DeploymentRuntimeAuthorityStore)[
+            "_CANONICAL_SEALED_DISPATCH_NAMES"
+        ]
+        is original
+    )
+
+
+@pytest.mark.parametrize("replacement_mode", ("empty", "equal_copy"))
+def test_runtime_authority_rejects_sealed_dispatch_membership_root_rebinding(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    replacement_mode: str,
+) -> None:
+    path = tmp_path / "deployment-runtime-authority.json"
+    store = DeploymentRuntimeAuthorityStore.initialize_pristine(
+        path,
+        authority_root=_authority_root(tmp_path),
+    )
+    _append(store, 0)
+    hostile_calls: list[None] = []
+
+    def hostile_records() -> tuple[object, ...]:
+        hostile_calls.append(None)
+        raise AssertionError("hostile records shadow executed")
+
+    store.__dict__["records"] = hostile_records
+    original = deployment_runtime_authority._SEALED_STORE_DISPATCH_NAMES
+    replacement = (
+        frozenset()
+        if replacement_mode == "empty"
+        else frozenset(set(original))
+    )
+    assert replacement is not original
+
+    monkeypatch.setattr(
+        deployment_runtime_authority,
+        "_SEALED_STORE_DISPATCH_NAMES",
+        replacement,
+    )
+
+    with pytest.raises(
+        DeploymentRuntimeAuthorityError,
+        match="sealed dispatch root was replaced",
+    ):
+        store.records()
+
+    assert hostile_calls == []

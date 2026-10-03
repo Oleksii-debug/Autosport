@@ -877,6 +877,95 @@ def _install_provider_capability_authority():
 ) = _install_provider_capability_authority()
 
 
+def _matrix_authority_scope(
+    matrix: ProviderCapabilityEvidenceMatrix,
+) -> tuple[object, ...]:
+    return (
+        matrix.profile.venue_id,
+        matrix.profile.account_id,
+        matrix.profile.adapter_id,
+        matrix.profile.adapter_version,
+        matrix.integration.integration_kind,
+        matrix.environment,
+        matrix.application_mode,
+    )
+
+
+class ProviderCapabilityEvidenceMatrixJournal:
+    """Deterministic in-process linear authority for product-issued matrices.
+
+    The journal deliberately stores exact product-issued objects rather than serialized
+    positive authority. A process restart must rebuild qualified matrix authority from
+    fresh/product-owned upstream evidence instead of deserializing a current matrix.
+    """
+
+    def __init__(self) -> None:
+        self._matrices: dict[str, ProviderCapabilityEvidenceMatrix] = {}
+        self._latest_by_scope: dict[tuple[object, ...], str] = {}
+
+    def publish(self, matrix: ProviderCapabilityEvidenceMatrix) -> str:
+        if type(matrix) is not ProviderCapabilityEvidenceMatrix:
+            raise ProviderCapabilityEvidenceMatrixError(
+                "matrix journal accepts exact ProviderCapabilityEvidenceMatrix only"
+            )
+        if not _is_product_issued_matrix(matrix):
+            raise ProviderCapabilityEvidenceMatrixError(
+                "matrix journal requires product-issued exact matrix"
+            )
+        matrix_id = matrix.matrix_id
+        existing = self._matrices.get(matrix_id)
+        if existing is matrix:
+            return matrix_id
+        if existing is not None:
+            raise ProviderCapabilityEvidenceMatrixError(
+                "matrix id collision across distinct objects"
+            )
+
+        scope = _matrix_authority_scope(matrix)
+        latest_id = self._latest_by_scope.get(scope)
+        if matrix.matrix_version == 1:
+            if latest_id is not None:
+                raise ProviderCapabilityEvidenceMatrixError(
+                    "matrix authority scope already has a root"
+                )
+        else:
+            if latest_id is None:
+                raise ProviderCapabilityEvidenceMatrixError(
+                    "matrix successor requires an existing journal root"
+                )
+            if matrix.predecessor_matrix_id != latest_id:
+                raise ProviderCapabilityEvidenceMatrixError(
+                    "matrix successor must extend exact journal latest"
+                )
+            previous = self._matrices[latest_id]
+            if not _is_product_issued_matrix(previous):
+                raise ProviderCapabilityEvidenceMatrixError(
+                    "journal latest matrix was mutated after publication"
+                )
+            validate_capability_matrix_successor(previous, matrix)
+
+        self._matrices[matrix_id] = matrix
+        self._latest_by_scope[scope] = matrix_id
+        return matrix_id
+
+    def latest_for(
+        self, anchor: ProviderCapabilityEvidenceMatrix
+    ) -> ProviderCapabilityEvidenceMatrix | None:
+        if type(anchor) is not ProviderCapabilityEvidenceMatrix:
+            raise ProviderCapabilityEvidenceMatrixError(
+                "matrix journal anchor must be exact matrix"
+            )
+        latest_id = self._latest_by_scope.get(_matrix_authority_scope(anchor))
+        if latest_id is None:
+            return None
+        matrix = self._matrices[latest_id]
+        if not _is_product_issued_matrix(matrix):
+            raise ProviderCapabilityEvidenceMatrixError(
+                "journal latest matrix was mutated after publication"
+            )
+        return matrix
+
+
 def validate_capability_matrix_successor(
     previous: ProviderCapabilityEvidenceMatrix,
     current: ProviderCapabilityEvidenceMatrix,
@@ -927,8 +1016,10 @@ def validate_capability_matrix_successor(
         raise ProviderCapabilityEvidenceMatrixError(
             "successor integration observation moved backwards"
         )
-    if _time(current.as_of, "current.as_of") < _time(previous.as_of, "previous.as_of"):
-        raise ProviderCapabilityEvidenceMatrixError("successor time moved backwards")
+    if _time(current.as_of, "current.as_of") <= _time(previous.as_of, "previous.as_of"):
+        raise ProviderCapabilityEvidenceMatrixError(
+            "successor time must advance strictly"
+        )
     if not _is_product_issued_matrix(previous) or not _is_product_issued_matrix(current):
         raise ProviderCapabilityEvidenceMatrixError(
             "successor matrices must be product-issued exact objects with unchanged payload"

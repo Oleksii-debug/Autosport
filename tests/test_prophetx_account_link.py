@@ -297,6 +297,73 @@ def test_partial_or_missing_manual_credentials_never_call_sink(access_key, secre
     assert ctl.public_snapshot().credential_present is False
 
 
+def test_second_manual_token_import_cannot_orphan_first_credential_reference():
+    ctl, _, sink, _ = controller()
+    ctl.import_approved_api_token(
+        access_key="ACCESS_SECRET",
+        secret_key="SUPER_SECRET",
+        environment="sandbox",
+    )
+    first_ref = sink.result
+    sink.result = "credential-ref-2"
+
+    with pytest.raises(
+        AccountLinkStateError,
+        match="explicitly unlinked",
+    ):
+        ctl.import_approved_api_token(
+            access_key="SECOND_ACCESS",
+            secret_key="SECOND_SECRET",
+            environment="sandbox",
+        )
+
+    assert len(sink.calls) == 1
+    assert ctl.public_snapshot().credential_present is True
+    assert ctl.public_snapshot().can_import_approved_api_token is False
+    removed = []
+    ctl.unlink(remover=removed.append)
+    assert removed == [first_ref]
+
+
+def test_failed_unlink_keeps_existing_credential_authoritative_and_blocks_relink():
+    ctl, _, sink, _ = controller()
+    ctl.import_approved_api_token(
+        access_key="ACCESS_SECRET",
+        secret_key="SUPER_SECRET",
+        environment="sandbox",
+    )
+    calls = []
+
+    def failing_remover(reference):
+        calls.append(reference)
+        raise RuntimeError("secret backend unavailable")
+
+    ctl.unlink(remover=failing_remover)
+
+    snap = ctl.public_snapshot()
+    assert calls == ["credential-ref-1"]
+    assert snap.credential_present is True
+    assert snap.can_submit_login is False
+    assert snap.can_import_approved_api_token is False
+    assert ctl.surface_contract().focus_target == "linked_status"
+
+    with pytest.raises(AccountLinkStateError, match="explicitly unlinked"):
+        ctl.open_login()
+    with pytest.raises(AccountLinkStateError, match="explicitly unlinked"):
+        ctl.submit_login(email="other@example.test", password="OTHER_SECRET")
+    with pytest.raises(AccountLinkStateError, match="explicitly unlinked"):
+        ctl.import_approved_api_token(
+            access_key="SECOND_ACCESS",
+            secret_key="SECOND_SECRET",
+            environment="production",
+        )
+    assert len(sink.calls) == 1
+
+    ctl.cancel()
+    assert ctl.state is AccountLinkState.LINKED_CREDENTIAL_STORED
+    assert ctl.public_snapshot().credential_present is True
+
+
 def test_sink_failure_is_bounded_and_retains_no_credential_reference():
     ctl, _, sink, _ = controller()
     sink.failure = RuntimeError("SUPER_SECRET storage details")

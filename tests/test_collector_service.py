@@ -2,6 +2,7 @@ import json
 import signal
 import tempfile
 import unittest
+from unittest.mock import patch
 from dataclasses import replace
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -25,6 +26,7 @@ from autosport.collector_service import (
     HeadlessCollectorService,
     ReadOnlyCollectorDeltaFeed,
     _SignalStopRequest,
+    main as collector_service_main,
 )
 from autosport.domain import MarketEvent
 from autosport.event_lifecycle import CatalogEvent, CatalogPage, EventPhase
@@ -238,6 +240,39 @@ class HeadlessCollectorServiceTests(unittest.TestCase):
 
             self.assertEqual(source.catalog_calls, 0)
             self.assertEqual(source.delta_calls, 0)
+
+    def test_cli_returns_retention_exit_when_source_binding_exhausts_budget(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            page = catalog_page(1, "event-1")
+
+            class BackpressuredBindingSource(FakeCollectorSource):
+                def bind_collector_store(self, store):
+                    raise CollectorStorageBackpressureError(
+                        "RETENTION_REQUIRED: simulated migration budget exhaustion"
+                    )
+
+            source = BackpressuredBindingSource([page], [()])
+            with patch(
+                "autosport.collector_service._load_source_factory",
+                return_value=lambda: source,
+            ), patch("builtins.print") as output:
+                code = collector_service_main(
+                    [
+                        "--workspace",
+                        tmp,
+                        "--source-factory",
+                        "ignored:factory",
+                        "--run-id",
+                        "run-1",
+                    ]
+                )
+
+            self.assertEqual(code, 4)
+            self.assertEqual(source.catalog_calls, 0)
+            self.assertEqual(source.delta_calls, 0)
+            payload = json.loads(output.call_args.args[0])
+            self.assertEqual(payload["error_code"], "RETENTION_REQUIRED")
+            self.assertEqual(payload["source_id"], "source-x")
 
     def test_runtime_epoch_activation_is_durable_and_revalidated_each_cycle(self):
         with tempfile.TemporaryDirectory() as tmp:

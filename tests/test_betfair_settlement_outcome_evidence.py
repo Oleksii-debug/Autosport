@@ -455,3 +455,121 @@ def test_captured_resolve_rejects_public_require_root_rebind(
             external_bet_id="bet-777",
         )
 
+def test_outcome_internal_evidence_constructor_rebind_fails_before_execution(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    store, ledger, plan, action, ref, _transport, client = _context(tmp_path)
+    _ingest(store, ledger, plan, action, _capture(client, ref))
+    hostile_calls: list[str] = []
+
+    def hostile_evidence(**_kwargs):
+        hostile_calls.append("evidence")
+        raise AssertionError("hostile evidence constructor executed")
+
+    monkeypatch.setattr(outcome_module, "_EVIDENCE_TYPE", hostile_evidence)
+
+    with pytest.raises(
+        BetfairOutcomeEvidenceError,
+        match="authority dispatch changed",
+    ):
+        resolve_current_binary_selection_outcome(
+            store,
+            bookmaker_id="betfair",
+            account_id="acct-1",
+            external_bet_id="bet-777",
+        )
+
+    assert hostile_calls == []
+
+
+@pytest.mark.parametrize(
+    ("name", "replacement"),
+    [
+        ("_ALLOWED_BET_OUTCOMES", frozenset({"WON", "LOST", "PUSH"})),
+        ("_ALLOWED_SIDES", frozenset({"BACK", "LAY", "HOSTILE"})),
+        ("_SCHEMA", "autosport.hostile"),
+        ("_SCHEMA_VERSION", 2),
+    ],
+)
+def test_outcome_semantic_constant_rebind_fails_before_projection(
+    tmp_path,
+    monkeypatch,
+    name,
+    replacement,
+) -> None:
+    store, ledger, plan, action, ref, _transport, client = _context(tmp_path)
+    _ingest(store, ledger, plan, action, _capture(client, ref))
+    monkeypatch.setattr(outcome_module, name, replacement)
+
+    with pytest.raises(
+        BetfairOutcomeEvidenceError,
+        match="authority dispatch changed",
+    ):
+        resolve_current_binary_selection_outcome(
+            store,
+            bookmaker_id="betfair",
+            account_id="acct-1",
+            external_bet_id="bet-777",
+        )
+
+
+@pytest.mark.parametrize("name", ["_digest", "_canonical"])
+def test_outcome_digest_authority_rebind_fails_before_hostile_execution(
+    tmp_path,
+    monkeypatch,
+    name,
+) -> None:
+    store, ledger, plan, action, ref, _transport, client = _context(tmp_path)
+    _ingest(store, ledger, plan, action, _capture(client, ref))
+    hostile_calls: list[str] = []
+
+    def hostile(*_args, **_kwargs):
+        hostile_calls.append(name)
+        raise AssertionError(f"hostile {name} executed")
+
+    monkeypatch.setattr(outcome_module, name, hostile)
+
+    with pytest.raises(
+        BetfairOutcomeEvidenceError,
+        match="authority dispatch changed",
+    ):
+        resolve_current_binary_selection_outcome(
+            store,
+            bookmaker_id="betfair",
+            account_id="acct-1",
+            external_bet_id="bet-777",
+        )
+
+    assert hostile_calls == []
+
+
+@pytest.mark.parametrize("name", ["type", "bool", "int", "getattr", "dict"])
+def test_outcome_builtin_shadow_fails_before_hostile_execution(
+    tmp_path,
+    monkeypatch,
+    name,
+) -> None:
+    store, ledger, plan, action, ref, _transport, client = _context(tmp_path)
+    _ingest(store, ledger, plan, action, _capture(client, ref))
+    hostile_calls: list[str] = []
+
+    def hostile(*_args, **_kwargs):
+        hostile_calls.append(name)
+        raise AssertionError(f"hostile builtin {name} executed")
+
+    monkeypatch.setattr(outcome_module, name, hostile, raising=False)
+
+    with pytest.raises(
+        BetfairOutcomeEvidenceError,
+        match="authority dispatch changed",
+    ):
+        resolve_current_binary_selection_outcome(
+            store,
+            bookmaker_id="betfair",
+            account_id="acct-1",
+            external_bet_id="bet-777",
+        )
+
+    assert hostile_calls == []
+

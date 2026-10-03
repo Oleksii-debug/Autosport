@@ -15,7 +15,7 @@ from autosport.economic_goal import EconomicGoalContract
 from autosport.economic_goal_store import EconomicGoalStore
 from autosport.monotonic_workspace_authority import MonotonicWorkspaceAuthority
 from autosport.paper import PaperBook
-from autosport.risk import PaperRiskPolicy, ProposedTicketRiskContext
+from autosport.risk import PaperRiskPolicy, ProposedTicketRiskContext, RiskOfRuinEvidence
 from autosport.risk_day_window import ProductDayRiskWindowStore
 from autosport.risk_turnover_evidence import PaperDayTurnoverResolver
 from autosport.workspace_lock import WorkspaceEconomicLock
@@ -512,6 +512,71 @@ def test_turnover_override_cannot_use_caller_time_to_refresh_stale_quote(tmp_pat
     }
     persisted = PaperBook.load(tmp_path / "paper_book.json")
     assert tuple(persisted.tickets) == tuple(book.tickets)
+
+
+def test_product_action_time_preserves_provenance_bound_proposal_context(tmp_path):
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    requested = now - timedelta(seconds=1)
+    if requested.date() != now.date():
+        pytest.skip("needs one second of current UTC-day history")
+
+    goal = replace(
+        _goal(),
+        max_turnover_fraction=Decimal("1"),
+        max_quote_age_seconds=Decimal("30"),
+        max_risk_of_ruin=Decimal("0.5"),
+    )
+    EconomicGoalStore(tmp_path).initialize_owner(goal)
+    book = PaperBook("100")
+    book.save(tmp_path / "paper_book.json")
+    candidate = _leg("product-action-provenance")
+    base_context = _context(candidate, _timestamp(requested))
+    policy = _policy(goal)
+    portfolio_sha256 = policy.risk_of_ruin_portfolio_sha256(book)
+    candidate_sha256 = policy.risk_of_ruin_candidate_sha256(base_context)
+    assert portfolio_sha256 is not None
+    assert candidate_sha256 is not None
+    evidence = RiskOfRuinEvidence(
+        evidence_id="product-action-time-ruin-evidence",
+        research_protocol_sha256="a" * 64,
+        reproducibility_bundle_sha256="b" * 64,
+        producer_identity="test-risk-model-source",
+        causal_cutoff=_timestamp(requested - timedelta(seconds=2)),
+        evaluated_at=_timestamp(requested - timedelta(seconds=1)),
+        bankroll_id="paper-bankroll",
+        currency="USD",
+        base_portfolio_sha256=portfolio_sha256,
+        candidate_sha256=candidate_sha256,
+        evaluated_stake=Decimal("0.01"),
+        upper_bound=Decimal("0.1"),
+    )
+    context = replace(base_context, risk_of_ruin_evidence=evidence)
+
+    baseline = policy.evaluate(book, Decimal("0.01"), context=context)
+    assert baseline.allowed is True
+
+    result = admit_paper_ticket(
+        workspace=tmp_path,
+        book=book,
+        risk_policy=policy,
+        stake=Decimal("0.01"),
+        legs=(candidate,),
+        reason="proposal provenance and action time have distinct authority",
+        placed_at=_timestamp(requested),
+        context=context,
+        provider_source_ids=("provider-1",),
+        bankroll_id="paper-bankroll",
+        currency="USD",
+    )
+
+    assert result.admitted is True
+    assert result.ticket is not None
+    assert context.proposal_ts == _timestamp(requested)
+    assert policy.risk_of_ruin_candidate_sha256(context) == candidate_sha256
+    persisted_time = datetime.fromisoformat(
+        result.ticket.placed_at.replace("Z", "+00:00")
+    ).astimezone(timezone.utc)
+    assert persisted_time > requested
 
 
 def test_positive_economic_admission_persists_product_action_time(tmp_path):

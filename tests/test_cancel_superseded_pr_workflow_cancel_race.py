@@ -114,6 +114,34 @@ def test_cancel_rejects_class_mutated_request_dispatch(monkeypatch) -> None:
         api.cancel(123)
 
 
+def test_cancel_rejects_in_place_request_code_rebind() -> None:
+    api = GitHubApi(repository="owner/repo", token="token")
+    original_code = GitHubApi._request.__code__
+
+    def forged_request(
+        self,
+        path,
+        *,
+        method="GET",
+        allowed_http_errors=frozenset(),
+    ):
+        del self, path, method, allowed_http_errors
+        return globals()["_CANCELLATION_ACCEPTED"]
+
+    forged_code = forged_request.__code__
+    assert len(forged_code.co_freevars) == len(original_code.co_freevars)
+
+    try:
+        GitHubApi._request.__code__ = forged_code
+        with pytest.raises(
+            CancellationError,
+            match="cancellation request dispatch changed",
+        ):
+            api.cancel(123)
+    finally:
+        GitHubApi._request.__code__ = original_code
+
+
 def test_cancel_rejects_coordinated_request_and_witness_rebind(monkeypatch) -> None:
     api = GitHubApi(repository="owner/repo", token="token")
     forged_acceptance = object()

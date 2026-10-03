@@ -363,11 +363,16 @@ class GitHubApi:
         allowed_http_error_type,
         cancellation_accepted,
     ):
+        request_impl_code = getattr(request_impl, "__code__", None)
+        if request_impl_code is None:
+            raise RuntimeError("canonical cancellation request executable is unavailable")
+
         def cancel(self, run_id: int) -> None:
             run_id = _require_positive_int(run_id, field="run id")
             bound_request = getattr(self, "_request", None)
             if (
-                getattr(bound_request, "__self__", None) is not self
+                getattr(request_impl, "__code__", None) is not request_impl_code
+                or getattr(bound_request, "__self__", None) is not self
                 or getattr(bound_request, "__func__", None) is not request_impl
             ):
                 raise CancellationError(

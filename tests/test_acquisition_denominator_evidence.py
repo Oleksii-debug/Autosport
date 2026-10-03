@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from tempfile import TemporaryDirectory
+import weakref
 
 import pytest
 
@@ -776,3 +777,159 @@ def test_direct_construction_cannot_mint_positive_coverage() -> None:
             schema_version=1,
             acquisition_complete_by_universe_freeze=True,
         )
+
+
+def _closure_cell(function, name: str):
+    closure = function.__closure__
+    assert closure is not None
+    index = function.__code__.co_freevars.index(name)
+    return closure[index]
+
+
+def _forge_complete_acquisition_evidence_for_authority_falsifier(
+    incomplete: AcquisitionDenominatorEvidence,
+) -> AcquisitionDenominatorEvidence:
+    values = {
+        name: getattr(incomplete, name)
+        for name in incomplete.__dataclass_fields__
+    }
+    values.update(
+        success_nonempty_count=0,
+        success_empty_count=incomplete.expected_slot_count,
+        provider_unavailable_count=0,
+        local_failure_count=0,
+        stop_requested_count=0,
+        pending_or_late_terminal_count=0,
+        terminal_after_freeze_count=0,
+        observed_delta_occurrence_count=0,
+        observed_unique_delta_count=0,
+        scheduled_start_coverage_complete=True,
+        acquisition_complete_by_universe_freeze=True,
+        coverage_strength=(
+            AcquisitionCoverageStrength.SCHEDULED_CYCLE_WINDOW_COMPLETE
+        ),
+        positive_evaluation_lineage_complete=False,
+        external_provider_universe_complete=False,
+        promotion_ready=False,
+        evidence_sha256="0" * 64,
+    )
+    provisional = AcquisitionDenominatorEvidence._issue(values)
+    values["evidence_sha256"] = acquisition_denominator_evidence._digest(
+        {
+            "schema": acquisition_denominator_evidence._SCHEMA,
+            **provisional.to_payload(include_digest=False),
+        }
+    )
+    return AcquisitionDenominatorEvidence._issue(values)
+
+
+def test_coherent_raw_builder_closure_rewrite_cannot_mint_product_authority() -> None:
+    with TemporaryDirectory() as tmp:
+        path = Path(tmp) / "collector.db"
+        store = CollectorDeltaStore(path)
+        _ensure_schedule(store)
+        cycle = _start_slot(store, 0)
+        _finish(
+            store,
+            cycle,
+            status="PROVIDER_UNAVAILABLE",
+            completed_at="2026-09-22T00:00:05+00:00",
+        )
+        source = build_source_universe_commitment(
+            store,
+            expected_store_path=path,
+            source_id=SOURCE_ID,
+            start_cycle_seq=cycle,
+            end_cycle_seq=cycle,
+        )
+        universe = _universe()
+        incomplete = build_acquisition_denominator_evidence(
+            store,
+            source,
+            universe,
+            expected_store_path=path,
+            expected_source_id=SOURCE_ID,
+            expected_run_id=RUN_ID,
+            expected_start_slot_ordinal=0,
+            expected_end_slot_ordinal=0,
+        )
+        assert incomplete.acquisition_complete_by_universe_freeze is False
+        forged = _forge_complete_acquisition_evidence_for_authority_falsifier(incomplete)
+        hostile_calls: list[object] = []
+
+        def hostile_builder(*args, **kwargs):
+            hostile_calls.append((args, kwargs))
+            return forged
+
+        public_builder = (
+            acquisition_denominator_evidence.build_acquisition_denominator_evidence
+        )
+        dispatch = _closure_cell(
+            public_builder,
+            "require_canonical_reader_dispatch",
+        ).cell_contents
+        raw_build_cell = _closure_cell(public_builder, "raw_build")
+        raw_build_code_cell = _closure_cell(dispatch, "raw_build_code")
+        prior_build = raw_build_cell.cell_contents
+        prior_code = raw_build_code_cell.cell_contents
+        try:
+            raw_build_cell.cell_contents = hostile_builder
+            raw_build_code_cell.cell_contents = hostile_builder.__code__
+            with pytest.raises(
+                AcquisitionDenominatorEvidenceError,
+                match="canonical acquisition .* authority changed",
+            ):
+                acquisition_denominator_evidence.build_acquisition_denominator_evidence(
+                    store,
+                    source,
+                    universe,
+                    expected_store_path=path,
+                    expected_source_id=SOURCE_ID,
+                    expected_run_id=RUN_ID,
+                    expected_start_slot_ordinal=0,
+                    expected_end_slot_ordinal=0,
+                )
+        finally:
+            raw_build_cell.cell_contents = prior_build
+            raw_build_code_cell.cell_contents = prior_code
+
+        assert hostile_calls == []
+
+
+def test_fake_issued_registry_closure_cannot_authorize_forged_complete_evidence() -> None:
+    with TemporaryDirectory() as tmp:
+        path = Path(tmp) / "collector.db"
+        store = CollectorDeltaStore(path)
+        _ensure_schedule(store)
+        cycle = _start_slot(store, 0)
+        _finish(
+            store,
+            cycle,
+            status="PROVIDER_UNAVAILABLE",
+            completed_at="2026-09-22T00:00:05+00:00",
+        )
+        incomplete = _build(
+            store,
+            path,
+            start_cycle_seq=cycle,
+            end_cycle_seq=cycle,
+            end_slot=0,
+        )
+        forged = _forge_complete_acquisition_evidence_for_authority_falsifier(incomplete)
+        public_require = (
+            acquisition_denominator_evidence.require_complete_acquisition_coverage
+        )
+        issued_cell = _closure_cell(public_require, "issued")
+        prior_issued = issued_cell.cell_contents
+        fake_issued = {
+            id(forged): (weakref.ref(forged), forged.evidence_sha256)
+        }
+        try:
+            issued_cell.cell_contents = fake_issued
+            with pytest.raises(
+                AcquisitionDenominatorEvidenceError,
+                match="canonical acquisition requirement authority changed",
+            ):
+                public_require(forged)
+        finally:
+            issued_cell.cell_contents = prior_issued

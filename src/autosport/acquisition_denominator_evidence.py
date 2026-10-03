@@ -500,26 +500,154 @@ def _install_acquisition_denominator_authority() -> None:
     raw_cycle_reader = _cycle_evidence
     raw_resolve_reader_code = raw_resolve_reader.__code__
     raw_cycle_reader_code = raw_cycle_reader.__code__
+    exact_getattr = getattr
+    exact_globals = globals
+    exact_id = id
+    exact_type = type
+    weakref_ref = weakref.ref
+
+    def anchor_code_constants(function, anchors, label: str) -> None:
+        constants = function.__code__.co_consts
+        if any(
+            sum(item == marker for item in constants) != 1
+            for marker, _anchored in anchors
+        ):
+            raise RuntimeError(f"{label} code anchor is ambiguous")
+        function.__code__ = function.__code__.replace(
+            co_consts=tuple(
+                next(
+                    (
+                        anchored
+                        for marker, anchored in anchors
+                        if item == marker
+                    ),
+                    item,
+                )
+                for item in constants
+            )
+        )
+
+    dispatch_error_marker = "__AUTOSPORT_ACQ_DISPATCH_ERROR_ANCHOR__"
+    dispatch_build_marker = "__AUTOSPORT_ACQ_DISPATCH_BUILD_ANCHOR__"
+    dispatch_build_code_marker = "__AUTOSPORT_ACQ_DISPATCH_BUILD_CODE_ANCHOR__"
+    dispatch_resolve_marker = "__AUTOSPORT_ACQ_DISPATCH_RESOLVE_ANCHOR__"
+    dispatch_resolve_code_marker = (
+        "__AUTOSPORT_ACQ_DISPATCH_RESOLVE_CODE_ANCHOR__"
+    )
+    dispatch_cycle_marker = "__AUTOSPORT_ACQ_DISPATCH_CYCLE_ANCHOR__"
+    dispatch_cycle_code_marker = "__AUTOSPORT_ACQ_DISPATCH_CYCLE_CODE_ANCHOR__"
+    dispatch_getattr_marker = "__AUTOSPORT_ACQ_DISPATCH_GETATTR_ANCHOR__"
+    dispatch_globals_marker = "__AUTOSPORT_ACQ_DISPATCH_GLOBALS_ANCHOR__"
 
     def require_canonical_reader_dispatch() -> None:
-        if (
-            getattr(raw_build, "__code__", None) is not raw_build_code
-            or globals().get("_resolve_scheduled_source_universe_canonical")
-            is not raw_resolve_reader
-            or getattr(raw_resolve_reader, "__code__", None)
-            is not raw_resolve_reader_code
-            or globals().get("_cycle_evidence") is not raw_cycle_reader
-            or getattr(raw_cycle_reader, "__code__", None) is not raw_cycle_reader_code
-        ):
-            raise AcquisitionDenominatorEvidenceError(
-                "canonical acquisition reader dispatch changed"
-            )
+        Error = "__AUTOSPORT_ACQ_DISPATCH_ERROR_ANCHOR__"  # noqa: N806
+        anchored_raw_build = "__AUTOSPORT_ACQ_DISPATCH_BUILD_ANCHOR__"
+        anchored_raw_build_code = "__AUTOSPORT_ACQ_DISPATCH_BUILD_CODE_ANCHOR__"
+        anchored_resolve_reader = "__AUTOSPORT_ACQ_DISPATCH_RESOLVE_ANCHOR__"
+        anchored_resolve_reader_code = (
+            "__AUTOSPORT_ACQ_DISPATCH_RESOLVE_CODE_ANCHOR__"
+        )
+        anchored_cycle_reader = "__AUTOSPORT_ACQ_DISPATCH_CYCLE_ANCHOR__"
+        anchored_cycle_reader_code = (
+            "__AUTOSPORT_ACQ_DISPATCH_CYCLE_CODE_ANCHOR__"
+        )
+        anchored_getattr = "__AUTOSPORT_ACQ_DISPATCH_GETATTR_ANCHOR__"
+        anchored_globals = "__AUTOSPORT_ACQ_DISPATCH_GLOBALS_ANCHOR__"
 
-    def authoritative_build(*args: object, **kwargs: object) -> AcquisitionDenominatorEvidence:
-        require_canonical_reader_dispatch()
-        evidence = raw_build(*args, **kwargs)
-        require_canonical_reader_dispatch()
-        identity = id(evidence)
+        if (
+            raw_build is not anchored_raw_build
+            or raw_build_code is not anchored_raw_build_code
+            or raw_resolve_reader is not anchored_resolve_reader
+            or raw_resolve_reader_code is not anchored_resolve_reader_code
+            or raw_cycle_reader is not anchored_cycle_reader
+            or raw_cycle_reader_code is not anchored_cycle_reader_code
+            or exact_getattr is not anchored_getattr
+            or exact_globals is not anchored_globals
+        ):
+            raise Error("canonical acquisition reader authority changed")
+        if (
+            anchored_getattr(anchored_raw_build, "__code__", None)
+            is not anchored_raw_build_code
+            or anchored_globals().get(
+                "_resolve_scheduled_source_universe_canonical"
+            )
+            is not anchored_resolve_reader
+            or anchored_getattr(anchored_resolve_reader, "__code__", None)
+            is not anchored_resolve_reader_code
+            or anchored_globals().get("_cycle_evidence")
+            is not anchored_cycle_reader
+            or anchored_getattr(anchored_cycle_reader, "__code__", None)
+            is not anchored_cycle_reader_code
+        ):
+            raise Error("canonical acquisition reader dispatch changed")
+
+    anchor_code_constants(
+        require_canonical_reader_dispatch,
+        (
+            (dispatch_error_marker, AcquisitionDenominatorEvidenceError),
+            (dispatch_build_marker, raw_build),
+            (dispatch_build_code_marker, raw_build_code),
+            (dispatch_resolve_marker, raw_resolve_reader),
+            (dispatch_resolve_code_marker, raw_resolve_reader_code),
+            (dispatch_cycle_marker, raw_cycle_reader),
+            (dispatch_cycle_code_marker, raw_cycle_reader_code),
+            (dispatch_getattr_marker, exact_getattr),
+            (dispatch_globals_marker, exact_globals),
+        ),
+        "canonical acquisition reader dispatcher",
+    )
+    dispatcher_code = require_canonical_reader_dispatch.__code__
+
+    build_error_marker = "__AUTOSPORT_ACQ_BUILDER_ERROR_ANCHOR__"
+    build_raw_marker = "__AUTOSPORT_ACQ_BUILDER_RAW_ANCHOR__"
+    build_raw_code_marker = "__AUTOSPORT_ACQ_BUILDER_RAW_CODE_ANCHOR__"
+    build_dispatch_marker = "__AUTOSPORT_ACQ_BUILDER_DISPATCH_ANCHOR__"
+    build_dispatch_code_marker = "__AUTOSPORT_ACQ_BUILDER_DISPATCH_CODE_ANCHOR__"
+    build_issued_marker = "__AUTOSPORT_ACQ_BUILDER_ISSUED_ANCHOR__"
+    build_lock_marker = "__AUTOSPORT_ACQ_BUILDER_LOCK_ANCHOR__"
+    build_weakref_marker = "__AUTOSPORT_ACQ_BUILDER_WEAKREF_ANCHOR__"
+    build_id_marker = "__AUTOSPORT_ACQ_BUILDER_ID_ANCHOR__"
+    build_getattr_marker = "__AUTOSPORT_ACQ_BUILDER_GETATTR_ANCHOR__"
+
+    def authoritative_build(
+        *args: object,
+        **kwargs: object,
+    ) -> AcquisitionDenominatorEvidence:
+        Error = "__AUTOSPORT_ACQ_BUILDER_ERROR_ANCHOR__"  # noqa: N806
+        anchored_raw_build = "__AUTOSPORT_ACQ_BUILDER_RAW_ANCHOR__"
+        anchored_raw_build_code = "__AUTOSPORT_ACQ_BUILDER_RAW_CODE_ANCHOR__"
+        anchored_dispatch = "__AUTOSPORT_ACQ_BUILDER_DISPATCH_ANCHOR__"
+        anchored_dispatch_code = "__AUTOSPORT_ACQ_BUILDER_DISPATCH_CODE_ANCHOR__"
+        anchored_issued = "__AUTOSPORT_ACQ_BUILDER_ISSUED_ANCHOR__"
+        anchored_lock = "__AUTOSPORT_ACQ_BUILDER_LOCK_ANCHOR__"
+        anchored_weakref_ref = "__AUTOSPORT_ACQ_BUILDER_WEAKREF_ANCHOR__"
+        anchored_id = "__AUTOSPORT_ACQ_BUILDER_ID_ANCHOR__"
+        anchored_getattr = "__AUTOSPORT_ACQ_BUILDER_GETATTR_ANCHOR__"
+
+        if (
+            raw_build is not anchored_raw_build
+            or raw_build_code is not anchored_raw_build_code
+            or require_canonical_reader_dispatch is not anchored_dispatch
+            or dispatcher_code is not anchored_dispatch_code
+            or issued is not anchored_issued
+            or lock is not anchored_lock
+            or weakref_ref is not anchored_weakref_ref
+            or exact_id is not anchored_id
+            or exact_getattr is not anchored_getattr
+        ):
+            raise Error("canonical acquisition builder authority changed")
+        if (
+            anchored_getattr(anchored_raw_build, "__code__", None)
+            is not anchored_raw_build_code
+            or anchored_getattr(anchored_dispatch, "__code__", None)
+            is not anchored_dispatch_code
+        ):
+            raise Error("canonical acquisition builder executable changed")
+
+        anchored_dispatch()
+        evidence = anchored_raw_build(*args, **kwargs)
+        anchored_dispatch()
+        identity = anchored_id(evidence)
         digest = evidence.evidence_sha256
 
         def clear(
@@ -527,47 +655,111 @@ def _install_acquisition_denominator_authority() -> None:
             *,
             _identity: int = identity,
         ) -> None:
-            with lock:
-                record = issued.get(_identity)
+            with anchored_lock:
+                record = anchored_issued.get(_identity)
                 if record is not None and record[0] is reference:
-                    issued.pop(_identity, None)
+                    anchored_issued.pop(_identity, None)
 
-        reference = weakref.ref(evidence, clear)
-        with lock:
-            issued[identity] = (reference, digest)
+        reference = anchored_weakref_ref(evidence, clear)
+        with anchored_lock:
+            anchored_issued[identity] = (reference, digest)
         return evidence
+
+    anchor_code_constants(
+        authoritative_build,
+        (
+            (build_error_marker, AcquisitionDenominatorEvidenceError),
+            (build_raw_marker, raw_build),
+            (build_raw_code_marker, raw_build_code),
+            (build_dispatch_marker, require_canonical_reader_dispatch),
+            (build_dispatch_code_marker, dispatcher_code),
+            (build_issued_marker, issued),
+            (build_lock_marker, lock),
+            (build_weakref_marker, weakref_ref),
+            (build_id_marker, exact_id),
+            (build_getattr_marker, exact_getattr),
+        ),
+        "canonical acquisition builder",
+    )
+
+    require_error_marker = "__AUTOSPORT_ACQ_REQUIRE_ERROR_ANCHOR__"
+    require_raw_marker = "__AUTOSPORT_ACQ_REQUIRE_RAW_ANCHOR__"
+    require_raw_code_marker = "__AUTOSPORT_ACQ_REQUIRE_RAW_CODE_ANCHOR__"
+    require_issued_marker = "__AUTOSPORT_ACQ_REQUIRE_ISSUED_ANCHOR__"
+    require_lock_marker = "__AUTOSPORT_ACQ_REQUIRE_LOCK_ANCHOR__"
+    require_id_marker = "__AUTOSPORT_ACQ_REQUIRE_ID_ANCHOR__"
+    require_type_marker = "__AUTOSPORT_ACQ_REQUIRE_TYPE_ANCHOR__"
+    require_getattr_marker = "__AUTOSPORT_ACQ_REQUIRE_GETATTR_ANCHOR__"
 
     def authoritative_require(
         evidence: AcquisitionDenominatorEvidence,
     ) -> AcquisitionDenominatorEvidence:
-        if getattr(raw_require, "__code__", None) is not raw_require_code:
-            raise AcquisitionDenominatorEvidenceError(
-                "canonical acquisition requirement executable changed"
+        Error = "__AUTOSPORT_ACQ_REQUIRE_ERROR_ANCHOR__"  # noqa: N806
+        anchored_raw_require = "__AUTOSPORT_ACQ_REQUIRE_RAW_ANCHOR__"
+        anchored_raw_require_code = "__AUTOSPORT_ACQ_REQUIRE_RAW_CODE_ANCHOR__"
+        anchored_issued = "__AUTOSPORT_ACQ_REQUIRE_ISSUED_ANCHOR__"
+        anchored_lock = "__AUTOSPORT_ACQ_REQUIRE_LOCK_ANCHOR__"
+        anchored_id = "__AUTOSPORT_ACQ_REQUIRE_ID_ANCHOR__"
+        anchored_type = "__AUTOSPORT_ACQ_REQUIRE_TYPE_ANCHOR__"
+        anchored_getattr = "__AUTOSPORT_ACQ_REQUIRE_GETATTR_ANCHOR__"
+
+        if (
+            raw_require is not anchored_raw_require
+            or raw_require_code is not anchored_raw_require_code
+            or issued is not anchored_issued
+            or lock is not anchored_lock
+            or exact_id is not anchored_id
+            or exact_type is not anchored_type
+            or exact_getattr is not anchored_getattr
+        ):
+            raise Error("canonical acquisition requirement authority changed")
+        if (
+            anchored_getattr(anchored_raw_require, "__code__", None)
+            is not anchored_raw_require_code
+        ):
+            raise Error("canonical acquisition requirement executable changed")
+        if anchored_type(evidence) is not AcquisitionDenominatorEvidence:
+            raise TypeError(
+                "evidence must be exact AcquisitionDenominatorEvidence"
             )
-        if type(evidence) is not AcquisitionDenominatorEvidence:
-            raise TypeError("evidence must be exact AcquisitionDenominatorEvidence")
         try:
             current_digest = evidence.evidence_sha256
         except (AttributeError, TypeError, ValueError) as exc:
-            raise AcquisitionDenominatorEvidenceError(
+            raise Error(
                 "acquisition denominator evidence structure is invalid"
             ) from exc
-        with lock:
-            record = issued.get(id(evidence))
+        with anchored_lock:
+            record = anchored_issued.get(anchored_id(evidence))
         if (
             record is None
             or record[0]() is not evidence
             or record[1] != current_digest
         ):
-            raise AcquisitionDenominatorEvidenceError(
+            raise Error(
                 "acquisition denominator evidence is not current product-issued authority"
             )
-        result = raw_require(evidence)
-        if getattr(raw_require, "__code__", None) is not raw_require_code:
-            raise AcquisitionDenominatorEvidenceError(
-                "canonical acquisition requirement executable changed"
-            )
+        result = anchored_raw_require(evidence)
+        if (
+            anchored_getattr(anchored_raw_require, "__code__", None)
+            is not anchored_raw_require_code
+        ):
+            raise Error("canonical acquisition requirement executable changed")
         return result
+
+    anchor_code_constants(
+        authoritative_require,
+        (
+            (require_error_marker, AcquisitionDenominatorEvidenceError),
+            (require_raw_marker, raw_require),
+            (require_raw_code_marker, raw_require_code),
+            (require_issued_marker, issued),
+            (require_lock_marker, lock),
+            (require_id_marker, exact_id),
+            (require_type_marker, exact_type),
+            (require_getattr_marker, exact_getattr),
+        ),
+        "canonical acquisition requirement",
+    )
 
     globals()["build_acquisition_denominator_evidence"] = authoritative_build
     globals()["require_complete_acquisition_coverage"] = authoritative_require

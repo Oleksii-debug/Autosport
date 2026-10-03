@@ -736,7 +736,6 @@ def _build_explicit_run_identity_checker(resolver, request_impl):
     ) -> bool:
         """Fail closed when explicit identity or its transport dispatch changes."""
 
-        production_dispatch_current = None
         if isinstance(api, WorkflowScopedGitHubApi):
             def production_dispatch_current() -> bool:
                 bound = getattr(api, "_explicit_run_identity_matches", None)
@@ -752,19 +751,58 @@ def _build_explicit_run_identity_checker(resolver, request_impl):
 
             if not production_dispatch_current():
                 return False
-            candidate = resolver
-            receiver = (api,)
-        else:
-            candidate = getattr(api, "_explicit_run_identity_matches", None)
-            if candidate is None:
-                return True
-            if not callable(candidate):
+            try:
+                run_id = _require_positive_int(run_id, field="run id")
+                expected_head_sha = _require_sha(
+                    expected_head_sha,
+                    field="expected workflow run head sha",
+                )
+                pr_number = _require_positive_int(
+                    pr_number,
+                    field="pull request number",
+                )
+                # Call the captured canonical transport directly. This removes dynamic
+                # self._request dispatch from the authority-producing GET itself; a
+                # concurrent class/instance rebound therefore cannot shape the response.
+                payload = request_impl(api, f"/actions/runs/{run_id}")
+            except CancellationError:
                 return False
-            receiver = ()
+            if not production_dispatch_current():
+                return False
+            if not isinstance(payload, dict):
+                return False
+            workflow_id = payload.get("workflow_id")
+            if type(workflow_id) is not int or workflow_id <= 0:
+                return False
+            if workflow_id != api._workflow_id or payload.get("event") != "pull_request":
+                return False
+            if type(payload.get("id")) is not int or payload.get("id") != run_id:
+                return False
+            if payload.get("head_sha") != expected_head_sha:
+                return False
+            name = payload.get("name")
+            status = payload.get("status")
+            pulls = payload.get("pull_requests")
+            if not isinstance(name, str) or not name or status not in _ACTIVE_STATUSES:
+                return False
+            if not isinstance(pulls, list) or len(pulls) != 1:
+                return False
+            pull = pulls[0]
+            if not isinstance(pull, dict):
+                return False
+            return (
+                type(pull.get("number")) is int
+                and pull.get("number") == pr_number
+            )
+
+        candidate = getattr(api, "_explicit_run_identity_matches", None)
+        if candidate is None:
+            return True
+        if not callable(candidate):
+            return False
         try:
-            matched = (
+            return (
                 candidate(
-                    *receiver,
                     run_id=run_id,
                     expected_head_sha=expected_head_sha,
                     pr_number=pr_number,
@@ -773,9 +811,6 @@ def _build_explicit_run_identity_checker(resolver, request_impl):
             )
         except CancellationError:
             return False
-        if production_dispatch_current is not None and not production_dispatch_current():
-            return False
-        return matched
 
     return check
 

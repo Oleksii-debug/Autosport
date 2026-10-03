@@ -43,6 +43,11 @@ _CANONICAL_EXECUTION_STOP_AUTHORITY = ExecutionStopAuthority
 _CANONICAL_PRODUCT_STOP_AUTHORITY_ROOT = (
     ExecutionStopAuthority._product_monotonic_authority_root
 )
+_CANONICAL_PRODUCT_STOP_AUTHORITY_ROOT_CODE = getattr(
+    _CANONICAL_PRODUCT_STOP_AUTHORITY_ROOT,
+    "__code__",
+    None,
+)
 _CANONICAL_STOP_ADMISSION_LEASE = ExecutionStopAuthority.admission_lease
 _CANONICAL_STOP_ADMISSION_LEASE_CODE = getattr(
     _CANONICAL_STOP_ADMISSION_LEASE,
@@ -423,6 +428,8 @@ def _account_owner_lease_path(
             None,
         )
         is not _CANONICAL_PRODUCT_STOP_AUTHORITY_ROOT
+        or getattr(_CANONICAL_PRODUCT_STOP_AUTHORITY_ROOT, "__code__", None)
+        is not _CANONICAL_PRODUCT_STOP_AUTHORITY_ROOT_CODE
     ):
         raise BetdaqHeartbeatSafetyError(
             "canonical STOP product authority root resolver changed"
@@ -822,6 +829,12 @@ class BetdaqHeartbeatSafetyController:
         self._client = account_client
         self._stop = stop_authority
         self._operation_lock = RLock()
+        self._bound_account_context_id = (
+            _authenticated_account_context(
+                account_client._credentials,
+                account_client._venue_id,
+            ).session_context_id
+        )
         self._store = BetdaqHeartbeatSafetyStore(state_path)
         self._lease = _ProcessLease(
             _account_owner_lease_path(account_client, stop_authority)
@@ -852,12 +865,20 @@ class BetdaqHeartbeatSafetyController:
         del exc_type, exc, tb
         self.close()
 
-    def _context_id(self) -> str:
+    def _live_context_id(self) -> str:
         context = _authenticated_account_context(
             self._client._credentials,
             self._client._venue_id,
         )
         return context.session_context_id
+
+    def _context_id(self) -> str:
+        current = self._live_context_id()
+        if current != self._bound_account_context_id:
+            raise BetdaqHeartbeatSafetyError(
+                "authenticated BETDAQ account context changed; recreate controller"
+            )
+        return current
 
     def _now(self) -> str:
         value = self._client._clock()
@@ -897,21 +918,31 @@ class BetdaqHeartbeatSafetyController:
 
     def _fence_account_context_if_needed(self) -> None:
         latest = self._latest()
-        if latest is None or latest.state.value not in _REMOTE_ACTIVE_STATES:
-            return
-        if latest.account_context_id == self._context_id():
-            return
-        self._store.append(
-            generation_id=latest.generation_id,
-            predecessor_generation_id=latest.predecessor_generation_id,
-            account_context_id=latest.account_context_id,
-            state=HeartbeatState.REVOKED,
-            threshold_ms=latest.threshold_ms,
-            registered_action=latest.registered_action,
-            operation="LOCAL_ACCOUNT_CONTEXT_FENCE",
-            observed_at=self._now(),
-            reconciliation_required=True,
+        current_context_id = self._live_context_id()
+        binding_changed = (
+            current_context_id != self._bound_account_context_id
         )
+        evidence_changed = bool(
+            latest is not None
+            and latest.state.value in _REMOTE_ACTIVE_STATES
+            and latest.account_context_id != current_context_id
+        )
+        if evidence_changed:
+            self._store.append(
+                generation_id=latest.generation_id,
+                predecessor_generation_id=latest.predecessor_generation_id,
+                account_context_id=latest.account_context_id,
+                state=HeartbeatState.REVOKED,
+                threshold_ms=latest.threshold_ms,
+                registered_action=latest.registered_action,
+                operation="LOCAL_ACCOUNT_CONTEXT_FENCE",
+                observed_at=self._now(),
+                reconciliation_required=True,
+            )
+        if binding_changed:
+            raise BetdaqHeartbeatSafetyError(
+                "authenticated BETDAQ account context changed; recreate controller"
+            )
 
     def _fence_stop_if_needed(self) -> None:
         self._fence_account_context_if_needed()

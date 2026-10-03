@@ -663,3 +663,45 @@ def test_public_heartbeat_operations_use_controller_operation_serialization(
         controller.close()
     assert spy.depth == 0
 
+def test_live_client_credential_rotation_fences_and_requires_recreation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A controller can never migrate its Punter lease by rebinding client credentials."""
+    provider = _ProviderQueue([_soap("RegisterHeartbeat")])
+    controller, _, _ = _controller(tmp_path, monkeypatch, provider)
+    registered = controller.register(
+        threshold_ms=6000,
+        action=HeartbeatAction.CANCEL_ORDERS,
+    )
+    controller._client._credentials = BetdaqCredentials(
+        username="rotated-user",
+        password="rotated-password",
+        application_identifier="rotated-app",
+    )
+    try:
+        with pytest.raises(
+            BetdaqHeartbeatSafetyError,
+            match="account context changed; recreate controller",
+        ):
+            controller.status()
+        latest = controller._store.history()[-1]
+        assert latest.state is HeartbeatState.REVOKED
+        assert latest.operation == "LOCAL_ACCOUNT_CONTEXT_FENCE"
+        assert latest.generation_id == registered.generation_id
+        assert latest.account_context_id == registered.account_context_id
+        assert latest.reconciliation_required is True
+        assert len(provider.requests) == 1
+
+        with pytest.raises(
+            BetdaqHeartbeatSafetyError,
+            match="account context changed; recreate controller",
+        ):
+            controller.register(
+                threshold_ms=6000,
+                action=HeartbeatAction.SUSPEND_ORDERS,
+            )
+        assert len(provider.requests) == 1
+    finally:
+        controller.close()
+

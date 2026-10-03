@@ -239,3 +239,33 @@ def test_different_punters_cannot_share_one_durable_state_writer(
             second.close()
         first.close()
 
+def test_owner_lease_rejects_in_place_product_root_resolver_code_mutation(
+    tmp_path,
+) -> None:
+    """In-place function mutation cannot redirect the machine-root owner lease."""
+    target = ExecutionStopAuthority._product_monotonic_authority_root
+    original_code = target.__code__
+    hostile_calls = []
+
+    def hostile_root():
+        hostile_calls.append(True)
+        raise AssertionError("hostile product-root resolver executed")
+
+    assert original_code.co_freevars == ()
+    assert hostile_root.__code__.co_freevars == ()
+    target.__code__ = hostile_root.__code__
+    try:
+        with pytest.raises(
+            BetdaqHeartbeatSafetyError,
+            match="product authority root resolver changed",
+        ):
+            BetdaqHeartbeatSafetyController(
+                account_client=_client("root-code-guard-user"),
+                stop_authority=ExecutionStopAuthority(tmp_path / "stop.jsonl"),
+                state_path=tmp_path / "heartbeat.json",
+            )
+    finally:
+        target.__code__ = original_code
+
+    assert hostile_calls == []
+

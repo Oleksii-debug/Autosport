@@ -277,8 +277,12 @@ class ProductGuiEconomicTicket:
     legs: tuple[str, ...]
 
     def __post_init__(self) -> None:
-        if type(self.ticket_id) is not str or not self.ticket_id:
-            raise ValueError("economic ticket id must be non-empty text")
+        if (
+            type(self.ticket_id) is not str
+            or not self.ticket_id
+            or self.ticket_id.strip() != self.ticket_id
+        ):
+            raise ValueError("economic ticket id must be non-empty trimmed text")
         if self.status not in {"open", "won", "lost", "void"}:
             raise ValueError("economic ticket status is not canonical")
         for field_name, value in (
@@ -293,7 +297,10 @@ class ProductGuiEconomicTicket:
         if (
             type(self.legs) is not tuple
             or not self.legs
-            or any(type(leg) is not str or not leg for leg in self.legs)
+            or any(
+                type(leg) is not str or not leg or leg.strip() != leg
+                for leg in self.legs
+            )
         ):
             raise ValueError("economic ticket legs must be non-empty canonical tuple")
 
@@ -372,12 +379,29 @@ class ProductGuiEconomicSnapshot:
         ):
             if type(value) is not Decimal or not value.is_finite():
                 raise ValueError(f"economic snapshot {field_name} must be finite Decimal")
+        if self.balance < 0:
+            raise ValueError("economic snapshot balance cannot be negative")
         if self.committed_stake < 0:
             raise ValueError("economic snapshot committed_stake cannot be negative")
         if type(self.tickets) is not tuple or any(
             type(ticket) is not ProductGuiEconomicTicket for ticket in self.tickets
         ):
             raise ValueError("economic snapshot tickets must be canonical tuple")
+        ticket_ids = tuple(ticket.ticket_id for ticket in self.tickets)
+        if len(ticket_ids) != len(set(ticket_ids)):
+            raise ValueError("economic snapshot ticket ids must be unique")
+        expected_committed = sum(
+            (
+                ticket.stake
+                for ticket in self.tickets
+                if ticket.status == "open"
+            ),
+            Decimal("0"),
+        )
+        if self.committed_stake != expected_committed:
+            raise ValueError(
+                "economic snapshot committed stake conflicts with open tickets"
+            )
         if self.portfolio_mode not in {
             "exact",
             "approximate",
@@ -392,6 +416,14 @@ class ProductGuiEconomicSnapshot:
         ):
             raise ValueError(
                 "economic snapshot portfolio_scenario_count must be positive int"
+            )
+        if not (
+            self.portfolio_worst_case
+            <= self.portfolio_mean_case
+            <= self.portfolio_best_case
+        ):
+            raise ValueError(
+                "economic snapshot portfolio bounds are internally inconsistent"
             )
 
 
@@ -432,6 +464,10 @@ def _capture_runtime_economic_snapshot(
 
     with _economic_lock_type(workspace):
         book_path = _path_type(coordinator.paper_book_path)
+        if book_path != workspace / "paper_book.json":
+            raise RuntimeError(
+                "economic snapshot PaperBook path is not canonical for runtime workspace"
+            )
         if book_path.exists():
             payload = book_path.read_bytes()
             paper_book_sha256 = _sha256(payload).hexdigest()

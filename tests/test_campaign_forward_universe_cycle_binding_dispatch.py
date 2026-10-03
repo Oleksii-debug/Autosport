@@ -1034,6 +1034,87 @@ def test_resolver_rejects_reflection_dependency_witness_rebind_before_execution(
         )
 
 
+def test_saved_resolver_rejects_shadowed_any_before_hostile_execution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    resolver = binding.resolve_campaign_forward_universe_cycle_authority
+    hostile_calls: list[str] = []
+
+    def hostile_any(*_args, **_kwargs):
+        hostile_calls.append("any")
+        raise AssertionError("hostile any executed")
+
+    monkeypatch.setattr(binding, "any", hostile_any, raising=False)
+
+    with pytest.raises(
+        binding.CampaignForwardUniverseCycleBindingError,
+        match="campaign forward-cycle builtin dispatch shadowed",
+    ):
+        resolver(
+            precommit_locator=None,
+            collector_store=None,
+            source_spec=None,
+            cycle_receipt=None,
+            provider_evidence_store=None,
+            universe_store=None,
+            protocol=None,
+            event_lifecycle=None,
+        )
+
+    assert hostile_calls == []
+
+
+def test_saved_authorizer_rejects_shadowed_tuple_before_hostile_execution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authorizer = binding.authorize_campaign_forward_source_receipts
+    hostile_calls: list[str] = []
+
+    def hostile_tuple(*_args, **_kwargs):
+        hostile_calls.append("tuple")
+        raise AssertionError("hostile tuple executed")
+
+    monkeypatch.setattr(binding, "tuple", hostile_tuple, raising=False)
+
+    with pytest.raises(
+        binding.CampaignForwardUniverseCycleBindingError,
+        match="campaign forward-cycle builtin dispatch shadowed",
+    ):
+        authorizer(
+            precommit_locator=None,
+            collector_store=None,
+            source_spec=None,
+            cycle_receipt=None,
+            provider_evidence_store=None,
+            universe_store=None,
+            protocol=None,
+            event_lifecycle=None,
+            opportunities=(),
+        )
+
+    assert hostile_calls == []
+
+
+def test_private_integrity_guard_rejects_shadowed_isinstance_without_execution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hostile_calls: list[str] = []
+
+    def hostile_isinstance(*_args, **_kwargs):
+        hostile_calls.append("isinstance")
+        raise AssertionError("hostile isinstance executed")
+
+    monkeypatch.setattr(binding, "isinstance", hostile_isinstance, raising=False)
+
+    with pytest.raises(
+        binding.CampaignForwardUniverseCycleBindingError,
+        match="campaign forward-cycle builtin dispatch shadowed",
+    ):
+        binding._require_dispatch_integrity()
+
+    assert hostile_calls == []
+
+
 def test_saved_resolver_rejects_shadowed_type_before_hostile_execution(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

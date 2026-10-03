@@ -660,6 +660,30 @@ def test_caller_cannot_override_canonical_account_publication_authorities():
     assert transport.calls == []
 
 
+def test_account_balance_helper_cannot_inject_caller_post(
+    monkeypatch,
+):
+    value, opener = canonical_client(monkeypatch, balance())
+    hostile_calls = []
+
+    def hostile_post(*args, **kwargs):
+        hostile_calls.append((args, kwargs))
+        return balance()
+
+    with pytest.raises(
+        BetdaqAccountReadOnlyError,
+        match="canonical account transport changed during acquisition",
+    ):
+        value.read_account_balance(
+            _expected_transport=value._transport,
+            _expected_https_post=hostile_post,
+            _expected_https_post_code=hostile_post.__code__,
+        )
+
+    assert hostile_calls == []
+    assert opener.calls == []
+
+
 def test_transport_rotation_during_canonical_account_io_fails_without_using_replacement(
     monkeypatch,
 ):

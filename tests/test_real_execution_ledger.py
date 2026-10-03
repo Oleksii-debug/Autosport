@@ -123,7 +123,12 @@ class RealExecutionLedgerTests(unittest.TestCase):
                     current.fingerprint,
                 )
 
-            self.assertEqual(calls, ["file", "directory"])
+            # Monotonic-authority PREPARE/COMMIT also fsync independent
+            # machine-state records. Preserve this test's original invariant:
+            # the ledger file fsync immediately precedes publication of its path.
+            directory_index = calls.index("directory")
+            self.assertGreater(directory_index, 0)
+            self.assertEqual(calls[directory_index - 1], "file")
 
     def test_failed_first_create_publish_barrier_never_returns_reservation_authority(self):
         with tempfile.TemporaryDirectory() as tmp:

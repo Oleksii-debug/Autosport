@@ -14,15 +14,20 @@ from pathlib import Path
 from typing import Any, Callable, TypeVar
 
 from .monotonic_workspace_authority import (
-    AuthorityPhase,
     MonotonicWorkspaceAuthority,
     MonotonicWorkspaceAuthorityError,
 )
 
 
 SCHEMA_VERSION = 1
-_REAL_EXECUTION_LEDGER_AUTHORITY_DOMAIN = "autosport.real-execution-ledger.v1"
 _T = TypeVar("_T")
+
+# Consume the canonical monotonic authority through function objects captured once.
+# This prevents a caller-owned instance attribute from substituting recover/prepare/
+# commit while keeping the durable transition implementation in its existing module.
+_MONOTONIC_RECOVER = MonotonicWorkspaceAuthority.recover
+_MONOTONIC_PREPARE = MonotonicWorkspaceAuthority.prepare
+_MONOTONIC_COMMIT = MonotonicWorkspaceAuthority.commit
 
 
 class ExecutionLedgerError(RuntimeError):
@@ -454,10 +459,34 @@ class RealExecutionLedger:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock_path = self.path.with_name(self.path.name + ".writer.lock")
         self._thread_lock = threading.RLock()
-        self._serialization_local = threading.local()
         # False until this instance has proven both the visible file contents and,
         # on POSIX, the directory entry naming the ledger durable.
         self._path_durable = False
+        # Serialization ownership is thread-specific. A process-wide boolean lets a
+        # second thread on the same ledger instance bypass the RLock/sidecar while a
+        # writer is inside PREPARE -> publish -> COMMIT and can incorrectly recover/
+        # abort that live transaction.
+        self._serialization_owner_thread_id: int | None = None
+        try:
+            authority_path = self.path.resolve(strict=False)
+            authority_workspace = authority_path.parent
+            authority_key = os.path.normcase(authority_path.name)
+            self._monotonic_authority = MonotonicWorkspaceAuthority(
+                workspace=authority_workspace,
+                domain="execution.real-ledger",
+                key=authority_key,
+            )
+        except (OSError, RuntimeError, MonotonicWorkspaceAuthorityError) as exc:
+            raise ExecutionLedgerIntegrityError(
+                "execution ledger monotonic authority could not be initialized"
+            ) from exc
+        self._monotonic_semantic_binding_sha256 = _digest(
+            {
+                "schema": "autosport.real_execution_ledger.monotonic-binding",
+                "schema_version": 1,
+                "ledger_key": authority_key,
+            }
+        )
 
     def _sync_parent_directory(self) -> None:
         """Durably publish this ledger pathname on platforms that require it."""
@@ -494,26 +523,19 @@ class RealExecutionLedger:
             ) from exc
         self._path_durable = True
 
-    def _acquire_posix_ledger_lock(
-        self, *, create_if_missing: bool = True
-    ) -> int | None:
-        """Serialize access on the stable ledger inode when POSIX flock exists."""
+    def _acquire_posix_ledger_lock(self) -> int | None:
+        """Serialize writers on the stable ledger inode when POSIX flock exists."""
 
         if os.name == "nt":
             return None
 
         import fcntl
 
-        flags = os.O_RDWR | (os.O_CREAT if create_if_missing else 0)
         try:
-            data_fd = os.open(self.path, flags, 0o600)
-        except FileNotFoundError:
-            if not create_if_missing:
-                return None
-            raise
+            data_fd = os.open(self.path, os.O_CREAT | os.O_RDWR, 0o600)
         except OSError as exc:
             raise ExecutionLedgerIntegrityError(
-                "execution ledger lock could not open ledger inode"
+                "execution ledger writer lock could not open ledger inode"
             ) from exc
         try:
             fcntl.flock(data_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -525,7 +547,7 @@ class RealExecutionLedger:
         except OSError as exc:
             os.close(data_fd)
             raise ExecutionLedgerIntegrityError(
-                "execution ledger lock failed"
+                "execution ledger writer lock failed"
             ) from exc
 
         try:
@@ -542,19 +564,85 @@ class RealExecutionLedger:
         ):
             os.close(data_fd)
             raise ExecutionLedgerIntegrityError(
-                "execution ledger path changed while acquiring lock"
+                "execution ledger path changed while acquiring writer lock"
             )
         return data_fd
 
-    def _serialized(
-        self,
-        operation: Callable[[], _T],
-        *,
-        create_ledger_inode: bool,
-    ) -> _T:
+    def _acquire_posix_ledger_read_lock(self) -> int | None:
+        """Fence authoritative reads against a concurrent canonical writer."""
+
+        if os.name == "nt":
+            return None
+
+        import fcntl
+
+        try:
+            data_fd = os.open(self.path, os.O_RDONLY)
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            raise ExecutionLedgerIntegrityError(
+                "execution ledger read lock could not open ledger inode"
+            ) from exc
+        try:
+            fcntl.flock(data_fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            os.close(data_fd)
+            raise ExecutionLedgerBusyError(
+                "ledger inode is already held by another writer"
+            ) from exc
+        except OSError as exc:
+            os.close(data_fd)
+            raise ExecutionLedgerIntegrityError(
+                "execution ledger read lock failed"
+            ) from exc
+
+        try:
+            descriptor_stat = os.fstat(data_fd)
+            path_stat = os.stat(self.path)
+        except OSError as exc:
+            os.close(data_fd)
+            raise ExecutionLedgerIntegrityError(
+                "execution ledger read path identity could not be verified"
+            ) from exc
+        if (descriptor_stat.st_dev, descriptor_stat.st_ino) != (
+            path_stat.st_dev,
+            path_stat.st_ino,
+        ):
+            os.close(data_fd)
+            raise ExecutionLedgerIntegrityError(
+                "execution ledger path changed while acquiring read lock"
+            )
+        return data_fd
+
+    def _read_serialized(self, operation: Callable[[], _T]) -> _T:
         with self._thread_lock:
-            if getattr(self._serialization_local, "depth", 0):
+            try:
+                fd = os.open(
+                    self._lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600
+                )
+            except FileExistsError as exc:
+                raise ExecutionLedgerBusyError(
+                    "writer lock exists; fail closed while authoritative read is serialized"
+                ) from exc
+
+            data_fd: int | None = None
+            try:
+                data_fd = self._acquire_posix_ledger_read_lock()
+                self._serialization_owner_thread_id = threading.get_ident()
                 return operation()
+            finally:
+                self._serialization_owner_thread_id = None
+                if data_fd is not None:
+                    os.close(data_fd)
+                os.close(fd)
+                try:
+                    self._lock_path.unlink()
+                except FileNotFoundError:
+                    pass
+
+    def _mutate(self, operation: Callable[[], _T]) -> _T:
+        with self._thread_lock:
             try:
                 fd = os.open(
                     self._lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600
@@ -565,14 +653,12 @@ class RealExecutionLedger:
                 ) from exc
 
             data_fd: int | None = None
-            self._serialization_local.depth = 1
             try:
-                data_fd = self._acquire_posix_ledger_lock(
-                    create_if_missing=create_ledger_inode
-                )
+                data_fd = self._acquire_posix_ledger_lock()
+                self._serialization_owner_thread_id = threading.get_ident()
                 return operation()
             finally:
-                self._serialization_local.depth = 0
+                self._serialization_owner_thread_id = None
                 if data_fd is not None:
                     os.close(data_fd)
                 os.close(fd)
@@ -580,12 +666,6 @@ class RealExecutionLedger:
                     self._lock_path.unlink()
                 except FileNotFoundError:
                     pass
-
-    def _mutate(self, operation: Callable[[], _T]) -> _T:
-        return self._serialized(operation, create_ledger_inode=True)
-
-    def _read_serialized(self, operation: Callable[[], _T]) -> _T:
-        return self._serialized(operation, create_ledger_inode=False)
 
     @classmethod
     def _validate_event(
@@ -688,120 +768,36 @@ class RealExecutionLedger:
         cls._validate_semantics(events)
         return events
 
-    def _monotonic_authority(self) -> MonotonicWorkspaceAuthority:
-        return MonotonicWorkspaceAuthority(
-            workspace=self.path.parent.resolve(strict=False),
-            domain=_REAL_EXECUTION_LEDGER_AUTHORITY_DOMAIN,
-            key=self.path.name,
-        )
-
-    def _authority_binding(
-        self,
-        *,
-        kind: str,
-        tx_id: str,
-        observed_state_sha256: str | None,
-        intended_state_sha256: str,
-    ) -> str:
-        material = "\0".join(
-            (
-                _REAL_EXECUTION_LEDGER_AUTHORITY_DOMAIN,
-                kind,
-                self.path.name,
-                tx_id,
-                observed_state_sha256 or "<PRISTINE>",
-                intended_state_sha256,
-            )
-        ).encode("utf-8")
-        return hashlib.sha256(material).hexdigest()
-
     @staticmethod
-    def _raise_monotonic_integrity(exc: MonotonicWorkspaceAuthorityError) -> None:
-        raise ExecutionLedgerIntegrityError(
-            "execution ledger monotonic authority rejected current state"
-        ) from exc
+    def _monotonic_state_sha256(raw: bytes) -> str | None:
+        return None if not raw else hashlib.sha256(raw).hexdigest()
 
-    def _recover_authority(
-        self,
-        authority: MonotonicWorkspaceAuthority,
-        history: tuple[Any, ...],
-        observed_state_sha256: str | None,
-    ) -> None:
+    def _monotonic_tx_id(self, state_sha256: str) -> str:
+        return f"real-execution-ledger:{state_sha256}"
+
+    def _recover_monotonic_state(self, raw: bytes) -> None:
+        observed = self._monotonic_state_sha256(raw)
         try:
-            pending = (
-                history[-1]
-                if history and history[-1].phase is AuthorityPhase.PREPARE
-                else None
-            )
-            if pending is None:
-                authority.recover(
-                    observed_state_sha256=observed_state_sha256
-                )
+            if observed is None:
+                _MONOTONIC_RECOVER(self._monotonic_authority, observed_state_sha256=None)
             else:
-                authority.recover(
-                    observed_state_sha256=observed_state_sha256,
-                    tx_id=pending.tx_id,
-                    semantic_binding_sha256=pending.semantic_binding_sha256,
+                _MONOTONIC_RECOVER(
+                    self._monotonic_authority,
+                    observed_state_sha256=observed,
+                    tx_id=self._monotonic_tx_id(observed),
+                    semantic_binding_sha256=self._monotonic_semantic_binding_sha256,
                 )
         except MonotonicWorkspaceAuthorityError as exc:
-            self._raise_monotonic_integrity(exc)
+            raise ExecutionLedgerIntegrityError(
+                "execution ledger rollback/monotonic authority check failed"
+            ) from exc
 
-    def _bootstrap_legacy_authority(
-        self,
-        *,
-        validated_raw: bytes,
-        observed_state_sha256: str,
-    ) -> None:
-        def operation() -> None:
-            try:
-                current_raw = self.path.read_bytes()
-            except OSError as exc:
-                raise ExecutionLedgerIntegrityError(
-                    "execution ledger changed before monotonic baseline"
-                ) from exc
-            if current_raw != validated_raw:
-                raise ExecutionLedgerIntegrityError(
-                    "execution ledger changed before monotonic baseline"
-                )
-            self._parse(current_raw)
-
-            authority = self._monotonic_authority()
-            try:
-                history = authority.read_history()
-                if history:
-                    self._recover_authority(
-                        authority,
-                        history,
-                        observed_state_sha256,
-                    )
-                    return
-                tx_id = f"bootstrap-{observed_state_sha256}"
-                binding = self._authority_binding(
-                    kind="BOOTSTRAP",
-                    tx_id=tx_id,
-                    observed_state_sha256=None,
-                    intended_state_sha256=observed_state_sha256,
-                )
-                authority.prepare(
-                    tx_id=tx_id,
-                    observed_state_sha256=None,
-                    intended_state_sha256=observed_state_sha256,
-                    semantic_binding_sha256=binding,
-                )
-                authority.commit(
-                    tx_id=tx_id,
-                    observed_state_sha256=observed_state_sha256,
-                    semantic_binding_sha256=binding,
-                )
-            except MonotonicWorkspaceAuthorityError as exc:
-                self._raise_monotonic_integrity(exc)
-
-        self._mutate(operation)
-
-    def _verified_raw_and_events_unlocked(
-        self,
-    ) -> tuple[bytes, list[dict[str, Any]]]:
-        if self.path.exists():
+    def _read_verified_state(self) -> tuple[bytes, list[dict[str, Any]]]:
+        if self._serialization_owner_thread_id != threading.get_ident():
+            return self._read_serialized(self._read_verified_state)
+        if not self.path.exists():
+            raw = b""
+        else:
             self._ensure_existing_path_durable()
             try:
                 raw = self.path.read_bytes()
@@ -809,33 +805,13 @@ class RealExecutionLedger:
                 raise ExecutionLedgerIntegrityError(
                     "execution ledger could not be read"
                 ) from exc
-        else:
-            raw = b""
-
         events = self._parse(raw)
-        observed = hashlib.sha256(raw).hexdigest() if raw else None
-        authority = self._monotonic_authority()
-        try:
-            history = authority.read_history()
-        except MonotonicWorkspaceAuthorityError as exc:
-            self._raise_monotonic_integrity(exc)
-
-        if not history and observed is not None:
-            self._bootstrap_legacy_authority(
-                validated_raw=raw,
-                observed_state_sha256=observed,
-            )
-        else:
-            self._recover_authority(authority, history, observed)
+        self._recover_monotonic_state(raw)
         return raw, events
 
-    def _verified_raw_and_events(
-        self,
-    ) -> tuple[bytes, list[dict[str, Any]]]:
-        return self._read_serialized(self._verified_raw_and_events_unlocked)
-
     def _events(self) -> list[dict[str, Any]]:
-        return self._verified_raw_and_events()[1]
+        _raw, events = self._read_verified_state()
+        return events
 
     def _append(
         self,
@@ -845,6 +821,17 @@ class RealExecutionLedger:
         attempt_id: str | None,
         payload: dict[str, Any],
     ) -> None:
+        if self._serialization_owner_thread_id != threading.get_ident():
+            self._mutate(
+                lambda: self._append(
+                    kind,
+                    plan_id,
+                    action_id,
+                    attempt_id,
+                    payload,
+                )
+            )
+            return
         event = {
             "schema_version": SCHEMA_VERSION,
             "event_id": str(uuid.uuid4()),
@@ -857,65 +844,56 @@ class RealExecutionLedger:
         }
         self._validate_event(event)
         envelope = _canonical({"sha256": _digest(event), "event": event})
-        current_raw, _events = self._verified_raw_and_events()
-        observed = (
-            hashlib.sha256(current_raw).hexdigest()
-            if current_raw
-            else None
-        )
-        append_bytes = (envelope + "\n").encode("utf-8")
-        intended_raw = current_raw + append_bytes
-        intended = hashlib.sha256(intended_raw).hexdigest()
-        authority = self._monotonic_authority()
-        binding = self._authority_binding(
-            kind=f"APPEND:{kind.value}",
-            tx_id=event["event_id"],
-            observed_state_sha256=observed,
-            intended_state_sha256=intended,
-        )
+        raw_before, _ = self._read_verified_state()
+        encoded_event = (envelope + "\n").encode("utf-8")
+        intended_raw = raw_before + encoded_event
+        observed_sha256 = self._monotonic_state_sha256(raw_before)
+        intended_sha256 = hashlib.sha256(intended_raw).hexdigest()
+        tx_id = self._monotonic_tx_id(intended_sha256)
         try:
-            authority.prepare(
-                tx_id=event["event_id"],
-                observed_state_sha256=observed,
-                intended_state_sha256=intended,
-                semantic_binding_sha256=binding,
+            _MONOTONIC_PREPARE(
+                self._monotonic_authority,
+                tx_id=tx_id,
+                observed_state_sha256=observed_sha256,
+                intended_state_sha256=intended_sha256,
+                semantic_binding_sha256=self._monotonic_semantic_binding_sha256,
             )
         except MonotonicWorkspaceAuthorityError as exc:
-            self._raise_monotonic_integrity(exc)
+            raise ExecutionLedgerIntegrityError(
+                "execution ledger monotonic PREPARE failed"
+            ) from exc
 
         path_existed_before = self.path.exists()
         try:
             with self.path.open("ab") as handle:
-                handle.write(append_bytes)
+                handle.write(encoded_event)
                 handle.flush()
                 os.fsync(handle.fileno())
             if not path_existed_before or not self._path_durable:
                 self._sync_parent_directory()
+            actual_raw = self.path.read_bytes()
         except OSError as exc:
             self._path_durable = False
             raise ExecutionLedgerIntegrityError(
                 "execution ledger durability barrier failed"
             ) from exc
-        self._path_durable = True
-
-        try:
-            published_raw = self.path.read_bytes()
-        except OSError as exc:
+        if actual_raw != intended_raw:
+            self._path_durable = False
             raise ExecutionLedgerIntegrityError(
-                "execution ledger could not verify published monotonic state"
-            ) from exc
-        if published_raw != intended_raw:
-            raise ExecutionLedgerIntegrityError(
-                "execution ledger changed before monotonic commit"
+                "execution ledger changed during durable append"
             )
+        self._path_durable = True
         try:
-            authority.commit(
-                tx_id=event["event_id"],
-                observed_state_sha256=intended,
-                semantic_binding_sha256=binding,
+            _MONOTONIC_COMMIT(
+                self._monotonic_authority,
+                tx_id=tx_id,
+                observed_state_sha256=intended_sha256,
+                semantic_binding_sha256=self._monotonic_semantic_binding_sha256,
             )
         except MonotonicWorkspaceAuthorityError as exc:
-            self._raise_monotonic_integrity(exc)
+            raise ExecutionLedgerIntegrityError(
+                "execution ledger monotonic COMMIT failed"
+            ) from exc
 
     @staticmethod
     def _plan_event(
@@ -2378,7 +2356,7 @@ class RealExecutionLedger:
                 events = self._events()
                 current_snapshot_sha256 = None
             else:
-                raw, events = self._verified_raw_and_events()
+                raw, events = self._read_verified_state()
                 current_snapshot_sha256 = hashlib.sha256(raw).hexdigest()
             plan_event, action = self._action_payload(
                 events, plan_id, action_id
@@ -2926,7 +2904,7 @@ class RealExecutionLedger:
         self._mutate(operation)
 
     def verified_snapshot(self) -> VerifiedExecutionLedgerSnapshot:
-        raw, events = self._verified_raw_and_events()
+        raw, events = self._read_verified_state()
         return VerifiedExecutionLedgerSnapshot(
             raw, hashlib.sha256(raw).hexdigest(), len(events)
         )

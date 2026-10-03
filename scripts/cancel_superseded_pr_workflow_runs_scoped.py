@@ -537,7 +537,11 @@ def cancel_superseded_explicit_pr_runs(
         {
             run.pr_numbers[0]
             for run in runs
-            if run.workflow_name == workflow_name and len(run.pr_numbers) == 1
+            if (
+                run.workflow_name == workflow_name
+                and len(run.pr_numbers) == 1
+                and run.run_id != current_run_id
+            )
         }
     )
 
@@ -625,29 +629,15 @@ def main(argv: list[str] | None = None) -> int:
         # missing-reference recovery and for separately cancelling the triggering
         # source run after the workflow-wide sweep. A zero value means the event did
         # not carry one unambiguous PR identity; that must not block cleanup for every
-        # other explicit PR in the exact source workflow.
+        # other explicit PR in the exact source workflow. Missing-reference source runs
+        # are handled uniformly by the existing workflow-wide orphan resolver after the
+        # shared active-run scan, so trigger-specific pre-recovery is unnecessary.
         trigger_pr_number: int | None = None
         if args.pr_number > 0:
             trigger_pr_number = _require_positive_int(
                 args.pr_number,
                 field="pull request number",
             )
-            trigger_qualification = api.live_pr_qualification(trigger_pr_number)
-            api.configure_historical_candidate_recovery(
-                pr_number=trigger_pr_number,
-                workflow_name=args.workflow_name,
-                current_run_id=current_run_id,
-            )
-            if (
-                trigger_qualification.head_sha == event_head_sha
-                and not trigger_qualification.integration_capable
-            ):
-                api.configure_same_head_candidate_recovery(
-                    pr_number=trigger_pr_number,
-                    event_head_sha=event_head_sha,
-                    workflow_name=args.workflow_name,
-                    current_run_id=current_run_id,
-                )
 
         # One exact-workflow snapshot now reconciles every explicit singleton PR group.
         # The selector and irreversible cancel boundary retain their existing live

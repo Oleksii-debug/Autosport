@@ -380,8 +380,9 @@ def test_freshness_is_bound_to_balance_observation_not_later_snapshot_time(
 ) -> None:
     now = datetime.now(timezone.utc)
     old = now - timedelta(minutes=2)
-    # read_account_details evidence, read_account_funds evidence, final snapshot time.
-    _SequencedDateTime.values = [old, old, now]
+    # developer-app identity evidence, account-details evidence, account-funds
+    # evidence, then the final BookmakerAccountSnapshot observation time.
+    _SequencedDateTime.values = [old, old, old, now]
     monkeypatch.setattr(betfair_readonly, "datetime", _SequencedDateTime)
 
     acquired, _ = _acquire_balance(monkeypatch, tmp_path, "100")

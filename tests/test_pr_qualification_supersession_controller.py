@@ -242,6 +242,10 @@ def test_zero_trigger_identity_leaves_current_run_eligible_for_orphan_cleanup(
         def __init__(self, **kwargs) -> None:
             events.append("api")
 
+        def active_runs(self) -> tuple[WorkflowRun, ...]:
+            events.append("snapshot")
+            return ()
+
         def cancel_historical_unbound_runs(self, **kwargs) -> tuple[int, ...]:
             assert kwargs["exclude_run_ids"] == ()
             events.append("orphan")
@@ -282,7 +286,7 @@ def test_zero_trigger_identity_leaves_current_run_eligible_for_orphan_cleanup(
             "7000",
         ]
     ) == 0
-    assert events == ["api", "sweep", "orphan"]
+    assert events == ["api", "snapshot", "sweep", "orphan"]
 
 
 def test_zero_trigger_orphan_cleanup_excludes_only_already_swept_runs(
@@ -293,6 +297,10 @@ def test_zero_trigger_orphan_cleanup_excludes_only_already_swept_runs(
     class FakeScopedApi:
         def __init__(self, **kwargs) -> None:
             events.append("api")
+
+        def active_runs(self) -> tuple[WorkflowRun, ...]:
+            events.append("snapshot")
+            return ()
 
         def cancel_historical_unbound_runs(self, **kwargs) -> tuple[int, ...]:
             assert kwargs["exclude_run_ids"] == (6001, 6002)
@@ -334,7 +342,75 @@ def test_zero_trigger_orphan_cleanup_excludes_only_already_swept_runs(
             "7000",
         ]
     ) == 0
-    assert events == ["api", "sweep", "orphan"]
+    assert events == ["api", "snapshot", "sweep", "orphan"]
+
+
+def test_zero_trigger_recovers_consistent_snapshot_identity_for_boundary_cancel(
+    monkeypatch,
+) -> None:
+    events: list[str] = []
+    stale_qualification = PullRequestQualification(
+        head_sha="b" * 40,
+        integration_capable=True,
+    )
+
+    class FakeScopedApi:
+        def __init__(self, **kwargs) -> None:
+            self._workflow_name = "CI"
+            events.append("api")
+
+        def active_runs(self) -> tuple[WorkflowRun, ...]:
+            events.append("snapshot")
+            return (
+                WorkflowRun(
+                    run_id=7000,
+                    head_sha="a" * 40,
+                    workflow_name="CI",
+                    pr_numbers=(2022,),
+                    status="queued",
+                ),
+            )
+
+        def live_pr_qualification(self, pr_number: int) -> PullRequestQualification:
+            assert pr_number == 2022
+            events.append("qualification")
+            return stale_qualification
+
+        def cancel_historical_unbound_runs(self, **kwargs) -> tuple[int, ...]:
+            assert kwargs["exclude_run_ids"] == (7000,)
+            events.append("orphan")
+            return ()
+
+        def cancel(self, run_id: int) -> None:
+            assert run_id == 7000
+            events.append("cancel")
+
+    monkeypatch.setattr(scoped_controller, "WorkflowScopedGitHubApi", FakeScopedApi)
+    monkeypatch.setenv("GITHUB_REPOSITORY", "Oleksii-debug/Autosport")
+    monkeypatch.setenv("GITHUB_TOKEN", "test-token")
+
+    assert scoped_controller.main(
+        [
+            "--pr-number",
+            "0",
+            "--event-head-sha",
+            "a" * 40,
+            "--workflow-name",
+            "CI",
+            "--workflow-id",
+            "356678400",
+            "--current-run-id",
+            "7000",
+        ]
+    ) == 0
+    assert events == [
+        "api",
+        "snapshot",
+        "orphan",
+        "qualification",
+        "qualification",
+        "cancel",
+    ]
 
 
 def test_explicit_stale_trigger_is_cancelled_once_after_orphan_exclusion(

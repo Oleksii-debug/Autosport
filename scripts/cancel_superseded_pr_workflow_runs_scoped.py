@@ -573,11 +573,46 @@ class WorkflowScopedGitHubApi(GitHubApi):
         return tuple(cancelled)
 
 
+def _explicit_singleton_pr_for_current_run(
+    runs: tuple[WorkflowRun, ...],
+    *,
+    workflow_name: str,
+    current_run_id: int,
+) -> int | None:
+    """Derive current source-run PR identity only from one consistent explicit snapshot.
+
+    The workflow_run event can omit pull_requests while the exact-workflow Actions
+    collection already exposes a singleton reference for the same source run. Reuse
+    that trusted snapshot without inventing authority from scheduler state. If the
+    moving active-run collection exposes no entry, an empty/multi-reference entry, or
+    conflicting singleton identities for the current run, fail closed and return None.
+    """
+
+    current_run_id = _require_positive_int(current_run_id, field="current run id")
+    if type(workflow_name) is not str or not workflow_name:
+        raise CancellationError("workflow name is required")
+    current_entries = tuple(
+        run
+        for run in runs
+        if run.run_id == current_run_id and run.workflow_name == workflow_name
+    )
+    if not current_entries or any(len(run.pr_numbers) != 1 for run in current_entries):
+        return None
+    pr_numbers = {run.pr_numbers[0] for run in current_entries}
+    if len(pr_numbers) != 1:
+        return None
+    return _require_positive_int(
+        next(iter(pr_numbers)),
+        field="snapshot pull request number",
+    )
+
+
 def cancel_superseded_explicit_pr_runs(
     api: WorkflowScopedGitHubApi,
     *,
     workflow_name: str,
     current_run_id: int,
+    runs: tuple[WorkflowRun, ...] | None = None,
 ) -> tuple[int, ...]:
     """Sweep superseded runs for every explicit singleton PR in one workflow snapshot.
 
@@ -599,7 +634,12 @@ def cancel_superseded_explicit_pr_runs(
     ):
         raise CancellationError("workflow name does not match exact workflow id")
 
-    runs = api.active_runs()
+    if runs is None:
+        runs = api.active_runs()
+    elif type(runs) is not tuple or any(
+        not isinstance(run, WorkflowRun) for run in runs
+    ):
+        raise CancellationError("invalid exact-workflow active-run snapshot")
     explicit_singleton_runs = tuple(
         run
         for run in runs
@@ -724,13 +764,27 @@ def main(argv: list[str] | None = None) -> int:
             )
 
         # One exact-workflow snapshot now reconciles every explicit singleton PR group.
-        # The selector and irreversible cancel boundary retain their existing live
-        # qualification checks; no cross-PR authority is inferred from scheduler state.
+        # If the trigger event itself carried no unambiguous PR identity, retain this
+        # same snapshot long enough to recover only a consistent explicit singleton
+        # identity for the current source run. This closes the event/snapshot metadata
+        # race without granting identity from scheduler state or historical heuristics.
+        sweep_runs: tuple[WorkflowRun, ...] | None = None
+        snapshot_trigger_pr_number: int | None = None
+        if trigger_pr_number is None:
+            sweep_runs = api.active_runs()
+            snapshot_trigger_pr_number = _explicit_singleton_pr_for_current_run(
+                sweep_runs,
+                workflow_name=args.workflow_name,
+                current_run_id=current_run_id,
+            )
         sweep_cancelled = cancel_superseded_explicit_pr_runs(
             api,
             workflow_name=args.workflow_name,
             current_run_id=current_run_id,
+            runs=sweep_runs,
         )
+        if trigger_pr_number is None and snapshot_trigger_pr_number is not None:
+            trigger_pr_number = snapshot_trigger_pr_number
         # An explicitly identified triggering source run has its own
         # live-qualification boundary below, so keep it out of orphan cleanup to avoid
         # a second cancellation race if the Actions list has meanwhile lost embedded

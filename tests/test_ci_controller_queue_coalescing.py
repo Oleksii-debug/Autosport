@@ -11,6 +11,7 @@ from scripts.cancel_superseded_pr_workflow_runs import (
 )
 from scripts.cancel_superseded_pr_workflow_runs_scoped import (
     _cancel_triggering_run_if_stale_or_nonqualifying,
+    _explicit_singleton_pr_for_current_run,
     cancel_superseded_explicit_pr_runs,
 )
 
@@ -132,6 +133,31 @@ def test_snapshot_change_revokes_stale_trigger_cancellation() -> None:
         qualification=qualification,
     )
     assert api.cancelled == []
+
+
+def test_current_run_snapshot_identity_requires_one_consistent_singleton() -> None:
+    singleton = _run(91, HEAD, (2039,))
+    assert _explicit_singleton_pr_for_current_run(
+        (singleton,),
+        workflow_name="CI",
+        current_run_id=91,
+    ) == 2039
+
+    assert _explicit_singleton_pr_for_current_run(
+        (singleton, _run(91, HEAD, (2039, 2040))),
+        workflow_name="CI",
+        current_run_id=91,
+    ) is None
+    assert _explicit_singleton_pr_for_current_run(
+        (singleton, _run(91, HEAD, (2040,))),
+        workflow_name="CI",
+        current_run_id=91,
+    ) is None
+    assert _explicit_singleton_pr_for_current_run(
+        (_run(92, HEAD, (2039,)),),
+        workflow_name="CI",
+        current_run_id=91,
+    ) is None
 
 
 def test_controller_scheduler_coalesces_all_prs_per_source_workflow() -> None:

@@ -2018,6 +2018,98 @@ class RealExecutionLedgerTests(unittest.TestCase):
             )
 
 
+
+    def test_supervised_attempt_requires_prior_product_issuance(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = RealExecutionLedger(Path(tmp) / "real.jsonl")
+            witness = "2" * 64
+            current = plan(
+                action(),
+                plan_id=f"supervised-v2-{witness}",
+            )
+            ledger.reserve_plan(current)
+
+            with self.assertRaisesRegex(
+                ExecutionStateError,
+                "requires prior product issuance",
+            ):
+                ledger.begin_attempt(
+                    plan_id=current.plan_id,
+                    action_id="a1",
+                    attempt_id="pre-issuance-attempt",
+                    reserved_at=RESERVED_AT,
+                )
+
+            ledger._bind_supervised_plan_issuance(
+                plan_id=current.plan_id,
+                bound_plan_witness=witness,
+                plan_fingerprint=current.fingerprint,
+            )
+            attempt = ledger.begin_attempt(
+                plan_id=current.plan_id,
+                action_id="a1",
+                attempt_id="post-issuance-attempt",
+                reserved_at=RESERVED_AT,
+            )
+            self.assertEqual(attempt.attempt_id, "post-issuance-attempt")
+
+
+    def test_restart_rejects_hash_valid_attempt_reordered_before_supervised_issuance(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "real.jsonl"
+            ledger = RealExecutionLedger(path)
+            witness = "3" * 64
+            current = plan(
+                action(),
+                plan_id=f"supervised-v2-{witness}",
+            )
+            ledger.reserve_plan(current)
+            ledger._bind_supervised_plan_issuance(
+                plan_id=current.plan_id,
+                bound_plan_witness=witness,
+                plan_fingerprint=current.fingerprint,
+            )
+            ledger.begin_attempt(
+                plan_id=current.plan_id,
+                action_id="a1",
+                attempt_id="issued-attempt",
+                reserved_at=RESERVED_AT,
+            )
+
+            lines = [
+                json.loads(line)
+                for line in path.read_text(encoding="utf-8").splitlines()
+            ]
+            self.assertEqual(
+                [line["event"]["event_type"] for line in lines],
+                [
+                    EventType.PLAN_RESERVED.value,
+                    EventType.SUPERVISED_PLAN_ISSUED.value,
+                    EventType.ATTEMPT_RESERVED.value,
+                ],
+            )
+            path.write_text(
+                "\n".join(
+                    json.dumps(
+                        envelope,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                    for envelope in (lines[0], lines[2], lines[1])
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            restarted = RealExecutionLedger(path)
+            with self.assertRaisesRegex(
+                ExecutionLedgerIntegrityError,
+                "supervised attempt reservation must follow product issuance",
+            ):
+                restarted.verify_integrity()
+
+
     def test_restart_rejects_hash_valid_supervised_issuance_before_plan_reservation(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "real.jsonl"

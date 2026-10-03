@@ -23,6 +23,10 @@ _CANONICAL_CYCLE_EVIDENCE_DESCRIPTOR = inspect.getattr_static(
     CollectorDeltaStore, "collector_cycle_evidence"
 )
 _CANONICAL_CYCLE_EVIDENCE_CODE = _CANONICAL_CYCLE_EVIDENCE.__code__
+_CANONICAL_SCHEDULED_SOURCE_UNIVERSE_RESOLVER = resolve_scheduled_source_universe
+_CANONICAL_SCHEDULED_SOURCE_UNIVERSE_RESOLVER_CODE = (
+    _CANONICAL_SCHEDULED_SOURCE_UNIVERSE_RESOLVER.__code__
+)
 
 
 class AcquisitionDenominatorEvidenceError(ValueError):
@@ -89,6 +93,45 @@ def _expected_path(store: CollectorDeltaStore, expected_store_path: str | Path) 
             "collector store path does not match product-expected authority path"
         )
     return expected
+
+
+def _resolve_scheduled_source_universe_canonical(
+    store: CollectorDeltaStore,
+    candidate_source_universe: SourceUniverseCommitment,
+    **kwargs: object,
+):
+    if (
+        globals().get("resolve_scheduled_source_universe")
+        is not _CANONICAL_SCHEDULED_SOURCE_UNIVERSE_RESOLVER
+        or getattr(
+            _CANONICAL_SCHEDULED_SOURCE_UNIVERSE_RESOLVER,
+            "__code__",
+            None,
+        )
+        is not _CANONICAL_SCHEDULED_SOURCE_UNIVERSE_RESOLVER_CODE
+    ):
+        raise AcquisitionDenominatorEvidenceError(
+            "canonical scheduled source-universe resolver is rebound"
+        )
+    resolved = _CANONICAL_SCHEDULED_SOURCE_UNIVERSE_RESOLVER(
+        store,
+        candidate_source_universe,
+        **kwargs,
+    )
+    if (
+        globals().get("resolve_scheduled_source_universe")
+        is not _CANONICAL_SCHEDULED_SOURCE_UNIVERSE_RESOLVER
+        or getattr(
+            _CANONICAL_SCHEDULED_SOURCE_UNIVERSE_RESOLVER,
+            "__code__",
+            None,
+        )
+        is not _CANONICAL_SCHEDULED_SOURCE_UNIVERSE_RESOLVER_CODE
+    ):
+        raise AcquisitionDenominatorEvidenceError(
+            "canonical scheduled source-universe resolver changed during resolution"
+        )
+    return resolved
 
 
 def _cycle_evidence(
@@ -366,7 +409,7 @@ def build_acquisition_denominator_evidence(
             "evaluation universe source does not match scheduled acquisition authority"
         )
 
-    scheduled = resolve_scheduled_source_universe(
+    scheduled = _resolve_scheduled_source_universe_canonical(
         store,
         candidate_source_universe,
         expected_store_path=expected_path,

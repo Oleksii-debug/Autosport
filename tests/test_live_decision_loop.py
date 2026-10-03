@@ -1240,6 +1240,83 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
                 1,
             )
 
+    def test_future_local_stale_provider_evidence_does_not_backpressure(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            clock = _ManualClock(self.START + timedelta(seconds=10))
+            stale = self._event(
+                selection="selection-a",
+                sequence=1,
+                observed=self.START + timedelta(seconds=11),
+            )
+            stale = MarketEvent.from_dict(
+                {
+                    **stale.to_dict(),
+                    "source_ts": (
+                        self.START - timedelta(seconds=10)
+                    ).isoformat(),
+                }
+            )
+            factory = _EmptyIntentFactory()
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(workspace, [(stale,)]),
+                factory=factory,
+                clock=clock,
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+
+            result = loop.run_cycle()
+
+            self.assertEqual(result.status, LiveCycleStatus.DECIDED)
+            self.assertEqual(factory.calls, [("input-a", ())])
+            self.assertEqual(
+                len(
+                    JsonlDecisionLedger(
+                        workspace / "decisions.jsonl"
+                    ).verified_records()
+                ),
+                1,
+            )
+
+    def test_future_local_closed_evidence_does_not_backpressure(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            clock = _ManualClock(self.START + timedelta(seconds=1))
+            closed = self._event(
+                selection="selection-a",
+                sequence=1,
+                observed=self.START + timedelta(seconds=2),
+                status="closed",
+            )
+            closed = MarketEvent.from_dict(
+                {
+                    **closed.to_dict(),
+                    "source_ts": self.START.isoformat(),
+                }
+            )
+            factory = _EmptyIntentFactory()
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(workspace, [(closed,)]),
+                factory=factory,
+                clock=clock,
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+
+            result = loop.run_cycle()
+
+            self.assertEqual(result.status, LiveCycleStatus.DECIDED)
+            self.assertEqual(factory.calls, [("input-a", ())])
+            self.assertEqual(
+                len(
+                    JsonlDecisionLedger(
+                        workspace / "decisions.jsonl"
+                    ).verified_records()
+                ),
+                1,
+            )
+
     def test_market_update_after_coherent_capture_cannot_publish_stale_pending(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

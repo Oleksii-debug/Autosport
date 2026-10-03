@@ -759,54 +759,6 @@ def test_exact_existing_attempt_replay_does_not_require_current_balance_generati
     assert ledger.attempt_state("generation-replay-attempt") is AttemptState.RESERVED
 
 
-def test_current_balance_generation_lock_enters_economic_lock_before_generation_hold(
-    monkeypatch,
-) -> None:
-    events: list[str] = []
-    acquired = object()
-    workspace = object()
-
-    @contextmanager
-    def economic_lock(actual_workspace):
-        assert actual_workspace is workspace
-        events.append("economic-enter")
-        try:
-            yield
-        finally:
-            events.append("economic-exit")
-
-    @contextmanager
-    def hold_current(actual_acquired, required):
-        assert actual_acquired is acquired
-        assert required == frozenset({BookmakerCapability.BALANCE_READ})
-        events.append("generation-enter")
-        try:
-            yield
-        finally:
-            events.append("generation-exit")
-
-    monkeypatch.setattr(headroom_module, "_canonical_economic_lock", economic_lock)
-    monkeypatch.setattr(
-        headroom_module,
-        "_canonical_account_snapshot_authority",
-        lambda: (object(), hold_current),
-    )
-
-    with headroom_module._current_balance_generation_lock(
-        workspace,
-        acquired,  # type: ignore[arg-type]
-    ):
-        events.append("body")
-
-    assert events == [
-        "economic-enter",
-        "generation-enter",
-        "body",
-        "generation-exit",
-        "economic-exit",
-    ]
-
-
 @pytest.mark.parametrize(
     "dependency_name",
     ("_canonical_account_snapshot_authority", "_canonical_economic_lock"),

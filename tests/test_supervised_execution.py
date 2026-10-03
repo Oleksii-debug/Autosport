@@ -721,6 +721,80 @@ def test_bound_plan_witness_code_replacement_fails_closed(
         ledger.saga(bound.execution_plan.plan_id)
 
 
+def test_instance_shadowed_ledger_methods_cannot_reopen_revoked_approval(
+    tmp_path,
+) -> None:
+    bound, approval, _, _ = _bound()
+    ledger = RealExecutionLedger(tmp_path / "shadowed-revoked-ledger.jsonl")
+    reserve_supervised_plan(ledger, bound, approval)
+    revoke_supervised_approval(
+        ledger,
+        bound,
+        approval,
+        revocation_evidence_sha256="f" * 64,
+    )
+    hostile_calls: list[object] = []
+
+    def hostile_begin_attempt(**kwargs):
+        hostile_calls.append(kwargs)
+        raise AssertionError("instance-shadowed begin_attempt executed")
+
+    ledger.supervised_approval_is_active = lambda **_kwargs: True
+    ledger.begin_attempt = hostile_begin_attempt
+    action = bound.execution_plan.actions[0]
+
+    with pytest.raises(
+        SupervisedExecutionError,
+        match="durable supervised approval is missing or revoked",
+    ):
+        begin_supervised_attempt(
+            ledger,
+            bound,
+            approval,
+            action_id=action.action_id,
+            attempt_id="shadowed-attempt",
+        )
+
+    assert hostile_calls == []
+    with pytest.raises(KeyError):
+        ledger.attempt_state("shadowed-attempt")
+
+
+def test_class_rebound_ledger_method_fails_before_hostile_dispatch(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    bound, approval, _, _ = _bound()
+    ledger = RealExecutionLedger(tmp_path / "class-rebound-ledger.jsonl")
+    reserve_supervised_plan(ledger, bound, approval)
+    hostile_calls: list[object] = []
+
+    def hostile_begin_attempt(self, **kwargs):
+        hostile_calls.append((self, kwargs))
+        raise AssertionError("class-rebound begin_attempt executed")
+
+    monkeypatch.setattr(
+        RealExecutionLedger,
+        "begin_attempt",
+        hostile_begin_attempt,
+    )
+    action = bound.execution_plan.actions[0]
+
+    with pytest.raises(
+        SupervisedExecutionError,
+        match="canonical real execution ledger authority changed",
+    ):
+        begin_supervised_attempt(
+            ledger,
+            bound,
+            approval,
+            action_id=action.action_id,
+            attempt_id="class-rebound-attempt",
+        )
+
+    assert hostile_calls == []
+
+
 def test_approval_binds_exact_route_and_slippage_terms() -> None:
     intent, policy, book = _intent()
     graph = PortfolioDependencyGraph.for_inputs(book, (intent,))

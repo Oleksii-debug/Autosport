@@ -77,15 +77,31 @@ _CANONICAL_STORE_SURFACE = tuple(
 # must not redirect canonical history into another SQLite authority while the public
 # method identities remain unchanged.
 _CANONICAL_STORE_TRANSITIVE_SURFACE = tuple(
-    (name, vars(_CANONICAL_COLLECTOR_STORE_TYPE)[name])
+    (
+        name,
+        descriptor,
+        descriptor.__func__
+        if isinstance(descriptor, (classmethod, staticmethod))
+        else descriptor,
+        getattr(
+            descriptor.__func__
+            if isinstance(descriptor, (classmethod, staticmethod))
+            else descriptor,
+            "__code__",
+            None,
+        ),
+    )
     for name in (
+        "_stat_file_identity",
         "_path_file_identity",
         "_connect",
         "_canonical_event_payload",
         "_append_event_payload_connection",
         "_bounded_identity_keys",
         "_delta_by_id",
+        "_row_delta",
     )
+    for descriptor in (vars(_CANONICAL_COLLECTOR_STORE_TYPE)[name],)
 )
 
 
@@ -132,10 +148,26 @@ def _canonical_collector_store_dispatch(
         )
     class_dict = vars(_CANONICAL_COLLECTOR_STORE_TYPE)
     instance_dict = vars(store)
-    for name, expected_descriptor in _CANONICAL_STORE_TRANSITIVE_SURFACE:
+    for (
+        name,
+        expected_descriptor,
+        expected_callable,
+        expected_code,
+    ) in _CANONICAL_STORE_TRANSITIVE_SURFACE:
+        current_descriptor = class_dict.get(name)
+        current_callable = (
+            current_descriptor.__func__
+            if isinstance(current_descriptor, (classmethod, staticmethod))
+            else current_descriptor
+        )
         if (
             name in instance_dict
-            or class_dict.get(name) is not expected_descriptor
+            or current_descriptor is not expected_descriptor
+            or current_callable is not expected_callable
+            or (
+                expected_code is not None
+                and getattr(current_callable, "__code__", None) is not expected_code
+            )
         ):
             raise ProductSourceStateError(
                 "canonical collector-store durable-history dispatch was replaced"

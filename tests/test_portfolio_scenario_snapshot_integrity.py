@@ -305,5 +305,22 @@ class PortfolioScenarioSnapshotIntegrityTests(unittest.TestCase):
             PortfolioEngine.affected_tickets([ticket], leg.quote_key)
 
 
+    def test_direct_scenario_profit_rejects_decimal_subclass_before_virtual_dispatch(self) -> None:
+        class HostileDecimal(Decimal):
+            def is_finite(self):
+                raise AssertionError("hostile Decimal is_finite executed")
+
+        leg = TicketLeg("event", "winner", "alice", Decimal("2"))
+        ticket = portfolio_module.PaperTicket(
+            ticket_id="synthetic-hostile-decimal",
+            stake=HostileDecimal("10"),
+            legs=(leg,),
+            placed_at="2026-09-21T08:00:00+00:00",
+        )
+
+        with self.assertRaisesRegex(ValueError, "stake must be a finite Decimal"):
+            PortfolioEngine.scenario_profit([ticket], {leg.quote_key})
+
+
 if __name__ == "__main__":
     unittest.main()

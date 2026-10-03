@@ -35,7 +35,7 @@ _PORTFOLIO_DECIMAL_CONTEXT = Context(
 
 
 def _require_finite_decimal(value: object, label: str) -> Decimal:
-    if not isinstance(value, Decimal) or not value.is_finite():
+    if type(value) is not Decimal or not value.is_finite():
         raise ValueError(f"{label} must be a finite Decimal")
     return value
 

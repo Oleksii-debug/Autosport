@@ -569,6 +569,46 @@ def test_newer_balance_generation_stales_assessment_before_new_reservation(
     assert recomputed.decision is HeadroomDecision.INSUFFICIENT_UPPER_BOUND
 
 
+def test_new_reservation_uses_current_generation_critical_section(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    acquired, _ = _acquire_balance(monkeypatch, tmp_path, "100")
+    action = _action("generation-critical-section-target", "10")
+    ledger = _ledger_with_plans(tmp_path, _plan("target", action))
+    assessment = _assess(
+        ledger,
+        acquired,
+        plan_id="target",
+        action_id="generation-critical-section-target",
+    )
+    entries: list[tuple[object, object]] = []
+    canonical_guard = headroom_module._current_balance_generation_lock
+
+    @contextmanager
+    def recording_guard(workspace, actual_acquired):
+        entries.append((workspace, actual_acquired))
+        with canonical_guard(workspace, actual_acquired):
+            yield
+
+    monkeypatch.setattr(
+        headroom_module,
+        "_current_balance_generation_lock",
+        recording_guard,
+    )
+
+    reservation = _reserve(
+        ledger,
+        acquired,
+        assessment,
+        attempt_id="generation-critical-section-attempt",
+    )
+
+    assert reservation.attempt_id == "generation-critical-section-attempt"
+    assert len(entries) == 1
+    assert entries[0][1] is acquired
+
+
 def test_exact_existing_attempt_replay_does_not_require_current_balance_generation(
     monkeypatch,
     tmp_path,

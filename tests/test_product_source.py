@@ -834,6 +834,96 @@ class ParlayApiProductSourceTests(unittest.TestCase):
 
             self.assertIsNone(source._collector_store)
 
+    def test_collector_store_binding_rejects_wrong_path_when_resolve_is_rebound(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory) / "workspace"
+            source = ParlayApiProductSource(
+                _Provider([]),
+                workspace=workspace,
+                authority_root=Path(directory) / "authority",
+                lawful_terms_ref="terms:parlayapi:v1",
+                retention_ref="retention:parlayapi:v1",
+            )
+            wrong_store = CollectorDeltaStore(
+                Path(directory) / "wrong-workspace" / "collector_deltas.json",
+                max_bytes=4 * 1024 * 1024,
+            )
+            hostile_calls = []
+
+            def hostile_resolve(path, *, strict=False):
+                hostile_calls.append((path, strict))
+                return source._collector_store_path
+
+            with patch.object(Path, "resolve", hostile_resolve):
+                with self.assertRaisesRegex(
+                    ProductSourceStateError,
+                    "canonical workspace store",
+                ):
+                    source.bind_collector_store(wrong_store)
+
+            self.assertEqual(hostile_calls, [])
+            self.assertIsNone(source._collector_store)
+
+    def test_collector_store_binding_fails_closed_on_path_equality_rebind(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory) / "workspace"
+            source = ParlayApiProductSource(
+                _Provider([]),
+                workspace=workspace,
+                authority_root=Path(directory) / "authority",
+                lawful_terms_ref="terms:parlayapi:v1",
+                retention_ref="retention:parlayapi:v1",
+            )
+            wrong_store = CollectorDeltaStore(
+                Path(directory) / "wrong-workspace" / "collector_deltas.json",
+                max_bytes=4 * 1024 * 1024,
+            )
+            hostile_calls = []
+
+            def hostile_eq(left, right):
+                hostile_calls.append((left, right))
+                return True
+
+            with patch.object(Path, "__eq__", hostile_eq):
+                with self.assertRaisesRegex(
+                    ProductSourceStateError,
+                    "path comparison dispatch was replaced",
+                ):
+                    source.bind_collector_store(wrong_store)
+
+            self.assertEqual(hostile_calls, [])
+            self.assertIsNone(source._collector_store)
+
+    def test_bound_store_reuse_fails_closed_on_path_equality_rebind(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory) / "workspace"
+            source = ParlayApiProductSource(
+                _Provider([]),
+                workspace=workspace,
+                authority_root=Path(directory) / "authority",
+                lawful_terms_ref="terms:parlayapi:v1",
+                retention_ref="retention:parlayapi:v1",
+            )
+            store = CollectorDeltaStore(
+                workspace / "collector_deltas.json",
+                max_bytes=4 * 1024 * 1024,
+            )
+            source.bind_collector_store(store)
+            hostile_calls = []
+
+            def hostile_eq(left, right):
+                hostile_calls.append((left, right))
+                return True
+
+            with patch.object(Path, "__eq__", hostile_eq):
+                with self.assertRaisesRegex(
+                    ProductSourceStateError,
+                    "path comparison dispatch was replaced",
+                ):
+                    source._require_collector_store()
+
+            self.assertEqual(hostile_calls, [])
+
     def test_bound_store_instance_method_shadow_cannot_redirect_history_reads(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory) / "workspace"

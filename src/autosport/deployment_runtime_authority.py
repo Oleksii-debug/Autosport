@@ -622,7 +622,8 @@ class DeploymentRuntimeAuthorityStore:
         latest = history[-1] if history else None
         pending_tx_id = (
             latest.tx_id
-            if latest.phase is AuthorityPhase.PREPARE
+            if latest is not None
+            and latest.phase is AuthorityPhase.PREPARE
             and latest.intended_state_sha256 == state_sha256
             else None
         )

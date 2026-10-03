@@ -21,6 +21,8 @@ _WINDOWS_RESERVED_NAMES = {
     "prn",
     "aux",
     "nul",
+    "conin$",
+    "conout$",
     *(f"com{index}" for index in range(1, 10)),
     *(f"lpt{index}" for index in range(1, 10)),
     "com¹",

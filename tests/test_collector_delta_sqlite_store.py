@@ -336,6 +336,22 @@ class CollectorSQLiteStoreTests(unittest.TestCase):
                         delta.delta_id,
                     ),
                 )
+                with self.assertRaisesRegex(
+                    sqlite3.IntegrityError,
+                    "requires retention tombstone",
+                ):
+                    connection.execute(
+                        "DELETE FROM collector_event_payloads_v1 WHERE delta_id=?",
+                        (delta.delta_id,),
+                    )
+                self.assertEqual(
+                    connection.execute(
+                        "SELECT COUNT(*) FROM collector_event_payloads_v1 "
+                        "WHERE delta_id=?",
+                        (delta.delta_id,),
+                    ).fetchone()[0],
+                    1,
+                )
                 connection.execute(
                     "DELETE FROM collector_deltas WHERE delta_id=?",
                     (delta.delta_id,),
@@ -357,6 +373,78 @@ class CollectorSQLiteStoreTests(unittest.TestCase):
             try:
                 connection.execute(
                     "DROP TRIGGER collector_event_payloads_retention_delete_v1"
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "event payload schema integrity guard is missing",
+            ):
+                CollectorDeltaStore(path)
+
+    def test_event_payload_v2_delete_guard_upgrades_without_accepting_weakened_sql(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "collector.json"
+            CollectorDeltaStore(path)
+            connection = sqlite3.connect(path)
+            try:
+                connection.execute(
+                    "DROP TRIGGER collector_event_payloads_retention_delete_v1"
+                )
+                connection.execute(
+                    "CREATE TRIGGER collector_event_payloads_retention_delete_v1 "
+                    "BEFORE DELETE ON collector_event_payloads_v1 "
+                    "WHEN NOT EXISTS (SELECT 1 FROM collector_delta_tombstones_v1 "
+                    "WHERE delta_id=OLD.delta_id AND source_id=OLD.source_id "
+                    "AND stream_epoch=OLD.stream_epoch) BEGIN "
+                    "SELECT RAISE(ABORT, 'collector event payload deletion requires retention tombstone'); END"
+                )
+                connection.execute(
+                    "UPDATE collector_meta SET value='2' "
+                    "WHERE key='collector_event_payload_schema_v1'"
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            CollectorDeltaStore(path)
+            connection = sqlite3.connect(path)
+            try:
+                marker = connection.execute(
+                    "SELECT value FROM collector_meta "
+                    "WHERE key='collector_event_payload_schema_v1'"
+                ).fetchone()[0]
+                trigger_sql = connection.execute(
+                    "SELECT sql FROM sqlite_master "
+                    "WHERE name='collector_event_payloads_retention_delete_v1'"
+                ).fetchone()[0]
+            finally:
+                connection.close()
+
+            self.assertEqual(marker, "3")
+            self.assertIn(
+                "WHEN EXISTS (SELECT 1 FROM collector_deltas WHERE delta_id=OLD.delta_id)",
+                " ".join(trigger_sql.split()),
+            )
+
+    def test_event_payload_v2_upgrade_rejects_tampered_delete_guard(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "collector.json"
+            CollectorDeltaStore(path)
+            connection = sqlite3.connect(path)
+            try:
+                connection.execute(
+                    "DROP TRIGGER collector_event_payloads_retention_delete_v1"
+                )
+                connection.execute(
+                    "CREATE TRIGGER collector_event_payloads_retention_delete_v1 "
+                    "BEFORE DELETE ON collector_event_payloads_v1 BEGIN SELECT 1; END"
+                )
+                connection.execute(
+                    "UPDATE collector_meta SET value='2' "
+                    "WHERE key='collector_event_payload_schema_v1'"
                 )
                 connection.commit()
             finally:

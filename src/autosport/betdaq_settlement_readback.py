@@ -799,6 +799,16 @@ def _parse_economic_soap_result(payload: bytes, method: str) -> ET.Element:
             else f"{{{_account._EXTERNAL_NS}}}Orders"
         ),
     }
+    if method == "GetOrderDetails":
+        # The generated BETDAQ contract documents AuditLog as a sibling of
+        # OrderSettlementInformation. It remains raw/content-bound evidence here;
+        # this economic projection does not infer settlement state from audit entries.
+        audit_log_tag = f"{{{_account._EXTERNAL_NS}}}AuditLog"
+        allowed_children.add(audit_log_tag)
+        if sum(child.tag == audit_log_tag for child in result) > 1:
+            raise BetdaqEconomicReadbackError(
+                "GetOrderDetails has duplicate AuditLog containers"
+            )
     if any(child.tag not in allowed_children for child in result):
         raise BetdaqEconomicReadbackError(
             f"BETDAQ economic {method} result contains unexpected element"

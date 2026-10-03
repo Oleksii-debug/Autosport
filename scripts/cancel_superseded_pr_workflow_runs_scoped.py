@@ -318,8 +318,8 @@ class WorkflowScopedGitHubApi(GitHubApi):
         pull_request,
     ):
         base_cancel_code = getattr(base_cancel, "__code__", None)
-        helper_dispatch = tuple(
-            (name, implementation, getattr(implementation, "__code__", None))
+        helper_dispatch = {
+            name: (implementation, getattr(implementation, "__code__", None))
             for name, implementation in (
                 (
                     "_historical_associated_pr_number",
@@ -333,7 +333,7 @@ class WorkflowScopedGitHubApi(GitHubApi):
                 ("live_pr_qualification", live_pr_qualification),
                 ("_pull_request", pull_request),
             )
-        )
+        }
 
         def cancel(self, run_id: int) -> None:
             """Revalidate synthetic candidate identity at the irreversible boundary."""
@@ -342,7 +342,9 @@ class WorkflowScopedGitHubApi(GitHubApi):
                 raise CancellationError(
                     "canonical base cancellation authority changed"
                 )
-            for name, expected, expected_code in helper_dispatch:
+
+            def require_helper_dispatch(name: str) -> None:
+                expected, expected_code = helper_dispatch[name]
                 bound = getattr(self, name, None)
                 if (
                     getattr(expected, "__code__", None) is not expected_code
@@ -353,14 +355,19 @@ class WorkflowScopedGitHubApi(GitHubApi):
                         "scoped cancellation revalidation dispatch changed"
                     )
 
+            for name in helper_dispatch:
+                require_helper_dispatch(name)
+
             run_id = _require_positive_int(run_id, field="run id")
             zero_association = self._zero_association_recovered_runs.get(run_id)
             if zero_association is not None:
                 candidate_head_sha, head_branch = zero_association
                 try:
+                    require_helper_dispatch("_historical_head_has_no_associated_prs")
                     no_association = historical_head_has_no_associated_prs(
                         self, candidate_head_sha
                     )
+                    require_helper_dispatch("_canonical_branch_head")
                     branch_head_sha = canonical_branch_head(self, head_branch)
                 except CancellationError as exc:
                     raise CancellationError(
@@ -375,6 +382,7 @@ class WorkflowScopedGitHubApi(GitHubApi):
             if recovered is not None:
                 pr_number, candidate_head_sha = recovered
                 try:
+                    require_helper_dispatch("_historical_associated_pr_number")
                     associated_pr_number = historical_associated_pr_number(
                         self, candidate_head_sha
                     )
@@ -394,6 +402,8 @@ class WorkflowScopedGitHubApi(GitHubApi):
                 # truth immediately afterward.  A historical candidate may be cancelled
                 # while the PR has advanced, but if the PR rolls back to that exact head,
                 # same-head cancellation again requires a non-integration-capable lifecycle.
+                require_helper_dispatch("live_pr_qualification")
+                require_helper_dispatch("_pull_request")
                 qualification = live_pr_qualification(self, pr_number)
                 if (
                     qualification.head_sha == candidate_head_sha

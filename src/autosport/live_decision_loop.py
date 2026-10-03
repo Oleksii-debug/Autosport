@@ -1614,13 +1614,13 @@ class PersistentLiveDecisionLoop:
         as_of: datetime,
         *,
         require_eligible: bool,
-        require_ineligible: bool = False,
+        require_failed: bool = False,
     ) -> None:
-        if type(require_eligible) is not bool or type(require_ineligible) is not bool:
+        if type(require_eligible) is not bool or type(require_failed) is not bool:
             raise TypeError("provider health eligibility requirements must be bools")
-        if require_eligible and require_ineligible:
+        if require_eligible and require_failed:
             raise ValueError(
-                "provider health cannot be required eligible and ineligible together"
+                "provider health cannot be required eligible and failed together"
             )
         store = self._health_store_for_boundaries(boundaries)
         if store is None:
@@ -1644,12 +1644,15 @@ class PersistentLiveDecisionLoop:
                     "bound provider health was not decision-eligible"
                 )
         if (
-            require_ineligible
+            require_failed
             and replayed_decisions
-            and all(decision.eligible for decision in replayed_decisions)
+            and not any(
+                decision.source_status == "failed"
+                for decision in replayed_decisions
+            )
         ):
             raise LiveDecisionProgressError(
-                "bound provider health does not prove a provider gap"
+                "bound provider health does not contain durable failed evidence"
             )
 
     def _recover_unfinished_progress(self) -> LiveCycleResult:
@@ -1708,7 +1711,7 @@ class PersistentLiveDecisionLoop:
             progress.provider_health_boundaries,
             decision_time,
             require_eligible=(progress.gate == _GATE_NORMAL),
-            require_ineligible=(progress.gate == _GATE_PROVIDER_GAP),
+            require_failed=(progress.gate == _GATE_PROVIDER_GAP),
         )
 
         if progress.gate == _GATE_NORMAL:
@@ -2197,11 +2200,11 @@ class PersistentLiveDecisionLoop:
                     provider_health_boundaries,
                     now,
                     require_eligible=False,
-                    require_ineligible=True,
+                    require_failed=True,
                 )
             except LiveDecisionProgressError as health_error:
                 raise _ConcurrentDecisionSnapshot(
-                    "provider gap lacks durable ineligible provider health evidence"
+                    "provider gap lacks durable failed provider health evidence"
                 ) from health_error
             captured_mirror_revision = (
                 None

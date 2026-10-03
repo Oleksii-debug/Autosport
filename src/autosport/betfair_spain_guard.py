@@ -36,7 +36,6 @@ class SpainLoginMode(str, Enum):
 
 
 class SpainOrderAdmission(str, Enum):
-    ADMISSIBLE = "ADMISSIBLE"
     REJECTED = "REJECTED"
     UNKNOWN = "UNKNOWN"
 

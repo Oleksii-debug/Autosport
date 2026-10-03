@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from .integrity import atomic_write_json
+from .json_integrity import strict_json_loads
 from .sport_domain_fitness import (
     CausalView,
     RouteRecommendation,
@@ -75,6 +76,7 @@ class DataClassification(StrEnum):
     PUBLIC = "PUBLIC"
     PRIVATE = "PRIVATE"
     RESTRICTED = "RESTRICTED"
+    SECRET = "SECRET"
 
 
 class VOCEvidenceProvenance(StrEnum):
@@ -123,8 +125,12 @@ def _authority_now() -> str:
 
 
 def _decimal(name: str, value: object) -> Decimal:
-    if not isinstance(value, Decimal) or not value.is_finite():
-        raise ModelComputeRouterError(f"{name} must be a finite Decimal")
+    # Routing/economic ingress must not dispatch through caller-defined Decimal
+    # subclasses before durable validation has accepted the value.
+    if type(value) is not Decimal:
+        raise ModelComputeRouterError(f"{name} must be a finite exact Decimal")
+    if not value.is_finite():
+        raise ModelComputeRouterError(f"{name} must be a finite exact Decimal")
     return value
 
 
@@ -381,8 +387,7 @@ class ComputeRoutingPolicy:
         _nonnegative("max_cloud_cost", self.max_cloud_cost)
         _nonnegative("voc_max_age_seconds", self.voc_max_age_seconds)
         if (
-            isinstance(self.voc_min_effective_sample_size, bool)
-            or not isinstance(self.voc_min_effective_sample_size, int)
+            type(self.voc_min_effective_sample_size) is not int
             or self.voc_min_effective_sample_size < 1
         ):
             raise ModelComputeRouterError(
@@ -1291,12 +1296,12 @@ def _classify_execution(
             "execution backend/model/config identity differs from "
             "routed decision",
         )
-    if available > _instant(
+    if available >= _instant(
         "decision_deadline", request.decision_deadline
     ):
         return (
             ExecutionDisposition.REJECTED_LATE,
-            "execution became available after decision deadline",
+            "execution became available at or after decision deadline",
         )
     if _seconds(now, completed) > request.response_ttl_seconds:
         return (
@@ -1329,9 +1334,9 @@ def _candidate_map(
 ) -> dict[str, ComputeCandidate]:
     result: dict[str, ComputeCandidate] = {}
     for candidate in candidates:
-        if not isinstance(candidate, ComputeCandidate):
+        if type(candidate) is not ComputeCandidate:
             raise TypeError(
-                "candidates must contain ComputeCandidate values"
+                "candidates must contain exact ComputeCandidate values"
             )
         if candidate.candidate_id in result:
             raise ModelComputeRouterError(
@@ -1356,8 +1361,8 @@ def _candidate_feasible(
         now,
     )
     return (
-        remaining >= _ZERO
-        and candidate.estimated_latency_seconds <= remaining
+        remaining > _ZERO
+        and candidate.estimated_latency_seconds < remaining
     )
 
 
@@ -1372,11 +1377,31 @@ def route_compute(
     domain_observation: SportDomainFitnessObservation | None = None,
     domain_route: RouteRecommendation | None = None,
 ) -> ComputeRouteDecision:
-    if not isinstance(request, ComputeRouteRequest):
-        raise TypeError("request must be ComputeRouteRequest")
-    if not isinstance(policy, ComputeRoutingPolicy):
-        raise TypeError("policy must be ComputeRoutingPolicy")
+    if type(request) is not ComputeRouteRequest:
+        raise TypeError("request must be exact ComputeRouteRequest")
+    if type(policy) is not ComputeRoutingPolicy:
+        raise TypeError("policy must be exact ComputeRoutingPolicy")
     now = _instant("as_of", as_of)
+    created_at = _instant("created_at", request.created_at)
+    if now < created_at:
+        raise ModelComputeRouterError(
+            "as_of precedes request creation"
+        )
+    if request.data_classification is DataClassification.SECRET:
+        return ComputeRouteDecision.build(
+            decision_id=f"{request.request_id}:wait",
+            request_id=request.request_id,
+            decided_at=as_of,
+            policy=policy,
+            tier=ComputeTier.WAIT,
+            candidate=None,
+            reason=(
+                "secret/credential data is not admissible to model compute; "
+                "use a non-model product authority boundary"
+            ),
+            voc_evidence_id=None,
+            domain_observation_id=None,
+        )
     if domain_route is not None and not isinstance(
         domain_route, RouteRecommendation
     ):
@@ -1390,11 +1415,7 @@ def route_compute(
         if domain_observation is None
         else domain_observation.observation_id
     )
-    if now < _instant("created_at", request.created_at):
-        raise ModelComputeRouterError(
-            "as_of precedes request creation"
-        )
-    if now > _instant(
+    if now >= _instant(
         "decision_deadline", request.decision_deadline
     ):
         return ComputeRouteDecision.build(
@@ -1663,10 +1684,29 @@ def route_compute(
                             + str(exc)
                         )
                     else:
+                        canonical_data_classification = current_context.get(
+                            "data_classification"
+                        )
+                        canonical_policy_id = current_context.get(
+                            "routing_policy_id"
+                        )
+                        canonical_policy_version = current_context.get(
+                            "routing_policy_version"
+                        )
+                        canonical_policy_sha256 = current_context.get(
+                            "routing_policy_sha256"
+                        )
+                        canonical_cloud_permission = current_context.get(
+                            "cloud_permission"
+                        )
+                        canonical_cloud_backend_id = current_context.get(
+                            "cloud_backend_id"
+                        )
                         expected_current_context = {
                             "request_id": request.request_id,
                             "decision_input_sha256": request.decision_input_sha256,
                             "task_class": request.required_capability,
+                            "data_classification": request.data_classification.value,
                             "sport_id": domain_observation.sport_id,
                             "league_id": domain_observation.league_id,
                             "regime_id": request.voc_regime_id,
@@ -1674,8 +1714,60 @@ def route_compute(
                             "contradiction_state": (
                                 request.voc_contradiction_state
                             ),
+                            "routing_policy_id": policy.policy_id,
+                            "routing_policy_version": str(policy.policy_version),
+                            "routing_policy_sha256": _canonical_digest(
+                                policy.payload()
+                            ),
+                            "cloud_permission": "ALLOW",
+                            "cloud_backend_id": cloud.backend_id,
                         }
-                        if current_context != expected_current_context:
+                        if canonical_data_classification is None:
+                            baseline_reason = (
+                                "canonical current VOC decision context is legacy "
+                                "and lacks data classification"
+                            )
+                        elif (
+                            canonical_data_classification
+                            != request.data_classification.value
+                        ):
+                            baseline_reason = (
+                                "canonical current VOC data classification "
+                                "does not match the current request"
+                            )
+                        elif (
+                            canonical_policy_id is None
+                            or canonical_policy_version is None
+                            or canonical_policy_sha256 is None
+                            or canonical_cloud_permission is None
+                            or canonical_cloud_backend_id is None
+                        ):
+                            baseline_reason = (
+                                "canonical current VOC decision context lacks "
+                                "product cloud permission authority"
+                            )
+                        elif (
+                            canonical_policy_id != policy.policy_id
+                            or canonical_policy_version
+                            != str(policy.policy_version)
+                            or canonical_policy_sha256
+                            != _canonical_digest(policy.payload())
+                        ):
+                            baseline_reason = (
+                                "canonical current VOC routing policy "
+                                "does not match the current policy"
+                            )
+                        elif canonical_cloud_permission != "ALLOW":
+                            baseline_reason = (
+                                "canonical current VOC cloud permission "
+                                "does not allow cloud compute"
+                            )
+                        elif canonical_cloud_backend_id != cloud.backend_id:
+                            baseline_reason = (
+                                "canonical current VOC cloud backend "
+                                "does not match the selected cloud candidate"
+                            )
+                        elif current_context != expected_current_context:
                             baseline_reason = (
                                 "canonical current VOC decision context "
                                 "does not match the current request"
@@ -1737,18 +1829,25 @@ def route_compute(
             domain_observation_id=domain_observation_id,
         )
 
+    # V3 VOC context cloud fields are durable caller/policy assertions, not an
+    # independently product-issued network permission.  Until a canonical
+    # product permission issuer exists, no positive CLOUD authority can be
+    # minted from ComputeRouteRequest/ComputeRoutingPolicy or their replayed
+    # context.  Preserve every validation above for deterministic diagnostics,
+    # then fail closed to the already-qualified baseline.
     return ComputeRouteDecision.build(
         decision_id=(
-            f"{request.request_id}:{cloud.candidate_id}"
+            f"{request.request_id}:{baseline.candidate_id}"
         ),
         request_id=request.request_id,
         decided_at=as_of,
         policy=policy,
-        tier=ComputeTier.CLOUD,
-        candidate=cloud,
+        tier=baseline.tier,
+        candidate=baseline,
         reason=(
-            "verified sport-domain evidence plus explicit public-data "
-            "cloud permission and fresh positive paired measured VOC evidence"
+            "independent product-issued cloud permission authority is "
+            "unavailable; caller-owned routing policy/context cannot "
+            "authorize cloud compute; fail closed to baseline"
         ),
         voc_evidence_id=voc_evidence.evidence_id,
         domain_observation_id=domain_observation_id,
@@ -2185,8 +2284,8 @@ class ModelComputeRouterStore:
                     "VOC shadow execution authority journal contains a blank record"
                 )
             try:
-                raw = json.loads(line)
-            except json.JSONDecodeError as exc:
+                raw = strict_json_loads(line)
+            except (json.JSONDecodeError, TypeError, ValueError) as exc:
                 raise ModelComputeRouterError(
                     "VOC shadow execution authority journal contains invalid JSON"
                 ) from exc
@@ -2343,8 +2442,8 @@ class ModelComputeRouterStore:
                     "execution authority journal contains a blank record"
                 )
             try:
-                raw = json.loads(line)
-            except json.JSONDecodeError as exc:
+                raw = strict_json_loads(line)
+            except (json.JSONDecodeError, TypeError, ValueError) as exc:
                 raise ModelComputeRouterError(
                     "execution authority journal contains invalid JSON"
                 ) from exc
@@ -2719,13 +2818,15 @@ class ModelComputeRouterStore:
 
     def _load(self) -> None:
         try:
-            raw = json.loads(
+            raw = strict_json_loads(
                 self.path.read_text(encoding="utf-8")
             )
         except (
             OSError,
             UnicodeDecodeError,
             json.JSONDecodeError,
+            TypeError,
+            ValueError,
         ) as exc:
             raise ModelComputeRouterError(
                 "routing store is unreadable"
@@ -3027,13 +3128,13 @@ class ModelComputeRouterStore:
                         "persisted ACCEPTED execution predates "
                         "route decision"
                     )
-                if available > _instant(
+                if available >= _instant(
                     "decision_deadline",
                     request.decision_deadline,
                 ):
                     raise ModelComputeRouterError(
                         "persisted ACCEPTED execution became "
-                        "available after decision deadline"
+                        "available at or after decision deadline"
                     )
                 if (
                     _seconds(available, completed)

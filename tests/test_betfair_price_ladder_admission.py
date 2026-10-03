@@ -4,10 +4,16 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from decimal import Decimal
 import json
+import urllib.request as _urllib_request
 
 import pytest
 
+from autosport.betfair_account_identity import (
+    build_betfair_authenticated_client,
+    resolve_betfair_authenticated_account_identity,
+)
 from autosport.betfair_account_readonly import (
+    ACCOUNT_JSON_RPC_ENDPOINT,
     BETTING_JSON_RPC_ENDPOINT,
     BetfairReadOnlyClient,
     BetfairSessionCredentials,
@@ -28,27 +34,53 @@ class FakeTransport:
         self.responses = list(responses)
         self.calls: list[dict[str, object]] = []
 
-    def post(
-        self,
-        url: str,
-        *,
-        headers,
-        body: bytes,
-        timeout_seconds: float,
-    ) -> bytes:
+    class Response:
+        def __init__(self, payload: bytes) -> None:
+            self._payload = payload
+        def __enter__(self):
+            return self
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+        def read(self, limit: int) -> bytes:
+            assert limit >= len(self._payload)
+            return self._payload
+
+    def open(self, request, data=None, timeout: float = 0):
+        assert data is None
+        assert request.data is not None
+        decoded = json.loads(request.data.decode("utf-8"))
+        if request.full_url == ACCOUNT_JSON_RPC_ENDPOINT:
+            assert decoded["method"] == "AccountAPING/v1.0/getAccountDetails"
+            raw = json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "id": decoded["id"],
+                    "result": {
+                        "currencyCode": "EUR",
+                        "localeCode": "en",
+                        "region": "GBR",
+                        "timezone": "Europe/London",
+                    },
+                },
+                separators=(",", ":"),
+            ).encode("utf-8")
+            return self.Response(raw)
+        assert request.full_url == BETTING_JSON_RPC_ENDPOINT
+        if not self.responses:
+            raise AssertionError("unexpected Betfair market transport call")
+        payload = json.loads(self.responses.pop(0).decode("utf-8"))
+        payload["id"] = decoded["id"]
         self.calls.append(
             {
-                "url": url,
-                "headers": dict(headers),
-                "body": body,
-                "timeout_seconds": timeout_seconds,
+                "url": request.full_url,
+                "headers": {key.lower(): value for key, value in request.header_items()},
+                "body": request.data,
+                "timeout_seconds": timeout,
             }
         )
-        if not self.responses:
-            raise AssertionError("unexpected transport call")
-        return self.responses.pop(0)
-
-
+        return self.Response(
+            json.dumps(payload, separators=(",", ":")).encode("utf-8")
+        )
 def response(result: object, request_id: int) -> bytes:
     return json.dumps(
         {"jsonrpc": "2.0", "result": result, "id": request_id},
@@ -70,26 +102,26 @@ def market_row(
     return {"marketId": market_id, "description": description}
 
 
-def authority_for(*responses: bytes):
+def authority_for(monkeypatch, *responses: bytes):
     transport = FakeTransport(list(responses))
-    client = BetfairReadOnlyClient(
-        BetfairSessionCredentials("app-secret", "session-secret"),
-        transport=transport,
-        clock=lambda: FIXED_NOW,
+    monkeypatch.setattr(_urllib_request, "_opener", transport)
+    client = build_betfair_authenticated_client(
+        BetfairSessionCredentials("app-secret", "session-secret")
     )
-    return BetfairPriceLadderAuthority(client), client, transport
+    identity = resolve_betfair_authenticated_account_identity(client)
+    return BetfairPriceLadderAuthority(client, identity), client, transport
 
 
-def acquire_for(ladder_type: str | None):
-    authority, client, transport = authority_for(
-        response([market_row(ladder_type)], 1)
+def acquire_for(monkeypatch, ladder_type: str | None):
+    authority, client, transport = authority_for(monkeypatch, 
+        monkeypatch,
+        response([market_row(ladder_type)], 1),
     )
     observation = authority.acquire("1.234")
     return authority, observation, client, transport
 
-
-def test_acquisition_reuses_canonical_readonly_client_and_binds_exact_request():
-    authority, _, transport = authority_for(
+def test_acquisition_reuses_canonical_readonly_client_and_binds_exact_request(monkeypatch):
+    authority, _, transport = authority_for(monkeypatch, 
         response([market_row("CLASSIC")], 1)
     )
 
@@ -137,8 +169,9 @@ def test_acquisition_reuses_canonical_readonly_client_and_binds_exact_request():
 )
 def test_classic_exact_valid_ticks_cover_all_band_boundaries(
     price: str,
+    monkeypatch,
 ):
-    authority, observation, _, _ = acquire_for("CLASSIC")
+    authority, observation, _, _ = acquire_for(monkeypatch, "CLASSIC")
 
     result = authority.resolve(
         observation=observation,
@@ -173,8 +206,9 @@ def test_classic_exact_valid_ticks_cover_all_band_boundaries(
 )
 def test_classic_off_grid_prices_fail_without_float_tolerance(
     price: str,
+    monkeypatch,
 ):
-    authority, observation, _, _ = acquire_for("CLASSIC")
+    authority, observation, _, _ = acquire_for(monkeypatch, "CLASSIC")
 
     result = authority.resolve(
         observation=observation,
@@ -192,8 +226,9 @@ def test_classic_off_grid_prices_fail_without_float_tolerance(
 )
 def test_finest_uses_one_cent_grid_instead_of_classic(
     price: str,
+    monkeypatch,
 ):
-    authority, observation, _, _ = acquire_for("FINEST")
+    authority, observation, _, _ = acquire_for(monkeypatch, "FINEST")
 
     result = authority.resolve(
         observation=observation,
@@ -212,8 +247,8 @@ def test_finest_uses_one_cent_grid_instead_of_classic(
     "price",
     ["1.001", "1.00", "1000.001", "1000.01"],
 )
-def test_finest_rejects_out_of_grid_or_bounds(price: str):
-    authority, observation, _, _ = acquire_for("FINEST")
+def test_finest_rejects_out_of_grid_or_bounds(price: str, monkeypatch):
+    authority, observation, _, _ = acquire_for(monkeypatch, "FINEST")
 
     result = authority.resolve(
         observation=observation,
@@ -224,8 +259,8 @@ def test_finest_rejects_out_of_grid_or_bounds(price: str):
     assert result.state is PriceLadderAdmissionState.PRICE_LADDER_INVALID
 
 
-def test_missing_price_ladder_description_remains_unknown_not_classic():
-    authority, observation, _, _ = acquire_for(None)
+def test_missing_price_ladder_description_remains_unknown_not_classic(monkeypatch):
+    authority, observation, _, _ = acquire_for(monkeypatch, None)
 
     result = authority.resolve(
         observation=observation,
@@ -238,8 +273,8 @@ def test_missing_price_ladder_description_remains_unknown_not_classic():
     result.assert_authoritative()
 
 
-def test_unknown_future_ladder_is_preserved_but_not_guessed():
-    authority, observation, _, _ = acquire_for(
+def test_unknown_future_ladder_is_preserved_but_not_guessed(monkeypatch):
+    authority, observation, _, _ = acquire_for(monkeypatch, 
         "FUTURE_PROVIDER_LADDER"
     )
 
@@ -257,8 +292,8 @@ def test_unknown_future_ladder_is_preserved_but_not_guessed():
     result.assert_authoritative()
 
 
-def test_line_range_metadata_is_preserved_but_current_action_semantics_fail_closed():
-    authority, _, _ = authority_for(
+def test_line_range_metadata_is_preserved_but_current_action_semantics_fail_closed(monkeypatch):
+    authority, _, _ = authority_for(monkeypatch, 
         response(
             [
                 market_row(
@@ -304,8 +339,9 @@ def test_line_range_metadata_is_preserved_but_current_action_semantics_fail_clos
 )
 def test_binary_float_bool_and_non_decimal_numeric_price_ingress_fails(
     price,
+    monkeypatch,
 ):
-    authority, observation, _, _ = acquire_for("CLASSIC")
+    authority, observation, _, _ = acquire_for(monkeypatch, "CLASSIC")
 
     with pytest.raises(
         BetfairPriceLadderError,
@@ -322,8 +358,8 @@ def test_binary_float_bool_and_non_decimal_numeric_price_ingress_fails(
     "price",
     ["NaN", "Infinity", "-Infinity"],
 )
-def test_nonfinite_decimal_text_fails_before_admission(price: str):
-    authority, observation, _, _ = acquire_for("CLASSIC")
+def test_nonfinite_decimal_text_fails_before_admission(price: str, monkeypatch):
+    authority, observation, _, _ = acquire_for(monkeypatch, "CLASSIC")
 
     with pytest.raises(
         BetfairPriceLadderError,
@@ -336,8 +372,8 @@ def test_nonfinite_decimal_text_fails_before_admission(price: str):
         )
 
 
-def test_market_a_evidence_cannot_be_reused_for_market_b():
-    authority, observation, _, _ = acquire_for("CLASSIC")
+def test_market_a_evidence_cannot_be_reused_for_market_b(monkeypatch):
+    authority, observation, _, _ = acquire_for(monkeypatch, "CLASSIC")
 
     with pytest.raises(
         BetfairPriceLadderError,
@@ -350,8 +386,8 @@ def test_market_a_evidence_cannot_be_reused_for_market_b():
         )
 
 
-def test_caller_copy_cannot_mint_market_definition_or_admission_authority():
-    authority, observation, _, _ = acquire_for("CLASSIC")
+def test_caller_copy_cannot_mint_market_definition_or_admission_authority(monkeypatch):
+    authority, observation, _, _ = acquire_for(monkeypatch, "CLASSIC")
     copied_observation = replace(observation)
 
     with pytest.raises(BetfairPriceLadderError, match="not issued"):
@@ -373,8 +409,8 @@ def test_caller_copy_cannot_mint_market_definition_or_admission_authority():
         copied_result.assert_authoritative()
 
 
-def test_later_market_definition_supersedes_old_positive_admission():
-    authority, _, _ = authority_for(
+def test_later_market_definition_supersedes_old_positive_admission(monkeypatch):
+    authority, _, _ = authority_for(monkeypatch, 
         response([market_row("CLASSIC")], 1),
         response([market_row("FINEST")], 2),
     )
@@ -412,9 +448,9 @@ def test_later_market_definition_supersedes_old_positive_admission():
     new_result.assert_authoritative()
 
 
-def test_same_price_classic_vs_finest_is_bound_to_provider_acquired_ladder():
-    classic_authority, classic, _, _ = acquire_for("CLASSIC")
-    finest_authority, finest, _, _ = acquire_for("FINEST")
+def test_same_price_classic_vs_finest_is_bound_to_provider_acquired_ladder(monkeypatch):
+    classic_authority, classic, _, _ = acquire_for(monkeypatch, "CLASSIC")
+    finest_authority, finest, _, _ = acquire_for(monkeypatch, "FINEST")
 
     classic_result = classic_authority.resolve(
         observation=classic,
@@ -441,8 +477,8 @@ def test_same_price_classic_vs_finest_is_bound_to_provider_acquired_ladder():
     )
 
 
-def test_exact_selection_and_handicap_are_bound_into_result_identity():
-    authority, observation, _, _ = acquire_for("CLASSIC")
+def test_exact_selection_and_handicap_are_bound_into_result_identity(monkeypatch):
+    authority, observation, _, _ = acquire_for(monkeypatch, "CLASSIC")
 
     first = authority.resolve(
         observation=observation,
@@ -464,8 +500,8 @@ def test_exact_selection_and_handicap_are_bound_into_result_identity():
     second.assert_authoritative()
 
 
-def test_instance_rpc_shadow_cannot_replace_canonical_readonly_acquisition():
-    authority, client, transport = authority_for(
+def test_instance_rpc_shadow_cannot_replace_canonical_readonly_acquisition(monkeypatch):
+    authority, client, transport = authority_for(monkeypatch, 
         response([market_row("CLASSIC")], 1)
     )
 
@@ -480,7 +516,7 @@ def test_instance_rpc_shadow_cannot_replace_canonical_readonly_acquisition():
     assert len(transport.calls) == 1
 
 
-def test_client_subclass_is_not_accepted_as_provider_authority():
+def test_client_subclass_is_not_accepted_as_provider_authority(monkeypatch):
     class FakeClient(BetfairReadOnlyClient):
         pass
 
@@ -494,7 +530,7 @@ def test_client_subclass_is_not_accepted_as_provider_authority():
         BetfairPriceLadderError,
         match="exact canonical",
     ):
-        BetfairPriceLadderAuthority(client)
+        BetfairPriceLadderAuthority(client, object())
 
 
 @pytest.mark.parametrize(
@@ -521,15 +557,16 @@ def test_client_subclass_is_not_accepted_as_provider_authority():
 def test_malformed_or_ambiguous_market_definition_fails_closed(
     result: object,
     message: str,
+    monkeypatch,
 ):
-    authority, _, _ = authority_for(response(result, 1))
+    authority, _, _ = authority_for(monkeypatch, response(result, 1))
 
     with pytest.raises(BetfairPriceLadderError, match=message):
         authority.acquire("1.234")
 
 
-def test_malformed_line_range_metadata_fails_closed_instead_of_partial_use():
-    authority, _, _ = authority_for(
+def test_malformed_line_range_metadata_fails_closed_instead_of_partial_use(monkeypatch):
+    authority, _, _ = authority_for(monkeypatch, 
         response(
             [
                 market_row(
@@ -552,8 +589,8 @@ def test_malformed_line_range_metadata_fails_closed_instead_of_partial_use():
         authority.acquire("1.234")
 
 
-def test_post_issue_mutation_is_detected_even_with_frozen_dataclass_bypass():
-    authority, observation, _, _ = acquire_for("CLASSIC")
+def test_post_issue_mutation_is_detected_even_with_frozen_dataclass_bypass(monkeypatch):
+    authority, observation, _, _ = acquire_for(monkeypatch, "CLASSIC")
     result = authority.resolve(
         observation=observation,
         market_id="1.234",
@@ -573,8 +610,8 @@ def test_post_issue_mutation_is_detected_even_with_frozen_dataclass_bypass():
         result.assert_authoritative()
 
 
-def test_admission_direct_construction_never_grants_execution_authority():
-    authority, observation, _, _ = acquire_for("CLASSIC")
+def test_admission_direct_construction_never_grants_execution_authority(monkeypatch):
+    authority, observation, _, _ = acquire_for(monkeypatch, "CLASSIC")
     issued = authority.resolve(
         observation=observation,
         market_id="1.234",
@@ -592,3 +629,49 @@ def test_admission_direct_construction_never_grants_execution_authority():
     assert forged.execution_authorized is False
     with pytest.raises(BetfairPriceLadderError, match="not issued"):
         forged.assert_authoritative()
+
+
+def test_caller_injected_transport_cannot_borrow_product_origin(monkeypatch):
+    authority, observation, _, _ = acquire_for(monkeypatch, "CLASSIC")
+    identity = authority._account_identity
+
+    class InjectedTransport:
+        def post(self, url, *, headers, body, timeout_seconds):
+            return response([market_row("CLASSIC")], 1)
+
+    direct_client = BetfairReadOnlyClient(
+        BetfairSessionCredentials("forged-app", "forged-session"),
+        transport=InjectedTransport(),
+        clock=lambda: FIXED_NOW,
+    )
+    with pytest.raises(
+        BetfairPriceLadderError,
+        match="authenticated origin",
+    ):
+        BetfairPriceLadderAuthority(direct_client, identity)
+
+    observation.assert_authoritative()
+
+
+def test_post_issue_k07_context_mutation_revokes_observation_and_admission(monkeypatch):
+    authority, observation, client, _ = acquire_for(monkeypatch, "CLASSIC")
+    admission = authority.resolve(
+        observation=observation,
+        market_id="1.234",
+        price="2.00",
+    )
+    observation.assert_authoritative()
+    admission.assert_authoritative()
+
+    client._credentials = BetfairSessionCredentials("rotated-app", "rotated-session")
+
+    with pytest.raises(
+        BetfairPriceLadderError,
+        match="authenticated origin is no longer authoritative",
+    ):
+        observation.assert_authoritative()
+    with pytest.raises(
+        BetfairPriceLadderError,
+        match="authenticated origin is no longer authoritative",
+    ):
+        admission.assert_authoritative()

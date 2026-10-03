@@ -13,7 +13,6 @@ if __package__:
         _RUNS_PER_PAGE,
         CancellationError,
         GitHubApi,
-        PullRequestQualification,
         WorkflowRun,
         _pull_request_qualification_state,
         _require_positive_int,
@@ -33,7 +32,6 @@ else:
         _RUNS_PER_PAGE,
         CancellationError,
         GitHubApi,
-        PullRequestQualification,
         WorkflowRun,
         _pull_request_qualification_state,
         _require_positive_int,
@@ -863,7 +861,7 @@ def _build_live_pr_qualification_reader(
     def read(
         api: WorkflowScopedGitHubApi,
         pr_number: int,
-    ) -> PullRequestQualification:
+    ) -> tuple[str, bool] | object:
         if not isinstance(api, WorkflowScopedGitHubApi):
             return api.live_pr_qualification(pr_number)
 
@@ -917,16 +915,14 @@ def _build_live_pr_qualification_reader(
             isinstance(head_repo, dict)
             and head_repo.get("full_name") == api._repository
         )
-        return PullRequestQualification(
-            head_sha=_require_sha(
+        return (
+            _require_sha(
                 head.get("sha"),
                 field="live pull request head",
             ),
-            integration_capable=(
-                state == "open"
-                and draft is False
-                and same_repository_head
-            ),
+            state == "open"
+            and draft is False
+            and same_repository_head,
         )
 
     return read

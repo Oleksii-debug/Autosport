@@ -1126,4 +1126,74 @@ class CompleteGameBoardEvidenceStore:
             self._verify_receipt(snapshot)
             authority = self._authority(snapshot.evidence_sha256)
             self._recover_provenance(authority, snapshot)
-        return _remember(snapshot)
+        return _CANONICAL_REMEMBER(snapshot)
+
+
+
+def _seal_provider_evidence_store_dispatch() -> None:
+    module_globals = globals()
+    store_type = CompleteGameBoardEvidenceStore
+    expected_save = store_type.save
+    expected_save_code = expected_save.__code__
+    expected_load = store_type.load
+    expected_load_code = expected_load.__code__
+    expected_assert = _CANONICAL_ASSERT_COMPLETE_GAME_BOARD_AUTHORITATIVE
+    expected_assert_code = _CANONICAL_ASSERT_COMPLETE_GAME_BOARD_AUTHORITATIVE_CODE
+    expected_remember = _CANONICAL_REMEMBER
+    expected_remember_code = _CANONICAL_REMEMBER_CODE
+
+    def require_store_authority() -> None:
+        if (
+            module_globals.get("_CANONICAL_ASSERT_COMPLETE_GAME_BOARD_AUTHORITATIVE")
+            is not expected_assert
+            or module_globals.get(
+                "_CANONICAL_ASSERT_COMPLETE_GAME_BOARD_AUTHORITATIVE_CODE"
+            )
+            is not expected_assert_code
+            or expected_assert.__code__ is not expected_assert_code
+            or module_globals.get("_CANONICAL_REMEMBER") is not expected_remember
+            or module_globals.get("_CANONICAL_REMEMBER_CODE")
+            is not expected_remember_code
+            or expected_remember.__code__ is not expected_remember_code
+            or expected_save.__code__ is not expected_save_code
+            or expected_load.__code__ is not expected_load_code
+        ):
+            raise ProviderObservationIntegrityError(
+                "provider evidence store authority witness changed"
+            )
+
+    @wraps(expected_save)
+    def sealed_save(self, snapshot):
+        if type(self) is not store_type:
+            raise TypeError(
+                "provider evidence save requires exact CompleteGameBoardEvidenceStore"
+            )
+        if inspect.getattr_static(store_type, "save") is not sealed_save:
+            raise ProviderObservationIntegrityError(
+                "provider evidence store save surface changed"
+            )
+        require_store_authority()
+        result = expected_save(self, snapshot)
+        require_store_authority()
+        return result
+
+    @wraps(expected_load)
+    def sealed_load(self, evidence_sha256):
+        if type(self) is not store_type:
+            raise TypeError(
+                "provider evidence load requires exact CompleteGameBoardEvidenceStore"
+            )
+        if inspect.getattr_static(store_type, "load") is not sealed_load:
+            raise ProviderObservationIntegrityError(
+                "provider evidence store load surface changed"
+            )
+        require_store_authority()
+        result = expected_load(self, evidence_sha256)
+        require_store_authority()
+        return result
+
+    store_type.save = sealed_save
+    store_type.load = sealed_load
+
+
+_seal_provider_evidence_store_dispatch()

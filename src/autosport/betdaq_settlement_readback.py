@@ -979,12 +979,22 @@ def _parse_postings_result(
             "BETDAQ postings result must contain exactly one Orders element"
         )
     currency = _required_attr(result, "Currency")
-    # BETDAQ's public operation contract exposes the raw row fields but does not
-    # document cursor exclusivity, row sorting, PostingCategory numeric meanings,
-    # or that returned rows are a contiguous account-ledger slice. Preserve exact
-    # provider order/raw values and enforce only identities the response proves.
+    # The provider API specification gives two paging-order laws that are
+    # authority-bearing for continuation:
+    # - ListAccountPostings rows are ordered by increasing PostedAt;
+    # - ListAccountPostingsById returns TransactionId values strictly greater than
+    #   the supplied cursor, ordered ascending by TransactionId.
+    # Do not invent stronger ResultingBalance adjacency or category-linkage laws.
     deduped: dict[str, BetdaqPostingObservation] = {}
     ordered_ids: list[str] = []
+    previous_posted_at: datetime | None = None
+    previous_transaction_id: int | None = None
+    cursor_transaction_id = (
+        int(query_transaction_id)
+        if method == "ListAccountPostingsById"
+        and query_transaction_id is not None
+        else None
+    )
     for child in containers[0]:
         if child.tag != f"{{{_account._EXTERNAL_NS}}}Order":
             raise BetdaqEconomicReadbackError(
@@ -1005,6 +1015,32 @@ def _parse_postings_result(
             currency=currency,
             evidence=evidence,
         )
+        if method == "ListAccountPostings":
+            posted_at = datetime.fromisoformat(
+                posting.posted_at[:-1] + "+00:00"
+            )
+            if previous_posted_at is not None and posted_at < previous_posted_at:
+                raise BetdaqEconomicReadbackError(
+                    "ListAccountPostings rows are not ordered by increasing PostedAt"
+                )
+            previous_posted_at = posted_at
+        else:
+            numeric_transaction_id = int(transaction_id)
+            if (
+                cursor_transaction_id is None
+                or numeric_transaction_id <= cursor_transaction_id
+            ):
+                raise BetdaqEconomicReadbackError(
+                    "ListAccountPostingsById returned transaction at/before cursor"
+                )
+            if (
+                previous_transaction_id is not None
+                and numeric_transaction_id <= previous_transaction_id
+            ):
+                raise BetdaqEconomicReadbackError(
+                    "ListAccountPostingsById rows are not strictly increasing by TransactionId"
+                )
+            previous_transaction_id = numeric_transaction_id
         previous = deduped.get(transaction_id)
         if previous is not None:
             if previous.provider_content_dict() != posting.provider_content_dict():

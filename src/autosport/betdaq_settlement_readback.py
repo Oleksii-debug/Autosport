@@ -564,6 +564,45 @@ class BetdaqPostingsReadback:
                 )
             seen[posting.transaction_id] = provider_content
 
+        # Reconstructed/copy-mutated canonical DTOs must retain the same provider
+        # continuation/order laws already enforced at the XML parser boundary. Without
+        # this second boundary check, dataclasses.replace() could reorder valid rows or
+        # move a ById row to/behind its cursor while retaining otherwise valid evidence.
+        if self.method == "ListAccountPostings":
+            previous_posted_at: datetime | None = None
+            for posting in self.postings:
+                posted_at = datetime.fromisoformat(
+                    posting.posted_at[:-1] + "+00:00"
+                )
+                if (
+                    previous_posted_at is not None
+                    and posted_at < previous_posted_at
+                ):
+                    raise BetdaqEconomicReadbackError(
+                        "canonical ListAccountPostings readback is not ordered by "
+                        "increasing PostedAt"
+                    )
+                previous_posted_at = posted_at
+        else:
+            transaction_cursor = int(self.query_transaction_id)
+            previous_transaction_id: int | None = None
+            for posting in self.postings:
+                transaction_id = int(posting.transaction_id)
+                if transaction_id <= transaction_cursor:
+                    raise BetdaqEconomicReadbackError(
+                        "canonical ListAccountPostingsById readback contains "
+                        "transaction at/before cursor"
+                    )
+                if (
+                    previous_transaction_id is not None
+                    and transaction_id <= previous_transaction_id
+                ):
+                    raise BetdaqEconomicReadbackError(
+                        "canonical ListAccountPostingsById readback is not strictly "
+                        "ordered by TransactionId"
+                    )
+                previous_transaction_id = transaction_id
+
     @property
     def readback_id(self) -> str:
         return "betdaq-postings:" + _canonical_sha256(

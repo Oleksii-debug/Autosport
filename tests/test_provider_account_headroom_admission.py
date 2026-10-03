@@ -610,6 +610,40 @@ def test_generation_lock_helper_rebinding_cannot_bypass_new_reservation(
         ledger.attempt_state("generation-helper-attempt")
 
 
+def test_generation_lock_wrapped_kwdefault_rebind_fails_before_execution(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    acquired, _ = _acquire_balance(monkeypatch, tmp_path, "100")
+    action = _action("generation-kwdefault-target", "10")
+    ledger = _ledger_with_plans(tmp_path, _plan("target", action))
+    wrapped = headroom_module._current_balance_generation_lock.__wrapped__
+    original = dict(wrapped.__kwdefaults__ or {})
+    hostile_calls = []
+
+    def hostile_lock(_workspace):
+        hostile_calls.append("executed")
+        raise AssertionError("hostile economic lock executed")
+
+    try:
+        wrapped.__kwdefaults__["_economic_lock"] = hostile_lock
+        with pytest.raises(
+            ProviderAccountHeadroomError,
+            match="generation lock authority changed",
+        ):
+            _assess(
+                ledger,
+                acquired,
+                plan_id="target",
+                action_id="generation-kwdefault-target",
+            )
+    finally:
+        wrapped.__kwdefaults__.clear()
+        wrapped.__kwdefaults__.update(original)
+
+    assert hostile_calls == []
+
+
 def test_generation_lock_wrapped_code_rebind_fails_before_execution(
     monkeypatch,
     tmp_path,

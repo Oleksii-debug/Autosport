@@ -119,6 +119,43 @@ def test_thread_start_failure_with_exploding_str_publishes_terminal_and_releases
     _assert_safe_terminal_error(worker, message)
 
 
+
+
+def test_renderer_failure_uses_secret_free_terminal_fallback_and_releases_busy() -> None:
+    worker = OneShotObservationWorker()
+
+    def task():
+        raise RuntimeError("provider-timeout")
+
+    with mock.patch(
+        "autosport.live_observation.safe_exception_text",
+        side_effect=RuntimeError("renderer failed"),
+    ):
+        assert worker.start(task) is True
+        message = _wait_for_terminal(worker)
+
+    assert message.result is None
+    assert message.error == "BaseException: exception details unavailable"
+    assert worker.busy is False
+
+
+def test_renderer_invalid_return_uses_secret_free_terminal_fallback() -> None:
+    worker = OneShotObservationWorker()
+
+    def task():
+        raise RuntimeError("provider-timeout")
+
+    with mock.patch(
+        "autosport.live_observation.safe_exception_text",
+        return_value=None,
+    ):
+        assert worker.start(task) is True
+        message = _wait_for_terminal(worker)
+
+    assert message.result is None
+    assert message.error == "BaseException: exception details unavailable"
+    assert worker.busy is False
+
 def test_task_error_is_redacted_before_localized_live_presentation() -> None:
     worker = OneShotObservationWorker()
     secret = "live-worker-secret-2056"

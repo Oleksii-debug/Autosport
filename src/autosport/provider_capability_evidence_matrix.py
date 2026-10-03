@@ -426,6 +426,11 @@ class ProviderCapabilityEvidenceMatrix:
         if requested_at > _time(self.as_of, "as_of"):
             return False
         fact = self.fact_for(capability)
+        # A weaker documentation/configuration fact may be retained for audit even
+        # when the canonical capability profile is UNKNOWN/UNSUPPORTED, but it must
+        # never qualify the capability against that stronger profile truth.
+        if fact.profile_state is not BookmakerCapabilityState.SUPPORTED:
+            return False
         if (
             fact.grade is not ProviderCapabilityTruthGrade.UNKNOWN_UNPROVEN
             and (
@@ -484,6 +489,11 @@ class ProviderCapabilityEvidenceMatrix:
         if requested_at > _time(self.as_of, "as_of"):
             return False
         fact = self.fact_for(capability)
+        # A weaker documentation/configuration fact may be retained for audit even
+        # when the canonical capability profile is UNKNOWN/UNSUPPORTED, but it must
+        # never qualify the capability against that stronger profile truth.
+        if fact.profile_state is not BookmakerCapabilityState.SUPPORTED:
+            return False
         if (
             fact.grade is not ProviderCapabilityTruthGrade.UNKNOWN_UNPROVEN
             and (

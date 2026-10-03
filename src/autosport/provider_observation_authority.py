@@ -569,6 +569,12 @@ _CANONICAL_CANONICAL_JSON = _canonical_json
 _CANONICAL_CANONICAL_JSON_CODE = _CANONICAL_CANONICAL_JSON.__code__
 _CANONICAL_REMEMBER = _remember
 _CANONICAL_REMEMBER_CODE = _CANONICAL_REMEMBER.__code__
+_CANONICAL_ASSERT_COMPLETE_GAME_BOARD_AUTHORITATIVE = (
+    assert_complete_game_board_authoritative
+)
+_CANONICAL_ASSERT_COMPLETE_GAME_BOARD_AUTHORITATIVE_CODE = (
+    _CANONICAL_ASSERT_COMPLETE_GAME_BOARD_AUTHORITATIVE.__code__
+)
 _CANONICAL_TEST_ACQUISITION_ORIGIN = _TEST_ACQUISITION_ORIGIN
 _CANONICAL_TEST_ACQUISITION_CAPABILITY = _TEST_ACQUISITION_CAPABILITY
 
@@ -634,6 +640,8 @@ def _require_production_capture_origin_integrity() -> None:
         or _default_clock is not _CANONICAL_DEFAULT_CLOCK
         or _canonical_json is not _CANONICAL_CANONICAL_JSON
         or _remember is not _CANONICAL_REMEMBER
+        or assert_complete_game_board_authoritative
+        is not _CANONICAL_ASSERT_COMPLETE_GAME_BOARD_AUTHORITATIVE
         or _TEST_ACQUISITION_ORIGIN is not _CANONICAL_TEST_ACQUISITION_ORIGIN
         or _TEST_ACQUISITION_CAPABILITY
         is not _CANONICAL_TEST_ACQUISITION_CAPABILITY
@@ -654,6 +662,8 @@ def _require_production_capture_origin_integrity() -> None:
         or _CANONICAL_CANONICAL_JSON.__code__
         is not _CANONICAL_CANONICAL_JSON_CODE
         or _CANONICAL_REMEMBER.__code__ is not _CANONICAL_REMEMBER_CODE
+        or _CANONICAL_ASSERT_COMPLETE_GAME_BOARD_AUTHORITATIVE.__code__
+        is not _CANONICAL_ASSERT_COMPLETE_GAME_BOARD_AUTHORITATIVE_CODE
         or CompleteGameBoardRequest.sse_url is not _CANONICAL_REQUEST_SSE_URL
         or getattr(_CANONICAL_URLOPEN, "__code__", None)
         is not _CANONICAL_URLOPEN_CODE
@@ -784,6 +794,8 @@ def _seal_provider_observation_capture_dispatch() -> None:
         "_CANONICAL_CANONICAL_JSON_CODE": _CANONICAL_CANONICAL_JSON_CODE,
         "_CANONICAL_REMEMBER": _CANONICAL_REMEMBER,
         "_CANONICAL_REMEMBER_CODE": _CANONICAL_REMEMBER_CODE,
+        "_CANONICAL_ASSERT_COMPLETE_GAME_BOARD_AUTHORITATIVE": _CANONICAL_ASSERT_COMPLETE_GAME_BOARD_AUTHORITATIVE,
+        "_CANONICAL_ASSERT_COMPLETE_GAME_BOARD_AUTHORITATIVE_CODE": _CANONICAL_ASSERT_COMPLETE_GAME_BOARD_AUTHORITATIVE_CODE,
         "_CANONICAL_TEST_ACQUISITION_ORIGIN": _CANONICAL_TEST_ACQUISITION_ORIGIN,
         "_CANONICAL_TEST_ACQUISITION_CAPABILITY": _CANONICAL_TEST_ACQUISITION_CAPABILITY,
         "_CANONICAL_SURFACE_CODE": _CANONICAL_SURFACE_CODE,
@@ -1042,7 +1054,7 @@ class CompleteGameBoardEvidenceStore:
     def save(self, snapshot: CompleteGameBoardSnapshot) -> Path:
         """Persist only a production capture and bind both independent trust roots."""
 
-        assert_complete_game_board_authoritative(snapshot)
+        _CANONICAL_ASSERT_COMPLETE_GAME_BOARD_AUTHORITATIVE(snapshot)
         path = self._path(snapshot.evidence_sha256)
         authority = self._authority(snapshot.evidence_sha256)
         intended = self._state_sha256(snapshot)

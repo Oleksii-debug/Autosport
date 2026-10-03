@@ -558,6 +558,40 @@ def test_betdaq_issuer_rejects_class_dispatch_mutation_before_io(monkeypatch):
     assert calls == []
 
 
+def test_betdaq_issuer_revalidates_client_executable_after_provider_io(
+    monkeypatch,
+):
+    client, calls = _canonical_betdaq_balance_client(monkeypatch)
+    canonical_opener = betdaq_account_module.urlopen
+
+    def mutating_opener(request, *, timeout):
+        # The pre-I/O issuance seal has already run. Mutate a method that _call()
+        # dynamically dispatches after transport.post() returns; without a post-I/O
+        # seal this forged executable can participate in evidence that is later marked
+        # product-issued.
+        monkeypatch.setattr(
+            BetdaqAccountReadOnlyClient,
+            "_observed_at",
+            lambda self: "2026-09-21T10:00:00Z",
+        )
+        return canonical_opener(request, timeout=timeout)
+
+    monkeypatch.setattr(betdaq_account_module, "urlopen", mutating_opener)
+
+    with pytest.raises(
+        CapabilityEvidenceError,
+        match="issuance surface changed",
+    ):
+        issue_betdaq_authenticated_capability_evidence(
+            client,
+            BookmakerCapability.BALANCE_READ,
+            committed_at="2026-09-21T10:01:00+00:00",
+            review_due_at="2026-09-21T11:01:00+00:00",
+        )
+
+    assert len(calls) == 1
+
+
 def test_betdaq_issuer_rejects_mutated_secure_endpoint_before_io(monkeypatch):
     client, calls = _canonical_betdaq_balance_client(monkeypatch)
     monkeypatch.setattr(

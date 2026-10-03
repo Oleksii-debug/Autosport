@@ -949,6 +949,75 @@ _RISK_POLICY_TRANSITION_METHOD_WITNESS, _RISK_POLICY_TRANSITION_GLOBAL_WITNESS =
 )
 
 
+_RUN_REGISTRY_GATE_METHOD_WITNESS, _RUN_REGISTRY_GATE_GLOBAL_WITNESS = (
+    _capture_class_transition_graph(
+        RunRegistry,
+        ("__init__", "in_progress"),
+    )
+)
+_RUN_TRANSACTION_GATE_METHOD_WITNESS, _RUN_TRANSACTION_GATE_GLOBAL_WITNESS = (
+    _capture_class_transition_graph(
+        RunTransaction,
+        ("__init__", "_read_manifest", "_validate_manifest_paths"),
+    )
+)
+_RUN_TRANSACTION_ROOT_NAME = RunTransaction.ROOT_NAME
+_TRANSACTION_RECOVERY_FUNCTION = transaction_history_requires_recovery
+_TRANSACTION_RECOVERY_CODE, _TRANSACTION_RECOVERY_BINDINGS = (
+    _capture_detached_function_graph(_TRANSACTION_RECOVERY_FUNCTION)
+)
+
+
+def _require_admission_recovery_gate_authority() -> None:
+    """Keep unresolved-run and crash-recovery blockers on canonical dispatch."""
+
+    if (
+        transaction_history_requires_recovery is not _TRANSACTION_RECOVERY_FUNCTION
+        or type(_TRANSACTION_RECOVERY_FUNCTION) is not FunctionType
+        or _TRANSACTION_RECOVERY_FUNCTION.__code__ is not _TRANSACTION_RECOVERY_CODE
+        or RunTransaction.ROOT_NAME != _RUN_TRANSACTION_ROOT_NAME
+    ):
+        raise RuntimeError("economic admission recovery gate authority changed")
+
+    for name, namespace, expected_value, expected_code in (
+        _TRANSACTION_RECOVERY_BINDINGS
+    ):
+        if namespace.get(name) is not expected_value:
+            raise RuntimeError("economic admission recovery gate authority changed")
+        if expected_code is not None and (
+            type(expected_value) is not FunctionType
+            or expected_value.__code__ is not expected_code
+        ):
+            raise RuntimeError("economic admission recovery gate authority changed")
+
+    _require_class_transition_graph(
+        RunRegistry,
+        methods=_RUN_REGISTRY_GATE_METHOD_WITNESS,
+        globals_witness=_RUN_REGISTRY_GATE_GLOBAL_WITNESS,
+        error="economic admission run registry gate authority changed",
+    )
+    _require_class_transition_graph(
+        RunTransaction,
+        methods=_RUN_TRANSACTION_GATE_METHOD_WITNESS,
+        globals_witness=_RUN_TRANSACTION_GATE_GLOBAL_WITNESS,
+        error="economic admission transaction gate authority changed",
+    )
+
+    path_witnesses = (
+        (Path.__new__, _ADMISSION_PATH_NEW, _ADMISSION_PATH_NEW_CODE),
+        (Path.__init__, _ADMISSION_PATH_INIT, _ADMISSION_PATH_INIT_CODE),
+        (Path.__truediv__, _ADMISSION_PATH_TRUEDIV, _ADMISSION_PATH_TRUEDIV_CODE),
+        (Path.lstat, _ADMISSION_PATH_LSTAT, _ADMISSION_PATH_LSTAT_CODE),
+        (Path.iterdir, _ADMISSION_PATH_ITERDIR, _ADMISSION_PATH_ITERDIR_CODE),
+    )
+    for current, expected, expected_code in path_witnesses:
+        if (
+            current is not expected
+            or getattr(current, "__code__", None) is not expected_code
+        ):
+            raise RuntimeError("economic admission recovery path authority changed")
+
+
 def _admission_risk_helper_authority_valid() -> bool:
     """Reject mutation of live or detached positive risk helper authority."""
 
@@ -1141,7 +1210,9 @@ def admit_paper_ticket(
     )
 
     _require_workspace_lock_dispatch()
+    _require_admission_recovery_gate_authority()
     with WorkspaceEconomicLock(root) as workspace_lock:
+        _require_admission_recovery_gate_authority()
         registry_path = _ADMISSION_PATH_TRUEDIV(root, "run_registry.json")
         registry_missing = False
         try:
@@ -1285,6 +1356,9 @@ def admit_paper_ticket(
                 book=working_book,
             )
 
+        # Positive mutation may only occur while the crash/recovery blockers still
+        # resolve through the exact graph inspected at the beginning of this lock.
+        _require_admission_recovery_gate_authority()
         opened = working_book.open_ticket(
             legs,
             amount,

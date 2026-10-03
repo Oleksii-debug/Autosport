@@ -42,8 +42,8 @@ class SpainOrderAdmission(str, Enum):
 
 
 class MinimumStakeSourceKind(str, Enum):
-    LIVE_PROVIDER_SURFACE = "LIVE_PROVIDER_SURFACE"
-    PROVIDER_ACCEPTANCE_PROBE = "PROVIDER_ACCEPTANCE_PROBE"
+    READ_ONLY_PROVIDER_SURFACE = "READ_ONLY_PROVIDER_SURFACE"
+    PROVIDER_DOCUMENTATION_SNAPSHOT = "PROVIDER_DOCUMENTATION_SNAPSHOT"
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,7 +70,7 @@ class BetfairSpainEndpointConfig:
 
 @dataclass(frozen=True, slots=True)
 class DynamicMinimumStakeEvidence:
-    """Time-bounded external evidence, never execution authority by itself."""
+    """Structural minimum-stake observation; public construction is never provider authority."""
 
     jurisdiction: str
     currency: str
@@ -102,6 +102,16 @@ class DynamicMinimumStakeEvidence:
             raise BetfairSpainGuardError(
                 "minimum-stake evidence never grants execution authority"
             )
+
+    @property
+    def provider_origin_proven(self) -> bool:
+        """Caller-constructible evidence cannot attest remote provider origin."""
+        return False
+
+    @property
+    def current_constraint_authority(self) -> bool:
+        """No public DTO may mint a current executable provider constraint."""
+        return False
 
 
 @dataclass(frozen=True, slots=True)
@@ -180,14 +190,17 @@ def assess_betfair_spain_limit_order(
     BetTarget sizing and the lower-minimum-at-large-price exception are explicitly
     unavailable to .es customers. The current ordinary LIMIT minimum is deliberately
     not hard-coded because live Betfair surfaces have exposed conflicting EUR values.
-    A caller must supply time-bounded provider-derived minimum-stake evidence.
+    Public DynamicMinimumStakeEvidence is structural only: its source labels,
+    timestamps and hashes are caller-supplied and cannot prove provider origin.
+    Until a separate product-owned authenticated read-only/rule acquisition authority
+    is composed, ordinary minimum-dependent decisions therefore remain UNKNOWN.
 
-    ADMISSIBLE means only that this narrow jurisdiction precheck did not find a
-    blocker. It is never authorization to place an order.
+    Stable .es prohibitions (target sizing and the lower-minimum payout exception)
+    can still be rejected deterministically. No state authorizes order placement.
     """
 
-    stake = _positive_decimal(backer_stake, "backer_stake")
-    current = _utc(as_of, "as_of")
+    _positive_decimal(backer_stake, "backer_stake")
+    _utc(as_of, "as_of")
     if type(uses_bet_target) is not bool:
         raise BetfairSpainGuardError("uses_bet_target must be bool")
     if type(uses_lower_minimum_payout_exception) is not bool:
@@ -222,35 +235,20 @@ def assess_betfair_spain_limit_order(
             "minimum_stake_evidence must be exact DynamicMinimumStakeEvidence"
         )
 
-    observed = _utc(minimum_stake_evidence.observed_at, "observed_at")
-    valid_until = _utc(minimum_stake_evidence.valid_until, "valid_until")
-    if observed > current:
-        return BetfairSpainAdmissionResult(
-            state=SpainOrderAdmission.UNKNOWN,
-            reason="minimum_stake_evidence_is_future",
-            minimum_backer_stake=None,
-            minimum_evidence_sha256=minimum_stake_evidence.source_sha256,
-        )
-    if current >= valid_until:
-        return BetfairSpainAdmissionResult(
-            state=SpainOrderAdmission.UNKNOWN,
-            reason="minimum_stake_evidence_is_expired",
-            minimum_backer_stake=None,
-            minimum_evidence_sha256=minimum_stake_evidence.source_sha256,
-        )
-
-    minimum = minimum_stake_evidence.minimum_backer_stake
-    if stake < minimum:
-        return BetfairSpainAdmissionResult(
-            state=SpainOrderAdmission.REJECTED,
-            reason="backer_stake_below_current_dynamic_minimum",
-            minimum_backer_stake=minimum,
-            minimum_evidence_sha256=minimum_stake_evidence.source_sha256,
+    # Critical authority fence: jurisdiction/currency/source labels, timestamps and
+    # content hashes on this public DTO are descriptive inputs, not authenticated
+    # acquisition provenance. Never derive a current minimum verdict from them.
+    if (
+        minimum_stake_evidence.provider_origin_proven is not False
+        or minimum_stake_evidence.current_constraint_authority is not False
+    ):
+        raise BetfairSpainGuardError(
+            "public minimum-stake evidence cannot gain provider authority"
         )
     return BetfairSpainAdmissionResult(
-        state=SpainOrderAdmission.ADMISSIBLE,
-        reason="narrow_es_jurisdiction_precheck_passed",
-        minimum_backer_stake=minimum,
+        state=SpainOrderAdmission.UNKNOWN,
+        reason="minimum_stake_provider_origin_unproven",
+        minimum_backer_stake=None,
         minimum_evidence_sha256=minimum_stake_evidence.source_sha256,
     )
 

@@ -881,6 +881,97 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
                 "failed",
             )
 
+    def test_custom_observer_provider_gap_binds_canonical_failed_health_horizon(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            decision_time = self.START + timedelta(seconds=1)
+            health_time = self.START + timedelta(milliseconds=500)
+            health_store = SourceHealthStore(workspace / "source_health.json")
+
+            def failing_observer(updates):
+                del updates
+                health_store.record_failure(
+                    "provider-a",
+                    now=health_time.isoformat(),
+                    error=ProviderUnavailableError("provider offline"),
+                )
+                raise ProviderUnavailableError("provider offline")
+
+            loop = self._loop(
+                workspace,
+                observer=failing_observer,
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(decision_time),
+            )
+            loop.register_input(
+                "input-a",
+                source_ids="provider-a",
+                selection_ids="selection-a",
+            )
+
+            result = loop.run_cycle()
+
+            self.assertEqual(result.status, LiveCycleStatus.PROVIDER_GAP)
+            progress = loop._load_progress()
+            self.assertIsNotNone(progress)
+            self.assertEqual(progress.gate, "provider_gap")
+            self.assertEqual(
+                progress.provider_health_boundaries,
+                (
+                    ProviderHealthReplayBoundary(
+                        source_id="provider-a",
+                        recorded_at=health_time.isoformat(),
+                        transition_order=1,
+                    ),
+                ),
+            )
+            record = JsonlDecisionLedger(
+                workspace / "decisions.jsonl"
+            ).verified_records()[0]
+            payload = record.to_dict()["payload"]
+            self.assertEqual(payload["gate"], "provider_gap")
+            self.assertEqual(
+                payload["provider_health_boundaries"],
+                [
+                    {
+                        "source_id": "provider-a",
+                        "recorded_at": health_time.isoformat(),
+                        "transition_order": 1,
+                    }
+                ],
+            )
+
+    def test_custom_observer_corrupt_canonical_health_authority_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(
+                    workspace,
+                    [(self._event(selection="selection-a", sequence=1),)],
+                ),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START + timedelta(seconds=1)),
+            )
+            loop.register_input(
+                "input-a",
+                source_ids="provider-a",
+                selection_ids="selection-a",
+            )
+            (workspace / "source_health.json").write_text(
+                '{"schema_version":3,"sources":',
+                encoding="utf-8",
+            )
+
+            result = loop.run_cycle()
+
+            self.assertEqual(result.status, LiveCycleStatus.BACKPRESSURE)
+            self.assertIn("health authority is unreadable", result.detail)
+            self.assertFalse((workspace / "decisions.jsonl").exists())
+            self.assertFalse(
+                (workspace / PersistentLiveDecisionLoop.PROGRESS_FILE_NAME).exists()
+            )
+
     def test_health_advance_after_capture_backpressures_before_pending_publication(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

@@ -131,43 +131,15 @@ class OneShotObservationWorker:
             thread.join()
 
     @staticmethod
-    def _safe_terminal_error(
-        exc: BaseException,
-        _renderer: Callable[..., str] = safe_exception_text,
-        _renderer_code: object = safe_exception_text.__code__,
-        _max_chars: int = _TERMINAL_ERROR_MAX_CHARS,
-        _truncation: str = _TERMINAL_ERROR_TRUNCATION,
-    ) -> str:
-        """Render one bounded terminal diagnostic through the canonical redactor."""
+    def _safe_terminal_error(_exc: BaseException) -> str:
+        """Return the fixed secret-free terminal disposition.
 
-        fallback = "BaseException: exception details unavailable"
-        if (
-            safe_exception_text is not _renderer
-            or _renderer.__code__ is not _renderer_code
-            or type(_max_chars) is not int
-            or _max_chars <= 0
-            or type(_truncation) is not str
-            or not _truncation
-            or len(_truncation) >= _max_chars
-        ):
-            return fallback
-        try:
-            rendered = _renderer(exc)
-        except BaseException:
-            return fallback
-        # A transient in-place executable mutation during rendering must not let the
-        # resulting text cross the terminal publication boundary.
-        if (
-            safe_exception_text is not _renderer
-            or _renderer.__code__ is not _renderer_code
-        ):
-            return fallback
-        if type(rendered) is not str or not rendered:
-            return fallback
-        if len(rendered) > _max_chars:
-            keep = _max_chars - len(_truncation)
-            rendered = rendered[:keep] + _truncation
-        return rendered
+        Exception-derived bytes are deliberately excluded from the poll/UIA
+        boundary. Detailed renderer output is not authority-bearing and cannot
+        be allowed to become a secret exfiltration path under runtime tampering.
+        """
+
+        return "BaseException: exception details unavailable"
 
     def _publish_setup_failure(self, exc: Exception) -> None:
         # Preserve the established caller contract: False means "already busy";

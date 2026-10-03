@@ -1669,8 +1669,6 @@ def assess_provider_account_headroom(
         ) = _current_economic_goal_denomination(
             ledger,
             provider_currency=currency,
-            provider_id=action.bookmaker_id,
-            account_id=action.account_id,
         )
         snapshot = verified_snapshot(ledger)
         try:
@@ -1686,6 +1684,7 @@ def assess_provider_account_headroom(
             raise ProviderAccountHeadroomStale(
                 "execution ledger changed while resolving target action"
             )
+        action = _find_action(target_view, action_id)
         target_denomination_binding = _require_plan_denomination(
             target_view,
             bound_by_plan_id=bound_by_plan_id,
@@ -1696,7 +1695,6 @@ def assess_provider_account_headroom(
             provider_id=action.bookmaker_id,
             account_id=action.account_id,
         )
-        action = _find_action(target_view, action_id)
         if action.bookmaker_id != "betfair" or action.side != "BACK":
             raise ProviderAccountHeadroomUnsupported(
                 "current provider-account headroom admission supports Betfair BACK only"

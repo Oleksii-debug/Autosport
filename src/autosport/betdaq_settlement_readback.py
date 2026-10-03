@@ -38,6 +38,10 @@ _INTEGER_RE = re.compile(r"[0-9]+\Z")
 _DECIMAL_RE = re.compile(r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)\Z")
 _CANONICAL_ACCOUNT_HTTPS_POST = _account._CANONICAL_HTTPS_POST
 _REQUIRE_CANONICAL_ACCOUNT_TRANSPORT = _account._require_canonical_account_transport
+_CANONICAL_SECURE_ENDPOINT = _account._SECURE_ENDPOINT
+_CANONICAL_EXTERNAL_NS = _account._EXTERNAL_NS
+_CANONICAL_SOAP11_NS = _account._SOAP11_NS
+_CANONICAL_SOAP12_NS = _account._SOAP12_NS
 _CANONICAL_ACCOUNT_CURRENCY = _account._currency
 _CANONICAL_ACCOUNT_CURRENCY_CODE = getattr(_CANONICAL_ACCOUNT_CURRENCY, "__code__", None)
 _CANONICAL_AUTHENTICATED_ACCOUNT_CONTEXT = _account._authenticated_account_context
@@ -59,6 +63,28 @@ _TERMINAL_ORDER_STATUS_CODES = _account._TERMINAL_STATUS_CODES
 
 class BetdaqEconomicReadbackError(RuntimeError):
     """BETDAQ settlement/posting readback contract or evidence error."""
+
+
+def _canonical_economic_protocol_authority() -> tuple[str, str, str, str]:
+    """Return the exact existing BETDAQ HTTPS/SOAP wire contract."""
+
+    live = (
+        getattr(_account, "_SECURE_ENDPOINT", None),
+        getattr(_account, "_EXTERNAL_NS", None),
+        getattr(_account, "_SOAP11_NS", None),
+        getattr(_account, "_SOAP12_NS", None),
+    )
+    canonical = (
+        _CANONICAL_SECURE_ENDPOINT,
+        _CANONICAL_EXTERNAL_NS,
+        _CANONICAL_SOAP11_NS,
+        _CANONICAL_SOAP12_NS,
+    )
+    if live != canonical or any(type(value) is not str for value in live):
+        raise BetdaqEconomicReadbackError(
+            "canonical BETDAQ economic protocol authority was replaced"
+        )
+    return canonical
 
 
 def _canonical_economic_transport_dispatch():
@@ -720,7 +746,7 @@ class BetdaqEconomicReadbackClient:
         settlement_nodes = [
             child
             for child in result
-            if child.tag == f"{{{_account._EXTERNAL_NS}}}OrderSettlementInformation"
+            if child.tag == f"{{{_CANONICAL_EXTERNAL_NS}}}OrderSettlementInformation"
         ]
         if len(settlement_nodes) > 1:
             raise BetdaqEconomicReadbackError(
@@ -841,10 +867,11 @@ class BetdaqEconomicReadbackClient:
             raise BetdaqEconomicReadbackError("method is outside economic READ allowlist")
         client = self._account_client
         request_identity = _economic_request_identity(method, request_attributes)
+        protocol_authority = _canonical_economic_protocol_authority()
         headers = {
             "Accept": "text/xml",
             "Content-Type": "text/xml; charset=utf-8",
-            "SOAPAction": f'"{_account._EXTERNAL_NS}{method}"',
+            "SOAPAction": f'"{_CANONICAL_EXTERNAL_NS}{method}"',
         }
         with client._call_lock:
             # Snapshot the exact authenticated identity used to construct the secure
@@ -881,7 +908,7 @@ class BetdaqEconomicReadbackClient:
             try:
                 payload = https_post(
                     transport,
-                    _account._SECURE_ENDPOINT,
+                    _CANONICAL_SECURE_ENDPOINT,
                     headers=headers,
                     body=body,
                     timeout_seconds=client._timeout_seconds,
@@ -896,6 +923,10 @@ class BetdaqEconomicReadbackClient:
             ):
                 raise BetdaqEconomicReadbackError(
                     "BETDAQ authenticated account context changed during economic acquisition"
+                )
+            if _canonical_economic_protocol_authority() != protocol_authority:
+                raise BetdaqEconomicReadbackError(
+                    "canonical BETDAQ economic protocol authority was replaced"
                 )
             try:
                 if (
@@ -945,12 +976,12 @@ def _request_xml(
     method: str,
     attributes: dict[str, str],
 ) -> bytes:
-    ET.register_namespace("soap", _account._SOAP11_NS)
-    envelope = ET.Element(f"{{{_account._SOAP11_NS}}}Envelope")
-    header = ET.SubElement(envelope, f"{{{_account._SOAP11_NS}}}Header")
+    ET.register_namespace("soap", _CANONICAL_SOAP11_NS)
+    envelope = ET.Element(f"{{{_CANONICAL_SOAP11_NS}}}Envelope")
+    header = ET.SubElement(envelope, f"{{{_CANONICAL_SOAP11_NS}}}Header")
     ET.SubElement(
         header,
-        f"{{{_account._EXTERNAL_NS}}}ExternalApiHeader",
+        f"{{{_CANONICAL_EXTERNAL_NS}}}ExternalApiHeader",
         {
             "version": credentials.version,
             "languageCode": credentials.language_code,
@@ -959,12 +990,12 @@ def _request_xml(
             "applicationIdentifier": credentials.application_identifier,
         },
     )
-    body = ET.SubElement(envelope, f"{{{_account._SOAP11_NS}}}Body")
-    method_element = ET.SubElement(body, f"{{{_account._EXTERNAL_NS}}}{method}")
+    body = ET.SubElement(envelope, f"{{{_CANONICAL_SOAP11_NS}}}Body")
+    method_element = ET.SubElement(body, f"{{{_CANONICAL_EXTERNAL_NS}}}{method}")
     request_name = _REQUEST_ELEMENT[method]
     ET.SubElement(
         method_element,
-        f"{{{_account._EXTERNAL_NS}}}{request_name}",
+        f"{{{_CANONICAL_EXTERNAL_NS}}}{request_name}",
         attributes,
     )
     return ET.tostring(envelope, encoding="utf-8", xml_declaration=True)
@@ -985,8 +1016,8 @@ def _parse_economic_soap_result(payload: bytes, method: str) -> ET.Element:
         ) from None
     namespace, local = _split_tag(root.tag)
     if local != "Envelope" or namespace not in {
-        _account._SOAP11_NS,
-        _account._SOAP12_NS,
+        _CANONICAL_SOAP11_NS,
+        _CANONICAL_SOAP12_NS,
     }:
         raise BetdaqEconomicReadbackError(
             "BETDAQ economic response has invalid SOAP Envelope"
@@ -1001,14 +1032,14 @@ def _parse_economic_soap_result(payload: bytes, method: str) -> ET.Element:
         child_namespace, child_local = _split_tag(child.tag)
         if child_namespace == namespace and child_local == "Fault":
             raise BetdaqEconomicReadbackError("BETDAQ economic SOAP Fault")
-    expected_response_tag = f"{{{_account._EXTERNAL_NS}}}{method}Response"
+    expected_response_tag = f"{{{_CANONICAL_EXTERNAL_NS}}}{method}Response"
     body_children = list(body)
     if len(body_children) != 1 or body_children[0].tag != expected_response_tag:
         raise BetdaqEconomicReadbackError(
             f"BETDAQ economic response is not the exact {method}Response body"
         )
     response = body_children[0]
-    expected_result_tag = f"{{{_account._EXTERNAL_NS}}}{method}Result"
+    expected_result_tag = f"{{{_CANONICAL_EXTERNAL_NS}}}{method}Result"
     response_children = list(response)
     if len(response_children) != 1 or response_children[0].tag != expected_result_tag:
         raise BetdaqEconomicReadbackError(
@@ -1018,7 +1049,7 @@ def _parse_economic_soap_result(payload: bytes, method: str) -> ET.Element:
     statuses = [
         child
         for child in result
-        if child.tag == f"{{{_account._EXTERNAL_NS}}}ReturnStatus"
+        if child.tag == f"{{{_CANONICAL_EXTERNAL_NS}}}ReturnStatus"
     ]
     if len(statuses) != 1:
         raise BetdaqEconomicReadbackError(
@@ -1040,18 +1071,18 @@ def _parse_economic_soap_result(payload: bytes, method: str) -> ET.Element:
         )
 
     allowed_children = {
-        f"{{{_account._EXTERNAL_NS}}}ReturnStatus",
+        f"{{{_CANONICAL_EXTERNAL_NS}}}ReturnStatus",
         (
-            f"{{{_account._EXTERNAL_NS}}}OrderSettlementInformation"
+            f"{{{_CANONICAL_EXTERNAL_NS}}}OrderSettlementInformation"
             if method == "GetOrderDetails"
-            else f"{{{_account._EXTERNAL_NS}}}Orders"
+            else f"{{{_CANONICAL_EXTERNAL_NS}}}Orders"
         ),
     }
     if method == "GetOrderDetails":
         # The generated BETDAQ contract documents AuditLog as a sibling of
         # OrderSettlementInformation. It remains raw/content-bound evidence here;
         # this economic projection does not infer settlement state from audit entries.
-        audit_log_tag = f"{{{_account._EXTERNAL_NS}}}AuditLog"
+        audit_log_tag = f"{{{_CANONICAL_EXTERNAL_NS}}}AuditLog"
         allowed_children.add(audit_log_tag)
         if sum(child.tag == audit_log_tag for child in result) > 1:
             raise BetdaqEconomicReadbackError(
@@ -1088,7 +1119,7 @@ def _parse_postings_result(
     containers = [
         child
         for child in result
-        if child.tag == f"{{{_account._EXTERNAL_NS}}}Orders"
+        if child.tag == f"{{{_CANONICAL_EXTERNAL_NS}}}Orders"
     ]
     if len(containers) != 1:
         raise BetdaqEconomicReadbackError(
@@ -1113,7 +1144,7 @@ def _parse_postings_result(
         else None
     )
     for child in containers[0]:
-        if child.tag != f"{{{_account._EXTERNAL_NS}}}Order":
+        if child.tag != f"{{{_CANONICAL_EXTERNAL_NS}}}Order":
             raise BetdaqEconomicReadbackError(
                 "BETDAQ postings Orders contains unexpected element"
             )

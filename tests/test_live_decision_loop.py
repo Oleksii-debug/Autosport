@@ -466,6 +466,54 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             self.assertEqual(seen_revisions, [0])
             self.assertGreater(loop.mirror_updates.mirror.revision, 0)
 
+    def test_intent_factories_receive_isolated_market_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            base = self._event(selection="selection-a", sequence=1)
+            event = MarketEvent.from_dict(
+                {
+                    **base.to_dict(),
+                    "metadata": {"nested": {"origin": "canonical"}},
+                }
+            )
+            seen = []
+
+            def mutating_factory(input_id, snapshot):
+                self.assertEqual(len(snapshot.events), 1)
+                metadata = snapshot.events[0].metadata
+                seen.append((input_id, metadata["nested"]["origin"]))
+                metadata["nested"]["origin"] = f"mutated-by-{input_id}"
+                return ()
+
+            mutating_factory.strategy_version_id = "live-test-strategy-v1"
+            mutating_factory.source_sha256 = self.INTENT_SOURCE_SHA256
+            mutating_factory.environment_sha256 = self.INTENT_ENVIRONMENT_SHA256
+            mutating_factory.config_sha256 = self.INTENT_CONFIG_SHA256
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(workspace, [(event,)]),
+                factory=mutating_factory,
+                clock=_ManualClock(self.START + timedelta(seconds=1)),
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+            loop.register_input("input-b", selection_ids="selection-a")
+
+            result = loop.run_cycle()
+
+            self.assertEqual(result.status, LiveCycleStatus.DECIDED)
+            self.assertEqual(
+                seen,
+                [
+                    ("input-a", "canonical"),
+                    ("input-b", "canonical"),
+                ],
+            )
+            durable = loop.mirror_updates.mirror.snapshot()
+            self.assertEqual(
+                durable[0].metadata,
+                {"nested": {"origin": "canonical"}},
+            )
+
     def test_pending_replay_hides_reconstructed_mirror_revision_from_factory(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

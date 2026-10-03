@@ -17,6 +17,7 @@ from urllib.parse import parse_qs, urlparse
 from urllib.request import HTTPSHandler, OpenerDirector
 
 import autosport.historical_snapshot as historical_snapshot
+import autosport.parlay_sport_provider as parlay_sport_module
 from autosport.historical_snapshot import (
     _atomic_write_jsonl,
     assert_historical_snapshot_provider_origin,
@@ -213,6 +214,36 @@ class HistoricalSnapshotTests(unittest.TestCase):
                     output_path=Path(temp) / "market.jsonl",
                     evidence_path=Path(temp) / "evidence.json",
                 )
+
+        self.assertEqual(calls, [])
+
+    def test_product_owned_capture_rejects_sport_validator_code_mutation_before_io(
+        self,
+    ) -> None:
+        calls: list[str] = []
+        target = parlay_sport_module._canonical_sport_key
+        original_code = target.__code__
+
+        def forged_validator(value):
+            calls.append(str(value))
+            return "basketball"
+
+        try:
+            target.__code__ = forged_validator.__code__
+            with tempfile.TemporaryDirectory() as temp:
+                with self.assertRaisesRegex(
+                    ProviderPayloadError,
+                    "authority changed before acquisition",
+                ):
+                    capture_product_owned_historical_snapshot(
+                        api_key="secret-key-must-not-leak",
+                        sport_key="basketball",
+                        requested_at="2026-09-12T10:03:00Z",
+                        output_path=Path(temp) / "market.jsonl",
+                        evidence_path=Path(temp) / "evidence.json",
+                    )
+        finally:
+            target.__code__ = original_code
 
         self.assertEqual(calls, [])
 

@@ -611,7 +611,7 @@ def _seal_scheduled_source_universe_dispatch() -> None:
     expected_base_sqlite3 = expected_base_connect_path_globals.get("sqlite3")
     expected_base_sqlite_connect = getattr(expected_base_sqlite3, "connect", None)
     expected_base_sqlite_row = getattr(expected_base_sqlite3, "Row", None)
-    expected_path_identity_surface = expected_class_seams["_path_file_identity"]
+    expected_path_identity_surface = expected_schedule_class_seams["_path_file_identity"]
     expected_path_identity_callable = getattr(
         expected_path_identity_surface, "__func__", expected_path_identity_surface
     )

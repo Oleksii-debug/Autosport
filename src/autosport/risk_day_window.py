@@ -489,6 +489,10 @@ class ProductDayRiskWindowStore:
     def current(self) -> ProductDayRiskWindow:
         """Return current UTC day evidence after durable rollback validation."""
 
+        if type(self) is not ProductDayRiskWindowStore:
+            raise RiskDayWindowIntegrityError(
+                "risk day store must be the canonical exact store type"
+            )
         with WorkspaceEconomicLock(self.workspace):
             target_day = _clock_utc_instant(self._clock).date()
             if os.path.lexists(self.state_path):
@@ -525,7 +529,8 @@ class ProductDayRiskWindowStore:
                     raise MonotonicAuthorityRollbackError(
                         "risk day state is missing after authority establishment"
                     )
-                return self._publish_day(
+                return type(self)._publish_day(
+                    self,
                     target_day,
                     observed_sha256=None,
                 )
@@ -535,12 +540,14 @@ class ProductDayRiskWindowStore:
                     "UTC day moved behind the committed risk day"
                 )
             if target_day == persisted_day:
-                return self._evidence(
+                return type(self)._evidence(
+                    self,
                     payload,
                     observed_sha256,
                     generation,
                 )
-            return self._publish_day(
+            return type(self)._publish_day(
+                self,
                 target_day,
                 observed_sha256=observed_sha256,
             )
@@ -551,13 +558,17 @@ class ProductDayRiskWindowStore:
     ) -> ProductDayRiskWindow:
         """Re-resolve positive product-clock day authority and reject substitutes."""
 
+        if type(self) is not ProductDayRiskWindowStore:
+            raise RiskDayWindowIntegrityError(
+                "risk day store must be the canonical exact store type"
+            )
         if type(candidate) is not ProductDayRiskWindow:
             raise RiskDayWindowMismatchError(
                 "candidate must be ProductDayRiskWindow evidence"
             )
         # Positive revalidation must bypass mutable exact-instance dispatch.
         # A caller-owned current attribute is not product clock/day authority.
-        current = ProductDayRiskWindowStore.current(self)
+        current = type(self).current(self)
         if not current.product_clock_authoritative:
             raise RiskDayWindowIntegrityError(
                 "test/synthetic clock cannot mint product day authority"

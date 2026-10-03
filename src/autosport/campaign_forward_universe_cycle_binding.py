@@ -1650,6 +1650,29 @@ def _seal_campaign_forward_universe_cycle_dispatch() -> None:
                 "campaign forward-cycle integrity guard changed"
             )
         if (
+            module_globals.get("inspect") is not expected_inspect
+            or module_globals.get("_CANONICAL_INSPECT") is not expected_inspect
+            or module_globals.get("_CANONICAL_GETATTR_STATIC")
+            is not expected_getattr_static
+            or module_globals.get("_CANONICAL_GETATTR_STATIC_CODE")
+            is not expected_getattr_static_code
+            or module_globals.get("_CANONICAL_GETATTR_STATIC_GLOBALS")
+            is not expected_getattr_static_globals
+            or module_globals.get("_CANONICAL_GETATTR_STATIC_GLOBAL_ITEMS")
+            is not expected_getattr_static_global_items
+            or expected_inspect.getattr_static is not expected_getattr_static
+            or expected_getattr_static.__code__ is not expected_getattr_static_code
+            or expected_getattr_static.__globals__ is not expected_getattr_static_globals
+            or any(
+                expected_getattr_static_globals.get(name) is not target
+                or getattr(target, "__code__", None) is not code
+                for name, target, code in expected_getattr_static_global_items
+            )
+        ):
+            raise expected_error(
+                "campaign forward-cycle reflection dispatch changed"
+            )
+        if (
             module_globals.get("_CANONICAL_AUTHORITY_CLASS") is not expected_authority_class
             or module_globals.get("_AUTHORITY_ISSUANCE_CAPABILITY")
             is not expected_authority_issuance_capability

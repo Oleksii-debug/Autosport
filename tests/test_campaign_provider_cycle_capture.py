@@ -2747,6 +2747,94 @@ def test_production_capture_accepts_only_canonical_default_clock_identity(
         capture_module._CANONICAL_TEST_CAMPAIGN_CLOCK_ORIGIN.reset(token)
 
 
+def test_sealed_campaign_capture_does_not_expose_unsealed_delegate() -> None:
+    sealed = capture_module.capture_campaign_complete_game_board
+
+    assert not hasattr(sealed, "__wrapped__")
+    assert sealed.__name__ == "capture_campaign_complete_game_board"
+
+
+def test_saved_campaign_capture_rejects_public_surface_rebind_before_execution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    capture = capture_module.capture_campaign_complete_game_board
+    hostile_calls: list[str] = []
+
+    def hostile(**_kwargs):
+        hostile_calls.append("capture")
+        raise AssertionError("hostile public capture executed")
+
+    monkeypatch.setattr(
+        capture_module,
+        "capture_campaign_complete_game_board",
+        hostile,
+    )
+
+    with pytest.raises(
+        CampaignProviderCycleCaptureIntegrityError,
+        match="public capture surface changed",
+    ):
+        capture(
+            precommit_locator=None,
+            store=None,
+            source_spec=None,
+            evidence_store=None,
+            request=None,
+            api_key="secret-value",
+        )
+
+    assert hostile_calls == []
+
+
+def test_campaign_capture_rejects_mid_call_public_surface_rebind(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    locator, store, spec, provider_store = _setup(tmp_path)
+    capture = capture_module.capture_campaign_complete_game_board
+    monkeypatch.setattr(
+        provider_module,
+        "urlopen",
+        lambda _request, _timeout: _FakeSseResponse(_frame()),
+    )
+    monkeypatch.setattr(provider_module, "_default_clock", lambda: CAPTURED_AT)
+
+    values = iter(
+        [
+            "2100-01-01T06:00:00+00:00",
+            "2100-01-01T06:00:01+00:00",
+            "2100-01-01T06:00:02+00:00",
+        ]
+    )
+    calls = 0
+
+    def mutating_clock() -> str:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            monkeypatch.setattr(
+                capture_module,
+                "capture_campaign_complete_game_board",
+                lambda **_kwargs: None,
+            )
+        return next(values)
+
+    with pytest.raises(
+        CampaignProviderCycleCaptureIntegrityError,
+        match="public capture surface changed",
+    ):
+        capture(
+            precommit_locator=locator,
+            store=store,
+            source_spec=spec,
+            evidence_store=provider_store,
+            request=_request(),
+            api_key="secret-value",
+            timeout_seconds=3.0,
+            clock=mutating_clock,
+        )
+
+
 def test_campaign_clock_witness_double_rebind_fails_before_clock_execution(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

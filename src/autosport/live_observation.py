@@ -58,26 +58,88 @@ class OneShotObservationWorker:
             if self._busy:
                 return False
             self._busy = True
+
+        # Live observation may persist market/source-health state. A pathological
+        # Thread.start() implementation can create the helper and still raise to its
+        # caller; do not let durable work cross that ambiguous startup boundary.
         try:
+            start_gate = threading.Event()
+            cancelled = threading.Event()
             thread = threading.Thread(
-                target=self._run,
-                args=(task,),
+                target=self._run_when_committed,
+                args=(task, start_gate, cancelled),
                 name="autosport-live-observation",
                 daemon=False,
             )
-            self._thread = thread
+        except BaseException as exc:
+            if isinstance(exc, Exception):
+                self._publish_setup_failure(exc)
+                return True
+            self._release_unstarted_slot()
+            raise
+
+        self._thread = thread
+        task_committed = False
+        try:
             thread.start()
-        except Exception as exc:
-            # The live-observation caller reserves False for a genuinely busy
-            # worker and schedules terminal polling whenever start() returns True.
-            # Preserve that contract for any ordinary Thread construction/start
-            # failure: publish one terminal error and let poll() restore idle state.
-            self._thread = None
-            self._messages.put(
-                ObservationWorkerMessage(error=f"{type(exc).__name__}: {exc}")
-            )
-            return True
+            # Startup is committed only after Thread.start() returns normally. Open
+            # the gate afterwards so the durable observation cannot run on a helper
+            # whose creation is still reported as failed to the caller.
+            task_committed = True
+            start_gate.set()
+        except BaseException as exc:
+            if task_committed:
+                start_gate.set()
+                if isinstance(exc, Exception):
+                    return True
+                raise
+
+            # Thread.start() may already have launched the helper before raising.
+            # Cancel first, then open the gate so that helper exits without task().
+            # If it really started, retain ownership until it is fully quiescent;
+            # never publish/release a slot while a prior non-daemon helper is alive.
+            cancelled.set()
+            start_gate.set()
+            self._reap_ambiguous_start(thread)
+            if isinstance(exc, Exception):
+                self._publish_setup_failure(exc)
+                return True
+            self._release_unstarted_slot()
+            raise
         return True
+
+    @staticmethod
+    def _reap_ambiguous_start(thread: threading.Thread) -> None:
+        # CPython's public ident remains None for a Thread that never started and is
+        # assigned before Thread.start() can return normally. Guarding on it avoids
+        # RuntimeError from joining an unstarted helper while still deterministically
+        # reaping the start-then-raise case after the cancellation gate is opened.
+        if thread.ident is not None:
+            thread.join()
+
+    def _publish_setup_failure(self, exc: Exception) -> None:
+        # Preserve the established caller contract: False means "already busy";
+        # an ordinary setup failure returns True and publishes one terminal error.
+        self._thread = None
+        self._messages.put(
+            ObservationWorkerMessage(error=f"{type(exc).__name__}: {exc}")
+        )
+
+    def _release_unstarted_slot(self) -> None:
+        self._thread = None
+        with self._lock:
+            self._busy = False
+
+    def _run_when_committed(
+        self,
+        task: ObservationTask,
+        start_gate: threading.Event,
+        cancelled: threading.Event,
+    ) -> None:
+        start_gate.wait()
+        if cancelled.is_set():
+            return
+        self._run(task)
 
     def _run(self, task: ObservationTask) -> None:
         try:
@@ -95,7 +157,23 @@ class OneShotObservationWorker:
             message = self._messages.get_nowait()
         except queue.Empty:
             return None
+
+        # The worker publishes its terminal message immediately before returning.
+        # Do not expose retry availability until the owned non-daemon helper itself
+        # is quiescent; otherwise a fast poll/start pair can transiently overlap two
+        # helpers despite the single-flight contract.
+        thread = self._thread
+        if thread is not None:
+            if thread is threading.current_thread():
+                # Preserve the message and busy ownership rather than losing the
+                # terminal disposition from an unsupported self-poll.
+                self._messages.put_nowait(message)
+                raise RuntimeError("observation worker cannot poll itself")
+            thread.join()
+
         with self._lock:
+            if self._thread is thread:
+                self._thread = None
             self._busy = False
         return message
 

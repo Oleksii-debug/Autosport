@@ -1361,9 +1361,33 @@ def _seal_provider_evidence_store_dispatch() -> None:
             "_unlock_handle",
         )
     )
+    expected_request_methods = tuple(
+        _surface_witness(CompleteGameBoardRequest, name)
+        for name in (
+            "sport_key",
+            "bookmakers",
+            "markets",
+            "kind",
+            "limit",
+            "max_age_s",
+            "source_id",
+            "to_payload",
+            "from_payload",
+        )
+    )
     expected_snapshot_methods = tuple(
         _surface_witness(CompleteGameBoardSnapshot, name)
-        for name in ("to_payload", "from_payload")
+        for name in (
+            "request",
+            "captured_at",
+            "frame_json",
+            "frame",
+            "frame_sha256",
+            "row_sha256s",
+            "evidence_sha256",
+            "to_payload",
+            "from_payload",
+        )
     )
     expected_path_type = type(Path("."))
     expected_path_factory_methods = tuple(
@@ -1384,6 +1408,7 @@ def _seal_provider_evidence_store_dispatch() -> None:
         "strict_json_loads": strict_json_loads,
         "atomic_write_json": atomic_write_json,
         "AuthorityPhase": AuthorityPhase,
+        "CompleteGameBoardRequest": CompleteGameBoardRequest,
         "CompleteGameBoardSnapshot": CompleteGameBoardSnapshot,
         "ProviderObservationIntegrityError": expected_error,
         "_CANONICAL_GETATTR_STATIC": expected_store_surface_reader,
@@ -1439,6 +1464,11 @@ def _seal_provider_evidence_store_dispatch() -> None:
         + tuple(
             ("lock." + name, function, code)
             for name, _surface, function, code in expected_lock_methods
+            if code is not None
+        )
+        + tuple(
+            ("request." + name, function, code)
+            for name, _surface, function, code in expected_request_methods
             if code is not None
         )
         + tuple(
@@ -1658,6 +1688,13 @@ def _seal_provider_evidence_store_dispatch() -> None:
         ):
             raise expected_error(
                 "provider evidence workspace lock dispatch changed"
+            )
+        if not _require_surface_witnesses(
+            CompleteGameBoardRequest,
+            expected_request_methods,
+        ):
+            raise expected_error(
+                "provider evidence request dispatch changed"
             )
         if not _require_surface_witnesses(
             CompleteGameBoardSnapshot,

@@ -2462,3 +2462,84 @@ def test_runtime_authority_rejects_record_init_code_replacement(
             store.records()
     finally:
         target.__code__ = original_code
+
+
+@pytest.mark.parametrize(
+    ("type_name", "member_name"),
+    (
+        ("EnvironmentIdentity", "__post_init__"),
+        ("EnvironmentIdentity", "environment_id"),
+        ("Episode", "__post_init__"),
+        ("Episode", "episode_id"),
+    ),
+)
+def test_runtime_authority_rejects_semantic_surface_descriptor_replacement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    type_name: str,
+    member_name: str,
+) -> None:
+    path = tmp_path / "deployment-runtime-authority.json"
+    store = DeploymentRuntimeAuthorityStore.initialize_pristine(
+        path,
+        authority_root=_authority_root(tmp_path),
+    )
+    semantic_type = getattr(deployment_runtime_authority, type_name)
+    hostile_calls: list[object] = []
+
+    def hostile(*args: object, **kwargs: object) -> object:
+        hostile_calls.append((args, kwargs))
+        raise AssertionError("hostile semantic identity surface executed")
+
+    current = vars(semantic_type)[member_name]
+    replacement: object = property(hostile) if isinstance(current, property) else hostile
+    monkeypatch.setattr(semantic_type, member_name, replacement)
+
+    with pytest.raises(
+        DeploymentRuntimeAuthorityError,
+        match="semantic type surface was replaced",
+    ):
+        store.records()
+
+    assert hostile_calls == []
+
+
+@pytest.mark.parametrize(
+    ("type_name", "member_name"),
+    (
+        ("EnvironmentIdentity", "__init__"),
+        ("EnvironmentIdentity", "environment_id"),
+        ("Episode", "__init__"),
+        ("Episode", "episode_id"),
+    ),
+)
+def test_runtime_authority_rejects_semantic_surface_code_replacement(
+    tmp_path: Path,
+    type_name: str,
+    member_name: str,
+) -> None:
+    path = tmp_path / "deployment-runtime-authority.json"
+    store = DeploymentRuntimeAuthorityStore.initialize_pristine(
+        path,
+        authority_root=_authority_root(tmp_path),
+    )
+    semantic_type = getattr(deployment_runtime_authority, type_name)
+    descriptor = vars(semantic_type)[member_name]
+    target = descriptor.fget if isinstance(descriptor, property) else descriptor
+    assert target is not None
+    original_code = target.__code__
+
+    def hostile(*args: object, **kwargs: object) -> object:
+        del args, kwargs
+        raise AssertionError("hostile semantic identity code executed")
+
+    assert hostile.__code__.co_freevars == original_code.co_freevars
+    target.__code__ = hostile.__code__
+    try:
+        with pytest.raises(
+            DeploymentRuntimeAuthorityError,
+            match="semantic type surface was replaced",
+        ):
+            store.records()
+    finally:
+        target.__code__ = original_code

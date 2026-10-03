@@ -1525,13 +1525,13 @@ class DeploymentRuntimeAuthorityStore(metaclass=_DeploymentRuntimeAuthorityStore
 
     @_authority.setter
     def _authority(self, value: MonotonicWorkspaceAuthority) -> None:
-        if type(value) is not _CANONICAL_MONOTONIC_AUTHORITY_TYPE:
-            raise DeploymentRuntimeAuthorityError(
-                "runtime authority binding must use canonical monotonic authority"
-            )
         try:
             object.__getattribute__(self, "_binding_authority")
         except AttributeError:
+            if type(value) is not _CANONICAL_MONOTONIC_AUTHORITY_TYPE:
+                raise DeploymentRuntimeAuthorityError(
+                    "runtime authority binding must use canonical monotonic authority"
+                )
             object.__setattr__(self, "_binding_authority", value)
             return
         raise AttributeError("deployment runtime authority bindings are write-once")
@@ -1918,9 +1918,9 @@ class DeploymentRuntimeAuthorityStore(metaclass=_DeploymentRuntimeAuthorityStore
                 temporary_name = handle.name
                 handle.write(raw)
                 handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(temporary_name, path)
-            _fsync_directory(path.parent)
+                _CANONICAL_OS_FSYNC(handle.fileno())
+            _CANONICAL_OS_REPLACE(temporary_name, path)
+            _CANONICAL_FSYNC_DIRECTORY(path.parent)
         finally:
             if temporary_name is not None:
                 try:
@@ -2164,6 +2164,21 @@ class DeploymentRuntimeAuthorityStore(metaclass=_DeploymentRuntimeAuthorityStore
                 "runtime authority record codec requirement dispatch was replaced"
             )
         _record_codec_requirement()
+        if (
+            os is not _CANONICAL_OS_MODULE
+            or os.open is not _CANONICAL_OS_OPEN
+            or os.fstat is not _CANONICAL_OS_FSTAT
+            or os.lstat is not _CANONICAL_OS_LSTAT
+            or os.fsync is not _CANONICAL_OS_FSYNC
+            or os.close is not _CANONICAL_OS_CLOSE
+            or os.replace is not _CANONICAL_OS_REPLACE
+            or _fsync_directory is not _CANONICAL_FSYNC_DIRECTORY
+            or getattr(_CANONICAL_FSYNC_DIRECTORY, "__code__", None)
+            is not _CANONICAL_FSYNC_DIRECTORY_CODE
+        ):
+            raise DeploymentRuntimeAuthorityError(
+                "runtime authority publication durability dispatch was replaced"
+            )
         if (
             _workspace_economic_lock is not _workspace_lock_helper
             or _CANONICAL_WORKSPACE_LOCK_HELPER is not _workspace_lock_helper

@@ -502,6 +502,13 @@ def test_sealed_capture_rejects_guard_rebind_before_execution(monkeypatch):
     assert calls == []
 
 
+def test_sealed_capture_does_not_expose_unsealed_delegate():
+    sealed = authority_module.capture_parlay_complete_game_board
+
+    assert not hasattr(sealed, "__wrapped__")
+    assert sealed.__name__ == "capture_parlay_complete_game_board"
+
+
 def test_sealed_capture_rejects_public_surface_rebind(monkeypatch):
     saved = capture_parlay_complete_game_board
     monkeypatch.setattr(

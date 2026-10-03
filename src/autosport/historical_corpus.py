@@ -283,16 +283,20 @@ def _snapshot_acquisition_provenance(
     if type(origin) is not str or not origin or origin != origin.strip():
         raise ValueError("snapshot acquisition request origin must be canonical text")
     parsed_origin = urlsplit(origin)
+    canonical_origin = f"{parsed_origin.scheme}://{parsed_origin.netloc}"
     if (
         parsed_origin.scheme != "https"
         or not parsed_origin.netloc
-        or parsed_origin.path not in {"", "/"}
+        or parsed_origin.path
         or parsed_origin.query
         or parsed_origin.fragment
         or parsed_origin.username is not None
         or parsed_origin.password is not None
+        or origin != canonical_origin
     ):
-        raise ValueError("snapshot acquisition request origin must be a secret-free HTTPS origin")
+        raise ValueError(
+            "snapshot acquisition request origin must be a canonical secret-free HTTPS origin"
+        )
     base_url_sha256 = _digest(
         request,
         "base_url_sha256",
@@ -346,6 +350,9 @@ def _snapshot_acquisition_provenance(
         raise ValueError("snapshot acquisition request.query_string is invalid") from exc
     if len(query_pairs) != len(required_query_keys):
         raise ValueError("snapshot acquisition request.query_string has duplicate/missing fields")
+    canonical_query_order = ("date", "regions", "markets", "oddsFormat", "dateFormat")
+    if tuple(key for key, _ in query_pairs) != canonical_query_order:
+        raise ValueError("snapshot acquisition request.query_string is not canonical")
     query_from_string = dict(query_pairs)
     if len(query_from_string) != len(query_pairs) or query_from_string != query:
         raise ValueError("snapshot acquisition request.query_string contradicts query object")

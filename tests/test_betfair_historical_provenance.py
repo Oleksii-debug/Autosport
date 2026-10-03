@@ -87,6 +87,32 @@ def snapshot(
     )
 
 
+class _ForgedHistoricalFileEvidence(HistoricalFileEvidence):
+    def authority_payload(self):
+        payload = super().authority_payload()
+        payload["file_sha256"] = SHA_B
+        return payload
+
+
+class _ForgedEnrichmentProvenance(EnrichmentProvenance):
+    def authority_payload(self):
+        payload = super().authority_payload()
+        payload["dataset_sha256"] = SHA_A
+        return payload
+
+
+class _ForgedSnapshot(BetfairHistoricalSnapshot):
+    pass
+
+
+class _ForgedStreamCapture(StreamCaptureEvidence):
+    pass
+
+
+class _ForgedHistoricalFeatureFact(HistoricalFeatureFact):
+    pass
+
+
 class BetfairHistoricalProvenanceTests(unittest.TestCase):
     def test_snapshot_binds_provider_source_and_package_fidelity(self) -> None:
         current = snapshot()
@@ -110,6 +136,89 @@ class BetfairHistoricalProvenanceTests(unittest.TestCase):
             snapshot(files=(first, second)).snapshot_identity_sha256,
             snapshot(files=(second, first)).snapshot_identity_sha256,
         )
+
+    def test_snapshot_rejects_file_subclass_authority_payload_override(self) -> None:
+        original = market_file()
+        forged = _ForgedHistoricalFileEvidence(
+            purchase_item_id=original.purchase_item_id,
+            provider_file_path=original.provider_file_path,
+            file_layout=original.file_layout,
+            file_sha256=original.file_sha256,
+            file_size=original.file_size,
+            provider_publish_start_ts=original.provider_publish_start_ts,
+            provider_publish_end_ts=original.provider_publish_end_ts,
+            settlement_available_ts=original.settlement_available_ts,
+            acquisition_ts=original.acquisition_ts,
+            raw_retention_reference=original.raw_retention_reference,
+            market_id=original.market_id,
+            event_id=original.event_id,
+        )
+        self.assertNotEqual(
+            forged.authority_payload()["file_sha256"],
+            original.authority_payload()["file_sha256"],
+        )
+        with self.assertRaisesRegex(TypeError, "exact HistoricalFileEvidence"):
+            snapshot(files=(forged,))
+
+    def test_snapshot_rejects_enrichment_subclass_authority_payload_override(self) -> None:
+        forged = _ForgedEnrichmentProvenance(
+            dataset_id="score-source-1",
+            dataset_sha256=SHA_B,
+            source_identity="lawful-score-provider",
+            observed_at="2026-09-20T11:30:00Z",
+            license_or_terms_reference="terms://score-provider/v1",
+            join_policy_id="join-by-provider-event-id-v1",
+            capabilities=("scores",),
+        )
+        self.assertEqual(forged.authority_payload()["dataset_sha256"], SHA_A)
+        with self.assertRaisesRegex(TypeError, "exact EnrichmentProvenance"):
+            snapshot(enrichments=(forged,))
+
+    def test_public_provenance_boundaries_reject_subclass_overrides(self) -> None:
+        base_snapshot = snapshot()
+        forged_snapshot = _ForgedSnapshot(
+            dataset_id=base_snapshot.dataset_id,
+            sport=base_snapshot.sport,
+            request_start_date=base_snapshot.request_start_date,
+            request_end_date=base_snapshot.request_end_date,
+            package_fidelity=base_snapshot.package_fidelity,
+            parser_version=base_snapshot.parser_version,
+            jurisdiction_class=base_snapshot.jurisdiction_class,
+            files=base_snapshot.files,
+            enrichments=base_snapshot.enrichments,
+        )
+        with self.assertRaisesRegex(TypeError, "exact BetfairHistoricalSnapshot"):
+            qualify_historical_stratum(
+                forged_snapshot,
+                EvaluationStratum.HISTORICAL_REPLAY,
+            )
+        with self.assertRaisesRegex(TypeError, "exact BetfairHistoricalSnapshot"):
+            enrichment_declares_feature_at(
+                forged_snapshot,
+                capability="scores",
+                decision_cutoff_ts="2026-09-20T11:00:00Z",
+            )
+
+        forged_stream = _ForgedStreamCapture(
+            capture_id="live-subclass",
+            key_class=StreamKeyClass.LIVE,
+            configured_delay_seconds=0,
+            observed_at="2026-09-20T10:00:00Z",
+        )
+        with self.assertRaisesRegex(TypeError, "exact StreamCaptureEvidence"):
+            qualify_stream_stratum(
+                forged_stream,
+                EvaluationStratum.LIVE_READ_FORWARD,
+            )
+
+        forged_fact = _ForgedHistoricalFeatureFact(
+            provider_publish_ts="2026-09-20T10:00:00Z",
+        )
+        with self.assertRaisesRegex(TypeError, "exact HistoricalFeatureFact"):
+            historical_fact_visible_at(
+                forged_fact,
+                decision_cutoff_ts="2026-09-20T11:00:00Z",
+            )
 
     def test_mixed_market_and_event_layout_is_rejected(self) -> None:
         with self.assertRaisesRegex(ValueError, "one canonical historical file layout"):

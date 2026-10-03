@@ -215,10 +215,10 @@ class BetfairHistoricalSnapshot:
             raise TypeError("package_fidelity must be HistoricalDataFidelity")
         _text(self.parser_version, field="parser_version")
         _text(self.jurisdiction_class, field="jurisdiction_class")
-        if not isinstance(self.files, tuple) or not self.files:
-            raise ValueError("files must be a non-empty tuple")
-        if any(not isinstance(item, HistoricalFileEvidence) for item in self.files):
-            raise TypeError("files must contain HistoricalFileEvidence values")
+        if type(self.files) is not tuple or not self.files:
+            raise ValueError("files must be a non-empty exact tuple")
+        if any(type(item) is not HistoricalFileEvidence for item in self.files):
+            raise TypeError("files must contain exact HistoricalFileEvidence values")
         layouts = {item.file_layout for item in self.files}
         if len(layouts) != 1:
             raise ValueError(
@@ -235,10 +235,10 @@ class BetfairHistoricalSnapshot:
             event_ids = [item.event_id for item in self.files]
             if len(set(event_ids)) != len(event_ids):
                 raise ValueError("one immutable EVENT_FILE snapshot may contain each event_id only once")
-        if not isinstance(self.enrichments, tuple):
-            raise TypeError("enrichments must be a tuple")
-        if any(not isinstance(item, EnrichmentProvenance) for item in self.enrichments):
-            raise TypeError("enrichments must contain EnrichmentProvenance values")
+        if type(self.enrichments) is not tuple:
+            raise TypeError("enrichments must be an exact tuple")
+        if any(type(item) is not EnrichmentProvenance for item in self.enrichments):
+            raise TypeError("enrichments must contain exact EnrichmentProvenance values")
         enrichment_ids = [item.dataset_id for item in self.enrichments]
         if len(set(enrichment_ids)) != len(enrichment_ids):
             raise ValueError("enrichment dataset identities must be unique")
@@ -333,8 +333,8 @@ def classify_redownload(
     previous: HistoricalFileEvidence,
     current: HistoricalFileEvidence,
 ) -> FileRedownloadDisposition:
-    if not isinstance(previous, HistoricalFileEvidence) or not isinstance(current, HistoricalFileEvidence):
-        raise TypeError("previous and current must be HistoricalFileEvidence")
+    if type(previous) is not HistoricalFileEvidence or type(current) is not HistoricalFileEvidence:
+        raise TypeError("previous and current must be exact HistoricalFileEvidence")
     if previous.purchase_item_id != current.purchase_item_id:
         raise ValueError("redownload comparison requires the same purchase_item_id")
     if previous.provider_file_path != current.provider_file_path:
@@ -380,8 +380,8 @@ def historical_fact_visible_at(
     *,
     decision_cutoff_ts: str,
 ) -> bool:
-    if not isinstance(fact, HistoricalFeatureFact):
-        raise TypeError("fact must be HistoricalFeatureFact")
+    if type(fact) is not HistoricalFeatureFact:
+        raise TypeError("fact must be exact HistoricalFeatureFact")
     cutoff = _timestamp(decision_cutoff_ts, field="decision_cutoff_ts")
     published = _timestamp(fact.provider_publish_ts, field="provider_publish_ts")
     if published > cutoff:
@@ -434,8 +434,8 @@ def qualify_historical_stratum(
     snapshot: BetfairHistoricalSnapshot,
     requested: EvaluationStratum,
 ) -> StratumQualification:
-    if not isinstance(snapshot, BetfairHistoricalSnapshot):
-        raise TypeError("snapshot must be BetfairHistoricalSnapshot")
+    if type(snapshot) is not BetfairHistoricalSnapshot:
+        raise TypeError("snapshot must be exact BetfairHistoricalSnapshot")
     if type(requested) is not EvaluationStratum:
         raise TypeError("requested must be EvaluationStratum")
     if requested is EvaluationStratum.HISTORICAL_REPLAY:
@@ -452,8 +452,8 @@ def qualify_stream_stratum(
     capture: StreamCaptureEvidence,
     requested: EvaluationStratum,
 ) -> StratumQualification:
-    if not isinstance(capture, StreamCaptureEvidence):
-        raise TypeError("capture must be StreamCaptureEvidence")
+    if type(capture) is not StreamCaptureEvidence:
+        raise TypeError("capture must be exact StreamCaptureEvidence")
     if type(requested) is not EvaluationStratum:
         raise TypeError("requested must be EvaluationStratum")
     if capture.key_class is StreamKeyClass.DELAYED:
@@ -485,8 +485,8 @@ def enrichment_declares_feature_at(
     capability and was observed by the cutoff. A separate authority verifier must decide
     whether that source is lawful/authorized for the intended use.
     """
-    if not isinstance(snapshot, BetfairHistoricalSnapshot):
-        raise TypeError("snapshot must be BetfairHistoricalSnapshot")
+    if type(snapshot) is not BetfairHistoricalSnapshot:
+        raise TypeError("snapshot must be exact BetfairHistoricalSnapshot")
     wanted = _text(capability, field="capability")
     cutoff = _timestamp(decision_cutoff_ts, field="decision_cutoff_ts")
     for enrichment in snapshot.enrichments:

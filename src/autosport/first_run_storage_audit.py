@@ -12,6 +12,7 @@ from .storage_preflight import (
     probe_webview_storage_writable,
     probe_workspace_writable,
 )
+from .webview2_release_environment import active_webview2_environment_overrides
 
 
 def run_first_run_storage_audit(output_path: str | Path) -> int:
@@ -30,6 +31,8 @@ def run_first_run_storage_audit(output_path: str | Path) -> int:
         if not launch_cwd.is_absolute():
             raise ValueError("launch working directory is not absolute")
         validate_product_storage_roots(workspace, webview_storage)
+        if active_webview2_environment_overrides():
+            raise ValueError("release-sensitive WebView2 environment override is active")
         probe_workspace_writable(workspace)
         probe_webview_storage_writable(webview_storage)
 
@@ -38,6 +41,7 @@ def run_first_run_storage_audit(output_path: str | Path) -> int:
             "workspace": str(workspace),
             "webview_storage": str(webview_storage),
             "launch_cwd": str(launch_cwd),
+            "webview_environment_overrides_clear": True,
             "real_money_execution": False,
             "human_tested": False,
             "nvda_verified": False,

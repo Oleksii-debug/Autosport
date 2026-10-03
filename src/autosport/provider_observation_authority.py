@@ -1168,7 +1168,7 @@ def _seal_provider_evidence_store_dispatch() -> None:
             raise TypeError(
                 "provider evidence save requires exact CompleteGameBoardEvidenceStore"
             )
-        if inspect.getattr_static(store_type, "save") is not sealed_save:
+        if _CANONICAL_GETATTR_STATIC(store_type, "save") is not sealed_save:
             raise ProviderObservationIntegrityError(
                 "provider evidence store save surface changed"
             )
@@ -1183,7 +1183,7 @@ def _seal_provider_evidence_store_dispatch() -> None:
             raise TypeError(
                 "provider evidence load requires exact CompleteGameBoardEvidenceStore"
             )
-        if inspect.getattr_static(store_type, "load") is not sealed_load:
+        if _CANONICAL_GETATTR_STATIC(store_type, "load") is not sealed_load:
             raise ProviderObservationIntegrityError(
                 "provider evidence store load surface changed"
             )

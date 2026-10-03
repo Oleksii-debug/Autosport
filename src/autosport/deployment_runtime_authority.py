@@ -63,6 +63,24 @@ _CANONICAL_MONOTONIC_AUTHORITY_CLASS_SURFACE: Final = tuple(
     )
 )
 
+# The instance dictionary is retained for explicit crash/fault injection seams, but
+# positive/read authority must never dispatch through caller-owned instance shadows.
+# These methods either expose validated durable truth or are part of its verification
+# graph; _write_atomic_path and _observed_now deliberately remain injectable.
+_SEALED_STORE_DISPATCH_NAMES: Final = frozenset(
+    {
+        "append",
+        "get",
+        "records",
+        "_read_payload",
+        "_records_from_payload",
+        "_state_sha256",
+        "_recover_state",
+        "_read_validated_records_locked",
+        "_new_transaction_id",
+    }
+)
+
 
 class DeploymentRuntimeAuthorityError(ValueError):
     """Durable runtime authority is missing, malformed, or conflicting."""
@@ -530,6 +548,21 @@ class DeploymentRuntimeAuthorityStore:
             "_binding_semantic_binding_sha256",
         }
     )
+
+    def __getattribute__(self, name: str) -> object:
+        if name in _SEALED_STORE_DISPATCH_NAMES:
+            if type(self) is not DeploymentRuntimeAuthorityStore:
+                raise TypeError(
+                    "runtime authority store must be exact DeploymentRuntimeAuthorityStore"
+                )
+            expected = _CANONICAL_STORE_METHOD_DESCRIPTORS.get(name)
+            current = vars(DeploymentRuntimeAuthorityStore).get(name)
+            if expected is None or current is not expected:
+                raise DeploymentRuntimeAuthorityError(
+                    "runtime authority store method dispatch was replaced"
+                )
+            return expected.__get__(self, DeploymentRuntimeAuthorityStore)
+        return object.__getattribute__(self, name)
 
     @property
     def path(self) -> Path:
@@ -1002,4 +1035,13 @@ class DeploymentRuntimeAuthorityStore:
     def records(self) -> tuple[DeploymentRuntimeAuthorityRecord, ...]:
         with self._lock, _workspace_economic_lock(self.workspace):
             return self._read_validated_records_locked()
+
+
+# Capture the exact canonical descriptor objects after class construction. Instance
+# __dict__ entries cannot outrank this map, and later class-level replacement is
+# detected before the hostile descriptor can be invoked.
+_CANONICAL_STORE_METHOD_DESCRIPTORS: Final = {
+    name: vars(DeploymentRuntimeAuthorityStore)[name]
+    for name in _SEALED_STORE_DISPATCH_NAMES
+}
 

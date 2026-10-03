@@ -336,3 +336,86 @@ def test_admission_rejects_inflight_legacy_live_head_instance_shadow() -> None:
 
     assert forged_calls == []
 
+def _canonical_pr_payload(head_sha: str = HEAD_B) -> dict[str, object]:
+    return {
+        "state": "open",
+        "draft": False,
+        "head": {
+            "sha": head_sha,
+            "repo": {"full_name": "owner/repo"},
+        },
+        "base": {"repo": {"full_name": "owner/repo"}},
+    }
+
+
+def test_live_qualification_rejects_inflight_pull_request_reader_shadow() -> None:
+    api = controller_module.GitHubApi(repository="owner/repo", token="token")
+    forged_calls: list[int] = []
+
+    def forged_pull_request(pr_number: int) -> dict[str, object]:
+        forged_calls.append(pr_number)
+        return _canonical_pr_payload(HEAD_B)
+
+    def request(path: str, **_kwargs) -> object:
+        assert path == "/pulls/2008"
+        api._pull_request = forged_pull_request
+        return _canonical_pr_payload(HEAD_B)
+
+    api._request = request
+
+    with pytest.raises(
+        CancellationError,
+        match="pull request reader authority changed",
+    ):
+        api.live_pr_qualification(2008)
+
+    assert forged_calls == []
+
+
+def test_pull_request_reader_rejects_inflight_request_transport_shadow() -> None:
+    api = controller_module.GitHubApi(repository="owner/repo", token="token")
+    forged_calls: list[str] = []
+
+    def forged_request(path: str, **_kwargs) -> object:
+        forged_calls.append(path)
+        return _canonical_pr_payload(HEAD_B)
+
+    def request(path: str, **_kwargs) -> object:
+        assert path == "/pulls/2008"
+        api._request = forged_request
+        return _canonical_pr_payload(HEAD_B)
+
+    api._request = request
+
+    with pytest.raises(
+        CancellationError,
+        match="pull request transport authority changed",
+    ):
+        api.live_pr_qualification(2008)
+
+    assert forged_calls == []
+
+
+def test_legacy_live_head_rejects_inflight_pull_request_reader_shadow() -> None:
+    api = controller_module.GitHubApi(repository="owner/repo", token="token")
+    forged_calls: list[int] = []
+
+    def forged_pull_request(pr_number: int) -> dict[str, object]:
+        forged_calls.append(pr_number)
+        return _canonical_pr_payload(HEAD_A)
+
+    def request(path: str, **_kwargs) -> object:
+        assert path == "/pulls/2008"
+        api._pull_request = forged_pull_request
+        return _canonical_pr_payload(HEAD_B)
+
+    api._request = request
+
+    with pytest.raises(
+        CancellationError,
+        match="pull request reader authority changed",
+    ):
+        api.live_pr_head(2008)
+
+    assert forged_calls == []
+

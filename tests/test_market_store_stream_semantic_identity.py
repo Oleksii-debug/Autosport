@@ -229,6 +229,35 @@ class MarketStoreStreamSemanticIdentityTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_missing_current_projection_does_not_promote_stale_history_event(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = SQLiteMarketStore(Path(temp_dir) / "market.db")
+            try:
+                first = self._event(sequence=40, odds="2.40")
+                latest = self._event(sequence=42, odds="2.80")
+                stale = self._event(sequence=41, odds="2.60")
+                self.assertTrue(store.append(first))
+                self.assertTrue(store.append(latest))
+                store.connection.execute(
+                    "DELETE FROM current_quotes WHERE source_id=? AND quote_key=?",
+                    (latest.source_id, latest.quote_key),
+                )
+                store.connection.commit()
+
+                self.assertTrue(store.append(stale))
+
+                self.assertEqual(
+                    [event.sequence for event in store.events()],
+                    [40, 41, 42],
+                )
+                restored = store.current_by_source()[
+                    (latest.source_id, latest.quote_key)
+                ]
+                self.assertEqual(restored.sequence, 42)
+                self.assertEqual(restored.dedupe_key, latest.dedupe_key)
+            finally:
+                store.close()
+
     def test_tampered_current_projection_cannot_redefine_history_semantics(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             store = SQLiteMarketStore(Path(temp_dir) / "market.db")

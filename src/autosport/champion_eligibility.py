@@ -465,16 +465,141 @@ class ChampionEligibilityDecision:
         )
 
 
+def _reject_later_contradictory_drift(
+    registry: ScientificRegistry,
+    decision: ChampionEligibilityDecision,
+    *,
+    as_of: str,
+) -> None:
+    """Reject an old positive lease after newer causal drift in the same exact scope.
+
+    The decision's own finding set remains immutable historical evidence. Activation
+    additionally inspects canonical findings that are causally visible at as_of so
+    a later degraded window cannot be hidden simply by replaying the older decision.
+    This is invalidation only: later NO_DRIFT evidence never extends valid_until.
+    """
+
+    decision_scope = (
+        decision.sport,
+        decision.league,
+        decision.regime,
+    )
+    evidence_end = _instant(decision.window_end, "decision.window_end")
+    monitor = DriftMonitor(registry)
+
+    for candidate in registry.causal_records("DriftFinding", as_of=as_of):
+        if candidate.record_id in decision.finding_ids:
+            continue
+        payload = candidate.payload
+        if (
+            payload.get("strategy_version_id") != decision.strategy_version_id
+            or payload.get("model_version_id") != decision.model_version_id
+        ):
+            continue
+        try:
+            finding, _reference, observation = monitor.require_canonical_finding(
+                candidate.record_id,
+                as_of=as_of,
+            )
+            state = DriftState(finding.payload.get("state"))
+            observation_end = _instant(
+                observation.payload.get("window_end"),
+                "later DriftObservation.window_end",
+            )
+            scope_values = tuple(
+                _text(observation.payload.get(name), f"later DriftObservation.{name}")
+                for name in ("sport", "league", "regime")
+            )
+        except (DriftControlError, ChampionEligibilityError, TypeError, ValueError):
+            # Only independently canonical drift evidence may invalidate activation.
+            # A caller-authored/malformed registry record is not deployment authority.
+            continue
+
+        if scope_values != decision_scope:
+            continue
+
+        finding_available = _instant(
+            finding.available_at,
+            "later DriftFinding.available_at",
+        )
+        decision_available = _instant(
+            decision.available_at,
+            "decision.available_at",
+        )
+        published_after_decision = registry.causal_precedes(
+            decision.record_type,
+            decision.record_id,
+            "DriftFinding",
+            candidate.record_id,
+        )
+        is_later_evidence = (
+            observation_end > evidence_end
+            or finding_available > decision_available
+            or published_after_decision
+        )
+        if not is_later_evidence:
+            continue
+        if state is DriftState.DRIFT_DETECTED:
+            raise ChampionEligibilityError(
+                "later canonical drift invalidates champion eligibility; "
+                "explicit re-authorization is required"
+            )
+
+
+def _rederive_decision(
+    registry: ScientificRegistry,
+    decision: ChampionEligibilityDecision,
+) -> ChampionEligibilityDecision:
+    """Re-resolve one decision from canonical drift evidence before authority use."""
+
+    try:
+        rederived = ChampionEligibilityDecision.from_findings(
+            registry,
+            canonical_strategy_id=decision.canonical_strategy_id,
+            strategy_version_id=decision.strategy_version_id,
+            model_version_id=decision.model_version_id,
+            environment_sha256=decision.environment_sha256,
+            protocol_id=decision.protocol_id,
+            config_sha256=decision.config_sha256,
+            sport=decision.sport,
+            league=decision.league,
+            regime=decision.regime,
+            finding_ids=decision.finding_ids,
+            window_start=decision.window_start,
+            window_end=decision.window_end,
+            evaluated_at=decision.evaluated_at,
+            valid_until=decision.valid_until,
+            minimum_samples=decision.minimum_samples,
+            minimum_effective_sample_size=decision.minimum_effective_sample_size,
+            degraded_streak=decision.degraded_streak,
+            recovery_streak=decision.recovery_streak,
+            admissible_actions=decision.admissible_actions,
+            research_trigger_id=decision.research_trigger_id,
+            reason=decision.reason,
+        )
+    except (ChampionEligibilityError, TypeError, ValueError) as exc:
+        raise ChampionEligibilityError(
+            "champion eligibility canonical re-derivation failed"
+        ) from exc
+
+    if rederived.to_payload() != decision.to_payload():
+        raise ChampionEligibilityError(
+            "champion eligibility decision does not match canonical derivation"
+        )
+    return rederived
+
+
 def persist_eligibility_decision(
     registry: ScientificRegistry,
     decision: ChampionEligibilityDecision,
 ) -> str:
     if not isinstance(registry, ScientificRegistry):
         raise TypeError("registry must be ScientificRegistry")
-    if not isinstance(decision, ChampionEligibilityDecision):
-        raise TypeError("decision must be ChampionEligibilityDecision")
-    registry.append(decision)
-    return decision.decision_id
+    if type(decision) is not ChampionEligibilityDecision:
+        raise TypeError("decision must be exact ChampionEligibilityDecision")
+    canonical = _rederive_decision(registry, decision)
+    registry.append(canonical)
+    return canonical.decision_id
 
 
 def bind_research_trigger(
@@ -519,8 +644,9 @@ def validate_activation_eligibility(
     """Pure fail-closed gate for champion activation; runtime actions may only narrow."""
     if not isinstance(registry, ScientificRegistry):
         raise TypeError("registry must be ScientificRegistry")
-    if not isinstance(decision, ChampionEligibilityDecision):
-        raise TypeError("decision must be ChampionEligibilityDecision")
+    if type(decision) is not ChampionEligibilityDecision:
+        raise TypeError("decision must be exact ChampionEligibilityDecision")
+    _rederive_decision(registry, decision)
     if decision.status is not ChampionEligibilityStatus.ELIGIBLE:
         raise ChampionEligibilityError(f"champion eligibility is {decision.status.value}")
     cutoff = _instant(as_of, "as_of")
@@ -551,6 +677,11 @@ def validate_activation_eligibility(
     }
     if entry.record_sha256 != _digest(expected_entry):
         raise ChampionEligibilityError("eligibility decision record identity mismatch")
+    _reject_later_contradictory_drift(
+        registry,
+        decision,
+        as_of=as_of,
+    )
     if type(admissible_actions) is not frozenset or not admissible_actions:
         raise ChampionEligibilityError("admissible_actions must be a non-empty frozenset")
     if not frozenset(admissible_actions).issubset(frozenset(decision.admissible_actions)):

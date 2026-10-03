@@ -26,6 +26,7 @@ from autosport.execution_empirical_evidence import (
 from autosport.real_execution_ledger import (
     AcknowledgementStatus,
     ExecutionAction,
+    ExecutionLedgerBusyError,
     ExecutionLedgerIntegrityError,
     ExecutionPlan,
     ExecutionStateError,
@@ -913,6 +914,20 @@ def _population_ledger(tmp_path) -> RealExecutionLedger:
         )
         ledger.acknowledge(acknowledgement)
     return ledger
+
+
+def test_projection_fails_closed_while_canonical_writer_lock_exists(tmp_path):
+    ledger = _ledger(tmp_path)
+    ledger._lock_path.write_text("writer-held", encoding="utf-8")
+
+    with pytest.raises(
+        ExecutionLedgerBusyError,
+        match="writer lock exists",
+    ):
+        build_empirical_execution_evidence(
+            ledger,
+            attempt_id="attempt-1",
+        )
 
 
 def test_population_projection_ignores_rebound_ledger_snapshot_seams(tmp_path):

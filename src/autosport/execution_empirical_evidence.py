@@ -147,21 +147,31 @@ def _digest(value: object) -> str:
 def _canonical_verified_ledger_snapshot(
     ledger: RealExecutionLedger,
 ) -> VerifiedExecutionLedgerSnapshot:
-    """Read one ledger snapshot without caller-rebindable instance method seams."""
+    """Capture exact bytes behind the canonical ledger read-serialization fence."""
 
-    path_value = ledger.path
-    if not isinstance(path_value, Path):
-        raise EmpiricalExecutionEvidenceUnavailable(
-            "canonical RealExecutionLedger path must be pathlib.Path"
+    def capture() -> VerifiedExecutionLedgerSnapshot:
+        path_value = ledger.path
+        if not isinstance(path_value, Path):
+            raise EmpiricalExecutionEvidenceUnavailable(
+                "canonical RealExecutionLedger path must be pathlib.Path"
+            )
+        path = Path(path_value)
+        try:
+            raw = path.read_bytes() if path.exists() else b""
+        except OSError as exc:
+            raise EmpiricalExecutionEvidenceUnavailable(
+                "canonical RealExecutionLedger bytes could not be read"
+            ) from exc
+        # Exact class dispatch avoids caller-rebound parser seams while the parent
+        # ledger owns the read/write serialization and inode fencing.
+        events = RealExecutionLedger._parse(raw)
+        return VerifiedExecutionLedgerSnapshot(
+            payload=raw,
+            sha256=hashlib.sha256(raw).hexdigest(),
+            event_count=len(events),
         )
-    path = Path(path_value)
-    raw = path.read_bytes() if path.exists() else b""
-    events = RealExecutionLedger._parse(raw)
-    return VerifiedExecutionLedgerSnapshot(
-        payload=raw,
-        sha256=hashlib.sha256(raw).hexdigest(),
-        event_count=len(events),
-    )
+
+    return RealExecutionLedger._read_serialized(ledger, capture)
 
 
 def _single_event(

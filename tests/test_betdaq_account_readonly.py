@@ -264,6 +264,195 @@ def test_canonical_build_opener_code_mutation_fails_before_io(monkeypatch):
         value.read_account_balance()
 
 
+@pytest.mark.parametrize(
+    ("attribute", "replacement"),
+    (
+        ("_SECURE_ENDPOINT", "https://example.invalid/foreign"),
+        ("_EXTERNAL_NS", "urn:foreign:betdaq"),
+        ("_SOAP11_NS", "urn:foreign:soap11"),
+        ("_SOAP12_NS", "urn:foreign:soap12"),
+    ),
+)
+def test_account_protocol_authority_replacement_fails_before_dispatch(
+    monkeypatch,
+    attribute,
+    replacement,
+):
+    opener = QueueUrlopen(balance())
+    _install_https_test_dispatch(monkeypatch, opener)
+    monkeypatch.setattr(betdaq_account_module, attribute, replacement)
+    value = BetdaqAccountReadOnlyClient(
+        BetdaqCredentials("alice", "p@ss", "app-id"),
+        clock=clock,
+    )
+
+    with pytest.raises(
+        BetdaqAccountReadOnlyError,
+        match="canonical BETDAQ account protocol authority was replaced",
+    ):
+        value.read_account_balance()
+
+    assert opener.calls == []
+
+
+@pytest.mark.parametrize(
+    ("attribute", "replacement"),
+    (
+        ("_SECURE_ENDPOINT", "https://example.invalid/foreign"),
+        ("_EXTERNAL_NS", "urn:foreign:betdaq"),
+        ("_SOAP11_NS", "urn:foreign:soap11"),
+        ("_SOAP12_NS", "urn:foreign:soap12"),
+    ),
+)
+def test_account_protocol_authority_replacement_during_dispatch_fails_closed(
+    monkeypatch,
+    attribute,
+    replacement,
+):
+    canonical_endpoint = betdaq_account_module._SECURE_ENDPOINT
+
+    class RotatingProtocolDispatch(QueueUrlopen):
+        def __call__(self, request, *, timeout):
+            response = super().__call__(request, timeout=timeout)
+            monkeypatch.setattr(betdaq_account_module, attribute, replacement)
+            return response
+
+    opener = RotatingProtocolDispatch(balance())
+    _install_https_test_dispatch(monkeypatch, opener)
+    value = BetdaqAccountReadOnlyClient(
+        BetdaqCredentials("alice", "p@ss", "app-id"),
+        clock=clock,
+    )
+
+    with pytest.raises(
+        BetdaqAccountReadOnlyError,
+        match="canonical BETDAQ account protocol authority was replaced",
+    ):
+        value.read_account_balance()
+
+    assert len(opener.calls) == 1
+    assert opener.calls[0][0].full_url == canonical_endpoint
+
+
+@pytest.mark.parametrize(
+    "attribute",
+    ("_credential_context_binding", "_authenticated_account_context"),
+)
+def test_account_context_authority_replacement_fails_before_provider_io(
+    monkeypatch,
+    attribute,
+):
+    opener = QueueUrlopen(balance())
+    _install_https_test_dispatch(monkeypatch, opener)
+    hostile_calls = []
+
+    def hostile(*args, **kwargs):
+        hostile_calls.append((args, kwargs))
+        raise AssertionError("hostile account-context authority executed")
+
+    monkeypatch.setattr(betdaq_account_module, attribute, hostile)
+    value = BetdaqAccountReadOnlyClient(
+        BetdaqCredentials("alice", "p@ss", "app-id"),
+        clock=clock,
+    )
+
+    with pytest.raises(
+        BetdaqAccountReadOnlyError,
+        match="canonical BETDAQ authenticated account context authority was replaced",
+    ):
+        value.read_account_evidence(
+            frozenset({BookmakerCapability.BALANCE_READ})
+        )
+
+    assert hostile_calls == []
+    assert opener.calls == []
+
+
+def test_account_context_resolver_replacement_during_provider_io_fails_closed(
+    monkeypatch,
+):
+    hostile_calls = []
+
+    def hostile(*args, **kwargs):
+        hostile_calls.append((args, kwargs))
+        raise AssertionError("hostile account-context resolver executed")
+
+    class RotatingContextDispatch(QueueUrlopen):
+        def __call__(self, request, *, timeout):
+            response = super().__call__(request, timeout=timeout)
+            monkeypatch.setattr(
+                betdaq_account_module,
+                "_authenticated_account_context",
+                hostile,
+            )
+            return response
+
+    opener = RotatingContextDispatch(balance())
+    _install_https_test_dispatch(monkeypatch, opener)
+    value = BetdaqAccountReadOnlyClient(
+        BetdaqCredentials("alice", "p@ss", "app-id"),
+        clock=clock,
+    )
+
+    with pytest.raises(
+        BetdaqAccountReadOnlyError,
+        match="canonical BETDAQ authenticated account context authority was replaced",
+    ):
+        value.read_account_evidence(
+            frozenset({BookmakerCapability.BALANCE_READ})
+        )
+
+    assert len(opener.calls) == 1
+    assert hostile_calls == []
+
+
+def test_account_context_cache_replacement_during_provider_io_fails_closed(
+    monkeypatch,
+):
+    class ResettingContextDispatch(QueueUrlopen):
+        def __call__(self, request, *, timeout):
+            response = super().__call__(request, timeout=timeout)
+            monkeypatch.setattr(betdaq_account_module, "_ACCOUNT_CONTEXTS", {})
+            return response
+
+    opener = ResettingContextDispatch(balance())
+    _install_https_test_dispatch(monkeypatch, opener)
+    value = BetdaqAccountReadOnlyClient(
+        BetdaqCredentials("alice", "p@ss", "app-id"),
+        clock=clock,
+    )
+
+    with pytest.raises(
+        BetdaqAccountReadOnlyError,
+        match="authenticated account context changed during acquisition",
+    ):
+        value.read_account_evidence(
+            frozenset({BookmakerCapability.BALANCE_READ})
+        )
+
+    assert len(opener.calls) == 1
+
+
+def test_private_account_rpc_allowlist_cannot_be_widened_by_injected_global(
+    monkeypatch,
+):
+    value, transport = client(balance())
+    monkeypatch.setattr(
+        betdaq_account_module,
+        "_ALLOWED_METHODS",
+        frozenset({"SubmitOrders"}),
+        raising=False,
+    )
+
+    with pytest.raises(
+        BetdaqAccountReadOnlyError,
+        match="outside the strict read-only allowlist",
+    ):
+        value._call("SubmitOrders", {"MarketId": "200"})
+
+    assert transport.calls == []
+
+
 def test_injected_transport_cannot_publish_canonical_account_evidence():
     value, transport = client(balance())
 

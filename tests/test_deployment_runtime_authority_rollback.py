@@ -3310,3 +3310,96 @@ def test_runtime_authority_rejects_clock_helper_code_replacement(
             _append(store, 0)
     finally:
         target.__code__ = original_code
+
+
+def test_runtime_authority_pristine_rejects_noop_prepare_and_commit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prepare_calls: list[object] = []
+    commit_calls: list[object] = []
+
+    def noop_prepare(
+        authority: MonotonicWorkspaceAuthority,
+        **kwargs: object,
+    ) -> None:
+        prepare_calls.append((authority, kwargs))
+
+    def noop_commit(
+        authority: MonotonicWorkspaceAuthority,
+        **kwargs: object,
+    ) -> None:
+        commit_calls.append((authority, kwargs))
+
+    monkeypatch.setattr(MonotonicWorkspaceAuthority, "prepare", noop_prepare)
+    monkeypatch.setattr(MonotonicWorkspaceAuthority, "commit", noop_commit)
+
+    with pytest.raises(MonotonicAuthorityRollbackError):
+        DeploymentRuntimeAuthorityStore.initialize_pristine(
+            tmp_path / "deployment-runtime-authority.json",
+            authority_root=_authority_root(tmp_path),
+        )
+
+    assert len(prepare_calls) == 1
+    assert len(commit_calls) == 1
+
+
+def test_runtime_authority_append_rejects_noop_prepare_and_commit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "deployment-runtime-authority.json"
+    authority_root = _authority_root(tmp_path)
+    store = DeploymentRuntimeAuthorityStore.initialize_pristine(
+        path,
+        authority_root=authority_root,
+    )
+    prepare_calls: list[object] = []
+    commit_calls: list[object] = []
+
+    def noop_prepare(**kwargs: object) -> None:
+        prepare_calls.append(kwargs)
+
+    def noop_commit(**kwargs: object) -> None:
+        commit_calls.append(kwargs)
+
+    monkeypatch.setattr(store._authority, "prepare", noop_prepare)
+    monkeypatch.setattr(store._authority, "commit", noop_commit)
+
+    with pytest.raises(MonotonicAuthorityRollbackError):
+        _append(store, 0)
+
+    assert len(prepare_calls) == 1
+    assert len(commit_calls) == 1
+
+    with pytest.raises(MonotonicAuthorityRollbackError):
+        DeploymentRuntimeAuthorityStore(
+            path,
+            authority_root=authority_root,
+        )
+
+
+def test_runtime_authority_postcommit_reread_recovers_noop_commit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "deployment-runtime-authority.json"
+    authority_root = _authority_root(tmp_path)
+    store = DeploymentRuntimeAuthorityStore.initialize_pristine(
+        path,
+        authority_root=authority_root,
+    )
+    commit_calls: list[object] = []
+
+    def noop_commit(**kwargs: object) -> None:
+        commit_calls.append(kwargs)
+
+    monkeypatch.setattr(store._authority, "commit", noop_commit)
+    runtime_authority_id = _append(store, 0)
+
+    assert len(commit_calls) == 1
+    records = store.records()
+    assert len(records) == 1
+    assert records[0].runtime_authority_id == runtime_authority_id
+    history = store._authority.read_history()
+    assert history[-1].phase is AuthorityPhase.COMMIT

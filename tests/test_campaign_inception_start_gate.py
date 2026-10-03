@@ -182,6 +182,26 @@ def test_source_spec_rejects_path_subclass_before_virtual_dispatch(
     assert calls == []
 
 
+def test_source_spec_rejects_boolean_zero_start_ordinal(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(
+        CampaignInceptionIntegrityError,
+        match="exact integer slot zero",
+    ):
+        CampaignInceptionSourceSpec(
+            expected_store_path=tmp_path / "collector.db",
+            source_id="betfair:exchange",
+            run_id="run-1",
+            stream_epoch="epoch-1",
+            anchor_at="2100-01-01T06:00:00+00:00",
+            interval_seconds=10,
+            max_items=250,
+            evaluation_start_slot_ordinal=False,  # type: ignore[arg-type]
+            evaluation_end_slot_ordinal=1,
+        )
+
+
 def _inception_authority(
     *,
     locator: ForwardUniversePrecommitLocator,

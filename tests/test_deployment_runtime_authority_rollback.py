@@ -280,6 +280,98 @@ def test_direct_validated_read_rechecks_binding_integrity(
         store._read_validated_records_locked()
 
 
+def test_monotonic_authority_instance_shadows_cannot_bypass_rollback(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "deployment-runtime-authority.json"
+    store = DeploymentRuntimeAuthorityStore.initialize_pristine(
+        path,
+        authority_root=_authority_root(tmp_path),
+    )
+    _append(store, 0)
+    valid_old_bytes = path.read_bytes()
+    _append(store, 1)
+    hostile_calls: list[str] = []
+
+    def hostile_read_history() -> tuple[object, ...]:
+        hostile_calls.append("read_history")
+        return ()
+
+    def hostile_recover(**_kwargs: object) -> object:
+        hostile_calls.append("recover")
+        raise AssertionError("hostile monotonic recovery executed")
+
+    store._authority.__dict__["read_history"] = hostile_read_history
+    store._authority.__dict__["recover"] = hostile_recover
+    path.write_bytes(valid_old_bytes)
+
+    with pytest.raises(MonotonicAuthorityRollbackError):
+        store.records()
+
+    assert hostile_calls == []
+
+
+def test_monotonic_authority_instance_shadows_cannot_take_prepare_or_commit(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "deployment-runtime-authority.json"
+    store = DeploymentRuntimeAuthorityStore.initialize_pristine(
+        path,
+        authority_root=_authority_root(tmp_path),
+    )
+    hostile_calls: list[str] = []
+
+    def hostile_prepare(**_kwargs: object) -> object:
+        hostile_calls.append("prepare")
+        raise AssertionError("hostile monotonic prepare executed")
+
+    def hostile_commit(**_kwargs: object) -> object:
+        hostile_calls.append("commit")
+        raise AssertionError("hostile monotonic commit executed")
+
+    store._authority.__dict__["prepare"] = hostile_prepare
+    store._authority.__dict__["commit"] = hostile_commit
+
+    _append(store, 0)
+
+    assert hostile_calls == []
+    assert len(store.records()) == 1
+
+
+@pytest.mark.parametrize("method_name", ("recover", "read_history", "prepare", "commit"))
+def test_monotonic_authority_method_code_replacement_fails_closed(
+    tmp_path: Path,
+    method_name: str,
+) -> None:
+    path = tmp_path / "deployment-runtime-authority.json"
+    store = DeploymentRuntimeAuthorityStore.initialize_pristine(
+        path,
+        authority_root=_authority_root(tmp_path),
+    )
+    _append(store, 0)
+
+    target = vars(MonotonicWorkspaceAuthority)[method_name]
+    original_code = target.__code__
+
+    def hostile(self, *args: object, **kwargs: object) -> object:
+        del self, args, kwargs
+        raise AssertionError("hostile monotonic method executable ran")
+
+    assert hostile.__code__.co_freevars == original_code.co_freevars
+    target.__code__ = hostile.__code__
+    try:
+        with pytest.raises(
+            DeploymentRuntimeAuthorityError,
+            match="monotonic workspace authority method dispatch was replaced",
+        ):
+            if method_name in {"recover", "read_history"}:
+                store.records()
+            else:
+                _append(store, 1)
+    finally:
+        target.__code__ = original_code
+
+
 def test_runtime_authority_rejects_semantic_binding_history_drift(
     tmp_path: Path,
 ) -> None:

@@ -8,6 +8,7 @@ or whole-product real-money readiness.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, localcontext
@@ -23,6 +24,7 @@ from .account_snapshot_acquisition import (
     AccountSnapshotAcquisitionError,
     AuthoritativeAccountSnapshot,
     assert_account_snapshot_acquisition_authoritative,
+    hold_current_account_snapshot_acquisition,
 )
 from .bookmaker_capability import BookmakerCapability
 from .economic_goal import EconomicGoalContractError
@@ -87,6 +89,18 @@ _ASSERT_ACCOUNT_SNAPSHOT_AUTHORITY_CLOSURE_VALUES = tuple(
     cell.cell_contents
     for cell in (getattr(_ASSERT_ACCOUNT_SNAPSHOT_AUTHORITY, "__closure__", None) or ())
 )
+_HOLD_CURRENT_ACCOUNT_SNAPSHOT_AUTHORITY = hold_current_account_snapshot_acquisition
+_HOLD_CURRENT_ACCOUNT_SNAPSHOT_AUTHORITY_CODE = getattr(
+    _HOLD_CURRENT_ACCOUNT_SNAPSHOT_AUTHORITY,
+    "__code__",
+    None,
+)
+_HOLD_CURRENT_ACCOUNT_SNAPSHOT_AUTHORITY_CLOSURE_VALUES = tuple(
+    cell.cell_contents
+    for cell in (
+        getattr(_HOLD_CURRENT_ACCOUNT_SNAPSHOT_AUTHORITY, "__closure__", None) or ()
+    )
+)
 _ACCOUNT_SNAPSHOT_AUTHORITY_BOUNDARY = next(
     (
         value
@@ -107,6 +121,16 @@ _ACCOUNT_SNAPSHOT_AUTHORITY_ASSERT_LIVE = (
 )
 _ACCOUNT_SNAPSHOT_AUTHORITY_ASSERT_LIVE_CODE = getattr(
     _ACCOUNT_SNAPSHOT_AUTHORITY_ASSERT_LIVE,
+    "__code__",
+    None,
+)
+_ACCOUNT_SNAPSHOT_AUTHORITY_HOLD_CURRENT = (
+    getattr(_ACCOUNT_SNAPSHOT_AUTHORITY_BOUNDARY_TYPE, "hold_current", None)
+    if _ACCOUNT_SNAPSHOT_AUTHORITY_BOUNDARY_TYPE is not None
+    else None
+)
+_ACCOUNT_SNAPSHOT_AUTHORITY_HOLD_CURRENT_CODE = getattr(
+    _ACCOUNT_SNAPSHOT_AUTHORITY_HOLD_CURRENT,
     "__code__",
     None,
 )
@@ -911,10 +935,15 @@ def _canonical_account_snapshot_authority(
     _assert=_ASSERT_ACCOUNT_SNAPSHOT_AUTHORITY,
     _assert_code=_ASSERT_ACCOUNT_SNAPSHOT_AUTHORITY_CODE,
     _closure_values=_ASSERT_ACCOUNT_SNAPSHOT_AUTHORITY_CLOSURE_VALUES,
+    _hold=_HOLD_CURRENT_ACCOUNT_SNAPSHOT_AUTHORITY,
+    _hold_code=_HOLD_CURRENT_ACCOUNT_SNAPSHOT_AUTHORITY_CODE,
+    _hold_closure_values=_HOLD_CURRENT_ACCOUNT_SNAPSHOT_AUTHORITY_CLOSURE_VALUES,
     _boundary=_ACCOUNT_SNAPSHOT_AUTHORITY_BOUNDARY,
     _boundary_type=_ACCOUNT_SNAPSHOT_AUTHORITY_BOUNDARY_TYPE,
     _boundary_assert=_ACCOUNT_SNAPSHOT_AUTHORITY_ASSERT_LIVE,
     _boundary_assert_code=_ACCOUNT_SNAPSHOT_AUTHORITY_ASSERT_LIVE_CODE,
+    _boundary_hold=_ACCOUNT_SNAPSHOT_AUTHORITY_HOLD_CURRENT,
+    _boundary_hold_code=_ACCOUNT_SNAPSHOT_AUTHORITY_HOLD_CURRENT_CODE,
     _fingerprint=_ACCOUNT_SNAPSHOT_AUTHORITY_FINGERPRINT,
     _fingerprint_code=_ACCOUNT_SNAPSHOT_AUTHORITY_FINGERPRINT_CODE,
     _canonical_sha=_ACCOUNT_SNAPSHOT_CANONICAL_SHA256,
@@ -928,19 +957,35 @@ def _canonical_account_snapshot_authority(
         None,
     )
     live_alias = globals().get("assert_account_snapshot_acquisition_authoritative")
+    live_hold = getattr(
+        _account_acquisition,
+        "hold_current_account_snapshot_acquisition",
+        None,
+    )
+    live_hold_alias = globals().get("hold_current_account_snapshot_acquisition")
     live_closure_values = tuple(
         cell.cell_contents
         for cell in (getattr(_assert, "__closure__", None) or ())
+    )
+    live_hold_closure_values = tuple(
+        cell.cell_contents
+        for cell in (getattr(_hold, "__closure__", None) or ())
     )
     if (
         live_module is not _assert
         or live_alias is not _assert
         or getattr(_assert, "__code__", None) is not _assert_code
         or live_closure_values != _closure_values
+        or live_hold is not _hold
+        or live_hold_alias is not _hold
+        or getattr(_hold, "__code__", None) is not _hold_code
+        or live_hold_closure_values != _hold_closure_values
         or _boundary is None
         or type(_boundary) is not _boundary_type
         or getattr(_boundary_type, "assert_live", None) is not _boundary_assert
         or getattr(_boundary_assert, "__code__", None) is not _boundary_assert_code
+        or getattr(_boundary_type, "hold_current", None) is not _boundary_hold
+        or getattr(_boundary_hold, "__code__", None) is not _boundary_hold_code
         or getattr(_boundary_type, "_fingerprint", None) is not _fingerprint
         or getattr(_fingerprint, "__code__", None) is not _fingerprint_code
         or getattr(_account_acquisition, "_canonical_sha256", None) is not _canonical_sha
@@ -953,7 +998,26 @@ def _canonical_account_snapshot_authority(
         raise ProviderAccountHeadroomError(
             "canonical account snapshot headroom authority changed"
         )
-    return _assert
+    return _assert, _hold
+
+
+@contextmanager
+def _current_balance_generation_lock(
+    workspace,
+    acquired: AuthoritativeAccountSnapshot,
+):
+    """Serialize product economic truth with the current BALANCE_READ generation."""
+
+    _, hold_current = _canonical_account_snapshot_authority()
+    required = frozenset({BookmakerCapability.BALANCE_READ})
+    with _current_balance_generation_lock(workspace, acquired):
+        try:
+            with hold_current(acquired, required):
+                yield
+        except AccountSnapshotAcquisitionError as exc:
+            raise ProviderAccountHeadroomStale(
+                "provider-account balance generation changed; recompute headroom"
+            ) from exc
 
 
 def _canonical_ledger_dispatch(
@@ -1464,7 +1528,7 @@ def _require_live_balance(
             "account evidence must be exact AuthoritativeAccountSnapshot"
         )
     try:
-        assert_live = _canonical_account_snapshot_authority()
+        assert_live, _ = _canonical_account_snapshot_authority()
         assert_live(acquired)
     except AccountSnapshotAcquisitionError as exc:
         raise ProviderAccountHeadroomError(
@@ -1946,7 +2010,7 @@ def assess_provider_account_headroom(
     intent_denomination_by_identity = _validated_intent_denomination_map(intents)
     workspace = _canonical_ledger_workspace(ledger)
 
-    with _canonical_economic_lock(workspace):
+    with _current_balance_generation_lock(workspace, acquired):
         (
             economic_goal_contract_sha256,
             economic_goal_bankroll_id,

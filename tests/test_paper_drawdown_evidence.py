@@ -1,5 +1,6 @@
 from dataclasses import replace
 from decimal import Decimal
+from types import FunctionType
 
 import pytest
 
@@ -398,6 +399,44 @@ def test_evidence_shape_rejects_impossible_internal_metrics(tmp_path):
         match="initial/open equity point cannot carry realized P&L",
     ):
         replace(evidence.points[0], realized_delta=Decimal("1"))
+
+
+def test_resolver_rejects_in_place_captured_helper_code_rebinding(tmp_path):
+    _initialize(tmp_path)
+
+    frozen = resolve_paper_drawdown_evidence
+    resolver = next(
+        cell.cell_contents
+        for cell in frozen.__closure__ or ()
+        if type(cell.cell_contents) is FunctionType
+        and cell.cell_contents.__name__ == "resolver"
+    )
+    canonical_sha256 = next(
+        cell.cell_contents
+        for cell in resolver.__closure__ or ()
+        if type(cell.cell_contents) is FunctionType
+        and cell.cell_contents.__name__ == "canonical_sha256"
+    )
+    original_code = canonical_sha256.__code__
+
+    def forged_sha256(_payload):
+        return "0" * 64
+
+    try:
+        canonical_sha256.__code__ = forged_sha256.__code__
+        with pytest.raises(
+            PaperDrawdownEvidenceError,
+            match="dependency executable authority changed",
+        ):
+            resolve_paper_drawdown_evidence(tmp_path)
+    finally:
+        canonical_sha256.__code__ = original_code
+
+    # Restoration must recover the exact canonical product resolver.
+    evidence = resolve_paper_drawdown_evidence(tmp_path)
+    assert evidence.source_state_sha256 != "0" * 64
+    assert evidence.path_sha256 != "0" * 64
+    assert evidence.evidence_sha256 != "0" * 64
 
 
 def test_missing_durable_sources_fail_closed(tmp_path):

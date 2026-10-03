@@ -71,6 +71,31 @@ from autosport.supervised_provider_evidence import (
 )
 
 
+def _find_closure_value(function, target_name: str):
+    pending = [function]
+    seen: set[int] = set()
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        closure = current.__closure__ or ()
+        for freevar, cell in zip(
+            current.__code__.co_freevars,
+            closure,
+            strict=True,
+        ):
+            try:
+                value = cell.cell_contents
+            except ValueError:
+                continue
+            if freevar == target_name:
+                return value
+            if callable(value) and hasattr(value, "__code__"):
+                pending.append(value)
+    raise AssertionError(f"closure value not found: {target_name}")
+
+
 DECISION_TS = "2026-09-18T13:20:00+00:00"
 APPROVED_AT = "2026-09-18T13:20:01+00:00"
 CREATED_AT = "2026-09-18T13:20:02+00:00"
@@ -804,6 +829,16 @@ def test_betfair_timeout_mocked_semantic_effect_stays_unknown() -> None:
                 readback=semantic,
             )
         assert ledger.attempt_state("attempt-1") is AttemptState.UNKNOWN
+
+def test_not_found_consumer_dependency_seal_is_immutable() -> None:
+    sealed = _find_closure_value(
+        reconcile_provider_not_found,
+        "sealed_function_graph",
+    )
+    assert type(sealed) is tuple
+    assert sealed
+    assert all(type(item) is tuple and len(item) == 3 for item in sealed)
+
 
 def test_not_found_consumer_rejects_timeout_assertion_rebind(monkeypatch) -> None:
     with tempfile.TemporaryDirectory() as tmp:

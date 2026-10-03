@@ -51,6 +51,36 @@ _WORKSPACE_LOCK_DISPATCH_WITNESSES = tuple(
     )
     for name in _WORKSPACE_LOCK_METHOD_NAMES
 )
+_WORKSPACE_LOCK_GLOBAL_WITNESSES = tuple(
+    (
+        name,
+        (
+            WorkspaceEconomicLock.__dict__[name].__func__.__globals__
+            if type(WorkspaceEconomicLock.__dict__[name]) is staticmethod
+            else WorkspaceEconomicLock.__dict__[name].__globals__
+        ),
+        tuple(
+            (global_name, method_globals[global_name])
+            for global_name in method_code.co_names
+            if global_name in method_globals
+        ),
+    )
+    for name in _WORKSPACE_LOCK_METHOD_NAMES
+    for method_code, method_globals in (
+        (
+            (
+                WorkspaceEconomicLock.__dict__[name].__func__.__code__
+                if type(WorkspaceEconomicLock.__dict__[name]) is staticmethod
+                else WorkspaceEconomicLock.__dict__[name].__code__
+            ),
+            (
+                WorkspaceEconomicLock.__dict__[name].__func__.__globals__
+                if type(WorkspaceEconomicLock.__dict__[name]) is staticmethod
+                else WorkspaceEconomicLock.__dict__[name].__globals__
+            ),
+        ),
+    )
+)
 
 
 def _require_workspace_lock_dispatch() -> None:
@@ -70,6 +100,24 @@ def _require_workspace_lock_dispatch() -> None:
             or current_function.__code__ is not expected_code
         ):
             raise RuntimeError("workspace economic lock executable authority changed")
+    for name, expected_globals, expected_bindings in _WORKSPACE_LOCK_GLOBAL_WITNESSES:
+        current_descriptor = WorkspaceEconomicLock.__dict__.get(name)
+        current_function = (
+            current_descriptor.__func__
+            if type(current_descriptor) is staticmethod
+            else current_descriptor
+        )
+        if (
+            type(current_function) is not FunctionType
+            or current_function.__globals__ is not expected_globals
+        ):
+            raise RuntimeError("workspace economic lock dependency authority changed")
+        for global_name, expected_binding in expected_bindings:
+            if (
+                global_name not in expected_globals
+                or expected_globals[global_name] is not expected_binding
+            ):
+            raise RuntimeError("workspace economic lock dependency authority changed")
 
 
 @dataclass(frozen=True, slots=True)

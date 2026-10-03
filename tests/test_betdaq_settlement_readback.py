@@ -347,6 +347,25 @@ def test_same_context_query_and_provider_payload_reresolve_same_evidence_id(monk
     assert first_value.evidence.observed_at != second_value.evidence.observed_at
 
 
+
+def test_readback_rejects_row_from_different_acquisition_with_same_evidence_id(
+    monkeypatch,
+):
+    payload = postings_by_id(posting(9001))
+    first, _ = economic_client(monkeypatch, payload, clock=clock_one)
+    first_value = first.read_account_postings_by_id(9001)
+    second, _ = economic_client(monkeypatch, payload, clock=clock_two)
+    second_value = second.read_account_postings_by_id(9001)
+
+    assert first_value.evidence.evidence_id == second_value.evidence.evidence_id
+    assert first_value.evidence != second_value.evidence
+    with pytest.raises(
+        BetdaqEconomicReadbackError,
+        match="posting evidence does not match exact readback acquisition",
+    ):
+        replace(second_value, postings=first_value.postings)
+
+
 def test_distinct_authenticated_contexts_cannot_collapse_same_economic_payload(
     monkeypatch,
 ):
@@ -372,7 +391,7 @@ def test_distinct_authenticated_contexts_cannot_collapse_same_economic_payload(
     )
     with pytest.raises(
         BetdaqEconomicReadbackError,
-        match="posting evidence does not match readback authenticated context",
+        match="posting evidence does not match exact readback acquisition",
     ):
         replace(second_value, postings=first_value.postings)
 

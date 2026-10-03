@@ -2642,10 +2642,13 @@ def test_economic_goal_provenance_json_rebinding_cannot_forge_contract_hash(
         hostile_calls.append((args, kwargs))
         return "{}"
 
+    class HostileJson:
+        dumps = staticmethod(hostile_dumps)
+
     monkeypatch.setattr(
-        headroom_module._economic_goal_provenance.json,
-        "dumps",
-        hostile_dumps,
+        headroom_module._economic_goal_provenance,
+        "json",
+        HostileJson,
     )
 
     with pytest.raises(
@@ -2675,10 +2678,13 @@ def test_economic_goal_provenance_sha256_rebinding_cannot_forge_contract_hash(
         hostile_calls.append((args, kwargs))
         raise AssertionError("hostile provenance sha256 executed")
 
+    class HostileHashlib:
+        sha256 = staticmethod(hostile_sha256)
+
     monkeypatch.setattr(
-        headroom_module._economic_goal_provenance.hashlib,
-        "sha256",
-        hostile_sha256,
+        headroom_module._economic_goal_provenance,
+        "hashlib",
+        HostileHashlib,
     )
 
     with pytest.raises(

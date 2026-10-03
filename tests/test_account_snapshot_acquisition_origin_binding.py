@@ -589,6 +589,7 @@ def test_closure_boundary_immutable_live_snapshot_preserves_weakref_expiry(
         acquisition_id="weakref-expiry",
     )
     assert len(calls) == 3
+    live_id = live.receipt.acquisition_id
     live_ref = ref(live)
     del live
     gc.collect()
@@ -602,7 +603,7 @@ def test_closure_boundary_immutable_live_snapshot_preserves_weakref_expiry(
         "_AccountSnapshotAuthorityBoundary__live",
     )
     assert type(live_registry) is MappingProxyType
-    assert "weakref-expiry" not in live_registry
+    assert live_id not in live_registry
 
     retry_calls = _install_transport(monkeypatch, [])
     with pytest.raises(

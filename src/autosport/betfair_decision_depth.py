@@ -4,7 +4,7 @@ from __future__ import annotations
 
 The authority in this module is intentionally narrow. It parses one
 caller-supplied Betfair-shaped MarketBook payload and records only the returned
-exchange ladder for an exact market, selection and side. The parser does not
+exchange ladder for an exact market, selection, optional handicap and side. The parser does not
 prove that the payload originated from Betfair or that the caller-supplied time
 was the network observation instant. Returned liquidity is also racy: it can
 disappear before an order reaches the exchange. Therefore this module never
@@ -21,7 +21,7 @@ import json
 from typing import Any, Mapping
 
 
-_SCHEMA_VERSION = 1
+_SCHEMA_VERSION = 2
 _PROVIDER_ID = "betfair"
 
 
@@ -52,6 +52,24 @@ def _selection_id(value: object, field: str = "selection_id") -> int:
     if type(value) is not int or value <= 0:
         raise BetfairDecisionDepthError(f"{field} must be a positive integer")
     return value
+
+
+def _handicap(value: object, field: str = "handicap") -> Decimal | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        raise BetfairDecisionDepthError(f"{field} must be a finite number or None")
+    try:
+        parsed = value if type(value) is Decimal else Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError) as exc:
+        raise BetfairDecisionDepthError(
+            f"{field} must be a finite number or None"
+        ) from exc
+    if not parsed.is_finite():
+        raise BetfairDecisionDepthError(f"{field} must be a finite number or None")
+    if parsed == 0:
+        return Decimal("0")
+    return parsed
 
 
 def _side(value: object) -> BetfairOrderSide:
@@ -134,6 +152,7 @@ class BetfairDecisionDepthSnapshot:
     inplay: bool | None
     bet_delay_seconds: int | None
     levels: tuple[BetfairDepthLevel, ...]
+    handicap: Decimal | None = None
     market_data_delayed: bool | None = None
     status: BetfairDecisionDepthStatus = field(
         default=BetfairDecisionDepthStatus.PARSED_RETURNED_EXCHANGE_LADDER, init=False
@@ -151,6 +170,7 @@ class BetfairDecisionDepthSnapshot:
     def __post_init__(self) -> None:
         _canonical_text(self.market_id, "market_id")
         _selection_id(self.selection_id)
+        object.__setattr__(self, "handicap", _handicap(self.handicap))
         if type(self.side) is not BetfairOrderSide:
             raise BetfairDecisionDepthError("side must be a BetfairOrderSide")
         object.__setattr__(self, "observed_at", _observed_at(self.observed_at))
@@ -267,6 +287,9 @@ class BetfairDecisionDepthSnapshot:
             "provider_id": self.provider_id,
             "market_id": self.market_id,
             "selection_id": self.selection_id,
+            "handicap": (
+                None if self.handicap is None else _canonical_decimal(self.handicap)
+            ),
             "side": self.side.value,
             "observed_at": self.observed_at.isoformat().replace("+00:00", "Z"),
             "market_status": self.market_status,
@@ -297,6 +320,7 @@ def issue_betfair_decision_depth_snapshot(
     selection_id: int,
     side: BetfairOrderSide | str,
     observed_at: datetime,
+    handicap: Decimal | int | str | None = None,
 ) -> BetfairDecisionDepthSnapshot:
     """Parse one caller-supplied MarketBook into non-authorizing depth evidence.
 
@@ -311,6 +335,7 @@ def issue_betfair_decision_depth_snapshot(
         raise BetfairDecisionDepthError("market_book must be a mapping")
     expected_market_id = _canonical_text(market_id, "market_id")
     expected_selection_id = _selection_id(selection_id)
+    expected_handicap = _handicap(handicap)
     resolved_side = _side(side)
     resolved_observed_at = _observed_at(observed_at)
 
@@ -351,11 +376,17 @@ def issue_betfair_decision_depth_snapshot(
         runner_selection_id = _selection_id(
             runner.get("selectionId"), f"marketBook.runners[{index}].selectionId"
         )
-        if runner_selection_id == expected_selection_id:
+        if runner_selection_id != expected_selection_id:
+            continue
+        runner_handicap = _handicap(
+            runner.get("handicap"), f"marketBook.runners[{index}].handicap"
+        )
+        if runner_handicap == expected_handicap:
             matches.append(runner)
     if len(matches) != 1:
         raise BetfairDecisionDepthError(
-            "requested selection must appear exactly once in marketBook.runners"
+            "requested selection and handicap must appear exactly once "
+            "in marketBook.runners"
         )
     runner = matches[0]
 
@@ -403,6 +434,7 @@ def issue_betfair_decision_depth_snapshot(
         market_id=expected_market_id,
         selection_id=expected_selection_id,
         side=resolved_side,
+        handicap=expected_handicap,
         observed_at=resolved_observed_at,
         market_status=market_status,
         runner_status=runner_status,

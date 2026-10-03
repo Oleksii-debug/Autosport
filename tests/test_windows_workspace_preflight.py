@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from autosport import windows_entry
+from autosport import integrity, windows_entry
 
 
 def test_workspace_probe_supports_spaces_and_ukrainian_unicode(tmp_path: Path) -> None:
@@ -56,6 +56,55 @@ def test_interactive_gui_fails_before_gui_import_when_workspace_is_unwritable(
 
     assert windows_entry._run_interactive_gui() == 2
     assert captured == {"workspace": workspace, "error": error}
+
+
+@pytest.mark.parametrize("failing_primitive", ("fsync", "replace", "path_lock"))
+def test_interactive_gui_fails_before_gui_import_when_atomic_publish_primitive_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    failing_primitive: str,
+) -> None:
+    workspace = tmp_path / "atomic publish workspace"
+    monkeypatch.setenv("AUTOSPORT_WORKSPACE", str(workspace))
+
+    if failing_primitive == "fsync":
+        def fail_fsync(_fd: int) -> None:
+            raise OSError("fsync unavailable")
+
+        monkeypatch.setattr(windows_entry.os, "fsync", fail_fsync)
+    elif failing_primitive == "replace":
+        def fail_replace(_source: object, _destination: object) -> None:
+            raise PermissionError("atomic replace denied")
+
+        monkeypatch.setattr(windows_entry.os, "replace", fail_replace)
+    else:
+        def fail_path_lock(_handle: object) -> None:
+            raise OSError("durable path lock unavailable")
+
+        # Exercise the real durable_path_lock context manager and fail at its
+        # OS-lock acquisition boundary after the disposable sidecar is opened.
+        monkeypatch.setattr(integrity, "_lock_handle", fail_path_lock)
+
+    captured: dict[str, object] = {}
+
+    def capture_error(candidate: Path, observed: OSError) -> None:
+        captured["workspace"] = candidate
+        captured["error"] = observed
+
+    def forbidden_gui_main() -> int:
+        raise AssertionError("GUI must not open when atomic workspace publication is unavailable")
+
+    monkeypatch.setattr(windows_entry, "_show_workspace_access_error", capture_error)
+    monkeypatch.setitem(
+        sys.modules,
+        "autosport.windows_gui",
+        SimpleNamespace(main=forbidden_gui_main),
+    )
+
+    assert windows_entry._run_interactive_gui() == 2
+    assert captured["workspace"] == workspace
+    assert isinstance(captured["error"], OSError)
+    assert list(workspace.iterdir()) == []
 
 
 def test_workspace_access_error_is_actionable_and_single_line(tmp_path: Path) -> None:

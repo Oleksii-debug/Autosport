@@ -188,6 +188,10 @@ class BetdaqOrderSettlementObservation:
             raise BetdaqEconomicReadbackError(
                 "order settlement evidence must be canonical BETDAQ economic evidence"
             )
+        if self.evidence.method != "GetOrderDetails":
+            raise BetdaqEconomicReadbackError(
+                "order settlement evidence method must be GetOrderDetails"
+            )
         if self.denomination_proven is not (self.currency is not None):
             raise BetdaqEconomicReadbackError(
                 "denomination_proven must match independently bound settlement currency"
@@ -288,6 +292,13 @@ class BetdaqPostingObservation:
         if type(self.evidence) is not BetdaqEconomicEvidence:
             raise BetdaqEconomicReadbackError(
                 "posting evidence must be canonical BETDAQ economic evidence"
+            )
+        if self.evidence.method not in {
+            "ListAccountPostings",
+            "ListAccountPostingsById",
+        }:
+            raise BetdaqEconomicReadbackError(
+                "posting evidence method must be a postings read method"
             )
 
     def provider_content_dict(self) -> dict[str, object]:
@@ -400,6 +411,10 @@ class BetdaqPostingsReadback:
         if type(self.evidence) is not BetdaqEconomicEvidence:
             raise BetdaqEconomicReadbackError(
                 "postings evidence must be canonical BETDAQ economic evidence"
+            )
+        if self.evidence.method != self.method:
+            raise BetdaqEconomicReadbackError(
+                "postings evidence method does not match readback method"
             )
         if type(self.postings) is not tuple:
             raise BetdaqEconomicReadbackError("postings must be an exact immutable tuple")

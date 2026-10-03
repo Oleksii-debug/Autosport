@@ -1135,6 +1135,7 @@ def _seal_provider_evidence_store_dispatch() -> None:
 
     module_globals = globals()
     store_type = CompleteGameBoardEvidenceStore
+    expected_inspect = inspect
     expected_getattr_static = inspect.getattr_static
     expected_save = store_type.save
     expected_save_code = expected_save.__code__
@@ -1245,8 +1246,8 @@ def _seal_provider_evidence_store_dispatch() -> None:
 
     def require_store_authority() -> None:
         if (
-            module_globals.get("inspect") is not inspect
-            or inspect.getattr_static is not expected_getattr_static
+            module_globals.get("inspect") is not expected_inspect
+            or expected_inspect.getattr_static is not expected_getattr_static
             or module_globals.get("_CANONICAL_ASSERT_COMPLETE_GAME_BOARD_AUTHORITATIVE")
             is not expected_assert
             or module_globals.get(

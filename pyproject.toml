@@ -14,7 +14,7 @@ build = ["pyinstaller==6.22.3"]
 test = ["pytest>=8,<9", "hypothesis>=6,<7"]
 
 [project.scripts]
-autosport = "autosport.cli:main"
+autosport = "autosport.console_entrypoint:main"
 autosport-product = "autosport.product_entrypoint:main"
 autosport-observe-continuous = "autosport.continuous_observation:main"
 autosport-export-evidence = "autosport.evidence_export:main"

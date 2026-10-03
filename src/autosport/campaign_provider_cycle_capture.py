@@ -16,6 +16,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Callable
 
 from . import provider_observation_authority as _provider_observation_module
@@ -40,6 +41,9 @@ _HEX = frozenset("0123456789abcdef")
 
 _CAPTURE = capture_parlay_complete_game_board
 _EVIDENCE_SAVE = CompleteGameBoardEvidenceStore.save
+_EVIDENCE_PATH = CompleteGameBoardEvidenceStore._path
+_CANONICAL_PATH_EQUALITY = Path.__eq__
+_CANONICAL_PATH_EQUALITY_CODE = getattr(_CANONICAL_PATH_EQUALITY, "__code__", None)
 _NEXT_SLOT = CollectorDeltaStore._next_collector_schedule_slot
 _SCHEDULE_DUE_AT = CollectorDeltaStore._collector_schedule_due_at
 _BEGIN_SCHEDULED = CollectorDeltaStore._begin_scheduled_collector_cycle
@@ -74,6 +78,7 @@ _STORE_CLASS_SEAM_CODES = {
 }
 _EVIDENCE_CLASS_SEAMS = {
     "save": inspect.getattr_static(CompleteGameBoardEvidenceStore, "save"),
+    "_path": inspect.getattr_static(CompleteGameBoardEvidenceStore, "_path"),
 }
 _EVIDENCE_CLASS_SEAM_CODES = {
     name: getattr(
@@ -467,6 +472,8 @@ def capture_campaign_complete_game_board(
     begin_scheduled = _BEGIN_SCHEDULED
     provider_capture = _CAPTURE
     evidence_save = _EVIDENCE_SAVE
+    evidence_path_for = _EVIDENCE_PATH
+    path_equal = _CANONICAL_PATH_EQUALITY
     record_artifact = _RECORD_ARTIFACT
     finish_cycle = _FINISH_CYCLE
     resolve_artifact = _RESOLVE_ARTIFACT
@@ -481,6 +488,8 @@ def capture_campaign_complete_game_board(
         ("_BEGIN_SCHEDULED", begin_scheduled),
         ("_CAPTURE", provider_capture),
         ("_EVIDENCE_SAVE", evidence_save),
+        ("_EVIDENCE_PATH", evidence_path_for),
+        ("_CANONICAL_PATH_EQUALITY", path_equal),
         ("_RECORD_ARTIFACT", record_artifact),
         ("_FINISH_CYCLE", finish_cycle),
         ("_RESOLVE_ARTIFACT", resolve_artifact),
@@ -770,8 +779,15 @@ def capture_campaign_complete_game_board(
         repeated_path = evidence_save(evidence_store, snapshot)
         require_stable_dispatch()
         require_seams(store, evidence_store)
-        if evidence_path != repeated_path or evidence_path.name != (
-            snapshot.evidence_sha256 + ".json"
+        expected_evidence_path = evidence_path_for(
+            evidence_store,
+            snapshot.evidence_sha256,
+        )
+        if (
+            type(evidence_path) is not type(expected_evidence_path)
+            or type(repeated_path) is not type(expected_evidence_path)
+            or path_equal(evidence_path, repeated_path) is not True
+            or path_equal(evidence_path, expected_evidence_path) is not True
         ):
             raise CampaignProviderCycleCaptureIntegrityError(
                 "provider evidence store did not retain exact captured identity"
@@ -945,6 +961,7 @@ def _seal_campaign_provider_cycle_capture_dispatch() -> None:
         "CompleteGameBoardEvidenceStore": CompleteGameBoardEvidenceStore,
         "CompleteGameBoardRequest": CompleteGameBoardRequest,
         "CompleteGameBoardSnapshot": CompleteGameBoardSnapshot,
+        "Path": Path,
         "CampaignInceptionReceipt": CampaignInceptionReceipt,
         "CampaignInceptionSourceSpec": CampaignInceptionSourceSpec,
         "ForwardUniversePrecommitLocator": ForwardUniversePrecommitLocator,
@@ -977,6 +994,9 @@ def _seal_campaign_provider_cycle_capture_dispatch() -> None:
         "_PROVIDER_SNAPSHOT_SEAMS": _PROVIDER_SNAPSHOT_SEAMS,
         "_PROVIDER_CANONICAL_ASSERT": _PROVIDER_CANONICAL_ASSERT,
         "_PROVIDER_CANONICAL_ASSERT_CODE": _PROVIDER_CANONICAL_ASSERT_CODE,
+        "_EVIDENCE_PATH": _EVIDENCE_PATH,
+        "_CANONICAL_PATH_EQUALITY": _CANONICAL_PATH_EQUALITY,
+        "_CANONICAL_PATH_EQUALITY_CODE": _CANONICAL_PATH_EQUALITY_CODE,
     }
     expected_callables = tuple(
         (
@@ -987,6 +1007,8 @@ def _seal_campaign_provider_cycle_capture_dispatch() -> None:
         for name, target in (
             ("_CAPTURE", _CAPTURE),
             ("_EVIDENCE_SAVE", _EVIDENCE_SAVE),
+            ("_EVIDENCE_PATH", _EVIDENCE_PATH),
+            ("_CANONICAL_PATH_EQUALITY", _CANONICAL_PATH_EQUALITY),
             ("_NEXT_SLOT", _NEXT_SLOT),
             ("_SCHEDULE_DUE_AT", _SCHEDULE_DUE_AT),
             ("_BEGIN_SCHEDULED", _BEGIN_SCHEDULED),

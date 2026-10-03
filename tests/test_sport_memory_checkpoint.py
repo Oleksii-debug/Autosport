@@ -4,6 +4,7 @@ from hashlib import sha256
 import json
 
 import pytest
+from unittest.mock import patch
 
 from autosport.learning_environment import EvidenceTruth
 from autosport.opponent_intelligence import (
@@ -19,6 +20,7 @@ from autosport.participant_identity import (
 from autosport.sport_memory_checkpoint import (
     SportMemoryCheckpointError,
     initialize_or_open_bound_sport_memory_runtime,
+    initialize_sport_memory_authority_checkpoint,
     load_verified_sport_memory_authority_checkpoint,
     open_bound_sport_memory_runtime,
 )
@@ -636,6 +638,141 @@ def test_bound_runtime_detects_direct_dict_and_selector_path_drift(tmp_path):
     refreshed = runtime._refresh_bound_authority()
     assert refreshed.path == opponent.path
     assert refreshed.identity_registry.path == identity.path
+
+
+def test_committed_checkpoint_with_missing_runtime_fails_closed_without_reinitializing(tmp_path):
+    identity, opponent = _canonical_stores(tmp_path)
+    checkpoint_path, runtime_path = _paths(tmp_path)
+    initialize_or_open_bound_sport_memory_runtime(
+        runtime_path,
+        checkpoint_path,
+        identity,
+        opponent,
+    )
+    checkpoint_bytes = checkpoint_path.read_bytes()
+
+    runtime_path.unlink()
+
+    with pytest.raises(
+        SportMemoryCheckpointError,
+        match="canonical authority checkpoint exists without sport-memory runtime",
+    ):
+        initialize_or_open_bound_sport_memory_runtime(
+            runtime_path,
+            checkpoint_path,
+            identity,
+            opponent,
+        )
+
+    assert checkpoint_path.read_bytes() == checkpoint_bytes
+    assert not runtime_path.exists()
+
+
+def test_checkpoint_publication_failure_leaves_recoverable_pristine_runtime_prefix(
+    tmp_path,
+):
+    identity, opponent = _canonical_stores(tmp_path)
+    checkpoint_path, runtime_path = _paths(tmp_path)
+
+    with patch(
+        "autosport.sport_memory_checkpoint.atomic_write_json",
+        side_effect=OSError("checkpoint publication failed"),
+    ):
+        with pytest.raises(
+            SportMemoryCheckpointError,
+            match="cannot persist sport-memory authority checkpoint",
+        ):
+            initialize_or_open_bound_sport_memory_runtime(
+                runtime_path,
+                checkpoint_path,
+                identity,
+                opponent,
+            )
+
+    assert runtime_path.is_file()
+    assert not checkpoint_path.exists()
+
+    recovered = initialize_or_open_bound_sport_memory_runtime(
+        runtime_path,
+        checkpoint_path,
+        identity,
+        opponent,
+    )
+    checkpoint = load_verified_sport_memory_authority_checkpoint(
+        checkpoint_path,
+        identity,
+        opponent,
+    )
+    assert recovered.authority_generation_sha256 == checkpoint.generation_sha256
+
+
+def test_non_pristine_runtime_without_checkpoint_cannot_reissue_authority(tmp_path):
+    identity, opponent = _canonical_stores(tmp_path, populated=True)
+    checkpoint_path, runtime_path = _paths(tmp_path)
+    runtime = initialize_or_open_bound_sport_memory_runtime(
+        runtime_path,
+        checkpoint_path,
+        identity,
+        opponent,
+    )
+    runtime.materialize(
+        participant_entity_id="p-alex",
+        scope=_scope(),
+        causal_cutoff=T2,
+        published_at=T3,
+        code_sha256=SHA_A,
+        dependency_sha256=SHA_B,
+        min_support=1,
+    )
+
+    checkpoint_path.unlink()
+
+    with pytest.raises(
+        SportMemoryCheckpointError,
+        match="non-pristine sport-memory runtime exists without canonical authority checkpoint",
+    ):
+        initialize_or_open_bound_sport_memory_runtime(
+            runtime_path,
+            checkpoint_path,
+            identity,
+            opponent,
+        )
+
+    assert runtime_path.is_file()
+    assert not checkpoint_path.exists()
+
+
+def test_standalone_checkpoint_without_runtime_is_not_laundered_as_first_boot(
+    tmp_path,
+):
+    identity, opponent = _canonical_stores(tmp_path)
+    checkpoint_path, runtime_path = _paths(tmp_path)
+    checkpoint = initialize_sport_memory_authority_checkpoint(
+        checkpoint_path,
+        identity,
+        opponent,
+    )
+
+    with pytest.raises(
+        SportMemoryCheckpointError,
+        match="canonical authority checkpoint exists without sport-memory runtime",
+    ):
+        initialize_or_open_bound_sport_memory_runtime(
+            runtime_path,
+            checkpoint_path,
+            identity,
+            opponent,
+        )
+
+    assert (
+        load_verified_sport_memory_authority_checkpoint(
+            checkpoint_path,
+            identity,
+            opponent,
+        )
+        == checkpoint
+    )
+    assert not runtime_path.exists()
 
 
 def test_existing_runtime_without_checkpoint_cannot_self_attest_generation(tmp_path):

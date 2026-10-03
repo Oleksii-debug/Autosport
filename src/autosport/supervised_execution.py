@@ -66,11 +66,16 @@ def _text(value: object, name: str) -> str:
     return value
 
 
-def _time(value: object, name: str) -> datetime:
+def _time(
+    value: object,
+    name: str,
+    _datetime=datetime,
+    _value_error=ValueError,
+) -> datetime:
     raw = _text(value, name)
     try:
-        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-    except ValueError as exc:
+        parsed = _datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except _value_error as exc:
         raise SupervisedExecutionError(f"{name} must be ISO-8601") from exc
     if parsed.tzinfo is None or parsed.utcoffset() is None:
         raise SupervisedExecutionError(f"{name} must be timezone-aware")
@@ -1819,6 +1824,8 @@ def _install_supervised_execution_composition_guard() -> None:
             name,
             globals()[name],
             getattr(globals()[name], "__code__", None),
+            getattr(globals()[name], "__defaults__", None),
+            getattr(globals()[name], "__kwdefaults__", None),
         )
         for name in helper_names
     )
@@ -1883,7 +1890,13 @@ def _install_supervised_execution_composition_guard() -> None:
     )
 
     def require_pristine_composition() -> None:
-        for name, expected, expected_code in helper_surface:
+        for (
+            name,
+            expected,
+            expected_code,
+            expected_defaults,
+            expected_kwdefaults,
+        ) in helper_surface:
             current = globals().get(name)
             if (
                 current is not expected
@@ -1891,6 +1904,8 @@ def _install_supervised_execution_composition_guard() -> None:
                     expected_code is not None
                     and getattr(current, "__code__", None) is not expected_code
                 )
+                or getattr(current, "__defaults__", None) is not expected_defaults
+                or getattr(current, "__kwdefaults__", None) is not expected_kwdefaults
             ):
                 raise SupervisedExecutionError(
                     "canonical supervised execution composition changed"

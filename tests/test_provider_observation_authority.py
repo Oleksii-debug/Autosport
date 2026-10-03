@@ -1036,23 +1036,18 @@ def test_store_save_rejects_workspace_lock_builtin_shadow(
     tmp_path,
     monkeypatch,
 ):
-    import builtins
-
     snapshot = _capture(monkeypatch)
     store = _store(tmp_path)
-    enter = authority_module.WorkspaceEconomicLock.__enter__
-    builtin_name = next(
-        name
-        for name in enter.__code__.co_names
-        if name not in enter.__globals__ and hasattr(builtins, name)
-    )
+    exit_method = authority_module.WorkspaceEconomicLock.__exit__
+    assert "BaseException" in exit_method.__code__.co_names
+    assert "BaseException" not in exit_method.__globals__
     hostile_calls: list[str] = []
 
     def hostile(*_args, **_kwargs):
-        hostile_calls.append(builtin_name)
+        hostile_calls.append("BaseException")
         raise AssertionError("hostile workspace-lock builtin executed")
 
-    monkeypatch.setitem(enter.__globals__, builtin_name, hostile)
+    monkeypatch.setitem(exit_method.__globals__, "BaseException", hostile)
 
     with pytest.raises(
         ProviderObservationIntegrityError,

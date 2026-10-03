@@ -204,6 +204,74 @@ class CollectorSQLiteStoreTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "is not retained"):
                 store.migrate_event_payloads({"unexpected-missing": event})
 
+    def test_legacy_event_migration_distinguishes_tombstone_from_missing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = CollectorDeltaStore(Path(tmp) / "collector.json")
+            event = MarketEvent.from_dict(event_payload())
+            connection = store._connect()
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                connection.execute(
+                    "INSERT INTO collector_delta_tombstones_v1("
+                    "delta_id, source_id, stream_epoch, payload_sha256, "
+                    "compacted_at, plan_id"
+                    ") VALUES(?,?,?,?,?,?)",
+                    (
+                        "retired-delta",
+                        "source-x",
+                        "epoch-1",
+                        "a" * 64,
+                        "2026-01-02T00:00:00+00:00",
+                        "retention-plan",
+                    ),
+                )
+                connection.execute(
+                    "INSERT INTO collector_delta_tombstones_v1("
+                    "delta_id, source_id, stream_epoch, payload_sha256, "
+                    "compacted_at, plan_id"
+                    ") VALUES(?,?,?,?,?,?)",
+                    (
+                        "foreign-retired-delta",
+                        "source-y",
+                        "epoch-1",
+                        "b" * 64,
+                        "2026-01-02T00:00:00+00:00",
+                        "foreign-retention-plan",
+                    ),
+                )
+                connection.commit()
+            finally:
+                if connection.in_transaction:
+                    connection.rollback()
+                connection.close()
+
+            self.assertEqual(
+                store.migrate_legacy_event_payloads(
+                    {"retired-delta": event},
+                    source_id="source-x",
+                    stream_epoch="epoch-1",
+                ),
+                (0, ("retired-delta",)),
+            )
+            with self.assertRaisesRegex(
+                ValueError,
+                "neither retained nor canonically retired",
+            ):
+                store.migrate_legacy_event_payloads(
+                    {"unexplained-missing": event},
+                    source_id="source-x",
+                    stream_epoch="epoch-1",
+                )
+            with self.assertRaisesRegex(
+                ValueError,
+                "tombstone conflicts with migration authority",
+            ):
+                store.migrate_legacy_event_payloads(
+                    {"foreign-retired-delta": event},
+                    source_id="source-x",
+                    stream_epoch="epoch-1",
+                )
+
     def test_event_payload_conflict_rolls_back_new_delta(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = CollectorDeltaStore(Path(tmp) / "collector.json")

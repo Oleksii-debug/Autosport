@@ -807,12 +807,11 @@ def build_empirical_execution_evidence(
         EventType.RECONCILED_NOT_FOUND,
         label="empirical evidence",
     )
-    provider_events = [
-        event
-        for event in attempt_events
-        if event["event_type"] == EventType.PROVIDER_EVIDENCE_BOUND.value
-    ]
-    provider_event = provider_events[-1] if provider_events else None
+    provider_event = _optional_single_event(
+        attempt_events,
+        EventType.PROVIDER_EVIDENCE_BOUND,
+        label="empirical evidence",
+    )
 
     ledger_terminal = state in _TERMINAL_STATES
     if state in _ACK_TERMINAL_STATES:
@@ -951,9 +950,11 @@ def build_empirical_execution_evidence(
             raise EmpiricalExecutionEvidenceUnavailable(
                 "accepted acknowledgement lacks accepted odds/stake"
             )
-        # PROVIDER_EVIDENCE_BOUND is generic correlation metadata. Its durable
-        # schema does not bind an external receipt or the accepted odds/stake,
-        # so it cannot promote acknowledgement prices into KNOWN slippage truth.
+        # #794 can bind the exact submitted request and canonical acknowledgement
+        # payload digests into PROVIDER_EVIDENCE_BOUND. This projection preserves
+        # those identities, but the ledger path/root remains caller-selected here.
+        # Exact in-ledger correlation therefore cannot promote accepted prices into
+        # KNOWN slippage until separate product-owned source-root provenance exists.
     elif state is AttemptState.REJECTED:
         slippage_status = SLIPPAGE_STATUS_NOT_APPLICABLE
 

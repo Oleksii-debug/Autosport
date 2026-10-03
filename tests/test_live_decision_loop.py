@@ -16,6 +16,7 @@ from autosport.decision_ledger import (
 )
 from autosport.domain import MarketEvent, TicketLeg
 from autosport.economic_goal import EconomicGoalContract
+from autosport.ingestion import IngestionStats
 from autosport.event_lifecycle import (
     CatalogEvent,
     CatalogPage,
@@ -1308,6 +1309,79 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
 
             self.assertEqual(result.status, LiveCycleStatus.DECIDED)
             self.assertEqual(factory.calls, [("input-a", ())])
+            self.assertEqual(
+                len(
+                    JsonlDecisionLedger(
+                        workspace / "decisions.jsonl"
+                    ).verified_records()
+                ),
+                1,
+            )
+
+    def test_degraded_observation_blocks_economic_cut_until_healthy_rebuild(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            event = self._event(selection="selection-a", sequence=1)
+            calls = {"value": 0}
+
+            def observer(updates):
+                calls["value"] += 1
+                if calls["value"] == 1:
+                    store = SQLiteMarketStore(workspace / "market.db")
+                    try:
+                        bus = MarketEventBus(store)
+                        bus.subscribe(updates.accept_persisted)
+                        bus.publish(event)
+                    finally:
+                        store.close()
+                    return IngestionStats(
+                        source_id=event.source_id,
+                        received=1,
+                        accepted=1,
+                        rejected=0,
+                        elapsed_seconds=0.01,
+                        cursor="1",
+                        quality_flags=("PROVIDER_SEQUENCE_GAP",),
+                        health_status="degraded",
+                    )
+                return IngestionStats(
+                    source_id=event.source_id,
+                    received=0,
+                    accepted=0,
+                    rejected=0,
+                    elapsed_seconds=0.01,
+                    cursor="1",
+                    quality_flags=(),
+                    health_status="healthy",
+                )
+
+            factory = _EmptyIntentFactory()
+            loop = self._loop(
+                workspace,
+                observer=observer,
+                factory=factory,
+                clock=_ManualClock(self.START + timedelta(seconds=1)),
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+
+            degraded = loop.run_cycle()
+
+            self.assertEqual(degraded.status, LiveCycleStatus.BACKPRESSURE)
+            self.assertIn("quality is degraded", degraded.detail)
+            self.assertEqual(factory.calls, [])
+            self.assertTrue(loop._needs_cache_rebuild)
+            self.assertEqual(loop.mirror_updates.pending_count, 1)
+            self.assertFalse((workspace / "decisions.jsonl").exists())
+
+            healthy = loop.run_cycle()
+
+            self.assertEqual(healthy.status, LiveCycleStatus.DECIDED)
+            self.assertEqual(
+                factory.calls,
+                [("input-a", (("selection-a", 1, "open"),))],
+            )
+            self.assertEqual(loop.mirror_updates.pending_count, 0)
+            self.assertFalse(loop._needs_cache_rebuild)
             self.assertEqual(
                 len(
                     JsonlDecisionLedger(

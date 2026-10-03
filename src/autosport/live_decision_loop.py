@@ -24,6 +24,7 @@ from .decision_ledger import (
 from .economic_goal_provenance import provenance_for
 from .domain import MarketEvent
 from .event_lifecycle import CatalogCheckpoint, CatalogPage, ContinuousEventLifecycle
+from .ingestion import IngestionStats
 from .ingestion_health import IngestionPolicy, SourceHealthStore
 from .integrity import atomic_write_json
 from .json_integrity import strict_json_loads
@@ -1139,13 +1140,32 @@ class PersistentLiveDecisionLoop:
         try:
             if self.catalog_lifecycle is not None:
                 self._refresh_catalog_lifecycle(catalog_now)
-            self._observe(self.mirror_updates)
+            observation = self._observe(self.mirror_updates)
         except ProviderUnavailableError as exc:
             self._needs_cache_rebuild = True
             return self._persist_provider_gap(
                 _require_utc_clock(self.clock),
                 exc,
                 expected_previous_progress=expected_previous_progress,
+            )
+
+        if isinstance(observation, IngestionStats) and (
+            observation.health_status != "healthy"
+            or bool(observation.quality_flags)
+        ):
+            # Persisted market bytes remain audit truth, but degraded acquisition
+            # cannot authorize an economic cut. Do not drain invalidations here:
+            # after a healthy poll they still identify every changed quote. Force
+            # cache reconstruction as well so a rejected/omitted quote cannot leave
+            # a stale intent silently reusable.
+            self._needs_cache_rebuild = True
+            return LiveCycleResult(
+                LiveCycleStatus.BACKPRESSURE,
+                affected_input_ids=self.dependencies.input_ids,
+                detail=(
+                    "provider observation quality is degraded; no economic action "
+                    "was emitted until a healthy observation rebuilds decision state"
+                ),
             )
 
         now = _require_utc_clock(self.clock)

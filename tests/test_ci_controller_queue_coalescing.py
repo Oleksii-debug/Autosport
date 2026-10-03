@@ -1758,12 +1758,13 @@ def test_controller_main_uses_workflow_wide_sweep_and_trigger_boundary() -> None
     text = Path("scripts/cancel_superseded_pr_workflow_runs_scoped.py").read_text(
         encoding="utf-8"
     )
-    assert "cancel_superseded_explicit_pr_runs(" in text
+    assert "sweep_impl = cancel_superseded_explicit_pr_runs" in text
     assert "runs = api.active_runs()" in text
-    assert text.index("sweep_cancelled = cancel_superseded_explicit_pr_runs(") < text.index(
-        "trigger_qualification = _trusted_live_pr_qualification("
+    assert text.index("sweep_cancelled = sweep_impl(") < text.index(
+        "trigger_qualification = trusted_qualification_impl("
     )
-    assert "_cancel_triggering_run_if_stale_or_nonqualifying(" in text
+    assert "trigger_impl = _cancel_triggering_run_if_stale_or_nonqualifying" in text
+    assert "trigger_impl(" in text
 
 def test_workflow_wide_sweep_preserves_sealed_scoped_cancel_boundary() -> None:
     text = Path("scripts/cancel_superseded_pr_workflow_runs_scoped.py").read_text(

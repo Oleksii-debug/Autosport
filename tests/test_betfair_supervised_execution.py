@@ -2152,3 +2152,120 @@ def test_post_provider_authority_drift_preserves_report_evidence(
         assert attempt.provider_evidence.acknowledgement_sha256 is None
         assert attempt.acknowledgement is None
         assert restarted.verify_integrity() > 0
+
+
+def test_post_provider_instruction_type_substitution_cannot_mint_terminal_ack(
+    monkeypatch,
+) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
+        canonical_instruction_type = (
+            betfair_supervised_execution.BetfairInstructionReport
+        )
+
+        class ForgedInstruction(canonical_instruction_type):
+            def __init__(self, **kwargs) -> None:
+                super().__init__(**kwargs)
+                object.__setattr__(self, "bet_id", "forged-bet")
+                object.__setattr__(
+                    self,
+                    "order_status",
+                    "EXECUTION_COMPLETE",
+                )
+                object.__setattr__(
+                    self,
+                    "average_price_matched",
+                    action.requested_odds,
+                )
+                object.__setattr__(
+                    self,
+                    "size_matched",
+                    action.requested_stake,
+                )
+
+        def respond_and_rebind_instruction_type(request):
+            payload = _response(
+                request,
+                matched="0",
+                average="0",
+                bet_id="provider-unmatched",
+                order_status="EXECUTABLE",
+            )
+            monkeypatch.setattr(
+                betfair_supervised_execution,
+                "BetfairInstructionReport",
+                ForgedInstruction,
+            )
+            return payload
+
+        transport = _Transport(respond_and_rebind_instruction_type)
+        client = _enabled_client(profile, transport, store=goal_store)
+        attempt_id = "attempt-postflight-instruction-type-drift"
+
+        result = execute_betfair_supervised_action(
+            ledger,
+            bound,
+            approval,
+            action_id=action.action_id,
+            attempt_id=attempt_id,
+            profile=profile,
+            client=client,
+            clock=lambda: SUBMITTED_AT,
+        )
+
+        assert result.outcome is PlaceOrdersOutcome.UNKNOWN
+        assert result.attempt_state is AttemptState.UNKNOWN
+        assert result.evidence_id is not None
+        view = ledger.verified_execution_view(bound.execution_plan.plan_id)
+        attempt = next(
+            item for item in view.attempts if item.attempt_id == attempt_id
+        )
+        assert attempt.provider_evidence is not None
+        assert attempt.acknowledgement is None
+
+
+def test_post_provider_outcome_substitution_cannot_terminalize_live_remainder(
+    monkeypatch,
+) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
+
+        def respond_and_rebind_outcome(request):
+            payload = _response(
+                request,
+                matched=action.requested_stake / Decimal("2"),
+                average=action.requested_odds,
+                bet_id="provider-partial-live",
+                order_status="EXECUTABLE",
+            )
+            monkeypatch.setattr(
+                betfair_supervised_execution,
+                "_report_outcome",
+                lambda report, action: PlaceOrdersOutcome.PARTIAL,
+            )
+            return payload
+
+        transport = _Transport(respond_and_rebind_outcome)
+        client = _enabled_client(profile, transport, store=goal_store)
+        attempt_id = "attempt-postflight-outcome-drift"
+
+        result = execute_betfair_supervised_action(
+            ledger,
+            bound,
+            approval,
+            action_id=action.action_id,
+            attempt_id=attempt_id,
+            profile=profile,
+            client=client,
+            clock=lambda: SUBMITTED_AT,
+        )
+
+        assert result.outcome is PlaceOrdersOutcome.UNKNOWN
+        assert result.attempt_state is AttemptState.UNKNOWN
+        assert result.evidence_id is not None
+        view = ledger.verified_execution_view(bound.execution_plan.plan_id)
+        attempt = next(
+            item for item in view.attempts if item.attempt_id == attempt_id
+        )
+        assert attempt.provider_evidence is not None
+        assert attempt.acknowledgement is None

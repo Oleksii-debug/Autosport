@@ -3085,6 +3085,81 @@ def test_rebound_text_helper_never_executes_or_breaks_failure_terminal(
     assert hostile_calls == []
 
 
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "request_witness_in_place",
+        "snapshot_witness_in_place",
+        "evidence_witness_tuple_rebind",
+        "evidence_store_type_rebind",
+    ],
+)
+def test_provider_callback_cannot_redefine_provider_evidence_witnesses(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: str,
+) -> None:
+    locator, store, spec, provider_store = _setup(tmp_path)
+
+    def mutating_provider_io(_request, _timeout):
+        if mutation == "request_witness_in_place":
+            monkeypatch.setitem(
+                capture_module._PROVIDER_REQUEST_SEAMS,
+                "source_id",
+                object(),
+            )
+        elif mutation == "snapshot_witness_in_place":
+            monkeypatch.setitem(
+                capture_module._PROVIDER_SNAPSHOT_SEAMS,
+                "captured_at",
+                object(),
+            )
+        elif mutation == "evidence_witness_tuple_rebind":
+            monkeypatch.setattr(
+                capture_module,
+                "_EVIDENCE_CLASS_SEAM_WITNESSES",
+                (),
+            )
+        elif mutation == "evidence_store_type_rebind":
+            monkeypatch.setattr(
+                capture_module,
+                "CompleteGameBoardEvidenceStore",
+                object,
+            )
+        else:
+            raise AssertionError(f"unknown mutation: {mutation}")
+        return _FakeSseResponse(_frame())
+
+    monkeypatch.setattr(provider_module, "urlopen", mutating_provider_io)
+    monkeypatch.setattr(provider_module, "_default_clock", lambda: CAPTURED_AT)
+
+    with pytest.raises(
+        CampaignProviderCycleCaptureIntegrityError,
+        match="provider/evidence seam authority changed",
+    ):
+        capture_module.capture_campaign_complete_game_board(
+            precommit_locator=locator,
+            store=store,
+            source_spec=spec,
+            evidence_store=provider_store,
+            request=_request(),
+            api_key="secret-value",
+            timeout_seconds=3.0,
+            clock=_clock(),
+        )
+
+    evidence = store.collector_cycle_evidence(
+        source_id=spec.source_id,
+        start_cycle_seq=1,
+        end_cycle_seq=1,
+    )
+    assert len(evidence) == 1
+    terminal = evidence[0]["terminal"]
+    assert terminal["status"] == "LOCAL_FAILURE"
+    assert "observed_artifacts" not in terminal
+    assert list(provider_store.root.glob("*.json")) == []
+
+
 def test_provider_callback_cannot_rebind_campaign_artifact_kind(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

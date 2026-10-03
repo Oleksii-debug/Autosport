@@ -33,7 +33,7 @@ from .workspace_lock import (
 
 
 PROVIDER_ID = "prophetx"
-STATE_SCHEMA_VERSION = 1
+STATE_SCHEMA_VERSION = 2
 CONSERVATIVE_SESSION_SLOT_HOLD = timedelta(minutes=20)
 RENEWAL_LEAD_TIME = timedelta(minutes=2)
 _BASE_RETRY_SECONDS = 5
@@ -49,6 +49,7 @@ class ProphetXSessionState(str, Enum):
     LOGIN_IN_FLIGHT = "login_in_flight"
     ACTIVE = "active"
     RENEWAL_DUE = "renewal_due"
+    RENEWING = "renewing"
     EXPIRED = "expired"
     AUTH_RETRYABLE_FAILURE = "auth_retryable_failure"
     PROVIDER_UNAVAILABLE = "provider_unavailable"
@@ -64,6 +65,8 @@ class ProphetXLoginAdmissionAction(str, Enum):
     WAIT_FOR_PROVIDER_SESSION_EXPIRY = "wait_for_provider_session_expiry"
     RETRY_LATER = "retry_later"
     RENEWAL_REQUIRED = "renewal_required"
+    START_RENEWAL = "start_renewal"
+    WAIT_FOR_EXISTING_RENEWAL = "wait_for_existing_renewal"
     CREDENTIAL_REJECTED = "credential_rejected"
     SHARED_ACCESS_KEY_CONFLICT = "shared_access_key_conflict"
 
@@ -73,6 +76,13 @@ class ProphetXLoginFailureClass(str, Enum):
     CREDENTIAL_REJECTED = "credential_rejected"
     RETRYABLE_PRE_SESSION_FAILURE = "retryable_pre_session_failure"
     PROVIDER_UNAVAILABLE_PRE_SESSION = "provider_unavailable_pre_session"
+    AMBIGUOUS_PROVIDER_RESULT = "ambiguous_provider_result"
+
+
+class ProphetXRenewalFailureClass(str, Enum):
+    RETRYABLE = "retryable"
+    PROVIDER_UNAVAILABLE = "provider_unavailable"
+    CREDENTIAL_REJECTED = "credential_rejected"
     AMBIGUOUS_PROVIDER_RESULT = "ambiguous_provider_result"
 
 
@@ -178,6 +188,7 @@ class ProphetXSessionSnapshot:
     retry_not_before: datetime | None = None
     transient_failures: int = 0
     last_failure_class: ProphetXLoginFailureClass | None = None
+    last_renewal_failure_class: ProphetXRenewalFailureClass | None = None
 
     def __post_init__(self) -> None:
         if type(self.state) is not ProphetXSessionState:
@@ -208,19 +219,29 @@ class ProphetXSessionSnapshot:
             raise ProphetXSessionLifecycleError(
                 "last_failure_class must be an exact ProphetXLoginFailureClass"
             )
+        if self.last_renewal_failure_class is not None and type(
+            self.last_renewal_failure_class
+        ) is not ProphetXRenewalFailureClass:
+            raise ProphetXSessionLifecycleError(
+                "last_renewal_failure_class must be an exact ProphetXRenewalFailureClass"
+            )
 
-        if self.state is ProphetXSessionState.LOGIN_IN_FLIGHT:
+        if self.state in {
+            ProphetXSessionState.LOGIN_IN_FLIGHT,
+            ProphetXSessionState.RENEWING,
+        }:
             if (
                 self.attempt_id is None
                 or self.attempt_started_at is None
                 or self.slot_hold_until is None
             ):
                 raise ProphetXSessionLifecycleError(
-                    "login_in_flight requires attempt and slot-hold evidence"
+                    "in-flight auth state requires attempt and slot-hold evidence"
                 )
         if self.state in {
             ProphetXSessionState.ACTIVE,
             ProphetXSessionState.RENEWAL_DUE,
+            ProphetXSessionState.RENEWING,
         }:
             if (
                 self.session_lineage_id is None
@@ -251,14 +272,20 @@ class ProphetXSessionSnapshot:
                 raise ProphetXSessionLifecycleError(
                     "login_in_flight slot hold must follow attempt start"
                 )
+        elif self.state is ProphetXSessionState.RENEWING:
+            if self.retry_not_before is not None:
+                raise ProphetXSessionLifecycleError(
+                    "renewing cannot carry retry_not_before"
+                )
         elif self.attempt_id is not None or self.attempt_started_at is not None:
             raise ProphetXSessionLifecycleError(
-                "attempt evidence is only valid for login_in_flight"
+                "attempt evidence is only valid for an in-flight auth operation"
             )
 
         if self.state in {
             ProphetXSessionState.ACTIVE,
             ProphetXSessionState.RENEWAL_DUE,
+            ProphetXSessionState.RENEWING,
         }:
             if self.access_expires_at <= self.last_transition_at:
                 raise ProphetXSessionLifecycleError(
@@ -268,9 +295,12 @@ class ProphetXSessionSnapshot:
                 raise ProphetXSessionLifecycleError(
                     "active slot hold cannot precede access expiry"
                 )
-            if self.retry_not_before is not None:
+            if (
+                self.state is not ProphetXSessionState.RENEWAL_DUE
+                and self.retry_not_before is not None
+            ):
                 raise ProphetXSessionLifecycleError(
-                    "active session state cannot carry login retry evidence"
+                    "active/renewing state cannot carry retry evidence"
                 )
 
         if self.state in {
@@ -338,6 +368,11 @@ class ProphetXSessionSnapshot:
                 None
                 if self.last_failure_class is None
                 else self.last_failure_class.value
+            ),
+            "last_renewal_failure_class": (
+                None
+                if self.last_renewal_failure_class is None
+                else self.last_renewal_failure_class.value
             ),
         }
 
@@ -826,6 +861,7 @@ class ProphetXSessionLifecycle:
             "retry_not_before",
             "transient_failures",
             "last_failure_class",
+            "last_renewal_failure_class",
         }
         if set(payload) != expected_fields:
             raise ProphetXSessionLifecycleError(
@@ -866,6 +902,17 @@ class ProphetXSessionLifecycle:
         except (TypeError, ValueError) as exc:
             raise ProphetXSessionLifecycleError(
                 "unknown ProphetX login failure class"
+            ) from exc
+        renewal_failure_raw = payload["last_renewal_failure_class"]
+        try:
+            renewal_failure = (
+                None
+                if renewal_failure_raw is None
+                else ProphetXRenewalFailureClass(renewal_failure_raw)
+            )
+        except (TypeError, ValueError) as exc:
+            raise ProphetXSessionLifecycleError(
+                "unknown ProphetX renewal failure class"
             ) from exc
         return ProphetXSessionSnapshot(
             state=state,
@@ -920,6 +967,7 @@ class ProphetXSessionLifecycle:
                 "transient_failures",
             ),
             last_failure_class=failure,
+            last_renewal_failure_class=renewal_failure,
         )
 
     def _write_state(self, snapshot: ProphetXSessionSnapshot) -> None:

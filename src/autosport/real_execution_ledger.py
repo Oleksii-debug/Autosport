@@ -1170,8 +1170,10 @@ class RealExecutionLedger:
                 )
             supervised_issuance[event["plan_id"]] = (witness, fingerprint)
 
-        approval_state: dict[str, tuple[str, str, datetime, bool]] = {}
-        for event in events:
+        approval_state: dict[
+            str, tuple[str, str, datetime, datetime, bool]
+        ] = {}
+        for event_index, event in enumerate(events):
             kind = event["event_type"]
             if kind not in {
                 EventType.SUPERVISED_APPROVAL_BOUND.value,
@@ -1189,10 +1191,20 @@ class RealExecutionLedger:
                 )
             payload = event["payload"]
             if kind == EventType.SUPERVISED_APPROVAL_BOUND.value:
+                if event["plan_id"].startswith("supervised-v2-") and not any(
+                    prior["event_type"]
+                    == EventType.SUPERVISED_PLAN_ISSUED.value
+                    and prior["plan_id"] == event["plan_id"]
+                    for prior in events[:event_index]
+                ):
+                    raise ExecutionLedgerIntegrityError(
+                        "supervised approval binding must follow product issuance"
+                    )
                 if set(payload) != {
                     "approval_id",
                     "approval_fingerprint",
                     "approved_at",
+                    "expires_at",
                     "evidence_sha256",
                 }:
                     raise ExecutionLedgerIntegrityError(
@@ -1202,19 +1214,43 @@ class RealExecutionLedger:
                     _sha256_text(payload["approval_fingerprint"], "approval_fingerprint")
                     _sha256_text(payload["evidence_sha256"], "evidence_sha256")
                     approved_at = _timestamp(payload["approved_at"], "approved_at")
+                    expires_at = _timestamp(payload["expires_at"], "expires_at")
+                    if expires_at <= approved_at:
+                        raise ValueError("approval expiry must follow approval time")
                 except (KeyError, TypeError, ValueError) as exc:
                     raise ExecutionLedgerIntegrityError(
                         "supervised approval binding values are invalid"
                     ) from exc
-                if payload["approval_id"] != plan_event["payload"]["plan"]["approval_id"]:
+                plan_approval_id = plan_event["payload"]["plan"]["approval_id"]
+                if payload["approval_id"] != plan_approval_id:
                     raise ExecutionLedgerIntegrityError(
                         "supervised approval identity mismatches stored plan"
                     )
+                if event["plan_id"].startswith("supervised-v2-"):
+                    if "@" not in plan_approval_id:
+                        raise ExecutionLedgerIntegrityError(
+                            "supervised plan approval identity lacks fingerprint"
+                        )
+                    encoded_fingerprint = plan_approval_id.rsplit("@", 1)[1]
+                    try:
+                        _sha256_text(
+                            encoded_fingerprint,
+                            "supervised plan approval fingerprint",
+                        )
+                    except ValueError as exc:
+                        raise ExecutionLedgerIntegrityError(
+                            "supervised plan approval identity fingerprint is invalid"
+                        ) from exc
+                    if payload["approval_fingerprint"] != encoded_fingerprint:
+                        raise ExecutionLedgerIntegrityError(
+                            "supervised approval fingerprint mismatches stored plan"
+                        )
                 prior = approval_state.get(event["plan_id"])
                 current = (
                     payload["approval_id"],
                     payload["approval_fingerprint"],
                     approved_at,
+                    expires_at,
                     False,
                 )
                 if prior is not None and prior != current:
@@ -1260,6 +1296,7 @@ class RealExecutionLedger:
                     prior[0],
                     prior[1],
                     prior[2],
+                    prior[3],
                     True,
                 )
 
@@ -1290,7 +1327,8 @@ class RealExecutionLedger:
                     raise ExecutionLedgerIntegrityError(
                         "supervised attempt reservation must follow product issuance"
                     )
-                approval_active = False
+                approval_binding: dict[str, Any] | None = None
+                approval_revoked = False
                 for prior in prior_events:
                     if prior["plan_id"] != first["plan_id"]:
                         continue
@@ -1298,13 +1336,13 @@ class RealExecutionLedger:
                         prior["event_type"]
                         == EventType.SUPERVISED_APPROVAL_BOUND.value
                     ):
-                        approval_active = True
+                        approval_binding = prior["payload"]
                     elif (
                         prior["event_type"]
                         == EventType.SUPERVISED_APPROVAL_REVOKED.value
                     ):
-                        approval_active = False
-                if not approval_active:
+                        approval_revoked = True
+                if approval_binding is None or approval_revoked:
                     raise ExecutionLedgerIntegrityError(
                         "supervised attempt reservation requires prior active approval"
                     )
@@ -1320,6 +1358,20 @@ class RealExecutionLedger:
                 raise ExecutionLedgerIntegrityError(
                     "attempt reservation timestamp is invalid"
                 ) from exc
+            if first["plan_id"].startswith("supervised-v2-"):
+                assert approval_binding is not None
+                approved_time = _timestamp(
+                    approval_binding["approved_at"],
+                    "approved_at",
+                )
+                expires_time = _timestamp(
+                    approval_binding["expires_at"],
+                    "expires_at",
+                )
+                if reserved_time < approved_time or reserved_time >= expires_time:
+                    raise ExecutionLedgerIntegrityError(
+                        "supervised attempt reservation is outside approval lifetime"
+                    )
             plan_event, action = cls._action_payload(
                 events, first["plan_id"], first["action_id"]
             )
@@ -1771,11 +1823,15 @@ class RealExecutionLedger:
         approval_id: str,
         approval_fingerprint: str,
         approved_at: str,
+        expires_at: str,
         evidence_sha256: str,
     ) -> None:
         _text(approval_id, "approval_id")
         _sha256_text(approval_fingerprint, "approval_fingerprint")
-        _timestamp(approved_at, "approved_at")
+        approved_time = _timestamp(approved_at, "approved_at")
+        expires_time = _timestamp(expires_at, "expires_at")
+        if expires_time <= approved_time:
+            raise ValueError("approval expires_at must follow approved_at")
         _sha256_text(evidence_sha256, "evidence_sha256")
 
         def operation() -> None:
@@ -1783,10 +1839,41 @@ class RealExecutionLedger:
             plan_event = self._plan_event(events, plan_id)
             if plan_event is None:
                 raise ExecutionStateError("approval binding requires reserved plan")
-            if plan_event["payload"]["plan"]["approval_id"] != approval_id:
+            plan_approval_id = plan_event["payload"]["plan"]["approval_id"]
+            if plan_approval_id != approval_id:
                 raise ExecutionIdentityConflict(
                     "approval identity mismatches durable execution plan"
                 )
+            if plan_id.startswith("supervised-v2-"):
+                issuance = [
+                    event
+                    for event in events
+                    if event["plan_id"] == plan_id
+                    and event["event_type"]
+                    == EventType.SUPERVISED_PLAN_ISSUED.value
+                ]
+                if len(issuance) != 1:
+                    raise ExecutionStateError(
+                        "supervised approval binding requires product issuance"
+                    )
+                if "@" not in plan_approval_id:
+                    raise ExecutionLedgerIntegrityError(
+                        "supervised plan approval identity lacks fingerprint"
+                    )
+                encoded_fingerprint = plan_approval_id.rsplit("@", 1)[1]
+                try:
+                    _sha256_text(
+                        encoded_fingerprint,
+                        "supervised plan approval fingerprint",
+                    )
+                except ValueError as exc:
+                    raise ExecutionLedgerIntegrityError(
+                        "supervised plan approval identity fingerprint is invalid"
+                    ) from exc
+                if encoded_fingerprint != approval_fingerprint:
+                    raise ExecutionIdentityConflict(
+                        "approval fingerprint mismatches durable execution plan"
+                    )
             bindings = [
                 event
                 for event in events
@@ -1797,6 +1884,7 @@ class RealExecutionLedger:
                 "approval_id": approval_id,
                 "approval_fingerprint": approval_fingerprint,
                 "approved_at": approved_at,
+                "expires_at": expires_at,
                 "evidence_sha256": evidence_sha256,
             }
             if bindings:
@@ -2152,7 +2240,7 @@ class RealExecutionLedger:
     ) -> ExecutionAttempt:
         _text(attempt_id, "attempt_id")
         reserved_at = reserved_at or _now()
-        _timestamp(reserved_at, "reserved_at")
+        reserved_time = _timestamp(reserved_at, "reserved_at")
 
         def operation() -> ExecutionAttempt:
             events = self._events()
@@ -2168,20 +2256,33 @@ class RealExecutionLedger:
                     raise ExecutionStateError(
                         "supervised execution attempt requires prior product issuance"
                     )
-                approval_active = False
+                approval_binding: dict[str, Any] | None = None
+                approval_revoked = False
                 for event in events:
                     if event["plan_id"] != plan_id:
                         continue
                     if event["event_type"] == EventType.SUPERVISED_APPROVAL_BOUND.value:
-                        approval_active = True
+                        approval_binding = event["payload"]
                     elif (
                         event["event_type"]
                         == EventType.SUPERVISED_APPROVAL_REVOKED.value
                     ):
-                        approval_active = False
-                if not approval_active:
+                        approval_revoked = True
+                if approval_binding is None or approval_revoked:
                     raise ExecutionStateError(
                         "supervised execution attempt requires active durable approval"
+                    )
+                approved_time = _timestamp(
+                    approval_binding["approved_at"],
+                    "approved_at",
+                )
+                expires_time = _timestamp(
+                    approval_binding["expires_at"],
+                    "expires_at",
+                )
+                if reserved_time < approved_time or reserved_time >= expires_time:
+                    raise ExecutionStateError(
+                        "supervised execution attempt is outside durable approval lifetime"
                     )
             if self._stale(events, plan_id):
                 raise ExecutionStateError(

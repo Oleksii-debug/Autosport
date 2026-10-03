@@ -406,11 +406,11 @@ class DeploymentRuntimeAuthorityStore:
     bytes while its separate machine-state root survives.
     """
 
-    def __init__(
+    def _configure(
         self,
         path: str | Path,
         *,
-        authority_root: str | Path | None = None,
+        authority_root: str | Path | None,
     ) -> None:
         self.path = Path(path).expanduser().resolve(strict=False)
         self.workspace = self.path.parent
@@ -431,6 +431,14 @@ class DeploymentRuntimeAuthorityStore:
                 "key": self.path.name,
             }
         )
+
+    def __init__(
+        self,
+        path: str | Path,
+        *,
+        authority_root: str | Path | None = None,
+    ) -> None:
+        self._configure(path, authority_root=authority_root)
         with self._lock, WorkspaceEconomicLock(self.workspace):
             self._read_validated_records_locked()
 
@@ -443,20 +451,48 @@ class DeploymentRuntimeAuthorityStore:
     ) -> "DeploymentRuntimeAuthorityStore":
         destination = Path(path).expanduser().resolve(strict=False)
         destination.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "schema": STORE_SCHEMA,
+            "schema_version": STORE_SCHEMA_VERSION,
+            "records": [],
+        }
         with WorkspaceEconomicLock(destination.parent):
             if destination.exists():
                 raise DeploymentRuntimeAuthorityError(
                     "runtime authority store already exists"
                 )
-            cls._write_atomic_path(
-                destination,
-                {
-                    "schema": STORE_SCHEMA,
-                    "schema_version": STORE_SCHEMA_VERSION,
-                    "records": [],
-                },
+
+            store = cls.__new__(cls)
+            store._configure(destination, authority_root=authority_root)
+            recovery = store._authority.recover(observed_state_sha256=None)
+            if recovery.committed_state_sha256 is not None:
+                raise DeploymentRuntimeAuthorityError(
+                    "runtime authority workspace is not pristine"
+                )
+
+            intended_sha256 = store._state_sha256(payload)
+            tx_id = store._new_transaction_id()
+            store._authority.prepare(
+                tx_id=tx_id,
+                observed_state_sha256=None,
+                intended_state_sha256=intended_sha256,
+                semantic_binding_sha256=store._semantic_binding_sha256,
             )
-        return cls(destination, authority_root=authority_root)
+            store._write_atomic_path(destination, payload)
+
+            published = store._read_payload()
+            store._records_from_payload(published)
+            published_sha256 = store._state_sha256(published)
+            if published_sha256 != intended_sha256:
+                raise DeploymentRuntimeAuthorityError(
+                    "published pristine runtime authority state does not match prepared digest"
+                )
+            store._authority.commit(
+                tx_id=tx_id,
+                observed_state_sha256=published_sha256,
+                semantic_binding_sha256=store._semantic_binding_sha256,
+            )
+            return store
 
     @staticmethod
     def _write_atomic_path(path: Path, payload: Mapping[str, object]) -> None:
@@ -577,28 +613,13 @@ class DeploymentRuntimeAuthorityStore:
             previous_available_at = current_available_at
         return tuple(records)
 
-    def _recover_or_bootstrap_state(
+    def _recover_state(
         self,
         payload: Mapping[str, object],
     ) -> None:
         state_sha256 = self._state_sha256(payload)
         history = self._authority.read_history()
-        if not history:
-            tx_id = self._new_transaction_id()
-            self._authority.prepare(
-                tx_id=tx_id,
-                observed_state_sha256=None,
-                intended_state_sha256=state_sha256,
-                semantic_binding_sha256=self._semantic_binding_sha256,
-            )
-            self._authority.commit(
-                tx_id=tx_id,
-                observed_state_sha256=state_sha256,
-                semantic_binding_sha256=self._semantic_binding_sha256,
-            )
-            return
-
-        latest = history[-1]
+        latest = history[-1] if history else None
         pending_tx_id = (
             latest.tx_id
             if latest.phase is AuthorityPhase.PREPARE
@@ -628,7 +649,7 @@ class DeploymentRuntimeAuthorityStore:
     ) -> tuple[DeploymentRuntimeAuthorityRecord, ...]:
         payload = self._read_payload()
         records = self._records_from_payload(payload)
-        self._recover_or_bootstrap_state(payload)
+        self._recover_state(payload)
         return records
 
     def _observed_now(self) -> str:

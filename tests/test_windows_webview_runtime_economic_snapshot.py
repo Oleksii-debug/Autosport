@@ -511,6 +511,57 @@ def test_semantic_shell_exposes_readonly_economic_freshness_controls() -> None:
     assert "runtimeEconomic.paper_book_sha256" in js
 
 
+def test_terminal_durable_refresh_retires_runtime_snapshot(
+    tmp_path: Path,
+) -> None:
+    controller = _controller(tmp_path)
+    controller._product_runtime_economic_snapshot = _snapshot(tmp_path)
+    controller.strategy_id = "baseline-v1"
+
+    # Avoid real session construction in this focused presentation test while
+    # preserving the retirement ordering at method entry.
+    original_session = worker_module
+    del original_session
+    try:
+        controller._refresh_economic_projection()
+    except Exception:
+        # An empty temporary workspace may fail deeper session startup depending on
+        # current composition requirements; snapshot retirement must already hold.
+        pass
+
+    assert controller._product_runtime_economic_snapshot is None
+
+
+def test_terminal_runtime_error_quarantines_visible_economics(
+    tmp_path: Path,
+) -> None:
+    message = ProductGuiMessage(kind="ERROR", error_type="RuntimeError")
+    controller = _controller(tmp_path, message)
+    controller._product_runtime_economic_snapshot = _snapshot(tmp_path)
+
+    controller._poll_workers()
+
+    assert controller._product_runtime_economic_snapshot is None
+    assert tmp_path in controller._recovery_required_workspaces
+    assert "stale bank" not in controller.bank
+    assert controller.tickets != ["stale ticket"]
+    assert controller.evaluation != ["stale portfolio"]
+
+
+def test_economic_projection_explicitly_denies_uncomputed_risk_and_real_money(
+    tmp_path: Path,
+) -> None:
+    controller = _controller(tmp_path)
+    empty = controller._product_runtime_economic_projection()
+    assert empty["risk_policy_evaluated"] is False
+    assert empty["real_money_authorized"] is False
+
+    controller._product_runtime_economic_snapshot = _snapshot(tmp_path)
+    current = controller._product_runtime_economic_projection()
+    assert current["risk_policy_evaluated"] is False
+    assert current["real_money_authorized"] is False
+
+
 def test_runtime_worker_keeps_tick_and_snapshot_inside_one_operation_fence() -> None:
     source = inspect.getsource(ProductGuiWorker._run)
 

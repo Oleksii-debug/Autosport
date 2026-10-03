@@ -1267,6 +1267,7 @@ def _forward_verification_case(
         universe_store,
         evidence,
         universe,
+        protocol,
     )
 
 
@@ -1283,6 +1284,7 @@ def test_cycle_bound_structural_verifier_replaces_caller_receipts_and_fixes_scop
         universe_store,
         evidence,
         universe,
+        _protocol,
     ) = _forward_verification_case(tmp_path, monkeypatch)
 
     raw = verify_campaign(evidence)
@@ -1331,6 +1333,7 @@ def test_cycle_bound_forward_verification_drives_durable_paper_admission(
         universe_store,
         evidence,
         _universe,
+        protocol,
     ) = _forward_verification_case(forward_root, monkeypatch)
     expected = verify_campaign_forward_evidence(
         precommit_locator=locator,
@@ -1386,6 +1389,7 @@ def test_cycle_bound_forward_verification_drives_durable_paper_admission(
         campaign_precommit_locator=locator,
         campaign_collector_store=store,
         campaign_source_spec=spec,
+        campaign_forward_protocol=protocol,
     )
     coordinator = fixture.coordinator()
     learning_evidence = dict(fixture.observation.evidence)
@@ -1399,6 +1403,62 @@ def test_cycle_bound_forward_verification_drives_durable_paper_admission(
         learning_evidence["campaign_forward_evaluation_plan_sha256"]
         == expected.prospective_evaluation_plan_sha256
     )
+    assert learning_evidence["campaign_forward_protocol_sha256"] == expected.protocol_sha256
+
+    alternate_protocol = ForwardEvidenceProtocolEnvelope(
+        campaign_id=protocol.campaign_id,
+        scientific_protocol_sha256=protocol.scientific_protocol_sha256,
+        candidate_universe_rule_id=protocol.candidate_universe_rule_id,
+        candidate_universe_rule_sha256=protocol.candidate_universe_rule_sha256,
+        forward_evaluation_policy_sha256="8" * 64,
+        runtime_identity_sha256=protocol.runtime_identity_sha256,
+        baseline_set_sha256=protocol.baseline_set_sha256,
+        protective_metric_set_sha256=protocol.protective_metric_set_sha256,
+        cost_policy_sha256=protocol.cost_policy_sha256,
+        precommit_anchor_lower=protocol.precommit_anchor_lower,
+        precommit_anchor_upper=protocol.precommit_anchor_upper,
+    )
+    mismatched_root = tmp_path / "protocol-mismatch-admission"
+    mismatched_root.mkdir()
+    mismatched = AdmissionFixture(
+        mismatched_root,
+        campaign_precommit_locator=locator,
+        campaign_collector_store=store,
+        campaign_source_spec=spec,
+        campaign_forward_protocol=alternate_protocol,
+    )
+    with pytest.raises(
+        PaperCampaignAdmissionError,
+        match="predecision learning Observation is not bound",
+    ):
+        admit_forward_verified(
+            mismatched.coordinator(),
+            precommit_locator=locator,
+            collector_store=store,
+            source_spec=spec,
+            cycle_receipt=cycle_receipt,
+            provider_evidence_store=provider_store,
+            universe_store=universe_store,
+            event_lifecycle=None,
+            evidence=evidence,
+            admission_id="protocol-mismatch-admission",
+            observation=mismatched.observation,
+            action_type="PAPER_PROPOSAL",
+            decision_action="OPEN_PAPER_TICKET",
+            decision_at="2026-09-20T05:00:05+00:00",
+            at="2026-09-20T05:00:05+00:00",
+            replay_run_id="protocol-mismatch-run",
+            agent="admission-test",
+            execution_decision_id=mismatched.execution_decision_id,
+            execution_run_id=mismatched.execution_run_id,
+            execution_attempt_id=mismatched.execution_attempt_id,
+            execution_ticket_id=mismatched.execution_ticket_id,
+        )
+    assert json.loads(
+        (mismatched.workspace / "paper-campaign-admission.json").read_text(
+            encoding="utf-8"
+        )
+    )["admissions"] == {}
 
     receipt = admit_forward_verified(
         coordinator,

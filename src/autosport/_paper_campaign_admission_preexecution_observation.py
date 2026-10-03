@@ -28,6 +28,7 @@ from .campaign_inception import (
     establish_campaign_inception,
 )
 from .causal_collector import CollectorDeltaStore
+from .forward_evidence_completeness import ForwardEvidenceProtocolEnvelope
 from .forward_universe_precommit_authority import ForwardUniversePrecommitLocator
 from .learning_environment import (
     CausalLearningEnvironment,
@@ -41,6 +42,7 @@ from .paper_campaign_admission import (
     _FORWARD_OBSERVATION_CAMPAIGN_ID,
     _FORWARD_OBSERVATION_EVALUATION_PLAN_SHA256,
     _FORWARD_OBSERVATION_INCEPTION_RECEIPT_SHA256,
+    _FORWARD_OBSERVATION_PROTOCOL_SHA256,
     _FORWARD_OBSERVATION_SOURCE_ID,
 )
 from .paper_execution_adoption import PaperExecutionAdoptionRuntime
@@ -205,11 +207,13 @@ def _install() -> None:
     campaign_locator_type = ForwardUniversePrecommitLocator
     campaign_store_type = CollectorDeltaStore
     campaign_source_spec_type = CampaignInceptionSourceSpec
+    campaign_protocol_type = ForwardEvidenceProtocolEnvelope
     campaign_binding_keys = _FORWARD_OBSERVATION_BINDING_KEYS
     campaign_id_key = _FORWARD_OBSERVATION_CAMPAIGN_ID
     campaign_source_id_key = _FORWARD_OBSERVATION_SOURCE_ID
     campaign_receipt_key = _FORWARD_OBSERVATION_INCEPTION_RECEIPT_SHA256
     campaign_plan_key = _FORWARD_OBSERVATION_EVALUATION_PLAN_SHA256
+    campaign_protocol_key = _FORWARD_OBSERVATION_PROTOCOL_SHA256
     json_loads = json.loads
     json_dumps = json.dumps
 
@@ -221,6 +225,7 @@ def _install() -> None:
         campaign_precommit_locator: ForwardUniversePrecommitLocator | None = None,
         campaign_collector_store: CollectorDeltaStore | None = None,
         campaign_source_spec: CampaignInceptionSourceSpec | None = None,
+        campaign_forward_protocol: ForwardEvidenceProtocolEnvelope | None = None,
         **kwargs,
     ) -> None:
         stable_runtime_init(self, *args, **kwargs)
@@ -228,6 +233,7 @@ def _install() -> None:
             campaign_precommit_locator,
             campaign_collector_store,
             campaign_source_spec,
+            campaign_forward_protocol,
         )
         campaign_requested = any(value is not None for value in campaign_args)
         if learning_environment is None:
@@ -253,10 +259,11 @@ def _install() -> None:
                 type(campaign_precommit_locator) is not campaign_locator_type
                 or type(campaign_collector_store) is not campaign_store_type
                 or type(campaign_source_spec) is not campaign_source_spec_type
+                or type(campaign_forward_protocol) is not campaign_protocol_type
             ):
                 raise TypeError(
                     "forward campaign execution requires exact precommit locator, "
-                    "collector store, and source spec"
+                    "collector store, source spec, and forward protocol"
                 )
             if (
                 stable_establish_campaign_inception.__code__
@@ -278,14 +285,25 @@ def _install() -> None:
                 raise _origin.PaperExecutionDecisionOriginError(
                     "campaign inception authority could not be established canonically"
                 )
+            if campaign_forward_protocol.campaign_id != receipt.campaign_id:
+                raise _origin.PaperExecutionDecisionOriginError(
+                    "forward protocol campaign differs from campaign inception"
+                )
+            protocol_sha256 = campaign_forward_protocol.protocol_sha256
+            if type(protocol_sha256) is not str or len(protocol_sha256) != 64:
+                raise _origin.PaperExecutionDecisionOriginError(
+                    "forward protocol identity is invalid"
+                )
             campaign_binding = (
                 campaign_precommit_locator,
                 campaign_collector_store,
                 campaign_source_spec,
+                campaign_forward_protocol,
                 receipt.receipt_sha256,
                 receipt.campaign_id,
                 receipt.source_id,
                 receipt.evaluation_universe_sha256,
+                protocol_sha256,
             )
 
         with bindings_lock:
@@ -346,10 +364,12 @@ def _install() -> None:
                 campaign_precommit_locator,
                 campaign_collector_store,
                 campaign_source_spec,
+                campaign_forward_protocol,
                 expected_receipt_sha256,
                 expected_campaign_id,
                 expected_source_id,
                 expected_plan_sha256,
+                expected_protocol_sha256,
             ) = campaign_binding
             if (
                 stable_establish_campaign_inception.__code__
@@ -372,9 +392,13 @@ def _install() -> None:
                 or current_receipt.source_id != expected_source_id
                 or current_receipt.evaluation_universe_sha256
                 != expected_plan_sha256
+                or type(campaign_forward_protocol) is not campaign_protocol_type
+                or campaign_forward_protocol.campaign_id != expected_campaign_id
+                or campaign_forward_protocol.protocol_sha256
+                != expected_protocol_sha256
             ):
                 raise _origin.PaperExecutionDecisionOriginError(
-                    "campaign inception authority changed before decision"
+                    "campaign inception/protocol authority changed before decision"
                 )
             campaign_evidence = (
                 (campaign_id_key, current_receipt.campaign_id),
@@ -384,6 +408,7 @@ def _install() -> None:
                     campaign_plan_key,
                     current_receipt.evaluation_universe_sha256,
                 ),
+                (campaign_protocol_key, expected_protocol_sha256),
             )
 
         try:

@@ -75,6 +75,7 @@ def _initial_seal():
                 _admission_module._FORWARD_OBSERVATION_SOURCE_ID,
                 _admission_module._FORWARD_OBSERVATION_INCEPTION_RECEIPT_SHA256,
                 _admission_module._FORWARD_OBSERVATION_EVALUATION_PLAN_SHA256,
+                _admission_module._FORWARD_OBSERVATION_PROTOCOL_SHA256,
             ),
             _admission_module._FORWARD_OBSERVATION_BINDING_KEYS,
         ),
@@ -227,6 +228,7 @@ def _build_guard(seal):
                 _admission_module._FORWARD_OBSERVATION_SOURCE_ID,
                 _admission_module._FORWARD_OBSERVATION_INCEPTION_RECEIPT_SHA256,
                 _admission_module._FORWARD_OBSERVATION_EVALUATION_PLAN_SHA256,
+                _admission_module._FORWARD_OBSERVATION_PROTOCOL_SHA256,
             )
             != forward_observation_keys
             or _admission_module._FORWARD_OBSERVATION_BINDING_KEYS

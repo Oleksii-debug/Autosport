@@ -111,6 +111,7 @@ def test_execution_observation_evidence_cannot_become_learning_observation_ident
         "campaign_forward_source_id",
         "campaign_forward_inception_receipt_sha256",
         "campaign_forward_evaluation_plan_sha256",
+        "campaign_forward_protocol_sha256",
     ],
 )
 def test_predecision_issuer_rejects_caller_campaign_binding_keys(

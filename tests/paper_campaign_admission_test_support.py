@@ -139,6 +139,7 @@ class AdmissionFixture:
         campaign_precommit_locator=None,
         campaign_collector_store=None,
         campaign_source_spec=None,
+        campaign_forward_protocol=None,
     ) -> None:
         self.workspace = base / "workspace"
         self.workspace.mkdir()
@@ -206,6 +207,7 @@ class AdmissionFixture:
             campaign_precommit_locator=campaign_precommit_locator,
             campaign_collector_store=campaign_collector_store,
             campaign_source_spec=campaign_source_spec,
+            campaign_forward_protocol=campaign_forward_protocol,
         )
         self.execution_runtime = execution_runtime
         if seed_execution_decision:

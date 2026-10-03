@@ -51,12 +51,14 @@ _FORWARD_OBSERVATION_INCEPTION_RECEIPT_SHA256 = (
 _FORWARD_OBSERVATION_EVALUATION_PLAN_SHA256 = (
     "campaign_forward_evaluation_plan_sha256"
 )
+_FORWARD_OBSERVATION_PROTOCOL_SHA256 = "campaign_forward_protocol_sha256"
 _FORWARD_OBSERVATION_BINDING_KEYS = frozenset(
     {
         _FORWARD_OBSERVATION_CAMPAIGN_ID,
         _FORWARD_OBSERVATION_SOURCE_ID,
         _FORWARD_OBSERVATION_INCEPTION_RECEIPT_SHA256,
         _FORWARD_OBSERVATION_EVALUATION_PLAN_SHA256,
+        _FORWARD_OBSERVATION_PROTOCOL_SHA256,
     }
 )
 _EXECUTION_FIELDS = frozenset(
@@ -258,6 +260,7 @@ def _require_forward_observation_binding(
         _FORWARD_OBSERVATION_EVALUATION_PLAN_SHA256: verification.get(
             "prospective_evaluation_plan_sha256"
         ),
+        _FORWARD_OBSERVATION_PROTOCOL_SHA256: verification.get("protocol_sha256"),
     }
     if any(type(value) is not str or not value for value in expected.values()):
         raise PaperCampaignAdmissionError(

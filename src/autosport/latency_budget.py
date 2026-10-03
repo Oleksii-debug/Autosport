@@ -24,13 +24,13 @@ class LatencyBudgetError(ValueError):
 
 
 def _canonical_label(value: str, *, field: str) -> str:
-    if not isinstance(value, str) or not value or value != value.strip():
+    if type(value) is not str or not value or value != value.strip():
         raise LatencyBudgetError(f"{field} must be a non-empty canonical string")
     return value
 
 
 def _non_negative_ns(value: int, *, field: str) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+    if type(value) is not int or value < 0:
         raise LatencyBudgetError(f"{field} must be a non-negative integer nanosecond value")
     return value
 
@@ -45,8 +45,7 @@ class LatencyBudget:
     def __post_init__(self) -> None:
         _canonical_label(self.name, field="name")
         if (
-            isinstance(self.budget_ns, bool)
-            or not isinstance(self.budget_ns, int)
+            type(self.budget_ns) is not int
             or self.budget_ns <= 0
         ):
             raise LatencyBudgetError("budget_ns must be a positive integer nanosecond value")
@@ -56,8 +55,7 @@ class LatencyBudget:
         """Build a budget from an exact positive integer millisecond value."""
 
         if (
-            isinstance(milliseconds, bool)
-            or not isinstance(milliseconds, int)
+            type(milliseconds) is not int
             or milliseconds <= 0
         ):
             raise LatencyBudgetError("milliseconds must be a positive integer value")
@@ -78,8 +76,8 @@ class LatencyMeasurement:
     def __post_init__(self) -> None:
         _canonical_label(self.operation, field="operation")
         _non_negative_ns(self.elapsed_ns, field="elapsed_ns")
-        if not isinstance(self.budget, LatencyBudget):
-            raise LatencyBudgetError("budget must be a LatencyBudget")
+        if type(self.budget) is not LatencyBudget:
+            raise LatencyBudgetError("budget must be an exact LatencyBudget")
 
     @property
     def within_budget(self) -> bool:
@@ -134,8 +132,7 @@ class LatencySummary:
             "breach_count": self.breach_count,
         }
         if (
-            isinstance(self.sample_count, bool)
-            or not isinstance(self.sample_count, int)
+            type(self.sample_count) is not int
             or self.sample_count <= 0
         ):
             raise LatencyBudgetError("sample_count must be a positive integer")
@@ -225,8 +222,8 @@ def _nearest_rank(sorted_samples: tuple[int, ...], percentile: int) -> int:
 def summarize_latency(samples_ns: Iterable[int], *, budget: LatencyBudget) -> LatencySummary:
     """Summarize samples using deterministic integer nearest-rank percentiles."""
 
-    if not isinstance(budget, LatencyBudget):
-        raise LatencyBudgetError("budget must be a LatencyBudget")
+    if type(budget) is not LatencyBudget:
+        raise LatencyBudgetError("budget must be an exact LatencyBudget")
 
     validated: list[int] = []
     for index, value in enumerate(samples_ns):
@@ -263,8 +260,8 @@ def measure_call(
     """
 
     _canonical_label(operation, field="operation")
-    if not isinstance(budget, LatencyBudget):
-        raise LatencyBudgetError("budget must be a LatencyBudget")
+    if type(budget) is not LatencyBudget:
+        raise LatencyBudgetError("budget must be an exact LatencyBudget")
     if not callable(call):
         raise LatencyBudgetError("call must be callable")
     if not callable(clock_ns):
@@ -272,8 +269,7 @@ def measure_call(
 
     start_ns = clock_ns()
     if (
-        isinstance(start_ns, bool)
-        or not isinstance(start_ns, int)
+        type(start_ns) is not int
         or start_ns < 0
     ):
         raise LatencyBudgetError(
@@ -282,8 +278,7 @@ def measure_call(
     result = call()
     end_ns = clock_ns()
     if (
-        isinstance(end_ns, bool)
-        or not isinstance(end_ns, int)
+        type(end_ns) is not int
         or end_ns < 0
     ):
         raise LatencyBudgetError(

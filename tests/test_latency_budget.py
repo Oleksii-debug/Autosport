@@ -227,3 +227,36 @@ def test_negative_injected_clock_ticks_fail_closed() -> None:
             budget=budget,
             clock_ns=lambda: next(ticks),
         )
+
+
+def test_canonical_metric_scalars_and_budget_reject_subclasses() -> None:
+    class _IntSubclass(int):
+        pass
+
+    class _StrSubclass(str):
+        pass
+
+    class _BudgetSubclass(LatencyBudget):
+        pass
+
+    with pytest.raises(LatencyBudgetError, match="canonical string"):
+        LatencyBudget(_StrSubclass("label"), 1)
+    with pytest.raises(LatencyBudgetError, match="positive integer"):
+        LatencyBudget("label", _IntSubclass(1))
+
+    budget = LatencyBudget("canonical", 10)
+    subclassed_budget = _BudgetSubclass("subclassed", 10)
+    with pytest.raises(LatencyBudgetError, match="exact LatencyBudget"):
+        LatencyMeasurement("op", 1, subclassed_budget)
+    with pytest.raises(LatencyBudgetError, match="exact LatencyBudget"):
+        summarize_latency([1], budget=subclassed_budget)
+    with pytest.raises(LatencyBudgetError, match="exact LatencyBudget"):
+        measure_call("op", lambda: None, budget=subclassed_budget)
+
+    with pytest.raises(LatencyBudgetError, match="non-negative integer nanoseconds"):
+        measure_call(
+            "op",
+            lambda: None,
+            budget=budget,
+            clock_ns=lambda: _IntSubclass(1),
+        )

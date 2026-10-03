@@ -63,6 +63,18 @@ def _append(store: DeploymentRuntimeAuthorityStore, index: int) -> str:
     return record.runtime_authority_id
 
 
+def _record_payload(index: int = 0) -> dict[str, object]:
+    environment, episode = _runtime_inputs(index)
+    return DeploymentRuntimeAuthorityRecord.create(
+        environment=environment,
+        episode=episode,
+        action_semantics_version="1",
+        action_semantics_meanings=_ACTION_MEANINGS,
+        available_at=f"2026-02-{index + 1:02d}T00:00:00Z",
+        previous_record_sha256=deployment_runtime_authority._EMPTY_CHAIN_SHA256,
+    ).to_dict()
+
+
 @pytest.mark.parametrize(
     "attribute",
     (
@@ -4064,3 +4076,124 @@ def test_runtime_authority_rejects_coordinated_publication_finalizer_root_rebind
 
     assert hostile_calls == []
 
+
+
+@pytest.mark.parametrize(
+    ("scope", "message"),
+    (
+        ("record", "runtime authority record envelope is not canonical"),
+        ("environment", "environment payload envelope is not canonical"),
+        ("episode", "episode payload envelope is not canonical"),
+        ("action_semantics", "action semantics payload envelope is not canonical"),
+    ),
+)
+def test_runtime_authority_record_codec_rejects_unknown_envelope_fields(
+    scope: str,
+    message: str,
+) -> None:
+    payload = _record_payload()
+    target = payload if scope == "record" else payload[scope]
+    assert isinstance(target, dict)
+    target["unexpected_field"] = "must-not-be-ignored"
+
+    with pytest.raises(DeploymentRuntimeAuthorityError, match=message):
+        DeploymentRuntimeAuthorityRecord.from_dict(payload)
+
+
+@pytest.mark.parametrize(
+    ("scope", "required_key", "message"),
+    (
+        ("record", "record_sha256", "runtime authority record envelope is not canonical"),
+        ("environment", "environment_id", "environment payload envelope is not canonical"),
+        ("episode", "episode_id", "episode payload envelope is not canonical"),
+        (
+            "action_semantics",
+            "action_semantics_id",
+            "action semantics payload envelope is not canonical",
+        ),
+    ),
+)
+def test_runtime_authority_record_codec_rejects_incomplete_envelopes(
+    scope: str,
+    required_key: str,
+    message: str,
+) -> None:
+    payload = _record_payload()
+    target = payload if scope == "record" else payload[scope]
+    assert isinstance(target, dict)
+    del target[required_key]
+
+    with pytest.raises(DeploymentRuntimeAuthorityError, match=message):
+        DeploymentRuntimeAuthorityRecord.from_dict(payload)
+
+
+def test_runtime_authority_append_rejects_environment_subclass_before_mutation(
+    tmp_path: Path,
+) -> None:
+    class DerivedEnvironmentIdentity(EnvironmentIdentity):
+        pass
+
+    canonical, _episode = _runtime_inputs(0)
+    environment = DerivedEnvironmentIdentity(
+        source_id=canonical.source_id,
+        config_id=canonical.config_id,
+        data_id=canonical.data_id,
+        protocol_id=canonical.protocol_id,
+        cutoff_ts=canonical.cutoff_ts,
+        seed=canonical.seed,
+    )
+    episode = Episode(
+        environment_id=environment.environment_id,
+        episode_key="derived-environment-episode",
+        policy_id="deployment-runtime-test-policy",
+        admissible_actions=("BACK", "LAY"),
+    )
+    store = DeploymentRuntimeAuthorityStore.initialize_pristine(
+        tmp_path / "deployment-runtime-authority.json",
+        authority_root=_authority_root(tmp_path),
+    )
+
+    with pytest.raises(
+        DeploymentRuntimeAuthorityError,
+        match="environment must be exact EnvironmentIdentity",
+    ):
+        store.append(
+            environment=environment,
+            episode=episode,
+            action_semantics_version="1",
+            action_semantics_meanings=_ACTION_MEANINGS,
+        )
+
+    assert store.records() == ()
+
+
+def test_runtime_authority_append_rejects_episode_subclass_before_mutation(
+    tmp_path: Path,
+) -> None:
+    class DerivedEpisode(Episode):
+        pass
+
+    environment, canonical = _runtime_inputs(0)
+    episode = DerivedEpisode(
+        environment_id=canonical.environment_id,
+        episode_key=canonical.episode_key,
+        policy_id=canonical.policy_id,
+        admissible_actions=canonical.admissible_actions,
+    )
+    store = DeploymentRuntimeAuthorityStore.initialize_pristine(
+        tmp_path / "deployment-runtime-authority.json",
+        authority_root=_authority_root(tmp_path),
+    )
+
+    with pytest.raises(
+        DeploymentRuntimeAuthorityError,
+        match="episode must be exact Episode",
+    ):
+        store.append(
+            environment=environment,
+            episode=episode,
+            action_semantics_version="1",
+            action_semantics_meanings=_ACTION_MEANINGS,
+        )
+
+    assert store.records() == ()

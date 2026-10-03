@@ -489,6 +489,68 @@ def test_execution_origin_predicate_rejects_transitive_network_dispatch_rebind(
     assert predicate() is False
 
 
+@pytest.mark.parametrize(
+    "name",
+    (
+        "read_market_event",
+        "read_current_orders_page",
+        "read_cleared_orders_page",
+    ),
+)
+def test_execution_readback_rejects_helper_class_dispatch_rebind(
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+) -> None:
+    client = build_betfair_authenticated_client(
+        BetfairSessionCredentials("app-key", "session-token"),
+        account_label="acct-1",
+    )
+
+    def hostile(*args, **kwargs):
+        del args, kwargs
+        raise AssertionError(
+            "hostile readback helper must not become provider-origin authority"
+        )
+
+    monkeypatch.setattr(BetfairReadOnlyClient, name, hostile)
+    with pytest.raises(
+        BetfairReadOnlyError,
+        match="origin authority implementation changed",
+    ):
+        _read(client)
+
+
+@pytest.mark.parametrize(
+    "name",
+    (
+        "read_market_event",
+        "read_current_orders_page",
+        "read_cleared_orders_page",
+    ),
+)
+def test_execution_readback_rejects_helper_instance_shadow(
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+) -> None:
+    client = build_betfair_authenticated_client(
+        BetfairSessionCredentials("app-key", "session-token"),
+        account_label="acct-1",
+    )
+
+    def hostile(*args, **kwargs):
+        del args, kwargs
+        raise AssertionError(
+            "instance-shadowed readback helper must not become provider-origin authority"
+        )
+
+    monkeypatch.setattr(client, name, hostile)
+    with pytest.raises(
+        BetfairReadOnlyError,
+        match="readback helper dispatch changed",
+    ):
+        _read(client)
+
+
 def test_execution_origin_predicate_rejects_default_tls_context_rebind(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

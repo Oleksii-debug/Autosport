@@ -1536,6 +1536,11 @@ class DeploymentRuntimeAuthorityStore:
                 observed_state_sha256=published_sha256,
                 semantic_binding_sha256=store._semantic_binding_sha256,
             )
+            committed_records = store._read_validated_records_locked()
+            if committed_records:
+                raise DeploymentRuntimeAuthorityError(
+                    "pristine runtime authority gained unexpected records"
+                )
             return store
 
     @staticmethod
@@ -2125,10 +2130,11 @@ class DeploymentRuntimeAuthorityStore:
                 observed_state_sha256=published_sha256,
                 semantic_binding_sha256=self._semantic_binding_sha256,
             )
+            committed_records = self._read_validated_records_locked()
             verified = next(
                 (
                     record
-                    for record in published_records
+                    for record in committed_records
                     if record.runtime_authority_id
                     == candidate.runtime_authority_id
                 ),

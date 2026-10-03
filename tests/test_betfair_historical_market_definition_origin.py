@@ -638,8 +638,8 @@ class BetfairHistoricalMarketDefinitionOriginTests(unittest.TestCase):
 
         with patch.object(
             origin_module,
-            "_issued_origin_digest_matches",
-            new=lambda _origin, _digest: True,
+            "_issued_origin_digest",
+            new=lambda _origin: "0" * 64,
         ), _upstream_authority_stub():
             self.assertFalse(bound.provider_origin_verified)
             with self.assertRaisesRegex(
@@ -657,8 +657,8 @@ class BetfairHistoricalMarketDefinitionOriginTests(unittest.TestCase):
 
         with patch.object(
             origin_module,
-            "_CANONICAL_ISSUED_ORIGIN_DIGEST_MATCHES",
-            new=lambda _origin, _digest: True,
+            "_CANONICAL_ISSUED_ORIGIN_DIGEST",
+            new=lambda _origin: "0" * 64,
         ), _upstream_authority_stub():
             self.assertFalse(bound.provider_origin_verified)
             with self.assertRaisesRegex(

@@ -36,6 +36,8 @@ class BetfairHistoricalMarketDefinitionOriginError(ValueError):
 _PARSER_REVISION = "autosport.betfair-historical-market-definition-origin.v1"
 _TOKEN = object()
 _HEX = frozenset("0123456789abcdef")
+
+
 def _build_issued_origin_registry():
     """Keep positive issuance membership outside mutable module-global containers."""
 
@@ -50,17 +52,16 @@ def _build_issued_origin_registry():
         issued_digests[identity] = digest
         weakref.finalize(origin, issued_digests.pop, identity, None)
 
-    def matches(origin: object, digest: str) -> bool:
+    def issued_digest(origin: object) -> str | None:
         identity = id(origin)
-        return (
-            issued_objects.get(identity) is origin
-            and issued_digests.get(identity) == digest
-        )
+        if issued_objects.get(identity) is not origin:
+            return None
+        return issued_digests.get(identity)
 
-    return register, matches
+    return register, issued_digest
 
 
-_register_issued_origin, _issued_origin_digest_matches = (
+_register_issued_origin, _issued_origin_digest = (
     _build_issued_origin_registry()
 )
 del _build_issued_origin_registry
@@ -71,9 +72,9 @@ _CANONICAL_REGISTER_ISSUED_ORIGIN_CODE = getattr(
     "__code__",
     None,
 )
-_CANONICAL_ISSUED_ORIGIN_DIGEST_MATCHES = _issued_origin_digest_matches
-_CANONICAL_ISSUED_ORIGIN_DIGEST_MATCHES_CODE = getattr(
-    _CANONICAL_ISSUED_ORIGIN_DIGEST_MATCHES,
+_CANONICAL_ISSUED_ORIGIN_DIGEST = _issued_origin_digest
+_CANONICAL_ISSUED_ORIGIN_DIGEST_CODE = getattr(
+    _CANONICAL_ISSUED_ORIGIN_DIGEST,
     "__code__",
     None,
 )
@@ -87,9 +88,9 @@ def _assert_canonical_issued_registry_dispatch() -> None:
             _CANONICAL_REGISTER_ISSUED_ORIGIN_CODE,
         ),
         (
-            _issued_origin_digest_matches,
-            _CANONICAL_ISSUED_ORIGIN_DIGEST_MATCHES,
-            _CANONICAL_ISSUED_ORIGIN_DIGEST_MATCHES_CODE,
+            _issued_origin_digest,
+            _CANONICAL_ISSUED_ORIGIN_DIGEST,
+            _CANONICAL_ISSUED_ORIGIN_DIGEST_CODE,
         ),
     )
     for current, expected, expected_code in checks:
@@ -311,9 +312,14 @@ class BetfairHistoricalMarketDefinitionOrigin:
             raise BetfairHistoricalMarketDefinitionOriginError(
                 "historical marketDefinition origin mutated after canonical issuance"
             ) from exc
-        if not _CANONICAL_ISSUED_ORIGIN_DIGEST_MATCHES(self, current_digest):
+        issued_digest = _CANONICAL_ISSUED_ORIGIN_DIGEST(self)
+        if issued_digest is None:
             raise BetfairHistoricalMarketDefinitionOriginError(
-                "historical marketDefinition origin was not issued unchanged by the canonical binder"
+                "historical marketDefinition origin was not issued by the canonical binder"
+            )
+        if current_digest != issued_digest:
+            raise BetfairHistoricalMarketDefinitionOriginError(
+                "historical marketDefinition origin mutated after canonical issuance"
             )
 
     @property

@@ -231,6 +231,7 @@ class ProviderAccountHeadroomAssessment:
     acquisition_id: str
     acquisition_snapshot_sha256: str
     acquired_at: str
+    balance_observed_at: str
     expires_at: str
     ledger_snapshot_sha256: str
     ledger_event_count: int
@@ -258,6 +259,7 @@ class ProviderAccountHeadroomAssessment:
             "currency",
             "acquisition_id",
             "acquired_at",
+            "balance_observed_at",
             "expires_at",
             "plan_id",
             "action_id",
@@ -326,10 +328,16 @@ class ProviderAccountHeadroomAssessment:
             )
         if type(self.schema_version) is not int or self.schema_version != _SCHEMA_VERSION:
             raise ProviderAccountHeadroomError("unsupported headroom assessment schema")
-        if _timestamp(self.expires_at, "expires_at") <= _timestamp(
-            self.acquired_at, "acquired_at"
-        ):
-            raise ProviderAccountHeadroomError("assessment expiry must follow acquisition")
+        acquired_time = _timestamp(self.acquired_at, "acquired_at")
+        balance_time = _timestamp(self.balance_observed_at, "balance_observed_at")
+        if balance_time > acquired_time:
+            raise ProviderAccountHeadroomError(
+                "provider balance observation cannot postdate product acquisition"
+            )
+        if _timestamp(self.expires_at, "expires_at") <= balance_time:
+            raise ProviderAccountHeadroomError(
+                "assessment expiry must follow provider balance observation"
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -393,6 +401,7 @@ def _assessment_payload(value: ProviderAccountHeadroomAssessment) -> dict[str, o
         "acquisition_id": value.acquisition_id,
         "acquisition_snapshot_sha256": value.acquisition_snapshot_sha256,
         "acquired_at": value.acquired_at,
+        "balance_observed_at": value.balance_observed_at,
         "expires_at": value.expires_at,
         "ledger_snapshot_sha256": value.ledger_snapshot_sha256,
         "ledger_event_count": value.ledger_event_count,
@@ -462,7 +471,7 @@ def _require_live_balance(
     acquired: AuthoritativeAccountSnapshot,
     *,
     now: datetime,
-) -> tuple[Decimal, str, datetime]:
+) -> tuple[Decimal, str, datetime, datetime]:
     if type(acquired) is not AuthoritativeAccountSnapshot:
         raise ProviderAccountHeadroomError(
             "account evidence must be exact AuthoritativeAccountSnapshot"
@@ -498,16 +507,26 @@ def _require_live_balance(
             "provider account currency is not canonical three-letter code"
         )
     acquired_at = _timestamp(receipt.acquired_at, "acquired_at")
+    balance_observed_at = _timestamp(balance.observed_at, "balance observed_at")
     if acquired_at > now:
         raise ProviderAccountHeadroomStale("account acquisition is from the future")
-    if now - acquired_at > _PRODUCT_MAX_ACCOUNT_SNAPSHOT_AGE:
+    if balance_observed_at > acquired_at:
+        raise ProviderAccountHeadroomError(
+            "provider balance observation postdates product acquisition receipt"
+        )
+    if balance_observed_at > now:
         raise ProviderAccountHeadroomStale(
-            "account acquisition exceeds product headroom freshness ceiling"
+            "provider balance observation is from the future"
+        )
+    if now - balance_observed_at > _PRODUCT_MAX_ACCOUNT_SNAPSHOT_AGE:
+        raise ProviderAccountHeadroomStale(
+            "provider balance observation exceeds product headroom freshness ceiling"
         )
     return (
         _decimal(balance.available_balance, "available_to_bet"),
         balance.currency,
         acquired_at,
+        balance_observed_at,
     )
 
 
@@ -541,6 +560,14 @@ def _resolve_account_liability_lattice(
     for plan_id in _ledger_plan_ids(start.payload):
         try:
             view = _VERIFIED_EXECUTION_VIEW(ledger, plan_id)
+            relevant_attempts = tuple(
+                attempt
+                for attempt in view.attempts
+                if (attempt.action.bookmaker_id, attempt.action.account_id)
+                == (provider_id, account_id)
+            )
+            if not relevant_attempts:
+                continue
             capital: ExecutionCapitalAtRiskEvidence = resolve_execution_capital_at_risk(
                 ledger,
                 plan_id,
@@ -564,10 +591,8 @@ def _resolve_account_liability_lattice(
             raise ProviderAccountHeadroomError(
                 "canonical capital-at-risk evidence duplicated attempt identity"
             )
-        for attempt in view.attempts:
+        for attempt in relevant_attempts:
             action = attempt.action
-            if (action.bookmaker_id, action.account_id) != (provider_id, account_id):
-                continue
             risk = risk_by_attempt.get(attempt.attempt.attempt_id)
             if risk is None:
                 raise ProviderAccountHeadroomUnsupported(
@@ -608,7 +633,10 @@ def assess_provider_account_headroom(
     plan_id = _text(plan_id, "plan_id")
     action_id = _text(action_id, "action_id")
     now = _utc_now()
-    available, currency, acquired_at = _require_live_balance(acquired, now=now)
+    available, currency, acquired_at, balance_observed_at = _require_live_balance(
+        acquired,
+        now=now,
+    )
 
     snapshot = _VERIFIED_SNAPSHOT(ledger)
     try:
@@ -661,7 +689,7 @@ def assess_provider_account_headroom(
         }
     )
     action_expiry = _timestamp(action.expires_at, "action expires_at")
-    freshness_expiry = acquired_at + _PRODUCT_MAX_ACCOUNT_SNAPSHOT_AGE
+    freshness_expiry = balance_observed_at + _PRODUCT_MAX_ACCOUNT_SNAPSHOT_AGE
     expiry = min(action_expiry, freshness_expiry)
     if now >= expiry:
         raise ProviderAccountHeadroomStale(
@@ -675,6 +703,7 @@ def assess_provider_account_headroom(
         acquisition_id=acquired.receipt.acquisition_id,
         acquisition_snapshot_sha256=acquired.receipt.snapshot_sha256,
         acquired_at=acquired.receipt.acquired_at,
+        balance_observed_at=acquired.snapshot.balance.observed_at,
         expires_at=expiry.isoformat(),
         ledger_snapshot_sha256=snapshot.sha256,
         ledger_event_count=snapshot.event_count,
@@ -726,10 +755,6 @@ def reserve_observed_provider_headroom(
         raise TypeError("ledger must be exact RealExecutionLedger")
     _assert_issued(assessment)
     attempt_id = _text(attempt_id, "attempt_id")
-    if assessment.decision is not HeadroomDecision.SUFFICIENT_LOWER_BOUND:
-        raise ProviderAccountHeadroomUnsupported(
-            "new internal reservation requires proven sufficient lower-bound headroom"
-        )
     if type(acquired) is not AuthoritativeAccountSnapshot:
         raise ProviderAccountHeadroomError(
             "account evidence must be exact AuthoritativeAccountSnapshot"
@@ -742,7 +767,6 @@ def reserve_observed_provider_headroom(
             "account acquisition changed after headroom assessment"
         )
 
-    prior_exists = False
     try:
         _ATTEMPT_STATE(ledger, attempt_id)
     except KeyError:
@@ -751,6 +775,10 @@ def reserve_observed_provider_headroom(
         prior_exists = True
 
     if not prior_exists:
+        if assessment.decision is not HeadroomDecision.SUFFICIENT_LOWER_BOUND:
+            raise ProviderAccountHeadroomUnsupported(
+                "new internal reservation requires proven sufficient lower-bound headroom"
+            )
         now = _utc_now()
         _require_live_balance(acquired, now=now)
         if now >= _timestamp(assessment.expires_at, "assessment expires_at"):
@@ -759,6 +787,9 @@ def reserve_observed_provider_headroom(
             )
 
     try:
+        # Canonical begin_attempt resolves an exact existing attempt before its
+        # stale-snapshot fence. That ordering is essential for crash/restart
+        # idempotency: identity resolution consumes no new provider headroom.
         attempt: ExecutionAttempt = _BEGIN_ATTEMPT(
             ledger,
             plan_id=assessment.plan_id,

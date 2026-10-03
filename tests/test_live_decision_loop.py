@@ -528,6 +528,79 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
                 2,
             )
 
+    def test_concurrent_update_during_multi_input_cut_retries_before_decision(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            clock = _ManualClock(self.START + timedelta(seconds=1))
+            observer = _DurableObserver(
+                workspace,
+                [
+                    (
+                        self._event(selection="selection-a", sequence=1),
+                        self._event(selection="selection-b", sequence=1),
+                    ),
+                    (),
+                ],
+            )
+            factory = _EmptyIntentFactory()
+            loop = self._loop(
+                workspace,
+                observer=observer,
+                factory=factory,
+                clock=clock,
+            )
+            self._register_two(loop)
+
+            real_capture = loop.dependencies.coherent_decision_views
+            injected = {"done": False}
+            concurrent = self._event(
+                selection="selection-b",
+                sequence=2,
+                odds="3.20",
+                observed=self.START + timedelta(milliseconds=1500),
+            )
+
+            def capture_then_advance(*args, **kwargs):
+                snapshots = real_capture(*args, **kwargs)
+                if not injected["done"]:
+                    injected["done"] = True
+                    store = SQLiteMarketStore(workspace / "market.db")
+                    try:
+                        store.append(concurrent)
+                    finally:
+                        store.close()
+                    loop.mirror_updates.accept_persisted(concurrent)
+                return snapshots
+
+            with patch.object(
+                loop.dependencies,
+                "coherent_decision_views",
+                side_effect=capture_then_advance,
+            ):
+                first = loop.run_cycle()
+
+            self.assertEqual(first.status, LiveCycleStatus.BACKPRESSURE)
+            self.assertEqual(first.affected_input_ids, ("input-a", "input-b"))
+            self.assertIn("revision advanced", first.detail)
+            self.assertEqual(factory.calls, [])
+            self.assertFalse((workspace / "decisions.jsonl").exists())
+
+            clock.value = self.START + timedelta(seconds=2)
+            second = loop.run_cycle()
+
+            self.assertEqual(second.status, LiveCycleStatus.DECIDED)
+            self.assertEqual(
+                factory.calls,
+                [
+                    ("input-a", (("selection-a", 1, "open"),)),
+                    ("input-b", (("selection-b", 2, "open"),)),
+                ],
+            )
+            records = JsonlDecisionLedger(
+                workspace / "decisions.jsonl"
+            ).verified_records()
+            self.assertEqual(len(records), 1)
+
     def test_single_dirty_and_no_change_cycles_avoid_unrelated_mirror_scans(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

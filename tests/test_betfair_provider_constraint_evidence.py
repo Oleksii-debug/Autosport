@@ -263,3 +263,42 @@ def test_public_serialized_shape_never_mints_provider_authority() -> None:
     assert result.current_constraint_authority is False
     assert result.execution_authorized is False
     assert result.real_money_execution is False
+
+
+
+def test_equivalent_decimal_encodings_share_semantics() -> None:
+    integer = observation(min_size=Decimal("1"), min_payout=Decimal("10"))
+    scaled = observation(
+        min_size=Decimal("1.0"),
+        min_payout=Decimal("10.00"),
+        source_revision="scaled-decimals",
+        source_sha256=HASH_B,
+    )
+
+    assert integer.semantic_sha256 == scaled.semantic_sha256
+    result = resolve(integer, scaled)
+    assert result.state is BetfairConstraintResolutionState.CONSISTENT_UNVERIFIED
+    assert result.min_standard_size == Decimal("1")
+
+
+def test_duplicate_generation_does_not_change_resolution_identity() -> None:
+    item = observation()
+
+    single = resolve(item)
+    duplicate = resolve(item, item)
+
+    assert duplicate.resolution_sha256 == single.resolution_sha256
+    assert duplicate.candidate_generation_sha256s == single.candidate_generation_sha256s
+    assert len(duplicate.candidate_generation_sha256s) == 1
+
+
+def test_observation_batch_is_bounded() -> None:
+    item = observation()
+
+    with pytest.raises(BetfairProviderConstraintError, match="bounded limit"):
+        resolve_betfair_standard_limit_constraint_evidence(
+            observations=tuple(item for _ in range(257)),
+            as_of=T0 + timedelta(days=1),
+            jurisdiction_scope="UK_INTERNATIONAL",
+            currency_code="GBP",
+        )

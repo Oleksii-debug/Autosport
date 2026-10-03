@@ -874,30 +874,57 @@ def test_by_id_returns_transactions_strictly_after_requested_cursor(monkeypatch)
     assert [row.transaction_id for row in result.postings] == ["9001"]
 
 
-def test_posting_category_stays_raw_without_undocumented_numeric_mapping(monkeypatch):
-    payload = postings_by_id(
-        posting(
-            9001,
-            category=1,
-            order_id=None,
-            market_id=None,
-        ),
-        posting(
-            9002,
-            amount="-0.50",
-            balance="777.00",
-            category=2,
-            order_id=None,
-            market_id=None,
+@pytest.mark.parametrize(
+    ("category", "order_id", "market_id", "message"),
+    (
+        (1, None, None, "Settlement posting requires exact OrderId"),
+        (1, "123", "200", "Settlement posting requires exact OrderId"),
+        (2, None, None, "Commission posting requires exact MarketId"),
+        (2, "123", "200", "Commission posting requires exact MarketId"),
+        (3, "123", None, "Other posting cannot claim"),
+        (3, None, "200", "Other posting cannot claim"),
+    ),
+)
+def test_documented_posting_category_handle_contract_fails_closed(
+    monkeypatch,
+    category,
+    order_id,
+    market_id,
+    message,
+):
+    client, _ = economic_client(
+        monkeypatch,
+        postings_by_id(
+            posting(
+                9001,
+                category=category,
+                order_id=order_id,
+                market_id=market_id,
+            )
         ),
     )
-    client, _ = economic_client(monkeypatch, payload)
 
-    result = client.read_account_postings_by_id(9000)
+    with pytest.raises(BetdaqEconomicReadbackError, match=message):
+        client.read_account_postings_by_id(9000)
 
-    assert [row.posting_category for row in result.postings] == [1, 2]
-    assert [row.order_id for row in result.postings] == [None, None]
-    assert [row.market_id for row in result.postings] == [None, None]
+
+def test_unknown_future_posting_category_stays_raw(monkeypatch):
+    client, _ = economic_client(
+        monkeypatch,
+        postings_by_id(
+            posting(
+                9001,
+                category=7,
+                order_id="123",
+                market_id="200",
+            )
+        ),
+    )
+
+    row = client.read_account_postings_by_id(9000).postings[0]
+    assert row.posting_category == 7
+    assert row.order_id == "123"
+    assert row.market_id == "200"
 
 
 def test_window_postings_reject_provider_order_that_moves_backward_in_time(monkeypatch):
@@ -958,6 +985,7 @@ def test_multiple_settlement_and_commission_postings_are_not_collapsed(monkeypat
             balance="102.50",
             category=1,
             order_id="123",
+            market_id=None,
         ),
         posting(
             9002,
@@ -971,6 +999,7 @@ def test_multiple_settlement_and_commission_postings_are_not_collapsed(monkeypat
             amount="-0.50",
             balance="101.00",
             category=2,
+            order_id=None,
             market_id="200",
         ),
         posting(

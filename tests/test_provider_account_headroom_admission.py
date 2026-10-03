@@ -883,3 +883,276 @@ def test_recomputed_insufficient_assessment_can_resolve_exact_existing_attempt(
     assert replay.attempt_fingerprint == first.attempt_fingerprint
     assert replay.reserved_at == first.reserved_at
     assert ledger.attempt_state("attempt-1") is AttemptState.RESERVED
+
+
+def test_headroom_rejects_missing_denomination_coverage_for_relevant_plan(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    acquired, _ = _acquire_balance(monkeypatch, tmp_path, "100")
+    target = _plan("target", _action("target-action", "10"))
+    liability = _plan("liability", _action("liability-action", "20"))
+    ledger = _ledger_with_plans(tmp_path, target, liability)
+    ledger.begin_attempt(
+        plan_id=_actual_plan_id(ledger, "liability"),
+        action_id="liability-action",
+        attempt_id="liability-attempt",
+    )
+
+    with pytest.raises(
+        ProviderAccountHeadroomUnsupported,
+        match="lacks exact supervised denomination binding",
+    ):
+        assess_provider_account_headroom(
+            ledger,
+            acquired,
+            plan_id=_actual_plan_id(ledger, "target"),
+            action_id="target-action",
+            bound_plans=(ledger._test_bound_plans[0],),
+        )
+
+
+def test_headroom_rejects_provider_currency_mismatching_durable_goal(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    acquired, _ = _acquire_balance(monkeypatch, tmp_path, "100")
+    usd_goal = replace(
+        _HEADROOM_GOAL,
+        goal_id="headroom-usd-goal",
+        currency="USD",
+    )
+    usd_goal_sha256 = provenance_for(usd_goal).contract_sha256
+    target = _plan(
+        "target",
+        _action("target-action", "10"),
+        economic_goal_contract_sha256=usd_goal_sha256,
+    )
+    ledger = _ledger_with_plans(
+        tmp_path,
+        target,
+        economic_goal=usd_goal,
+    )
+
+    with pytest.raises(
+        ProviderAccountHeadroomUnsupported,
+        match="provider balance currency mismatches durable economic-goal currency",
+    ):
+        _assess(
+            ledger,
+            acquired,
+            plan_id="target",
+            action_id="target-action",
+        )
+
+
+def test_headroom_rejects_bound_plan_from_noncurrent_goal_revision(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    acquired, _ = _acquire_balance(monkeypatch, tmp_path, "100")
+    stale_goal = replace(
+        _HEADROOM_GOAL,
+        goal_id="stale-goal",
+    )
+    stale_sha256 = provenance_for(stale_goal).contract_sha256
+    target = _plan(
+        "target",
+        _action("target-action", "10"),
+        economic_goal_contract_sha256=stale_sha256,
+    )
+    ledger = _ledger_with_plans(tmp_path, target)
+
+    with pytest.raises(
+        ProviderAccountHeadroomUnsupported,
+        match="does not match current durable denomination authority",
+    ):
+        _assess(
+            ledger,
+            acquired,
+            plan_id="target",
+            action_id="target-action",
+        )
+
+
+def test_headroom_rejects_mixed_goal_liability_before_arithmetic(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    acquired, _ = _acquire_balance(monkeypatch, tmp_path, "100")
+    foreign_goal = replace(
+        _HEADROOM_GOAL,
+        goal_id="foreign-goal",
+    )
+    foreign_sha256 = provenance_for(foreign_goal).contract_sha256
+    target = _plan("target", _action("target-action", "10"))
+    liability = _plan(
+        "liability",
+        _action("liability-action", "90"),
+        economic_goal_contract_sha256=foreign_sha256,
+    )
+    ledger = _ledger_with_plans(tmp_path, target, liability)
+    ledger.begin_attempt(
+        plan_id=_actual_plan_id(ledger, "liability"),
+        action_id="liability-action",
+        attempt_id="liability-attempt",
+    )
+
+    with pytest.raises(
+        ProviderAccountHeadroomUnsupported,
+        match="does not match current durable denomination authority",
+    ):
+        _assess(
+            ledger,
+            acquired,
+            plan_id="target",
+            action_id="target-action",
+        )
+
+
+def test_unrelated_account_plan_needs_no_denomination_coverage(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    acquired, _ = _acquire_balance(monkeypatch, tmp_path, "100")
+    target = _plan("target", _action("target-action", "10"))
+    foreign = _plan(
+        "foreign",
+        _action("foreign-action", "90", account_id="acct-2"),
+    )
+    ledger = _ledger_with_plans(tmp_path, target, foreign)
+    ledger.begin_attempt(
+        plan_id=_actual_plan_id(ledger, "foreign"),
+        action_id="foreign-action",
+        attempt_id="foreign-attempt-denomination",
+    )
+
+    assessment = assess_provider_account_headroom(
+        ledger,
+        acquired,
+        plan_id=_actual_plan_id(ledger, "target"),
+        action_id="target-action",
+        bound_plans=(ledger._test_bound_plans[0],),
+    )
+
+    assert assessment.decision is HeadroomDecision.SUFFICIENT_LOWER_BOUND
+    assert assessment.definitely_unreflected_product_liability == Decimal("0")
+    assert assessment.unknown_reflection_product_liability == Decimal("0")
+
+
+def test_assessment_binds_current_goal_and_exact_denomination_coverage(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    acquired, _ = _acquire_balance(monkeypatch, tmp_path, "100")
+    target = _plan("target", _action("target-action", "10"))
+    liability = _plan("liability", _action("liability-action", "20"))
+    ledger = _ledger_with_plans(tmp_path, target, liability)
+    ledger.begin_attempt(
+        plan_id=_actual_plan_id(ledger, "liability"),
+        action_id="liability-action",
+        attempt_id="liability-attempt",
+    )
+
+    assessment = _assess(
+        ledger,
+        acquired,
+        plan_id="target",
+        action_id="target-action",
+    )
+
+    assert assessment.currency == "GBP"
+    assert assessment.economic_goal_contract_sha256 == _HEADROOM_GOAL_SHA256
+    assert len(assessment.denomination_authority_sha256) == 64
+    assert assessment.definitely_unreflected_product_liability == Decimal("20")
+    assert assessment.upper_headroom == Decimal("80")
+
+
+def test_new_reservation_rejects_missing_bound_plan_coverage_after_assessment(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    acquired, _ = _acquire_balance(monkeypatch, tmp_path, "100")
+    target = _plan("target", _action("target-action", "10"))
+    ledger = _ledger_with_plans(tmp_path, target)
+    assessment = _assess(
+        ledger,
+        acquired,
+        plan_id="target",
+        action_id="target-action",
+    )
+
+    with pytest.raises(
+        ProviderAccountHeadroomUnsupported,
+        match="exact bound supervised execution plans are required",
+    ):
+        reserve_observed_provider_headroom(
+            ledger,
+            acquired,
+            assessment,
+            attempt_id="new-attempt",
+            bound_plans=(),
+        )
+
+
+def test_goal_revision_drift_revokes_new_headroom_reservation(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    acquired, _ = _acquire_balance(monkeypatch, tmp_path, "100")
+    target = _plan("target", _action("target-action", "10"))
+    ledger = _ledger_with_plans(tmp_path, target)
+    assessment = _assess(
+        ledger,
+        acquired,
+        plan_id="target",
+        action_id="target-action",
+    )
+
+    successor = replace(_HEADROOM_GOAL, revision=2)
+    EconomicGoalStore(tmp_path).persist_automatic_successor(successor)
+
+    with pytest.raises(
+        ProviderAccountHeadroomStale,
+        match="economic-goal denomination authority changed",
+    ):
+        _reserve(
+            ledger,
+            acquired,
+            assessment,
+            attempt_id="new-attempt",
+        )
+
+
+def test_existing_attempt_replay_does_not_require_new_denomination_authority(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    acquired, _ = _acquire_balance(monkeypatch, tmp_path, "100")
+    target = _plan("target", _action("target-action", "10"))
+    ledger = _ledger_with_plans(tmp_path, target)
+    assessment = _assess(
+        ledger,
+        acquired,
+        plan_id="target",
+        action_id="target-action",
+    )
+    first = _reserve(
+        ledger,
+        acquired,
+        assessment,
+        attempt_id="replay-attempt",
+    )
+
+    replay = reserve_observed_provider_headroom(
+        ledger,
+        acquired,
+        assessment,
+        attempt_id="replay-attempt",
+        bound_plans=(),
+    )
+
+    assert replay.attempt_id == first.attempt_id
+    assert replay.attempt_fingerprint == first.attempt_fingerprint
+    assert replay.post_reservation_ledger_sha256 == first.post_reservation_ledger_sha256
+

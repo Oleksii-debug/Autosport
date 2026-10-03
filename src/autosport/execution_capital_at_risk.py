@@ -284,6 +284,10 @@ class ExecutionCapitalAtRiskEvidence:
         or caller-mutable object provenance.
         """
 
+        if type(self) is not ExecutionCapitalAtRiskEvidence:
+            raise ExecutionCapitalAtRiskError(
+                "capital-at-risk evidence must be exact canonical type"
+            )
         if type(ledger) is not RealExecutionLedger:
             raise ExecutionCapitalAtRiskError(
                 "ledger must be exact RealExecutionLedger"
@@ -719,6 +723,54 @@ def _install_capital_risk_dispatch_authority() -> None:
     exact_globals = globals
     exact_getattr = getattr
 
+    # Every Python helper that can change the conservative monetary projection is
+    # part of the authority graph.  raw_resolve/raw_currentness use module-global
+    # lookups, so pin both binding identity and executable identity here rather
+    # than allowing coordinated helper rebinding to redefine "canonical" risk.
+    derivation_functions = (
+        ("_ledger_source_sha256", _ledger_source_sha256, _ledger_source_sha256.__code__),
+        ("_requested_limit_capital", _requested_limit_capital, _requested_limit_capital.__code__),
+        ("_accepted_capital", _accepted_capital, _accepted_capital.__code__),
+        ("_attempt_risk", _attempt_risk, _attempt_risk.__code__),
+        ("_sum_capital", _sum_capital, _sum_capital.__code__),
+        ("_bounded_precision", _bounded_precision, _bounded_precision.__code__),
+        ("_add_precision", _add_precision, _add_precision.__code__),
+        ("_add", _add, _add.__code__),
+        ("_subtract", _subtract, _subtract.__code__),
+        ("_subtract_nonnegative", _subtract_nonnegative, _subtract_nonnegative.__code__),
+        ("_decimal_text", _decimal_text, _decimal_text.__code__),
+        ("_attempt_payload", _attempt_payload, _attempt_payload.__code__),
+        ("_evidence_payload", _evidence_payload, _evidence_payload.__code__),
+        ("_evidence_digest", _evidence_digest, _evidence_digest.__code__),
+    )
+    derivation_bindings = (
+        ("Decimal", Decimal),
+        ("localcontext", localcontext),
+        ("AttemptState", AttemptState),
+        ("AcknowledgementStatus", AcknowledgementStatus),
+        ("ExecutionAttemptReadView", ExecutionAttemptReadView),
+        ("VerifiedExecutionPlanView", VerifiedExecutionPlanView),
+        ("RealExecutionLedger", RealExecutionLedger),
+        ("ExecutionLedgerIntegrityError", ExecutionLedgerIntegrityError),
+        ("AttemptCapitalAtRisk", AttemptCapitalAtRisk),
+        ("ExecutionCapitalAtRiskEvidence", ExecutionCapitalAtRiskEvidence),
+    )
+    attempt_post_init = AttemptCapitalAtRisk.__post_init__
+    attempt_post_init_code = attempt_post_init.__code__
+    evidence_post_init = ExecutionCapitalAtRiskEvidence.__post_init__
+    evidence_post_init_code = evidence_post_init.__code__
+    json_module = json
+    json_dumps = json.dumps
+    json_dumps_code = exact_getattr(json_dumps, "__code__", None)
+    hashlib_module = hashlib
+    sha256 = hashlib.sha256
+    os_module = os
+    os_path = os.path
+    path_normcase = os.path.normcase
+    path_realpath = os.path.realpath
+    path_abspath = os.path.abspath
+    os_fspath = os.fspath
+
     def require_dispatch() -> None:
         namespace = exact_globals()
         if (
@@ -730,10 +782,41 @@ def _install_capital_risk_dispatch_authority() -> None:
             is not raw_resolve_code
             or exact_getattr(raw_currentness, "__code__", None)
             is not raw_currentness_code
+            or AttemptCapitalAtRisk.__post_init__ is not attempt_post_init
+            or exact_getattr(attempt_post_init, "__code__", None)
+            is not attempt_post_init_code
+            or ExecutionCapitalAtRiskEvidence.__post_init__ is not evidence_post_init
+            or exact_getattr(evidence_post_init, "__code__", None)
+            is not evidence_post_init_code
+            or namespace.get("json") is not json_module
+            or json_module.dumps is not json_dumps
+            or exact_getattr(json_dumps, "__code__", None) is not json_dumps_code
+            or namespace.get("hashlib") is not hashlib_module
+            or hashlib_module.sha256 is not sha256
+            or namespace.get("os") is not os_module
+            or os_module.path is not os_path
+            or os_path.normcase is not path_normcase
+            or os_path.realpath is not path_realpath
+            or os_path.abspath is not path_abspath
+            or os_module.fspath is not os_fspath
         ):
             raise ExecutionCapitalAtRiskError(
                 "capital-risk ledger read dispatch changed"
             )
+        for name, expected, expected_code in derivation_functions:
+            current = namespace.get(name)
+            if (
+                current is not expected
+                or exact_getattr(expected, "__code__", None) is not expected_code
+            ):
+                raise ExecutionCapitalAtRiskError(
+                    "capital-risk ledger read dispatch changed"
+                )
+        for name, expected in derivation_bindings:
+            if namespace.get(name) is not expected:
+                raise ExecutionCapitalAtRiskError(
+                    "capital-risk ledger read dispatch changed"
+                )
 
     def authoritative_resolve(
         ledger: RealExecutionLedger,
@@ -751,13 +834,14 @@ def _install_capital_risk_dispatch_authority() -> None:
         # Snapshot/current-source validation is necessary but not sufficient:
         # caller-created evidence can copy those identities while understating risk.
         # Re-derive the complete canonical evidence from the same durable ledger and
-        # require exact value equality.  No mutable issuance registry is involved.
+        # require the same canonical payload digest. No mutable issuance registry is
+        # involved, and the full derivation helper graph is pinned above.
         require_dispatch()
         raw_currentness(self, ledger)
         require_dispatch()
         canonical = raw_resolve(ledger, self.plan_id)
         require_dispatch()
-        if canonical != self:
+        if canonical.evidence_sha256 != self.evidence_sha256:
             raise ExecutionCapitalAtRiskError(
                 "capital-at-risk evidence is not current product-issued authority"
             )

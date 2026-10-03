@@ -36,6 +36,12 @@ _CANONICAL_SOAP11_NS = _account._SOAP11_NS
 _CANONICAL_SOAP12_NS = _account._SOAP12_NS
 _CANONICAL_ACCOUNT_CURRENCY = _account._currency
 _CANONICAL_ACCOUNT_CURRENCY_CODE = getattr(_CANONICAL_ACCOUNT_CURRENCY, "__code__", None)
+_CANONICAL_ACCOUNT_CONTEXT_DISPATCH = _account._canonical_account_context_dispatch
+_CANONICAL_ACCOUNT_CONTEXT_DISPATCH_CODE = getattr(
+    _CANONICAL_ACCOUNT_CONTEXT_DISPATCH,
+    "__code__",
+    None,
+)
 _CANONICAL_AUTHENTICATED_ACCOUNT_CONTEXT = _account._authenticated_account_context
 _CANONICAL_AUTHENTICATED_ACCOUNT_CONTEXT_CODE = getattr(
     _CANONICAL_AUTHENTICATED_ACCOUNT_CONTEXT,
@@ -104,9 +110,23 @@ def _canonical_economic_transport_dispatch():
 
 
 def _canonical_authenticated_account_context_dispatch():
-    """Return the exact existing account-context resolver and type authority."""
+    """Reuse the shared account-context authority and verify its exact resolver."""
 
-    live_resolver = getattr(_account, "_authenticated_account_context", None)
+    live_dispatch = getattr(_account, "_canonical_account_context_dispatch", None)
+    if (
+        live_dispatch is not _CANONICAL_ACCOUNT_CONTEXT_DISPATCH
+        or getattr(live_dispatch, "__code__", None)
+        is not _CANONICAL_ACCOUNT_CONTEXT_DISPATCH_CODE
+    ):
+        raise BetdaqEconomicReadbackError(
+            "canonical BETDAQ authenticated account context authority was replaced"
+        )
+    try:
+        live_resolver = live_dispatch()
+    except _account.BetdaqAccountReadOnlyError:
+        raise BetdaqEconomicReadbackError(
+            "canonical BETDAQ authenticated account context authority was replaced"
+        ) from None
     live_type = getattr(_account, "BetdaqAuthenticatedAccountContext", None)
     if (
         live_resolver is not _CANONICAL_AUTHENTICATED_ACCOUNT_CONTEXT

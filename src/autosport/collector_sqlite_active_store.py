@@ -5,6 +5,7 @@ import json
 import math
 import os
 import sqlite3
+import stat
 from datetime import timedelta
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -24,6 +25,7 @@ from .collector_sqlite_store import (
     _payload_digest,
 )
 from .domain import MarketEvent
+from .workspace_lock import _open_read_only_descriptor
 
 
 _SQLITE_HEADER = b"SQLite format 3\x00"
@@ -69,19 +71,13 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
     """Canonical indexed SQLite store with bounded product-compatible durability."""
 
     @staticmethod
-    def _path_file_identity(path: Path) -> tuple[int, int]:
-        """Return one cross-platform identity for the file currently at path."""
-
-        try:
-            result = os.stat(path, follow_symlinks=True)
-        except OSError as exc:
-            raise ValueError(
-                "canonical collector store file identity is unavailable"
-            ) from exc
+    def _stat_file_identity(result: os.stat_result) -> tuple[int, int]:
         device = result.st_dev
         inode = result.st_ino
         if (
-            type(device) is not int
+            not stat.S_ISREG(result.st_mode)
+            or result.st_nlink != 1
+            or type(device) is not int
             or device < 0
             or type(inode) is not int
             or inode <= 0
@@ -90,6 +86,41 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
                 "canonical collector store file identity is unavailable"
             )
         return device, inode
+
+    @classmethod
+    def _path_file_identity(cls, path: Path) -> tuple[int, int]:
+        """Return one no-alias cross-platform identity for the canonical path."""
+
+        try:
+            result = os.stat(path, follow_symlinks=False)
+        except OSError as exc:
+            raise ValueError(
+                "canonical collector store file identity is unavailable"
+            ) from exc
+        return cls._stat_file_identity(result)
+
+    @classmethod
+    def _read_existing_prefix(cls, path: Path) -> tuple[bytes, tuple[int, int]]:
+        """Read an existing authority only through the canonical no-follow seam."""
+
+        try:
+            path_before = cls._path_file_identity(path)
+            descriptor = _open_read_only_descriptor(path)
+        except (OSError, ValueError) as exc:
+            raise ValueError("invalid causal collector store") from exc
+        try:
+            opened_before = cls._stat_file_identity(os.fstat(descriptor))
+            path_opened = cls._path_file_identity(path)
+            if opened_before != path_before or path_opened != path_before:
+                raise ValueError("canonical collector store file identity changed")
+            prefix = os.read(descriptor, len(_SQLITE_HEADER))
+            opened_after = cls._stat_file_identity(os.fstat(descriptor))
+            path_after = cls._path_file_identity(path)
+            if opened_after != path_before or path_after != path_before:
+                raise ValueError("canonical collector store file identity changed")
+            return prefix, path_before
+        finally:
+            os.close(descriptor)
 
     def _connect(self) -> sqlite3.Connection:
         """Open only the same live SQLite file object captured at initialization.
@@ -120,13 +151,12 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        if self.path.exists():
-            try:
-                with self.path.open("rb") as handle:
-                    prefix = handle.read(len(_SQLITE_HEADER))
-            except OSError as exc:
-                raise ValueError("invalid causal collector store") from exc
+        if os.path.lexists(self.path):
+            prefix, initial_identity = self._read_existing_prefix(self.path)
             if prefix == _SQLITE_HEADER:
+                # Seal the existing file before any SQLite open that can carry
+                # verification, pragma, migration, or schema-upgrade authority.
+                self._canonical_file_identity_v1 = initial_identity
                 self._verify_sqlite_schema()
             else:
                 self._migrate_legacy_json()

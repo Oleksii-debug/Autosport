@@ -139,7 +139,7 @@ def _capture_with_provider_requested_size(
     )
 
 
-def test_current_order_wrong_requested_size_cannot_mint_effect_evidence() -> None:
+def test_current_order_wrong_requested_size_fails_semantic_validation() -> None:
     action = _action()
     profile = _profile()
     capture = _capture_with_provider_requested_size(

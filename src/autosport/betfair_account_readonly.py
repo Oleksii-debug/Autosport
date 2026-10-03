@@ -1265,6 +1265,18 @@ def _install_execution_readback_authority() -> None:
     fingerprint_method_code = fingerprint_method.__code__
     client_type = BetfairReadOnlyClient
     envelope_type = BetfairExecutionReadbackEnvelope
+    readback_dispatch = tuple(
+        (
+            name,
+            getattr(client_type, name),
+            getattr(getattr(client_type, name), "__code__", None),
+        )
+        for name in (
+            "read_market_event",
+            "read_current_orders_page",
+            "read_cleared_orders_page",
+        )
+    )
     identity_type = account_identity.BetfairAuthenticatedAccountIdentity
     identity_error = account_identity.BetfairAccountIdentityError
     resolve_identity = account_identity.resolve_betfair_authenticated_account_identity
@@ -1299,9 +1311,26 @@ def _install_execution_readback_authority() -> None:
             or origin_dispatch_current.__closure__ is not None
             or origin_dispatch_current.__defaults__ is not origin_dispatch_current_defaults
             or hasattr(account_identity, binder_name)
+            or any(
+                getattr(client_type, name, None) is not expected
+                or getattr(expected, "__code__", None) is not expected_code
+                for name, expected, expected_code in readback_dispatch
+            )
         ):
             raise BetfairReadOnlyError(
                 "execution readback origin authority implementation changed"
+            )
+
+    def require_readback_dispatch_authority(
+        client: BetfairReadOnlyClient,
+    ) -> None:
+        require_executable_authority()
+        instance_dict = getattr(client, "__dict__", None)
+        if type(instance_dict) is not dict or any(
+            name in instance_dict for name, _, _ in readback_dispatch
+        ):
+            raise BetfairReadOnlyError(
+                "execution readback helper dispatch changed"
             )
 
     def authoritative_read(
@@ -1313,7 +1342,7 @@ def _install_execution_readback_authority() -> None:
         page_size: int = 1000,
         max_pages: int = 100,
     ) -> BetfairExecutionReadbackEnvelope:
-        require_executable_authority()
+        require_readback_dispatch_authority(self)
 
         # K07 is the sole product-owned authenticated-client/session authority,
         # but even K07 identity acquisition must not run through a network graph that
@@ -1335,7 +1364,7 @@ def _install_execution_readback_authority() -> None:
             page_size=page_size,
             max_pages=max_pages,
         )
-        require_executable_authority()
+        require_readback_dispatch_authority(self)
         if type(capture) is not envelope_type:
             raise BetfairReadOnlyError(
                 "execution readback returned non-canonical envelope"

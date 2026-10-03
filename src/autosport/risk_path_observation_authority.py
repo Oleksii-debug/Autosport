@@ -19,7 +19,6 @@ from .risk_path_equity_replay import (
     replay_paper_book_equity_path,
 )
 from .risk_sampling_dependence import (
-    ResolvedFixedNIidSamplingStructure,
     inspect_fixed_n_iid_sampling_structure,
     resolve_fixed_n_iid_precommit_authority,
 )

@@ -9,6 +9,10 @@ import autosport.risk_reporting as risk_reporting
 from autosport.domain import TicketLeg
 from autosport.economic_goal import EconomicGoalContract
 from autosport.paper import PaperBook
+from autosport.paper_drawdown_evidence import (
+    DRAW_DOWN_ECONOMIC_BASIS,
+    DRAW_DOWN_HISTORY_MODE,
+)
 from autosport.risk import PaperRiskPolicy
 from autosport.risk_reporting import (
     DRAWDOWN_METRIC_REALIZED_SETTLED_EQUITY,
@@ -58,6 +62,13 @@ class PaperRiskReportingTests(unittest.TestCase):
             report.drawdown_metric_class,
             DRAWDOWN_METRIC_REALIZED_SETTLED_EQUITY,
         )
+        self.assertEqual(report.drawdown_economic_basis, DRAW_DOWN_ECONOMIC_BASIS)
+        self.assertEqual(report.drawdown_history_mode, DRAW_DOWN_HISTORY_MODE)
+        self.assertFalse(report.drawdown_net_cost_evidence_complete)
+        self.assertFalse(report.marked_equity_drawdown_supported)
+        self.assertFalse(report.drawdown_capital_at_risk_included)
+        self.assertFalse(report.stress_drawdown_included)
+        self.assertFalse(report.drawdown_as_known_at_supported)
         self.assertFalse(report.includes_live_execution_exposure)
         self.assertFalse(report.live_execution_headroom_authoritative)
         self.assertEqual(
@@ -114,6 +125,8 @@ class PaperRiskReportingTests(unittest.TestCase):
         self.assertEqual(report.peak_equity, Decimal("100"))
         self.assertEqual(report.current_drawdown_amount, Decimal("0"))
         self.assertEqual(report.committed_stake, Decimal("10"))
+        self.assertFalse(report.drawdown_capital_at_risk_included)
+        self.assertFalse(report.marked_equity_drawdown_supported)
         self.assertEqual(report.drawdown_loss_room, Decimal("10.00"))
 
     def test_settled_loss_reports_exact_drawdown_and_same_enforcement_headroom(self) -> None:

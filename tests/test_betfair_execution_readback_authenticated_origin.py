@@ -212,3 +212,79 @@ def test_public_authority_slots_cannot_mint_origin_without_canonical_capture(
 
     with pytest.raises(BetfairReadOnlyError, match="product-origin authority"):
         forged.assert_authoritative()
+
+
+def _closure_value(function, name: str):
+    closure = function.__closure__ or ()
+    mapping = dict(zip(function.__code__.co_freevars, closure, strict=True))
+    return mapping[name].cell_contents
+
+
+def test_origin_proof_cannot_be_replayed_onto_equal_capture_object(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(_urllib_request, "_opener", _Opener())
+    client = build_betfair_authenticated_client(
+        BetfairSessionCredentials("app-key", "session-token"),
+        account_label="acct-1",
+    )
+    capture = _read(client)
+    capture.assert_authoritative()
+    copied = replace(capture)
+
+    object.__setattr__(copied, "_authority_client", capture._authority_client)
+    object.__setattr__(
+        copied,
+        "_authority_account_identity",
+        capture._authority_account_identity,
+    )
+    object.__setattr__(
+        copied,
+        "_authority_capture_fingerprint",
+        capture._authority_capture_fingerprint,
+    )
+    object.__setattr__(
+        copied,
+        "_authority_origin_proof",
+        capture._authority_origin_proof,
+    )
+
+    with pytest.raises(BetfairReadOnlyError, match="product-origin authority"):
+        copied.assert_authoritative()
+
+
+def test_closure_recovered_origin_issuer_rejects_external_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(_urllib_request, "_opener", _Opener())
+    client = build_betfair_authenticated_client(
+        BetfairSessionCredentials("app-key", "session-token"),
+        account_label="acct-1",
+    )
+    identity = resolve_betfair_authenticated_account_identity(client)
+    forged = BetfairReadOnlyClient(
+        BetfairSessionCredentials("app-key", "session-token"),
+        transport=_CustomTransport(),
+        venue_id="betfair",
+        account_id="acct-1",
+    )
+    structural = _read(forged)
+    issuer = _closure_value(BetfairReadOnlyClient.read_execution_readback, "issue_origin")
+
+    with pytest.raises(
+        BetfairAccountIdentityError,
+        match="only be issued by canonical acquisition",
+    ):
+        issuer(
+            client,
+            identity,
+            capture_identity=id(structural),
+            capture_fingerprint=structural._authority_fingerprint(),
+        )
+
+
+def test_readback_origin_binder_is_consumed_and_not_publicly_reusable() -> None:
+    assert not hasattr(
+        account_identity_module,
+        "_bind_betfair_execution_readback_origin_authority",
+    )

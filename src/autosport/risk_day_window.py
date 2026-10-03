@@ -518,6 +518,7 @@ class ProductDayRiskWindowStore(metaclass=_ProductDayRiskWindowStoreMeta):
             raise RiskDayWindowIntegrityError(
                 "risk day store must be the canonical exact store type"
             )
+        _require_workspace_lock_dispatch()
         with WorkspaceEconomicLock(self.workspace):
             target_day = _clock_utc_instant(self._clock).date()
             if os.path.lexists(self.state_path):
@@ -698,6 +699,65 @@ class ProductDayRiskWindowStore(metaclass=_ProductDayRiskWindowStoreMeta):
 _MONOTONIC_RECOVER = MonotonicWorkspaceAuthority.recover
 _MONOTONIC_PREPARE = MonotonicWorkspaceAuthority.prepare
 _MONOTONIC_COMMIT = MonotonicWorkspaceAuthority.commit
+
+# Product-day evidence must be serialized by the exact cooperating-writer lock graph
+# reviewed with this consumer. A frozen module global still points at a mutable Python
+# class object, so class-method rebinding could otherwise bypass acquire()/identity
+# validation without changing this module's frozen globals.
+_WORKSPACE_LOCK_FILE_NAME = WorkspaceEconomicLock.FILE_NAME
+_WORKSPACE_LOCK_METHOD_NAMES = (
+    "__init__",
+    "acquire",
+    "release",
+    "__enter__",
+    "__exit__",
+    "_open_lock_handle",
+    "_open_new_lock_handle",
+    "_validate_existing_lock_path",
+    "_validate_open_handle_identity",
+    "_require_regular_file",
+    "_require_single_link",
+    "_lock_handle",
+    "_unlock_handle",
+)
+_WORKSPACE_LOCK_DISPATCH_WITNESSES = tuple(
+    (
+        name,
+        WorkspaceEconomicLock.__dict__[name],
+        (
+            WorkspaceEconomicLock.__dict__[name].__func__.__code__
+            if type(WorkspaceEconomicLock.__dict__[name]) is staticmethod
+            else WorkspaceEconomicLock.__dict__[name].__code__
+        ),
+    )
+    for name in _WORKSPACE_LOCK_METHOD_NAMES
+)
+
+
+def _require_workspace_lock_dispatch() -> None:
+    if (
+        WorkspaceEconomicLock.__dict__.get("FILE_NAME") != _WORKSPACE_LOCK_FILE_NAME
+        or WorkspaceEconomicLock.FILE_NAME != _WORKSPACE_LOCK_FILE_NAME
+    ):
+        raise RiskDayWindowIntegrityError("workspace economic lock authority changed")
+    for name, expected_descriptor, expected_code in _WORKSPACE_LOCK_DISPATCH_WITNESSES:
+        current_descriptor = WorkspaceEconomicLock.__dict__.get(name)
+        if current_descriptor is not expected_descriptor:
+            raise RiskDayWindowIntegrityError(
+                "workspace economic lock executable authority changed"
+            )
+        current_function = (
+            current_descriptor.__func__
+            if type(current_descriptor) is staticmethod
+            else current_descriptor
+        )
+        if (
+            type(current_function) is not FunctionType
+            or current_function.__code__ is not expected_code
+        ):
+            raise RiskDayWindowIntegrityError(
+                "workspace economic lock executable authority changed"
+            )
 
 
 def _freeze_risk_day_module_globals() -> dict[str, object]:

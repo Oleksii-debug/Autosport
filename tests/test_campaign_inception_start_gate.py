@@ -182,6 +182,62 @@ def test_source_spec_rejects_path_subclass_before_virtual_dispatch(
     assert calls == []
 
 
+def test_source_spec_does_not_dispatch_path_constructor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store_path = tmp_path / "collector.db"
+    original = inception_module.Path.__new__
+    calls: list[tuple[object, ...]] = []
+
+    def hostile(*args: object, **kwargs: object):
+        calls.append(args)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(
+        inception_module.Path,
+        "__new__",
+        staticmethod(hostile),
+    )
+
+    spec = CampaignInceptionSourceSpec(
+        expected_store_path=store_path,
+        source_id="betfair:exchange",
+        run_id="run-1",
+        stream_epoch="epoch-1",
+        anchor_at="2100-01-01T06:00:00+00:00",
+        interval_seconds=10,
+        max_items=250,
+        evaluation_start_slot_ordinal=0,
+        evaluation_end_slot_ordinal=1,
+    )
+
+    assert spec.expected_store_path is store_path
+    assert calls == []
+
+
+def test_source_spec_rejects_noncanonical_absolute_store_path(
+    tmp_path: Path,
+) -> None:
+    noncanonical = tmp_path / "nested" / ".." / "collector.db"
+
+    with pytest.raises(
+        CampaignInceptionIntegrityError,
+        match="canonical absolute path",
+    ):
+        CampaignInceptionSourceSpec(
+            expected_store_path=noncanonical,
+            source_id="betfair:exchange",
+            run_id="run-1",
+            stream_epoch="epoch-1",
+            anchor_at="2100-01-01T06:00:00+00:00",
+            interval_seconds=10,
+            max_items=250,
+            evaluation_start_slot_ordinal=0,
+            evaluation_end_slot_ordinal=1,
+        )
+
+
 def test_source_spec_rejects_boolean_zero_start_ordinal(
     tmp_path: Path,
 ) -> None:

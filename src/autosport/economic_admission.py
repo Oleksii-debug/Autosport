@@ -2058,6 +2058,28 @@ def admit_paper_ticket(
                 ticket=None,
                 book=working_book,
             )
+
+        # The caller's current PaperBook view is evidence, not the durable commit
+        # target. Keep it untouched until the mutation has been durably published:
+        # any exception after open_ticket (chronology binding, authority reread,
+        # filesystem publication or readback) must not leave a caller-visible
+        # debited/open state that never became canonical.
+        _require_paperbook_admission_authority()
+        mutation_book = _PAPERBOOK_LOAD_FUNCTION(PaperBook, book_path)
+        if (
+            not _same_semantic_book_state(working_book, mutation_book)
+            or _RISK_BOOK_STATE(PaperRiskPolicy, mutation_book)
+            != pre_evaluation_state
+        ):
+            return PaperAdmissionResult(
+                risk=RiskDecision(
+                    False,
+                    "virtual bankroll changed before PAPER admission mutation",
+                ),
+                ticket=None,
+                book=working_book,
+            )
+
         day_admission_permit: object | None = None
         if day_authority is not None:
             # Refresh both day authority and the product-owned action instant at the
@@ -2150,7 +2172,7 @@ def admit_paper_ticket(
             try:
                 day_admission_permit = (
                     _PAPERBOOK_PREPARE_PRODUCT_DAY_ADMISSION_FUNCTION(
-                        working_book,
+                        mutation_book,
                         admission_ts=fresh_admission_ts,
                         window_store=window_store,
                         window_evidence=window_evidence,
@@ -2171,7 +2193,7 @@ def admit_paper_ticket(
             _require_paperbook_admission_authority()
 
         opened = _PAPERBOOK_OPEN_TICKET_FUNCTION(
-            working_book,
+            mutation_book,
             legs,
             amount,
             reason=reason,
@@ -2183,12 +2205,12 @@ def admit_paper_ticket(
         )
         if day_admission_permit is not None:
             _PAPERBOOK_RECORD_PRODUCT_DAY_ADMISSION_FUNCTION(
-                working_book,
+                mutation_book,
                 opened.ticket_id,
                 permit=day_admission_permit,
             )
         _require_paperbook_admission_authority()
-        _PAPERBOOK_SAVE_FUNCTION(working_book, book_path)
+        _PAPERBOOK_SAVE_FUNCTION(mutation_book, book_path)
         _require_paperbook_admission_authority()
         persisted = _PAPERBOOK_LOAD_FUNCTION(PaperBook, book_path)
         persisted_ticket = persisted.tickets.get(opened.ticket_id)
@@ -2196,15 +2218,14 @@ def admit_paper_ticket(
             raise RuntimeError(
                 "persisted PaperBook lost the ticket opened inside admission"
             )
-        if not _same_semantic_book_state(working_book, persisted):
+        if not _same_semantic_book_state(mutation_book, persisted):
             raise RuntimeError(
                 "persisted PaperBook state does not match the admitted mutation"
             )
-        result_book = book if working_book is book else persisted
         return PaperAdmissionResult(
             risk=decision,
-            ticket=result_book.tickets[persisted_ticket.ticket_id],
-            book=result_book,
+            ticket=persisted.tickets[persisted_ticket.ticket_id],
+            book=persisted,
         )
 
 

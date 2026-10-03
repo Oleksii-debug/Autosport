@@ -2728,6 +2728,67 @@ def _assert_paperbook_mutation_gate_tamper_rejected(
         )
 
 
+def test_post_open_authority_failure_does_not_mutate_caller_book(tmp_path):
+    """A failed positive commit must not leak a half-open ticket into caller state."""
+
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    book = PaperBook("100")
+    book_path = tmp_path / "paper_book.json"
+    book.save(book_path)
+    candidate = _leg("post-open-caller-atomicity")
+    policy = PaperRiskPolicy(
+        max_ticket_fraction=Decimal("1"),
+        max_committed_fraction=Decimal("1"),
+        minimum_cash_reserve_fraction=Decimal("0"),
+    )
+    original_uuid4 = paper_module.uuid.uuid4
+    original_save = PaperBook.__dict__["save"]
+    hostile_called = False
+
+    def hostile_save(self, path):
+        del self, path
+        raise AssertionError("post-open replacement save must never execute")
+
+    def rebind_after_open_started():
+        nonlocal hostile_called
+        hostile_called = True
+        ticket_id = original_uuid4()
+        # open_ticket has already passed the final pre-mutation authority check.
+        # Rebind one witnessed post-open dependency from inside a canonical callback
+        # so the next authority reread fails after the old implementation mutated
+        # the supplied PaperBook.
+        PaperBook.save = hostile_save
+        return ticket_id
+
+    try:
+        paper_module.uuid.uuid4 = rebind_after_open_started
+        with pytest.raises(
+            RuntimeError,
+            match="economic admission PaperBook mutation authority changed",
+        ):
+            admit_paper_ticket(
+                workspace=tmp_path,
+                book=book,
+                risk_policy=policy,
+                stake=Decimal("1"),
+                legs=(candidate,),
+                reason="post-open failure must not leak caller mutation",
+                placed_at=_timestamp(now),
+            )
+    finally:
+        paper_module.uuid.uuid4 = original_uuid4
+        PaperBook.save = original_save
+
+    assert hostile_called is True
+    assert book.balance == Decimal("100")
+    assert book.tickets == {}
+    assert book._lifecycle == []
+    persisted = PaperBook.load(book_path)
+    assert persisted.balance == Decimal("100")
+    assert persisted.tickets == {}
+    assert persisted._lifecycle == []
+
+
 def test_paperbook_open_ticket_rebind_cannot_inflate_approved_stake(tmp_path):
     now, book, candidate, context, policy = _paperbook_mutation_gate_case(tmp_path)
     original = PaperBook.__dict__["open_ticket"]

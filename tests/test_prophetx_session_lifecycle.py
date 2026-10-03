@@ -609,6 +609,7 @@ def test_successful_renewal_preserves_session_lineage_and_exact_new_expiry(tmp_p
         attempt_id=started.attempt_id,
         now=due_at + timedelta(seconds=1),
         access_expires_at=renewed_expiry,
+    provider_session_slot_preservation_proven=True,
     )
 
     assert renewed.state is ProphetXSessionState.ACTIVE
@@ -874,6 +875,7 @@ def test_successful_renewal_resets_transient_failure_backoff(tmp_path):
         attempt_id=second_attempt.attempt_id,
         now=retry_at + timedelta(seconds=1),
         access_expires_at=retry_at + timedelta(minutes=10),
+    provider_session_slot_preservation_proven=True,
     )
     assert renewed.transient_failures == 0
     assert renewed.last_renewal_failure_class is None
@@ -1217,4 +1219,45 @@ def test_retryable_state_rejects_nonfuture_retry_horizon(tmp_path, state):
         lifecycle.begin_login(
             now=NOW + timedelta(minutes=1),
             access_token_available=False,
+        )
+
+
+def test_renewal_success_requires_provider_slot_preservation_proof(tmp_path):
+    lifecycle = _lifecycle(tmp_path)
+    active = _active(lifecycle)
+    due_at = active.access_expires_at - timedelta(minutes=1)
+    lifecycle.begin_login(
+        now=due_at,
+        access_token_available=True,
+        access_token_lineage_id=active.session_lineage_id,
+    )
+    started = lifecycle.begin_renewal(
+        now=due_at,
+        refresh_token_lineage_id=active.session_lineage_id,
+    )
+
+    with pytest.raises(
+        ProphetXSessionLifecycleError,
+        match="requires proven provider-session slot preservation",
+    ):
+        lifecycle.complete_renewal_success(
+            attempt_id=started.attempt_id,
+            now=due_at + timedelta(seconds=1),
+            access_expires_at=due_at + timedelta(minutes=10),
+            provider_session_slot_preservation_proven=False,
+        )
+
+    still_renewing = lifecycle.read_snapshot()
+    assert still_renewing.state is ProphetXSessionState.RENEWING
+    assert still_renewing.attempt_id == started.attempt_id
+
+    with pytest.raises(
+        ProphetXSessionLifecycleError,
+        match="must be an exact bool",
+    ):
+        lifecycle.complete_renewal_success(
+            attempt_id=started.attempt_id,
+            now=due_at + timedelta(seconds=1),
+            access_expires_at=due_at + timedelta(minutes=10),
+            provider_session_slot_preservation_proven=1,
         )

@@ -5,6 +5,7 @@ from tempfile import TemporaryDirectory
 
 import pytest
 
+import autosport.acquisition_denominator_evidence as acquisition_denominator_evidence
 from autosport._evaluation_universe_structural_gate import (
     _authorize_structural_intake_for_tests,
 )
@@ -487,6 +488,44 @@ def test_missing_due_slot_cannot_disappear_from_acquisition_denominator() -> Non
                 expected_start_slot_ordinal=0,
                 expected_end_slot_ordinal=1,
             )
+
+def test_internal_issue_constructor_cannot_mint_positive_authority() -> None:
+    with TemporaryDirectory() as tmp:
+        path = Path(tmp) / "collector.db"
+        store = CollectorDeltaStore(path)
+        _ensure_schedule(store)
+        cycle = _start_slot(store, 0)
+        _finish(
+            store,
+            cycle,
+            completed_at="2026-09-22T00:00:05+00:00",
+        )
+        issued = _build(
+            store,
+            path,
+            start_cycle_seq=cycle,
+            end_cycle_seq=cycle,
+            end_slot=0,
+        )
+        payload = issued.to_payload()
+        payload.pop("schema")
+        forged = AcquisitionDenominatorEvidence._issue(payload)
+
+        with pytest.raises(
+            AcquisitionDenominatorEvidenceError,
+            match="not current product-issued authority",
+        ):
+            require_complete_acquisition_coverage(forged)
+
+
+def test_issuance_registry_and_installer_are_not_module_capabilities() -> None:
+    assert not hasattr(acquisition_denominator_evidence, "_ISSUED")
+    assert not hasattr(acquisition_denominator_evidence, "_remember_issued")
+    assert not hasattr(
+        acquisition_denominator_evidence,
+        "_install_acquisition_denominator_authority",
+    )
+
 
 def test_direct_construction_cannot_mint_positive_coverage() -> None:
     with pytest.raises(TypeError, match="product-issued"):

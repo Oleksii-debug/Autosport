@@ -309,8 +309,28 @@ class WorkflowScopedGitHubApi(GitHubApi):
             raise CancellationError("invalid canonical branch target")
         return _require_sha(target.get("sha"), field="canonical branch head")
 
-    def _build_cancel(base_cancel):
+    def _build_cancel(
+        base_cancel,
+        historical_associated_pr_number,
+        historical_head_has_no_associated_prs,
+        canonical_branch_head,
+        live_pr_qualification,
+        pull_request,
+    ):
         base_cancel_code = getattr(base_cancel, "__code__", None)
+        helper_dispatch = (
+            (
+                "_historical_associated_pr_number",
+                historical_associated_pr_number,
+            ),
+            (
+                "_historical_head_has_no_associated_prs",
+                historical_head_has_no_associated_prs,
+            ),
+            ("_canonical_branch_head", canonical_branch_head),
+            ("live_pr_qualification", live_pr_qualification),
+            ("_pull_request", pull_request),
+        )
 
         def cancel(self, run_id: int) -> None:
             """Revalidate synthetic candidate identity at the irreversible boundary."""
@@ -319,16 +339,25 @@ class WorkflowScopedGitHubApi(GitHubApi):
                 raise CancellationError(
                     "canonical base cancellation authority changed"
                 )
-    
+            for name, expected in helper_dispatch:
+                bound = getattr(self, name, None)
+                if (
+                    getattr(bound, "__self__", None) is not self
+                    or getattr(bound, "__func__", None) is not expected
+                ):
+                    raise CancellationError(
+                        "scoped cancellation revalidation dispatch changed"
+                    )
+
             run_id = _require_positive_int(run_id, field="run id")
             zero_association = self._zero_association_recovered_runs.get(run_id)
             if zero_association is not None:
                 candidate_head_sha, head_branch = zero_association
                 try:
-                    no_association = self._historical_head_has_no_associated_prs(
-                        candidate_head_sha
+                    no_association = historical_head_has_no_associated_prs(
+                        self, candidate_head_sha
                     )
-                    branch_head_sha = self._canonical_branch_head(head_branch)
+                    branch_head_sha = canonical_branch_head(self, head_branch)
                 except CancellationError as exc:
                     raise CancellationError(
                         "unbound workflow run branch authority could not be revalidated"
@@ -342,8 +371,8 @@ class WorkflowScopedGitHubApi(GitHubApi):
             if recovered is not None:
                 pr_number, candidate_head_sha = recovered
                 try:
-                    associated_pr_number = self._historical_associated_pr_number(
-                        candidate_head_sha
+                    associated_pr_number = historical_associated_pr_number(
+                        self, candidate_head_sha
                     )
                 except (
                     _HistoricalAssociationAbsent,
@@ -361,7 +390,7 @@ class WorkflowScopedGitHubApi(GitHubApi):
                 # truth immediately afterward.  A historical candidate may be cancelled
                 # while the PR has advanced, but if the PR rolls back to that exact head,
                 # same-head cancellation again requires a non-integration-capable lifecycle.
-                qualification = self.live_pr_qualification(pr_number)
+                qualification = live_pr_qualification(self, pr_number)
                 if (
                     qualification.head_sha == candidate_head_sha
                     and qualification.integration_capable
@@ -373,7 +402,14 @@ class WorkflowScopedGitHubApi(GitHubApi):
     
         return cancel
 
-    cancel = _build_cancel(GitHubApi.cancel)
+    cancel = _build_cancel(
+        GitHubApi.cancel,
+        _historical_associated_pr_number,
+        _historical_head_has_no_associated_prs,
+        _canonical_branch_head,
+        GitHubApi.live_pr_qualification,
+        GitHubApi._pull_request,
+    )
     del _build_cancel
 
     def _active_runs_for_status(self, status: str) -> tuple[WorkflowRun, ...]:

@@ -20,12 +20,28 @@ from .economic_goal_provenance import provenance_for
 from .economic_goal_store import EconomicGoalStore
 from .paper import PaperBook
 from .risk_day_window import ProductDayRiskWindow, ProductDayRiskWindowStore
+from ._paperbook_current_binding_verifier import (
+    seal_current_binding_consumer as _seal_current_binding_consumer,
+)
 
 
 _SCHEMA: Final = "autosport.risk.paper-day-turnover-evidence"
 _SCHEMA_VERSION: Final = 1
 _METRIC_CLASS: Final = "PAPER_ACCEPTED_TURNOVER"
 _SCOPE_CLASS: Final = "UTC_DAY"
+
+
+def _require_current_paper_book_binding(book: PaperBook, book_path) -> None:
+    """Consume only the existing sealed PaperBook generation/path authority."""
+
+    _REQUIRE_CURRENT_BINDING(book, book_path)
+
+
+_PAPERBOOK_REQUIRE_CURRENT = _seal_current_binding_consumer(
+    _require_current_paper_book_binding
+)
+del _require_current_paper_book_binding
+del _seal_current_binding_consumer
 
 
 class PaperDayTurnoverEvidenceError(RuntimeError):
@@ -441,6 +457,21 @@ class PaperDayTurnoverResolver(metaclass=_PaperDayTurnoverResolverMeta):
                 "risk day store path is not canonical for its workspace"
             )
 
+        book_path = goal_workspace / "paper_book.json"
+        try:
+            # Positive turnover evidence is a projection of the current durable
+            # workspace PaperBook generation, never a caller-selected in-memory
+            # history. Require the supplied object to carry the existing sealed
+            # path/generation binding, then load that exact durable authority and
+            # derive every monetary constituent from the loaded snapshot.
+            _PAPERBOOK_REQUIRE_CURRENT(book, book_path)
+            durable_book = _PAPERBOOK_LOAD(book_path)
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            raise PaperDayTurnoverEvidenceIncompleteError(
+                "PaperBook is not current durable workspace authority"
+            ) from exc
+        book = durable_book
+
         try:
             # Exact-type checks above make direct class dispatch authoritative here.
             # Do not let a mutable exact store instance shadow load and mint a
@@ -607,6 +638,7 @@ class PaperDayTurnoverResolver(metaclass=_PaperDayTurnoverResolverMeta):
 # captured callables. Their implementations remain owned by their source modules.
 _ECONOMIC_GOAL_LOAD = EconomicGoalStore.load
 _PAPERBOOK_VALIDATE_LOADED_STATE = PaperBook._validate_loaded_state
+_PAPERBOOK_LOAD = PaperBook.load
 _RISK_DAY_REQUIRE_CURRENT = ProductDayRiskWindowStore.require_current
 
 
@@ -632,6 +664,8 @@ def _freeze_turnover_module_globals() -> dict[str, object]:
         frozen[name] = clone
     frozen["_ECONOMIC_GOAL_LOAD"] = _ECONOMIC_GOAL_LOAD
     frozen["_PAPERBOOK_VALIDATE_LOADED_STATE"] = _PAPERBOOK_VALIDATE_LOADED_STATE
+    frozen["_PAPERBOOK_LOAD"] = _PAPERBOOK_LOAD
+    frozen["_PAPERBOOK_REQUIRE_CURRENT"] = _PAPERBOOK_REQUIRE_CURRENT
     frozen["_RISK_DAY_REQUIRE_CURRENT"] = _RISK_DAY_REQUIRE_CURRENT
     if "_RISK_TURNOVER_RESOLVE_BOUND" in source:
         frozen["_RISK_TURNOVER_RESOLVE_BOUND"] = source[

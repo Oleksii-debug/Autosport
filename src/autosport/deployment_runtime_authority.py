@@ -117,6 +117,35 @@ _CANONICAL_MONOTONIC_READ_HISTORY: Final = MonotonicWorkspaceAuthority.read_hist
 _CANONICAL_MONOTONIC_READ_HISTORY_CODE: Final = (
     MonotonicWorkspaceAuthority.read_history.__code__
 )
+_MONOTONIC_READ_RECOVERY_INTERNAL_NAMES: Final = (
+    "_validate_authority_root_selection",
+    "_validate_authority_root_activation",
+    "_validate_workspace_binding",
+    "_ensure_authority_root_bound",
+    "_ensure_authority_root_activated",
+    "_load_bound_history",
+    "_new_terminal_record",
+    "_append_record",
+    "_load_history",
+    "_validate_namespace_marker",
+    "_ensure_namespace_marker",
+    "_decode_record",
+    "_payload",
+    "_namespace_payload",
+)
+_CANONICAL_MONOTONIC_READ_RECOVERY_INTERNAL_SURFACE: Final = tuple(
+    (
+        name,
+        descriptor,
+        getattr(
+            getattr(descriptor, "__func__", descriptor),
+            "__code__",
+            None,
+        ),
+    )
+    for name in _MONOTONIC_READ_RECOVERY_INTERNAL_NAMES
+    for descriptor in (vars(MonotonicWorkspaceAuthority)[name],)
+)
 _CANONICAL_OBJECT_NEW: Final = object.__new__
 _CANONICAL_HASHLIB_MODULE: Final = hashlib
 _CANONICAL_HASHLIB_SHA256: Final = hashlib.sha256
@@ -288,8 +317,28 @@ def _assert_monotonic_read_recovery_dispatch(
             raise DeploymentRuntimeAuthorityError(
                 "runtime authority monotonic read dispatch was replaced"
             )
+    for name, expected, expected_code in (
+        _CANONICAL_MONOTONIC_READ_RECOVERY_INTERNAL_SURFACE
+    ):
+        current = class_dict.get(name)
+        current_callable = getattr(current, "__func__", current)
+        if (
+            current is not expected
+            or (
+                expected_code is not None
+                and getattr(current_callable, "__code__", None) is not expected_code
+            )
+        ):
+            raise DeploymentRuntimeAuthorityError(
+                "runtime authority monotonic read internal dispatch was replaced"
+            )
     instance_dict = object.__getattribute__(authority, "__dict__")
-    if "recover" in instance_dict or "read_history" in instance_dict:
+    protected_instance_names = {
+        "recover",
+        "read_history",
+        *_MONOTONIC_READ_RECOVERY_INTERNAL_NAMES,
+    }
+    if protected_instance_names.intersection(instance_dict):
         raise DeploymentRuntimeAuthorityError(
             "runtime authority monotonic read instance dispatch was replaced"
         )

@@ -287,6 +287,20 @@ def test_risk_day_frozen_helper_code_mutation_cannot_mint_headroom(tmp_path):
         helper.__code__ = original_code
 
 
+def test_monotonic_constructor_code_mutation_cannot_mint_day_headroom(tmp_path):
+    constructor = MonotonicWorkspaceAuthority.__init__
+    original_code = constructor.__code__
+    try:
+        constructor.__code__ = _replacement_code_preserving_freevars(constructor)
+        with pytest.raises(
+            RuntimeError,
+            match="monotonic day authority transition graph changed",
+        ):
+            _assert_day_authority_dependency_rejected(tmp_path)
+    finally:
+        constructor.__code__ = original_code
+
+
 def test_monotonic_transition_helper_rebind_cannot_mint_day_headroom(tmp_path):
     original = MonotonicWorkspaceAuthority._load_bound_history
 

@@ -5,6 +5,7 @@ import inspect
 import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from enum import StrEnum
 from pathlib import Path
 
 from .causal_collector import CollectorDeltaStore
@@ -26,6 +27,13 @@ _ISSUED: dict[int, tuple["AcquisitionDenominatorEvidence", str]] = {}
 
 class AcquisitionDenominatorEvidenceError(ValueError):
     """Scheduled acquisition evidence cannot support the frozen denominator."""
+
+
+class AcquisitionCoverageStrength(StrEnum):
+    """Strongest generic coverage claim this composition can make."""
+
+    INCOMPLETE_OR_UNKNOWN = "INCOMPLETE_OR_UNKNOWN"
+    SCHEDULED_CYCLE_WINDOW_COMPLETE = "SCHEDULED_CYCLE_WINDOW_COMPLETE"
 
 
 def _canonical_json(value: object) -> bytes:
@@ -170,6 +178,8 @@ class AcquisitionDenominatorEvidence:
     observed_unique_delta_count: int
     scheduled_start_coverage_complete: bool
     acquisition_complete_by_universe_freeze: bool
+    coverage_strength: AcquisitionCoverageStrength
+    positive_evaluation_lineage_complete: bool
     external_provider_universe_complete: bool
     promotion_ready: bool
     evidence_sha256: str
@@ -216,6 +226,10 @@ class AcquisitionDenominatorEvidence:
             "scheduled_start_coverage_complete": self.scheduled_start_coverage_complete,
             "acquisition_complete_by_universe_freeze": (
                 self.acquisition_complete_by_universe_freeze
+            ),
+            "coverage_strength": self.coverage_strength.value,
+            "positive_evaluation_lineage_complete": (
+                self.positive_evaluation_lineage_complete
             ),
             "external_provider_universe_complete": (
                 self.external_provider_universe_complete
@@ -417,6 +431,12 @@ def build_acquisition_denominator_evidence(
         and int(as_of["pending_or_late_terminal_count"]) == 0
     )
 
+    coverage_strength = (
+        AcquisitionCoverageStrength.SCHEDULED_CYCLE_WINDOW_COMPLETE
+        if complete_by_freeze
+        else AcquisitionCoverageStrength.INCOMPLETE_OR_UNKNOWN
+    )
+
     payload: dict[str, object] = {
         "schema_version": _SCHEMA_VERSION,
         "evaluation_universe_sha256": evaluation_universe.universe_sha256,
@@ -435,6 +455,12 @@ def build_acquisition_denominator_evidence(
             scheduled.scheduled_start_coverage_complete
         ),
         "acquisition_complete_by_universe_freeze": complete_by_freeze,
+        "coverage_strength": coverage_strength,
+        # Current main has no exact scheduled-cycle -> provider-evidence ->
+        # EvaluationUniverse positive-row lineage. Active #2050/#1185 own that
+        # adjacent authority. Keep this false mechanically rather than inferring
+        # linkage from source_id, timestamps, counts, or matching hashes.
+        "positive_evaluation_lineage_complete": False,
         "external_provider_universe_complete": False,
         "promotion_ready": False,
     }
@@ -450,7 +476,11 @@ def build_acquisition_denominator_evidence(
 def require_complete_acquisition_coverage(
     evidence: AcquisitionDenominatorEvidence,
 ) -> AcquisitionDenominatorEvidence:
-    """Require product-issued, cutoff-causal acquisition coverage for qualification."""
+    """Require the bounded scheduled-acquisition prerequisite only.
+
+    This does not authorize scientific promotion or prove that positive provider
+    observations are the exact acquisitions materialized in EvaluationUniverse.
+    """
 
     if type(evidence) is not AcquisitionDenominatorEvidence:
         raise TypeError("evidence must be exact AcquisitionDenominatorEvidence")
@@ -470,12 +500,13 @@ def require_complete_acquisition_coverage(
     if not evidence.acquisition_complete_by_universe_freeze:
         raise AcquisitionDenominatorEvidenceError(
             "frozen evaluation universe has failed, stopped, pending, late, "
-            "or post-cutoff acquisition coverage"
+            "or post-cutoff scheduled acquisition coverage"
         )
     return evidence
 
 
 __all__ = [
+    "AcquisitionCoverageStrength",
     "AcquisitionDenominatorEvidence",
     "AcquisitionDenominatorEvidenceError",
     "build_acquisition_denominator_evidence",

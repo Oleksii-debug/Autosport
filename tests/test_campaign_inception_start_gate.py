@@ -223,6 +223,58 @@ def _state_file(locator: ForwardUniversePrecommitLocator) -> Path:
     return paths[0]
 
 
+def test_oversized_inception_state_fails_closed_before_json_decode(
+    tmp_path: Path,
+) -> None:
+    _manifest_value, locator, store, spec, _authority_root = _setup(tmp_path)
+    establish_campaign_inception(
+        precommit_locator=locator,
+        store=store,
+        source_spec=spec,
+    )
+    path = _state_file(locator)
+    path.write_bytes(b"x" * (inception_module._MAX_STATE_BYTES + 1))
+
+    with pytest.raises(
+        CampaignInceptionIntegrityError,
+        match="state exceeds supported size",
+    ):
+        establish_campaign_inception(
+            precommit_locator=locator,
+            store=store,
+            source_spec=spec,
+        )
+
+
+def test_inception_state_symlink_is_not_followed(
+    tmp_path: Path,
+) -> None:
+    _manifest_value, locator, store, spec, _authority_root = _setup(tmp_path)
+    establish_campaign_inception(
+        precommit_locator=locator,
+        store=store,
+        source_spec=spec,
+    )
+    path = _state_file(locator)
+    external = tmp_path / "external-state.json"
+    external.write_bytes(path.read_bytes())
+    path.unlink()
+    try:
+        path.symlink_to(external)
+    except OSError as exc:
+        pytest.skip(f"symlink creation unavailable: {exc}")
+
+    with pytest.raises(
+        CampaignInceptionIntegrityError,
+        match="state must be one regular file",
+    ):
+        establish_campaign_inception(
+            precommit_locator=locator,
+            store=store,
+            source_spec=spec,
+        )
+
+
 def _stage_pending_inception(
     *,
     locator: ForwardUniversePrecommitLocator,
@@ -629,6 +681,7 @@ def test_source_mismatch_is_rejected_before_schedule_mutation(
         "_CANONICAL_GATE_AUTHORIZE",
         "_CANONICAL_SCHEDULE_ID",
         "_CANONICAL_SCHEDULE_DUE_AT",
+        "_CANONICAL_STATE_READ_OPEN",
     ),
 )
 def test_inception_rejects_canonical_alias_rebind_before_hostile_dispatch(
@@ -706,6 +759,60 @@ def test_inception_rejects_path_alias_rebind_before_prestart_dispatch(
         )
         is None
     )
+
+
+@pytest.mark.parametrize("name", ("stat", "fstat", "read"))
+def test_inception_rejects_state_read_os_dispatch_rebind(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+) -> None:
+    _manifest_value, locator, store, spec, _authority_root = _setup(tmp_path)
+    original = getattr(inception_module.os, name)
+    calls: list[str] = []
+
+    def hostile(*args: object, **kwargs: object):
+        calls.append(name)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(inception_module.os, name, hostile)
+    with pytest.raises(
+        CampaignInceptionIntegrityError,
+        match="filesystem dispatch authority is rebound",
+    ):
+        establish_campaign_inception(
+            precommit_locator=locator,
+            store=store,
+            source_spec=spec,
+        )
+
+    assert calls == []
+
+
+def test_inception_rejects_state_file_type_dispatch_rebind(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _manifest_value, locator, store, spec, _authority_root = _setup(tmp_path)
+    original = inception_module.stat.S_ISREG
+    calls: list[int] = []
+
+    def hostile(mode: int) -> bool:
+        calls.append(mode)
+        return original(mode)
+
+    monkeypatch.setattr(inception_module.stat, "S_ISREG", hostile)
+    with pytest.raises(
+        CampaignInceptionIntegrityError,
+        match="file-type dispatch authority is rebound",
+    ):
+        establish_campaign_inception(
+            precommit_locator=locator,
+            store=store,
+            source_spec=spec,
+        )
+
+    assert calls == []
 
 
 def test_inception_rejects_os_fspath_rebind_before_path_canonicalization(

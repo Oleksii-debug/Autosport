@@ -15,7 +15,7 @@ class PaperBookJsonIntegrityTests(unittest.TestCase):
             )
 
             with self.assertRaisesRegex(ValueError, "duplicate JSON key: balance"):
-                PaperBook.load(path)
+                PaperBook.load_bytes(path.read_bytes())
 
     def test_duplicate_nested_ticket_key_cannot_select_plausible_economics(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -49,7 +49,7 @@ class PaperBookJsonIntegrityTests(unittest.TestCase):
             )
 
             with self.assertRaisesRegex(ValueError, "duplicate JSON key: stake"):
-                PaperBook.load(path)
+                PaperBook.load_bytes(path.read_bytes())
 
     def test_nonfinite_constant_in_non_economic_evidence_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -82,7 +82,7 @@ class PaperBookJsonIntegrityTests(unittest.TestCase):
             )
 
             with self.assertRaisesRegex(ValueError, "non-finite JSON constant: NaN"):
-                PaperBook.load(path)
+                PaperBook.load_bytes(path.read_bytes())
 
 
 if __name__ == "__main__":

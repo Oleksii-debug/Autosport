@@ -782,6 +782,34 @@ def load_verified_sport_memory_authority_checkpoint(
     return checkpoint
 
 
+def _open_existing_bound_runtime(
+    runtime: Path,
+    checkpoint: Path,
+    identity_registry: ParticipantIdentityRegistry,
+    opponent_store: OpponentIntelligenceStore,
+    authority: SportMemoryAuthorityCheckpoint,
+    verified_opponent: OpponentIntelligenceStore,
+) -> SportMemoryRuntime:
+    """Load one already-published runtime without a missing-file TOCTOU window."""
+
+    with durable_path_lock(runtime):
+        if not runtime.is_file():
+            raise SportMemoryCheckpointError("sport-memory runtime does not exist")
+        bound = BoundSportMemoryRuntime(
+            runtime,
+            verified_opponent,
+            authority_generation_sha256=authority.generation_sha256,
+            checkpoint_path=checkpoint,
+            identity_registry=identity_registry,
+            opponent_store=opponent_store,
+        )
+        if not runtime.is_file():
+            raise SportMemoryCheckpointError(
+                "sport-memory runtime disappeared during open"
+            )
+        return _verify_runtime_snapshot_bindings(bound, verified_opponent)
+
+
 def open_bound_sport_memory_runtime(
     runtime_path: Path,
     checkpoint_path: Path,
@@ -798,20 +826,17 @@ def open_bound_sport_memory_runtime(
         Path(identity_registry.path),
         Path(opponent_store.path),
     )
-    if not runtime.exists():
-        raise SportMemoryCheckpointError("sport-memory runtime does not exist")
     authority, verified_opponent = _load_verified_checkpoint_and_opponent(
         checkpoint, identity_registry, opponent_store
     )
-    bound = BoundSportMemoryRuntime(
+    return _open_existing_bound_runtime(
         runtime,
+        checkpoint,
+        identity_registry,
+        opponent_store,
+        authority,
         verified_opponent,
-        authority_generation_sha256=authority.generation_sha256,
-        checkpoint_path=checkpoint,
-        identity_registry=identity_registry,
-        opponent_store=opponent_store,
     )
-    return _verify_runtime_snapshot_bindings(bound, verified_opponent)
 
 
 def initialize_or_open_bound_sport_memory_runtime(
@@ -901,12 +926,11 @@ def initialize_or_open_bound_sport_memory_runtime(
                         opponent_store,
                     )
 
-    bound = BoundSportMemoryRuntime(
+    return _open_existing_bound_runtime(
         runtime,
+        checkpoint,
+        identity_registry,
+        opponent_store,
+        authority,
         verified_opponent,
-        authority_generation_sha256=authority.generation_sha256,
-        checkpoint_path=checkpoint,
-        identity_registry=identity_registry,
-        opponent_store=opponent_store,
     )
-    return _verify_runtime_snapshot_bindings(bound, verified_opponent)

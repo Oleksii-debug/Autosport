@@ -2332,6 +2332,8 @@ def test_headroom_issuance_mutators_and_registries_are_not_module_globals() -> N
     assert not hasattr(headroom_module, "_issue_reservation")
     assert not hasattr(headroom_module, "_ISSUED")
     assert not hasattr(headroom_module, "_ISSUED_LOCK")
+    assert not hasattr(headroom_module, "_assert_issued")
+    assert not hasattr(headroom_module, "_reservation_is_issued")
     assert not hasattr(headroom_module, "_RESERVATION_ISSUED")
     assert not hasattr(headroom_module, "_RESERVATION_ISSUED_LOCK")
 
@@ -2388,4 +2390,43 @@ def test_reconstructed_reservation_loses_product_internal_proof(
     assert reservation.product_internal_reservation_proven is True
     assert reconstructed.product_internal_reservation_proven is False
     assert not hasattr(headroom_module, "_issue_reservation")
+
+def test_global_assertion_rebinding_cannot_self_mint_reconstructed_assessment(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    acquired, _ = _acquire_balance(monkeypatch, tmp_path, "100")
+    target = _plan("target", _action("target-action", "10"))
+    ledger = _ledger_with_plans(tmp_path, target)
+    issued = _assess(
+        ledger,
+        acquired,
+        plan_id="target",
+        action_id="target-action",
+    )
+    reconstructed = replace(issued)
+    hostile_calls: list[object] = []
+
+    def hostile_assert(value):
+        hostile_calls.append(value)
+
+    monkeypatch.setattr(
+        headroom_module,
+        "_assert_issued",
+        hostile_assert,
+        raising=False,
+    )
+
+    with pytest.raises(
+        ProviderAccountHeadroomError,
+        match="not canonically issued",
+    ):
+        _reserve(
+            ledger,
+            acquired,
+            reconstructed,
+            attempt_id="global-assertion-forgery-attempt",
+        )
+
+    assert hostile_calls == []
 

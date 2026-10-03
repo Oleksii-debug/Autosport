@@ -73,6 +73,31 @@ _AUTHORIZE_FORWARD_RECEIPTS = authorize_forward_source_receipts
 _VERIFY_FORWARD_EVIDENCE = verify_campaign
 _CANONICAL_CAMPAIGN_EVIDENCE = CampaignEvidence
 _CANONICAL_VERIFICATION_RESULT = VerificationResult
+_CANONICAL_CAMPAIGN_EVIDENCE_DATACLASS_FIELDS = CampaignEvidence.__dataclass_fields__
+_CANONICAL_CAMPAIGN_EVIDENCE_FIELD_ITEMS = tuple(
+    _CANONICAL_CAMPAIGN_EVIDENCE_DATACLASS_FIELDS.items()
+)
+_CANONICAL_CAMPAIGN_EVIDENCE_FIELD_DESCRIPTORS = tuple(
+    (name, inspect.getattr_static(CampaignEvidence, name))
+    for name in _CANONICAL_CAMPAIGN_EVIDENCE_DATACLASS_FIELDS
+)
+_CANONICAL_CAMPAIGN_EVIDENCE_INIT = inspect.getattr_static(
+    CampaignEvidence,
+    "__init__",
+)
+_CANONICAL_CAMPAIGN_EVIDENCE_INIT_CODE = getattr(
+    _CANONICAL_CAMPAIGN_EVIDENCE_INIT,
+    "__code__",
+    None,
+)
+_CANONICAL_VERIFICATION_RESULT_DATACLASS_FIELDS = VerificationResult.__dataclass_fields__
+_CANONICAL_VERIFICATION_RESULT_FIELD_ITEMS = tuple(
+    _CANONICAL_VERIFICATION_RESULT_DATACLASS_FIELDS.items()
+)
+_CANONICAL_VERIFICATION_RESULT_FIELD_DESCRIPTORS = tuple(
+    (name, inspect.getattr_static(VerificationResult, name))
+    for name in _CANONICAL_VERIFICATION_RESULT_DATACLASS_FIELDS
+)
 
 _CAPTURED_CALLABLES = (
     ("_ESTABLISH_CAMPAIGN", _ESTABLISH_CAMPAIGN, _ESTABLISH_CAMPAIGN.__code__),
@@ -1338,6 +1363,18 @@ def _seal_campaign_forward_universe_cycle_dispatch() -> None:
     expected_verification_result_type = VerificationResult
     expected_canonical_campaign_evidence = _CANONICAL_CAMPAIGN_EVIDENCE
     expected_canonical_verification_result = _CANONICAL_VERIFICATION_RESULT
+    expected_campaign_evidence_fields = _CANONICAL_CAMPAIGN_EVIDENCE_DATACLASS_FIELDS
+    expected_campaign_evidence_field_items = _CANONICAL_CAMPAIGN_EVIDENCE_FIELD_ITEMS
+    expected_campaign_evidence_field_descriptors = (
+        _CANONICAL_CAMPAIGN_EVIDENCE_FIELD_DESCRIPTORS
+    )
+    expected_campaign_evidence_init = _CANONICAL_CAMPAIGN_EVIDENCE_INIT
+    expected_campaign_evidence_init_code = _CANONICAL_CAMPAIGN_EVIDENCE_INIT_CODE
+    expected_verification_result_fields = _CANONICAL_VERIFICATION_RESULT_DATACLASS_FIELDS
+    expected_verification_result_field_items = _CANONICAL_VERIFICATION_RESULT_FIELD_ITEMS
+    expected_verification_result_field_descriptors = (
+        _CANONICAL_VERIFICATION_RESULT_FIELD_DESCRIPTORS
+    )
     expected_inspect = inspect
     expected_getattr_static = inspect.getattr_static
     expected_hashlib = hashlib
@@ -1435,6 +1472,41 @@ def _seal_campaign_forward_universe_cycle_dispatch() -> None:
             is not expected_canonical_campaign_evidence
             or module_globals.get("_CANONICAL_VERIFICATION_RESULT")
             is not expected_canonical_verification_result
+            or module_globals.get("_CANONICAL_CAMPAIGN_EVIDENCE_DATACLASS_FIELDS")
+            is not expected_campaign_evidence_fields
+            or CampaignEvidence.__dataclass_fields__ is not expected_campaign_evidence_fields
+            or tuple(expected_campaign_evidence_fields.items())
+            != expected_campaign_evidence_field_items
+            or module_globals.get("_CANONICAL_CAMPAIGN_EVIDENCE_FIELD_ITEMS")
+            is not expected_campaign_evidence_field_items
+            or module_globals.get("_CANONICAL_CAMPAIGN_EVIDENCE_FIELD_DESCRIPTORS")
+            is not expected_campaign_evidence_field_descriptors
+            or any(
+                expected_getattr_static(CampaignEvidence, name) is not descriptor
+                for name, descriptor in expected_campaign_evidence_field_descriptors
+            )
+            or module_globals.get("_CANONICAL_CAMPAIGN_EVIDENCE_INIT")
+            is not expected_campaign_evidence_init
+            or module_globals.get("_CANONICAL_CAMPAIGN_EVIDENCE_INIT_CODE")
+            is not expected_campaign_evidence_init_code
+            or expected_getattr_static(CampaignEvidence, "__init__")
+            is not expected_campaign_evidence_init
+            or getattr(expected_campaign_evidence_init, "__code__", None)
+            is not expected_campaign_evidence_init_code
+            or module_globals.get("_CANONICAL_VERIFICATION_RESULT_DATACLASS_FIELDS")
+            is not expected_verification_result_fields
+            or VerificationResult.__dataclass_fields__
+            is not expected_verification_result_fields
+            or tuple(expected_verification_result_fields.items())
+            != expected_verification_result_field_items
+            or module_globals.get("_CANONICAL_VERIFICATION_RESULT_FIELD_ITEMS")
+            is not expected_verification_result_field_items
+            or module_globals.get("_CANONICAL_VERIFICATION_RESULT_FIELD_DESCRIPTORS")
+            is not expected_verification_result_field_descriptors
+            or any(
+                expected_getattr_static(VerificationResult, name) is not descriptor
+                for name, descriptor in expected_verification_result_field_descriptors
+            )
         ):
             raise expected_error(
                 "campaign forward-cycle structural evidence types changed"

@@ -7,6 +7,7 @@ from weakref import ref
 
 import pytest
 
+import autosport.account_snapshot_acquisition as acquisition_module
 import autosport.betfair_account_readonly as betfair_readonly
 from autosport.account_snapshot_acquisition import (
     AccountSnapshotAcquisitionError,
@@ -615,4 +616,37 @@ def test_closure_boundary_immutable_live_snapshot_preserves_weakref_expiry(
             acquisition_id="weakref-expiry",
         )
     assert retry_calls == []
+
+def test_closure_boundary_storage_ignores_mappingproxy_module_rebind(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        acquisition_module,
+        "MappingProxyType",
+        lambda value: dict(value),
+    )
+    acquirer = BetfairAccountSnapshotAcquirer(
+        tmp_path / "account.sqlite3",
+        _credentials("A"),
+        account_id="default-account",
+    )
+    authority = _extract_inner_authority_boundary(
+        _extract_outer_guard_raw_acquire()
+    )
+    issued = getattr(
+        authority,
+        "_AccountSnapshotAuthorityBoundary__issued",
+    )
+    live = getattr(
+        authority,
+        "_AccountSnapshotAuthorityBoundary__live",
+    )
+
+    assert type(issued) is MappingProxyType
+    assert type(live) is MappingProxyType
+    with pytest.raises(TypeError):
+        issued[id(acquirer)] = issued[id(acquirer)]
+    with pytest.raises(TypeError):
+        live["forged"] = object()
 

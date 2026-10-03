@@ -358,6 +358,137 @@ def test_inception_state_hardlink_alias_is_rejected(
         )
 
 
+def _pristine_inception_state_payload(
+    *,
+    locator: ForwardUniversePrecommitLocator,
+    store: CollectorDeltaStore,
+    spec: CampaignInceptionSourceSpec,
+) -> tuple[dict[str, object], dict[str, object]]:
+    manifest, witness = inception_module._resolve_precommit(locator)
+    precommit = inception_module._precommit_payload(manifest, witness)
+    gate_binding = inception_module._gate_binding_sha256(
+        precommit=precommit,
+        spec=spec,
+    )
+    prepared = inception_module._CANONICAL_PRESTART_PREPARER(
+        store,
+        expected_store_path=spec.expected_store_path,
+        expected_source_id=spec.source_id,
+        expected_run_id=spec.run_id,
+        expected_stream_epoch=spec.stream_epoch,
+        anchor_at=spec.anchor_at,
+        interval_seconds=spec.interval_seconds,
+        max_items=spec.max_items,
+        evaluation_start_slot_ordinal=spec.evaluation_start_slot_ordinal,
+        evaluation_end_slot_ordinal=spec.evaluation_end_slot_ordinal,
+        gate_binding_sha256=gate_binding,
+    )
+    payload = inception_module._new_state_payload(
+        precommit=precommit,
+        spec=spec,
+        prepared=prepared,
+    )
+    return precommit, payload
+
+
+@pytest.mark.parametrize(
+    ("field_name", "replacement"),
+    (
+        ("anchor_at", "2100-01-01T06:00:01+00:00"),
+        ("interval_seconds", "11.0"),
+        ("max_items", 251),
+        ("next_due_at", "2100-01-01T06:00:01+00:00"),
+        ("schema_version", True),
+        ("next_slot_ordinal", False),
+        ("evaluation_start_slot_ordinal", False),
+        ("evaluation_end_slot_ordinal", True),
+    ),
+)
+def test_validate_state_rejects_semantically_rehashed_prepared_schedule_tamper(
+    tmp_path: Path,
+    field_name: str,
+    replacement: object,
+) -> None:
+    _manifest_value, locator, store, spec, _authority_root = _setup(tmp_path)
+    precommit, payload = _pristine_inception_state_payload(
+        locator=locator,
+        store=store,
+        spec=spec,
+    )
+    prepared = dict(payload["prepared_schedule"])
+    prepared[field_name] = replacement
+    prestart_material = dict(prepared)
+    prestart_material.pop("prestart_sha256")
+    prepared["prestart_sha256"] = inception_module._digest(prestart_material)
+    payload["prepared_schedule"] = prepared
+    payload["semantic_binding_sha256"] = inception_module._semantic_binding_sha256(
+        precommit=precommit,
+        spec=spec,
+        prepared=prepared,
+    )
+
+    with pytest.raises(
+        CampaignInceptionIntegrityError,
+        match="prepared schedule does not match exact inception source specification",
+    ):
+        inception_module._validate_state(
+            payload,
+            precommit=precommit,
+            spec=spec,
+        )
+
+
+def test_validate_state_rejects_rehashed_wrong_prestart_digest(
+    tmp_path: Path,
+) -> None:
+    _manifest_value, locator, store, spec, _authority_root = _setup(tmp_path)
+    precommit, payload = _pristine_inception_state_payload(
+        locator=locator,
+        store=store,
+        spec=spec,
+    )
+    prepared = dict(payload["prepared_schedule"])
+    prepared["prestart_sha256"] = "a" * 64
+    payload["prepared_schedule"] = prepared
+    payload["semantic_binding_sha256"] = inception_module._semantic_binding_sha256(
+        precommit=precommit,
+        spec=spec,
+        prepared=prepared,
+    )
+
+    with pytest.raises(
+        CampaignInceptionIntegrityError,
+        match="prestart digest mismatch",
+    ):
+        inception_module._validate_state(
+            payload,
+            precommit=precommit,
+            spec=spec,
+        )
+
+
+def test_validate_state_rejects_boolean_top_level_schema_version(
+    tmp_path: Path,
+) -> None:
+    _manifest_value, locator, store, spec, _authority_root = _setup(tmp_path)
+    precommit, payload = _pristine_inception_state_payload(
+        locator=locator,
+        store=store,
+        spec=spec,
+    )
+    payload["schema_version"] = True
+
+    with pytest.raises(
+        CampaignInceptionIntegrityError,
+        match="state schema is noncanonical",
+    ):
+        inception_module._validate_state(
+            payload,
+            precommit=precommit,
+            spec=spec,
+        )
+
+
 def _stage_pending_inception(
     *,
     locator: ForwardUniversePrecommitLocator,

@@ -114,7 +114,7 @@ def authority_for(monkeypatch, *responses: bytes):
 
 
 def acquire_for(monkeypatch, ladder_type: str | None):
-    authority, client, transport = authority_for(monkeypatch, 
+    authority, client, transport = authority_for(
         monkeypatch,
         response([market_row(ladder_type)], 1),
     )
@@ -738,3 +738,49 @@ def test_tick_predicate_rebinding_cannot_turn_invalid_price_positive(monkeypatch
             market_id="1.234",
             price="2.01",
         )
+
+
+
+def test_transient_provider_parser_rebind_during_io_cannot_mint_ladder_authority(monkeypatch):
+    authority, _, transport = authority_for(
+        monkeypatch,
+        response([market_row("FUTURE_PROVIDER_LADDER")], 1),
+    )
+    original_open = transport.open
+    original_provider_required_text = _ladder._provider_required_text
+    forged_called = False
+
+    def forged_provider_required_text(value, key, field_name):
+        nonlocal forged_called
+        if field_name == "price_ladder_type":
+            forged_called = True
+            # Old code consumed this live alias and the helper could restore it
+            # before the post-I/O persistent-dispatch check.
+            monkeypatch.setattr(
+                _ladder,
+                "_provider_required_text",
+                original_provider_required_text,
+            )
+            return "CLASSIC"
+        return original_provider_required_text(value, key, field_name)
+
+    def mutating_open(request, data=None, timeout: float = 0):
+        result = original_open(request, data=data, timeout=timeout)
+        if request.full_url == BETTING_JSON_RPC_ENDPOINT:
+            monkeypatch.setattr(
+                _ladder,
+                "_provider_required_text",
+                forged_provider_required_text,
+            )
+        return result
+
+    monkeypatch.setattr(transport, "open", mutating_open)
+
+    with pytest.raises(
+        BetfairPriceLadderError,
+        match="canonical dispatch _provider_required_text was rebound",
+    ):
+        authority.acquire("1.234")
+
+    assert forged_called is False
+    assert len(transport.calls) == 1

@@ -278,12 +278,20 @@ class BetfairPriceLadderAuthority:
         market_id: str,
         *,
         _rpc=_CANONICAL_RPC,
+        _required_text_fn,
+        _json_object_fn,
+        _provider_required_text_fn,
+        _provider_enum_text_fn,
+        _parse_line_range_fn,
+        _canonical_sha256_fn,
+        _line_payload_fn,
+        _observation_type,
     ) -> BetfairPriceLadderObservation:
         # _rpc is an import-time default deliberately pinned to the canonical
         # BetfairReadOnlyClient implementation. The public installed wrapper
         # does not expose this seam, so rebinding the module alias later cannot
         # redirect authoritative provider acquisition.
-        market = _required_text(market_id, "market_id")
+        market = _required_text_fn(market_id, "market_id")
         params = {
             "filter": {"marketIds": [market]},
             "marketProjection": ["MARKET_DESCRIPTION"],
@@ -303,8 +311,8 @@ class BetfairPriceLadderAuthority:
             raise BetfairPriceLadderError(
                 "exact market definition is unavailable from listMarketCatalogue"
             )
-        row = _json_object(rows[0], "marketCatalogue[0]")
-        returned_market = _provider_required_text(
+        row = _json_object_fn(rows[0], "marketCatalogue[0]")
+        returned_market = _provider_required_text_fn(
             row,
             "marketId",
             "market_id",
@@ -318,30 +326,30 @@ class BetfairPriceLadderAuthority:
         ladder_type: str | None = None
         line_range: BetfairLineRangeInfo | None = None
         if description_raw is not None:
-            description = _json_object(
+            description = _json_object_fn(
                 description_raw,
                 "marketCatalogue[0].description",
             )
             ladder_raw = description.get("priceLadderDescription")
             if ladder_raw is not None:
-                ladder = _json_object(
+                ladder = _json_object_fn(
                     ladder_raw,
                     "marketCatalogue[0].description.priceLadderDescription",
                 )
-                ladder_type = _provider_required_text(
+                ladder_type = _provider_required_text_fn(
                     ladder,
                     "type",
                     "price_ladder_type",
                 )
-                _provider_enum_text(
+                _provider_enum_text_fn(
                     ladder_type,
                     "price_ladder_type",
                 )
             line_raw = description.get("lineRangeInfo")
             if line_raw is not None:
-                line_range = _parse_line_range(line_raw)
+                line_range = _parse_line_range_fn(line_raw)
 
-        request_scope_sha256 = _canonical_sha256(
+        request_scope_sha256 = _canonical_sha256_fn(
             {
                 "schema": "autosport.betfair_price_ladder_request",
                 "schema_version": 1,
@@ -363,20 +371,20 @@ class BetfairPriceLadderAuthority:
             "line_range": (
                 None
                 if line_range is None
-                else line_range.canonical_payload()
+                else _line_payload_fn(line_range)
             ),
             "observed_at": response.evidence.observed_at,
             "source_payload_sha256": response.evidence.source_payload_sha256,
             "request_scope_sha256": request_scope_sha256,
         }
-        return BetfairPriceLadderObservation(
+        return _observation_type(
             market_id=returned_market,
             ladder_type=ladder_type,
             line_range=line_range,
             observed_at=response.evidence.observed_at,
             source_payload_sha256=response.evidence.source_payload_sha256,
             request_scope_sha256=request_scope_sha256,
-            evidence_sha256=_canonical_sha256(payload),
+            evidence_sha256=_canonical_sha256_fn(payload),
         )
 
     def resolve(
@@ -387,41 +395,50 @@ class BetfairPriceLadderAuthority:
         price: Decimal | str,
         selection_id: int | None = None,
         handicap: Decimal | str | None = None,
+        _required_text_fn,
+        _input_decimal_fn,
+        _positive_int_fn,
+        _classic_tick_fn,
+        _finest_tick_fn,
+        _decimal_text_fn,
+        _canonical_sha256_fn,
+        _admission_type,
+        _state_type,
     ) -> BetfairPriceLadderAdmission:
-        market = _required_text(market_id, "market_id")
+        market = _required_text_fn(market_id, "market_id")
         if observation.market_id != market:
             raise BetfairPriceLadderError(
                 "price-ladder observation belongs to a different market"
             )
-        exact_price = _input_decimal(price, "price")
+        exact_price = _input_decimal_fn(price, "price")
         exact_handicap = (
             None
             if handicap is None
-            else _input_decimal(handicap, "handicap")
+            else _input_decimal_fn(handicap, "handicap")
         )
         if selection_id is not None:
-            _positive_int(selection_id, "selection_id")
+            _positive_int_fn(selection_id, "selection_id")
 
         if observation.ladder_type is None:
-            state = PriceLadderAdmissionState.UNKNOWN_UNPROVEN
+            state = _state_type.UNKNOWN_UNPROVEN
         elif observation.ladder_type == "CLASSIC":
             state = (
-                PriceLadderAdmissionState.PRICE_LADDER_ADMISSIBLE
-                if _classic_tick(exact_price)
-                else PriceLadderAdmissionState.PRICE_LADDER_INVALID
+                _state_type.PRICE_LADDER_ADMISSIBLE
+                if _classic_tick_fn(exact_price)
+                else _state_type.PRICE_LADDER_INVALID
             )
         elif observation.ladder_type == "FINEST":
             state = (
-                PriceLadderAdmissionState.PRICE_LADDER_ADMISSIBLE
-                if _finest_tick(exact_price)
-                else PriceLadderAdmissionState.PRICE_LADDER_INVALID
+                _state_type.PRICE_LADDER_ADMISSIBLE
+                if _finest_tick_fn(exact_price)
+                else _state_type.PRICE_LADDER_INVALID
             )
         else:
             # LINE_RANGE is intentionally not interpreted here. Current
             # canonical standard-LIMIT action semantics do not prove that the
             # submitted number is the provider line-position/handicap domain.
             state = (
-                PriceLadderAdmissionState.UNSUPPORTED_LADDER_SEMANTICS
+                _state_type.UNSUPPORTED_LADDER_SEMANTICS
             )
 
         payload = {
@@ -431,23 +448,23 @@ class BetfairPriceLadderAuthority:
             "state": state.value,
             "market_id": market,
             "ladder_type": observation.ladder_type,
-            "price": _decimal_text(exact_price),
+            "price": _decimal_text_fn(exact_price),
             "observation_sha256": observation.evidence_sha256,
             "selection_id": selection_id,
             "handicap": (
                 None
                 if exact_handicap is None
-                else _decimal_text(exact_handicap)
+                else _decimal_text_fn(exact_handicap)
             ),
             "execution_authorized": False,
         }
-        return BetfairPriceLadderAdmission(
+        return _admission_type(
             state=state,
             market_id=market,
             ladder_type=observation.ladder_type,
             price=exact_price,
             observation_sha256=observation.evidence_sha256,
-            admission_sha256=_canonical_sha256(payload),
+            admission_sha256=_canonical_sha256_fn(payload),
             selection_id=selection_id,
             handicap=exact_handicap,
         )
@@ -723,6 +740,228 @@ def _install_price_ladder_authority() -> None:
     canonical_sha256_fn = sha256
     canonical_decimal_type = Decimal
     canonical_fraction_type = Fraction
+    canonical_invalid_operation = InvalidOperation
+    canonical_mapping_type = Mapping
+    canonical_error_type = BetfairPriceLadderError
+    canonical_line_range_type = BetfairLineRangeInfo
+    canonical_observation_type = BetfairPriceLadderObservation
+    canonical_admission_type = BetfairPriceLadderAdmission
+    canonical_state_type = PriceLadderAdmissionState
+    canonical_classic_bands = _CLASSIC_BANDS
+
+    # Domain semantics below are closure-pinned rather than looked up from the mutable
+    # module namespace after provider I/O. Persistent rebinding is still rejected by
+    # require_source_dispatch(); these callables additionally close the mutate-use-
+    # restore window where a transient alias could be consumed and restored before the
+    # post-call integrity check.
+    def pinned_required_text(value: object, field_name: str) -> str:
+        if (
+            not isinstance(value, str)
+            or not value
+            or value != value.strip()
+        ):
+            raise canonical_error_type(
+                f"{field_name} must be a non-empty trimmed string"
+            )
+        return value
+
+    def pinned_json_object(
+        value: object,
+        field_name: str,
+    ) -> Mapping[str, object]:
+        if (
+            not isinstance(value, canonical_mapping_type)
+            or any(not isinstance(key, str) for key in value)
+        ):
+            raise canonical_error_type(f"{field_name} must be a JSON object")
+        return value
+
+    def pinned_finite_decimal(value: object, field_name: str) -> Decimal:
+        if (
+            not isinstance(value, canonical_decimal_type)
+            or not value.is_finite()
+        ):
+            raise canonical_error_type(f"{field_name} must be a finite Decimal")
+        return value
+
+    def pinned_provider_required_text(
+        value: Mapping[str, object],
+        key: str,
+        field_name: str,
+    ) -> str:
+        if key not in value:
+            raise canonical_error_type(
+                f"{field_name} is missing from provider response"
+            )
+        return pinned_required_text(value[key], field_name)
+
+    def pinned_provider_number(
+        value: Mapping[str, object],
+        key: str,
+        field_name: str,
+    ) -> Decimal:
+        if key not in value:
+            raise canonical_error_type(
+                f"{field_name} is missing from provider response"
+            )
+        raw = value[key]
+        if isinstance(raw, canonical_decimal_type):
+            result = raw
+        elif isinstance(raw, int) and not isinstance(raw, bool):
+            result = canonical_decimal_type(raw)
+        else:
+            raise canonical_error_type(
+                f"{field_name} must be provider JSON number without binary float"
+            )
+        return pinned_finite_decimal(result, field_name)
+
+    def pinned_provider_enum_text(value: object, field_name: str) -> str:
+        text = pinned_required_text(value, field_name)
+        if not text.isascii() or text != text.upper():
+            raise canonical_error_type(
+                f"{field_name} must be uppercase ASCII provider enum text"
+            )
+        return text
+
+    def pinned_positive_int(value: object, field_name: str) -> int:
+        if (
+            not isinstance(value, int)
+            or isinstance(value, bool)
+            or value <= 0
+        ):
+            raise canonical_error_type(f"{field_name} must be a positive integer")
+        return value
+
+    def pinned_input_decimal(value: object, field_name: str) -> Decimal:
+        if isinstance(value, canonical_decimal_type):
+            result = value
+        elif isinstance(value, str):
+            if not value or value != value.strip():
+                raise canonical_error_type(
+                    f"{field_name} text must be non-empty and trimmed"
+                )
+            try:
+                result = canonical_decimal_type(value)
+            except canonical_invalid_operation:
+                raise canonical_error_type(
+                    f"{field_name} text is not an exact decimal"
+                ) from None
+        else:
+            raise canonical_error_type(
+                f"{field_name} must be Decimal or exact decimal text"
+            )
+        return pinned_finite_decimal(result, field_name)
+
+    def pinned_decimal_text(value: Decimal) -> str:
+        pinned_finite_decimal(value, "decimal")
+        if value == 0:
+            return "0"
+        text = format(value, "f")
+        if "." in text:
+            text = text.rstrip("0").rstrip(".")
+        return text
+
+    def pinned_parse_line_range(value: object) -> BetfairLineRangeInfo:
+        raw = pinned_json_object(
+            value,
+            "marketCatalogue[0].description.lineRangeInfo",
+        )
+        return canonical_line_range_type(
+            pinned_provider_number(raw, "minUnitValue", "min_unit_value"),
+            pinned_provider_number(raw, "maxUnitValue", "max_unit_value"),
+            pinned_provider_number(raw, "interval", "interval"),
+            pinned_provider_required_text(raw, "marketUnit", "market_unit"),
+        )
+
+    def pinned_line_payload(value: BetfairLineRangeInfo) -> dict[str, str]:
+        return {
+            "min_unit_value": pinned_decimal_text(value.min_unit_value),
+            "max_unit_value": pinned_decimal_text(value.max_unit_value),
+            "interval": pinned_decimal_text(value.interval),
+            "market_unit": pinned_required_text(value.market_unit, "market_unit"),
+        }
+
+    def pinned_classic_tick(price: Decimal) -> bool:
+        if (
+            price < canonical_decimal_type("1.01")
+            or price > canonical_decimal_type("1000")
+        ):
+            return False
+        value = canonical_fraction_type(price)
+        for lower, upper, step in canonical_classic_bands:
+            if lower <= price <= upper:
+                units = (
+                    value - canonical_fraction_type(lower)
+                ) / canonical_fraction_type(step)
+                if units.denominator == 1:
+                    return True
+        return False
+
+    def pinned_finest_tick(price: Decimal) -> bool:
+        if (
+            price < canonical_decimal_type("1.01")
+            or price > canonical_decimal_type("1000")
+        ):
+            return False
+        units = (
+            canonical_fraction_type(price)
+            - canonical_fraction_type(canonical_decimal_type("1.01"))
+        ) / canonical_fraction_type(canonical_decimal_type("0.01"))
+        return units.denominator == 1
+
+    def pinned_canonical_sha256(value: object) -> str:
+        try:
+            raw = canonical_json_dumps(
+                value,
+                ensure_ascii=True,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            ).encode("utf-8")
+        except (TypeError, ValueError, UnicodeEncodeError) as exc:
+            raise canonical_error_type(
+                "price-ladder evidence is not canonical JSON"
+            ) from exc
+        return canonical_sha256_fn(raw).hexdigest()
+
+    def pinned_observation_fingerprint(
+        value: BetfairPriceLadderObservation,
+    ) -> str:
+        return canonical_sha256_fn(
+            repr(
+                (
+                    value.market_id,
+                    value.ladder_type,
+                    value.line_range,
+                    value.observed_at,
+                    value.source_payload_sha256,
+                    value.request_scope_sha256,
+                    value.evidence_sha256,
+                    value.adapter_id,
+                    value.adapter_version,
+                    value.source_kind,
+                )
+            ).encode("utf-8")
+        ).hexdigest()
+
+    def pinned_admission_fingerprint(
+        value: BetfairPriceLadderAdmission,
+    ) -> str:
+        return canonical_sha256_fn(
+            repr(
+                (
+                    value.state,
+                    value.market_id,
+                    value.ladder_type,
+                    value.price,
+                    value.observation_sha256,
+                    value.admission_sha256,
+                    value.selection_id,
+                    value.handicap,
+                    value.execution_authorized,
+                )
+            ).encode("utf-8")
+        ).hexdigest()
 
     def require_source_dispatch() -> None:
         for name, expected in canonical_dispatch:
@@ -812,11 +1051,22 @@ def _install_price_ladder_authority() -> None:
         self: BetfairPriceLadderAuthority,
         market_id: str,
     ) -> BetfairPriceLadderObservation:
-        market = _required_text(market_id, "market_id")
         require_bound_origin(self)
+        market = pinned_required_text(market_id, "market_id")
         with issuance_lock:
             latest_by_market.pop((id(self), market), None)
-        observation = raw_acquire(self, market)
+        observation = raw_acquire(
+            self,
+            market,
+            _required_text_fn=pinned_required_text,
+            _json_object_fn=pinned_json_object,
+            _provider_required_text_fn=pinned_provider_required_text,
+            _provider_enum_text_fn=pinned_provider_enum_text,
+            _parse_line_range_fn=pinned_parse_line_range,
+            _canonical_sha256_fn=pinned_canonical_sha256,
+            _line_payload_fn=pinned_line_payload,
+            _observation_type=canonical_observation_type,
+        )
         require_bound_origin(self)
         observation_id = id(observation)
         def forget_observation(_weakref: object, *, key: int = observation_id) -> None:
@@ -827,7 +1077,7 @@ def _install_price_ladder_authority() -> None:
         with issuance_lock:
             issued_observations[observation_id] = (
                 observation_ref,
-                observation._authority_fingerprint(),
+                pinned_observation_fingerprint(observation),
                 authority_ref,
                 observation.market_id,
             )
@@ -843,7 +1093,7 @@ def _install_price_ladder_authority() -> None:
             raise BetfairPriceLadderError(
                 "price-ladder observation was not issued by canonical authority"
             )
-        if record[1] != self._authority_fingerprint():
+        if record[1] != pinned_observation_fingerprint(self):
             raise BetfairPriceLadderError(
                 "price-ladder observation changed after canonical acquisition"
             )
@@ -864,11 +1114,11 @@ def _install_price_ladder_authority() -> None:
         handicap: Decimal | str | None = None,
     ) -> BetfairPriceLadderAdmission:
         require_bound_origin(self)
-        if type(observation) is not BetfairPriceLadderObservation:
+        if type(observation) is not canonical_observation_type:
             raise BetfairPriceLadderError(
                 "observation must be exact canonical BetfairPriceLadderObservation"
             )
-        observation.assert_authoritative()
+        assert_observation(observation)
         with issuance_lock:
             record = issued_observations.get(id(observation))
             latest = latest_by_market.get((id(self), observation.market_id))
@@ -888,6 +1138,15 @@ def _install_price_ladder_authority() -> None:
             price=price,
             selection_id=selection_id,
             handicap=handicap,
+            _required_text_fn=pinned_required_text,
+            _input_decimal_fn=pinned_input_decimal,
+            _positive_int_fn=pinned_positive_int,
+            _classic_tick_fn=pinned_classic_tick,
+            _finest_tick_fn=pinned_finest_tick,
+            _decimal_text_fn=pinned_decimal_text,
+            _canonical_sha256_fn=pinned_canonical_sha256,
+            _admission_type=canonical_admission_type,
+            _state_type=canonical_state_type,
         )
         require_bound_origin(self)
         admission_id = id(admission)
@@ -897,7 +1156,7 @@ def _install_price_ladder_authority() -> None:
         with issuance_lock:
             issued_admissions[admission_id] = (
                 ref(admission, forget_admission),
-                admission._authority_fingerprint(),
+                pinned_admission_fingerprint(admission),
                 ref(self),
                 ref(observation),
             )
@@ -912,7 +1171,7 @@ def _install_price_ladder_authority() -> None:
             raise BetfairPriceLadderError(
                 "price-ladder admission was not issued by canonical authority"
             )
-        if record[1] != self._authority_fingerprint():
+        if record[1] != pinned_admission_fingerprint(self):
             raise BetfairPriceLadderError(
                 "price-ladder admission changed after canonical resolution"
             )
@@ -923,7 +1182,7 @@ def _install_price_ladder_authority() -> None:
                 "price-ladder admission authority is no longer live"
             )
         require_bound_origin(authority)
-        observation.assert_authoritative()
+        assert_observation(observation)
         with issuance_lock:
             latest = latest_by_market.get((id(authority), observation.market_id))
         if latest is None or latest() is not observation:

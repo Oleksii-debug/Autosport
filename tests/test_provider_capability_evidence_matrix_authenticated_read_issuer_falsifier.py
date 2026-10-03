@@ -148,7 +148,7 @@ def test_product_issued_betdaq_lifecycle_can_mint_bounded_authenticated_matrix_f
     assert fact.capability is BookmakerCapability.BALANCE_READ
     assert fact.environment == "production"
     assert fact.application_mode == "betdaq-authenticated-readonly"
-    assert fact.observed_at == issuance.evidence.observed_at
+    assert fact.observed_at == "2026-09-21T10:01:30+00:00"
     assert fact.expires_at == "2026-09-21T11:00:00+00:00"
     assert fact.evidence_sha256 == issuance.evidence.evidence_id
 
@@ -282,3 +282,59 @@ def test_matrix_fact_expiry_never_outlives_lifecycle_review_boundary(
         accepted_grades=accepted,
         at_time="2026-09-21T10:30:00+00:00",
     )
+
+
+def test_betdaq_matrix_authority_cannot_predate_lifecycle_commit(
+    monkeypatch,
+) -> None:
+    issuance = _product_issued_betdaq_balance(monkeypatch)
+    integration = bind_bookmaker_integration(
+        issuance.profile,
+        integration_kind=BookmakerIntegrationKind.OFFICIAL_API,
+        observed_at="2026-09-21T10:00:00+00:00",
+        source_ref="betdaq-secure-api",
+        source_payload_sha256="d" * 64,
+    )
+    fact = issue_betdaq_authenticated_read_evidence(issuance, integration)
+    assert fact.observed_at == "2026-09-21T10:01:00+00:00"
+
+    matrix = build_provider_capability_evidence_matrix(
+        issuance.profile,
+        integration,
+        environment="production",
+        application_mode="betdaq-authenticated-readonly",
+        matrix_version=1,
+        as_of="2026-09-21T10:02:00+00:00",
+        matrix_ref="betdaq-commit-causality",
+        evidence=(fact,),
+    )
+    accepted = frozenset({ProviderCapabilityTruthGrade.AUTHENTICATED_READ_PROVEN})
+    assert not matrix.qualifies(
+        BookmakerCapability.BALANCE_READ,
+        accepted_grades=accepted,
+        at_time="2026-09-21T10:00:59+00:00",
+    )
+    assert matrix.qualifies(
+        BookmakerCapability.BALANCE_READ,
+        accepted_grades=accepted,
+        at_time="2026-09-21T10:01:00+00:00",
+    )
+
+
+def test_late_integration_cannot_resurrect_expired_betdaq_lifecycle(
+    monkeypatch,
+) -> None:
+    issuance = _product_issued_betdaq_balance(monkeypatch)
+    integration = bind_bookmaker_integration(
+        issuance.profile,
+        integration_kind=BookmakerIntegrationKind.OFFICIAL_API,
+        observed_at="2026-09-21T11:00:00+00:00",
+        source_ref="betdaq-secure-api-late",
+        source_payload_sha256="f" * 64,
+    )
+
+    with pytest.raises(
+        ProviderCapabilityEvidenceMatrixError,
+        match="became available at or after its expiry",
+    ):
+        issue_betdaq_authenticated_read_evidence(issuance, integration)

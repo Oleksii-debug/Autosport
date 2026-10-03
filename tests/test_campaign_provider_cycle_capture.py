@@ -10,6 +10,7 @@ import autosport.campaign_forward_universe_cycle_binding as binding_module
 import autosport.campaign_provider_cycle_capture as capture_module
 import autosport.provider_observation_authority as provider_module
 from autosport.campaign_inception import (
+    CampaignInceptionReceipt,
     CampaignInceptionSourceSpec,
     establish_campaign_inception,
 )
@@ -939,6 +940,65 @@ def test_module_dispatch_rebind_rejects_before_hostile_or_provider_execution(
             clock=_clock(),
         )
     assert calls == []
+
+
+def test_clock_cannot_extend_campaign_window_by_rebinding_receipt_descriptor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    locator, store, spec, provider_store = _setup(tmp_path)
+    provider_calls: list[str] = []
+    original = vars(CampaignInceptionReceipt)["observation_not_after"]
+
+    def forged_not_after(_self):
+        return "2200-01-01T00:00:00+00:00"
+
+    mutated = False
+
+    def mutating_clock() -> str:
+        nonlocal mutated
+        if not mutated:
+            mutated = True
+            type.__setattr__(
+                CampaignInceptionReceipt,
+                "observation_not_after",
+                property(forged_not_after),
+            )
+        return "2100-01-01T06:00:00+00:00"
+
+    monkeypatch.setattr(
+        provider_module,
+        "urlopen",
+        lambda _request, _timeout: provider_calls.append("provider"),
+    )
+    try:
+        with pytest.raises(
+            CampaignProviderCycleCaptureIntegrityError,
+            match="inception receipt field authority changed",
+        ):
+            capture_campaign_complete_game_board(
+                precommit_locator=locator,
+                store=store,
+                source_spec=spec,
+                evidence_store=provider_store,
+                request=_request(),
+                api_key="secret-value",
+                timeout_seconds=3.0,
+                clock=mutating_clock,
+            )
+    finally:
+        type.__setattr__(
+            CampaignInceptionReceipt,
+            "observation_not_after",
+            original,
+        )
+
+    assert provider_calls == []
+    assert store.collector_cycle_evidence(
+        source_id=spec.source_id,
+        start_cycle_seq=1,
+        end_cycle_seq=1,
+    ) == ()
 
 
 def test_first_clock_cannot_mutate_provider_capture_dispatch_before_io(

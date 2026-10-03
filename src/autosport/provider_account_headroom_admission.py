@@ -42,6 +42,10 @@ _VERIFIED_SNAPSHOT = RealExecutionLedger.verified_snapshot
 _VERIFIED_EXECUTION_VIEW = RealExecutionLedger.verified_execution_view
 _BEGIN_ATTEMPT = RealExecutionLedger.begin_attempt
 _ATTEMPT_STATE = RealExecutionLedger.attempt_state
+_VERIFIED_SNAPSHOT_CODE = getattr(_VERIFIED_SNAPSHOT, "__code__", None)
+_VERIFIED_EXECUTION_VIEW_CODE = getattr(_VERIFIED_EXECUTION_VIEW, "__code__", None)
+_BEGIN_ATTEMPT_CODE = getattr(_BEGIN_ATTEMPT, "__code__", None)
+_ATTEMPT_STATE_CODE = getattr(_ATTEMPT_STATE, "__code__", None)
 
 
 class ProviderAccountHeadroomError(RuntimeError):
@@ -60,6 +64,48 @@ class HeadroomDecision(str, Enum):
     SUFFICIENT_LOWER_BOUND = "SUFFICIENT_LOWER_BOUND"
     INSUFFICIENT_UPPER_BOUND = "INSUFFICIENT_UPPER_BOUND"
     WAIT_COVERAGE = "WAIT_COVERAGE"
+
+
+def _canonical_ledger_dispatch(
+    *,
+    _snapshot=_VERIFIED_SNAPSHOT,
+    _snapshot_code=_VERIFIED_SNAPSHOT_CODE,
+    _view=_VERIFIED_EXECUTION_VIEW,
+    _view_code=_VERIFIED_EXECUTION_VIEW_CODE,
+    _begin=_BEGIN_ATTEMPT,
+    _begin_code=_BEGIN_ATTEMPT_CODE,
+    _state=_ATTEMPT_STATE,
+    _state_code=_ATTEMPT_STATE_CODE,
+):
+    expected = (_snapshot, _view, _begin, _state)
+    live_class = (
+        vars(RealExecutionLedger).get("verified_snapshot"),
+        vars(RealExecutionLedger).get("verified_execution_view"),
+        vars(RealExecutionLedger).get("begin_attempt"),
+        vars(RealExecutionLedger).get("attempt_state"),
+    )
+    live_aliases = (
+        globals().get("_VERIFIED_SNAPSHOT"),
+        globals().get("_VERIFIED_EXECUTION_VIEW"),
+        globals().get("_BEGIN_ATTEMPT"),
+        globals().get("_ATTEMPT_STATE"),
+    )
+    expected_codes = (
+        _snapshot_code,
+        _view_code,
+        _begin_code,
+        _state_code,
+    )
+    if (
+        live_class != expected
+        or live_aliases != expected
+        or tuple(getattr(item, "__code__", None) for item in expected)
+        != expected_codes
+    ):
+        raise ProviderAccountHeadroomError(
+            "canonical execution ledger headroom authority changed"
+        )
+    return expected
 
 
 _PRODUCT_MAX_ACCOUNT_SNAPSHOT_AGE = timedelta(seconds=30)
@@ -575,7 +621,8 @@ def _resolve_account_liability_lattice(
     inclusion in the exact provider balance observation until a separate
     canonical causal-coverage authority proves otherwise.
     """
-    start = _VERIFIED_SNAPSHOT(ledger)
+    verified_snapshot, verified_execution_view, _, _ = _canonical_ledger_dispatch()
+    start = verified_snapshot(ledger)
     if (
         start.sha256 != expected_snapshot_sha256
         or start.event_count != expected_event_count
@@ -588,7 +635,7 @@ def _resolve_account_liability_lattice(
 
     for plan_id in _ledger_plan_ids(start.payload):
         try:
-            view = _VERIFIED_EXECUTION_VIEW(ledger, plan_id)
+            view = verified_execution_view(ledger, plan_id)
             relevant_attempts = tuple(
                 attempt
                 for attempt in view.attempts
@@ -638,7 +685,7 @@ def _resolve_account_liability_lattice(
                     risk.max_plausible_capital_at_risk,
                 )
 
-    finish = _VERIFIED_SNAPSHOT(ledger)
+    finish = verified_snapshot(ledger)
     if (
         finish.sha256 != expected_snapshot_sha256
         or finish.event_count != expected_event_count
@@ -661,15 +708,16 @@ def assess_provider_account_headroom(
         raise TypeError("ledger must be exact RealExecutionLedger")
     plan_id = _text(plan_id, "plan_id")
     action_id = _text(action_id, "action_id")
+    verified_snapshot, verified_execution_view, _, _ = _canonical_ledger_dispatch()
     now = _read_headroom_utc_now()
     available, currency, acquired_at, balance_observed_at = _require_live_balance(
         acquired,
         now=now,
     )
 
-    snapshot = _VERIFIED_SNAPSHOT(ledger)
+    snapshot = verified_snapshot(ledger)
     try:
-        target_view = _VERIFIED_EXECUTION_VIEW(ledger, plan_id)
+        target_view = verified_execution_view(ledger, plan_id)
     except KeyError as exc:
         raise ProviderAccountHeadroomUnsupported(
             "target execution plan is not durably reserved"
@@ -756,7 +804,7 @@ def assess_provider_account_headroom(
         },
         evidence_sha256=_assessment_digest(provisional),
     )
-    final_snapshot = _VERIFIED_SNAPSHOT(ledger)
+    final_snapshot = verified_snapshot(ledger)
     if (
         final_snapshot.sha256 != snapshot.sha256
         or final_snapshot.event_count != snapshot.event_count
@@ -782,6 +830,7 @@ def reserve_observed_provider_headroom(
     """
     if type(ledger) is not RealExecutionLedger:
         raise TypeError("ledger must be exact RealExecutionLedger")
+    verified_snapshot, _, begin_attempt, attempt_state = _canonical_ledger_dispatch()
     _assert_issued(assessment)
     attempt_id = _text(attempt_id, "attempt_id")
     if type(acquired) is not AuthoritativeAccountSnapshot:
@@ -797,7 +846,7 @@ def reserve_observed_provider_headroom(
         )
 
     try:
-        _ATTEMPT_STATE(ledger, attempt_id)
+        attempt_state(ledger, attempt_id)
     except KeyError:
         prior_exists = False
     else:
@@ -819,7 +868,7 @@ def reserve_observed_provider_headroom(
         # Canonical begin_attempt resolves an exact existing attempt before its
         # stale-snapshot fence. That ordering is essential for crash/restart
         # idempotency: identity resolution consumes no new provider headroom.
-        attempt: ExecutionAttempt = _BEGIN_ATTEMPT(
+        attempt: ExecutionAttempt = begin_attempt(
             ledger,
             plan_id=assessment.plan_id,
             action_id=assessment.action_id,
@@ -831,7 +880,7 @@ def reserve_observed_provider_headroom(
             "execution ledger changed; recompute provider-account headroom"
         ) from exc
 
-    post = _VERIFIED_SNAPSHOT(ledger)
+    post = verified_snapshot(ledger)
     return ProductInternalHeadroomReservation(
         assessment_sha256=assessment.evidence_sha256,
         attempt_id=attempt.attempt_id,

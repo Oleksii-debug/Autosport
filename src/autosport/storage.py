@@ -745,6 +745,7 @@ class SQLiteMarketStore:
             (event.source_id, event.quote_key),
         ).fetchone()
         previous_event = _event_from_current_row(previous) if previous is not None else None
+        projection_was_missing = previous_event is None
         if previous_event is not None:
             # current_quotes is a derived acceleration structure, never semantic
             # authority by itself. Prove its exact source payload still exists in
@@ -776,6 +777,7 @@ class SQLiteMarketStore:
                 (event.source_id, event.quote_key, event.dedupe_key),
             ).fetchall()
             expected_semantics: tuple[str, str | None] | None = None
+            latest_prior_event: MarketEvent | None = None
             for prior_row in prior_rows:
                 prior_event = _event_from_history_row(prior_row)
                 if expected_semantics is None:
@@ -785,9 +787,29 @@ class SQLiteMarketStore:
                         expected_semantics,
                         prior_event,
                     )
+                if (
+                    latest_prior_event is None
+                    or _projection_order_key(prior_event)
+                    > _projection_order_key(latest_prior_event)
+                ):
+                    latest_prior_event = prior_event
             if expected_semantics is not None:
                 _assert_stream_semantic_identity(expected_semantics, event)
+            previous_event = latest_prior_event
+
+        projection_event: MarketEvent | None = None
+        projection_payload: str | None = None
         if previous_event is None or incoming_key > _projection_order_key(previous_event):
+            projection_event = event
+            projection_payload = payload
+        elif projection_was_missing:
+            # Restore a missing derived projection from the authoritative latest
+            # historical event instead of allowing a stale incoming row to regress it.
+            projection_event = previous_event
+            projection_payload = _validate_incoming_event(previous_event)
+
+        if projection_event is not None:
+            assert projection_payload is not None
             self.connection.execute(
                 """INSERT INTO current_quotes
                    (source_id,quote_key,observed_ts,sequence,payload_json)
@@ -797,11 +819,11 @@ class SQLiteMarketStore:
                    sequence=excluded.sequence,
                    payload_json=excluded.payload_json""",
                 (
-                    event.source_id,
-                    event.quote_key,
-                    event.observed_ts,
-                    event.sequence,
-                    payload,
+                    projection_event.source_id,
+                    projection_event.quote_key,
+                    projection_event.observed_ts,
+                    projection_event.sequence,
+                    projection_payload,
                 ),
             )
         return True

@@ -6,7 +6,7 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from types import FunctionType, MappingProxyType
 
-from .domain import PaperTicket, TicketLeg
+from .domain import MarketEvent, PaperTicket, TicketLeg
 from .economic_goal_provenance import provenance_for
 from .economic_goal_store import EconomicGoalStore
 from .monotonic_workspace_authority import MonotonicWorkspaceAuthority
@@ -1111,6 +1111,18 @@ _RISK_POLICY_FIELD_DESCRIPTOR_WITNESSES = tuple(
     (name, PaperRiskPolicy.__dict__[name])
     for name in tuple(PaperRiskPolicy.__dataclass_fields__)
 )
+_PROPOSED_CONTEXT_FIELD_DESCRIPTOR_WITNESSES = tuple(
+    (name, ProposedTicketRiskContext.__dict__[name])
+    for name in tuple(ProposedTicketRiskContext.__dataclass_fields__)
+)
+_TICKET_LEG_FIELD_DESCRIPTOR_WITNESSES = tuple(
+    (name, TicketLeg.__dict__[name])
+    for name in tuple(TicketLeg.__dataclass_fields__)
+)
+_MARKET_EVENT_FIELD_DESCRIPTOR_WITNESSES = tuple(
+    (name, MarketEvent.__dict__[name])
+    for name in tuple(MarketEvent.__dataclass_fields__)
+)
 _ECONOMIC_GOAL_FIELD_DESCRIPTOR_WITNESSES = tuple(
     (name, EconomicGoalContract.__dict__[name])
     for name in tuple(EconomicGoalContract.__dataclass_fields__)
@@ -1275,6 +1287,12 @@ def _admission_risk_helper_authority_valid() -> bool:
     for owner, witnesses in (
         (PaperRiskPolicy, _RISK_POLICY_FIELD_DESCRIPTOR_WITNESSES),
         (EconomicGoalContract, _ECONOMIC_GOAL_FIELD_DESCRIPTOR_WITNESSES),
+        (
+            ProposedTicketRiskContext,
+            _PROPOSED_CONTEXT_FIELD_DESCRIPTOR_WITNESSES,
+        ),
+        (TicketLeg, _TICKET_LEG_FIELD_DESCRIPTOR_WITNESSES),
+        (MarketEvent, _MARKET_EVENT_FIELD_DESCRIPTOR_WITNESSES),
     ):
         for name, expected_descriptor in witnesses:
             if owner.__dict__.get(name) is not expected_descriptor:

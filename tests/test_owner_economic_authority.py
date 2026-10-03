@@ -136,6 +136,35 @@ def test_initial_form_rejects_nonfinite_or_noncanonical_values_without_writing(
     assert not (tmp_path / EconomicGoalStore.FILE_NAME).exists()
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("max_stake_fraction", " 0.02"),
+        ("max_stake_amount", " "),
+        ("max_quote_age_seconds", "5 "),
+        ("max_concurrent_positions", " 0"),
+        ("max_parlay_legs", "1 "),
+        ("automation_level", " 0"),
+    ),
+)
+def test_owner_numeric_fields_reject_outer_whitespace_without_writing(
+    tmp_path: Path,
+    field: str,
+    value: str,
+) -> None:
+    service = OwnerEconomicAuthorityService(tmp_path)
+
+    with pytest.raises(OwnerEconomicAuthorityError):
+        service.initialize_from_form(
+            _values(**{field: value}),
+            emergency_stop=False,
+            confirmed=True,
+        )
+
+    assert service.read_view().state == "absent"
+    assert not (tmp_path / EconomicGoalStore.FILE_NAME).exists()
+
+
 def test_owner_can_set_zero_concurrent_positions_as_strictest_position_cap(
     tmp_path: Path,
 ) -> None:

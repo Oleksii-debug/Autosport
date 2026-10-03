@@ -860,6 +860,34 @@ def test_non_pristine_runtime_without_checkpoint_cannot_reissue_authority(tmp_pa
     assert not checkpoint_path.exists()
 
 
+def test_standalone_checkpoint_accepts_explicit_matching_pristine_runtime(
+    tmp_path,
+):
+    identity, opponent = _canonical_stores(tmp_path)
+    checkpoint_path, runtime_path = _paths(tmp_path)
+    checkpoint = initialize_sport_memory_authority_checkpoint(
+        checkpoint_path,
+        identity,
+        opponent,
+    )
+    SportMemoryRuntime.initialize_pristine(
+        runtime_path,
+        opponent,
+        authority_generation_sha256=checkpoint.generation_sha256,
+    )
+
+    bound = initialize_or_open_bound_sport_memory_runtime(
+        runtime_path,
+        checkpoint_path,
+        identity,
+        opponent,
+    )
+
+    assert bound.authority_generation_sha256 == checkpoint.generation_sha256
+    assert runtime_path.is_file()
+    assert checkpoint_path.is_file()
+
+
 def test_standalone_checkpoint_without_runtime_is_not_laundered_as_first_boot(
     tmp_path,
 ):

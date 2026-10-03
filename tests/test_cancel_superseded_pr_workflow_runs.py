@@ -584,7 +584,10 @@ def test_parse_run_rejects_inplace_workflow_run_constructor_mutation(
         object.__setattr__(self, "pr_numbers", (999,))
         object.__setattr__(self, "status", status)
 
-    monkeypatch.setattr(workflow_run_init, "__code__", forged_init.__code__)
+    forged_code = forged_init.__code__.replace(
+        co_freevars=workflow_run_init.__code__.co_freevars,
+    )
+    monkeypatch.setattr(workflow_run_init, "__code__", forged_code)
 
     with pytest.raises(
         CancellationError,

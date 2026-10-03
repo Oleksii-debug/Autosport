@@ -2944,7 +2944,10 @@ def test_scoped_active_run_scan_rejects_inflight_workflow_run_constructor_mutati
         assert method == "GET"
         assert not allowed_http_errors
         assert "status=queued" in path
-        monkeypatch.setattr(workflow_run_init, "__code__", forged_init.__code__)
+        forged_code = forged_init.__code__.replace(
+            co_freevars=workflow_run_init.__code__.co_freevars,
+        )
+        monkeypatch.setattr(workflow_run_init, "__code__", forged_code)
         return {
             "total_count": 1,
             "workflow_runs": [

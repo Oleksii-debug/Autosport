@@ -420,6 +420,7 @@ def test_durable_resolve_remains_non_authoritative_without_new_provider_read(
         )
     assert durable.source_authority_proven is False
 
+
 def _boundary_mapping_snapshots(authority: object) -> list[MappingProxyType]:
     snapshots: list[MappingProxyType] = []
     seen: set[int] = set()

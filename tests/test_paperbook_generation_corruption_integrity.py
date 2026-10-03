@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from decimal import Decimal
+import json
 
 import pytest
 
@@ -274,3 +275,83 @@ def test_snapshot_and_witness_transplant_to_another_workspace_path_is_rejected(
 
     # Source authority is unaffected by the rejected transplant.
     assert PaperBook.load(source_path).balance == Decimal("90")
+
+
+
+def test_truncated_witness_digest_field_fails_closed_repeatably(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A parseable record with an incomplete digest cannot infer authority."""
+
+    _bind_authority_root(tmp_path, monkeypatch)
+    path = tmp_path / "paper-book.json"
+    _saved_book(path)
+    snapshot_bytes = path.read_bytes()
+
+    witness_path = guard._witness_path(path)
+    lines = witness_path.read_text(encoding="utf-8").splitlines()
+    record = json.loads(lines[-1])
+    witness_sha = record["witness_sha256"]
+    assert isinstance(witness_sha, str) and len(witness_sha) == 64
+    record["witness_sha256"] = witness_sha[:-1]
+    lines[-1] = json.dumps(
+        record,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    witness_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    corrupted_witness = witness_path.read_bytes()
+
+    for _attempt in range(2):
+        with pytest.raises(
+            ValueError,
+            match="snapshot witness witness_sha256 must be lowercase SHA-256 hex",
+        ):
+            PaperBook.load(path)
+        assert path.read_bytes() == snapshot_bytes
+        assert witness_path.read_bytes() == corrupted_witness
+
+
+def test_mixed_newer_witness_schema_fails_closed_without_partial_migration(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A newer record schema cannot be mixed into an older readable generation."""
+
+    _bind_authority_root(tmp_path, monkeypatch)
+    path = tmp_path / "paper-book.json"
+    _saved_book(path)
+
+    newer = PaperBook.load(path)
+    newer.open_ticket(
+        [_leg("schema-generation-selection", "7")],
+        "5",
+        placed_at="2026-10-03T12:00:05+00:00",
+    )
+    newer.save(path)
+    snapshot_bytes = path.read_bytes()
+
+    witness_path = guard._witness_path(path)
+    lines = witness_path.read_text(encoding="utf-8").splitlines()
+    assert len(lines) >= 4
+    final = json.loads(lines[-1])
+    final["witness_schema_version"] = guard._WITNESS_SCHEMA_VERSION + 1
+    lines[-1] = json.dumps(
+        final,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    witness_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    corrupted_witness = witness_path.read_bytes()
+
+    for _attempt in range(2):
+        with pytest.raises(
+            ValueError,
+            match="unsupported PaperBook snapshot witness schema",
+        ):
+            PaperBook.load(path)
+        assert path.read_bytes() == snapshot_bytes
+        assert witness_path.read_bytes() == corrupted_witness

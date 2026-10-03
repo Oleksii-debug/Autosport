@@ -116,3 +116,48 @@ def test_installed_publisher_fails_closed_before_rebound_monotonic_commit(
     assert hostile_called is False
     assert not target.exists()
     assert original_commit is not hostile_commit
+
+def test_installed_publisher_fails_closed_before_nested_monotonic_append_dispatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A transient nested append replacement must not mint an undurable witness."""
+
+    workspace = tmp_path / "workspace"
+    evidence = workspace / "evidence"
+    evidence.mkdir(parents=True)
+    target = evidence / "precommit.json"
+    authority_root = tmp_path / "machine-authority"
+    original_append = precommit_module.MonotonicWorkspaceAuthority._append_record
+    append_calls = 0
+
+    def suppress_final_witness_commit(
+        self: object,
+        record: object,
+        index: int,
+    ) -> None:
+        nonlocal append_calls
+        append_calls += 1
+        if append_calls == 4:
+            # Without the transitive class-method seal this suppresses the durable
+            # witness COMMIT while commit() still returns its terminal record.
+            return
+        original_append(self, record, index)
+
+    monkeypatch.setattr(
+        precommit_module.MonotonicWorkspaceAuthority,
+        "_append_record",
+        suppress_final_witness_commit,
+    )
+
+    with pytest.raises(RuntimeError, match="method dispatch authority changed: _append_record"):
+        publish_campaign_precommit_manifest(
+            target,
+            _manifest(),
+            workspace=workspace,
+            authority_root=authority_root,
+        )
+
+    assert append_calls == 0
+    assert not target.exists()
+

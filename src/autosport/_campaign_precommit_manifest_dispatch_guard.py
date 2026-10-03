@@ -27,6 +27,25 @@ _AUTHORITY_METHOD_NAMES = (
     "prepare",
     "read_history",
     "recover",
+    "_validate_authority_root_selection",
+    "_ensure_authority_root_bound",
+    "_validate_authority_root_activation",
+    "_ensure_authority_root_activated",
+    "_validate_workspace_binding",
+    "_ensure_workspace_bound",
+    "_load_bound_history",
+    "_latest_record_for_tx",
+    "_require_same_transaction",
+    "_validate_prepare_retry",
+    "_new_record",
+    "_new_terminal_record",
+    "_payload",
+    "_namespace_payload",
+    "_ensure_namespace_marker",
+    "_validate_namespace_marker",
+    "_append_record",
+    "_load_history",
+    "_decode_record",
 )
 
 
@@ -168,26 +187,57 @@ def _require_function_graph(
                 )
 
 
+def _authority_function_from_descriptor(
+    descriptor: object,
+    label: str,
+) -> FunctionType:
+    if type(descriptor) is _FUNCTION_TYPE:
+        return descriptor
+    if type(descriptor) in (staticmethod, classmethod):
+        function = descriptor.__func__
+        if type(function) is _FUNCTION_TYPE:
+            return function
+    raise RuntimeError(f"canonical {label} is not a Python function")
+
+
 def _capture_class_method_graph(
     owner: object,
     method_names: tuple[str, ...],
     label: str,
-) -> tuple[tuple[object, str, FunctionType, tuple[tuple[object, ...], ...]], ...]:
+) -> tuple[
+    tuple[
+        object,
+        str,
+        object,
+        FunctionType,
+        tuple[tuple[object, ...], ...],
+    ],
+    ...,
+]:
     namespace = getattr(owner, "__dict__", None)
     if namespace is None:
         raise RuntimeError(f"canonical {label} has no class namespace")
 
     captured: list[
-        tuple[object, str, FunctionType, tuple[tuple[object, ...], ...]]
+        tuple[
+            object,
+            str,
+            object,
+            FunctionType,
+            tuple[tuple[object, ...], ...],
+        ]
     ] = []
     for name in method_names:
-        method = namespace.get(name, _EMPTY)
-        if type(method) is not _FUNCTION_TYPE:
-            raise RuntimeError(f"canonical {label}.{name} is not a Python function")
+        descriptor = namespace.get(name, _EMPTY)
+        method = _authority_function_from_descriptor(
+            descriptor,
+            f"{label}.{name}",
+        )
         captured.append(
             (
                 owner,
                 name,
+                descriptor,
                 method,
                 _capture_function_graph(method, f"{label}.{name}"),
             )
@@ -197,16 +247,28 @@ def _capture_class_method_graph(
 
 def _require_class_method_graph(
     graph: tuple[
-        tuple[object, str, FunctionType, tuple[tuple[object, ...], ...]], ...
+        tuple[
+            object,
+            str,
+            object,
+            FunctionType,
+            tuple[tuple[object, ...], ...],
+        ],
+        ...,
     ],
     label: str,
 ) -> None:
-    for owner, name, expected_method, function_graph in graph:
+    for owner, name, expected_descriptor, expected_method, function_graph in graph:
         namespace = getattr(owner, "__dict__", None)
-        if namespace is None or namespace.get(name, _EMPTY) is not expected_method:
+        if namespace is None or namespace.get(name, _EMPTY) is not expected_descriptor:
+            raise RuntimeError(f"{label} method dispatch authority changed: {name}")
+        current_method = _authority_function_from_descriptor(
+            expected_descriptor,
+            f"{label}.{name}",
+        )
+        if current_method is not expected_method:
             raise RuntimeError(f"{label} method dispatch authority changed: {name}")
         _require_function_graph(function_graph, f"{label}.{name}")
-
 
 def _install() -> None:
     original = _precommit.publish_campaign_precommit_manifest

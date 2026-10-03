@@ -38,6 +38,12 @@ from .real_execution_ledger import (
 )
 
 
+_VERIFIED_SNAPSHOT = RealExecutionLedger.verified_snapshot
+_VERIFIED_EXECUTION_VIEW = RealExecutionLedger.verified_execution_view
+_BEGIN_ATTEMPT = RealExecutionLedger.begin_attempt
+_ATTEMPT_STATE = RealExecutionLedger.attempt_state
+
+
 class ProviderAccountHeadroomError(RuntimeError):
     """Base error for provider-account capital-axis admission evidence."""
 
@@ -521,7 +527,7 @@ def _resolve_account_liability_lattice(
     inclusion in the exact provider balance observation until a separate
     canonical causal-coverage authority proves otherwise.
     """
-    start = ledger.verified_snapshot()
+    start = _VERIFIED_SNAPSHOT(ledger)
     if (
         start.sha256 != expected_snapshot_sha256
         or start.event_count != expected_event_count
@@ -534,7 +540,7 @@ def _resolve_account_liability_lattice(
 
     for plan_id in _ledger_plan_ids(start.payload):
         try:
-            view = ledger.verified_execution_view(plan_id)
+            view = _VERIFIED_EXECUTION_VIEW(ledger, plan_id)
             capital: ExecutionCapitalAtRiskEvidence = resolve_execution_capital_at_risk(
                 ledger,
                 plan_id,
@@ -578,7 +584,7 @@ def _resolve_account_liability_lattice(
                     risk.max_plausible_capital_at_risk,
                 )
 
-    finish = ledger.verified_snapshot()
+    finish = _VERIFIED_SNAPSHOT(ledger)
     if (
         finish.sha256 != expected_snapshot_sha256
         or finish.event_count != expected_event_count
@@ -604,9 +610,9 @@ def assess_provider_account_headroom(
     now = _utc_now()
     available, currency, acquired_at = _require_live_balance(acquired, now=now)
 
-    snapshot = ledger.verified_snapshot()
+    snapshot = _VERIFIED_SNAPSHOT(ledger)
     try:
-        target_view = ledger.verified_execution_view(plan_id)
+        target_view = _VERIFIED_EXECUTION_VIEW(ledger, plan_id)
     except KeyError as exc:
         raise ProviderAccountHeadroomUnsupported(
             "target execution plan is not durably reserved"
@@ -692,7 +698,7 @@ def assess_provider_account_headroom(
         },
         evidence_sha256=_assessment_digest(provisional),
     )
-    final_snapshot = ledger.verified_snapshot()
+    final_snapshot = _VERIFIED_SNAPSHOT(ledger)
     if (
         final_snapshot.sha256 != snapshot.sha256
         or final_snapshot.event_count != snapshot.event_count
@@ -738,7 +744,7 @@ def reserve_observed_provider_headroom(
 
     prior_exists = False
     try:
-        ledger.attempt_state(attempt_id)
+        _ATTEMPT_STATE(ledger, attempt_id)
     except KeyError:
         prior_exists = False
     else:
@@ -753,7 +759,8 @@ def reserve_observed_provider_headroom(
             )
 
     try:
-        attempt: ExecutionAttempt = ledger.begin_attempt(
+        attempt: ExecutionAttempt = _BEGIN_ATTEMPT(
+            ledger,
             plan_id=assessment.plan_id,
             action_id=assessment.action_id,
             attempt_id=attempt_id,
@@ -764,7 +771,7 @@ def reserve_observed_provider_headroom(
             "execution ledger changed; recompute provider-account headroom"
         ) from exc
 
-    post = ledger.verified_snapshot()
+    post = _VERIFIED_SNAPSHOT(ledger)
     return ProductInternalHeadroomReservation(
         assessment_sha256=assessment.evidence_sha256,
         attempt_id=attempt.attempt_id,

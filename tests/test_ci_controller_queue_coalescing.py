@@ -1731,6 +1731,51 @@ def test_workflow_wide_sweep_preserves_sealed_scoped_cancel_boundary() -> None:
         "_cancel_run_or_defer_active_conflict(api, run_id)"
     )
 
+def test_trigger_ready_tuple_cannot_be_relabelled_nonqualifying_by_adapter_rebind(monkeypatch) -> None:
+    ready_head = "7" * 40
+    forged_calls = {"state": 0, "cancel": 0}
+
+    def forged_state(_qualification):
+        forged_calls["state"] += 1
+        return (ready_head, False)
+
+    monkeypatch.setattr(
+        scoped_controller,
+        "_pull_request_qualification_state",
+        forged_state,
+    )
+    monkeypatch.setattr(
+        scoped_controller,
+        "_explicit_run_identity_is_current",
+        lambda *_args, **_kwargs: True,
+    )
+    monkeypatch.setattr(
+        scoped_controller,
+        "_trusted_live_pr_qualification",
+        lambda *_args, **_kwargs: (ready_head, True),
+    )
+
+    def forged_cancel(_api, _run_id):
+        forged_calls["cancel"] += 1
+        return True
+
+    monkeypatch.setattr(
+        scoped_controller,
+        "_cancel_run_or_defer_active_conflict",
+        forged_cancel,
+    )
+
+    api = SweepApi((), {})
+    assert not _cancel_triggering_run_if_stale_or_nonqualifying(
+        api,  # type: ignore[arg-type]
+        pr_number=303,
+        event_head_sha=ready_head,
+        current_run_id=7012,
+        qualification=(ready_head, True),
+    )
+    assert forged_calls == {"state": 0, "cancel": 0}
+
+
 def test_explicit_run_boundary_scoped_type_rebind_cannot_reopen_dynamic_request_shadow(
     monkeypatch,
 ) -> None:

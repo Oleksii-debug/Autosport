@@ -280,16 +280,20 @@ class CampaignInceptionSourceSpec:
             )
         canonical_anchor = _instant(self.anchor_at, "anchor_at").isoformat()
         object.__setattr__(self, "anchor_at", canonical_anchor)
-        if (
-            isinstance(self.interval_seconds, bool)
-            or not isinstance(self.interval_seconds, (int, float))
-            or not math.isfinite(float(self.interval_seconds))
-            or float(self.interval_seconds) <= 0
-        ):
+        # This value feeds the durable schedule/gate identity before the sealed
+        # campaign-establishment entrypoint is reached.  Do not invoke caller-defined
+        # numeric protocols (for example a float subclass overriding __float__) while
+        # constructing authority-bearing schedule input.
+        if type(self.interval_seconds) not in {int, float}:
+            raise CampaignInceptionIntegrityError(
+                "interval_seconds must be an exact built-in int or float"
+            )
+        interval_seconds = float(self.interval_seconds)
+        if not math.isfinite(interval_seconds) or interval_seconds <= 0:
             raise CampaignInceptionIntegrityError(
                 "interval_seconds must be positive and finite"
             )
-        object.__setattr__(self, "interval_seconds", float(self.interval_seconds))
+        object.__setattr__(self, "interval_seconds", interval_seconds)
         if type(self.max_items) is not int or self.max_items <= 0:
             raise CampaignInceptionIntegrityError(
                 "max_items must be a positive integer"

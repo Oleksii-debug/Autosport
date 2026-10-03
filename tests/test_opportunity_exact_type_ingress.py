@@ -4,6 +4,8 @@ from decimal import Decimal
 
 import pytest
 
+import autosport.opportunity as opportunity_module
+
 from autosport.domain import MarketEvent
 from autosport.forecasting import ForecastRecord
 from autosport.opportunity import (
@@ -265,3 +267,115 @@ def test_canonical_tuple_fields_reject_subclasses_before_iteration() -> None:
             portfolio_evidence_refs=_HostileTuple(()),  # type: ignore[arg-type]
         )
 
+
+
+
+class _RebindHostileDecimal(Decimal):
+    def is_finite(self) -> bool:
+        raise AssertionError("rebound Decimal virtual dispatch executed")
+
+
+class _RebindHostileMarketEvent(MarketEvent):
+    __slots__ = ()
+
+    def to_dict(self) -> dict[str, object]:
+        raise AssertionError("rebound MarketEvent serialization executed")
+
+
+class _RebindHostileQuoteRef(QuoteRef):
+    __slots__ = ()
+
+    @property
+    def identity_key(self) -> tuple[str, str, str, str, str, int]:
+        raise AssertionError("rebound QuoteRef identity dispatch executed")
+
+
+def test_decimal_module_global_rebind_cannot_replace_canonical_type(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(opportunity_module, "Decimal", _RebindHostileDecimal)
+
+    with pytest.raises(
+        OpportunityContractError,
+        match="allocation stake must be an exact finite Decimal",
+    ):
+        PlanAllocation(_HASH, _RebindHostileDecimal("1"))
+
+    restored = PlanAllocation.from_dict(
+        {"opportunity_id": _HASH, "stake": "1"}
+    )
+    assert type(restored.stake) is Decimal
+    assert restored.stake == Decimal("1")
+
+
+def test_market_event_global_rebind_cannot_replace_quote_source_trust_root(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hostile = _RebindHostileMarketEvent(
+        event_id="event-rebound-market",
+        market_id="market-rebound-market",
+        selection_id="selection-rebound-market",
+        decimal_odds=Decimal("2"),
+        observed_ts="2026-09-16T16:00:00+00:00",
+        source_id="provider-rebound-market",
+        sequence=1,
+        source_ts="2026-09-16T15:59:59+00:00",
+        ingest_ts="2026-09-16T16:00:01+00:00",
+    )
+    monkeypatch.setattr(opportunity_module, "MarketEvent", _RebindHostileMarketEvent)
+
+    with pytest.raises(
+        OpportunityContractError,
+        match="quote source must be a MarketEvent",
+    ):
+        QuoteRef.from_market_event(hostile)
+
+
+def test_quote_ref_global_rebind_cannot_replace_opportunity_member_trust_root(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hostile = _RebindHostileQuoteRef(
+        event_id="event-rebound-quote",
+        market_id="market-rebound-quote",
+        selection_id="selection-rebound-quote",
+        source_id="provider-rebound-quote",
+        sequence=1,
+        decimal_odds=Decimal("2"),
+        observed_ts="2026-09-16T16:00:00+00:00",
+        source_ts="2026-09-16T15:59:59+00:00",
+        ingest_ts="2026-09-16T16:00:01+00:00",
+        market_event_hash=_HASH,
+    )
+    monkeypatch.setattr(opportunity_module, "QuoteRef", _RebindHostileQuoteRef)
+
+    with pytest.raises(
+        OpportunityContractError,
+        match="opportunity quotes must be QuoteRef values",
+    ):
+        Opportunity(
+            strategy_class=StrategyClass.ARBITRAGE,
+            decision=OpportunityDecision.WAIT,
+            quotes=(hostile,),
+        )
+
+
+def test_serialized_nested_reconstruction_ignores_rebound_type_globals(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original = Opportunity(
+        strategy_class=StrategyClass.ARBITRAGE,
+        decision=OpportunityDecision.WAIT,
+        quotes=(_quote(),),
+    )
+    payload = original.to_dict()
+
+    class _PoisonQuoteRef:
+        @classmethod
+        def from_dict(cls, raw: object) -> object:
+            raise AssertionError("rebound QuoteRef.from_dict executed")
+
+    monkeypatch.setattr(opportunity_module, "QuoteRef", _PoisonQuoteRef)
+
+    restored = Opportunity.from_dict(payload)
+    assert restored == original
+    assert all(type(item) is QuoteRef for item in restored.quotes)

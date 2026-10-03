@@ -150,6 +150,7 @@ def test_opportunity_set_rejects_conflicting_decisions_for_same_facts() -> None:
     ):
         OpportunitySet((waiting, actionable))
 
+
 class _HostileDecimal(Decimal):
     def is_finite(self) -> bool:
         raise AssertionError("Decimal subclass virtual dispatch must not execute")

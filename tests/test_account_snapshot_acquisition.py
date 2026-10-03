@@ -700,6 +700,73 @@ def test_current_generation_guard_consults_durable_generation_not_only_process_s
             raise AssertionError("process-local current state must not override durable truth")
 
 
+def test_acquire_rejects_durable_store_connect_rebinding_before_provider_io(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    database = tmp_path / "durable-store-acquire-dispatch.sqlite3"
+    acquirer = BetfairAccountSnapshotAcquirer(database, _credentials())
+    calls = _install_transport(monkeypatch, [_DEVELOPER_APPS, _DETAILS, _FUNDS])
+    hostile_calls = []
+
+    def hostile_connect(self):
+        hostile_calls.append(self)
+        raise AssertionError("hostile durable-store connect executed")
+
+    monkeypatch.setattr(
+        acquisition_module._AccountSnapshotStore,
+        "_connect",
+        hostile_connect,
+    )
+
+    with pytest.raises(
+        AccountSnapshotAcquisitionError,
+        match="durable-store dispatch changed",
+    ):
+        acquirer.acquire(
+            _balance_capabilities(),
+            acquisition_id="durable-store-acquire-dispatch",
+        )
+
+    assert calls == []
+    assert hostile_calls == []
+
+
+def test_current_generation_guard_rejects_durable_store_connect_rebinding(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    database = tmp_path / "durable-store-guard-dispatch.sqlite3"
+    _install_transport(monkeypatch, [_DEVELOPER_APPS, _DETAILS, _FUNDS])
+    acquired = BetfairAccountSnapshotAcquirer(database, _credentials()).acquire(
+        _balance_capabilities(),
+        acquisition_id="durable-store-guard-dispatch",
+    )
+    hostile_calls = []
+
+    def hostile_connect(self):
+        hostile_calls.append(self)
+        raise AssertionError("hostile durable-store connect executed")
+
+    monkeypatch.setattr(
+        acquisition_module._AccountSnapshotStore,
+        "_connect",
+        hostile_connect,
+    )
+
+    with pytest.raises(
+        AccountSnapshotAcquisitionError,
+        match="durable-store dispatch changed",
+    ):
+        with hold_current_account_snapshot_acquisition(
+            acquired,
+            _balance_capabilities(),
+        ):
+            raise AssertionError("rebound durable store must not enter")
+
+    assert hostile_calls == []
+
+
 def test_new_acquisition_id_preserves_later_identical_read_time(
     tmp_path,
     monkeypatch,

@@ -16,6 +16,7 @@ import json
 from pathlib import Path
 from typing import Callable, Mapping, Sequence
 
+from . import supervised_execution as _supervised_execution_runtime
 from .betfair_account_readonly import (
     BETTING_JSON_RPC_ENDPOINT,
     BetfairExecutionReadbackEnvelope,
@@ -1637,6 +1638,38 @@ _CANONICAL_REPORT_OUTCOME = _report_outcome
 _CANONICAL_REPORT_OUTCOME_CODE = _CANONICAL_REPORT_OUTCOME.__code__
 
 
+def _attempt_causal_observation_time(
+    ledger: RealExecutionLedger,
+    *,
+    plan_id: str,
+    attempt_id: str,
+) -> str:
+    """Return a product-clock timestamp not earlier than durable attempt facts."""
+
+    candidate = _supervised_execution_runtime._trusted_now()
+    _time(candidate, "trusted execution time")
+    view = ledger.verified_execution_view(plan_id)
+    matches = tuple(
+        item
+        for item in view.attempts
+        if item.attempt.attempt_id == attempt_id
+    )
+    if len(matches) != 1:
+        raise BetfairSupervisedExecutionError(
+            "attempt is not uniquely present in verified execution view"
+        )
+    attempt_view = matches[0]
+    boundaries = [candidate, attempt_view.attempt.reserved_at]
+    if attempt_view.submitted_at is not None:
+        boundaries.append(attempt_view.submitted_at)
+    if attempt_view.provider_evidence is not None:
+        boundaries.append(attempt_view.provider_evidence.observed_at)
+    return max(
+        boundaries,
+        key=lambda raw: _time(raw, "attempt causal boundary"),
+    )
+
+
 def read_betfair_supervised_action_readback(
     client: BetfairReadOnlyClient,
     ledger: RealExecutionLedger,
@@ -1695,7 +1728,11 @@ def execute_betfair_supervised_action(
         )
     action = bound.action_for(action_id)
     _validate_betfair_place_action(action)
-    now = clock or _now
+    # Retain the public compatibility parameter, but never execute caller
+    # code to timestamp an authority-bearing provider write or uncertainty
+    # transition. The same product-owned clock domain used by supervised
+    # reservation owns those durable times.
+    _ = clock
     execution_workspace = ledger.path.parent.resolve()
 
     # Serialize the current owner authority through the actual provider-write
@@ -1955,7 +1992,11 @@ def execute_betfair_supervised_action(
                     "betfair_placeOrders_existing_submitted_"
                     "requires_readback"
                 ),
-                observed_at=now(),
+                observed_at=_attempt_causal_observation_time(
+                    ledger,
+                    plan_id=bound.execution_plan.plan_id,
+                    attempt_id=attempt_id,
+                ),
             )
             return BetfairSupervisedExecutionResult(
                 PlaceOrdersOutcome.UNKNOWN,
@@ -1974,7 +2015,7 @@ def execute_betfair_supervised_action(
         ) -> None:
             ledger.mark_submitted(
                 attempt_id,
-                submitted_at=now(),
+                submitted_at=_supervised_execution_runtime._trusted_now(),
                 request_sha256=request_sha256,
             )
 
@@ -2037,7 +2078,11 @@ def execute_betfair_supervised_action(
             unknown_observed_at = (
                 ambiguous_observed_at
                 if ambiguous_observed_at is not None
-                else now()
+                else _attempt_causal_observation_time(
+                    ledger,
+                    plan_id=bound.execution_plan.plan_id,
+                    attempt_id=attempt_id,
+                )
             )
             ledger.mark_unknown(
                 attempt_id,

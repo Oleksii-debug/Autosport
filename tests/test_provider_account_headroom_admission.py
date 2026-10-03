@@ -1733,3 +1733,52 @@ def test_ledger_workspace_authority_dispatch_rebinding_cannot_redirect_goal(
 
     assert hostile_calls == []
 
+def test_economic_goal_store_filename_rebinding_cannot_redirect_denomination(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    acquired, _ = _acquire_balance(monkeypatch, tmp_path, "100")
+    target = _plan("target", _action("target-action", "10"))
+    ledger = _ledger_with_plans(tmp_path, target)
+
+    monkeypatch.setattr(EconomicGoalStore, "FILE_NAME", "alternate-goal.json")
+
+    with pytest.raises(
+        ProviderAccountHeadroomError,
+        match="canonical monetary denomination authority changed",
+    ):
+        _assess(
+            ledger,
+            acquired,
+            plan_id="target",
+            action_id="target-action",
+        )
+
+
+def test_economic_goal_store_path_factory_rebinding_cannot_redirect_denomination(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    acquired, _ = _acquire_balance(monkeypatch, tmp_path, "100")
+    target = _plan("target", _action("target-action", "10"))
+    ledger = _ledger_with_plans(tmp_path, target)
+    foreign_workspace = tmp_path / "foreign-economic-goal"
+    foreign_workspace.mkdir()
+
+    monkeypatch.setattr(
+        headroom_module._economic_goal_store,
+        "Path",
+        lambda _workspace: foreign_workspace,
+    )
+
+    with pytest.raises(
+        ProviderAccountHeadroomError,
+        match="canonical economic-goal store path authority changed",
+    ):
+        _assess(
+            ledger,
+            acquired,
+            plan_id="target",
+            action_id="target-action",
+        )
+

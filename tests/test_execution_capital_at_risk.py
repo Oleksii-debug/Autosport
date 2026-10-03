@@ -1155,3 +1155,27 @@ def test_upstream_ledger_instance_method_shadow_is_rejected_before_execution(
     ):
         resolve_execution_capital_at_risk(ledger, plan.plan_id)
 
+def test_upstream_classmethod_code_mutation_is_rejected_before_execution(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    ledger, plan = _ledger(tmp_path, _action(stake="10"))
+    _attempt(ledger, plan)
+
+    state_descriptor = RealExecutionLedger.__dict__["_state"]
+    assert isinstance(state_descriptor, classmethod)
+    original = state_descriptor.__func__
+
+    def forged_state(_cls, _events):
+        raise AssertionError("mutated ledger state parser must not execute")
+
+    assert forged_state.__closure__ is None
+    assert original.__closure__ is None
+    monkeypatch.setattr(original, "__code__", forged_state.__code__)
+
+    with pytest.raises(
+        ExecutionCapitalAtRiskError,
+        match="canonical execution-ledger read authority changed",
+    ):
+        resolve_execution_capital_at_risk(ledger, plan.plan_id)
+

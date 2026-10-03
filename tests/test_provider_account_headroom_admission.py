@@ -2430,3 +2430,106 @@ def test_global_assertion_rebinding_cannot_self_mint_reconstructed_assessment(
 
     assert hostile_calls == []
 
+def test_headroom_digest_rebinding_fails_before_assessment(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    acquired, _ = _acquire_balance(monkeypatch, tmp_path, "100")
+    target = _plan("target", _action("target-action", "10"))
+    ledger = _ledger_with_plans(tmp_path, target)
+    hostile_calls: list[object] = []
+
+    def hostile_digest(payload):
+        hostile_calls.append(payload)
+        return "0" * 64
+
+    monkeypatch.setattr(
+        headroom_module,
+        "_canonical_digest",
+        hostile_digest,
+    )
+
+    with pytest.raises(
+        ProviderAccountHeadroomError,
+        match="digest authority changed",
+    ):
+        _assess(
+            ledger,
+            acquired,
+            plan_id="target",
+            action_id="target-action",
+        )
+
+    assert hostile_calls == []
+
+
+def test_headroom_json_dispatch_rebinding_fails_before_assessment(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    acquired, _ = _acquire_balance(monkeypatch, tmp_path, "100")
+    target = _plan("target", _action("target-action", "10"))
+    ledger = _ledger_with_plans(tmp_path, target)
+    hostile_calls: list[object] = []
+
+    def hostile_json(*args, **kwargs):
+        hostile_calls.append((args, kwargs))
+        return "{}"
+
+    monkeypatch.setattr(
+        headroom_module.json,
+        "dumps",
+        hostile_json,
+    )
+
+    with pytest.raises(
+        ProviderAccountHeadroomError,
+        match="digest authority changed",
+    ):
+        _assess(
+            ledger,
+            acquired,
+            plan_id="target",
+            action_id="target-action",
+        )
+
+    assert hostile_calls == []
+
+
+def test_issued_assessment_exact_state_cannot_be_hidden_by_digest_rebinding(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    acquired, _ = _acquire_balance(monkeypatch, tmp_path, "100")
+    target = _plan("target", _action("target-action", "10"))
+    ledger = _ledger_with_plans(tmp_path, target)
+    assessment = _assess(
+        ledger,
+        acquired,
+        plan_id="target",
+        action_id="target-action",
+    )
+    original_evidence_sha256 = assessment.evidence_sha256
+    object.__setattr__(
+        assessment,
+        "provider_available_to_bet",
+        Decimal("999"),
+    )
+
+    monkeypatch.setattr(
+        headroom_module,
+        "_assessment_digest",
+        lambda _value: original_evidence_sha256,
+    )
+
+    with pytest.raises(
+        ProviderAccountHeadroomError,
+        match="not canonically issued",
+    ):
+        _reserve(
+            ledger,
+            acquired,
+            assessment,
+            attempt_id="mutated-issued-assessment",
+        )
+

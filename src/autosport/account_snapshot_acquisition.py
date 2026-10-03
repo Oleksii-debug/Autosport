@@ -434,6 +434,22 @@ class _AccountSnapshotStore:
                 );
                 CREATE INDEX IF NOT EXISTS account_snapshot_acquisitions_source_observation
                 ON account_snapshot_acquisitions(source_observation_id);
+                CREATE TABLE IF NOT EXISTS account_snapshot_current_capability_generation (
+                    venue_id TEXT NOT NULL,
+                    account_id TEXT NOT NULL,
+                    authenticated_account_identity_sha256 TEXT NOT NULL,
+                    capability TEXT NOT NULL,
+                    acquisition_id TEXT NOT NULL,
+                    generation INTEGER NOT NULL CHECK (generation >= 1),
+                    PRIMARY KEY (
+                        venue_id,
+                        account_id,
+                        authenticated_account_identity_sha256,
+                        capability
+                    ),
+                    FOREIGN KEY (acquisition_id)
+                        REFERENCES account_snapshot_acquisitions(acquisition_id)
+                );
                 CREATE TRIGGER IF NOT EXISTS account_snapshot_acquisitions_no_update
                 BEFORE UPDATE ON account_snapshot_acquisitions
                 BEGIN
@@ -571,7 +587,102 @@ class _AccountSnapshotStore:
                     record_sha256,
                 ),
             )
+            for capability in requested:
+                connection.execute(
+                    """
+                    INSERT INTO account_snapshot_current_capability_generation
+                        (
+                            venue_id,
+                            account_id,
+                            authenticated_account_identity_sha256,
+                            capability,
+                            acquisition_id,
+                            generation
+                        )
+                    VALUES (?, ?, ?, ?, ?, 1)
+                    ON CONFLICT (
+                        venue_id,
+                        account_id,
+                        authenticated_account_identity_sha256,
+                        capability
+                    )
+                    DO UPDATE SET
+                        acquisition_id = excluded.acquisition_id,
+                        generation =
+                            account_snapshot_current_capability_generation.generation + 1
+                    """,
+                    (
+                        snapshot.profile.venue_id,
+                        snapshot.profile.account_id,
+                        authenticated_account_identity_sha256,
+                        capability,
+                        acquisition_id,
+                    ),
+                )
         return self.resolve(acquisition_id)
+
+    @contextmanager
+    def _hold_current_capability_generation(
+        self,
+        *,
+        venue_id: str,
+        account_id: str,
+        authenticated_account_identity_sha256: str,
+        acquisition_id: str,
+        required_capabilities: tuple[str, ...],
+    ):
+        venue_id = _text(venue_id, "venue_id")
+        account_id = _text(account_id, "account_id")
+        authenticated_account_identity_sha256 = _sha256_hex(
+            authenticated_account_identity_sha256,
+            "authenticated_account_identity_sha256",
+        )
+        acquisition_id = _sha256_hex(acquisition_id, "acquisition_id")
+        if (
+            type(required_capabilities) is not tuple
+            or not required_capabilities
+            or any(type(capability) is not str for capability in required_capabilities)
+            or len(set(required_capabilities)) != len(required_capabilities)
+        ):
+            raise AccountSnapshotAcquisitionError(
+                "required durable generation capabilities must be unique exact strings"
+            )
+
+        with self._connect() as connection:
+            # BEGIN IMMEDIATE is the cross-process publication barrier. Every canonical
+            # acquisition record uses the same write transaction, so a newer generation
+            # cannot publish while a consumer holds this current-generation proof.
+            connection.execute("BEGIN IMMEDIATE")
+            for capability in required_capabilities:
+                row = connection.execute(
+                    """
+                    SELECT acquisition_id, generation
+                    FROM account_snapshot_current_capability_generation
+                    WHERE venue_id = ?
+                      AND account_id = ?
+                      AND authenticated_account_identity_sha256 = ?
+                      AND capability = ?
+                    """,
+                    (
+                        venue_id,
+                        account_id,
+                        authenticated_account_identity_sha256,
+                        capability,
+                    ),
+                ).fetchone()
+                if (
+                    row is None
+                    or len(row) != 2
+                    or type(row[0]) is not str
+                    or type(row[1]) is not int
+                    or row[1] < 1
+                    or row[0] != acquisition_id
+                ):
+                    raise AccountSnapshotAcquisitionError(
+                        "account snapshot is not the durable current canonical provider "
+                        f"acquisition for required capability {capability}"
+                    )
+            yield
 
     def resolve(self, acquisition_id: str) -> AuthoritativeAccountSnapshot:
         acquisition_id = _sha256_hex(acquisition_id, "acquisition_id")
@@ -1195,6 +1306,7 @@ def _install_account_snapshot_acquisition_authority() -> None:
     raw_init = BetfairAccountSnapshotAcquirer.__init__
     raw_read = BetfairAccountSnapshotAcquirer._read_provider_snapshot
     raw_record = _AccountSnapshotStore.record
+    raw_hold_current_generation = _AccountSnapshotStore._hold_current_capability_generation
     raw_resolve = _AccountSnapshotStore.resolve
     raw_resolve_request = _AccountSnapshotStore.resolve_request
     canonical_snapshot_read = BetfairReadOnlyClient.read_account_snapshot
@@ -1551,6 +1663,7 @@ def _install_account_snapshot_acquisition_authority() -> None:
                     ref(acquired, forget_live),
                     fingerprint,
                     origin_credentials,
+                    store,
                 )
                 live_snapshot = immutable_mapping_type(updated)
 
@@ -1612,24 +1725,38 @@ def _install_account_snapshot_acquisition_authority() -> None:
                     raise AccountSnapshotAcquisitionError(
                         "account snapshot was not issued by live canonical provider acquisition"
                     )
-                for capability in required_names:
-                    current_id = current_capability_snapshot.get(
-                        (
-                            receipt.venue_id,
-                            receipt.account_id,
-                            receipt.authenticated_account_identity_sha256,
-                            capability,
-                        )
+                if len(current) != 4 or type(current[3]) is not _AccountSnapshotStore:
+                    raise AccountSnapshotAcquisitionError(
+                        "live account snapshot durable generation authority is unavailable"
                     )
-                    if current_id != receipt.acquisition_id:
-                        raise AccountSnapshotAcquisitionError(
-                            "account snapshot is not the current canonical provider acquisition "
-                            f"for required capability {capability}"
+                store = current[3]
+                with raw_hold_current_generation(
+                    store,
+                    venue_id=receipt.venue_id,
+                    account_id=receipt.account_id,
+                    authenticated_account_identity_sha256=(
+                        receipt.authenticated_account_identity_sha256
+                    ),
+                    acquisition_id=receipt.acquisition_id,
+                    required_capabilities=tuple(required_names),
+                ):
+                    for capability in required_names:
+                        current_id = current_capability_snapshot.get(
+                            (
+                                receipt.venue_id,
+                                receipt.account_id,
+                                receipt.authenticated_account_identity_sha256,
+                                capability,
+                            )
                         )
-                # Keep the authority lock held for the entire consumer critical section.
-                # A genuine newer acquisition cannot publish a replacement generation
-                # until the downstream operation exits this context.
-                yield acquired
+                        if current_id != receipt.acquisition_id:
+                            raise AccountSnapshotAcquisitionError(
+                                "account snapshot is not the current canonical provider "
+                                f"acquisition for required capability {capability}"
+                            )
+                    # Keep both the process authority lock and the durable SQLite
+                    # publication barrier held for the entire consumer critical section.
+                    yield acquired
 
         def resolve(
             self,
@@ -1758,6 +1885,7 @@ def _install_account_snapshot_acquisition_authority() -> None:
     BetfairAccountSnapshotAcquirer.verify = verify
     delattr(BetfairAccountSnapshotAcquirer, "_read_provider_snapshot")
     delattr(_AccountSnapshotStore, "record")
+    delattr(_AccountSnapshotStore, "_hold_current_capability_generation")
     delattr(_AccountSnapshotStore, "resolve_request")
 
 

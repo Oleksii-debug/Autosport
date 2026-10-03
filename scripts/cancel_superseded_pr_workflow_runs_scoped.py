@@ -1055,10 +1055,13 @@ def cancel_superseded_explicit_pr_runs(
         if type(value) is tuple:
             if len(value) != 2 or type(value[1]) is not bool:
                 raise CancellationError("invalid trusted pull request qualification")
-            return (
-                _require_sha(value[0], field="pull request head sha"),
-                value[1],
-            )
+            head_sha = value[0]
+            if type(head_sha) is not str or len(head_sha) != 40:
+                raise CancellationError("invalid trusted pull request qualification")
+            head_sha = head_sha.lower()
+            if any(ch not in "0123456789abcdef" for ch in head_sha):
+                raise CancellationError("invalid trusted pull request qualification")
+            return (head_sha, value[1])
         return _pull_request_qualification_state(value)
 
     current_run_id = _require_positive_int(current_run_id, field="current run id")
@@ -1214,10 +1217,13 @@ def _cancel_triggering_run_if_stale_or_nonqualifying(
         if type(value) is tuple:
             if len(value) != 2 or type(value[1]) is not bool:
                 raise CancellationError("invalid trusted pull request qualification")
-            return (
-                _require_sha(value[0], field="pull request head sha"),
-                value[1],
-            )
+            head_sha = value[0]
+            if type(head_sha) is not str or len(head_sha) != 40:
+                raise CancellationError("invalid trusted pull request qualification")
+            head_sha = head_sha.lower()
+            if any(ch not in "0123456789abcdef" for ch in head_sha):
+                raise CancellationError("invalid trusted pull request qualification")
+            return (head_sha, value[1])
         return _pull_request_qualification_state(value)
 
     event_head_sha = _require_sha(event_head_sha, field="event head sha")

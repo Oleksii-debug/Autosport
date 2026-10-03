@@ -154,7 +154,16 @@ class GitHubApi:
         )
         try:
             with urlopen(request, timeout=20) as response:
-                status_code = response.status if is_cancel_request else None
+                if is_cancel_request:
+                    status_code = response.status
+                    if type(status_code) is not int or status_code != 202:
+                        raise CancellationError(
+                            "workflow run cancellation returned unexpected HTTP status"
+                        )
+                    # For this endpoint the documented HTTP 202 Accepted status is the
+                    # success authority. The response body is non-authoritative and is
+                    # deliberately neither read nor parsed.
+                    return None
                 body = response.read()
         except HTTPError as exc:
             if exc.code in allowed_http_errors:
@@ -166,12 +175,6 @@ class GitHubApi:
             raise CancellationError(
                 f"GitHub API request failed: {type(exc).__name__}"
             ) from exc
-        if is_cancel_request and (
-            type(status_code) is not int or status_code != 202
-        ):
-            raise CancellationError(
-                "workflow run cancellation returned unexpected HTTP status"
-            )
         if not body:
             return None
         try:

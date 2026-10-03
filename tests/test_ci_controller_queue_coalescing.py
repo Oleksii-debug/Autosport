@@ -1728,8 +1728,9 @@ def test_workflow_wide_sweep_preserves_sealed_scoped_cancel_boundary() -> None:
         "def _cancel_triggering_run_if_stale_or_nonqualifying(", 1
     )[0]
     assert sweep.index("current_qualification = _trusted_live_pr_qualification(") < sweep.index(
-        "_cancel_run_or_defer_active_conflict(api, run_id)"
+        "_cancel_effect(api, run_id)"
     )
+    assert "_cancel_effect_code=_cancel_run_or_defer_active_conflict.__code__" in sweep
 
 def test_trigger_ready_tuple_cannot_be_relabelled_nonqualifying_by_adapter_rebind(monkeypatch) -> None:
     ready_head = "7" * 40

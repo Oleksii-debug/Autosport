@@ -229,7 +229,18 @@ class PortfolioEngine:
 
     @staticmethod
     def affected_tickets(tickets: list[PaperTicket], quote_key: str) -> list[str]:
-        return [ticket.ticket_id for ticket in tickets if ticket.status is TicketStatus.OPEN and any(leg.quote_key == quote_key for leg in ticket.legs)]
+        if (
+            type(quote_key) is not str
+            or not quote_key
+            or quote_key != quote_key.strip()
+        ):
+            raise ValueError("quote_key must be canonical non-empty text")
+        ticket_snapshot = _snapshot_open_tickets_for_analysis(tickets)
+        return [
+            ticket.ticket_id
+            for ticket in ticket_snapshot
+            if any(leg.quote_key == quote_key for leg in ticket.legs)
+        ]
 
     @staticmethod
     def scenario_profit(tickets: list[PaperTicket], winning_quote_keys: set[str]) -> Decimal:

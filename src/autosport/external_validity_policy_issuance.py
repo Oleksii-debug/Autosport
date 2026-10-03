@@ -1317,9 +1317,9 @@ def _derive_policy_evaluation(
             )
         observed_count = len(sample_ids)
         scored_count = observed_count - abstention_count
-        metric_value = sum((row[2] for row in rows), Decimal(0)) / Decimal(
-            observed_count
-        )
+        source_metric_value = sum(
+            (row[2] for row in rows), Decimal(0)
+        ) / Decimal(observed_count)
 
     challenger_metrics = policy_evaluation.get("challenger_metrics")
     if type(challenger_metrics) is not dict or "policy_loss" not in challenger_metrics:
@@ -1329,9 +1329,32 @@ def _derive_policy_evaluation(
     policy_loss = _decimal(
         challenger_metrics.get("policy_loss"), "source challenger policy_loss"
     )
-    if metric_value != -policy_loss:
+    if source_metric_value != -policy_loss:
         raise ProductPolicyEvaluationIssuanceError(
             "source sample utility does not reconcile to canonical policy_loss"
+        )
+
+    projection_rule = "predictive_net_utility=-policy_loss"
+    metric_value = source_metric_value
+    if target.baseline_kind is BaselineKind.NO_BET_WAIT:
+        if abstention_count != observed_count:
+            raise ProductPolicyEvaluationIssuanceError(
+                "NO_BET_WAIT source policy must abstain on every frozen sample"
+            )
+        # The paired evaluator may carry qualified counterfactual WAIT reward for
+        # ordinary policy-learning/scientific use.  NO_ACTION did not realize that
+        # counterfactual value, so product issuance must not convert hindsight
+        # avoided-loss knowledge into factual action utility.  Applicable costs stay
+        # separately represented by total_cost and are deliberately not zeroed here.
+        rows = [
+            (sample_id, regime_id, Decimal(0))
+            for sample_id, regime_id, _source_net in rows
+        ]
+        metric_value = Decimal(0)
+        projection_rule = (
+            "no_action_action_utility=0;"
+            "counterfactual_wait_reward_excluded;"
+            "applicable_cost_preserved_separately"
         )
 
     low, high = _bootstrap_interval(protocol, rows)
@@ -1378,7 +1401,7 @@ def _derive_policy_evaluation(
         "source_policy_evaluation_sha256": source.policy_evaluation_sha256,
         "source_metric": "policy_loss",
         "projection_metric": protocol.primary_metric,
-        "projection_rule": "predictive_net_utility=-policy_loss",
+        "projection_rule": projection_rule,
         "uncertainty_method": protocol.uncertainty_method,
         "bootstrap_replicates": _BOOTSTRAP_REPLICATES,
         "bootstrap_schedule": "sha256-frozen-protocol-cohort-sample-blocks-v1",

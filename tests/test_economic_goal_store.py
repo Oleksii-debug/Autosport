@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import replace
 from decimal import Decimal
+import os
+from pathlib import Path
 
 import pytest
 
@@ -197,6 +199,104 @@ def test_strict_json_rejects_duplicate_schema_key() -> None:
 
     with pytest.raises(EconomicGoalContractError, match="invalid economic goal JSON"):
         economic_goal_from_json(duplicate)
+
+
+def test_store_rejects_hard_linked_owner_authority(tmp_path: Path) -> None:
+    store = EconomicGoalStore(tmp_path)
+    store.initialize_owner(_goal())
+    alias = tmp_path / "economic-goal-alias.json"
+    try:
+        os.link(store.path, alias)
+    except OSError as exc:
+        pytest.skip(f"hard links unavailable on this runner: {exc}")
+
+    with pytest.raises(
+        EconomicGoalContractError,
+        match="single-link regular non-symlink",
+    ):
+        EconomicGoalStore(tmp_path).load()
+
+
+def test_store_rejects_symlinked_owner_authority(tmp_path: Path) -> None:
+    target_dir = tmp_path / "external"
+    target_dir.mkdir()
+    target = target_dir / "goal.json"
+    target.write_text(
+        __import__("json").dumps(economic_goal_to_payload(_goal())),
+        encoding="utf-8",
+    )
+    store = EconomicGoalStore(tmp_path)
+    try:
+        store.path.symlink_to(target)
+    except OSError as exc:
+        pytest.skip(f"symlinks unavailable on this runner: {exc}")
+
+    with pytest.raises(
+        EconomicGoalContractError,
+        match="single-link regular non-symlink",
+    ):
+        store.load()
+
+
+def test_owner_initialization_rejects_broken_symlink_path_without_replacing_it(
+    tmp_path: Path,
+) -> None:
+    store = EconomicGoalStore(tmp_path)
+    target = tmp_path / "missing-external-goal.json"
+    try:
+        store.path.symlink_to(target)
+    except OSError as exc:
+        pytest.skip(f"symlinks unavailable on this runner: {exc}")
+
+    with pytest.raises(EconomicGoalContractError, match="already exists"):
+        store.initialize_owner(_goal())
+
+    assert store.path.is_symlink()
+    assert not target.exists()
+
+
+def test_store_rejects_oversized_owner_authority_before_json_decoding(
+    tmp_path: Path,
+) -> None:
+    store = EconomicGoalStore(tmp_path)
+    store.path.write_bytes(b"{" + b" " * (128 * 1024) + b"}")
+
+    with pytest.raises(
+        EconomicGoalContractError,
+        match="bounded authority size",
+    ):
+        store.load()
+
+
+def test_store_rejects_path_replacement_during_verified_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import autosport.economic_goal_store as goal_store
+
+    store = EconomicGoalStore(tmp_path)
+    store.initialize_owner(_goal())
+    replacement = tmp_path / "replacement.json"
+    replacement.write_bytes(store.path.read_bytes())
+
+    real_open = goal_store._open_read_only_descriptor
+    calls = 0
+
+    def redirected_second_open(path: Path) -> int:
+        nonlocal calls
+        if Path(path) == store.path:
+            calls += 1
+            if calls == 2:
+                return real_open(replacement)
+        return real_open(path)
+
+    monkeypatch.setattr(goal_store, "_open_read_only_descriptor", redirected_second_open)
+
+    with pytest.raises(
+        EconomicGoalContractError,
+        match="pathname changed while being read",
+    ):
+        store.load()
 
 
 def test_corrupt_durable_file_fails_closed_on_restart(tmp_path) -> None:

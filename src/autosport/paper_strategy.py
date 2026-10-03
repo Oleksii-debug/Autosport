@@ -15,6 +15,7 @@ from .decision_ledger import (
 from .domain import MarketEvent, PaperTicket, TicketLeg
 from .forecasting import ForecastRecord, parse_iso_timestamp
 from .opportunity import ForecastRef, QuoteRef
+from . import predictive_authority as _predictive_authority
 from .price_truth import paper_quote_rejection_reason
 from .probability import paper_value
 from .risk import PaperRiskPolicy, ProposedTicketRiskContext
@@ -31,6 +32,17 @@ from .uncertainty_sizing import (
 _MATERIAL_ACTION_SCHEMA = "autosport.paper-value.open-ticket.v1"
 _MATERIAL_ACTION_MARKER = "material_action_id="
 _MATERIAL_ACTION_NAME = "OPEN_PAPER_VALUE_TICKET"
+
+# Importing predictive_authority installs the process-local resolver guard.  Capture
+# that exact producer-owned verifier after installation so this consumer never
+# falls back to ForecastRef's structural/audit-only method through mutable class
+# dispatch.  The code-object witness also fails closed on in-place mutation.
+_PREDICTIVE_FORECAST_ELIGIBILITY_REASON = (
+    _predictive_authority.ForecastRef.predictive_eligibility_reason
+)
+_PREDICTIVE_FORECAST_ELIGIBILITY_REASON_CODE = (
+    _PREDICTIVE_FORECAST_ELIGIBILITY_REASON.__code__
+)
 
 
 class PaperDecisionReconciliationRequired(RuntimeError):
@@ -205,8 +217,21 @@ class PaperValueAgent:
             )
             return None
 
+        verifier = _PREDICTIVE_FORECAST_ELIGIBILITY_REASON
+        if (
+            type(reference) is not ForecastRef
+            or _predictive_authority.ForecastRef.predictive_eligibility_reason
+            is not verifier
+            or verifier.__code__ is not _PREDICTIVE_FORECAST_ELIGIBILITY_REASON_CODE
+        ):
+            context.notes.append(
+                "paper-value material action withheld: predictive authority "
+                "verifier integrity changed"
+            )
+            return None
         try:
-            reason = reference.predictive_eligibility_reason(
+            reason = verifier(
+                reference,
                 parse_iso_timestamp(event.observed_ts),
                 expected_model_id=forecast.model_id,
             )

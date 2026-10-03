@@ -126,6 +126,62 @@ class PortfolioScenarioSnapshotIntegrityTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "non-empty string"):
             PortfolioEngine.scenario_profit([ticket], {""})
 
+    def test_direct_scenario_profit_rejects_non_positive_ticket_stake(self) -> None:
+        leg = TicketLeg("event", "winner", "alice", Decimal("2"))
+        ticket = portfolio_module.PaperTicket(
+            ticket_id="synthetic-negative-stake",
+            stake=Decimal("-10"),
+            legs=(leg,),
+            placed_at="2026-09-21T08:00:00+00:00",
+        )
+
+        with self.assertRaisesRegex(ValueError, "stake must be positive"):
+            PortfolioEngine.scenario_profit([ticket], {leg.quote_key})
+
+    def test_direct_scenario_profit_rejects_empty_ticket_legs(self) -> None:
+        ticket = portfolio_module.PaperTicket(
+            ticket_id="synthetic-empty-ticket",
+            stake=Decimal("10"),
+            legs=(),
+            placed_at="2026-09-21T08:00:00+00:00",
+        )
+
+        with self.assertRaisesRegex(ValueError, "requires at least one canonical leg"):
+            PortfolioEngine.scenario_profit([ticket], set())
+
+    def test_direct_scenario_profit_rejects_lay_leg_back_math_bypass(self) -> None:
+        lay_leg = TicketLeg(
+            "event",
+            "winner",
+            "alice",
+            Decimal("2"),
+            exchange_side="lay",
+        )
+        ticket = portfolio_module.PaperTicket(
+            ticket_id="synthetic-lay-ticket",
+            stake=Decimal("10"),
+            legs=(lay_leg,),
+            placed_at="2026-09-21T08:00:00+00:00",
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "LAY economic materialization is not supported",
+        ):
+            PortfolioEngine.scenario_profit([ticket], {lay_leg.quote_key})
+
+    def test_direct_scenario_profit_rejects_duplicate_quote_identity(self) -> None:
+        leg = TicketLeg("event", "winner", "alice", Decimal("2"))
+        ticket = portfolio_module.PaperTicket(
+            ticket_id="synthetic-duplicate-ticket",
+            stake=Decimal("10"),
+            legs=(leg, leg),
+            placed_at="2026-09-21T08:00:00+00:00",
+        )
+
+        with self.assertRaisesRegex(ValueError, "duplicate quote_key leg"):
+            PortfolioEngine.scenario_profit([ticket], {leg.quote_key})
+
     def test_snapshot_fails_closed_if_settlement_crosses_capture_window(self) -> None:
         book = PaperBook("100")
         first_leg = TicketLeg("event-1", "winner", "alice", Decimal("2"))

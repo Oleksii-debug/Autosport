@@ -5,7 +5,7 @@ import json
 import math
 import time
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any, Callable, Mapping
@@ -302,7 +302,28 @@ class ParlayApiTableTennisProvider:
         provider_state: ProviderStateSnapshot | None,
     ) -> Iterator[ProviderQuote]:
         for event in events:
-            yield from self._event_quotes(event, observed_ts, http_status, provider_state)
+            scoped_event = _provider_state_scoped_event(event, provider_state)
+            for quote in self._event_quotes(scoped_event, observed_ts, http_status):
+                if provider_state is None:
+                    yield quote
+                    continue
+                raw_book_key = quote.metadata.get("bookmaker_key")
+                book_key = _provider_identity(raw_book_key, field="bookmaker identity")
+                source_state = provider_state.for_source(book_key)
+                if source_state is None or source_state.role == "offline":
+                    # Defensive postcondition: source filtering happened before parsing,
+                    # but a subclass must not be able to reintroduce uncovered/offline rows.
+                    continue
+                metadata = dict(quote.metadata)
+                metadata.update(
+                    {
+                        "provider_state_role": source_state.role,
+                        "provider_state_age_seconds": source_state.age_seconds,
+                        "provider_state_server_timestamp": provider_state.server_timestamp,
+                        "provider_state_truncated": provider_state.truncated,
+                    }
+                )
+                yield replace(quote, metadata=metadata)
 
     def _clear_pending_snapshot(self) -> None:
         self._pending_quotes = None
@@ -466,7 +487,6 @@ class ParlayApiTableTennisProvider:
         event: dict[str, Any],
         observed_ts: str,
         http_status: int,
-        provider_state: ProviderStateSnapshot | None,
     ) -> list[ProviderQuote]:
         if "id" in event:
             raw_event_id = event["id"]
@@ -502,9 +522,6 @@ class ParlayApiTableTennisProvider:
             else:
                 raise ProviderPayloadError("bookmaker is missing key/title identity")
             book_key = _provider_identity(raw_book_key, field="bookmaker identity")
-            source_state = provider_state.for_source(book_key) if provider_state is not None else None
-            if provider_state is not None and (source_state is None or source_state.role == "offline"):
-                continue
             block_freshness = _parse_bookmaker_block_freshness(bookmaker)
             markets = bookmaker.get("markets", [])
             if not isinstance(markets, list):
@@ -560,15 +577,6 @@ class ParlayApiTableTennisProvider:
                         "provider_block_topped_up": block_freshness.topped_up,
                         "provider_block_freshness_complete": block_freshness.complete,
                     }
-                    if source_state is not None and provider_state is not None:
-                        metadata.update(
-                            {
-                                "provider_state_role": source_state.role,
-                                "provider_state_age_seconds": source_state.age_seconds,
-                                "provider_state_server_timestamp": provider_state.server_timestamp,
-                                "provider_state_truncated": provider_state.truncated,
-                            }
-                        )
                     output.append(
                         ProviderQuote(
                             provider_event_id=event_id,
@@ -585,6 +593,45 @@ class ParlayApiTableTennisProvider:
                         )
                     )
         return output
+
+
+def _provider_state_scoped_event(
+    event: dict[str, Any],
+    provider_state: ProviderStateSnapshot | None,
+) -> dict[str, Any]:
+    if provider_state is None:
+        return event
+    bookmakers = event.get("bookmakers", [])
+    if not isinstance(bookmakers, list):
+        return event
+
+    kept: list[object] = []
+    changed = False
+    for bookmaker in bookmakers:
+        if not isinstance(bookmaker, dict):
+            # Preserve malformed entries so the canonical event parser still fails closed.
+            kept.append(bookmaker)
+            continue
+        if "key" in bookmaker:
+            raw_book_key = bookmaker["key"]
+        elif "title" in bookmaker:
+            raw_book_key = bookmaker["title"]
+        else:
+            # Preserve missing identity so _event_quotes emits the established error.
+            kept.append(bookmaker)
+            continue
+        book_key = _provider_identity(raw_book_key, field="bookmaker identity")
+        source_state = provider_state.for_source(book_key)
+        if source_state is None or source_state.role == "offline":
+            changed = True
+            continue
+        kept.append(bookmaker)
+
+    if not changed:
+        return event
+    scoped = dict(event)
+    scoped["bookmakers"] = kept
+    return scoped
 
 
 def _parse_bookmaker_block_freshness(

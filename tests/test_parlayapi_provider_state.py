@@ -57,6 +57,16 @@ def provider_state_header(
     return json.dumps(payload, separators=(",", ":"))
 
 
+class _ThreeArgumentParlaySubclass(ParlayApiTableTennisProvider):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.event_quote_calls = 0
+
+    def _event_quotes(self, event, observed_ts, http_status):
+        self.event_quote_calls += 1
+        return super()._event_quotes(event, observed_ts, http_status)
+
+
 class ParlayApiProviderStateTests(unittest.TestCase):
     def _provider(self, response: HttpJsonResponse, **kwargs) -> ParlayApiTableTennisProvider:
         return ParlayApiTableTennisProvider(
@@ -65,6 +75,42 @@ class ParlayApiProviderStateTests(unittest.TestCase):
             clock=lambda: "2026-09-21T20:00:01+00:00",
             **kwargs,
         )
+
+    def test_three_argument_subclass_hook_preserves_provider_state_projection(self):
+        response = HttpJsonResponse(
+            [EVENT],
+            200,
+            {"X-Provider-State": provider_state_header()},
+        )
+        provider = _ThreeArgumentParlaySubclass(
+            "key",
+            transport=lambda *_: response,
+            clock=lambda: "2026-09-21T20:00:01+00:00",
+        )
+        batch = provider.read_batch()
+
+        self.assertEqual(provider.event_quote_calls, 1)
+        self.assertEqual(len(batch.quotes), 2)
+        self.assertEqual(batch.quality_flags, ())
+        self.assertEqual(batch.quotes[0].metadata["provider_state_role"], "primary")
+        self.assertEqual(batch.quotes[0].metadata["provider_block_stale_seconds"], 1.0)
+
+    def test_three_argument_subclass_cannot_reintroduce_offline_rows(self):
+        response = HttpJsonResponse(
+            [EVENT],
+            200,
+            {"X-Provider-State": provider_state_header(role="offline", age_seconds=None)},
+        )
+        provider = _ThreeArgumentParlaySubclass(
+            "key",
+            transport=lambda *_: response,
+            clock=lambda: "2026-09-21T20:00:01+00:00",
+        )
+        batch = provider.read_batch()
+
+        self.assertEqual(provider.event_quote_calls, 1)
+        self.assertEqual(batch.quotes, ())
+        self.assertEqual(batch.quality_flags, ("UPSTREAM_SOURCE_OFFLINE",))
 
     def test_primary_same_response_state_is_bound_to_quote_metadata(self):
         response = HttpJsonResponse(

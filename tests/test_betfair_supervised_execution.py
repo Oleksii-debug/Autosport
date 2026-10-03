@@ -1970,3 +1970,185 @@ def test_client_repr_never_exposes_session_credentials() -> None:
     assert "super-secret-app" not in rendered
     assert "super-secret-session" not in rendered
     assert "enabled=False" in rendered
+
+
+def test_matched_without_bet_id_persists_exact_provider_request_evidence_across_restart() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
+        transport = _Transport(
+            lambda request: _response(
+                request,
+                execution_status="SUCCESS",
+                instruction_status="SUCCESS",
+                matched=action.requested_stake,
+                average=action.requested_odds,
+                bet_id=None,
+                order_status="EXECUTION_COMPLETE",
+            )
+        )
+        client = _enabled_client(profile, transport, store=goal_store)
+        attempt_id = "attempt-matched-without-provider-id"
+
+        result = execute_betfair_supervised_action(
+            ledger,
+            bound,
+            approval,
+            action_id=action.action_id,
+            attempt_id=attempt_id,
+            profile=profile,
+            client=client,
+            clock=lambda: SUBMITTED_AT,
+        )
+
+        assert result.outcome is PlaceOrdersOutcome.UNKNOWN
+        assert result.attempt_state is AttemptState.UNKNOWN
+        assert result.evidence_id is not None
+        assert result.external_receipt_id is None
+        assert len(transport.calls) == 1
+
+        request_sha256 = sha256(transport.calls[0]["body"]).hexdigest()
+        binding = ledger.provider_evidence_binding(attempt_id)
+        assert binding is not None
+        assert binding["evidence_id"] == result.evidence_id
+        assert binding["request_sha256"] == request_sha256
+        assert binding.get("acknowledgement_sha256") is None
+
+        restarted = RealExecutionLedger(Path(tmp) / "real.jsonl")
+        assert restarted.attempt_state(attempt_id) is AttemptState.UNKNOWN
+        execution_view = restarted.verified_execution_view(
+            bound.execution_plan.plan_id
+        )
+        attempt = next(
+            item
+            for item in execution_view.attempts
+            if item.attempt_id == attempt_id
+        )
+        assert attempt.submitted_request_sha256 == request_sha256
+        assert attempt.provider_evidence is not None
+        assert attempt.provider_evidence.evidence_id == result.evidence_id
+        assert attempt.provider_evidence.request_sha256 == request_sha256
+        assert attempt.provider_evidence.acknowledgement_sha256 is None
+        assert attempt.acknowledgement is None
+        assert restarted.verify_integrity() > 0
+
+
+def test_malformed_provider_response_persists_raw_response_provenance() -> None:
+    malformed_response = b'{"jsonrpc":"2.0","result":'
+    with tempfile.TemporaryDirectory() as tmp:
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
+        transport = _Transport(lambda _request: malformed_response)
+        client = _enabled_client(profile, transport, store=goal_store)
+        attempt_id = "attempt-malformed-provider-response"
+
+        result = execute_betfair_supervised_action(
+            ledger,
+            bound,
+            approval,
+            action_id=action.action_id,
+            attempt_id=attempt_id,
+            profile=profile,
+            client=client,
+            clock=lambda: SUBMITTED_AT,
+        )
+
+        assert result.outcome is PlaceOrdersOutcome.UNKNOWN
+        assert result.attempt_state is AttemptState.UNKNOWN
+        assert result.evidence_id is not None
+        assert result.external_receipt_id is None
+        assert len(transport.calls) == 1
+
+        request_sha256 = sha256(transport.calls[0]["body"]).hexdigest()
+        response_sha256 = sha256(malformed_response).hexdigest()
+        binding = ledger.provider_evidence_binding(attempt_id)
+        assert binding is not None
+        assert binding["evidence_id"] == result.evidence_id
+        assert binding["request_sha256"] == request_sha256
+        assert binding["source"] == (
+            "betfair:placeOrders:ambiguous:" + response_sha256
+        )
+        assert binding.get("acknowledgement_sha256") is None
+
+        restarted = RealExecutionLedger(Path(tmp) / "real.jsonl")
+        assert restarted.attempt_state(attempt_id) is AttemptState.UNKNOWN
+        execution_view = restarted.verified_execution_view(
+            bound.execution_plan.plan_id
+        )
+        attempt = next(
+            item
+            for item in execution_view.attempts
+            if item.attempt_id == attempt_id
+        )
+        assert attempt.submitted_request_sha256 == request_sha256
+        assert attempt.provider_evidence is not None
+        assert attempt.provider_evidence.evidence_id == result.evidence_id
+        assert attempt.provider_evidence.request_sha256 == request_sha256
+        assert attempt.provider_evidence.source == (
+            "betfair:placeOrders:ambiguous:" + response_sha256
+        )
+        assert attempt.provider_evidence.acknowledgement_sha256 is None
+        assert attempt.acknowledgement is None
+        assert restarted.verify_integrity() > 0
+
+
+def test_post_provider_authority_drift_preserves_report_evidence(
+    monkeypatch,
+) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
+
+        def respond_and_rebind_parser(request):
+            payload = _response(
+                request,
+                matched=action.requested_stake,
+                average=action.requested_odds,
+            )
+            monkeypatch.setattr(
+                betfair_supervised_execution,
+                "_parse_place_orders_response",
+                lambda *args, **kwargs: object(),
+            )
+            return payload
+
+        transport = _Transport(respond_and_rebind_parser)
+        client = _enabled_client(profile, transport, store=goal_store)
+        attempt_id = "attempt-postflight-authority-drift"
+
+        result = execute_betfair_supervised_action(
+            ledger,
+            bound,
+            approval,
+            action_id=action.action_id,
+            attempt_id=attempt_id,
+            profile=profile,
+            client=client,
+            clock=lambda: SUBMITTED_AT,
+        )
+
+        assert result.outcome is PlaceOrdersOutcome.UNKNOWN
+        assert result.attempt_state is AttemptState.UNKNOWN
+        assert result.evidence_id is not None
+        assert result.external_receipt_id is None
+        assert len(transport.calls) == 1
+
+        request_sha256 = sha256(transport.calls[0]["body"]).hexdigest()
+        binding = ledger.provider_evidence_binding(attempt_id)
+        assert binding is not None
+        assert binding["evidence_id"] == result.evidence_id
+        assert binding["request_sha256"] == request_sha256
+        assert binding.get("acknowledgement_sha256") is None
+
+        restarted = RealExecutionLedger(Path(tmp) / "real.jsonl")
+        assert restarted.attempt_state(attempt_id) is AttemptState.UNKNOWN
+        view = restarted.verified_execution_view(bound.execution_plan.plan_id)
+        attempt = next(
+            item
+            for item in view.attempts
+            if item.attempt_id == attempt_id
+        )
+        assert attempt.submitted_request_sha256 == request_sha256
+        assert attempt.provider_evidence is not None
+        assert attempt.provider_evidence.evidence_id == result.evidence_id
+        assert attempt.provider_evidence.request_sha256 == request_sha256
+        assert attempt.provider_evidence.acknowledgement_sha256 is None
+        assert attempt.acknowledgement is None
+        assert restarted.verify_integrity() > 0

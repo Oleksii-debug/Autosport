@@ -379,6 +379,37 @@ class BoundedMirrorInvalidationBufferTests(unittest.TestCase):
             },
         )
 
+    def test_atomic_drain_and_route_retains_dirty_state_on_routing_failure(self) -> None:
+        mirror = MarketMirror()
+        runtime = BoundedMirrorInvalidationBuffer(mirror)
+        dependencies = FocusedMirrorDependencyIndex(mirror)
+        dependencies.register("decision-all", source_ids="provider-a")
+        event = self.event(selection="selection-a", sequence=1, odds="2.00")
+        runtime.accept_persisted(event)
+
+        with patch.object(
+            dependencies,
+            "affected_inputs",
+            side_effect=RuntimeError("simulated routing failure"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "simulated routing failure"):
+                runtime.drain_and_route(dependencies)
+
+        self.assertEqual(runtime.pending_count, 1)
+        batch, affected = runtime.drain_and_route(dependencies)
+
+        self.assertEqual(
+            batch.changed_keys,
+            ((event.source_id, event.quote_key),),
+        )
+        self.assertEqual(affected, ("decision-all",))
+        self.assertEqual(runtime.pending_count, 0)
+        self.assertEqual(
+            dependencies.matching_keys("decision-all"),
+            ((event.source_id, event.quote_key),),
+        )
+
+
     def test_drained_unrouted_key_invalidates_captured_routing_generation(self) -> None:
         mirror = MarketMirror()
         runtime = BoundedMirrorInvalidationBuffer(mirror)

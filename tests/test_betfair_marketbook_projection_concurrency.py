@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from threading import Barrier, Thread
 
 import pytest
 
@@ -30,6 +31,17 @@ def begin_projected(
         observed_at=at,
         has_order_projection=True,
         has_match_projection=False,
+    )
+
+
+def active_generation(
+    value: BetfairMarketBookProjectionConcurrencyGate,
+    request_id: str,
+) -> int:
+    return next(
+        lease.generation
+        for lease in value.snapshot().active
+        if lease.request_id == request_id
     )
 
 
@@ -92,7 +104,11 @@ def test_completion_releases_exactly_one_slot() -> None:
     for index in range(3):
         assert begin_projected(value, f"r{index}").allowed
 
-    value.complete("r1", observed_at=T0 + timedelta(seconds=1))
+    value.complete(
+        "r1",
+        lease_generation=active_generation(value, "r1"),
+        observed_at=T0 + timedelta(seconds=1),
+    )
     assert [item.request_id for item in value.snapshot().active] == ["r0", "r2"]
     replacement = value.begin(
         "r3",
@@ -107,9 +123,18 @@ def test_completion_releases_exactly_one_slot() -> None:
 def test_duplicate_completion_cannot_double_release() -> None:
     value = gate()
     assert begin_projected(value, "r0").allowed
-    value.complete("r0", observed_at=T0 + timedelta(seconds=1))
+    generation = active_generation(value, "r0")
+    value.complete(
+        "r0",
+        lease_generation=generation,
+        observed_at=T0 + timedelta(seconds=1),
+    )
     with pytest.raises(ValueError, match="not an active"):
-        value.complete("r0", observed_at=T0 + timedelta(seconds=1))
+        value.complete(
+            "r0",
+            lease_generation=generation,
+            observed_at=T0 + timedelta(seconds=1),
+        )
     assert value.snapshot().active == ()
 
 
@@ -144,7 +169,11 @@ def test_time_advance_never_auto_expires_unresolved_leases() -> None:
 def test_explicit_completion_can_release_old_unresolved_lease() -> None:
     value = gate()
     assert begin_projected(value, "r0").allowed
-    value.complete("r0", observed_at=T0 + timedelta(days=365))
+    value.complete(
+        "r0",
+        lease_generation=active_generation(value, "r0"),
+        observed_at=T0 + timedelta(days=365),
+    )
     assert value.snapshot().active == ()
 
 
@@ -227,12 +256,12 @@ def test_naive_time_fails_closed() -> None:
 
 def test_state_rejects_wrong_policy_version() -> None:
     with pytest.raises(ValueError, match="unsupported"):
-        MarketBookProjectionConcurrencyState("wrong", None, ())
+        MarketBookProjectionConcurrencyState("wrong", None, (), 1)
 
 
 def test_state_rejects_more_than_three_active_projection_requests() -> None:
     leases = tuple(
-        MarketBookProjectionLease(f"r{index}", 0)
+        MarketBookProjectionLease(f"r{index}", 0, index + 1)
         for index in range(4)
     )
     with pytest.raises(ValueError, match="exceeds"):
@@ -240,33 +269,37 @@ def test_state_rejects_more_than_three_active_projection_requests() -> None:
             BETFAIR_MARKETBOOK_PROJECTION_CONCURRENCY_POLICY_VERSION,
             0,
             leases,
+            5,
         )
 
 
 def test_state_rejects_unsorted_or_duplicate_active_ids() -> None:
-    a = MarketBookProjectionLease("a", 0)
-    b = MarketBookProjectionLease("b", 0)
+    a = MarketBookProjectionLease("a", 0, 1)
+    b = MarketBookProjectionLease("b", 0, 2)
     with pytest.raises(ValueError, match="sorted"):
         MarketBookProjectionConcurrencyState(
             BETFAIR_MARKETBOOK_PROJECTION_CONCURRENCY_POLICY_VERSION,
             0,
             (b, a),
+            3,
         )
     with pytest.raises(ValueError, match="duplicate"):
         MarketBookProjectionConcurrencyState(
             BETFAIR_MARKETBOOK_PROJECTION_CONCURRENCY_POLICY_VERSION,
             0,
             (a, a),
+            2,
         )
 
 
 def test_state_rejects_lease_acquired_after_last_observed_time() -> None:
-    lease = MarketBookProjectionLease("a", 2)
+    lease = MarketBookProjectionLease("a", 2, 1)
     with pytest.raises(ValueError, match="after last"):
         MarketBookProjectionConcurrencyState(
             BETFAIR_MARKETBOOK_PROJECTION_CONCURRENCY_POLICY_VERSION,
             1,
             (lease,),
+            2,
         )
 
 
@@ -294,7 +327,7 @@ def test_price_only_request_never_needs_completion() -> None:
     assert decision.allowed
     assert value.snapshot().active == ()
     with pytest.raises(ValueError, match="not an active"):
-        value.complete("price", observed_at=T0)
+        value.complete("price", lease_generation=1, observed_at=T0)
 
 
 def test_local_gate_never_claims_complete_provider_limit_or_dispatch_authority() -> None:
@@ -311,3 +344,136 @@ def test_local_gate_never_claims_complete_provider_limit_or_dispatch_authority()
     for decision in (projected, price_only):
         assert decision.provider_limit_coverage_complete is False
         assert decision.provider_dispatch_authorized is False
+
+
+
+def test_competing_third_slot_begins_are_serialized() -> None:
+    value = gate()
+    assert begin_projected(value, "r0").allowed
+    assert begin_projected(value, "r1").allowed
+
+    start = Barrier(3)
+    decisions = []
+    errors: list[BaseException] = []
+
+    def compete(request_id: str) -> None:
+        try:
+            start.wait()
+            decisions.append(
+                begin_projected(
+                    value,
+                    request_id,
+                    at=T0 + timedelta(microseconds=1),
+                )
+            )
+        except BaseException as exc:  # pragma: no cover - surfaced below
+            errors.append(exc)
+
+    workers = [
+        Thread(target=compete, args=("r2",)),
+        Thread(target=compete, args=("r3",)),
+    ]
+    for worker in workers:
+        worker.start()
+    start.wait()
+    for worker in workers:
+        worker.join()
+
+    assert errors == []
+    assert len(decisions) == 2
+    assert sum(decision.allowed for decision in decisions) == 1
+    assert sum(not decision.allowed for decision in decisions) == 1
+    assert len(value.snapshot().active) == 3
+
+
+def test_stale_completion_cannot_release_reused_request_id_generation() -> None:
+    value = gate()
+    first = begin_projected(value, "same")
+    assert first.lease_generation is not None
+    value.complete(
+        "same",
+        lease_generation=first.lease_generation,
+        observed_at=T0 + timedelta(seconds=1),
+    )
+
+    second = begin_projected(
+        value,
+        "same",
+        at=T0 + timedelta(seconds=2),
+    )
+    assert second.allowed
+    assert second.lease_generation is not None
+    assert second.lease_generation != first.lease_generation
+
+    before = value.snapshot()
+    with pytest.raises(ValueError, match="does not match"):
+        value.complete(
+            "same",
+            lease_generation=first.lease_generation,
+            observed_at=T0 + timedelta(seconds=3),
+        )
+    after = value.snapshot()
+    assert after == before
+    assert active_generation(value, "same") == second.lease_generation
+
+
+def test_restart_preserves_generation_against_stale_completion() -> None:
+    value = gate()
+    first = begin_projected(value, "same")
+    assert first.lease_generation is not None
+    value.complete(
+        "same",
+        lease_generation=first.lease_generation,
+        observed_at=T0 + timedelta(seconds=1),
+    )
+
+    restored = BetfairMarketBookProjectionConcurrencyGate(state=value.snapshot())
+    second = begin_projected(
+        restored,
+        "same",
+        at=T0 + timedelta(seconds=2),
+    )
+    assert second.lease_generation is not None
+    assert second.lease_generation > first.lease_generation
+
+    before = restored.snapshot()
+    with pytest.raises(ValueError, match="does not match"):
+        restored.complete(
+            "same",
+            lease_generation=first.lease_generation,
+            observed_at=T0 + timedelta(seconds=3),
+        )
+    assert restored.snapshot() == before
+
+
+def test_invalid_completion_does_not_advance_causal_time() -> None:
+    value = gate()
+    first = begin_projected(value, "r0")
+    assert first.lease_generation is not None
+    before = value.snapshot()
+    with pytest.raises(ValueError, match="does not match"):
+        value.complete(
+            "r0",
+            lease_generation=first.lease_generation + 1,
+            observed_at=T0 + timedelta(days=1),
+        )
+    assert value.snapshot() == before
+
+
+def test_state_rejects_generation_rewind_or_duplicate_active_generation() -> None:
+    a = MarketBookProjectionLease("a", 0, 1)
+    b = MarketBookProjectionLease("b", 0, 1)
+    with pytest.raises(ValueError, match="precede next"):
+        MarketBookProjectionConcurrencyState(
+            BETFAIR_MARKETBOOK_PROJECTION_CONCURRENCY_POLICY_VERSION,
+            0,
+            (a,),
+            1,
+        )
+    with pytest.raises(ValueError, match="duplicate active lease generation"):
+        MarketBookProjectionConcurrencyState(
+            BETFAIR_MARKETBOOK_PROJECTION_CONCURRENCY_POLICY_VERSION,
+            0,
+            (a, b),
+            2,
+        )

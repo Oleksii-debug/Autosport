@@ -1638,6 +1638,62 @@ _CANONICAL_REPORT_OUTCOME = _report_outcome
 _CANONICAL_REPORT_OUTCOME_CODE = _CANONICAL_REPORT_OUTCOME.__code__
 
 
+def _existing_execution_attempt_view(
+    ledger: RealExecutionLedger,
+    bound: BoundSupervisedExecutionPlan,
+    *,
+    action_id: str,
+    attempt_id: str,
+):
+    """Resolve a durable prior attempt without reopening current-time admission."""
+
+    try:
+        view = ledger.verified_execution_view(bound.execution_plan.plan_id)
+    except KeyError:
+        return None
+    if view.plan_fingerprint != bound.execution_plan.fingerprint:
+        raise BetfairSupervisedExecutionError(
+            "durable execution-plan fingerprint mismatches bound plan"
+        )
+    matches = tuple(
+        item
+        for item in view.attempts
+        if item.attempt.attempt_id == attempt_id
+    )
+    if not matches:
+        return None
+    if len(matches) != 1:
+        raise BetfairSupervisedExecutionError(
+            "attempt is not uniquely present in verified execution view"
+        )
+    attempt_view = matches[0]
+    if attempt_view.action.action_id != action_id:
+        raise BetfairSupervisedExecutionError(
+            "attempt_id belongs to a different execution action"
+        )
+    return attempt_view
+
+
+def _require_bound_approval_identity(
+    bound: BoundSupervisedExecutionPlan,
+    approval: SupervisedApproval,
+) -> None:
+    """Verify immutable approval identity without re-running current-time admission."""
+
+    if type(approval) is not SupervisedApproval:
+        raise TypeError("approval must be exact SupervisedApproval")
+    bound.verify_binding()
+    if (
+        approval.portfolio_plan_sha256 != bound.portfolio_plan_sha256
+        or approval.intent_id != bound.intent_id
+        or approval.fingerprint != bound.approval_fingerprint
+        or approval.ledger_identity != bound.execution_plan.approval_id
+    ):
+        raise BetfairSupervisedExecutionError(
+            "approval identity mismatches bound execution plan"
+        )
+
+
 def _attempt_causal_observation_time(
     ledger: RealExecutionLedger,
     *,
@@ -1728,6 +1784,7 @@ def execute_betfair_supervised_action(
         )
     action = bound.action_for(action_id)
     _validate_betfair_place_action(action)
+    _require_bound_approval_identity(bound, approval)
     # Retain the public compatibility parameter, but never execute caller
     # code to timestamp an authority-bearing provider write or uncertainty
     # transition. The same product-owned clock domain used by supervised
@@ -1745,6 +1802,91 @@ def execute_betfair_supervised_action(
     # held. This prevents a known local authority denial from being mislabeled
     # as provider-effect uncertainty.
     with WorkspaceEconomicLock(execution_workspace):
+        existing_attempt = _existing_execution_attempt_view(
+            ledger,
+            bound,
+            action_id=action_id,
+            attempt_id=attempt_id,
+        )
+        if (
+            existing_attempt is not None
+            and existing_attempt.state is not AttemptState.RESERVED
+        ):
+            provider_evidence_id = (
+                None
+                if existing_attempt.provider_evidence is None
+                else existing_attempt.provider_evidence.evidence_id
+            )
+            if existing_attempt.state is AttemptState.SUBMITTED:
+                provider_order_ref = ledger.provider_order_reference(
+                    attempt_id=attempt_id,
+                    provider_id=action.bookmaker_id,
+                )
+                if provider_order_ref is None:
+                    raise BetfairSupervisedExecutionError(
+                        "submitted Betfair attempt lacks durable provider order reference"
+                    )
+                ledger.mark_unknown(
+                    attempt_id,
+                    reason=(
+                        "betfair_placeOrders_existing_submitted_"
+                        "requires_readback"
+                    ),
+                    observed_at=_attempt_causal_observation_time(
+                        ledger,
+                        plan_id=bound.execution_plan.plan_id,
+                        attempt_id=attempt_id,
+                    ),
+                )
+                return BetfairSupervisedExecutionResult(
+                    PlaceOrdersOutcome.UNKNOWN,
+                    attempt_id,
+                    ledger.attempt_state(attempt_id),
+                    provider_evidence_id,
+                    None,
+                )
+            if existing_attempt.state in {
+                AttemptState.UNKNOWN,
+                AttemptState.RECONCILED_NOT_FOUND,
+            }:
+                reconciliation_evidence_id = (
+                    None
+                    if existing_attempt.not_found_reconciliation is None
+                    else existing_attempt.not_found_reconciliation.evidence_id
+                )
+                return BetfairSupervisedExecutionResult(
+                    PlaceOrdersOutcome.UNKNOWN,
+                    attempt_id,
+                    existing_attempt.state,
+                    provider_evidence_id or reconciliation_evidence_id,
+                    None,
+                )
+            terminal_outcomes = {
+                AttemptState.ACCEPTED: PlaceOrdersOutcome.ACCEPTED,
+                AttemptState.PARTIAL: PlaceOrdersOutcome.PARTIAL,
+                AttemptState.REJECTED: PlaceOrdersOutcome.REJECTED,
+            }
+            terminal_outcome = terminal_outcomes.get(existing_attempt.state)
+            if terminal_outcome is None:
+                raise BetfairSupervisedExecutionError(
+                    "unsupported durable Betfair attempt state"
+                )
+            acknowledgement = existing_attempt.acknowledgement
+            if acknowledgement is None:
+                raise BetfairSupervisedExecutionError(
+                    "terminal durable Betfair attempt lacks acknowledgement"
+                )
+            return BetfairSupervisedExecutionResult(
+                terminal_outcome,
+                attempt_id,
+                existing_attempt.state,
+                (
+                    provider_evidence_id
+                    or acknowledgement.reconciliation_evidence_id
+                ),
+                acknowledgement.external_receipt_id,
+            )
+
         ambient_urllib_opener = (
             _CANONICAL_URLLIB_BETFAIR_URLOPEN_GLOBALS.get("_opener")
         )

@@ -474,3 +474,134 @@ def test_zero_association_cancel_rejects_foreign_head_repository_at_effect_bound
         match="unbound workflow run identity changed",
     ):
         api.cancel(80)
+
+def test_scoped_workflow_id_cannot_be_redirected_by_validator_rebind(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        scoped_controller,
+        "_require_positive_int",
+        lambda value, *, field: 999,
+    )
+
+    api = WorkflowScopedGitHubApi(
+        repository="owner/repo",
+        token="token",
+        workflow_id=356678400,
+        workflow_name="CI",
+    )
+
+    assert object.__getattribute__(
+        api,
+        "_WorkflowScopedGitHubApi__workflow_id",
+    ) == 356678400
+
+
+def test_singleton_event_pr_identity_cannot_be_redirected_by_validator_rebind(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        scoped_controller,
+        "_require_positive_int",
+        lambda value, *, field: 999,
+    )
+
+    assert scoped_controller._validated_event_pr_identity(
+        303,
+        reference_mode="singleton",
+    ) == (303, False)
+
+
+def test_explicit_sweep_current_run_cannot_be_reclassified_by_validator_rebind(
+    monkeypatch,
+) -> None:
+    current_head = "c" * 40
+    cancelled: list[int] = []
+
+    class FixtureApi:
+        _WorkflowScopedGitHubApi__workflow_name = "CI"
+
+    run = base_controller.WorkflowRun(
+        run_id=123,
+        head_sha=current_head,
+        workflow_name="CI",
+        pr_numbers=(303,),
+        status="queued",
+    )
+
+    monkeypatch.setattr(
+        scoped_controller,
+        "_require_positive_int",
+        lambda value, *, field: 999 if field == "current run id" else value,
+    )
+    monkeypatch.setattr(
+        scoped_controller,
+        "_trusted_live_pr_qualification",
+        lambda *_args, **_kwargs: (current_head, False),
+    )
+    monkeypatch.setattr(
+        scoped_controller,
+        "_explicit_run_identity_is_current",
+        lambda *_args, **_kwargs: True,
+    )
+    monkeypatch.setattr(
+        scoped_controller,
+        "_cancel_run_or_defer_active_conflict",
+        lambda _api, run_id: cancelled.append(run_id) is None or True,
+    )
+
+    assert scoped_controller.cancel_superseded_explicit_pr_runs(
+        FixtureApi(),  # type: ignore[arg-type]
+        workflow_name="CI",
+        current_run_id=123,
+        runs=(run,),
+    ) == ()
+    assert cancelled == []
+
+
+def test_trigger_current_run_coordinate_cannot_be_redirected_by_validator_rebind(
+    monkeypatch,
+) -> None:
+    event_head = "d" * 40
+    live_head = "e" * 40
+    checked: list[int] = []
+    cancelled: list[int] = []
+
+    monkeypatch.setattr(
+        scoped_controller,
+        "_require_positive_int",
+        lambda value, *, field: 999 if field == "current run id" else value,
+    )
+
+    def check_identity(_api, *, run_id, expected_head_sha, pr_number):
+        assert expected_head_sha == event_head
+        assert pr_number == 303
+        checked.append(run_id)
+        return True
+
+    monkeypatch.setattr(
+        scoped_controller,
+        "_explicit_run_identity_is_current",
+        check_identity,
+    )
+    monkeypatch.setattr(
+        scoped_controller,
+        "_trusted_live_pr_qualification",
+        lambda *_args, **_kwargs: (live_head, True),
+    )
+    monkeypatch.setattr(
+        scoped_controller,
+        "_cancel_run_or_defer_active_conflict",
+        lambda _api, run_id: cancelled.append(run_id) is None or True,
+    )
+
+    assert scoped_controller._cancel_triggering_run_if_stale_or_nonqualifying(
+        object(),  # type: ignore[arg-type]
+        pr_number=303,
+        event_head_sha=event_head,
+        current_run_id=123,
+        qualification=(live_head, True),
+    )
+    assert checked == [123]
+    assert cancelled == [123]
+

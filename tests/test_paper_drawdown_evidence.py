@@ -15,6 +15,7 @@ from autosport.paper_drawdown_evidence import (
     require_current_paper_drawdown_evidence,
     resolve_paper_drawdown_evidence,
 )
+from autosport.risk_reporting import build_paper_risk_report
 
 
 def _goal() -> EconomicGoalContract:
@@ -184,6 +185,46 @@ def test_recovery_does_not_erase_historical_max_drawdown(tmp_path):
     assert evidence.historical_max_drawdown_amount == Decimal("50")
     assert evidence.historical_max_drawdown_fraction == Decimal("0.5")
     assert evidence.recovered_to_peak is True
+
+
+def test_product_evidence_matches_merged_risk_report_drawdown_projection(tmp_path):
+    book = _initialize(tmp_path)
+    winning = _open(book, "new-peak", "50", "2026-09-20T10:00:00+00:00")
+    book.settle(
+        winning.ticket_id,
+        {winning.legs[0].quote_key},
+        settled_at="2026-09-20T11:00:00+00:00",
+    )
+    losing = _open(book, "post-peak-loss", "50", "2026-09-20T12:00:00+00:00")
+    book.settle(
+        losing.ticket_id,
+        set(),
+        settled_at="2026-09-20T13:00:00+00:00",
+    )
+    book.save(tmp_path / "paper_book.json")
+
+    evidence = resolve_paper_drawdown_evidence(tmp_path)
+    report = build_paper_risk_report(book, _goal())
+
+    assert evidence.current_equity == report.current_equity
+    assert evidence.peak_equity == report.peak_equity
+    assert (
+        evidence.historical_max_drawdown_amount
+        == report.historical_max_drawdown_amount
+    )
+    assert (
+        evidence.historical_max_drawdown_fraction
+        == report.historical_max_drawdown_fraction
+    )
+    assert (
+        evidence.historical_max_drawdown_peak_id
+        == report.historical_max_drawdown_peak_id
+    )
+    assert (
+        evidence.historical_max_drawdown_trough_id
+        == report.historical_max_drawdown_trough_id
+    )
+    assert evidence.current_drawdown_amount == report.current_drawdown_amount
 
 
 def test_restart_reresolves_identical_path_and_evidence_identity(tmp_path):

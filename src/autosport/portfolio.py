@@ -196,9 +196,10 @@ class PortfolioEngine:
 
     @staticmethod
     def scenario_profit(tickets: list[PaperTicket], winning_quote_keys: set[str]) -> Decimal:
+        ticket_snapshot = _snapshot_open_tickets_for_analysis(tickets)
         try:
             with localcontext(_PORTFOLIO_DECIMAL_CONTEXT):
-                return _scenario_profit_in_context(tickets, winning_quote_keys)
+                return _scenario_profit_in_context(ticket_snapshot, winning_quote_keys)
         except DecimalException as exc:
             raise _portfolio_arithmetic_error(exc) from exc
 

@@ -501,6 +501,8 @@ def test_tampered_acquisition_digest_fails_closed(tmp_path: Path) -> None:
         ("sport", "endpoint_path contradicts sport_key"),
         ("raw-bytes", "cannot claim raw response bytes"),
         ("response-digest", "response payload digest contradicts"),
+        ("base-url-digest", "base_url_sha256 does not bind canonical origin"),
+        ("request-url-digest", "request_url_sha256 does not bind canonical request URL"),
     ],
 )
 def test_self_consistent_but_semantically_false_acquisition_claim_fails_closed(
@@ -520,8 +522,12 @@ def test_self_consistent_but_semantically_false_acquisition_claim_fails_closed(
         acquisition["request"]["endpoint_path"] = "/v1/historical/sports/baseball/odds"
     elif mutation == "raw-bytes":
         acquisition["raw_response_bytes_bound"] = True
-    else:
+    elif mutation == "response-digest":
         acquisition["response_payload_sha256"] = "3" * 64
+    elif mutation == "base-url-digest":
+        acquisition["request"]["base_url_sha256"] = "4" * 64
+    else:
+        acquisition["request"]["request_url_sha256"] = "5" * 64
     payload["acquisition_sha256"] = _canonical_sha256(acquisition)
     evidence.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
     proof = _write_governance(

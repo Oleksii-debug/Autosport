@@ -348,6 +348,37 @@ def test_coordinated_qualification_root_rebind_cannot_forge_trusted_head(
     ) == CancellationResult(current_head=True, cancelled_run_ids=())
 
 
+def test_live_pr_qualification_does_not_trust_rebound_sha_helper(
+    monkeypatch,
+) -> None:
+    api = controller_module.GitHubApi(
+        repository="owner/repo",
+        token="token",
+    )
+    api._pull_request = lambda pr_number: {
+        "state": "open",
+        "draft": False,
+        "head": {
+            "sha": HEAD_B,
+            "repo": {"full_name": "owner/repo"},
+        },
+        "base": {"repo": {"full_name": "owner/repo"}},
+    } if pr_number == 2008 else (_ for _ in ()).throw(AssertionError(pr_number))
+
+    def forged_sha(_value, *, field: str) -> str:
+        del field
+        return HEAD_A
+
+    monkeypatch.setattr(controller_module, "_require_sha", forged_sha)
+
+    assert api.live_pr_qualification(2008) == (HEAD_B, True)
+    assert admit_current_head(
+        api=api,
+        pr_number=2008,
+        event_head_sha=HEAD_A,
+    ) == CancellationResult(current_head=False, cancelled_run_ids=())
+
+
 def test_in_place_qualification_state_drift_revokes_cancellation() -> None:
     qualification = PullRequestQualification(
         head_sha=HEAD_B,

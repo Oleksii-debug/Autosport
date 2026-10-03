@@ -11,7 +11,7 @@ import hashlib
 import inspect
 import json
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Sequence
 
 from . import provider_evaluation_universe as _provider_universe_module
@@ -68,6 +68,7 @@ _HEX = frozenset("0123456789abcdef")
 
 _ESTABLISH_CAMPAIGN = establish_campaign_inception
 _RESOLVE_ARTIFACT = CollectorDeltaStore.collector_cycle_observation_artifact_evidence
+_SCHEDULE_DUE_AT = CollectorDeltaStore._collector_schedule_due_at
 _LOAD_PROVIDER_EVIDENCE = CompleteGameBoardEvidenceStore.load
 _GUARDED_UNIVERSE_LOAD = load_guarded_provider_evaluation_universe
 _RESOLVE_FORWARD_IDENTITY = resolve_forward_universe_authority_identity
@@ -105,6 +106,7 @@ _CANONICAL_VERIFICATION_RESULT_FIELD_DESCRIPTORS = tuple(
 _CAPTURED_CALLABLES = (
     ("_ESTABLISH_CAMPAIGN", _ESTABLISH_CAMPAIGN, _ESTABLISH_CAMPAIGN.__code__),
     ("_RESOLVE_ARTIFACT", _RESOLVE_ARTIFACT, _RESOLVE_ARTIFACT.__code__),
+    ("_SCHEDULE_DUE_AT", _SCHEDULE_DUE_AT, _SCHEDULE_DUE_AT.__code__),
     (
         "_LOAD_PROVIDER_EVIDENCE",
         _LOAD_PROVIDER_EVIDENCE,
@@ -269,10 +271,15 @@ def _require_cycle_observation_chronology(
         "collector due_at",
     )
     try:
-        slot_deadline = slot_due + _CANONICAL_TIMEDELTA(
-            seconds=source_spec.interval_seconds
+        slot_deadline = _instant(
+            _SCHEDULE_DUE_AT(
+                anchor_at=source_spec.anchor_at,
+                interval_seconds=repr(source_spec.interval_seconds),
+                slot_ordinal=slot_ordinal + 1,
+            ),
+            "collector next slot due_at",
         )
-    except (OverflowError, ValueError) as exc:
+    except (OverflowError, TypeError, ValueError) as exc:
         raise CampaignForwardUniverseCycleBindingError(
             "collector fixed schedule slot window is not representable"
         ) from exc
@@ -644,7 +651,6 @@ _CANONICAL_SHA256 = hashlib.sha256
 _CANONICAL_JSON = json
 _CANONICAL_JSON_DUMPS = json.dumps
 _CANONICAL_DATETIME = datetime
-_CANONICAL_TIMEDELTA = timedelta
 _CANONICAL_TIMEZONE = timezone
 
 
@@ -676,7 +682,6 @@ def _require_dispatch_integrity() -> None:
         or module_globals.get("json") is not _CANONICAL_JSON
         or _CANONICAL_JSON.dumps is not _CANONICAL_JSON_DUMPS
         or module_globals.get("datetime") is not _CANONICAL_DATETIME
-        or module_globals.get("timedelta") is not _CANONICAL_TIMEDELTA
         or module_globals.get("timezone") is not _CANONICAL_TIMEZONE
     ):
         raise CampaignForwardUniverseCycleBindingError(
@@ -930,7 +935,6 @@ def resolve_campaign_forward_universe_cycle_authority(
     expected_json = json
     expected_json_dumps = json.dumps
     expected_datetime = datetime
-    expected_timedelta = timedelta
     expected_timezone = timezone
     expected_inspect = inspect
     expected_getattr_static = inspect.getattr_static
@@ -1006,7 +1010,6 @@ def resolve_campaign_forward_universe_cycle_authority(
             or module_globals.get("json") is not expected_json
             or expected_json.dumps is not expected_json_dumps
             or module_globals.get("datetime") is not expected_datetime
-            or module_globals.get("timedelta") is not expected_timedelta
             or module_globals.get("timezone") is not expected_timezone
         ):
             raise CampaignForwardUniverseCycleBindingError(
@@ -1473,7 +1476,6 @@ def _seal_campaign_forward_universe_cycle_dispatch() -> None:
     expected_json = json
     expected_json_dumps = json.dumps
     expected_datetime = datetime
-    expected_timedelta = timedelta
     expected_timezone = timezone
     expected_authority_class = _CANONICAL_AUTHORITY_CLASS
     expected_authority_issuance_capability = _CANONICAL_AUTHORITY_ISSUANCE_CAPABILITY
@@ -1632,7 +1634,6 @@ def _seal_campaign_forward_universe_cycle_dispatch() -> None:
             or module_globals.get("json") is not expected_json
             or expected_json.dumps is not expected_json_dumps
             or module_globals.get("datetime") is not expected_datetime
-            or module_globals.get("timedelta") is not expected_timedelta
             or module_globals.get("timezone") is not expected_timezone
         ):
             raise expected_error(

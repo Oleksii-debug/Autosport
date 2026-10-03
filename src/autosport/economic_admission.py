@@ -21,6 +21,16 @@ from .workspace_lock import WorkspaceEconomicLock
 
 _ECONOMIC_GOAL_FILE_NAME = EconomicGoalStore.FILE_NAME
 
+_ADMISSION_PATH_NEW = Path.__new__
+_ADMISSION_PATH_NEW_CODE = getattr(_ADMISSION_PATH_NEW, "__code__", None)
+_ADMISSION_PATH_INIT = Path.__init__
+_ADMISSION_PATH_INIT_CODE = getattr(_ADMISSION_PATH_INIT, "__code__", None)
+_ADMISSION_PATH_EXPANDUSER = Path.expanduser
+_ADMISSION_PATH_EXPANDUSER_CODE = getattr(_ADMISSION_PATH_EXPANDUSER, "__code__", None)
+_ADMISSION_PATH_RESOLVE = Path.resolve
+_ADMISSION_PATH_RESOLVE_CODE = getattr(_ADMISSION_PATH_RESOLVE, "__code__", None)
+_ADMISSION_CANONICAL_PATH_TYPE = type(Path())
+
 
 # The admission critical section is only atomic while the exact reviewed
 # WorkspaceEconomicLock executable graph remains installed. Freezing this module's
@@ -121,6 +131,38 @@ def _require_workspace_lock_dispatch() -> None:
                 or expected_globals[global_name] is not expected_binding
             ):
                 raise RuntimeError("workspace economic lock dependency authority changed")
+
+
+def _canonical_workspace_root(workspace: str | Path) -> Path:
+    """Resolve the economic workspace through the frozen canonical Path surface."""
+
+    path_witnesses = (
+        (Path.__new__, _ADMISSION_PATH_NEW, _ADMISSION_PATH_NEW_CODE),
+        (Path.__init__, _ADMISSION_PATH_INIT, _ADMISSION_PATH_INIT_CODE),
+        (
+            Path.expanduser,
+            _ADMISSION_PATH_EXPANDUSER,
+            _ADMISSION_PATH_EXPANDUSER_CODE,
+        ),
+        (Path.resolve, _ADMISSION_PATH_RESOLVE, _ADMISSION_PATH_RESOLVE_CODE),
+    )
+    for current, expected, expected_code in path_witnesses:
+        if (
+            current is not expected
+            or getattr(current, "__code__", None) is not expected_code
+        ):
+            raise RuntimeError("economic admission workspace path authority changed")
+
+    candidate = Path(workspace)
+    if type(candidate) is not _ADMISSION_CANONICAL_PATH_TYPE:
+        raise RuntimeError("economic admission workspace path type is not canonical")
+    expanded = _ADMISSION_PATH_EXPANDUSER(candidate)
+    if type(expanded) is not _ADMISSION_CANONICAL_PATH_TYPE:
+        raise RuntimeError("economic admission workspace path type is not canonical")
+    resolved = _ADMISSION_PATH_RESOLVE(expanded, strict=False)
+    if type(resolved) is not _ADMISSION_CANONICAL_PATH_TYPE:
+        raise RuntimeError("economic admission workspace path type is not canonical")
+    return resolved
 
 
 @dataclass(frozen=True, slots=True)
@@ -582,7 +624,7 @@ def admit_paper_ticket(
         currency=currency,
     )
 
-    root = Path(workspace).expanduser().resolve(strict=False)
+    root = _canonical_workspace_root(workspace)
     book_path = root / "paper_book.json"
     day_turnover_snapshot = _prepare_paper_day_turnover_snapshot(
         root=root,

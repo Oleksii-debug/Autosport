@@ -299,8 +299,12 @@ class OwnerEconomicAuthorityService:
 
     def read_view(self) -> OwnerEconomicAuthorityView:
         try:
-            exists = self.store.path.exists()
+            self.store.path.lstat()
+        except FileNotFoundError:
+            exists = False
         except OSError:
+            exists = True
+        else:
             exists = True
         if not exists:
             return OwnerEconomicAuthorityView(

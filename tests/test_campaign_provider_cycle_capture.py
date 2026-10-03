@@ -1654,14 +1654,14 @@ def test_failure_clock_transitive_store_seam_code_mutation_fails_closed(
     assert evidence[0]["terminal"] is None
 
 
-def test_saved_capture_rejects_timedelta_primitive_rebind_before_execution(
+def test_saved_capture_rejects_schedule_deadline_dispatch_rebind_before_execution(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     locator, store, spec, provider_store = _setup(tmp_path)
     capture = capture_campaign_complete_game_board
     provider_calls: list[str] = []
-    monkeypatch.setattr(capture_module, "timedelta", object())
+    monkeypatch.setattr(capture_module, "_SCHEDULE_DUE_AT", lambda **_kwargs: "2100-01-08T06:00:00+00:00")
     monkeypatch.setattr(
         provider_module,
         "urlopen",
@@ -1670,7 +1670,7 @@ def test_saved_capture_rejects_timedelta_primitive_rebind_before_execution(
 
     with pytest.raises(
         CampaignProviderCycleCaptureIntegrityError,
-        match="dispatch authority is rebound: timedelta",
+        match="dispatch authority is rebound: _SCHEDULE_DUE_AT",
     ):
         capture(
             precommit_locator=locator,

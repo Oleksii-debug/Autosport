@@ -1473,8 +1473,21 @@ def _install_market_book_depth_authority():
     canonical_post = canonical_transport_type.post
     canonical_post_code = canonical_post.__code__
     canonical_urlopen = (canonical_post.__kwdefaults__ or {}).get("_urlopen")
+    canonical_rpc = canonical_client_type._rpc
+    canonical_rpc_code = canonical_rpc.__code__
     if canonical_urlopen is None or canonical_urlopen is not urlopen:
         raise RuntimeError("canonical Betfair urlopen origin is unavailable")
+
+    def canonical_rpc_dispatch(source: object) -> bool:
+        if "_rpc" in vars(source):
+            return False
+        bound_rpc = getattr(source, "_rpc", None)
+        return (
+            canonical_client_type._rpc is canonical_rpc
+            and canonical_rpc.__code__ is canonical_rpc_code
+            and getattr(bound_rpc, "__self__", None) is source
+            and getattr(bound_rpc, "__func__", None) is canonical_rpc
+        )
 
     def source_origin_authoritative(source: object) -> bool:
         if type(source) is not canonical_client_type:
@@ -1491,7 +1504,8 @@ def _install_market_book_depth_authority():
         if "post" in vars(transport):
             return False
         return (
-            type(transport).post is canonical_post
+            canonical_rpc_dispatch(source)
+            and type(transport).post is canonical_post
             and canonical_post.__code__ is canonical_post_code
             and (canonical_post.__kwdefaults__ or {}).get("_urlopen")
             is canonical_urlopen
@@ -1515,6 +1529,13 @@ def _install_market_book_depth_authority():
         market_id: str,
         selection_id: int,
     ) -> BetfairMarketBookDepthObservation:
+        # raw_read resolves self._rpc dynamically. Seal that dispatch before any
+        # authority-bearing read so an instance/class replacement cannot turn a
+        # caller-supplied payload into a canonically issued MarketBook receipt.
+        if not canonical_rpc_dispatch(self):
+            raise BetfairReadOnlyError(
+                "canonical MarketBook RPC dispatch changed"
+            )
         # listMarketBook does not carry an authoritative provider publish instant.
         # Capture the local request-start boundary before network IO so downstream
         # freshness can conservatively include the entire REST acquisition interval

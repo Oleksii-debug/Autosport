@@ -580,6 +580,70 @@ def test_urlopen_kwdefault_and_module_alias_substitution_cannot_mint_provider_or
             )
 
 
+
+def test_instance_rpc_substitution_cannot_mint_market_book_authority() -> None:
+    source = _canonical_client()
+    called = False
+
+    def forged_rpc(method, params):
+        nonlocal called
+        called = True
+        raise AssertionError("forged RPC must not execute")
+
+    source._rpc = forged_rpc
+    with pytest.raises(
+        BetfairReadOnlyError,
+        match="canonical MarketBook RPC dispatch changed",
+    ):
+        source.read_market_book_depth("1.234", 42)
+    assert called is False
+
+
+def test_class_rpc_substitution_cannot_mint_market_book_authority(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    canonical_rpc = BetfairReadOnlyClient._rpc
+
+    def forged_rpc(self, method, params):
+        raise AssertionError("forged RPC must not execute")
+
+    monkeypatch.setattr(BetfairReadOnlyClient, "_rpc", forged_rpc)
+    source = _canonical_client()
+    with pytest.raises(
+        BetfairReadOnlyError,
+        match="canonical MarketBook RPC dispatch changed",
+    ):
+        source.read_market_book_depth("1.234", 42)
+
+    monkeypatch.setattr(BetfairReadOnlyClient, "_rpc", canonical_rpc)
+
+
+def test_post_issuance_rpc_rebind_revokes_market_book_authority(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    receipt, canonical_source = _synthetic_authoritative_receipt(
+        MarketBookTransport()
+    )
+
+    def forged_rpc(self, method, params):
+        raise AssertionError("forged RPC must not execute")
+
+    monkeypatch.setattr(BetfairReadOnlyClient, "_rpc", forged_rpc)
+    bound = _bound(datetime.now(timezone.utc))
+    with tempfile.TemporaryDirectory() as tmp:
+        with pytest.raises(
+            BetfairReadOnlyError,
+            match="lacks canonical direct Betfair provider IO origin",
+        ):
+            assess_authoritative_betfair_execution_feasibility(
+                _reserved_ledger(tmp, bound),
+                bound,
+                receipt,
+                action_id=ACTION_ID,
+                max_snapshot_age=timedelta(seconds=2),
+            )
+
+
 def test_market_book_authority_exposes_no_module_level_mint_or_registry() -> None:
     assert not hasattr(betfair_account_readonly, "_issue_market_book_depth")
     assert not hasattr(betfair_account_readonly, "_MARKET_BOOK_DEPTH_ISSUED")

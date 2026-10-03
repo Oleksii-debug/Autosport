@@ -2947,3 +2947,66 @@ def test_public_capture_rejects_reflection_dependency_witness_rebind(
             timeout_seconds=3.0,
             clock=_clock(),
         )
+
+
+
+def test_capture_does_not_dispatch_through_shadowed_globals(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    locator, store, spec, _provider_store = _setup(tmp_path)
+    hostile_calls: list[str] = []
+
+    def hostile_globals():
+        hostile_calls.append("globals")
+        raise AssertionError("hostile globals executed")
+
+    monkeypatch.setattr(capture_module, "globals", hostile_globals, raising=False)
+
+    with pytest.raises(TypeError, match="evidence_store must be the exact"):
+        capture_module.capture_campaign_complete_game_board(
+            precommit_locator=locator,
+            store=store,
+            source_spec=spec,
+            evidence_store=None,
+            request=_request(),
+            api_key="secret-value",
+            timeout_seconds=3.0,
+            clock=_clock(),
+        )
+
+    assert hostile_calls == []
+
+
+def test_capture_does_not_dispatch_through_shadowed_vars(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    locator, store, spec, provider_store = _setup(tmp_path)
+    hostile_calls: list[str] = []
+
+    def hostile_vars(_value):
+        hostile_calls.append("vars")
+        raise AssertionError("hostile vars executed")
+
+    monkeypatch.setattr(capture_module, "vars", hostile_vars, raising=False)
+    monkeypatch.setattr(
+        provider_module,
+        "urlopen",
+        lambda _request, _timeout: _FakeSseResponse(_frame()),
+    )
+    monkeypatch.setattr(provider_module, "_default_clock", lambda: CAPTURED_AT)
+
+    snapshot, receipt = capture_module.capture_campaign_complete_game_board(
+        precommit_locator=locator,
+        store=store,
+        source_spec=spec,
+        evidence_store=provider_store,
+        request=_request(),
+        api_key="secret-value",
+        timeout_seconds=3.0,
+        clock=_clock(),
+    )
+
+    assert hostile_calls == []
+    assert receipt.provider_evidence_sha256 == snapshot.evidence_sha256

@@ -55,6 +55,8 @@ class ProductSourcePayloadError(ProductSourceError):
 Clock = Callable[[], str]
 
 _CANONICAL_COLLECTOR_STORE_TYPE = CollectorDeltaStore
+_CANONICAL_PATH_EQ = Path.__eq__
+_CANONICAL_PATH_EQ_CODE = getattr(_CANONICAL_PATH_EQ, "__code__", None)
 _CANONICAL_STORE_MIGRATE_LEGACY = CollectorDeltaStore.migrate_legacy_event_payloads
 _CANONICAL_STORE_EVENT_DIGEST_MAPS = CollectorDeltaStore.event_digest_maps
 _CANONICAL_STORE_RESOLVE_EVENT = CollectorDeltaStore.resolve_event
@@ -85,6 +87,38 @@ _CANONICAL_STORE_TRANSITIVE_SURFACE = tuple(
         "_delta_by_id",
     )
 )
+
+
+def _same_canonical_collector_store_path(observed: object, expected: Path) -> bool:
+    """Compare store paths without ambient pathlib late dispatch."""
+
+    if type(observed) is not type(expected):
+        return False
+    current_eq = Path.__eq__
+    if (
+        current_eq is not _CANONICAL_PATH_EQ
+        or (
+            _CANONICAL_PATH_EQ_CODE is not None
+            and getattr(_CANONICAL_PATH_EQ, "__code__", None)
+            is not _CANONICAL_PATH_EQ_CODE
+        )
+    ):
+        raise ProductSourceStateError(
+            "canonical collector-store path comparison dispatch was replaced"
+        )
+    equal = _CANONICAL_PATH_EQ(observed, expected)
+    if (
+        Path.__eq__ is not _CANONICAL_PATH_EQ
+        or (
+            _CANONICAL_PATH_EQ_CODE is not None
+            and getattr(_CANONICAL_PATH_EQ, "__code__", None)
+            is not _CANONICAL_PATH_EQ_CODE
+        )
+    ):
+        raise ProductSourceStateError(
+            "canonical collector-store path comparison dispatch was replaced"
+        )
+    return equal is True
 
 
 def _canonical_collector_store_dispatch(
@@ -190,6 +224,7 @@ class ParlayApiProductSource:
         self.source_id = source_id
         self.stream_epoch = self._STREAM_EPOCH
         self.workspace = workspace_path
+        self._collector_store_path = self.workspace / "collector_deltas.json"
         self.lawful_terms_ref = self._text(lawful_terms_ref, "lawful_terms_ref")
         self.retention_ref = self._text(retention_ref, "retention_ref")
         self.clock = clock
@@ -748,9 +783,10 @@ class ParlayApiProductSource:
         # isinstance check, so canonical product composition requires the exact store.
         if type(store) is not _CANONICAL_COLLECTOR_STORE_TYPE:
             raise TypeError("store must be exact canonical CollectorDeltaStore")
-        expected = (self.workspace / "collector_deltas.json").resolve(strict=False)
-        observed = store.path.resolve(strict=False)
-        if observed != expected:
+        if not _same_canonical_collector_store_path(
+            store.path,
+            self._collector_store_path,
+        ):
             raise ProductSourceStateError(
                 "product source collector store must be the canonical workspace store"
             )
@@ -781,18 +817,17 @@ class ParlayApiProductSource:
             # HeadlessCollectorService before any source I/O.  Keep direct/unit
             # source use available without mutating collector storage merely by
             # constructing the source.
-            store = _CANONICAL_COLLECTOR_STORE_TYPE(
-                self.workspace / "collector_deltas.json"
-            )
+            store = _CANONICAL_COLLECTOR_STORE_TYPE(self._collector_store_path)
             self._collector_store = store
             try:
                 self._migrate_legacy_history_to_collector_store()
             except Exception:
                 self._collector_store = None
                 raise
-        if store.path.resolve(strict=False) != (
-            self.workspace / "collector_deltas.json"
-        ).resolve(strict=False):
+        if not _same_canonical_collector_store_path(
+            store.path,
+            self._collector_store_path,
+        ):
             raise ProductSourceStateError(
                 "product source collector store authority changed"
             )

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import threading
+
 import pytest
 
 from autosport.monotonic_workspace_authority import MonotonicAuthorityIntegrityError
@@ -196,6 +198,71 @@ def test_pristine_authoritative_read_does_not_create_ledger_file(
     assert snapshot.payload == b""
     assert snapshot.event_count == 0
     assert not path.exists()
+
+
+
+def test_same_instance_reader_cannot_abort_active_writer_prepare_window(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    path = _isolated_ledger_path(tmp_path, monkeypatch)
+    ledger = RealExecutionLedger(path)
+    current_plan = _plan()
+    original_prepare = ledger._monotonic_authority.prepare
+    prepare_published = threading.Event()
+    allow_writer_to_publish = threading.Event()
+    reader_done = threading.Event()
+    writer_errors: list[BaseException] = []
+    reader_errors: list[BaseException] = []
+    reader_snapshots = []
+
+    def prepare_then_pause(**kwargs):
+        record = original_prepare(**kwargs)
+        prepare_published.set()
+        if not allow_writer_to_publish.wait(timeout=5):
+            raise AssertionError("writer test barrier timed out")
+        return record
+
+    monkeypatch.setattr(
+        ledger._monotonic_authority,
+        "prepare",
+        prepare_then_pause,
+    )
+
+    def run_writer() -> None:
+        try:
+            ledger.reserve_plan(current_plan)
+        except BaseException as exc:  # pragma: no cover - asserted below
+            writer_errors.append(exc)
+
+    def run_reader() -> None:
+        try:
+            reader_snapshots.append(ledger.verified_snapshot())
+        except BaseException as exc:  # pragma: no cover - asserted below
+            reader_errors.append(exc)
+        finally:
+            reader_done.set()
+
+    writer = threading.Thread(target=run_writer)
+    reader = threading.Thread(target=run_reader)
+    writer.start()
+    assert prepare_published.wait(timeout=5)
+
+    reader.start()
+    reader_finished_during_prepare = reader_done.wait(timeout=0.2)
+
+    allow_writer_to_publish.set()
+    writer.join(timeout=5)
+    reader.join(timeout=5)
+
+    assert not writer.is_alive()
+    assert not reader.is_alive()
+    assert not reader_finished_during_prepare
+    assert writer_errors == []
+    assert reader_errors == []
+    assert len(reader_snapshots) == 1
+    assert reader_snapshots[0].event_count == 1
+    assert RealExecutionLedger(path).verified_snapshot().event_count == 1
 
 
 def test_reader_cannot_abort_active_writer_prepare_window(

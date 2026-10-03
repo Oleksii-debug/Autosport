@@ -1092,6 +1092,11 @@ class EmpiricalExecutionPopulationEvidence:
     unverified_ledger_terminal_count: int = field(init=False)
     right_censored_count: int = field(init=False)
     provider_evidence_count: int = field(init=False)
+    submitted_request_identity_count: int = field(init=False)
+    provider_request_binding_count: int = field(init=False)
+    provider_acknowledgement_binding_count: int = field(init=False)
+    durable_acknowledgement_identity_count: int = field(init=False)
+    provider_bound_durable_ack_count: int = field(init=False)
     provider_outcome_unverified_ack_count: int = field(init=False)
     provider_outcome_unverified_absence_count: int = field(init=False)
     provider_outcome_not_applicable_count: int = field(init=False)
@@ -1217,6 +1222,51 @@ class EmpiricalExecutionPopulationEvidence:
         provider_evidence_count = sum(
             sample.provider_evidence_id is not None for sample in self.samples
         )
+        submitted_request_identity_count = sum(
+            sample.submitted_request_sha256 is not None for sample in self.samples
+        )
+        provider_request_binding_count = sum(
+            sample.provider_evidence_request_sha256 is not None
+            for sample in self.samples
+        )
+        provider_acknowledgement_binding_count = sum(
+            sample.provider_evidence_acknowledgement_sha256 is not None
+            for sample in self.samples
+        )
+        durable_acknowledgement_identity_count = sum(
+            sample.acknowledgement_payload_sha256 is not None
+            for sample in self.samples
+        )
+        provider_bound_durable_ack_count = sum(
+            sample.provider_evidence_acknowledgement_sha256 is not None
+            and sample.acknowledgement_payload_sha256 is not None
+            for sample in self.samples
+        )
+        if (
+            provider_request_binding_count > submitted_request_identity_count
+            or provider_request_binding_count > provider_evidence_count
+        ):
+            raise EmpiricalExecutionEvidenceError(
+                "population provider-request bindings exceed durable provenance"
+            )
+        if provider_acknowledgement_binding_count > provider_evidence_count:
+            raise EmpiricalExecutionEvidenceError(
+                "population provider-ack bindings exceed provider evidence"
+            )
+        if durable_acknowledgement_identity_count != ledger_terminal_count:
+            raise EmpiricalExecutionEvidenceError(
+                "population durable acknowledgement identities must cover terminal attempts"
+            )
+        if (
+            provider_bound_durable_ack_count
+            > provider_acknowledgement_binding_count
+            or provider_bound_durable_ack_count
+            > durable_acknowledgement_identity_count
+        ):
+            raise EmpiricalExecutionEvidenceError(
+                "population exact provider/durable ACK overlap is inconsistent"
+            )
+
         provider_outcome_unverified_ack_count = sum(
             sample.provider_outcome_verification_reason
             == PROVIDER_OUTCOME_UNVERIFIED_ACK
@@ -1293,6 +1343,31 @@ class EmpiricalExecutionPopulationEvidence:
         )
         object.__setattr__(self, "right_censored_count", right_censored_count)
         object.__setattr__(self, "provider_evidence_count", provider_evidence_count)
+        object.__setattr__(
+            self,
+            "submitted_request_identity_count",
+            submitted_request_identity_count,
+        )
+        object.__setattr__(
+            self,
+            "provider_request_binding_count",
+            provider_request_binding_count,
+        )
+        object.__setattr__(
+            self,
+            "provider_acknowledgement_binding_count",
+            provider_acknowledgement_binding_count,
+        )
+        object.__setattr__(
+            self,
+            "durable_acknowledgement_identity_count",
+            durable_acknowledgement_identity_count,
+        )
+        object.__setattr__(
+            self,
+            "provider_bound_durable_ack_count",
+            provider_bound_durable_ack_count,
+        )
         object.__setattr__(
             self,
             "provider_outcome_unverified_ack_count",
@@ -1428,6 +1503,39 @@ class EmpiricalExecutionPopulationEvidence:
             "provider_evidence_count": self.provider_evidence_count,
             "provider_evidence_rate": self._rate(
                 self.provider_evidence_count,
+                self.total_attempts,
+            ),
+            "submitted_request_identity_count": (
+                self.submitted_request_identity_count
+            ),
+            "submitted_request_identity_rate": self._rate(
+                self.submitted_request_identity_count,
+                self.total_attempts,
+            ),
+            "provider_request_binding_count": self.provider_request_binding_count,
+            "provider_request_binding_rate": self._rate(
+                self.provider_request_binding_count,
+                self.total_attempts,
+            ),
+            "provider_acknowledgement_binding_count": (
+                self.provider_acknowledgement_binding_count
+            ),
+            "provider_acknowledgement_binding_rate": self._rate(
+                self.provider_acknowledgement_binding_count,
+                self.total_attempts,
+            ),
+            "durable_acknowledgement_identity_count": (
+                self.durable_acknowledgement_identity_count
+            ),
+            "durable_acknowledgement_identity_rate": self._rate(
+                self.durable_acknowledgement_identity_count,
+                self.total_attempts,
+            ),
+            "provider_bound_durable_ack_count": (
+                self.provider_bound_durable_ack_count
+            ),
+            "provider_bound_durable_ack_rate": self._rate(
+                self.provider_bound_durable_ack_count,
                 self.total_attempts,
             ),
             "provider_outcome_verification_counts": {

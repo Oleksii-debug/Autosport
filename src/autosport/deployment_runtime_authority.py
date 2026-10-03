@@ -60,6 +60,25 @@ _CANONICAL_MONOTONIC_AUTHORITY_ID: Final = MONOTONIC_AUTHORITY_ID
 _CANONICAL_AUTHORITY_PHASE_TYPE: Final = AuthorityPhase
 _CANONICAL_RECOVERY_DISPOSITION_TYPE: Final = RecoveryDisposition
 _CANONICAL_PATH_TYPE: Final = Path
+_CANONICAL_CONCRETE_PATH_TYPE: Final = type(Path("."))
+_CANONICAL_PATH_READ_TEXT: Final = _CANONICAL_CONCRETE_PATH_TYPE.read_text
+_CANONICAL_PATH_READ_TEXT_CODE: Final = getattr(
+    _CANONICAL_PATH_READ_TEXT,
+    "__code__",
+    None,
+)
+_CANONICAL_PATH_EXPANDUSER: Final = _CANONICAL_CONCRETE_PATH_TYPE.expanduser
+_CANONICAL_PATH_EXPANDUSER_CODE: Final = getattr(
+    _CANONICAL_PATH_EXPANDUSER,
+    "__code__",
+    None,
+)
+_CANONICAL_PATH_RESOLVE: Final = _CANONICAL_CONCRETE_PATH_TYPE.resolve
+_CANONICAL_PATH_RESOLVE_CODE: Final = getattr(
+    _CANONICAL_PATH_RESOLVE,
+    "__code__",
+    None,
+)
 _CANONICAL_DATETIME_TYPE: Final = datetime
 _CANONICAL_TIMEZONE_MODULE: Final = timezone
 _CANONICAL_WORKSPACE_IDENTITY_BINDING_TYPE: Final = WorkspaceIdentityBinding
@@ -1069,7 +1088,43 @@ class DeploymentRuntimeAuthorityStore:
             raise DeploymentRuntimeAuthorityError(
                 "runtime authority construction helper dispatch was replaced"
             )
-        self.path = _CANONICAL_PATH_TYPE(path).expanduser().resolve(strict=False)
+        candidate_path = _CANONICAL_PATH_TYPE(path)
+        current_path_type = type(candidate_path)
+        if current_path_type is not _CANONICAL_CONCRETE_PATH_TYPE:
+            raise DeploymentRuntimeAuthorityError(
+                "runtime authority concrete path type was replaced"
+            )
+        for current, expected, expected_code in (
+            (
+                current_path_type.expanduser,
+                _CANONICAL_PATH_EXPANDUSER,
+                _CANONICAL_PATH_EXPANDUSER_CODE,
+            ),
+            (
+                current_path_type.resolve,
+                _CANONICAL_PATH_RESOLVE,
+                _CANONICAL_PATH_RESOLVE_CODE,
+            ),
+            (
+                current_path_type.read_text,
+                _CANONICAL_PATH_READ_TEXT,
+                _CANONICAL_PATH_READ_TEXT_CODE,
+            ),
+        ):
+            if (
+                current is not expected
+                or (
+                    expected_code is not None
+                    and getattr(current, "__code__", None) is not expected_code
+                )
+            ):
+                raise DeploymentRuntimeAuthorityError(
+                    "runtime authority path dispatch was replaced"
+                )
+        self.path = _CANONICAL_PATH_RESOLVE(
+            _CANONICAL_PATH_EXPANDUSER(candidate_path),
+            strict=False,
+        )
         self.workspace = self.path.parent
         self._lock = _CANONICAL_NEW_LOCAL_LOCK_HELPER()
         self._authority = _CANONICAL_MONOTONIC_CONSTRUCTOR_HELPER(
@@ -1250,8 +1305,21 @@ class DeploymentRuntimeAuthorityStore:
         return f"deployment-runtime-{_CANONICAL_UUID4().hex}"
 
     def _read_payload(self) -> dict[str, object]:
+        current_read_text = getattr(type(self.path), "read_text", None)
+        if (
+            type(self.path) is not _CANONICAL_CONCRETE_PATH_TYPE
+            or current_read_text is not _CANONICAL_PATH_READ_TEXT
+            or (
+                _CANONICAL_PATH_READ_TEXT_CODE is not None
+                and getattr(current_read_text, "__code__", None)
+                is not _CANONICAL_PATH_READ_TEXT_CODE
+            )
+        ):
+            raise DeploymentRuntimeAuthorityError(
+                "runtime authority path read dispatch was replaced"
+            )
         try:
-            raw = self.path.read_text(encoding="utf-8")
+            raw = _CANONICAL_PATH_READ_TEXT(self.path, encoding="utf-8")
         except FileNotFoundError as exc:
             self._authority.recover(observed_state_sha256=None)
             raise DeploymentRuntimeAuthorityError(
@@ -1399,9 +1467,11 @@ class DeploymentRuntimeAuthorityStore:
         )
         lock = object.__getattribute__(self, "_binding_lock")
         if (
-            not isinstance(path, _CANONICAL_PATH_TYPE)
-            or not isinstance(workspace, _CANONICAL_PATH_TYPE)
+            type(path) is not _CANONICAL_CONCRETE_PATH_TYPE
+            or type(workspace) is not _CANONICAL_CONCRETE_PATH_TYPE
             or type(lock) is not _CANONICAL_RLOCK_TYPE
+            or getattr(type(path), "read_text", None) is not _CANONICAL_PATH_READ_TEXT
+            or getattr(type(path), "resolve", None) is not _CANONICAL_PATH_RESOLVE
         ):
             raise DeploymentRuntimeAuthorityError(
                 "runtime authority binding integrity mismatch"
@@ -1473,7 +1543,7 @@ class DeploymentRuntimeAuthorityStore:
         )
         expected_root_resolved = _CANONICAL_OS_PATH_NORMCASE(
             _CANONICAL_OS_PATH_NORMPATH(
-                str(authority.authority_root.resolve(strict=False))
+                str(_CANONICAL_PATH_RESOLVE(authority.authority_root, strict=False))
             )
         )
         expected_root_locator_sha256 = _CANONICAL_HASHLIB_SHA256(

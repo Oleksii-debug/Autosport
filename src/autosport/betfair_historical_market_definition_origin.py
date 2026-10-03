@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import weakref
 from dataclasses import dataclass, field
 from typing import Any, Mapping
 
@@ -35,6 +36,10 @@ class BetfairHistoricalMarketDefinitionOriginError(ValueError):
 _PARSER_REVISION = "autosport.betfair-historical-market-definition-origin.v1"
 _TOKEN = object()
 _HEX = frozenset("0123456789abcdef")
+_ISSUED_ORIGIN_OBJECTS: weakref.WeakValueDictionary[int, object] = (
+    weakref.WeakValueDictionary()
+)
+_ISSUED_ORIGIN_DIGESTS: dict[int, str] = {}
 
 
 def _text(value: object, name: str) -> str:
@@ -109,7 +114,7 @@ def _provider_path_package_tier(provider_path: object) -> HistoricalPackageTier:
         ) from exc
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, weakref_slot=True)
 class BetfairHistoricalMarketDefinitionOrigin:
     """One archive revision bound to an authenticated exact historical file."""
 
@@ -189,9 +194,36 @@ class BetfairHistoricalMarketDefinitionOrigin:
                 "marketDefinition canonical identity mismatch"
             )
 
+    def _calculated_evidence_sha256(self) -> str:
+        return _digest(self._identity_payload())
+
+    def assert_issued_integrity(self) -> None:
+        """Require the exact unchanged origin object issued by the canonical binder."""
+
+        identity = id(self)
+        if (
+            type(self) is not BetfairHistoricalMarketDefinitionOrigin
+            or _ISSUED_ORIGIN_OBJECTS.get(identity) is not self
+        ):
+            raise BetfairHistoricalMarketDefinitionOriginError(
+                "historical marketDefinition origin was not issued by the canonical binder"
+            )
+        issued_digest = _ISSUED_ORIGIN_DIGESTS.get(identity)
+        try:
+            current_digest = self._calculated_evidence_sha256()
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise BetfairHistoricalMarketDefinitionOriginError(
+                "historical marketDefinition origin mutated after canonical issuance"
+            ) from exc
+        if issued_digest is None or current_digest != issued_digest:
+            raise BetfairHistoricalMarketDefinitionOriginError(
+                "historical marketDefinition origin mutated after canonical issuance"
+            )
+
     @property
     def provider_origin_verified(self) -> bool:
         try:
+            self.assert_issued_integrity()
             self._witness.assert_authoritative()
         except Exception:
             return False
@@ -199,7 +231,8 @@ class BetfairHistoricalMarketDefinitionOrigin:
 
     @property
     def evidence_sha256(self) -> str:
-        return _digest(self._identity_payload())
+        self.assert_issued_integrity()
+        return self._calculated_evidence_sha256()
 
     def _identity_payload(self) -> dict[str, object]:
         return {
@@ -247,6 +280,7 @@ class BetfairHistoricalMarketDefinitionOrigin:
         }
 
     def market_definition(self) -> dict[str, object]:
+        self.assert_issued_integrity()
         value = json.loads(self.market_definition_json)
         if type(value) is not dict:
             raise BetfairHistoricalMarketDefinitionOriginError(
@@ -261,6 +295,7 @@ class BetfairHistoricalMarketDefinitionOrigin:
             )
 
     def assert_published_by(self, cutoff_pt_ms: int) -> None:
+        self.assert_issued_integrity()
         if type(cutoff_pt_ms) is not int or cutoff_pt_ms < 0:
             raise BetfairHistoricalMarketDefinitionOriginError(
                 "cutoff_pt_ms must be a non-negative exact integer"
@@ -373,7 +408,7 @@ def bind_betfair_historical_market_definition_origin(
 
     record, definition = selected
     canonical_definition, definition_sha = _canonical_market_definition(definition)
-    return BetfairHistoricalMarketDefinitionOrigin(
+    origin = BetfairHistoricalMarketDefinitionOrigin(
         provider_origin_witness_sha256=witness.witness_sha256,
         transport_contract_sha256=witness.transport_contract_sha256,
         download_file_identity_sha256=witness.download_file_identity_sha256,
@@ -394,6 +429,16 @@ def bind_betfair_historical_market_definition_origin(
         _witness=witness,
         _token=_TOKEN,
     )
+    identity = id(origin)
+    _ISSUED_ORIGIN_OBJECTS[identity] = origin
+    _ISSUED_ORIGIN_DIGESTS[identity] = origin._calculated_evidence_sha256()
+    weakref.finalize(
+        origin,
+        _ISSUED_ORIGIN_DIGESTS.pop,
+        identity,
+        None,
+    )
+    return origin
 
 
 __all__ = [

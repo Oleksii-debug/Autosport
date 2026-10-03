@@ -6,7 +6,33 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from autosport.paths import default_workspace
+from autosport.paths import default_workspace, validate_product_storage_roots
+
+
+class ProductStorageRootIsolationTests(unittest.TestCase):
+    def test_disjoint_sibling_roots_are_accepted(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            validate_product_storage_roots(
+                root / "Autosport" / "workspace",
+                root / "Autosport" / "webview2",
+            )
+
+    def test_equal_or_nested_storage_roots_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            cases = (
+                (root / "shared", root / "shared"),
+                (root / "shared", root / "shared" / "webview2"),
+                (root / "shared" / "workspace", root / "shared"),
+            )
+            for workspace, webview in cases:
+                with self.subTest(workspace=workspace, webview=webview):
+                    with self.assertRaisesRegex(
+                        ValueError,
+                        r"must be disjoint trees",
+                    ):
+                        validate_product_storage_roots(workspace, webview)
 
 
 class DefaultWorkspaceContractTests(unittest.TestCase):

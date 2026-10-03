@@ -164,6 +164,24 @@ def test_cancel_wrapper_rejects_production_class_rebound_cancel_dispatch(
     assert redirected == []
 
 
+def test_cancel_wrapper_rejects_production_api_subclass() -> None:
+    class ForgedScopedApi(WorkflowScopedGitHubApi):
+        pass
+
+    api = ForgedScopedApi(
+        repository="owner/repo",
+        token="token",
+        workflow_id=1,
+        workflow_name="CI",
+    )
+
+    with pytest.raises(
+        CancellationError,
+        match="workflow run cancellation API type changed",
+    ):
+        scoped_controller._cancel_run_or_defer_active_conflict(api, 123)
+
+
 def test_cancel_wrapper_calls_captured_production_cancel_directly(monkeypatch) -> None:
     api = WorkflowScopedGitHubApi(
         repository="owner/repo",

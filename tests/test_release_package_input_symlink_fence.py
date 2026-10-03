@@ -237,6 +237,43 @@ class ReleasePackageInputSymlinkFenceTests(unittest.TestCase):
             self.assertFalse((root / "Autosport-V1" / "Autosport.exe").exists())
             self.assertFalse(paths["package"].exists())
 
+    def test_example_dot_dot_destination_is_rejected_before_destructive_staging(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paths = self._make_inputs(root)
+            source_parent = root / "example-parent"
+            approved_child = source_parent / "approved-child"
+            approved_child.mkdir(parents=True)
+            (source_parent / "Autosport.exe").write_bytes(b"substitute-executable")
+            paths["example"] = approved_child / ".."
+
+            staging = root / "Autosport-V1"
+            staging.mkdir()
+            marker_file = staging / "keep.txt"
+            marker_file.write_text(
+                "preserve-on-destination-preflight-failure",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "release example tree must have a safe destination basename",
+            ):
+                self._build(paths)
+
+            self.assertEqual(
+                marker_file.read_text(encoding="utf-8"),
+                "preserve-on-destination-preflight-failure",
+            )
+            self.assertFalse(paths["package"].exists())
+
+    def test_example_windows_unsafe_destination_basename_is_rejected(self) -> None:
+        with self.assertRaisesRegex(
+            ValueError,
+            "release example tree has an unsafe Windows destination basename",
+        ):
+            release_package._release_example_destination_name(Path("CON"))
+
     def test_top_level_symlink_fails_before_existing_staging_is_deleted(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

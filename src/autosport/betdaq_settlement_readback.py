@@ -985,7 +985,8 @@ def _parse_postings_result(
     # - ListAccountPostings rows are ordered by increasing PostedAt;
     # - ListAccountPostingsById returns TransactionId values strictly greater than
     #   the supplied cursor, ordered ascending by TransactionId.
-    # Do not invent stronger ResultingBalance adjacency or category-linkage laws.
+    # Exact duplicate transaction rows remain idempotent per the canonical #1734
+    # contract; do not invent ResultingBalance adjacency beyond provider evidence.
     deduped: dict[str, BetdaqPostingObservation] = {}
     ordered_ids: list[str] = []
     previous_posted_at: datetime | None = None
@@ -1036,10 +1037,10 @@ def _parse_postings_result(
                 )
             if (
                 previous_transaction_id is not None
-                and numeric_transaction_id <= previous_transaction_id
+                and numeric_transaction_id < previous_transaction_id
             ):
                 raise BetdaqEconomicReadbackError(
-                    "ListAccountPostingsById rows are not strictly increasing by TransactionId"
+                    "ListAccountPostingsById rows are not ordered ascending by TransactionId"
                 )
             previous_transaction_id = numeric_transaction_id
         previous = deduped.get(transaction_id)

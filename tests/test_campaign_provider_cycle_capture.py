@@ -12,6 +12,7 @@ import autosport.provider_observation_authority as provider_module
 from autosport.campaign_inception import (
     CampaignInceptionReceipt,
     CampaignInceptionSourceSpec,
+    campaign_evaluation_plan_sha256,
     establish_campaign_inception,
 )
 from autosport.campaign_precommit_manifest import (
@@ -134,7 +135,7 @@ def _request() -> CompleteGameBoardRequest:
     )
 
 
-def _manifest() -> CampaignPrecommitManifest:
+def _manifest(*, evaluation_plan_sha256: str) -> CampaignPrecommitManifest:
     return CampaignPrecommitManifest(
         campaign_id="campaign-cycle-capture-test",
         source_id="parlayapi:table_tennis",
@@ -142,7 +143,7 @@ def _manifest() -> CampaignPrecommitManifest:
         committed_at="2099-12-31T19:00:00Z",
         observation_not_before="2100-01-01T06:00:00Z",
         observation_not_after="2100-01-08T06:00:00Z",
-        evaluation_universe_sha256=B,
+        evaluation_universe_sha256=evaluation_plan_sha256,
         strategy_version_id="strategy-v17",
         champion_version_id="model-v42",
         baseline_version_id="market-baseline-v3",
@@ -156,22 +157,6 @@ def _manifest() -> CampaignPrecommitManifest:
 
 
 def _setup(tmp_path: Path):
-    workspace = tmp_path / "workspace"
-    evidence = workspace / "evidence"
-    evidence.mkdir(parents=True)
-    manifest_path = evidence / "precommit.json"
-    authority_root = tmp_path / "machine-authority"
-    publish_campaign_precommit_manifest(
-        manifest_path,
-        _manifest(),
-        workspace=workspace,
-        authority_root=authority_root,
-    )
-    locator = ForwardUniversePrecommitLocator(
-        manifest_path=manifest_path,
-        workspace=workspace,
-        authority_root=authority_root,
-    )
     store_path = tmp_path / "collector.db"
     store = CollectorDeltaStore(store_path)
     spec = CampaignInceptionSourceSpec(
@@ -184,6 +169,24 @@ def _setup(tmp_path: Path):
         max_items=250,
         evaluation_start_slot_ordinal=0,
         evaluation_end_slot_ordinal=1,
+    )
+    workspace = tmp_path / "workspace"
+    evidence = workspace / "evidence"
+    evidence.mkdir(parents=True)
+    manifest_path = evidence / "precommit.json"
+    authority_root = tmp_path / "machine-authority"
+    publish_campaign_precommit_manifest(
+        manifest_path,
+        _manifest(
+            evaluation_plan_sha256=campaign_evaluation_plan_sha256(spec),
+        ),
+        workspace=workspace,
+        authority_root=authority_root,
+    )
+    locator = ForwardUniversePrecommitLocator(
+        manifest_path=manifest_path,
+        workspace=workspace,
+        authority_root=authority_root,
     )
     provider_store = CompleteGameBoardEvidenceStore(
         workspace,

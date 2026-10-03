@@ -315,10 +315,11 @@ def _capture_runtime_economic_snapshot(
 
     if type(runtime) is not _runtime_type or type(tick) is not _tick_type:
         raise RuntimeError("economic snapshot requires exact canonical runtime tick")
-    workspace = Path(runtime.workspace).expanduser().resolve(strict=False)
+    workspace = Path(runtime.workspace)
     coordinator = runtime.coordinator
     if (
-        Path(coordinator.workspace).expanduser().resolve(strict=False) != workspace
+        not workspace.is_absolute()
+        or Path(coordinator.workspace) != workspace
         or tick.session_id != coordinator.session_id
         or tick.source_id != runtime.manifest.source_id
         or tick.cycle_index < 0

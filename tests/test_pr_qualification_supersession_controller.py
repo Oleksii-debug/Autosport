@@ -132,7 +132,8 @@ def test_scoped_controller_reconciles_each_pr_against_fresh_live_qualification()
     )
 
     assert "cancel_superseded_explicit_pr_runs(" in source
-    assert "current_qualification = api.live_pr_qualification(pr_number)" in source\n    assert "current_qualification != qualification" in source
+    assert "current_qualification = api.live_pr_qualification(pr_number)" in source
+    assert "current_qualification != qualification" in source
 
 
 class FakeTriggeringRunApi:

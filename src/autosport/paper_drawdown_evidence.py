@@ -480,9 +480,14 @@ def _make_resolver() -> FunctionType:
     path_resolve = Path.resolve
     path_truediv = Path.__truediv__
     canonical_path_type = type(Path())
+    path_read_bytes = canonical_path_type.read_bytes
+    path_read_text = canonical_path_type.read_text
     goal_store_type = EconomicGoalStore
     goal_store_new = EconomicGoalStore.__new__
     goal_store_init = EconomicGoalStore.__init__
+    goal_store_path_type = goal_store_init.__globals__.get("Path")
+    if goal_store_path_type is not Path:
+        raise RuntimeError("economic-goal store path authority is unavailable")
     goal_store_file_name = EconomicGoalStore.FILE_NAME
     goal_load = EconomicGoalStore.load
     goal_load_code = goal_load.__code__
@@ -511,6 +516,82 @@ def _make_resolver() -> FunctionType:
         raise RuntimeError("economic-goal parser dependency authority is unavailable")
     goal_strict_json_code = goal_strict_json.__code__
     goal_from_payload_code = goal_from_payload.__code__
+    book_helper_names = (
+        "__init__",
+        "_from_raw_snapshot",
+        "_parse_snapshot_decimal",
+        "_required_snapshot_field",
+        "_parse_snapshot_legs",
+        "_parse_snapshot_provider_accounts",
+        "_parse_snapshot_status",
+        "_parse_lifecycle",
+        "_parse_lifecycle_key_list",
+        "_validate_loaded_state",
+        "_validate_lifecycle_reachability",
+        "_validate_lifecycle_entry",
+        "_require_canonical_text",
+        "_require_finite",
+        "_validate_placed_at",
+        "_validate_settled_at",
+        "_validate_timestamp",
+        "_require_utf8_string",
+        "_validate_ticket_provenance",
+        "_validate_ticket_leg",
+        "_debit_balance",
+        "_settlement_result",
+    )
+    book_helper_witnesses = []
+    for helper_name in book_helper_names:
+        descriptor = book_type.__dict__.get(helper_name)
+        if descriptor is None:
+            raise RuntimeError(
+                "PaperBook durable parse helper authority is unavailable: "
+                + helper_name
+            )
+        function = getattr(descriptor, "__func__", descriptor)
+        book_helper_witnesses.append(
+            (
+                helper_name,
+                descriptor,
+                function,
+                getattr(function, "__code__", None),
+            )
+        )
+    book_helper_witnesses = tuple(book_helper_witnesses)
+
+    paper_globals = book_load_function.__globals__
+    paper_global_names = (
+        "Path",
+        "PaperTicket",
+        "TicketLeg",
+        "TicketStatus",
+        "Decimal",
+        "json",
+        "_reject_duplicate_json_keys",
+        "_reject_nonfinite_json_constant",
+        "_revoke_ticket_opening_authority",
+        "_revoke_paperbook_causal_history_authority",
+        "_install_validated_ticket_opening_authority",
+        "_install_validated_paperbook_causal_history_authority",
+        "_SCHEMA_MISSING",
+        "_SUPPORTED_PAPER_SNAPSHOT_SCHEMA_VERSIONS",
+    )
+    paper_global_witnesses = []
+    for global_name in paper_global_names:
+        if global_name not in paper_globals:
+            raise RuntimeError(
+                "PaperBook durable load global authority is unavailable: "
+                + global_name
+            )
+        value = paper_globals[global_name]
+        paper_global_witnesses.append(
+            (
+                global_name,
+                value,
+                value.__code__ if type(value) is FunctionType else None,
+            )
+        )
+    paper_global_witnesses = tuple(paper_global_witnesses)
     exact_ticket_status = TicketStatus
     exact_point_type = PaperRealizedEquityPoint
     exact_evidence_type = PaperRealizedDrawdownEvidence
@@ -615,6 +696,8 @@ def _make_resolver() -> FunctionType:
             or path_type.expanduser is not path_expanduser
             or path_type.resolve is not path_resolve
             or path_type.__truediv__ is not path_truediv
+            or canonical_path_type.read_bytes is not path_read_bytes
+            or canonical_path_type.read_text is not path_read_text
         ):
             raise error_type(
                 "drawdown workspace path authority changed"
@@ -642,6 +725,7 @@ def _make_resolver() -> FunctionType:
         if (
             goal_store_type.__new__ is not goal_store_new
             or goal_store_type.__init__ is not goal_store_init
+            or goal_store_init.__globals__.get("Path") is not goal_store_path_type
             or goal_store_type.FILE_NAME != goal_store_file_name
         ):
             raise error_type(
@@ -652,6 +736,43 @@ def _make_resolver() -> FunctionType:
             raise error_type(
                 "drawdown economic-goal store type is not canonical"
             )
+        for (
+            helper_name,
+            expected_descriptor,
+            expected_function,
+            expected_code,
+        ) in book_helper_witnesses:
+            current_descriptor = book_type.__dict__.get(helper_name)
+            current_function = getattr(
+                current_descriptor,
+                "__func__",
+                current_descriptor,
+            )
+            if (
+                current_descriptor is not expected_descriptor
+                or current_function is not expected_function
+                or getattr(current_function, "__code__", None) is not expected_code
+            ):
+                raise error_type(
+                    "drawdown PaperBook parse/validation authority changed: "
+                    + helper_name
+                )
+        for global_name, expected_value, expected_code in paper_global_witnesses:
+            current_value = paper_globals.get(global_name)
+            if (
+                current_value is not expected_value
+                or (
+                    expected_code is not None
+                    and (
+                        type(current_value) is not FunctionType
+                        or current_value.__code__ is not expected_code
+                    )
+                )
+            ):
+                raise error_type(
+                    "drawdown PaperBook durable load global changed: "
+                    + global_name
+                )
         try:
             goal = goal_load(goal_store)
             book = book_load(book_path)
@@ -667,6 +788,9 @@ def _make_resolver() -> FunctionType:
             or goal_strict_json.__code__ is not goal_strict_json_code
             or goal_parser.__globals__.get("economic_goal_from_payload") is not goal_from_payload
             or goal_from_payload.__code__ is not goal_from_payload_code
+            or goal_store_init.__globals__.get("Path") is not goal_store_path_type
+            or canonical_path_type.read_bytes is not path_read_bytes
+            or canonical_path_type.read_text is not path_read_text
             or book_type.load_bytes.__func__ is not book_load_bytes_function
             or book_load_bytes_function.__code__ is not book_load_bytes_code
             or book_type.load_bytes.__self__ is not book_load_bytes_owner
@@ -677,6 +801,43 @@ def _make_resolver() -> FunctionType:
             raise error_type(
                 "drawdown durable source resolver authority changed during load"
             )
+        for (
+            helper_name,
+            expected_descriptor,
+            expected_function,
+            expected_code,
+        ) in book_helper_witnesses:
+            current_descriptor = book_type.__dict__.get(helper_name)
+            current_function = getattr(
+                current_descriptor,
+                "__func__",
+                current_descriptor,
+            )
+            if (
+                current_descriptor is not expected_descriptor
+                or current_function is not expected_function
+                or getattr(current_function, "__code__", None) is not expected_code
+            ):
+                raise error_type(
+                    "drawdown PaperBook parse/validation authority changed during load: "
+                    + helper_name
+                )
+        for global_name, expected_value, expected_code in paper_global_witnesses:
+            current_value = paper_globals.get(global_name)
+            if (
+                current_value is not expected_value
+                or (
+                    expected_code is not None
+                    and (
+                        type(current_value) is not FunctionType
+                        or current_value.__code__ is not expected_code
+                    )
+                )
+            ):
+                raise error_type(
+                    "drawdown PaperBook durable load global changed during load: "
+                    + global_name
+                )
 
         for ticket in book.tickets.values():
             if (

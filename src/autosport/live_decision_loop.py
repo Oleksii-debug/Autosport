@@ -1145,7 +1145,7 @@ class PersistentLiveDecisionLoop:
                 affected_input_ids=refresh_input_ids,
                 detail=str(exc),
             )
-        current_market_sha = self._market_state_sha256()
+        current_market_sha = self._market_state_sha256(registered_input_ids)
 
         clean_committed_restart = (
             self._needs_cache_rebuild
@@ -1190,7 +1190,7 @@ class PersistentLiveDecisionLoop:
             )
         self._refresh_intents_from_snapshots(snapshots)
 
-        intents = self._all_cached_intents()
+        intents = self._all_cached_intents(registered_input_ids)
         graph = (
             None
             if not intents
@@ -1370,7 +1370,7 @@ class PersistentLiveDecisionLoop:
                 decision_time,
                 expected_market_state_sha256=progress.market_state_sha256,
             )
-            intents = self._all_cached_intents()
+            intents = self._all_cached_intents(progress.registered_input_ids)
         else:
             intents = ()
 
@@ -1645,9 +1645,16 @@ class PersistentLiveDecisionLoop:
             produced = self.intent_factory(input_id, snapshot)
             self._intent_cache[input_id] = self._validated_intents(produced)
 
-    def _all_cached_intents(self) -> tuple[object, ...]:
+    def _all_cached_intents(
+        self,
+        input_ids: tuple[str, ...],
+    ) -> tuple[object, ...]:
+        if type(input_ids) is not tuple or any(
+            type(input_id) is not str for input_id in input_ids
+        ):
+            raise TypeError("input_ids must be a tuple of strings")
         flattened: list[object] = []
-        for input_id in self.dependencies.input_ids:
+        for input_id in input_ids:
             flattened.extend(self._intent_cache.get(input_id, ()))
         return tuple(flattened)
 
@@ -1711,7 +1718,7 @@ class PersistentLiveDecisionLoop:
         decision_context_sha256 = self._decision_context_sha256()
         try:
             self._capture_input_views(affected, now, incremental=False)
-            market_sha = self._market_state_sha256()
+            market_sha = self._market_state_sha256(affected)
             decision_book = self._write_pending(
                 decision_ts=decision_ts,
                 market_state_sha256=market_sha,
@@ -2382,9 +2389,13 @@ class PersistentLiveDecisionLoop:
                 "cannot verify persisted live decision progress"
             ) from exc
 
-    def _market_state_sha256(self) -> str:
+    def _market_state_sha256(self, input_ids: tuple[str, ...]) -> str:
+        if type(input_ids) is not tuple or any(
+            type(input_id) is not str for input_id in input_ids
+        ):
+            raise TypeError("input_ids must be a tuple of strings")
         payload: list[dict[str, str]] = []
-        for input_id in self.dependencies.input_ids:
+        for input_id in input_ids:
             try:
                 digest = self._input_market_sha256[input_id]
             except KeyError as exc:

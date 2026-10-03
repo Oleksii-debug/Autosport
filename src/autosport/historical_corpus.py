@@ -73,6 +73,10 @@ class HistoricalCorpusBuild:
     source_ids: tuple[str, ...]
     market_types: tuple[str, ...]
     redistribution_policy: str
+    structural_corpus_identity: str
+    provider_origin_verified: bool
+    provider_origin_authority_persisted: bool
+    scientific_qualification: str
 
 
 def _sha256(path: Path) -> str:
@@ -1334,6 +1338,10 @@ def assemble_historical_corpus(
             source_ids=source_ids,
             market_types=market_types,
             redistribution_policy=effective_redistribution_policy,
+            structural_corpus_identity=structural_corpus_identity,
+            provider_origin_verified=False,
+            provider_origin_authority_persisted=False,
+            scientific_qualification="PROVIDER_ORIGIN_UNVERIFIED",
         )
     finally:
         if staging.exists():
@@ -1344,8 +1352,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="autosport-build-historical-corpus",
         description=(
-            "Assemble selected authenticated Parlay historical snapshots for one exact sport and separate sealed "
-            "outcomes into a governed replay corpus; explicit-sport captures use schema-v3 while "
+            "Assemble selected structurally bound Parlay historical snapshots for one exact sport and separate "
+            "sealed outcomes into a governed replay corpus; persisted provider origin remains unverified; "
+            "explicit-sport captures use schema-v3 while "
             "legacy captures remain schema-v2 without inventing event-level sport truth."
         ),
     )
@@ -1401,12 +1410,16 @@ def main(argv: list[str] | None = None) -> int:
         f"coverage={result.coverage_start_ts}..{result.coverage_end_ts}"
     )
     print(f"historical_import_identity={result.import_identity}")
+    print(f"structural_corpus_identity={result.structural_corpus_identity}")
     print(
         f"market_sha256={result.market_sha256} results_sha256={result.results_sha256} "
         f"redistribution_policy={result.redistribution_policy}"
     )
     print(
-        "scope=selected_point_in_time_snapshots_only historical_window_market_coverage_verified=false "
+        "scope=selected_point_in_time_snapshots_only "
+        f"scientific_qualification={result.scientific_qualification} "
+        "provider_origin_verified=false provider_origin_authority_persisted=false "
+        "historical_window_market_coverage_verified=false "
         "licensing_or_retention_verified=true outcome_source_checksum_verified=true "
         "outcome_labels_source_bound=true profitability_claim=false real_money_execution=false"
     )

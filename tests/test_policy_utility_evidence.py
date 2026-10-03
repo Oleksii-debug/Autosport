@@ -283,6 +283,37 @@ def test_bool_is_not_accepted_as_support_count() -> None:
         )
 
 
+def test_effective_sample_size_cannot_exceed_raw_support_count() -> None:
+    with pytest.raises(PolicyUtilityError, match="cannot exceed support_count"):
+        _evidence(
+            truth_class=UtilityTruthClass.ESTIMATED,
+            support_count=2,
+            effective_sample_size=Decimal("2.0001"),
+            uncertainty=Decimal("0"),
+        )
+
+    boundary = _evidence(
+        truth_class=UtilityTruthClass.ESTIMATED,
+        support_count=2,
+        effective_sample_size=Decimal("2"),
+        uncertainty=Decimal("0"),
+    )
+    assert boundary.effective_sample_size == Decimal("2")
+
+
+def test_deserialization_rejects_effective_sample_size_above_support_count() -> None:
+    raw = _evidence(
+        truth_class=UtilityTruthClass.ESTIMATED,
+        support_count=2,
+        effective_sample_size=Decimal("2"),
+        uncertainty=Decimal("0"),
+    ).to_dict()
+    raw["effective_sample_size"] = "3"
+
+    with pytest.raises(PolicyUtilityError, match="cannot exceed support_count"):
+        PolicyUtilityEvidence.from_dict(raw)
+
+
 def test_authority_refs_must_be_sorted_unique() -> None:
     ref_a = _ref("a-family", "a", SHA_A)
     ref_b = _ref("b-family", "b", SHA_B)
@@ -347,3 +378,45 @@ def test_from_dict_rejects_unknown_fields_and_noncanonical_decimal() -> None:
     noncanonical["utility_value"] = "1.500"
     with pytest.raises(PolicyUtilityError, match="canonical decimal text"):
         PolicyUtilityEvidence.from_dict(noncanonical)
+
+def test_store_rejects_duplicate_json_authority_key_even_when_last_value_is_valid(
+    tmp_path,
+) -> None:
+    path = tmp_path / "utility.jsonl"
+    evidence = _evidence(currency="EUR", utility_value=Decimal("0.20"))
+    assert PolicyUtilityStore(path).append(evidence) is True
+
+    # Keep the final canonical value and its existing evidence digest intact,
+    # but prepend a conflicting duplicate authority key. Plain json.loads()
+    # silently applies last-wins semantics and used to accept these ambiguous
+    # durable bytes as canonical policy-utility evidence.
+    raw = path.read_text(encoding="utf-8").rstrip("\n")
+    marker = json.dumps("risk_fingerprint") + ":" + json.dumps(SHA_D)
+    duplicated = (
+        json.dumps("risk_fingerprint")
+        + ":"
+        + json.dumps("7" * 64)
+        + ","
+        + marker
+    )
+    assert marker in raw
+    path.write_text(raw.replace(marker, duplicated, 1) + "\n", encoding="utf-8")
+
+    with pytest.raises(PolicyUtilityError, match="invalid policy utility store JSON"):
+        PolicyUtilityStore(path)
+
+
+def test_store_rejects_missing_trailing_record_boundary_on_restart(tmp_path) -> None:
+    path = tmp_path / "utility.jsonl"
+    evidence = _evidence(currency="EUR", utility_value=Decimal("0.20"))
+    assert PolicyUtilityStore(path).append(evidence) is True
+
+    canonical = path.read_text(encoding="utf-8")
+    assert canonical.endswith("\n")
+    path.write_text(canonical[:-1], encoding="utf-8")
+
+    with pytest.raises(
+        PolicyUtilityError,
+        match="lacks canonical trailing record boundary",
+    ):
+        PolicyUtilityStore(path)

@@ -2992,6 +2992,90 @@ def test_private_surface_guard_rejection_ignores_shadowed_type_error(
     assert hostile_calls == []
 
 
+@pytest.mark.parametrize(
+    "builtin_name",
+    [
+        "TypeError",
+        "ValueError",
+        "OverflowError",
+        "BaseException",
+        "dict",
+        "int",
+        "repr",
+    ],
+)
+def test_campaign_capture_rejects_remaining_builtin_shadow_before_execution(
+    monkeypatch: pytest.MonkeyPatch,
+    builtin_name: str,
+) -> None:
+    capture = capture_module.capture_campaign_complete_game_board
+    hostile_calls: list[str] = []
+
+    def hostile(*_args, **_kwargs):
+        hostile_calls.append(builtin_name)
+        raise AssertionError(f"shadowed {builtin_name} executed")
+
+    monkeypatch.setattr(capture_module, builtin_name, hostile, raising=False)
+
+    with pytest.raises(
+        CampaignProviderCycleCaptureIntegrityError,
+        match="campaign provider-cycle builtin dispatch shadowed",
+    ):
+        capture(
+            precommit_locator=None,
+            store=None,
+            source_spec=None,
+            evidence_store=None,
+            request=None,
+            api_key="secret-value",
+        )
+
+    assert hostile_calls == []
+
+
+def test_failure_cleanup_uses_captured_base_exception_after_provider_callback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    locator, store, spec, provider_store = _setup(tmp_path)
+
+    def mutating_failure(_request, _timeout):
+        monkeypatch.setattr(
+            capture_module,
+            "BaseException",
+            lambda *_args, **_kwargs: None,
+            raising=False,
+        )
+        raise OSError("forced provider transport failure")
+
+    monkeypatch.setattr(provider_module, "urlopen", mutating_failure)
+    monkeypatch.setattr(provider_module, "_default_clock", lambda: CAPTURED_AT)
+
+    with pytest.raises(
+        ProviderObservationUnsupportedError,
+        match="provider SSE initial-state acquisition failed",
+    ):
+        capture_module.capture_campaign_complete_game_board(
+            precommit_locator=locator,
+            store=store,
+            source_spec=spec,
+            evidence_store=provider_store,
+            request=_request(),
+            api_key="secret-value",
+            timeout_seconds=3.0,
+            clock=_clock(),
+        )
+
+    evidence = store.collector_cycle_evidence(
+        source_id=spec.source_id,
+        start_cycle_seq=1,
+        end_cycle_seq=1,
+    )
+    assert len(evidence) == 1
+    assert evidence[0]["terminal"]["status"] == "LOCAL_FAILURE"
+    assert "observed_artifacts" not in evidence[0]["terminal"]
+
+
 def test_campaign_clock_witness_double_rebind_fails_before_clock_execution(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

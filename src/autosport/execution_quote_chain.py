@@ -581,11 +581,29 @@ def _install_quote_chain_evidence_authority() -> None:
     def assert_projection_issued(self: ExecutionQuoteChainEvidence) -> None:
         _lookup(self, require_fingerprint=True)
 
+    def submit_instruction_identity_bound(
+        self: ExecutionQuoteChainEvidence,
+    ) -> bool:
+        _lookup(self, require_fingerprint=False)
+        return self.submission_instruction_sha256 is not None
+
+    def provider_request_correlation_bound(
+        self: ExecutionQuoteChainEvidence,
+    ) -> bool:
+        _lookup(self, require_fingerprint=False)
+        return (
+            self.submission_instruction_sha256 is not None
+            and self.provider_request_sha256 == self.submission_instruction_sha256
+        )
+
     def actual_submitted_instruction_bound(
         self: ExecutionQuoteChainEvidence,
     ) -> bool:
         _lookup(self, require_fingerprint=False)
-        return self.provider_request_correlation_bound
+        return (
+            self.submission_instruction_sha256 is not None
+            and self.provider_request_sha256 == self.submission_instruction_sha256
+        )
 
     def evidence_sha256(self: ExecutionQuoteChainEvidence) -> str:
         assert_projection_issued(self)
@@ -657,6 +675,12 @@ def _install_quote_chain_evidence_authority() -> None:
             raise
 
     ExecutionQuoteChainEvidence.assert_projection_issued = assert_projection_issued
+    ExecutionQuoteChainEvidence.submit_instruction_identity_bound = property(
+        submit_instruction_identity_bound
+    )
+    ExecutionQuoteChainEvidence.provider_request_correlation_bound = property(
+        provider_request_correlation_bound
+    )
     ExecutionQuoteChainEvidence.actual_submitted_instruction_bound = property(
         actual_submitted_instruction_bound
     )

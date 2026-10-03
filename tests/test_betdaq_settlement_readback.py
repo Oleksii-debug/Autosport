@@ -172,7 +172,10 @@ def test_documented_order_audit_log_is_accepted_and_content_bound(monkeypatch):
         'xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:nil="true" />'
         '</AuditLog></AuditLog>'
     )
-    second_audit = first_audit.replace('TotalAgainstStake="4.00"', 'TotalAgainstStake="5.00"')
+    second_audit = first_audit.replace(
+        'TotalAgainstStake="4.00"',
+        'TotalAgainstStake="5.00"',
+    )
     client, _ = economic_client(
         monkeypatch,
         order_details(audit_log=first_audit),
@@ -386,7 +389,6 @@ def test_same_context_query_and_provider_payload_reresolve_same_evidence_id(monk
         == second_value.postings[0].observation_id
     )
     assert first_value.evidence.observed_at != second_value.evidence.observed_at
-
 
 
 def test_readback_rejects_row_from_different_acquisition_with_same_evidence_id(

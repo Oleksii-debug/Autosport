@@ -501,6 +501,12 @@ def _assert_canonical_origin_derivation_dispatch() -> None:
             )
 
 
+_CANONICAL_ORIGIN_DERIVATION_GUARD = _assert_canonical_origin_derivation_dispatch
+_CANONICAL_ORIGIN_DERIVATION_GUARD_CODE = (
+    _assert_canonical_origin_derivation_dispatch.__code__
+)
+
+
 def bind_betfair_historical_market_definition_origin(
     *,
     witness: HistoricalProviderOriginWitness,
@@ -517,7 +523,16 @@ def bind_betfair_historical_market_definition_origin(
     the witness's real download ``retrieved_at`` remains the product acquisition time.
     """
 
-    _assert_canonical_origin_derivation_dispatch()
+    if (
+        _assert_canonical_origin_derivation_dispatch
+        is not _CANONICAL_ORIGIN_DERIVATION_GUARD
+        or _CANONICAL_ORIGIN_DERIVATION_GUARD.__code__
+        is not _CANONICAL_ORIGIN_DERIVATION_GUARD_CODE
+    ):
+        raise BetfairHistoricalMarketDefinitionOriginError(
+            "canonical historical marketDefinition derivation guard was replaced"
+        )
+    _CANONICAL_ORIGIN_DERIVATION_GUARD()
 
     if type(witness) is not HistoricalProviderOriginWitness:
         raise TypeError("witness must be exact HistoricalProviderOriginWitness")

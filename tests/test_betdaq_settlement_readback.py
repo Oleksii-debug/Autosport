@@ -418,6 +418,22 @@ def test_same_context_query_and_provider_payload_reresolve_same_evidence_id(monk
         == second_value.postings[0].observation_id
     )
     assert first_value.evidence.observed_at != second_value.evidence.observed_at
+    assert first_value.evidence.acquisition_id != second_value.evidence.acquisition_id
+
+
+def test_economic_acquisition_identity_binds_product_receive_time(monkeypatch):
+    payload = postings_by_id(posting(9001))
+    client, _ = economic_client(monkeypatch, payload, clock=clock_one)
+    value = client.read_account_postings_by_id(9000)
+
+    shifted = replace(
+        value.evidence,
+        observed_at="2026-09-23T12:34:56.000000Z",
+    )
+
+    assert shifted.evidence_id == value.evidence.evidence_id
+    assert shifted.observed_at != value.evidence.observed_at
+    assert shifted.acquisition_id != value.evidence.acquisition_id
 
 
 def test_readback_rejects_row_from_different_acquisition_with_same_evidence_id(

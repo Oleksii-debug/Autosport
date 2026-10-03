@@ -5,6 +5,7 @@ import pytest
 from scripts.cancel_superseded_pr_workflow_runs import (
     CancellationError,
     CancellationResult,
+    PullRequestQualification,
     WorkflowRun,
     _write_github_output,
     admit_current_head,
@@ -164,6 +165,139 @@ def test_current_head_cancels_stale_runs_on_both_sides_of_run_id_ordering() -> N
     )
     assert result == CancellationResult(current_head=True, cancelled_run_ids=(40, 42))
     assert api.cancelled == [40, 42]
+
+
+def test_qualification_eq_rebind_cannot_self_confirm_head_change() -> None:
+    api = FakeApi(
+        [HEAD_B, HEAD_C],
+        (
+            _run(50, HEAD_A),
+            _run(51, HEAD_C),
+        ),
+    )
+    original = PullRequestQualification.__eq__
+
+    try:
+        PullRequestQualification.__eq__ = lambda _self, _other: True
+        result = cancel_superseded(
+            api=api,
+            pr_number=2008,
+            event_head_sha=HEAD_B,
+            workflow_name="CI",
+            current_run_id=49,
+        )
+    finally:
+        PullRequestQualification.__eq__ = original
+
+    assert result == CancellationResult(current_head=False, cancelled_run_ids=())
+    assert api.cancelled == []
+
+
+def test_qualification_field_class_shadow_is_rejected_before_read() -> None:
+    qualification = PullRequestQualification(
+        head_sha=HEAD_B,
+        integration_capable=True,
+    )
+
+    class QualificationApi:
+        def live_pr_qualification(self, pr_number: int):
+            assert pr_number == 2008
+            return qualification
+
+    original_present = "head_sha" in PullRequestQualification.__dict__
+    assert original_present is False
+    hostile_called = False
+
+    def forged_head(_self):
+        nonlocal hostile_called
+        hostile_called = True
+        return HEAD_B
+
+    try:
+        PullRequestQualification.head_sha = property(forged_head)
+        with pytest.raises(
+            CancellationError,
+            match="pull request qualification authority changed",
+        ):
+            admit_current_head(
+                api=QualificationApi(),
+                pr_number=2008,
+                event_head_sha=HEAD_B,
+            )
+    finally:
+        delattr(PullRequestQualification, "head_sha")
+
+    assert hostile_called is False
+
+
+def test_qualification_constructor_code_mutation_is_rejected() -> None:
+    qualification = PullRequestQualification(
+        head_sha=HEAD_B,
+        integration_capable=True,
+    )
+
+    class QualificationApi:
+        def live_pr_qualification(self, pr_number: int):
+            assert pr_number == 2008
+            return qualification
+
+    target = PullRequestQualification.__init__
+    original_code = target.__code__
+
+    def forged_init(self, head_sha, integration_capable):
+        del self, head_sha, integration_capable
+
+    assert len(forged_init.__code__.co_freevars) == len(original_code.co_freevars)
+    try:
+        target.__code__ = forged_init.__code__
+        with pytest.raises(
+            CancellationError,
+            match="pull request qualification authority changed",
+        ):
+            admit_current_head(
+                api=QualificationApi(),
+                pr_number=2008,
+                event_head_sha=HEAD_B,
+            )
+    finally:
+        target.__code__ = original_code
+
+
+def test_in_place_qualification_state_drift_revokes_cancellation() -> None:
+    qualification = PullRequestQualification(
+        head_sha=HEAD_B,
+        integration_capable=True,
+    )
+
+    class MutableQualificationApi:
+        def __init__(self) -> None:
+            self.reads = 0
+            self.cancelled: list[int] = []
+
+        def live_pr_qualification(self, pr_number: int):
+            assert pr_number == 2008
+            self.reads += 1
+            if self.reads == 2:
+                object.__setattr__(qualification, "head_sha", HEAD_C)
+            return qualification
+
+        def active_runs(self):
+            return (_run(50, HEAD_A),)
+
+        def cancel(self, run_id: int) -> None:
+            self.cancelled.append(run_id)
+
+    api = MutableQualificationApi()
+    result = cancel_superseded(
+        api=api,
+        pr_number=2008,
+        event_head_sha=HEAD_B,
+        workflow_name="CI",
+        current_run_id=49,
+    )
+
+    assert result == CancellationResult(current_head=False, cancelled_run_ids=())
+    assert api.cancelled == []
 
 
 def test_head_change_after_run_listing_revokes_cancellation_authority() -> None:

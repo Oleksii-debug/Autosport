@@ -1,7 +1,8 @@
 """Versioned, fail-honest provider capability evidence matrix.
 
-Composes current-main BookmakerCapabilityProfile and BookmakerIntegrationEvidence.
-No provider I/O, credentials, execution, settlement, or money-moving authority.
+Composes BookmakerCapabilityProfile, BookmakerIntegrationEvidence and bounded
+product-issued lifecycle proof. No provider-write, execution, settlement, or
+money-moving authority is created here.
 """
 
 from __future__ import annotations
@@ -634,7 +635,12 @@ def _install_provider_capability_authority():
         *,
         journal: CapabilityEvidenceJournal | None = None,
     ) -> ProviderCapabilityEvidence:
-        """Compose matrix read authority from exact product-issued BETDAQ lifecycle proof."""
+        """Compose matrix read authority from exact product-issued BETDAQ lifecycle proof.
+
+        Initial evidence can be composed without a journal. Revalidation successors
+        require a caller-owned exact journal containing the predecessor chain; successful
+        composition publishes the successor into that journal before qualification.
+        """
 
         if type(issuance) is not BetdaqAuthenticatedCapabilityIssuance:
             raise ProviderCapabilityEvidenceMatrixError(

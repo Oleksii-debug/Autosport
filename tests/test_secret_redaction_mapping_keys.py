@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+from urllib.parse import quote
 
 from autosport.secret_redaction import (
     REDACTED,
@@ -50,6 +51,55 @@ def test_known_secret_nested_base64_spellings_are_redacted() -> None:
         assert encoded not in rendered
         assert secret not in rendered
         assert REDACTED in rendered
+
+
+def test_known_secret_url_encoded_base64_spelling_is_redacted() -> None:
+    secret = "AS+MIXED/SECRET=7f31"
+    base64_encoded = base64.b64encode(secret.encode("utf-8")).decode("ascii")
+    encoded = quote(base64_encoded, safe="")
+
+    rendered = redact_operator_text(
+        f"provider_opaque={encoded}",
+        extra_secret_values=(secret,),
+    )
+
+    assert encoded not in rendered
+    assert base64_encoded not in rendered
+    assert secret not in rendered
+    assert REDACTED in rendered
+
+
+def test_known_secret_base64_encoded_url_spelling_is_redacted() -> None:
+    secret = "AS+MIXED/SECRET=9c42"
+    url_encoded = quote(secret, safe="")
+    encoded = base64.b64encode(url_encoded.encode("utf-8")).decode("ascii")
+
+    rendered = redact_operator_text(
+        f"provider_opaque={encoded}",
+        extra_secret_values=(secret,),
+    )
+
+    assert encoded not in rendered
+    assert url_encoded not in rendered
+    assert secret not in rendered
+    assert REDACTED in rendered
+
+
+def test_known_secret_nested_family_then_mixed_encoding_is_redacted() -> None:
+    secret = "AS+MIXED/NESTED=2ab7"
+    first = base64.b64encode(secret.encode("utf-8"))
+    nested_base64 = base64.b64encode(first).decode("ascii")
+    encoded = quote(nested_base64, safe="")
+
+    rendered = redact_operator_text(
+        f"provider_opaque={encoded}",
+        extra_secret_values=(secret,),
+    )
+
+    assert encoded not in rendered
+    assert nested_base64 not in rendered
+    assert secret not in rendered
+    assert REDACTED in rendered
 
 
 def test_known_secret_url_percent_spelling_is_redacted() -> None:

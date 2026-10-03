@@ -218,6 +218,28 @@ def test_initial_issue_rejects_product_available_planned_run_outcome(
     assert not list(workspace.glob(".risk-randomization-precommit-*.json"))
 
 
+def test_unrelated_product_outcome_does_not_block_planned_membership(
+    tmp_path, monkeypatch
+) -> None:
+    workspace, registry, authority_root = _paths(tmp_path)
+    membership = _membership()
+    receipt = _publish_membership(
+        monkeypatch, workspace, registry, authority_root, membership
+    )
+    _accept_planned_run_outcome(workspace, run_id="run-unrelated")
+
+    issued = precommit.issue_risk_randomization_precommit(
+        registry,
+        workspace=workspace,
+        research_protocol_id=receipt.research_protocol_id,
+        dataset_snapshot_id=receipt.dataset_snapshot_id,
+        experiment_id="experiment-after-unrelated-outcome",
+        authority_root=authority_root,
+    )
+
+    assert issued.product_preoutcome_chronology_proven is True
+
+
 def test_retry_and_resolve_preserve_root_after_later_product_outcome(
     tmp_path, monkeypatch
 ) -> None:

@@ -118,6 +118,42 @@ def test_login_success_is_authenticated_but_never_execution_enabled():
     ]
 
 
+def test_opaque_password_preserves_provider_significant_surrounding_whitespace():
+    ctl, transport, _, _ = controller()
+    password = "  PASSWORD_SECRET  "
+
+    ctl.submit_login(email="operator@example.test", password=password)
+
+    assert transport.begin_calls == [
+        ("operator@example.test", password, "stable-device-1")
+    ]
+
+
+def test_opaque_2fa_code_preserves_provider_significant_surrounding_whitespace():
+    ctl, transport, _, _ = controller()
+    make_2fa(ctl, transport)
+    ctl.send_verification_code()
+    code = "  123456  "
+
+    ctl.verify_two_factor(code=code)
+
+    assert transport.verify_calls == [("challenge-ref-1", code)]
+
+
+def test_opaque_manual_api_secrets_are_stored_without_normalization():
+    ctl, _, sink, _ = controller()
+    access_key = "  ACCESS_SECRET  "
+    secret_key = "  SUPER_SECRET  "
+
+    ctl.import_approved_api_token(
+        access_key=access_key,
+        secret_key=secret_key,
+        environment="sandbox",
+    )
+
+    assert sink.calls == [(access_key, secret_key, "sandbox")]
+
+
 def test_2fa_required_is_deterministic_and_public_state_has_no_secret_context():
     ctl, transport, _, _ = controller()
     make_2fa(ctl, transport)

@@ -139,6 +139,50 @@ def _inject_pre_action_commit_crash(tmp_path, monkeypatch):
     return event, policy, pre_actions[0]
 
 
+def test_economic_risk_admission_rechecks_execution_quote_truth(
+    tmp_path,
+) -> None:
+    book = PaperBook("100.00")
+    runtime = _runtime(tmp_path, book)
+    event = MarketEvent(
+        event_id="event-quote-reject",
+        market_id="market-quote-reject",
+        selection_id="selection-quote-reject",
+        decimal_odds=Decimal("2.00"),
+        observed_ts="2026-09-20T09:00:00+00:00",
+        source_id="provider-a",
+        sequence=1,
+        sport="football",
+        metadata={"execution_quote_verified": False},
+    )
+    policy = PaperRiskPolicy(economic_goal=_economic_goal())
+    agent = _agent(event, policy)
+    decision_id = "economic-quote-recheck"
+    descriptor = runtime.prepare_paper_value_action(
+        event=event,
+        stake=Decimal("1.00"),
+        decision_id=decision_id,
+        account_id="account-a",
+        bankroll_id=policy.economic_goal.bankroll_id,
+        currency=policy.economic_goal.currency,
+    )
+
+    with pytest.raises(
+        PaperExecutionAdoptionError,
+        match="no longer proves quote execution safety",
+    ):
+        recovery._require_economic_pre_action_risk_pass(
+            agent=agent,
+            pre_action_book=book,
+            descriptor=descriptor,
+            event=event,
+        )
+
+    assert book.balance == Decimal("100.00")
+    assert not book.tickets
+    assert not runtime.ledger.events()
+
+
 def test_economic_risk_admission_recovers_crash_after_pre_action_before_commit(
     tmp_path, monkeypatch
 ) -> None:

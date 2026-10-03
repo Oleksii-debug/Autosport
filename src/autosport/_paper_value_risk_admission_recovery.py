@@ -15,6 +15,7 @@ from .json_integrity import strict_json_loads
 from .paper import PaperBook
 from .paper_execution_adoption import PaperExecutionAdoptionError, PaperExecutionAdoptionRuntime
 from .paper_strategy import PaperValueAgent
+from .price_truth import paper_quote_rejection_reason
 from .risk import ProposedTicketRiskContext
 
 
@@ -345,6 +346,10 @@ def _require_economic_pre_action_risk_pass(
     ):
         raise PaperExecutionAdoptionError(
             "economic paper-value risk admission execution context is invalid"
+        )
+    if paper_quote_rejection_reason(event, action.requested_stake) is not None:
+        raise PaperExecutionAdoptionError(
+            "durable economic paper-value decision no longer proves quote execution safety"
         )
     leg = TicketLeg(
         event.event_id,

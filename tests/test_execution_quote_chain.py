@@ -933,3 +933,48 @@ def test_to_dict_returns_detached_canonical_issuance_snapshot(tmp_path) -> None:
     assert second["chain_complete"] is False
     assert second["submission_instruction_sha256"] is None
     assert second["evidence_sha256"] == evidence.evidence_sha256
+
+
+def test_hard_false_quote_chain_authority_getters_have_no_mutable_python_code() -> None:
+    evidence_type = execution_quote_chain.ExecutionQuoteChainEvidence
+
+    for name in ("accepted_price_verified", "chain_complete"):
+        descriptor = evidence_type.__dict__[name]
+        getter = descriptor.fget
+        assert getter is not None
+        assert not hasattr(getter, "__code__")
+
+        def hostile_getter(_self):
+            return True
+
+        with pytest.raises((AttributeError, TypeError)):
+            setattr(getter, "__code__", hostile_getter.__code__)
+
+
+def test_hard_false_quote_chain_authority_constants_are_class_sealed(
+    tmp_path,
+) -> None:
+    evidence_type = execution_quote_chain.ExecutionQuoteChainEvidence
+    evidence = _project(_submitted(tmp_path))
+
+    assert evidence.accepted_price_verified is False
+    assert evidence.chain_complete is False
+
+    for name in (
+        "_accepted_price_verified_constant",
+        "_chain_complete_constant",
+    ):
+        with pytest.raises(
+            TypeError,
+            match="quote-chain evidence authority surface is sealed",
+        ):
+            setattr(evidence_type, name, True)
+
+        with pytest.raises((AttributeError, TypeError)):
+            object.__setattr__(evidence, name, True)
+
+    assert evidence.accepted_price_verified is False
+    assert evidence.chain_complete is False
+    payload = evidence.to_dict()
+    assert payload["accepted_price_verified"] is False
+    assert payload["chain_complete"] is False

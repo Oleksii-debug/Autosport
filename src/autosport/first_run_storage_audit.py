@@ -3,7 +3,11 @@ from __future__ import annotations
 from pathlib import Path
 
 from .integrity import atomic_write_json
-from .paths import default_webview_storage_path, default_workspace
+from .paths import (
+    default_webview_storage_path,
+    default_workspace,
+    validate_product_storage_roots,
+)
 
 
 def run_first_run_storage_audit(output_path: str | Path) -> int:
@@ -21,8 +25,7 @@ def run_first_run_storage_audit(output_path: str | Path) -> int:
             raise ValueError("WebView storage identity is not absolute")
         if not launch_cwd.is_absolute():
             raise ValueError("launch working directory is not absolute")
-        if workspace == webview_storage:
-            raise ValueError("workspace and WebView storage identities collide")
+        validate_product_storage_roots(workspace, webview_storage)
 
         payload = {
             "status": "PASS",

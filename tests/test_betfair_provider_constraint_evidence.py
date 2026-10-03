@@ -27,6 +27,7 @@ def observation(
     lower_enabled: bool = True,
     scope: str = "UK_INTERNATIONAL",
     currency: str = "GBP",
+    source_ref: str = SOURCE,
     source_revision: str = "current",
     source_sha256: str = HASH_A,
     retrieved_at: datetime = T0,
@@ -43,7 +44,7 @@ def observation(
         min_standard_size=min_size,
         min_payout=min_payout,
         lower_minimum_payout_enabled=lower_enabled,
-        source_ref=SOURCE,
+        source_ref=source_ref,
         source_revision=source_revision,
         source_sha256=source_sha256,
         retrieved_at=retrieved_at,
@@ -328,3 +329,14 @@ def test_semantic_decimal_identity_ignores_ambient_context_rounding() -> None:
 
     result = resolve(first, second)
     assert result.state is BetfairConstraintResolutionState.CONFLICTING_UNVERIFIED
+
+
+
+def test_source_reference_text_is_bounded() -> None:
+    with pytest.raises(BetfairProviderConstraintError, match="bounded canonical"):
+        observation(source_ref="x" * 4097)
+
+
+def test_source_revision_text_is_bounded() -> None:
+    with pytest.raises(BetfairProviderConstraintError, match="bounded canonical"):
+        observation(source_revision="r" * 4097)

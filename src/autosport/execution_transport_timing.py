@@ -460,6 +460,48 @@ def _finish_timing(
         return None, _timing_reason(exc)
 
 
+def _start_timing_reason(exc: TransportTimingEvidenceError) -> str:
+    message = str(exc)
+    if "clock sample failed" in message:
+        return "START_CLOCK_SAMPLE_FAILED"
+    if "non-negative int" in message:
+        return "START_CLOCK_INVALID"
+    return "TIMING_EVIDENCE_UNAVAILABLE"
+
+
+def _run_transport_without_timing(
+    *,
+    operation: Callable[[], bytes],
+    timing_unavailable_reason: str,
+) -> TransportRoundTripMeasurement:
+    """Preserve transport truth when the observational start clock is unavailable."""
+
+    try:
+        response = operation()
+    except Exception as exc:
+        return TransportRoundTripMeasurement(
+            response=None,
+            transport_error=exc,
+            witness=None,
+            timing_unavailable_reason=timing_unavailable_reason,
+        )
+    if type(response) is not bytes:
+        return TransportRoundTripMeasurement(
+            response=None,
+            transport_error=_InvalidTransportResponse(
+                "transport returned a non-bytes response"
+            ),
+            witness=None,
+            timing_unavailable_reason=timing_unavailable_reason,
+        )
+    return TransportRoundTripMeasurement(
+        response=response,
+        transport_error=None,
+        witness=None,
+        timing_unavailable_reason=timing_unavailable_reason,
+    )
+
+
 def _measure_transport_round_trip_impl(
     *,
     attempt_id: str,
@@ -494,7 +536,13 @@ def _measure_transport_round_trip_impl(
     clock = product_clock if production_clock else monotonic_ns
     assert clock is not None
 
-    start_ns = _sample(clock, "transport_start_ns")
+    try:
+        start_ns = _sample(clock, "transport_start_ns")
+    except TransportTimingEvidenceError as exc:
+        return _run_transport_without_timing(
+            operation=operation,
+            timing_unavailable_reason=_start_timing_reason(exc),
+        )
 
     try:
         response = operation()

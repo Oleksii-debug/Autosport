@@ -39,6 +39,11 @@ class RaiseOnSecondClock:
         raise RuntimeError("clock unavailable")
 
 
+class RaiseOnFirstClock:
+    def __call__(self) -> int:
+        raise RuntimeError("clock unavailable")
+
+
 def _measure(*, clock, operation, request: bytes = b'{"x":1}'):
     return measure_transport_round_trip(
         attempt_id="attempt-1",
@@ -126,18 +131,47 @@ def test_end_clock_exception_cannot_convert_successful_transport_to_failure() ->
     assert measurement.timing_unavailable_reason == "END_CLOCK_SAMPLE_FAILED"
 
 
-def test_bad_start_clock_prevents_transport_call() -> None:
+def test_bad_start_clock_cannot_prevent_successful_transport_call() -> None:
     called = False
 
     def operation() -> bytes:
         nonlocal called
         called = True
-        return b"should-not-run"
+        return b"provider-response"
 
-    with pytest.raises(TransportTimingEvidenceError):
-        _measure(clock=FakeClock(True), operation=operation)
+    measurement = _measure(clock=FakeClock(True), operation=operation)
 
-    assert called is False
+    assert called is True
+    assert measurement.unwrap() == b"provider-response"
+    assert measurement.witness is None
+    assert measurement.timing_unavailable_reason == "START_CLOCK_INVALID"
+
+
+def test_start_clock_exception_cannot_prevent_successful_transport_call() -> None:
+    measurement = _measure(
+        clock=RaiseOnFirstClock(),
+        operation=lambda: b"provider-response",
+    )
+
+    assert measurement.unwrap() == b"provider-response"
+    assert measurement.witness is None
+    assert measurement.timing_unavailable_reason == "START_CLOCK_SAMPLE_FAILED"
+
+
+def test_bad_start_clock_preserves_exact_original_timeout() -> None:
+    error = TimeoutError("ambiguous provider effect")
+
+    def operation() -> bytes:
+        raise error
+
+    measurement = _measure(clock=FakeClock(True), operation=operation)
+
+    assert measurement.transport_error is error
+    assert measurement.witness is None
+    assert measurement.timing_unavailable_reason == "START_CLOCK_INVALID"
+    with pytest.raises(TimeoutError) as caught:
+        measurement.unwrap()
+    assert caught.value is error
 
 
 def test_timeout_preserves_exact_original_exception_and_timing() -> None:

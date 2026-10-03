@@ -66,16 +66,19 @@ def _canonical_input_id(value: object) -> str:
 
 
 def _canonical_as_of(value: object) -> datetime:
-    if not isinstance(value, datetime):
-        raise TypeError("as_of must be a datetime")
+    # This is an authority boundary: datetime subclasses can override timezone
+    # conversion/offset dispatch. Accept the exact stdlib scalar only.
+    if type(value) is not datetime:
+        raise TypeError("as_of must be an exact datetime")
     if value.tzinfo is None or value.utcoffset() is None:
         raise LiveMarketActionabilityError("as_of must be timezone-aware")
     return value.astimezone(timezone.utc)
 
 
 def _canonical_max_age(value: object) -> timedelta:
-    if not isinstance(value, timedelta):
-        raise TypeError("max_age must be a timedelta")
+    # Do not let caller-defined timedelta comparison dispatch influence freshness.
+    if type(value) is not timedelta:
+        raise TypeError("max_age must be an exact timedelta")
     if value < timedelta(0):
         raise LiveMarketActionabilityError("max_age must be non-negative")
     return value
@@ -175,11 +178,17 @@ def evaluate_registered_input_current_view(
     provider state, second market store, financial authority, or execution authority.
     """
 
-    if not isinstance(updates, BoundedMirrorInvalidationBuffer):
-        raise TypeError("updates must be BoundedMirrorInvalidationBuffer")
-    if not isinstance(dependencies, FocusedMirrorDependencyIndex):
-        raise TypeError("dependencies must be FocusedMirrorDependencyIndex")
-    if dependencies._mirror is not updates.mirror:
+    # Subclasses are caller-controlled executable dispatch. This diagnostic boundary
+    # reads private dependency/index seams, so only the exact canonical runtime types
+    # are admissible; otherwise an override could rewrite selectors or evidence.
+    if type(updates) is not BoundedMirrorInvalidationBuffer:
+        raise TypeError("updates must be exact BoundedMirrorInvalidationBuffer")
+    if type(dependencies) is not FocusedMirrorDependencyIndex:
+        raise TypeError("dependencies must be exact FocusedMirrorDependencyIndex")
+    mirror = updates.mirror
+    if type(mirror) is not MarketMirror:
+        raise TypeError("updates mirror must be exact MarketMirror")
+    if dependencies._mirror is not mirror:
         raise LiveMarketActionabilityError(
             "dependencies and updates must share the same canonical MarketMirror"
         )

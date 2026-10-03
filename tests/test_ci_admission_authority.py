@@ -419,3 +419,110 @@ def test_legacy_live_head_rejects_inflight_pull_request_reader_shadow() -> None:
 
     assert forged_calls == []
 
+def _main_admission_args() -> list[str]:
+    return [
+        "--pr-number",
+        "2008",
+        "--event-head-sha",
+        HEAD_B,
+        "--workflow-name",
+        "CI",
+        "--current-run-id",
+        "123",
+        "--admission-only",
+    ]
+
+
+def _main_cancel_args() -> list[str]:
+    return [
+        "--pr-number",
+        "2008",
+        "--event-head-sha",
+        HEAD_B,
+        "--workflow-name",
+        "CI",
+        "--current-run-id",
+        "123",
+    ]
+
+
+def test_main_rejects_preentry_admission_dispatch_rebind(monkeypatch, tmp_path) -> None:
+    forged_calls: list[str] = []
+
+    def forged_admit(**_kwargs) -> CancellationResult:
+        forged_calls.append("admit")
+        return CancellationResult(current_head=True, cancelled_run_ids=())
+
+    output = tmp_path / "github-output.txt"
+    monkeypatch.setattr(controller_module, "admit_current_head", forged_admit)
+    monkeypatch.setenv("GITHUB_REPOSITORY", "owner/repo")
+    monkeypatch.setenv("GITHUB_TOKEN", "token")
+    monkeypatch.setenv("GITHUB_OUTPUT", str(output))
+
+    assert controller_module.main(_main_admission_args()) == 2
+    assert forged_calls == []
+    assert not output.exists()
+
+
+def test_main_rejects_preentry_cancel_dispatch_rebind(monkeypatch, tmp_path) -> None:
+    forged_calls: list[str] = []
+
+    def forged_cancel(**_kwargs) -> CancellationResult:
+        forged_calls.append("cancel")
+        return CancellationResult(current_head=True, cancelled_run_ids=(999,))
+
+    output = tmp_path / "github-output.txt"
+    monkeypatch.setattr(controller_module, "cancel_superseded", forged_cancel)
+    monkeypatch.setenv("GITHUB_REPOSITORY", "owner/repo")
+    monkeypatch.setenv("GITHUB_TOKEN", "token")
+    monkeypatch.setenv("GITHUB_OUTPUT", str(output))
+
+    assert controller_module.main(_main_cancel_args()) == 2
+    assert forged_calls == []
+    assert not output.exists()
+
+
+def test_main_rejects_preentry_output_writer_rebind(monkeypatch, tmp_path) -> None:
+    forged_calls: list[object] = []
+
+    def forged_output(result: object) -> None:
+        forged_calls.append(result)
+
+    output = tmp_path / "github-output.txt"
+    monkeypatch.setattr(controller_module, "_write_github_output", forged_output)
+    monkeypatch.setenv("GITHUB_REPOSITORY", "owner/repo")
+    monkeypatch.setenv("GITHUB_TOKEN", "token")
+    monkeypatch.setenv("GITHUB_OUTPUT", str(output))
+
+    assert controller_module.main(_main_admission_args()) == 2
+    assert forged_calls == []
+    assert not output.exists()
+
+
+def test_main_rejects_preentry_api_type_rebind(monkeypatch) -> None:
+    forged_calls: list[str] = []
+
+    class ForgedApi:
+        def __init__(self, **_kwargs) -> None:
+            forged_calls.append("init")
+
+    monkeypatch.setattr(controller_module, "GitHubApi", ForgedApi)
+    monkeypatch.setenv("GITHUB_REPOSITORY", "owner/repo")
+    monkeypatch.setenv("GITHUB_TOKEN", "token")
+
+    assert controller_module.main(_main_admission_args()) == 2
+    assert forged_calls == []
+
+
+def test_main_rejects_preentry_admission_code_mutation(monkeypatch) -> None:
+    target = controller_module.admit_current_head
+
+    def forged_admit(**_kwargs) -> CancellationResult:
+        return CancellationResult(current_head=True, cancelled_run_ids=())
+
+    monkeypatch.setattr(target, "__code__", forged_admit.__code__)
+    monkeypatch.setenv("GITHUB_REPOSITORY", "owner/repo")
+    monkeypatch.setenv("GITHUB_TOKEN", "token")
+
+    assert controller_module.main(_main_admission_args()) == 2
+

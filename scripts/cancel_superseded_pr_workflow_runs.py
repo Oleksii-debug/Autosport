@@ -71,6 +71,21 @@ def _require_positive_int(value: object, *, field: str) -> int:
     return value
 
 
+def _strict_json_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    value: dict[str, object] = {}
+    for key, item in pairs:
+        if key in value:
+            raise CancellationError("GitHub API JSON contains duplicate object key")
+        value[key] = item
+    return value
+
+
+def _reject_nonstandard_json_constant(value: str) -> object:
+    raise CancellationError(
+        f"GitHub API JSON contains non-standard constant: {value}"
+    )
+
+
 def parse_run(payload: object) -> WorkflowRun:
     if not isinstance(payload, dict):
         raise CancellationError("workflow run must be an object")
@@ -191,7 +206,11 @@ class GitHubApi:
         if not body:
             return None
         try:
-            return json.loads(body)
+            return json.loads(
+                body,
+                object_pairs_hook=_strict_json_object,
+                parse_constant=_reject_nonstandard_json_constant,
+            )
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise CancellationError("GitHub API returned invalid JSON") from exc
 

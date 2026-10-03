@@ -1284,7 +1284,11 @@ def _seal_provider_evidence_store_dispatch() -> None:
 
     def _surface_witness(owner, name):
         surface = expected_getattr_static(owner, name)
-        function = expected_getattr(surface, "__func__", surface)
+        function = expected_getattr(
+            surface,
+            "__func__",
+            expected_getattr(surface, "fget", surface),
+        )
         return (
             name,
             surface,

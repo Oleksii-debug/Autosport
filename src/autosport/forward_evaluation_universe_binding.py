@@ -6,9 +6,10 @@ Positive membership is never accepted from caller-created receipts or from which
 ProviderEvaluationUniverseStore happens to be supplied.  The resolver composes two
 existing authorities:
 
-1. #1257 CampaignPrecommitManifest + monotonic publication witness selects the exact
-   evaluation-universe SHA prospectively, before source observation; and
-2. ProviderEvaluationUniverseStore re-resolves the exact durable rows, with guarded
+1. #1257 CampaignPrecommitManifest + monotonic publication witness fixes the
+   prospective campaign/evaluation-plan identity before source observation; and
+2. ProviderEvaluationUniverseStore re-resolves the exact realized durable rows,
+   universe digest, and membership digest after provider observation, with guarded
    backing identity/load semantics.
 
 No second universe store, scheduler, execution authority, or money permission exists
@@ -90,9 +91,9 @@ def _instant(value: str, name: str) -> datetime:
 _RULE_PAYLOAD = {
     "rule_id": FORWARD_UNIVERSE_RULE_ID,
     "authority": "CampaignPrecommitManifest + ProviderEvaluationUniverseStore",
-    "membership": "exact prospectively selected durable EvaluationUniverse rows",
+    "membership": "exact realized durable EvaluationUniverse rows",
     "expected_universe_authority": (
-        "CampaignPrecommitPublicationWitness + evaluation_universe_sha256"
+        "CampaignPrecommitPublicationWitness + prospective evaluation-plan identity"
     ),
     "backing_authority": (
         "workspace identity + monotonic evaluation-universe namespace locator"
@@ -303,13 +304,12 @@ def _build_load_expectations(
                 locator=precommit,
                 campaign_id=protocol.campaign_id,
                 source_id=store.source_id,
-                evaluation_universe_sha256=universe.universe_sha256,
                 earliest_source_observation=earliest,
                 latest_source_observation=latest,
             )
         except precommit_error as exc:
             raise ForwardEvaluationUniverseBindingError(
-                "prospective campaign precommit does not authorize durable evaluation universe"
+                "prospective campaign precommit plan cannot be re-resolved"
             ) from exc
         if precommit_resolver.__code__ is not precommit_resolver_code:
             raise ForwardEvaluationUniverseBindingError(

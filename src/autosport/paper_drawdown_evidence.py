@@ -430,12 +430,14 @@ def _make_resolver() -> FunctionType:
                 continue
             with local_context(exact_context()):
                 drawdown = running_peak - equity
+            ratio_context = exact_context()
+            ratio_context.traps[inexact_signal] = False
+            with local_context(ratio_context):
+                drawdown_fraction = drawdown / running_peak
+            if drawdown_fraction > maximum_fraction:
+                maximum_fraction = drawdown_fraction
             if drawdown > maximum_drawdown:
                 maximum_drawdown = drawdown
-                ratio_context = exact_context()
-                ratio_context.traps[inexact_signal] = False
-                with local_context(ratio_context):
-                    maximum_fraction = drawdown / running_peak
                 maximum_peak_id = running_peak_id
                 maximum_trough_id = point_id
 

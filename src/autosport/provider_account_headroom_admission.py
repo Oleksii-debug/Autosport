@@ -181,7 +181,9 @@ def _canonical_ledger_dispatch(
 
 
 _PRODUCT_MAX_ACCOUNT_SNAPSHOT_AGE = timedelta(seconds=30)
-_SCHEMA_VERSION = 1
+# Version 2 binds the exact durable economic-goal denomination and the set of
+# liability-bearing supervised execution plans into every assessment identity.
+_SCHEMA_VERSION = 2
 _ZERO = Decimal("0")
 
 

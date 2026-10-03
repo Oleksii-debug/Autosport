@@ -923,6 +923,16 @@ class ProphetXSessionLifecycle:
                     retry_at=current.slot_hold_until,
                 )
             if now >= current.access_expires_at - RENEWAL_LEAD_TIME:
+                if (
+                    current.state is ProphetXSessionState.RENEWAL_DUE
+                    and current.retry_not_before is not None
+                    and now < current.retry_not_before
+                ):
+                    return ProphetXLoginAdmission(
+                        action=ProphetXLoginAdmissionAction.RENEWAL_REQUIRED,
+                        snapshot=current,
+                        retry_at=current.retry_not_before,
+                    )
                 if current.state is not ProphetXSessionState.RENEWAL_DUE:
                     current = ProphetXSessionSnapshot(
                         state=ProphetXSessionState.RENEWAL_DUE,

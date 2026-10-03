@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass, replace
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import (
     Context,
     Decimal,
@@ -15,10 +15,46 @@ from decimal import (
     localcontext,
 )
 
+from pathlib import Path
+
 from .domain import MarketEvent, PaperTicket, TicketLeg, TicketStatus
 from .economic_goal import EconomicGoalContract
 from .economic_goal_provenance import provenance_for
 from .paper import PaperBook
+
+
+def _verify_product_risk_of_ruin_authority(
+    registry_path: str | Path | None,
+    evidence: object,
+    *,
+    kind: str,
+    available_by: str,
+) -> tuple[bool, str]:
+    # Import only when the mature authority-bearing policy path is evaluated.
+    # Importing this module while autosport.risk itself is initializing creates
+    # a cycle through ScientificRegistry -> agents -> decision_ledger -> risk.
+    from . import risk_of_ruin_authority as authority_module
+    from ._scientific_registry_read_authority import (
+        ScientificRegistryReadAuthorityError,
+        _source_owned_function,
+    )
+
+    try:
+        verifier = _source_owned_function(
+            authority_module.verify_risk_of_ruin_authority,
+            module=authority_module,
+            qualname="verify_risk_of_ruin_authority",
+        )
+    except ScientificRegistryReadAuthorityError:
+        prefix = "portfolio" if kind == "single" else "portfolio vector"
+        return False, f"{prefix} risk-of-ruin product authority verifier changed"
+
+    return verifier(
+        registry_path,
+        evidence,
+        kind=kind,
+        available_by=available_by,
+    )
 
 
 def _canonical_context_text(name: str, value: object) -> str:
@@ -177,7 +213,7 @@ class RiskOfRuinEvidence:
             )
 
         if (
-            not isinstance(self.evaluated_stake, Decimal)
+            type(self.evaluated_stake) is not Decimal
             or not self.evaluated_stake.is_finite()
             or self.evaluated_stake <= 0
         ):
@@ -185,7 +221,7 @@ class RiskOfRuinEvidence:
                 "risk-of-ruin evaluated_stake must be a positive finite exact Decimal"
             )
         if (
-            not isinstance(self.upper_bound, Decimal)
+            type(self.upper_bound) is not Decimal
             or not self.upper_bound.is_finite()
             or self.upper_bound < Decimal("0")
             or self.upper_bound > Decimal("1")
@@ -271,7 +307,7 @@ class RiskOfRuinVectorEvidence:
         has_positive = False
         for stake in self.evaluated_stakes:
             if (
-                not isinstance(stake, Decimal)
+                type(stake) is not Decimal
                 or not stake.is_finite()
                 or stake < Decimal("0")
             ):
@@ -284,7 +320,7 @@ class RiskOfRuinVectorEvidence:
                 "vector risk-of-ruin evaluated_stakes must contain a positive stake"
             )
         if (
-            not isinstance(self.upper_bound, Decimal)
+            type(self.upper_bound) is not Decimal
             or not self.upper_bound.is_finite()
             or self.upper_bound < Decimal("0")
             or self.upper_bound > Decimal("1")
@@ -443,7 +479,7 @@ class ProposedTicketRiskContext:
         if self.risk_of_ruin_upper_bound is not None:
             bound = self.risk_of_ruin_upper_bound
             if (
-                not isinstance(bound, Decimal)
+                type(bound) is not Decimal
                 or not bound.is_finite()
                 or bound < Decimal("0")
                 or bound > Decimal("1")
@@ -451,9 +487,9 @@ class ProposedTicketRiskContext:
                 raise ValueError(
                     "risk_of_ruin_upper_bound must be an exact Decimal between 0 and 1"
                 )
-        if self.risk_of_ruin_evidence is not None and not isinstance(
-            self.risk_of_ruin_evidence, RiskOfRuinEvidence
-        ):
+        if self.risk_of_ruin_evidence is not None and type(
+            self.risk_of_ruin_evidence
+        ) is not RiskOfRuinEvidence:
             raise ValueError(
                 "risk_of_ruin_evidence must be canonical RiskOfRuinEvidence"
             )
@@ -557,6 +593,7 @@ class PaperRiskPolicy(metaclass=_PaperRiskPolicyMeta):
     max_committed_fraction: Decimal = Decimal("0.20")
     minimum_cash_reserve_fraction: Decimal = Decimal("0.20")
     economic_goal: EconomicGoalContract | None = None
+    risk_of_ruin_registry_path: str | Path | None = None
 
     def __post_init__(self) -> None:
         for field_name in (
@@ -578,12 +615,22 @@ class PaperRiskPolicy(metaclass=_PaperRiskPolicyMeta):
             self.economic_goal, EconomicGoalContract
         ):
             raise TypeError("economic_goal must be an EconomicGoalContract or None")
+        raw_path = self.risk_of_ruin_registry_path
+        if raw_path is not None:
+            if not isinstance(raw_path, (str, Path)):
+                raise TypeError("risk_of_ruin_registry_path must be str, Path or None")
+            canonical = str(raw_path)
+            if not canonical or canonical != canonical.strip():
+                raise ValueError(
+                    "risk_of_ruin_registry_path must be a non-empty canonical path"
+                )
+            object.__setattr__(self, "risk_of_ruin_registry_path", canonical)
 
     def provenance_payload(self) -> dict[str, object]:
         """Canonical identity of the exact executable paper-risk authority."""
 
         goal = self.economic_goal
-        return {
+        payload: dict[str, object] = {
             "schema": "autosport.paper_risk_policy_provenance",
             "schema_version": 1,
             "max_ticket_fraction": str(self.max_ticket_fraction),
@@ -593,6 +640,13 @@ class PaperRiskPolicy(metaclass=_PaperRiskPolicyMeta):
                 provenance_for(goal).contract_sha256 if goal is not None else None
             ),
         }
+        if self.risk_of_ruin_registry_path is not None:
+            payload["schema_version"] = 2
+            payload["risk_of_ruin_authority"] = {
+                "kind": "scientific_registry_evaluation_bundle_v1",
+                "registry_path": str(self.risk_of_ruin_registry_path),
+            }
+        return payload
 
     @property
     def provenance_sha256(self) -> str:
@@ -716,6 +770,8 @@ class PaperRiskPolicy(metaclass=_PaperRiskPolicyMeta):
                                 "market_id": leg.market_id,
                                 "selection_id": leg.selection_id,
                                 "locked_odds": str(leg.locked_odds),
+                                "sport": leg.sport,
+                                "exchange_side": leg.exchange_side,
                             }
                             for leg in ticket.legs
                         ],
@@ -741,7 +797,7 @@ class PaperRiskPolicy(metaclass=_PaperRiskPolicyMeta):
                 )
             return _sha256_payload(
                 {
-                    "schema": "autosport.paper-risk-state.v3",
+                    "schema": "autosport.paper-risk-state.v4",
                     "initial_bankroll": str(book.initial_bankroll),
                     "balance": str(book.balance),
                     "tickets": tickets,
@@ -770,12 +826,14 @@ class PaperRiskPolicy(metaclass=_PaperRiskPolicyMeta):
                     "market_id": leg.market_id,
                     "selection_id": leg.selection_id,
                     "locked_odds": str(leg.locked_odds),
+                    "sport": leg.sport,
+                    "exchange_side": leg.exchange_side,
                 }
                 for leg in sorted(context.legs, key=lambda item: item.quote_key)
             ]
             return _sha256_payload(
                 {
-                    "schema": "autosport.risk-candidate.v2",
+                    "schema": "autosport.risk-candidate.v3",
                     "legs": legs,
                     "quotes": quotes,
                     "provider_accounts": [
@@ -824,6 +882,8 @@ class PaperRiskPolicy(metaclass=_PaperRiskPolicyMeta):
         amount: Decimal,
         goal: EconomicGoalContract,
         context: ProposedTicketRiskContext,
+        *,
+        registry_path: str | Path | None = None,
     ) -> RiskDecision | None:
         if goal.max_risk_of_ruin >= Decimal("1"):
             return None
@@ -886,7 +946,34 @@ class PaperRiskPolicy(metaclass=_PaperRiskPolicyMeta):
                 False,
                 "portfolio risk-of-ruin evidence uses future information",
             )
-        return None
+
+        from ._scientific_registry_read_authority import (
+            ScientificRegistryReadAuthorityError,
+            _source_owned_function,
+        )
+
+        risk_module = __import__(
+            __name__,
+            fromlist=["_verify_product_risk_of_ruin_authority"],
+        )
+        try:
+            verifier = _source_owned_function(
+                getattr(risk_module, "_verify_product_risk_of_ruin_authority", None),
+                module=risk_module,
+                qualname="_verify_product_risk_of_ruin_authority",
+            )
+        except ScientificRegistryReadAuthorityError:
+            return RiskDecision(
+                False,
+                "portfolio risk-of-ruin product authority dispatch changed",
+            )
+        verified, reason = verifier(
+            registry_path,
+            evidence,
+            kind="single",
+            available_by=context.proposal_ts,
+        )
+        return None if verified else RiskDecision(False, reason)
 
     @classmethod
     def _risk_of_ruin_vector_evidence_decision(
@@ -896,6 +983,8 @@ class PaperRiskPolicy(metaclass=_PaperRiskPolicyMeta):
         contexts: tuple[ProposedTicketRiskContext, ...],
         stakes: tuple[Decimal, ...],
         evidence: RiskOfRuinVectorEvidence | None,
+        *,
+        registry_path: str | Path | None = None,
     ) -> RiskDecision | None:
         if goal.max_risk_of_ruin >= Decimal("1"):
             return None
@@ -904,7 +993,7 @@ class PaperRiskPolicy(metaclass=_PaperRiskPolicyMeta):
                 False,
                 "multi-candidate portfolio risk-of-ruin requires vector-bound evidence",
             )
-        if not isinstance(evidence, RiskOfRuinVectorEvidence):
+        if type(evidence) is not RiskOfRuinVectorEvidence:
             return RiskDecision(
                 False,
                 "multi-candidate portfolio risk-of-ruin vector evidence is invalid",
@@ -979,7 +1068,34 @@ class PaperRiskPolicy(metaclass=_PaperRiskPolicyMeta):
                 False,
                 "portfolio vector risk-of-ruin evidence uses future information",
             )
-        return None
+
+        from ._scientific_registry_read_authority import (
+            ScientificRegistryReadAuthorityError,
+            _source_owned_function,
+        )
+
+        risk_module = __import__(
+            __name__,
+            fromlist=["_verify_product_risk_of_ruin_authority"],
+        )
+        try:
+            verifier = _source_owned_function(
+                getattr(risk_module, "_verify_product_risk_of_ruin_authority", None),
+                module=risk_module,
+                qualname="_verify_product_risk_of_ruin_authority",
+            )
+        except ScientificRegistryReadAuthorityError:
+            return RiskDecision(
+                False,
+                "portfolio vector risk-of-ruin product authority dispatch changed",
+            )
+        verified, reason = verifier(
+            registry_path,
+            evidence,
+            kind="vector",
+            available_by=causal_limit.astimezone(timezone.utc).isoformat(),
+        )
+        return None if verified else RiskDecision(False, reason)
 
     @classmethod
     def _historical_risk_metrics(
@@ -1544,7 +1660,11 @@ class PaperRiskPolicy(metaclass=_PaperRiskPolicyMeta):
         if goal.max_risk_of_ruin < Decimal("1"):
             assert context is not None
             if self._risk_of_ruin_evidence_decision(
-                book, amount, goal, context
+                book,
+                amount,
+                goal,
+                context,
+                registry_path=self.risk_of_ruin_registry_path,
             ) is not None:
                 return None
 
@@ -1837,6 +1957,7 @@ class PaperRiskPolicy(metaclass=_PaperRiskPolicyMeta):
                     contexts,
                     result,
                     risk_of_ruin_vector_evidence,
+                    registry_path=self.risk_of_ruin_registry_path,
                 )
                 if vector_ruin_decision is not None:
                     action = (
@@ -2019,7 +2140,11 @@ class PaperRiskPolicy(metaclass=_PaperRiskPolicyMeta):
 
             if goal.max_risk_of_ruin < Decimal("1"):
                 ruin_decision = self._risk_of_ruin_evidence_decision(
-                    book, amount, goal, context
+                    book,
+                    amount,
+                    goal,
+                    context,
+                    registry_path=self.risk_of_ruin_registry_path,
                 )
                 if ruin_decision is not None:
                     return ruin_decision

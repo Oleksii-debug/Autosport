@@ -29,6 +29,14 @@ _ADMISSION_PATH_EXPANDUSER = Path.expanduser
 _ADMISSION_PATH_EXPANDUSER_CODE = getattr(_ADMISSION_PATH_EXPANDUSER, "__code__", None)
 _ADMISSION_PATH_RESOLVE = Path.resolve
 _ADMISSION_PATH_RESOLVE_CODE = getattr(_ADMISSION_PATH_RESOLVE, "__code__", None)
+_ADMISSION_PATH_TRUEDIV = Path.__truediv__
+_ADMISSION_PATH_TRUEDIV_CODE = getattr(_ADMISSION_PATH_TRUEDIV, "__code__", None)
+_ADMISSION_PATH_LSTAT = Path.lstat
+_ADMISSION_PATH_LSTAT_CODE = getattr(_ADMISSION_PATH_LSTAT, "__code__", None)
+_ADMISSION_PATH_ITERDIR = Path.iterdir
+_ADMISSION_PATH_ITERDIR_CODE = getattr(_ADMISSION_PATH_ITERDIR, "__code__", None)
+_ADMISSION_PATH_EXISTS = Path.exists
+_ADMISSION_PATH_EXISTS_CODE = getattr(_ADMISSION_PATH_EXISTS, "__code__", None)
 _ADMISSION_CANONICAL_PATH_TYPE = type(Path())
 
 
@@ -145,6 +153,10 @@ def _canonical_workspace_root(workspace: str | Path) -> Path:
             _ADMISSION_PATH_EXPANDUSER_CODE,
         ),
         (Path.resolve, _ADMISSION_PATH_RESOLVE, _ADMISSION_PATH_RESOLVE_CODE),
+        (Path.__truediv__, _ADMISSION_PATH_TRUEDIV, _ADMISSION_PATH_TRUEDIV_CODE),
+        (Path.lstat, _ADMISSION_PATH_LSTAT, _ADMISSION_PATH_LSTAT_CODE),
+        (Path.iterdir, _ADMISSION_PATH_ITERDIR, _ADMISSION_PATH_ITERDIR_CODE),
+        (Path.exists, _ADMISSION_PATH_EXISTS, _ADMISSION_PATH_EXISTS_CODE),
     )
     for current, expected, expected_code in path_witnesses:
         if (
@@ -625,7 +637,7 @@ def admit_paper_ticket(
     )
 
     root = _canonical_workspace_root(workspace)
-    book_path = root / "paper_book.json"
+    book_path = _ADMISSION_PATH_TRUEDIV(root, "paper_book.json")
     day_turnover_snapshot = _prepare_paper_day_turnover_snapshot(
         root=root,
         book_path=book_path,
@@ -634,10 +646,10 @@ def admit_paper_ticket(
 
     _require_workspace_lock_dispatch()
     with WorkspaceEconomicLock(root) as workspace_lock:
-        registry_path = root / "run_registry.json"
+        registry_path = _ADMISSION_PATH_TRUEDIV(root, "run_registry.json")
         registry_missing = False
         try:
-            registry_path.lstat()
+            _ADMISSION_PATH_LSTAT(registry_path)
         except FileNotFoundError:
             registry_missing = True
         else:
@@ -650,9 +662,12 @@ def admit_paper_ticket(
                 "Workspace has unresolved transaction history; repair it before PAPER admission."
             )
         if registry_missing:
-            transaction_root = root / RunTransaction.ROOT_NAME
+            transaction_root = _ADMISSION_PATH_TRUEDIV(
+                root,
+                RunTransaction.ROOT_NAME,
+            )
             try:
-                first_transaction = next(transaction_root.iterdir())
+                first_transaction = next(_ADMISSION_PATH_ITERDIR(transaction_root))
             except FileNotFoundError:
                 pass
             except StopIteration:
@@ -664,7 +679,7 @@ def admit_paper_ticket(
                     "repair it before PAPER admission."
                 )
 
-        if not book_path.exists():
+        if not _ADMISSION_PATH_EXISTS(book_path):
             raise FileNotFoundError(
                 "canonical paper_book.json must already exist; "
                 "bootstrap/recovery belongs to the product lifecycle"

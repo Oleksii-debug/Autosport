@@ -176,6 +176,7 @@ def parse_run(
     _sha_validator=_require_sha,
     _sha_validator_code=_require_sha.__code__,
     _active_statuses: tuple[str, ...] = _ACTIVE_STATUSES,
+    _workflow_run_type=WorkflowRun,
 ) -> WorkflowRun:
     if (
         getattr(_positive_int, "__code__", None) is not _positive_int_code
@@ -204,7 +205,7 @@ def parse_run(
         pr_numbers.append(
             _positive_int(item.get("number"), field="pull request number")
         )
-    return WorkflowRun(
+    return _workflow_run_type(
         run_id=run_id,
         head_sha=head_sha,
         workflow_name=name,
@@ -332,6 +333,7 @@ class GitHubApi:
         *,
         _pulls_per_page: int = _PULLS_PER_PAGE,
         _encode_query=urlencode,
+        _encode_query_code=urlencode.__code__,
         _sha_validator=_require_sha,
         _sha_validator_code=_require_sha.__code__,
         _positive_int=_require_positive_int,
@@ -362,6 +364,9 @@ class GitHubApi:
                 request_code is not None
                 and bound_func is request_func
                 and getattr(request_func, "__code__", None) is request_code
+                and getattr(_encode_query, "__code__", None) is _encode_query_code
+                and getattr(_sha_validator, "__code__", None) is _sha_validator_code
+                and getattr(_positive_int, "__code__", None) is _positive_int_code
             )
 
         if (
@@ -369,8 +374,7 @@ class GitHubApi:
             or _pulls_per_page <= 0
             or _pulls_per_page > 100
             or not callable(_encode_query)
-            or getattr(_sha_validator, "__code__", None) is not _sha_validator_code
-            or getattr(_positive_int, "__code__", None) is not _positive_int_code
+            or getattr(_encode_query, "__code__", None) is not _encode_query_code
             or not request_dispatch_current()
         ):
             raise CancellationError("commit association authority is unavailable")
@@ -472,6 +476,7 @@ class GitHubApi:
         _active_statuses: tuple[str, ...] = _ACTIVE_STATUSES,
         _runs_per_page: int = _RUNS_PER_PAGE,
         _encode_query=urlencode,
+        _encode_query_code=urlencode.__code__,
         _run_parser=parse_run,
         _run_parser_code=parse_run.__code__,
     ) -> tuple[WorkflowRun, ...]:
@@ -486,6 +491,7 @@ class GitHubApi:
             or _runs_per_page <= 0
             or _runs_per_page > 100
             or not callable(_encode_query)
+            or getattr(_encode_query, "__code__", None) is not _encode_query_code
             or getattr(_run_parser, "__code__", None) is not _run_parser_code
         ):
             raise CancellationError("workflow-runs pagination authority is unavailable")
@@ -501,6 +507,8 @@ class GitHubApi:
                 request_code is not None
                 and bound_func is request_func
                 and getattr(request_func, "__code__", None) is request_code
+                and getattr(_encode_query, "__code__", None) is _encode_query_code
+                and getattr(_run_parser, "__code__", None) is _run_parser_code
             )
 
         if not request_dispatch_current():

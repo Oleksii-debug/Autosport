@@ -233,7 +233,7 @@ def test_stale_trigger_cancellation_is_revoked_if_live_qualification_moves_again
     assert api.cancelled == []
 
 
-def test_zero_trigger_identity_does_not_block_workflow_wide_sweep(
+def test_zero_trigger_identity_leaves_current_run_eligible_for_orphan_cleanup(
     monkeypatch,
 ) -> None:
     events: list[str] = []
@@ -243,7 +243,7 @@ def test_zero_trigger_identity_does_not_block_workflow_wide_sweep(
             events.append("api")
 
         def cancel_historical_unbound_runs(self, **kwargs) -> tuple[int, ...]:
-            assert kwargs["exclude_run_ids"] == (7000,)
+            assert kwargs["exclude_run_ids"] == ()
             events.append("orphan")
             return ()
 
@@ -285,7 +285,7 @@ def test_zero_trigger_identity_does_not_block_workflow_wide_sweep(
     assert events == ["api", "sweep", "orphan"]
 
 
-def test_orphan_cleanup_excludes_current_and_already_swept_runs(
+def test_zero_trigger_orphan_cleanup_excludes_only_already_swept_runs(
     monkeypatch,
 ) -> None:
     events: list[str] = []
@@ -295,7 +295,7 @@ def test_orphan_cleanup_excludes_current_and_already_swept_runs(
             events.append("api")
 
         def cancel_historical_unbound_runs(self, **kwargs) -> tuple[int, ...]:
-            assert kwargs["exclude_run_ids"] == (7000, 6001, 6002)
+            assert kwargs["exclude_run_ids"] == (6001, 6002)
             events.append("orphan")
             return ()
 

@@ -262,6 +262,36 @@ class CollectorScheduleStartGateTests(unittest.TestCase):
                     authorization_sha256=AUTH_B,
                 )
 
+    def test_gate_status_rejects_authorization_identity_corruption(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = self._store(tmp)
+            schedule = self._ensure(store, gate=GATE_A)
+
+            connection = sqlite3.connect(store.path)
+            try:
+                connection.execute(
+                    "INSERT INTO collector_schedule_start_authorizations_v1("
+                    "source_id, run_id, schedule_id, gate_binding_sha256, "
+                    "authorization_sha256) VALUES(?,?,?,?,?)",
+                    (
+                        "source-x",
+                        "run-1",
+                        schedule["schedule_id"],
+                        GATE_B,
+                        AUTH_A,
+                    ),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            with self.assertRaisesRegex(ValueError, "authorization identity is corrupt"):
+                store._collector_schedule_start_gate_status(
+                    source_id="source-x",
+                    run_id="run-1",
+                )
+
+
     def test_gate_and_authorization_rows_are_sql_immutable(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = self._store(tmp)

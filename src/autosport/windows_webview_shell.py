@@ -843,6 +843,7 @@ class AutosportWebController:
         source_id: object,
     ) -> bool:
         workspace = Path(self._active_workspace)
+        canonical_workspace = workspace.resolve(strict=False)
         identity = getattr(self, "_product_runtime_identity", None)
         if (
             type(snapshot) is not ProductGuiEconomicSnapshot
@@ -852,8 +853,9 @@ class AutosportWebController:
             or type(session_id) is not str
             or type(source_id) is not str
             or identity is None
-            or identity != (workspace, session_id, source_id)
-            or snapshot.workspace != workspace
+            or identity[1:] != (session_id, source_id)
+            or Path(identity[0]).resolve(strict=False) != canonical_workspace
+            or snapshot.workspace != canonical_workspace
             or snapshot.session_id != session_id
             or snapshot.source_id != source_id
             or snapshot.cycle_index != cycle_index

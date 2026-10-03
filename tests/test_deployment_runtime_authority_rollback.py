@@ -3072,3 +3072,119 @@ def test_runtime_authority_rejects_monotonic_read_internal_instance_shadow(
         store.records()
 
     assert hostile_calls == []
+
+
+@pytest.mark.parametrize(
+    ("name", "replacement"),
+    (
+        ("AuthorityPhase", object),
+        ("RecoveryDisposition", object),
+        ("AuthorityRecord", object),
+        ("_History", object),
+        ("WorkspaceEconomicLock", object),
+        ("strict_json_loads", lambda _text: {}),
+        ("stat", object()),
+        ("_RECORD_FILE_RE", object()),
+        ("_SHA256_RE", object()),
+        ("AUTHORITY_SCHEMA", "hostile.monotonic.schema"),
+        ("AUTHORITY_SCHEMA_VERSION", 999),
+        ("AUTHORITY_ID", "hostile.monotonic.authority"),
+        ("_NAMESPACE_SCHEMA", "hostile.monotonic.namespace"),
+        ("_NAMESPACE_MARKER_KEYS", frozenset({"hostile"})),
+        ("_RECORD_KEYS", frozenset({"hostile"})),
+    ),
+)
+def test_runtime_authority_rejects_monotonic_dependency_rebinding(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    replacement: object,
+) -> None:
+    path = tmp_path / "deployment-runtime-authority.json"
+    store = DeploymentRuntimeAuthorityStore.initialize_pristine(
+        path,
+        authority_root=_authority_root(tmp_path),
+    )
+    monkeypatch.setattr(
+        deployment_runtime_authority._monotonic_workspace_authority,
+        name,
+        replacement,
+    )
+
+    with pytest.raises(
+        DeploymentRuntimeAuthorityError,
+        match="monotonic dependency was replaced|monotonic constant was replaced|monotonic helper was replaced",
+    ):
+        store.records()
+
+
+@pytest.mark.parametrize(
+    "helper_name",
+    (
+        "_text",
+        "_digest",
+        "_record_hash",
+        "_sync_directory_lineage",
+        "_durable_exclusive_json_create",
+    ),
+)
+def test_runtime_authority_rejects_monotonic_helper_rebinding(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    helper_name: str,
+) -> None:
+    path = tmp_path / "deployment-runtime-authority.json"
+    store = DeploymentRuntimeAuthorityStore.initialize_pristine(
+        path,
+        authority_root=_authority_root(tmp_path),
+    )
+    hostile_calls: list[object] = []
+
+    def hostile(*args: object, **kwargs: object) -> object:
+        hostile_calls.append((args, kwargs))
+        raise AssertionError("hostile monotonic helper executed")
+
+    monkeypatch.setattr(
+        deployment_runtime_authority._monotonic_workspace_authority,
+        helper_name,
+        hostile,
+    )
+    with pytest.raises(
+        DeploymentRuntimeAuthorityError,
+        match="monotonic helper was replaced",
+    ):
+        store.records()
+
+    assert hostile_calls == []
+
+
+@pytest.mark.parametrize("helper_name", ("_record_hash", "strict_json_loads"))
+def test_runtime_authority_rejects_monotonic_helper_code_replacement(
+    tmp_path: Path,
+    helper_name: str,
+) -> None:
+    path = tmp_path / "deployment-runtime-authority.json"
+    store = DeploymentRuntimeAuthorityStore.initialize_pristine(
+        path,
+        authority_root=_authority_root(tmp_path),
+    )
+    target = getattr(
+        deployment_runtime_authority._monotonic_workspace_authority,
+        helper_name,
+    )
+    original_code = target.__code__
+
+    def hostile(*args: object, **kwargs: object) -> object:
+        del args, kwargs
+        raise AssertionError("hostile monotonic helper code executed")
+
+    assert hostile.__code__.co_freevars == original_code.co_freevars
+    target.__code__ = hostile.__code__
+    try:
+        with pytest.raises(
+            DeploymentRuntimeAuthorityError,
+            match="monotonic helper was replaced",
+        ):
+            store.records()
+    finally:
+        target.__code__ = original_code

@@ -175,7 +175,7 @@ def _sorted_unique_evidence(
     field_name: str,
 ) -> tuple[EvidenceRef, ...]:
     refs = tuple(values)
-    if any(not isinstance(item, EvidenceRef) for item in refs):
+    if any(type(item) is not EvidenceRef for item in refs):
         raise OpportunityContractError(
             f"{field_name} must contain only EvidenceRef values"
         )

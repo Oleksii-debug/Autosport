@@ -232,3 +232,31 @@ def test_decimal_subclasses_fail_closed_before_virtual_dispatch() -> None:
             valid_until="2026-09-17T16:00:00+00:00",
         )
 
+
+class _HostileEvidenceRef(EvidenceRef):
+    __slots__ = ()
+
+    def __hash__(self) -> int:
+        raise AssertionError("EvidenceRef subclass hash dispatch must not execute")
+
+    def __lt__(self, other: object) -> bool:
+        raise AssertionError("EvidenceRef subclass ordering dispatch must not execute")
+
+
+def test_evidence_ref_subclasses_fail_closed_before_virtual_dispatch() -> None:
+    hostile = _HostileEvidenceRef(
+        "attacker-evidence-authority",
+        "attacker-evidence-reference",
+    )
+
+    with pytest.raises(
+        OpportunityContractError,
+        match="opportunity evidence_refs must contain only EvidenceRef values",
+    ):
+        Opportunity(
+            strategy_class=StrategyClass.ARBITRAGE,
+            decision=OpportunityDecision.WAIT,
+            quotes=(_quote(),),
+            evidence_refs=(hostile,),
+        )
+

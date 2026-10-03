@@ -486,6 +486,49 @@ def test_caller_authenticated_account_scope_requires_upstream_authority():
     assert "product-owned upstream authority" in decision.reason
 
 
+def test_availability_cannot_precede_capability_observation():
+    profile = _profile()
+    evidence = _evidence(profile)
+    journal = CapabilityEvidenceJournal()
+    journal.publish(evidence)
+    earlier = _availability(
+        evidence,
+        CapabilityAvailabilityState.DEGRADED,
+        observed_at="2026-09-21T09:59:59+00:00",
+    )
+
+    with pytest.raises(
+        CapabilityEvidenceError,
+        match="cannot precede its capability observation",
+    ):
+        journal.publish_availability(earlier)
+
+
+def test_availability_same_time_conflict_fails_but_identical_is_idempotent():
+    profile = _profile()
+    evidence = _evidence(profile)
+    journal = CapabilityEvidenceJournal()
+    journal.publish(evidence)
+    degraded = _availability(
+        evidence,
+        CapabilityAvailabilityState.DEGRADED,
+        observed_at="2026-09-21T10:02:00+00:00",
+    )
+    assert journal.publish_availability(degraded) == degraded.availability_id
+    assert journal.publish_availability(degraded) == degraded.availability_id
+
+    conflicting = _availability(
+        evidence,
+        CapabilityAvailabilityState.TEMPORARILY_UNAVAILABLE,
+        observed_at=degraded.observed_at,
+    )
+    with pytest.raises(
+        CapabilityEvidenceError,
+        match="conflicting availability at the same observation timestamp",
+    ):
+        journal.publish_availability(conflicting)
+
+
 def test_caller_available_state_cannot_mint_runtime_health_authority():
     profile = _profile()
     scope = CapabilityScope("betfair", None, "production")

@@ -626,6 +626,85 @@ def test_gate_authorization_is_exact_committed_authority_record(
     assert status is not None
     assert status["authorization_sha256"] == history[-1].record_sha256
 
+def test_inception_rejects_receipt_field_mapping_erasure_before_start_gate(
+    tmp_path: Path,
+) -> None:
+    _manifest_value, locator, store, spec, _authority_root = _setup(tmp_path)
+    fields = CampaignInceptionReceipt.__dataclass_fields__
+    original = dict(fields)
+    fields.clear()
+    try:
+        with pytest.raises(
+            CampaignInceptionIntegrityError,
+            match="receipt field authority is rebound",
+        ):
+            establish_campaign_inception(
+                precommit_locator=locator,
+                store=store,
+                source_spec=spec,
+            )
+    finally:
+        fields.update(original)
+
+    assert (
+        store._collector_schedule_start_gate_status(
+            source_id=spec.source_id,
+            run_id=spec.run_id,
+        )
+        is None
+    )
+
+
+def test_inception_rejects_receipt_window_descriptor_rebind_before_start_gate(
+    tmp_path: Path,
+) -> None:
+    _manifest_value, locator, store, spec, _authority_root = _setup(tmp_path)
+    original = vars(CampaignInceptionReceipt)["observation_not_after"]
+    type.__setattr__(
+        CampaignInceptionReceipt,
+        "observation_not_after",
+        property(lambda _self: "2200-01-01T00:00:00+00:00"),
+    )
+    try:
+        with pytest.raises(
+            CampaignInceptionIntegrityError,
+            match="receipt field authority is rebound",
+        ):
+            establish_campaign_inception(
+                precommit_locator=locator,
+                store=store,
+                source_spec=spec,
+            )
+    finally:
+        type.__setattr__(
+            CampaignInceptionReceipt,
+            "observation_not_after",
+            original,
+        )
+
+    assert (
+        store._collector_schedule_start_gate_status(
+            source_id=spec.source_id,
+            run_id=spec.run_id,
+        )
+        is None
+    )
+
+
+def test_receipt_private_issuer_rejects_mapping_subclass_without_dispatch() -> None:
+    calls: list[str] = []
+
+    class HostileMapping(dict):
+        def __iter__(self):
+            calls.append("__iter__")
+            return super().__iter__()
+
+    with pytest.raises(TypeError, match="values must be exact dict"):
+        CampaignInceptionReceipt._issue(HostileMapping())
+
+    assert calls == []
+
+
 def test_receipt_is_resolver_issued_not_caller_constructible() -> None:
     with pytest.raises(TypeError, match="resolver-issued"):
         CampaignInceptionReceipt()

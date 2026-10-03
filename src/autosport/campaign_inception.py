@@ -474,8 +474,16 @@ class CampaignInceptionReceipt:
 
     @classmethod
     def _issue(cls, values: Mapping[str, object]) -> "CampaignInceptionReceipt":
-        instance = object.__new__(cls)
-        for name in cls.__dataclass_fields__:
+        if cls is not CampaignInceptionReceipt:
+            raise TypeError("CampaignInceptionReceipt issuer requires exact canonical class")
+        if type(values) is not dict:
+            raise TypeError("campaign inception receipt values must be exact dict")
+        if set(values) != set(_CAMPAIGN_RECEIPT_FIELD_NAMES):
+            raise CampaignInceptionIntegrityError(
+                "campaign inception receipt fields are not canonical"
+            )
+        instance = object.__new__(CampaignInceptionReceipt)
+        for name in _CAMPAIGN_RECEIPT_FIELD_NAMES:
             object.__setattr__(instance, name, values[name])
         return instance
 
@@ -484,7 +492,21 @@ class CampaignInceptionReceipt:
         return self.authority_record_sha256
 
     def to_dict(self) -> dict[str, object]:
-        return {name: getattr(self, name) for name in self.__dataclass_fields__}
+        return {
+            name: getattr(self, name)
+            for name in _CAMPAIGN_RECEIPT_FIELD_NAMES
+        }
+
+
+_CAMPAIGN_RECEIPT_DATACLASS_FIELDS = CampaignInceptionReceipt.__dataclass_fields__
+_CAMPAIGN_RECEIPT_FIELD_NAMES = tuple(_CAMPAIGN_RECEIPT_DATACLASS_FIELDS)
+_CAMPAIGN_RECEIPT_FIELD_DESCRIPTORS = tuple(
+    (
+        name,
+        inspect.getattr_static(CampaignInceptionReceipt, name),
+    )
+    for name in _CAMPAIGN_RECEIPT_FIELD_NAMES
+)
 
 
 def _require_store_seams(store: CollectorDeltaStore) -> None:
@@ -1311,6 +1333,10 @@ def _seal_campaign_inception_dispatch() -> None:
     expected_locator_type = ForwardUniversePrecommitLocator
     expected_spec_type = CampaignInceptionSourceSpec
     expected_receipt_type = CampaignInceptionReceipt
+    expected_receipt_dataclass_fields = _CAMPAIGN_RECEIPT_DATACLASS_FIELDS
+    expected_receipt_field_names = _CAMPAIGN_RECEIPT_FIELD_NAMES
+    expected_receipt_field_descriptors = _CAMPAIGN_RECEIPT_FIELD_DESCRIPTORS
+    expected_receipt_field_items = tuple(expected_receipt_dataclass_fields.items())
     expected_prepared_type = PreparedScheduledSourceUniverse
     expected_manifest_type = CampaignPrecommitManifest
     expected_witness_type = CampaignPrecommitPublicationWitness
@@ -1515,6 +1541,29 @@ def _seal_campaign_inception_dispatch() -> None:
                 raise expected_error_type(
                     "campaign inception type dispatch authority is rebound: " + name
                 )
+
+        if (
+            module_globals.get("_CAMPAIGN_RECEIPT_DATACLASS_FIELDS")
+            is not expected_receipt_dataclass_fields
+            or module_globals.get("_CAMPAIGN_RECEIPT_FIELD_NAMES")
+            is not expected_receipt_field_names
+            or module_globals.get("_CAMPAIGN_RECEIPT_FIELD_DESCRIPTORS")
+            is not expected_receipt_field_descriptors
+            or CampaignInceptionReceipt.__dataclass_fields__
+            is not expected_receipt_dataclass_fields
+            or tuple(expected_receipt_dataclass_fields.items())
+            != expected_receipt_field_items
+            or tuple(expected_receipt_dataclass_fields)
+            != expected_receipt_field_names
+            or any(
+                expected_getattr_static(expected_receipt_type, name)
+                is not descriptor
+                for name, descriptor in expected_receipt_field_descriptors
+            )
+        ):
+            raise expected_error_type(
+                "campaign inception receipt field authority is rebound"
+            )
 
         if (
             module_globals.get("SCHEMA") != expected_schema

@@ -153,6 +153,78 @@ def test_pristine_bootstrap_prepares_before_publish_under_one_workspace_lock(
     assert store.records() == ()
 
 
+def test_pristine_bootstrap_has_no_post_publish_pre_authority_lock_gap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    replacement_workspace = tmp_path.parent / f"{tmp_path.name}-replacement"
+    replacement_path = replacement_workspace / "deployment-runtime-authority.json"
+    replacement_root = tmp_path.parent / f"{tmp_path.name}-replacement-authority"
+    replacement = DeploymentRuntimeAuthorityStore.initialize_pristine(
+        replacement_path,
+        authority_root=replacement_root.resolve(strict=False),
+    )
+    _append(replacement, 0)
+    replacement_bytes = replacement_path.read_bytes()
+
+    path = tmp_path / "deployment-runtime-authority.json"
+    authority_root = _authority_root(tmp_path)
+    workspace = path.parent.resolve(strict=False)
+    target_commit_seen = False
+    replacement_performed = False
+    injecting = False
+
+    original_commit = MonotonicWorkspaceAuthority.commit
+    original_exit = WorkspaceEconomicLock.__exit__
+
+    def tracked_commit(
+        authority: MonotonicWorkspaceAuthority,
+        **kwargs: object,
+    ) -> object:
+        nonlocal target_commit_seen
+        result = original_commit(authority, **kwargs)  # type: ignore[arg-type]
+        if (
+            authority.workspace.resolve(strict=False) == workspace
+            and authority.domain == "deployment-runtime-authority"
+        ):
+            target_commit_seen = True
+        return result
+
+    def adversarial_exit(
+        lock: WorkspaceEconomicLock,
+        exc_type: object,
+        exc_value: object,
+        traceback: object,
+    ) -> None:
+        nonlocal injecting, replacement_performed
+        original_exit(lock, exc_type, exc_value, traceback)
+        if (
+            not injecting
+            and not target_commit_seen
+            and lock.workspace.resolve(strict=False) == workspace
+            and path.exists()
+        ):
+            injecting = True
+            try:
+                with WorkspaceEconomicLock(workspace):
+                    path.write_bytes(replacement_bytes)
+                replacement_performed = True
+            finally:
+                injecting = False
+
+    monkeypatch.setattr(MonotonicWorkspaceAuthority, "commit", tracked_commit)
+    monkeypatch.setattr(WorkspaceEconomicLock, "__exit__", adversarial_exit)
+
+    store = DeploymentRuntimeAuthorityStore.initialize_pristine(
+        path,
+        authority_root=authority_root,
+    )
+
+    assert target_commit_seen
+    assert not replacement_performed
+    assert store.records() == ()
+
+
 def test_pristine_bootstrap_crash_before_publish_aborts_and_retries(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

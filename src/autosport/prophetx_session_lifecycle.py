@@ -494,10 +494,19 @@ class ProphetXSessionLifecycle:
         self,
         *,
         now: datetime,
+        refresh_token_lineage_id: str | None = None,
     ) -> ProphetXLoginAdmission:
         """Reserve one refresh attempt without allocating a new provider session."""
 
         timestamp = _aware_utc(now, "now")
+        if refresh_token_lineage_id is None:
+            raise ProphetXSessionLifecycleError(
+                "refresh token requires session lineage evidence"
+            )
+        refresh_lineage = _sha256_hex(
+            refresh_token_lineage_id,
+            "refresh_token_lineage_id",
+        )
         with self._thread_lock:
             try:
                 with WorkspaceEconomicLock(self._scope_dir):
@@ -514,6 +523,10 @@ class ProphetXSessionLifecycle:
                     if current.credential_revision != self.scope.credential_revision:
                         raise ProphetXSessionLifecycleError(
                             "credential revision changed before renewal"
+                        )
+                    if current.session_lineage_id != refresh_lineage:
+                        raise ProphetXSessionLifecycleError(
+                            "refresh token lineage does not match active session"
                         )
                     if current.state is ProphetXSessionState.RENEWING:
                         uncertainty_deadline = self._renewal_uncertainty_deadline(current)

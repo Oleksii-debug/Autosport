@@ -997,6 +997,7 @@ def test_headroom_rejects_missing_denomination_coverage_for_relevant_plan(
             plan_id=_actual_plan_id(ledger, "target"),
             action_id="target-action",
             bound_plans=(ledger._test_bound_plans[0],),
+            intents=ledger._test_intents,
         )
 
 
@@ -1169,6 +1170,7 @@ def test_unrelated_account_plan_needs_no_denomination_coverage(
         plan_id=_actual_plan_id(ledger, "target"),
         action_id="target-action",
         bound_plans=(ledger._test_bound_plans[0],),
+        intents=(ledger._test_intents[0],),
     )
 
     assert assessment.decision is HeadroomDecision.SUFFICIENT_LOWER_BOUND
@@ -1336,6 +1338,7 @@ def test_target_plan_without_bound_denomination_coverage_fails_closed(
             plan_id=_actual_plan_id(ledger, "target"),
             action_id="target-action",
             bound_plans=(ledger._test_bound_plans[1],),
+            intents=ledger._test_intents,
         )
 
 
@@ -1358,6 +1361,7 @@ def test_duplicate_bound_plan_denomination_identity_is_rejected(
             plan_id=_actual_plan_id(ledger, "target"),
             action_id="target-action",
             bound_plans=(bound, bound),
+            intents=ledger._test_intents,
         )
 
 

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -31,6 +33,26 @@ _ACTION_MEANINGS = (
 def _authority_root(tmp_path: Path) -> Path:
     return (tmp_path.parent / f"{tmp_path.name}-machine-authority").resolve(
         strict=False
+    )
+
+
+def _run_isolated_tamper_probe(
+    script: str,
+    tmp_path: Path,
+    *extra_args: str,
+) -> None:
+    completed = subprocess.run(
+        [sys.executable, "-c", script, str(tmp_path), *extra_args],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert completed.returncode == 0, (
+        "isolated tamper probe failed\n"
+        + completed.stdout
+        + "\n"
+        + completed.stderr
     )
 
 
@@ -549,30 +571,51 @@ def test_runtime_authority_rejects_monotonic_constructor_surface_replacement(
     tmp_path: Path,
     attribute: str,
 ) -> None:
-    original = vars(MonotonicWorkspaceAuthority).get(attribute)
-    hostile_calls = []
+    # __new__ is a CPython special type slot. Rebinding it can poison later
+    # constructor calls in the same interpreter even after the visible class
+    # attribute is restored. Exercise both constructor surfaces in an isolated
+    # child process so the falsifier cannot contaminate unrelated qualification.
+    script = r"""
+import sys
+from pathlib import Path
 
-    def hostile(*args: object, **kwargs: object) -> None:
-        hostile_calls.append((args, kwargs))
-        raise AssertionError("hostile authority constructor surface executed")
+from autosport.deployment_runtime_authority import (
+    DeploymentRuntimeAuthorityError,
+    DeploymentRuntimeAuthorityStore,
+)
+from autosport.monotonic_workspace_authority import MonotonicWorkspaceAuthority
 
-    type.__setattr__(MonotonicWorkspaceAuthority, attribute, hostile)
+tmp_path = Path(sys.argv[1])
+attribute = sys.argv[2]
+authority_root = (
+    tmp_path.parent / f"{tmp_path.name}-machine-authority"
+).resolve(strict=False)
+original = vars(MonotonicWorkspaceAuthority).get(attribute)
+hostile_calls = []
+
+def hostile(*args, **kwargs):
+    hostile_calls.append((args, kwargs))
+    raise AssertionError("hostile authority constructor surface executed")
+
+type.__setattr__(MonotonicWorkspaceAuthority, attribute, hostile)
+try:
     try:
-        with pytest.raises(
-            DeploymentRuntimeAuthorityError,
-            match="constructor dispatch was replaced",
-        ):
-            DeploymentRuntimeAuthorityStore.initialize_pristine(
-                tmp_path / "deployment-runtime-authority.json",
-                authority_root=_authority_root(tmp_path),
-            )
-    finally:
-        if original is None:
-            type.__delattr__(MonotonicWorkspaceAuthority, attribute)
-        else:
-            type.__setattr__(MonotonicWorkspaceAuthority, attribute, original)
-
+        DeploymentRuntimeAuthorityStore.initialize_pristine(
+            tmp_path / "deployment-runtime-authority.json",
+            authority_root=authority_root,
+        )
+    except DeploymentRuntimeAuthorityError as exc:
+        assert "constructor dispatch was replaced" in str(exc)
+    else:
+        raise AssertionError("constructor replacement did not fail closed")
     assert hostile_calls == []
+finally:
+    if original is None:
+        type.__delattr__(MonotonicWorkspaceAuthority, attribute)
+    else:
+        type.__setattr__(MonotonicWorkspaceAuthority, attribute, original)
+"""
+    _run_isolated_tamper_probe(script, tmp_path, attribute)
 
 
 def test_runtime_authority_rejects_monotonic_init_code_replacement(
@@ -2770,38 +2813,49 @@ def test_runtime_authority_pristine_rejects_digest_rebinding_before_use(
 def test_runtime_authority_pristine_bypasses_replaced_store_new(
     tmp_path: Path,
 ) -> None:
-    hostile_calls: list[object] = []
-    original_new = vars(DeploymentRuntimeAuthorityStore).get("__new__")
+    # DeploymentRuntimeAuthorityStore.__new__ is also a special constructor slot.
+    # Keep the low-level bypass falsifier, but contain the slot mutation inside a
+    # child interpreter so cleanup cannot poison the rest of the pytest worker.
+    script = r"""
+import sys
+from pathlib import Path
 
-    def hostile_new(cls: object, *args: object, **kwargs: object) -> object:
-        hostile_calls.append((cls, args, kwargs))
-        raise AssertionError("hostile store __new__ executed")
+from autosport.deployment_runtime_authority import DeploymentRuntimeAuthorityStore
 
-    # The public metaclass surface intentionally rejects ordinary class mutation.
-    # Exercise the stronger low-level adversarial case without leaving pytest's
-    # monkeypatch finalizer unable to restore the protected root surface.
-    type.__setattr__(
-        DeploymentRuntimeAuthorityStore,
-        "__new__",
-        staticmethod(hostile_new),
+tmp_path = Path(sys.argv[1])
+authority_root = (
+    tmp_path.parent / f"{tmp_path.name}-machine-authority"
+).resolve(strict=False)
+hostile_calls = []
+original_new = vars(DeploymentRuntimeAuthorityStore).get("__new__")
+
+def hostile_new(cls, *args, **kwargs):
+    hostile_calls.append((cls, args, kwargs))
+    raise AssertionError("hostile store __new__ executed")
+
+type.__setattr__(
+    DeploymentRuntimeAuthorityStore,
+    "__new__",
+    staticmethod(hostile_new),
+)
+try:
+    store = DeploymentRuntimeAuthorityStore.initialize_pristine(
+        tmp_path / "deployment-runtime-authority.json",
+        authority_root=authority_root,
     )
-    try:
-        store = DeploymentRuntimeAuthorityStore.initialize_pristine(
-            tmp_path / "deployment-runtime-authority.json",
-            authority_root=_authority_root(tmp_path),
+    assert hostile_calls == []
+    assert store.records() == ()
+finally:
+    if original_new is None:
+        type.__delattr__(DeploymentRuntimeAuthorityStore, "__new__")
+    else:
+        type.__setattr__(
+            DeploymentRuntimeAuthorityStore,
+            "__new__",
+            original_new,
         )
-
-        assert hostile_calls == []
-        assert store.records() == ()
-    finally:
-        if original_new is None:
-            type.__delattr__(DeploymentRuntimeAuthorityStore, "__new__")
-        else:
-            type.__setattr__(
-                DeploymentRuntimeAuthorityStore,
-                "__new__",
-                original_new,
-            )
+"""
+    _run_isolated_tamper_probe(script, tmp_path)
 
 
 def test_runtime_authority_rejects_path_read_descriptor_replacement(

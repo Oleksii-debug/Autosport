@@ -727,3 +727,49 @@ def test_unambiguous_renewal_failure_after_original_expiry_allows_fresh_login(tm
         access_token_available=False,
     )
     assert fresh.action is ProphetXLoginAdmissionAction.CREATE_LOGIN
+
+
+def test_revocation_during_renewal_preserves_ambiguous_refresh_slot_horizon(tmp_path):
+    lifecycle = _lifecycle(tmp_path)
+    active = _active(lifecycle)
+    due_at = active.access_expires_at - timedelta(minutes=1)
+    lifecycle.begin_login(now=due_at, access_token_available=True)
+    lifecycle.begin_renewal(now=due_at)
+
+    revoked_at = due_at + timedelta(seconds=1)
+    revoked = lifecycle.record_credential_revoked(now=revoked_at)
+
+    assert revoked.state is ProphetXSessionState.CREDENTIAL_REJECTED
+    assert (
+        revoked.slot_hold_until
+        == due_at + CONSERVATIVE_SESSION_SLOT_HOLD
+    )
+    assert revoked.slot_hold_until > active.access_expires_at
+
+
+def test_renewal_persisted_state_remains_secret_free(tmp_path):
+    lifecycle = _lifecycle(tmp_path)
+    active = _active(lifecycle)
+    due_at = active.access_expires_at - timedelta(minutes=1)
+    lifecycle.begin_login(now=due_at, access_token_available=True)
+    lifecycle.begin_renewal(now=due_at)
+
+    raw = lifecycle.state_path.read_text(encoding="utf-8")
+    assert '"state":"renewing"' in raw
+    assert "secret_key" not in raw
+    assert "refresh_token" not in raw
+    assert "access_token" not in raw
+    assert "Bearer " not in raw
+
+
+def test_renewal_before_lead_window_is_rejected(tmp_path):
+    lifecycle = _lifecycle(tmp_path)
+    active = _active(lifecycle)
+
+    with pytest.raises(
+        ProphetXSessionLifecycleError,
+        match="renewal is not due yet",
+    ):
+        lifecycle.begin_renewal(
+            now=active.access_expires_at - timedelta(minutes=3)
+        )

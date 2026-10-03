@@ -902,6 +902,38 @@ def test_journal_json_rejects_duplicate_evidence_and_availability_entries():
         CapabilityEvidenceJournal.from_json(json.dumps(duplicate_availability))
 
 
+def test_journal_json_rejects_duplicate_object_keys_and_nonstandard_constants():
+    _, _, journal = _journal()
+    canonical = journal.to_json()
+
+    duplicate_top_level = canonical.replace(
+        '"schema_version":1',
+        '"schema_version":1,"schema_version":1',
+        1,
+    )
+    with pytest.raises(CapabilityEvidenceError, match="duplicate JSON object key"):
+        CapabilityEvidenceJournal.from_json(duplicate_top_level)
+
+    duplicate_nested = canonical.replace(
+        '"venue_id":"betfair"',
+        '"venue_id":"betfair","venue_id":"betfair"',
+        1,
+    )
+    with pytest.raises(CapabilityEvidenceError, match="duplicate JSON object key"):
+        CapabilityEvidenceJournal.from_json(duplicate_nested)
+
+    nonstandard_constant = canonical.replace(
+        '"schema_version":1',
+        '"schema_version":NaN',
+        1,
+    )
+    with pytest.raises(
+        CapabilityEvidenceError,
+        match="non-standard JSON constant: NaN",
+    ):
+        CapabilityEvidenceJournal.from_json(nonstandard_constant)
+
+
 def test_missing_profile_after_restart_fails_closed():
     _, _, journal = _journal()
     decision = journal.resolve(

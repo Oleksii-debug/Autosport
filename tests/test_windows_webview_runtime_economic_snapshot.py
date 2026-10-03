@@ -105,7 +105,7 @@ def _snapshot(
         session_id="session-1",
         source_id="source-1",
         cycle_index=cycle_index,
-        as_of="2026-10-03T08:00:00+00:00",
+        cycle_last_success_at="2026-10-03T08:00:00+00:00",
         paper_book_sha256="a" * 64,
         balance=Decimal("90"),
         committed_stake=Decimal("10"),
@@ -186,7 +186,7 @@ def test_runtime_snapshot_uses_one_exact_durable_paperbook_image(
     assert snapshot.session_id == tick.session_id
     assert snapshot.source_id == tick.source_id
     assert snapshot.cycle_index == tick.cycle_index
-    assert snapshot.as_of == tick.last_success_at
+    assert snapshot.cycle_last_success_at == tick.last_success_at
     assert snapshot.paper_book_sha256 == sha256(expected_payload).hexdigest()
     assert snapshot.balance == Decimal("90")
     assert snapshot.committed_stake == Decimal("10")
@@ -261,7 +261,7 @@ def test_controller_applies_exact_runtime_snapshot_to_visible_economics(
     projection = controller._product_runtime_economic_projection()
     assert projection["available"] is True
     assert projection["cycle_index"] == 1
-    assert projection["as_of"] == "2026-10-03T08:00:00+00:00"
+    assert projection["cycle_last_success_at"] == "2026-10-03T08:00:00+00:00"
     assert projection["paper_book_sha256"] == "a" * 64
     assert projection["balance"] == "90"
     assert projection["committed_stake"] == "10"
@@ -313,7 +313,7 @@ def test_runtime_tick_projects_fresh_economics_without_ui_thread_session_reopen(
     assert tmp_path not in controller._recovery_required_workspaces
 
 
-def test_nonmonotonic_runtime_economic_cycle_fails_closed(tmp_path: Path) -> None:
+def test_lower_runtime_economic_cycle_fails_closed(tmp_path: Path) -> None:
     controller = _controller(tmp_path)
     controller.product_worker.busy = True
     controller._product_runtime_identity = (
@@ -325,8 +325,8 @@ def test_nonmonotonic_runtime_economic_cycle_fails_closed(tmp_path: Path) -> Non
     controller._product_runtime_economic_snapshot = prior
 
     assert not controller._apply_product_runtime_economic_snapshot(
-        _snapshot(tmp_path, cycle_index=5),
-        cycle_index=5,
+        _snapshot(tmp_path, cycle_index=4),
+        cycle_index=4,
         session_id="session-1",
         source_id="source-1",
     )

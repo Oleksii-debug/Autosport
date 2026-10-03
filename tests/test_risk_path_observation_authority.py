@@ -33,6 +33,7 @@ from autosport.risk_path_observation_authority import (
     ProductRunCapitalPathError,
     _conservative_minimum_equity,
     resolve_product_run_capital_path_evidence,
+    verify_product_run_capital_path_evidence,
 )
 from autosport.risk_sampling_membership import ResolvedFixedNRiskMembership
 from autosport.run_registry import RunRegistry
@@ -578,6 +579,60 @@ def test_product_run_capital_path_evidence_cannot_be_caller_minted() -> None:
             settlement_effects_sha256="4" * 64,
             replay_source_evidence_sha256="5" * 64,
             source_evidence_sha256="6" * 64,
+        )
+
+
+def test_object_new_forgery_cannot_pass_canonical_evidence_verifier(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    membership, workspace, registry_path, authority_root, manifest = (
+        _product_precommit(tmp_path, monkeypatch)
+    )
+    _tx, bridge, _ticket = _completed_run_with_settlement_bridge(workspace)
+    canonical = resolve_product_run_capital_path_evidence(
+        workspace=workspace,
+        run_id=RUN_ID,
+        member_index=0,
+        membership=membership,
+        registry_path=registry_path,
+        sampling_manifest_json=manifest,
+        settlement_bridge=bridge,
+        authority_root=authority_root,
+    )
+
+    forged = object.__new__(ProductRunCapitalPathEvidence)
+    for field_name in (
+        "member_id",
+        "member_index",
+        "expected_stream_sha256",
+        "base_snapshot_sha256",
+        "final_snapshot_sha256",
+        "changed_ticket_ids",
+        "minimum_equity",
+        "outcome_available_at",
+        "settlement_effects_sha256",
+        "replay_source_evidence_sha256",
+        "source_evidence_sha256",
+        "complete",
+    ):
+        object.__setattr__(forged, field_name, getattr(canonical, field_name))
+    object.__setattr__(forged, "source_evidence_sha256", "0" * 64)
+
+    with pytest.raises(
+        ProductRunCapitalPathError,
+        match="does not match canonical durable roots",
+    ):
+        verify_product_run_capital_path_evidence(
+            forged,
+            workspace=workspace,
+            run_id=RUN_ID,
+            member_index=0,
+            membership=membership,
+            registry_path=registry_path,
+            sampling_manifest_json=manifest,
+            settlement_bridge=bridge,
+            authority_root=authority_root,
         )
 
 

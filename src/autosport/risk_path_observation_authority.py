@@ -844,8 +844,60 @@ def resolve_product_run_capital_path_evidence(
     return result
 
 
+def verify_product_run_capital_path_evidence(
+    candidate: ProductRunCapitalPathEvidence,
+    *,
+    workspace: str | Path,
+    run_id: str,
+    member_index: int,
+    membership: ResolvedFixedNRiskMembership,
+    registry_path: str | Path,
+    sampling_manifest_json: str,
+    settlement_bridge: PaperSettlementLearningBridge,
+    authority_root: str | Path | None = None,
+) -> ProductRunCapitalPathEvidence:
+    """Re-resolve a candidate; possession of an evidence object is never authority."""
+
+    if type(candidate) is not ProductRunCapitalPathEvidence:
+        raise TypeError(
+            "candidate must be an exact ProductRunCapitalPathEvidence"
+        )
+    canonical = resolve_product_run_capital_path_evidence(
+        workspace=workspace,
+        run_id=run_id,
+        member_index=member_index,
+        membership=membership,
+        registry_path=registry_path,
+        sampling_manifest_json=sampling_manifest_json,
+        settlement_bridge=settlement_bridge,
+        authority_root=authority_root,
+    )
+    for field_name in (
+        "member_id",
+        "member_index",
+        "expected_stream_sha256",
+        "base_snapshot_sha256",
+        "final_snapshot_sha256",
+        "changed_ticket_ids",
+        "minimum_equity",
+        "outcome_available_at",
+        "settlement_effects_sha256",
+        "replay_source_evidence_sha256",
+        "source_evidence_sha256",
+        "complete",
+    ):
+        supplied = getattr(candidate, field_name)
+        expected = getattr(canonical, field_name)
+        if type(supplied) is not type(expected) or supplied != expected:
+            raise ProductRunCapitalPathError(
+                "run-capital evidence does not match canonical durable roots"
+            )
+    return canonical
+
+
 __all__ = [
     "ProductRunCapitalPathEvidence",
     "ProductRunCapitalPathError",
     "resolve_product_run_capital_path_evidence",
+    "verify_product_run_capital_path_evidence",
 ]

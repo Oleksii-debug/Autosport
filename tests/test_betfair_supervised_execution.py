@@ -6,6 +6,7 @@ import tempfile
 from dataclasses import replace
 from datetime import datetime, timezone
 from decimal import Decimal
+from hashlib import sha256
 from pathlib import Path
 
 import pytest
@@ -285,6 +286,7 @@ class _Transport:
             {
                 "url": url,
                 "headers": dict(headers),
+                "body": body,
                 "request": request,
                 "timeout_seconds": timeout_seconds,
             }
@@ -396,6 +398,7 @@ class _TimeoutTransport(_Transport):
             {
                 "url": url,
                 "headers": dict(headers),
+                "body": body,
                 "request": request,
                 "timeout_seconds": timeout_seconds,
             }
@@ -1148,6 +1151,10 @@ def test_full_match_persists_provider_report_and_canonical_ack() -> None:
             accepted_attempt.submitted_request_sha256
             == binding["request_sha256"]
         )
+        assert (
+            accepted_attempt.submitted_request_sha256
+            == sha256(transport.calls[0]["body"]).hexdigest()
+        )
         assert accepted_attempt.provider_evidence is not None
         assert (
             accepted_attempt.provider_evidence.request_sha256
@@ -1563,6 +1570,10 @@ def test_transport_timeout_readback_stays_non_authoritative_for_retry(
             if attempt.attempt_id == "attempt-timeout"
         )
         assert timeout_attempt.submitted_request_sha256 is not None
+        assert (
+            timeout_attempt.submitted_request_sha256
+            == sha256(transport.calls[0]["body"]).hexdigest()
+        )
         assert timeout_attempt.provider_evidence is None
         assert timeout_attempt.acknowledgement is None
         assert not restarted.can_retry_action(

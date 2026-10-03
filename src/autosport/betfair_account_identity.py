@@ -185,7 +185,27 @@ def _make_account_identity_authority():
     canonical_next_request_id = client_type._next_request_id
     canonical_observed_at = client_type._observed_at
     canonical_network_post = transport_type.post
+    canonical_network_post_code = getattr(canonical_network_post, "__code__", None)
     canonical_build_opener = readonly_module.build_opener
+    canonical_build_opener_code = getattr(canonical_build_opener, "__code__", None)
+    canonical_rpc_code = getattr(canonical_rpc, "__code__", None)
+    canonical_request_type = readonly_module.Request
+    canonical_request_init = getattr(canonical_request_type, "__init__", None)
+    canonical_request_init_code = getattr(canonical_request_init, "__code__", None)
+    canonical_read_method_endpoint = readonly_module._READ_METHOD_ENDPOINT
+    canonical_read_method_items = tuple(canonical_read_method_endpoint.items())
+    canonical_account_endpoint = readonly_module.ACCOUNT_JSON_RPC_ENDPOINT
+    canonical_betting_endpoint = readonly_module.BETTING_JSON_RPC_ENDPOINT
+    canonical_read_method_names = tuple(
+        getattr(readonly_module, name)
+        for name in (
+            "_GET_ACCOUNT_FUNDS",
+            "_GET_ACCOUNT_DETAILS",
+            "_LIST_CURRENT_ORDERS",
+            "_LIST_CLEARED_ORDERS",
+            "_LIST_MARKET_CATALOGUE",
+        )
+    )
     canonical_identity_init = identity_type.__init__
     canonical_identity_post_init = identity_type.__post_init__
 
@@ -234,6 +254,41 @@ def _make_account_identity_authority():
 
     def execution_readback_network_dispatch_is_current() -> bool:
         try:
+            if (
+                transport_type.post is not canonical_network_post
+                or getattr(canonical_network_post, "__code__", None)
+                is not canonical_network_post_code
+                or client_type._rpc is not canonical_rpc
+                or getattr(canonical_rpc, "__code__", None) is not canonical_rpc_code
+                or readonly_module.build_opener is not canonical_build_opener
+                or getattr(canonical_build_opener, "__code__", None)
+                is not canonical_build_opener_code
+                or readonly_module.Request is not canonical_request_type
+                or getattr(canonical_request_type, "__init__", None)
+                is not canonical_request_init
+                or getattr(canonical_request_init, "__code__", None)
+                is not canonical_request_init_code
+                or readonly_module._READ_METHOD_ENDPOINT
+                is not canonical_read_method_endpoint
+                or tuple(canonical_read_method_endpoint.items())
+                != canonical_read_method_items
+                or readonly_module.ACCOUNT_JSON_RPC_ENDPOINT
+                != canonical_account_endpoint
+                or readonly_module.BETTING_JSON_RPC_ENDPOINT
+                != canonical_betting_endpoint
+                or tuple(
+                    getattr(readonly_module, name, missing_value)
+                    for name in (
+                        "_GET_ACCOUNT_FUNDS",
+                        "_GET_ACCOUNT_DETAILS",
+                        "_LIST_CURRENT_ORDERS",
+                        "_LIST_CLEARED_ORDERS",
+                        "_LIST_MARKET_CATALOGUE",
+                    )
+                )
+                != canonical_read_method_names
+            ):
+                return False
             return all(
                 getattr(owner, name, missing_value) is expected
                 for owner, name, expected in network_dispatch_surfaces

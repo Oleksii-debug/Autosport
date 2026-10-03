@@ -108,6 +108,8 @@ class MarketBookRateDecision:
     allowed: bool
     blocked_market_ids: tuple[str, ...] = ()
     next_eligible_at_utc_us: int | None = None
+    provider_limit_coverage_complete: bool = False
+    provider_dispatch_authorized: bool = False
 
     @property
     def scheduled_at(self) -> datetime:
@@ -132,6 +134,10 @@ class BetfairMarketBookPerMarketRateGate:
     is implemented conservatively as a rolling one-second window. The policy is
     versioned so a future, separately qualified interpretation cannot silently rewrite
     historical admission decisions.
+
+    Passing this gate proves only that this one product-local per-market rolling-window
+    budget has room. It does not model Betfair's complete account/provider request
+    pressure, prove provider acceptance, or authorize provider dispatch.
     """
 
     def __init__(self, state: MarketBookRateGateState | None = None) -> None:

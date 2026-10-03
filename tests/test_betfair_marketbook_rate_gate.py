@@ -294,3 +294,24 @@ def test_competing_fifth_call_reservations_are_serialized() -> None:
     state = gate.snapshot()
     window = next(item for item in state.markets if item.market_id == "1.234")
     assert len(window.accepted_at_utc_us) == 5
+
+
+
+def test_local_rate_admission_never_claims_complete_provider_dispatch_authority() -> None:
+    gate = BetfairMarketBookPerMarketRateGate()
+    allowed = gate.reserve(("1.234",), scheduled_at=T0)
+    for index in range(1, 5):
+        assert gate.reserve(
+            ("1.234",),
+            scheduled_at=T0 + timedelta(microseconds=index),
+        ).allowed
+    denied = gate.reserve(
+        ("1.234",),
+        scheduled_at=T0 + timedelta(microseconds=10),
+    )
+
+    assert allowed.allowed is True
+    assert denied.allowed is False
+    for decision in (allowed, denied):
+        assert decision.provider_limit_coverage_complete is False
+        assert decision.provider_dispatch_authorized is False

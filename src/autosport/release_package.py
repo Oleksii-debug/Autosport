@@ -101,7 +101,11 @@ def _is_windows_reparse_point(metadata: object) -> bool:
     )
 
 
-def _require_regular_source_file(path: Path, *, label: str) -> None:
+def _require_regular_source_file(
+    path: Path,
+    *,
+    label: str,
+) -> os.stat_result:
     try:
         metadata = path.lstat()
     except OSError as exc:
@@ -112,6 +116,7 @@ def _require_regular_source_file(path: Path, *, label: str) -> None:
         raise ValueError(f"{label} must not be a Windows reparse point: {path}")
     if not stat.S_ISREG(metadata.st_mode):
         raise ValueError(f"{label} must be a regular file: {path}")
+    return metadata
 
 
 def _same_regular_source_snapshot(
@@ -154,7 +159,15 @@ def _open_regular_source_stream(
 ) -> Iterator[BinaryIO]:
     """Open one stable regular source without following its final pathname alias."""
 
-    _require_regular_source_file(path, label=label)
+    initial_snapshot = _require_regular_source_file(path, label=label)
+    authority_snapshot = (
+        expected_snapshot if expected_snapshot is not None else initial_snapshot
+    )
+    if (
+        expected_snapshot is not None
+        and not _same_regular_source_snapshot(expected_snapshot, initial_snapshot)
+    ):
+        raise ValueError(f"{label} changed during open: {path}")
     try:
         try:
             descriptor = _open_read_only_descriptor(path)
@@ -183,12 +196,9 @@ def _open_regular_source_stream(
             opened = os.fstat(stream.fileno())
             current = path.lstat()
             if (
-                (
-                    expected_snapshot is not None
-                    and not _same_regular_source_snapshot(
-                        expected_snapshot,
-                        opened,
-                    )
+                not _same_regular_source_snapshot(
+                    authority_snapshot,
+                    opened,
                 )
                 or stat.S_ISLNK(current.st_mode)
                 or _is_windows_reparse_point(current)

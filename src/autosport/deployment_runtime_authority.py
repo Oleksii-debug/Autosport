@@ -1786,6 +1786,8 @@ class DeploymentRuntimeAuthorityStore(metaclass=_DeploymentRuntimeAuthorityStore
         path: str | Path,
         *,
         authority_root: str | Path | None = None,
+        _workspace_lock_helper: Any = _workspace_economic_lock,
+        _workspace_lock_helper_code: object = _workspace_economic_lock.__code__,
     ) -> "DeploymentRuntimeAuthorityStore":
         if cls is not DeploymentRuntimeAuthorityStore:
             raise TypeError(
@@ -1838,7 +1840,18 @@ class DeploymentRuntimeAuthorityStore(metaclass=_DeploymentRuntimeAuthorityStore
             "schema_version": STORE_SCHEMA_VERSION,
             "records": [],
         }
-        with _workspace_economic_lock(destination.parent):
+        if (
+            _workspace_economic_lock is not _workspace_lock_helper
+            or _CANONICAL_WORKSPACE_LOCK_HELPER is not _workspace_lock_helper
+            or getattr(_workspace_lock_helper, "__code__", None)
+            is not _workspace_lock_helper_code
+            or _CANONICAL_WORKSPACE_LOCK_HELPER_CODE
+            is not _workspace_lock_helper_code
+        ):
+            raise DeploymentRuntimeAuthorityError(
+                "runtime authority construction helper dispatch was replaced"
+            )
+        with _workspace_lock_helper(destination.parent):
             if destination.exists():
                 raise DeploymentRuntimeAuthorityError(
                     "runtime authority store already exists"

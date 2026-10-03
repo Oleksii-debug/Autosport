@@ -273,14 +273,23 @@ class BetfairPriceLadderAuthority:
             f"adapter_id={ADAPTER_ID!r}, adapter_version={ADAPTER_VERSION!r})"
         )
 
-    def acquire(self, market_id: str) -> BetfairPriceLadderObservation:
+    def acquire(
+        self,
+        market_id: str,
+        *,
+        _rpc=_CANONICAL_RPC,
+    ) -> BetfairPriceLadderObservation:
+        # _rpc is an import-time default deliberately pinned to the canonical
+        # BetfairReadOnlyClient implementation. The public installed wrapper
+        # does not expose this seam, so rebinding the module alias later cannot
+        # redirect authoritative provider acquisition.
         market = _required_text(market_id, "market_id")
         params = {
             "filter": {"marketIds": [market]},
             "marketProjection": ["MARKET_DESCRIPTION"],
             "maxResults": 1,
         }
-        response = _CANONICAL_RPC(
+        response = _rpc(
             self._client,
             _LIST_MARKET_CATALOGUE,
             params,

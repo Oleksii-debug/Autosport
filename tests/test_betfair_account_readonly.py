@@ -464,6 +464,8 @@ def test_execution_readback_binds_action_market_account_and_all_cleared_statuses
     assert requests[1]["params"]["customerOrderRefs"] == ["action-1"]
     assert requests[1]["params"]["marketIds"] == ["1.234"]
     assert requests[1]["params"]["orderProjection"] == "ALL"
+    assert "orderBy" not in requests[1]["params"]
+    assert "dateRange" not in requests[1]["params"]
     assert [request["params"]["betStatus"] for request in requests[2:]] == [
         "SETTLED",
         "VOIDED",

@@ -812,13 +812,22 @@ class BetdaqEconomicReadbackClient:
             raise BetdaqEconomicReadbackError("method is outside economic READ allowlist")
         client = self._account_client
         request_identity = _economic_request_identity(method, request_attributes)
-        body = _request_xml(client, method, request_attributes)
         headers = {
             "Accept": "text/xml",
             "Content-Type": "text/xml; charset=utf-8",
             "SOAPAction": f'"{_account._EXTERNAL_NS}{method}"',
         }
         with client._call_lock:
+            # Snapshot the exact authenticated identity used to construct the secure
+            # request. Evidence must bind to these same values even if another owner
+            # rotates/rebinds the mutable account client while network I/O is in flight.
+            credentials = client._credentials
+            venue_id = client._venue_id
+            if type(credentials) is not _account.BetdaqCredentials:
+                raise BetdaqEconomicReadbackError(
+                    "BETDAQ economic read requires canonical credentials"
+                )
+            body = _request_xml(credentials, method, request_attributes)
             transport = client._transport
             try:
                 require_transport, https_post = _canonical_economic_transport_dispatch()
@@ -839,6 +848,13 @@ class BetdaqEconomicReadbackClient:
                 raise BetdaqEconomicReadbackError(
                     "BETDAQ economic read transport failed"
                 ) from None
+            if (
+                client._credentials is not credentials
+                or client._venue_id != venue_id
+            ):
+                raise BetdaqEconomicReadbackError(
+                    "BETDAQ authenticated account context changed during economic acquisition"
+                )
         if type(payload) is not bytes:
             raise BetdaqEconomicReadbackError(
                 "BETDAQ economic read transport must return bytes"
@@ -846,7 +862,7 @@ class BetdaqEconomicReadbackClient:
         try:
             result = _parse_economic_soap_result(payload, method)
             context = _account._authenticated_account_context(
-                client._credentials, client._venue_id
+                credentials, venue_id
             )
             observed_at = client._observed_at()
         except Exception:
@@ -864,14 +880,13 @@ class BetdaqEconomicReadbackClient:
 
 
 def _request_xml(
-    client: BetdaqAccountReadOnlyClient,
+    credentials: _account.BetdaqCredentials,
     method: str,
     attributes: dict[str, str],
 ) -> bytes:
     ET.register_namespace("soap", _account._SOAP11_NS)
     envelope = ET.Element(f"{{{_account._SOAP11_NS}}}Envelope")
     header = ET.SubElement(envelope, f"{{{_account._SOAP11_NS}}}Header")
-    credentials = client._credentials
     ET.SubElement(
         header,
         f"{{{_account._EXTERNAL_NS}}}ExternalApiHeader",

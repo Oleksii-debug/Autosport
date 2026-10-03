@@ -114,6 +114,33 @@ def test_cancel_rejects_class_mutated_request_dispatch(monkeypatch) -> None:
         api.cancel(123)
 
 
+def test_cancel_rejects_coordinated_request_and_witness_rebind(monkeypatch) -> None:
+    api = GitHubApi(repository="owner/repo", token="token")
+    forged_acceptance = object()
+
+    def hostile_request(*_args, **_kwargs):
+        return forged_acceptance
+
+    monkeypatch.setattr(GitHubApi, "_request", hostile_request)
+    monkeypatch.setattr(
+        controller_module,
+        "_CANONICAL_REQUEST",
+        hostile_request,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        controller_module,
+        "_CANCELLATION_ACCEPTED",
+        forged_acceptance,
+    )
+
+    with pytest.raises(
+        CancellationError,
+        match="cancellation request dispatch changed",
+    ):
+        api.cancel(123)
+
+
 def test_cancel_rejects_subclass_request_override_even_with_internal_witness() -> None:
     class _ForgedRequestApi(GitHubApi):
         def _request(self, *_args, **_kwargs):

@@ -28,6 +28,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
+from . import outcome_trust as _outcome_trust
+from . import run_registry as _run_registry
 from .integrity import atomic_write_json, durable_path_lock
 from .json_integrity import strict_json_loads
 from .monotonic_workspace_authority import (
@@ -42,10 +44,16 @@ from .risk_membership_publication import (
 )
 
 _SCHEMA: Final = "autosport.risk.randomization-precommit"
-_SCHEMA_VERSION: Final = 1
+_SCHEMA_VERSION: Final = 2
 _AUTHORITY_DOMAIN: Final = "autosport.risk.randomization-precommit.v1"
 _ROOT_BYTES: Final = 32
 _HEX: Final = frozenset("0123456789abcdef")
+
+_RUN_REGISTRY_TYPE = _run_registry.RunRegistry
+_RUN_REGISTRY_READ = _RUN_REGISTRY_TYPE._read
+_RUN_REGISTRY_READ_CODE = getattr(_RUN_REGISTRY_READ, "__code__", None)
+_OUTCOME_LINEAGE_PARSER = _outcome_trust.outcome_lineage_binding_from_payload
+_OUTCOME_LINEAGE_PARSER_CODE = getattr(_OUTCOME_LINEAGE_PARSER, "__code__", None)
 
 
 class RiskRandomizationPrecommitError(RuntimeError):
@@ -59,6 +67,7 @@ class RiskRandomizationPrecommitReceipt:
     membership_sha256: str
     membership_receipt_sha256: str
     randomization_root_sha256: str
+    preoutcome_run_registry_sha256: str
     state_sha256: str
     authority_generation: int
     authority_record_sha256: str
@@ -66,6 +75,10 @@ class RiskRandomizationPrecommitReceipt:
 
     @property
     def product_randomization_root_issued(self) -> bool:
+        return True
+
+    @property
+    def product_preoutcome_chronology_proven(self) -> bool:
         return True
 
     @property
@@ -225,6 +238,76 @@ def _read_regular_bytes(path: Path) -> bytes:
     return payload
 
 
+def _preoutcome_run_registry_sha256(
+    workspace: Path,
+    planned_run_ids: object,
+) -> str:
+    if type(planned_run_ids) is not list or not planned_run_ids:
+        raise RiskRandomizationPrecommitError(
+            "fixed-N membership lacks canonical planned run ids"
+        )
+    planned = frozenset(
+        _text(value, f"planned_run_ids[{index}]")
+        for index, value in enumerate(planned_run_ids)
+    )
+    if len(planned) != len(planned_run_ids):
+        raise RiskRandomizationPrecommitError(
+            "fixed-N membership planned run ids are not unique"
+        )
+
+    if (
+        _run_registry.RunRegistry is not _RUN_REGISTRY_TYPE
+        or vars(_RUN_REGISTRY_TYPE).get("_read") is not _RUN_REGISTRY_READ
+        or getattr(_RUN_REGISTRY_READ, "__code__", None) is not _RUN_REGISTRY_READ_CODE
+        or _outcome_trust.outcome_lineage_binding_from_payload
+        is not _OUTCOME_LINEAGE_PARSER
+        or getattr(_OUTCOME_LINEAGE_PARSER, "__code__", None)
+        is not _OUTCOME_LINEAGE_PARSER_CODE
+    ):
+        raise RiskRandomizationPrecommitError(
+            "product outcome availability authority dispatch changed"
+        )
+
+    run_registry_path = workspace / "run_registry.json"
+    try:
+        registry = _RUN_REGISTRY_TYPE(run_registry_path)
+        raw = _RUN_REGISTRY_READ(registry)
+    except (OSError, ValueError) as exc:
+        raise RiskRandomizationPrecommitError(
+            "canonical product RunRegistry cannot be re-resolved"
+        ) from exc
+    if type(raw) is not dict or type(raw.get("runs")) is not dict:
+        raise RiskRandomizationPrecommitError(
+            "canonical product RunRegistry is invalid"
+        )
+
+    try:
+        for item in raw["runs"].values():
+            if type(item) is not dict or item.get("run_id") not in planned:
+                continue
+            raw_lineage = item.get("outcome_lineage")
+            if raw_lineage is None:
+                continue
+            binding = _OUTCOME_LINEAGE_PARSER(
+                raw_lineage,
+                context="risk randomization planned-run outcome lineage",
+            )
+            if any(
+                revision.first_available_at is not None
+                for revision in binding.revisions
+            ):
+                raise RiskRandomizationPrecommitError(
+                    "randomization root cannot be issued after a planned run outcome "
+                    "became product-available"
+                )
+    except _outcome_trust.OutcomeLineageTrustError as exc:
+        raise RiskRandomizationPrecommitError(
+            "planned-run product outcome availability cannot be re-resolved"
+        ) from exc
+
+    return _sha256_bytes(_canonical_bytes(raw))
+
+
 def _membership_binding(receipt: RiskMembershipPublicationReceipt) -> dict[str, object]:
     if type(receipt) is not RiskMembershipPublicationReceipt:
         raise RiskRandomizationPrecommitError(
@@ -258,6 +341,7 @@ def _state_template(
     experiment_id: str,
     membership: dict[str, object],
     randomization_root_sha256: str,
+    preoutcome_run_registry_sha256: str,
 ) -> dict[str, object]:
     return {
         "schema": _SCHEMA,
@@ -266,6 +350,7 @@ def _state_template(
         "experiment_id": experiment_id,
         "membership": membership,
         "randomization_root_sha256": randomization_root_sha256,
+        "preoutcome_run_registry_sha256": preoutcome_run_registry_sha256,
     }
 
 
@@ -290,6 +375,7 @@ def _decode_state(
         "experiment_id",
         "membership",
         "randomization_root_sha256",
+        "preoutcome_run_registry_sha256",
     }
     if type(raw) is not dict or set(raw) != expected_keys:
         raise RiskRandomizationPrecommitError(
@@ -307,6 +393,10 @@ def _decode_state(
             "randomization precommit conflicts with exact experiment membership"
         )
     _sha256_text(raw.get("randomization_root_sha256"), "randomization_root_sha256")
+    _sha256_text(
+        raw.get("preoutcome_run_registry_sha256"),
+        "preoutcome_run_registry_sha256",
+    )
     if raw_bytes != _pretty_bytes(raw):
         raise RiskRandomizationPrecommitError(
             "randomization precommit state is not canonically serialized"
@@ -366,6 +456,7 @@ def _receipt(
         "membership_sha256": membership["membership_sha256"],
         "membership_receipt_sha256": membership["membership_receipt_sha256"],
         "randomization_root_sha256": state["randomization_root_sha256"],
+        "preoutcome_run_registry_sha256": state["preoutcome_run_registry_sha256"],
         "state_sha256": state_sha256,
         "authority_generation": authority_record.generation,
         "authority_record_sha256": authority_record.record_sha256,
@@ -476,50 +567,57 @@ def _issue_risk_randomization_precommit(
                     "committed randomization state is missing from workspace"
                 )
 
-            randomization_root_sha256 = hashlib.sha256(
-                secrets.token_bytes(_ROOT_BYTES)
-            ).hexdigest()
-            state = _state_template(
-                workspace_instance_id=authority.workspace_instance_id,
-                experiment_id=experiment_id,
-                membership=membership,
-                randomization_root_sha256=randomization_root_sha256,
-            )
-            intended = _sha256_bytes(_pretty_bytes(state))
-            binding = _semantic_binding_sha256(
-                experiment_key=experiment_key,
-                membership_receipt_sha256=str(membership["membership_receipt_sha256"]),
-                state_sha256=intended,
-            )
-            tx_id = f"risk-randomization-{uuid.uuid4().hex}"
-            authority.prepare(
-                tx_id=tx_id,
-                observed_state_sha256=None,
-                intended_state_sha256=intended,
-                semantic_binding_sha256=binding,
-            )
-            atomic_write_json(state_path, state)
-            published, published_sha = _decode_state(
-                state_path,
-                workspace_instance_id=authority.workspace_instance_id,
-                experiment_id=experiment_id,
-                membership=membership,
-            )
-            if published_sha != intended:
-                raise RiskRandomizationPrecommitError(
-                    "published randomization state differs from prepared state"
+            run_registry_path = workspace_path / "run_registry.json"
+            with durable_path_lock(run_registry_path):
+                preoutcome_run_registry_sha256 = _preoutcome_run_registry_sha256(
+                    workspace_path,
+                    membership["planned_run_ids"],
                 )
-            record = authority.commit(
-                tx_id=tx_id,
-                observed_state_sha256=published_sha,
-                semantic_binding_sha256=binding,
-            )
-            return _receipt(
-                state=published,
-                state_sha256=published_sha,
-                authority=authority,
-                authority_record=record,
-            )
+                randomization_root_sha256 = hashlib.sha256(
+                    secrets.token_bytes(_ROOT_BYTES)
+                ).hexdigest()
+                state = _state_template(
+                    workspace_instance_id=authority.workspace_instance_id,
+                    experiment_id=experiment_id,
+                    membership=membership,
+                    randomization_root_sha256=randomization_root_sha256,
+                    preoutcome_run_registry_sha256=preoutcome_run_registry_sha256,
+                )
+                intended = _sha256_bytes(_pretty_bytes(state))
+                binding = _semantic_binding_sha256(
+                    experiment_key=experiment_key,
+                    membership_receipt_sha256=str(membership["membership_receipt_sha256"]),
+                    state_sha256=intended,
+                )
+                tx_id = f"risk-randomization-{uuid.uuid4().hex}"
+                authority.prepare(
+                    tx_id=tx_id,
+                    observed_state_sha256=None,
+                    intended_state_sha256=intended,
+                    semantic_binding_sha256=binding,
+                )
+                atomic_write_json(state_path, state)
+                published, published_sha = _decode_state(
+                    state_path,
+                    workspace_instance_id=authority.workspace_instance_id,
+                    experiment_id=experiment_id,
+                    membership=membership,
+                )
+                if published_sha != intended:
+                    raise RiskRandomizationPrecommitError(
+                        "published randomization state differs from prepared state"
+                    )
+                record = authority.commit(
+                    tx_id=tx_id,
+                    observed_state_sha256=published_sha,
+                    semantic_binding_sha256=binding,
+                )
+                return _receipt(
+                    state=published,
+                    state_sha256=published_sha,
+                    authority=authority,
+                    authority_record=record,
+                )
     except RiskRandomizationPrecommitError:
         raise
     except (MonotonicWorkspaceAuthorityError, OSError, ValueError) as exc:

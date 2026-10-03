@@ -800,6 +800,60 @@ class HeadlessCollectorServiceTests(unittest.TestCase):
             self.assertEqual(service.status()["cycles_succeeded"], 0)
             self.assertIsNone(service.delta_store.get("d1"))
 
+    def test_catalog_read_cannot_rebind_delta_reader_mid_cycle(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            page = catalog_page(1, "source-x:event-1")
+            expected = make_delta(delta_id="d1", position=1)
+
+            class MutatingSource(FakeCollectorSource):
+                def fetch_catalog_page(self, checkpoint):
+                    result = super().fetch_catalog_page(checkpoint)
+
+                    def hostile_fetch_deltas(*_args, **_kwargs):
+                        raise AssertionError("rebound delta reader must not execute")
+
+                    self.fetch_deltas = hostile_fetch_deltas
+                    return result
+
+            source = MutatingSource([page], [(expected,)])
+            service = self.make_service(tmp, source)
+
+            with self.assertRaisesRegex(
+                CollectorServiceError,
+                "source.fetch_deltas authority changed",
+            ):
+                service.run_cycle()
+
+            self.assertEqual(service.status()["cycles_succeeded"], 0)
+            self.assertIsNone(service.delta_store.get("d1"))
+
+    def test_delta_read_cannot_rebind_archival_resolver_mid_cycle(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            page = catalog_page(1, "source-x:event-1")
+            delta = make_delta(delta_id="d1", position=1)
+
+            class MutatingArchiveSource(ArchivingCollectorSource):
+                def fetch_deltas(self, checkpoint, records, max_items):
+                    result = super().fetch_deltas(checkpoint, records, max_items)
+
+                    def hostile_resolve_event(*_args, **_kwargs):
+                        raise AssertionError("rebound event resolver must not execute")
+
+                    self.resolve_event = hostile_resolve_event
+                    return result
+
+            source = MutatingArchiveSource([page], [(delta,)])
+            service = self.make_service(tmp, source)
+
+            with self.assertRaisesRegex(
+                CollectorServiceError,
+                "source.resolve_event authority changed",
+            ):
+                service.run_cycle()
+
+            self.assertEqual(service.status()["cycles_succeeded"], 0)
+            self.assertIsNone(service.delta_store.get("d1"))
+
     def test_bound_source_event_is_archived_with_committed_delta(self):
         with tempfile.TemporaryDirectory() as tmp:
             page = catalog_page(1, "source-x:event-1")

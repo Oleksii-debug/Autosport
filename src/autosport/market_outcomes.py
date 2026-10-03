@@ -572,7 +572,7 @@ class MarketSettlementOutcomeAuthority:
         ):
             raise ValueError(
                 "durable market outcome authority readback requires separately "
-                "verified exact canonical source authority"
+                "verified source authority of exact canonical type"
             )
         canonical = verified_authority.to_dict()
         expected = set(canonical)

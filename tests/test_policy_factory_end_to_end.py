@@ -1421,3 +1421,75 @@ def test_product_issued_no_action_baseline_cannot_receive_hindsight_wait_utility
     assert Decimal(issued.uncertainty_low) == Decimal("0")
     assert Decimal(issued.uncertainty_high) == Decimal("0")
 
+    # A frozen slot labelled NO_BET_WAIT must also prove behavioral abstention.
+    # Binding the label to an otherwise valid product-issued policy that acts must
+    # fail closed instead of silently applying the zero-utility projection.
+    mislabelled_policy, mislabelled_update = _policy_successor(
+        predecessor,
+        observation_id="3" * 64,
+        outcome_id="4" * 64,
+        episode_id="5" * 64,
+        decided_at="2026-09-19T09:35:00Z",
+        available_at="2026-09-19T09:36:00Z",
+        reward_value="2",
+        action_type="BET",
+    )
+    mislabelled_spec = _spec(
+        experiment_id="experiment-policy-issued-mislabelled-no-action",
+        model_id="model-policy-issued-mislabelled-no-action",
+        evaluation_id="evaluation-policy-issued-mislabelled-no-action",
+        promotion_id="promotion-policy-issued-mislabelled-no-action",
+        predecessor_policy_id=predecessor.policy_id,
+        predecessor_model_id=predecessor_model_id,
+        created_at=CHALLENGER_CREATED,
+        completed_at=CHALLENGER_COMPLETED,
+        decided_at=CHALLENGER_DECIDED,
+    )
+    mislabelled_result = _run_nongoverned_factory_retest(
+        ExperimentRunner(registry, store),
+        predecessor_policy=predecessor,
+        challenger_policy=mislabelled_policy,
+        update_evidence=mislabelled_update,
+        spec=mislabelled_spec,
+        evaluation_cases=cases,
+        rule=rule,
+    )
+    assert mislabelled_result.strategy_version_id == mislabelled_policy.policy_id
+
+    mislabelled_model = store.read("model", mislabelled_spec.model_version_id)
+    mislabelled_artifact_sha256 = mislabelled_model["policy_artifact_sha256"]
+    mislabelled_evaluation = store.read(
+        "evaluation",
+        mislabelled_spec.evaluation_bundle_id,
+    )
+    assert any(
+        sample["challenger_action"] != "WAIT"
+        for sample in mislabelled_evaluation["policy_evaluation"]["samples"]
+    )
+
+    mislabelled_protocol = replace(
+        protocol,
+        baselines=tuple(
+            replace(
+                baseline,
+                baseline_id=mislabelled_policy.policy_id,
+                implementation_sha256=mislabelled_artifact_sha256,
+                supported=True,
+                unsupported_reason=None,
+            )
+            if baseline.kind is BaselineKind.NO_BET_WAIT
+            else baseline
+            for baseline in protocol.baselines
+        ),
+    )
+    with pytest.raises(
+        ProductPolicyEvaluationIssuanceError,
+        match="NO_BET_WAIT source policy must abstain on every frozen sample",
+    ):
+        issue_product_policy_evaluation(
+            authority,
+            mislabelled_protocol,
+            source_evaluation_bundle_id=mislabelled_spec.evaluation_bundle_id,
+            baseline_kind=BaselineKind.NO_BET_WAIT,
+        )
+

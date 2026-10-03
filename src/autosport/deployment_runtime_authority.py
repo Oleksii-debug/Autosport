@@ -1576,11 +1576,11 @@ class DeploymentRuntimeAuthorityStore(metaclass=_DeploymentRuntimeAuthorityStore
         _monotonic_constructor_helper: object = _construct_monotonic_authority,
         _monotonic_constructor_helper_code: object = _construct_monotonic_authority.__code__,
         _path_expanduser: object = _CANONICAL_PATH_EXPANDUSER,
-        _path_expanduser_code: object = _path_expanduser_CODE,
+        _path_expanduser_code: object = _CANONICAL_PATH_EXPANDUSER_CODE,
         _path_resolve: object = _CANONICAL_PATH_RESOLVE,
-        _path_resolve_code: object = _path_resolve_CODE,
+        _path_resolve_code: object = _CANONICAL_PATH_RESOLVE_CODE,
         _path_read_text: object = _CANONICAL_PATH_READ_TEXT,
-        _path_read_text_code: object = _path_read_text_CODE,
+        _path_read_text_code: object = _CANONICAL_PATH_READ_TEXT_CODE,
     ) -> None:
         self._assert_static_authority_contract()
         if (
@@ -1612,11 +1612,11 @@ class DeploymentRuntimeAuthorityStore(metaclass=_DeploymentRuntimeAuthorityStore
             or _CANONICAL_MONOTONIC_CONSTRUCTOR_HELPER_CODE
             is not _monotonic_constructor_helper_code
             or _path_expanduser is not _path_expanduser
-            or _path_expanduser_CODE is not _path_expanduser_code
+            or _CANONICAL_PATH_EXPANDUSER_CODE is not _path_expanduser_code
             or _path_resolve is not _path_resolve
-            or _path_resolve_CODE is not _path_resolve_code
+            or _CANONICAL_PATH_RESOLVE_CODE is not _path_resolve_code
             or _path_read_text is not _path_read_text
-            or _path_read_text_CODE is not _path_read_text_code
+            or _CANONICAL_PATH_READ_TEXT_CODE is not _path_read_text_code
         ):
             raise DeploymentRuntimeAuthorityError(
                 "runtime authority construction helper dispatch was replaced"
@@ -1631,17 +1631,17 @@ class DeploymentRuntimeAuthorityStore(metaclass=_DeploymentRuntimeAuthorityStore
             (
                 current_path_type.expanduser,
                 _path_expanduser,
-                _path_expanduser_CODE,
+                _path_expanduser_code,
             ),
             (
                 current_path_type.resolve,
                 _path_resolve,
-                _path_resolve_CODE,
+                _path_resolve_code,
             ),
             (
                 current_path_type.read_text,
                 _path_read_text,
-                _path_read_text_CODE,
+                _path_read_text_code,
             ),
         ):
             if (

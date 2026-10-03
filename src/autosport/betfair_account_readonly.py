@@ -714,6 +714,17 @@ class BetfairReadOnlyClient:
         page_size: int = 1000,
         max_pages: int = 100,
     ) -> BetfairExecutionReadbackEnvelope:
+        # Freeze the exact helper dispatch and status coverage before the first
+        # provider-capable callback.  The product-origin wrapper has already
+        # established that these bound methods are canonical; retaining the
+        # bindings prevents an in-flight callback from installing a transient
+        # self-removing instance shadow that redirects a later scope read and
+        # disappears before the wrapper's post-capture dispatch check.
+        read_market_event = self.read_market_event
+        read_current_orders_page = self.read_current_orders_page
+        read_cleared_orders_page = self.read_cleared_orders_page
+        cleared_statuses = _EXECUTION_CLEARED_STATUSES
+
         action = _required_text(action_id, "action_id")
         order_ref = action
         if provider_order_ref is not None:
@@ -730,7 +741,7 @@ class BetfairReadOnlyClient:
         _positive_int(max_pages, "max_pages")
         market_event: BetfairMarketEventObservation | None
         try:
-            market_event = self.read_market_event(market)
+            market_event = read_market_event(market)
         except BetfairReadOnlyError as exc:
             if str(exc) != (
                 "exact market-to-event identity is unavailable from listMarketCatalogue"
@@ -745,7 +756,7 @@ class BetfairReadOnlyClient:
             pages: list[BetfairCurrentOrderPage] = []
             offset = 0
             for _ in range(max_pages):
-                page = self.read_current_orders_page(
+                page = read_current_orders_page(
                     from_record=offset,
                     record_count=page_size,
                     customer_order_refs=(order_ref,),
@@ -769,11 +780,11 @@ class BetfairReadOnlyClient:
             groups: list[
                 tuple[str, tuple[BetfairClearedOrderPage, ...]]
             ] = []
-            for status in _EXECUTION_CLEARED_STATUSES:
+            for status in cleared_statuses:
                 pages: list[BetfairClearedOrderPage] = []
                 offset = 0
                 for _ in range(max_pages):
-                    page = self.read_cleared_orders_page(
+                    page = read_cleared_orders_page(
                         from_record=offset,
                         record_count=page_size,
                         bet_status=status,

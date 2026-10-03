@@ -11,6 +11,7 @@ import hashlib
 import inspect
 import json
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Sequence
 
 from . import provider_evaluation_universe as _provider_universe_module
@@ -193,6 +194,45 @@ def _digest(value: object) -> str:
             allow_nan=False,
         ).encode("utf-8")
     ).hexdigest()
+
+
+def _instant(value: object, field: str) -> datetime:
+    raw = _text(value, field)
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise CampaignForwardUniverseCycleBindingError(
+            f"{field} must be ISO-8601"
+        ) from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise CampaignForwardUniverseCycleBindingError(
+            f"{field} must include timezone"
+        )
+    return parsed.astimezone(timezone.utc)
+
+
+def _require_cycle_observation_chronology(
+    *,
+    snapshot: CompleteGameBoardSnapshot,
+    collector_evidence: dict[str, object],
+) -> None:
+    attempted = _instant(
+        collector_evidence.get("attempted_at"),
+        "collector attempted_at",
+    )
+    completed = _instant(
+        collector_evidence.get("completed_at"),
+        "collector completed_at",
+    )
+    captured = _instant(snapshot.captured_at, "provider captured_at")
+    if completed < attempted:
+        raise CampaignForwardUniverseCycleBindingError(
+            "collector cycle completion predates authorized START"
+        )
+    if captured < attempted or captured > completed:
+        raise CampaignForwardUniverseCycleBindingError(
+            "provider observation is outside authorized collector cycle chronology"
+        )
 
 
 @dataclass(frozen=True, slots=True, init=False)
@@ -561,6 +601,11 @@ def resolve_campaign_forward_universe_cycle_authority(
             "provider evidence resolver returned noncanonical snapshot"
         )
     _require_dispatch_integrity()
+    _require_cycle_observation_chronology(
+        snapshot=snapshot,
+        collector_evidence=collector_evidence,
+    )
+    _require_dispatch_integrity()
 
     expected_receipt = _expected_cycle_receipt_payload(
         campaign=campaign,
@@ -713,6 +758,11 @@ _INTERNAL_CALLABLES = tuple(
         ("_text", _text),
         ("_sha", _sha),
         ("_digest", _digest),
+        ("_instant", _instant),
+        (
+            "_require_cycle_observation_chronology",
+            _require_cycle_observation_chronology,
+        ),
         (
             "_expected_cycle_receipt_payload",
             _expected_cycle_receipt_payload,

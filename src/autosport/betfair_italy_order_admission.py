@@ -1,9 +1,12 @@
-"""Fail-closed request-level admission for Betfair Italy LIMIT orders.
+"""Truth-bounded request-level rule projection for Betfair Italy LIMIT orders.
 
-This module models only the Italian Exchange rules that can be decided from a
-fully projected `placeOrders` LIMIT batch before provider I/O. It does not own
-odds-ladder validity, account funds, BSP orders, provider writes,
-acceptance/readback, settlement, or execution authorization.
+This module evaluates the represented .it Exchange rules against an immutable
+standard-size LIMIT batch. It deliberately does not prove that the caller is an
+Italy-authenticated session, that EUR is the current authenticated account
+currency, or that the represented provider rules are current at decision time.
+
+A rule-set match is therefore diagnostic/preflight structure only. It is never
+market admissibility, provider-write permission, or real-money authority.
 """
 from __future__ import annotations
 
@@ -18,25 +21,25 @@ BACK_STAKE_INCREMENT_EUR = Decimal("0.50")
 LAY_MIN_BACKER_STAKE_EUR = Decimal("0.50")
 MAX_PRESELECTED_RETURN_EUR = Decimal("10000.00")
 
+# Bound all caller-controlled Decimal shapes before Fraction construction or
+# arithmetic. These limits are far beyond legitimate Exchange order values and
+# prevent pathological exponents/coefficients from becoming a resource sink.
+_MAX_DECIMAL_DIGITS = 64
+_MAX_ABS_EXPONENT = 18
+
 
 class ItalianOrderAdmissionError(ValueError):
     """Raised when an order projection is malformed or outside this contract."""
 
 
 class ItalianLimitAdmissionState(str, Enum):
-    ADMISSIBLE = "ADMISSIBLE"
+    RULESET_SATISFIED_UNBOUND = "RULESET_SATISFIED_UNBOUND"
     REJECTED = "REJECTED"
 
 
 @dataclass(frozen=True, slots=True)
 class ItalianLimitInstruction:
-    """Minimal provider-faithful LIMIT projection needed by the .it rules.
-
-    For standard-size orders, ``size`` is Betfair's LIMIT ``size``: the
-    backer's stake on both BACK and LAY instructions. ``bet_target_type`` is
-    carried only so the .it guard can reject PAYOUT/BACKERS_PROFIT before
-    applying standard-size stake/return semantics.
-    """
+    """Minimal standard-size LIMIT projection needed by represented .it rules."""
 
     selection_id: int
     side: str
@@ -45,81 +48,120 @@ class ItalianLimitInstruction:
     bet_target_type: str | None = None
 
     def __post_init__(self) -> None:
-        if (
-            not isinstance(self.selection_id, int)
-            or isinstance(self.selection_id, bool)
-            or self.selection_id <= 0
-        ):
-            raise ItalianOrderAdmissionError("selection_id must be a positive integer")
-        if self.side not in {"BACK", "LAY"}:
+        if type(self.selection_id) is not int or self.selection_id <= 0:
+            raise ItalianOrderAdmissionError(
+                "selection_id must be a positive integer"
+            )
+        if type(self.side) is not str or self.side not in {"BACK", "LAY"}:
             raise ItalianOrderAdmissionError("side must be exactly BACK or LAY")
         _positive_decimal(self.size, "size")
         _positive_decimal(self.price, "price")
-        if self.price <= 1:
+        if self.price <= Decimal("1"):
             raise ItalianOrderAdmissionError("price must be greater than 1")
-        if self.bet_target_type is not None:
-            if self.bet_target_type not in {"PAYOUT", "BACKERS_PROFIT"}:
-                raise ItalianOrderAdmissionError(
-                    "bet_target_type must be PAYOUT, BACKERS_PROFIT, or None"
-                )
+        if self.bet_target_type is not None and (
+            type(self.bet_target_type) is not str
+            or self.bet_target_type not in {"PAYOUT", "BACKERS_PROFIT"}
+        ):
+            raise ItalianOrderAdmissionError(
+                "bet_target_type must be PAYOUT, BACKERS_PROFIT, or None"
+            )
 
 
 @dataclass(frozen=True, slots=True)
 class ItalianLimitBatchAdmission:
+    """Result for represented rule checks, never a provider admission token."""
+
     state: ItalianLimitAdmissionState
     reason_codes: tuple[str, ...]
     preselected_returns_eur: tuple[Decimal, ...]
 
     def __post_init__(self) -> None:
-        if not isinstance(self.state, ItalianLimitAdmissionState):
-            raise ItalianOrderAdmissionError("state must be ItalianLimitAdmissionState")
-        if not isinstance(self.reason_codes, tuple) or any(
-            not isinstance(reason, str) or not reason for reason in self.reason_codes
+        if type(self.state) is not ItalianLimitAdmissionState:
+            raise ItalianOrderAdmissionError(
+                "state must be exact ItalianLimitAdmissionState"
+            )
+        if type(self.reason_codes) is not tuple or any(
+            type(reason) is not str or not reason
+            for reason in self.reason_codes
         ):
-            raise ItalianOrderAdmissionError("reason_codes must be a tuple of strings")
-        if not isinstance(self.preselected_returns_eur, tuple) or any(
-            not isinstance(value, Decimal) or not value.is_finite() or value <= 0
+            raise ItalianOrderAdmissionError(
+                "reason_codes must be an exact tuple of non-empty strings"
+            )
+        if type(self.preselected_returns_eur) is not tuple or any(
+            type(value) is not Decimal
+            or not value.is_finite()
+            or value <= 0
             for value in self.preselected_returns_eur
         ):
             raise ItalianOrderAdmissionError(
                 "preselected_returns_eur must contain positive finite Decimals"
             )
-        if self.state is ItalianLimitAdmissionState.ADMISSIBLE and self.reason_codes:
+        if (
+            self.state is ItalianLimitAdmissionState.RULESET_SATISFIED_UNBOUND
+            and self.reason_codes
+        ):
             raise ItalianOrderAdmissionError(
-                "ADMISSIBLE result cannot carry rejection reasons"
+                "RULESET_SATISFIED_UNBOUND cannot carry rejection reasons"
             )
         if (
             self.state is ItalianLimitAdmissionState.REJECTED
             and not self.reason_codes
         ):
-            raise ItalianOrderAdmissionError("REJECTED result requires a reason")
+            raise ItalianOrderAdmissionError(
+                "REJECTED result requires a reason"
+            )
+
+    @property
+    def ruleset_satisfied_unbound(self) -> bool:
+        return (
+            self.state
+            is ItalianLimitAdmissionState.RULESET_SATISFIED_UNBOUND
+        )
 
     @property
     def admissible(self) -> bool:
-        return self.state is ItalianLimitAdmissionState.ADMISSIBLE
+        """No result from this unbound ruleset is provider admission."""
+        return False
+
+    @property
+    def jurisdiction_bound(self) -> bool:
+        return False
+
+    @property
+    def account_currency_bound(self) -> bool:
+        return False
+
+    @property
+    def current_provider_rules_proven(self) -> bool:
+        return False
 
     @property
     def execution_authorized(self) -> bool:
-        """This deterministic preflight never grants provider-write authority."""
+        return False
+
+    @property
+    def real_money_execution(self) -> bool:
         return False
 
 
 def evaluate_italian_limit_batch(
     instructions: tuple[ItalianLimitInstruction, ...],
 ) -> ItalianLimitBatchAdmission:
-    """Evaluate the documented Betfair Italy LIMIT request-level rules.
+    """Evaluate only the represented Betfair Italy standard-LIMIT rule slice.
 
-    The result is a deterministic preflight only. A positive result means the
-    projected LIMIT batch satisfies the rules represented here; it does not
-    prove account funds, market validity, provider acceptance, or permission to
-    perform a real-money write.
+    A no-reason result is RULESET_SATISFIED_UNBOUND, not ADMISSIBLE. Positive
+    provider admission requires separate product-owned current-rule,
+    authenticated-jurisdiction, account-currency, market, risk/funds and other
+    execution authorities.
     """
 
-    if not isinstance(instructions, tuple):
-        raise ItalianOrderAdmissionError("instructions must be an immutable tuple")
-    if any(not isinstance(item, ItalianLimitInstruction) for item in instructions):
+    if type(instructions) is not tuple:
         raise ItalianOrderAdmissionError(
-            "instructions must contain only ItalianLimitInstruction values"
+            "instructions must be an immutable exact tuple"
+        )
+    if any(type(item) is not ItalianLimitInstruction for item in instructions):
+        raise ItalianOrderAdmissionError(
+            "instructions must contain exact ItalianLimitInstruction values"
         )
 
     reasons: list[str] = []
@@ -141,46 +183,69 @@ def evaluate_italian_limit_batch(
         prefix = f"I{index}:"
         if instruction.bet_target_type is not None:
             # .it does not support Betfair target sizing. Do not reinterpret
-            # the target-mode numeric fields as standard backer's stake or
-            # synthesize an EUR10k return from semantics that are unavailable.
+            # target-mode numeric fields as standard backer's-stake economics.
             reasons.append(prefix + "TARGET_MODE_UNAVAILABLE_IT")
             continue
 
         if instruction.side == "BACK":
             if instruction.size < BACK_MIN_STAKE_EUR:
                 reasons.append(prefix + "BACK_STAKE_BELOW_EUR_2")
-            if not _is_multiple(instruction.size, BACK_STAKE_INCREMENT_EUR):
-                reasons.append(prefix + "BACK_STAKE_NOT_EUR_0_50_INCREMENT")
+            if not _is_multiple(
+                instruction.size, BACK_STAKE_INCREMENT_EUR
+            ):
+                reasons.append(
+                    prefix + "BACK_STAKE_NOT_EUR_0_50_INCREMENT"
+                )
         else:
             if instruction.size < LAY_MIN_BACKER_STAKE_EUR:
-                reasons.append(prefix + "LAY_BACKER_STAKE_BELOW_EUR_0_50")
+                reasons.append(
+                    prefix + "LAY_BACKER_STAKE_BELOW_EUR_0_50"
+                )
 
-        # For BACK, total return including original stake is size * price.
-        # For LAY, Betfair LIMIT size is the corresponding backer's stake /
-        # layer's potential profit; liability is size * (price - 1), so
-        # returned liability + profit is likewise size * price.
-        preselected_return = _exact_multiply(instruction.size, instruction.price)
+        # Represented rule arithmetic only: for standard LIMIT both BACK and
+        # LAY returned amount at submitted price is backer's stake * price.
+        preselected_return = _exact_multiply(
+            instruction.size, instruction.price
+        )
         returns.append(preselected_return)
         if preselected_return > MAX_PRESELECTED_RETURN_EUR:
-            reasons.append(prefix + "PRESELECTED_RETURN_EXCEEDS_EUR_10000")
+            reasons.append(
+                prefix + "PRESELECTED_RETURN_EXCEEDS_EUR_10000"
+            )
 
     state = (
         ItalianLimitAdmissionState.REJECTED
         if reasons
-        else ItalianLimitAdmissionState.ADMISSIBLE
+        else ItalianLimitAdmissionState.RULESET_SATISFIED_UNBOUND
     )
-    return ItalianLimitBatchAdmission(state, tuple(reasons), tuple(returns))
+    return ItalianLimitBatchAdmission(
+        state, tuple(reasons), tuple(returns)
+    )
 
 
 def _positive_decimal(value: object, field: str) -> Decimal:
-    if not isinstance(value, Decimal) or not value.is_finite() or value <= 0:
+    if (
+        type(value) is not Decimal
+        or not value.is_finite()
+        or value <= 0
+    ):
         raise ItalianOrderAdmissionError(
-            f"{field} must be a positive finite Decimal"
+            f"{field} must be an exact positive finite Decimal"
+        )
+    digits = value.as_tuple().digits
+    exponent = value.as_tuple().exponent
+    if (
+        len(digits) > _MAX_DECIMAL_DIGITS
+        or abs(exponent) > _MAX_ABS_EXPONENT
+    ):
+        raise ItalianOrderAdmissionError(
+            f"{field} exceeds bounded Decimal shape"
         )
     return value
 
 
 def _is_multiple(value: Decimal, increment: Decimal) -> bool:
+    # Inputs are shape-bounded before this exact-rational conversion.
     value_fraction = Fraction(value)
     increment_fraction = Fraction(increment)
     quotient = value_fraction / increment_fraction
@@ -188,10 +253,15 @@ def _is_multiple(value: Decimal, increment: Decimal) -> bool:
 
 
 def _exact_multiply(left: Decimal, right: Decimal) -> Decimal:
-    """Multiply finite Decimals without depending on the ambient context."""
+    """Multiply bounded finite Decimals independently of ambient precision."""
 
     left_digits = max(1, len(left.as_tuple().digits))
     right_digits = max(1, len(right.as_tuple().digits))
     with localcontext() as context:
         context.prec = left_digits + right_digits + 2
-        return left * right
+        result = left * right
+    if not result.is_finite() or result <= 0:
+        raise ItalianOrderAdmissionError(
+            "preselected return is not a positive finite Decimal"
+        )
+    return result

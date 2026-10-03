@@ -52,6 +52,39 @@ _CANONICAL_VERIFIED_EXECUTION_VIEW = RealExecutionLedger.verified_execution_view
 _CANONICAL_VERIFIED_EXECUTION_VIEW_CODE = (
     RealExecutionLedger.verified_execution_view.__code__
 )
+_CANONICAL_VERIFIED_EXECUTION_VIEW_GLOBALS = (
+    _CANONICAL_VERIFIED_EXECUTION_VIEW.__globals__
+)
+_CANONICAL_VERIFIED_EXECUTION_PLAN_VIEW_TYPE = (
+    _CANONICAL_VERIFIED_EXECUTION_VIEW_GLOBALS["VerifiedExecutionPlanView"]
+)
+_CANONICAL_EXECUTION_ATTEMPT_READ_VIEW_TYPE = (
+    _CANONICAL_VERIFIED_EXECUTION_VIEW_GLOBALS["ExecutionAttemptReadView"]
+)
+_CANONICAL_PROVIDER_EVIDENCE_BINDING_VIEW_TYPE = (
+    _CANONICAL_VERIFIED_EXECUTION_VIEW_GLOBALS["ProviderEvidenceBindingView"]
+)
+_CANONICAL_EXECUTION_ATTEMPT_TYPE = (
+    _CANONICAL_VERIFIED_EXECUTION_VIEW_GLOBALS["ExecutionAttempt"]
+)
+_CANONICAL_EXECUTION_ACTION_TYPE = (
+    _CANONICAL_VERIFIED_EXECUTION_VIEW_GLOBALS["ExecutionAction"]
+)
+_CANONICAL_EXTERNAL_ACKNOWLEDGEMENT_TYPE = (
+    _CANONICAL_VERIFIED_EXECUTION_VIEW_GLOBALS["ExternalAcknowledgement"]
+)
+_CANONICAL_EXECUTION_PLAN_TYPE = (
+    _CANONICAL_VERIFIED_EXECUTION_VIEW_GLOBALS["ExecutionPlan"]
+)
+_CANONICAL_VERIFIED_EXECUTION_VIEW_TYPE_BINDINGS = (
+    ("VerifiedExecutionPlanView", _CANONICAL_VERIFIED_EXECUTION_PLAN_VIEW_TYPE),
+    ("ExecutionAttemptReadView", _CANONICAL_EXECUTION_ATTEMPT_READ_VIEW_TYPE),
+    ("ProviderEvidenceBindingView", _CANONICAL_PROVIDER_EVIDENCE_BINDING_VIEW_TYPE),
+    ("ExecutionAttempt", _CANONICAL_EXECUTION_ATTEMPT_TYPE),
+    ("ExecutionAction", _CANONICAL_EXECUTION_ACTION_TYPE),
+    ("ExternalAcknowledgement", _CANONICAL_EXTERNAL_ACKNOWLEDGEMENT_TYPE),
+    ("ExecutionPlan", _CANONICAL_EXECUTION_PLAN_TYPE),
+)
 
 
 class ExecutionQuoteChainError(RuntimeError):
@@ -139,6 +172,12 @@ def _require_canonical_verified_execution_view_dispatch(
         current is not _CANONICAL_VERIFIED_EXECUTION_VIEW
         or getattr(current, "__code__", None)
         is not _CANONICAL_VERIFIED_EXECUTION_VIEW_CODE
+        or getattr(_CANONICAL_VERIFIED_EXECUTION_VIEW, "__globals__", None)
+        is not _CANONICAL_VERIFIED_EXECUTION_VIEW_GLOBALS
+        or any(
+            _CANONICAL_VERIFIED_EXECUTION_VIEW_GLOBALS.get(name) is not expected
+            for name, expected in _CANONICAL_VERIFIED_EXECUTION_VIEW_TYPE_BINDINGS
+        )
     ):
         raise ExecutionQuoteChainUnavailable(
             "canonical verified execution view authority is unavailable"
@@ -151,9 +190,51 @@ def _read_canonical_verified_execution_view(
 ):
     _require_canonical_verified_execution_view_dispatch(ledger)
     try:
-        return _CANONICAL_VERIFIED_EXECUTION_VIEW(ledger, plan_id)
+        view = _CANONICAL_VERIFIED_EXECUTION_VIEW(ledger, plan_id)
     finally:
         _require_canonical_verified_execution_view_dispatch(ledger)
+    if type(view) is not _CANONICAL_VERIFIED_EXECUTION_PLAN_VIEW_TYPE:
+        raise ExecutionQuoteChainUnavailable(
+            "canonical verified execution view type authority is unavailable"
+        )
+    if type(view.plan) is not _CANONICAL_EXECUTION_PLAN_TYPE:
+        raise ExecutionQuoteChainUnavailable(
+            "canonical execution plan view type authority is unavailable"
+        )
+    if type(view.attempts) is not tuple:
+        raise ExecutionQuoteChainUnavailable(
+            "canonical execution attempt collection is unavailable"
+        )
+    for item in view.attempts:
+        if type(item) is not _CANONICAL_EXECUTION_ATTEMPT_READ_VIEW_TYPE:
+            raise ExecutionQuoteChainUnavailable(
+                "canonical execution attempt read-view type authority is unavailable"
+            )
+        if type(item.attempt) is not _CANONICAL_EXECUTION_ATTEMPT_TYPE:
+            raise ExecutionQuoteChainUnavailable(
+                "canonical execution attempt type authority is unavailable"
+            )
+        if type(item.action) is not _CANONICAL_EXECUTION_ACTION_TYPE:
+            raise ExecutionQuoteChainUnavailable(
+                "canonical execution action type authority is unavailable"
+            )
+        if (
+            item.provider_evidence is not None
+            and type(item.provider_evidence)
+            is not _CANONICAL_PROVIDER_EVIDENCE_BINDING_VIEW_TYPE
+        ):
+            raise ExecutionQuoteChainUnavailable(
+                "canonical provider evidence view type authority is unavailable"
+            )
+        if (
+            item.acknowledgement is not None
+            and type(item.acknowledgement)
+            is not _CANONICAL_EXTERNAL_ACKNOWLEDGEMENT_TYPE
+        ):
+            raise ExecutionQuoteChainUnavailable(
+                "canonical acknowledgement view type authority is unavailable"
+            )
+    return view
 
 
 @dataclass(frozen=True, slots=True, weakref_slot=True)
@@ -649,6 +730,33 @@ def _install_quote_chain_evidence_authority() -> None:
     identity_witnesses = (
         ("RealExecutionLedger", _CANONICAL_REAL_EXECUTION_LEDGER),
         ("_CANONICAL_REAL_EXECUTION_LEDGER", _CANONICAL_REAL_EXECUTION_LEDGER),
+        (
+            "_CANONICAL_VERIFIED_EXECUTION_VIEW_GLOBALS",
+            _CANONICAL_VERIFIED_EXECUTION_VIEW_GLOBALS,
+        ),
+        (
+            "_CANONICAL_VERIFIED_EXECUTION_PLAN_VIEW_TYPE",
+            _CANONICAL_VERIFIED_EXECUTION_PLAN_VIEW_TYPE,
+        ),
+        (
+            "_CANONICAL_EXECUTION_ATTEMPT_READ_VIEW_TYPE",
+            _CANONICAL_EXECUTION_ATTEMPT_READ_VIEW_TYPE,
+        ),
+        (
+            "_CANONICAL_PROVIDER_EVIDENCE_BINDING_VIEW_TYPE",
+            _CANONICAL_PROVIDER_EVIDENCE_BINDING_VIEW_TYPE,
+        ),
+        ("_CANONICAL_EXECUTION_ATTEMPT_TYPE", _CANONICAL_EXECUTION_ATTEMPT_TYPE),
+        ("_CANONICAL_EXECUTION_ACTION_TYPE", _CANONICAL_EXECUTION_ACTION_TYPE),
+        (
+            "_CANONICAL_EXTERNAL_ACKNOWLEDGEMENT_TYPE",
+            _CANONICAL_EXTERNAL_ACKNOWLEDGEMENT_TYPE,
+        ),
+        ("_CANONICAL_EXECUTION_PLAN_TYPE", _CANONICAL_EXECUTION_PLAN_TYPE),
+        (
+            "_CANONICAL_VERIFIED_EXECUTION_VIEW_TYPE_BINDINGS",
+            _CANONICAL_VERIFIED_EXECUTION_VIEW_TYPE_BINDINGS,
+        ),
         ("AttemptState", AttemptState),
         ("_CANONICAL_VERIFIED_EXECUTION_VIEW", _CANONICAL_VERIFIED_EXECUTION_VIEW),
         (

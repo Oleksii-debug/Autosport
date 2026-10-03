@@ -1307,6 +1307,7 @@ class PersistentLiveDecisionLoop:
             )
             provider_health_boundaries = self._capture_provider_health_boundaries(
                 snapshots,
+                registered_input_ids,
                 decision_time,
                 require_eligible=True,
             )
@@ -1522,6 +1523,7 @@ class PersistentLiveDecisionLoop:
     def _capture_provider_health_boundaries(
         self,
         snapshots: dict[str, MirrorSnapshot],
+        input_ids: tuple[str, ...],
         as_of: datetime,
         *,
         require_eligible: bool,
@@ -1529,11 +1531,27 @@ class PersistentLiveDecisionLoop:
         store = self._default_health_store
         if store is None:
             return ()
+        if type(input_ids) is not tuple or any(
+            type(input_id) is not str for input_id in input_ids
+        ):
+            raise TypeError("input_ids must be a tuple of strings")
         source_id_set = {
             event.source_id
             for snapshot in snapshots.values()
             for event in snapshot.events
         }
+        for input_id in input_ids:
+            spec = self._input_specs.get(input_id)
+            if spec is None:
+                raise _ConcurrentDecisionSnapshot(
+                    "provider health capture lost a registered dependency input"
+                )
+            if spec.source_ids is not None:
+                source_id_set.update(spec.source_ids)
+            for key in self.dependencies.matching_keys(input_id):
+                event = self.mirror_updates.mirror.event_for_quote_key(*key)
+                if event is not None:
+                    source_id_set.add(event.source_id)
         if self.provider is not None:
             try:
                 source_id_set.add(
@@ -2142,6 +2160,7 @@ class PersistentLiveDecisionLoop:
             )
             provider_health_boundaries = self._capture_provider_health_boundaries(
                 gap_snapshots,
+                affected,
                 now,
                 require_eligible=False,
             )

@@ -10,6 +10,7 @@ from pathlib import Path
 from autosport.causal_collector import (
     CollectorDelta,
     CollectorDeltaStore,
+    CollectorStorageBackpressureError,
     CursorRegressionError,
     DeltaConflictError,
     GapState,
@@ -649,6 +650,46 @@ class CollectorSQLiteStoreTests(unittest.TestCase):
             self.assertEqual(errors, [])
             self.assertEqual(sorted(results), [False, True])
             self.assertEqual(CollectorDeltaStore(path).get("d1"), delta)
+
+    def test_legacy_event_migration_preserves_sqlite_full_backpressure_type(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = CollectorDeltaStore(Path(tmp) / "collector.json")
+            payload = event_payload()
+            event = MarketEvent.from_dict(payload)
+            delta = make_delta(payload=payload)
+            self.assertTrue(store.append(delta))
+
+            original_descriptor = vars(CollectorDeltaStore)[
+                "_append_event_payload_connection"
+            ]
+
+            def exhaust_page_budget(cls, connection, admitted_delta, admitted_event):
+                raise sqlite3.OperationalError("database or disk is full")
+
+            CollectorDeltaStore._append_event_payload_connection = classmethod(
+                exhaust_page_budget
+            )
+            try:
+                with self.assertRaisesRegex(
+                    CollectorStorageBackpressureError,
+                    "RETENTION_REQUIRED",
+                ):
+                    store.migrate_legacy_event_payloads(
+                        {delta.delta_id: event},
+                        source_id=delta.source_id,
+                        stream_epoch=delta.stream_epoch,
+                    )
+            finally:
+                CollectorDeltaStore._append_event_payload_connection = (
+                    original_descriptor
+                )
+
+            self.assertEqual(store.get(delta.delta_id), delta)
+            with self.assertRaisesRegex(
+                ValueError,
+                "event payload is unavailable",
+            ):
+                store.resolve_event(delta)
 
     def test_delivery_anchor_must_belong_to_requested_source(self):
         with tempfile.TemporaryDirectory() as tmp:

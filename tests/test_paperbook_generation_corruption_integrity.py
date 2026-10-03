@@ -165,3 +165,42 @@ def test_reordered_generation_witness_fails_closed_even_with_valid_latest_snapsh
             PaperBook.load(path)
         assert path.read_bytes() == latest_snapshot
         assert witness_path.read_bytes() == corrupted_witness
+
+
+
+def test_deleted_middle_generation_witness_record_cannot_be_projected_across(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A valid latest snapshot cannot hide a hole in publication history."""
+
+    _bind_authority_root(tmp_path, monkeypatch)
+    path = tmp_path / "paper-book.json"
+    _saved_book(path)
+
+    newer = PaperBook.load(path)
+    newer_ticket = newer.open_ticket(
+        [_leg("second-generation-selection", "5")],
+        "5",
+        placed_at="2026-10-03T12:00:03+00:00",
+    )
+    newer.save(path)
+    latest_snapshot = path.read_bytes()
+    assert newer_ticket.ticket_id in PaperBook.load(path).tickets
+
+    witness_path = guard._witness_path(path)
+    lines = witness_path.read_bytes().splitlines(keepends=True)
+    assert len(lines) >= 4
+
+    # Remove generation 1 COMMIT while retaining generation 1 PREPARE and the
+    # individually valid generation 2 PREPARE/COMMIT records. The reader must not
+    # jump across the missing terminal record to bless the newest snapshot.
+    del lines[1]
+    witness_path.write_bytes(b"".join(lines))
+    corrupted_witness = witness_path.read_bytes()
+
+    for _attempt in range(2):
+        with pytest.raises(ValueError, match="witness"):
+            PaperBook.load(path)
+        assert path.read_bytes() == latest_snapshot
+        assert witness_path.read_bytes() == corrupted_witness

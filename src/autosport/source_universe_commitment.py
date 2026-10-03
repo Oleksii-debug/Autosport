@@ -412,6 +412,20 @@ def _seal_source_universe_dispatch() -> None:
     )
     expected_cycle_evidence = _CANONICAL_COLLECTOR_CYCLE_EVIDENCE
     expected_cycle_evidence_code = getattr(expected_cycle_evidence, "__code__", None)
+    # The canonical store method is a Python function: keeping its class surface and
+    # code object unchanged is not enough if authority-bearing names in its defining
+    # module are rebound.  Freeze the narrow terminal-decoding dependency graph too.
+    expected_cycle_globals = expected_cycle_evidence.__globals__
+    expected_cycle_text = expected_cycle_globals.get("_text")
+    expected_cycle_text_code = getattr(expected_cycle_text, "__code__", None)
+    expected_cycle_statuses = expected_cycle_globals.get("_CYCLE_TERMINAL_STATUSES")
+    expected_cycle_hashlib = expected_cycle_globals.get("hashlib")
+    expected_cycle_sha256 = getattr(expected_cycle_hashlib, "sha256", None)
+    expected_cycle_json = expected_cycle_globals.get("json")
+    expected_cycle_json_loads = getattr(expected_cycle_json, "loads", None)
+    expected_cycle_json_loads_code = getattr(
+        expected_cycle_json_loads, "__code__", None
+    )
     expected_read_names = _CANONICAL_READ_SEAM_NAMES
     expected_class_seams = _CANONICAL_CLASS_READ_SEAMS
     expected_class_seam_witnesses = tuple(
@@ -427,6 +441,38 @@ def _seal_source_universe_dispatch() -> None:
         )
         for name, expected in sorted(expected_class_seams.items())
     )
+    expected_store_base_type = expected_store_type.__mro__[1]
+    expected_base_connect_surface = expected_getattr_static(
+        expected_store_base_type, "_connect"
+    )
+    expected_base_connect_callable = getattr(
+        expected_base_connect_surface, "__func__", expected_base_connect_surface
+    )
+    expected_base_connect_code = getattr(
+        expected_base_connect_callable, "__code__", None
+    )
+    expected_base_connect_path_surface = expected_getattr_static(
+        expected_store_base_type, "_connect_path"
+    )
+    expected_base_connect_path_callable = getattr(
+        expected_base_connect_path_surface,
+        "__func__",
+        expected_base_connect_path_surface,
+    )
+    expected_base_connect_path_code = getattr(
+        expected_base_connect_path_callable, "__code__", None
+    )
+    expected_base_connect_path_globals = expected_base_connect_path_callable.__globals__
+    expected_base_sqlite3 = expected_base_connect_path_globals.get("sqlite3")
+    expected_base_sqlite_connect = getattr(expected_base_sqlite3, "connect", None)
+    expected_base_sqlite_row = getattr(expected_base_sqlite3, "Row", None)
+    expected_path_identity_surface = expected_class_seams["_path_file_identity"]
+    expected_path_identity_callable = getattr(
+        expected_path_identity_surface, "__func__", expected_path_identity_surface
+    )
+    expected_path_identity_globals = expected_path_identity_callable.__globals__
+    expected_path_os = expected_path_identity_globals.get("os")
+    expected_path_os_stat = getattr(expected_path_os, "stat", None)
     expected_field_names = _COMMITMENT_FIELD_NAMES
     expected_commitment_field_surfaces = tuple(
         (
@@ -521,6 +567,47 @@ def _seal_source_universe_dispatch() -> None:
             raise expected_error_type(
                 "source-universe collector-cycle evidence authority is rebound"
             )
+        current_cycle_globals = getattr(
+            expected_cycle_evidence, "__globals__", None
+        )
+        if current_cycle_globals is not expected_cycle_globals:
+            raise expected_error_type(
+                "source-universe collector-cycle global authority drifted"
+            )
+        if (
+            current_cycle_globals.get("_text") is not expected_cycle_text
+            or getattr(expected_cycle_text, "__code__", None)
+            is not expected_cycle_text_code
+        ):
+            raise expected_error_type(
+                "source-universe collector-cycle text authority is rebound or mutated"
+            )
+        if (
+            current_cycle_globals.get("_CYCLE_TERMINAL_STATUSES")
+            is not expected_cycle_statuses
+        ):
+            raise expected_error_type(
+                "source-universe collector-cycle status authority is rebound"
+            )
+        if (
+            current_cycle_globals.get("hashlib") is not expected_cycle_hashlib
+            or getattr(expected_cycle_hashlib, "sha256", None)
+            is not expected_cycle_sha256
+        ):
+            raise expected_error_type(
+                "source-universe collector-cycle digest authority is rebound"
+            )
+        current_cycle_json = current_cycle_globals.get("json")
+        if (
+            current_cycle_json is not expected_cycle_json
+            or getattr(expected_cycle_json, "loads", None)
+            is not expected_cycle_json_loads
+            or getattr(expected_cycle_json_loads, "__code__", None)
+            is not expected_cycle_json_loads_code
+        ):
+            raise expected_error_type(
+                "source-universe collector-cycle JSON authority is rebound or mutated"
+            )
         if module_globals.get("_CANONICAL_READ_SEAM_NAMES") is not expected_read_names:
             raise expected_error_type(
                 "source-universe durable read-seam identity is rebound"
@@ -556,6 +643,72 @@ def _seal_source_universe_dispatch() -> None:
                 raise expected_error_type(
                     "source-universe canonical durable read seam drifted: " + name
                 )
+        if expected_store_type.__mro__[1] is not expected_store_base_type:
+            raise expected_error_type(
+                "source-universe collector base type authority is rebound"
+            )
+        current_base_connect_surface = expected_getattr_static(
+            expected_store_base_type, "_connect", None
+        )
+        current_base_connect_callable = getattr(
+            current_base_connect_surface,
+            "__func__",
+            current_base_connect_surface,
+        )
+        if (
+            current_base_connect_surface is not expected_base_connect_surface
+            or current_base_connect_callable is not expected_base_connect_callable
+            or getattr(current_base_connect_callable, "__code__", None)
+            is not expected_base_connect_code
+        ):
+            raise expected_error_type(
+                "source-universe collector base connection authority is rebound or mutated"
+            )
+        current_base_connect_path_surface = expected_getattr_static(
+            expected_store_base_type, "_connect_path", None
+        )
+        current_base_connect_path_callable = getattr(
+            current_base_connect_path_surface,
+            "__func__",
+            current_base_connect_path_surface,
+        )
+        if (
+            current_base_connect_path_surface is not expected_base_connect_path_surface
+            or current_base_connect_path_callable
+            is not expected_base_connect_path_callable
+            or getattr(current_base_connect_path_callable, "__code__", None)
+            is not expected_base_connect_path_code
+            or getattr(current_base_connect_path_callable, "__globals__", None)
+            is not expected_base_connect_path_globals
+            or expected_base_connect_path_globals.get("sqlite3")
+            is not expected_base_sqlite3
+            or getattr(expected_base_sqlite3, "connect", None)
+            is not expected_base_sqlite_connect
+            or getattr(expected_base_sqlite3, "Row", None)
+            is not expected_base_sqlite_row
+        ):
+            raise expected_error_type(
+                "source-universe collector SQLite connection authority drifted"
+            )
+        current_path_identity_surface = expected_getattr_static(
+            expected_store_type, "_path_file_identity", None
+        )
+        current_path_identity_callable = getattr(
+            current_path_identity_surface,
+            "__func__",
+            current_path_identity_surface,
+        )
+        if (
+            current_path_identity_surface is not expected_path_identity_surface
+            or current_path_identity_callable is not expected_path_identity_callable
+            or getattr(current_path_identity_callable, "__globals__", None)
+            is not expected_path_identity_globals
+            or expected_path_identity_globals.get("os") is not expected_path_os
+            or getattr(expected_path_os, "stat", None) is not expected_path_os_stat
+        ):
+            raise expected_error_type(
+                "source-universe collector file-identity authority drifted"
+            )
         if module_globals.get("_COMMITMENT_FIELD_NAMES") is not expected_field_names:
             raise expected_error_type(
                 "source-universe verification field authority is rebound"

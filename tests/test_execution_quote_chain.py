@@ -477,6 +477,28 @@ def test_replaced_verified_execution_view_cannot_mint_positive_request_binding(
         _project(ledger)
 
 
+def test_instance_shadow_verified_execution_view_fails_closed(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    ledger = _submitted(tmp_path)
+
+    def hostile_view(plan_id):
+        raise AssertionError("instance-shadowed verified_execution_view executed")
+
+    monkeypatch.setattr(
+        ledger,
+        "verified_execution_view",
+        hostile_view,
+    )
+
+    with pytest.raises(
+        ExecutionQuoteChainUnavailable,
+        match="canonical verified execution view authority is unavailable",
+    ):
+        _project(ledger)
+
+
 def test_in_place_verified_execution_view_code_replacement_fails_closed(
     tmp_path,
     monkeypatch,

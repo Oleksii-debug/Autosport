@@ -1002,7 +1002,7 @@ def test_window_postings_reject_provider_order_that_moves_backward_in_time(monke
         )
 
 
-def test_by_id_rejects_provider_rows_not_strictly_increasing_by_transaction(monkeypatch):
+def test_by_id_rejects_provider_rows_that_move_backward_by_transaction(monkeypatch):
     payload = postings_by_id(
         posting(9002, balance="102.50"),
         posting(9001, amount="-3.00", balance="91.00"),
@@ -1011,9 +1011,21 @@ def test_by_id_rejects_provider_rows_not_strictly_increasing_by_transaction(monk
 
     with pytest.raises(
         BetdaqEconomicReadbackError,
-        match="not strictly increasing by TransactionId",
+        match="not ordered ascending by TransactionId",
     ):
         client.read_account_postings_by_id(9000)
+
+
+def test_by_id_identical_duplicate_transaction_is_idempotent(monkeypatch):
+    duplicate = posting(9001)
+    client, _ = economic_client(
+        monkeypatch,
+        postings_by_id(duplicate, duplicate),
+    )
+
+    result = client.read_account_postings_by_id(9000)
+
+    assert [row.transaction_id for row in result.postings] == ["9001"]
 
 
 def test_by_id_rejects_transaction_at_cursor(monkeypatch):

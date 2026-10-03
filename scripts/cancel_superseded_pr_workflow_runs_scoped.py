@@ -883,10 +883,8 @@ def _build_live_pr_qualification_reader(
 
         if not production_dispatch_current():
             raise CancellationError("live PR qualification dispatch changed")
-        pr_number = _require_positive_int(
-            pr_number,
-            field="pull request number",
-        )
+        if type(pr_number) is not int or pr_number <= 0:
+            raise CancellationError("invalid pull request number")
         # This read is cancellation authority. Avoid the nested dynamic
         # live_pr_qualification -> self._pull_request -> self._request path:
         # a transient nested shadow could restore canonical dispatch before the outer

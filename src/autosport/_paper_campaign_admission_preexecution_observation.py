@@ -228,7 +228,6 @@ def _install() -> None:
         campaign_forward_protocol: ForwardEvidenceProtocolEnvelope | None = None,
         **kwargs,
     ) -> None:
-        stable_runtime_init(self, *args, **kwargs)
         campaign_args = (
             campaign_precommit_locator,
             campaign_collector_store,
@@ -241,30 +240,37 @@ def _install() -> None:
                 raise TypeError(
                     "forward campaign execution requires learning_environment"
                 )
-            return
-        if type(learning_environment) is not CausalLearningEnvironment:
+        elif type(learning_environment) is not CausalLearningEnvironment:
             raise TypeError(
                 "learning_environment must be exact CausalLearningEnvironment or None"
             )
-        try:
-            stable_checkpoint(learning_environment)
-        except LearningEnvironmentError as exc:
-            raise _origin.PaperExecutionDecisionOriginError(
-                "campaign learning environment must be at a durable checkpoint before decision"
-            ) from exc
+        else:
+            try:
+                stable_checkpoint(learning_environment)
+            except LearningEnvironmentError as exc:
+                raise _origin.PaperExecutionDecisionOriginError(
+                    "campaign learning environment must be at a durable checkpoint before decision"
+                ) from exc
+        if campaign_requested and (
+            type(campaign_precommit_locator) is not campaign_locator_type
+            or type(campaign_collector_store) is not campaign_store_type
+            or type(campaign_source_spec) is not campaign_source_spec_type
+            or type(campaign_forward_protocol) is not campaign_protocol_type
+        ):
+            raise TypeError(
+                "forward campaign execution requires exact precommit locator, "
+                "collector store, source spec, and forward protocol"
+            )
+
+        # Reject malformed forward capability before the base execution runtime may
+        # materialize or bind PaperBook state. The durable inception transaction is
+        # intentionally later: a failed base constructor must not authorize START.
+        stable_runtime_init(self, *args, **kwargs)
+        if learning_environment is None:
+            return
 
         campaign_binding = None
         if campaign_requested:
-            if (
-                type(campaign_precommit_locator) is not campaign_locator_type
-                or type(campaign_collector_store) is not campaign_store_type
-                or type(campaign_source_spec) is not campaign_source_spec_type
-                or type(campaign_forward_protocol) is not campaign_protocol_type
-            ):
-                raise TypeError(
-                    "forward campaign execution requires exact precommit locator, "
-                    "collector store, source spec, and forward protocol"
-                )
             if (
                 stable_establish_campaign_inception.__code__
                 is not stable_establish_campaign_inception_code

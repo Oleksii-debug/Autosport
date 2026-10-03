@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import pytest
 
+from autosport import _paper_execution_decision_origin as origin_module
 from autosport.decision_ledger import JsonlDecisionLedger
+from autosport.paper_execution_adoption import PaperExecutionAdoptionRuntime
 from autosport.learning_environment import Observation
 from autosport.paper_campaign_admission import PaperCampaignAdmissionError
 from paper_campaign_admission_test_support import AdmissionFixture
@@ -125,7 +127,7 @@ def test_predecision_issuer_rejects_caller_campaign_binding_keys(
     )
 
     with pytest.raises(
-        Exception,
+        origin_module.PaperExecutionDecisionOriginError,
         match="product-owned",
     ):
         issuer(
@@ -133,3 +135,23 @@ def test_predecision_issuer_rejects_caller_campaign_binding_keys(
             available_at="2026-09-20T05:00:01+00:00",
             evidence=((reserved_key, "a" * 64),),
         )
+
+
+
+def test_partial_forward_constructor_rejects_before_base_runtime_side_effects(tmp_path):
+    paper_book_path = tmp_path / "must-not-exist.json"
+
+    with pytest.raises(
+        TypeError,
+        match="forward campaign execution requires learning_environment",
+    ):
+        PaperExecutionAdoptionRuntime(
+            book=object(),
+            ledger=object(),
+            config=object(),
+            max_quote_age=object(),
+            paper_book_path=paper_book_path,
+            campaign_precommit_locator=object(),
+        )
+
+    assert not paper_book_path.exists()

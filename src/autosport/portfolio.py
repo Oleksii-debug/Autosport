@@ -196,10 +196,20 @@ class PortfolioEngine:
 
     @staticmethod
     def scenario_profit(tickets: list[PaperTicket], winning_quote_keys: set[str]) -> Decimal:
+        if type(winning_quote_keys) is not set:
+            raise ValueError("winning_quote_keys must be an exact set")
+        winning_snapshot = winning_quote_keys.copy()
+        if any(
+            type(quote_key) is not str or not quote_key
+            for quote_key in winning_snapshot
+        ):
+            raise ValueError(
+                "winning_quote_keys must contain non-empty string quote keys"
+            )
         ticket_snapshot = _snapshot_open_tickets_for_analysis(tickets)
         try:
             with localcontext(_PORTFOLIO_DECIMAL_CONTEXT):
-                return _scenario_profit_in_context(ticket_snapshot, winning_quote_keys)
+                return _scenario_profit_in_context(ticket_snapshot, winning_snapshot)
         except DecimalException as exc:
             raise _portfolio_arithmetic_error(exc) from exc
 

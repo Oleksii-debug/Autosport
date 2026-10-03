@@ -536,8 +536,11 @@ _TEST_ACQUISITION_ORIGIN = ContextVar(
     default=None,
 )
 
+_CANONICAL_MODULE_GLOBALS = globals()
 _CANONICAL_INSPECT = inspect
 _CANONICAL_GETATTR_STATIC = inspect.getattr_static
+_CANONICAL_MATH = math
+_CANONICAL_MATH_ISFINITE = math.isfinite
 _CANONICAL_HTTP_REQUEST = Request
 _CANONICAL_HTTP_REQUEST_INIT = inspect.getattr_static(Request, "__init__")
 _CANONICAL_HTTP_REQUEST_INIT_CODE = getattr(
@@ -626,9 +629,29 @@ _CANONICAL_SNAPSHOT_ORIGIN_SURFACES = tuple(
 
 
 def _require_production_capture_origin_integrity() -> None:
+    module_globals = _CANONICAL_MODULE_GLOBALS
+    if (
+        module_globals.get("_CANONICAL_MODULE_GLOBALS") is not module_globals
+        or "any" in module_globals
+        or "getattr" in module_globals
+        or "isinstance" in module_globals
+        or "type" in module_globals
+        or "str" in module_globals
+        or "bool" in module_globals
+        or "int" in module_globals
+        or "float" in module_globals
+        or "dict" in module_globals
+        or "ValueError" in module_globals
+        or "TypeError" in module_globals
+    ):
+        raise ProviderObservationIntegrityError(
+            "provider production acquisition builtin dispatch shadowed"
+        )
     if (
         inspect is not _CANONICAL_INSPECT
         or _CANONICAL_INSPECT.getattr_static is not _CANONICAL_GETATTR_STATIC
+        or module_globals.get("math") is not _CANONICAL_MATH
+        or _CANONICAL_MATH.isfinite is not _CANONICAL_MATH_ISFINITE
         or Request is not _CANONICAL_HTTP_REQUEST
         or urlopen is not _CANONICAL_URLOPEN
         or strict_json_loads is not _CANONICAL_STRICT_JSON_LOADS
@@ -765,13 +788,17 @@ def capture_parlay_complete_game_board(
 
 
 def _seal_provider_observation_capture_dispatch() -> None:
-    module_globals = globals()
+    module_globals = _CANONICAL_MODULE_GLOBALS
+    expected_any = any
     expected_capture = capture_parlay_complete_game_board
     expected_capture_code = expected_capture.__code__
     expected_guard = _require_production_capture_origin_integrity
     expected_guard_code = expected_guard.__code__
     expected_witnesses = {
+        "_CANONICAL_MODULE_GLOBALS": _CANONICAL_MODULE_GLOBALS,
         "_CANONICAL_INSPECT": _CANONICAL_INSPECT,
+        "_CANONICAL_MATH": _CANONICAL_MATH,
+        "_CANONICAL_MATH_ISFINITE": _CANONICAL_MATH_ISFINITE,
         "_CANONICAL_GETATTR_STATIC": _CANONICAL_GETATTR_STATIC,
         "_CANONICAL_HTTP_REQUEST": _CANONICAL_HTTP_REQUEST,
         "_CANONICAL_HTTP_REQUEST_INIT": _CANONICAL_HTTP_REQUEST_INIT,
@@ -806,6 +833,25 @@ def _seal_provider_observation_capture_dispatch() -> None:
     expected_witness_items = tuple(expected_witnesses.items())
 
     def require_sealed_surface() -> None:
+        if expected_any(
+            name in module_globals
+            for name in (
+                "any",
+                "getattr",
+                "isinstance",
+                "type",
+                "str",
+                "bool",
+                "int",
+                "float",
+                "dict",
+                "ValueError",
+                "TypeError",
+            )
+        ):
+            raise ProviderObservationIntegrityError(
+                "provider production acquisition builtin dispatch shadowed"
+            )
         if (
             module_globals.get("_require_production_capture_origin_integrity")
             is not expected_guard
@@ -815,7 +861,7 @@ def _seal_provider_observation_capture_dispatch() -> None:
             raise ProviderObservationIntegrityError(
                 "provider production acquisition guard changed"
             )
-        if any(
+        if expected_any(
             module_globals.get(name) is not expected
             for name, expected in expected_witness_items
         ):

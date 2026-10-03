@@ -919,8 +919,14 @@ class PaperBook:
         start_utc = start.astimezone(timezone.utc)
         end_utc = end.astimezone(timezone.utc)
         admission_utc = admission_instant.astimezone(timezone.utc)
+        canonical_admission_ts = admission_utc.isoformat().replace("+00:00", "Z")
+        canonical_window_start = start_utc.isoformat().replace("+00:00", "Z")
+        canonical_window_end = end_utc.isoformat().replace("+00:00", "Z")
         if (
-            start_utc.hour != 0
+            admission_ts != canonical_admission_ts
+            or window_start != canonical_window_start
+            or window_end_exclusive != canonical_window_end
+            or start_utc.hour != 0
             or start_utc.minute != 0
             or start_utc.second != 0
             or start_utc.microsecond != 0
@@ -1293,6 +1299,10 @@ class PaperBook:
                     item["window_authority_generation"],
                 ),
                 ticket_id=ticket_id,
+            )
+        if tuple(admissions) != tuple(sorted(admissions)):
+            raise ValueError(
+                "PaperBook snapshot product_day_admissions must be sorted by ticket_id"
             )
         return admissions
 

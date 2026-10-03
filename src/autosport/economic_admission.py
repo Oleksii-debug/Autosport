@@ -45,6 +45,85 @@ _ADMISSION_PATH_EXISTS_CODE = getattr(_ADMISSION_PATH_EXISTS, "__code__", None)
 _ADMISSION_CANONICAL_PATH_TYPE = type(Path())
 
 
+def _capture_instance_state_class_witnesses(
+    owner: type,
+    names: tuple[str, ...],
+) -> tuple[tuple[str, bool, object], ...]:
+    """Capture whether canonical instance-state names exist on the mutable class."""
+
+    return tuple(
+        (name, name in owner.__dict__, owner.__dict__.get(name))
+        for name in names
+    )
+
+
+def _require_instance_state_class_witnesses(
+    owner: type,
+    witnesses: tuple[tuple[str, bool, object], ...],
+    *,
+    error: str,
+) -> None:
+    """Reject class data descriptors that can shadow trusted instance state."""
+
+    for name, expected_present, expected_value in witnesses:
+        if (
+            (name in owner.__dict__) is not expected_present
+            or owner.__dict__.get(name) is not expected_value
+        ):
+            raise RuntimeError(error)
+
+
+_WORKSPACE_LOCK_STATE_WITNESSES = _capture_instance_state_class_witnesses(
+    WorkspaceEconomicLock,
+    ("workspace", "path", "_handle"),
+)
+_PRODUCT_DAY_STORE_STATE_WITNESSES = _capture_instance_state_class_witnesses(
+    ProductDayRiskWindowStore,
+    ("workspace", "state_path", "_clock", "_authority"),
+)
+_ECONOMIC_GOAL_STORE_STATE_WITNESSES = _capture_instance_state_class_witnesses(
+    EconomicGoalStore,
+    ("workspace", "path"),
+)
+_RUN_REGISTRY_STATE_WITNESSES = _capture_instance_state_class_witnesses(
+    RunRegistry,
+    ("path",),
+)
+_RUN_TRANSACTION_STATE_WITNESSES = _capture_instance_state_class_witnesses(
+    RunTransaction,
+    (
+        "workspace",
+        "run_id",
+        "root",
+        "manifest_path",
+        "run_ledger_path",
+        "staged_book_path",
+        "staged_ledger_path",
+        "staged_summary_path",
+        "_identity",
+    ),
+)
+_MONOTONIC_AUTHORITY_STATE_WITNESSES = _capture_instance_state_class_witnesses(
+    MonotonicWorkspaceAuthority,
+    (
+        "workspace",
+        "domain",
+        "key",
+        "authority_root",
+        "workspace_binding",
+        "workspace_instance_id",
+        "authority_root_selection",
+        "authority_root_binding_path",
+        "workspace_binding_path",
+        "namespace_sha256",
+        "authority_root_activation_path",
+        "journal_dir",
+        "records_dir",
+        "namespace_marker_path",
+    ),
+)
+
+
 # The admission critical section is only atomic while the exact reviewed
 # WorkspaceEconomicLock executable graph remains installed. Freezing this module's
 # globals preserves the class object, not its mutable Python class attributes, so
@@ -110,6 +189,11 @@ _WORKSPACE_LOCK_GLOBAL_WITNESSES = tuple(
 
 
 def _require_workspace_lock_dispatch() -> None:
+    _require_instance_state_class_witnesses(
+        WorkspaceEconomicLock,
+        _WORKSPACE_LOCK_STATE_WITNESSES,
+        error="workspace economic lock state authority changed",
+    )
     if WorkspaceEconomicLock.__dict__.get("FILE_NAME") is not _WORKSPACE_LOCK_FILE_NAME:
         raise RuntimeError("workspace economic lock authority changed")
     for name, expected_descriptor, expected_code in _WORKSPACE_LOCK_DISPATCH_WITNESSES:
@@ -401,6 +485,16 @@ _RISK_DAY_STORE_WITNESSES = tuple(
 def _require_product_day_turnover_dispatch() -> None:
     """Fail closed if positive day/turnover executable authority drifts."""
 
+    _require_instance_state_class_witnesses(
+        ProductDayRiskWindowStore,
+        _PRODUCT_DAY_STORE_STATE_WITNESSES,
+        error="product day store state authority changed",
+    )
+    _require_instance_state_class_witnesses(
+        MonotonicWorkspaceAuthority,
+        _MONOTONIC_AUTHORITY_STATE_WITNESSES,
+        error="monotonic day authority state changed",
+    )
     _require_class_transition_graph(
         MonotonicWorkspaceAuthority,
         methods=_MONOTONIC_TRANSITION_METHOD_WITNESS,
@@ -706,6 +800,11 @@ def _quote_context_with_product_admission_time(
 def _canonical_economic_goal_store(root: Path) -> EconomicGoalStore:
     """Construct the exact durable goal store and reject constructor/path drift."""
 
+    _require_instance_state_class_witnesses(
+        EconomicGoalStore,
+        _ECONOMIC_GOAL_STORE_STATE_WITNESSES,
+        error="economic goal store state authority changed",
+    )
     if (
         EconomicGoalStore.__dict__.get("FILE_NAME") != _ECONOMIC_GOAL_FILE_NAME
         or EconomicGoalStore.__new__ is not _ECONOMIC_GOAL_STORE_NEW
@@ -1264,6 +1363,16 @@ _TRANSACTION_RECOVERY_CODE, _TRANSACTION_RECOVERY_BINDINGS = (
 def _require_admission_recovery_gate_authority() -> None:
     """Keep unresolved-run and crash-recovery blockers on canonical dispatch."""
 
+    _require_instance_state_class_witnesses(
+        RunRegistry,
+        _RUN_REGISTRY_STATE_WITNESSES,
+        error="economic admission run registry state authority changed",
+    )
+    _require_instance_state_class_witnesses(
+        RunTransaction,
+        _RUN_TRANSACTION_STATE_WITNESSES,
+        error="economic admission transaction state authority changed",
+    )
     if (
         transaction_history_requires_recovery is not _TRANSACTION_RECOVERY_FUNCTION
         or type(_TRANSACTION_RECOVERY_FUNCTION) is not FunctionType

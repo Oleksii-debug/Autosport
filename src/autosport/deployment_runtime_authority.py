@@ -879,9 +879,9 @@ class DeploymentRuntimeAuthorityStore:
             raw = self.path.read_text(encoding="utf-8")
         except FileNotFoundError as exc:
             _canonical_monotonic_authority_method(
-            self._authority,
-            "recover",
-        )(observed_state_sha256=None)
+                self._authority,
+                "recover",
+            )(observed_state_sha256=None)
             raise DeploymentRuntimeAuthorityError(
                 "cannot read runtime authority store"
             ) from exc

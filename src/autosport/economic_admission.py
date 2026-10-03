@@ -20,6 +20,10 @@ from .workspace_lock import WorkspaceEconomicLock
 
 
 _ECONOMIC_GOAL_FILE_NAME = EconomicGoalStore.FILE_NAME
+_ECONOMIC_GOAL_STORE_NEW = EconomicGoalStore.__new__
+_ECONOMIC_GOAL_STORE_NEW_CODE = getattr(_ECONOMIC_GOAL_STORE_NEW, "__code__", None)
+_ECONOMIC_GOAL_STORE_INIT = EconomicGoalStore.__init__
+_ECONOMIC_GOAL_STORE_INIT_CODE = getattr(_ECONOMIC_GOAL_STORE_INIT, "__code__", None)
 
 _ADMISSION_PATH_NEW = Path.__new__
 _ADMISSION_PATH_NEW_CODE = getattr(_ADMISSION_PATH_NEW, "__code__", None)
@@ -279,15 +283,33 @@ def _parse_utc_timestamp(value: str) -> datetime | None:
 def _canonical_economic_goal_store(root: Path) -> EconomicGoalStore:
     """Construct the exact durable goal store and reject constructor/path drift."""
 
-    if EconomicGoalStore.__dict__.get("FILE_NAME") != _ECONOMIC_GOAL_FILE_NAME:
+    if (
+        EconomicGoalStore.__dict__.get("FILE_NAME") != _ECONOMIC_GOAL_FILE_NAME
+        or EconomicGoalStore.__new__ is not _ECONOMIC_GOAL_STORE_NEW
+        or getattr(EconomicGoalStore.__new__, "__code__", None)
+        is not _ECONOMIC_GOAL_STORE_NEW_CODE
+        or EconomicGoalStore.__init__ is not _ECONOMIC_GOAL_STORE_INIT
+        or getattr(EconomicGoalStore.__init__, "__code__", None)
+        is not _ECONOMIC_GOAL_STORE_INIT_CODE
+    ):
         raise RuntimeError("economic goal store authority changed")
+    if type(root) is not _ADMISSION_CANONICAL_PATH_TYPE:
+        raise RuntimeError("economic goal store path is not canonical")
     store = EconomicGoalStore(root)
     if type(store) is not EconomicGoalStore:
         raise RuntimeError("economic goal store authority changed")
-    expected_workspace = root.expanduser().resolve(strict=False)
+    if type(store.workspace) is not _ADMISSION_CANONICAL_PATH_TYPE:
+        raise RuntimeError("economic goal store path is not canonical")
+    store_workspace = _ADMISSION_PATH_RESOLVE(
+        _ADMISSION_PATH_EXPANDUSER(store.workspace),
+        strict=False,
+    )
+    expected_path = _ADMISSION_PATH_TRUEDIV(root, _ECONOMIC_GOAL_FILE_NAME)
     if (
-        store.workspace.expanduser().resolve(strict=False) != expected_workspace
-        or store.path != expected_workspace / _ECONOMIC_GOAL_FILE_NAME
+        type(store_workspace) is not _ADMISSION_CANONICAL_PATH_TYPE
+        or type(store.path) is not _ADMISSION_CANONICAL_PATH_TYPE
+        or store_workspace != root
+        or store.path != expected_path
     ):
         raise RuntimeError("economic goal store path is not canonical")
     return store
@@ -309,7 +331,7 @@ def _prepare_paper_day_turnover_snapshot(
     """
 
     goal = risk_policy.economic_goal
-    if goal is None or not book_path.exists():
+    if goal is None or not _ADMISSION_PATH_EXISTS(book_path):
         return None
     try:
         goal_store = _canonical_economic_goal_store(root)

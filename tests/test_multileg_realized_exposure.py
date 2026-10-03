@@ -200,7 +200,7 @@ class MultiLegRealizedExposureProjectionTests(unittest.TestCase):
             {"AUTOSPORT_PAPER_EXECUTION_WITNESS_DIR": str(Path(tmp) / "authority")},
             clear=False,
         ):
-            root = Path(tmp)
+            root = Path(tmp) / "product-workspace"
             actions = (_action("a", "home"), _action("b", "away"))
             _, ledger, plan, result, config, ledger_path, book_path = _execute(
                 root=root,
@@ -255,7 +255,7 @@ class MultiLegRealizedExposureProjectionTests(unittest.TestCase):
             {"AUTOSPORT_PAPER_EXECUTION_WITNESS_DIR": str(Path(tmp) / "authority")},
             clear=False,
         ):
-            root = Path(tmp)
+            root = Path(tmp) / "product-workspace"
             actions = (
                 _action("a", "home"),
                 _action("b", "away"),
@@ -300,7 +300,7 @@ class MultiLegRealizedExposureProjectionTests(unittest.TestCase):
             {"AUTOSPORT_PAPER_EXECUTION_WITNESS_DIR": str(Path(tmp) / "authority")},
             clear=False,
         ):
-            root = Path(tmp)
+            root = Path(tmp) / "product-workspace"
             actions = (_action("a", "home"), _action("b", "away"))
             _, ledger, plan, result, config, _, book_path = _execute(
                 root=root,
@@ -328,7 +328,7 @@ class MultiLegRealizedExposureProjectionTests(unittest.TestCase):
             {"AUTOSPORT_PAPER_EXECUTION_WITNESS_DIR": str(Path(tmp) / "authority")},
             clear=False,
         ):
-            root = Path(tmp)
+            root = Path(tmp) / "product-workspace"
             actions = (
                 _action("a", "home", stake="7.25"),
                 _action("b", "away", stake="11.75"),
@@ -374,7 +374,7 @@ class MultiLegRealizedExposureProjectionTests(unittest.TestCase):
             {"AUTOSPORT_PAPER_EXECUTION_WITNESS_DIR": str(Path(tmp) / "authority")},
             clear=False,
         ):
-            root = Path(tmp)
+            root = Path(tmp) / "product-workspace"
             actions = (_action("a", "home"),)
             _, ledger, plan, result, config, _, book_path = _execute(
                 root=root,
@@ -400,7 +400,7 @@ class MultiLegRealizedExposureProjectionTests(unittest.TestCase):
             {"AUTOSPORT_PAPER_EXECUTION_WITNESS_DIR": str(Path(tmp) / "authority")},
             clear=False,
         ):
-            root = Path(tmp)
+            root = Path(tmp) / "product-workspace"
             actions = (_action("a", "home"),)
             book, ledger, plan, result, config, _, book_path = _execute(
                 root=root,
@@ -449,7 +449,7 @@ class MultiLegRealizedExposureProjectionTests(unittest.TestCase):
             {"AUTOSPORT_PAPER_EXECUTION_WITNESS_DIR": str(Path(tmp) / "authority")},
             clear=False,
         ):
-            root = Path(tmp)
+            root = Path(tmp) / "product-workspace"
             actions = (_action("a", "home"),)
             _, ledger, plan, result, config, _, book_path = _execute(
                 root=root,
@@ -482,7 +482,7 @@ class MultiLegRealizedExposureProjectionTests(unittest.TestCase):
             {"AUTOSPORT_PAPER_EXECUTION_WITNESS_DIR": str(Path(tmp) / "authority")},
             clear=False,
         ):
-            root = Path(tmp)
+            root = Path(tmp) / "product-workspace"
             actions = (_action("a", "home", stake="20.00"),)
             book, ledger, plan, result, config, _, book_path = _execute(
                 root=root,

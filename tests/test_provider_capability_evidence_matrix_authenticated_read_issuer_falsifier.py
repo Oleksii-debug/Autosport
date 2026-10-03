@@ -727,3 +727,90 @@ def test_caller_available_assertion_does_not_become_required_positive_health_aut
     )
 
     assert fact.grade is ProviderCapabilityTruthGrade.AUTHENTICATED_READ_PROVEN
+
+
+def test_available_audit_record_cannot_launder_prior_outage_into_matrix_authority(
+    monkeypatch,
+) -> None:
+    issuance = _product_issued_betdaq_balance(monkeypatch)
+    journal = CapabilityEvidenceJournal()
+    journal.publish(issuance.evidence)
+    journal.publish_availability(
+        CapabilityAvailability(
+            evidence_id=issuance.evidence.evidence_id,
+            state=CapabilityAvailabilityState.TEMPORARILY_UNAVAILABLE,
+            observed_at="2026-09-21T10:01:10+00:00",
+            source_ref="provider-outage",
+            source_payload_sha256="d" * 64,
+        )
+    )
+    journal.publish_availability(
+        CapabilityAvailability(
+            evidence_id=issuance.evidence.evidence_id,
+            state=CapabilityAvailabilityState.AVAILABLE,
+            observed_at="2026-09-21T10:01:20+00:00",
+            source_ref="caller-claims-recovered",
+            source_payload_sha256="e" * 64,
+        )
+    )
+    before = journal.to_json()
+    integration = bind_bookmaker_integration(
+        issuance.profile,
+        integration_kind=BookmakerIntegrationKind.OFFICIAL_API,
+        observed_at="2026-09-21T10:01:30+00:00",
+        source_ref="betdaq-secure-api-after-claimed-recovery",
+        source_payload_sha256="f" * 64,
+    )
+
+    with pytest.raises(
+        ProviderCapabilityEvidenceMatrixError,
+        match="negative runtime availability",
+    ):
+        issue_betdaq_authenticated_read_evidence(
+            issuance,
+            integration,
+            journal=journal,
+        )
+
+    assert journal.to_json() == before
+
+
+def test_fresh_successor_can_recover_matrix_authority_after_old_evidence_outage(
+    monkeypatch,
+) -> None:
+    first = _product_issued_betdaq_balance(monkeypatch)
+    journal = CapabilityEvidenceJournal()
+    journal.publish(first.evidence)
+    journal.publish_availability(
+        CapabilityAvailability(
+            evidence_id=first.evidence.evidence_id,
+            state=CapabilityAvailabilityState.TEMPORARILY_UNAVAILABLE,
+            observed_at="2026-09-21T10:02:00+00:00",
+            source_ref="old-provider-outage",
+            source_payload_sha256="1" * 64,
+        )
+    )
+    successor = _product_issued_betdaq_balance(
+        monkeypatch,
+        observed_minute=5,
+        committed_at="2026-09-21T10:06:00+00:00",
+        review_due_at="2026-09-21T11:06:00+00:00",
+        predecessor_id=first.evidence.evidence_id,
+    )
+    integration = bind_bookmaker_integration(
+        successor.profile,
+        integration_kind=BookmakerIntegrationKind.OFFICIAL_API,
+        observed_at="2026-09-21T10:06:30+00:00",
+        source_ref="betdaq-secure-api-fresh-recovery",
+        source_payload_sha256="2" * 64,
+    )
+
+    fact = issue_betdaq_authenticated_read_evidence(
+        successor,
+        integration,
+        journal=journal,
+    )
+
+    assert fact.grade is ProviderCapabilityTruthGrade.AUTHENTICATED_READ_PROVEN
+    assert fact.evidence_sha256 == successor.evidence.evidence_id
+    assert journal.latest_evidence_id_for(successor.evidence) == successor.evidence.evidence_id

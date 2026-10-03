@@ -67,6 +67,25 @@ def test_cancel_accepts_nonempty_202_success_response_body(monkeypatch) -> None:
     ]
 
 
+def test_cancel_ignores_arbitrary_202_response_body(monkeypatch) -> None:
+    api = GitHubApi(repository="owner/repo", token="token")
+
+    class _UnreadableSuccessResponse(_FakeSuccessResponse):
+        def read(self) -> bytes:
+            raise AssertionError("202 cancellation body must not be read")
+
+    monkeypatch.setattr(
+        controller_module,
+        "urlopen",
+        lambda *_args, **_kwargs: _UnreadableSuccessResponse(
+            202,
+            b"not-json-and-non-authoritative",
+        ),
+    )
+
+    api.cancel(123)
+
+
 @pytest.mark.parametrize(
     ("status", "body"),
     [

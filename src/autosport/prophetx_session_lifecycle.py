@@ -361,14 +361,24 @@ class ProphetXSessionSnapshot:
                 raise ProphetXSessionLifecycleError(
                     "provider-slot wait state requires a future hold horizon"
                 )
-            if (
-                self.session_lineage_id is not None
-                or self.access_expires_at is not None
-                or self.retry_not_before is not None
-            ):
+            if self.session_lineage_id is not None or self.retry_not_before is not None:
                 raise ProphetXSessionLifecycleError(
-                    "provider-slot wait cannot carry active-session or retry evidence"
+                    "provider-slot wait cannot carry active-session or retry authority"
                 )
+            if self.state is ProphetXSessionState.SESSION_POOL_EXHAUSTED:
+                if self.access_expires_at is not None:
+                    raise ProphetXSessionLifecycleError(
+                        "session-pool exhaustion cannot carry access-expiry evidence"
+                    )
+            elif self.access_expires_at is not None:
+                if self.access_expires_at <= self.last_transition_at:
+                    raise ProphetXSessionLifecycleError(
+                        "wait-state access expiry must follow the latest transition"
+                    )
+                if self.access_expires_at > self.slot_hold_until:
+                    raise ProphetXSessionLifecycleError(
+                        "provider-slot hold cannot precede observed access expiry"
+                    )
 
         if self.state in {
             ProphetXSessionState.AUTH_RETRYABLE_FAILURE,
@@ -775,6 +785,7 @@ class ProphetXSessionLifecycle:
                         credential_revision=current.credential_revision,
                         integration_role=current.integration_role,
                         last_transition_at=timestamp,
+                        access_expires_at=expires,
                         slot_hold_until=conservative_hold,
                         transient_failures=0,
                         last_failure_class=current.last_failure_class,

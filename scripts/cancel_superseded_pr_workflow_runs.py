@@ -425,7 +425,24 @@ class GitHubApi:
     def _pull_request(self, pr_number: int) -> dict[str, object]:
         if type(pr_number) is not int or pr_number <= 0:
             raise CancellationError("invalid pull request number")
-        payload = self._request(f"/pulls/{pr_number}")
+
+        request_impl = self._request
+        request_func = getattr(request_impl, "__func__", request_impl)
+        request_self = getattr(request_impl, "__self__", None)
+        request_code = getattr(request_func, "__code__", None)
+        if request_code is None:
+            raise CancellationError("pull request transport authority is unavailable")
+
+        payload = request_impl(f"/pulls/{pr_number}")
+
+        rebound_request = self._request
+        rebound_func = getattr(rebound_request, "__func__", rebound_request)
+        if (
+            getattr(rebound_request, "__self__", None) is not request_self
+            or rebound_func is not request_func
+            or getattr(request_func, "__code__", None) is not request_code
+        ):
+            raise CancellationError("pull request transport authority changed")
         if not isinstance(payload, dict):
             raise CancellationError("invalid pull request response")
         return payload

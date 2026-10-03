@@ -511,7 +511,9 @@ def _seal_source_universe_dispatch() -> None:
     original_verify = verify_source_universe_commitment
     original_verify_code = original_verify.__code__
 
-    def require_dispatch_integrity() -> None:
+    def require_dispatch_integrity(
+        *, allow_sqlite_connect_override: bool = False
+    ) -> None:
         if module_globals.get("CollectorDeltaStore") is not expected_store_type:
             raise expected_error_type(
                 "source-universe collector type authority is rebound"
@@ -634,10 +636,16 @@ def _seal_source_universe_dispatch() -> None:
                 "__func__",
                 current_surface,
             )
+            if current_class_seams.get(name) is not expected_surface:
+                raise expected_error_type(
+                    "source-universe class read-seam witness map drifted: " + name
+                )
+            if current_surface is not expected_surface:
+                raise expected_error_type(
+                    "store canonical durable read seam is class-rebound: " + name
+                )
             if (
-                current_class_seams.get(name) is not expected_surface
-                or current_surface is not expected_surface
-                or current_callable is not expected_callable
+                current_callable is not expected_callable
                 or getattr(current_callable, "__code__", None) is not expected_code
             ):
                 raise expected_error_type(
@@ -682,8 +690,11 @@ def _seal_source_universe_dispatch() -> None:
             is not expected_base_connect_path_globals
             or expected_base_connect_path_globals.get("sqlite3")
             is not expected_base_sqlite3
-            or getattr(expected_base_sqlite3, "connect", None)
-            is not expected_base_sqlite_connect
+            or (
+                not allow_sqlite_connect_override
+                and getattr(expected_base_sqlite3, "connect", None)
+                is not expected_base_sqlite_connect
+            )
             or getattr(expected_base_sqlite3, "Row", None)
             is not expected_base_sqlite_row
         ):
@@ -767,7 +778,12 @@ def _seal_source_universe_dispatch() -> None:
             raise expected_error_type(
                 "source-universe public builder authority is rebound"
             )
-        require_dispatch_integrity()
+        runtime_sqlite_connect = getattr(expected_base_sqlite3, "connect", None)
+        require_dispatch_integrity(
+            allow_sqlite_connect_override=(
+                runtime_sqlite_connect is not expected_base_sqlite_connect
+            )
+        )
         result = original_build(
             store,
             expected_store_path=expected_store_path,
@@ -775,6 +791,11 @@ def _seal_source_universe_dispatch() -> None:
             start_cycle_seq=start_cycle_seq,
             end_cycle_seq=end_cycle_seq,
         )
+        if runtime_sqlite_connect is not expected_base_sqlite_connect:
+            raise expected_error_type(
+                "source-universe collector SQLite connection authority drifted "
+                "during authority dispatch"
+            )
         require_dispatch_integrity()
         if type(result) is not expected_commitment_type:
             raise expected_error_type(
@@ -805,7 +826,12 @@ def _seal_source_universe_dispatch() -> None:
             raise expected_error_type(
                 "source-universe verifier builder authority is rebound"
             )
-        require_dispatch_integrity()
+        runtime_sqlite_connect = getattr(expected_base_sqlite3, "connect", None)
+        require_dispatch_integrity(
+            allow_sqlite_connect_override=(
+                runtime_sqlite_connect is not expected_base_sqlite_connect
+            )
+        )
         result = original_verify(
             store,
             candidate,
@@ -814,6 +840,11 @@ def _seal_source_universe_dispatch() -> None:
             expected_start_cycle_seq=expected_start_cycle_seq,
             expected_end_cycle_seq=expected_end_cycle_seq,
         )
+        if runtime_sqlite_connect is not expected_base_sqlite_connect:
+            raise expected_error_type(
+                "source-universe collector SQLite connection authority drifted "
+                "during authority dispatch"
+            )
         require_dispatch_integrity()
         if type(result) is not expected_commitment_type:
             raise expected_error_type(

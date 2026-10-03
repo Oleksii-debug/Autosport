@@ -2543,3 +2543,113 @@ def test_runtime_authority_rejects_semantic_surface_code_replacement(
             store.records()
     finally:
         target.__code__ = original_code
+
+
+@pytest.mark.parametrize(
+    "helper_name",
+    (
+        "_canonical_text",
+        "_timestamp",
+        "_timestamp_identity",
+        "_sha256_hex",
+        "_stable_hash",
+    ),
+)
+def test_runtime_authority_rejects_learning_environment_helper_rebinding(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    helper_name: str,
+) -> None:
+    path = tmp_path / "deployment-runtime-authority.json"
+    store = DeploymentRuntimeAuthorityStore.initialize_pristine(
+        path,
+        authority_root=_authority_root(tmp_path),
+    )
+    hostile_calls: list[object] = []
+
+    def hostile(*args: object, **kwargs: object) -> object:
+        hostile_calls.append((args, kwargs))
+        raise AssertionError("hostile learning-environment helper executed")
+
+    monkeypatch.setattr(
+        deployment_runtime_authority._learning_environment,
+        helper_name,
+        hostile,
+    )
+    with pytest.raises(
+        DeploymentRuntimeAuthorityError,
+        match="learning-environment helper was replaced",
+    ):
+        store.records()
+
+    assert hostile_calls == []
+
+
+@pytest.mark.parametrize(
+    "helper_name",
+    ("_timestamp_identity", "_stable_hash"),
+)
+def test_runtime_authority_rejects_learning_environment_helper_code_replacement(
+    tmp_path: Path,
+    helper_name: str,
+) -> None:
+    path = tmp_path / "deployment-runtime-authority.json"
+    store = DeploymentRuntimeAuthorityStore.initialize_pristine(
+        path,
+        authority_root=_authority_root(tmp_path),
+    )
+    target = getattr(
+        deployment_runtime_authority._learning_environment,
+        helper_name,
+    )
+    original_code = target.__code__
+
+    def hostile(*args: object, **kwargs: object) -> object:
+        del args, kwargs
+        raise AssertionError("hostile learning-environment helper code executed")
+
+    assert hostile.__code__.co_freevars == original_code.co_freevars
+    target.__code__ = hostile.__code__
+    try:
+        with pytest.raises(
+            DeploymentRuntimeAuthorityError,
+            match="learning-environment helper was replaced",
+        ):
+            store.records()
+    finally:
+        target.__code__ = original_code
+
+
+@pytest.mark.parametrize(
+    ("name", "replacement"),
+    (
+        ("ENVIRONMENT_SCHEMA", "hostile.learning.environment"),
+        ("ENVIRONMENT_SCHEMA_VERSION", 999),
+        ("hashlib", object()),
+        ("json", object()),
+        ("datetime", object()),
+        ("timezone", object()),
+    ),
+)
+def test_runtime_authority_rejects_learning_environment_dependency_rebinding(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    replacement: object,
+) -> None:
+    path = tmp_path / "deployment-runtime-authority.json"
+    store = DeploymentRuntimeAuthorityStore.initialize_pristine(
+        path,
+        authority_root=_authority_root(tmp_path),
+    )
+
+    monkeypatch.setattr(
+        deployment_runtime_authority._learning_environment,
+        name,
+        replacement,
+    )
+    with pytest.raises(
+        DeploymentRuntimeAuthorityError,
+        match="learning-environment dependency was replaced",
+    ):
+        store.records()

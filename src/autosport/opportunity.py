@@ -171,10 +171,12 @@ class EvidenceRef:
 
 
 def _sorted_unique_evidence(
-    values: Iterable[EvidenceRef],
+    values: tuple[EvidenceRef, ...],
     field_name: str,
 ) -> tuple[EvidenceRef, ...]:
-    refs = tuple(values)
+    if type(values) is not tuple:
+        raise OpportunityContractError(f"{field_name} must be a tuple")
+    refs = values
     if any(type(item) is not EvidenceRef for item in refs):
         raise OpportunityContractError(
             f"{field_name} must contain only EvidenceRef values"
@@ -825,7 +827,9 @@ class Opportunity:
                 "probability edge is supported only for PREDICTIVE_EDGE or HYBRID"
             )
 
-        quotes = tuple(self.quotes)
+        if type(self.quotes) is not tuple:
+            raise OpportunityContractError("opportunity quotes must be a tuple")
+        quotes = self.quotes
         if not quotes:
             raise OpportunityContractError(
                 "opportunity requires at least one quote"
@@ -847,7 +851,9 @@ class Opportunity:
             )
         object.__setattr__(self, "quotes", quotes)
 
-        forecasts = tuple(self.forecasts)
+        if type(self.forecasts) is not tuple:
+            raise OpportunityContractError("opportunity forecasts must be a tuple")
+        forecasts = self.forecasts
         if any(type(item) is not ForecastRef for item in forecasts):
             raise OpportunityContractError(
                 "opportunity forecasts must be ForecastRef values"
@@ -1028,7 +1034,9 @@ class OpportunitySet:
     opportunities: tuple[Opportunity, ...]
 
     def __post_init__(self) -> None:
-        values = tuple(self.opportunities)
+        if type(self.opportunities) is not tuple:
+            raise OpportunityContractError("opportunity set members must be a tuple")
+        values = self.opportunities
         if len(values) > _MAX_OPPORTUNITIES:
             raise OpportunityContractError(
                 f"opportunity set exceeds {_MAX_OPPORTUNITIES} members"
@@ -1164,7 +1172,9 @@ class PortfolioPlan:
                 "opportunity_set must be an OpportunitySet"
             )
 
-        allocations = tuple(self.allocations)
+        if type(self.allocations) is not tuple:
+            raise OpportunityContractError("allocations must be a tuple")
+        allocations = self.allocations
         if any(
             type(item) is not PlanAllocation for item in allocations
         ):

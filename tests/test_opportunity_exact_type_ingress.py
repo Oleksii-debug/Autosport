@@ -212,3 +212,56 @@ def test_portfolio_plan_members_require_exact_types() -> None:
             opportunity_set=exact_set,
             allocations=(hostile_allocation,),
         )
+
+class _HostileTuple(tuple):
+    def __iter__(self):
+        raise AssertionError("hostile tuple iteration executed")
+
+
+def test_canonical_tuple_fields_reject_subclasses_before_iteration() -> None:
+    quote = _quote()
+
+    with pytest.raises(OpportunityContractError, match="opportunity quotes must be a tuple"):
+        Opportunity(
+            strategy_class=StrategyClass.ARBITRAGE,
+            decision=OpportunityDecision.WAIT,
+            quotes=_HostileTuple((quote,)),  # type: ignore[arg-type]
+        )
+
+    with pytest.raises(OpportunityContractError, match="opportunity forecasts must be a tuple"):
+        Opportunity(
+            strategy_class=StrategyClass.ARBITRAGE,
+            decision=OpportunityDecision.WAIT,
+            quotes=(quote,),
+            forecasts=_HostileTuple(()),  # type: ignore[arg-type]
+        )
+
+    with pytest.raises(OpportunityContractError, match="opportunity evidence_refs must be a tuple"):
+        Opportunity(
+            strategy_class=StrategyClass.ARBITRAGE,
+            decision=OpportunityDecision.WAIT,
+            quotes=(quote,),
+            evidence_refs=_HostileTuple(()),  # type: ignore[arg-type]
+        )
+
+    opportunity = Opportunity(
+        strategy_class=StrategyClass.ARBITRAGE,
+        decision=OpportunityDecision.WAIT,
+        quotes=(quote,),
+    )
+    with pytest.raises(OpportunityContractError, match="opportunity set members must be a tuple"):
+        OpportunitySet(_HostileTuple((opportunity,)))  # type: ignore[arg-type]
+
+    opportunity_set = OpportunitySet((opportunity,))
+    with pytest.raises(OpportunityContractError, match="allocations must be a tuple"):
+        PortfolioPlan(
+            opportunity_set=opportunity_set,
+            allocations=_HostileTuple(()),  # type: ignore[arg-type]
+        )
+
+    with pytest.raises(OpportunityContractError, match="portfolio_evidence_refs must be a tuple"):
+        PortfolioPlan(
+            opportunity_set=opportunity_set,
+            portfolio_evidence_refs=_HostileTuple(()),  # type: ignore[arg-type]
+        )
+

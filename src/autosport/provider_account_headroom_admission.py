@@ -83,6 +83,55 @@ _ASSERT_ACCOUNT_SNAPSHOT_AUTHORITY_CODE = getattr(
     "__code__",
     None,
 )
+_ASSERT_ACCOUNT_SNAPSHOT_AUTHORITY_CLOSURE_VALUES = tuple(
+    cell.cell_contents
+    for cell in (getattr(_ASSERT_ACCOUNT_SNAPSHOT_AUTHORITY, "__closure__", None) or ())
+)
+_ACCOUNT_SNAPSHOT_AUTHORITY_BOUNDARY = next(
+    (
+        value
+        for value in _ASSERT_ACCOUNT_SNAPSHOT_AUTHORITY_CLOSURE_VALUES
+        if hasattr(value, "assert_live") and hasattr(type(value), "_fingerprint")
+    ),
+    None,
+)
+_ACCOUNT_SNAPSHOT_AUTHORITY_BOUNDARY_TYPE = (
+    type(_ACCOUNT_SNAPSHOT_AUTHORITY_BOUNDARY)
+    if _ACCOUNT_SNAPSHOT_AUTHORITY_BOUNDARY is not None
+    else None
+)
+_ACCOUNT_SNAPSHOT_AUTHORITY_ASSERT_LIVE = (
+    getattr(_ACCOUNT_SNAPSHOT_AUTHORITY_BOUNDARY_TYPE, "assert_live", None)
+    if _ACCOUNT_SNAPSHOT_AUTHORITY_BOUNDARY_TYPE is not None
+    else None
+)
+_ACCOUNT_SNAPSHOT_AUTHORITY_ASSERT_LIVE_CODE = getattr(
+    _ACCOUNT_SNAPSHOT_AUTHORITY_ASSERT_LIVE,
+    "__code__",
+    None,
+)
+_ACCOUNT_SNAPSHOT_AUTHORITY_FINGERPRINT = (
+    getattr(_ACCOUNT_SNAPSHOT_AUTHORITY_BOUNDARY_TYPE, "_fingerprint", None)
+    if _ACCOUNT_SNAPSHOT_AUTHORITY_BOUNDARY_TYPE is not None
+    else None
+)
+_ACCOUNT_SNAPSHOT_AUTHORITY_FINGERPRINT_CODE = getattr(
+    _ACCOUNT_SNAPSHOT_AUTHORITY_FINGERPRINT,
+    "__code__",
+    None,
+)
+_ACCOUNT_SNAPSHOT_CANONICAL_SHA256 = getattr(
+    _account_acquisition,
+    "_canonical_sha256",
+    None,
+)
+_ACCOUNT_SNAPSHOT_CANONICAL_SHA256_CODE = getattr(
+    _ACCOUNT_SNAPSHOT_CANONICAL_SHA256,
+    "__code__",
+    None,
+)
+_ACCOUNT_SNAPSHOT_PAYLOAD = getattr(_account_acquisition, "_snapshot_payload", None)
+_ACCOUNT_SNAPSHOT_PAYLOAD_CODE = getattr(_ACCOUNT_SNAPSHOT_PAYLOAD, "__code__", None)
 _RESOLVE_CAPITAL_AT_RISK = resolve_execution_capital_at_risk
 _RESOLVE_CAPITAL_AT_RISK_CODE = getattr(_RESOLVE_CAPITAL_AT_RISK, "__code__", None)
 _ASSERT_CAPITAL_ISSUED_CURRENT = ExecutionCapitalAtRiskEvidence.assert_issued_current
@@ -825,6 +874,17 @@ def _canonical_account_snapshot_authority(
     *,
     _assert=_ASSERT_ACCOUNT_SNAPSHOT_AUTHORITY,
     _assert_code=_ASSERT_ACCOUNT_SNAPSHOT_AUTHORITY_CODE,
+    _closure_values=_ASSERT_ACCOUNT_SNAPSHOT_AUTHORITY_CLOSURE_VALUES,
+    _boundary=_ACCOUNT_SNAPSHOT_AUTHORITY_BOUNDARY,
+    _boundary_type=_ACCOUNT_SNAPSHOT_AUTHORITY_BOUNDARY_TYPE,
+    _boundary_assert=_ACCOUNT_SNAPSHOT_AUTHORITY_ASSERT_LIVE,
+    _boundary_assert_code=_ACCOUNT_SNAPSHOT_AUTHORITY_ASSERT_LIVE_CODE,
+    _fingerprint=_ACCOUNT_SNAPSHOT_AUTHORITY_FINGERPRINT,
+    _fingerprint_code=_ACCOUNT_SNAPSHOT_AUTHORITY_FINGERPRINT_CODE,
+    _canonical_sha=_ACCOUNT_SNAPSHOT_CANONICAL_SHA256,
+    _canonical_sha_code=_ACCOUNT_SNAPSHOT_CANONICAL_SHA256_CODE,
+    _snapshot_payload=_ACCOUNT_SNAPSHOT_PAYLOAD,
+    _snapshot_payload_code=_ACCOUNT_SNAPSHOT_PAYLOAD_CODE,
 ):
     live_module = getattr(
         _account_acquisition,
@@ -832,10 +892,27 @@ def _canonical_account_snapshot_authority(
         None,
     )
     live_alias = globals().get("assert_account_snapshot_acquisition_authoritative")
+    live_closure_values = tuple(
+        cell.cell_contents
+        for cell in (getattr(_assert, "__closure__", None) or ())
+    )
     if (
         live_module is not _assert
         or live_alias is not _assert
         or getattr(_assert, "__code__", None) is not _assert_code
+        or live_closure_values != _closure_values
+        or _boundary is None
+        or type(_boundary) is not _boundary_type
+        or getattr(_boundary_type, "assert_live", None) is not _boundary_assert
+        or getattr(_boundary_assert, "__code__", None) is not _boundary_assert_code
+        or getattr(_boundary_type, "_fingerprint", None) is not _fingerprint
+        or getattr(_fingerprint, "__code__", None) is not _fingerprint_code
+        or getattr(_account_acquisition, "_canonical_sha256", None) is not _canonical_sha
+        or getattr(_canonical_sha, "__code__", None) is not _canonical_sha_code
+        or getattr(_account_acquisition, "_snapshot_payload", None) is not _snapshot_payload
+        or getattr(_snapshot_payload, "__code__", None) is not _snapshot_payload_code
+        or getattr(_account_acquisition, "AuthoritativeAccountSnapshot", None)
+        is not AuthoritativeAccountSnapshot
     ):
         raise ProviderAccountHeadroomError(
             "canonical account snapshot headroom authority changed"

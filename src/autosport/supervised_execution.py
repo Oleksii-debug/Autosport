@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -359,6 +360,61 @@ def _bound_binding_sha256(
     )
 
 
+def _bound_plan_witness(value: BoundSupervisedExecutionPlan) -> str:
+    if type(value) is not BoundSupervisedExecutionPlan:
+        raise SupervisedExecutionError(
+            "supervised execution plan must be exact BoundSupervisedExecutionPlan"
+        )
+    value.verify_binding()
+    return _bound_binding_sha256(
+        value.execution_plan,
+        value.portfolio_plan_sha256,
+        value.economic_goal_contract_sha256,
+        value.intent_id,
+        value.intent_sha256,
+        value.approval_fingerprint,
+        value.profile_bindings,
+        value.constraints,
+    )
+
+
+def _make_bound_plan_authority_registry():
+    lock = threading.RLock()
+    issued: dict[int, tuple[BoundSupervisedExecutionPlan, str]] = {}
+
+    def issue(value: BoundSupervisedExecutionPlan) -> BoundSupervisedExecutionPlan:
+        witness = _bound_plan_witness(value)
+        with lock:
+            issued[id(value)] = (value, witness)
+        return value
+
+    def assert_authoritative(value: BoundSupervisedExecutionPlan) -> None:
+        try:
+            witness = _bound_plan_witness(value)
+        except SupervisedExecutionError as exc:
+            raise SupervisedExecutionError(
+                "bound supervised execution plan is not current canonical product issuance"
+            ) from exc
+        with lock:
+            record = issued.get(id(value))
+        if (
+            record is None
+            or record[0] is not value
+            or record[1] != witness
+        ):
+            raise SupervisedExecutionError(
+                "bound supervised execution plan is not current canonical product issuance"
+            )
+
+    return issue, assert_authoritative
+
+
+(
+    _issue_bound_supervised_execution_plan,
+    assert_bound_supervised_execution_plan_authoritative,
+) = _make_bound_plan_authority_registry()
+
+
 @dataclass(frozen=True, slots=True)
 class ProviderReadback:
     bookmaker_id: str
@@ -695,7 +751,7 @@ def build_supervised_execution_plan(
         created_at=created_at,
         actions=tuple(actions),
     )
-    return BoundSupervisedExecutionPlan(
+    bound = BoundSupervisedExecutionPlan(
         execution,
         plan_sha,
         economic_goal_contract_sha256,
@@ -705,6 +761,7 @@ def build_supervised_execution_plan(
         bindings,
         constraints,
     )
+    return _issue_bound_supervised_execution_plan(bound)
 
 
 def _require_approval(
@@ -712,7 +769,7 @@ def _require_approval(
     approval: SupervisedApproval,
     at: str,
 ) -> None:
-    bound.verify_binding()
+    assert_bound_supervised_execution_plan_authoritative(bound)
     approval.require_active(at)
     if (
         approval.portfolio_plan_sha256 != bound.portfolio_plan_sha256
@@ -739,7 +796,7 @@ def _require_durable_approval(
 
 
 def _require_reserved(ledger: RealExecutionLedger, bound: BoundSupervisedExecutionPlan) -> None:
-    bound.verify_binding()
+    assert_bound_supervised_execution_plan_authoritative(bound)
     try:
         saga = ledger.saga(bound.execution_plan.plan_id)
     except KeyError as exc:

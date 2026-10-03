@@ -8,8 +8,21 @@ from datetime import datetime
 from decimal import Decimal
 
 from .domain import PaperTicket, TicketStatus
-from .market_outcomes import MarketSettlementOutcomeAuthority
+from . import market_outcomes as _market_outcomes_module
+from .market_outcomes import (
+    MarketSettlementOutcomeAuthority,
+    _assert_canonical_market_outcome_authority_dispatch,
+)
 from .portfolio import PortfolioEngine, _snapshot_open_tickets_for_analysis
+
+
+_CANONICAL_MARKET_OUTCOME_AUTHORITY_TYPE = MarketSettlementOutcomeAuthority
+_CANONICAL_MARKET_OUTCOME_DISPATCH_GUARD = (
+    _assert_canonical_market_outcome_authority_dispatch
+)
+_CANONICAL_MARKET_OUTCOME_DISPATCH_GUARD_CODE = (
+    _assert_canonical_market_outcome_authority_dispatch.__code__
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -152,6 +165,19 @@ class ScenarioSearchEngine:
         A conservative terminal superset is exhaustive but not exact; the report
         labels those two truths separately and never samples an oversized space.
         """
+        if (
+            _market_outcomes_module.MarketSettlementOutcomeAuthority
+            is not _CANONICAL_MARKET_OUTCOME_AUTHORITY_TYPE
+            or _market_outcomes_module._assert_canonical_market_outcome_authority_dispatch
+            is not _CANONICAL_MARKET_OUTCOME_DISPATCH_GUARD
+            or _CANONICAL_MARKET_OUTCOME_DISPATCH_GUARD.__code__
+            is not _CANONICAL_MARKET_OUTCOME_DISPATCH_GUARD_CODE
+        ):
+            raise ValueError(
+                "canonical market outcome authority dispatch guard was replaced"
+            )
+        _CANONICAL_MARKET_OUTCOME_DISPATCH_GUARD()
+
         if type(authorities) not in (list, tuple) or not authorities:
             raise ValueError(
                 "authoritative outcome analysis requires market authorities"

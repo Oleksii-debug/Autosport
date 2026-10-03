@@ -157,6 +157,33 @@ class MarketMirror:
             raise ValueError("max_age must be non-negative")
         return as_of.astimezone(timezone.utc), max_age
 
+    @classmethod
+    def _decision_visible_event(
+        cls,
+        event: MarketEvent,
+        *,
+        boundary: datetime,
+        max_age: timedelta,
+    ) -> bool:
+        """Require provider freshness and local causal availability at one cutoff."""
+
+        if event.status not in cls._DECISION_ELIGIBLE_STATUSES:
+            return False
+        source_time = cls._utc_timestamp(event.source_ts or event.observed_ts)
+        observed_time = cls._utc_timestamp(event.observed_ts)
+        ingest_time = cls._utc_timestamp(event.ingest_ts)
+        if (
+            source_time is None
+            or observed_time is None
+            or ingest_time is None
+            or source_time > boundary
+            or observed_time > boundary
+            or ingest_time > boundary
+        ):
+            return False
+        age = boundary - source_time
+        return timedelta(0) <= age <= max_age
+
     def apply(self, event: MarketEvent) -> MirrorApplyResult:
         """Apply one event iff it advances source-local sequence state.
 
@@ -316,17 +343,16 @@ class MarketMirror:
             market_ids=market_ids,
             selection_ids=selection_ids,
         )
-        eligible: list[MarketEvent] = []
-        for event in captured.events:
-            if event.status not in self._DECISION_ELIGIBLE_STATUSES:
-                continue
-            timestamp = self._utc_timestamp(event.source_ts or event.observed_ts)
-            if timestamp is None:
-                continue
-            age = boundary - timestamp
-            if timedelta(0) <= age <= age_limit:
-                eligible.append(event)
-        return MirrorSnapshot(revision=captured.revision, events=tuple(eligible))
+        eligible = tuple(
+            event
+            for event in captured.events
+            if self._decision_visible_event(
+                event,
+                boundary=boundary,
+                max_age=age_limit,
+            )
+        )
+        return MirrorSnapshot(revision=captured.revision, events=eligible)
 
     def event_for_quote_key(
         self,
@@ -383,17 +409,16 @@ class MarketMirror:
                 if key in self._latest
             )
 
-        eligible: list[MarketEvent] = []
-        for event in events:
-            if event.status not in self._DECISION_ELIGIBLE_STATUSES:
-                continue
-            timestamp = self._utc_timestamp(event.source_ts or event.observed_ts)
-            if timestamp is None:
-                continue
-            age = boundary - timestamp
-            if timedelta(0) <= age <= age_limit:
-                eligible.append(event)
-        return MirrorSnapshot(revision=revision, events=tuple(eligible))
+        eligible = tuple(
+            event
+            for event in events
+            if self._decision_visible_event(
+                event,
+                boundary=boundary,
+                max_age=age_limit,
+            )
+        )
+        return MirrorSnapshot(revision=revision, events=eligible)
 
     def snapshot(self) -> tuple[MarketEvent, ...]:
         """Return a deterministic, ownership-isolated snapshot by source and quote."""

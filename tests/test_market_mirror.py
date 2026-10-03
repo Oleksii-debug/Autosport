@@ -391,6 +391,56 @@ class MarketMirrorTests(unittest.TestCase):
             ("source-fresh",),
         )
 
+    def test_active_views_exclude_future_local_receipt_with_old_provider_time(self) -> None:
+        mirror = MarketMirror()
+        future_local = self.event(
+            selection="late-local",
+            observed_ts="2026-09-16T19:00:01+00:00",
+            source_ts="2026-09-16T18:59:30+00:00",
+            ingest_ts="2026-09-16T19:00:02+00:00",
+        )
+        mirror.apply(future_local)
+        boundary = datetime(2026, 9, 16, 19, 0, tzinfo=timezone.utc)
+
+        full = mirror.active_view(
+            as_of=boundary,
+            max_age=timedelta(minutes=5),
+        )
+        focused = mirror.active_view_for_keys(
+            ((future_local.source_id, future_local.quote_key),),
+            as_of=boundary,
+            max_age=timedelta(minutes=5),
+        )
+
+        self.assertEqual(full.events, ())
+        self.assertEqual(focused.events, ())
+        self.assertEqual(mirror.view().events, (future_local,))
+
+    def test_active_views_exclude_future_ingest_with_available_observation(self) -> None:
+        mirror = MarketMirror()
+        late_ingest = self.event(
+            selection="late-ingest",
+            observed_ts="2026-09-16T18:59:40+00:00",
+            source_ts="2026-09-16T18:59:30+00:00",
+            ingest_ts="2026-09-16T19:00:01+00:00",
+        )
+        mirror.apply(late_ingest)
+        boundary = datetime(2026, 9, 16, 19, 0, tzinfo=timezone.utc)
+
+        full = mirror.active_view(
+            as_of=boundary,
+            max_age=timedelta(minutes=5),
+        )
+        focused = mirror.active_view_for_keys(
+            ((late_ingest.source_id, late_ingest.quote_key),),
+            as_of=boundary,
+            max_age=timedelta(minutes=5),
+        )
+
+        self.assertEqual(full.events, ())
+        self.assertEqual(focused.events, ())
+        self.assertEqual(mirror.view().events, (late_ingest,))
+
     def test_active_snapshot_requires_aware_boundary_and_nonnegative_age(self) -> None:
         mirror = MarketMirror()
         mirror.apply(self.event())

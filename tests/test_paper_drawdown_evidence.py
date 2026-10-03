@@ -13,6 +13,8 @@ from autosport.economic_goal import EconomicGoalContract
 from autosport.economic_goal_store import EconomicGoalStore
 from autosport.paper import PaperBook
 from autosport.paper_drawdown_evidence import (
+    DRAW_DOWN_ECONOMIC_BASIS,
+    DRAW_DOWN_HISTORY_MODE,
     DRAW_DOWN_METRIC_CLASS,
     DRAW_DOWN_SCOPE,
     PaperDrawdownEvidenceError,
@@ -85,6 +87,14 @@ def test_open_stake_is_not_realized_settled_drawdown(tmp_path):
     assert book.balance == Decimal("20")
     assert evidence.scope == DRAW_DOWN_SCOPE
     assert evidence.metric_class == DRAW_DOWN_METRIC_CLASS
+    assert evidence.economic_basis == DRAW_DOWN_ECONOMIC_BASIS
+    assert evidence.history_mode == DRAW_DOWN_HISTORY_MODE
+    assert evidence.path_point_count == len(evidence.points) == 2
+    assert evidence.net_cost_evidence_complete is False
+    assert evidence.marked_equity_supported is False
+    assert evidence.capital_at_risk_included is False
+    assert evidence.risk_of_ruin_included is False
+    assert evidence.stress_drawdown_included is False
     assert evidence.initial_equity == Decimal("100")
     assert evidence.current_equity == Decimal("100")
     assert evidence.minimum_equity == Decimal("100")
@@ -374,6 +384,44 @@ def test_open_event_changes_path_identity_without_minting_drawdown(tmp_path):
     assert after.source_state_sha256 != before.source_state_sha256
     assert after.historical_max_drawdown_amount == before.historical_max_drawdown_amount
     assert after.current_equity == before.current_equity
+
+
+@pytest.mark.parametrize(
+    ("field_name", "forged_value"),
+    (
+        ("economic_basis", "NET_AFTER_ALL_COSTS"),
+        ("history_mode", "AS_KNOWN_AT"),
+        ("net_cost_evidence_complete", True),
+        ("marked_equity_supported", True),
+        ("capital_at_risk_included", True),
+        ("risk_of_ruin_included", True),
+        ("stress_drawdown_included", True),
+    ),
+)
+def test_evidence_shape_rejects_authority_class_upgrade(
+    tmp_path,
+    field_name,
+    forged_value,
+):
+    _initialize(tmp_path)
+    evidence = resolve_paper_drawdown_evidence(tmp_path)
+
+    with pytest.raises(
+        PaperDrawdownEvidenceError,
+        match="economic basis|history mode|cannot upgrade unsupported authority",
+    ):
+        replace(evidence, **{field_name: forged_value})
+
+
+def test_evidence_shape_rejects_forged_path_point_count(tmp_path):
+    _initialize(tmp_path)
+    evidence = resolve_paper_drawdown_evidence(tmp_path)
+
+    with pytest.raises(
+        PaperDrawdownEvidenceError,
+        match="path point count does not match the path",
+    ):
+        replace(evidence, path_point_count=evidence.path_point_count + 1)
 
 
 def test_evidence_shape_rejects_impossible_internal_metrics(tmp_path):

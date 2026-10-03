@@ -36,6 +36,7 @@ SUBMITTED = "2026-10-03T12:00:01.200000+00:00"
 PROVIDER = "2026-10-03T12:00:01.500000+00:00"
 ACKED = "2026-10-03T12:00:01.600000+00:00"
 EVIDENCE_ID = "e" * 64
+REQUEST_SHA256 = "a" * 64
 
 
 def _action(
@@ -81,18 +82,32 @@ def _reserved(tmp_path, *, action: ExecutionAction | None = None) -> RealExecuti
     return ledger
 
 
-def _submitted(tmp_path, *, action: ExecutionAction | None = None) -> RealExecutionLedger:
+def _submitted(
+    tmp_path,
+    *,
+    action: ExecutionAction | None = None,
+    request_sha256: str | None = None,
+) -> RealExecutionLedger:
     ledger = _reserved(tmp_path, action=action)
-    ledger.mark_submitted("attempt-1", submitted_at=SUBMITTED)
+    ledger.mark_submitted(
+        "attempt-1",
+        submitted_at=SUBMITTED,
+        request_sha256=request_sha256,
+    )
     return ledger
 
 
-def _bind_provider(ledger: RealExecutionLedger) -> None:
+def _bind_provider(
+    ledger: RealExecutionLedger,
+    *,
+    request_sha256: str | None = None,
+) -> None:
     ledger.bind_provider_evidence(
         attempt_id="attempt-1",
         evidence_id=EVIDENCE_ID,
         observed_at=PROVIDER,
         source="provider-response",
+        request_sha256=request_sha256,
     )
 
 
@@ -102,17 +117,25 @@ def _ack(
     status: AcknowledgementStatus = AcknowledgementStatus.ACCEPTED,
     odds: Decimal | None = Decimal("2.08"),
     stake: Decimal | None = Decimal("10.00"),
+    request_sha256: str | None = None,
 ) -> None:
-    ledger.acknowledge(
-        ExternalAcknowledgement(
-            attempt_id="attempt-1",
-            external_receipt_id="receipt-1",
-            status=status,
-            acknowledged_at=ACKED,
-            accepted_odds=odds,
-            accepted_stake=stake,
-        )
+    acknowledgement = ExternalAcknowledgement(
+        attempt_id="attempt-1",
+        external_receipt_id="receipt-1",
+        status=status,
+        acknowledged_at=ACKED,
+        accepted_odds=odds,
+        accepted_stake=stake,
     )
+    ledger._bind_provider_acknowledgement_evidence(
+        attempt_id="attempt-1",
+        evidence_id=EVIDENCE_ID,
+        observed_at=ACKED,
+        source="provider-response",
+        request_sha256=request_sha256,
+        acknowledgement=acknowledgement,
+    )
+    ledger.acknowledge(acknowledgement)
 
 
 def _project(ledger: RealExecutionLedger):
@@ -152,9 +175,48 @@ def test_submitted_attempt_does_not_launder_requested_action_into_submit_truth(
     assert evidence.chain_complete is False
 
 
+def test_exact_request_digest_binds_submit_to_provider_without_promoting_price(
+    tmp_path,
+) -> None:
+    ledger = _submitted(tmp_path, request_sha256=REQUEST_SHA256)
+    _bind_provider(ledger, request_sha256=REQUEST_SHA256)
+
+    evidence = _project(ledger)
+
+    assert evidence.chain_status == CHAIN_SUBMIT_INSTRUCTION_BOUND
+    assert evidence.submission_instruction_sha256 == REQUEST_SHA256
+    assert evidence.provider_request_sha256 == REQUEST_SHA256
+    assert evidence.submit_instruction_identity_bound is True
+    assert evidence.provider_request_correlation_bound is True
+    assert evidence.actual_submitted_instruction_bound is True
+    assert evidence.accepted_price_status == ACCEPTED_PRICE_UNKNOWN
+    assert evidence.accepted_price_verified is False
+    assert evidence.chain_complete is False
+
+
+def test_exact_provider_ack_binding_is_visible_without_promoting_price_authority(
+    tmp_path,
+) -> None:
+    ledger = _submitted(tmp_path, request_sha256=REQUEST_SHA256)
+    _ack(
+        ledger,
+        odds=Decimal("2.08"),
+        stake=Decimal("10.00"),
+        request_sha256=REQUEST_SHA256,
+    )
+
+    evidence = _project(ledger)
+
+    assert evidence.chain_status == CHAIN_SUBMIT_INSTRUCTION_BOUND
+    assert evidence.actual_submitted_instruction_bound is True
+    assert evidence.acknowledgement_binding_matches is True
+    assert evidence.accepted_price_status == ACCEPTED_PRICE_ACKNOWLEDGED_UNVERIFIED
+    assert evidence.accepted_price_verified is False
+    assert evidence.chain_complete is False
+
+
 def test_numeric_equal_acknowledgement_still_cannot_complete_chain(tmp_path) -> None:
     ledger = _submitted(tmp_path)
-    _bind_provider(ledger)
     _ack(ledger, odds=Decimal("2.10"), stake=Decimal("10.00"))
 
     evidence = _project(ledger)
@@ -171,7 +233,6 @@ def test_different_acknowledged_odds_remain_distinct_from_decision_request(
     tmp_path,
 ) -> None:
     ledger = _submitted(tmp_path)
-    _bind_provider(ledger)
     _ack(ledger, odds=Decimal("2.06"), stake=Decimal("7.50"))
 
     evidence = _project(ledger)
@@ -188,7 +249,6 @@ def test_partial_acknowledgement_preserves_quantity_without_promoting_price(
     tmp_path,
 ) -> None:
     ledger = _submitted(tmp_path)
-    _bind_provider(ledger)
     _ack(
         ledger,
         status=AcknowledgementStatus.PARTIAL,
@@ -209,7 +269,6 @@ def test_partial_acknowledgement_preserves_quantity_without_promoting_price(
 
 def test_rejected_acknowledgement_has_no_accepted_price_claim(tmp_path) -> None:
     ledger = _submitted(tmp_path)
-    _bind_provider(ledger)
     _ack(
         ledger,
         status=AcknowledgementStatus.REJECTED,
@@ -432,7 +491,6 @@ def test_acknowledgement_observation_cannot_be_reinterpreted_as_verified_price(
     tmp_path,
 ) -> None:
     ledger = _submitted(tmp_path)
-    _bind_provider(ledger)
     _ack(ledger)
 
     evidence = _project(ledger)

@@ -848,6 +848,7 @@ def _build_explicit_run_identity_checker(resolver, request_impl):
 
 
 def _build_live_pr_qualification_reader(
+    workflow_scoped_api_type,
     live_pr_qualification,
     pull_request,
     request_impl,
@@ -862,7 +863,7 @@ def _build_live_pr_qualification_reader(
         api: WorkflowScopedGitHubApi,
         pr_number: int,
     ) -> tuple[str, bool] | object:
-        if not isinstance(api, WorkflowScopedGitHubApi):
+        if not isinstance(api, workflow_scoped_api_type):
             return api.live_pr_qualification(pr_number)
 
         def production_dispatch_current() -> bool:
@@ -933,6 +934,7 @@ _explicit_run_identity_is_current = _build_explicit_run_identity_checker(
     GitHubApi._request,
 )
 _trusted_live_pr_qualification = _build_live_pr_qualification_reader(
+    WorkflowScopedGitHubApi,
     GitHubApi.live_pr_qualification,
     GitHubApi._pull_request,
     GitHubApi._request,

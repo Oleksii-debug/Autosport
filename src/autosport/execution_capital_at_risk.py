@@ -331,10 +331,70 @@ def _install_ledger_read_authority():
     verified_snapshot = ledger_type.verified_snapshot
     execution_view_code = verified_execution_view.__code__
     snapshot_code = verified_snapshot.__code__
+    execution_view_globals = verified_execution_view.__globals__
+    snapshot_globals = verified_snapshot.__globals__
     exact_globals = globals
     exact_getattr = getattr
+    missing = object()
 
-    def require() -> None:
+    # Reuse the canonical #2090 read-view authority pattern: pin the constructor
+    # aliases used by the ledger method itself, not only the consumer's imported
+    # aliases.  Otherwise unchanged verified_execution_view bytecode can still
+    # construct attacker-selected DTO classes after an upstream global rebind.
+    verified_plan_view_type = execution_view_globals["VerifiedExecutionPlanView"]
+    attempt_read_view_type = execution_view_globals["ExecutionAttemptReadView"]
+    provider_evidence_view_type = execution_view_globals["ProviderEvidenceBindingView"]
+    execution_attempt_type = execution_view_globals["ExecutionAttempt"]
+    execution_action_type = execution_view_globals["ExecutionAction"]
+    external_acknowledgement_type = execution_view_globals["ExternalAcknowledgement"]
+    execution_plan_type = execution_view_globals["ExecutionPlan"]
+    snapshot_type = snapshot_globals["VerifiedExecutionLedgerSnapshot"]
+    attempt_state_type = execution_view_globals["AttemptState"]
+    view_type_bindings = (
+        ("VerifiedExecutionPlanView", verified_plan_view_type),
+        ("ExecutionAttemptReadView", attempt_read_view_type),
+        ("ProviderEvidenceBindingView", provider_evidence_view_type),
+        ("ExecutionAttempt", execution_attempt_type),
+        ("ExecutionAction", execution_action_type),
+        ("ExternalAcknowledgement", external_acknowledgement_type),
+        ("ExecutionPlan", execution_plan_type),
+        ("AttemptState", attempt_state_type),
+    )
+    snapshot_type_bindings = (
+        ("VerifiedExecutionLedgerSnapshot", snapshot_type),
+    )
+
+    # These are the direct RealExecutionLedger call targets used while projecting
+    # the verified plan/snapshot.  Reject class rebinding/code mutation and instance
+    # shadowing before any risk projection can consume them.
+    ledger_method_names = (
+        "verified_execution_view",
+        "verified_snapshot",
+        "_parse",
+        "_plan_event",
+        "_plan_from_dict",
+        "_attempt_events",
+        "_state",
+        "_acknowledgement_from_dict",
+        "_found_reconciliation_from_dict",
+        "_reconciliation_snapshot_from_dict",
+        "_stale",
+        "_read_verified_state",
+    )
+    ledger_methods = tuple(
+        (
+            name,
+            ledger_type.__dict__.get(name, missing),
+            exact_getattr(ledger_type.__dict__.get(name, missing), "__code__", None),
+        )
+        for name in ledger_method_names
+    )
+    if any(value is missing or code is None for _, value, code in ledger_methods):
+        raise ExecutionCapitalAtRiskError(
+            "canonical execution-ledger read authority is incomplete"
+        )
+
+    def require(ledger: RealExecutionLedger | None = None) -> None:
         namespace = exact_globals()
         if (
             namespace.get("RealExecutionLedger") is not ledger_type
@@ -344,38 +404,112 @@ def _install_ledger_read_authority():
             or namespace.get("_READ_VERIFIED_EXECUTION_VIEW")
             is not read_execution_view
             or namespace.get("_READ_VERIFIED_SNAPSHOT") is not read_snapshot
-            or ledger_type.verified_execution_view is not verified_execution_view
-            or ledger_type.verified_snapshot is not verified_snapshot
+            or ledger_type.__dict__.get("verified_execution_view")
+            is not verified_execution_view
+            or ledger_type.__dict__.get("verified_snapshot")
+            is not verified_snapshot
             or exact_getattr(verified_execution_view, "__code__", None)
             is not execution_view_code
             or exact_getattr(verified_snapshot, "__code__", None)
             is not snapshot_code
+            or exact_getattr(verified_execution_view, "__globals__", None)
+            is not execution_view_globals
+            or exact_getattr(verified_snapshot, "__globals__", None)
+            is not snapshot_globals
+            or any(
+                execution_view_globals.get(name, missing) is not expected
+                for name, expected in view_type_bindings
+            )
+            or any(
+                snapshot_globals.get(name, missing) is not expected
+                for name, expected in snapshot_type_bindings
+            )
         ):
             raise ExecutionCapitalAtRiskError(
                 "canonical execution-ledger read authority changed"
             )
+        for name, expected, expected_code in ledger_methods:
+            current = ledger_type.__dict__.get(name, missing)
+            if (
+                current is not expected
+                or exact_getattr(current, "__code__", None) is not expected_code
+            ):
+                raise ExecutionCapitalAtRiskError(
+                    "canonical execution-ledger read authority changed"
+                )
+            if ledger is not None and name in getattr(ledger, "__dict__", {}):
+                raise ExecutionCapitalAtRiskError(
+                    "canonical execution-ledger read authority changed"
+                )
 
     def read_execution_view(
         ledger: RealExecutionLedger,
         plan_id: str,
     ) -> VerifiedExecutionPlanView:
-        require()
+        require(ledger)
         if type(ledger) is not ledger_type:
             raise TypeError("ledger must be exact RealExecutionLedger")
         value = verified_execution_view(ledger, plan_id)
-        require()
+        require(ledger)
+        if type(value) is not verified_plan_view_type:
+            raise ExecutionCapitalAtRiskError(
+                "canonical execution plan view type authority changed"
+            )
+        if type(value.plan) is not execution_plan_type:
+            raise ExecutionCapitalAtRiskError(
+                "canonical execution plan type authority changed"
+            )
+        if type(value.attempts) is not tuple:
+            raise ExecutionCapitalAtRiskError(
+                "canonical execution attempt collection is invalid"
+            )
+        for item in value.attempts:
+            if type(item) is not attempt_read_view_type:
+                raise ExecutionCapitalAtRiskError(
+                    "canonical execution attempt read-view type authority changed"
+                )
+            if type(item.attempt) is not execution_attempt_type:
+                raise ExecutionCapitalAtRiskError(
+                    "canonical execution attempt type authority changed"
+                )
+            if type(item.action) is not execution_action_type:
+                raise ExecutionCapitalAtRiskError(
+                    "canonical execution action type authority changed"
+                )
+            if type(item.state) is not attempt_state_type:
+                raise ExecutionCapitalAtRiskError(
+                    "canonical execution attempt state authority changed"
+                )
+            if (
+                item.provider_evidence is not None
+                and type(item.provider_evidence) is not provider_evidence_view_type
+            ):
+                raise ExecutionCapitalAtRiskError(
+                    "canonical provider evidence view type authority changed"
+                )
+            if (
+                item.acknowledgement is not None
+                and type(item.acknowledgement)
+                is not external_acknowledgement_type
+            ):
+                raise ExecutionCapitalAtRiskError(
+                    "canonical acknowledgement view type authority changed"
+                )
         return value
 
     def read_snapshot(ledger: RealExecutionLedger):
-        require()
+        require(ledger)
         if type(ledger) is not ledger_type:
             raise TypeError("ledger must be exact RealExecutionLedger")
         value = verified_snapshot(ledger)
-        require()
+        require(ledger)
+        if type(value) is not snapshot_type:
+            raise ExecutionCapitalAtRiskError(
+                "canonical execution snapshot type authority changed"
+            )
         return value
 
     return require, read_execution_view, read_snapshot
-
 
 (
     _require_ledger_read_authority,
@@ -754,6 +888,7 @@ def _install_capital_risk_dispatch_authority() -> None:
         ("ExecutionLedgerIntegrityError", ExecutionLedgerIntegrityError),
         ("AttemptCapitalAtRisk", AttemptCapitalAtRisk),
         ("ExecutionCapitalAtRiskEvidence", ExecutionCapitalAtRiskEvidence),
+        ("_MAX_EXACT_PRECISION", _MAX_EXACT_PRECISION),
     )
     attempt_post_init = AttemptCapitalAtRisk.__post_init__
     attempt_post_init_code = attempt_post_init.__code__

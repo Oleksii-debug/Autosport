@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import autosport.windows_entry as windows_entry
+from autosport.webview2_release_environment import WEBVIEW2_ENVIRONMENT_OVERRIDES
 from autosport.windows_entry import main
 
 
@@ -157,6 +158,31 @@ class WindowsEntrypointFailClosedTests(unittest.TestCase):
 
         workspace_probe.assert_called_once_with(workspace)
         show_storage_error.assert_called_once_with(workspace, storage_error)
+
+    def test_webview_override_fails_before_runtime_dependency_check(self) -> None:
+        calls: list[str] = []
+        environment = {name: "" for name in WEBVIEW2_ENVIRONMENT_OVERRIDES}
+        environment["WEBVIEW2_USER_DATA_FOLDER"] = " \t "
+        path_patch, workspace_patch = self._interactive_patches(calls=calls)
+
+        with (
+            path_patch,
+            workspace_patch,
+            patch.dict("os.environ", environment, clear=False),
+            patch.object(windows_entry, "_show_startup_error") as show_error,
+            patch.dict(
+                sys.modules,
+                {
+                    "autosport.webview2_runtime_deployment": self._deployment_module(
+                        calls=calls,
+                    ),
+                },
+            ),
+        ):
+            self.assertEqual(main([]), 3)
+
+        self.assertEqual(calls, ["workspace"])
+        show_error.assert_called_once_with(windows_entry._WEBVIEW2_STARTUP_ERROR)
 
     def test_unavailable_runtime_fails_before_webview_shell_start(self) -> None:
         calls: list[str] = []

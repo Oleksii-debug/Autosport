@@ -261,7 +261,7 @@ def resolve_forecast_predictive_authority(
     )
 
 
-def _install_runtime_authority() -> Callable[..., ForecastRef]:
+def _install_runtime_authority() -> tuple[\n    Callable[..., ForecastRef],\n    Callable[..., str | None],\n]:
     """Install non-virtual object-identity admission and the sole durable mint path.
 
     Runtime authority state lives only in this closure.  There is no module-global
@@ -300,6 +300,27 @@ def _install_runtime_authority() -> Callable[..., ForecastRef]:
         ):
             return _AUTHORITY_MISSING_REASON
         return None
+
+    guarded_reason_code = guarded_reason.__code__
+
+    def runtime_forecast_ref_eligibility_reason(
+        reference: ForecastRef,
+        decision_time: object,
+        *,
+        expected_model_id: str | None,
+    ) -> str | None:
+        """Resolve runtime membership without consumer-owned executable witnesses."""
+
+        if guarded_reason.__code__ is not guarded_reason_code:
+            return "predictive authority verifier integrity changed"
+        reason = guarded_reason(
+            reference,
+            decision_time,
+            expected_model_id=expected_model_id,
+        )
+        if guarded_reason.__code__ is not guarded_reason_code:
+            return "predictive authority verifier integrity changed"
+        return reason
 
     def guarded_opportunity_reason(
         self: Opportunity,
@@ -397,8 +418,14 @@ def _install_runtime_authority() -> Callable[..., ForecastRef]:
         authorized[id(reference)] = (reference, fingerprint)
         return reference
 
-    return resolve_authoritative_forecast_ref
+    return (
+        resolve_authoritative_forecast_ref,
+        runtime_forecast_ref_eligibility_reason,
+    )
 
 
-resolve_authoritative_forecast_ref = _install_runtime_authority()
+(
+    resolve_authoritative_forecast_ref,
+    runtime_forecast_ref_eligibility_reason,
+) = _install_runtime_authority()
 _qualification.resolve_predictive_eligibility = resolve_predictive_eligibility

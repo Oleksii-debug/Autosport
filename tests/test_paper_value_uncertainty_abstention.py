@@ -794,7 +794,9 @@ class PaperValueUncertaintyAbstentionTests(unittest.TestCase):
                 decision.stake_ceiling,
             )
 
-    def test_uncertainty_sizing_evaluator_rebinding_fails_closed(self) -> None:
+    def test_coordinated_sizing_witness_rebind_cannot_mint_eligible(
+        self,
+    ) -> None:
         goal = self._goal()
         event = self._event()
         forecast = self._forecast(event, uncertainty=Decimal("0.01"))
@@ -802,43 +804,66 @@ class PaperValueUncertaintyAbstentionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             authorized_ref = self._resolver_authorized_ref(root, event, forecast)
-            evidence = self._sizing_evidence(event, forecast)
+            abstain_evidence = self._sizing_evidence(
+                event,
+                forecast,
+                net_win_profit_per_stake=Decimal("0.50"),
+            )
+            eligible_evidence = self._sizing_evidence(event, forecast)
             policy = self._sizing_policy()
             forged_decision = self._sizing_decision(
                 goal,
                 event,
                 forecast,
-                evidence,
+                eligible_evidence,
                 policy,
             )
             self.assertEqual(forged_decision.action, SizingAction.ELIGIBLE)
             context, ledger_path = self._context(root, event)
 
-            original = paper_strategy_module.evaluate_uncertainty_sizing
+            forged_called = False
+
+            def forged_evaluator(evidence, request, policy):
+                nonlocal forged_called
+                forged_called = True
+                return forged_decision
+
+            missing = object()
+            names = (
+                "evaluate_uncertainty_sizing",
+                "_UNCERTAINTY_SIZING_EVALUATOR",
+                "_UNCERTAINTY_SIZING_EVALUATOR_CODE",
+            )
+            previous = {name: getattr(paper_strategy_module, name, missing) for name in names}
             try:
-                paper_strategy_module.evaluate_uncertainty_sizing = (
-                    lambda evidence, request, policy: forged_decision
-                )
+                paper_strategy_module.evaluate_uncertainty_sizing = forged_evaluator
+                paper_strategy_module._UNCERTAINTY_SIZING_EVALUATOR = forged_evaluator
+                paper_strategy_module._UNCERTAINTY_SIZING_EVALUATOR_CODE = forged_evaluator.__code__
                 self._agent(
                     goal,
                     forecast,
                     predictive_ref=authorized_ref,
-                    sizing_evidence=evidence,
+                    sizing_evidence=abstain_evidence,
                     sizing_policy=policy,
                 ).on_market_event(event, context)
             finally:
-                paper_strategy_module.evaluate_uncertainty_sizing = original
+                for name, value in previous.items():
+                    if value is missing:
+                        delattr(paper_strategy_module, name)
+                    else:
+                        setattr(paper_strategy_module, name, value)
 
+            self.assertFalse(
+                forged_called,
+                "consumer-owned forged evaluator must not be an authority boundary",
+            )
             self.assertEqual(context.paper_book.tickets, {})
             self.assertFalse(ledger_path.exists())
             self.assertTrue(
-                any(
-                    "uncertainty sizing evaluator integrity changed" in note
-                    for note in context.notes
-                )
+                any("insufficient_conservative_edge" in note for note in context.notes)
             )
 
-    def test_predictive_verifier_rebinding_cannot_authorize_self_attested_ref(
+    def test_coordinated_predictive_witness_rebind_cannot_authorize_ref(
         self,
     ) -> None:
         goal = self._goal()
@@ -848,16 +873,19 @@ class PaperValueUncertaintyAbstentionTests(unittest.TestCase):
 
         original = ForecastRef.predictive_eligibility_reason
 
-        def permissive(
-            self,
-            decision_time,
-            *,
-            expected_model_id,
-        ):
+        def permissive(self, decision_time, *, expected_model_id):
             return None
 
+        missing = object()
+        names = (
+            "_PREDICTIVE_FORECAST_ELIGIBILITY_REASON",
+            "_PREDICTIVE_FORECAST_ELIGIBILITY_REASON_CODE",
+        )
+        previous = {name: getattr(paper_strategy_module, name, missing) for name in names}
         try:
             ForecastRef.predictive_eligibility_reason = permissive
+            paper_strategy_module._PREDICTIVE_FORECAST_ELIGIBILITY_REASON = permissive
+            paper_strategy_module._PREDICTIVE_FORECAST_ELIGIBILITY_REASON_CODE = permissive.__code__
             with tempfile.TemporaryDirectory() as tmp:
                 context, ledger_path = self._context(Path(tmp), event)
                 self._agent(
@@ -870,12 +898,17 @@ class PaperValueUncertaintyAbstentionTests(unittest.TestCase):
                 self.assertFalse(ledger_path.exists())
                 self.assertTrue(
                     any(
-                        "predictive authority verifier integrity changed" in note
+                        "predictive eligibility was not resolved from canonical" in note
                         for note in context.notes
                     )
                 )
         finally:
             ForecastRef.predictive_eligibility_reason = original
+            for name, value in previous.items():
+                if value is missing:
+                    delattr(paper_strategy_module, name)
+                else:
+                    setattr(paper_strategy_module, name, value)
 
     def test_predictive_verifier_code_mutation_fails_closed_before_authority(
         self,

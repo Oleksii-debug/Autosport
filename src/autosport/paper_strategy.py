@@ -15,17 +15,14 @@ from .decision_ledger import (
 from .domain import MarketEvent, PaperTicket, TicketLeg
 from .forecasting import ForecastRecord, parse_iso_timestamp
 from .opportunity import ForecastRef, QuoteRef
-from . import predictive_authority as _predictive_authority
 from .price_truth import paper_quote_rejection_reason
 from .probability import paper_value
 from .risk import PaperRiskPolicy, ProposedTicketRiskContext
 from .uncertainty_sizing import (
-    SizingAction,
     UncertaintySizingDecision,
     UncertaintySizingEvidence,
     UncertaintySizingPolicy,
     UncertaintySizingRequest,
-    evaluate_uncertainty_sizing,
 )
 
 
@@ -33,20 +30,10 @@ _MATERIAL_ACTION_SCHEMA = "autosport.paper-value.open-ticket.v1"
 _MATERIAL_ACTION_MARKER = "material_action_id="
 _MATERIAL_ACTION_NAME = "OPEN_PAPER_VALUE_TICKET"
 
-# Importing predictive_authority installs the process-local resolver guard.  Capture
-# that exact producer-owned verifier after installation so this consumer never
-# falls back to ForecastRef's structural/audit-only method through mutable class
-# dispatch.  The code-object witness also fails closed on in-place mutation.
-_PREDICTIVE_FORECAST_ELIGIBILITY_REASON = (
-    _predictive_authority.ForecastRef.predictive_eligibility_reason
-)
-_PREDICTIVE_FORECAST_ELIGIBILITY_REASON_CODE = (
-    _PREDICTIVE_FORECAST_ELIGIBILITY_REASON.__code__
-)
-_UNCERTAINTY_SIZING_EVALUATOR = evaluate_uncertainty_sizing
-_UNCERTAINTY_SIZING_EVALUATOR_CODE = _UNCERTAINTY_SIZING_EVALUATOR.__code__
-_UNCERTAINTY_SIZING_DECISION_TYPE = UncertaintySizingDecision
-_UNCERTAINTY_SIZING_ELIGIBLE = SizingAction.ELIGIBLE
+# Positive predictive and sizing authority is resolved at producer-owned boundaries.
+# Do not cache executable/code witness pairs in this consumer module: coordinated
+# rebinding of a consumer executable and its expected witness must not mint PAPER
+# exposure.
 
 
 class PaperDecisionReconciliationRequired(RuntimeError):
@@ -221,23 +208,24 @@ class PaperValueAgent:
             )
             return None
 
-        verifier = _PREDICTIVE_FORECAST_ELIGIBILITY_REASON
-        if (
-            type(reference) is not ForecastRef
-            or _predictive_authority.ForecastRef.predictive_eligibility_reason
-            is not verifier
-            or verifier.__code__ is not _PREDICTIVE_FORECAST_ELIGIBILITY_REASON_CODE
-        ):
+        if type(reference) is not ForecastRef:
             context.notes.append(
-                "paper-value material action withheld: predictive authority "
-                "verifier integrity changed"
+                "paper-value material action withheld: predictive ForecastRef type "
+                "is not canonical"
             )
             return None
         try:
-            reason = verifier(
-                reference,
-                parse_iso_timestamp(event.observed_ts),
-                expected_model_id=forecast.model_id,
+            # Resolve the producer module at use time. Runtime membership is owned
+            # by predictive_authority's closure, not by a consumer-side function/code
+            # witness pair that can be moved coherently with a forged verifier.
+            from . import predictive_authority as predictive_authority_producer
+
+            reason = (
+                predictive_authority_producer.runtime_forecast_ref_eligibility_reason(
+                    reference,
+                    parse_iso_timestamp(event.observed_ts),
+                    expected_model_id=forecast.model_id,
+                )
             )
         except Exception:
             context.notes.append(
@@ -246,9 +234,7 @@ class PaperValueAgent:
             )
             return None
         if reason is not None:
-            context.notes.append(
-                "paper-value material action withheld: " + reason
-            )
+            context.notes.append("paper-value material action withheld: " + reason)
             return None
 
         witness = reference.predictive_eligibility
@@ -370,16 +356,6 @@ class PaperValueAgent:
             )
             return None
 
-        evaluator = _UNCERTAINTY_SIZING_EVALUATOR
-        if (
-            evaluate_uncertainty_sizing is not evaluator
-            or evaluator.__code__ is not _UNCERTAINTY_SIZING_EVALUATOR_CODE
-        ):
-            context.notes.append(
-                "paper-value material action withheld: canonical uncertainty sizing "
-                "evaluator integrity changed"
-            )
-            return None
         try:
             request = UncertaintySizingRequest(
                 candidate_id=forecast.forecast_id,
@@ -389,7 +365,10 @@ class PaperValueAgent:
                 currency=goal.currency,
                 bankroll=sizing_bankroll,
             )
-            decision = evaluator(
+            # Exact evidence type is established by the binding checks above. Let
+            # the producer-owned type dispatch the canonical evaluator so a consumer
+            # rebind cannot substitute both an evaluator and its expected witness.
+            decision = type(evidence).evaluate_canonical(
                 evidence,
                 request,
                 policy,
@@ -400,18 +379,8 @@ class PaperValueAgent:
                 "could not be evaluated"
             )
             return None
-        if (
-            evaluate_uncertainty_sizing is not evaluator
-            or evaluator.__code__ is not _UNCERTAINTY_SIZING_EVALUATOR_CODE
-            or type(decision) is not _UNCERTAINTY_SIZING_DECISION_TYPE
-        ):
-            context.notes.append(
-                "paper-value material action withheld: canonical uncertainty sizing "
-                "evaluator integrity changed"
-            )
-            return None
 
-        if decision.action is not _UNCERTAINTY_SIZING_ELIGIBLE:
+        if decision.action.value != "eligible":
             reason = ",".join(decision.reasons) if decision.reasons else "abstain"
             context.notes.append(
                 "paper-value material action withheld: canonical uncertainty sizing "
@@ -729,7 +698,7 @@ class PaperValueAgent:
             )
             sizing_eligible = (
                 sizing_decision is not None
-                and sizing_decision.action is _UNCERTAINTY_SIZING_ELIGIBLE
+                and sizing_decision.action.value == "eligible"
                 and sizing_decision.conservative_ev_per_stake >= self.minimum_edge
             )
             if not sizing_eligible:

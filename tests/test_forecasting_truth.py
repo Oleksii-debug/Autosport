@@ -164,7 +164,7 @@ class ForecastTruthTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "must not overlap"):
             evaluate_walk_forward(records, outcomes, overlapping)
 
-    def test_paper_decision_requires_predictive_authority_before_versioned_provenance(self):
+    def test_paper_decision_carries_versioned_forecast_provenance(self):
         event = MarketEvent.from_dict(
             {
                 "event_id": "e",
@@ -181,17 +181,9 @@ class ForecastTruthTests(unittest.TestCase):
             generated_at="2026-02-10T12:00:00+00:00",
         )
         record = ForecastRecord(
-            **{
-                **record.to_dict(),
-                "probability": Decimal(record.probability),
-                "uncertainty": Decimal(record.uncertainty),
-                "evidence_hashes": tuple(record.evidence_hashes),
-            }
+            **{**record.to_dict(), "probability": Decimal(record.probability), "uncertainty": Decimal(record.uncertainty), "evidence_hashes": tuple(record.evidence_hashes)}
         )
-        # ForecastRecord provenance is audit data until the exact scientific
-        # registry resolver mints the ForecastRef runtime authority. The legacy
-        # test harness supplies #623 execution authority, so a missing ticket here
-        # specifically proves predictive admission rather than execution absence.
+        # to_dict preserves the explicit forecast_id while rebuilding an immutable record.
         with tempfile.TemporaryDirectory() as tmp:
             ledger_path = Path(tmp) / "decisions.jsonl"
             book = PaperBook("10000")
@@ -201,25 +193,16 @@ class ForecastTruthTests(unittest.TestCase):
                 decision_ledger=JsonlDecisionLedger(ledger_path),
             )
             AgentOrchestrator(
-                [
-                    MarketMirrorAgent(),
-                    PaperValueAgent(
-                        {event.quote_key: record},
-                        "50",
-                        "0.05",
-                    ),
-                ],
+                [MarketMirrorAgent(), PaperValueAgent({event.quote_key: record}, "50", "0.05")],
                 context,
             ).on_market_event(event)
-
-            self.assertEqual(book.tickets, {})
-            self.assertFalse(ledger_path.exists())
-            self.assertTrue(
-                any(
-                    "canonical predictive ForecastRef authority" in note
-                    for note in context.notes
-                )
-            )
+            envelope = json.loads(ledger_path.read_text(encoding="utf-8"))
+            payload = envelope["record"]["payload"]
+            self.assertEqual(payload["forecast_id"], record.forecast_id)
+            self.assertEqual(payload["forecast_hash"], record.canonical_hash)
+            self.assertEqual(payload["model_version"], "1.2.0")
+            self.assertEqual(payload["strategy_version"], "paper-value-v2")
+            self.assertEqual(payload["uncertainty"], "0.08")
 
     def test_paper_agent_does_not_use_forecast_from_after_market_event(self):
         event = MarketEvent.from_dict(

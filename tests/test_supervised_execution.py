@@ -786,6 +786,86 @@ def test_instance_shadowed_ledger_methods_cannot_reopen_revoked_approval(
         ledger.attempt_state("shadowed-attempt")
 
 
+
+@pytest.mark.parametrize(
+    "method_name",
+    (
+        "_events",
+        "_plan_event",
+        "_append",
+        "_mutate",
+        "_ensure_existing_path_durable",
+        "_sync_parent_directory",
+        "_validate_event",
+        "_parse",
+        "_validate_semantics",
+    ),
+)
+def test_class_rebound_ledger_internal_method_fails_before_hostile_dispatch(
+    monkeypatch,
+    tmp_path,
+    method_name,
+) -> None:
+    bound, approval, _, _ = _bound()
+    ledger = RealExecutionLedger(tmp_path / f"internal-class-{method_name}.jsonl")
+    hostile_calls: list[object] = []
+
+    def hostile(*args, **kwargs):
+        hostile_calls.append((args, kwargs))
+        raise AssertionError("hostile ledger internal executed")
+
+    monkeypatch.setattr(RealExecutionLedger, method_name, hostile)
+
+    with pytest.raises(
+        SupervisedExecutionError,
+        match="canonical real execution ledger internal authority changed",
+    ):
+        reserve_supervised_plan(ledger, bound, approval)
+
+    assert hostile_calls == []
+    with pytest.raises(KeyError):
+        ledger.saga(bound.execution_plan.plan_id)
+
+
+@pytest.mark.parametrize(
+    "method_name",
+    (
+        "_events",
+        "_plan_event",
+        "_append",
+        "_mutate",
+        "_ensure_existing_path_durable",
+        "_sync_parent_directory",
+        "_validate_event",
+        "_parse",
+        "_validate_semantics",
+    ),
+)
+def test_instance_shadowed_ledger_internal_method_fails_before_hostile_dispatch(
+    tmp_path,
+    method_name,
+) -> None:
+    bound, approval, _, _ = _bound()
+    ledger = RealExecutionLedger(tmp_path / f"internal-instance-{method_name}.jsonl")
+    hostile_calls: list[object] = []
+
+    def hostile(*args, **kwargs):
+        hostile_calls.append((args, kwargs))
+        raise AssertionError("instance-shadowed ledger internal executed")
+
+    ledger.__dict__[method_name] = hostile
+
+    with pytest.raises(
+        SupervisedExecutionError,
+        match="canonical real execution ledger internal authority changed",
+    ):
+        reserve_supervised_plan(ledger, bound, approval)
+
+    assert hostile_calls == []
+    with pytest.raises(KeyError):
+        RealExecutionLedger.saga(ledger, bound.execution_plan.plan_id)
+
+
 def test_class_rebound_ledger_method_fails_before_hostile_dispatch(
     monkeypatch,
     tmp_path,

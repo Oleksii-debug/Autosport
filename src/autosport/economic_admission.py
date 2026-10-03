@@ -359,7 +359,7 @@ def _require_class_transition_graph(
 _MONOTONIC_TRANSITION_METHOD_WITNESS, _MONOTONIC_TRANSITION_GLOBAL_WITNESS = (
     _capture_class_transition_graph(
         MonotonicWorkspaceAuthority,
-        ("recover", "prepare", "commit"),
+        ("__init__", "recover", "prepare", "commit"),
     )
 )
 

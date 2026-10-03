@@ -813,6 +813,31 @@ class CapabilityEvidenceJournal:
             journal.publish_availability(item)
         return journal
 
+    def latest_evidence_id_for(
+        self, evidence: CapabilityEvidence
+    ) -> str | None:
+        """Return the exact latest evidence id for the candidate capability/scope."""
+
+        if type(evidence) is not CapabilityEvidence:
+            raise CapabilityEvidenceError(
+                "latest evidence query requires exact CapabilityEvidence"
+            )
+        candidates = [
+            (evidence_id, other)
+            for evidence_id, other in self._evidence.items()
+            if other.capability is evidence.capability
+            and _scope_key(other.scope) == _scope_key(evidence.scope)
+        ]
+        if not candidates:
+            return None
+        return max(
+            candidates,
+            key=lambda item: (
+                _time(item[1].committed_at, "committed_at"),
+                item[0],
+            ),
+        )[0]
+
     def staged_with_exact_evidence(
         self, evidence: CapabilityEvidence
     ) -> "CapabilityEvidenceJournal":

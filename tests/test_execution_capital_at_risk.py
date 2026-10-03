@@ -1091,12 +1091,13 @@ def test_derivation_helper_inplace_code_mutation_is_rejected_before_execution(
     _attempt(ledger, plan)
     canonical = resolve_execution_capital_at_risk(ledger, plan.plan_id)
 
-    called: list[bool] = []
-
     def forged_attempt(_view):
-        called.append(True)
         raise AssertionError("mutated risk helper must not execute")
 
+    # Keep the replacement code closure-free so assignment itself is valid; the
+    # product guard, not Python's free-variable compatibility check, must reject it.
+    assert forged_attempt.__closure__ is None
+    assert capital_risk_module._attempt_risk.__closure__ is None
     monkeypatch.setattr(
         capital_risk_module._attempt_risk,
         "__code__",
@@ -1108,6 +1109,4 @@ def test_derivation_helper_inplace_code_mutation_is_rejected_before_execution(
         match="capital-risk ledger read dispatch changed",
     ):
         canonical.assert_issued_current(ledger)
-
-    assert called == []
 

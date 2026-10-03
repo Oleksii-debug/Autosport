@@ -354,6 +354,12 @@ def capture_campaign_complete_game_board(
     )
     expected_inspect = inspect
     expected_getattr_static = inspect.getattr_static
+    expected_hashlib = hashlib
+    expected_sha256 = hashlib.sha256
+    expected_json = json
+    expected_json_dumps = json.dumps
+    expected_datetime = datetime
+    expected_utc = UTC
 
     def require_stable_dispatch() -> None:
         if (
@@ -362,6 +368,17 @@ def capture_campaign_complete_game_board(
         ):
             raise CampaignProviderCycleCaptureIntegrityError(
                 "campaign provider-cycle reflection dispatch changed"
+            )
+        if (
+            module_globals.get("hashlib") is not expected_hashlib
+            or expected_hashlib.sha256 is not expected_sha256
+            or module_globals.get("json") is not expected_json
+            or expected_json.dumps is not expected_json_dumps
+            or module_globals.get("datetime") is not expected_datetime
+            or module_globals.get("UTC") is not expected_utc
+        ):
+            raise CampaignProviderCycleCaptureIntegrityError(
+                "campaign provider-cycle chronology/digest primitives changed"
             )
         for name, target, code in expected_codes:
             if module_globals.get(name) is not target:
@@ -548,6 +565,12 @@ def capture_campaign_complete_game_board(
                 if (
                     module_globals.get("inspect") is not expected_inspect
                     or expected_inspect.getattr_static is not expected_getattr_static
+                    or module_globals.get("hashlib") is not expected_hashlib
+                    or expected_hashlib.sha256 is not expected_sha256
+                    or module_globals.get("json") is not expected_json
+                    or expected_json.dumps is not expected_json_dumps
+                    or module_globals.get("datetime") is not expected_datetime
+                    or module_globals.get("UTC") is not expected_utc
                     or module_globals.get("_require_canonical_seams")
                     is not require_seams
                     or getattr(require_seams_function, "__code__", None)
@@ -604,6 +627,12 @@ def _seal_campaign_provider_cycle_capture_dispatch() -> None:
     expected_capture_code = expected_capture.__code__
     expected_inspect = inspect
     expected_getattr_static = inspect.getattr_static
+    expected_hashlib = hashlib
+    expected_sha256 = hashlib.sha256
+    expected_json = json
+    expected_json_dumps = json.dumps
+    expected_datetime = datetime
+    expected_utc = UTC
     expected_values = {
         "CollectorDeltaStore": CollectorDeltaStore,
         "CompleteGameBoardEvidenceStore": CompleteGameBoardEvidenceStore,
@@ -615,6 +644,10 @@ def _seal_campaign_provider_cycle_capture_dispatch() -> None:
         "CampaignCompleteBoardCycleReceipt": CampaignCompleteBoardCycleReceipt,
         "CampaignProviderCycleCaptureIntegrityError": expected_error,
         "inspect": expected_inspect,
+        "hashlib": expected_hashlib,
+        "json": expected_json,
+        "datetime": expected_datetime,
+        "UTC": expected_utc,
         "ARTIFACT_KIND": ARTIFACT_KIND,
     }
     expected_callables = tuple(
@@ -660,6 +693,13 @@ def _seal_campaign_provider_cycle_capture_dispatch() -> None:
         if expected_inspect.getattr_static is not expected_getattr_static:
             raise expected_error(
                 "campaign provider-cycle reflection dispatch changed"
+            )
+        if (
+            expected_hashlib.sha256 is not expected_sha256
+            or expected_json.dumps is not expected_json_dumps
+        ):
+            raise expected_error(
+                "campaign provider-cycle chronology/digest primitives changed"
             )
         for name, expected, code in expected_callables:
             if module_globals.get(name) is not expected:

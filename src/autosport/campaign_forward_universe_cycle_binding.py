@@ -75,6 +75,7 @@ _AUTHORIZE_FORWARD_RECEIPTS = authorize_forward_source_receipts
 _VERIFY_FORWARD_EVIDENCE = verify_campaign
 _CANONICAL_CAMPAIGN_EVIDENCE = CampaignEvidence
 _CANONICAL_VERIFICATION_RESULT = VerificationResult
+_CANONICAL_VERIFICATION_CODE = VerificationCode
 _CANONICAL_CAMPAIGN_EVIDENCE_DATACLASS_FIELDS = CampaignEvidence.__dataclass_fields__
 _CANONICAL_CAMPAIGN_EVIDENCE_FIELD_ITEMS = tuple(
     _CANONICAL_CAMPAIGN_EVIDENCE_DATACLASS_FIELDS.items()
@@ -469,12 +470,17 @@ class CampaignForwardEvidenceVerification:
         if (
             type(structural_result.codes) is not tuple
             or not structural_result.codes
-            or not all(type(code) is VerificationCode for code in structural_result.codes)
+            or not all(
+                type(code) is _CANONICAL_VERIFICATION_CODE
+                for code in structural_result.codes
+            )
         ):
             raise CampaignForwardUniverseCycleBindingError(
                 "structural result codes must be canonical VerificationCode values"
             )
-        structural_pass = structural_result.codes == (VerificationCode.PASS,)
+        structural_pass = structural_result.codes == (
+            _CANONICAL_VERIFICATION_CODE.PASS,
+        )
         if structural_result.ok is not structural_pass:
             raise CampaignForwardUniverseCycleBindingError(
                 "structural result ok flag conflicts with canonical verification codes"
@@ -632,6 +638,8 @@ def _require_dispatch_integrity() -> None:
         != _COMPOSED_VERIFICATION_DOMAIN
         or module_globals.get("_COMPOSED_VERIFICATION_SCOPE")
         != _COMPOSED_VERIFICATION_SCOPE
+        or module_globals.get("VerificationCode")
+        is not _CANONICAL_VERIFICATION_CODE
         or module_globals.get("_AUTHORITY_ISSUANCE_CAPABILITY")
         is not _CANONICAL_AUTHORITY_ISSUANCE_CAPABILITY
         or module_globals.get("_VERIFICATION_ISSUANCE_CAPABILITY")
@@ -1420,6 +1428,7 @@ def _seal_campaign_forward_universe_cycle_dispatch() -> None:
     expected_verification_result_type = VerificationResult
     expected_canonical_campaign_evidence = _CANONICAL_CAMPAIGN_EVIDENCE
     expected_canonical_verification_result = _CANONICAL_VERIFICATION_RESULT
+    expected_canonical_verification_code = _CANONICAL_VERIFICATION_CODE
     expected_campaign_evidence_fields = _CANONICAL_CAMPAIGN_EVIDENCE_DATACLASS_FIELDS
     expected_campaign_evidence_field_items = _CANONICAL_CAMPAIGN_EVIDENCE_FIELD_ITEMS
     expected_campaign_evidence_field_descriptors = (
@@ -1541,6 +1550,10 @@ def _seal_campaign_forward_universe_cycle_dispatch() -> None:
             is not expected_canonical_campaign_evidence
             or module_globals.get("_CANONICAL_VERIFICATION_RESULT")
             is not expected_canonical_verification_result
+            or module_globals.get("VerificationCode")
+            is not expected_canonical_verification_code
+            or module_globals.get("_CANONICAL_VERIFICATION_CODE")
+            is not expected_canonical_verification_code
             or module_globals.get("_CANONICAL_CAMPAIGN_EVIDENCE_DATACLASS_FIELDS")
             is not expected_campaign_evidence_fields
             or CampaignEvidence.__dataclass_fields__ is not expected_campaign_evidence_fields

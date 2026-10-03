@@ -295,6 +295,38 @@ class ReleasePackageInputSymlinkFenceTests(unittest.TestCase):
 
             self.assertFalse(paths["package"].exists())
 
+    def test_windows_member_validator_rejects_console_device_names(self) -> None:
+        for member in (
+            "Autosport-V1/examples/demo/CONIN$",
+            "Autosport-V1/examples/demo/conout$.txt",
+        ):
+            with self.subTest(member=member):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "release package contains reserved Windows device name",
+                ):
+                    release_package._validate_windows_member(member)
+
+    def test_builder_rejects_console_device_member_name(self) -> None:
+        if os.name == "nt":
+            self.skipTest("console device names are not ordinary Windows files")
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paths = self._make_inputs(root)
+            (paths["example"] / "CONIN$.txt").write_text(
+                "must-not-publish-as-file\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "release package contains reserved Windows device name",
+            ):
+                self._build(paths)
+
+            self.assertFalse(paths["package"].exists())
+
     def test_builder_rejects_casefolded_windows_member_collision(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+import autosport.deployment_runtime_authority as deployment_runtime_authority
 from autosport.deployment_runtime_authority import (
     STORE_SCHEMA,
     STORE_SCHEMA_VERSION,
@@ -218,6 +219,47 @@ def test_pristine_bootstrap_publish_before_commit_recovers_same_tip(
     )
     assert path.read_bytes() == pristine_bytes
     assert reopened.records() == ()
+
+
+def test_local_publish_directory_sync_precedes_monotonic_commit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "deployment-runtime-authority.json"
+    authority_root = _authority_root(tmp_path)
+    store = DeploymentRuntimeAuthorityStore.initialize_pristine(
+        path,
+        authority_root=authority_root,
+    )
+    directory_sync_seen = False
+
+    original_sync = deployment_runtime_authority._fsync_directory
+    original_commit = MonotonicWorkspaceAuthority.commit
+
+    def tracked_sync(directory: Path) -> None:
+        nonlocal directory_sync_seen
+        original_sync(directory)
+        if directory.resolve(strict=False) == store.workspace:
+            directory_sync_seen = True
+
+    def tracked_commit(
+        authority: MonotonicWorkspaceAuthority,
+        **kwargs: object,
+    ) -> object:
+        if authority is store._authority:
+            assert directory_sync_seen
+        return original_commit(authority, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(
+        deployment_runtime_authority,
+        "_fsync_directory",
+        tracked_sync,
+    )
+    monkeypatch.setattr(MonotonicWorkspaceAuthority, "commit", tracked_commit)
+
+    _append(store, 0)
+
+    assert directory_sync_seen
 
 
 def test_valid_old_store_restore_is_rejected_by_independent_authority(

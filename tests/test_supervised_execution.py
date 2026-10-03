@@ -196,7 +196,7 @@ def _profile(*, observed_at: str = DECISION_TS) -> BookmakerCapabilityProfile:
     )
 
 
-def _bound():
+def _bound(*, created_at: str = CREATED_AT):
     intent, policy, book = _intent()
     graph = PortfolioDependencyGraph.for_inputs(book, (intent,))
     portfolio = build_portfolio_plan(
@@ -243,7 +243,7 @@ def _bound():
         (_profile(),),
         approval,
         (constraint,),
-        created_at=CREATED_AT,
+        created_at=created_at,
     )
     return bound, approval, portfolio, intent
 
@@ -1480,6 +1480,22 @@ def test_durable_revocation_rejects_original_approved_object_after_restart() -> 
                 action_id=bound.execution_plan.actions[0].action_id,
                 attempt_id="attempt-revoked",
             )
+
+
+
+def test_reservation_rejects_future_dated_product_issued_plan(tmp_path) -> None:
+    bound, approval, _, _ = _bound(
+        created_at="2026-09-18T13:20:04+00:00",
+    )
+    ledger = RealExecutionLedger(tmp_path / "future-created-plan.jsonl")
+
+    with pytest.raises(
+        SupervisedExecutionError,
+        match="creation is in the future relative to trusted clock",
+    ):
+        reserve_supervised_plan(ledger, bound, approval)
+
+    assert not ledger.path.exists()
 
 
 def test_trusted_clock_prevents_backdating_expired_quote(monkeypatch) -> None:

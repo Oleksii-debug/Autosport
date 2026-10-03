@@ -1610,6 +1610,7 @@ class PersistentLiveDecisionLoop:
                     )
                 ),
             )
+            self._verify_intent_factory_provenance()
             produced = self.intent_factory(input_id, focused)
             self._intent_cache[input_id] = self._validated_intents(produced)
 
@@ -1739,6 +1740,7 @@ class PersistentLiveDecisionLoop:
         snapshots: dict[str, MirrorSnapshot],
     ) -> None:
         for input_id, snapshot in snapshots.items():
+            self._verify_intent_factory_provenance()
             produced = self.intent_factory(input_id, snapshot)
             self._intent_cache[input_id] = self._validated_intents(produced)
 

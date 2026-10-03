@@ -128,6 +128,9 @@ class AutosportApp(tk.Tk):
         self._active_strategy_id = "baseline-v1"
         self._active_research_plan: ResearchStrategyPlan | None = None
         self._closing = False
+        self._close_teardown_unresolved = False
+        self._close_teardown_workspace: Path | None = None
+        self._last_teardown_failure_workspace: Path | None = None
         startup_status = (
             text("ui.status.startup.ready")
             if self._startup_economic_error is None
@@ -480,6 +483,7 @@ class AutosportApp(tk.Tk):
         return None
 
     def _hide_uncertain_economic_state(self, ticket_message: str) -> bool:
+        self._last_teardown_failure_workspace = None
         session = self.session
         self.session = None
         self.bank.set(
@@ -514,6 +518,7 @@ class AutosportApp(tk.Tk):
         try:
             session.close()
         except BaseException as exc:
+            self._last_teardown_failure_workspace = session_workspace
             if session_workspace is not None:
                 self._block_workspace_for_recovery(session_workspace)
             if not isinstance(exc, Exception):
@@ -527,6 +532,24 @@ class AutosportApp(tk.Tk):
             )
             return False
         return True
+
+    def _remember_close_teardown_failure(self) -> None:
+        self._close_teardown_unresolved = True
+        failed_workspace = self.__dict__.get("_last_teardown_failure_workspace")
+        self._close_teardown_workspace = (
+            Path(failed_workspace) if failed_workspace is not None else None
+        )
+
+    def _clear_close_teardown_after_recovery(self, workspace: Path) -> None:
+        if not self.__dict__.get("_close_teardown_unresolved", False):
+            return
+        target = self.__dict__.get("_close_teardown_workspace")
+        if target is not None and Path(target) != Path(workspace):
+            return
+        if target is None and self._recovery_required_workspaces:
+            return
+        self._close_teardown_unresolved = False
+        self._close_teardown_workspace = None
 
     def choose_dataset(self) -> None:
         if self._closing:
@@ -904,6 +927,7 @@ class AutosportApp(tk.Tk):
         self.bank.set(self._bank_text())
         self._refresh_tickets()
         self._recovery_required_workspaces.discard(replay_workspace)
+        self._clear_close_teardown_after_recovery(replay_workspace)
         self.status.set(summary + text("ui.status.recovery.ready_suffix"))
         messagebox.showinfo(text("ui.dialog.title"), text("ui.info.recovery.complete"))
 
@@ -1094,6 +1118,16 @@ class AutosportApp(tk.Tk):
             self._append_log(close_message)
             self.bell()
             return
+        if self.__dict__.get("_close_teardown_unresolved", False):
+            close_message = text("ui.status.close.teardown_blocked")
+            self.status.set(close_message)
+            self._append_log(close_message)
+            self.bell()
+            messagebox.showerror(
+                text("ui.dialog.title"),
+                text("ui.error.close.teardown"),
+            )
+            return
         self._closing = True
         try:
             teardown_succeeded = self._hide_uncertain_economic_state(
@@ -1101,11 +1135,13 @@ class AutosportApp(tk.Tk):
             )
         except BaseException:
             # Process-control exceptions still leave economic truth quarantined by
-            # _hide_uncertain_economic_state. Keep the window alive if control
-            # returns to Tk/test code rather than destroying it from a finally.
+            # _hide_uncertain_economic_state. Persist the close latch too so a
+            # later close gesture cannot reinterpret the detached session as safe.
+            self._remember_close_teardown_failure()
             self._closing = False
             raise
         if not teardown_succeeded:
+            self._remember_close_teardown_failure()
             self._closing = False
             close_message = text("ui.status.close.teardown_blocked")
             self.status.set(close_message)
@@ -1116,6 +1152,8 @@ class AutosportApp(tk.Tk):
                 text("ui.error.close.teardown"),
             )
             return
+        self._close_teardown_unresolved = False
+        self._close_teardown_workspace = None
         self.destroy()
 
 

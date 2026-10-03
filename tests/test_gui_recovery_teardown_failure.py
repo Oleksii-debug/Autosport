@@ -60,6 +60,9 @@ def _base_partial_app() -> AutosportApp:
     app._active_research_plan = None
     app._recovery_required_workspaces = set()
     app._closing = False
+    app._close_teardown_unresolved = False
+    app._close_teardown_workspace = None
+    app._last_teardown_failure_workspace = None
     app.session = _RaisingCloseSession(Path("economic-workspace"))
     app.bank = _Value("STALE BANKROLL=9999")
     app.tickets = _Tickets("STALE TICKET=should-not-remain-visible")
@@ -168,13 +171,16 @@ def test_close_teardown_failure_keeps_window_open_and_quarantines_workspace() ->
 
     with patch("autosport.gui.messagebox.showerror") as showerror:
         AutosportApp.close_app(app)
+        AutosportApp.close_app(app)
 
     assert stale is not None
     assert stale.closed
     assert app.session is None
     assert app._closing is False
+    assert app._close_teardown_unresolved is True
+    assert app._close_teardown_workspace == Path("economic-workspace")
     assert destroy_calls == []
-    assert bell_calls == ["bell"]
+    assert bell_calls == ["bell", "bell"]
     assert Path("economic-workspace") in app._recovery_required_workspaces
     assert "9999" not in app.bank.value
     assert app.tickets.lines == [text("ui.status.close.teardown_ticket")]
@@ -184,10 +190,30 @@ def test_close_teardown_failure_keeps_window_open_and_quarantines_workspace() ->
         "вторинна_помилка=OSError: simulated session close failure" in line
         for line in app._logs
     )
-    showerror.assert_called_once_with(
+    assert showerror.call_count == 2
+    showerror.assert_called_with(
         text("ui.dialog.title"),
         text("ui.error.close.teardown"),
     )
+
+
+def test_close_teardown_latch_clears_only_after_matching_recovery() -> None:
+    app = _base_partial_app()
+    failed_workspace = Path("economic-workspace")
+    other_workspace = Path("other-workspace")
+    app._close_teardown_unresolved = True
+    app._close_teardown_workspace = failed_workspace
+    app._recovery_required_workspaces = {failed_workspace, other_workspace}
+
+    app._recovery_required_workspaces.discard(other_workspace)
+    AutosportApp._clear_close_teardown_after_recovery(app, other_workspace)
+    assert app._close_teardown_unresolved is True
+    assert app._close_teardown_workspace == failed_workspace
+
+    app._recovery_required_workspaces.discard(failed_workspace)
+    AutosportApp._clear_close_teardown_after_recovery(app, failed_workspace)
+    assert app._close_teardown_unresolved is False
+    assert app._close_teardown_workspace is None
 
 
 def test_close_process_control_failure_never_destroys_window() -> None:
@@ -213,6 +239,8 @@ def test_close_process_control_failure_never_destroys_window() -> None:
 
     assert app.session is None
     assert app._closing is False
+    assert app._close_teardown_unresolved is True
+    assert app._close_teardown_workspace == exact_workspace
     assert destroy_calls == []
     assert bell_calls == []
     assert exact_workspace in app._recovery_required_workspaces
@@ -245,6 +273,8 @@ def test_close_success_destroys_only_after_session_teardown() -> None:
     assert close_order == ["session.close", "destroy"]
     assert app.session is None
     assert app._closing is True
+    assert app._close_teardown_unresolved is False
+    assert app._close_teardown_workspace is None
     assert app._recovery_required_workspaces == set()
 
 

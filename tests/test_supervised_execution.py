@@ -391,6 +391,19 @@ def test_mutated_issued_bound_plan_revokes_product_authority() -> None:
         assert_bound_supervised_execution_plan_authoritative(bound)
 
 
+def test_malformed_post_issuance_mutation_fails_closed_as_supervised_error() -> None:
+    bound, _, _, _ = _bound()
+    assert_bound_supervised_execution_plan_authoritative(bound)
+
+    object.__setattr__(bound, "constraints", (object(),))
+
+    with pytest.raises(
+        SupervisedExecutionError,
+        match="not current canonical product issuance",
+    ):
+        assert_bound_supervised_execution_plan_authoritative(bound)
+
+
 def test_reservation_rejects_structurally_valid_but_unissued_bound_plan(tmp_path) -> None:
     bound, approval, _, _ = _bound()
     reconstructed = BoundSupervisedExecutionPlan(

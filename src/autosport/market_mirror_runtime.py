@@ -132,7 +132,7 @@ class FocusedMirrorDependencyIndex:
     @property
     def input_ids(self) -> tuple[str, ...]:
         with self._lock:
-            return tuple(self._dependencies)
+            return tuple(sorted(self._dependencies))
 
     def _dependency(self, input_id: str) -> FocusedMirrorDependency:
         normalized_id = self._input_id(input_id)
@@ -148,7 +148,12 @@ class FocusedMirrorDependencyIndex:
             raise TypeError("batch must be a MirrorInvalidationBatch")
 
         with self._lock:
-            dependencies = tuple(self._dependencies.values())
+            dependencies = tuple(
+                sorted(
+                    self._dependencies.values(),
+                    key=lambda dependency: dependency.input_id,
+                )
+            )
 
         if batch.full_refresh_required:
             snapshot = self._mirror.snapshot()

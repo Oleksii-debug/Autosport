@@ -481,6 +481,62 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             selection_ids="selection-b",
         )
 
+    def test_input_registration_permutation_has_one_canonical_decision_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as left_directory, tempfile.TemporaryDirectory() as right_directory:
+            left_workspace = Path(left_directory)
+            right_workspace = Path(right_directory)
+            clock_left = _ManualClock(self.START + timedelta(seconds=1))
+            clock_right = _ManualClock(self.START + timedelta(seconds=1))
+            batch = (
+                self._event(selection="selection-a", sequence=1),
+                self._event(selection="selection-b", sequence=1),
+            )
+            left = self._loop(
+                left_workspace,
+                observer=_DurableObserver(left_workspace, [batch]),
+                factory=_EmptyIntentFactory(),
+                clock=clock_left,
+            )
+            right = self._loop(
+                right_workspace,
+                observer=_DurableObserver(right_workspace, [batch]),
+                factory=_EmptyIntentFactory(),
+                clock=clock_right,
+            )
+
+            left.register_input("input-b", selection_ids="selection-b")
+            left.register_input("input-a", selection_ids="selection-a")
+            right.register_input("input-a", selection_ids="selection-a")
+            right.register_input("input-b", selection_ids="selection-b")
+
+            self.assertEqual(left.dependencies.input_ids, ("input-a", "input-b"))
+            self.assertEqual(right.dependencies.input_ids, ("input-a", "input-b"))
+
+            left_result = left.run_cycle()
+            right_result = right.run_cycle()
+
+            self.assertEqual(left_result.status, LiveCycleStatus.DECIDED)
+            self.assertEqual(right_result.status, LiveCycleStatus.DECIDED)
+            self.assertEqual(left_result.affected_input_ids, ("input-a", "input-b"))
+            self.assertEqual(right_result.affected_input_ids, ("input-a", "input-b"))
+            self.assertEqual(left_result.plan.plan_sha256, right_result.plan.plan_sha256)
+            self.assertEqual(left_result.decision_id, right_result.decision_id)
+
+            left_record = JsonlDecisionLedger(
+                left_workspace / "decisions.jsonl"
+            ).verified_records()[0]
+            right_record = JsonlDecisionLedger(
+                right_workspace / "decisions.jsonl"
+            ).verified_records()[0]
+            self.assertEqual(
+                left_record.payload["market_state_sha256"],
+                right_record.payload["market_state_sha256"],
+            )
+            self.assertEqual(
+                left_record.payload["decision_context_sha256"],
+                right_record.payload["decision_context_sha256"],
+            )
+
     def test_first_cycle_rebuilds_all_then_only_affected_input_recomputes(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

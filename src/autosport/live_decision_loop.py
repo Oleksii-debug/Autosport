@@ -970,7 +970,9 @@ class PersistentLiveDecisionLoop:
         if len(self._input_specs) >= self.bounds.max_registered_inputs:
             raise ValueError("max_registered_inputs would be exceeded")
 
-        previous_specs = tuple(self._input_specs.values())
+        previous_specs = tuple(
+            sorted(self._input_specs.values(), key=lambda spec: spec.input_id)
+        )
         dependency = self.dependencies.register(
             candidate.input_id,
             source_ids=candidate.source_ids,
@@ -994,7 +996,9 @@ class PersistentLiveDecisionLoop:
         existing = self._input_specs.get(normalized_id)
         if existing is None:
             return False
-        previous_specs = tuple(self._input_specs.values())
+        previous_specs = tuple(
+            sorted(self._input_specs.values(), key=lambda spec: spec.input_id)
+        )
         if not self.dependencies.unregister(normalized_id):
             raise LiveDecisionProgressError(
                 "live dependency registry is inconsistent during retirement"
@@ -1130,7 +1134,7 @@ class PersistentLiveDecisionLoop:
             for input_id in registered_input_ids:
                 self._pending_affected[input_id] = None
 
-        refresh_input_ids = tuple(self._pending_affected)
+        refresh_input_ids = tuple(sorted(self._pending_affected))
         affected = refresh_input_ids
         if not affected:
             return LiveCycleResult(
@@ -1279,7 +1283,10 @@ class PersistentLiveDecisionLoop:
                 "schema_version": 1,
                 "inputs": [
                     spec.to_dict()
-                    for spec in self._input_specs.values()
+                    for spec in sorted(
+                        self._input_specs.values(),
+                        key=lambda item: item.input_id,
+                    )
                 ],
             }
         )
@@ -1661,7 +1668,7 @@ class PersistentLiveDecisionLoop:
         ):
             raise TypeError("input_ids must be a tuple of strings")
         flattened: list[object] = []
-        for input_id in input_ids:
+        for input_id in sorted(input_ids):
             flattened.extend(self._intent_cache.get(input_id, ()))
         return tuple(flattened)
 
@@ -2171,7 +2178,12 @@ class PersistentLiveDecisionLoop:
         values = raw["inputs"]
         if type(values) is not list:
             raise LiveDecisionProgressError("live dependency inputs must be a JSON array")
-        specs = tuple(_InputSpec.from_dict(value) for value in values)
+        specs = tuple(
+            sorted(
+                (_InputSpec.from_dict(value) for value in values),
+                key=lambda spec: spec.input_id,
+            )
+        )
         if len({spec.input_id for spec in specs}) != len(specs):
             raise LiveDecisionProgressError(
                 "live dependency registry contains duplicate input_id"
@@ -2183,7 +2195,9 @@ class PersistentLiveDecisionLoop:
         *,
         expected_previous: tuple[_InputSpec, ...],
     ) -> None:
-        candidate = tuple(self._input_specs.values())
+        candidate = tuple(
+            sorted(self._input_specs.values(), key=lambda spec: spec.input_id)
+        )
         payload = {
             "schema": _INPUTS_SCHEMA,
             "schema_version": _INPUTS_VERSION,
@@ -2412,7 +2426,7 @@ class PersistentLiveDecisionLoop:
         ):
             raise TypeError("input_ids must be a tuple of strings")
         payload: list[dict[str, str]] = []
-        for input_id in input_ids:
+        for input_id in sorted(input_ids):
             try:
                 digest = self._input_market_sha256[input_id]
             except KeyError as exc:

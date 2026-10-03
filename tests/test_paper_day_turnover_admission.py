@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
@@ -220,6 +221,51 @@ def test_current_day_turnover_still_consumes_exact_owner_cap(tmp_path):
     assert result.admitted is False
     assert result.risk.reason == "economic goal turnover limit exceeded"
     assert len(result.book.tickets) == 1
+
+
+def test_under_lock_goal_successor_cannot_be_hidden_by_live_load_rebinding(tmp_path):
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    old = now - timedelta(days=2)
+    goal = _goal()
+    goal_store = EconomicGoalStore(tmp_path)
+    goal_store.initialize_owner(goal)
+
+    book = _book_with_settled_turnover(placed_at=_timestamp(old), stake="50")
+    book_path = tmp_path / "paper_book.json"
+    book.save(book_path)
+    policy = _policy(goal)
+    root = tmp_path.resolve()
+
+    snapshot = economic_admission._prepare_paper_day_turnover_snapshot(
+        root=root,
+        book_path=book_path,
+        risk_policy=policy,
+    )
+    assert snapshot is not None
+
+    tighter_goal = replace(
+        goal,
+        revision=goal.revision + 1,
+        max_turnover_fraction=Decimal("0.01"),
+    )
+    goal_store.persist_automatic_successor(tighter_goal)
+
+    original_load = EconomicGoalStore.load
+    try:
+        EconomicGoalStore.load = lambda self: goal
+        with WorkspaceEconomicLock(root) as workspace_lock:
+            room = economic_admission._revalidated_product_day_turnover_room(
+                snapshot=snapshot,
+                root=root,
+                book=PaperBook.load(book_path),
+                risk_policy=policy,
+                placed_at=_timestamp(now),
+                workspace_lock=workspace_lock,
+            )
+    finally:
+        EconomicGoalStore.load = original_load
+
+    assert room is None
 
 
 def test_missing_durable_goal_never_mints_day_turnover_headroom(tmp_path):

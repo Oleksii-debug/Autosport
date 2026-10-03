@@ -370,10 +370,27 @@ def _build_historical_snapshot_provider_origin_authority():
     provider_type = ParlayApiSportProvider
     base_provider_type = ParlayApiTableTennisProvider
     canonical_provider_init = provider_type.__init__
+    canonical_provider_init_code = getattr(canonical_provider_init, "__code__", None)
     canonical_base_provider_init = base_provider_type.__init__
+    canonical_base_provider_init_code = getattr(
+        canonical_base_provider_init,
+        "__code__",
+        None,
+    )
     canonical_provider_request = provider_type._request
+    canonical_provider_request_code = getattr(
+        canonical_provider_request,
+        "__code__",
+        None,
+    )
     canonical_event_quotes = provider_type._event_quotes
+    canonical_event_quotes_code = getattr(canonical_event_quotes, "__code__", None)
     canonical_base_event_quotes = base_provider_type._event_quotes
+    canonical_base_event_quotes_code = getattr(
+        canonical_base_event_quotes,
+        "__code__",
+        None,
+    )
     canonical_sport_descriptor = provider_type.__dict__.get("sport_key")
     canonical_source_descriptor = provider_type.__dict__.get("source_id")
     canonical_sport_validator = _canonical_sport_key
@@ -392,6 +409,19 @@ def _build_historical_snapshot_provider_origin_authority():
     canonical_defaults = canonical_base_provider_init.__kwdefaults__
     if type(canonical_defaults) is not dict:
         raise RuntimeError("canonical Parlay provider defaults are unavailable")
+    if (
+        canonical_provider_init_code is None
+        or canonical_base_provider_init_code is None
+        or canonical_provider_request_code is None
+        or canonical_event_quotes_code is None
+        or canonical_base_event_quotes_code is None
+        or type(canonical_sport_descriptor) is not property
+        or type(canonical_source_descriptor) is not property
+        or canonical_sport_validator_code is None
+        or canonical_sport_pattern is None
+        or type(canonical_reserved_sports) is not frozenset
+    ):
+        raise RuntimeError("canonical multisport Parlay provider authority is unavailable")
     canonical_default_transport = canonical_defaults.get("transport")
     canonical_clock = canonical_defaults.get("clock")
     canonical_sleeper = canonical_defaults.get("sleeper")
@@ -1374,10 +1404,20 @@ def _build_historical_snapshot_provider_origin_authority():
     def provider_definition_is_current() -> bool:
         return (
             provider_type.__init__ is canonical_provider_init
+            and getattr(canonical_provider_init, "__code__", None)
+            is canonical_provider_init_code
             and base_provider_type.__init__ is canonical_base_provider_init
+            and getattr(canonical_base_provider_init, "__code__", None)
+            is canonical_base_provider_init_code
             and provider_type._request is canonical_provider_request
+            and getattr(canonical_provider_request, "__code__", None)
+            is canonical_provider_request_code
             and provider_type._event_quotes is canonical_event_quotes
+            and getattr(canonical_event_quotes, "__code__", None)
+            is canonical_event_quotes_code
             and base_provider_type._event_quotes is canonical_base_event_quotes
+            and getattr(canonical_base_event_quotes, "__code__", None)
+            is canonical_base_event_quotes_code
             and provider_type.__dict__.get("sport_key")
             is canonical_sport_descriptor
             and provider_type.__dict__.get("source_id")

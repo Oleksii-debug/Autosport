@@ -183,6 +183,29 @@ def _environment(value: object) -> str:
 
 
 @dataclass(frozen=True, slots=True)
+class AccountLinkSurfaceContract:
+    """Provider-specific semantic contract for the canonical Windows shell.
+
+    This is machine-checkable presentation metadata only. It does not assert that
+    a physical UIA tree or NVDA speech output has been human-verified.
+    """
+
+    focus_target: str
+    primary_action: str | None
+    status_region_id: str = "prophetx-account-link-status"
+    status_live_mode: str = "polite"
+    verification_code_input_mode: str = "single_text_input"
+    field_accessible_names: tuple[tuple[str, str], ...] = (
+        ("email", "Email"),
+        ("password", "Password"),
+        ("verification_code", "Verification code"),
+        ("access_key", "Access key"),
+        ("secret_key", "Secret key"),
+    )
+    masked_fields: tuple[str, ...] = ("password", "secret_key")
+
+
+@dataclass(frozen=True, slots=True)
 class AccountLinkPublicSnapshot:
     state: str
     diagnostic_code: str
@@ -443,6 +466,49 @@ class ProphetXAccountLinkController:
             return
         self._credential_ref = None
         self.cancel()
+
+    def surface_contract(self) -> AccountLinkSurfaceContract:
+        """Return deterministic focus/action semantics without rendering a UI."""
+
+        state = self._state
+        challenge_available = _opaque_ref(self._challenge_ref)
+        if state is AccountLinkState.TWO_FACTOR_REQUIRED:
+            focus_target = "send_verification_code"
+            primary_action = "send_verification_code"
+        elif state is AccountLinkState.TWO_FACTOR_CODE_ENTRY or (
+            challenge_available
+            and state
+            in {
+                AccountLinkState.AUTH_ERROR,
+                AccountLinkState.PROVIDER_UNAVAILABLE,
+            }
+        ):
+            focus_target = "verification_code"
+            primary_action = "verify_two_factor"
+        elif state is AccountLinkState.KEY_GENERATION_BLOCKED_UNVERIFIED_TOKEN_CONTRACT:
+            focus_target = "manual_api_token_import"
+            primary_action = "import_approved_api_token"
+        elif state is AccountLinkState.LINKED_CREDENTIAL_STORED:
+            focus_target = "linked_status"
+            primary_action = None
+        elif state in {
+            AccountLinkState.AUTHENTICATING,
+            AccountLinkState.TWO_FACTOR_SENDING,
+            AccountLinkState.TWO_FACTOR_VERIFYING,
+            AccountLinkState.KEY_GENERATING,
+        }:
+            focus_target = "prophetx-account-link-status"
+            primary_action = None
+        elif state is AccountLinkState.AUTHENTICATED_SESSION:
+            focus_target = "manual_api_token_import"
+            primary_action = "import_approved_api_token"
+        else:
+            focus_target = "email"
+            primary_action = "submit_login"
+        return AccountLinkSurfaceContract(
+            focus_target=focus_target,
+            primary_action=primary_action,
+        )
 
     def public_snapshot(self) -> AccountLinkPublicSnapshot:
         now = self._read_clock()

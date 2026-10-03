@@ -864,18 +864,20 @@ def test_under_lock_goal_successor_cannot_be_hidden_by_live_load_rebinding(tmp_p
     try:
         EconomicGoalStore.load = lambda self: goal
         with WorkspaceEconomicLock(root) as workspace_lock:
-            room = economic_admission._revalidated_product_day_turnover_room(
-                snapshot=snapshot,
-                root=root,
-                book=PaperBook.load(book_path),
-                risk_policy=policy,
-                placed_at=_timestamp(now),
-                workspace_lock=workspace_lock,
+            authority = (
+                economic_admission._revalidated_product_day_admission_authority(
+                    snapshot=snapshot,
+                    root=root,
+                    book=PaperBook.load(book_path),
+                    risk_policy=policy,
+                    placed_at=_timestamp(now),
+                    workspace_lock=workspace_lock,
+                )
             )
     finally:
         EconomicGoalStore.load = original_load
 
-    assert room is None
+    assert authority is None
 
 
 def test_missing_durable_goal_never_mints_day_turnover_headroom(tmp_path):

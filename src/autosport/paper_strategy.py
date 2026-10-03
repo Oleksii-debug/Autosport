@@ -365,13 +365,17 @@ class PaperValueAgent:
                 currency=goal.currency,
                 bankroll=sizing_bankroll,
             )
-            # Exact evidence type is established by the binding checks above. Let
-            # the producer-owned type dispatch the canonical evaluator so a consumer
-            # rebind cannot substitute both an evaluator and its expected witness.
-            decision = type(evidence).evaluate_canonical(
-                evidence,
-                request,
-                policy,
+            # Resolve the producer module at use time. The producer closure captures
+            # the canonical evaluator/result type and does not dispatch through the
+            # mutable public evidence class method.
+            from . import uncertainty_sizing as uncertainty_sizing_producer
+
+            decision = (
+                uncertainty_sizing_producer.evaluate_authoritative_uncertainty_sizing(
+                    evidence,
+                    request,
+                    policy,
+                )
             )
         except Exception:
             context.notes.append(

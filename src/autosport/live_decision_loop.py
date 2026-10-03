@@ -597,6 +597,7 @@ class _Progress:
     ledger_offset: int | None
     gate: str
     provider_health_boundaries: tuple[ProviderHealthReplayBoundary, ...] = ()
+    progress_schema_version: int = _PROGRESS_VERSION
 
     def __post_init__(self) -> None:
         _canonical_text("loop_id", self.loop_id)
@@ -611,6 +612,10 @@ class _Progress:
             raise LiveDecisionProgressError("unsupported live progress phase")
         if self.gate not in {_GATE_NORMAL, _GATE_PROVIDER_GAP}:
             raise LiveDecisionProgressError("unsupported live progress gate")
+        if self.progress_schema_version not in {1, _PROGRESS_VERSION}:
+            raise LiveDecisionProgressError(
+                "unsupported live progress schema version"
+            )
         if type(self.provider_health_boundaries) is not tuple:
             raise LiveDecisionProgressError(
                 "provider_health_boundaries must be a tuple"
@@ -634,6 +639,10 @@ class _Progress:
         ):
             raise LiveDecisionProgressError(
                 "provider_health_boundaries must have unique source_id values"
+            )
+        if self.progress_schema_version == 1 and self.provider_health_boundaries:
+            raise LiveDecisionProgressError(
+                "legacy live progress cannot carry provider health boundaries"
             )
         if type(self.affected_input_ids) is not tuple:
             raise LiveDecisionProgressError("affected_input_ids must be a tuple")
@@ -677,9 +686,9 @@ class _Progress:
                 )
 
     def to_dict(self) -> dict[str, object]:
-        return {
+        payload: dict[str, object] = {
             "schema": _PROGRESS_SCHEMA,
-            "schema_version": _PROGRESS_VERSION,
+            "schema_version": self.progress_schema_version,
             "loop_id": self.loop_id,
             "phase": self.phase,
             "decision_ts": self.decision_ts,
@@ -687,15 +696,17 @@ class _Progress:
             "decision_context_sha256": self.decision_context_sha256,
             "affected_input_ids": list(self.affected_input_ids),
             "registered_input_ids": list(self.registered_input_ids),
-            "provider_health_boundaries": [
-                boundary.to_dict()
-                for boundary in self.provider_health_boundaries
-            ],
             "decision_id": self.decision_id,
             "plan_sha256": self.plan_sha256,
             "ledger_offset": self.ledger_offset,
             "gate": self.gate,
         }
+        if self.progress_schema_version == _PROGRESS_VERSION:
+            payload["provider_health_boundaries"] = [
+                boundary.to_dict()
+                for boundary in self.provider_health_boundaries
+            ]
+        return payload
 
     @classmethod
     def from_dict(cls, raw: object) -> "_Progress":
@@ -753,6 +764,7 @@ class _Progress:
                 ledger_offset=raw["ledger_offset"],
                 gate=raw["gate"],
                 provider_health_boundaries=health_boundaries,
+                progress_schema_version=schema_version,
             )
         except (TypeError, ValueError) as exc:
             raise LiveDecisionProgressError("live decision progress is invalid") from exc
@@ -1755,6 +1767,14 @@ class PersistentLiveDecisionLoop:
             affected_input_ids=progress.affected_input_ids,
             gate=progress.gate,
             provider_health_boundaries=progress.provider_health_boundaries,
+            decision_schema_version_override=(
+                2
+                if (
+                    progress.progress_schema_version == 1
+                    and progress.phase == _PHASE_APPEND_PENDING
+                )
+                else None
+            ),
             detail=(
                 "recovered unfinished durable live decision before provider polling"
             ),
@@ -2189,6 +2209,7 @@ class PersistentLiveDecisionLoop:
         provider_health_boundaries: tuple[ProviderHealthReplayBoundary, ...],
         detail: str = "",
         decision_context_sha256_override: str | None = None,
+        decision_schema_version_override: int | None = None,
     ) -> LiveCycleResult:
         self._verify_intent_factory_provenance()
         if decision_context_sha256_override is None:
@@ -2216,10 +2237,22 @@ class PersistentLiveDecisionLoop:
         health_payload = [
             boundary.to_dict() for boundary in provider_health_boundaries
         ]
+        if decision_schema_version_override is None:
+            decision_schema_version = 3
+        elif decision_schema_version_override == 2:
+            decision_schema_version = 2
+        else:
+            raise ValueError(
+                "decision_schema_version_override must be 2 or None"
+            )
+        if decision_schema_version == 2 and provider_health_boundaries:
+            raise LiveDecisionProgressError(
+                "legacy live decision identity cannot carry provider health horizons"
+            )
         provenance = self.intent_provenance
         context_payload = {
             "schema": "autosport.live_decision_context",
-            "schema_version": 3,
+            "schema_version": decision_schema_version,
             "loop_id": self.loop_id,
             "mode": self.mode.value,
             "gate": gate,
@@ -2229,8 +2262,9 @@ class PersistentLiveDecisionLoop:
             "intent_model_version_id": provenance.model_version_id,
             "intent_provenance_sha256": provenance.provenance_sha256,
             "plan_sha256": plan.plan_sha256,
-            "provider_health_boundaries": health_payload,
         }
+        if decision_schema_version == 3:
+            context_payload["provider_health_boundaries"] = health_payload
         context_hash = _canonical_json_sha256(context_payload)
         decision_id = f"live-{context_hash}"
         prepared_execution: PreparedPaperExecution | None = None
@@ -2262,7 +2296,7 @@ class PersistentLiveDecisionLoop:
 
         record_payload = {
             "schema": "autosport.persistent_live_decision",
-            "schema_version": 3,
+            "schema_version": decision_schema_version,
             "loop_id": self.loop_id,
             "mode": self.mode.value,
             "gate": gate,
@@ -2272,11 +2306,12 @@ class PersistentLiveDecisionLoop:
             "intent_model_version_id": provenance.model_version_id,
             "intent_provenance_sha256": provenance.provenance_sha256,
             "affected_input_ids": list(affected_input_ids),
-            "provider_health_boundaries": health_payload,
             "plan_sha256": plan.plan_sha256,
             "plan": plan.to_dict(),
             MATERIAL_ACTION_ID_PAYLOAD_KEY: decision_id,
         }
+        if decision_schema_version == 3:
+            record_payload["provider_health_boundaries"] = health_payload
         if expected_execution_payload is not None:
             # Execution adoption remains separately versioned evidence inside the
             # health-bound live-decision schema.
@@ -2394,10 +2429,13 @@ class PersistentLiveDecisionLoop:
                     or existing.payload.get("intent_provenance_sha256")
                     != provenance.provenance_sha256
                     or existing.payload.get("gate") != gate
-                    or existing.payload.get("provider_health_boundaries")
-                    != tuple(
-                        boundary.to_dict()
-                        for boundary in provider_health_boundaries
+                    or (
+                        decision_schema_version == 3
+                        and existing.payload.get("provider_health_boundaries")
+                        != tuple(
+                            boundary.to_dict()
+                            for boundary in provider_health_boundaries
+                        )
                     )
                     or existing.payload.get(MATERIAL_ACTION_ID_PAYLOAD_KEY)
                     != decision_id

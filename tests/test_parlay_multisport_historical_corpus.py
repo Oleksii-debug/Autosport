@@ -505,6 +505,7 @@ def test_tampered_acquisition_digest_fails_closed(tmp_path: Path) -> None:
         ("request-url-digest", "request_url_sha256 does not bind canonical request URL"),
         ("origin-alias", "origin must be a canonical secret-free HTTPS origin"),
         ("query-order", "query_string is not canonical"),
+        ("query-encoding-alias", "query_string is not canonical"),
     ],
 )
 def test_self_consistent_but_semantically_false_acquisition_claim_fails_closed(
@@ -542,7 +543,7 @@ def test_self_consistent_but_semantically_false_acquisition_claim_fails_closed(
                 f"{request['query_string']}"
             ).encode("utf-8")
         ).hexdigest()
-    else:
+    elif mutation == "query-order":
         request = acquisition["request"]
         query = request["query"]
         request["query_string"] = urlencode(
@@ -554,6 +555,19 @@ def test_self_consistent_but_semantically_false_acquisition_claim_fails_closed(
                 ("dateFormat", query["dateFormat"]),
             ]
         )
+        request["request_url_sha256"] = hashlib.sha256(
+            (
+                f"{request['origin']}{request['endpoint_path']}?"
+                f"{request['query_string']}"
+            ).encode("utf-8")
+        ).hexdigest()
+    else:
+        request = acquisition["request"]
+        request["query_string"] = request["query_string"].replace(
+            "regions=us",
+            "regions=%75s",
+        )
+        assert "regions=%75s" in request["query_string"]
         request["request_url_sha256"] = hashlib.sha256(
             (
                 f"{request['origin']}{request['endpoint_path']}?"

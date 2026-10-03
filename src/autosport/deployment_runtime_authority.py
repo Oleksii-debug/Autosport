@@ -944,6 +944,7 @@ class DeploymentRuntimeAuthorityStore:
         self,
         payload: Mapping[str, object],
     ) -> None:
+        self._assert_binding_integrity()
         state_sha256 = self._state_sha256(payload)
         history = self._authority.read_history()
         if any(
@@ -982,6 +983,7 @@ class DeploymentRuntimeAuthorityStore:
     def _read_validated_records_locked(
         self,
     ) -> tuple[DeploymentRuntimeAuthorityRecord, ...]:
+        self._assert_binding_integrity()
         payload = self._read_payload()
         records = self._records_from_payload(payload)
         self._recover_state(payload)

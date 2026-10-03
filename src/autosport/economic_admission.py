@@ -258,12 +258,17 @@ def _freeze_external_python_function_graph(function: FunctionType) -> FunctionTy
             clone.__doc__ = value.__doc__
             clones[name] = clone
     frozen_globals.update(clones)
-    frozen = clones.get(function.__name__)
-    if (
-        type(frozen) is not FunctionType
-        or frozen.__code__ is not function.__code__
-    ):
-        raise RuntimeError("canonical risk helper frozen graph is unavailable")
+    frozen = FunctionType(
+        function.__code__,
+        frozen_globals,
+        name=function.__name__,
+        argdefs=function.__defaults__,
+    )
+    if function.__kwdefaults__ is not None:
+        frozen.__kwdefaults__ = dict(function.__kwdefaults__)
+    frozen.__annotations__ = dict(function.__annotations__)
+    frozen.__qualname__ = function.__qualname__
+    frozen.__doc__ = function.__doc__
     return frozen
 
 

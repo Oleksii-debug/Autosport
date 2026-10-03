@@ -2787,6 +2787,7 @@ def test_runtime_authority_rejects_path_construction_dispatch_replacement(
     method_name: str,
 ) -> None:
     concrete = type(Path("."))
+    authority_root = _authority_root(tmp_path)
     hostile_calls: list[object] = []
 
     def hostile(self: object, *args: object, **kwargs: object) -> object:
@@ -2800,7 +2801,7 @@ def test_runtime_authority_rejects_path_construction_dispatch_replacement(
     ):
         DeploymentRuntimeAuthorityStore.initialize_pristine(
             tmp_path / "deployment-runtime-authority.json",
-            authority_root=_authority_root(tmp_path),
+            authority_root=authority_root,
         )
 
     assert hostile_calls == []

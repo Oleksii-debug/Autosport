@@ -534,6 +534,10 @@ class _HistoricalRiskMetrics:
     turnover: Decimal
 
 
+PAPER_RISK_POLICY_PROVENANCE_SCHEMA_VERSION = 2
+PAPER_RISK_POLICY_SEMANTICS = "owner-risk-sport-aware-v2"
+
+
 class _PaperRiskPolicyMeta(type):
     """Composition point for final owner-facing risk-root data descriptors."""
 
@@ -592,7 +596,8 @@ class PaperRiskPolicy(metaclass=_PaperRiskPolicyMeta):
         goal = self.economic_goal
         return {
             "schema": "autosport.paper_risk_policy_provenance",
-            "schema_version": 1,
+            "schema_version": PAPER_RISK_POLICY_PROVENANCE_SCHEMA_VERSION,
+            "semantics": PAPER_RISK_POLICY_SEMANTICS,
             "max_ticket_fraction": str(self.max_ticket_fraction),
             "max_committed_fraction": str(self.max_committed_fraction),
             "minimum_cash_reserve_fraction": str(self.minimum_cash_reserve_fraction),
@@ -601,9 +606,19 @@ class PaperRiskPolicy(metaclass=_PaperRiskPolicyMeta):
             ),
         }
 
+    def provenance_record(self) -> dict[str, object]:
+        """Return the sealed policy payload plus its canonical digest."""
+
+        payload = self.provenance_payload()
+        return {**payload, "sha256": _sha256_payload(payload)}
+
     @property
     def provenance_sha256(self) -> str:
-        return _sha256_payload(self.provenance_payload())
+        # Convenience projection only. Durable authority consumers use the sealed
+        # provenance_record() root rather than trusting this replaceable property.
+        value = self.provenance_record()["sha256"]
+        assert isinstance(value, str)
+        return value
 
     @staticmethod
     def _decimal_context() -> Context:

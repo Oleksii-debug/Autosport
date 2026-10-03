@@ -623,6 +623,7 @@ def _verify_exact_provider_universe_snapshot(
         ) from exc
     return universe
 
+
 def resolve_campaign_forward_universe_cycle_authority(
     *,
     precommit_locator: ForwardUniversePrecommitLocator,

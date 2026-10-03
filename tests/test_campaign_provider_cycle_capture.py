@@ -71,6 +71,10 @@ from autosport.provider_observation_authority import (
     CompleteGameBoardRequest,
     ProviderObservationUnsupportedError,
 )
+from autosport.decision_ledger import JsonlDecisionLedger
+from autosport.paper_campaign_admission import PaperCampaignAdmissionError
+from autosport.paper_campaign_forward_admission import admit_forward_verified
+from paper_campaign_admission_test_support import AdmissionFixture
 
 
 A = "a" * 64
@@ -1085,10 +1089,10 @@ def test_later_successful_capture_cannot_define_forward_universe(
         )
 
 
-def test_cycle_bound_structural_verifier_replaces_caller_receipts_and_fixes_scope(
+def _forward_verification_case(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-) -> None:
+):
     locator, store, spec, provider_store = _setup(tmp_path)
     monkeypatch.setattr(
         provider_module,
@@ -1254,6 +1258,35 @@ def test_cycle_bound_structural_verifier_replaces_caller_receipts_and_fixes_scop
         cost_evidence=(CostEvidence(1, True),),
     )
 
+    return (
+        locator,
+        store,
+        spec,
+        provider_store,
+        cycle_receipt,
+        universe_store,
+        evidence,
+        universe,
+        protocol,
+    )
+
+
+def test_cycle_bound_structural_verifier_replaces_caller_receipts_and_fixes_scope(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (
+        locator,
+        store,
+        spec,
+        provider_store,
+        cycle_receipt,
+        universe_store,
+        evidence,
+        universe,
+        _protocol,
+    ) = _forward_verification_case(tmp_path, monkeypatch)
+
     raw = verify_campaign(evidence)
     assert raw.ok is False
     assert VerificationCode.COHORT_OMISSION_DETECTED in raw.codes
@@ -1283,6 +1316,201 @@ def test_cycle_bound_structural_verifier_replaces_caller_receipts_and_fixes_scop
     assert len(result.campaign_cycle_authority_sha256) == 64
     assert len(result.receipt_sha256) == 64
 
+
+
+def test_cycle_bound_forward_verification_drives_durable_paper_admission(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    forward_root = tmp_path / "forward"
+    forward_root.mkdir()
+    (
+        locator,
+        store,
+        spec,
+        provider_store,
+        cycle_receipt,
+        universe_store,
+        evidence,
+        _universe,
+        protocol,
+    ) = _forward_verification_case(forward_root, monkeypatch)
+    expected = verify_campaign_forward_evidence(
+        precommit_locator=locator,
+        collector_store=store,
+        source_spec=spec,
+        cycle_receipt=cycle_receipt,
+        provider_evidence_store=provider_store,
+        universe_store=universe_store,
+        event_lifecycle=None,
+        evidence=evidence,
+    )
+    assert expected.structural_ok is True
+    assert expected.structural_codes == ("PASS",)
+
+    admission_root = tmp_path / "admission"
+    admission_root.mkdir()
+
+    # A canonical forward receipt cannot retroactively qualify an unrelated
+    # predecision/execution chain that was created without this campaign inception.
+    unbound_root = tmp_path / "unbound-admission"
+    unbound_root.mkdir()
+    unbound = AdmissionFixture(unbound_root)
+    with pytest.raises(
+        PaperCampaignAdmissionError,
+        match="predecision learning Observation is not bound",
+    ):
+        admit_forward_verified(
+            unbound.coordinator(),
+            precommit_locator=locator,
+            collector_store=store,
+            source_spec=spec,
+            cycle_receipt=cycle_receipt,
+            provider_evidence_store=provider_store,
+            universe_store=universe_store,
+            event_lifecycle=None,
+            evidence=evidence,
+            admission_id="unbound-admission",
+            observation=unbound.observation,
+            action_type="PAPER_PROPOSAL",
+            decision_action="OPEN_PAPER_TICKET",
+            decision_at="2026-09-20T05:00:05+00:00",
+            at="2026-09-20T05:00:05+00:00",
+            replay_run_id="unbound-run",
+            agent="admission-test",
+            execution_decision_id=unbound.execution_decision_id,
+            execution_run_id=unbound.execution_run_id,
+            execution_attempt_id=unbound.execution_attempt_id,
+            execution_ticket_id=unbound.execution_ticket_id,
+        )
+
+    fixture = AdmissionFixture(
+        admission_root,
+        campaign_precommit_locator=locator,
+        campaign_collector_store=store,
+        campaign_source_spec=spec,
+        campaign_forward_protocol=protocol,
+    )
+    coordinator = fixture.coordinator()
+    learning_evidence = dict(fixture.observation.evidence)
+    assert learning_evidence["campaign_forward_campaign_id"] == expected.campaign_id
+    assert learning_evidence["campaign_forward_source_id"] == expected.source_id
+    assert (
+        learning_evidence["campaign_forward_inception_receipt_sha256"]
+        == expected.campaign_receipt_sha256
+    )
+    assert (
+        learning_evidence["campaign_forward_evaluation_plan_sha256"]
+        == expected.prospective_evaluation_plan_sha256
+    )
+    assert learning_evidence["campaign_forward_protocol_sha256"] == expected.protocol_sha256
+
+    alternate_protocol = ForwardEvidenceProtocolEnvelope(
+        campaign_id=protocol.campaign_id,
+        scientific_protocol_sha256=protocol.scientific_protocol_sha256,
+        candidate_universe_rule_id=protocol.candidate_universe_rule_id,
+        candidate_universe_rule_sha256=protocol.candidate_universe_rule_sha256,
+        forward_evaluation_policy_sha256="8" * 64,
+        runtime_identity_sha256=protocol.runtime_identity_sha256,
+        baseline_set_sha256=protocol.baseline_set_sha256,
+        protective_metric_set_sha256=protocol.protective_metric_set_sha256,
+        cost_policy_sha256=protocol.cost_policy_sha256,
+        precommit_anchor_lower=protocol.precommit_anchor_lower,
+        precommit_anchor_upper=protocol.precommit_anchor_upper,
+    )
+    mismatched_root = tmp_path / "protocol-mismatch-admission"
+    mismatched_root.mkdir()
+    mismatched = AdmissionFixture(
+        mismatched_root,
+        campaign_precommit_locator=locator,
+        campaign_collector_store=store,
+        campaign_source_spec=spec,
+        campaign_forward_protocol=alternate_protocol,
+    )
+    with pytest.raises(
+        PaperCampaignAdmissionError,
+        match="predecision learning Observation is not bound",
+    ):
+        admit_forward_verified(
+            mismatched.coordinator(),
+            precommit_locator=locator,
+            collector_store=store,
+            source_spec=spec,
+            cycle_receipt=cycle_receipt,
+            provider_evidence_store=provider_store,
+            universe_store=universe_store,
+            event_lifecycle=None,
+            evidence=evidence,
+            admission_id="protocol-mismatch-admission",
+            observation=mismatched.observation,
+            action_type="PAPER_PROPOSAL",
+            decision_action="OPEN_PAPER_TICKET",
+            decision_at="2026-09-20T05:00:05+00:00",
+            at="2026-09-20T05:00:05+00:00",
+            replay_run_id="protocol-mismatch-run",
+            agent="admission-test",
+            execution_decision_id=mismatched.execution_decision_id,
+            execution_run_id=mismatched.execution_run_id,
+            execution_attempt_id=mismatched.execution_attempt_id,
+            execution_ticket_id=mismatched.execution_ticket_id,
+        )
+    assert json.loads(
+        (mismatched.workspace / "paper-campaign-admission.json").read_text(
+            encoding="utf-8"
+        )
+    )["admissions"] == {}
+
+    receipt = admit_forward_verified(
+        coordinator,
+        precommit_locator=locator,
+        collector_store=store,
+        source_spec=spec,
+        cycle_receipt=cycle_receipt,
+        provider_evidence_store=provider_store,
+        universe_store=universe_store,
+        event_lifecycle=None,
+        evidence=evidence,
+        admission_id="admission-1",
+        observation=fixture.observation,
+        action_type="PAPER_PROPOSAL",
+        decision_action="OPEN_PAPER_TICKET",
+        decision_at="2026-09-20T05:00:05+00:00",
+        at="2026-09-20T05:00:05+00:00",
+        replay_run_id="admission-run",
+        agent="admission-test",
+        execution_decision_id=fixture.execution_decision_id,
+        execution_run_id=fixture.execution_run_id,
+        execution_attempt_id=fixture.execution_attempt_id,
+        execution_ticket_id=fixture.execution_ticket_id,
+    )
+
+    assert receipt.admission_id == "admission-1"
+    state = json.loads(
+        (fixture.workspace / "paper-campaign-admission.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert state["admissions"]["admission-1"]["phase"] == "COMMITTED"
+
+    records = JsonlDecisionLedger(
+        fixture.workspace / "decisions.jsonl"
+    ).verified_records()
+    durable = [record for record in records if record.decision_id == receipt.decision_id]
+    assert len(durable) == 1
+    forward_payload = durable[0].payload["campaign_forward_verification"]
+    assert forward_payload["receipt_sha256"] == expected.receipt_sha256
+    assert forward_payload["campaign_id"] == expected.campaign_id
+    assert forward_payload["source_id"] == expected.source_id
+    assert (
+        forward_payload["campaign_receipt_sha256"]
+        == expected.campaign_receipt_sha256
+    )
+    assert forward_payload["verification_scope"] == expected.verification_scope
+    assert forward_payload["provider_universe_authority_resolved"] is True
+    assert forward_payload["structural_ok"] is True
+    assert forward_payload["structural_codes"] == ["PASS"]
+    assert forward_payload["promotion_ready"] is False
+    assert forward_payload["real_money_ready"] is False
 
 def test_delayed_collector_start_after_precommit_window_blocks_before_provider_io(
     tmp_path: Path,

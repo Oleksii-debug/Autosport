@@ -11,7 +11,11 @@ from autosport.campaign_inception import (
     CampaignInceptionSourceSpec,
 )
 from autosport.forward_evaluation_universe_binding import ForwardUniverseAuthorityIdentity
-from autosport.forward_evidence_completeness import VerificationCode, VerificationResult
+from autosport.forward_evidence_completeness import (
+    ForwardEvidenceProtocolEnvelope,
+    VerificationCode,
+    VerificationResult,
+)
 
 
 @pytest.mark.parametrize(
@@ -172,6 +176,8 @@ def test_composed_verification_receipt_fixes_nonpromotion_truth() -> None:
 
     assert receipt.structural_ok is True
     assert receipt.structural_codes == ("PASS",)
+    assert receipt.source_id == authority.source_id
+    assert receipt.campaign_receipt_sha256 == authority.campaign_receipt_sha256
     assert receipt.campaign_cycle_authority_sha256 == authority.authority_sha256
     assert receipt.prospective_evaluation_plan_sha256 == "b" * 64
     assert receipt.universe_sha256 == "d" * 64
@@ -1599,3 +1605,46 @@ def test_saved_resolver_rejects_inception_window_descriptor_replacement() -> Non
             "observation_not_after",
             original,
         )
+
+
+def test_forward_protocol_digest_descriptor_rebind_fails_closed(monkeypatch):
+    called = []
+    def hostile(_self):
+        called.append("protocol_sha256")
+        raise AssertionError("hostile protocol digest executed")
+    monkeypatch.setattr(ForwardEvidenceProtocolEnvelope, "protocol_sha256", property(hostile))
+    with pytest.raises(
+        binding.CampaignForwardUniverseCycleBindingError,
+        match="forward protocol executable surface changed",
+    ):
+        binding._require_dispatch_integrity()
+    assert called == []
+
+
+def test_forward_protocol_field_descriptor_rebind_fails_closed(monkeypatch):
+    monkeypatch.setattr(
+        ForwardEvidenceProtocolEnvelope,
+        "campaign_id",
+        property(lambda _self: "hostile-campaign"),
+    )
+    with pytest.raises(
+        binding.CampaignForwardUniverseCycleBindingError,
+        match="forward protocol field descriptor changed: campaign_id",
+    ):
+        binding._require_dispatch_integrity()
+
+
+def test_forward_protocol_payload_code_mutation_fails_closed():
+    method = ForwardEvidenceProtocolEnvelope.canonical_payload
+    original_code = method.__code__
+    def hostile(_self):
+        raise AssertionError("hostile protocol payload executed")
+    method.__code__ = hostile.__code__
+    try:
+        with pytest.raises(
+            binding.CampaignForwardUniverseCycleBindingError,
+            match="forward protocol executable surface changed",
+        ):
+            binding._require_dispatch_integrity()
+    finally:
+        method.__code__ = original_code

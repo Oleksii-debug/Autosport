@@ -401,10 +401,43 @@ def _build_guard(seal):
             record = envelope["record"]
             if record.get("decision_id") != decision_id:
                 continue
+            payload = record.get("payload")
+            if type(payload) is not dict:
+                raise _origin.PaperExecutionDecisionOriginError(
+                    "decision origin durable DecisionRecord payload is invalid"
+                )
+            raw_learning = payload.get("learning_observation")
+            learning_json: str | None = None
+            decision_observed_ts: str | None = None
+            if raw_learning is not None:
+                if type(raw_learning) is not dict:
+                    raise _origin.PaperExecutionDecisionOriginError(
+                        "decision origin learning observation commitment is invalid"
+                    )
+                try:
+                    learning_json = json_dumps(
+                        raw_learning,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                        allow_nan=False,
+                    )
+                except (TypeError, ValueError) as exc:
+                    raise _origin.PaperExecutionDecisionOriginError(
+                        "decision origin learning observation commitment is invalid"
+                    ) from exc
+                observed_ts = record.get("observed_ts")
+                if type(observed_ts) is not str or not observed_ts:
+                    raise _origin.PaperExecutionDecisionOriginError(
+                        "decision origin durable DecisionRecord time is invalid"
+                    )
+                decision_observed_ts = observed_ts
             matches.append(
                 _origin.DecisionRecordOrigin(
                     decision_id=decision_id,
                     record_sha256=envelope["sha256"],
+                    learning_observation_json=learning_json,
+                    decision_observed_ts=decision_observed_ts,
                 )
             )
         if len(matches) != 1:

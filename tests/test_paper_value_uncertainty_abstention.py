@@ -3,7 +3,7 @@ from __future__ import annotations
 import importlib.util
 import tempfile
 import unittest
-from datetime import timedelta
+from datetime import datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
@@ -27,6 +27,13 @@ from autosport.paper_execution_reality import (
 from autosport.paper_strategy import Forecast, PaperValueAgent
 from autosport.predictive_authority import resolve_authoritative_forecast_ref
 from autosport.risk import PaperRiskPolicy
+from autosport.uncertainty_sizing import (
+    SizingAction,
+    UncertaintySizingEvidence,
+    UncertaintySizingPolicy,
+    UncertaintySizingRequest,
+    evaluate_uncertainty_sizing,
+)
 
 
 _PREDICTIVE_HELPER_PATH = Path(__file__).with_name("test_predictive_authority.py")
@@ -150,17 +157,26 @@ class PaperValueUncertaintyAbstentionTests(unittest.TestCase):
         forecast: Forecast | ForecastRecord,
         *,
         predictive_ref: ForecastRef | None = None,
+        sizing_evidence: UncertaintySizingEvidence | None = None,
+        sizing_policy: UncertaintySizingPolicy | None = None,
     ) -> PaperValueAgent:
         refs = (
             None
             if predictive_ref is None
             else {forecast.quote_key: predictive_ref}
         )
+        sizing = (
+            None
+            if sizing_evidence is None
+            else {forecast.quote_key: sizing_evidence}
+        )
         return PaperValueAgent(
             {forecast.quote_key: forecast},
             stake=Decimal("1"),
             risk_policy=PaperRiskPolicy(economic_goal=goal),
             predictive_forecast_refs=refs,
+            uncertainty_sizing_evidence=sizing,
+            uncertainty_sizing_policy=sizing_policy,
         )
 
     @staticmethod
@@ -217,6 +233,94 @@ class PaperValueUncertaintyAbstentionTests(unittest.TestCase):
             decision_time=event.observed_ts,
             policy=policy,
             qualification=qualification,
+        )
+
+    @staticmethod
+    def _sizing_evidence(
+        event: MarketEvent,
+        forecast: ForecastRecord,
+        *,
+        net_win_profit_per_stake: Decimal | None = None,
+    ) -> UncertaintySizingEvidence:
+        if forecast.market_snapshot_hash is None or forecast.uncertainty is None:
+            raise AssertionError("test forecast must bind snapshot + uncertainty")
+        quote = QuoteRef.from_market_event(
+            event,
+            market_snapshot_hash=forecast.market_snapshot_hash,
+        )
+        lower = max(
+            Decimal("0"),
+            forecast.probability - forecast.uncertainty,
+        )
+        upper = min(
+            Decimal("1"),
+            forecast.probability + forecast.uncertainty,
+        )
+        payoff = (
+            event.decimal_odds - Decimal("1")
+            if net_win_profit_per_stake is None
+            else net_win_profit_per_stake
+        )
+        valid_until = (
+            datetime.fromisoformat(event.observed_ts) + timedelta(minutes=5)
+        ).isoformat()
+        return UncertaintySizingEvidence(
+            evidence_id="paper-sizing-" + forecast.forecast_id,
+            candidate_id=forecast.forecast_id,
+            quote_sha256=quote.market_event_hash,
+            probability_model_version_id=forecast.model_version,
+            calibration_bundle_sha256="c" * 64,
+            causal_cutoff=forecast.input_cutoff_ts,
+            produced_at=forecast.generated_at,
+            valid_until=valid_until,
+            probability_lower=lower,
+            probability_point=forecast.probability,
+            probability_upper=upper,
+            net_win_profit_per_stake=payoff,
+            evidence_refs=(
+                "evidence://forecast/" + forecast.forecast_id,
+                "evidence://quote/" + quote.market_event_hash,
+            ),
+        )
+
+    @staticmethod
+    def _sizing_policy(
+        *,
+        max_uncertainty_width: Decimal = Decimal("0.20"),
+        max_bankroll_fraction: Decimal = Decimal("0.10"),
+        fractional_kelly: Decimal = Decimal("1"),
+    ) -> UncertaintySizingPolicy:
+        return UncertaintySizingPolicy(
+            policy_id="paper-value-canonical-sizing-v1",
+            fractional_kelly=fractional_kelly,
+            max_bankroll_fraction=max_bankroll_fraction,
+            max_uncertainty_width=max_uncertainty_width,
+            min_conservative_ev_per_stake=Decimal("0"),
+        )
+
+    @staticmethod
+    def _sizing_decision(
+        goal: EconomicGoalContract,
+        event: MarketEvent,
+        forecast: ForecastRecord,
+        evidence: UncertaintySizingEvidence,
+        policy: UncertaintySizingPolicy,
+    ):
+        quote = QuoteRef.from_market_event(
+            event,
+            market_snapshot_hash=forecast.market_snapshot_hash,
+        )
+        return evaluate_uncertainty_sizing(
+            evidence,
+            UncertaintySizingRequest(
+                candidate_id=forecast.forecast_id,
+                quote_sha256=quote.market_event_hash,
+                decision_ts=event.observed_ts,
+                bankroll_id=goal.bankroll_id,
+                currency=goal.currency,
+                bankroll=Decimal("100"),
+            ),
+            policy,
         )
 
     def test_goal_active_paper_value_abstains_when_uncertainty_erases_robust_edge(
@@ -370,11 +474,24 @@ class PaperValueUncertaintyAbstentionTests(unittest.TestCase):
                 forecast,
             )
             context, ledger_path = self._context(root, event)
+            goal = self._goal()
+            sizing_evidence = self._sizing_evidence(event, forecast)
+            sizing_policy = self._sizing_policy()
+            sizing_decision = self._sizing_decision(
+                goal,
+                event,
+                forecast,
+                sizing_evidence,
+                sizing_policy,
+            )
+            self.assertEqual(sizing_decision.action, SizingAction.ELIGIBLE)
 
             self._agent(
-                self._goal(),
+                goal,
                 forecast,
                 predictive_ref=authorized_ref,
+                sizing_evidence=sizing_evidence,
+                sizing_policy=sizing_policy,
             ).on_market_event(event, context)
 
             self.assertEqual(len(context.paper_book.tickets), 1)
@@ -392,6 +509,26 @@ class PaperValueUncertaintyAbstentionTests(unittest.TestCase):
             self.assertEqual(
                 payload["expected_profit_per_unit"],
                 "0.12",
+            )
+            self.assertEqual(
+                payload["uncertainty_sizing_evidence_fingerprint"],
+                sizing_evidence.fingerprint_sha256,
+            )
+            self.assertEqual(
+                payload["uncertainty_sizing_policy_fingerprint"],
+                sizing_policy.fingerprint_sha256,
+            )
+            self.assertEqual(
+                payload["uncertainty_sizing_decision_fingerprint"],
+                sizing_decision.decision_fingerprint_sha256,
+            )
+            self.assertEqual(
+                payload["uncertainty_sizing_stake_ceiling"],
+                str(sizing_decision.stake_ceiling),
+            )
+            self.assertLessEqual(
+                Decimal(payload["requested_stake"]),
+                sizing_decision.stake_ceiling,
             )
 
     def test_resolver_minted_uncertainty_erases_positive_point_edge_before_material_action(
@@ -436,6 +573,129 @@ class PaperValueUncertaintyAbstentionTests(unittest.TestCase):
 
             self.assertEqual(context.paper_book.tickets, {})
             self.assertFalse(ledger_path.exists())
+
+    def test_canonical_sizing_abstains_when_all_in_payoff_erases_nominal_edge(
+        self,
+    ) -> None:
+        goal = self._goal()
+        event = self._event()
+        forecast = self._forecast(event, uncertainty=Decimal("0.01"))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            authorized_ref = self._resolver_authorized_ref(root, event, forecast)
+            evidence = self._sizing_evidence(
+                event,
+                forecast,
+                net_win_profit_per_stake=Decimal("0.50"),
+            )
+            policy = self._sizing_policy()
+            decision = self._sizing_decision(
+                goal,
+                event,
+                forecast,
+                evidence,
+                policy,
+            )
+            self.assertEqual(decision.action, SizingAction.ABSTAIN)
+            self.assertIn("insufficient_conservative_edge", decision.reasons)
+            context, ledger_path = self._context(root, event)
+
+            self._agent(
+                goal,
+                forecast,
+                predictive_ref=authorized_ref,
+                sizing_evidence=evidence,
+                sizing_policy=policy,
+            ).on_market_event(event, context)
+
+            self.assertEqual(context.paper_book.tickets, {})
+            self.assertFalse(ledger_path.exists())
+            self.assertTrue(
+                any(
+                    "insufficient_conservative_edge" in note
+                    for note in context.notes
+                )
+            )
+
+    def test_canonical_sizing_width_policy_can_abstain_despite_positive_point_edge(
+        self,
+    ) -> None:
+        goal = self._goal()
+        event = self._event()
+        forecast = self._forecast(event, uncertainty=Decimal("0.01"))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            authorized_ref = self._resolver_authorized_ref(root, event, forecast)
+            evidence = self._sizing_evidence(event, forecast)
+            policy = self._sizing_policy(
+                max_uncertainty_width=Decimal("0.01"),
+            )
+            decision = self._sizing_decision(
+                goal,
+                event,
+                forecast,
+                evidence,
+                policy,
+            )
+            self.assertEqual(decision.action, SizingAction.ABSTAIN)
+            self.assertIn("uncertainty_too_wide", decision.reasons)
+            context, ledger_path = self._context(root, event)
+
+            self._agent(
+                goal,
+                forecast,
+                predictive_ref=authorized_ref,
+                sizing_evidence=evidence,
+                sizing_policy=policy,
+            ).on_market_event(event, context)
+
+            self.assertEqual(context.paper_book.tickets, {})
+            self.assertFalse(ledger_path.exists())
+
+    def test_canonical_sizing_ceiling_only_tightens_downstream_risk_stake(
+        self,
+    ) -> None:
+        goal = self._goal()
+        event = self._event()
+        forecast = self._forecast(event, uncertainty=Decimal("0.01"))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            authorized_ref = self._resolver_authorized_ref(root, event, forecast)
+            evidence = self._sizing_evidence(event, forecast)
+            policy = self._sizing_policy(
+                max_bankroll_fraction=Decimal("0.001"),
+            )
+            decision = self._sizing_decision(
+                goal,
+                event,
+                forecast,
+                evidence,
+                policy,
+            )
+            self.assertEqual(decision.action, SizingAction.ELIGIBLE)
+            self.assertEqual(decision.stake_ceiling, Decimal("0.100"))
+            context, ledger_path = self._context(root, event)
+
+            self._agent(
+                goal,
+                forecast,
+                predictive_ref=authorized_ref,
+                sizing_evidence=evidence,
+                sizing_policy=policy,
+            ).on_market_event(event, context)
+
+            self.assertEqual(len(context.paper_book.tickets), 1)
+            ticket = next(iter(context.paper_book.tickets.values()))
+            self.assertEqual(ticket.stake, decision.stake_ceiling)
+            records = context.decision_ledger.verified_records()
+            self.assertEqual(len(records), 1)
+            self.assertEqual(
+                Decimal(records[0].payload["requested_stake"]),
+                decision.stake_ceiling,
+            )
 
     def test_predictive_reference_mapping_is_snapshotted_and_key_bound(self) -> None:
         event = self._event()

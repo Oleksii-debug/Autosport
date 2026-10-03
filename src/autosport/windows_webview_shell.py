@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from .calculation_manual import ManualCalculationEvidence, ManualCalculationService
+from .causal_collector import GapState, SyncState
 from .dataset import ReplayDataset, load_dataset
 from .dataset_worker import OneShotDatasetValidationWorker
 from .gui_evidence_export import OneShotEvidenceExportWorker, resolve_evidence_output_destination
@@ -357,6 +358,12 @@ class AutosportWebController:
         self.product_worker = ProductGuiWorker()
         self.product_runtime_status = "Тривалий імітаційний режим не запущено."
         self._product_runtime_identity: tuple[Path, str, str] | None = None
+        self.product_runtime_source_status = (
+            "Стан зовнішнього джерела ще не підтверджено канонічним циклом."
+        )
+        self._product_runtime_source_provider_unavailable: bool | None = None
+        self._product_runtime_source_attention_required: bool | None = None
+        self._product_runtime_source_last_success_at: str | None = None
         # Request identity/replay bookkeeping is intentionally separate from the
         # ordinary controller lock. Reservations are brief; handlers never run
         # while this lock is held, so the emergency lane can preserve one global
@@ -551,7 +558,7 @@ class AutosportWebController:
             "source_id": source_id,
         }
 
-    def _reject_product_runtime_identity(self, workspace: Path) -> None:
+    def _quarantine_product_runtime_truth(self, workspace: Path) -> None:
         resolved_workspace = Path(workspace)
         self._recovery_required_workspaces.add(resolved_workspace)
         self.product_runtime_status = text(
@@ -560,6 +567,9 @@ class AutosportWebController:
         if self.product_worker.busy:
             self.product_worker.request_stop("runtime_error")
         self._fail(self.product_runtime_status)
+
+    def _reject_product_runtime_identity(self, workspace: Path) -> None:
+        self._quarantine_product_runtime_truth(workspace)
 
     def _bind_product_runtime_identity(
         self,
@@ -590,6 +600,111 @@ class AutosportWebController:
             self._reject_product_runtime_identity(resolved_workspace)
             return False
         self._product_runtime_identity = candidate
+        return True
+
+    def _product_runtime_source_projection(self) -> dict[str, Any]:
+        return {
+            "status": getattr(
+                self,
+                "product_runtime_source_status",
+                "Стан зовнішнього джерела ще не підтверджено канонічним циклом.",
+            ),
+            "provider_unavailable": getattr(
+                self,
+                "_product_runtime_source_provider_unavailable",
+                None,
+            ),
+            "attention_required": getattr(
+                self,
+                "_product_runtime_source_attention_required",
+                None,
+            ),
+            "last_success_at": getattr(
+                self,
+                "_product_runtime_source_last_success_at",
+                None,
+            )
+            or "",
+        }
+
+    def _project_product_runtime_source_tick(self, tick: object) -> bool:
+        try:
+            provider_unavailable = tick.source_provider_unavailable
+            gap_states = tick.source_gap_states
+            sync_states = tick.source_sync_states
+            full_refresh_required = tick.full_refresh_required
+            invalidation_backlog = tick.invalidation_backlog
+            last_success_at = tick.last_success_at
+        except AttributeError:
+            self._quarantine_product_runtime_truth(Path(self._active_workspace))
+            return False
+
+        if (
+            type(provider_unavailable) is not bool
+            or type(gap_states) is not tuple
+            or type(sync_states) is not tuple
+            or type(full_refresh_required) is not bool
+            or type(invalidation_backlog) is not bool
+            or (
+                last_success_at is not None
+                and (
+                    type(last_success_at) is not str
+                    or not last_success_at
+                    or last_success_at.strip() != last_success_at
+                )
+            )
+        ):
+            self._quarantine_product_runtime_truth(Path(self._active_workspace))
+            return False
+
+        try:
+            canonical_gap_states = tuple(GapState(value) for value in gap_states)
+            canonical_sync_states = tuple(SyncState(value) for value in sync_states)
+        except (TypeError, ValueError):
+            self._quarantine_product_runtime_truth(Path(self._active_workspace))
+            return False
+
+        gap_attention = any(
+            value in {GapState.DETECTED, GapState.CURSOR_RESET}
+            for value in canonical_gap_states
+        )
+        sync_attention = any(
+            value
+            in {
+                SyncState.GAP_DETECTED,
+                SyncState.CURSOR_RESET,
+                SyncState.EPOCH_CHANGED,
+                SyncState.RETRY_REQUIRED,
+            }
+            for value in canonical_sync_states
+        )
+        attention_required = bool(
+            provider_unavailable
+            or gap_attention
+            or sync_attention
+            or full_refresh_required
+            or invalidation_backlog
+        )
+
+        self._product_runtime_source_provider_unavailable = provider_unavailable
+        self._product_runtime_source_attention_required = attention_required
+        self._product_runtime_source_last_success_at = last_success_at
+
+        if provider_unavailable:
+            self.product_runtime_source_status = (
+                "Зовнішнє джерело недоступне в останньому канонічному циклі. "
+                "Порожній результат цього циклу не вважається здоровою стрічкою."
+            )
+        elif attention_required:
+            self.product_runtime_source_status = (
+                "Останній канонічний цикл має прогалину, повторну синхронізацію "
+                "або чергу оновлення. Дані потребують уваги."
+            )
+        else:
+            self.product_runtime_source_status = (
+                "Останній канонічний цикл не повідомляє про недоступність, "
+                "невирішену прогалину або чергу оновлення."
+            )
         return True
 
     def _refresh_economic_projection(self) -> None:
@@ -804,6 +919,8 @@ class AutosportWebController:
                     source_id=product_message.tick.source_id,
                 ):
                     continue
+                if not self._project_product_runtime_source_tick(product_message.tick):
+                    continue
                 self.product_runtime_status = (
                     "Тривалий імітаційний режим: завершено цикл "
                     f"{product_message.tick.cycle_index}; "
@@ -869,6 +986,7 @@ class AutosportWebController:
                 source_entry,
             )
             runtime_identity = self._product_runtime_identity_projection()
+            runtime_source = self._product_runtime_source_projection()
             return {
                 "status": self.status,
                 "last_error": self._bridge_validation_error or self.last_error,
@@ -929,6 +1047,14 @@ class AutosportWebController:
                     "workspace": runtime_identity["workspace"],
                     "session_id": runtime_identity["session_id"],
                     "source_id": runtime_identity["source_id"],
+                    "source_status": runtime_source["status"],
+                    "source_provider_unavailable": runtime_source[
+                        "provider_unavailable"
+                    ],
+                    "source_attention_required": runtime_source[
+                        "attention_required"
+                    ],
+                    "source_last_success_at": runtime_source["last_success_at"],
                 },
                 "surface_key": self.surface_key,
                 "surfaces": surfaces,

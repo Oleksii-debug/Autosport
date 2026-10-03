@@ -425,6 +425,14 @@
       byId("product-runtime-source-id"),
       productRuntime.source_id || "—",
     );
+    setValueIfChanged(
+      byId("product-runtime-source-health"),
+      productRuntime.source_status || "Стан зовнішнього джерела ще не підтверджено канонічним циклом.",
+    );
+    setValueIfChanged(
+      byId("product-runtime-source-last-success"),
+      productRuntime.source_last_success_at || "—",
+    );
     syncRuntimeActionAvailability(
       byId("product-runtime-start"),
       byId("product-runtime-stop"),

@@ -5,6 +5,7 @@ import inspect
 import threading
 from types import SimpleNamespace
 
+from autosport.causal_collector import GapState, SyncState
 from autosport.windows_webview_shell import AutosportWebController, web_shell_index_path
 
 
@@ -89,6 +90,12 @@ def test_tick_runtime_status_does_not_expose_internal_english_terms(tmp_path: Pa
                 session_id="session-1",
                 source_id="source-1",
                 cycle_index=7,
+                source_provider_unavailable=False,
+                source_gap_states=(GapState.NONE.value,),
+                source_sync_states=(SyncState.READY.value,),
+                full_refresh_required=False,
+                invalidation_backlog=False,
+                last_success_at="2026-10-03T08:00:00+00:00",
                 committed_delta_ids=("delta-1", "delta-2"),
                 settled_ticket_ids=("ticket-1",),
             ),
@@ -241,3 +248,140 @@ def test_runtime_identity_is_keyboard_readable_in_semantic_shell() -> None:
     assert 'productRuntime.workspace || "—"' in javascript
     assert 'productRuntime.session_id || "—"' in javascript
     assert 'productRuntime.source_id || "—"' in javascript
+
+
+def _tick_message(
+    *,
+    provider_unavailable: bool,
+    gap_states: tuple[str, ...] = (GapState.NONE.value,),
+    sync_states: tuple[str, ...] = (SyncState.READY.value,),
+    full_refresh_required: bool = False,
+    invalidation_backlog: bool = False,
+    last_success_at: str | None = "2026-10-03T08:00:00+00:00",
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        kind="TICK",
+        status=None,
+        tick=SimpleNamespace(
+            session_id="session-1",
+            source_id="source-1",
+            cycle_index=7,
+            source_provider_unavailable=provider_unavailable,
+            source_gap_states=gap_states,
+            source_sync_states=sync_states,
+            full_refresh_required=full_refresh_required,
+            invalidation_backlog=invalidation_backlog,
+            last_success_at=last_success_at,
+            committed_delta_ids=(),
+            settled_ticket_ids=(),
+        ),
+        stop_reason=None,
+        error_type=None,
+    )
+
+
+def test_provider_unavailable_zero_event_cycle_is_not_rendered_as_healthy_empty(
+    tmp_path: Path,
+) -> None:
+    controller = _controller(
+        tmp_path,
+        _tick_message(
+            provider_unavailable=True,
+            last_success_at="2026-10-03T07:59:00+00:00",
+        ),
+    )
+
+    controller._poll_workers()
+    projection = controller._product_runtime_source_projection()
+
+    assert projection["provider_unavailable"] is True
+    assert projection["attention_required"] is True
+    assert projection["last_success_at"] == "2026-10-03T07:59:00+00:00"
+    assert "недоступ" in projection["status"].casefold()
+    assert "порожн" in projection["status"].casefold()
+    assert "здоров" in projection["status"].casefold()
+
+
+def test_source_gap_or_backlog_is_explicit_attention_not_clean_cycle(
+    tmp_path: Path,
+) -> None:
+    controller = _controller(
+        tmp_path,
+        _tick_message(
+            provider_unavailable=False,
+            gap_states=(GapState.DETECTED.value,),
+            sync_states=(SyncState.GAP_DETECTED.value,),
+            invalidation_backlog=True,
+        ),
+    )
+
+    controller._poll_workers()
+    projection = controller._product_runtime_source_projection()
+
+    assert projection["provider_unavailable"] is False
+    assert projection["attention_required"] is True
+    assert "прогалин" in projection["status"].casefold()
+    assert "потребують уваги" in projection["status"].casefold()
+
+
+def test_clean_source_snapshot_is_bounded_not_global_health_claim(
+    tmp_path: Path,
+) -> None:
+    controller = _controller(
+        tmp_path,
+        _tick_message(provider_unavailable=False),
+    )
+
+    controller._poll_workers()
+    projection = controller._product_runtime_source_projection()
+
+    assert projection["provider_unavailable"] is False
+    assert projection["attention_required"] is False
+    assert "останній канонічний цикл" in projection["status"].casefold()
+    assert "здоров" not in projection["status"].casefold()
+    assert "готов" not in projection["status"].casefold()
+
+
+def test_unknown_source_projection_fails_closed_and_requests_runtime_stop(
+    tmp_path: Path,
+) -> None:
+    controller = _controller(
+        tmp_path,
+        _tick_message(
+            provider_unavailable=False,
+            gap_states=("UNKNOWN_GAP_STATE",),
+        ),
+    )
+    controller.product_worker.busy = True
+
+    controller._poll_workers()
+
+    assert tmp_path in controller._recovery_required_workspaces
+    assert controller.product_worker.stop_reasons == ["runtime_error"]
+    assert "віднов" in controller.product_runtime_status.casefold()
+
+
+def test_runtime_state_contract_projects_source_degradation_truth() -> None:
+    source = inspect.getsource(AutosportWebController.state)
+
+    assert '"source_status": runtime_source["status"]' in source
+    assert '"source_provider_unavailable": runtime_source[' in source
+    assert '"source_attention_required": runtime_source[' in source
+    assert '"source_last_success_at": runtime_source["last_success_at"]' in source
+
+
+def test_runtime_source_truth_is_keyboard_readable_in_semantic_shell() -> None:
+    index = web_shell_index_path()
+    html = index.read_text(encoding="utf-8")
+    javascript = index.with_name("app.js").read_text(encoding="utf-8")
+
+    for control_id in (
+        "product-runtime-source-health",
+        "product-runtime-source-last-success",
+    ):
+        assert f'<label for="{control_id}">' in html
+        assert f'id="{control_id}" type="text" readonly' in html
+        assert f'byId("{control_id}")' in javascript
+
+    assert "productRuntime.source_status" in javascript
+    assert "productRuntime.source_last_success_at" in javascript

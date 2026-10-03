@@ -608,7 +608,13 @@ def test_surface_contract_has_stable_accessible_names_and_secret_masking():
         "access_key": "Access key",
         "secret_key": "Secret key",
     }
-    assert surface.masked_fields == ("password", "secret_key")
+    assert surface.masked_fields == (
+        "password",
+        "verification_code",
+        "access_key",
+        "secret_key",
+    )
+    assert "email" not in surface.masked_fields
     assert surface.verification_code_input_mode == "single_text_input"
     assert surface.status_region_id == "prophetx-account-link-status"
     assert surface.status_live_mode == "polite"

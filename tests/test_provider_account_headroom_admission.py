@@ -1,0 +1,320 @@
+from __future__ import annotations
+
+from dataclasses import replace
+from datetime import datetime, timedelta, timezone
+from decimal import Decimal
+import json
+
+import pytest
+
+import autosport.betfair_account_readonly as betfair_readonly
+from autosport.account_snapshot_acquisition import BetfairAccountSnapshotAcquirer
+from autosport.betfair_account_readonly import BetfairSessionCredentials
+from autosport.bookmaker_capability import BookmakerCapability
+from autosport.provider_account_headroom_admission import (
+    HeadroomDecision,
+    ProviderAccountHeadroomError,
+    ProviderAccountHeadroomStale,
+    ProviderAccountHeadroomUnsupported,
+    assess_provider_account_headroom,
+    reserve_observed_provider_headroom,
+)
+from autosport.real_execution_ledger import (
+    AttemptState,
+    ExecutionAction,
+    ExecutionPlan,
+    RealExecutionLedger,
+)
+
+
+def _response(result: object, request_id: int) -> bytes:
+    return json.dumps(
+        {"jsonrpc": "2.0", "result": result, "id": request_id},
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+
+_DEVELOPER_APPS = _response(
+    [
+        {
+            "appId": 12345,
+            "appVersions": [
+                {
+                    "versionId": 67890,
+                    "version": "1.0",
+                    "applicationKey": "DEVAPP-SECRET-SENTINEL",
+                    "ownerManaged": False,
+                }
+            ],
+        }
+    ],
+    1,
+)
+_DETAILS = _response(
+    {
+        "currencyCode": "GBP",
+        "localeCode": "en",
+        "region": "GBR",
+        "timezone": "Europe/London",
+    },
+    2,
+)
+
+
+def _funds(available: str, *, exposure: str = "-12.34") -> bytes:
+    return _response(
+        {
+            "availableToBetBalance": float(available),
+            "exposure": float(exposure),
+            "retainedCommission": 0.05,
+            "exposureLimit": -5000.00,
+        },
+        3,
+    )
+
+
+def _install_transport(monkeypatch, responses: list[bytes]) -> list[dict[str, object]]:
+    queue = list(responses)
+    calls: list[dict[str, object]] = []
+
+    def post(self, url, *, headers, body, timeout_seconds):
+        calls.append(
+            {
+                "url": url,
+                "headers": dict(headers),
+                "body": body,
+                "timeout_seconds": timeout_seconds,
+            }
+        )
+        if not queue:
+            raise AssertionError("unexpected provider call")
+        return queue.pop(0)
+
+    monkeypatch.setattr(
+        betfair_readonly.UrllibBetfairHttpTransport,
+        "post",
+        post,
+    )
+    return calls
+
+
+def _credentials() -> BetfairSessionCredentials:
+    return BetfairSessionCredentials(
+        "APP-SECRET-SENTINEL",
+        "SESSION-SECRET-SENTINEL",
+    )
+
+
+def _acquire_balance(monkeypatch, tmp_path, available: str = "100.10"):
+    calls = _install_transport(
+        monkeypatch,
+        [_DEVELOPER_APPS, _DETAILS, _funds(available)],
+    )
+    acquired = BetfairAccountSnapshotAcquirer(
+        tmp_path / "account.sqlite3",
+        _credentials(),
+        account_id="acct-1",
+    ).acquire(
+        frozenset({BookmakerCapability.BALANCE_READ}),
+        acquisition_id=f"headroom-{available}",
+    )
+    assert acquired.snapshot.balance is not None
+    return acquired, calls
+
+
+def _action(
+    action_id: str,
+    stake: str,
+    *,
+    account_id: str = "acct-1",
+) -> ExecutionAction:
+    now = datetime.now(timezone.utc)
+    return ExecutionAction(
+        action_id=action_id,
+        bookmaker_id="betfair",
+        account_id=account_id,
+        event_id=f"event-{action_id}",
+        market_id=f"market-{action_id}",
+        selection_id=f"selection-{action_id}",
+        side="BACK",
+        requested_odds="2.50",
+        requested_stake=stake,
+        quote_id=f"quote-{action_id}",
+        quote_observed_at=(now - timedelta(seconds=2)).isoformat(),
+        expires_at=(now + timedelta(minutes=2)).isoformat(),
+    )
+
+
+def _plan(plan_id: str, action: ExecutionAction) -> ExecutionPlan:
+    return ExecutionPlan(
+        plan_id=plan_id,
+        bookmaker_profile_version="profile-v1",
+        decision_id=f"decision-{plan_id}",
+        approval_id=f"approval-{plan_id}",
+        created_at=(datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat(),
+        actions=(action,),
+    )
+
+
+def _ledger_with_plans(tmp_path, *plans: ExecutionPlan) -> RealExecutionLedger:
+    ledger = RealExecutionLedger(tmp_path / "real-ledger.jsonl")
+    for item in plans:
+        ledger.reserve_plan(item)
+    return ledger
+
+
+def test_provider_exposure_is_not_double_subtracted(monkeypatch, tmp_path) -> None:
+    acquired, _ = _acquire_balance(monkeypatch, tmp_path, "100.10")
+    action = _action("a1", "95")
+    ledger = _ledger_with_plans(tmp_path, _plan("p1", action))
+
+    assessment = assess_provider_account_headroom(
+        ledger,
+        acquired,
+        plan_id="p1",
+        action_id="a1",
+    )
+
+    assert assessment.provider_available_to_bet == Decimal("100.1")
+    assert assessment.definitely_unreflected_product_liability == 0
+    assert assessment.unknown_reflection_product_liability == 0
+    assert assessment.lower_headroom == Decimal("100.1")
+    assert assessment.upper_headroom == Decimal("100.1")
+    assert assessment.decision is HeadroomDecision.SUFFICIENT_LOWER_BOUND
+    assert assessment.provider_atomicity_proven is False
+    assert assessment.provider_balance_generation_cas_proven is False
+    assert assessment.execution_authority is False
+    assert assessment.real_money_readiness is False
+
+
+def test_same_snapshot_two_writer_race_only_one_reserves(monkeypatch, tmp_path) -> None:
+    acquired, _ = _acquire_balance(monkeypatch, tmp_path, "100")
+    first_action = _action("a1", "80")
+    second_action = _action("a2", "80")
+    ledger = _ledger_with_plans(
+        tmp_path,
+        _plan("p1", first_action),
+        _plan("p2", second_action),
+    )
+
+    first = assess_provider_account_headroom(
+        ledger, acquired, plan_id="p1", action_id="a1"
+    )
+    second_from_same_generation = assess_provider_account_headroom(
+        ledger, acquired, plan_id="p2", action_id="a2"
+    )
+    assert first.ledger_snapshot_sha256 == second_from_same_generation.ledger_snapshot_sha256
+    assert first.decision is HeadroomDecision.SUFFICIENT_LOWER_BOUND
+    assert second_from_same_generation.decision is HeadroomDecision.SUFFICIENT_LOWER_BOUND
+
+    reserved = reserve_observed_provider_headroom(
+        ledger,
+        acquired,
+        first,
+        attempt_id="attempt-1",
+    )
+    assert reserved.product_internal_reservation_proven is True
+    assert reserved.provider_atomicity_proven is False
+    assert ledger.attempt_state("attempt-1") is AttemptState.RESERVED
+
+    with pytest.raises(
+        ProviderAccountHeadroomStale,
+        match="execution ledger changed",
+    ):
+        reserve_observed_provider_headroom(
+            ledger,
+            acquired,
+            second_from_same_generation,
+            attempt_id="attempt-2",
+        )
+
+    recomputed = assess_provider_account_headroom(
+        ledger, acquired, plan_id="p2", action_id="a2"
+    )
+    assert recomputed.definitely_unreflected_product_liability == Decimal("80")
+    assert recomputed.unknown_reflection_product_liability == 0
+    assert recomputed.lower_headroom == Decimal("20")
+    assert recomputed.upper_headroom == Decimal("20")
+    assert recomputed.decision is HeadroomDecision.INSUFFICIENT_UPPER_BOUND
+
+
+def test_submitted_liability_with_unknown_balance_coverage_forces_wait(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    acquired, _ = _acquire_balance(monkeypatch, tmp_path, "100")
+    first_action = _action("a1", "70")
+    second_action = _action("a2", "50")
+    ledger = _ledger_with_plans(
+        tmp_path,
+        _plan("p1", first_action),
+        _plan("p2", second_action),
+    )
+    first = assess_provider_account_headroom(
+        ledger, acquired, plan_id="p1", action_id="a1"
+    )
+    reserve_observed_provider_headroom(
+        ledger, acquired, first, attempt_id="attempt-1"
+    )
+    ledger.mark_submitted("attempt-1")
+
+    second = assess_provider_account_headroom(
+        ledger, acquired, plan_id="p2", action_id="a2"
+    )
+    assert second.definitely_unreflected_product_liability == 0
+    assert second.unknown_reflection_product_liability == Decimal("70")
+    assert second.lower_headroom == Decimal("30")
+    assert second.upper_headroom == Decimal("100")
+    assert second.decision is HeadroomDecision.WAIT_COVERAGE
+
+
+def test_other_provider_account_cannot_donate_headroom(monkeypatch, tmp_path) -> None:
+    acquired, _ = _acquire_balance(monkeypatch, tmp_path, "1000")
+    foreign = _action("a1", "20", account_id="acct-2")
+    ledger = _ledger_with_plans(tmp_path, _plan("p1", foreign))
+
+    with pytest.raises(
+        ProviderAccountHeadroomUnsupported,
+        match="provider/account mismatches live balance acquisition",
+    ):
+        assess_provider_account_headroom(
+            ledger, acquired, plan_id="p1", action_id="a1"
+        )
+
+
+def test_caller_reconstructed_assessment_cannot_reserve(monkeypatch, tmp_path) -> None:
+    acquired, _ = _acquire_balance(monkeypatch, tmp_path, "100")
+    action = _action("a1", "10")
+    ledger = _ledger_with_plans(tmp_path, _plan("p1", action))
+    assessment = assess_provider_account_headroom(
+        ledger, acquired, plan_id="p1", action_id="a1"
+    )
+    forged = replace(assessment)
+
+    with pytest.raises(
+        ProviderAccountHeadroomError,
+        match="not canonically issued",
+    ):
+        reserve_observed_provider_headroom(
+            ledger, acquired, forged, attempt_id="attempt-1"
+        )
+
+
+def test_exact_attempt_retry_is_idempotent_after_reservation(monkeypatch, tmp_path) -> None:
+    acquired, _ = _acquire_balance(monkeypatch, tmp_path, "100")
+    action = _action("a1", "10")
+    ledger = _ledger_with_plans(tmp_path, _plan("p1", action))
+    assessment = assess_provider_account_headroom(
+        ledger, acquired, plan_id="p1", action_id="a1"
+    )
+
+    first = reserve_observed_provider_headroom(
+        ledger, acquired, assessment, attempt_id="attempt-1"
+    )
+    second = reserve_observed_provider_headroom(
+        ledger, acquired, assessment, attempt_id="attempt-1"
+    )
+
+    assert second.attempt_fingerprint == first.attempt_fingerprint
+    assert second.reserved_at == first.reserved_at
+    assert ledger.attempt_state("attempt-1") is AttemptState.RESERVED

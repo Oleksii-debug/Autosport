@@ -56,7 +56,7 @@ _ACTIVE_CANCELLATION_CONFLICT_MESSAGE = (
 )
 
 
-def _cancel_run_or_defer_active_conflict(api, run_id: int) -> bool:
+def _cancel_run_or_defer_active_conflict(api: GitHubApi, run_id: int) -> bool:
     """Attempt one authorized cancel without promoting a 409-active race to success.
 
     Canonical GitHubApi.cancel() proves HTTP 202 acceptance or completed status after a
@@ -552,7 +552,6 @@ class WorkflowScopedGitHubApi(GitHubApi):
         for status in _ACTIVE_STATUSES:
             runs.extend(self._active_runs_for_status(status))
         return tuple(runs)
-
 
     def cancel_historical_unbound_runs(
         self,

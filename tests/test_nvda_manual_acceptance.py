@@ -255,6 +255,99 @@ def test_reject_then_later_accept_is_explicit_successor(tmp_path):
     assert resolution.nvda_verified is False
 
 
+def test_verified_accept_becomes_stale_after_later_reject_from_restarted_ledger(
+    tmp_path,
+):
+    transcript = _transcript()
+    ledger = _ledger(tmp_path)
+    _record(ledger, transcript, reviewed_at=T0)
+    accepted_resolution = _resolve(ledger, transcript)
+    assert accepted_resolution is not None
+    assert accepted_resolution.accepted_manual_decision is True
+
+    assert (
+        verify_manual_nvda_acceptance_resolution(
+            accepted_resolution,
+            expected_artifact_sha256=ARTIFACT_SHA,
+            expected_source_sha=SOURCE_SHA,
+            expected_transcript_sha256=accepted_resolution.record.transcript_sha256,
+        )
+        is accepted_resolution
+    )
+
+    restarted = ManualNvdaAcceptanceLedger(ledger.path)
+    _record(
+        restarted,
+        transcript,
+        decision=ManualNvdaDecision.REJECT_PHYSICAL_NVDA,
+        reviewed_at=T1,
+    )
+
+    with pytest.raises(
+        NvdaManualAcceptanceStateError,
+        match="no longer the current durable decision",
+    ):
+        verify_manual_nvda_acceptance_resolution(
+            accepted_resolution,
+            expected_artifact_sha256=ARTIFACT_SHA,
+            expected_source_sha=SOURCE_SHA,
+            expected_transcript_sha256=accepted_resolution.record.transcript_sha256,
+        )
+
+    rejected_resolution = _resolve(restarted, transcript)
+    assert rejected_resolution is not None
+    assert rejected_resolution.accepted_manual_decision is False
+    assert (
+        verify_manual_nvda_acceptance_resolution(
+            rejected_resolution,
+            expected_artifact_sha256=ARTIFACT_SHA,
+            expected_source_sha=SOURCE_SHA,
+            expected_transcript_sha256=rejected_resolution.record.transcript_sha256,
+        )
+        is rejected_resolution
+    )
+
+
+def test_verified_reject_becomes_stale_after_later_accept(tmp_path):
+    transcript = _transcript()
+    ledger = _ledger(tmp_path)
+    _record(
+        ledger,
+        transcript,
+        decision=ManualNvdaDecision.REJECT_PHYSICAL_NVDA,
+        reviewed_at=T0,
+    )
+    rejected_resolution = _resolve(ledger, transcript)
+    assert rejected_resolution is not None
+    assert rejected_resolution.accepted_manual_decision is False
+
+    _record(ledger, transcript, reviewed_at=T1)
+
+    with pytest.raises(
+        NvdaManualAcceptanceStateError,
+        match="no longer the current durable decision",
+    ):
+        verify_manual_nvda_acceptance_resolution(
+            rejected_resolution,
+            expected_artifact_sha256=ARTIFACT_SHA,
+            expected_source_sha=SOURCE_SHA,
+            expected_transcript_sha256=rejected_resolution.record.transcript_sha256,
+        )
+
+    accepted_resolution = _resolve(ledger, transcript)
+    assert accepted_resolution is not None
+    assert accepted_resolution.accepted_manual_decision is True
+    assert (
+        verify_manual_nvda_acceptance_resolution(
+            accepted_resolution,
+            expected_artifact_sha256=ARTIFACT_SHA,
+            expected_source_sha=SOURCE_SHA,
+            expected_transcript_sha256=accepted_resolution.record.transcript_sha256,
+        )
+        is accepted_resolution
+    )
+
+
 def test_new_decision_must_not_backdate_or_reuse_timestamp(tmp_path):
     transcript = _transcript()
     ledger = _ledger(tmp_path)

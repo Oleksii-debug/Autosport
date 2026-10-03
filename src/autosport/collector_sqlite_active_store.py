@@ -7,7 +7,7 @@ import os
 import sqlite3
 from datetime import timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping, Sequence
 
 from .causal_collector_legacy import (
     CollectorDelta,
@@ -16,17 +16,26 @@ from .causal_collector_legacy import (
     StreamCheckpoint,
     _instant,
     _text,
+    canonical_event_digest,
 )
 from .collector_sqlite_store import (
     CollectorDeltaStore as _SQLiteCollectorDeltaStore,
     _canonical_delta_json,
     _payload_digest,
 )
+from .domain import MarketEvent
 
 
 _SQLITE_HEADER = b"SQLite format 3\x00"
 _PROJECTION_INTEGRITY_META_KEY = "indexed_projection_integrity_v1"
 _PROJECTION_IMMUTABILITY_TRIGGER = "collector_deltas_projection_immutable_v1"
+_EVENT_PAYLOAD_TABLE = "collector_event_payloads_v1"
+_EVENT_PAYLOAD_SCHEMA_META_KEY = "collector_event_payload_schema_v1"
+_EVENT_PAYLOAD_QUOTE_INDEX = "collector_event_payloads_v1_quote"
+_EVENT_PAYLOAD_DEDUPE_INDEX = "collector_event_payloads_v1_dedupe"
+_EVENT_PAYLOAD_IMMUTABLE_UPDATE_TRIGGER = "collector_event_payloads_immutable_update_v1"
+_EVENT_PAYLOAD_MAX_QUERY_KEYS = 50_000
+_EVENT_PAYLOAD_QUERY_CHUNK = 400
 _INDEXED_PROJECTION_FIELDS = (
     "delta_id",
     "source_id",
@@ -172,6 +181,71 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
         connection = self._connect()
         try:
             connection.execute("BEGIN IMMEDIATE")
+            event_schema_marker = connection.execute(
+                "SELECT value FROM collector_meta WHERE key=?",
+                (_EVENT_PAYLOAD_SCHEMA_META_KEY,),
+            ).fetchone()
+            event_object_names = {
+                row["name"]
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master "
+                    "WHERE name IN (?,?,?,?)",
+                    (
+                        _EVENT_PAYLOAD_TABLE,
+                        _EVENT_PAYLOAD_QUOTE_INDEX,
+                        _EVENT_PAYLOAD_DEDUPE_INDEX,
+                        _EVENT_PAYLOAD_IMMUTABLE_UPDATE_TRIGGER,
+                    ),
+                ).fetchall()
+            }
+            required_event_objects = {
+                _EVENT_PAYLOAD_TABLE,
+                _EVENT_PAYLOAD_QUOTE_INDEX,
+                _EVENT_PAYLOAD_DEDUPE_INDEX,
+                _EVENT_PAYLOAD_IMMUTABLE_UPDATE_TRIGGER,
+            }
+            if event_schema_marker is None:
+                if event_object_names:
+                    raise ValueError(
+                        "collector event payload schema is present without its durable marker"
+                    )
+                connection.execute(
+                    f"CREATE TABLE {_EVENT_PAYLOAD_TABLE} ("
+                    "delta_id TEXT PRIMARY KEY NOT NULL,"
+                    "source_id TEXT NOT NULL,"
+                    "stream_epoch TEXT NOT NULL,"
+                    "quote_key TEXT NOT NULL,"
+                    "dedupe_key TEXT NOT NULL,"
+                    "event_id TEXT NOT NULL,"
+                    "canonical_event_digest TEXT NOT NULL,"
+                    "payload_json TEXT NOT NULL,"
+                    "FOREIGN KEY(delta_id) REFERENCES collector_deltas(delta_id) "
+                    "ON DELETE CASCADE)"
+                )
+                connection.execute(
+                    f"CREATE INDEX {_EVENT_PAYLOAD_QUOTE_INDEX} "
+                    f"ON {_EVENT_PAYLOAD_TABLE}(source_id, stream_epoch, quote_key)"
+                )
+                connection.execute(
+                    f"CREATE INDEX {_EVENT_PAYLOAD_DEDUPE_INDEX} "
+                    f"ON {_EVENT_PAYLOAD_TABLE}(source_id, stream_epoch, dedupe_key)"
+                )
+                connection.execute(
+                    f"CREATE TRIGGER {_EVENT_PAYLOAD_IMMUTABLE_UPDATE_TRIGGER} "
+                    f"BEFORE UPDATE ON {_EVENT_PAYLOAD_TABLE} BEGIN "
+                    "SELECT RAISE(ABORT, 'collector event payload evidence is immutable'); END"
+                )
+                connection.execute(
+                    "INSERT INTO collector_meta(key, value) VALUES(?, '1')",
+                    (_EVENT_PAYLOAD_SCHEMA_META_KEY,),
+                )
+            elif (
+                event_schema_marker[0] != "1"
+                or event_object_names != required_event_objects
+            ):
+                raise ValueError(
+                    "collector event payload schema integrity guard is missing"
+                )
             connection.execute(
                 "CREATE TABLE IF NOT EXISTS collector_cycle_starts_v1 ("
                 "source_id TEXT NOT NULL,"
@@ -362,6 +436,260 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
                         f"collector delta indexed projection conflicts with payload: {field}"
                     )
         return delta
+
+    @staticmethod
+    def _canonical_event_payload(
+        event: MarketEvent,
+    ) -> tuple[str, str, str, str]:
+        if not isinstance(event, MarketEvent):
+            raise TypeError("event must be MarketEvent")
+        payload = event.to_dict()
+        payload_json = json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+        digest = canonical_event_digest(event)
+        return payload_json, digest, event.quote_key, event.dedupe_key
+
+    @classmethod
+    def _append_event_payload_connection(
+        cls,
+        connection: sqlite3.Connection,
+        delta: CollectorDelta,
+        event: MarketEvent,
+    ) -> bool:
+        delta.validate()
+        payload_json, digest, quote_key, dedupe_key = cls._canonical_event_payload(event)
+        if (
+            digest != delta.canonical_event_digest
+            or event.event_id != delta.event_id
+            or dedupe_key != delta.event_dedupe_key
+        ):
+            raise DeltaConflictError(
+                f"event payload conflicts with collector delta {delta.delta_id}"
+            )
+
+        retained = cls._delta_by_id(connection, delta.delta_id)
+        if retained is None:
+            tombstone = connection.execute(
+                "SELECT source_id, stream_epoch FROM collector_delta_tombstones_v1 "
+                "WHERE delta_id=?",
+                (delta.delta_id,),
+            ).fetchone()
+            if (
+                tombstone is not None
+                and tombstone["source_id"] == delta.source_id
+                and tombstone["stream_epoch"] == delta.stream_epoch
+            ):
+                return False
+            raise DeltaConflictError(
+                f"event payload target delta {delta.delta_id} is not retained"
+            )
+        if _canonical_delta_json(retained) != _canonical_delta_json(delta):
+            raise DeltaConflictError(
+                f"event payload target delta {delta.delta_id} conflicts"
+            )
+
+        existing = connection.execute(
+            f"SELECT source_id, stream_epoch, quote_key, dedupe_key, event_id, "
+            f"canonical_event_digest, payload_json FROM {_EVENT_PAYLOAD_TABLE} "
+            "WHERE delta_id=?",
+            (delta.delta_id,),
+        ).fetchone()
+        expected = (
+            delta.source_id,
+            delta.stream_epoch,
+            quote_key,
+            dedupe_key,
+            event.event_id,
+            digest,
+            payload_json,
+        )
+        if existing is not None:
+            observed = (
+                existing["source_id"],
+                existing["stream_epoch"],
+                existing["quote_key"],
+                existing["dedupe_key"],
+                existing["event_id"],
+                existing["canonical_event_digest"],
+                existing["payload_json"],
+            )
+            if observed != expected:
+                raise DeltaConflictError(
+                    f"event payload {delta.delta_id} conflicts with immutable evidence"
+                )
+            return False
+
+        connection.execute(
+            f"INSERT INTO {_EVENT_PAYLOAD_TABLE}("
+            "delta_id, source_id, stream_epoch, quote_key, dedupe_key, event_id, "
+            "canonical_event_digest, payload_json"
+            ") VALUES(?,?,?,?,?,?,?,?)",
+            (delta.delta_id, *expected),
+        )
+        return True
+
+    def migrate_event_payloads(
+        self,
+        events_by_delta_id: Mapping[str, MarketEvent],
+        *,
+        allow_missing_delta_ids: Sequence[str] = (),
+    ) -> int:
+        if not isinstance(events_by_delta_id, Mapping):
+            raise TypeError("events_by_delta_id must be a mapping")
+        allowed_missing = set(
+            self._bounded_identity_keys(
+                allow_missing_delta_ids,
+                "allow_missing_delta_id",
+            )
+        )
+        connection = self._connect()
+        migrated = 0
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            for delta_id, event in events_by_delta_id.items():
+                delta_id = _text(delta_id, "delta_id")
+                delta = self._delta_by_id(connection, delta_id)
+                if delta is None:
+                    if delta_id in allowed_missing:
+                        continue
+                    raise ValueError(
+                        f"event payload migration target {delta_id} is not retained"
+                    )
+                if self._append_event_payload_connection(connection, delta, event):
+                    migrated += 1
+            connection.commit()
+            return migrated
+        except sqlite3.DatabaseError as exc:
+            if connection.in_transaction:
+                connection.rollback()
+            raise ValueError("cannot migrate collector event payload evidence") from exc
+        except Exception:
+            if connection.in_transaction:
+                connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    def resolve_event(self, delta: CollectorDelta) -> MarketEvent:
+        if not isinstance(delta, CollectorDelta):
+            raise TypeError("delta must be CollectorDelta")
+        delta.validate()
+        connection = self._connect()
+        try:
+            retained = self._delta_by_id(connection, delta.delta_id)
+            if retained is None or _canonical_delta_json(retained) != _canonical_delta_json(delta):
+                raise ValueError("collector event resolution delta is not retained exactly")
+            row = connection.execute(
+                f"SELECT source_id, stream_epoch, quote_key, dedupe_key, event_id, "
+                f"canonical_event_digest, payload_json FROM {_EVENT_PAYLOAD_TABLE} "
+                "WHERE delta_id=?",
+                (delta.delta_id,),
+            ).fetchone()
+            if row is None:
+                raise ValueError("collector event payload is unavailable")
+            if (
+                row["source_id"] != delta.source_id
+                or row["stream_epoch"] != delta.stream_epoch
+                or row["event_id"] != delta.event_id
+                or row["canonical_event_digest"] != delta.canonical_event_digest
+            ):
+                raise ValueError("collector event payload projection conflicts with delta")
+            try:
+                raw = json.loads(row["payload_json"])
+            except (TypeError, ValueError, json.JSONDecodeError) as exc:
+                raise ValueError("collector event payload JSON is invalid") from exc
+            if not isinstance(raw, dict):
+                raise ValueError("collector event payload must be a JSON object")
+            event = MarketEvent.from_dict(raw)
+            payload_json, digest, quote_key, dedupe_key = self._canonical_event_payload(event)
+            if (
+                payload_json != row["payload_json"]
+                or digest != row["canonical_event_digest"]
+                or quote_key != row["quote_key"]
+                or dedupe_key != row["dedupe_key"]
+                or event.event_id != delta.event_id
+                or event.dedupe_key != delta.event_dedupe_key
+            ):
+                raise ValueError("collector event payload integrity check failed")
+            return event
+        except sqlite3.DatabaseError as exc:
+            raise ValueError("cannot resolve collector event payload") from exc
+        finally:
+            connection.close()
+
+    @staticmethod
+    def _bounded_identity_keys(
+        values: Sequence[str],
+        field: str,
+    ) -> tuple[str, ...]:
+        if not isinstance(values, (tuple, list)):
+            raise TypeError(f"{field} must be a tuple or list")
+        if len(values) > _EVENT_PAYLOAD_MAX_QUERY_KEYS:
+            raise ValueError(f"{field} exceeds bounded query keys")
+        return tuple(sorted({_text(value, field) for value in values}))
+
+    def event_digest_maps(
+        self,
+        *,
+        source_id: str,
+        stream_epoch: str,
+        quote_keys: Sequence[str],
+        dedupe_keys: Sequence[str],
+    ) -> tuple[dict[str, str], dict[str, str]]:
+        source_id = _text(source_id, "source_id")
+        stream_epoch = _text(stream_epoch, "stream_epoch")
+        quotes = self._bounded_identity_keys(quote_keys, "quote_key")
+        dedupes = self._bounded_identity_keys(dedupe_keys, "dedupe_key")
+        quote_map: dict[str, str] = {}
+        dedupe_map: dict[str, str] = {}
+        connection = self._connect()
+        try:
+            for offset in range(0, len(quotes), _EVENT_PAYLOAD_QUERY_CHUNK):
+                chunk = quotes[offset : offset + _EVENT_PAYLOAD_QUERY_CHUNK]
+                placeholders = ",".join("?" for _ in chunk)
+                rows = connection.execute(
+                    f"SELECT p.quote_key, p.canonical_event_digest, d.commit_seq "
+                    f"FROM {_EVENT_PAYLOAD_TABLE} AS p "
+                    "JOIN collector_deltas AS d ON d.delta_id=p.delta_id "
+                    "WHERE p.source_id=? AND p.stream_epoch=? "
+                    f"AND p.quote_key IN ({placeholders}) "
+                    "ORDER BY d.commit_seq DESC",
+                    (source_id, stream_epoch, *chunk),
+                ).fetchall()
+                for row in rows:
+                    quote_map.setdefault(
+                        row["quote_key"], row["canonical_event_digest"]
+                    )
+
+            for offset in range(0, len(dedupes), _EVENT_PAYLOAD_QUERY_CHUNK):
+                chunk = dedupes[offset : offset + _EVENT_PAYLOAD_QUERY_CHUNK]
+                placeholders = ",".join("?" for _ in chunk)
+                rows = connection.execute(
+                    f"SELECT p.dedupe_key, p.canonical_event_digest "
+                    f"FROM {_EVENT_PAYLOAD_TABLE} AS p "
+                    "JOIN collector_deltas AS d ON d.delta_id=p.delta_id "
+                    "WHERE p.source_id=? AND p.stream_epoch=? "
+                    f"AND p.dedupe_key IN ({placeholders})",
+                    (source_id, stream_epoch, *chunk),
+                ).fetchall()
+                for row in rows:
+                    prior = dedupe_map.setdefault(
+                        row["dedupe_key"], row["canonical_event_digest"]
+                    )
+                    if prior != row["canonical_event_digest"]:
+                        raise ValueError(
+                            "collector event dedupe identity changed canonical payload"
+                        )
+            return quote_map, dedupe_map
+        except sqlite3.DatabaseError as exc:
+            raise ValueError("cannot resolve collector event identity digests") from exc
+        finally:
+            connection.close()
 
     @staticmethod
     def _cycle_terminal_payload_sha256(payload_json: str) -> str:
@@ -1422,6 +1750,7 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
         delta: CollectorDelta,
         *,
         activated_at: str,
+        event: MarketEvent | None = None,
     ) -> bool:
         """Atomically admit one canonical delta and its active-epoch authority."""
 
@@ -1433,6 +1762,8 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
         try:
             connection.execute("BEGIN IMMEDIATE")
             changed = self._append_connection(connection, delta)
+            if event is not None:
+                self._append_event_payload_connection(connection, delta, event)
             if changed:
                 self._write({"schema_version": self.schema_version})
 

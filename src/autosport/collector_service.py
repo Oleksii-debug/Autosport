@@ -20,6 +20,7 @@ from .causal_collector import (
     RemoteCollectorAdapter,
     StreamCheckpoint,
 )
+from .domain import MarketEvent
 from .event_lifecycle import (
     CatalogCheckpoint,
     CatalogPage,
@@ -499,6 +500,19 @@ class HeadlessCollectorService:
         self.source = source
         self._source_identity = source
         self._source_id = source_id
+        binder = getattr(source, "bind_collector_store", None)
+        if binder is not None:
+            if not callable(binder):
+                raise TypeError("source.bind_collector_store must be callable")
+            binder(delta_store)
+            if (
+                getattr(source, "source_id", None) != source_id
+                or getattr(source, "stream_epoch", None) != stream_epoch
+            ):
+                raise CollectorServiceError(
+                    "source identity changed while binding canonical collector store"
+                )
+        self._archives_canonical_events = binder is not None
         self.config = config or CollectorServiceConfig()
         self.clock = clock or (lambda: datetime.now(timezone.utc).isoformat())
         self.sleep = sleep or time.sleep
@@ -562,7 +576,7 @@ class HeadlessCollectorService:
         if not isinstance(delta, CollectorDelta):
             raise TypeError("delta must be CollectorDelta")
         delta.validate()
-        self._require_source_identity(
+        source = self._require_source_identity(
             expected_stream_epoch=delta.stream_epoch
         )
         if delta.source_id != self._source_id:
@@ -571,10 +585,23 @@ class HeadlessCollectorService:
             )
         activated_at = self.clock()
         _CollectorServiceState._instant(activated_at, "activated_at")
+        event = None
+        if self._archives_canonical_events:
+            resolver = getattr(source, "resolve_event", None)
+            if not callable(resolver):
+                raise CollectorServiceError(
+                    "collector-bound source must provide resolve_event"
+                )
+            event = resolver(delta)
+            if not isinstance(event, MarketEvent):
+                raise CollectorServiceError(
+                    "collector-bound source resolve_event must return MarketEvent"
+                )
         try:
             return self.delta_store._append_with_runtime_stream_epoch(
                 delta,
                 activated_at=activated_at,
+                event=event,
             )
         except CollectorStorageBackpressureError as exc:
             raise CollectorRetentionRequiredError(

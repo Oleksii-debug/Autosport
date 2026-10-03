@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import stat
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -10,6 +11,7 @@ from typing import Callable
 
 from .causal_collector import (
     CollectorDelta,
+    CollectorDeltaStore,
     StreamCheckpoint,
     canonical_event_digest,
     digest_source_payload,
@@ -62,6 +64,9 @@ class ParlayApiProductSource:
     _STREAM_EPOCH = "parlayapi-table-tennis-product-v1"
     _READ_BATCH_ITEMS = 1000
     _MAX_SNAPSHOT_ITEMS = 50_000
+    _MAX_STATE_BYTES = 512 * 1024 * 1024
+    _LEGACY_HISTORY_VERIFY_CHUNK = 10_000
+    _LEGACY_EVENT_MIGRATION_CHUNK = 1_000
     _STATE_FIELDS = {
         "schema",
         "schema_version",
@@ -145,8 +150,12 @@ class ParlayApiProductSource:
                 }
             ).encode("utf-8")
         ).hexdigest()
+        self._collector_store: CollectorDeltaStore | None = None
         self._initialize_state()
         self._read_state()
+        self.bind_collector_store(
+            CollectorDeltaStore(self.workspace / "collector_deltas.json")
+        )
 
     @staticmethod
     def _text(value: object, field: str) -> str:
@@ -230,9 +239,84 @@ class ParlayApiProductSource:
             "event_cache": {},
         }
 
+    @staticmethod
+    def _stable_state_metadata(left: os.stat_result, right: os.stat_result) -> bool:
+        return (
+            left.st_mode == right.st_mode
+            and left.st_size == right.st_size
+            and left.st_mtime_ns == right.st_mtime_ns
+            and left.st_ctime_ns == right.st_ctime_ns
+        )
+
+    def _read_state_text_bounded(self) -> str:
+        path = self.state_path
+        try:
+            path_before = os.stat(path, follow_symlinks=False)
+        except OSError as exc:
+            raise ProductSourceStateError(
+                "cannot verify durable product source state"
+            ) from exc
+        if (
+            not stat.S_ISREG(path_before.st_mode)
+            or path_before.st_nlink != 1
+            or path_before.st_size > self._MAX_STATE_BYTES
+        ):
+            raise ProductSourceStateError(
+                "durable product source state is not a bounded canonical file"
+            )
+
+        try:
+            handle = path.open("rb")
+        except OSError as exc:
+            raise ProductSourceStateError(
+                "cannot verify durable product source state"
+            ) from exc
+        with handle:
+            try:
+                opened_before = os.fstat(handle.fileno())
+                current = os.stat(path, follow_symlinks=False)
+                with path.open("rb") as verification:
+                    same_file = os.path.sameopenfile(
+                        handle.fileno(),
+                        verification.fileno(),
+                    )
+                if (
+                    not same_file
+                    or not stat.S_ISREG(opened_before.st_mode)
+                    or opened_before.st_nlink != 1
+                    or not self._stable_state_metadata(path_before, opened_before)
+                    or not self._stable_state_metadata(path_before, current)
+                ):
+                    raise ProductSourceStateError(
+                        "durable product source state changed while validating"
+                    )
+                payload = handle.read(self._MAX_STATE_BYTES + 1)
+                opened_after = os.fstat(handle.fileno())
+                current_after = os.stat(path, follow_symlinks=False)
+            except ProductSourceStateError:
+                raise
+            except OSError as exc:
+                raise ProductSourceStateError(
+                    "cannot verify durable product source state"
+                ) from exc
+        if (
+            len(payload) > self._MAX_STATE_BYTES
+            or not self._stable_state_metadata(opened_before, opened_after)
+            or not self._stable_state_metadata(path_before, current_after)
+        ):
+            raise ProductSourceStateError(
+                "durable product source state changed or exceeded its byte bound"
+            )
+        try:
+            return payload.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ProductSourceStateError(
+                "durable product source state is not valid UTF-8"
+            ) from exc
+
     def _read_state_unlocked(self) -> dict[str, object]:
         try:
-            raw = strict_json_loads(self.state_path.read_text(encoding="utf-8"))
+            raw = strict_json_loads(self._read_state_text_bounded())
         except (OSError, TypeError, ValueError) as exc:
             raise ProductSourceStateError("cannot verify durable product source state") from exc
         if (
@@ -385,6 +469,25 @@ class ParlayApiProductSource:
                 raise ProductSourceStateError(
                     "product source authority prepared a different state transition"
                 )
+            try:
+                rendered = (
+                    json.dumps(
+                        sealed,
+                        ensure_ascii=False,
+                        indent=2,
+                        sort_keys=True,
+                        allow_nan=False,
+                    )
+                    + "\n"
+                ).encode("utf-8")
+            except (TypeError, ValueError, UnicodeError) as exc:
+                raise ProductSourceStateError(
+                    "product source state cannot be serialized"
+                ) from exc
+            if len(rendered) > self._MAX_STATE_BYTES:
+                raise ProductSourceStateError(
+                    "product source state exceeds bounded checkpoint capacity"
+                )
             atomic_write_json(self.state_path, sealed)
             verified = self._read_state_unlocked()
             if verified["state_sha256"] != intended or verified["authority_tx_id"] != tx_id:
@@ -472,6 +575,118 @@ class ParlayApiProductSource:
             raise ProductSourceStateError(
                 "cannot acquire canonical product source journal lock"
             ) from exc
+
+    def bind_collector_store(self, store: CollectorDeltaStore) -> None:
+        if not isinstance(store, CollectorDeltaStore):
+            raise TypeError("store must be CollectorDeltaStore")
+        expected = (self.workspace / "collector_deltas.json").resolve(strict=False)
+        observed = store.path.resolve(strict=False)
+        if observed != expected:
+            raise ProductSourceStateError(
+                "product source collector store must be the canonical workspace store"
+            )
+        current = self._collector_store
+        if current is not None and current.path.resolve(strict=False) != observed:
+            raise ProductSourceStateError(
+                "product source collector store authority cannot be replaced"
+            )
+        self._collector_store = store
+        self._migrate_legacy_history_to_collector_store()
+
+    def _require_collector_store(self) -> CollectorDeltaStore:
+        store = self._collector_store
+        if store is None:
+            raise ProductSourceStateError(
+                "canonical collector store is not bound to product source"
+            )
+        if store.path.resolve(strict=False) != (
+            self.workspace / "collector_deltas.json"
+        ).resolve(strict=False):
+            raise ProductSourceStateError(
+                "product source collector store authority changed"
+            )
+        return store
+
+    def _migrate_legacy_history_to_collector_store(self) -> None:
+        store = self._require_collector_store()
+        state = self._read_state()
+        cache = state["event_cache"]
+        quote_history = state["last_committed_quote_digests"]
+        dedupe_history = state["last_committed_dedupe_digests"]
+        assert isinstance(cache, dict)
+        assert isinstance(quote_history, dict)
+        assert isinstance(dedupe_history, dict)
+        if not cache and not quote_history and not dedupe_history:
+            return
+
+        pending_delta_ids: set[str] = set()
+        pending = state["pending"]
+        if isinstance(pending, dict) and pending["assigned"]:
+            for item in pending["items"]:
+                delta = CollectorDelta.from_dict(item["delta"])
+                pending_delta_ids.add(delta.delta_id)
+
+        cache_items = list(cache.items())
+        for offset in range(
+            0,
+            len(cache_items),
+            self._LEGACY_EVENT_MIGRATION_CHUNK,
+        ):
+            migrate: dict[str, MarketEvent] = {}
+            for delta_id, event_raw in cache_items[
+                offset : offset + self._LEGACY_EVENT_MIGRATION_CHUNK
+            ]:
+                try:
+                    migrate[delta_id] = MarketEvent.from_dict(event_raw)
+                except (TypeError, ValueError) as exc:
+                    raise ProductSourceStateError(
+                        "legacy historical event cache is invalid"
+                    ) from exc
+            try:
+                store.migrate_event_payloads(
+                    migrate,
+                    allow_missing_delta_ids=tuple(sorted(pending_delta_ids)),
+                )
+            except (TypeError, ValueError) as exc:
+                raise ProductSourceStateError(
+                    "legacy historical event cache conflicts with canonical collector retention"
+                ) from exc
+
+        def verify_history(
+            history: dict[str, object],
+            *,
+            quote: bool,
+        ) -> None:
+            items = list(history.items())
+            for offset in range(0, len(items), self._LEGACY_HISTORY_VERIFY_CHUNK):
+                chunk = items[offset : offset + self._LEGACY_HISTORY_VERIFY_CHUNK]
+                keys = tuple(str(key) for key, _ in chunk)
+                try:
+                    quote_map, dedupe_map = store.event_digest_maps(
+                        source_id=self.source_id,
+                        stream_epoch=self.stream_epoch,
+                        quote_keys=keys if quote else (),
+                        dedupe_keys=() if quote else keys,
+                    )
+                except (TypeError, ValueError) as exc:
+                    raise ProductSourceStateError(
+                        "legacy digest history cannot be verified against collector retention"
+                    ) from exc
+                observed = quote_map if quote else dedupe_map
+                for key, digest in chunk:
+                    if observed.get(key) != digest:
+                        kind = "quote" if quote else "dedupe"
+                        raise ProductSourceStateError(
+                            f"legacy {kind} history conflicts with canonical collector history"
+                        )
+
+        verify_history(quote_history, quote=True)
+        verify_history(dedupe_history, quote=False)
+
+        state["last_committed_quote_digests"] = {}
+        state["last_committed_dedupe_digests"] = {}
+        state["event_cache"] = {}
+        self._write_state(state)
 
     def _validate_pending(self, pending: object) -> None:
         base_fields = {
@@ -748,15 +963,13 @@ class ParlayApiProductSource:
             raise ProductSourceStateError(
                 "product source acquisition compliance provenance is invalid"
             ) from exc
+
         cursor, quotes, quality_flags = self._read_provider_snapshot()
         catalog_events = self._catalog_events(quotes)
-        committed_quotes = state["last_committed_quote_digests"]
-        committed_dedupes = state["last_committed_dedupe_digests"]
-        assert isinstance(committed_quotes, dict)
-        assert isinstance(committed_dedupes, dict)
+
+        normalized: list[tuple[ProviderQuote, MarketEvent, str]] = []
         seen_quotes: dict[str, str] = {}
         seen_dedupes: dict[str, str] = {}
-        items: list[dict[str, object]] = []
         for quote in quotes:
             event = self.normalizer.normalize(self.source_id, quote)
             digest = canonical_event_digest(event)
@@ -774,6 +987,23 @@ class ParlayApiProductSource:
                     "provider snapshot reuses one causal dedupe identity"
                 )
             seen_dedupes[event.dedupe_key] = digest
+            normalized.append((quote, event, digest))
+
+        store = self._require_collector_store()
+        try:
+            committed_quotes, committed_dedupes = store.event_digest_maps(
+                source_id=self.source_id,
+                stream_epoch=self.stream_epoch,
+                quote_keys=tuple(seen_quotes),
+                dedupe_keys=tuple(seen_dedupes),
+            )
+        except (TypeError, ValueError) as exc:
+            raise ProductSourceStateError(
+                "cannot resolve bounded canonical collector event history"
+            ) from exc
+
+        items: list[dict[str, object]] = []
+        for quote, event, digest in normalized:
             committed_dedupe = committed_dedupes.get(event.dedupe_key)
             if committed_dedupe is not None and committed_dedupe != digest:
                 raise ProductSourcePayloadError(
@@ -793,6 +1023,7 @@ class ParlayApiProductSource:
                     "delta": None,
                 }
             )
+
         pending: dict[str, object] = {
             "catalog_cursor": cursor,
             "catalog_position": position,
@@ -899,8 +1130,6 @@ class ParlayApiProductSource:
         self._instant(assigned_at, "collector_received_at")
         items = pending["items"]
         assert isinstance(items, list)
-        event_cache = state["event_cache"]
-        assert isinstance(event_cache, dict)
         for offset, item in enumerate(items, start=1):
             assert isinstance(item, dict)
             event = MarketEvent.from_dict(item["event"])
@@ -942,10 +1171,6 @@ class ParlayApiProductSource:
                 quality_flags=tuple(pending["quality_flags"]),
             )
             delta.validate()
-            existing = event_cache.get(delta_id)
-            if existing is not None and existing != event.to_dict():
-                raise ProductSourceStateError("event cache conflicts for deterministic delta id")
-            event_cache[delta_id] = event.to_dict()
             item["delta"] = delta.to_dict()
         pending["assigned"] = True
         if not items:
@@ -973,13 +1198,6 @@ class ParlayApiProductSource:
             state["last_confirmed_delta_position"] = final.cursor_position
             state["last_confirmed_delta_cursor"] = final.source_cursor
             state["last_confirmed_delta_id"] = final.delta_id
-        committed_quotes = state["last_committed_quote_digests"]
-        committed_dedupes = state["last_committed_dedupe_digests"]
-        assert isinstance(committed_quotes, dict)
-        assert isinstance(committed_dedupes, dict)
-        for item in items:
-            committed_quotes[str(item["quote_key"])] = str(item["canonical_digest"])
-            committed_dedupes[str(item["dedupe_key"])] = str(item["canonical_digest"])
         self._record_catalog_confirmation(state, pending)
         pending["confirmed"] = True
         self._write_state(state)
@@ -1037,22 +1255,36 @@ class ParlayApiProductSource:
         delta.validate()
         if delta.source_id != self.source_id or delta.stream_epoch != self.stream_epoch:
             raise ProductSourceStateError("delta identity does not belong to this source")
+
         state = self._read_state()
-        event_cache = state["event_cache"]
-        assert isinstance(event_cache, dict)
-        event_raw = event_cache.get(delta.delta_id)
-        if event_raw is None:
+        pending = state["pending"]
+        if isinstance(pending, dict) and pending["assigned"]:
+            for item in pending["items"]:
+                pending_delta = CollectorDelta.from_dict(item["delta"])
+                if pending_delta.delta_id != delta.delta_id:
+                    continue
+                if pending_delta != delta:
+                    raise ProductSourceStateError(
+                        "pending event conflicts with collector delta"
+                    )
+                event = MarketEvent.from_dict(item["event"])
+                if (
+                    event.event_id != delta.event_id
+                    or event.dedupe_key != delta.event_dedupe_key
+                    or canonical_event_digest(event) != delta.canonical_event_digest
+                ):
+                    raise ProductSourceStateError(
+                        "pending event conflicts with collector delta"
+                    )
+                return event
+
+        try:
+            return self._require_collector_store().resolve_event(delta)
+        except (TypeError, ValueError) as exc:
             raise ProductSourceStateError(
-                "canonical event payload is absent from durable source state"
-            )
-        event = MarketEvent.from_dict(event_raw)
-        if (
-            event.event_id != delta.event_id
-            or event.dedupe_key != delta.event_dedupe_key
-            or canonical_event_digest(event) != delta.canonical_event_digest
-        ):
-            raise ProductSourceStateError("durable event conflicts with collector delta")
-        return event
+                "canonical event payload is absent or invalid in collector retention"
+            ) from exc
+
 
 
 def _required_env(name: str) -> str:

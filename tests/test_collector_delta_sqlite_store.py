@@ -101,6 +101,129 @@ class CollectorSQLiteStoreTests(unittest.TestCase):
             checkpoint = reopened.stream_checkpoint("source-x", "epoch-1")
             self.assertEqual(checkpoint.last_delta_id, delta.delta_id)
 
+    def test_event_payload_schema_marker_prevents_silent_recreation_after_loss(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "collector.json"
+            store = CollectorDeltaStore(path)
+            payload = event_payload()
+            event = MarketEvent.from_dict(payload)
+            delta = make_delta(payload=payload)
+            store._append_with_runtime_stream_epoch(
+                delta,
+                activated_at="2026-01-01T00:00:00+00:00",
+                event=event,
+            )
+
+            connection = sqlite3.connect(path)
+            try:
+                connection.execute("DROP TABLE collector_event_payloads_v1")
+                connection.commit()
+            finally:
+                connection.close()
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "event payload schema integrity guard is missing",
+            ):
+                CollectorDeltaStore(path)
+
+    def test_runtime_append_archives_event_atomically_and_resolves_exact_payload(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = CollectorDeltaStore(Path(tmp) / "collector.json")
+            payload = event_payload()
+            event = MarketEvent.from_dict(payload)
+            delta = make_delta(payload=payload)
+
+            self.assertTrue(
+                store._append_with_runtime_stream_epoch(
+                    delta,
+                    activated_at="2026-01-01T00:00:00+00:00",
+                    event=event,
+                )
+            )
+            self.assertEqual(store.resolve_event(delta), event)
+            quote_map, dedupe_map = store.event_digest_maps(
+                source_id=delta.source_id,
+                stream_epoch=delta.stream_epoch,
+                quote_keys=[event.quote_key],
+                dedupe_keys=[event.dedupe_key],
+            )
+            self.assertEqual(
+                quote_map,
+                {event.quote_key: delta.canonical_event_digest},
+            )
+            self.assertEqual(
+                dedupe_map,
+                {event.dedupe_key: delta.canonical_event_digest},
+            )
+
+            self.assertFalse(
+                store._append_with_runtime_stream_epoch(
+                    delta,
+                    activated_at="2026-01-01T00:00:05+00:00",
+                    event=event,
+                )
+            )
+            self.assertEqual(store.resolve_event(delta), event)
+
+    def test_event_payload_migration_allows_only_explicit_pending_missing_ids(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = CollectorDeltaStore(Path(tmp) / "collector.json")
+            event = MarketEvent.from_dict(event_payload())
+            missing = "pending-not-yet-committed"
+
+            self.assertEqual(
+                store.migrate_event_payloads(
+                    {missing: event},
+                    allow_missing_delta_ids=(missing,),
+                ),
+                0,
+            )
+            with self.assertRaisesRegex(ValueError, "is not retained"):
+                store.migrate_event_payloads({"unexpected-missing": event})
+
+    def test_event_payload_conflict_rolls_back_new_delta(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = CollectorDeltaStore(Path(tmp) / "collector.json")
+            delta = make_delta()
+            conflicting = MarketEvent.from_dict(event_payload(odds="1.91"))
+
+            with self.assertRaises(DeltaConflictError):
+                store._append_with_runtime_stream_epoch(
+                    delta,
+                    activated_at="2026-01-01T00:00:00+00:00",
+                    event=conflicting,
+                )
+
+            self.assertIsNone(store.get(delta.delta_id))
+
+    def test_event_payload_is_deleted_with_retained_delta_parent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "collector.json"
+            store = CollectorDeltaStore(path)
+            payload = event_payload()
+            event = MarketEvent.from_dict(payload)
+            delta = make_delta(payload=payload)
+            store._append_with_runtime_stream_epoch(
+                delta,
+                activated_at="2026-01-01T00:00:00+00:00",
+                event=event,
+            )
+
+            connection = store._connect()
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                connection.execute(
+                    "DELETE FROM collector_deltas WHERE delta_id=?",
+                    (delta.delta_id,),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            with self.assertRaisesRegex(ValueError, "not retained exactly"):
+                store.resolve_event(delta)
+
     def test_legacy_json_migrates_once_and_preserves_exact_backup(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "collector.json"

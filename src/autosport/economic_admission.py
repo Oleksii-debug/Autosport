@@ -504,6 +504,14 @@ class _PaperDayTurnoverSnapshot:
     window_evidence: ProductDayRiskWindow
 
 
+@dataclass(frozen=True, slots=True)
+class _ProductDayAdmissionAuthority:
+    """Current product-day headroom plus the product-owned action instant."""
+
+    turnover_room: Decimal
+    admission_ts: str
+
+
 def _positive_decimal(value: Decimal | str) -> Decimal:
     if type(value) is Decimal:
         amount = value
@@ -579,6 +587,60 @@ def _parse_utc_timestamp(value: str) -> datetime | None:
     if parsed.tzinfo is None or parsed.utcoffset() is None:
         return None
     return parsed.astimezone(timezone.utc)
+
+
+def _product_clock_admission_timestamp(
+    *,
+    window_store: ProductDayRiskWindowStore,
+    current_window: ProductDayRiskWindow,
+) -> str | None:
+    """Issue the admission instant from the same product clock as current day authority."""
+
+    if not current_window.product_clock_authoritative:
+        return None
+    clock = window_store._clock
+    try:
+        raw_ns = clock()
+    except (OSError, RuntimeError, TypeError, ValueError):
+        return None
+    if type(raw_ns) is not int or raw_ns < 0:
+        return None
+    seconds, nanoseconds = divmod(raw_ns, 1_000_000_000)
+    try:
+        instant = datetime.fromtimestamp(seconds, timezone.utc).replace(
+            microsecond=nanoseconds // 1_000,
+        )
+    except (OverflowError, OSError, ValueError):
+        return None
+    window_start = _parse_utc_timestamp(current_window.window_start)
+    window_end = _parse_utc_timestamp(current_window.window_end_exclusive)
+    if (
+        window_start is None
+        or window_end is None
+        or not (window_start <= instant < window_end)
+    ):
+        return None
+    return instant.isoformat().replace("+00:00", "Z")
+
+
+def _context_with_product_admission_time(
+    context: ProposedTicketRiskContext,
+    admission_ts: str,
+) -> ProposedTicketRiskContext:
+    """Preserve proposal evidence while replacing caller time with product time."""
+
+    return ProposedTicketRiskContext(
+        legs=context.legs,
+        quotes=context.quotes,
+        provider_accounts=context.provider_accounts,
+        bankroll_id=context.bankroll_id,
+        currency=context.currency,
+        measurement_window_start=context.measurement_window_start,
+        measurement_window_end=context.measurement_window_end,
+        proposal_ts=admission_ts,
+        risk_of_ruin_upper_bound=context.risk_of_ruin_upper_bound,
+        risk_of_ruin_evidence=context.risk_of_ruin_evidence,
+    )
 
 
 def _canonical_economic_goal_store(root: Path) -> EconomicGoalStore:
@@ -660,7 +722,7 @@ def _prepare_paper_day_turnover_snapshot(
     )
 
 
-def _revalidated_product_day_turnover_room(
+def _revalidated_product_day_admission_authority(
     *,
     snapshot: _PaperDayTurnoverSnapshot | None,
     root: Path,
@@ -668,8 +730,8 @@ def _revalidated_product_day_turnover_room(
     risk_policy: PaperRiskPolicy,
     placed_at: str,
     workspace_lock: WorkspaceEconomicLock,
-) -> Decimal | None:
-    """Return bounded UTC-day room only after canonical under-lock re-resolution."""
+) -> _ProductDayAdmissionAuthority | None:
+    """Return current day room plus a product-owned action instant under one lock."""
 
     if snapshot is None:
         return None
@@ -729,8 +791,17 @@ def _revalidated_product_day_turnover_room(
         room = evidence.residual_headroom
         if type(room) is not Decimal or not room.is_finite() or room < 0:
             return None
+        admission_ts = _product_clock_admission_timestamp(
+            window_store=window_store,
+            current_window=current_window,
+        )
+        if admission_ts is None:
+            return None
         _require_product_day_turnover_dispatch()
-        return room
+        return _ProductDayAdmissionAuthority(
+            turnover_room=room,
+            admission_ts=admission_ts,
+        )
     except (ArithmeticError, OSError, RuntimeError, TypeError, ValueError):
         return None
 
@@ -1026,23 +1097,12 @@ def admit_paper_ticket(
             working_book = book
 
         pre_evaluation_state = risk_policy._book_state(working_book)
-        decision = risk_policy.evaluate(working_book, amount, context=context)
-
-        # Every positive economic-goal admission must bind the ticket timestamp to
-        # the exact current product-issued UTC-day authority.  Limiting this check
-        # to the whole-history turnover rejection path lets a caller persist an
-        # otherwise-allowed ticket under a stale day and manufacture future daily
-        # headroom.  Reuse the same under-lock turnover/window authority for both
-        # baseline-positive admission and the bounded-day turnover continuation.
         goal = risk_policy.economic_goal
-        turnover_override_candidate = (
-            not decision.allowed
-            and decision.reason == "economic goal turnover limit exceeded"
-            and context is not None
-        )
-        turnover_room: Decimal | None = None
-        if goal is not None and (decision.allowed or turnover_override_candidate):
-            turnover_room = _revalidated_product_day_turnover_room(
+        day_authority: _ProductDayAdmissionAuthority | None = None
+        effective_context = context
+        effective_placed_at = placed_at
+        if goal is not None:
+            day_authority = _revalidated_product_day_admission_authority(
                 snapshot=day_turnover_snapshot,
                 root=root,
                 book=working_book,
@@ -1050,12 +1110,44 @@ def admit_paper_ticket(
                 placed_at=placed_at,
                 workspace_lock=workspace_lock,
             )
+            if day_authority is not None:
+                effective_placed_at = day_authority.admission_ts
+                if context is not None:
+                    try:
+                        effective_context = _context_with_product_admission_time(
+                            context,
+                            day_authority.admission_ts,
+                        )
+                    except (TypeError, ValueError):
+                        day_authority = None
+                        effective_context = context
+                        effective_placed_at = placed_at
+
+        decision = risk_policy.evaluate(
+            working_book,
+            amount,
+            context=effective_context,
+        )
+
+        # Positive economic-goal risk must use the exact product-owned action instant.
+        # Caller proposal_ts remains input binding only: using it as causal cutoff can
+        # hide newer bankroll lifecycle events or make an actually stale quote appear
+        # fresh. Cross-day caller timestamps still fail the current-day membership
+        # check, while accepted tickets persist the product-owned instant.
+        turnover_override_candidate = (
+            not decision.allowed
+            and decision.reason == "economic goal turnover limit exceeded"
+            and effective_context is not None
+        )
+        turnover_room = (
+            None if day_authority is None else day_authority.turnover_room
+        )
 
         if decision.allowed and goal is not None:
-            if turnover_room is None:
+            if day_authority is None:
                 decision = RiskDecision(
                     False,
-                    "economic goal current product day membership unavailable",
+                    "economic goal current product action time unavailable",
                 )
             elif amount > turnover_room:
                 decision = RiskDecision(
@@ -1064,11 +1156,12 @@ def admit_paper_ticket(
                 )
         elif turnover_override_candidate:
             if turnover_room is not None and amount <= turnover_room:
+                assert effective_context is not None
                 decision = _resume_after_product_day_turnover(
                     risk_policy=risk_policy,
                     book=working_book,
                     amount=amount,
-                    context=context,
+                    context=effective_context,
                     pre_evaluation_state=pre_evaluation_state,
                 )
         if not decision.allowed:
@@ -1082,7 +1175,7 @@ def admit_paper_ticket(
             legs,
             amount,
             reason=reason,
-            placed_at=placed_at,
+            placed_at=effective_placed_at,
             provider_source_ids=provider_source_ids,
             provider_accounts=provider_accounts,
             bankroll_id=bankroll_id,

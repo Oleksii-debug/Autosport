@@ -4,12 +4,17 @@ This module is deliberately read-only. It projects facts from one verified
 `RealExecutionLedger` snapshot and keeps the intended action, durable submit
 boundary, provider-correlation evidence, and acknowledgement economics separate.
 
-Current ledger schema v1 does not persist the identity/digest of the exact
-serialized provider instruction in `ATTEMPT_SUBMITTED`. Therefore this
-projection can never claim a complete decision -> actual-submit -> accepted
-price chain yet. That negative fact is intentional product truth: downstream
-slippage/economic/learning consumers must not substitute `ExecutionAction`
-requested odds for the actual serialized instruction.
+Current main ledger schema v1 stores only `submitted_at` in
+`ATTEMPT_SUBMITTED`. The active canonical ACK-trust lineage (#794) adds an
+optional exact request digest to the same event/read view and can correlate that
+digest with provider evidence. This projection consumes that authority when
+present instead of inventing a second writer or serializer.
+
+Even a request hash plus an acknowledgement hash is not, by itself, typed
+provider accepted-price provenance. Acknowledgement odds/stake therefore remain
+explicitly unverified and this projection cannot claim a complete
+decision -> actual-submit -> accepted-price chain until a canonical provider
+outcome resolver supplies that missing authority.
 """
 
 from __future__ import annotations
@@ -22,14 +27,16 @@ from .real_execution_ledger import (
     RealExecutionLedger,
     _decimal_text,
     _digest,
+    _sha256_text,
 )
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 CHAIN_NOT_SUBMITTED = "NOT_SUBMITTED"
 CHAIN_SUBMISSION_UNKNOWN = "SUBMISSION_UNKNOWN"
 CHAIN_SUBMIT_INSTRUCTION_UNBOUND = "SUBMIT_INSTRUCTION_UNBOUND"
+CHAIN_SUBMIT_INSTRUCTION_BOUND = "SUBMIT_INSTRUCTION_BOUND"
 
 ACCEPTED_PRICE_NOT_APPLICABLE = "NOT_APPLICABLE"
 ACCEPTED_PRICE_ACKNOWLEDGED_UNVERIFIED = "ACKNOWLEDGED_UNVERIFIED"
@@ -78,13 +85,14 @@ class ExecutionQuoteChainEvidence:
 
     reserved_at: str
     submitted_at: str | None
-    submission_instruction_sha256: None
+    submission_instruction_sha256: str | None
     chain_status: str
 
     provider_order_ref: str | None
     provider_evidence_id: str | None
     provider_evidence_observed_at: str | None
     provider_evidence_source: str | None
+    provider_request_sha256: str | None
     provider_acknowledgement_sha256: str | None
     acknowledgement_binding_matches: bool
 
@@ -102,52 +110,105 @@ class ExecutionQuoteChainEvidence:
             raise ExecutionQuoteChainError("unsupported quote-chain evidence schema")
         if type(self.source_event_count) is not int or self.source_event_count < 1:
             raise ExecutionQuoteChainError("source_event_count must be positive int")
+        try:
+            _sha256_text(self.source_ledger_sha256, "source_ledger_sha256")
+            _sha256_text(self.plan_fingerprint, "plan_fingerprint")
+            _sha256_text(self.effect_fingerprint, "effect_fingerprint")
+            if self.submission_instruction_sha256 is not None:
+                _sha256_text(
+                    self.submission_instruction_sha256,
+                    "submission_instruction_sha256",
+                )
+            if self.provider_request_sha256 is not None:
+                _sha256_text(self.provider_request_sha256, "provider_request_sha256")
+            if self.provider_acknowledgement_sha256 is not None:
+                _sha256_text(
+                    self.provider_acknowledgement_sha256,
+                    "provider_acknowledgement_sha256",
+                )
+        except ValueError as exc:
+            raise ExecutionQuoteChainError(str(exc)) from exc
+
         if type(self.acknowledgement_binding_matches) is not bool:
             raise ExecutionQuoteChainError(
                 "acknowledgement_binding_matches must be bool"
             )
-        if self.submission_instruction_sha256 is not None:
-            raise ExecutionQuoteChainError(
-                "current ledger schema cannot bind submitted instruction identity"
+
+        if self.submitted_at is None:
+            if self.submission_instruction_sha256 is not None:
+                raise ExecutionQuoteChainError(
+                    "unsubmitted attempt cannot bind submitted instruction identity"
+                )
+            expected_chain_status = (
+                CHAIN_NOT_SUBMITTED
+                if self.attempt_state == AttemptState.RESERVED.value
+                else CHAIN_SUBMISSION_UNKNOWN
             )
-        if self.submitted_at is not None:
+        elif self.submission_instruction_sha256 is None:
             expected_chain_status = CHAIN_SUBMIT_INSTRUCTION_UNBOUND
-        elif self.attempt_state == AttemptState.RESERVED.value:
-            expected_chain_status = CHAIN_NOT_SUBMITTED
         else:
-            expected_chain_status = CHAIN_SUBMISSION_UNKNOWN
+            expected_chain_status = CHAIN_SUBMIT_INSTRUCTION_BOUND
         if self.chain_status != expected_chain_status:
             raise ExecutionQuoteChainError("chain_status mismatches durable submit truth")
 
-        has_ack = self.acknowledgement_status is not None
-        ack_values = (
-            self.external_receipt_id,
-            self.acknowledged_at,
+        provider_identity = (
+            self.provider_evidence_id,
+            self.provider_evidence_observed_at,
+            self.provider_evidence_source,
         )
-        if has_ack != all(value is not None for value in ack_values):
-            raise ExecutionQuoteChainError(
-                "acknowledgement identity/time must be present with acknowledgement status"
-            )
-        if not has_ack and (
-            self.acknowledged_odds is not None or self.acknowledged_stake is not None
+        if any(value is not None for value in provider_identity) and not all(
+            value is not None for value in provider_identity
         ):
             raise ExecutionQuoteChainError(
-                "unacknowledged attempt cannot claim acknowledgement economics"
+                "provider evidence identity/time/source must be present together"
             )
-        if has_ack and self.acknowledgement_status in {"ACCEPTED", "PARTIAL"}:
+        if self.provider_request_sha256 is not None:
+            if not all(value is not None for value in provider_identity):
+                raise ExecutionQuoteChainError(
+                    "provider request digest requires provider evidence identity"
+                )
+            if self.submission_instruction_sha256 is None:
+                raise ExecutionQuoteChainError(
+                    "provider request digest lacks durable submitted request identity"
+                )
+            if self.provider_request_sha256 != self.submission_instruction_sha256:
+                raise ExecutionQuoteChainError(
+                    "provider request digest conflicts with durable submission"
+                )
+
+        has_ack = self.acknowledgement_status is not None
+        if not has_ack:
+            if self.external_receipt_id is not None or self.acknowledged_at is not None:
+                raise ExecutionQuoteChainError(
+                    "unacknowledged attempt cannot claim acknowledgement identity/time"
+                )
+            if self.acknowledged_odds is not None or self.acknowledged_stake is not None:
+                raise ExecutionQuoteChainError(
+                    "unacknowledged attempt cannot claim acknowledgement economics"
+                )
+            expected_price_status = ACCEPTED_PRICE_UNKNOWN
+        elif self.acknowledgement_status in {"ACCEPTED", "PARTIAL"}:
+            if self.external_receipt_id is None or self.acknowledged_at is None:
+                raise ExecutionQuoteChainError(
+                    "accepted/partial acknowledgement requires receipt identity/time"
+                )
             if self.acknowledged_odds is None or self.acknowledged_stake is None:
                 raise ExecutionQuoteChainError(
                     "accepted/partial acknowledgement requires acknowledgement economics"
                 )
             expected_price_status = ACCEPTED_PRICE_ACKNOWLEDGED_UNVERIFIED
-        elif has_ack and self.acknowledgement_status == "REJECTED":
+        elif self.acknowledgement_status == "REJECTED":
+            if self.acknowledged_at is None:
+                raise ExecutionQuoteChainError(
+                    "rejected acknowledgement requires acknowledgement time"
+                )
             if self.acknowledged_odds is not None or self.acknowledged_stake is not None:
                 raise ExecutionQuoteChainError(
                     "rejected acknowledgement cannot claim acknowledgement economics"
                 )
             expected_price_status = ACCEPTED_PRICE_NOT_APPLICABLE
         else:
-            expected_price_status = ACCEPTED_PRICE_UNKNOWN
+            raise ExecutionQuoteChainError("unsupported acknowledgement status")
         if self.accepted_price_status != expected_price_status:
             raise ExecutionQuoteChainError(
                 "accepted_price_status mismatches acknowledgement truth"
@@ -164,10 +225,29 @@ class ExecutionQuoteChainEvidence:
             )
 
     @property
-    def actual_submitted_instruction_bound(self) -> bool:
-        """Whether exact serialized submit identity is durably available."""
+    def submit_instruction_identity_bound(self) -> bool:
+        """Whether a canonical exact submitted-request digest is durable."""
 
-        return False
+        return self.submission_instruction_sha256 is not None
+
+    @property
+    def provider_request_correlation_bound(self) -> bool:
+        """Whether provider evidence binds the same exact durable request digest."""
+
+        return (
+            self.submission_instruction_sha256 is not None
+            and self.provider_request_sha256 == self.submission_instruction_sha256
+        )
+
+    @property
+    def actual_submitted_instruction_bound(self) -> bool:
+        """Whether provider evidence correlates the exact durable request identity.
+
+        This is not evidence that an external effect occurred and does not
+        promote acknowledgement odds into verified accepted-price truth.
+        """
+
+        return self.provider_request_correlation_bound
 
     @property
     def accepted_price_verified(self) -> bool:
@@ -211,12 +291,15 @@ class ExecutionQuoteChainEvidence:
             "reserved_at": self.reserved_at,
             "submitted_at": self.submitted_at,
             "submission_instruction_sha256": self.submission_instruction_sha256,
+            "submit_instruction_identity_bound": self.submit_instruction_identity_bound,
+            "provider_request_correlation_bound": self.provider_request_correlation_bound,
             "actual_submitted_instruction_bound": self.actual_submitted_instruction_bound,
             "chain_status": self.chain_status,
             "provider_order_ref": self.provider_order_ref,
             "provider_evidence_id": self.provider_evidence_id,
             "provider_evidence_observed_at": self.provider_evidence_observed_at,
             "provider_evidence_source": self.provider_evidence_source,
+            "provider_request_sha256": self.provider_request_sha256,
             "provider_acknowledgement_sha256": self.provider_acknowledgement_sha256,
             "acknowledgement_binding_matches": self.acknowledgement_binding_matches,
             "external_receipt_id": self.external_receipt_id,
@@ -250,10 +333,11 @@ def build_execution_quote_chain_evidence(
     """Project one attempt from one verified ledger snapshot.
 
     The function reads the canonical ledger exactly through
-    `verified_execution_view` and never reconstructs a provider request.
-    Because current `ATTEMPT_SUBMITTED` stores only `submitted_at`, every
-    submitted attempt remains `SUBMIT_INSTRUCTION_UNBOUND` even if an
-    acknowledgement happens to repeat the requested odds exactly.
+    `verified_execution_view` and never reconstructs provider request bytes
+    or provider outcome truth. On current-main views the optional request-digest
+    fields are absent and remain unbound. On the canonical #794 successor view,
+    the same projection consumes its `submitted_request_sha256` and provider
+    `request_sha256` fields without owning or duplicating that writer seam.
     """
 
     if type(ledger) is not RealExecutionLedger:
@@ -280,8 +364,29 @@ def build_execution_quote_chain_evidence(
     acknowledgement = attempt_view.acknowledgement
     provider = attempt_view.provider_evidence
 
+    submitted_request_sha256 = getattr(
+        attempt_view,
+        "submitted_request_sha256",
+        None,
+    )
+    provider_request_sha256 = (
+        getattr(provider, "request_sha256", None) if provider is not None else None
+    )
+    if (
+        provider_request_sha256 is not None
+        and submitted_request_sha256 is not None
+        and provider_request_sha256 != submitted_request_sha256
+    ):
+        raise ExecutionQuoteChainUnavailable(
+            "provider request evidence conflicts with durable submitted request"
+        )
+
     if attempt_view.submitted_at is not None:
-        chain_status = CHAIN_SUBMIT_INSTRUCTION_UNBOUND
+        chain_status = (
+            CHAIN_SUBMIT_INSTRUCTION_BOUND
+            if submitted_request_sha256 is not None
+            else CHAIN_SUBMIT_INSTRUCTION_UNBOUND
+        )
     elif attempt_view.state is AttemptState.RESERVED:
         chain_status = CHAIN_NOT_SUBMITTED
     else:
@@ -344,7 +449,7 @@ def build_execution_quote_chain_evidence(
         requested_stake=action.requested_stake,
         reserved_at=attempt_view.attempt.reserved_at,
         submitted_at=attempt_view.submitted_at,
-        submission_instruction_sha256=None,
+        submission_instruction_sha256=submitted_request_sha256,
         chain_status=chain_status,
         provider_order_ref=attempt_view.provider_order_ref,
         provider_evidence_id=(provider.evidence_id if provider is not None else None),
@@ -352,6 +457,7 @@ def build_execution_quote_chain_evidence(
             provider.observed_at if provider is not None else None
         ),
         provider_evidence_source=(provider.source if provider is not None else None),
+        provider_request_sha256=provider_request_sha256,
         provider_acknowledgement_sha256=provider_acknowledgement_sha256,
         acknowledgement_binding_matches=acknowledgement_binding_matches,
         external_receipt_id=external_receipt_id,

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import copy
+import gc
+import weakref
 from datetime import datetime, timezone
 import json
 
@@ -121,25 +123,30 @@ def test_traversal_requires_one_authenticated_session_without_retaining_secrets(
         ) = authority._build_observation_authority()
 
         session_a = BetfairSessionCredentials("product-app", "session-a")
-        same_session_pages = read_traversal(session_a, record_count=1)
-        assert len(same_session_pages) == 2
-        assert validate_traversal(same_session_pages) is same_session_pages
+        session_a_traversal = read_traversal(session_a, record_count=1)
+        assert len(session_a_traversal) == 2
+        same_session_pages = validate_traversal(session_a_traversal)
+        assert type(same_session_pages) is tuple
+        assert tuple(session_a_traversal) == same_session_pages
 
         first, second_same_session = same_session_pages
 
-        # Tuple identity is itself part of the acquisition-owned capability.
-        # A consumer cannot reconstruct an equivalent tuple and inherit authority.
-        reconstructed_pages = tuple([first, second_same_session])
-        assert reconstructed_pages == same_session_pages
-        assert reconstructed_pages is not same_session_pages
+        # The private capability object, not structural tuple equality, carries
+        # traversal authority. Reconstructing the same capability class is rejected.
+        reconstructed_capability = type(session_a_traversal)(
+            tuple([first, second_same_session])
+        )
         with pytest.raises(
             authority.BetfairProviderBillingInputsAuthorityError,
             match="issued by canonical pagination acquisition",
         ):
-            validate_traversal(reconstructed_pages)
+            validate_traversal(reconstructed_capability)
+
+        with pytest.raises(TypeError, match="exact canonical capability"):
+            validate_traversal(tuple([first, second_same_session]))
 
         # Even individually canonical pages from the same authenticated credentials
-        # cannot be spliced into a new positive traversal.
+        # cannot be spliced into a caller-constructed positive traversal capability.
         reconstructed_session_a = BetfairSessionCredentials(
             "product-app", "session-a"
         )
@@ -147,11 +154,12 @@ def test_traversal_requires_one_authenticated_session_without_retaining_secrets(
             read(session_a, from_record=0, record_count=1),
             read(reconstructed_session_a, from_record=1, record_count=1),
         )
+        forged_same_session = type(session_a_traversal)(separately_issued_pages)
         with pytest.raises(
             authority.BetfairProviderBillingInputsAuthorityError,
             match="issued by canonical pagination acquisition",
         ):
-            validate_traversal(separately_issued_pages)
+            validate_traversal(forged_same_session)
 
         closure = dict(
             zip(
@@ -170,20 +178,46 @@ def test_traversal_requires_one_authenticated_session_without_retaining_secrets(
         )
         assert all(type(record[2]) is bytes for record in issued_registry.values())
         assert all(
-            type(record[1]) is bytes for record in traversal_registry.values()
+            type(record[1]) is tuple and type(record[2]) is bytes
+            for record in traversal_registry.values()
         )
 
-        # A different authenticated session can own its own exact traversal, but
-        # cross-session page composition still cannot mint a traversal capability.
+        # A different authenticated session owns a distinct exact traversal.
         session_b = BetfairSessionCredentials("product-app", "session-b")
-        session_b_pages = read_traversal(session_b, record_count=1)
-        assert validate_traversal(session_b_pages) is session_b_pages
-
-        cross_session_pages = tuple([first, session_b_pages[1]])
+        session_b_traversal = read_traversal(session_b, record_count=1)
+        session_b_pages = validate_traversal(session_b_traversal)
+        cross_session_capability = type(session_a_traversal)(
+            tuple([first, session_b_pages[1]])
+        )
         with pytest.raises(
             authority.BetfairProviderBillingInputsAuthorityError,
             match="issued by canonical pagination acquisition",
         ):
-            validate_traversal(cross_session_pages)
+            validate_traversal(cross_session_capability)
+
+        # Issuance registries are not process-lifetime owners. Once external
+        # possession disappears, weak-reference callbacks remove exact identities.
+        ephemeral_source = read(session_a, from_record=0, record_count=1)
+        ephemeral_source_id = id(ephemeral_source)
+        ephemeral_source_ref = weakref.ref(ephemeral_source)
+        assert ephemeral_source_id in issued_registry
+        del ephemeral_source
+        gc.collect()
+        assert ephemeral_source_ref() is None
+        assert ephemeral_source_id not in issued_registry
+
+        ephemeral_traversal = read_traversal(session_a, record_count=1)
+        ephemeral_traversal_id = id(ephemeral_traversal)
+        ephemeral_traversal_ref = weakref.ref(ephemeral_traversal)
+        ephemeral_page_ids = tuple(id(page) for page in ephemeral_traversal)
+        ephemeral_page_refs = tuple(weakref.ref(page) for page in ephemeral_traversal)
+        assert ephemeral_traversal_id in traversal_registry
+        assert all(page_id in issued_registry for page_id in ephemeral_page_ids)
+        del ephemeral_traversal
+        gc.collect()
+        assert ephemeral_traversal_ref() is None
+        assert ephemeral_traversal_id not in traversal_registry
+        assert all(page_ref() is None for page_ref in ephemeral_page_refs)
+        assert all(page_id not in issued_registry for page_id in ephemeral_page_ids)
     finally:
         authority._urllib_request.__dict__["_opener"] = previous_opener

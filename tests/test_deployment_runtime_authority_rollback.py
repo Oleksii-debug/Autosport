@@ -1054,3 +1054,40 @@ def test_reopen_commits_prepared_state_after_publish_before_commit_crash(
     retry_id = _append(reopened, 1)
     assert retry_id == records[1].runtime_authority_id
     assert reopened.records() == records
+
+def test_post_init_hardlink_split_cannot_bootstrap_alias_authority(
+    tmp_path: Path,
+) -> None:
+    """A valid-old hard-link alias must not mint a second runtime authority."""
+
+    path = tmp_path / "deployment-runtime-authority.json"
+    alias = tmp_path / "deployment-runtime-authority-alias.json"
+    authority_root = _authority_root(tmp_path)
+    store = DeploymentRuntimeAuthorityStore.initialize_pristine(
+        path,
+        authority_root=authority_root,
+    )
+    first_id = _append(store, 0)
+    valid_old_bytes = path.read_bytes()
+
+    try:
+        alias.hardlink_to(path)
+    except OSError as exc:
+        pytest.skip(f"hard links unavailable in this environment: {exc}")
+
+    assert alias.read_bytes() == valid_old_bytes
+    second_id = _append(store, 1)
+
+    assert second_id != first_id
+    assert path.read_bytes() != valid_old_bytes
+    assert alias.read_bytes() == valid_old_bytes
+    assert len(store.records()) == 2
+
+    with pytest.raises(MonotonicAuthorityRollbackError):
+        DeploymentRuntimeAuthorityStore(
+            alias,
+            authority_root=authority_root,
+        )
+
+    assert alias.read_bytes() == valid_old_bytes
+

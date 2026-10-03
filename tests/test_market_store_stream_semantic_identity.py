@@ -84,6 +84,65 @@ class MarketStoreStreamSemanticIdentityTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_missing_and_explicit_semantics_cannot_replace_each_other(self) -> None:
+        transitions = (
+            (None, "match_odds"),
+            ("match_odds", None),
+        )
+        for first_semantics, rebound_semantics in transitions:
+            with self.subTest(
+                first_semantics=first_semantics,
+                rebound_semantics=rebound_semantics,
+            ):
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    store = SQLiteMarketStore(Path(temp_dir) / "market.db")
+                    try:
+                        first = self._event(
+                            sequence=22,
+                            market_semantics_id=first_semantics,
+                        )
+                        rebound = self._event(
+                            sequence=23,
+                            odds="2.55",
+                            market_semantics_id=rebound_semantics,
+                        )
+                        self.assertTrue(store.append(first))
+                        with self.assertRaisesRegex(
+                            ValueError,
+                            "market quote stream semantic identity changed",
+                        ):
+                            store.append(rebound)
+                        self.assertEqual(
+                            [event.dedupe_key for event in store.events()],
+                            [first.dedupe_key],
+                        )
+                    finally:
+                        store.close()
+
+    def test_stale_sequence_cannot_pollute_history_with_different_semantics(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = SQLiteMarketStore(Path(temp_dir) / "market.db")
+            try:
+                current = self._event(sequence=29)
+                stale_conflict = self._event(
+                    sequence=28,
+                    odds="2.20",
+                    market_type=MarketType.TOTAL,
+                    market_semantics_id="total_points",
+                )
+                self.assertTrue(store.append(current))
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "market quote stream semantic identity changed",
+                ):
+                    store.append(stale_conflict)
+                self.assertEqual(
+                    [event.dedupe_key for event in store.events()],
+                    [current.dedupe_key],
+                )
+            finally:
+                store.close()
+
     def test_batch_semantic_rebind_rolls_back_earlier_batch_accepts(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             store = SQLiteMarketStore(Path(temp_dir) / "market.db")

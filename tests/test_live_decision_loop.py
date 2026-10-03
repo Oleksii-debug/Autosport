@@ -1093,7 +1093,7 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
                 payload["provider_health_boundaries"][0]["transition_order"],
                 1,
             )
-            self.assertEqual(result.plan.total_stake, Decimal("0"))
+            self.assertFalse(any(stake > 0 for stake in result.plan.stakes))
             loop.close()
 
     @staticmethod

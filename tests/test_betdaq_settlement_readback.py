@@ -114,6 +114,7 @@ def posting(
     category=7,
     order_id="123",
     market_id="200",
+    posted_at="2026-09-22T23:59:00Z",
 ):
     optional = ""
     if order_id is not None:
@@ -121,7 +122,7 @@ def posting(
     if market_id is not None:
         optional += f' MarketId="{market_id}"'
     return (
-        f'<Order PostedAt="2026-09-22T23:59:00Z" Description="fixture" '
+        f'<Order PostedAt="{posted_at}" Description="fixture" '
         f'Amount="{amount}" ResultingBalance="{balance}" '
         f'PostingCategory="{category}"{optional} TransactionId="{transaction_id}" />'
     )
@@ -297,13 +298,13 @@ def test_incomplete_postings_window_keeps_exact_rows_but_not_complete_absence(
 
 def test_by_id_read_never_inherits_window_completeness(monkeypatch):
     client, opener = economic_client(monkeypatch, postings_by_id(posting(9001)))
-    result = client.read_account_postings_by_id(9001)
-    assert result.query_transaction_id == "9001"
+    result = client.read_account_postings_by_id(9000)
+    assert result.query_transaction_id == "9000"
     assert result.window_complete is None
     assert len(result.postings) == 1
     body = opener.calls[0][0].data
     assert b"listAccountPostingsByIdRequest" in body
-    assert b'TransactionId="9001"' in body
+    assert b'TransactionId="9000"' in body
 
 
 def test_duplicate_transaction_id_is_idempotent_only_for_identical_content(
@@ -333,9 +334,9 @@ def test_duplicate_transaction_id_is_idempotent_only_for_identical_content(
 def test_same_context_query_and_provider_payload_reresolve_same_evidence_id(monkeypatch):
     payload = postings_by_id(posting(9001))
     first, _ = economic_client(monkeypatch, payload, clock=clock_one)
-    first_value = first.read_account_postings_by_id(9001)
+    first_value = first.read_account_postings_by_id(9000)
     second, _ = economic_client(monkeypatch, payload, clock=clock_two)
-    second_value = second.read_account_postings_by_id(9001)
+    second_value = second.read_account_postings_by_id(9000)
     assert first_value.evidence.evidence_id == second_value.evidence.evidence_id
     assert first_value.readback_id == second_value.readback_id
     assert (
@@ -354,13 +355,13 @@ def test_distinct_authenticated_contexts_cannot_collapse_same_economic_payload(
         payload,
         credentials=BetdaqCredentials("alice-a", "secret-a", "app-a"),
     )
-    first_value = first.read_account_postings_by_id(9001)
+    first_value = first.read_account_postings_by_id(9000)
     second, _ = economic_client(
         monkeypatch,
         payload,
         credentials=BetdaqCredentials("alice-b", "secret-b", "app-b"),
     )
-    second_value = second.read_account_postings_by_id(9001)
+    second_value = second.read_account_postings_by_id(9000)
     assert first_value.evidence.account_context_id != second_value.evidence.account_context_id
     assert first_value.evidence.evidence_id != second_value.evidence.evidence_id
     assert first_value.readback_id != second_value.readback_id
@@ -435,7 +436,7 @@ def test_official_generated_response_without_return_status_is_accepted(monkeypat
         include_return_status=False,
     )
     client, _ = economic_client(monkeypatch, payload)
-    result = client.read_account_postings_by_id(9001)
+    result = client.read_account_postings_by_id(9000)
     assert result.postings[0].transaction_id == "9001"
     assert result.window_complete is None
 
@@ -571,7 +572,7 @@ def test_public_economic_dto_rejects_decimal_subclass_before_virtual_dispatch(
 
 def test_postings_readback_rejects_mutable_container(monkeypatch):
     client, _ = economic_client(monkeypatch, postings_by_id(posting(9001)))
-    value = client.read_account_postings_by_id(9001)
+    value = client.read_account_postings_by_id(9000)
 
     with pytest.raises(
         BetdaqEconomicReadbackError,
@@ -644,7 +645,11 @@ def test_posting_identity_ignores_unrelated_sibling_rows_in_response(monkeypatch
     client, _ = economic_client(
         monkeypatch,
         postings_window(row, complete="false"),
-        postings_window(row, posting(9002), complete="false"),
+        postings_window(
+            row,
+            posting(9002, balance="105.00"),
+            complete="false",
+        ),
     )
     start = datetime(2026, 9, 22, tzinfo=timezone.utc)
     end = datetime(2026, 9, 23, tzinfo=timezone.utc)
@@ -748,4 +753,154 @@ def test_readback_rejects_posting_currency_mutation(monkeypatch):
         match="posting currency does not match readback currency",
     ):
         replace(readback, postings=(forged,))
+
+def test_by_id_requires_strict_cursor_progress(monkeypatch):
+    client, _ = economic_client(monkeypatch, postings_by_id(posting(9001)))
+
+    with pytest.raises(
+        BetdaqEconomicReadbackError,
+        match="must advance beyond requested TransactionId",
+    ):
+        client.read_account_postings_by_id(9001)
+
+
+def test_by_id_requires_strictly_increasing_transaction_order(monkeypatch):
+    payload = postings_by_id(
+        posting(9002, balance="102.50"),
+        posting(9001, balance="105.00"),
+    )
+    client, _ = economic_client(monkeypatch, payload)
+
+    with pytest.raises(
+        BetdaqEconomicReadbackError,
+        match="strictly increasing TransactionId",
+    ):
+        client.read_account_postings_by_id(9000)
+
+
+def test_window_requires_nondecreasing_provider_posted_at(monkeypatch):
+    payload = postings_window(
+        posting(
+            9001,
+            balance="102.50",
+            posted_at="2026-09-22T23:59:01Z",
+        ),
+        posting(
+            9002,
+            balance="105.00",
+            posted_at="2026-09-22T23:59:00Z",
+        ),
+    )
+    client, _ = economic_client(monkeypatch, payload)
+
+    with pytest.raises(
+        BetdaqEconomicReadbackError,
+        match="not ordered by PostedAt",
+    ):
+        client.read_account_postings(
+            datetime(2026, 9, 22, tzinfo=timezone.utc),
+            datetime(2026, 9, 23, tzinfo=timezone.utc),
+        )
+
+
+def test_posting_resulting_balance_chain_must_reconcile(monkeypatch):
+    payload = postings_window(
+        posting(9001, amount="2.50", balance="102.50"),
+        posting(9002, amount="3.00", balance="999.00"),
+    )
+    client, _ = economic_client(monkeypatch, payload)
+
+    with pytest.raises(
+        BetdaqEconomicReadbackError,
+        match="ResultingBalance chain is inconsistent",
+    ):
+        client.read_account_postings(
+            datetime(2026, 9, 22, tzinfo=timezone.utc),
+            datetime(2026, 9, 23, tzinfo=timezone.utc),
+        )
+
+
+def test_settlement_category_requires_order_identity(monkeypatch):
+    client, _ = economic_client(
+        monkeypatch,
+        postings_by_id(posting(9001, category=1, order_id=None)),
+    )
+
+    with pytest.raises(
+        BetdaqEconomicReadbackError,
+        match="Settlement posting requires provider OrderId",
+    ):
+        client.read_account_postings_by_id(9000)
+
+
+def test_commission_category_requires_market_identity(monkeypatch):
+    client, _ = economic_client(
+        monkeypatch,
+        postings_by_id(posting(9001, category=2, market_id=None)),
+    )
+
+    with pytest.raises(
+        BetdaqEconomicReadbackError,
+        match="Commission posting requires provider MarketId",
+    ):
+        client.read_account_postings_by_id(9000)
+
+
+def test_future_posting_category_remains_explicit_unknown(monkeypatch):
+    client, _ = economic_client(
+        monkeypatch,
+        postings_by_id(posting(9001, category=99)),
+    )
+    result = client.read_account_postings_by_id(9000)
+
+    assert result.postings[0].posting_category == 99
+    assert result.postings[0].posting_category_name == "UNKNOWN"
+
+
+def test_multiple_settlement_and_commission_postings_are_not_collapsed(monkeypatch):
+    payload = postings_by_id(
+        posting(
+            9001,
+            amount="2.50",
+            balance="102.50",
+            category=1,
+            order_id="123",
+        ),
+        posting(
+            9002,
+            amount="-1.00",
+            balance="101.50",
+            category=1,
+            order_id="123",
+        ),
+        posting(
+            9003,
+            amount="-0.50",
+            balance="101.00",
+            category=2,
+            market_id="200",
+        ),
+        posting(
+            9004,
+            amount="-0.25",
+            balance="100.75",
+            category=2,
+            market_id="200",
+        ),
+    )
+    client, _ = economic_client(monkeypatch, payload)
+    result = client.read_account_postings_by_id(9000)
+
+    assert [row.transaction_id for row in result.postings] == [
+        "9001",
+        "9002",
+        "9003",
+        "9004",
+    ]
+    assert [row.posting_category_name for row in result.postings] == [
+        "SETTLEMENT",
+        "SETTLEMENT",
+        "COMMISSION",
+        "COMMISSION",
+    ]
 

@@ -232,6 +232,72 @@ class ParlayApiProductSourceTests(unittest.TestCase):
             self.assertEqual(delta.lawful_terms_ref, "terms:parlayapi:before-io")
             self.assertEqual(delta.retention_ref, "retention:parlayapi:before-io")
 
+    def test_pending_snapshot_rejects_provider_rebinding_during_provider_io(self) -> None:
+        class _MutatingProvider(_Provider):
+            mutate = None
+
+            def read_batch(self, max_items: int = 1000) -> ProviderBatch:
+                if self.mutate is not None:
+                    self.mutate()
+                return super().read_batch(max_items)
+
+        with tempfile.TemporaryDirectory() as directory:
+            first = _MutatingProvider([_batch(cursor="snapshot-1")])
+            second = _Provider([_batch(cursor="snapshot-1")])
+            source = ParlayApiProductSource(
+                first,
+                workspace=Path(directory) / "workspace",
+                authority_root=Path(directory) / "authority",
+                lawful_terms_ref="terms:parlayapi:v1",
+                retention_ref="retention:parlayapi:v1",
+            )
+            first.mutate = lambda: setattr(source, "provider", second)
+
+            with self.assertRaisesRegex(
+                ProductSourcePayloadError,
+                "provider changed during acquisition",
+            ):
+                source.fetch_catalog_page(None)
+
+            self.assertEqual(len(second.batches), 1)
+
+    def test_pending_snapshot_rejects_normalizer_rebinding_during_provider_io(self) -> None:
+        class _MutatingProvider(_Provider):
+            mutate = None
+
+            def read_batch(self, max_items: int = 1000) -> ProviderBatch:
+                if self.mutate is not None:
+                    self.mutate()
+                return super().read_batch(max_items)
+
+        with tempfile.TemporaryDirectory() as directory:
+            provider = _MutatingProvider([_batch(cursor="snapshot-1")])
+            source = ParlayApiProductSource(
+                provider,
+                workspace=Path(directory) / "workspace",
+                authority_root=Path(directory) / "authority",
+                lawful_terms_ref="terms:parlayapi:v1",
+                retention_ref="retention:parlayapi:v1",
+            )
+
+            class _HostileNormalizer:
+                calls = 0
+
+                def normalize(self, source_id, quote):
+                    self.calls += 1
+                    raise AssertionError("rebound normalizer must not execute")
+
+            hostile = _HostileNormalizer()
+            provider.mutate = lambda: setattr(source, "normalizer", hostile)
+
+            with self.assertRaisesRegex(
+                ProductSourceStateError,
+                "normalizer changed during acquisition",
+            ):
+                source.fetch_catalog_page(None)
+
+            self.assertEqual(hostile.calls, 0)
+
     def test_legacy_unassigned_pending_without_provenance_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             source = ParlayApiProductSource(

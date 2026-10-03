@@ -171,6 +171,38 @@ def test_runtime_authority_instance_dict_cannot_shadow_bindings(
     assert len(store.records()) == 1
 
 
+def test_instance_dictionary_cannot_shadow_monotonic_verification_dispatch(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "deployment-runtime-authority.json"
+    store = DeploymentRuntimeAuthorityStore.initialize_pristine(
+        path,
+        authority_root=_authority_root(tmp_path),
+    )
+    _append(store, 0)
+    valid_old_bytes = path.read_bytes()
+    _append(store, 1)
+
+    hostile_calls: list[str] = []
+
+    def hostile_recover(_payload: object) -> None:
+        hostile_calls.append("recover")
+        raise AssertionError("instance recovery shadow executed")
+
+    def hostile_records() -> tuple[object, ...]:
+        hostile_calls.append("records")
+        return ()
+
+    store.__dict__["_recover_state"] = hostile_recover
+    store.__dict__["records"] = hostile_records
+    path.write_bytes(valid_old_bytes)
+
+    with pytest.raises(MonotonicAuthorityRollbackError):
+        store.records()
+
+    assert hostile_calls == []
+
+
 def test_runtime_authority_store_rejects_subclass_constructor_dispatch(
     tmp_path: Path,
 ) -> None:

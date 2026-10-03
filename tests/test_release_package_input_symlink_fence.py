@@ -9,6 +9,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import autosport.data_tool_package as data_tool_package
 import autosport.release_package as release_package
 from autosport.data_tool_package import bind_portable_data_tool, verify_portable_data_tool
 
@@ -352,6 +353,38 @@ class ReleasePackageInputSymlinkFenceTests(unittest.TestCase):
                 self._build(paths)
 
             self.assertFalse(paths["package"].exists())
+
+    def test_portable_data_writer_rejects_file_directory_prefix_collision(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            package = Path(temporary) / "candidate.zip"
+            with self.assertRaisesRegex(
+                ValueError,
+                "release package contains Windows file/directory path collision",
+            ):
+                data_tool_package._write_deterministic(
+                    package,
+                    {
+                        "Autosport-Data.exe": b"portable-tool",
+                        "Autosport-Data.exe/child.txt": b"child",
+                    },
+                )
+            self.assertFalse(package.exists())
+
+    def test_portable_data_reader_rejects_file_directory_prefix_collision(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            package = Path(temporary) / "candidate.zip"
+            release_package._write_canonical_zip(
+                package,
+                {
+                    "Autosport-V1/node": b"file",
+                    "Autosport-V1/NODE/child.txt": b"child",
+                },
+            )
+            with self.assertRaisesRegex(
+                ValueError,
+                "release package contains Windows file/directory path collision",
+            ):
+                data_tool_package._read_members(package)
 
     def test_top_level_symlink_fails_before_existing_staging_is_deleted(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

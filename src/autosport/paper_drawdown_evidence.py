@@ -497,10 +497,20 @@ def _make_resolver() -> FunctionType:
     book_load_bytes_function = book_load_bytes.__func__
     book_load_bytes_code = book_load_bytes_function.__code__
     book_load_bytes_owner = book_load_bytes.__self__
+    book_from_raw = book_type._from_raw_snapshot
+    book_from_raw_function = book_from_raw.__func__
+    book_from_raw_code = book_from_raw_function.__code__
+    book_from_raw_owner = book_from_raw.__self__
     goal_parser = goal_load.__globals__.get("economic_goal_from_json")
     if type(goal_parser) is not FunctionType:
         raise RuntimeError("economic-goal parser authority is unavailable")
     goal_parser_code = goal_parser.__code__
+    goal_strict_json = goal_parser.__globals__.get("strict_json_loads")
+    goal_from_payload = goal_parser.__globals__.get("economic_goal_from_payload")
+    if type(goal_strict_json) is not FunctionType or type(goal_from_payload) is not FunctionType:
+        raise RuntimeError("economic-goal parser dependency authority is unavailable")
+    goal_strict_json_code = goal_strict_json.__code__
+    goal_from_payload_code = goal_from_payload.__code__
     exact_ticket_status = TicketStatus
     exact_point_type = PaperRealizedEquityPoint
     exact_evidence_type = PaperRealizedDrawdownEvidence
@@ -581,6 +591,10 @@ def _make_resolver() -> FunctionType:
             goal_load.__code__ is not goal_load_code
             or goal_load.__globals__.get("economic_goal_from_json") is not goal_parser
             or goal_parser.__code__ is not goal_parser_code
+            or goal_parser.__globals__.get("strict_json_loads") is not goal_strict_json
+            or goal_strict_json.__code__ is not goal_strict_json_code
+            or goal_parser.__globals__.get("economic_goal_from_payload") is not goal_from_payload
+            or goal_from_payload.__code__ is not goal_from_payload_code
             or goal_provenance.__code__ is not goal_provenance_code
             or book_load.__func__ is not book_load_function
             or book_load_function.__code__ is not book_load_code
@@ -588,6 +602,9 @@ def _make_resolver() -> FunctionType:
             or book_type.load_bytes.__func__ is not book_load_bytes_function
             or book_load_bytes_function.__code__ is not book_load_bytes_code
             or book_type.load_bytes.__self__ is not book_load_bytes_owner
+            or book_type._from_raw_snapshot.__func__ is not book_from_raw_function
+            or book_from_raw_function.__code__ is not book_from_raw_code
+            or book_type._from_raw_snapshot.__self__ is not book_from_raw_owner
         ):
             raise error_type(
                 "drawdown durable source resolver authority changed"
@@ -646,9 +663,16 @@ def _make_resolver() -> FunctionType:
         if (
             goal_load.__globals__.get("economic_goal_from_json") is not goal_parser
             or goal_parser.__code__ is not goal_parser_code
+            or goal_parser.__globals__.get("strict_json_loads") is not goal_strict_json
+            or goal_strict_json.__code__ is not goal_strict_json_code
+            or goal_parser.__globals__.get("economic_goal_from_payload") is not goal_from_payload
+            or goal_from_payload.__code__ is not goal_from_payload_code
             or book_type.load_bytes.__func__ is not book_load_bytes_function
             or book_load_bytes_function.__code__ is not book_load_bytes_code
-            or book_type.load_bytes.__self__ is not book_load_bytes_owner
+            or book_load_bytes.__self__ is not book_load_bytes_owner
+            or book_type._from_raw_snapshot.__func__ is not book_from_raw_function
+            or book_from_raw_function.__code__ is not book_from_raw_code
+            or book_type._from_raw_snapshot.__self__ is not book_from_raw_owner
         ):
             raise error_type(
                 "drawdown durable source resolver authority changed during load"

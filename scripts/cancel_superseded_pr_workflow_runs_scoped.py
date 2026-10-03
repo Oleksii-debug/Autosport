@@ -886,6 +886,7 @@ def _build_live_pr_qualification_reader(
             raise CancellationError("live PR qualification dispatch changed")
         if type(pr_number) is not int or pr_number <= 0:
             raise CancellationError("invalid pull request number")
+        repository = api._repository
         # This read is cancellation authority. Avoid the nested dynamic
         # live_pr_qualification -> self._pull_request -> self._request path:
         # a transient nested shadow could restore canonical dispatch before the outer
@@ -893,6 +894,8 @@ def _build_live_pr_qualification_reader(
         payload = request_impl(api, f"/pulls/{pr_number}")
         if not production_dispatch_current():
             raise CancellationError("live PR qualification dispatch changed")
+        if api._repository != repository:
+            raise CancellationError("GitHub API repository binding changed")
         if not isinstance(payload, dict):
             raise CancellationError("invalid pull request response")
         head = payload.get("head")
@@ -906,13 +909,13 @@ def _build_live_pr_qualification_reader(
         base_repo = base.get("repo")
         if (
             not isinstance(base_repo, dict)
-            or base_repo.get("full_name") != api._repository
+            or base_repo.get("full_name") != repository
         ):
             raise CancellationError("pull request base repository is not canonical")
         head_repo = head.get("repo")
         same_repository_head = (
             isinstance(head_repo, dict)
-            and head_repo.get("full_name") == api._repository
+            and head_repo.get("full_name") == repository
         )
         head_sha = head.get("sha")
         if type(head_sha) is not str or len(head_sha) != 40:

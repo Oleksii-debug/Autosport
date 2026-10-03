@@ -86,6 +86,38 @@ def _canonical_terminal_order_status_codes() -> frozenset[int]:
     return live_codes
 
 
+def _economic_request_identity(method: str, attributes: dict[str, str]) -> str:
+    """Bind an economic claim to the exact provider READ request that produced it."""
+
+    if method not in _READ_METHODS:
+        raise BetdaqEconomicReadbackError(
+            "method is outside economic READ request-identity allowlist"
+        )
+    if type(attributes) is not dict:
+        raise BetdaqEconomicReadbackError(
+            "economic request identity attributes must be an exact dict"
+        )
+    canonical_attributes: dict[str, str] = {}
+    for key, value in attributes.items():
+        if (
+            type(key) is not str
+            or not key
+            or type(value) is not str
+            or value != value.strip()
+        ):
+            raise BetdaqEconomicReadbackError(
+                "economic request identity attributes are not canonical text"
+            )
+        canonical_attributes[key] = value
+    return _canonical_sha256(
+        {
+            "schema": _ECONOMIC_SCHEMA,
+            "method": method,
+            "attributes": dict(sorted(canonical_attributes.items())),
+        }
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class BetdaqEconomicEvidence:
     method: str
@@ -233,6 +265,14 @@ class BetdaqOrderSettlementObservation:
         if self.evidence.method != "GetOrderDetails":
             raise BetdaqEconomicReadbackError(
                 "order settlement evidence method must be GetOrderDetails"
+            )
+        expected_request_identity = _economic_request_identity(
+            "GetOrderDetails",
+            {"OrderId": self.order_id},
+        )
+        if self.evidence.request_identity_sha256 != expected_request_identity:
+            raise BetdaqEconomicReadbackError(
+                "order settlement evidence request identity does not match order_id"
             )
         if self.denomination_proven is not (self.currency is not None):
             raise BetdaqEconomicReadbackError(
@@ -431,6 +471,16 @@ class BetdaqPostingsReadback:
                 raise BetdaqEconomicReadbackError(
                     "postings window bounds must use canonical UTC timestamp spelling"
                 )
+            start_utc = datetime.fromisoformat(
+                self.query_start_at[:-1] + "+00:00"
+            )
+            end_utc = datetime.fromisoformat(
+                self.query_end_at[:-1] + "+00:00"
+            )
+            if start_utc >= end_utc:
+                raise BetdaqEconomicReadbackError(
+                    "postings window start must precede end"
+                )
             if type(self.window_complete) is not bool:
                 raise BetdaqEconomicReadbackError(
                     "window completeness must come from provider boolean"
@@ -458,6 +508,25 @@ class BetdaqPostingsReadback:
         if self.evidence.method != self.method:
             raise BetdaqEconomicReadbackError(
                 "postings evidence method does not match readback method"
+            )
+        if self.method == "ListAccountPostings":
+            request_attributes = {
+                "StartTime": self.query_start_at,
+                "EndTime": self.query_end_at,
+            }
+        else:
+            request_attributes = {"TransactionId": self.query_transaction_id}
+        if any(type(value) is not str for value in request_attributes.values()):
+            raise BetdaqEconomicReadbackError(
+                "postings readback query is not canonical request text"
+            )
+        expected_request_identity = _economic_request_identity(
+            self.method,
+            request_attributes,
+        )
+        if self.evidence.request_identity_sha256 != expected_request_identity:
+            raise BetdaqEconomicReadbackError(
+                "postings evidence request identity does not match readback query"
             )
         if type(self.postings) is not tuple:
             raise BetdaqEconomicReadbackError("postings must be an exact immutable tuple")
@@ -693,13 +762,7 @@ class BetdaqEconomicReadbackClient:
         if method not in _READ_METHODS:
             raise BetdaqEconomicReadbackError("method is outside economic READ allowlist")
         client = self._account_client
-        request_identity = _canonical_sha256(
-            {
-                "schema": _ECONOMIC_SCHEMA,
-                "method": method,
-                "attributes": dict(sorted(request_attributes.items())),
-            }
-        )
+        request_identity = _economic_request_identity(method, request_attributes)
         body = _request_xml(client, method, request_attributes)
         headers = {
             "Accept": "text/xml",

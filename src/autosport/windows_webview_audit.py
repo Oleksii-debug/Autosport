@@ -64,6 +64,9 @@ _REQUIRED_CONTROLS = {
     "product-runtime-start": "button",
     "product-runtime-stop": "button",
     "product-runtime-status": "input",
+    "product-runtime-workspace": "input",
+    "product-runtime-session-id": "input",
+    "product-runtime-source-id": "input",
     "emergency-stop-action": "button",
 }
 _READONLY_CONTROLS = {
@@ -74,6 +77,9 @@ _READONLY_CONTROLS = {
     "334",
     "product-source-status",
     "product-runtime-status",
+    "product-runtime-workspace",
+    "product-runtime-session-id",
+    "product-runtime-source-id",
 }
 _LIST_CONTROLS = {"203", "204", "304", "307"}
 _TABLE_CONTROLS = {"201"}

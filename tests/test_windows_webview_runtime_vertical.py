@@ -248,7 +248,15 @@ def test_terminal_product_message_is_drained_before_start_can_reenable(
         (),
         {
             "kind": "STARTED",
-            "status": type("Status", (), {"source_id": "source-1", "cycles_completed": 0})(),
+            "status": type(
+                "Status",
+                (),
+                {
+                    "session_id": "session-1",
+                    "source_id": "source-1",
+                    "cycles_completed": 0,
+                },
+            )(),
             "tick": None,
             "stop_reason": None,
             "error_type": None,
@@ -259,7 +267,15 @@ def test_terminal_product_message_is_drained_before_start_can_reenable(
         (),
         {
             "kind": "STOPPED",
-            "status": type("Status", (), {"source_id": "source-1", "cycles_completed": 1})(),
+            "status": type(
+                "Status",
+                (),
+                {
+                    "session_id": "session-1",
+                    "source_id": "source-1",
+                    "cycles_completed": 1,
+                },
+            )(),
             "tick": None,
             "stop_reason": "operator_stop",
             "error_type": None,

@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from autosport.gui import AutosportApp
+from autosport.localization_v2 import text
 
 
 class _Value:
@@ -225,4 +226,4 @@ def test_replay_worker_start_refusal_success_republishes_selected_session(
     assert selected_workspace not in app._recovery_required_workspaces
     assert app.bank.value == f"FRESH:{selected_workspace}"
     assert app.tickets.lines == [f"FRESH:{selected_workspace}"]
-    assert "не вдалося запустити" in app.status.value.lower()
+    assert app.status.value == text("ui.status.replay.start_failed")

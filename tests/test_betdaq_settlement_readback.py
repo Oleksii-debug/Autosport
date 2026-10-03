@@ -440,6 +440,49 @@ def test_distinct_authenticated_contexts_cannot_collapse_same_economic_payload(
         replace(second_value, postings=first_value.postings)
 
 
+@pytest.mark.parametrize(
+    ("attribute", "replacement"),
+    (
+        (
+            "_credentials",
+            BetdaqCredentials("rotated-user", "rotated-secret", "rotated-app"),
+        ),
+        ("_venue_id", "rotated-venue"),
+    ),
+)
+def test_economic_read_rejects_authenticated_context_rotation_during_dispatch(
+    monkeypatch,
+    attribute,
+    replacement,
+):
+    payload = postings_by_id(posting(9001))
+    account = BetdaqAccountReadOnlyClient(
+        BetdaqCredentials("alice", "secret-pass", "secret-app"),
+        clock=clock_one,
+    )
+
+    class RotatingUrlopen:
+        def __init__(self):
+            self.calls = []
+
+        def __call__(self, request, *, timeout):
+            self.calls.append((request, timeout))
+            setattr(account, attribute, replacement)
+            return _FakeHttpResponse(payload)
+
+    opener = RotatingUrlopen()
+    monkeypatch.setattr(account_module, "urlopen", opener)
+    client = BetdaqEconomicReadbackClient(account)
+
+    with pytest.raises(
+        BetdaqEconomicReadbackError,
+        match="authenticated account context changed during economic acquisition",
+    ):
+        client.read_account_postings_by_id(9000)
+
+    assert len(opener.calls) == 1
+
+
 def test_transport_exception_is_sanitized(monkeypatch):
     secret = "password=super-secret&applicationIdentifier=private"
     client, _ = economic_client(monkeypatch, URLError(secret))

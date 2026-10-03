@@ -278,6 +278,7 @@ def capture_campaign_complete_game_board(
             "provider request source_id does not match campaign collector source"
         )
     require_seams = _require_canonical_seams
+    instant = _instant
     establish_inception = establish_campaign_inception
     next_slot = _NEXT_SLOT
     begin_scheduled = _BEGIN_SCHEDULED
@@ -290,6 +291,7 @@ def capture_campaign_complete_game_board(
     module_globals = globals()
     expected_dispatch = (
         ("_require_canonical_seams", require_seams),
+        ("_instant", instant),
         ("establish_campaign_inception", establish_inception),
         ("_NEXT_SLOT", next_slot),
         ("_BEGIN_SCHEDULED", begin_scheduled),
@@ -350,7 +352,10 @@ def capture_campaign_complete_game_board(
         raise CampaignProviderCycleCaptureIntegrityError(
             "campaign collector next slot does not match inception receipt"
         )
-    attempted_at = _instant(clock(), "collector attempted_at")
+    raw_attempted_at = clock()
+    require_stable_dispatch()
+    require_seams(store, evidence_store)
+    attempted_at = instant(raw_attempted_at, "collector attempted_at")
     attempted_instant = datetime.fromisoformat(attempted_at)
     try:
         cycle_seq = begin_scheduled(
@@ -380,7 +385,7 @@ def capture_campaign_complete_game_board(
             raise CampaignProviderCycleCaptureIntegrityError(
                 "provider capture returned noncanonical snapshot type"
             )
-        provider_captured_at = _instant(
+        provider_captured_at = instant(
             snapshot.captured_at,
             "provider captured_at",
         )
@@ -389,7 +394,10 @@ def capture_campaign_complete_game_board(
             raise CampaignProviderCycleCaptureIntegrityError(
                 "provider observation predates authorized collector START"
             )
-        completed_at = _instant(clock(), "collector completed_at")
+        raw_completed_at = clock()
+        require_stable_dispatch()
+        require_seams(store, evidence_store)
+        completed_at = instant(raw_completed_at, "collector completed_at")
         if datetime.fromisoformat(completed_at) < provider_captured_instant:
             raise CampaignProviderCycleCaptureIntegrityError(
                 "provider observation falls after collector cycle completion"
@@ -458,12 +466,40 @@ def capture_campaign_complete_game_board(
     except BaseException as exc:
         if not terminal_written:
             try:
+                raw_failure_completed_at = clock()
+                instant_function = getattr(instant, "__func__", instant)
+                finish_function = getattr(finish_cycle, "__func__", finish_cycle)
+                expected_instant_code = next(
+                    code
+                    for name, target, code in expected_codes
+                    if name == "_instant" and target is instant
+                )
+                expected_finish_code = next(
+                    code
+                    for name, target, code in expected_codes
+                    if name == "_FINISH_CYCLE" and target is finish_cycle
+                )
+                if (
+                    module_globals.get("_instant") is not instant
+                    or getattr(instant_function, "__code__", None)
+                    is not expected_instant_code
+                    or module_globals.get("_FINISH_CYCLE") is not finish_cycle
+                    or getattr(finish_function, "__code__", None)
+                    is not expected_finish_code
+                ):
+                    raise CampaignProviderCycleCaptureIntegrityError(
+                        "campaign provider-cycle failure terminal dispatch changed"
+                    )
+                failure_completed_at = instant(
+                    raw_failure_completed_at,
+                    "collector failure completed_at",
+                )
                 finish_cycle(
                     store,
                     source_id=source_spec.source_id,
                     cycle_seq=cycle_seq,
                     status="LOCAL_FAILURE",
-                    completed_at=_instant(clock(), "collector failure completed_at"),
+                    completed_at=failure_completed_at,
                     catalog_changes=(),
                     observed_delta_ids=(),
                     committed_delta_ids=(),

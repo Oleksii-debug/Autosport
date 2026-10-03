@@ -22,8 +22,10 @@ permissions:
 # PR metadata is deliberately not scheduler authority. Empty/multi-reference source
 # events share the same workflow lane and cannot grant PR cancellation authority: the
 # helper still requires explicit singleton run identity or the existing fail-closed
-# historical association/branch recovery before any effect. Different source workflows
-# remain isolated by workflow_id.
+# historical association/branch recovery, which resolves identity again before any
+# effect. Different source workflows remain isolated by workflow_id. A delayed stale-head
+# event may be the surviving trigger; that controller still reconciles its source workflow
+# against fresh live PR qualification rather than trusting the trigger head.
 #
 # cancel-in-progress stays false so a newer requested event cannot kill a controller
 # that is already making trusted decisions. At most one running and one pending

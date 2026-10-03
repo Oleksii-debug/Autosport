@@ -30,6 +30,10 @@ from .integrity import atomic_write_json
 from .json_integrity import strict_json_loads
 from .live_observation import poll_open_market_store_once
 from .market_mirror import MarketMirror, MarketMirrorRevisionChanged, MirrorSnapshot
+from .market_mirror_health import (
+    HealthGatedMirrorDecisionIndex,
+    ProviderHealthReplayBoundary,
+)
 from .market_mirror_runtime import (
     BoundedMirrorInvalidationBuffer,
     FocusedMirrorDependency,
@@ -1426,6 +1430,96 @@ class PersistentLiveDecisionLoop:
 
     def _decision_context_sha256(self) -> str:
         return self._decision_context_sha256_for_book(self.book)
+
+    def _provider_health_gate(
+        self,
+        store: SourceHealthStore,
+    ) -> HealthGatedMirrorDecisionIndex:
+        if not isinstance(store, SourceHealthStore):
+            raise TypeError("store must be SourceHealthStore")
+        return HealthGatedMirrorDecisionIndex(
+            self.dependencies,
+            store,
+            max_health_age=self.max_quote_age,
+        )
+
+    def _capture_provider_health_boundaries(
+        self,
+        snapshots: dict[str, MirrorSnapshot],
+        as_of: datetime,
+        *,
+        require_eligible: bool,
+    ) -> tuple[ProviderHealthReplayBoundary, ...]:
+        store = self._default_health_store
+        if store is None:
+            return ()
+        source_ids = tuple(
+            sorted(
+                {
+                    event.source_id
+                    for snapshot in snapshots.values()
+                    for event in snapshot.events
+                }
+            )
+        )
+        try:
+            return self._provider_health_gate(store).bind_replay_boundaries(
+                source_ids,
+                as_of=as_of,
+                require_eligible=require_eligible,
+            )
+        except (TypeError, ValueError) as exc:
+            raise _ConcurrentDecisionSnapshot(
+                "provider health changed or became ineligible during decision "
+                "snapshot capture; retrying before economic action"
+            ) from exc
+
+    def _health_store_for_boundaries(
+        self,
+        boundaries: tuple[ProviderHealthReplayBoundary, ...],
+    ) -> SourceHealthStore | None:
+        if not boundaries:
+            return None
+        if self._default_health_store is not None:
+            return self._default_health_store
+        path = self.workspace / "source_health.json"
+        if not path.exists():
+            raise LiveDecisionProgressError(
+                "bound provider health replay history is missing"
+            )
+        try:
+            return SourceHealthStore(path)
+        except (OSError, TypeError, ValueError) as exc:
+            raise LiveDecisionProgressError(
+                "bound provider health replay history is unreadable"
+            ) from exc
+
+    def _verify_provider_health_boundaries(
+        self,
+        boundaries: tuple[ProviderHealthReplayBoundary, ...],
+        as_of: datetime,
+        *,
+        require_eligible: bool,
+    ) -> None:
+        store = self._health_store_for_boundaries(boundaries)
+        if store is None:
+            return
+        gate = self._provider_health_gate(store)
+        for expected in boundaries:
+            try:
+                replayed = gate.provider_health(
+                    expected.source_id,
+                    as_of=as_of,
+                    replay_boundary=expected,
+                )
+            except (TypeError, ValueError) as exc:
+                raise LiveDecisionProgressError(
+                    "bound provider health replay horizon is unavailable"
+                ) from exc
+            if require_eligible and not replayed.eligible:
+                raise LiveDecisionProgressError(
+                    "bound provider health was not decision-eligible"
+                )
 
     def _recover_unfinished_progress(self) -> LiveCycleResult:
         progress = self._progress

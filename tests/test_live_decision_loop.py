@@ -1743,6 +1743,50 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             self.assertEqual(resumed_observer.calls, 0)
             self.assertFalse((workspace / "decisions.jsonl").exists())
 
+    def test_dependency_registry_mutation_is_blocked_while_decision_pending(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+
+            def fail_after_pending(input_id, snapshot):
+                raise RuntimeError("simulated process loss after pending cursor")
+
+            fail_after_pending.strategy_version_id = "live-test-strategy-v1"
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(
+                    workspace,
+                    [(self._event(selection="selection-a", sequence=1),)],
+                ),
+                factory=fail_after_pending,
+                clock=_ManualClock(self.START + timedelta(seconds=1)),
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "simulated process loss after pending cursor",
+            ):
+                loop.run_cycle()
+
+            with self.assertRaisesRegex(
+                LiveDecisionProgressError,
+                "economic decision is unfinished",
+            ):
+                loop.unregister_input("input-a")
+            with self.assertRaisesRegex(
+                LiveDecisionProgressError,
+                "economic decision is unfinished",
+            ):
+                loop.register_input("input-b", selection_ids="selection-b")
+
+            self.assertEqual(loop.dependencies.input_ids, ("input-a",))
+            self.assertEqual(
+                tuple(loop._input_specs),
+                ("input-a",),
+            )
+            self.assertTrue(loop.progress_path.exists())
+            self.assertEqual(loop._load_progress().phase, "pending")
+
     def test_pending_restart_rejects_changed_paper_book_before_poll(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

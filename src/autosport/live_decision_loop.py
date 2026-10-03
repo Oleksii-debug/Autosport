@@ -2035,6 +2035,13 @@ class PersistentLiveDecisionLoop:
         ):
             raise TypeError("expected_registered_input_ids must be a tuple of strings")
         with WorkspaceEconomicLock(self.workspace):
+            durable_input_specs = self._load_input_registry() or ()
+            current_input_specs = tuple(self._input_specs.values())
+            if durable_input_specs != current_input_specs:
+                raise _ConcurrentDecisionSnapshot(
+                    "durable dependency registry changed during decision snapshot "
+                    "capture; retrying before economic action"
+                )
             # The snapshot is written before the cursor: a crash before cursor
             # publication leaves only ignorable stale snapshot bytes, while every
             # visible PENDING cursor has an exact pre-action portfolio witness.
@@ -2160,6 +2167,15 @@ class PersistentLiveDecisionLoop:
             "inputs": [spec.to_dict() for spec in candidate],
         }
         with WorkspaceEconomicLock(self.workspace):
+            durable_progress = self._load_progress()
+            if (
+                durable_progress is not None
+                and durable_progress.phase in {_PHASE_PENDING, _PHASE_APPEND_PENDING}
+            ):
+                raise LiveDecisionProgressError(
+                    "cannot mutate live dependency registry while an economic "
+                    "decision is unfinished"
+                )
             durable = self._load_input_registry() or ()
             if durable != expected_previous:
                 raise LiveDecisionProgressError(

@@ -36,11 +36,12 @@ def _finding(
     evidence_grade: AttributionEvidenceGrade | None = None,
 ) -> AttributionFinding:
     if evidence_grade is None:
-        evidence_grade = (
-            AttributionEvidenceGrade.NOT_IDENTIFIABLE
-            if status is AttributionStatus.UNKNOWN
-            else AttributionEvidenceGrade.FACTUAL_MECHANICAL
-        )
+        if status is AttributionStatus.UNKNOWN:
+            evidence_grade = AttributionEvidenceGrade.NOT_IDENTIFIABLE
+        elif component is AttributionComponent.EXECUTION:
+            evidence_grade = AttributionEvidenceGrade.FACTUAL_MECHANICAL
+        else:
+            evidence_grade = AttributionEvidenceGrade.DESCRIPTIVE_ASSOCIATION
     return AttributionFinding(
         component=component,
         status=status,

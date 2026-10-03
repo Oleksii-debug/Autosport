@@ -122,8 +122,19 @@ def test_repeated_origin_module_reload_preserves_originless_reserve_load_and_exe
             )
         )
         # White-box fixture: model an already-authorized lower-layer execution.
-        runtime._exposure_scope_authorities[id(prepared)] = prepared
-
+        publisher = PaperExecutionAdoptionRuntime._publish_exposure_scope
+        cells = dict(
+            zip(
+                publisher.__code__.co_freevars,
+                publisher.__closure__ or (),
+                strict=True,
+            )
+        )
+        scope_cell = cells["scope_authorities"]
+        current = scope_cell.cell_contents
+        if type(current) is not tuple:
+            raise AssertionError("canonical scope authority registry is not immutable")
+        scope_cell.cell_contents = (*current, (runtime, prepared, runtime.ledger))
         result = runtime.execute(
             prepared=prepared,
             trigger_id=plan.decision_id,

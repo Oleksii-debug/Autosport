@@ -140,6 +140,31 @@ def _caller_prepared(runtime: PaperExecutionAdoptionRuntime) -> PreparedPaperExe
     )
 
 
+def _seed_scope_authority_for_lower_layer(
+    runtime: PaperExecutionAdoptionRuntime,
+    prepared: PreparedPaperExecution,
+) -> None:
+    """Test-only setup beyond the TRUSTED_PRODUCT_INTERPRETER threat boundary.
+
+    Lower-layer dispatch falsifiers need an already-issued scope capability without
+    recreating the full decision/risk path. Mutating a closure cell is deliberately
+    private interpreter state; production exposes no equivalent grant surface.
+    """
+    publisher = PaperExecutionAdoptionRuntime._publish_exposure_scope
+    cells = dict(
+        zip(
+            publisher.__code__.co_freevars,
+            publisher.__closure__ or (),
+            strict=True,
+        )
+    )
+    scope_cell = cells["scope_authorities"]
+    current = scope_cell.cell_contents
+    if type(current) is not tuple:
+        raise AssertionError("canonical scope authority registry is not immutable")
+    scope_cell.cell_contents = (*current, (runtime, prepared, runtime.ledger))
+
+
 class PaperExposureScopeProvenanceGuardTests(unittest.TestCase):
     def _runtime(self, root: Path) -> tuple[PaperExecutionLedger, PaperExecutionAdoptionRuntime]:
         ledger = PaperExecutionLedger(root / "paper-execution.jsonl")
@@ -227,19 +252,53 @@ class PaperExposureScopeProvenanceGuardTests(unittest.TestCase):
         }:
             self.assertNotIn(forbidden, freevars)
 
-    def test_direct_mint_does_not_enter_scope_authority_registry(self) -> None:
+    def test_direct_mint_does_not_create_runtime_scope_authority_surface(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             ledger, runtime = self._runtime(Path(tmp))
             prepared = _caller_prepared(runtime)
             runtime._mint_prepared(prepared)
             self.assertIs(runtime._prepared_authorities[id(prepared)], prepared)
-            self.assertNotIn(id(prepared), runtime._exposure_scope_authorities)
+            self.assertFalse(hasattr(runtime, "_exposure_scope_authorities"))
             with self.assertRaisesRegex(
                 PaperExecutionAdoptionError,
                 "lacks canonical PAPER exposure-scope authority",
             ):
                 runtime._require_exposure_scope_authority(prepared)
             self.assertEqual(ledger.events(), ())
+
+    def test_runtime_attribute_registry_injection_cannot_mint_scope_authority(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger, runtime = self._runtime(Path(tmp))
+            prepared = _caller_prepared(runtime)
+            runtime._mint_prepared(prepared)
+            runtime._exposure_scope_authorities = {id(prepared): prepared}
+            with self.assertRaisesRegex(
+                PaperExecutionIntegrityError,
+                "reserved for canonical execution authority",
+            ):
+                runtime._publish_exposure_scope(
+                    prepared=prepared,
+                    run_id=runtime.expected_run_id(
+                        prepared,
+                        prepared.execution_plan.decision_id,
+                    ),
+                )
+            self.assertEqual(ledger.events(), ())
+
+    def test_exact_ledger_swap_cannot_retarget_scope_authorization(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            event, agent, context, runtime, _decision_ledger = _fixture(root)
+            origin_ledger = runtime.ledger
+            replacement = PaperExecutionLedger(root / "swapped-paper-execution.jsonl")
+            runtime.ledger = replacement
+            with self.assertRaisesRegex(
+                PaperExecutionIntegrityError,
+                "ledger origin changed",
+            ):
+                agent.on_market_event(event, context)
+            self.assertEqual(origin_ledger.events(), ())
+            self.assertEqual(replacement.events(), ())
 
     def test_generic_append_cannot_mint_reserved_exposure_scope(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -377,15 +436,9 @@ class PaperExposureScopeProvenanceGuardTests(unittest.TestCase):
     def test_concrete_ledger_path_open_rebind_fails_before_reserved_publication(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             ledger, runtime = self._runtime(Path(tmp))
-            prepared = runtime.prepare_paper_value_action(
-                event=_event(),
-                stake=Decimal("5.00"),
-                decision_id="path-open-dispatch",
-                account_id="paper-account",
-                bankroll_id="bankroll-eur",
-                currency="EUR",
-            )
-            runtime._exposure_scope_authorities[id(prepared)] = prepared
+            prepared = _caller_prepared(runtime)
+            runtime._mint_prepared(prepared)
+            _seed_scope_authority_for_lower_layer(runtime, prepared)
             run_id = runtime.expected_run_id(
                 prepared,
                 prepared.execution_plan.decision_id,
@@ -420,15 +473,9 @@ class PaperExposureScopeProvenanceGuardTests(unittest.TestCase):
     def test_concrete_ledger_path_exists_rebind_fails_before_reserved_publication(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             ledger, runtime = self._runtime(Path(tmp))
-            prepared = runtime.prepare_paper_value_action(
-                event=_event(),
-                stake=Decimal("5.00"),
-                decision_id="path-exists-dispatch",
-                account_id="paper-account",
-                bankroll_id="bankroll-eur",
-                currency="EUR",
-            )
-            runtime._exposure_scope_authorities[id(prepared)] = prepared
+            prepared = _caller_prepared(runtime)
+            runtime._mint_prepared(prepared)
+            _seed_scope_authority_for_lower_layer(runtime, prepared)
             run_id = runtime.expected_run_id(
                 prepared,
                 prepared.execution_plan.decision_id,

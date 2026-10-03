@@ -935,9 +935,17 @@ def _parse_place_orders_response(
             status == "FAILURE"
             and instruction.status != "FAILURE"
         )
+        or (
+            status == "PROCESSED_WITH_ERRORS"
+            and instruction.status != "FAILURE"
+        )
     ):
         raise BetfairPlaceOrdersAmbiguous(
             "placeOrders execution/instruction statuses conflict"
+        )
+    if status == "SUCCESS" and result.get("errorCode") is not None:
+        raise BetfairPlaceOrdersAmbiguous(
+            "successful placeOrders execution cannot carry provider errorCode"
         )
     if status == "FAILURE" and result.get("errorCode") is None:
         raise BetfairPlaceOrdersAmbiguous(

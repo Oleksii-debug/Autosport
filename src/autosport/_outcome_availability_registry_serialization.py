@@ -365,8 +365,43 @@ def _begin_with_causal_outcome_publication(
         _run_registry._require_canonical_sha256(
             "base_decision_ledger_sha256", base_decision_ledger_sha256
         )
-    if not isinstance(outcome_lineage, _outcome_trust.OutcomeLineageBinding):
-        raise ValueError("outcome_lineage must be an OutcomeLineageBinding or null")
+    if type(outcome_lineage) is not _outcome_trust.OutcomeLineageBinding:
+        raise ValueError("outcome_lineage must be an exact OutcomeLineageBinding or null")
+    if (
+        type(outcome_lineage.revisions) is not tuple
+        or not outcome_lineage.revisions
+        or any(
+            type(revision) is not _outcome_trust.TrustedOutcomeRevision
+            for revision in outcome_lineage.revisions
+        )
+    ):
+        raise ValueError(
+            "outcome_lineage revisions must be a non-empty exact tuple of TrustedOutcomeRevision values"
+        )
+
+    # Caller timestamps are assertions, never product availability authority.  Strip
+    # them while canonicalizing every identity field before the first durable UNKNOWN
+    # publication.  This also prevents malformed caller dataclasses from corrupting
+    # the registry and prevents virtual subclass dispatch from changing meaning across
+    # the two-phase transition.
+    incoming_identity_payload = {
+        "source_identity": outcome_lineage.source_identity,
+        "record_id": outcome_lineage.record_id,
+        "root_revision_id": outcome_lineage.root_revision_id,
+        "root_record_sha256": outcome_lineage.root_record_sha256,
+        "revisions": [
+            {
+                "revision": revision.revision,
+                "revision_id": revision.revision_id,
+                "record_sha256": revision.record_sha256,
+            }
+            for revision in outcome_lineage.revisions
+        ],
+    }
+    outcome_lineage = _ORIGINAL_BINDING_FROM_PAYLOAD(
+        incoming_identity_payload,
+        context="incoming outcome_lineage",
+    )
 
     with durable_path_lock(self.path):
         state = self._read()

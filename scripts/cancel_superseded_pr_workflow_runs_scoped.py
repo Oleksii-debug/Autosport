@@ -1426,7 +1426,11 @@ def _explicit_singleton_pr_for_current_run(
 
     if type(current_run_id) is not int or current_run_id <= 0:
         raise CancellationError("invalid current run id")
-    event_head_sha = _require_sha(event_head_sha, field="event head sha")
+    if type(event_head_sha) is not str or len(event_head_sha) != 40:
+        raise CancellationError("invalid event head sha")
+    event_head_sha = event_head_sha.lower()
+    if any(ch not in "0123456789abcdef" for ch in event_head_sha):
+        raise CancellationError("invalid event head sha")
     if type(workflow_name) is not str or not workflow_name:
         raise CancellationError("workflow name is required")
     current_entries = tuple(
@@ -1768,7 +1772,11 @@ def _cancel_triggering_run_if_stale_or_nonqualifying(
             return (head_sha, value[1])
         return _pull_request_qualification_state(value)
 
-    event_head_sha = _require_sha(event_head_sha, field="event head sha")
+    if type(event_head_sha) is not str or len(event_head_sha) != 40:
+        raise CancellationError("invalid event head sha")
+    event_head_sha = event_head_sha.lower()
+    if any(ch not in "0123456789abcdef" for ch in event_head_sha):
+        raise CancellationError("invalid event head sha")
     if type(current_run_id) is not int or current_run_id <= 0:
         raise CancellationError("invalid current run id")
     qualification_state = qualification_state_from_trusted_read(qualification)
@@ -1874,7 +1882,12 @@ def main(argv: list[str] | None = None) -> int:
             workflow_id=args.workflow_id,
             workflow_name=args.workflow_name,
         )
-        event_head_sha = _require_sha(args.event_head_sha, field="event head sha")
+        event_head_sha = args.event_head_sha
+        if type(event_head_sha) is not str or len(event_head_sha) != 40:
+            raise CancellationError("invalid event head sha")
+        event_head_sha = event_head_sha.lower()
+        if any(ch not in "0123456789abcdef" for ch in event_head_sha):
+            raise CancellationError("invalid event head sha")
         if type(args.current_run_id) is not int or args.current_run_id <= 0:
             raise CancellationError("invalid current run id")
         current_run_id = args.current_run_id

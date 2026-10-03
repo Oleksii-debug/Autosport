@@ -2768,3 +2768,93 @@ def test_production_trigger_ignores_preentry_decision_global_rebind(
     assert cancelled == [7015]
     assert forged_calls == []
 
+
+
+def test_event_head_coordinate_does_not_use_rebound_sha_helper(
+    monkeypatch,
+) -> None:
+    forged_calls: list[tuple[object, str]] = []
+
+    def forged_sha(value, *, field: str) -> str:
+        forged_calls.append((value, field))
+        return HEAD
+
+    monkeypatch.setattr(scoped_controller, "_require_sha", forged_sha)
+
+    runs = (
+        WorkflowRun(
+            run_id=7016,
+            head_sha=STALE_HEAD,
+            workflow_name="CI",
+            pr_numbers=(303,),
+            status="queued",
+        ),
+    )
+    assert (
+        _explicit_singleton_pr_for_current_run(
+            runs,
+            workflow_name="CI",
+            current_run_id=7016,
+            event_head_sha=STALE_HEAD,
+        )
+        == 303
+    )
+
+    cancelled: list[int] = []
+
+    class FixtureApi:
+        def cancel(self, run_id: int) -> None:
+            cancelled.append(run_id)
+
+    def trusted_qualification(_api, pr_number: int):
+        assert pr_number == 303
+        return (HEAD, True)
+
+    def trusted_identity(
+        _api,
+        *,
+        run_id: int,
+        expected_head_sha: str,
+        pr_number: int,
+    ) -> bool:
+        assert run_id == 7016
+        assert expected_head_sha == STALE_HEAD
+        assert pr_number == 303
+        return True
+
+    def cancel_effect(_api, run_id: int) -> bool:
+        cancelled.append(run_id)
+        return True
+
+    assert _cancel_triggering_run_if_stale_or_nonqualifying(
+        FixtureApi(),  # type: ignore[arg-type]
+        pr_number=303,
+        event_head_sha=STALE_HEAD,
+        current_run_id=7016,
+        qualification=(HEAD, True),
+        _cancel_effect=cancel_effect,
+        _cancel_effect_code=cancel_effect.__code__,
+        _qualification_reader=trusted_qualification,
+        _qualification_reader_code=trusted_qualification.__code__,
+        _identity_checker=trusted_identity,
+        _identity_checker_code=trusted_identity.__code__,
+    )
+    assert cancelled == [7016]
+    assert forged_calls == []
+
+
+def test_controller_event_head_validation_is_primitive_not_global() -> None:
+    source = Path("scripts/cancel_superseded_pr_workflow_runs_scoped.py").read_text(
+        encoding="utf-8"
+    )
+    snapshot = source.split("def _explicit_singleton_pr_for_current_run(", 1)[1].split(
+        "def _validated_event_pr_identity(", 1
+    )[0]
+    trigger = source.split(
+        "def _cancel_triggering_run_if_stale_or_nonqualifying(", 1
+    )[1].split("def main(", 1)[0]
+    main_source = source.split("def main(", 1)[1]
+
+    assert '_require_sha(event_head_sha, field="event head sha")' not in snapshot
+    assert '_require_sha(event_head_sha, field="event head sha")' not in trigger
+    assert '_require_sha(args.event_head_sha, field="event head sha")' not in main_source

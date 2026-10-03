@@ -211,6 +211,21 @@ def test_runtime_snapshot_uses_one_exact_durable_paperbook_image(
     assert snapshot.portfolio_best_case == Decimal("10")
 
 
+def test_runtime_snapshot_uses_trusted_resolved_workspace_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    relative = Path("runtime-workspace")
+    relative.mkdir()
+    runtime = _runtime(relative)
+
+    snapshot = _capture_runtime_economic_snapshot(runtime, _tick())
+
+    assert snapshot.workspace == relative.resolve()
+    assert snapshot.workspace.is_absolute()
+
+
 def test_runtime_snapshot_without_paperbook_is_explicit_initial_state(
     tmp_path: Path,
 ) -> None:

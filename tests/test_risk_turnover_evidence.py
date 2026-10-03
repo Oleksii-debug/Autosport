@@ -270,7 +270,9 @@ def test_evidence_value_contract_rejects_scalar_subclasses_before_hooks(tmp_path
     assert _HostileDecimal.hook_calls == 0
 
 
-def test_previous_day_ticket_does_not_enter_current_utc_day(tmp_path):
+def test_previous_day_ticket_cannot_mint_current_day_headroom_without_chronology(
+    tmp_path,
+):
     store = _store(tmp_path)
     window = store.current()
     book = _book()
@@ -283,15 +285,45 @@ def test_previous_day_ticket_does_not_enter_current_utc_day(tmp_path):
     )
     _open(book, window, stake="20", suffix="current")
 
-    evidence = _resolve_current(
-        book=book,
-        goal_store=_goal_store(store),
-        window_store=store,
-        window_evidence=window,
+    # _resolve_current persists the exact canonical book before resolving. The old
+    # ticket is therefore durable economic state, but its placed_at is not
+    # product-issued admission chronology. Excluding it would mint false headroom.
+    with pytest.raises(
+        PaperDayTurnoverEvidenceIncompleteError,
+        match="product-issued UTC-day admission chronology",
+    ):
+        _resolve_current(
+            book=book,
+            goal_store=_goal_store(store),
+            window_store=store,
+            window_evidence=window,
+        )
+
+
+def test_previous_day_unbound_ticket_cannot_hide_from_goal_turnover(tmp_path):
+    store = _store(tmp_path)
+    window = store.current()
+    book = _book()
+    _open(
+        book,
+        window,
+        stake="30",
+        suffix="old-unbound",
+        placed_at=_before(window),
+        bankroll_id=None,
+        currency=None,
     )
 
-    assert evidence.confirmed_turnover == Decimal("20")
-    assert evidence.constituent_count == 1
+    with pytest.raises(
+        PaperDayTurnoverEvidenceIncompleteError,
+        match="bankroll identity",
+    ):
+        _resolve_current(
+            book=book,
+            goal_store=_goal_store(store),
+            window_store=store,
+            window_evidence=window,
+        )
 
 
 def test_settlement_and_payout_do_not_erase_or_inflate_accepted_turnover(tmp_path):

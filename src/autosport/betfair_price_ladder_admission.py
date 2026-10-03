@@ -22,6 +22,11 @@ from .betfair_account_readonly import (
     BetfairReadOnlyClient,
     BetfairReadOnlyError,
 )
+from .betfair_account_identity import (
+    BetfairAccountIdentityError,
+    BetfairAuthenticatedAccountIdentity,
+    require_authoritative_betfair_account_identity,
+)
 
 _LIST_MARKET_CATALOGUE = "SportsAPING/v1.0/listMarketCatalogue"
 _CONTRACT_VERSION = "1"
@@ -235,12 +240,32 @@ class BetfairPriceLadderAdmission:
 class BetfairPriceLadderAuthority:
     """Acquire exact market metadata and issue one-axis price-tick admissions."""
 
-    def __init__(self, client: BetfairReadOnlyClient) -> None:
+    def __init__(
+        self,
+        client: BetfairReadOnlyClient,
+        account_identity: BetfairAuthenticatedAccountIdentity,
+    ) -> None:
         if type(client) is not BetfairReadOnlyClient:
             raise BetfairPriceLadderError(
                 "client must be exact canonical BetfairReadOnlyClient"
             )
+        if type(account_identity) is not BetfairAuthenticatedAccountIdentity:
+            raise BetfairPriceLadderError(
+                "account_identity must be exact canonical "
+                "BetfairAuthenticatedAccountIdentity"
+            )
+        try:
+            require_authoritative_betfair_account_identity(
+                account_identity,
+                client=client,
+            )
+        except BetfairAccountIdentityError as exc:
+            raise BetfairPriceLadderError(
+                "price-ladder authority requires current product-owned "
+                "Betfair authenticated origin"
+            ) from exc
         self._client = client
+        self._account_identity = account_identity
 
     def __repr__(self) -> str:
         return (
@@ -654,43 +679,102 @@ def _install_price_ladder_authority() -> None:
         int,
         tuple[object, str, object, object],
     ] = {}
+    origin_by_authority: dict[
+        int,
+        tuple[object, BetfairReadOnlyClient, BetfairAuthenticatedAccountIdentity],
+    ] = {}
     issuance_lock = Lock()
 
+    raw_init = BetfairPriceLadderAuthority.__init__
+    raw_setattr = BetfairPriceLadderAuthority.__setattr__
     raw_acquire = BetfairPriceLadderAuthority.acquire
     raw_resolve = BetfairPriceLadderAuthority.resolve
-    validate_observation = (
-        BetfairPriceLadderObservation.assert_authoritative
-    )
-    validate_admission = (
-        BetfairPriceLadderAdmission.assert_authoritative
-    )
+    validate_observation = BetfairPriceLadderObservation.assert_authoritative
+    validate_admission = BetfairPriceLadderAdmission.assert_authoritative
+    require_account_origin = require_authoritative_betfair_account_identity
+    account_origin_error = BetfairAccountIdentityError
+
+    def require_bound_origin(
+        authority: BetfairPriceLadderAuthority,
+    ) -> tuple[BetfairReadOnlyClient, BetfairAuthenticatedAccountIdentity]:
+        with issuance_lock:
+            record = origin_by_authority.get(id(authority))
+        if record is None or record[0]() is not authority:
+            raise BetfairPriceLadderError(
+                "price-ladder authority lacks product-owned Betfair origin binding"
+            )
+        client = record[1]
+        account_identity = record[2]
+        if (
+            authority._client is not client
+            or authority._account_identity is not account_identity
+        ):
+            raise BetfairPriceLadderError(
+                "price-ladder authority origin changed after construction"
+            )
+        try:
+            require_account_origin(account_identity, client=client)
+        except account_origin_error as exc:
+            raise BetfairPriceLadderError(
+                "price-ladder authenticated origin is no longer authoritative"
+            ) from exc
+        return client, account_identity
+
+    def authoritative_init(
+        self: BetfairPriceLadderAuthority,
+        client: BetfairReadOnlyClient,
+        account_identity: BetfairAuthenticatedAccountIdentity,
+    ) -> None:
+        raw_init(self, client, account_identity)
+        try:
+            require_account_origin(account_identity, client=client)
+        except account_origin_error as exc:
+            raise BetfairPriceLadderError(
+                "price-ladder authority requires current product-owned "
+                "Betfair authenticated origin"
+            ) from exc
+        authority_id = id(self)
+        def forget_authority(_weakref: object, *, key: int = authority_id) -> None:
+            with issuance_lock:
+                origin_by_authority.pop(key, None)
+        with issuance_lock:
+            origin_by_authority[authority_id] = (
+                ref(self, forget_authority),
+                client,
+                account_identity,
+            )
+
+    def bound_setattr(
+        self: BetfairPriceLadderAuthority,
+        name: str,
+        value: object,
+    ) -> None:
+        if name in {"_client", "_account_identity"}:
+            with issuance_lock:
+                record = origin_by_authority.get(id(self))
+            if record is not None and record[0]() is self:
+                expected = record[1] if name == "_client" else record[2]
+                if value is not expected:
+                    raise BetfairPriceLadderError(
+                        "price-ladder authority origin is immutable after construction"
+                    )
+        raw_setattr(self, name, value)
 
     def authoritative_acquire(
         self: BetfairPriceLadderAuthority,
         market_id: str,
     ) -> BetfairPriceLadderObservation:
         market = _required_text(market_id, "market_id")
-        # A refresh attempt is itself evidence that the caller needs a current
-        # definition. Revoke the prior current witness before provider I/O so
-        # any failure leaves historical evidence auditable but non-consumable.
+        require_bound_origin(self)
         with issuance_lock:
             latest_by_market.pop((id(self), market), None)
-
         observation = raw_acquire(self, market)
+        require_bound_origin(self)
         observation_id = id(observation)
-
-        def forget_observation(
-            _weakref: object,
-            *,
-            key: int = observation_id,
-        ) -> None:
+        def forget_observation(_weakref: object, *, key: int = observation_id) -> None:
             with issuance_lock:
                 issued_observations.pop(key, None)
-
-        observation_ref = ref(
-            observation,
-            forget_observation,
-        )
+        observation_ref = ref(observation, forget_observation)
         authority_ref = ref(self)
         with issuance_lock:
             issued_observations[observation_id] = (
@@ -699,27 +783,27 @@ def _install_price_ladder_authority() -> None:
                 authority_ref,
                 observation.market_id,
             )
-            latest_by_market[
-                (id(self), observation.market_id)
-            ] = observation_ref
+            latest_by_market[(id(self), observation.market_id)] = observation_ref
         return observation
 
-    def assert_observation(
-        self: BetfairPriceLadderObservation,
-    ) -> None:
+    def assert_observation(self: BetfairPriceLadderObservation) -> None:
         validate_observation(self)
         with issuance_lock:
             record = issued_observations.get(id(self))
         if record is None or record[0]() is not self:
             raise BetfairPriceLadderError(
-                "price-ladder observation was not issued "
-                "by canonical authority"
+                "price-ladder observation was not issued by canonical authority"
             )
         if record[1] != self._authority_fingerprint():
             raise BetfairPriceLadderError(
-                "price-ladder observation changed "
-                "after canonical acquisition"
+                "price-ladder observation changed after canonical acquisition"
             )
+        authority = record[2]()
+        if authority is None:
+            raise BetfairPriceLadderError(
+                "price-ladder observation authority is no longer live"
+            )
+        require_bound_origin(authority)
 
     def authoritative_resolve(
         self: BetfairPriceLadderAuthority,
@@ -730,17 +814,15 @@ def _install_price_ladder_authority() -> None:
         selection_id: int | None = None,
         handicap: Decimal | str | None = None,
     ) -> BetfairPriceLadderAdmission:
+        require_bound_origin(self)
         if type(observation) is not BetfairPriceLadderObservation:
             raise BetfairPriceLadderError(
-                "observation must be exact canonical "
-                "BetfairPriceLadderObservation"
+                "observation must be exact canonical BetfairPriceLadderObservation"
             )
         observation.assert_authoritative()
         with issuance_lock:
             record = issued_observations.get(id(observation))
-            latest = latest_by_market.get(
-                (id(self), observation.market_id)
-            )
+            latest = latest_by_market.get((id(self), observation.market_id))
         if (
             record is None
             or record[2]() is not self
@@ -748,10 +830,8 @@ def _install_price_ladder_authority() -> None:
             or latest() is not observation
         ):
             raise BetfairPriceLadderError(
-                "price-ladder observation is not the current "
-                "acquisition for this authority"
+                "price-ladder observation is not the current acquisition for this authority"
             )
-
         admission = raw_resolve(
             self,
             observation=observation,
@@ -760,16 +840,11 @@ def _install_price_ladder_authority() -> None:
             selection_id=selection_id,
             handicap=handicap,
         )
+        require_bound_origin(self)
         admission_id = id(admission)
-
-        def forget_admission(
-            _weakref: object,
-            *,
-            key: int = admission_id,
-        ) -> None:
+        def forget_admission(_weakref: object, *, key: int = admission_id) -> None:
             with issuance_lock:
                 issued_admissions.pop(key, None)
-
         with issuance_lock:
             issued_admissions[admission_id] = (
                 ref(admission, forget_admission),
@@ -779,21 +854,17 @@ def _install_price_ladder_authority() -> None:
             )
         return admission
 
-    def assert_admission(
-        self: BetfairPriceLadderAdmission,
-    ) -> None:
+    def assert_admission(self: BetfairPriceLadderAdmission) -> None:
         validate_admission(self)
         with issuance_lock:
             record = issued_admissions.get(id(self))
         if record is None or record[0]() is not self:
             raise BetfairPriceLadderError(
-                "price-ladder admission was not issued "
-                "by canonical authority"
+                "price-ladder admission was not issued by canonical authority"
             )
         if record[1] != self._authority_fingerprint():
             raise BetfairPriceLadderError(
-                "price-ladder admission changed "
-                "after canonical resolution"
+                "price-ladder admission changed after canonical resolution"
             )
         authority = record[2]()
         observation = record[3]()
@@ -801,25 +872,21 @@ def _install_price_ladder_authority() -> None:
             raise BetfairPriceLadderError(
                 "price-ladder admission authority is no longer live"
             )
+        require_bound_origin(authority)
         observation.assert_authoritative()
         with issuance_lock:
-            latest = latest_by_market.get(
-                (id(authority), observation.market_id)
-            )
+            latest = latest_by_market.get((id(authority), observation.market_id))
         if latest is None or latest() is not observation:
             raise BetfairPriceLadderError(
-                "price-ladder admission was superseded "
-                "by a newer market definition"
+                "price-ladder admission was superseded by a newer market definition"
             )
 
+    BetfairPriceLadderAuthority.__setattr__ = bound_setattr
+    BetfairPriceLadderAuthority.__init__ = authoritative_init
     BetfairPriceLadderAuthority.acquire = authoritative_acquire
     BetfairPriceLadderAuthority.resolve = authoritative_resolve
-    BetfairPriceLadderObservation.assert_authoritative = (
-        assert_observation
-    )
-    BetfairPriceLadderAdmission.assert_authoritative = (
-        assert_admission
-    )
+    BetfairPriceLadderObservation.assert_authoritative = assert_observation
+    BetfairPriceLadderAdmission.assert_authoritative = assert_admission
 
 
 _install_price_ladder_authority()

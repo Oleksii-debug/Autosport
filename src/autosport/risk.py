@@ -306,17 +306,17 @@ class ProposedTicketRiskContext:
     carried unchanged and never inferred.
 
     This seam carries the canonical proposal-local identities needed for parlay,
-    market deny-list, and provider deny-list enforcement. Canonical sport identity
-    is deliberately absent until the upstream #339 identity authority exists, so
-    any non-empty owner sport deny-list must fail closed instead of being guessed.
+    market/provider/sport deny-list and concentration enforcement. Sport identity
+    comes only from validated TicketLeg/MarketEvent identity and is never inferred
+    from free-form metadata. Missing sport identity in either the proposal or any
+    relevant open ticket therefore fails closed for sport-specific owner limits.
     Session/day loss, drawdown and turnover are enforced conservatively from the
     canonical PaperBook lifecycle and therefore survive snapshot restart without a
     second state authority. Risk-of-ruin remains evidence-gated because a balance
-    history is not a probability model. Event/market concentration is enforced
-    against the whole open stake set. Provider concentration additionally requires source-scoped bookmaker account
-    identity for every relevant proposal/open ticket; provider-only history is not
-    sufficient account-scoped exposure proof. Sport concentration remains fail-closed
-    until canonical sport identity has a durable authority.
+    history is not a probability model. Event/market/sport concentration is enforced
+    against the whole open stake set. Provider concentration additionally requires
+    source-scoped bookmaker account identity for every relevant proposal/open ticket;
+    provider-only history is not sufficient account-scoped exposure proof.
     """
 
     legs: tuple[TicketLeg, ...]
@@ -473,6 +473,12 @@ class ProposedTicketRiskContext:
     @property
     def source_ids(self) -> frozenset[str]:
         return frozenset(quote.source_id for quote in self.quotes)
+
+    @property
+    def sport_ids(self) -> frozenset[str]:
+        return frozenset(
+            leg.sport for leg in self.legs if leg.sport is not None
+        )
 
     @property
     def provider_account_keys(self) -> frozenset[tuple[str, str]]:
@@ -716,6 +722,8 @@ class PaperRiskPolicy(metaclass=_PaperRiskPolicyMeta):
                                 "market_id": leg.market_id,
                                 "selection_id": leg.selection_id,
                                 "locked_odds": str(leg.locked_odds),
+                                "sport": leg.sport,
+                                "exchange_side": leg.exchange_side,
                             }
                             for leg in ticket.legs
                         ],
@@ -741,7 +749,7 @@ class PaperRiskPolicy(metaclass=_PaperRiskPolicyMeta):
                 )
             return _sha256_payload(
                 {
-                    "schema": "autosport.paper-risk-state.v3",
+                    "schema": "autosport.paper-risk-state.v4",
                     "initial_bankroll": str(book.initial_bankroll),
                     "balance": str(book.balance),
                     "tickets": tickets,
@@ -770,12 +778,14 @@ class PaperRiskPolicy(metaclass=_PaperRiskPolicyMeta):
                     "market_id": leg.market_id,
                     "selection_id": leg.selection_id,
                     "locked_odds": str(leg.locked_odds),
+                    "sport": leg.sport,
+                    "exchange_side": leg.exchange_side,
                 }
                 for leg in sorted(context.legs, key=lambda item: item.quote_key)
             ]
             return _sha256_payload(
                 {
-                    "schema": "autosport.risk-candidate.v2",
+                    "schema": "autosport.risk-candidate.v3",
                     "legs": legs,
                     "quotes": quotes,
                     "provider_accounts": [
@@ -1243,7 +1253,7 @@ class PaperRiskPolicy(metaclass=_PaperRiskPolicyMeta):
         dimension: str,
         limit: Decimal,
     ) -> RiskDecision | None:
-        """Enforce exact whole-open-portfolio event/market stake concentration."""
+        """Enforce exact whole-open-portfolio identity stake concentration."""
         if limit >= Decimal("1"):
             return None
         if dimension == "event":
@@ -1266,6 +1276,15 @@ class PaperRiskPolicy(metaclass=_PaperRiskPolicyMeta):
                     "owner provider concentration limit cannot be proven without "
                     "canonical whole-portfolio exposure evidence",
                 )
+        elif dimension == "sport":
+            if any(leg.sport is None for leg in context.legs):
+                return RiskDecision(
+                    False,
+                    "owner sport concentration limit cannot be proven without "
+                    "canonical whole-portfolio exposure evidence",
+                )
+            proposed_identities = context.sport_ids
+            identity_attribute = "sport"
         else:
             raise ValueError("unsupported concentration dimension")
 
@@ -1299,9 +1318,18 @@ class PaperRiskPolicy(metaclass=_PaperRiskPolicyMeta):
                     identities = frozenset(ticket.provider_source_ids)
                 else:
                     assert identity_attribute is not None
-                    identities = frozenset(
+                    raw_identities = tuple(
                         getattr(leg, identity_attribute) for leg in ticket.legs
                     )
+                    if dimension == "sport" and any(
+                        identity is None for identity in raw_identities
+                    ):
+                        return RiskDecision(
+                            False,
+                            "owner sport concentration limit cannot be proven without "
+                            "canonical whole-portfolio exposure evidence",
+                        )
+                    identities = frozenset(raw_identities)
                 for identity in identities:
                     exposure_by_identity[identity] = cls._exact_positive_sum(
                         (
@@ -1349,15 +1377,22 @@ class PaperRiskPolicy(metaclass=_PaperRiskPolicyMeta):
         if context.source_ids & goal.blocked_providers:
             return RiskDecision(False, "proposed ticket uses an owner-blocked provider")
         if goal.blocked_sports:
-            return RiskDecision(
-                False,
-                "owner sport deny-list cannot be proven without canonical sport identity",
-            )
+            if any(leg.sport is None for leg in context.legs):
+                return RiskDecision(
+                    False,
+                    "owner sport deny-list cannot be proven without canonical sport identity",
+                )
+            if context.sport_ids & goal.blocked_sports:
+                return RiskDecision(
+                    False,
+                    "proposed ticket contains an owner-blocked sport",
+                )
 
         for dimension, limit in (
             ("event", goal.max_event_concentration_fraction),
             ("market", goal.max_market_concentration_fraction),
             ("provider", goal.max_provider_concentration_fraction),
+            ("sport", goal.max_sport_concentration_fraction),
         ):
             decision = cls._identity_concentration_decision(
                 book,
@@ -1369,14 +1404,6 @@ class PaperRiskPolicy(metaclass=_PaperRiskPolicyMeta):
             if decision is not None:
                 return decision
 
-        # Sport identity still has no canonical durable authority. Never infer it
-        # from event/market/provider strings or free-form metadata.
-        if goal.max_sport_concentration_fraction < Decimal("1"):
-            return RiskDecision(
-                False,
-                "owner sport concentration limit cannot be proven without "
-                "canonical whole-portfolio exposure evidence",
-            )
         return None
 
     @staticmethod

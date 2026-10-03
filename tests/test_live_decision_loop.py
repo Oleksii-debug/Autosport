@@ -601,6 +601,73 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             ).verified_records()
             self.assertEqual(len(records), 1)
 
+    def test_update_during_final_coherence_getter_retries_before_decision(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            clock = _ManualClock(self.START + timedelta(seconds=1))
+            observer = _DurableObserver(
+                workspace,
+                [(self._event(selection="selection-a", sequence=1),), ()],
+            )
+            factory = _EmptyIntentFactory()
+            loop = self._loop(
+                workspace,
+                observer=observer,
+                factory=factory,
+                clock=clock,
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+
+            concurrent = self._event(
+                selection="selection-a",
+                sequence=2,
+                odds="2.20",
+                observed=self.START + timedelta(milliseconds=500),
+            )
+            descriptor = type(loop.mirror_updates).full_refresh_required
+            injected = {"done": False}
+
+            def final_gate_then_advance(instance):
+                prior = descriptor.__get__(instance, type(instance))
+                if not injected["done"]:
+                    injected["done"] = True
+                    store = SQLiteMarketStore(workspace / "market.db")
+                    try:
+                        store.append(concurrent)
+                    finally:
+                        store.close()
+                    instance.accept_persisted(concurrent)
+                return prior
+
+            with patch.object(
+                type(loop.mirror_updates),
+                "full_refresh_required",
+                property(final_gate_then_advance),
+            ):
+                first = loop.run_cycle()
+
+            self.assertEqual(first.status, LiveCycleStatus.BACKPRESSURE)
+            self.assertIn("revision advanced", first.detail)
+            self.assertEqual(factory.calls, [])
+            self.assertFalse((workspace / "decisions.jsonl").exists())
+
+            clock.value = self.START + timedelta(seconds=2)
+            second = loop.run_cycle()
+
+            self.assertEqual(second.status, LiveCycleStatus.DECIDED)
+            self.assertEqual(
+                factory.calls,
+                [("input-a", (("selection-a", 2, "open"),))],
+            )
+            self.assertEqual(
+                len(
+                    JsonlDecisionLedger(
+                        workspace / "decisions.jsonl"
+                    ).verified_records()
+                ),
+                1,
+            )
+
     def test_future_local_availability_cannot_enter_old_decision_cut(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

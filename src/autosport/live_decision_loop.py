@@ -1561,10 +1561,19 @@ class PersistentLiveDecisionLoop:
                     "focused market inputs did not resolve to one mirror revision"
                 )
             captured_revision = next(iter(revisions))
+            # Linearize the cut only after invalidation-state reads. A market
+            # update can land between the first revision read and the final
+            # buffer getter; the trailing revision witness makes that window
+            # fail closed instead of publishing a stale economic cut.
+            revision_before_invalidation_read = self.mirror_updates.mirror.revision
+            pending_count = self.mirror_updates.pending_count
+            full_refresh_required = self.mirror_updates.full_refresh_required
+            revision_after_invalidation_read = self.mirror_updates.mirror.revision
             if (
-                self.mirror_updates.mirror.revision != captured_revision
-                or self.mirror_updates.pending_count
-                or self.mirror_updates.full_refresh_required
+                revision_before_invalidation_read != captured_revision
+                or pending_count
+                or full_refresh_required
+                or revision_after_invalidation_read != captured_revision
             ):
                 raise _ConcurrentDecisionSnapshot(
                     "market revision advanced during decision snapshot capture; "

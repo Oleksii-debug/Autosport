@@ -383,9 +383,14 @@ def _copy_regular_source_file(
     destination: str | Path,
     *,
     label: str,
+    expected_snapshot: os.stat_result | None = None,
 ) -> None:
     Path(destination).write_bytes(
-        _read_regular_source_bytes(Path(source), label=label)
+        _read_regular_source_bytes(
+            Path(source),
+            label=label,
+            expected_snapshot=expected_snapshot,
+        )
     )
 
 
@@ -880,13 +885,28 @@ def build_windows_package(
     restart_recovery_path = Path(restart_recovery_path)
     output_zip = Path(output_zip)
 
-    _require_regular_source_file(exe_path, label="Autosport executable input")
-    _require_regular_source_file(start_file, label="Windows start-file input")
+    exe_snapshot = _require_regular_source_file(
+        exe_path,
+        label="Autosport executable input",
+    )
+    start_snapshot = _require_regular_source_file(
+        start_file,
+        label="Windows start-file input",
+    )
     _require_regular_source_tree(example_dir, label="release example tree")
-    _require_regular_source_file(diagnostic_path, label="packaged diagnostic input")
-    _require_regular_source_file(accessibility_path, label="accessibility audit input")
-    _require_regular_source_file(keyboard_path, label="keyboard audit input")
-    _require_regular_source_file(
+    diagnostic_snapshot = _require_regular_source_file(
+        diagnostic_path,
+        label="packaged diagnostic input",
+    )
+    accessibility_snapshot = _require_regular_source_file(
+        accessibility_path,
+        label="accessibility audit input",
+    )
+    keyboard_snapshot = _require_regular_source_file(
+        keyboard_path,
+        label="keyboard audit input",
+    )
+    restart_recovery_snapshot = _require_regular_source_file(
         restart_recovery_path,
         label="restart/recovery audit input",
     )
@@ -899,31 +919,37 @@ def build_windows_package(
         exe_path,
         package_dir / "Autosport.exe",
         label="Autosport executable input",
+        expected_snapshot=exe_snapshot,
     )
     _copy_regular_source_file(
         start_file,
         package_dir / "WINDOWS_START_HERE.txt",
         label="Windows start-file input",
+        expected_snapshot=start_snapshot,
     )
     _copy_regular_source_file(
         diagnostic_path,
         package_dir / "packaged-diagnostic.json",
         label="packaged diagnostic input",
+        expected_snapshot=diagnostic_snapshot,
     )
     _copy_regular_source_file(
         accessibility_path,
         package_dir / "accessibility-audit.json",
         label="accessibility audit input",
+        expected_snapshot=accessibility_snapshot,
     )
     _copy_regular_source_file(
         keyboard_path,
         package_dir / "keyboard-audit.json",
         label="keyboard audit input",
+        expected_snapshot=keyboard_snapshot,
     )
     _copy_regular_source_file(
         restart_recovery_path,
         package_dir / "restart-recovery-audit.json",
         label="restart/recovery audit input",
+        expected_snapshot=restart_recovery_snapshot,
     )
     _copy_regular_source_tree(
         example_dir,

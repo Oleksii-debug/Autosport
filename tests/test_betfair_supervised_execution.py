@@ -882,6 +882,9 @@ def test_full_match_persists_provider_report_and_canonical_ack() -> None:
             if item.attempt.attempt_id == "attempt-accepted"
         )
         assert submitted.submitted_request_sha256 == request_sha256
+        assert submitted.provider_evidence is not None
+        assert submitted.provider_evidence.request_sha256 == request_sha256
+        assert binding["request_sha256"] == request_sha256
         assert request["method"] == "SportsAPING/v1.0/placeOrders"
         assert request["params"]["async"] is False
         assert len(request["params"]["customerRef"]) == 32
@@ -941,6 +944,11 @@ def test_better_than_requested_back_limit_preserves_distinct_submit_and_accept()
         assert attempt.acknowledgement.accepted_odds == accepted_odds
         assert attempt.acknowledgement.accepted_stake == action.requested_stake
         assert attempt.submitted_request_sha256 is not None
+        assert attempt.provider_evidence is not None
+        assert (
+            attempt.provider_evidence.request_sha256
+            == attempt.submitted_request_sha256
+        )
 
 
 def test_worse_than_requested_standard_back_limit_is_unknown_contradiction() -> None:
@@ -984,6 +992,10 @@ def test_worse_than_requested_standard_back_limit_is_unknown_contradiction() -> 
         assert attempt.provider_evidence.evidence_id == result.evidence_id
         assert attempt.acknowledgement is None
         assert attempt.submitted_request_sha256 is not None
+        assert (
+            attempt.provider_evidence.request_sha256
+            == attempt.submitted_request_sha256
+        )
         assert not ledger.can_retry_action(
             plan_id=bound.execution_plan.plan_id,
             action_id=action.action_id,
@@ -1365,7 +1377,16 @@ def test_unmatched_success_is_unknown_until_readback() -> None:
         assert result.evidence_id is not None
         binding = ledger.provider_evidence_binding("attempt-unmatched")
         assert binding is not None
-        assert set(binding) == {"evidence_id", "observed_at", "source"}
+        assert set(binding) == {
+            "evidence_id",
+            "observed_at",
+            "source",
+            "request_sha256",
+        }
+        unmatched_view = ledger.verified_execution_view(
+            bound.execution_plan.plan_id
+        ).attempts[0]
+        assert binding["request_sha256"] == unmatched_view.submitted_request_sha256
         assert not ledger.can_retry_action(
             plan_id=bound.execution_plan.plan_id,
             action_id=action.action_id,

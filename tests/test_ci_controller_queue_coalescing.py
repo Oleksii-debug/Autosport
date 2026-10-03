@@ -754,6 +754,70 @@ def test_explicit_run_boundary_checker_rejects_transitive_request_shadow(
     assert not invoked["value"]
 
 
+def test_explicit_run_boundary_checker_rejects_class_request_rebind(
+    monkeypatch,
+) -> None:
+    api = WorkflowScopedGitHubApi(
+        repository="owner/repo",
+        token="token",
+        workflow_id=356678400,
+        workflow_name="CI",
+    )
+
+    def forged_request(self, _path: str, **_kwargs):
+        raise AssertionError("class-rebound request transport must not execute")
+
+    monkeypatch.setattr(WorkflowScopedGitHubApi, "_request", forged_request)
+
+    assert not _explicit_run_identity_is_current(
+        api,
+        run_id=7012,
+        expected_head_sha=HEAD,
+        pr_number=303,
+    )
+
+
+def test_explicit_run_boundary_checker_rejects_in_place_request_code_mutation(
+    monkeypatch,
+) -> None:
+    api = WorkflowScopedGitHubApi(
+        repository="owner/repo",
+        token="token",
+        workflow_id=356678400,
+        workflow_name="CI",
+    )
+
+    def forged_request(
+        self,
+        _path: str,
+        *,
+        method: str = "GET",
+        allowed_http_errors: frozenset[int] = frozenset(),
+    ):
+        return {
+            "id": 7012,
+            "workflow_id": 356678400,
+            "event": "pull_request",
+            "head_sha": HEAD,
+            "name": "CI",
+            "status": "queued",
+            "pull_requests": [{"number": 303}],
+        }
+
+    monkeypatch.setattr(
+        scoped_controller.GitHubApi._request,
+        "__code__",
+        forged_request.__code__,
+    )
+
+    assert not _explicit_run_identity_is_current(
+        api,
+        run_id=7012,
+        expected_head_sha=HEAD,
+        pr_number=303,
+    )
+
+
 def test_live_pr_boundary_rejects_transitive_request_shadow(monkeypatch) -> None:
     api = WorkflowScopedGitHubApi(
         repository="owner/repo",

@@ -424,6 +424,19 @@ def test_same_code_reconstruction_with_foreign_raw_read_cannot_mint_origin(
     with pytest.raises(BetfairReadOnlyError, match="product-origin authority"):
         capture.assert_authoritative()
 
+def test_readback_dependency_seal_is_immutable_tuple() -> None:
+    sealed = _closure_value(
+        BetfairReadOnlyClient.read_execution_readback,
+        "sealed_readback_graph",
+    )
+    assert type(sealed) is tuple
+    assert sealed
+    assert all(
+        type(item) is tuple and len(item) == 3 and type(item[0]) is str
+        for item in sealed
+    )
+
+
 def test_readback_network_predicate_has_no_mutable_closure_authority() -> None:
     predicate = _closure_value(
         BetfairReadOnlyClient.read_execution_readback,

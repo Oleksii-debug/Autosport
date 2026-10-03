@@ -1214,6 +1214,7 @@ def _seal_campaign_provider_cycle_capture_dispatch() -> None:
 
     module_globals = _CANONICAL_MODULE_GLOBALS
     expected_error = CampaignProviderCycleCaptureIntegrityError
+    expected_type_error = TypeError
     expected_capture = capture_campaign_complete_game_board
     expected_capture_code = expected_capture.__code__
     expected_inspect = inspect
@@ -1446,7 +1447,7 @@ def _seal_campaign_provider_cycle_capture_dispatch() -> None:
 
     def sealed_capture_campaign_complete_game_board(*args, **kwargs):
         if "_public_surface_guard" in kwargs:
-            raise TypeError(
+            raise expected_type_error(
                 "_public_surface_guard is private to the sealed campaign capture"
             )
         require_public_capture_surface()

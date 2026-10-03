@@ -1220,7 +1220,7 @@ def verify_campaign_forward_evidence(
     universe_store: ProviderEvaluationUniverseStore,
     event_lifecycle: ContinuousEventLifecycle | None,
     evidence: CampaignEvidence,
-) -> VerificationResult:
+) -> CampaignForwardEvidenceVerification:
     """Run structural #879 verification only over cycle-authorized source receipts.
 
     This is composition, not promotion authority. Caller-supplied authoritative
@@ -1286,7 +1286,18 @@ def verify_campaign_forward_evidence(
         raise CampaignForwardUniverseCycleBindingError(
             "campaign/cycle/provider/universe authority changed during structural verification"
         )
-    return result
+    _require_dispatch_integrity()
+    receipt = _CANONICAL_VERIFICATION_ISSUER_FUNCTION(
+        _CANONICAL_VERIFICATION_CLASS,
+        authority=after,
+        structural_result=result,
+    )
+    _require_dispatch_integrity()
+    if type(receipt) is not _CANONICAL_VERIFICATION_CLASS:
+        raise CampaignForwardUniverseCycleBindingError(
+            "composed forward verification returned noncanonical receipt"
+        )
+    return receipt
 
 
 _INTERNAL_CALLABLES = tuple(
@@ -1526,6 +1537,7 @@ _seal_campaign_forward_universe_cycle_dispatch()
 
 
 __all__ = [
+    "CampaignForwardEvidenceVerification",
     "CampaignForwardUniverseCycleAuthority",
     "CampaignForwardUniverseCycleBindingError",
     "authorize_campaign_forward_source_receipts",

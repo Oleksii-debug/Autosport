@@ -154,6 +154,7 @@ def _read_canonical_contract_text(path: Path) -> str:
 
     descriptor: int | None = None
     verification_descriptor: int | None = None
+    final_verification_descriptor: int | None = None
     try:
         path_before = path.lstat()
         _require_regular_single_link(path_before)
@@ -191,9 +192,20 @@ def _read_canonical_contract_text(path: Path) -> str:
         verification_descriptor = _open_read_only_descriptor(path)
         verification_stat = os.fstat(verification_descriptor)
         _require_regular_single_link(verification_stat)
+        if not os.path.sameopenfile(descriptor, verification_descriptor):
+            raise EconomicGoalContractError(
+                "persisted economic goal pathname changed while being read"
+            )
+
+        # Re-check the pathname after the first descriptor identity proof, then
+        # open it one final time. This closes the replace-after-verification-open
+        # window even when an attacker supplies a same-shape regular file.
         path_after = path.lstat()
         _require_regular_single_link(path_after)
-        if not os.path.sameopenfile(descriptor, verification_descriptor):
+        final_verification_descriptor = _open_read_only_descriptor(path)
+        final_verification_stat = os.fstat(final_verification_descriptor)
+        _require_regular_single_link(final_verification_stat)
+        if not os.path.sameopenfile(descriptor, final_verification_descriptor):
             raise EconomicGoalContractError(
                 "persisted economic goal pathname changed while being read"
             )
@@ -211,7 +223,11 @@ def _read_canonical_contract_text(path: Path) -> str:
             "cannot safely read persisted economic goal"
         ) from exc
     finally:
-        for candidate in (verification_descriptor, descriptor):
+        for candidate in (
+            final_verification_descriptor,
+            verification_descriptor,
+            descriptor,
+        ):
             if candidate is not None:
                 try:
                     os.close(candidate)

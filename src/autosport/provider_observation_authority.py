@@ -1130,6 +1130,14 @@ class CompleteGameBoardEvidenceStore:
 
 
 
+_CANONICAL_EVIDENCE_STORE_SAVE_IMPLEMENTATION_CODE = (
+    CompleteGameBoardEvidenceStore.save.__code__
+)
+_CANONICAL_EVIDENCE_STORE_LOAD_IMPLEMENTATION_CODE = (
+    CompleteGameBoardEvidenceStore.load.__code__
+)
+
+
 def _seal_provider_evidence_store_dispatch() -> None:
     """Seal the durable provider-evidence persistence graph against runtime retargeting."""
 
@@ -1141,9 +1149,9 @@ def _seal_provider_evidence_store_dispatch() -> None:
     expected_inspect = inspect
     expected_getattr_static = inspect.getattr_static
     expected_save = store_type.save
-    expected_save_code = expected_save.__code__
+    expected_save_code = _CANONICAL_EVIDENCE_STORE_SAVE_IMPLEMENTATION_CODE
     expected_load = store_type.load
-    expected_load_code = expected_load.__code__
+    expected_load_code = _CANONICAL_EVIDENCE_STORE_LOAD_IMPLEMENTATION_CODE
     expected_assert = _CANONICAL_ASSERT_COMPLETE_GAME_BOARD_AUTHORITATIVE
     expected_assert_code = _CANONICAL_ASSERT_COMPLETE_GAME_BOARD_AUTHORITATIVE_CODE
     expected_remember = _CANONICAL_REMEMBER
@@ -1209,6 +1217,8 @@ def _seal_provider_evidence_store_dispatch() -> None:
         "CompleteGameBoardSnapshot": CompleteGameBoardSnapshot,
         "ProviderObservationIntegrityError": expected_error,
         "_CANONICAL_GETATTR_STATIC": expected_store_surface_reader,
+        "_CANONICAL_EVIDENCE_STORE_SAVE_IMPLEMENTATION_CODE": expected_save_code,
+        "_CANONICAL_EVIDENCE_STORE_LOAD_IMPLEMENTATION_CODE": expected_load_code,
         "hashlib": hashlib,
         "hmac": hmac,
         "os": os,
@@ -1333,7 +1343,6 @@ def _seal_provider_evidence_store_dispatch() -> None:
                 "provider evidence filesystem path dispatch changed"
             )
 
-    @wraps(expected_save)
     def sealed_save(self, snapshot):
         if type(self) is not store_type:
             raise TypeError(
@@ -1348,7 +1357,6 @@ def _seal_provider_evidence_store_dispatch() -> None:
         require_store_authority()
         return result
 
-    @wraps(expected_load)
     def sealed_load(self, evidence_sha256):
         if type(self) is not store_type:
             raise TypeError(
@@ -1363,6 +1371,8 @@ def _seal_provider_evidence_store_dispatch() -> None:
         require_store_authority()
         return result
 
+    if hasattr(sealed_save, "__wrapped__") or hasattr(sealed_load, "__wrapped__"):
+        raise RuntimeError("provider evidence store seal must not expose unsealed delegates")
     store_type.save = sealed_save
     store_type.load = sealed_load
 

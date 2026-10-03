@@ -293,8 +293,20 @@ def _snapshot_acquisition_provenance(
         or parsed_origin.password is not None
     ):
         raise ValueError("snapshot acquisition request origin must be a secret-free HTTPS origin")
-    _digest(request, "base_url_sha256", context="snapshot acquisition request")
-    _digest(request, "request_url_sha256", context="snapshot acquisition request")
+    base_url_sha256 = _digest(
+        request,
+        "base_url_sha256",
+        context="snapshot acquisition request",
+    )
+    if hashlib.sha256(origin.encode("utf-8")).hexdigest() != base_url_sha256:
+        raise ValueError(
+            "snapshot acquisition request base_url_sha256 does not bind canonical origin"
+        )
+    request_url_sha256 = _digest(
+        request,
+        "request_url_sha256",
+        context="snapshot acquisition request",
+    )
     if request.get("request_url_persisted") is not False:
         raise ValueError("snapshot acquisition request_url_persisted must be false")
     if request.get("request_credentials_persisted") is not False:
@@ -337,6 +349,14 @@ def _snapshot_acquisition_provenance(
     query_from_string = dict(query_pairs)
     if len(query_from_string) != len(query_pairs) or query_from_string != query:
         raise ValueError("snapshot acquisition request.query_string contradicts query object")
+    canonical_request_url = f"{origin}{expected_endpoint}?{query_string}"
+    if (
+        hashlib.sha256(canonical_request_url.encode("utf-8")).hexdigest()
+        != request_url_sha256
+    ):
+        raise ValueError(
+            "snapshot acquisition request_url_sha256 does not bind canonical request URL"
+        )
 
     response_headers = raw.get("response_headers")
     if not isinstance(response_headers, dict):

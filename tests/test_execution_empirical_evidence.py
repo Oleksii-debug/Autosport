@@ -883,6 +883,11 @@ def test_population_aggregate_keeps_complete_funnel_denominator(tmp_path):
     assert aggregate.unverified_ledger_terminal_count == 3
     assert aggregate.right_censored_count == 4
     assert aggregate.provider_evidence_count == 3
+    assert aggregate.submitted_request_identity_count == 0
+    assert aggregate.provider_request_binding_count == 0
+    assert aggregate.provider_acknowledgement_binding_count == 3
+    assert aggregate.durable_acknowledgement_identity_count == 3
+    assert aggregate.provider_bound_durable_ack_count == 3
     assert aggregate.provider_outcome_unverified_ack_count == 3
     assert aggregate.provider_outcome_unverified_absence_count == 1
     assert aggregate.provider_outcome_not_applicable_count == 3
@@ -929,6 +934,26 @@ def test_population_aggregate_keeps_complete_funnel_denominator(tmp_path):
         "denominator": 7,
     }
     assert payload["provider_evidence_rate"] == {
+        "numerator": 3,
+        "denominator": 7,
+    }
+    assert payload["submitted_request_identity_rate"] == {
+        "numerator": 0,
+        "denominator": 7,
+    }
+    assert payload["provider_request_binding_rate"] == {
+        "numerator": 0,
+        "denominator": 7,
+    }
+    assert payload["provider_acknowledgement_binding_rate"] == {
+        "numerator": 3,
+        "denominator": 7,
+    }
+    assert payload["durable_acknowledgement_identity_rate"] == {
+        "numerator": 3,
+        "denominator": 7,
+    }
+    assert payload["provider_bound_durable_ack_rate"] == {
         "numerator": 3,
         "denominator": 7,
     }

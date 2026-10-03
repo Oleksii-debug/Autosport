@@ -4,10 +4,9 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from hashlib import sha256
-import hmac
 import json
 import math
-from secrets import token_bytes, token_hex
+from secrets import token_hex
 from typing import Callable, Protocol
 import xml.etree.ElementTree as ET
 
@@ -26,7 +25,9 @@ BETDAQ_DECIMAL_PRICE_FORMAT = 1
 _SCHEMA = "autosport.betdaq-odds-ladder-acquisition-v1"
 _ACQ_PREFIX = "betdaq-ladder-acq:"
 _CANONICAL_LIVE_POST = BetdaqReadOnlyLiveTransport._post_readonly
-_CREDENTIAL_CONTEXT_HMAC_KEY = token_bytes(32)
+_CANONICAL_LIVE_TRANSPORT_SELECTED = (
+    BetdaqReadOnlyLiveTransport.canonical_transport_selected.fget
+)
 _ORIGIN_WITNESS = object()
 _CLOCK_WITNESS = object()
 
@@ -346,7 +347,7 @@ class BetdaqOddsLadderAcquirer:
         wire = parse_get_odds_ladder_response(payload)
         observed_at = _clock_text(self._clock)
         acquisition_id = _canonical_acq_id(self._id_factory())
-        request_fp = _request_fingerprint(request, self._credentials)
+        request_fp = _request_fingerprint(body)
         response_sha = sha256(payload).hexdigest()
         evidence_sha = _evidence_sha(
             acquisition_id,
@@ -492,7 +493,8 @@ def _canonical_live_transport(
         return (
             object.__getattribute__(transport, "_credentials") is credentials
             and object.__getattribute__(transport, "_canonical_only") is True
-            and transport.canonical_transport_selected
+            and _CANONICAL_LIVE_TRANSPORT_SELECTED is not None
+            and _CANONICAL_LIVE_TRANSPORT_SELECTED(transport)
         )
     except (AttributeError, TypeError):
         return False
@@ -510,8 +512,8 @@ def _soap_request(
             "version": credentials.version,
             "languageCode": credentials.language_code,
             "username": credentials.username,
-            "password": credentials.password,
-            "applicationIdentifier": credentials.application_identifier,
+            "password": "",
+            "applicationIdentifier": "",
         },
     )
     body = ET.SubElement(envelope, f"{{{SOAP11_NS}}}Body")
@@ -524,40 +526,14 @@ def _soap_request(
     return ET.tostring(envelope, encoding="utf-8", xml_declaration=True)
 
 
-def _credential_context_sha256(credentials: BetdaqCredentials) -> str:
-    """Opaque process-local binding; never persist or hash raw credentials directly."""
-    material = json.dumps(
-        {
-            "endpoint": BETDAQ_ODDS_LADDER_ENDPOINT,
-            "version": credentials.version,
-            "language_code": credentials.language_code,
-            "username": credentials.username,
-            "password": credentials.password,
-            "application_identifier": credentials.application_identifier,
-        },
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
-    return hmac.digest(_CREDENTIAL_CONTEXT_HMAC_KEY, material, "sha256").hex()
+def _request_fingerprint(serialized_request: bytes) -> str:
+    """Bind evidence to the exact non-secret ReadOnly SOAP bytes sent on the wire."""
 
-
-def _request_fingerprint(
-    request: BetdaqOddsLadderRequest,
-    credentials: BetdaqCredentials,
-) -> str:
-    # No username/password/application identifier is persisted or hashed here.
-    return _json_sha(
-        {
-            "schema": _SCHEMA,
-            "endpoint": BETDAQ_ODDS_LADDER_ENDPOINT,
-            "soap_action": BETDAQ_ODDS_LADDER_SOAP_ACTION,
-            "price_format": request.price_format,
-            "api_version": credentials.version,
-            "language_code": credentials.language_code,
-            "credential_context_sha256": _credential_context_sha256(credentials),
-        }
-    )
+    if type(serialized_request) is not bytes or not serialized_request:
+        raise BetdaqOddsLadderAcquisitionError(
+            "serialized odds-ladder request must be non-empty bytes"
+        )
+    return sha256(serialized_request).hexdigest()
 
 
 def _evidence_sha(

@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import datetime, timezone
 from decimal import Decimal
+from hashlib import sha256
 import json
 import xml.etree.ElementTree as ET
 
@@ -178,6 +179,14 @@ def test_request_is_exact_readonly_decimal_ladder_call() -> None:
     assert "PlaceOrders" not in text
     assert "UpdateOrders" not in text
     assert "CancelOrders" not in text
+    assert "test-password" not in text
+    assert "test-application" not in text
+    header_nodes = root.findall(f".//{{{API}}}ExternalApiHeader")
+    assert len(header_nodes) == 1
+    assert header_nodes[0].attrib["username"] == "test-user"
+    assert header_nodes[0].attrib["password"] == ""
+    assert header_nodes[0].attrib["applicationIdentifier"] == ""
+    assert observation.request_fingerprint_sha256 == sha256(body).hexdigest()
     assert observation.price_format == 1
     assert observation.exact_entry(Decimal("2.0")).price == Decimal("2.00")
 
@@ -232,30 +241,44 @@ def test_same_provider_bytes_do_not_collapse_distinct_acquisitions() -> None:
     assert first.evidence_sha256 != second.evidence_sha256
 
 
-def test_request_fingerprint_binds_context_without_persisting_credentials() -> None:
+def test_request_fingerprint_binds_exact_readonly_wire_without_secure_secrets() -> None:
     payload = _response()
+    first_transport = RecordingTransport([payload])
     first = BetdaqOddsLadderAcquirer(
         credentials=_credentials(
             username="user-one",
             password="very-secret-one",
             application_identifier="app-secret-one",
         ),
-        transport=RecordingTransport([payload]),
+        transport=first_transport,
         clock=lambda: "2026-09-23T00:00:01Z",
         acquisition_id_factory=lambda: "5" * 32,
     ).acquire()
+    second_transport = RecordingTransport([payload])
     second = BetdaqOddsLadderAcquirer(
         credentials=_credentials(
             username="user-two",
             password="very-secret-two",
             application_identifier="app-secret-two",
         ),
-        transport=RecordingTransport([payload]),
+        transport=second_transport,
         clock=lambda: "2026-09-23T00:00:01Z",
         acquisition_id_factory=lambda: "6" * 32,
     ).acquire()
 
+    first_body = first_transport.calls[0][2]
+    second_body = second_transport.calls[0][2]
+    assert first.request_fingerprint_sha256 == sha256(first_body).hexdigest()
+    assert second.request_fingerprint_sha256 == sha256(second_body).hexdigest()
     assert first.request_fingerprint_sha256 != second.request_fingerprint_sha256
+    for secret in (
+        "very-secret-one",
+        "app-secret-one",
+        "very-secret-two",
+        "app-secret-two",
+    ):
+        assert secret.encode() not in first_body
+        assert secret.encode() not in second_body
     serialized = json.dumps(first.to_safe_record(), sort_keys=True)
     for secret in ("user-one", "very-secret-one", "app-secret-one"):
         assert secret not in serialized
@@ -314,6 +337,33 @@ def test_product_owned_https_transport_cannot_be_passed_ungoverned() -> None:
             credentials=_credentials(),
             transport=UrllibBetdaqSoapTransport(),
         )
+
+
+def test_live_origin_check_uses_captured_transport_selection_descriptor(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    credentials = _credentials()
+    governor = resolve_betdaq_rate_governor(
+        tmp_path,
+        default_betdaq_rate_policy(),
+        clock=lambda: 61.0,
+        wall_clock=lambda: datetime(2026, 10, 3, tzinfo=timezone.utc),
+    )
+    injected = RecordingTransport([_response()])
+    live_transport = BetdaqReadOnlyLiveTransport(
+        credentials=credentials,
+        rate_governor=governor,
+        transport=injected,
+    )
+    object.__setattr__(live_transport, "_canonical_only", True)
+    monkeypatch.setattr(
+        BetdaqReadOnlyLiveTransport,
+        "canonical_transport_selected",
+        property(lambda self: True),
+    )
+
+    assert ladder_acq._canonical_live_transport(live_transport, credentials) is False
 
 
 def test_shared_live_transport_defers_unmodeled_ladder_before_http(tmp_path) -> None:

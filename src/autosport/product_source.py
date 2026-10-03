@@ -689,8 +689,20 @@ class ParlayApiProductSource:
             raise ProductSourceStateError(
                 "product source collector store authority cannot be replaced"
             )
+        if current is store:
+            self._migrate_legacy_history_to_collector_store()
+            return
+
+        # Treat first binding as an in-memory authority transition: migration must
+        # succeed before this source retains the store.  A failed/backpressured
+        # upgrade may be retried by a fresh canonical composition without inheriting
+        # a half-established store authority.
         self._collector_store = store
-        self._migrate_legacy_history_to_collector_store()
+        try:
+            self._migrate_legacy_history_to_collector_store()
+        except Exception:
+            self._collector_store = None
+            raise
 
     def _require_collector_store(self) -> CollectorDeltaStore:
         store = self._collector_store
@@ -701,7 +713,11 @@ class ParlayApiProductSource:
             # constructing the source.
             store = CollectorDeltaStore(self.workspace / "collector_deltas.json")
             self._collector_store = store
-            self._migrate_legacy_history_to_collector_store()
+            try:
+                self._migrate_legacy_history_to_collector_store()
+            except Exception:
+                self._collector_store = None
+                raise
         if store.path.resolve(strict=False) != (
             self.workspace / "collector_deltas.json"
         ).resolve(strict=False):

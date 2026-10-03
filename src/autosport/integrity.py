@@ -9,7 +9,11 @@ import threading
 from pathlib import Path
 from typing import Any, Iterator
 
-from .monotonic_workspace_authority import AuthorityPhase, MonotonicWorkspaceAuthority
+from .monotonic_workspace_authority import (
+    AuthorityPhase,
+    MonotonicAuthorityRollbackError,
+    MonotonicWorkspaceAuthority,
+)
 
 if os.name == "nt":
     import msvcrt
@@ -241,13 +245,14 @@ def establish_validated_scientific_registry_read_baseline(
     path: str | Path,
     validated_text: str,
 ) -> None:
-    """Bind the first validated non-pristine registry image to machine authority.
+    """Revalidate a non-pristine registry against existing machine authority.
 
-    The verified reader cannot safely bootstrap a historyless legacy image before
-    the ScientificRegistry parser has validated its complete schema and record
-    digests. The caller therefore returns here only after validation. Re-read the
-    exact bytes under the durable path lock before creating the trust-on-first-use
-    baseline so a concurrent replacement cannot be certified from stale text.
+    A historyless non-pristine image is ambiguous: it may be legacy data, a copied
+    workspace, a restored valid-old file, or caller-authored bytes. Read-time TOFU
+    cannot distinguish those cases and therefore cannot mint product authority.
+    The normal writer establishes authority from the already-durable pristine image
+    before the first real append. Any legacy/import migration needs an explicit
+    separate product contract instead of silent first-read bootstrap.
     """
 
     if type(validated_text) is not str:
@@ -276,6 +281,10 @@ def establish_validated_scientific_registry_read_baseline(
 
         observed = hashlib.sha256(current_bytes).hexdigest()
         authority = _scientific_registry_authority(destination)
+        if not authority.read_history():
+            raise MonotonicAuthorityRollbackError(
+                "validated non-pristine scientific registry lacks independent authority history"
+            )
         _recover_or_bootstrap_scientific_registry_authority(
             authority,
             destination,

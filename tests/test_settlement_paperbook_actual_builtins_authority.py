@@ -153,10 +153,13 @@ def test_outcome_callback_cannot_retarget_prelearning_len_dispatch(
     )
 
     try:
-        result = coordinator._settlement_resolutions(
-            as_of="2026-09-22T07:02:00+00:00",
-        )
-        assert canonical_len(result) == 1
+        with pytest.raises(
+            ContinuousSessionError,
+            match="PaperBook .*builtin|builtin.*authority|canonical.*builtin",
+        ):
+            coordinator._settlement_resolutions(
+                as_of="2026-09-22T07:02:00+00:00",
+            )
         assert hostile_calls == []
     finally:
         builtins.len = canonical_len

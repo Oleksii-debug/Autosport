@@ -744,6 +744,40 @@ def test_posting_replay_coalescence_rejects_account_context_mixing(monkeypatch):
         coalesce_posting_replays(first, second)
 
 
+def test_same_credentials_in_fresh_account_context_do_not_mint_restart_identity(
+    monkeypatch,
+):
+    payload = postings_by_id(posting(9001))
+    credentials = BetdaqCredentials("alice", "secret-pass", "secret-app")
+
+    first_client, _ = economic_client(
+        monkeypatch,
+        payload,
+        credentials=credentials,
+    )
+    first = first_client.read_account_postings_by_id(9001)
+
+    monkeypatch.setattr(account_module, "_ACCOUNT_CONTEXTS", {})
+
+    second_client, _ = economic_client(
+        monkeypatch,
+        payload,
+        credentials=credentials,
+    )
+    second = second_client.read_account_postings_by_id(9001)
+
+    assert first.evidence.account_context_id != second.evidence.account_context_id
+    assert (
+        first.postings[0].transaction_identity
+        != second.postings[0].transaction_identity
+    )
+    with pytest.raises(
+        BetdaqEconomicReadbackError,
+        match="different authenticated account contexts",
+    ):
+        coalesce_posting_replays(first, second)
+
+
 def test_readback_rejects_posting_currency_mutation(monkeypatch):
     client, _ = economic_client(monkeypatch, postings_by_id(posting(9001)))
     readback = client.read_account_postings_by_id(9001)
@@ -766,13 +800,6 @@ def test_canonical_readback_rejects_duplicate_transaction_rows(monkeypatch):
         match="must not retain duplicate transaction ids",
     ):
         replace(readback, postings=(row, row))
-
-
-
-
-
-
-
 
 
 def test_by_id_reresolves_the_requested_transaction_identity(monkeypatch):

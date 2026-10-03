@@ -191,3 +191,8 @@ from . import _drift_decimal_resource_guard as _drift_decimal_resource_guard  # 
 # K07 authenticated account identity must acquire account details from a sealed
 # product-origin snapshot, not mutable live-client fields during provider I/O.
 from . import _betfair_account_identity_io_snapshot_guard as _betfair_account_identity_io_snapshot_guard  # noqa: F401,E402
+
+# Campaign denomination is positive only while the complete canonical
+# FinalizedCampaignAuthority re-resolution graph remains the product-loaded graph.
+# Any same-process class monkeypatch fails closed to missing denomination authority.
+from . import _campaign_denomination_dispatch_seal as _campaign_denomination_dispatch_seal  # noqa: F401,E402

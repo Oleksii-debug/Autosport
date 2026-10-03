@@ -111,7 +111,7 @@ class AttributionStatus(StrEnum):
 
 
 class AttributionEvidenceGrade(StrEnum):
-    """Identifiability/provenance strength of one causal attribution finding."""
+    """Evidence-basis and identifiability category for one attribution finding."""
 
     FACTUAL_MECHANICAL = "FACTUAL_MECHANICAL"
     SCIENTIFIC_COHORT_ESTIMATE = "SCIENTIFIC_COHORT_ESTIMATE"

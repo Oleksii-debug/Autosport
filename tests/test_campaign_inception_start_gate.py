@@ -275,6 +275,33 @@ def test_inception_state_symlink_is_not_followed(
         )
 
 
+def test_inception_state_hardlink_alias_is_rejected(
+    tmp_path: Path,
+) -> None:
+    _manifest_value, locator, store, spec, _authority_root = _setup(tmp_path)
+    establish_campaign_inception(
+        precommit_locator=locator,
+        store=store,
+        source_spec=spec,
+    )
+    path = _state_file(locator)
+    alias = tmp_path / "inception-state-alias.json"
+    try:
+        alias.hardlink_to(path)
+    except OSError as exc:
+        pytest.skip(f"hardlink creation unavailable: {exc}")
+
+    with pytest.raises(
+        CampaignInceptionIntegrityError,
+        match="state must be one regular file",
+    ):
+        establish_campaign_inception(
+            precommit_locator=locator,
+            store=store,
+            source_spec=spec,
+        )
+
+
 def _stage_pending_inception(
     *,
     locator: ForwardUniversePrecommitLocator,

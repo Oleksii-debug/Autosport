@@ -5,6 +5,8 @@ from threading import Barrier
 
 import pytest
 
+import autosport.run_transaction as run_transaction
+
 from autosport.scientific_registry import ScientificRegistry
 from autosport.strategy_model_factory import (
     ExperimentRunner,
@@ -39,18 +41,22 @@ def test_factory_artifact_evidence_rejects_redirected_verification_open(
     replacement.write_bytes(source_bytes.replace(b"1", b"2", 1))
     assert replacement.stat().st_size == source.stat().st_size
 
-    real_open = Path.open
+    real_open_descriptor = run_transaction._open_read_only_descriptor
     source_open_count = 0
 
-    def redirected_open(self: Path, *args, **kwargs):
+    def redirected_open(path: Path):
         nonlocal source_open_count
-        if self == source:
+        if Path(path) == source:
             source_open_count += 1
             if source_open_count >= 2:
-                return real_open(replacement, *args, **kwargs)
-        return real_open(self, *args, **kwargs)
+                return real_open_descriptor(replacement)
+        return real_open_descriptor(path)
 
-    monkeypatch.setattr(Path, "open", redirected_open)
+    monkeypatch.setattr(
+        run_transaction,
+        "_open_read_only_descriptor",
+        redirected_open,
+    )
 
     with pytest.raises(ValueError, match="stable regular object"):
         if operation == "read":

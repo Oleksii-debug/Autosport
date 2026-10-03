@@ -1036,6 +1036,9 @@ def test_day_authority_descriptor_witness_inventory_is_complete():
         economic_admission.ProductDayRiskWindow: tuple(
             economic_admission.ProductDayRiskWindow.__dataclass_fields__
         ),
+        economic_admission.AuthorityRecovery: tuple(
+            economic_admission.AuthorityRecovery.__dataclass_fields__
+        ),
     }
     observed = {
         owner: tuple(name for name, _descriptor in witnesses)
@@ -1056,6 +1059,7 @@ def test_day_authority_descriptor_witness_inventory_is_complete():
         ("PaperDayTurnoverEvidence", "breached"),
         ("ProductDayRiskWindow", "state_sha256"),
         ("ProductDayRiskWindow", "product_clock_authoritative"),
+        ("AuthorityRecovery", "committed_generation"),
     ),
 )
 def test_day_authority_descriptor_rebind_cannot_mint_headroom(
@@ -1724,6 +1728,7 @@ def test_carrier_executable_witness_inventory_is_complete():
             "__post_init__",
             "__eq__",
         ),
+        economic_admission.AuthorityRecovery: ("__init__",),
     }
 
 
@@ -1753,6 +1758,11 @@ def test_carrier_executable_witness_inventory_is_complete():
         (
             economic_admission.ProductDayRiskWindow,
             "__eq__",
+            "day-error",
+        ),
+        (
+            economic_admission.AuthorityRecovery,
+            "__init__",
             "day-error",
         ),
     ),

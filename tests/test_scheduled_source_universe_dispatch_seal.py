@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 
 import autosport.collector_sqlite_active_store as active_store_module
+import autosport.collector_sqlite_store as sqlite_store_module
 import autosport.scheduled_source_universe as scheduled_module
 import autosport.source_universe_commitment as source_module
 from autosport.causal_collector import CollectorDeltaStore
@@ -812,6 +813,37 @@ class ScheduledSourceUniverseDispatchSealTests(unittest.TestCase):
                 setattr(base_store_type, "_connect", original_connect)
 
             self.assertEqual(hostile_calls, [])
+
+
+    def test_source_self_restoring_sqlite_connect_override_cannot_mint_authority(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path, store, cycle_seq, _candidate = _ready_store(tmp)
+            original_connect = sqlite_store_module.sqlite3.connect
+            override_calls = []
+
+            def self_restoring_connect(database, *args, **kwargs):
+                override_calls.append(database)
+                sqlite_store_module.sqlite3.connect = original_connect
+                return original_connect(database, *args, **kwargs)
+
+            sqlite_store_module.sqlite3.connect = self_restoring_connect
+            try:
+                with self.assertRaisesRegex(
+                    source_module.SourceUniverseCommitmentError,
+                    "SQLite connection authority drifted during authority dispatch",
+                ):
+                    source_module.build_source_universe_commitment(
+                        store,
+                        expected_store_path=path,
+                        source_id=SOURCE_ID,
+                        start_cycle_seq=cycle_seq,
+                        end_cycle_seq=cycle_seq,
+                    )
+            finally:
+                sqlite_store_module.sqlite3.connect = original_connect
+
+            self.assertTrue(override_calls)
+
 
 if __name__ == "__main__":
     unittest.main()

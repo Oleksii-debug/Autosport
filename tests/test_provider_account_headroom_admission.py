@@ -1053,7 +1053,7 @@ def test_headroom_rejects_missing_denomination_coverage_for_relevant_plan(
             ledger,
             acquired,
             plan_id=_actual_plan_id(ledger, "target"),
-            action_id="target-action",
+            action_id=_actual_action_id(ledger, "target", "target-action"),
             bound_plans=(ledger._test_bound_plans[0],),
             intents=ledger._test_intents,
         )
@@ -1078,6 +1078,31 @@ def test_headroom_rejects_opaque_bound_intent_without_exact_intent_evidence(
             action_id=_actual_action_id(ledger, "target", "target-action"),
             bound_plans=ledger._test_bound_plans,
             intents=(),
+        )
+
+
+def test_headroom_rejects_structurally_valid_but_unissued_supervised_plan(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    acquired, _ = _acquire_balance(monkeypatch, tmp_path, "100")
+    target = _plan("target", _action("target-action", "10"))
+    ledger = _ledger_with_plans(tmp_path, target)
+    issued = ledger._test_bound_plans[0]
+    reconstructed = replace(issued)
+
+    reconstructed.verify_binding()
+    with pytest.raises(
+        ProviderAccountHeadroomUnsupported,
+        match="lacks canonical product issuance authority",
+    ):
+        assess_provider_account_headroom(
+            ledger,
+            acquired,
+            plan_id=_actual_plan_id(ledger, "target"),
+            action_id=_actual_action_id(ledger, "target", "target-action"),
+            bound_plans=(reconstructed,),
+            intents=ledger._test_intents,
         )
 
 
@@ -1392,7 +1417,7 @@ def test_target_plan_without_bound_denomination_coverage_fails_closed(
             ledger,
             acquired,
             plan_id=_actual_plan_id(ledger, "target"),
-            action_id="target-action",
+            action_id=_actual_action_id(ledger, "target", "target-action"),
             bound_plans=(ledger._test_bound_plans[1],),
             intents=ledger._test_intents,
         )
@@ -1415,7 +1440,7 @@ def test_duplicate_bound_plan_denomination_identity_is_rejected(
             ledger,
             acquired,
             plan_id=_actual_plan_id(ledger, "target"),
-            action_id="target-action",
+            action_id=_actual_action_id(ledger, "target", "target-action"),
             bound_plans=(bound, bound),
             intents=ledger._test_intents,
         )

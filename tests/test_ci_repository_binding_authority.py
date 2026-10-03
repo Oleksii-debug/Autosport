@@ -271,3 +271,105 @@ def test_explicit_run_identity_rejects_workflow_binding_drift_during_get(
         expected_head_sha=HEAD,
         pr_number=303,
     )
+
+
+def test_unbound_cancel_rejects_foreign_workflow_run_at_effect_boundary(
+    monkeypatch,
+) -> None:
+    api = WorkflowScopedGitHubApi(
+        repository="owner/repo",
+        token="token",
+        workflow_id=356678400,
+        workflow_name="CI",
+    )
+    api._zero_association_recovered_runs[77] = (HEAD, "feature/stale")
+    canonical_request = scoped_controller.GitHubApi._request
+
+    class FakeResponse:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, _exc_type, _exc, _tb):
+            return False
+
+        def read(self) -> bytes:
+            return (
+                b'{"id":77,"workflow_id":999999,"event":"pull_request",'
+                b'"head_sha":"' + HEAD.encode("ascii") + b'",'
+                b'"name":"Other Workflow","status":"queued",'
+                b'"pull_requests":[]}'
+            )
+
+    requested: list[str] = []
+
+    def foreign_run_urlopen(request, *, timeout: int):
+        assert timeout == 20
+        requested.append(request.full_url)
+        return FakeResponse()
+
+    monkeypatch.setitem(
+        canonical_request.__globals__,
+        "urlopen",
+        foreign_run_urlopen,
+    )
+
+    with pytest.raises(
+        CancellationError,
+        match="unbound workflow run identity changed",
+    ):
+        api.cancel(77)
+
+    assert requested == [
+        "https://api.github.com/repos/owner/repo/actions/runs/77"
+    ]
+
+
+def test_unbound_cancel_rejects_reappeared_pr_reference_at_effect_boundary(
+    monkeypatch,
+) -> None:
+    api = WorkflowScopedGitHubApi(
+        repository="owner/repo",
+        token="token",
+        workflow_id=356678400,
+        workflow_name="CI",
+    )
+    api._recovered_runs[78] = (303, HEAD)
+    canonical_request = scoped_controller.GitHubApi._request
+
+    class FakeResponse:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, _exc_type, _exc, _tb):
+            return False
+
+        def read(self) -> bytes:
+            return (
+                b'{"id":78,"workflow_id":356678400,"event":"pull_request",'
+                b'"head_sha":"' + HEAD.encode("ascii") + b'",'
+                b'"name":"CI","status":"in_progress",'
+                b'"pull_requests":[{"number":303}]}'
+            )
+
+    def rebound_identity_urlopen(request, *, timeout: int):
+        assert timeout == 20
+        assert request.full_url == (
+            "https://api.github.com/repos/owner/repo/actions/runs/78"
+        )
+        return FakeResponse()
+
+    monkeypatch.setitem(
+        canonical_request.__globals__,
+        "urlopen",
+        rebound_identity_urlopen,
+    )
+
+    with pytest.raises(
+        CancellationError,
+        match="unbound workflow run identity changed",
+    ):
+        api.cancel(78)

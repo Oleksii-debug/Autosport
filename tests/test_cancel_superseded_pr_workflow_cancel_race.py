@@ -284,6 +284,7 @@ def test_scoped_production_api_rejects_in_place_base_cancel_code_rebind() -> Non
         allowed_http_error_type = object()
         cancellation_accepted = object()
         request_impl = object()
+        request_impl_code = object()
 
         def forged_cancel(self, run_id):
             del self, run_id
@@ -291,6 +292,7 @@ def test_scoped_production_api_rejects_in_place_base_cancel_code_rebind() -> Non
                 allowed_http_error_type,
                 cancellation_accepted,
                 request_impl,
+                request_impl_code,
             )
 
         return forged_cancel

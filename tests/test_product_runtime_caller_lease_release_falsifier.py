@@ -37,22 +37,22 @@ class _Source:
         raise AssertionError("no market delta should be resolved in this test")
 
 
-class _BlockingCoordinator:
+class _BlockingCollector:
+    """Block inside the canonical coordinator after a runtime tick is admitted."""
+
     def __init__(self, inner, *, tick_entered: Event, allow_tick_return: Event) -> None:
         self._inner = inner
         self._tick_entered = tick_entered
         self._allow_tick_return = allow_tick_return
-        self.tick_effects = 0
+        self.cycle_effects = 0
 
-    def status(self):
-        return self._inner.status()
-
-    def tick(self):
+    def run_cycle(self):
         self._tick_entered.set()
         if not self._allow_tick_return.wait(timeout=5):
             raise AssertionError("test did not release the in-flight runtime tick")
-        self.tick_effects += 1
-        return object()
+        result = self._inner.run_cycle()
+        self.cycle_effects += 1
+        return result
 
     def __getattr__(self, name):
         return getattr(self._inner, name)
@@ -107,8 +107,8 @@ class ProductRuntimeCallerLeaseReleaseFalsifierTests(unittest.TestCase):
             release_finished = Event()
             tick_errors: list[BaseException] = []
             release_errors: list[BaseException] = []
-            first.coordinator = _BlockingCoordinator(
-                first.coordinator,
+            first.coordinator.collector = _BlockingCollector(
+                first.coordinator.collector,
                 tick_entered=tick_entered,
                 allow_tick_return=allow_tick_return,
             )
@@ -160,7 +160,7 @@ class ProductRuntimeCallerLeaseReleaseFalsifierTests(unittest.TestCase):
             self.assertFalse(release_thread.is_alive())
             self.assertEqual(tick_errors, [])
             self.assertEqual(release_errors, [])
-            self.assertEqual(first.coordinator.tick_effects, 1)
+            self.assertEqual(first.coordinator.collector.cycle_effects, 1)
             self.assertTrue(release_finished.is_set())
 
             second = build_autonomous_product_runtime(

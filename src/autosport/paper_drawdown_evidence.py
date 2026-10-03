@@ -49,32 +49,32 @@ class PaperRealizedEquityPoint:
 
     def __post_init__(self) -> None:
         if type(self.sequence) is not int or self.sequence < 0:
-            raise error_type("equity point sequence must be non-negative")
+            raise PaperDrawdownEvidenceError("equity point sequence must be non-negative")
         if type(self.point_id) is not str or not self.point_id:
-            raise error_type("equity point identity is required")
+            raise PaperDrawdownEvidenceError("equity point identity is required")
         if self.action not in {"initial", "open", "settle"}:
-            raise error_type("equity point action is invalid")
+            raise PaperDrawdownEvidenceError("equity point action is invalid")
         if self.action == "initial":
             if self.ticket_id is not None or self.event_time is not None:
-                raise error_type(
+                raise PaperDrawdownEvidenceError(
                     "initial equity point cannot carry ticket/time identity"
                 )
         elif type(self.ticket_id) is not str or not self.ticket_id:
-            raise error_type("lifecycle equity point requires ticket_id")
+            raise PaperDrawdownEvidenceError("lifecycle equity point requires ticket_id")
         for name, value in (
             ("equity", self.equity),
             ("realized_delta", self.realized_delta),
         ):
             if type(value) is not Decimal or not value.is_finite():
-                raise error_type(
+                raise PaperDrawdownEvidenceError(
                     f"equity point {name} must be a finite exact Decimal"
                 )
         if self.equity < 0:
-            raise error_type("equity point cannot be negative")
+            raise PaperDrawdownEvidenceError("equity point cannot be negative")
         if self.event_time is not None and (
             type(self.event_time) is not str or not self.event_time
         ):
-            raise error_type(
+            raise PaperDrawdownEvidenceError(
                 "equity point event_time must be non-empty or None"
             )
 
@@ -109,15 +109,15 @@ class PaperRealizedDrawdownEvidence:
 
     def __post_init__(self) -> None:
         if self.schema != DRAW_DOWN_EVIDENCE_SCHEMA:
-            raise error_type("drawdown evidence schema is invalid")
+            raise PaperDrawdownEvidenceError("drawdown evidence schema is invalid")
         if self.scope != DRAW_DOWN_SCOPE or self.metric_class != DRAW_DOWN_METRIC_CLASS:
-            raise error_type("drawdown evidence scope/metric is invalid")
+            raise PaperDrawdownEvidenceError("drawdown evidence scope/metric is invalid")
         if type(self.goal_id) is not str or not self.goal_id:
-            raise error_type("drawdown evidence goal_id is required")
+            raise PaperDrawdownEvidenceError("drawdown evidence goal_id is required")
         if type(self.goal_revision) is not int or self.goal_revision < 1:
-            raise error_type("drawdown evidence goal revision is invalid")
+            raise PaperDrawdownEvidenceError("drawdown evidence goal revision is invalid")
         if type(self.bankroll_id) is not str or not self.bankroll_id:
-            raise error_type("drawdown evidence bankroll_id is required")
+            raise PaperDrawdownEvidenceError("drawdown evidence bankroll_id is required")
         if (
             type(self.currency) is not str
             or len(self.currency) != 3
@@ -125,7 +125,7 @@ class PaperRealizedDrawdownEvidence:
             or not self.currency.isalpha()
             or self.currency != self.currency.upper()
         ):
-            raise error_type("drawdown evidence currency is invalid")
+            raise PaperDrawdownEvidenceError("drawdown evidence currency is invalid")
         for name in (
             "goal_contract_sha256",
             "source_state_sha256",
@@ -139,7 +139,7 @@ class PaperRealizedDrawdownEvidence:
                 or value != value.lower()
                 or any(ch not in "0123456789abcdef" for ch in value)
             ):
-                raise error_type(
+                raise PaperDrawdownEvidenceError(
                     f"drawdown evidence {name} must be lowercase SHA-256"
                 )
         values = (
@@ -155,39 +155,39 @@ class PaperRealizedDrawdownEvidence:
             type(value) is not Decimal or not value.is_finite() or value < 0
             for value in values
         ):
-            raise error_type(
+            raise PaperDrawdownEvidenceError(
                 "drawdown evidence monetary metrics must be non-negative finite Decimals"
             )
         if self.initial_equity <= 0 or self.peak_equity <= 0:
-            raise error_type(
+            raise PaperDrawdownEvidenceError(
                 "drawdown evidence initial/peak equity must be positive"
             )
         if self.current_equity > self.peak_equity:
-            raise error_type(
+            raise PaperDrawdownEvidenceError(
                 "drawdown evidence current equity cannot exceed peak"
             )
         if self.minimum_equity > self.current_equity and len(self.points) <= 1:
-            raise error_type("drawdown evidence minimum equity is invalid")
+            raise PaperDrawdownEvidenceError("drawdown evidence minimum equity is invalid")
         if type(self.open_position_count) is not int or self.open_position_count < 0:
-            raise error_type("drawdown evidence open count is invalid")
+            raise PaperDrawdownEvidenceError("drawdown evidence open count is invalid")
         if self.as_known_at_supported is not False:
-            raise error_type(
+            raise PaperDrawdownEvidenceError(
                 "current-history drawdown evidence cannot claim AS_KNOWN_AT authority"
             )
         if type(self.points) is not tuple or not self.points:
-            raise error_type("drawdown evidence requires a non-empty path")
+            raise PaperDrawdownEvidenceError("drawdown evidence requires a non-empty path")
         if tuple(point.sequence for point in self.points) != tuple(range(len(self.points))):
-            raise error_type(
+            raise PaperDrawdownEvidenceError(
                 "drawdown evidence points must use contiguous canonical sequence"
             )
         if self.points[0].action != "initial":
-            raise error_type("drawdown evidence path must begin at initial equity")
+            raise PaperDrawdownEvidenceError("drawdown evidence path must begin at initial equity")
         if self.points[0].equity != self.initial_equity:
-            raise error_type(
+            raise PaperDrawdownEvidenceError(
                 "drawdown evidence initial point does not match initial equity"
             )
         if self.points[-1].equity != self.current_equity:
-            raise error_type(
+            raise PaperDrawdownEvidenceError(
                 "drawdown evidence final point does not match current equity"
             )
 
@@ -539,6 +539,7 @@ def _make_resolver() -> FunctionType:
 
 
 def _freeze_resolver(function: FunctionType) -> FunctionType:
+    error_type = PaperDrawdownEvidenceError
     if type(function) is not FunctionType:
         raise TypeError("drawdown resolver must be a Python function")
     function_type = FunctionType

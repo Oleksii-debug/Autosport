@@ -49,6 +49,12 @@ class MarketMirror:
         self._revision = 0
         self._lock = RLock()
 
+    @property
+    def revision(self) -> int:
+        """Return the exact current mirror revision without copying market state."""
+        with self._lock:
+            return self._revision
+
     @staticmethod
     def _key(event: MarketEvent) -> tuple[str, str]:
         # Include source identity so two providers using the same local IDs cannot

@@ -336,6 +336,11 @@ class ProphetXAccountLinkController:
         self._challenge_ref: str | None = None
         self._session_ref: str | None = None
         self._credential_ref: str | None = None
+        # A successful sink call with an invalid receipt is an ambiguous durable
+        # outcome: the secret may already exist but cannot be addressed safely.
+        # Quarantine this controller until process restart + canonical secret-store
+        # reconciliation rather than allowing another write to orphan/overwrite it.
+        self._credential_lifecycle_uncertain = False
         self._last_verification_send_ns: int | None = None
 
     @property
@@ -343,6 +348,7 @@ class ProphetXAccountLinkController:
         return self._state
 
     def open_login(self) -> None:
+        self._require_credential_lifecycle_resolved()
         if self._credential_ref is not None:
             raise AccountLinkStateError("linked credential must be explicitly unlinked first")
         self._clear_auth_context(cancel_challenge=True)
@@ -350,6 +356,7 @@ class ProphetXAccountLinkController:
         self._diagnostic = DiagnosticCode.NONE
 
     def submit_login(self, *, email: str, password: str) -> None:
+        self._require_credential_lifecycle_resolved()
         if self._credential_ref is not None:
             raise AccountLinkStateError("linked credential must be explicitly unlinked first")
         if self._state not in {
@@ -469,6 +476,7 @@ class ProphetXAccountLinkController:
         prove production entitlement, and cannot enable execution.
         """
 
+        self._require_credential_lifecycle_resolved()
         if self._credential_ref is not None:
             raise AccountLinkStateError(
                 "linked credential must be explicitly unlinked first"
@@ -495,21 +503,31 @@ class ProphetXAccountLinkController:
 
         if not _opaque_ref(credential_ref):
             self._credential_ref = None
+            self._credential_lifecycle_uncertain = True
             self._state = AccountLinkState.AUTH_ERROR
             self._diagnostic = DiagnosticCode.CREDENTIAL_STORAGE_FAILED
             return
         self._clear_auth_context(cancel_challenge=True)
+        self._credential_lifecycle_uncertain = False
         self._credential_ref = credential_ref
         self._state = AccountLinkState.LINKED_CREDENTIAL_STORED
         self._diagnostic = DiagnosticCode.NONE
 
     def session_expired(self) -> None:
         self._clear_auth_context(cancel_challenge=True)
+        if self._credential_lifecycle_uncertain:
+            self._state = AccountLinkState.AUTH_ERROR
+            self._diagnostic = DiagnosticCode.CREDENTIAL_STORAGE_FAILED
+            return
         self._state = AccountLinkState.SESSION_EXPIRED
         self._diagnostic = DiagnosticCode.SESSION_EXPIRED
 
     def cancel(self) -> None:
         self._clear_auth_context(cancel_challenge=True)
+        if self._credential_lifecycle_uncertain:
+            self._state = AccountLinkState.AUTH_ERROR
+            self._diagnostic = DiagnosticCode.CREDENTIAL_STORAGE_FAILED
+            return
         if self._credential_ref is not None:
             self._state = AccountLinkState.LINKED_CREDENTIAL_STORED
         else:
@@ -532,6 +550,7 @@ class ProphetXAccountLinkController:
             self._diagnostic = DiagnosticCode.CREDENTIAL_STORAGE_FAILED
             return
         self._credential_ref = None
+        self._credential_lifecycle_uncertain = False
         self.cancel()
 
     def surface_contract(self) -> AccountLinkSurfaceContract:
@@ -539,7 +558,10 @@ class ProphetXAccountLinkController:
 
         state = self._state
         challenge_available = _opaque_ref(self._challenge_ref)
-        if self._credential_ref is not None:
+        if self._credential_lifecycle_uncertain:
+            focus_target = "prophetx-account-link-status"
+            primary_action = None
+        elif self._credential_ref is not None:
             focus_target = "linked_status"
             primary_action = None
         elif state is AccountLinkState.TWO_FACTOR_REQUIRED:
@@ -591,6 +613,7 @@ class ProphetXAccountLinkController:
             diagnostic_code=self._diagnostic.value,
             can_submit_login=bool(
                 self._credential_ref is None
+                and not self._credential_lifecycle_uncertain
                 and state
                 in {
                     AccountLinkState.LOGIN_FORM,
@@ -619,7 +642,10 @@ class ProphetXAccountLinkController:
                     AccountLinkState.PROVIDER_UNAVAILABLE,
                 }
             ),
-            can_import_approved_api_token=self._credential_ref is None,
+            can_import_approved_api_token=bool(
+                self._credential_ref is None
+                and not self._credential_lifecycle_uncertain
+            ),
             credential_present=self._credential_ref is not None,
             resend_after_ms=int(resend_after_ms),
             direct_key_generation_available=False,
@@ -698,6 +724,12 @@ class ProphetXAccountLinkController:
                 self._cancel_challenge(challenge_ref=challenge_ref)
             except Exception:
                 pass
+
+    def _require_credential_lifecycle_resolved(self) -> None:
+        if self._credential_lifecycle_uncertain:
+            raise AccountLinkStateError(
+                "credential lifecycle requires secret-store reconciliation"
+            )
 
     def _read_clock(self) -> int:
         try:

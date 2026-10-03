@@ -453,6 +453,57 @@ def test_failed_unlink_keeps_existing_credential_authoritative_and_blocks_relink
     assert ctl.public_snapshot().credential_present is True
 
 
+
+def test_invalid_store_receipt_quarantines_secret_lifecycle_until_reconciliation():
+    ctl, _, sink, _ = controller()
+    # Model a sink that may have committed the secret but violated its receipt
+    # contract. The controller cannot safely address or remove that possible write.
+    sink.result = " invalid-credential-reference "
+
+    ctl.import_approved_api_token(
+        access_key="ACCESS_SECRET",
+        secret_key="SUPER_SECRET",
+        environment="production",
+    )
+
+    assert sink.calls == [("ACCESS_SECRET", "SUPER_SECRET", "production")]
+    snap = ctl.public_snapshot()
+    assert snap.state == AccountLinkState.AUTH_ERROR.value
+    assert snap.diagnostic_code == DiagnosticCode.CREDENTIAL_STORAGE_FAILED.value
+    assert snap.credential_present is False
+    assert snap.can_submit_login is False
+    assert snap.can_import_approved_api_token is False
+    assert ctl.surface_contract().focus_target == "prophetx-account-link-status"
+    assert ctl.surface_contract().primary_action is None
+
+    with pytest.raises(AccountLinkStateError, match="secret-store reconciliation"):
+        ctl.open_login()
+    with pytest.raises(AccountLinkStateError, match="secret-store reconciliation"):
+        ctl.submit_login(email="operator@example.test", password="PASSWORD_SECRET")
+    with pytest.raises(AccountLinkStateError, match="secret-store reconciliation"):
+        ctl.import_approved_api_token(
+            access_key="SECOND_ACCESS",
+            secret_key="SECOND_SECRET",
+            environment="sandbox",
+        )
+
+    assert len(sink.calls) == 1
+    assert sink.remove_calls == []
+
+    # Generic UI lifecycle actions must not pretend the ambiguous durable outcome
+    # was cleared. A fresh process must re-resolve canonical secret-store truth.
+    ctl.cancel()
+    assert ctl.state is AccountLinkState.AUTH_ERROR
+    assert ctl.public_snapshot().can_import_approved_api_token is False
+    ctl.unlink()
+    assert ctl.state is AccountLinkState.AUTH_ERROR
+    assert sink.remove_calls == []
+    assert ProphetXAccountLinkController.restart_safe_state(ctl.public_snapshot()) == (
+        AccountLinkState.LOGIN_FORM,
+        None,
+    )
+
+
 def test_sink_failure_is_bounded_and_retains_no_credential_reference():
     ctl, _, sink, _ = controller()
     sink.failure = RuntimeError("SUPER_SECRET storage details")

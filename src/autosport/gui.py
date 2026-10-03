@@ -1059,6 +1059,13 @@ class AutosportApp(tk.Tk):
             self._append_log(close_message)
             self.bell()
             return
+        recovery_worker = self.__dict__.get("recovery_worker")
+        if recovery_worker is not None and recovery_worker.busy:
+            close_message = text("ui.status.close.recovery_busy")
+            self.status.set(close_message)
+            self._append_log(close_message)
+            self.bell()
+            return
         if self._evidence_export_busy:
             close_message = text("ui.status.close.evidence_export_busy")
             self.status.set(close_message)

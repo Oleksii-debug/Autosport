@@ -657,6 +657,38 @@ def test_economic_private_call_cannot_be_widened_to_provider_write_by_globals(
     assert opener.calls == []
 
 
+def test_economic_read_rejects_transient_protocol_rebind_from_call_lock(
+    monkeypatch,
+):
+    client, opener = economic_client(monkeypatch, postings_by_id(posting(9001)))
+    canonical_endpoint = settlement_module._CANONICAL_SECURE_ENDPOINT
+    entered = []
+
+    class TransientProtocolLock:
+        def __enter__(self):
+            entered.append(True)
+            settlement_module._CANONICAL_SECURE_ENDPOINT = (
+                "https://example.invalid/credential-capture"
+            )
+            return self
+
+        def __exit__(self, _exc_type, _exc, _tb):
+            settlement_module._CANONICAL_SECURE_ENDPOINT = canonical_endpoint
+            return False
+
+    client._account_client._call_lock = TransientProtocolLock()
+
+    with pytest.raises(
+        BetdaqEconomicReadbackError,
+        match="canonical BETDAQ economic protocol authority was replaced",
+    ):
+        client.read_account_postings_by_id(9000)
+
+    assert entered == [True]
+    assert opener.calls == []
+    assert settlement_module._CANONICAL_SECURE_ENDPOINT == canonical_endpoint
+
+
 @pytest.mark.parametrize(
     ("local_alias", "replacement"),
     (

@@ -14,6 +14,7 @@ if __package__:
         CancellationError,
         GitHubApi,
         WorkflowRun,
+        _pull_request_qualification_state,
         _require_positive_int,
         _require_sha,
         parse_run,
@@ -32,6 +33,7 @@ else:
         CancellationError,
         GitHubApi,
         WorkflowRun,
+        _pull_request_qualification_state,
         _require_positive_int,
         _require_sha,
         parse_run,
@@ -386,8 +388,14 @@ class WorkflowScopedGitHubApi(GitHubApi):
         canonical_branch_head,
         live_pr_qualification,
         pull_request,
+        qualification_state_reader,
     ):
         base_cancel_code = getattr(base_cancel, "__code__", None)
+        qualification_state_reader_code = getattr(
+            qualification_state_reader,
+            "__code__",
+            None,
+        )
         helper_dispatch = (
             (
                 "_request",
@@ -420,9 +428,12 @@ class WorkflowScopedGitHubApi(GitHubApi):
                 getattr(pull_request, "__code__", None),
             ),
         )
-        if any(
-            implementation_code is None
-            for _, _, implementation_code in helper_dispatch
+        if (
+            qualification_state_reader_code is None
+            or any(
+                implementation_code is None
+                for _, _, implementation_code in helper_dispatch
+            )
         ):
             raise RuntimeError(
                 "canonical scoped cancellation executable is unavailable"
@@ -521,8 +532,25 @@ class WorkflowScopedGitHubApi(GitHubApi):
                 require_helper_dispatch("live_pr_qualification")
                 require_helper_dispatch("_pull_request")
                 if (
-                    qualification.head_sha == candidate_head_sha
-                    and qualification.integration_capable
+                    getattr(qualification_state_reader, "__code__", None)
+                    is not qualification_state_reader_code
+                ):
+                    raise CancellationError(
+                        "pull request qualification reader authority changed"
+                    )
+                qualification_head, integration_capable = (
+                    qualification_state_reader(qualification)
+                )
+                if (
+                    getattr(qualification_state_reader, "__code__", None)
+                    is not qualification_state_reader_code
+                ):
+                    raise CancellationError(
+                        "pull request qualification reader authority changed"
+                    )
+                if (
+                    qualification_head == candidate_head_sha
+                    and integration_capable
                 ):
                     raise _CancellationAuthorityChanged(
                         "recovered workflow run live qualification changed"
@@ -543,6 +571,7 @@ class WorkflowScopedGitHubApi(GitHubApi):
         _canonical_branch_head,
         GitHubApi.live_pr_qualification,
         GitHubApi._pull_request,
+        _pull_request_qualification_state,
     )
     del _build_cancel
 
@@ -703,9 +732,12 @@ class WorkflowScopedGitHubApi(GitHubApi):
                 qualification = _trusted_live_pr_qualification(self, pr_number)
             except CancellationError:
                 continue
+            qualification_head, integration_capable = (
+                _pull_request_qualification_state(qualification)
+            )
             if (
-                qualification.head_sha == candidate_head_sha
-                and qualification.integration_capable
+                qualification_head == candidate_head_sha
+                and integration_capable
             ):
                 continue
             self._recovered_runs[run_id] = (pr_number, candidate_head_sha)
@@ -1013,13 +1045,15 @@ def cancel_superseded_explicit_pr_runs(
             # one group must fail that group closed without starving independent PRs
             # whose own live authority can still be proven.
             continue
+        qualification_state = _pull_request_qualification_state(qualification)
+        qualification_head, integration_capable = qualification_state
         selected = select_superseded_runs(
             explicit_singleton_runs,
             pr_number=pr_number,
-            live_head_sha=qualification.head_sha,
+            live_head_sha=qualification_head,
             workflow_name=workflow_name,
             current_run_id=current_run_id,
-            cancel_same_head=not qualification.integration_capable,
+            cancel_same_head=not integration_capable,
         )
         for run_id in selected:
             if run_id in cancelled_ids:
@@ -1039,7 +1073,10 @@ def cancel_superseded_explicit_pr_runs(
                 current_qualification = _trusted_live_pr_qualification(api, pr_number)
             except CancellationError:
                 break
-            if current_qualification != qualification:
+            if (
+                _pull_request_qualification_state(current_qualification)
+                != qualification_state
+            ):
                 break
             if not _cancel_run_or_defer_active_conflict(api, run_id):
                 continue
@@ -1067,10 +1104,12 @@ def _cancel_triggering_run_if_stale_or_nonqualifying(
 
     event_head_sha = _require_sha(event_head_sha, field="event head sha")
     current_run_id = _require_positive_int(current_run_id, field="current run id")
-    stale = qualification.head_sha != event_head_sha
+    qualification_state = _pull_request_qualification_state(qualification)
+    qualification_head, integration_capable = qualification_state
+    stale = qualification_head != event_head_sha
     same_head_nonqualifying = (
-        qualification.head_sha == event_head_sha
-        and not qualification.integration_capable
+        qualification_head == event_head_sha
+        and not integration_capable
     )
     if not stale and not same_head_nonqualifying:
         return False
@@ -1087,7 +1126,10 @@ def _cancel_triggering_run_if_stale_or_nonqualifying(
         # A failed authority reread grants no trigger cancellation authority, but it
         # must not invalidate independently completed workflow-wide cleanup.
         return False
-    if current_qualification != qualification:
+    if (
+        _pull_request_qualification_state(current_qualification)
+        != qualification_state
+    ):
         return False
     return _cancel_run_or_defer_active_conflict(api, current_run_id)
 

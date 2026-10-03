@@ -312,7 +312,11 @@ class BetdaqPostingObservation:
 
     @property
     def transaction_identity(self) -> str:
-        """Stable transaction identity inside one authenticated BETDAQ account context."""
+        """Stable only inside one authenticated process-local BETDAQ account context.
+
+        A restart may issue a new context. Cross-session account equivalence is a
+        separate authority and is deliberately not inferred from credentials here.
+        """
 
         return "betdaq-posting-transaction:" + _canonical_sha256(
             {

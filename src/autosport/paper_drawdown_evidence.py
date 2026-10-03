@@ -41,6 +41,78 @@ class PaperDrawdownEvidenceMismatchError(PaperDrawdownEvidenceError):
     """Raised when supplied evidence is not the current canonical result."""
 
 
+def _make_shape_canonical_sha256() -> FunctionType:
+    """Build a closed canonical encoder for typed evidence shape validation.
+
+    The evidence DTO must not delegate its own digest truth to live module-global
+    json/hashlib bindings.  This encoder supports only the exact scalar/container
+    domain used by the canonical drawdown payloads and matches json.dumps with
+    ensure_ascii=False, sort_keys=True and compact separators.
+    """
+
+    exact_type = type
+    exact_dict = dict
+    exact_list = list
+    exact_tuple = tuple
+    exact_str = str
+    exact_int = int
+    exact_bool = bool
+    exact_sorted = sorted
+    exact_encode_string = json.encoder.encode_basestring
+    exact_sha256 = hashlib.sha256
+    error_type = PaperDrawdownEvidenceError
+
+    def encode(value: object) -> str:
+        value_type = exact_type(value)
+        if value is None:
+            return "null"
+        if value_type is exact_bool:
+            return "true" if value else "false"
+        if value_type is exact_str:
+            return exact_encode_string(value)
+        if value_type is exact_int:
+            return exact_str(value)
+        if value_type is exact_list or value_type is exact_tuple:
+            return "[" + ",".join(encode(item) for item in value) + "]"
+        if value_type is exact_dict:
+            if any(exact_type(key) is not exact_str for key in value):
+                raise error_type(
+                    "drawdown evidence canonical digest requires string object keys"
+                )
+            return "{" + ",".join(
+                exact_encode_string(key) + ":" + encode(value[key])
+                for key in exact_sorted(value)
+            ) + "}"
+        raise error_type(
+            "drawdown evidence canonical digest encountered unsupported value type"
+        )
+
+    encode_code = encode.__code__
+
+    def canonical_sha256(payload: object) -> str:
+        if encode.__code__ is not encode_code:
+            raise error_type(
+                "drawdown evidence canonical digest encoder authority changed"
+            )
+        try:
+            encoded = encode(payload).encode("utf-8")
+        except UnicodeEncodeError as exc:
+            raise error_type(
+                "drawdown evidence canonical digest contains invalid Unicode"
+            ) from exc
+        if encode.__code__ is not encode_code:
+            raise error_type(
+                "drawdown evidence canonical digest encoder authority changed"
+            )
+        return exact_sha256(encoded).hexdigest()
+
+    return canonical_sha256
+
+
+_SHAPE_CANONICAL_SHA256 = _make_shape_canonical_sha256()
+_SHAPE_CANONICAL_SHA256_CODE = _SHAPE_CANONICAL_SHA256.__code__
+
+
 def _exact_shape_sum(values: tuple[Decimal, ...]) -> Decimal:
     """Add canonical evidence decimals without ambient Decimal-context rounding."""
 
@@ -212,7 +284,15 @@ class PaperRealizedDrawdownEvidence:
     as_known_at_supported: bool
     points: tuple[PaperRealizedEquityPoint, ...]
 
-    def __post_init__(self) -> None:
+    def __post_init__(
+        self,
+        _canonical_shape_sha256: FunctionType = _SHAPE_CANONICAL_SHA256,
+        _canonical_shape_sha256_code: object = _SHAPE_CANONICAL_SHA256_CODE,
+    ) -> None:
+        if _canonical_shape_sha256.__code__ is not _canonical_shape_sha256_code:
+            raise PaperDrawdownEvidenceError(
+                "drawdown evidence canonical digest authority changed"
+            )
         if self.schema != DRAW_DOWN_EVIDENCE_SCHEMA:
             raise PaperDrawdownEvidenceError("drawdown evidence schema is invalid")
         if self.scope != DRAW_DOWN_SCOPE or self.metric_class != DRAW_DOWN_METRIC_CLASS:
@@ -522,15 +602,7 @@ class PaperRealizedDrawdownEvidence:
                 for point in self.points
             ],
         }
-        expected_path_sha256 = hashlib.sha256(
-            json.dumps(
-                path_payload,
-                ensure_ascii=False,
-                sort_keys=True,
-                separators=(",", ":"),
-                allow_nan=False,
-            ).encode("utf-8")
-        ).hexdigest()
+        expected_path_sha256 = _canonical_shape_sha256(path_payload)
         if self.path_sha256 != expected_path_sha256:
             raise PaperDrawdownEvidenceError(
                 "drawdown evidence path digest does not match canonical path"
@@ -573,19 +645,20 @@ class PaperRealizedDrawdownEvidence:
             "settlement_availability_complete": self.settlement_availability_complete,
             "as_known_at_supported": self.as_known_at_supported,
         }
-        expected_evidence_sha256 = hashlib.sha256(
-            json.dumps(
-                evidence_payload,
-                ensure_ascii=False,
-                sort_keys=True,
-                separators=(",", ":"),
-                allow_nan=False,
-            ).encode("utf-8")
-        ).hexdigest()
+        expected_evidence_sha256 = _canonical_shape_sha256(evidence_payload)
+        if _canonical_shape_sha256.__code__ is not _canonical_shape_sha256_code:
+            raise PaperDrawdownEvidenceError(
+                "drawdown evidence canonical digest authority changed"
+            )
         if self.evidence_sha256 != expected_evidence_sha256:
             raise PaperDrawdownEvidenceError(
                 "drawdown evidence result digest does not match canonical evidence"
             )
+
+
+del _SHAPE_CANONICAL_SHA256
+del _SHAPE_CANONICAL_SHA256_CODE
+del _make_shape_canonical_sha256
 
 
 def _make_resolver() -> FunctionType:

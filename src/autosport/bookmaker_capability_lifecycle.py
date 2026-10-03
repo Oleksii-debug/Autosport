@@ -593,7 +593,8 @@ class CapabilityEvidenceJournal:
             ):
                 same_scope.append((other_id, other))
                 if (
-                    other.committed_at == evidence.committed_at
+                    _time(other.committed_at, "other.committed_at")
+                    == _time(evidence.committed_at, "committed_at")
                     and other_id != evidence_id
                 ):
                     raise CapabilityEvidenceError(
@@ -658,7 +659,8 @@ class CapabilityEvidenceJournal:
         for other_id, other in self._availability.items():
             if (
                 other.evidence_id == availability.evidence_id
-                and other.observed_at == availability.observed_at
+                and _time(other.observed_at, "other.observed_at")
+                == _time(availability.observed_at, "availability.observed_at")
                 and other_id != availability_id
             ):
                 raise CapabilityEvidenceError(

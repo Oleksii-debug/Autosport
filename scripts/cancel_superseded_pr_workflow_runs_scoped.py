@@ -511,8 +511,9 @@ class WorkflowScopedGitHubApi(GitHubApi):
             # cross-workflow run id, completed run, changed head, or reappeared PR
             # reference therefore grants zero cancellation authority.
             recovered_candidate_head: str | None = None
+            recovered_candidate_branch: str | None = None
             if zero_association is not None:
-                recovered_candidate_head = zero_association[0]
+                recovered_candidate_head, recovered_candidate_branch = zero_association
             elif recovered is not None:
                 recovered_candidate_head = recovered[1]
             if recovered_candidate_head is not None:
@@ -520,13 +521,25 @@ class WorkflowScopedGitHubApi(GitHubApi):
                     self,
                     "_WorkflowScopedGitHubApi__workflow_id",
                 )
+                repository_authority = object.__getattribute__(
+                    self,
+                    "_GitHubApi__repository",
+                )
                 require_helper_dispatch("_request")
                 run_payload = request_impl(self, f"/actions/runs/{run_id}")
                 require_helper_dispatch("_request")
-                if object.__getattribute__(
-                    self,
-                    "_WorkflowScopedGitHubApi__workflow_id",
-                ) != workflow_id_authority:
+                if (
+                    object.__getattribute__(
+                        self,
+                        "_WorkflowScopedGitHubApi__workflow_id",
+                    )
+                    != workflow_id_authority
+                    or object.__getattribute__(
+                        self,
+                        "_GitHubApi__repository",
+                    )
+                    != repository_authority
+                ):
                     raise _CancellationAuthorityChanged(
                         "unbound workflow run identity changed"
                     )
@@ -539,6 +552,8 @@ class WorkflowScopedGitHubApi(GitHubApi):
                 live_head_sha = run_payload.get("head_sha")
                 live_status = run_payload.get("status")
                 live_prs = run_payload.get("pull_requests")
+                live_head_branch = run_payload.get("head_branch")
+                live_head_repository = run_payload.get("head_repository")
                 if (
                     type(live_run_id) is not int
                     or live_run_id != run_id
@@ -562,6 +577,16 @@ class WorkflowScopedGitHubApi(GitHubApi):
                     )
                     or type(live_prs) is not list
                     or live_prs
+                    or (
+                        recovered_candidate_branch is not None
+                        and (
+                            type(live_head_branch) is not str
+                            or live_head_branch != recovered_candidate_branch
+                            or type(live_head_repository) is not dict
+                            or live_head_repository.get("full_name")
+                            != repository_authority
+                        )
+                    )
                 ):
                     raise _CancellationAuthorityChanged(
                         "unbound workflow run identity changed"

@@ -145,6 +145,8 @@ class ProphetXCredentialSink(Protocol):
         environment: str,
     ) -> str: ...
 
+    def remove_prophetx_credentials(self, *, credential_ref: str) -> None: ...
+
 
 def _canonical_text(value: object, name: str, *, max_length: int = 4096) -> str:
     if type(value) is not str:
@@ -288,6 +290,11 @@ class ProphetXAccountLinkController:
             "store_prophetx_credentials",
             None,
         )
+        remove_credentials = getattr(
+            credential_sink,
+            "remove_prophetx_credentials",
+            None,
+        )
         if not all(
             callable(item)
             for item in (
@@ -298,8 +305,10 @@ class ProphetXAccountLinkController:
             )
         ):
             raise TypeError("transport must provide the complete account-link auth surface")
-        if not callable(store_credentials):
-            raise TypeError("credential_sink must provide atomic ProphetX storage")
+        if not callable(store_credentials) or not callable(remove_credentials):
+            raise TypeError(
+                "credential_sink must provide atomic ProphetX store/remove authority"
+            )
         self._transport = transport
         self._credential_sink = credential_sink
         self._begin_login = begin_login
@@ -307,6 +316,7 @@ class ProphetXAccountLinkController:
         self._verify_two_factor = verify_two_factor
         self._cancel_challenge = cancel_challenge
         self._store_credentials = store_credentials
+        self._remove_credentials = remove_credentials
         self._device_id = _canonical_text(device_id, "device_id", max_length=512)
         if not callable(clock_ns):
             raise TypeError("clock_ns must be callable")
@@ -501,16 +511,18 @@ class ProphetXAccountLinkController:
             self._state = AccountLinkState.NOT_LINKED
         self._diagnostic = DiagnosticCode.NONE
 
-    def unlink(self, *, remover: Callable[[str], None]) -> None:
+    def unlink(self) -> None:
+        """Remove the exact stored credential through its original lifecycle authority."""
+
         if self._credential_ref is None:
             self.cancel()
             return
-        if not callable(remover):
-            raise TypeError("remover must be callable")
         credential_ref = self._credential_ref
         try:
-            remover(credential_ref)
+            self._remove_credentials(credential_ref=credential_ref)
         except Exception:
+            # The delete outcome is not proven. Retain the exact opaque reference and
+            # block relinking so a possibly-still-stored secret cannot be orphaned.
             self._state = AccountLinkState.AUTH_ERROR
             self._diagnostic = DiagnosticCode.CREDENTIAL_STORAGE_FAILED
             return

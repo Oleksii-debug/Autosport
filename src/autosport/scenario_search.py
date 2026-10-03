@@ -183,11 +183,11 @@ class ScenarioSearchEngine:
                 "authoritative outcome analysis requires market authorities"
             )
         if any(
-            not isinstance(authority, MarketSettlementOutcomeAuthority)
+            type(authority) is not _CANONICAL_MARKET_OUTCOME_AUTHORITY_TYPE
             for authority in authorities
         ):
             raise ValueError(
-                "authoritative outcome analysis requires canonical market authorities"
+                "authoritative outcome analysis requires exact canonical market authorities"
             )
 
         ordered = tuple(

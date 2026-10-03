@@ -14,6 +14,7 @@ from autosport.campaign_precommit_manifest import (
     publish_campaign_precommit_manifest,
 )
 import autosport.provider_observation_authority as provider_module
+import autosport.campaign_forward_universe_cycle_binding as cycle_binding
 from autosport.evaluation_universe import (
     AttritionReason,
     EvaluationRow,
@@ -374,6 +375,37 @@ def _opportunities(protocol, expectations):
         items.append(item)
         predecessor = item.opportunity_sha256
     return tuple(items)
+
+
+def test_cycle_binding_reverifies_durable_universe_without_reissuing_semantic_authority(
+    tmp_path,
+    monkeypatch,
+):
+    """#2050 must verify #1185 provenance without crossing #662 issuance again."""
+
+    store = _stored_universe(tmp_path, monkeypatch, empty=False)
+    ledger = ProviderEvaluationUniverseStore.load(store)
+    assert ledger is not None
+
+    # Reacquire the same canonical provider bytes as a live-issued snapshot.  The
+    # fixture's temporary legacy semantic bypass is already disabled here, so the
+    # old #2050 implementation would fail by calling the product semantic-issuance
+    # constructor without its required pre-evaluation capabilities.
+    snapshot = _capture(monkeypatch, empty=False)
+    resolved = cycle_binding._verify_exact_provider_universe_snapshot(
+        ledger=ledger,
+        snapshot=snapshot,
+        event_lifecycle=ContinuousEventLifecycle(tmp_path / "events.json"),
+    )
+
+    assert resolved is ledger.universe
+    assert (
+        resolved.intake_snapshot.committed_at
+        == snapshot.captured_at
+    )
+    assert tuple(resolved.intake_snapshot.expected_row_keys) == tuple(
+        sorted(row.row_key for row in resolved.rows)
+    )
 
 
 def test_empty_complete_board_becomes_authoritative_excluded_receipt_after_restart(

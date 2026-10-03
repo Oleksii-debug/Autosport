@@ -503,6 +503,8 @@ def test_tampered_acquisition_digest_fails_closed(tmp_path: Path) -> None:
         ("response-digest", "response payload digest contradicts"),
         ("base-url-digest", "base_url_sha256 does not bind canonical origin"),
         ("request-url-digest", "request_url_sha256 does not bind canonical request URL"),
+        ("origin-alias", "origin must be a canonical secret-free HTTPS origin"),
+        ("query-order", "query_string is not canonical"),
     ],
 )
 def test_self_consistent_but_semantically_false_acquisition_claim_fails_closed(
@@ -526,8 +528,38 @@ def test_self_consistent_but_semantically_false_acquisition_claim_fails_closed(
         acquisition["response_payload_sha256"] = "3" * 64
     elif mutation == "base-url-digest":
         acquisition["request"]["base_url_sha256"] = "4" * 64
-    else:
+    elif mutation == "request-url-digest":
         acquisition["request"]["request_url_sha256"] = "5" * 64
+    elif mutation == "origin-alias":
+        request = acquisition["request"]
+        request["origin"] = "https://parlay-api.com/"
+        request["base_url_sha256"] = hashlib.sha256(
+            request["origin"].encode("utf-8")
+        ).hexdigest()
+        request["request_url_sha256"] = hashlib.sha256(
+            (
+                f"{request['origin']}{request['endpoint_path']}?"
+                f"{request['query_string']}"
+            ).encode("utf-8")
+        ).hexdigest()
+    else:
+        request = acquisition["request"]
+        query = request["query"]
+        request["query_string"] = urlencode(
+            [
+                ("markets", query["markets"]),
+                ("date", query["date"]),
+                ("regions", query["regions"]),
+                ("oddsFormat", query["oddsFormat"]),
+                ("dateFormat", query["dateFormat"]),
+            ]
+        )
+        request["request_url_sha256"] = hashlib.sha256(
+            (
+                f"{request['origin']}{request['endpoint_path']}?"
+                f"{request['query_string']}"
+            ).encode("utf-8")
+        ).hexdigest()
     payload["acquisition_sha256"] = _canonical_sha256(acquisition)
     evidence.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
     proof = _write_governance(

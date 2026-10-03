@@ -392,6 +392,14 @@ def test_latest_evidence_query_keeps_newer_successor_authoritative(monkeypatch):
 
     assert journal.latest_evidence_id_for(first.evidence) == fresh.evidence.evidence_id
     assert journal.latest_evidence_id_for(fresh.evidence) == fresh.evidence.evidence_id
+    assert journal.latest_evidence_id_for(
+        first.evidence,
+        as_of="2026-09-21T10:05:59+00:00",
+    ) == first.evidence.evidence_id
+    assert journal.latest_evidence_id_for(
+        first.evidence,
+        as_of="2026-09-21T10:06:00+00:00",
+    ) == fresh.evidence.evidence_id
 
 
 def test_staged_historical_exact_object_does_not_displace_newer_successor(monkeypatch):
@@ -408,6 +416,10 @@ def test_staged_historical_exact_object_does_not_displace_newer_successor(monkey
     staged = journal.staged_with_exact_evidence(first.evidence)
 
     assert staged.latest_evidence_id_for(first.evidence) == fresh.evidence.evidence_id
+    assert staged.latest_evidence_id_for(
+        first.evidence,
+        as_of="2026-09-21T10:05:59+00:00",
+    ) == first.evidence.evidence_id
     assert journal.latest_evidence_id_for(first.evidence) == fresh.evidence.evidence_id
 
 

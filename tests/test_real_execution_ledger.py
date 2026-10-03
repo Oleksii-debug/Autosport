@@ -2193,6 +2193,13 @@ class RealExecutionLedgerTests(unittest.TestCase):
                 bound_plan_witness=witness,
                 plan_fingerprint=current.fingerprint,
             )
+            ledger.bind_supervised_approval(
+                plan_id=current.plan_id,
+                approval_id=current.approval_id,
+                approval_fingerprint="d" * 64,
+                approved_at=TS,
+                evidence_sha256="e" * 64,
+            )
             ledger.begin_attempt(
                 plan_id=current.plan_id,
                 action_id="a1",
@@ -2209,6 +2216,7 @@ class RealExecutionLedgerTests(unittest.TestCase):
                 [
                     EventType.PLAN_RESERVED.value,
                     EventType.SUPERVISED_PLAN_ISSUED.value,
+                    EventType.SUPERVISED_APPROVAL_BOUND.value,
                     EventType.ATTEMPT_RESERVED.value,
                 ],
             )
@@ -2220,7 +2228,7 @@ class RealExecutionLedgerTests(unittest.TestCase):
                         sort_keys=True,
                         separators=(",", ":"),
                     )
-                    for envelope in (lines[0], lines[2], lines[1])
+                    for envelope in (lines[0], lines[3], lines[1], lines[2])
                 )
                 + "\n",
                 encoding="utf-8",

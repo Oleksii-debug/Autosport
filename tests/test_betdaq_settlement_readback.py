@@ -92,6 +92,7 @@ def order_details(
         'MarketSettledDate="2026-09-22T23:58:00Z" />'
     ),
     audit_log="",
+    include_return_status=True,
 ):
     return soap(
         "GetOrderDetails",
@@ -105,6 +106,7 @@ def order_details(
             f'SequenceNumber="{sequence}" PunterReferenceNumber="77"'
         ),
         settlement + audit_log,
+        include_return_status=include_return_status,
     )
 
 
@@ -131,7 +133,9 @@ def posting(
     )
 
 
-def postings_window(*rows, complete="true", currency="EUR"):
+def postings_window(
+    *rows, complete="true", currency="EUR", include_return_status=True
+):
     return soap(
         "ListAccountPostings",
         (
@@ -139,10 +143,11 @@ def postings_window(*rows, complete="true", currency="EUR"):
             f'Credit="0" Exposure="-20.00" HaveAllPostingsBeenReturned="{complete}"'
         ),
         f"<Orders>{''.join(rows)}</Orders>",
+        include_return_status=include_return_status,
     )
 
 
-def postings_by_id(*rows, currency="EUR"):
+def postings_by_id(*rows, currency="EUR", include_return_status=True):
     return soap(
         "ListAccountPostingsById",
         (
@@ -150,6 +155,7 @@ def postings_by_id(*rows, currency="EUR"):
             'Credit="0" Exposure="-20.00"'
         ),
         f"<Orders>{''.join(rows)}</Orders>",
+        include_return_status=include_return_status,
     )
 
 
@@ -532,20 +538,40 @@ def test_by_id_response_cannot_mint_window_completeness(monkeypatch):
         client.read_account_postings_by_id(9000)
 
 
-def test_official_generated_response_without_return_status_is_accepted(monkeypatch):
-    payload = soap(
-        "ListAccountPostingsById",
-        (
-            'Currency="EUR" AvailableFunds="100.00" Balance="120.00" '
-            'Credit="0" Exposure="-20.00"'
-        ),
-        f"<Orders>{posting(9001)}</Orders>",
-        include_return_status=False,
-    )
+@pytest.mark.parametrize(
+    "read_kind",
+    ("order_details", "postings_window", "postings_by_id"),
+)
+def test_missing_return_status_fails_closed_for_all_economic_reads(
+    monkeypatch, read_kind
+):
+    if read_kind == "order_details":
+        payload = order_details(include_return_status=False)
+    elif read_kind == "postings_window":
+        payload = postings_window(
+            posting(9001),
+            include_return_status=False,
+        )
+    else:
+        payload = postings_by_id(
+            posting(9001),
+            include_return_status=False,
+        )
+
     client, _ = economic_client(monkeypatch, payload)
-    result = client.read_account_postings_by_id(9000)
-    assert result.postings[0].transaction_id == "9001"
-    assert result.window_complete is None
+    with pytest.raises(
+        BetdaqEconomicReadbackError,
+        match="failed canonical validation",
+    ):
+        if read_kind == "order_details":
+            client.read_order_details(123)
+        elif read_kind == "postings_window":
+            client.read_account_postings(
+                datetime(2026, 9, 22, 23, 0, tzinfo=timezone.utc),
+                datetime(2026, 9, 23, 0, 10, tzinfo=timezone.utc),
+            )
+        else:
+            client.read_account_postings_by_id(9000)
 
 
 def test_present_nonzero_return_status_fails_closed(monkeypatch):

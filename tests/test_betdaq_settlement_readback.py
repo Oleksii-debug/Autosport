@@ -1185,6 +1185,36 @@ def test_order_result_sibling_smuggling_is_rejected(monkeypatch):
         client.read_order_details(123)
 
 
+def test_return_status_rejects_unknown_provider_attribute(monkeypatch):
+    payload = postings_by_id(posting(9001)).replace(
+        b'<ReturnStatus Code="0" ',
+        b'<ReturnStatus FutureStatusField="unexpected" Code="0" ',
+        1,
+    )
+    client, _ = economic_client(monkeypatch, payload)
+
+    with pytest.raises(
+        BetdaqEconomicReadbackError,
+        match="failed canonical validation",
+    ):
+        client.read_account_postings_by_id(9000)
+
+
+def test_postings_orders_container_rejects_unknown_provider_attribute(monkeypatch):
+    payload = postings_by_id(posting(9001)).replace(
+        b"<Orders>",
+        b'<Orders FutureContainerField="unexpected">',
+        1,
+    )
+    client, _ = economic_client(monkeypatch, payload)
+
+    with pytest.raises(
+        BetdaqEconomicReadbackError,
+        match="failed canonical validation",
+    ):
+        client.read_account_postings_by_id(9000)
+
+
 def test_order_result_rejects_unknown_provider_attribute(monkeypatch):
     payload = order_details().replace(
         b"<GetOrderDetailsResult ",

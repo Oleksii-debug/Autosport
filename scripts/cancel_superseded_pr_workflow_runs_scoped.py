@@ -828,9 +828,28 @@ class WorkflowScopedGitHubApi(GitHubApi):
     )
     del _build_cancel
 
-    def _active_runs_for_status(self, status: str) -> tuple[WorkflowRun, ...]:
-        if status not in _ACTIVE_STATUSES:
+    def _active_runs_for_status(
+        self,
+        status: str,
+        *,
+        _active_statuses: tuple[str, ...] = _ACTIVE_STATUSES,
+        _runs_per_page: int = _RUNS_PER_PAGE,
+        _encode_query=urlencode,
+    ) -> tuple[WorkflowRun, ...]:
+        if (
+            type(_active_statuses) is not tuple
+            or not _active_statuses
+            or any(type(item) is not str or not item for item in _active_statuses)
+            or status not in _active_statuses
+        ):
             raise CancellationError("invalid active workflow status")
+        if (
+            type(_runs_per_page) is not int
+            or _runs_per_page <= 0
+            or _runs_per_page > 100
+            or not callable(_encode_query)
+        ):
+            raise CancellationError("active workflow pagination authority is unavailable")
         workflow_id = object.__getattribute__(
             self,
             "_WorkflowScopedGitHubApi__workflow_id",
@@ -842,11 +861,11 @@ class WorkflowScopedGitHubApi(GitHubApi):
         runs: list[WorkflowRun] = []
         page = 1
         while True:
-            query = urlencode(
+            query = _encode_query(
                 {
                     "event": "pull_request",
                     "status": status,
-                    "per_page": _RUNS_PER_PAGE,
+                    "per_page": _runs_per_page,
                     "page": page,
                 }
             )
@@ -936,22 +955,32 @@ class WorkflowScopedGitHubApi(GitHubApi):
             # turn harmless queue shrinkage into a failed controller invocation.
             if (
                 not page_runs
-                or len(page_runs) < _RUNS_PER_PAGE
+                or len(page_runs) < _runs_per_page
                 or len(runs) >= total_count
             ):
                 break
             page += 1
         return tuple(runs)
 
-    def active_runs(self) -> tuple[WorkflowRun, ...]:
+    def active_runs(
+        self,
+        *,
+        _active_statuses: tuple[str, ...] = _ACTIVE_STATUSES,
+    ) -> tuple[WorkflowRun, ...]:
         # Snapshot-local identity state must never leak across repeated scans on one API
         # object. A later invocation may observe a different stable queue and must derive
         # orphan authority only from that invocation's complete observation set.
+        if (
+            type(_active_statuses) is not tuple
+            or not _active_statuses
+            or any(type(item) is not str or not item for item in _active_statuses)
+        ):
+            raise CancellationError("active workflow status authority is unavailable")
         self._unbound_active_runs.clear()
         self._explicit_active_run_ids.clear()
         self._conflicted_unbound_run_ids.clear()
         runs: list[WorkflowRun] = []
-        for status in _ACTIVE_STATUSES:
+        for status in _active_statuses:
             runs.extend(self._active_runs_for_status(status))
         return tuple(runs)
 

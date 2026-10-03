@@ -58,30 +58,49 @@ _ACTIVE_CANCELLATION_CONFLICT_MESSAGE = (
 )
 
 
-def _cancel_run_or_defer_active_conflict(api: GitHubApi, run_id: int) -> bool:
-    """Attempt one authorized cancel without promoting a 409-active race to success.
+def _build_cancel_run_or_defer_active_conflict(
+    error_type,
+    active_conflict_message: str,
+):
+    """Freeze the one cancellation race that may be deferred without success."""
 
-    Canonical GitHubApi.cancel() proves HTTP 202 acceptance or completed status after a
-    409. Its exact 409-active error means this controller obtained no cancellation
-    effect because another actor may already be racing the same run. Defer that run to a
-    later sweep, but preserve every other cancellation error as fatal/unknown.
-    """
+    if type(active_conflict_message) is not str or not active_conflict_message:
+        raise RuntimeError("canonical active-cancellation conflict message is unavailable")
 
-    # This helper sits directly between exact run-identity proof and api.cancel().
-    # Preserve that proven primitive coordinate; a rebound compatibility validator
-    # must not be able to substitute another run after the proof has completed.
-    if type(run_id) is not int or run_id <= 0:
-        raise CancellationError("invalid run id")
-    try:
-        api.cancel(run_id)
-    except CancellationError as exc:
-        if (
-            exc.__class__ is CancellationError
-            and str(exc) == _ACTIVE_CANCELLATION_CONFLICT_MESSAGE
-        ):
-            return False
-        raise
-    return True
+    def cancel_or_defer(api: GitHubApi, run_id: int) -> bool:
+        """Attempt one authorized cancel without promoting a 409-active race to success.
+
+        Canonical GitHubApi.cancel() proves HTTP 202 acceptance or completed status after
+        a 409. Its exact 409-active error means this controller obtained no cancellation
+        effect because another actor may already be racing the same run. Defer that run
+        to a later sweep, but preserve every other cancellation error as fatal/unknown.
+        """
+
+        # This helper sits directly between exact run-identity proof and api.cancel().
+        # Preserve that proven primitive coordinate; a rebound compatibility validator
+        # must not be able to substitute another run after the proof has completed.
+        if type(run_id) is not int or run_id <= 0:
+            raise error_type("invalid run id")
+        try:
+            api.cancel(run_id)
+        except error_type as exc:
+            if (
+                exc.__class__ is error_type
+                and exc.args == (active_conflict_message,)
+            ):
+                return False
+            raise
+        return True
+
+    return cancel_or_defer
+
+
+_cancel_run_or_defer_active_conflict = _build_cancel_run_or_defer_active_conflict(
+    CancellationError,
+    _ACTIVE_CANCELLATION_CONFLICT_MESSAGE,
+)
+del _build_cancel_run_or_defer_active_conflict
+del _ACTIVE_CANCELLATION_CONFLICT_MESSAGE
 
 
 class WorkflowScopedGitHubApi(GitHubApi):

@@ -987,7 +987,7 @@ class ParlayApiProductSourceTests(unittest.TestCase):
 
             self.assertEqual(hostile_calls, [])
 
-    def test_bound_store_connect_code_mutation_fails_before_hostile_dispatch(self) -> None:
+    def test_bound_store_staticmethod_code_mutation_fails_before_hostile_dispatch(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory) / "workspace"
             source = ParlayApiProductSource(
@@ -1003,21 +1003,24 @@ class ParlayApiProductSourceTests(unittest.TestCase):
                 max_bytes=4 * 1024 * 1024,
             )
             source.bind_collector_store(store)
-            original_connect = CollectorDeltaStore._connect
-            original_code = original_connect.__code__
+            descriptor = vars(CollectorDeltaStore)["_bounded_identity_keys"]
+            original_bounded_keys = descriptor.__func__
+            original_code = original_bounded_keys.__code__
 
-            def hostile_connect(self):
-                raise AssertionError("hostile in-place _connect code executed")
+            def hostile_bounded_keys(values, field):
+                raise AssertionError(
+                    "hostile in-place _bounded_identity_keys code executed"
+                )
 
             try:
-                original_connect.__code__ = hostile_connect.__code__
+                original_bounded_keys.__code__ = hostile_bounded_keys.__code__
                 with self.assertRaisesRegex(
                     ProductSourceStateError,
                     "durable-history dispatch was replaced",
                 ):
                     source.fetch_catalog_page(None)
             finally:
-                original_connect.__code__ = original_code
+                original_bounded_keys.__code__ = original_code
 
     def test_bound_store_classmethod_code_mutation_fails_before_hostile_dispatch(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -17,7 +17,7 @@ from .real_execution_ledger import (
     VerifiedExecutionLedgerSnapshot,
 )
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 8
 
 SOURCE_ROOT_AUTHORITY_UNQUALIFIED = "UNQUALIFIED_CALLER_SELECTED_LEDGER"
 EVALUATION_PROTOCOL_AUTHORITY_UNQUALIFIED = "UNQUALIFIED_CALLER_PROTOCOL_DIGEST"
@@ -50,6 +50,7 @@ _CENSOR_REASON_BY_STATE = {
     AttemptState.UNKNOWN: "UNKNOWN_EXTERNAL_EFFECT",
     AttemptState.RECONCILED_NOT_FOUND: "RECONCILED_NOT_FOUND_UNVERIFIED_ABSENCE_AUTHORITY",
 }
+_UNKNOWN_RECONCILED_FOUND_CENSOR_REASON = "UNKNOWN_RECONCILED_FOUND_AWAITING_ACK"
 
 
 class EmpiricalExecutionEvidenceError(RuntimeError):
@@ -147,21 +148,32 @@ def _digest(value: object) -> str:
 def _canonical_verified_ledger_snapshot(
     ledger: RealExecutionLedger,
 ) -> VerifiedExecutionLedgerSnapshot:
-    """Read one ledger snapshot without caller-rebindable instance method seams."""
+    """Capture exact bytes behind the canonical ledger read-serialization fence."""
 
-    path_value = ledger.path
-    if not isinstance(path_value, Path):
-        raise EmpiricalExecutionEvidenceUnavailable(
-            "canonical RealExecutionLedger path must be pathlib.Path"
+    def capture() -> VerifiedExecutionLedgerSnapshot:
+        path_value = ledger.path
+        if not isinstance(path_value, Path):
+            raise EmpiricalExecutionEvidenceUnavailable(
+                "canonical RealExecutionLedger path must be pathlib.Path"
+            )
+        path = Path(path_value)
+        try:
+            raw = path.read_bytes() if path.exists() else b""
+        except OSError as exc:
+            raise EmpiricalExecutionEvidenceUnavailable(
+                "canonical RealExecutionLedger bytes could not be read"
+            ) from exc
+        # Exact class dispatch avoids caller-rebound parser seams while the parent
+        # ledger owns the read/write serialization and inode fencing.
+        events = RealExecutionLedger._parse(raw)
+        RealExecutionLedger._recover_monotonic_state(ledger, raw, events)
+        return VerifiedExecutionLedgerSnapshot(
+            payload=raw,
+            sha256=hashlib.sha256(raw).hexdigest(),
+            event_count=len(events),
         )
-    path = Path(path_value)
-    raw = path.read_bytes() if path.exists() else b""
-    events = RealExecutionLedger._parse(raw)
-    return VerifiedExecutionLedgerSnapshot(
-        payload=raw,
-        sha256=hashlib.sha256(raw).hexdigest(),
-        event_count=len(events),
-    )
+
+    return RealExecutionLedger._read_serialized(ledger, capture)
 
 
 def _single_event(
@@ -216,8 +228,12 @@ class EmpiricalExecutionEvidence:
 
     plan_id: str
     plan_fingerprint: str
+    bookmaker_profile_version: str
+    decision_id: str
+    approval_id: str
     action_id: str
     attempt_id: str
+    attempt_effect_fingerprint: str
     attempt_state: str
     ledger_terminal: bool
     provider_outcome_verified: bool
@@ -231,22 +247,30 @@ class EmpiricalExecutionEvidence:
     side: str
     quote_id: str
 
-    decision_at: str
+    plan_created_at: str
+    decision_at: str | None
     quote_observed_at: str
+    quote_available_to_product_at: str | None
+    quote_expires_at: str
     reserved_at: str
     submitted_at: str | None
+    submitted_request_sha256: str | None
     provider_evidence_observed_at: str | None
     acknowledged_at: str | None
 
     external_receipt_id: str | None
     provider_evidence_id: str | None
     provider_evidence_source: str | None
+    provider_evidence_request_sha256: str | None
+    provider_evidence_acknowledgement_sha256: str | None
     acknowledgement_status: str | None
+    acknowledgement_payload_sha256: str | None
 
     reconciliation_evidence_id: str | None
     reconciliation_evidence_source: str | None
     reconciliation_evidence_observed_at: str | None
     reconciliation_external_effect_found: bool | None
+    reconciliation_external_receipt_id: str | None
 
     requested_odds: Decimal
     requested_stake: Decimal
@@ -296,6 +320,9 @@ class EmpiricalExecutionEvidence:
 
         for name in (
             "plan_id",
+            "bookmaker_profile_version",
+            "decision_id",
+            "approval_id",
             "action_id",
             "attempt_id",
             "bookmaker_id",
@@ -305,8 +332,9 @@ class EmpiricalExecutionEvidence:
             "selection_id",
             "side",
             "quote_id",
-            "decision_at",
+            "plan_created_at",
             "quote_observed_at",
+            "quote_expires_at",
             "reserved_at",
             "attempt_state",
             "provider_outcome_verification_reason",
@@ -318,12 +346,30 @@ class EmpiricalExecutionEvidence:
 
         _sha256(self.source_ledger_sha256, "source_ledger_sha256")
         _sha256(self.plan_fingerprint, "plan_fingerprint")
+        _sha256(self.attempt_effect_fingerprint, "attempt_effect_fingerprint")
         _optional_sha256(self.provider_evidence_id, "provider_evidence_id")
         _optional_text(self.provider_evidence_source, "provider_evidence_source")
+        _optional_sha256(self.submitted_request_sha256, "submitted_request_sha256")
+        _optional_sha256(
+            self.provider_evidence_request_sha256,
+            "provider_evidence_request_sha256",
+        )
+        _optional_sha256(
+            self.provider_evidence_acknowledgement_sha256,
+            "provider_evidence_acknowledgement_sha256",
+        )
         _optional_text(self.external_receipt_id, "external_receipt_id")
         _optional_text(self.acknowledgement_status, "acknowledgement_status")
+        _optional_sha256(
+            self.acknowledgement_payload_sha256,
+            "acknowledgement_payload_sha256",
+        )
         _optional_text(self.reconciliation_evidence_id, "reconciliation_evidence_id")
         _optional_text(self.reconciliation_evidence_source, "reconciliation_evidence_source")
+        _optional_text(
+            self.reconciliation_external_receipt_id,
+            "reconciliation_external_receipt_id",
+        )
 
         if type(self.source_event_count) is not int or self.source_event_count < 1:
             raise EmpiricalExecutionEvidenceError("source_event_count must be positive int")
@@ -343,8 +389,17 @@ class EmpiricalExecutionEvidence:
                 "reconciliation_external_effect_found must be bool when present"
             )
 
-        _timestamp(self.decision_at, "decision_at")
+        _timestamp(self.plan_created_at, "plan_created_at")
+        if self.decision_at is not None:
+            raise EmpiricalExecutionEvidenceError(
+                "current execution ledger does not prove exact decision timestamp"
+            )
         _timestamp(self.quote_observed_at, "quote_observed_at")
+        if self.quote_available_to_product_at is not None:
+            raise EmpiricalExecutionEvidenceError(
+                "current execution ledger does not prove quote product-availability time"
+            )
+        _timestamp(self.quote_expires_at, "quote_expires_at")
         _timestamp(self.reserved_at, "reserved_at")
         _optional_timestamp(self.submitted_at, "submitted_at")
         _optional_timestamp(
@@ -364,6 +419,20 @@ class EmpiricalExecutionEvidence:
             self.reconciliation_evidence_observed_at,
             self.reconciliation_external_effect_found,
         )
+        if not reconciliation_present:
+            if self.reconciliation_external_receipt_id is not None:
+                raise EmpiricalExecutionEvidenceError(
+                    "reconciliation receipt requires durable reconciliation evidence"
+                )
+        elif self.reconciliation_external_effect_found is True:
+            if self.reconciliation_external_receipt_id is None:
+                raise EmpiricalExecutionEvidenceError(
+                    "positive reconciliation requires receipt identity"
+                )
+        elif self.reconciliation_external_receipt_id is not None:
+            raise EmpiricalExecutionEvidenceError(
+                "not-found reconciliation cannot claim receipt identity"
+            )
 
         try:
             state = AttemptState(self.attempt_state)
@@ -412,16 +481,43 @@ class EmpiricalExecutionEvidence:
                     raise EmpiricalExecutionEvidenceError(
                         "terminal state must match acknowledgement_status"
                     )
-                if self.acknowledged_at is None or self.external_receipt_id is None:
+                if self.acknowledged_at is None:
                     raise EmpiricalExecutionEvidenceError(
-                        "acknowledged terminal attempt requires durable acknowledgement identity"
+                        "acknowledged terminal attempt requires acknowledgement time"
+                    )
+                if (
+                    state in {AttemptState.ACCEPTED, AttemptState.PARTIAL}
+                    and self.external_receipt_id is None
+                ):
+                    raise EmpiricalExecutionEvidenceError(
+                        "accepted/partial acknowledgement requires external receipt identity"
                     )
                 if reconciliation_present:
-                    raise EmpiricalExecutionEvidenceError(
-                        "acknowledged terminal attempt cannot claim not-found reconciliation"
-                    )
+                    if self.reconciliation_external_effect_found is not True:
+                        raise EmpiricalExecutionEvidenceError(
+                            "terminal acknowledgement requires positive reconciliation evidence"
+                        )
+                    if self.external_receipt_id is None:
+                        raise EmpiricalExecutionEvidenceError(
+                            "positive reconciliation requires external receipt identity"
+                        )
+                    if (
+                        self.reconciliation_external_receipt_id
+                        != self.external_receipt_id
+                    ):
+                        raise EmpiricalExecutionEvidenceError(
+                            "positive reconciliation receipt must match acknowledgement"
+                        )
         else:
-            expected_reason = _CENSOR_REASON_BY_STATE.get(state)
+            expected_reason = (
+                _UNKNOWN_RECONCILED_FOUND_CENSOR_REASON
+                if (
+                    state is AttemptState.UNKNOWN
+                    and reconciliation_present
+                    and self.reconciliation_external_effect_found is True
+                )
+                else _CENSOR_REASON_BY_STATE.get(state)
+            )
             if expected_reason is None:
                 raise EmpiricalExecutionEvidenceError(
                     "unsupported nonterminal attempt state"
@@ -463,6 +559,19 @@ class EmpiricalExecutionEvidence:
                     raise EmpiricalExecutionEvidenceError(
                         "unverified RECONCILED_NOT_FOUND requires external_effect_found=false"
                     )
+                if self.reconciliation_external_receipt_id is not None:
+                    raise EmpiricalExecutionEvidenceError(
+                        "not-found reconciliation cannot claim receipt identity"
+                    )
+            elif state is AttemptState.UNKNOWN and reconciliation_present:
+                if self.reconciliation_external_effect_found is not True:
+                    raise EmpiricalExecutionEvidenceError(
+                        "UNKNOWN reconciliation evidence must prove external effect found"
+                    )
+                if self.reconciliation_external_receipt_id is None:
+                    raise EmpiricalExecutionEvidenceError(
+                        "positive UNKNOWN reconciliation requires receipt identity"
+                    )
             elif reconciliation_present:
                 raise EmpiricalExecutionEvidenceError(
                     "nonterminal attempt cannot claim reconciliation"
@@ -484,6 +593,48 @@ class EmpiricalExecutionEvidence:
         ):
             raise EmpiricalExecutionEvidenceError(
                 "provider evidence identity/source/time must be all present or all absent"
+            )
+
+        if self.submitted_request_sha256 is not None and self.submitted_at is None:
+            raise EmpiricalExecutionEvidenceError(
+                "submitted request identity requires durable submission"
+            )
+        if (
+            self.provider_evidence_request_sha256 is not None
+            or self.provider_evidence_acknowledgement_sha256 is not None
+        ) and self.provider_evidence_id is None:
+            raise EmpiricalExecutionEvidenceError(
+                "provider provenance digests require durable provider evidence"
+            )
+        if self.provider_evidence_request_sha256 is not None:
+            if self.submitted_request_sha256 is None:
+                raise EmpiricalExecutionEvidenceError(
+                    "provider request provenance requires submitted request identity"
+                )
+            if (
+                self.provider_evidence_request_sha256
+                != self.submitted_request_sha256
+            ):
+                raise EmpiricalExecutionEvidenceError(
+                    "provider request provenance mismatches durable submission"
+                )
+        if self.acknowledgement_status is None:
+            if self.acknowledgement_payload_sha256 is not None:
+                raise EmpiricalExecutionEvidenceError(
+                    "acknowledgement payload identity requires durable acknowledgement"
+                )
+        elif self.acknowledgement_payload_sha256 is None:
+            raise EmpiricalExecutionEvidenceError(
+                "durable acknowledgement requires canonical payload identity"
+            )
+        if (
+            self.provider_evidence_acknowledgement_sha256 is not None
+            and self.acknowledgement_payload_sha256 is not None
+            and self.provider_evidence_acknowledgement_sha256
+            != self.acknowledgement_payload_sha256
+        ):
+            raise EmpiricalExecutionEvidenceError(
+                "provider acknowledgement provenance mismatches durable acknowledgement"
             )
 
         requested_odds = _decimal(self.requested_odds, "requested_odds")
@@ -599,8 +750,12 @@ class EmpiricalExecutionEvidence:
             "source_root_authority_status": self.source_root_authority_status,
             "plan_id": self.plan_id,
             "plan_fingerprint": self.plan_fingerprint,
+            "bookmaker_profile_version": self.bookmaker_profile_version,
+            "decision_id": self.decision_id,
+            "approval_id": self.approval_id,
             "action_id": self.action_id,
             "attempt_id": self.attempt_id,
+            "attempt_effect_fingerprint": self.attempt_effect_fingerprint,
             "attempt_state": self.attempt_state,
             "ledger_terminal": self.ledger_terminal,
             "provider_outcome_verified": self.provider_outcome_verified,
@@ -614,20 +769,32 @@ class EmpiricalExecutionEvidence:
             "selection_id": self.selection_id,
             "side": self.side,
             "quote_id": self.quote_id,
+            "plan_created_at": self.plan_created_at,
             "decision_at": self.decision_at,
             "quote_observed_at": self.quote_observed_at,
+            "quote_available_to_product_at": self.quote_available_to_product_at,
+            "quote_expires_at": self.quote_expires_at,
             "reserved_at": self.reserved_at,
             "submitted_at": self.submitted_at,
+            "submitted_request_sha256": self.submitted_request_sha256,
             "provider_evidence_observed_at": self.provider_evidence_observed_at,
             "acknowledged_at": self.acknowledged_at,
             "external_receipt_id": self.external_receipt_id,
             "provider_evidence_id": self.provider_evidence_id,
             "provider_evidence_source": self.provider_evidence_source,
+            "provider_evidence_request_sha256": (
+                self.provider_evidence_request_sha256
+            ),
+            "provider_evidence_acknowledgement_sha256": (
+                self.provider_evidence_acknowledgement_sha256
+            ),
             "acknowledgement_status": self.acknowledgement_status,
+            "acknowledgement_payload_sha256": self.acknowledgement_payload_sha256,
             "reconciliation_evidence_id": self.reconciliation_evidence_id,
             "reconciliation_evidence_source": self.reconciliation_evidence_source,
             "reconciliation_evidence_observed_at": self.reconciliation_evidence_observed_at,
             "reconciliation_external_effect_found": self.reconciliation_external_effect_found,
+            "reconciliation_external_receipt_id": self.reconciliation_external_receipt_id,
             "requested_odds": _decimal_text(self.requested_odds),
             "requested_stake": _decimal_text(self.requested_stake),
             "slippage_status": self.slippage_status,
@@ -740,12 +907,16 @@ def build_empirical_execution_evidence(
         EventType.RECONCILED_NOT_FOUND,
         label="empirical evidence",
     )
-    provider_events = [
+    positive_reconciliation_events = [
         event
         for event in attempt_events
-        if event["event_type"] == EventType.PROVIDER_EVIDENCE_BOUND.value
+        if event["event_type"] == EventType.RECONCILED_FOUND.value
     ]
-    provider_event = provider_events[-1] if provider_events else None
+    provider_event = _optional_single_event(
+        attempt_events,
+        EventType.PROVIDER_EVIDENCE_BOUND,
+        label="empirical evidence",
+    )
 
     ledger_terminal = state in _TERMINAL_STATES
     if state in _ACK_TERMINAL_STATES:
@@ -787,11 +958,30 @@ def build_empirical_execution_evidence(
     if type(plan) is not dict:
         raise EmpiricalExecutionEvidenceUnavailable("stored plan payload is invalid")
 
-    decision_at = _text(plan.get("created_at"), "decision_at")
+    bookmaker_profile_version = _text(
+        plan.get("bookmaker_profile_version"),
+        "bookmaker_profile_version",
+    )
+    decision_id = _text(plan.get("decision_id"), "decision_id")
+    approval_id = _text(plan.get("approval_id"), "approval_id")
+    plan_created_at = _text(plan.get("created_at"), "plan_created_at")
     quote_observed_at = _text(action.get("quote_observed_at"), "quote_observed_at")
+    quote_expires_at = _text(action.get("expires_at"), "quote_expires_at")
     reserved_at = _text(reservation["payload"].get("reserved_at"), "reserved_at")
+    attempt_effect_fingerprint = _sha256(
+        reservation["payload"].get("effect_fingerprint"),
+        "attempt_effect_fingerprint",
+    )
     submitted_at = (
         _text(submission["payload"].get("submitted_at"), "submitted_at")
+        if submission is not None
+        else None
+    )
+    submitted_request_sha256 = (
+        _optional_sha256(
+            submission["payload"].get("request_sha256"),
+            "submitted_request_sha256",
+        )
         if submission is not None
         else None
     )
@@ -799,6 +989,8 @@ def build_empirical_execution_evidence(
     provider_evidence_id: str | None = None
     provider_evidence_source: str | None = None
     provider_evidence_observed_at: str | None = None
+    provider_evidence_request_sha256: str | None = None
+    provider_evidence_acknowledgement_sha256: str | None = None
     if provider_event is not None:
         provider_payload = provider_event["payload"]
         provider_evidence_id = _sha256(
@@ -811,12 +1003,26 @@ def build_empirical_execution_evidence(
             provider_payload.get("observed_at"),
             "provider_evidence_observed_at",
         )
+        provider_evidence_request_sha256 = _optional_sha256(
+            provider_payload.get("request_sha256"),
+            "provider_evidence_request_sha256",
+        )
+        provider_evidence_acknowledgement_sha256 = _optional_sha256(
+            provider_payload.get("acknowledgement_sha256"),
+            "provider_evidence_acknowledgement_sha256",
+        )
 
     acknowledgement = (
         RealExecutionLedger._acknowledgement_from_dict(
             acknowledgement_event["payload"]
         )
         if acknowledgement_event is not None
+        else None
+    )
+
+    acknowledgement_payload_sha256 = (
+        _digest(acknowledgement.to_dict())
+        if acknowledgement is not None
         else None
     )
 
@@ -827,6 +1033,8 @@ def build_empirical_execution_evidence(
         if reconciliation_event is not None
         else None
     )
+    reconciliation_external_effect_found: bool | None = None
+    reconciliation_external_receipt_id: str | None = None
     if reconciliation is not None:
         if reconciliation.attempt_id != attempt:
             raise EmpiricalExecutionEvidenceUnavailable(
@@ -836,6 +1044,57 @@ def build_empirical_execution_evidence(
             raise EmpiricalExecutionEvidenceUnavailable(
                 "RECONCILED_NOT_FOUND requires external_effect_found=false"
             )
+        reconciliation_external_effect_found = False
+    elif (
+        acknowledgement is not None
+        and acknowledgement.reconciliation_evidence_id is not None
+    ):
+        matching_positive_reconciliations = [
+            event
+            for event in positive_reconciliation_events
+            if event["payload"].get("evidence_id")
+            == acknowledgement.reconciliation_evidence_id
+        ]
+        if len(matching_positive_reconciliations) != 1:
+            raise EmpiricalExecutionEvidenceUnavailable(
+                "terminal acknowledgement lacks exact positive reconciliation evidence"
+            )
+        positive_reconciliation = RealExecutionLedger._found_reconciliation_from_dict(
+            matching_positive_reconciliations[0]["payload"]
+        )
+        if positive_reconciliation.attempt_id != attempt:
+            raise EmpiricalExecutionEvidenceUnavailable(
+                "positive reconciliation attempt identity mismatch"
+            )
+        if (
+            positive_reconciliation.external_receipt_id
+            != acknowledgement.external_receipt_id
+        ):
+            raise EmpiricalExecutionEvidenceUnavailable(
+                "positive reconciliation receipt identity mismatch"
+            )
+        reconciliation = positive_reconciliation
+        reconciliation_external_effect_found = True
+        reconciliation_external_receipt_id = (
+            positive_reconciliation.external_receipt_id
+        )
+    elif state is AttemptState.UNKNOWN and positive_reconciliation_events:
+        if len(positive_reconciliation_events) != 1:
+            raise EmpiricalExecutionEvidenceUnavailable(
+                "UNKNOWN attempt has ambiguous positive reconciliation lineage"
+            )
+        positive_reconciliation = RealExecutionLedger._found_reconciliation_from_dict(
+            positive_reconciliation_events[0]["payload"]
+        )
+        if positive_reconciliation.attempt_id != attempt:
+            raise EmpiricalExecutionEvidenceUnavailable(
+                "positive reconciliation attempt identity mismatch"
+            )
+        reconciliation = positive_reconciliation
+        reconciliation_external_effect_found = True
+        reconciliation_external_receipt_id = (
+            positive_reconciliation.external_receipt_id
+        )
 
     requested_odds = _decimal(action.get("requested_odds"), "requested_odds")
     requested_stake = _decimal(action.get("requested_stake"), "requested_stake")
@@ -860,9 +1119,11 @@ def build_empirical_execution_evidence(
             raise EmpiricalExecutionEvidenceUnavailable(
                 "accepted acknowledgement lacks accepted odds/stake"
             )
-        # PROVIDER_EVIDENCE_BOUND is generic correlation metadata. Its durable
-        # schema does not bind an external receipt or the accepted odds/stake,
-        # so it cannot promote acknowledgement prices into KNOWN slippage truth.
+        # #794 can bind the exact submitted request and canonical acknowledgement
+        # payload digests into PROVIDER_EVIDENCE_BOUND. This projection preserves
+        # those identities, but the ledger path/root remains caller-selected here.
+        # Exact in-ledger correlation therefore cannot promote accepted prices into
+        # KNOWN slippage until separate product-owned source-root provenance exists.
     elif state is AttemptState.REJECTED:
         slippage_status = SLIPPAGE_STATUS_NOT_APPLICABLE
 
@@ -872,7 +1133,14 @@ def build_empirical_execution_evidence(
         )
 
     right_censored = state in _CENSOR_REASON_BY_STATE
-    censor_reason = _CENSOR_REASON_BY_STATE.get(state) if right_censored else None
+    censor_reason = (
+        _UNKNOWN_RECONCILED_FOUND_CENSOR_REASON
+        if (
+            state is AttemptState.UNKNOWN
+            and reconciliation_external_effect_found is True
+        )
+        else (_CENSOR_REASON_BY_STATE.get(state) if right_censored else None)
+    )
     censor_cutoff_recorded_at = (
         _text(events[-1].get("recorded_at"), "censor_cutoff_recorded_at")
         if right_censored
@@ -894,8 +1162,12 @@ def build_empirical_execution_evidence(
         source_root_authority_status=SOURCE_ROOT_AUTHORITY_UNQUALIFIED,
         plan_id=plan_id,
         plan_fingerprint=plan_fingerprint,
+        bookmaker_profile_version=bookmaker_profile_version,
+        decision_id=decision_id,
+        approval_id=approval_id,
         action_id=action_id,
         attempt_id=attempt,
+        attempt_effect_fingerprint=attempt_effect_fingerprint,
         attempt_state=state.value,
         ledger_terminal=ledger_terminal,
         provider_outcome_verified=False,
@@ -907,10 +1179,14 @@ def build_empirical_execution_evidence(
         selection_id=_text(action.get("selection_id"), "selection_id"),
         side=_text(action.get("side"), "side"),
         quote_id=_text(action.get("quote_id"), "quote_id"),
-        decision_at=decision_at,
+        plan_created_at=plan_created_at,
+        decision_at=None,
         quote_observed_at=quote_observed_at,
+        quote_available_to_product_at=None,
+        quote_expires_at=quote_expires_at,
         reserved_at=reserved_at,
         submitted_at=submitted_at,
+        submitted_request_sha256=submitted_request_sha256,
         provider_evidence_observed_at=provider_evidence_observed_at,
         acknowledged_at=(
             acknowledgement.acknowledged_at if acknowledgement is not None else None
@@ -920,9 +1196,14 @@ def build_empirical_execution_evidence(
         ),
         provider_evidence_id=provider_evidence_id,
         provider_evidence_source=provider_evidence_source,
+        provider_evidence_request_sha256=provider_evidence_request_sha256,
+        provider_evidence_acknowledgement_sha256=(
+            provider_evidence_acknowledgement_sha256
+        ),
         acknowledgement_status=(
             acknowledgement.status.value if acknowledgement is not None else None
         ),
+        acknowledgement_payload_sha256=acknowledgement_payload_sha256,
         reconciliation_evidence_id=(
             reconciliation.evidence_id if reconciliation is not None else None
         ),
@@ -933,7 +1214,10 @@ def build_empirical_execution_evidence(
             reconciliation.observed_at if reconciliation is not None else None
         ),
         reconciliation_external_effect_found=(
-            reconciliation.external_effect_found if reconciliation is not None else None
+            reconciliation_external_effect_found
+        ),
+        reconciliation_external_receipt_id=(
+            reconciliation_external_receipt_id
         ),
         requested_odds=requested_odds,
         requested_stake=requested_stake,
@@ -961,7 +1245,7 @@ def build_empirical_execution_evidence(
     return evidence
 
 
-POPULATION_SCHEMA_VERSION = 4
+POPULATION_SCHEMA_VERSION = 11
 
 
 @dataclass(frozen=True, slots=True, weakref_slot=True, init=False)
@@ -985,15 +1269,31 @@ class EmpiricalExecutionPopulationEvidence:
     evaluation_protocol_authority_verified: bool
     evaluation_protocol_authority_status: str
     samples: tuple[EmpiricalExecutionEvidence, ...]
+    decision_count: int
+    plan_count: int
+    planned_action_count: int
+    attempted_action_count: int
     schema_version: int = POPULATION_SCHEMA_VERSION
 
     total_attempts: int = field(init=False)
+    unattempted_action_count: int = field(init=False)
+    retry_attempt_count: int = field(init=False)
+    submitted_attempt_count: int = field(init=False)
+    unsubmitted_attempt_count: int = field(init=False)
     state_counts: tuple[tuple[str, int], ...] = field(init=False)
     ledger_terminal_count: int = field(init=False)
     provider_verified_terminal_count: int = field(init=False)
     unverified_ledger_terminal_count: int = field(init=False)
     right_censored_count: int = field(init=False)
     provider_evidence_count: int = field(init=False)
+    submitted_request_identity_count: int = field(init=False)
+    provider_request_binding_count: int = field(init=False)
+    provider_acknowledgement_binding_count: int = field(init=False)
+    durable_acknowledgement_identity_count: int = field(init=False)
+    provider_bound_durable_ack_count: int = field(init=False)
+    reconciliation_evidence_count: int = field(init=False)
+    positive_reconciliation_count: int = field(init=False)
+    negative_reconciliation_count: int = field(init=False)
     provider_outcome_unverified_ack_count: int = field(init=False)
     provider_outcome_unverified_absence_count: int = field(init=False)
     provider_outcome_not_applicable_count: int = field(init=False)
@@ -1050,9 +1350,38 @@ class EmpiricalExecutionPopulationEvidence:
             raise EmpiricalExecutionEvidenceError(
                 "source_event_count must be positive int"
             )
-        if type(self.samples) is not tuple or not self.samples:
+        for name in (
+            "decision_count",
+            "plan_count",
+            "planned_action_count",
+        ):
+            value = getattr(self, name)
+            if type(value) is not int or value < 1:
+                raise EmpiricalExecutionEvidenceError(
+                    f"{name} must be positive int"
+                )
+        if (
+            type(self.attempted_action_count) is not int
+            or self.attempted_action_count < 0
+        ):
             raise EmpiricalExecutionEvidenceError(
-                "population evidence requires non-empty canonical sample tuple"
+                "attempted_action_count must be non-negative int"
+            )
+        if not (
+            self.decision_count
+            <= self.plan_count
+            <= self.planned_action_count
+        ):
+            raise EmpiricalExecutionEvidenceError(
+                "population decision/plan/action funnel is inconsistent"
+            )
+        if self.attempted_action_count > self.planned_action_count:
+            raise EmpiricalExecutionEvidenceError(
+                "attempted actions cannot exceed planned actions"
+            )
+        if type(self.samples) is not tuple:
+            raise EmpiricalExecutionEvidenceError(
+                "population samples must be canonical tuple"
             )
         if any(type(sample) is not EmpiricalExecutionEvidence for sample in self.samples):
             raise EmpiricalExecutionEvidenceError(
@@ -1088,6 +1417,23 @@ class EmpiricalExecutionPopulationEvidence:
                 )
 
         total = len(self.samples)
+        if total < self.attempted_action_count:
+            raise EmpiricalExecutionEvidenceError(
+                "attempt denominator cannot be smaller than attempted-action count"
+            )
+        unattempted_action_count = (
+            self.planned_action_count - self.attempted_action_count
+        )
+        retry_attempt_count = total - self.attempted_action_count
+        submitted_attempt_count = sum(
+            sample.submitted_at is not None for sample in self.samples
+        )
+        unsubmitted_attempt_count = total - submitted_attempt_count
+        if submitted_attempt_count > total:
+            raise EmpiricalExecutionEvidenceError(
+                "submitted attempts cannot exceed attempt denominator"
+            )
+
         counts = tuple(
             (
                 state.value,
@@ -1119,6 +1465,67 @@ class EmpiricalExecutionPopulationEvidence:
         provider_evidence_count = sum(
             sample.provider_evidence_id is not None for sample in self.samples
         )
+        submitted_request_identity_count = sum(
+            sample.submitted_request_sha256 is not None for sample in self.samples
+        )
+        provider_request_binding_count = sum(
+            sample.provider_evidence_request_sha256 is not None
+            for sample in self.samples
+        )
+        provider_acknowledgement_binding_count = sum(
+            sample.provider_evidence_acknowledgement_sha256 is not None
+            for sample in self.samples
+        )
+        durable_acknowledgement_identity_count = sum(
+            sample.acknowledgement_payload_sha256 is not None
+            for sample in self.samples
+        )
+        provider_bound_durable_ack_count = sum(
+            sample.provider_evidence_acknowledgement_sha256 is not None
+            and sample.acknowledgement_payload_sha256 is not None
+            for sample in self.samples
+        )
+        if (
+            provider_request_binding_count > submitted_request_identity_count
+            or provider_request_binding_count > provider_evidence_count
+        ):
+            raise EmpiricalExecutionEvidenceError(
+                "population provider-request bindings exceed durable provenance"
+            )
+        if provider_acknowledgement_binding_count > provider_evidence_count:
+            raise EmpiricalExecutionEvidenceError(
+                "population provider-ack bindings exceed provider evidence"
+            )
+        if durable_acknowledgement_identity_count != ledger_terminal_count:
+            raise EmpiricalExecutionEvidenceError(
+                "population durable acknowledgement identities must cover terminal attempts"
+            )
+        if (
+            provider_bound_durable_ack_count
+            > provider_acknowledgement_binding_count
+            or provider_bound_durable_ack_count
+            > durable_acknowledgement_identity_count
+        ):
+            raise EmpiricalExecutionEvidenceError(
+                "population exact provider/durable ACK overlap is inconsistent"
+            )
+
+        positive_reconciliation_count = sum(
+            sample.reconciliation_external_effect_found is True
+            for sample in self.samples
+        )
+        negative_reconciliation_count = sum(
+            sample.reconciliation_external_effect_found is False
+            for sample in self.samples
+        )
+        reconciliation_evidence_count = (
+            positive_reconciliation_count + negative_reconciliation_count
+        )
+        if reconciliation_evidence_count > total:
+            raise EmpiricalExecutionEvidenceError(
+                "population reconciliation evidence exceeds denominator"
+            )
+
         provider_outcome_unverified_ack_count = sum(
             sample.provider_outcome_verification_reason
             == PROVIDER_OUTCOME_UNVERIFIED_ACK
@@ -1177,6 +1584,22 @@ class EmpiricalExecutionPopulationEvidence:
             )
 
         object.__setattr__(self, "total_attempts", total)
+        object.__setattr__(
+            self,
+            "unattempted_action_count",
+            unattempted_action_count,
+        )
+        object.__setattr__(self, "retry_attempt_count", retry_attempt_count)
+        object.__setattr__(
+            self,
+            "submitted_attempt_count",
+            submitted_attempt_count,
+        )
+        object.__setattr__(
+            self,
+            "unsubmitted_attempt_count",
+            unsubmitted_attempt_count,
+        )
         object.__setattr__(self, "state_counts", counts)
         object.__setattr__(
             self,
@@ -1195,6 +1618,46 @@ class EmpiricalExecutionPopulationEvidence:
         )
         object.__setattr__(self, "right_censored_count", right_censored_count)
         object.__setattr__(self, "provider_evidence_count", provider_evidence_count)
+        object.__setattr__(
+            self,
+            "submitted_request_identity_count",
+            submitted_request_identity_count,
+        )
+        object.__setattr__(
+            self,
+            "provider_request_binding_count",
+            provider_request_binding_count,
+        )
+        object.__setattr__(
+            self,
+            "provider_acknowledgement_binding_count",
+            provider_acknowledgement_binding_count,
+        )
+        object.__setattr__(
+            self,
+            "durable_acknowledgement_identity_count",
+            durable_acknowledgement_identity_count,
+        )
+        object.__setattr__(
+            self,
+            "provider_bound_durable_ack_count",
+            provider_bound_durable_ack_count,
+        )
+        object.__setattr__(
+            self,
+            "reconciliation_evidence_count",
+            reconciliation_evidence_count,
+        )
+        object.__setattr__(
+            self,
+            "positive_reconciliation_count",
+            positive_reconciliation_count,
+        )
+        object.__setattr__(
+            self,
+            "negative_reconciliation_count",
+            negative_reconciliation_count,
+        )
         object.__setattr__(
             self,
             "provider_outcome_unverified_ack_count",
@@ -1297,7 +1760,35 @@ class EmpiricalExecutionPopulationEvidence:
             "sample_evidence_sha256s": [
                 sample.evidence_sha256 for sample in self.samples
             ],
+            "decision_count": self.decision_count,
+            "plan_count": self.plan_count,
+            "planned_action_count": self.planned_action_count,
+            "attempted_action_count": self.attempted_action_count,
+            "unattempted_action_count": self.unattempted_action_count,
+            "planned_action_attempt_rate": self._rate(
+                self.attempted_action_count,
+                self.planned_action_count,
+            ),
+            "unattempted_action_rate": self._rate(
+                self.unattempted_action_count,
+                self.planned_action_count,
+            ),
             "total_attempts": self.total_attempts,
+            "retry_attempt_count": self.retry_attempt_count,
+            "retry_attempt_rate": self._rate(
+                self.retry_attempt_count,
+                self.total_attempts,
+            ),
+            "submitted_attempt_count": self.submitted_attempt_count,
+            "unsubmitted_attempt_count": self.unsubmitted_attempt_count,
+            "submitted_attempt_rate": self._rate(
+                self.submitted_attempt_count,
+                self.total_attempts,
+            ),
+            "unsubmitted_attempt_rate": self._rate(
+                self.unsubmitted_attempt_count,
+                self.total_attempts,
+            ),
             "state_counts": state_counts,
             "state_rates": {
                 state: self._rate(count, self.total_attempts)
@@ -1330,6 +1821,54 @@ class EmpiricalExecutionPopulationEvidence:
             "provider_evidence_count": self.provider_evidence_count,
             "provider_evidence_rate": self._rate(
                 self.provider_evidence_count,
+                self.total_attempts,
+            ),
+            "submitted_request_identity_count": (
+                self.submitted_request_identity_count
+            ),
+            "submitted_request_identity_rate": self._rate(
+                self.submitted_request_identity_count,
+                self.total_attempts,
+            ),
+            "provider_request_binding_count": self.provider_request_binding_count,
+            "provider_request_binding_rate": self._rate(
+                self.provider_request_binding_count,
+                self.total_attempts,
+            ),
+            "provider_acknowledgement_binding_count": (
+                self.provider_acknowledgement_binding_count
+            ),
+            "provider_acknowledgement_binding_rate": self._rate(
+                self.provider_acknowledgement_binding_count,
+                self.total_attempts,
+            ),
+            "durable_acknowledgement_identity_count": (
+                self.durable_acknowledgement_identity_count
+            ),
+            "durable_acknowledgement_identity_rate": self._rate(
+                self.durable_acknowledgement_identity_count,
+                self.total_attempts,
+            ),
+            "provider_bound_durable_ack_count": (
+                self.provider_bound_durable_ack_count
+            ),
+            "provider_bound_durable_ack_rate": self._rate(
+                self.provider_bound_durable_ack_count,
+                self.total_attempts,
+            ),
+            "reconciliation_evidence_count": self.reconciliation_evidence_count,
+            "reconciliation_evidence_rate": self._rate(
+                self.reconciliation_evidence_count,
+                self.total_attempts,
+            ),
+            "positive_reconciliation_count": self.positive_reconciliation_count,
+            "positive_reconciliation_rate": self._rate(
+                self.positive_reconciliation_count,
+                self.total_attempts,
+            ),
+            "negative_reconciliation_count": self.negative_reconciliation_count,
+            "negative_reconciliation_rate": self._rate(
+                self.negative_reconciliation_count,
                 self.total_attempts,
             ),
             "provider_outcome_verification_counts": {
@@ -1388,6 +1927,10 @@ def _issue_empirical_execution_population_evidence(
     source_event_count: int,
     evaluation_protocol_sha256: str,
     samples: tuple[EmpiricalExecutionEvidence, ...],
+    decision_count: int,
+    plan_count: int,
+    planned_action_count: int,
+    attempted_action_count: int,
 ) -> EmpiricalExecutionPopulationEvidence:
     evidence = object.__new__(EmpiricalExecutionPopulationEvidence)
     object.__setattr__(evidence, "source_ledger_sha256", source_ledger_sha256)
@@ -1414,6 +1957,10 @@ def _issue_empirical_execution_population_evidence(
         EVALUATION_PROTOCOL_AUTHORITY_UNQUALIFIED,
     )
     object.__setattr__(evidence, "samples", samples)
+    object.__setattr__(evidence, "decision_count", decision_count)
+    object.__setattr__(evidence, "plan_count", plan_count)
+    object.__setattr__(evidence, "planned_action_count", planned_action_count)
+    object.__setattr__(evidence, "attempted_action_count", attempted_action_count)
     object.__setattr__(evidence, "schema_version", POPULATION_SCHEMA_VERSION)
     evidence.__post_init__()
     _register_issued_empirical_population(evidence)
@@ -1449,7 +1996,32 @@ def build_empirical_execution_population_evidence(
     except ExecutionLedgerIntegrityError:
         raise
 
+    plan_events = [
+        event
+        for event in events
+        if event.get("event_type") == EventType.PLAN_RESERVED.value
+    ]
+    decision_ids: set[str] = set()
+    plan_ids: set[str] = set()
+    planned_action_keys: set[tuple[str, str]] = set()
+    for event in plan_events:
+        plan = RealExecutionLedger._plan_from_dict(event["payload"]["plan"])
+        if plan.plan_id in plan_ids:
+            raise EmpiricalExecutionEvidenceUnavailable(
+                "verified snapshot contains duplicate plan reservation"
+            )
+        plan_ids.add(plan.plan_id)
+        decision_ids.add(plan.decision_id)
+        for action in plan.actions:
+            key = (plan.plan_id, action.action_id)
+            if key in planned_action_keys:
+                raise EmpiricalExecutionEvidenceUnavailable(
+                    "verified snapshot contains duplicate planned action"
+                )
+            planned_action_keys.add(key)
+
     attempt_ids: list[str] = []
+    attempted_action_keys: set[tuple[str, str]] = set()
     seen: set[str] = set()
     for event in events:
         if event.get("event_type") != EventType.ATTEMPT_RESERVED.value:
@@ -1461,10 +2033,17 @@ def build_empirical_execution_population_evidence(
             )
         seen.add(attempt_id)
         attempt_ids.append(attempt_id)
+        action_id = _text(event.get("action_id"), "action_id")
+        action_key = (_text(event.get("plan_id"), "plan_id"), action_id)
+        if action_key not in planned_action_keys:
+            raise EmpiricalExecutionEvidenceUnavailable(
+                "attempt reservation references action outside frozen plan funnel"
+            )
+        attempted_action_keys.add(action_key)
 
-    if not attempt_ids:
+    if not planned_action_keys:
         raise EmpiricalExecutionEvidenceUnavailable(
-            "verified snapshot contains no execution attempts"
+            "verified snapshot contains no planned execution actions"
         )
 
     samples = tuple(
@@ -1486,5 +2065,9 @@ def build_empirical_execution_population_evidence(
         source_event_count=initial_snapshot.event_count,
         evaluation_protocol_sha256=protocol_sha256,
         samples=samples,
+        decision_count=len(decision_ids),
+        plan_count=len(plan_ids),
+        planned_action_count=len(planned_action_keys),
+        attempted_action_count=len(attempted_action_keys),
     )
 

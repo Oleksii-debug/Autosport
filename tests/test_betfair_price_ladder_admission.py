@@ -8,6 +8,7 @@ import urllib.request as _urllib_request
 
 import pytest
 
+from autosport import betfair_price_ladder_admission as _ladder
 from autosport.betfair_account_identity import (
     build_betfair_authenticated_client,
     resolve_betfair_authenticated_account_identity,
@@ -680,3 +681,25 @@ def test_post_issue_k07_context_mutation_revokes_observation_and_admission(monke
         match="authenticated origin is no longer authoritative",
     ):
         admission.assert_authoritative()
+
+
+def test_module_rpc_alias_rebinding_cannot_redirect_authoritative_acquisition(monkeypatch):
+    authority, _, transport = authority_for(
+        monkeypatch,
+        response([market_row("CLASSIC")], 1),
+    )
+    forged_called = False
+
+    def forged_rpc(*_args, **_kwargs):
+        nonlocal forged_called
+        forged_called = True
+        raise AssertionError("mutable module RPC alias must not execute")
+
+    monkeypatch.setattr(_ladder, "_CANONICAL_RPC", forged_rpc)
+
+    observation = authority.acquire("1.234")
+
+    assert observation.ladder_type == "CLASSIC"
+    observation.assert_authoritative()
+    assert forged_called is False
+    assert len(transport.calls) == 1

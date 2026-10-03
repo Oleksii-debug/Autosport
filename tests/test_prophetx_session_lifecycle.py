@@ -899,3 +899,32 @@ def test_unavailable_access_token_rejects_lineage_claim(tmp_path):
             access_token_available=False,
             access_token_lineage_id=sha256(b"stale").hexdigest(),
         )
+
+
+@pytest.mark.parametrize(
+    "state",
+    [
+        ProphetXSessionState.EXPIRED,
+        ProphetXSessionState.NO_SESSION,
+    ],
+)
+def test_empty_terminal_state_cannot_hide_provider_slot_hold(tmp_path, state):
+    lifecycle = _lifecycle(tmp_path)
+    _active(lifecycle)
+    payload = json.loads(lifecycle.state_path.read_text(encoding="utf-8"))
+    payload["state"] = state.value
+    payload["session_lineage_id"] = None
+    payload["access_expires_at"] = None
+    payload["retry_not_before"] = None
+    # Keep the previously active provider-slot horizon to model contradictory
+    # persisted authority. A terminal-state label must not bypass that evidence.
+    lifecycle.state_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(
+        ProphetXSessionLifecycleError,
+        match="cannot carry session, slot, or retry evidence",
+    ):
+        lifecycle.begin_login(
+            now=NOW + timedelta(minutes=1),
+            access_token_available=False,
+        )

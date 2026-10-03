@@ -19,8 +19,9 @@ outcome resolver supplies that missing authority.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import InitVar, dataclass, field
 from decimal import Decimal
+from weakref import ReferenceType, ref
 
 from .real_execution_ledger import (
     AttemptState,
@@ -42,6 +43,8 @@ ACCEPTED_PRICE_NOT_APPLICABLE = "NOT_APPLICABLE"
 ACCEPTED_PRICE_ACKNOWLEDGED_UNVERIFIED = "ACKNOWLEDGED_UNVERIFIED"
 ACCEPTED_PRICE_UNKNOWN = "UNKNOWN"
 
+_QUOTE_CHAIN_EVIDENCE_ISSUANCE_TOKEN = object()
+
 
 class ExecutionQuoteChainError(RuntimeError):
     """Base error for quote-chain projection failures."""
@@ -51,14 +54,15 @@ class ExecutionQuoteChainUnavailable(ExecutionQuoteChainError):
     """Requested plan/attempt cannot be projected from canonical durable facts."""
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, weakref_slot=True)
 class ExecutionQuoteChainEvidence:
     """One immutable, snapshot-bound quote-chain diagnostic.
 
     The class intentionally exposes no caller-settable `chain_complete` or
-    `accepted_price_verified` field. With the current ledger schema both are
-    properties that remain false. This object is evidence about a missing
-    authority boundary, not a new execution or provider authority.
+    `accepted_price_verified` field. Exact request-binding fields may become
+    positive only on a canonical builder-issued projection; accepted-price and
+    full-chain authority remain false until a typed provider outcome authority
+    exists. This object is not a new execution or provider-write authority.
     """
 
     source_ledger_sha256: str
@@ -104,8 +108,10 @@ class ExecutionQuoteChainEvidence:
     accepted_price_status: str
 
     schema_version: int = SCHEMA_VERSION
+    _evidence_sha256: str = field(init=False, repr=False)
+    _issuance_token: InitVar[object | None] = None
 
-    def __post_init__(self) -> None:
+    def __post_init__(self, _issuance_token: object | None) -> None:
         if type(self.schema_version) is not int or self.schema_version != SCHEMA_VERSION:
             raise ExecutionQuoteChainError("unsupported quote-chain evidence schema")
         if type(self.source_event_count) is not int or self.source_event_count < 1:
@@ -224,6 +230,38 @@ class ExecutionQuoteChainEvidence:
                 "provider acknowledgement digest cannot match without acknowledgement"
             )
 
+        if _issuance_token is not _QUOTE_CHAIN_EVIDENCE_ISSUANCE_TOKEN:
+            raise ExecutionQuoteChainError(
+                "quote-chain evidence must be issued by canonical ledger projection"
+            )
+        object.__setattr__(
+            self,
+            "_evidence_sha256",
+            _digest(self.to_dict(include_evidence_sha256=False)),
+        )
+
+    def assert_projection_issued(self) -> None:
+        """Verify this object came from the canonical ledger projection builder."""
+
+        issued = _ISSUED_QUOTE_CHAIN_EVIDENCE.get(id(self))
+        try:
+            current_fingerprint = _digest(
+                self.to_dict(include_evidence_sha256=False)
+            )
+        except Exception as exc:
+            raise ExecutionQuoteChainError(
+                "quote-chain evidence is no longer canonical"
+            ) from exc
+        if (
+            issued is None
+            or issued[0]() is not self
+            or issued[1] != current_fingerprint
+            or self._evidence_sha256 != current_fingerprint
+        ):
+            raise ExecutionQuoteChainError(
+                "quote-chain evidence was not issued by canonical ledger projection"
+            )
+
     @property
     def submit_instruction_identity_bound(self) -> bool:
         """Whether a canonical exact submitted-request digest is durable."""
@@ -263,7 +301,8 @@ class ExecutionQuoteChainEvidence:
 
     @property
     def evidence_sha256(self) -> str:
-        return _digest(self.to_dict(include_evidence_sha256=False))
+        self.assert_projection_issued()
+        return self._evidence_sha256
 
     def to_dict(self, *, include_evidence_sha256: bool = True) -> dict[str, object]:
         payload: dict[str, object] = {
@@ -320,8 +359,30 @@ class ExecutionQuoteChainEvidence:
             "chain_complete": self.chain_complete,
         }
         if include_evidence_sha256:
-            payload["evidence_sha256"] = _digest(payload)
+            payload["evidence_sha256"] = self.evidence_sha256
         return payload
+
+
+_ISSUED_QUOTE_CHAIN_EVIDENCE: dict[
+    int, tuple[ReferenceType[ExecutionQuoteChainEvidence], str]
+] = {}
+
+
+def _register_issued_quote_chain_evidence(
+    evidence: ExecutionQuoteChainEvidence,
+) -> None:
+    identity = id(evidence)
+
+    def _discard(reference: ReferenceType[ExecutionQuoteChainEvidence]) -> None:
+        current = _ISSUED_QUOTE_CHAIN_EVIDENCE.get(identity)
+        if current is not None and current[0] is reference:
+            _ISSUED_QUOTE_CHAIN_EVIDENCE.pop(identity, None)
+
+    reference = ref(evidence, _discard)
+    _ISSUED_QUOTE_CHAIN_EVIDENCE[identity] = (
+        reference,
+        evidence._evidence_sha256,
+    )
 
 
 def build_execution_quote_chain_evidence(
@@ -427,7 +488,7 @@ def build_execution_quote_chain_evidence(
         else:
             accepted_price_status = ACCEPTED_PRICE_NOT_APPLICABLE
 
-    return ExecutionQuoteChainEvidence(
+    evidence = ExecutionQuoteChainEvidence(
         source_ledger_sha256=view.snapshot_sha256,
         source_event_count=view.event_count,
         plan_id=view.plan.plan_id,
@@ -466,4 +527,7 @@ def build_execution_quote_chain_evidence(
         acknowledged_odds=acknowledged_odds,
         acknowledged_stake=acknowledged_stake,
         accepted_price_status=accepted_price_status,
+        _issuance_token=_QUOTE_CHAIN_EVIDENCE_ISSUANCE_TOKEN,
     )
+    _register_issued_quote_chain_evidence(evidence)
+    return evidence

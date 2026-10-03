@@ -1018,3 +1018,70 @@ def test_result_digest_rejects_oversize_vector_before_materialization() -> None:
         assert "stake vector exceeds supported size" in str(exc)
     else:
         raise AssertionError("oversize stake vector entered canonical authority digest")
+
+
+class _ForgedInt(int):
+    pass
+
+
+def test_result_digest_requires_exact_bounded_effective_sample_size() -> None:
+    policy = _policy()
+    book = PaperBook("100")
+    context = _context(1)
+    evidence = _single_evidence(policy, book, context)
+
+    for invalid in (_ForgedInt(1), 10_001):
+        try:
+            risk_of_ruin_result_sha256(
+                evidence,
+                kind="single",
+                evaluator_source_sha256=EVALUATOR_SOURCE,
+                dataset_snapshot_id="risk-dataset",
+                dataset_manifest_sha256=DATASET_MANIFEST,
+                effective_sample_size=invalid,
+                evaluation_available_at=EVALUATED_AT,
+            )
+        except ValueError as exc:
+            assert "effective_sample_size must be an exact integer" in str(exc)
+        else:
+            raise AssertionError(
+                "unsupported effective sample size entered authority digest"
+            )
+
+
+def test_result_digest_rejects_unbounded_dataset_and_evidence_identity() -> None:
+    policy = _policy()
+    book = PaperBook("100")
+    context = _context(1)
+    canonical = _single_evidence(policy, book, context)
+
+    try:
+        risk_of_ruin_result_sha256(
+            canonical,
+            kind="single",
+            evaluator_source_sha256=EVALUATOR_SOURCE,
+            dataset_snapshot_id="d" * 513,
+            dataset_manifest_sha256=DATASET_MANIFEST,
+            effective_sample_size=SAMPLE_SIZE,
+            evaluation_available_at=EVALUATED_AT,
+        )
+    except ValueError as exc:
+        assert "dataset_snapshot_id must be bounded canonical text" in str(exc)
+    else:
+        raise AssertionError("oversize dataset identity entered authority digest")
+
+    oversized_evidence = replace(canonical, evidence_id="e" * 513)
+    try:
+        risk_of_ruin_result_sha256(
+            oversized_evidence,
+            kind="single",
+            evaluator_source_sha256=EVALUATOR_SOURCE,
+            dataset_snapshot_id="risk-dataset",
+            dataset_manifest_sha256=DATASET_MANIFEST,
+            effective_sample_size=SAMPLE_SIZE,
+            evaluation_available_at=EVALUATED_AT,
+        )
+    except ValueError as exc:
+        assert "risk-of-ruin evidence_id must be bounded canonical text" in str(exc)
+    else:
+        raise AssertionError("oversize evidence identity entered authority digest")

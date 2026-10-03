@@ -313,6 +313,30 @@ def test_runtime_tick_projects_fresh_economics_without_ui_thread_session_reopen(
     assert tmp_path not in controller._recovery_required_workspaces
 
 
+def test_same_cycle_economic_snapshot_is_valid_for_degraded_provider_tick(
+    tmp_path: Path,
+) -> None:
+    controller = _controller(tmp_path)
+    controller._product_runtime_identity = (
+        tmp_path,
+        "session-1",
+        "source-1",
+    )
+    controller._product_runtime_economic_snapshot = _snapshot(
+        tmp_path,
+        cycle_index=5,
+    )
+
+    assert controller._apply_product_runtime_economic_snapshot(
+        _snapshot(tmp_path, cycle_index=5),
+        cycle_index=5,
+        session_id="session-1",
+        source_id="source-1",
+    )
+    assert controller._product_runtime_economic_projection()["cycle_index"] == 5
+    assert tmp_path not in controller._recovery_required_workspaces
+
+
 def test_lower_runtime_economic_cycle_fails_closed(tmp_path: Path) -> None:
     controller = _controller(tmp_path)
     controller.product_worker.busy = True

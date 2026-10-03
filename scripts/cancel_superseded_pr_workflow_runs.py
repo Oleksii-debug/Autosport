@@ -470,7 +470,11 @@ class GitHubApi:
             raise RuntimeError("canonical cancellation request executable is unavailable")
 
         def cancel(self, run_id: int) -> None:
-            run_id = _require_positive_int(run_id, field="run id")
+            # The run id is the irreversible effect coordinate. Validate the primitive
+            # directly inside the closure-built authority boundary so rebinding the
+            # module-level compatibility helper cannot redirect a trusted cancellation.
+            if type(run_id) is not int or run_id <= 0:
+                raise CancellationError("invalid run id")
             bound_request = getattr(self, "_request", None)
             if (
                 getattr(request_impl, "__code__", None) is not request_impl_code

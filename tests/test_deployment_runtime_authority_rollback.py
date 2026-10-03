@@ -61,6 +61,45 @@ def _append(store: DeploymentRuntimeAuthorityStore, index: int) -> str:
     return record.runtime_authority_id
 
 
+@pytest.mark.parametrize(
+    "attribute",
+    (
+        "path",
+        "workspace",
+        "_lock",
+        "_authority",
+        "_semantic_binding_sha256",
+    ),
+)
+def test_runtime_authority_bindings_are_write_once(
+    tmp_path: Path,
+    attribute: str,
+) -> None:
+    path = tmp_path / "deployment-runtime-authority.json"
+    store = DeploymentRuntimeAuthorityStore.initialize_pristine(
+        path,
+        authority_root=_authority_root(tmp_path),
+    )
+    original = getattr(store, attribute)
+
+    with pytest.raises(
+        AttributeError,
+        match="authority bindings are write-once",
+    ):
+        setattr(store, attribute, object())
+    assert getattr(store, attribute) is original
+
+    with pytest.raises(
+        AttributeError,
+        match="authority bindings are write-once",
+    ):
+        delattr(store, attribute)
+    assert getattr(store, attribute) is original
+
+    _append(store, 0)
+    assert len(store.records()) == 1
+
+
 def test_runtime_authority_store_rejects_subclass_constructor_dispatch(
     tmp_path: Path,
 ) -> None:

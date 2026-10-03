@@ -987,6 +987,73 @@ class ParlayApiProductSourceTests(unittest.TestCase):
 
             self.assertEqual(hostile_calls, [])
 
+    def test_bound_store_connect_code_mutation_fails_before_hostile_dispatch(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory) / "workspace"
+            source = ParlayApiProductSource(
+                _Provider([_batch(cursor="snapshot-1")]),
+                workspace=workspace,
+                authority_root=Path(directory) / "authority",
+                lawful_terms_ref="terms:parlayapi:v1",
+                retention_ref="retention:parlayapi:v1",
+                clock=lambda: "2026-09-20T17:34:02+00:00",
+            )
+            store = CollectorDeltaStore(
+                workspace / "collector_deltas.json",
+                max_bytes=4 * 1024 * 1024,
+            )
+            source.bind_collector_store(store)
+            original_connect = CollectorDeltaStore._connect
+            original_code = original_connect.__code__
+
+            def hostile_connect(self):
+                raise AssertionError("hostile in-place _connect code executed")
+
+            try:
+                original_connect.__code__ = hostile_connect.__code__
+                with self.assertRaisesRegex(
+                    ProductSourceStateError,
+                    "durable-history dispatch was replaced",
+                ):
+                    source.fetch_catalog_page(None)
+            finally:
+                original_connect.__code__ = original_code
+
+    def test_bound_store_classmethod_code_mutation_fails_before_hostile_dispatch(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory) / "workspace"
+            source = ParlayApiProductSource(
+                _Provider([_batch(cursor="snapshot-1")]),
+                workspace=workspace,
+                authority_root=Path(directory) / "authority",
+                lawful_terms_ref="terms:parlayapi:v1",
+                retention_ref="retention:parlayapi:v1",
+                clock=lambda: "2026-09-20T17:34:02+00:00",
+            )
+            store = CollectorDeltaStore(
+                workspace / "collector_deltas.json",
+                max_bytes=4 * 1024 * 1024,
+            )
+            source.bind_collector_store(store)
+            descriptor = vars(CollectorDeltaStore)["_path_file_identity"]
+            original_path_identity = descriptor.__func__
+            original_code = original_path_identity.__code__
+
+            def hostile_path_identity(cls, path):
+                raise AssertionError(
+                    "hostile in-place _path_file_identity code executed"
+                )
+
+            try:
+                original_path_identity.__code__ = hostile_path_identity.__code__
+                with self.assertRaisesRegex(
+                    ProductSourceStateError,
+                    "durable-history dispatch was replaced",
+                ):
+                    source.fetch_catalog_page(None)
+            finally:
+                original_path_identity.__code__ = original_code
+
     def test_bound_store_class_method_replacement_fails_before_hostile_dispatch(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory) / "workspace"

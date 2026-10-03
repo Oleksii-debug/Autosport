@@ -4,6 +4,7 @@ import unittest
 from decimal import Decimal
 from unittest.mock import patch
 
+import autosport.portfolio as portfolio_module
 from autosport.domain import TicketStatus, TicketLeg
 from autosport.paper import PaperBook
 from autosport.portfolio import PortfolioEngine
@@ -68,10 +69,7 @@ class PortfolioScenarioSnapshotIntegrityTests(unittest.TestCase):
 
     def test_direct_scenario_profit_uses_frozen_open_ticket_cut(self) -> None:
         book, ticket, leg = self._open_ticket()
-        original_profit = __import__(
-            "autosport.portfolio",
-            fromlist=["_scenario_profit_in_context"],
-        )._scenario_profit_in_context
+        original_profit = portfolio_module._scenario_profit_in_context
 
         def settle_source_then_calculate(tickets, winning_quote_keys):
             book.settle(
@@ -96,6 +94,37 @@ class PortfolioScenarioSnapshotIntegrityTests(unittest.TestCase):
             Decimal("10"),
             "direct scenario profit must use the OPEN-ticket cut captured before evaluation",
         )
+
+    def test_direct_scenario_profit_freezes_winner_set_before_ticket_snapshot(self) -> None:
+        _book, ticket, leg = self._open_ticket()
+        winners = {leg.quote_key}
+        original_snapshot = portfolio_module._snapshot_open_tickets_for_analysis
+
+        def snapshot_then_mutate_winners(tickets):
+            snapshot = original_snapshot(tickets)
+            winners.clear()
+            return snapshot
+
+        with patch(
+            "autosport.portfolio._snapshot_open_tickets_for_analysis",
+            side_effect=snapshot_then_mutate_winners,
+        ):
+            profit = PortfolioEngine.scenario_profit([ticket], winners)
+
+        self.assertEqual(winners, set())
+        self.assertEqual(
+            profit,
+            Decimal("10"),
+            "scenario winners must be frozen before mutable ticket snapshot work",
+        )
+
+    def test_direct_scenario_profit_rejects_malformed_winner_collection(self) -> None:
+        _book, ticket, leg = self._open_ticket()
+
+        with self.assertRaisesRegex(ValueError, "exact set"):
+            PortfolioEngine.scenario_profit([ticket], (leg.quote_key,))
+        with self.assertRaisesRegex(ValueError, "non-empty string"):
+            PortfolioEngine.scenario_profit([ticket], {""})
 
     def test_snapshot_fails_closed_if_settlement_crosses_capture_window(self) -> None:
         book = PaperBook("100")

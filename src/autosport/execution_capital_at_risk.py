@@ -742,3 +742,55 @@ def resolve_execution_capital_at_risk(
         )
     _issue(evidence)
     return evidence
+
+
+def _install_capital_risk_dispatch_authority() -> None:
+    raw_resolve = resolve_execution_capital_at_risk
+    raw_resolve_code = raw_resolve.__code__
+    raw_currentness = ExecutionCapitalAtRiskEvidence.assert_issued_current
+    raw_currentness_code = raw_currentness.__code__
+    require_reader = _require_ledger_read_authority
+    read_execution_view = _READ_VERIFIED_EXECUTION_VIEW
+    read_snapshot = _READ_VERIFIED_SNAPSHOT
+    exact_globals = globals
+    exact_getattr = getattr
+
+    def require_dispatch() -> None:
+        namespace = exact_globals()
+        if (
+            namespace.get("_require_ledger_read_authority") is not require_reader
+            or namespace.get("_READ_VERIFIED_EXECUTION_VIEW")
+            is not read_execution_view
+            or namespace.get("_READ_VERIFIED_SNAPSHOT") is not read_snapshot
+            or exact_getattr(raw_resolve, "__code__", None)
+            is not raw_resolve_code
+            or exact_getattr(raw_currentness, "__code__", None)
+            is not raw_currentness_code
+        ):
+            raise ExecutionCapitalAtRiskError(
+                "capital-risk ledger read dispatch changed"
+            )
+
+    def authoritative_resolve(
+        ledger: RealExecutionLedger,
+        plan_id: str,
+    ) -> ExecutionCapitalAtRiskEvidence:
+        require_dispatch()
+        value = raw_resolve(ledger, plan_id)
+        require_dispatch()
+        return value
+
+    def authoritative_currentness(
+        self: ExecutionCapitalAtRiskEvidence,
+        ledger: RealExecutionLedger,
+    ) -> None:
+        require_dispatch()
+        raw_currentness(self, ledger)
+        require_dispatch()
+
+    globals()["resolve_execution_capital_at_risk"] = authoritative_resolve
+    ExecutionCapitalAtRiskEvidence.assert_issued_current = authoritative_currentness
+
+
+_install_capital_risk_dispatch_authority()
+del _install_capital_risk_dispatch_authority

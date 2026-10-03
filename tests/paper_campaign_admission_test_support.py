@@ -6,6 +6,8 @@ from decimal import Decimal
 from pathlib import Path
 from unittest.mock import patch
 
+from campaign_forward_admission_test_support import build_forward_admission_verification
+
 from autosport import _paper_execution_decision_origin as origin_module
 from autosport import _paper_execution_decision_origin_instance_guard as origin_instance_guard
 from autosport.agent_loop import AgentLoopRuntime
@@ -37,11 +39,11 @@ from autosport.paper_settlement_learning import PaperSettlementLearningBridge
 from autosport.real_execution_ledger import ExecutionAction, ExecutionPlan
 from autosport.risk import PaperRiskPolicy
 
-T0 = "2026-09-20T05:00:00+00:00"
-T1 = "2026-09-20T05:00:01+00:00"
-T2 = "2026-09-20T05:00:05+00:00"
-T3 = "2026-09-20T05:00:10+00:00"
-T4 = "2026-09-20T05:01:00+00:00"
+T0 = "2100-01-01T07:00:00+00:00"
+T1 = "2100-01-01T07:00:01+00:00"
+T2 = "2100-01-01T07:00:05+00:00"
+T3 = "2100-01-01T07:00:10+00:00"
+T4 = "2100-01-01T07:01:00+00:00"
 
 
 def _config() -> PaperExecutionModelConfig:
@@ -137,6 +139,8 @@ class AdmissionFixture:
         seed_execution_decision: bool = True,
         decision_plan_fingerprint: str | None = None,
     ) -> None:
+        self.base = base
+        self._forward_verification_kwargs: dict[str, object] | None = None
         self.workspace = base / "workspace"
         self.workspace.mkdir()
         self.authority = base / "authority"
@@ -152,7 +156,7 @@ class AdmissionFixture:
             config_id="admission-config",
             data_id="admission-data",
             protocol_id="admission-protocol",
-            cutoff_ts="2026-09-20T05:02:00+00:00",
+            cutoff_ts="2100-01-01T07:02:00+00:00",
             seed=41,
         )
         self.environment = CausalLearningEnvironment(
@@ -445,8 +449,15 @@ class AdmissionFixture:
                 ),
             )
 
-    def admit(self, coordinator: PaperCampaignAdmissionCoordinator, **overrides):
-        values = {
+    def forward_verification_kwargs(self) -> dict[str, object]:
+        if self._forward_verification_kwargs is None:
+            self._forward_verification_kwargs = build_forward_admission_verification(
+                self.base / "forward-verification"
+            )
+        return dict(self._forward_verification_kwargs)
+
+    def admission_values(self) -> dict[str, object]:
+        return {
             "admission_id": "admission-1",
             "observation": self.observation,
             "action_type": "PAPER_PROPOSAL",
@@ -460,5 +471,9 @@ class AdmissionFixture:
             "execution_attempt_id": self.execution_attempt_id,
             "execution_ticket_id": self.execution_ticket_id,
         }
+
+    def admit(self, coordinator: PaperCampaignAdmissionCoordinator, **overrides):
+        values = self.admission_values()
+        values.update(self.forward_verification_kwargs())
         values.update(overrides)
         return coordinator.admit(**values)

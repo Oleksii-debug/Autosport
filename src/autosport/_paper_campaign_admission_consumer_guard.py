@@ -11,10 +11,12 @@ read to authorize admission.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from pathlib import Path
 from threading import RLock
 from weakref import WeakKeyDictionary
 
+from . import campaign_forward_universe_cycle_binding as _campaign_forward
 from .decision_ledger import JsonlDecisionLedger
 from .paper_campaign_admission import (
     PaperCampaignAdmissionCoordinator,
@@ -45,7 +47,7 @@ def _sealed_tuple_from_callable(candidate: object):
             continue
         if (
             type(value) is tuple
-            and len(value) == 14
+            and len(value) == 18
             and value[0] == _SEAL_MARKER
         ):
             return value
@@ -68,6 +70,10 @@ def _initial_seal():
         PaperExecutionLedger.events,
         WeakKeyDictionary(),
         RLock(),
+        PaperCampaignAdmissionCoordinator.admit,
+        _campaign_forward,
+        _campaign_forward.CampaignForwardEvidenceVerification,
+        _campaign_forward.verify_campaign_forward_evidence,
     )
 
 
@@ -86,10 +92,43 @@ def _build_guard(seal):
     execution_events = seal[11]
     authority_bindings = seal[12]
     authority_bindings_lock = seal[13]
+    original_admit = seal[14]
+    forward_module = seal[15]
+    forward_verification_type = seal[16]
+    forward_verify = seal[17]
     runtime_methods = _RUNTIME_METHODS
     bridge_methods = _BRIDGE_METHODS
     path_cls = Path
     rlock_factory = RLock
+    mapping_cls = Mapping
+    exact_type = type
+    exact_dict = dict
+    exact_tuple = tuple
+    exact_len = len
+    isinstance_fn = isinstance
+    object_getattribute = object.__getattribute__
+    forward_payload_key = "campaign_forward_verification"
+    forward_parameter_key = "campaign_forward_verification_sha256"
+    forward_scope = "CYCLE_BOUND_PROVIDER_UNIVERSE_STRUCTURAL_ONLY"
+    forward_fields = (
+        "schema_version",
+        "campaign_id",
+        "protocol_sha256",
+        "structural_result_sha256",
+        "structural_ok",
+        "structural_codes",
+        "terminal_root_sha256",
+        "candidate_count",
+        "campaign_cycle_authority_sha256",
+        "prospective_evaluation_plan_sha256",
+        "universe_sha256",
+        "membership_sha256",
+        "verification_scope",
+        "provider_universe_authority_resolved",
+        "promotion_ready",
+        "real_money_ready",
+        "receipt_sha256",
+    )
 
     def has_instance_shadow(value: object, method_name: str) -> bool:
         try:
@@ -202,6 +241,13 @@ def _build_guard(seal):
         if seal[0] != seal_marker:
             raise RuntimeError("PAPER admission executable authority seal changed")
         value = original_getattribute(self, name)
+        if name == "admit":
+            reject_instance_shadow(self, "admit", "PAPER campaign admission")
+            if coordinator_cls.admit is not guarded_admit:
+                raise PaperCampaignAdmissionError(
+                    "PAPER campaign admission entry point changed after installation"
+                )
+            return value
         if name not in {"decision_ledger", "execution_ledger", "runtime"}:
             return value
         binding = binding_for_optional(self)
@@ -443,11 +489,144 @@ def _build_guard(seal):
             )
             return result
 
+    def guarded_admit(
+        self: PaperCampaignAdmissionCoordinator,
+        *,
+        campaign_forward_verification,
+        campaign_forward_precommit_locator,
+        campaign_forward_collector_store,
+        campaign_forward_source_spec,
+        campaign_forward_cycle_receipt,
+        campaign_forward_provider_evidence_store,
+        campaign_forward_universe_store,
+        campaign_forward_event_lifecycle,
+        campaign_forward_evidence,
+        **kwargs,
+    ):
+        """Re-resolve exact forward evidence before any admission PREPARED mutation."""
+
+        if seal[0] != seal_marker:
+            raise RuntimeError("PAPER admission executable authority seal changed")
+        reject_instance_shadow(self, "admit", "PAPER campaign admission")
+        if coordinator_cls.admit is not guarded_admit:
+            raise PaperCampaignAdmissionError(
+                "PAPER campaign admission entry point changed after installation"
+            )
+
+        def require_forward_surface() -> None:
+            if (
+                forward_module.CampaignForwardEvidenceVerification
+                is not forward_verification_type
+                or forward_module.verify_campaign_forward_evidence is not forward_verify
+            ):
+                raise PaperCampaignAdmissionError(
+                    "campaign forward verification authority surface changed"
+                )
+
+        def forward_snapshot(value: object) -> tuple[tuple[str, object], ...]:
+            return exact_tuple(
+                (name, object_getattribute(value, name))
+                for name in forward_fields
+            )
+
+        require_forward_surface()
+        if exact_type(campaign_forward_verification) is not forward_verification_type:
+            raise TypeError(
+                "campaign_forward_verification must be exact "
+                "CampaignForwardEvidenceVerification"
+            )
+        carried_snapshot = forward_snapshot(campaign_forward_verification)
+
+        resolved = forward_verify(
+            precommit_locator=campaign_forward_precommit_locator,
+            collector_store=campaign_forward_collector_store,
+            source_spec=campaign_forward_source_spec,
+            cycle_receipt=campaign_forward_cycle_receipt,
+            provider_evidence_store=campaign_forward_provider_evidence_store,
+            universe_store=campaign_forward_universe_store,
+            event_lifecycle=campaign_forward_event_lifecycle,
+            evidence=campaign_forward_evidence,
+        )
+
+        require_forward_surface()
+        reject_instance_shadow(self, "admit", "PAPER campaign admission")
+        if coordinator_cls.admit is not guarded_admit:
+            raise PaperCampaignAdmissionError(
+                "PAPER campaign admission entry point changed during forward verification"
+            )
+        if exact_type(resolved) is not forward_verification_type:
+            raise PaperCampaignAdmissionError(
+                "campaign forward verifier returned noncanonical receipt"
+            )
+
+        resolved_snapshot = forward_snapshot(resolved)
+        if resolved_snapshot != carried_snapshot:
+            raise PaperCampaignAdmissionError(
+                "carried campaign forward verification changed on canonical re-resolution"
+            )
+        resolved_values = exact_dict(resolved_snapshot)
+        if (
+            resolved_values["structural_ok"] is not True
+            or resolved_values["structural_codes"] != ("PASS",)
+            or resolved_values["verification_scope"] != forward_scope
+            or resolved_values["provider_universe_authority_resolved"] is not True
+            or resolved_values["promotion_ready"] is not False
+            or resolved_values["real_money_ready"] is not False
+        ):
+            raise PaperCampaignAdmissionError(
+                "campaign forward verification is not exact structural PASS/non-promotion truth"
+            )
+
+        decision_payload = kwargs.get("decision_payload")
+        if decision_payload is None:
+            payload = {}
+        elif isinstance_fn(decision_payload, mapping_cls):
+            payload = exact_dict(decision_payload)
+        else:
+            raise TypeError("decision_payload must be a mapping or None")
+        if forward_payload_key in payload:
+            raise PaperCampaignAdmissionError(
+                "decision_payload attempts to replace campaign forward verification authority"
+            )
+        payload[forward_payload_key] = exact_dict(resolved_snapshot)
+        kwargs["decision_payload"] = payload
+
+        action_parameters = kwargs.get("action_parameters", ())
+        if exact_type(action_parameters) is not exact_tuple:
+            raise TypeError("action_parameters must be a canonical tuple")
+        for item in action_parameters:
+            if (
+                exact_type(item) is exact_tuple
+                and exact_len(item) == 2
+                and item[0] == forward_parameter_key
+            ):
+                raise PaperCampaignAdmissionError(
+                    "action_parameters attempt to replace campaign forward verification authority"
+                )
+        kwargs["action_parameters"] = exact_tuple(
+            (*action_parameters, (forward_parameter_key, resolved_values["receipt_sha256"]))
+        )
+
+        require_forward_surface()
+        reject_instance_shadow(self, "admit", "PAPER campaign admission")
+        if coordinator_cls.admit is not guarded_admit:
+            raise PaperCampaignAdmissionError(
+                "PAPER campaign admission entry point changed before admission commit"
+            )
+        result = original_admit(self, **kwargs)
+        require_forward_surface()
+        if coordinator_cls.admit is not guarded_admit:
+            raise PaperCampaignAdmissionError(
+                "PAPER campaign admission entry point changed during admission"
+            )
+        return result
+
     return (
         guarded_init,
         guarded_getattribute,
         guarded_resolved_execution_decision_id,
         guarded_execution_attempt,
+        guarded_admit,
         reject_instance_shadow,
         assert_decision_ledger_class_method,
         assert_execution_ledger_class_method,
@@ -471,6 +650,7 @@ def _install() -> None:
             PaperCampaignAdmissionCoordinator.__getattribute__,
             PaperCampaignAdmissionCoordinator._resolved_execution_decision_id,
             PaperCampaignAdmissionCoordinator._execution_attempt,
+            PaperCampaignAdmissionCoordinator.admit,
         ):
             if _sealed_tuple_from_callable(candidate) is not seal:
                 raise RuntimeError(
@@ -482,6 +662,7 @@ def _install() -> None:
         guarded_getattribute,
         guarded_resolved_execution_decision_id,
         guarded_execution_attempt,
+        guarded_admit,
         reject_instance_shadow,
         assert_decision_ledger_class_method,
         assert_execution_ledger_class_method,
@@ -494,6 +675,7 @@ def _install() -> None:
     global _ORIGINAL_GETATTRIBUTE
     global _ORIGINAL_RESOLVED_EXECUTION_DECISION_ID
     global _ORIGINAL_EXECUTION_ATTEMPT
+    global _ORIGINAL_ADMIT
     global _PINNED_DECISION_VERIFIED_RECORDS
     global _PINNED_EXECUTION_EVENTS
     global _AUTHORITY_BINDINGS
@@ -505,6 +687,7 @@ def _install() -> None:
     _ORIGINAL_GETATTRIBUTE = seal[7]
     _ORIGINAL_RESOLVED_EXECUTION_DECISION_ID = seal[8]
     _ORIGINAL_EXECUTION_ATTEMPT = seal[9]
+    _ORIGINAL_ADMIT = seal[14]
     _PINNED_DECISION_VERIFIED_RECORDS = seal[10]
     _PINNED_EXECUTION_EVENTS = seal[11]
     _AUTHORITY_BINDINGS = WeakKeyDictionary()
@@ -522,6 +705,7 @@ def _install() -> None:
         guarded_resolved_execution_decision_id
     )
     PaperCampaignAdmissionCoordinator._execution_attempt = guarded_execution_attempt
+    PaperCampaignAdmissionCoordinator.admit = guarded_admit
     setattr(PaperCampaignAdmissionCoordinator, _GUARD_MARKER, True)
 
 

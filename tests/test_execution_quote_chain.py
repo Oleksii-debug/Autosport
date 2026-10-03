@@ -694,3 +694,86 @@ def test_issued_quote_chain_mutation_cannot_mint_submit_binding(tmp_path) -> Non
     ):
         _ = evidence.evidence_sha256
 
+
+def test_quote_chain_builder_rejects_projection_read_helper_rebinding(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    ledger = _submitted(tmp_path)
+
+    def hostile_read(ledger, plan_id):
+        raise AssertionError("hostile projection read helper executed")
+
+    monkeypatch.setattr(
+        execution_quote_chain,
+        "_read_canonical_verified_execution_view",
+        hostile_read,
+    )
+
+    with pytest.raises(
+        ExecutionQuoteChainUnavailable,
+        match="projection dependency authority is unavailable",
+    ):
+        _project(ledger)
+
+
+def test_quote_chain_builder_rejects_projection_digest_rebinding(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    ledger = _submitted(tmp_path)
+
+    def hostile_digest(payload):
+        raise AssertionError("hostile digest helper executed")
+
+    monkeypatch.setattr(
+        execution_quote_chain,
+        "_digest",
+        hostile_digest,
+    )
+
+    with pytest.raises(
+        ExecutionQuoteChainUnavailable,
+        match="projection dependency authority is unavailable",
+    ):
+        _project(ledger)
+
+
+def test_quote_chain_builder_rejects_in_place_projection_helper_code_rebinding(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    ledger = _submitted(tmp_path)
+    helper = execution_quote_chain._read_canonical_verified_execution_view
+
+    def hostile_read(ledger, plan_id):
+        raise AssertionError("hostile projection read helper code executed")
+
+    monkeypatch.setattr(helper, "__code__", hostile_read.__code__)
+
+    with pytest.raises(
+        ExecutionQuoteChainUnavailable,
+        match="projection dependency authority is unavailable",
+    ):
+        _project(ledger)
+
+
+def test_quote_chain_evidence_constructor_and_field_descriptors_are_sealed() -> None:
+    evidence_type = execution_quote_chain.ExecutionQuoteChainEvidence
+
+    for name in (
+        "__init__",
+        "__post_init__",
+        "submission_instruction_sha256",
+        "provider_request_sha256",
+        "acknowledgement_binding_matches",
+        "_evidence_sha256",
+    ):
+        original = evidence_type.__dict__[name]
+        with pytest.raises(
+            TypeError,
+            match="quote-chain evidence authority surface is sealed",
+        ):
+            setattr(evidence_type, name, object())
+        assert evidence_type.__dict__[name] is original
+

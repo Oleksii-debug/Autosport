@@ -57,12 +57,15 @@ class PaperValueUncertaintyAbstentionTests(unittest.TestCase):
         )
 
     @staticmethod
-    def _event() -> MarketEvent:
+    def _event(
+        *,
+        decimal_odds: Decimal = Decimal("2"),
+    ) -> MarketEvent:
         return MarketEvent(
             event_id="event-uncertainty",
             market_id="market-uncertainty",
             selection_id="selection-uncertainty",
-            decimal_odds=Decimal("2"),
+            decimal_odds=decimal_odds,
             observed_ts="2026-09-17T15:00:00+00:00",
             source_id="provider-1",
             sequence=1,
@@ -188,6 +191,32 @@ class PaperValueUncertaintyAbstentionTests(unittest.TestCase):
             forecast,
             quote,
             predictive_eligibility=evidence,
+        )
+
+    @staticmethod
+    def _resolver_authorized_ref(
+        root: Path,
+        event: MarketEvent,
+        forecast: ForecastRecord,
+    ) -> ForecastRef:
+        policy = _PREDICTIVE_HELPERS._policy()
+        qualification = _PREDICTIVE_HELPERS._qualification()
+        registry, _ = _PREDICTIVE_HELPERS._promoted_registry(
+            root,
+            qualification,
+            policy,
+        )
+        quote = QuoteRef.from_market_event(
+            event,
+            market_snapshot_hash=forecast.market_snapshot_hash,
+        )
+        return resolve_authoritative_forecast_ref(
+            registry,
+            forecast,
+            quote,
+            decision_time=event.observed_ts,
+            policy=policy,
+            qualification=qualification,
         )
 
     def test_goal_active_paper_value_abstains_when_uncertainty_erases_robust_edge(
@@ -333,27 +362,12 @@ class PaperValueUncertaintyAbstentionTests(unittest.TestCase):
             uncertainty=Decimal("0.04"),
             market_snapshot_hash="a" * 64,
         )
-        quote = QuoteRef.from_market_event(
-            event,
-            market_snapshot_hash=forecast.market_snapshot_hash,
-        )
-        policy = _PREDICTIVE_HELPERS._policy()
-        qualification = _PREDICTIVE_HELPERS._qualification()
-
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            registry, _ = _PREDICTIVE_HELPERS._promoted_registry(
+            authorized_ref = self._resolver_authorized_ref(
                 root,
-                qualification,
-                policy,
-            )
-            authorized_ref = resolve_authoritative_forecast_ref(
-                registry,
+                event,
                 forecast,
-                quote,
-                decision_time=event.observed_ts,
-                policy=policy,
-                qualification=qualification,
             )
             context, ledger_path = self._context(root, event)
 
@@ -379,6 +393,49 @@ class PaperValueUncertaintyAbstentionTests(unittest.TestCase):
                 payload["expected_profit_per_unit"],
                 "0.12",
             )
+
+    def test_resolver_minted_uncertainty_erases_positive_point_edge_before_material_action(
+        self,
+    ) -> None:
+        goal = self._goal()
+        event = self._event(decimal_odds=Decimal("1.80"))
+        forecast = self._forecast(
+            event,
+            uncertainty=Decimal("0.10"),
+        )
+
+        point_ev = forecast.probability * event.decimal_odds - Decimal("1")
+        self.assertGreater(point_ev, 0)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            authorized_ref = self._resolver_authorized_ref(
+                root,
+                event,
+                forecast,
+            )
+            context, ledger_path = self._context(root, event)
+            agent = self._agent(
+                goal,
+                forecast,
+                predictive_ref=authorized_ref,
+            )
+
+            qualified_probability = agent._qualified_forecast_probability(
+                forecast,
+                event,
+                context,
+            )
+            self.assertEqual(qualified_probability, Decimal("0.50"))
+            self.assertLessEqual(
+                qualified_probability * event.decimal_odds - Decimal("1"),
+                0,
+            )
+
+            agent.on_market_event(event, context)
+
+            self.assertEqual(context.paper_book.tickets, {})
+            self.assertFalse(ledger_path.exists())
 
     def test_predictive_reference_mapping_is_snapshotted_and_key_bound(self) -> None:
         event = self._event()

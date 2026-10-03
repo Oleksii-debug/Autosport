@@ -226,6 +226,10 @@ class PaperRealizedDrawdownEvidence:
             )
         if type(self.points) is not tuple or not self.points:
             raise PaperDrawdownEvidenceError("drawdown evidence requires a non-empty path")
+        if any(type(point) is not PaperRealizedEquityPoint for point in self.points):
+            raise PaperDrawdownEvidenceError(
+                "drawdown evidence path requires canonical equity points"
+            )
         if tuple(point.sequence for point in self.points) != tuple(range(len(self.points))):
             raise PaperDrawdownEvidenceError(
                 "drawdown evidence points must use contiguous canonical sequence"
@@ -253,22 +257,26 @@ class PaperRealizedDrawdownEvidence:
                 raise PaperDrawdownEvidenceError(
                     "drawdown evidence initial action may appear only at path origin"
                 )
-            assert point.ticket_id is not None
+            ticket_id = point.ticket_id
+            if type(ticket_id) is not str or not ticket_id:
+                raise PaperDrawdownEvidenceError(
+                    "drawdown evidence lifecycle point requires canonical ticket identity"
+                )
             if point.action == "open":
-                if point.ticket_id in opened_ticket_ids:
+                if ticket_id in opened_ticket_ids:
                     raise PaperDrawdownEvidenceError(
                         "drawdown evidence ticket may open only once"
                     )
-                opened_ticket_ids.add(point.ticket_id)
+                opened_ticket_ids.add(ticket_id)
                 continue
             if (
-                point.ticket_id not in opened_ticket_ids
-                or point.ticket_id in settled_ticket_ids
+                ticket_id not in opened_ticket_ids
+                or ticket_id in settled_ticket_ids
             ):
                 raise PaperDrawdownEvidenceError(
                     "drawdown evidence settlement must follow one canonical open"
                 )
-            settled_ticket_ids.add(point.ticket_id)
+            settled_ticket_ids.add(ticket_id)
             settlement_times_complete = (
                 settlement_times_complete and point.event_time is not None
             )
@@ -292,11 +300,15 @@ class PaperRealizedDrawdownEvidence:
 
         point_ids = {point.point_id for point in self.points}
         if self.historical_max_drawdown_amount > 0:
-            assert self.historical_max_drawdown_peak_id is not None
-            assert self.historical_max_drawdown_trough_id is not None
+            peak_id = self.historical_max_drawdown_peak_id
+            trough_id = self.historical_max_drawdown_trough_id
             if (
-                self.historical_max_drawdown_peak_id not in point_ids
-                or self.historical_max_drawdown_trough_id not in point_ids
+                type(peak_id) is not str
+                or not peak_id
+                or type(trough_id) is not str
+                or not trough_id
+                or peak_id not in point_ids
+                or trough_id not in point_ids
             ):
                 raise PaperDrawdownEvidenceError(
                     "drawdown evidence loss episode identity is not in the path"
@@ -304,10 +316,7 @@ class PaperRealizedDrawdownEvidence:
             point_indexes = {
                 point.point_id: index for index, point in enumerate(self.points)
             }
-            if (
-                point_indexes[self.historical_max_drawdown_peak_id]
-                >= point_indexes[self.historical_max_drawdown_trough_id]
-            ):
+            if point_indexes[peak_id] >= point_indexes[trough_id]:
                 raise PaperDrawdownEvidenceError(
                     "drawdown evidence loss episode order is invalid"
                 )

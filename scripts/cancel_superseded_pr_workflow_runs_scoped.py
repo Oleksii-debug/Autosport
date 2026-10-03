@@ -1115,7 +1115,42 @@ def cancel_superseded_explicit_pr_runs(
             current_run_id=current_run_id,
             cancel_same_head=not integration_capable,
         )
+        # The selector is a convenience projection, not an irreversible-effect
+        # authority. Revalidate every returned id against this function's already
+        # frozen snapshot and live qualification before any run-identity reread or
+        # cancellation. A rebound selector may omit work, but it cannot widen the
+        # cancellation set, redirect another PR group, or select the triggering run.
+        if type(selected) is not tuple:
+            continue
+        validated_selected: list[int] = []
+        selection_seen: set[int] = set()
+        selection_valid = True
         for run_id in selected:
+            if (
+                type(run_id) is not int
+                or run_id <= 0
+                or run_id == current_run_id
+                or run_id in selection_seen
+            ):
+                selection_valid = False
+                break
+            candidate = explicit_singletons_by_id.get(run_id)
+            if (
+                candidate is None
+                or candidate.workflow_name != workflow_name
+                or candidate.pr_numbers != (pr_number,)
+                or (
+                    integration_capable
+                    and candidate.head_sha == qualification_head
+                )
+            ):
+                selection_valid = False
+                break
+            selection_seen.add(run_id)
+            validated_selected.append(run_id)
+        if not selection_valid:
+            continue
+        for run_id in validated_selected:
             if run_id in cancelled_ids:
                 continue
             candidate = explicit_singletons_by_id[run_id]

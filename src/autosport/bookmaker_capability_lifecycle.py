@@ -628,6 +628,12 @@ class CapabilityEvidenceJournal:
                 predecessor.committed_at, "predecessor.committed_at"
             ):
                 raise CapabilityEvidenceError("revalidation must commit after predecessor")
+            if _time(evidence.observed_at, "observed_at") <= _time(
+                predecessor.observed_at, "predecessor.observed_at"
+            ):
+                raise CapabilityEvidenceError(
+                    "successor evidence must be observed after predecessor"
+                )
         self._evidence[evidence_id] = evidence
         return evidence_id
 

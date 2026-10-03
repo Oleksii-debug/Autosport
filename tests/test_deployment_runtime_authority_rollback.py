@@ -3900,3 +3900,167 @@ def test_runtime_authority_store_dispatch_seal_rejects_method_default_replacemen
     finally:
         target.__defaults__ = original_defaults
 
+
+def test_runtime_authority_rejects_coordinated_construction_digest_root_rebinding(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "deployment-runtime-authority.json"
+    store = DeploymentRuntimeAuthorityStore.initialize_pristine(
+        path,
+        authority_root=_authority_root(tmp_path),
+    )
+    hostile_calls: list[object] = []
+
+    def hostile_digest(value: object) -> str:
+        hostile_calls.append(value)
+        return "a" * 64
+
+    monkeypatch.setattr(deployment_runtime_authority, "_digest", hostile_digest)
+    monkeypatch.setattr(
+        deployment_runtime_authority,
+        "_CANONICAL_DIGEST",
+        hostile_digest,
+    )
+    monkeypatch.setattr(
+        deployment_runtime_authority,
+        "_CANONICAL_DIGEST_CODE",
+        hostile_digest.__code__,
+    )
+
+    with pytest.raises(
+        DeploymentRuntimeAuthorityError,
+        match="construction helper dispatch was replaced",
+    ):
+        store._configure(path, authority_root=_authority_root(tmp_path))
+
+    assert hostile_calls == []
+
+
+def test_runtime_authority_rejects_coordinated_state_digest_root_rebinding(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "deployment-runtime-authority.json"
+    store = DeploymentRuntimeAuthorityStore.initialize_pristine(
+        path,
+        authority_root=_authority_root(tmp_path),
+    )
+    hostile_calls: list[object] = []
+
+    def hostile_encoder(value: object) -> str:
+        hostile_calls.append(value)
+        return "{}"
+
+    monkeypatch.setattr(
+        deployment_runtime_authority,
+        "_canonical_json",
+        hostile_encoder,
+    )
+    monkeypatch.setattr(
+        deployment_runtime_authority,
+        "_CANONICAL_JSON_ENCODER",
+        hostile_encoder,
+    )
+    monkeypatch.setattr(
+        deployment_runtime_authority,
+        "_CANONICAL_JSON_ENCODER_CODE",
+        hostile_encoder.__code__,
+    )
+
+    with pytest.raises(
+        DeploymentRuntimeAuthorityError,
+        match="state-digest dispatch was replaced",
+    ):
+        store._state_sha256(
+            {
+                "schema": STORE_SCHEMA,
+                "schema_version": STORE_SCHEMA_VERSION,
+                "records": [],
+            }
+        )
+
+    assert hostile_calls == []
+
+
+def test_runtime_authority_rejects_coordinated_transaction_id_root_rebinding(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "deployment-runtime-authority.json"
+    store = DeploymentRuntimeAuthorityStore.initialize_pristine(
+        path,
+        authority_root=_authority_root(tmp_path),
+    )
+    hostile_calls: list[None] = []
+
+    class HostileUuid:
+        hex = "0" * 32
+
+    def hostile_uuid4() -> HostileUuid:
+        hostile_calls.append(None)
+        return HostileUuid()
+
+    monkeypatch.setattr(
+        deployment_runtime_authority.uuid,
+        "uuid4",
+        hostile_uuid4,
+    )
+    monkeypatch.setattr(
+        deployment_runtime_authority,
+        "_CANONICAL_UUID4",
+        hostile_uuid4,
+    )
+    monkeypatch.setattr(
+        deployment_runtime_authority,
+        "_CANONICAL_UUID4_CODE",
+        hostile_uuid4.__code__,
+    )
+
+    with pytest.raises(
+        DeploymentRuntimeAuthorityError,
+        match="transaction-id dispatch was replaced",
+    ):
+        store._new_transaction_id()
+
+    assert hostile_calls == []
+
+
+def test_runtime_authority_rejects_coordinated_publication_finalizer_root_rebinding(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "deployment-runtime-authority.json"
+    store = DeploymentRuntimeAuthorityStore.initialize_pristine(
+        path,
+        authority_root=_authority_root(tmp_path),
+    )
+    hostile_calls: list[Path] = []
+
+    def hostile_finalizer(target: Path) -> None:
+        hostile_calls.append(target)
+
+    monkeypatch.setattr(
+        deployment_runtime_authority,
+        "_durably_finalize_published_path",
+        hostile_finalizer,
+    )
+    monkeypatch.setattr(
+        deployment_runtime_authority,
+        "_CANONICAL_DURABLE_PUBLICATION_FINALIZER",
+        hostile_finalizer,
+    )
+    monkeypatch.setattr(
+        deployment_runtime_authority,
+        "_CANONICAL_DURABLE_PUBLICATION_FINALIZER_CODE",
+        hostile_finalizer.__code__,
+    )
+
+    with pytest.raises(
+        DeploymentRuntimeAuthorityError,
+        match="publication finalizer dispatch was replaced",
+    ):
+        store._finalize_published_path(path)
+
+    assert hostile_calls == []
+

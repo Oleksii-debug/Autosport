@@ -157,7 +157,14 @@ def test_admission_rejects_lock_validator_dependency_rebinding(tmp_path):
     assert persisted.tickets == {}
 
 
-def test_admission_rejects_workspace_path_rebinding_before_mutation(tmp_path):
+@pytest.mark.parametrize(
+    "method_name",
+    ["resolve", "__truediv__", "lstat", "iterdir", "exists"],
+)
+def test_admission_rejects_workspace_path_rebinding_before_mutation(
+    tmp_path,
+    method_name,
+):
     book = PaperBook("100")
     book.save(tmp_path / "paper_book.json")
     policy = PaperRiskPolicy(
@@ -166,17 +173,18 @@ def test_admission_rejects_workspace_path_rebinding_before_mutation(tmp_path):
         minimum_cash_reserve_fraction=Decimal("0"),
     )
     candidate = _leg("workspace-path-dispatch")
-    original_resolve = Path.resolve
+    had_own_attribute = method_name in Path.__dict__
+    original_local = Path.__dict__.get(method_name)
     hostile_called = False
 
-    def hostile_resolve(self, *args, **kwargs):
+    def hostile_path_method(*args, **kwargs):
         nonlocal hostile_called
-        del self, args, kwargs
+        del args, kwargs
         hostile_called = True
-        return tmp_path
+        raise AssertionError("mutated Path method executed")
 
     try:
-        Path.resolve = hostile_resolve
+        setattr(Path, method_name, hostile_path_method)
         with pytest.raises(
             RuntimeError,
             match="economic admission workspace path authority changed",
@@ -191,7 +199,10 @@ def test_admission_rejects_workspace_path_rebinding_before_mutation(tmp_path):
                 placed_at="2026-10-03T06:30:00Z",
             )
     finally:
-        Path.resolve = original_resolve
+        if had_own_attribute:
+            setattr(Path, method_name, original_local)
+        else:
+            delattr(Path, method_name)
 
     assert hostile_called is False
     persisted = PaperBook.load(tmp_path / "paper_book.json")

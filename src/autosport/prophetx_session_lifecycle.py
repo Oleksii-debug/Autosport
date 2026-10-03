@@ -530,7 +530,10 @@ class ProphetXSessionLifecycle:
                         )
                     if current.state is ProphetXSessionState.RENEWING:
                         uncertainty_deadline = self._renewal_uncertainty_deadline(current)
-                        if current.attempt_id in self._owned_attempts:
+                        if (
+                            current.attempt_id in self._owned_attempts
+                            and timestamp < uncertainty_deadline
+                        ):
                             return ProphetXLoginAdmission(
                                 action=ProphetXLoginAdmissionAction.WAIT_FOR_EXISTING_RENEWAL,
                                 snapshot=current,
@@ -544,6 +547,8 @@ class ProphetXSessionLifecycle:
                                 snapshot=current,
                                 retry_at=uncertainty_deadline,
                             )
+                        if current.attempt_id is not None:
+                            self._owned_attempts.discard(current.attempt_id)
                         raise ProphetXSessionLifecycleError(
                             "stale renewal ambiguity must re-enter login admission"
                         )
@@ -956,7 +961,10 @@ class ProphetXSessionLifecycle:
 
         if current.state is ProphetXSessionState.RENEWING:
             uncertainty_deadline = self._renewal_uncertainty_deadline(current)
-            if current.attempt_id in self._owned_attempts:
+            if (
+                current.attempt_id in self._owned_attempts
+                and now < uncertainty_deadline
+            ):
                 return ProphetXLoginAdmission(
                     action=ProphetXLoginAdmissionAction.WAIT_FOR_EXISTING_RENEWAL,
                     snapshot=current,
@@ -968,6 +976,8 @@ class ProphetXSessionLifecycle:
                     snapshot=current,
                     retry_at=uncertainty_deadline,
                 )
+            if current.attempt_id is not None:
+                self._owned_attempts.discard(current.attempt_id)
             return self._grant_login(
                 now,
                 generation=current.generation + 1,

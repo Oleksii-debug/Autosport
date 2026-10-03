@@ -16,9 +16,6 @@ from enum import Enum
 import hashlib
 import json
 import os
-import threading
-from types import MappingProxyType
-import weakref
 
 from . import account_snapshot_acquisition as _account_acquisition
 from .account_snapshot_acquisition import (
@@ -57,7 +54,6 @@ from . import supervised_execution as _supervised_execution
 from .supervised_execution import (
     BoundSupervisedExecutionPlan,
     SupervisedExecutionError,
-    assert_bound_supervised_execution_plan_authoritative,
 )
 from . import workspace_lock as _workspace_lock
 from .workspace_lock import WorkspaceEconomicLock
@@ -325,16 +321,6 @@ _BOUND_SUPERVISED_BINDING_SHA256_CODE = getattr(
     "__code__",
     None,
 )
-_BOUND_SUPERVISED_PLAN_WITNESS = getattr(
-    _supervised_execution,
-    "_bound_plan_witness",
-    None,
-)
-_BOUND_SUPERVISED_PLAN_WITNESS_CODE = getattr(
-    _BOUND_SUPERVISED_PLAN_WITNESS,
-    "__code__",
-    None,
-)
 _BOUND_SUPERVISED_DIGEST = getattr(_supervised_execution, "_digest", None)
 _BOUND_SUPERVISED_DIGEST_CODE = getattr(
     _BOUND_SUPERVISED_DIGEST,
@@ -354,14 +340,6 @@ _BOUND_SUPERVISED_HASHLIB_SHA256 = getattr(
 _BOUND_SUPERVISED_PLAN_VERIFY = BoundSupervisedExecutionPlan.verify_binding
 _BOUND_SUPERVISED_PLAN_VERIFY_CODE = getattr(
     _BOUND_SUPERVISED_PLAN_VERIFY,
-    "__code__",
-    None,
-)
-_ASSERT_BOUND_SUPERVISED_PLAN_AUTHORITY = (
-    assert_bound_supervised_execution_plan_authoritative
-)
-_ASSERT_BOUND_SUPERVISED_PLAN_AUTHORITY_CODE = getattr(
-    _ASSERT_BOUND_SUPERVISED_PLAN_AUTHORITY,
     "__code__",
     None,
 )
@@ -642,16 +620,12 @@ def _canonical_denomination_dispatch(
     _bound_type=_BOUND_SUPERVISED_PLAN_TYPE,
     _bound_binding_sha=_BOUND_SUPERVISED_BINDING_SHA256,
     _bound_binding_sha_code=_BOUND_SUPERVISED_BINDING_SHA256_CODE,
-    _bound_witness=_BOUND_SUPERVISED_PLAN_WITNESS,
-    _bound_witness_code=_BOUND_SUPERVISED_PLAN_WITNESS_CODE,
     _bound_digest=_BOUND_SUPERVISED_DIGEST,
     _bound_digest_code=_BOUND_SUPERVISED_DIGEST_CODE,
     _bound_json_dumps=_BOUND_SUPERVISED_JSON_DUMPS,
     _bound_sha256=_BOUND_SUPERVISED_HASHLIB_SHA256,
     _bound_verify=_BOUND_SUPERVISED_PLAN_VERIFY,
     _bound_verify_code=_BOUND_SUPERVISED_PLAN_VERIFY_CODE,
-    _bound_assert=_ASSERT_BOUND_SUPERVISED_PLAN_AUTHORITY,
-    _bound_assert_code=_ASSERT_BOUND_SUPERVISED_PLAN_AUTHORITY_CODE,
     _lock_type=_WORKSPACE_ECONOMIC_LOCK_TYPE,
     _lock_file_name=_WORKSPACE_ECONOMIC_LOCK_FILE_NAME,
     _lock_init=_WORKSPACE_ECONOMIC_LOCK_INIT,
@@ -687,11 +661,6 @@ def _canonical_denomination_dispatch(
         vars(live_bound_type).get("verify_binding")
         if live_bound_type is _bound_type
         else None
-    )
-    live_bound_assert = getattr(
-        _supervised_execution,
-        "assert_bound_supervised_execution_plan_authoritative",
-        None,
     )
     live_lock_type = getattr(_workspace_lock, "WorkspaceEconomicLock", None)
     live_lock_init = (
@@ -773,9 +742,6 @@ def _canonical_denomination_dispatch(
         or getattr(_supervised_execution, "_bound_binding_sha256", None)
         is not _bound_binding_sha
         or getattr(_bound_binding_sha, "__code__", None) is not _bound_binding_sha_code
-        or getattr(_supervised_execution, "_bound_plan_witness", None)
-        is not _bound_witness
-        or getattr(_bound_witness, "__code__", None) is not _bound_witness_code
         or getattr(_supervised_execution, "_digest", None) is not _bound_digest
         or getattr(_bound_digest, "__code__", None) is not _bound_digest_code
         or getattr(getattr(_supervised_execution, "json", None), "dumps", None)
@@ -784,10 +750,6 @@ def _canonical_denomination_dispatch(
         is not _bound_sha256
         or live_bound_verify is not _bound_verify
         or getattr(_bound_verify, "__code__", None) is not _bound_verify_code
-        or live_bound_assert is not _bound_assert
-        or globals().get("assert_bound_supervised_execution_plan_authoritative")
-        is not _bound_assert
-        or getattr(_bound_assert, "__code__", None) is not _bound_assert_code
         or live_lock_type is not _lock_type
         or globals().get("WorkspaceEconomicLock") is not _lock_type
         or vars(live_lock_type).get("FILE_NAME") != _lock_file_name
@@ -821,7 +783,6 @@ def _canonical_denomination_dispatch(
         _provenance,
         _bound_type,
         _bound_verify,
-        _bound_assert,
         _lock_type,
     )
 
@@ -1473,7 +1434,10 @@ class ProductInternalHeadroomReservation:
 
     @property
     def product_internal_reservation_proven(self) -> bool:
-        return _reservation_is_issued(self)
+        # No process-local Python object registry can prove product issuance under the
+        # repository's same-process reflection threat model.  Durable ledger state is
+        # the economic authority; this convenience object deliberately grants none.
+        return False
 
 
 def _reservation_digest(value: ProductInternalHeadroomReservation) -> str:
@@ -1606,7 +1570,7 @@ def _require_live_balance(
 def _validated_bound_plan_map(
     bound_plans: tuple[BoundSupervisedExecutionPlan, ...],
 ) -> dict[str, BoundSupervisedExecutionPlan]:
-    _, _, _, bound_type, verify_binding, assert_bound_authoritative, _ = (
+    _, _, _, bound_type, verify_binding, _ = (
         _canonical_denomination_dispatch()
     )
     if type(bound_plans) is not tuple or not bound_plans:
@@ -1621,10 +1585,9 @@ def _validated_bound_plan_map(
             )
         try:
             verify_binding(bound)
-            assert_bound_authoritative(bound)
         except SupervisedExecutionError as exc:
             raise ProviderAccountHeadroomUnsupported(
-                "bound supervised execution plan lacks canonical product issuance authority"
+                "bound supervised execution plan lacks canonical structural binding"
             ) from exc
         plan_id = bound.execution_plan.plan_id
         if plan_id in result:
@@ -1772,7 +1735,7 @@ def _require_plan_denomination(
         raise ProviderAccountHeadroomUnsupported(
             "relevant execution plan lacks exact supervised denomination binding"
         )
-    _, _, _, bound_type, verify_binding, assert_bound_authoritative, _ = (
+    _, _, _, bound_type, verify_binding, _ = (
         _canonical_denomination_dispatch()
     )
     if type(bound) is not bound_type:
@@ -1781,10 +1744,9 @@ def _require_plan_denomination(
         )
     try:
         verify_binding(bound)
-        assert_bound_authoritative(bound)
     except SupervisedExecutionError as exc:
         raise ProviderAccountHeadroomUnsupported(
-            "relevant supervised plan binding lacks current product issuance authority"
+            "relevant supervised plan binding lacks canonical structural authority"
         ) from exc
     if (
         bound.economic_goal_contract_sha256 != economic_goal_contract_sha256
@@ -2224,6 +2186,8 @@ def reserve_observed_provider_headroom(
     intents: tuple[OpportunityIntent, ...] = (),
     _digest_authority=_assert_headroom_digest_authority,
     _digest_authority_code=getattr(_assert_headroom_digest_authority, "__code__", None),
+    _assessment_digest_authority=_assessment_digest,
+    _assessment_digest_code=getattr(_assessment_digest, "__code__", None),
     _generation_lock=_current_balance_generation_lock,
     _generation_lock_code=getattr(_current_balance_generation_lock, "__code__", None),
     _generation_lock_wrapped=getattr(_current_balance_generation_lock, "__wrapped__", None),
@@ -2257,6 +2221,14 @@ def reserve_observed_provider_headroom(
         )
     _digest_authority()
     if (
+        globals().get("_assessment_digest") is not _assessment_digest_authority
+        or getattr(_assessment_digest_authority, "__code__", None)
+        is not _assessment_digest_code
+    ):
+        raise ProviderAccountHeadroomError(
+            "canonical headroom assessment digest authority changed"
+        )
+    if (
         globals().get("_current_balance_generation_lock") is not _generation_lock
         or getattr(_generation_lock, "__code__", None) is not _generation_lock_code
         or getattr(_generation_lock, "__wrapped__", None) is not _generation_lock_wrapped
@@ -2280,6 +2252,20 @@ def reserve_observed_provider_headroom(
         attempt_state,
     ) = _canonical_ledger_dispatch()
     attempt_id = _text(attempt_id, "attempt_id")
+    if type(assessment) is not ProviderAccountHeadroomAssessment:
+        raise ProviderAccountHeadroomError(
+            "assessment must be exact ProviderAccountHeadroomAssessment"
+        )
+    try:
+        expected_evidence_sha256 = _assessment_digest_authority(assessment)
+    except (ProviderAccountHeadroomError, TypeError, ValueError) as exc:
+        raise ProviderAccountHeadroomError(
+            "headroom assessment identity is invalid"
+        ) from exc
+    if assessment.evidence_sha256 != expected_evidence_sha256:
+        raise ProviderAccountHeadroomError(
+            "headroom assessment digest does not match exact assessment state"
+        )
     if type(acquired) is not AuthoritativeAccountSnapshot:
         raise ProviderAccountHeadroomError(
             "account evidence must be exact AuthoritativeAccountSnapshot"
@@ -2300,26 +2286,19 @@ def reserve_observed_provider_headroom(
         prior_exists = True
 
     if not prior_exists:
-        if assessment.decision is not HeadroomDecision.SUFFICIENT_LOWER_BOUND:
-            raise ProviderAccountHeadroomUnsupported(
-                "new internal reservation requires proven sufficient lower-bound headroom"
-            )
         now = _read_headroom_utc_now()
-        _, current_currency, _, _ = _require_live_balance(acquired, now=now)
-        if current_currency != assessment.currency:
-            raise ProviderAccountHeadroomStale(
-                "provider account denomination changed after headroom assessment"
-            )
-        if now >= _timestamp(assessment.expires_at, "assessment expires_at"):
-            raise ProviderAccountHeadroomStale(
-                "headroom assessment expired before reservation"
-            )
+        (
+            current_available,
+            current_currency,
+            _current_acquired_at,
+            current_balance_observed_at,
+        ) = _require_live_balance(acquired, now=now)
         bound_by_plan_id = _validated_bound_plan_map(bound_plans)
         intent_denomination_by_identity = _validated_intent_denomination_map(intents)
         workspace = _canonical_ledger_workspace(ledger)
-        # New product-internal capital consumption must keep the exact provider
-        # BALANCE_READ generation current through the ledger CAS. The helper acquires
-        # the workspace economic lock first, then the provider-generation hold.
+        # New product-internal capital consumption must re-derive the entire
+        # economically material assessment from exact live source truth while holding
+        # both the economic workspace and exact BALANCE_READ generation through CAS.
         with _generation_lock(workspace, acquired):
             (
                 current_goal_sha256,
@@ -2328,10 +2307,6 @@ def reserve_observed_provider_headroom(
                 ledger,
                 provider_currency=current_currency,
             )
-            if current_goal_sha256 != assessment.economic_goal_contract_sha256:
-                raise ProviderAccountHeadroomStale(
-                    "economic-goal denomination authority changed after assessment"
-                )
             current_snapshot = verified_snapshot(ledger)
             if (
                 current_snapshot.sha256 != assessment.ledger_snapshot_sha256
@@ -2346,6 +2321,30 @@ def reserve_observed_provider_headroom(
                 raise ProviderAccountHeadroomStale(
                     "target execution plan disappeared after headroom assessment"
                 ) from exc
+            if (
+                target_view.snapshot_sha256 != current_snapshot.sha256
+                or target_view.event_count != current_snapshot.event_count
+            ):
+                raise ProviderAccountHeadroomStale(
+                    "execution ledger changed while resolving reservation target"
+                )
+            action = _find_action(target_view, assessment.action_id)
+            if action.bookmaker_id != "betfair" or action.side != "BACK":
+                raise ProviderAccountHeadroomUnsupported(
+                    "current provider-account headroom reservation supports Betfair BACK only"
+                )
+            if (action.bookmaker_id, action.account_id) != (
+                acquired.receipt.venue_id,
+                acquired.receipt.account_id,
+            ):
+                raise ProviderAccountHeadroomUnsupported(
+                    "target action provider/account mismatches live balance acquisition"
+                )
+            proposed = _decimal(
+                action.requested_stake,
+                "proposed Betfair BACK liability",
+                positive=True,
+            )
             target_binding = _require_plan_denomination(
                 target_view,
                 bound_by_plan_id=bound_by_plan_id,
@@ -2353,8 +2352,8 @@ def reserve_observed_provider_headroom(
                 economic_goal_contract_sha256=current_goal_sha256,
                 economic_goal_bankroll_id=current_goal_bankroll_id,
                 provider_currency=current_currency,
-                provider_id=assessment.provider_id,
-                account_id=assessment.account_id,
+                provider_id=action.bookmaker_id,
+                account_id=action.account_id,
             )
             (
                 definitely_unreflected,
@@ -2362,8 +2361,8 @@ def reserve_observed_provider_headroom(
                 liability_bindings,
             ) = _resolve_account_liability_lattice(
                 ledger,
-                provider_id=assessment.provider_id,
-                account_id=assessment.account_id,
+                provider_id=action.bookmaker_id,
+                account_id=action.account_id,
                 expected_snapshot_sha256=current_snapshot.sha256,
                 expected_event_count=current_snapshot.event_count,
                 bound_by_plan_id=bound_by_plan_id,
@@ -2372,21 +2371,109 @@ def reserve_observed_provider_headroom(
                 economic_goal_bankroll_id=current_goal_bankroll_id,
                 provider_currency=current_currency,
             )
-            if (
-                definitely_unreflected
-                != assessment.definitely_unreflected_product_liability
-                or unknown_reflection
-                != assessment.unknown_reflection_product_liability
-                or _denomination_authority_sha256(
-                    currency=current_currency,
-                    economic_goal_contract_sha256=current_goal_sha256,
-                    economic_goal_bankroll_id=current_goal_bankroll_id,
-                    plan_bindings=(target_binding, *liability_bindings),
-                )
-                != assessment.denomination_authority_sha256
-            ):
+            denomination_authority_sha256 = _denomination_authority_sha256(
+                currency=current_currency,
+                economic_goal_contract_sha256=current_goal_sha256,
+                economic_goal_bankroll_id=current_goal_bankroll_id,
+                plan_bindings=(target_binding, *liability_bindings),
+            )
+            upper_headroom = _subtract_floor_zero(
+                current_available,
+                definitely_unreflected,
+            )
+            lower_headroom = _subtract_floor_zero(
+                upper_headroom,
+                unknown_reflection,
+            )
+            decision = _classify(
+                lower_headroom,
+                upper_headroom,
+                proposed,
+            )
+            action_fingerprint = _canonical_digest(
+                {
+                    "plan_fingerprint": target_view.plan_fingerprint,
+                    "action": action.to_dict(),
+                    "currency": current_currency,
+                    "economic_goal_contract_sha256": current_goal_sha256,
+                    "denomination_authority_sha256": denomination_authority_sha256,
+                }
+            )
+            action_expiry = _timestamp(action.expires_at, "action expires_at")
+            expiry = min(
+                action_expiry,
+                current_balance_observed_at + _PRODUCT_MAX_ACCOUNT_SNAPSHOT_AGE,
+            )
+            if now >= expiry:
                 raise ProviderAccountHeadroomStale(
-                    "denomination or liability authority changed after assessment"
+                    "target quote or provider-account observation expired before reservation"
+                )
+
+            canonical_source = (
+                action.bookmaker_id,
+                action.account_id,
+                current_currency,
+                current_goal_sha256,
+                denomination_authority_sha256,
+                acquired.receipt.acquisition_id,
+                acquired.receipt.snapshot_sha256,
+                acquired.receipt.acquired_at,
+                acquired.snapshot.balance.observed_at,
+                expiry.isoformat(),
+                current_snapshot.sha256,
+                current_snapshot.event_count,
+                target_view.plan.plan_id,
+                action.action_id,
+                action_fingerprint,
+                proposed,
+                current_available,
+                definitely_unreflected,
+                unknown_reflection,
+                lower_headroom,
+                upper_headroom,
+                decision,
+                False,
+                False,
+                False,
+                False,
+                _SCHEMA_VERSION,
+            )
+            assessment_source = (
+                assessment.provider_id,
+                assessment.account_id,
+                assessment.currency,
+                assessment.economic_goal_contract_sha256,
+                assessment.denomination_authority_sha256,
+                assessment.acquisition_id,
+                assessment.acquisition_snapshot_sha256,
+                assessment.acquired_at,
+                assessment.balance_observed_at,
+                assessment.expires_at,
+                assessment.ledger_snapshot_sha256,
+                assessment.ledger_event_count,
+                assessment.plan_id,
+                assessment.action_id,
+                assessment.action_fingerprint,
+                assessment.proposed_liability,
+                assessment.provider_available_to_bet,
+                assessment.definitely_unreflected_product_liability,
+                assessment.unknown_reflection_product_liability,
+                assessment.lower_headroom,
+                assessment.upper_headroom,
+                assessment.decision,
+                assessment.provider_atomicity_proven,
+                assessment.provider_balance_generation_cas_proven,
+                assessment.execution_authority,
+                assessment.real_money_readiness,
+                assessment.schema_version,
+            )
+            if assessment_source != canonical_source:
+                raise ProviderAccountHeadroomStale(
+                    "headroom assessment does not match current canonical source truth"
+                )
+            if decision is not HeadroomDecision.SUFFICIENT_LOWER_BOUND:
+                raise ProviderAccountHeadroomUnsupported(
+                    "new internal reservation requires proven sufficient lower-bound headroom"
                 )
             if (
                 _current_economic_goal_denomination(
@@ -2400,8 +2487,6 @@ def reserve_observed_provider_headroom(
                 )
             try:
                 # The ledger CAS proves the exact liability snapshot is still current.
-                # WorkspaceEconomicLock keeps the durable economic-goal revision stable
-                # across the final denomination reread and internal reservation commit.
                 attempt: ExecutionAttempt = begin_attempt(
                     ledger,
                     plan_id=assessment.plan_id,
@@ -2440,175 +2525,3 @@ def reserve_observed_provider_headroom(
         post_reservation_event_count=post.event_count,
     )
     return reservation
-
-def _install_headroom_issuance_authority() -> None:
-    assessment_fields = tuple(ProviderAccountHeadroomAssessment.__dataclass_fields__)
-    reservation_fields = tuple(ProductInternalHeadroomReservation.__dataclass_fields__)
-    raw_assess = assess_provider_account_headroom
-    raw_reserve = reserve_observed_provider_headroom
-    digest_authority = _assert_headroom_digest_authority
-    digest_authority_code = getattr(digest_authority, "__code__", None)
-    immutable_mapping_type = MappingProxyType
-    assessment_issued = immutable_mapping_type({})
-    reservation_issued = immutable_mapping_type({})
-    assessment_lock = threading.RLock()
-    reservation_lock = threading.RLock()
-
-    def require_digest_authority() -> None:
-        if getattr(digest_authority, "__code__", None) is not digest_authority_code:
-            raise ProviderAccountHeadroomError(
-                "canonical provider-account headroom digest guard changed"
-            )
-        digest_authority()
-
-    def assessment_state(
-        value: ProviderAccountHeadroomAssessment,
-    ) -> tuple[object, ...]:
-        return tuple(getattr(value, field) for field in assessment_fields)
-
-    def reservation_state(
-        value: ProductInternalHeadroomReservation,
-    ) -> tuple[object, ...]:
-        return tuple(getattr(value, field) for field in reservation_fields)
-
-    def assert_issued(value: ProviderAccountHeadroomAssessment) -> None:
-        if type(value) is not ProviderAccountHeadroomAssessment:
-            raise ProviderAccountHeadroomError(
-                "assessment must be exact ProviderAccountHeadroomAssessment"
-            )
-        require_digest_authority()
-        try:
-            digest = _assessment_digest(value)
-        except (ProviderAccountHeadroomError, TypeError, ValueError) as exc:
-            raise ProviderAccountHeadroomError(
-                "headroom assessment identity is invalid"
-            ) from exc
-        with assessment_lock:
-            current = assessment_issued.get(id(value))
-        if (
-            current is None
-            or current[0]() is not value
-            or current[1] != assessment_state(value)
-            or value.evidence_sha256 != digest
-        ):
-            raise ProviderAccountHeadroomError(
-                "headroom assessment was not canonically issued"
-            )
-
-    def reservation_is_issued(value: ProductInternalHeadroomReservation) -> bool:
-        if type(value) is not ProductInternalHeadroomReservation:
-            return False
-        try:
-            require_digest_authority()
-            _reservation_digest(value)
-        except (ProviderAccountHeadroomError, TypeError, ValueError):
-            return False
-        with reservation_lock:
-            current = reservation_issued.get(id(value))
-        return (
-            current is not None
-            and current[0]() is value
-            and current[1] == reservation_state(value)
-        )
-
-    def authoritative_assess(
-        ledger: RealExecutionLedger,
-        acquired: AuthoritativeAccountSnapshot,
-        *,
-        plan_id: str,
-        action_id: str,
-        bound_plans: tuple[BoundSupervisedExecutionPlan, ...],
-        intents: tuple[OpportunityIntent, ...],
-    ) -> ProviderAccountHeadroomAssessment:
-        nonlocal assessment_issued
-        value = raw_assess(
-            ledger,
-            acquired,
-            plan_id=plan_id,
-            action_id=action_id,
-            bound_plans=bound_plans,
-            intents=intents,
-        )
-        require_digest_authority()
-        digest = _assessment_digest(value)
-        if digest != value.evidence_sha256:
-            raise ProviderAccountHeadroomError(
-                "headroom assessment identity changed before canonical issuance"
-            )
-        identity = id(value)
-
-        def clear(
-            reference: weakref.ReferenceType[ProviderAccountHeadroomAssessment],
-            *,
-            _identity: int = identity,
-        ) -> None:
-            nonlocal assessment_issued
-            with assessment_lock:
-                current = assessment_issued.get(_identity)
-                if current is not None and current[0] is reference:
-                    updated = dict(assessment_issued)
-                    updated.pop(_identity, None)
-                    assessment_issued = immutable_mapping_type(updated)
-
-        reference = weakref.ref(value, clear)
-        with assessment_lock:
-            updated = dict(assessment_issued)
-            updated[identity] = (reference, assessment_state(value))
-            assessment_issued = immutable_mapping_type(updated)
-        return value
-
-    def authoritative_reserve(
-        ledger: RealExecutionLedger,
-        acquired: AuthoritativeAccountSnapshot,
-        assessment: ProviderAccountHeadroomAssessment,
-        *,
-        attempt_id: str,
-        bound_plans: tuple[BoundSupervisedExecutionPlan, ...],
-        intents: tuple[OpportunityIntent, ...] = (),
-    ) -> ProductInternalHeadroomReservation:
-        nonlocal reservation_issued
-        assert_issued(assessment)
-        value = raw_reserve(
-            ledger,
-            acquired,
-            assessment,
-            attempt_id=attempt_id,
-            bound_plans=bound_plans,
-            intents=intents,
-        )
-        require_digest_authority()
-        _reservation_digest(value)
-        identity = id(value)
-
-        def clear(
-            reference: weakref.ReferenceType[ProductInternalHeadroomReservation],
-            *,
-            _identity: int = identity,
-        ) -> None:
-            nonlocal reservation_issued
-            with reservation_lock:
-                current = reservation_issued.get(_identity)
-                if current is not None and current[0] is reference:
-                    updated = dict(reservation_issued)
-                    updated.pop(_identity, None)
-                    reservation_issued = immutable_mapping_type(updated)
-
-        reference = weakref.ref(value, clear)
-        with reservation_lock:
-            updated = dict(reservation_issued)
-            updated[identity] = (reference, reservation_state(value))
-            reservation_issued = immutable_mapping_type(updated)
-        return value
-
-    setattr(
-        ProductInternalHeadroomReservation,
-        "product_internal_reservation_proven",
-        property(reservation_is_issued),
-    )
-    globals()["assess_provider_account_headroom"] = authoritative_assess
-    globals()["reserve_observed_provider_headroom"] = authoritative_reserve
-
-
-_install_headroom_issuance_authority()
-del _install_headroom_issuance_authority
-

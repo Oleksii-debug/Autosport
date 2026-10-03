@@ -5,7 +5,6 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 import json
-import weakref
 
 import pytest
 
@@ -493,7 +492,7 @@ def test_same_snapshot_two_writer_race_only_one_reserves(monkeypatch, tmp_path) 
         first,
         attempt_id="attempt-1",
     )
-    assert reserved.product_internal_reservation_proven is True
+    assert reserved.product_internal_reservation_proven is False
     assert reserved.provider_atomicity_proven is False
     assert ledger.attempt_state("attempt-1") is AttemptState.RESERVED
 
@@ -1054,22 +1053,28 @@ def test_other_provider_account_cannot_donate_headroom(monkeypatch, tmp_path) ->
         )
 
 
-def test_caller_reconstructed_assessment_cannot_reserve(monkeypatch, tmp_path) -> None:
+def test_exact_reconstructed_assessment_can_reserve_after_source_revalidation(
+    monkeypatch,
+    tmp_path,
+) -> None:
     acquired, _ = _acquire_balance(monkeypatch, tmp_path, "100")
     action = _action("a1", "10")
     ledger = _ledger_with_plans(tmp_path, _plan("p1", action))
     assessment = _assess(
         ledger, acquired, plan_id="p1", action_id="a1"
     )
-    forged = replace(assessment)
+    reconstructed = replace(assessment)
 
-    with pytest.raises(
-        ProviderAccountHeadroomError,
-        match="not canonically issued",
-    ):
-        _reserve(
-            ledger, acquired, forged, attempt_id="attempt-1"
-        )
+    reservation = _reserve(
+        ledger,
+        acquired,
+        reconstructed,
+        attempt_id="attempt-1",
+    )
+
+    assert reservation.assessment_sha256 == reconstructed.evidence_sha256
+    assert reservation.product_internal_reservation_proven is False
+    assert ledger.attempt_state("attempt-1") is AttemptState.RESERVED
 
 
 def test_module_attempt_state_rebinding_cannot_bypass_headroom_gate(
@@ -1144,7 +1149,7 @@ def test_copied_or_mutated_internal_reservation_loses_product_proof(
         ledger, acquired, assessment, attempt_id="attempt-issued"
     )
 
-    assert issued.product_internal_reservation_proven is True
+    assert issued.product_internal_reservation_proven is False
     copied = replace(issued)
     assert copied.product_internal_reservation_proven is False
 
@@ -1204,7 +1209,7 @@ def test_instance_shadow_cannot_bypass_snapshot_or_reservation_cas(
     )
 
     assert calls == {"snapshot": 0, "begin": 0}
-    assert reserved.product_internal_reservation_proven is True
+    assert reserved.product_internal_reservation_proven is False
     assert ledger.attempt_state("attempt-1") is AttemptState.RESERVED
 
 
@@ -1459,7 +1464,7 @@ def test_headroom_rejects_opaque_bound_intent_without_exact_intent_evidence(
         )
 
 
-def test_headroom_rejects_structurally_valid_but_unissued_supervised_plan(
+def test_headroom_accepts_restart_reconstructed_structural_denomination_binding(
     monkeypatch,
     tmp_path,
 ) -> None:
@@ -1470,18 +1475,18 @@ def test_headroom_rejects_structurally_valid_but_unissued_supervised_plan(
     reconstructed = replace(issued)
 
     reconstructed.verify_binding()
-    with pytest.raises(
-        ProviderAccountHeadroomUnsupported,
-        match="lacks canonical product issuance authority",
-    ):
-        assess_provider_account_headroom(
-            ledger,
-            acquired,
-            plan_id=_actual_plan_id(ledger, "target"),
-            action_id=_actual_action_id(ledger, "target", "target-action"),
-            bound_plans=(reconstructed,),
-            intents=ledger._test_intents,
-        )
+    assessment = assess_provider_account_headroom(
+        ledger,
+        acquired,
+        plan_id=_actual_plan_id(ledger, "target"),
+        action_id=_actual_action_id(ledger, "target", "target-action"),
+        bound_plans=(reconstructed,),
+        intents=ledger._test_intents,
+    )
+
+    assert assessment.decision is HeadroomDecision.SUFFICIENT_LOWER_BOUND
+    assert assessment.execution_authority is False
+    assert assessment.real_money_readiness is False
 
 
 def test_headroom_rejects_intent_currency_mismatching_current_goal(
@@ -2480,7 +2485,7 @@ def test_bound_binding_sha_rebinding_cannot_make_goal_binding_tautological(
     assert hostile_calls == []
 
 
-def test_bound_plan_witness_rebinding_cannot_retain_stale_issuance(
+def test_bound_plan_witness_rebinding_is_outside_headroom_structural_authority(
     monkeypatch,
     tmp_path,
 ) -> None:
@@ -2491,7 +2496,7 @@ def test_bound_plan_witness_rebinding_cannot_retain_stale_issuance(
 
     def hostile_witness(bound):
         hostile_calls.append(bound)
-        return bound.execution_plan.plan_id.removeprefix("supervised-v2-")
+        raise AssertionError("process-local product issuance witness must not execute")
 
     monkeypatch.setattr(
         headroom_module._supervised_execution,
@@ -2499,18 +2504,47 @@ def test_bound_plan_witness_rebinding_cannot_retain_stale_issuance(
         hostile_witness,
     )
 
-    with pytest.raises(
-        ProviderAccountHeadroomError,
-        match="canonical monetary denomination authority changed",
-    ):
-        _assess(
-            ledger,
-            acquired,
-            plan_id="target",
-            action_id="target-action",
-        )
+    assessment = _assess(
+        ledger,
+        acquired,
+        plan_id="target",
+        action_id="target-action",
+    )
 
     assert hostile_calls == []
+    assert assessment.decision is HeadroomDecision.SUFFICIENT_LOWER_BOUND
+    assert assessment.execution_authority is False
+
+
+def test_supervised_process_issuance_assertion_rebinding_is_inert_for_headroom(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    acquired, _ = _acquire_balance(monkeypatch, tmp_path, "100")
+    target = _plan("target", _action("target-action", "10"))
+    ledger = _ledger_with_plans(tmp_path, target)
+    hostile_calls: list[object] = []
+
+    def hostile_assert(bound):
+        hostile_calls.append(bound)
+        raise AssertionError("process-local product issuance assertion must not execute")
+
+    monkeypatch.setattr(
+        headroom_module._supervised_execution,
+        "assert_bound_supervised_execution_plan_authoritative",
+        hostile_assert,
+    )
+
+    assessment = _assess(
+        ledger,
+        acquired,
+        plan_id="target",
+        action_id="target-action",
+    )
+
+    assert hostile_calls == []
+    assert assessment.decision is HeadroomDecision.SUFFICIENT_LOWER_BOUND
+    assert assessment.real_money_readiness is False
 
 
 def test_bound_plan_digest_rebinding_cannot_forge_denomination_identity(
@@ -2708,31 +2742,25 @@ def test_headroom_issuance_mutators_and_registries_are_not_module_globals() -> N
     assert not hasattr(headroom_module, "_RESERVATION_ISSUED_LOCK")
 
 
-def _headroom_authority_closure_values(*roots):
-    stack = list(roots)
-    seen: set[int] = set()
-    values: list[object] = []
-    while stack:
-        current = stack.pop()
-        identity = id(current)
-        if identity in seen:
-            continue
-        seen.add(identity)
-        wrapped = getattr(current, "__wrapped__", None)
-        if callable(wrapped):
-            stack.append(wrapped)
-        for cell in getattr(current, "__closure__", None) or ():
-            value = cell.cell_contents
-            values.append(value)
-            if (
-                callable(value)
-                and getattr(value, "__module__", None) == headroom_module.__name__
-            ):
-                stack.append(value)
-    return tuple(values)
+def test_headroom_authority_has_no_positive_process_local_issuance_registry() -> None:
+    assert not hasattr(headroom_module, "_issue_assessment")
+    assert not hasattr(headroom_module, "_issue_reservation")
+    assert not hasattr(headroom_module, "_assert_issued")
+    assert not hasattr(headroom_module, "_reservation_is_issued")
+    assert (
+        ProductInternalHeadroomReservation(
+            assessment_sha256="a" * 64,
+            attempt_id="no-process-proof",
+            attempt_fingerprint="b" * 64,
+            reserved_at="2026-10-03T10:00:00+00:00",
+            post_reservation_ledger_sha256="c" * 64,
+            post_reservation_event_count=1,
+        ).product_internal_reservation_proven
+        is False
+    )
 
 
-def test_headroom_issuance_closure_graph_exposes_no_mutable_identity_registry(
+def test_digest_valid_but_source_false_assessment_cannot_mint_reservation(
     monkeypatch,
     tmp_path,
 ) -> None:
@@ -2745,83 +2773,35 @@ def test_headroom_issuance_closure_graph_exposes_no_mutable_identity_registry(
         plan_id="target",
         action_id="target-action",
     )
-    reservation = _reserve(
-        ledger,
-        acquired,
+    forged = replace(
         assessment,
-        attempt_id="closure-registry-issued",
+        provider_available_to_bet=Decimal("1000"),
+        upper_headroom=Decimal("1000"),
+        lower_headroom=Decimal("1000"),
+        evidence_sha256="0" * 64,
     )
-    property_getter = (
-        ProductInternalHeadroomReservation.product_internal_reservation_proven.fget
+    object.__setattr__(
+        forged,
+        "evidence_sha256",
+        headroom_module._assessment_digest(forged),
     )
-    assert property_getter is not None
-
-    values = _headroom_authority_closure_values(
-        headroom_module.assess_provider_account_headroom,
-        headroom_module.reserve_observed_provider_headroom,
-        property_getter,
-    )
-    issued_ids = {id(assessment), id(reservation)}
-    assert not any(
-        type(value) is dict and not issued_ids.isdisjoint(value)
-        for value in values
-    )
-    assert not any(
-        type(value) is dict
-        and any(
-            getattr(item, "__call__", None) is not None
-            for item in value.values()
-        )
-        for value in values
-    )
-
-
-def test_closure_exposed_issuance_state_is_read_only_and_has_no_mint_callable(
-    monkeypatch,
-    tmp_path,
-) -> None:
-    acquired, _ = _acquire_balance(monkeypatch, tmp_path, "100")
-    target = _plan("target", _action("target-action", "10"))
-    ledger = _ledger_with_plans(tmp_path, target)
-    issued = _assess(
-        ledger,
-        acquired,
-        plan_id="target",
-        action_id="target-action",
-    )
-    reconstructed = replace(issued)
-
-    values = _headroom_authority_closure_values(
-        headroom_module.assess_provider_account_headroom,
-        headroom_module.reserve_observed_provider_headroom,
-    )
-    mappings = [
-        value for value in values if type(value).__name__ == "mappingproxy"
-    ]
-    assert mappings
-    assert all(type(value) is not dict for value in values)
-    assert not any(
-        callable(value)
-        and getattr(value, "__name__", None)
-        in {"issue_assessment", "issue_reservation"}
-        for value in values
-    )
-    with pytest.raises(TypeError):
-        mappings[0][id(reconstructed)] = (weakref.ref(reconstructed), ())
 
     with pytest.raises(
-        ProviderAccountHeadroomError,
-        match="not canonically issued",
+        ProviderAccountHeadroomStale,
+        match="does not match current canonical source truth",
     ):
         _reserve(
             ledger,
             acquired,
-            reconstructed,
-            attempt_id="closure-readonly-self-mint",
+            forged,
+            attempt_id="source-false-assessment",
         )
 
+    with pytest.raises(KeyError):
+        ledger.attempt_state("source-false-assessment")
 
-def test_reconstructed_assessment_cannot_self_mint_via_module_surface(
+
+def test_reconstructed_assessment_uses_source_truth_not_hidden_mint_state(
     monkeypatch,
     tmp_path,
 ) -> None:
@@ -2837,16 +2817,14 @@ def test_reconstructed_assessment_cannot_self_mint_via_module_surface(
     reconstructed = replace(issued)
 
     assert not hasattr(headroom_module, "_issue_assessment")
-    with pytest.raises(
-        ProviderAccountHeadroomError,
-        match="not canonically issued",
-    ):
-        _reserve(
-            ledger,
-            acquired,
-            reconstructed,
-            attempt_id="forged-assessment-attempt",
-        )
+    reservation = _reserve(
+        ledger,
+        acquired,
+        reconstructed,
+        attempt_id="reconstructed-source-truth",
+    )
+    assert reservation.assessment_sha256 == reconstructed.evidence_sha256
+    assert ledger.attempt_state("reconstructed-source-truth") is AttemptState.RESERVED
 
 
 def test_reconstructed_reservation_loses_product_internal_proof(
@@ -2870,28 +2848,30 @@ def test_reconstructed_reservation_loses_product_internal_proof(
     )
     reconstructed = replace(reservation)
 
-    assert reservation.product_internal_reservation_proven is True
+    assert reservation.product_internal_reservation_proven is False
     assert reconstructed.product_internal_reservation_proven is False
     assert not hasattr(headroom_module, "_issue_reservation")
 
-def test_global_assertion_rebinding_cannot_self_mint_reconstructed_assessment(
+def test_obsolete_issuance_assertion_injection_cannot_change_reservation_authority(
     monkeypatch,
     tmp_path,
 ) -> None:
     acquired, _ = _acquire_balance(monkeypatch, tmp_path, "100")
     target = _plan("target", _action("target-action", "10"))
     ledger = _ledger_with_plans(tmp_path, target)
-    issued = _assess(
-        ledger,
-        acquired,
-        plan_id="target",
-        action_id="target-action",
+    reconstructed = replace(
+        _assess(
+            ledger,
+            acquired,
+            plan_id="target",
+            action_id="target-action",
+        )
     )
-    reconstructed = replace(issued)
     hostile_calls: list[object] = []
 
     def hostile_assert(value):
         hostile_calls.append(value)
+        raise AssertionError("obsolete process-local issuance assertion executed")
 
     monkeypatch.setattr(
         headroom_module,
@@ -2900,18 +2880,17 @@ def test_global_assertion_rebinding_cannot_self_mint_reconstructed_assessment(
         raising=False,
     )
 
-    with pytest.raises(
-        ProviderAccountHeadroomError,
-        match="not canonically issued",
-    ):
-        _reserve(
-            ledger,
-            acquired,
-            reconstructed,
-            attempt_id="global-assertion-forgery-attempt",
-        )
+    reservation = _reserve(
+        ledger,
+        acquired,
+        reconstructed,
+        attempt_id="obsolete-assertion-inert",
+    )
 
     assert hostile_calls == []
+    assert reservation.product_internal_reservation_proven is False
+    assert ledger.attempt_state("obsolete-assertion-inert") is AttemptState.RESERVED
+
 
 def test_headroom_digest_rebinding_fails_before_assessment(
     monkeypatch,
@@ -3007,7 +2986,7 @@ def test_issued_assessment_exact_state_cannot_be_hidden_by_digest_rebinding(
 
     with pytest.raises(
         ProviderAccountHeadroomError,
-        match="not canonically issued",
+        match="canonical headroom assessment digest authority changed",
     ):
         _reserve(
             ledger,
@@ -3015,6 +2994,8 @@ def test_issued_assessment_exact_state_cannot_be_hidden_by_digest_rebinding(
             assessment,
             attempt_id="mutated-issued-assessment",
         )
+    with pytest.raises(KeyError):
+        ledger.attempt_state("mutated-issued-assessment")
 
 def test_economic_goal_path_read_rebinding_cannot_supply_forged_goal(
     monkeypatch,

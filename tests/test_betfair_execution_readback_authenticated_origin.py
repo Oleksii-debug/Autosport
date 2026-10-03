@@ -599,6 +599,53 @@ def test_execution_origin_predicate_rejects_clock_code_mutation(
     assert predicate() is False
 
 
+@pytest.mark.parametrize(
+    ("owner", "name"),
+    (
+        (_urllib_request.OpenerDirector, "error"),
+        (_urllib_request.HTTPErrorProcessor, "http_response"),
+        (_urllib_request.HTTPRedirectHandler, "http_error_302"),
+    ),
+)
+def test_execution_origin_predicate_rejects_http_error_dispatch_rebind(
+    monkeypatch: pytest.MonkeyPatch,
+    owner,
+    name: str,
+) -> None:
+    predicate = _closure_value(
+        BetfairReadOnlyClient.read_execution_readback,
+        "origin_dispatch_current",
+    )
+    assert predicate() is True
+
+    def hostile(*args, **kwargs):
+        del args, kwargs
+        raise AssertionError("hostile HTTP error dispatch must not become origin authority")
+
+    monkeypatch.setattr(owner, name, hostile)
+    assert predicate() is False
+
+
+def test_execution_origin_predicate_rejects_network_surface_code_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    predicate = _closure_value(
+        BetfairReadOnlyClient.read_execution_readback,
+        "origin_dispatch_current",
+    )
+    assert predicate() is True
+    target = _urllib_request.OpenerDirector.open
+    original_code = target.__code__
+
+    def hostile(self, fullurl, data=None, timeout=0):
+        del self, fullurl, data, timeout
+        raise AssertionError("mutated opener code must not become origin authority")
+
+    assert len(hostile.__code__.co_freevars) == len(original_code.co_freevars)
+    monkeypatch.setattr(target, "__code__", hostile.__code__)
+    assert predicate() is False
+
+
 def test_execution_origin_predicate_rejects_redirect_handler_rebind(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -301,6 +301,68 @@ def test_low_level_field_mutation_cannot_mint_positive_result() -> None:
     assert result.current_view_eligible is False
 
 
+def test_runtime_subclasses_cannot_supply_caller_dispatch() -> None:
+    class ForgedUpdates(BoundedMirrorInvalidationBuffer):
+        @property
+        def mirror(self):
+            raise AssertionError("subclass mirror dispatch must not run")
+
+    class ForgedDependencies(FocusedMirrorDependencyIndex):
+        def _dependency(self, input_id: str):
+            raise AssertionError("subclass dependency dispatch must not run")
+
+    mirror = MarketMirror()
+    canonical_updates = BoundedMirrorInvalidationBuffer(mirror)
+    canonical_dependencies = FocusedMirrorDependencyIndex(mirror)
+    canonical_dependencies.register("input-1", source_ids="provider-a")
+
+    with pytest.raises(TypeError, match="exact BoundedMirrorInvalidationBuffer"):
+        _evaluate(ForgedUpdates(mirror), canonical_dependencies)
+
+    with pytest.raises(TypeError, match="exact FocusedMirrorDependencyIndex"):
+        _evaluate(canonical_updates, ForgedDependencies(mirror))
+
+
+def test_market_mirror_subclass_cannot_supply_caller_view_dispatch() -> None:
+    class ForgedMirror(MarketMirror):
+        def view(self, **kwargs):
+            raise AssertionError("subclass view dispatch must not run")
+
+    mirror = ForgedMirror()
+    updates = BoundedMirrorInvalidationBuffer(mirror)
+    dependencies = FocusedMirrorDependencyIndex(mirror)
+    dependencies.register("input-1", source_ids="provider-a")
+
+    with pytest.raises(TypeError, match="exact MarketMirror"):
+        _evaluate(updates, dependencies)
+
+
+def test_datetime_and_timedelta_subclasses_cannot_control_policy_dispatch() -> None:
+    class ForgedDateTime(datetime):
+        def astimezone(self, tz=None):
+            raise AssertionError("datetime subclass dispatch must not run")
+
+    class ForgedTimedelta(timedelta):
+        def __lt__(self, other):
+            raise AssertionError("timedelta subclass dispatch must not run")
+
+    updates, dependencies = _runtime(_event())
+
+    with pytest.raises(TypeError, match="exact datetime"):
+        _evaluate(
+            updates,
+            dependencies,
+            as_of=ForgedDateTime(2026, 9, 23, 11, 0, 0, tzinfo=UTC),
+        )
+
+    with pytest.raises(TypeError, match="exact timedelta"):
+        _evaluate(
+            updates,
+            dependencies,
+            max_age=ForgedTimedelta(seconds=60),
+        )
+
+
 def test_dependency_index_from_different_mirror_is_rejected() -> None:
     updates, _ = _runtime(_event())
 

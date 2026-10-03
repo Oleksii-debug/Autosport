@@ -188,28 +188,28 @@ def _verify(action: ExecutionAction, *, surface: str, requested_price: float | N
     )
 
 
-def test_current_order_wrong_requested_price_cannot_mint_effect_evidence() -> None:
+def test_current_order_wrong_requested_price_fails_semantic_validation() -> None:
     action = _action()
 
     with pytest.raises(ProviderEvidenceError):
         _verify(action, surface="current", requested_price=3.5)
 
 
-def test_current_order_missing_requested_price_cannot_mint_effect_evidence() -> None:
+def test_current_order_missing_requested_price_fails_semantic_validation() -> None:
     action = _action()
 
     with pytest.raises(ProviderEvidenceError):
         _verify(action, surface="current", requested_price=None)
 
 
-def test_cleared_order_wrong_requested_price_cannot_mint_effect_evidence() -> None:
+def test_cleared_order_wrong_requested_price_fails_semantic_validation() -> None:
     action = _action()
 
     with pytest.raises(ProviderEvidenceError):
         _verify(action, surface="cleared", requested_price=3.5)
 
 
-def test_current_order_exact_requested_price_preserves_favorable_execution() -> None:
+def test_current_order_exact_requested_price_preserves_semantic_execution() -> None:
     action = _action()
 
     evidence = _verify(action, surface="current", requested_price=2.0)
@@ -219,7 +219,7 @@ def test_current_order_exact_requested_price_preserves_favorable_execution() -> 
     assert evidence.accepted_stake == Decimal("1.0")
 
 
-def test_cleared_order_exact_requested_price_preserves_favorable_execution() -> None:
+def test_cleared_order_exact_requested_price_preserves_semantic_execution() -> None:
     action = _action()
 
     evidence = _verify(action, surface="cleared", requested_price=2.0)

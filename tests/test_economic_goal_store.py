@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from decimal import Decimal
+import json
 import os
 from pathlib import Path
 
@@ -222,7 +223,7 @@ def test_store_rejects_symlinked_owner_authority(tmp_path: Path) -> None:
     target_dir.mkdir()
     target = target_dir / "goal.json"
     target.write_text(
-        __import__("json").dumps(economic_goal_to_payload(_goal())),
+        json.dumps(economic_goal_to_payload(_goal())),
         encoding="utf-8",
     )
     store = EconomicGoalStore(tmp_path)

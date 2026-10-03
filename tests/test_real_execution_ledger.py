@@ -53,12 +53,16 @@ def action(
     )
 
 
-def plan(*actions: ExecutionAction, plan_id: str = "p1") -> ExecutionPlan:
+def plan(
+    *actions: ExecutionAction,
+    plan_id: str = "p1",
+    approval_id: str = "approval-1",
+) -> ExecutionPlan:
     return ExecutionPlan(
         plan_id=plan_id,
         bookmaker_profile_version="profile-v1",
         decision_id="decision-1",
-        approval_id="approval-1",
+        approval_id=approval_id,
         created_at=TS,
         actions=tuple(actions or (action(),)),
     )
@@ -1932,9 +1936,11 @@ class RealExecutionLedgerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             ledger = RealExecutionLedger(Path(tmp) / "real.jsonl")
             witness = "a" * 64
+            approval_fingerprint = "b" * 64
             current = plan(
                 action(),
                 plan_id=f"supervised-v2-{witness}",
+                approval_id=f"approval-1@{approval_fingerprint}",
             )
 
             with self.assertRaisesRegex(
@@ -2023,9 +2029,11 @@ class RealExecutionLedgerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             ledger = RealExecutionLedger(Path(tmp) / "real.jsonl")
             witness = "2" * 64
+            approval_fingerprint = "4" * 64
             current = plan(
                 action(),
                 plan_id=f"supervised-v2-{witness}",
+                approval_id=f"approval-1@{approval_fingerprint}",
             )
             ledger.reserve_plan(current)
 
@@ -2059,8 +2067,9 @@ class RealExecutionLedgerTests(unittest.TestCase):
             ledger.bind_supervised_approval(
                 plan_id=current.plan_id,
                 approval_id=current.approval_id,
-                approval_fingerprint="4" * 64,
+                approval_fingerprint=approval_fingerprint,
                 approved_at=TS,
+                expires_at=EXPIRES_AT,
                 evidence_sha256="5" * 64,
             )
             attempt = ledger.begin_attempt(
@@ -2073,13 +2082,73 @@ class RealExecutionLedgerTests(unittest.TestCase):
 
 
 
-    def test_supervised_attempt_rejects_revoked_durable_approval(self):
+
+    def test_supervised_approval_binding_requires_product_issuance(self):
         with tempfile.TemporaryDirectory() as tmp:
             ledger = RealExecutionLedger(Path(tmp) / "real.jsonl")
-            witness = "6" * 64
+            witness = "f" * 64
+            approval_fingerprint = "1" * 64
             current = plan(
                 action(),
                 plan_id=f"supervised-v2-{witness}",
+                approval_id=f"approval-1@{approval_fingerprint}",
+            )
+            ledger.reserve_plan(current)
+
+            with self.assertRaisesRegex(
+                ExecutionStateError,
+                "approval binding requires product issuance",
+            ):
+                ledger.bind_supervised_approval(
+                    plan_id=current.plan_id,
+                    approval_id=current.approval_id,
+                    approval_fingerprint=approval_fingerprint,
+                    approved_at=TS,
+                    expires_at=EXPIRES_AT,
+                    evidence_sha256="2" * 64,
+                )
+
+
+    def test_supervised_approval_binding_must_match_plan_encoded_fingerprint(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = RealExecutionLedger(Path(tmp) / "real.jsonl")
+            witness = "3" * 64
+            approval_fingerprint = "4" * 64
+            current = plan(
+                action(),
+                plan_id=f"supervised-v2-{witness}",
+                approval_id=f"approval-1@{approval_fingerprint}",
+            )
+            ledger.reserve_plan(current)
+            ledger._bind_supervised_plan_issuance(
+                plan_id=current.plan_id,
+                bound_plan_witness=witness,
+                plan_fingerprint=current.fingerprint,
+            )
+
+            with self.assertRaisesRegex(
+                ExecutionIdentityConflict,
+                "fingerprint mismatches durable execution plan",
+            ):
+                ledger.bind_supervised_approval(
+                    plan_id=current.plan_id,
+                    approval_id=current.approval_id,
+                    approval_fingerprint="5" * 64,
+                    approved_at=TS,
+                    expires_at=EXPIRES_AT,
+                    evidence_sha256="6" * 64,
+                )
+
+
+    def test_supervised_attempt_rejects_expired_durable_approval(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = RealExecutionLedger(Path(tmp) / "real.jsonl")
+            witness = "7" * 64
+            approval_fingerprint = "8" * 64
+            current = plan(
+                action(),
+                plan_id=f"supervised-v2-{witness}",
+                approval_id=f"approval-1@{approval_fingerprint}",
             )
             ledger.reserve_plan(current)
             ledger._bind_supervised_plan_issuance(
@@ -2090,14 +2159,52 @@ class RealExecutionLedgerTests(unittest.TestCase):
             ledger.bind_supervised_approval(
                 plan_id=current.plan_id,
                 approval_id=current.approval_id,
-                approval_fingerprint="7" * 64,
+                approval_fingerprint=approval_fingerprint,
                 approved_at=TS,
+                expires_at=RESERVED_AT,
+                evidence_sha256="9" * 64,
+            )
+
+            with self.assertRaisesRegex(
+                ExecutionStateError,
+                "outside durable approval lifetime",
+            ):
+                ledger.begin_attempt(
+                    plan_id=current.plan_id,
+                    action_id="a1",
+                    attempt_id="expired-approval-attempt",
+                    reserved_at=RESERVED_AT,
+                )
+
+
+    def test_supervised_attempt_rejects_revoked_durable_approval(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = RealExecutionLedger(Path(tmp) / "real.jsonl")
+            witness = "6" * 64
+            approval_fingerprint = "7" * 64
+            current = plan(
+                action(),
+                plan_id=f"supervised-v2-{witness}",
+                approval_id=f"approval-1@{approval_fingerprint}",
+            )
+            ledger.reserve_plan(current)
+            ledger._bind_supervised_plan_issuance(
+                plan_id=current.plan_id,
+                bound_plan_witness=witness,
+                plan_fingerprint=current.fingerprint,
+            )
+            ledger.bind_supervised_approval(
+                plan_id=current.plan_id,
+                approval_id=current.approval_id,
+                approval_fingerprint=approval_fingerprint,
+                approved_at=TS,
+                expires_at=EXPIRES_AT,
                 evidence_sha256="8" * 64,
             )
             ledger.revoke_supervised_approval(
                 plan_id=current.plan_id,
                 approval_id=current.approval_id,
-                approval_fingerprint="7" * 64,
+                approval_fingerprint=approval_fingerprint,
                 revoked_at=RESERVED_AT,
                 revocation_evidence_sha256="9" * 64,
             )
@@ -2132,8 +2239,9 @@ class RealExecutionLedgerTests(unittest.TestCase):
             ledger.bind_supervised_approval(
                 plan_id=current.plan_id,
                 approval_id=current.approval_id,
-                approval_fingerprint="b" * 64,
+                approval_fingerprint=approval_fingerprint,
                 approved_at=TS,
+                expires_at=EXPIRES_AT,
                 evidence_sha256="c" * 64,
             )
             ledger.begin_attempt(
@@ -2183,9 +2291,11 @@ class RealExecutionLedgerTests(unittest.TestCase):
             path = Path(tmp) / "real.jsonl"
             ledger = RealExecutionLedger(path)
             witness = "3" * 64
+            approval_fingerprint = "d" * 64
             current = plan(
                 action(),
                 plan_id=f"supervised-v2-{witness}",
+                approval_id=f"approval-1@{approval_fingerprint}",
             )
             ledger.reserve_plan(current)
             ledger._bind_supervised_plan_issuance(
@@ -2196,8 +2306,9 @@ class RealExecutionLedgerTests(unittest.TestCase):
             ledger.bind_supervised_approval(
                 plan_id=current.plan_id,
                 approval_id=current.approval_id,
-                approval_fingerprint="d" * 64,
+                approval_fingerprint=approval_fingerprint,
                 approved_at=TS,
+                expires_at=EXPIRES_AT,
                 evidence_sha256="e" * 64,
             )
             ledger.begin_attempt(

@@ -776,6 +776,8 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
         try:
             row = connection.execute(
                 "SELECT g.schedule_id, g.gate_binding_sha256, "
+                "a.schedule_id AS authorization_schedule_id, "
+                "a.gate_binding_sha256 AS authorization_gate_binding_sha256, "
                 "a.authorization_sha256 "
                 "FROM collector_schedule_start_gates_v1 AS g "
                 "LEFT JOIN collector_schedule_start_authorizations_v1 AS a "
@@ -785,18 +787,37 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
             ).fetchone()
             if row is None:
                 return None
+            schedule_id = self._schedule_authority_sha256(
+                row["schedule_id"],
+                "stored schedule_id",
+            )
             gate_binding = self._schedule_authority_sha256(
                 row["gate_binding_sha256"],
                 "stored gate_binding_sha256",
             )
             authorization = row["authorization_sha256"]
             if authorization is not None:
+                authorization_schedule_id = self._schedule_authority_sha256(
+                    row["authorization_schedule_id"],
+                    "stored authorization schedule_id",
+                )
+                authorization_gate_binding = self._schedule_authority_sha256(
+                    row["authorization_gate_binding_sha256"],
+                    "stored authorization gate_binding_sha256",
+                )
                 authorization = self._schedule_authority_sha256(
                     authorization,
                     "stored authorization_sha256",
                 )
+                if (
+                    authorization_schedule_id != schedule_id
+                    or authorization_gate_binding != gate_binding
+                ):
+                    raise ValueError(
+                        "collector schedule START authorization identity is corrupt"
+                    )
             return {
-                "schedule_id": _text(row["schedule_id"], "schedule_id"),
+                "schedule_id": schedule_id,
                 "gate_binding_sha256": gate_binding,
                 "authorization_sha256": authorization,
             }

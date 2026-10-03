@@ -261,7 +261,10 @@ def resolve_forecast_predictive_authority(
     )
 
 
-def _install_runtime_authority() -> tuple[\n    Callable[..., ForecastRef],\n    Callable[..., str | None],\n]:
+def _install_runtime_authority() -> tuple[
+    Callable[..., ForecastRef],
+    Callable[..., str | None],
+]:
     """Install non-virtual object-identity admission and the sole durable mint path.
 
     Runtime authority state lives only in this closure.  There is no module-global

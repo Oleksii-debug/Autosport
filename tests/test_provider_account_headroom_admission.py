@@ -3101,3 +3101,110 @@ def test_account_snapshot_payload_rebinding_cannot_hide_balance_mutation(
 
     assert hostile_calls == []
 
+def test_supervised_binding_json_module_rebinding_cannot_forge_plan_identity(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    acquired, _ = _acquire_balance(monkeypatch, tmp_path, "100")
+    target = _plan("target", _action("target-action", "10"))
+    ledger = _ledger_with_plans(tmp_path, target)
+    hostile_calls: list[object] = []
+
+    def hostile_dumps(*args, **kwargs):
+        hostile_calls.append((args, kwargs))
+        return "{}"
+
+    class HostileJson:
+        dumps = staticmethod(hostile_dumps)
+
+    monkeypatch.setattr(
+        headroom_module._supervised_execution,
+        "json",
+        HostileJson,
+    )
+
+    with pytest.raises(
+        ProviderAccountHeadroomError,
+        match="canonical monetary denomination authority changed",
+    ):
+        _assess(
+            ledger,
+            acquired,
+            plan_id="target",
+            action_id="target-action",
+        )
+
+    assert hostile_calls == []
+
+
+def test_portfolio_intent_hash_module_rebinding_cannot_forge_denomination(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    acquired, _ = _acquire_balance(monkeypatch, tmp_path, "100")
+    target = _plan("target", _action("target-action", "10"))
+    ledger = _ledger_with_plans(tmp_path, target)
+    hostile_calls: list[object] = []
+
+    def hostile_sha256(*args, **kwargs):
+        hostile_calls.append((args, kwargs))
+        raise AssertionError("hostile portfolio sha256 executed")
+
+    class HostileHashlib:
+        sha256 = staticmethod(hostile_sha256)
+
+    monkeypatch.setattr(
+        headroom_module._portfolio_plan,
+        "hashlib",
+        HostileHashlib,
+    )
+
+    with pytest.raises(
+        ProviderAccountHeadroomError,
+        match="canonical opportunity-intent denomination authority changed",
+    ):
+        _assess(
+            ledger,
+            acquired,
+            plan_id="target",
+            action_id="target-action",
+        )
+
+    assert hostile_calls == []
+
+
+def test_risk_candidate_hash_module_rebinding_cannot_forge_account_scope(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    acquired, _ = _acquire_balance(monkeypatch, tmp_path, "100")
+    target = _plan("target", _action("target-action", "10"))
+    ledger = _ledger_with_plans(tmp_path, target)
+    hostile_calls: list[object] = []
+
+    def hostile_dumps(*args, **kwargs):
+        hostile_calls.append((args, kwargs))
+        return "{}"
+
+    class HostileJson:
+        dumps = staticmethod(hostile_dumps)
+
+    monkeypatch.setattr(
+        headroom_module._risk,
+        "json",
+        HostileJson,
+    )
+
+    with pytest.raises(
+        ProviderAccountHeadroomError,
+        match="canonical opportunity-intent denomination authority changed",
+    ):
+        _assess(
+            ledger,
+            acquired,
+            plan_id="target",
+            action_id="target-action",
+        )
+
+    assert hostile_calls == []
+

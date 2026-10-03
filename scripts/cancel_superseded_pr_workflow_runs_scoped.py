@@ -757,7 +757,11 @@ class WorkflowScopedGitHubApi(GitHubApi):
         return tuple(cancelled)
 
 
-def _build_explicit_run_identity_checker(resolver, request_impl):
+def _build_explicit_run_identity_checker(
+    workflow_scoped_api_type,
+    resolver,
+    request_impl,
+):
     resolver_code = getattr(resolver, "__code__", None)
     request_code = getattr(request_impl, "__code__", None)
     if resolver_code is None or request_code is None:
@@ -772,7 +776,7 @@ def _build_explicit_run_identity_checker(resolver, request_impl):
     ) -> bool:
         """Fail closed when explicit identity or its transport dispatch changes."""
 
-        if isinstance(api, WorkflowScopedGitHubApi):
+        if isinstance(api, workflow_scoped_api_type):
             def production_dispatch_current() -> bool:
                 bound = getattr(api, "_explicit_run_identity_matches", None)
                 bound_request = getattr(api, "_request", None)
@@ -943,6 +947,7 @@ def _build_live_pr_qualification_reader(
     return read
 
 _explicit_run_identity_is_current = _build_explicit_run_identity_checker(
+    WorkflowScopedGitHubApi,
     WorkflowScopedGitHubApi._explicit_run_identity_matches,
     GitHubApi._request,
 )

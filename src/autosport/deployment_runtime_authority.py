@@ -1666,11 +1666,11 @@ class DeploymentRuntimeAuthorityStore(metaclass=_DeploymentRuntimeAuthorityStore
             is not _monotonic_constructor_helper_code
             or _CANONICAL_MONOTONIC_CONSTRUCTOR_HELPER_CODE
             is not _monotonic_constructor_helper_code
-            or _path_expanduser is not _path_expanduser
+            or _CANONICAL_PATH_EXPANDUSER is not _path_expanduser
             or _CANONICAL_PATH_EXPANDUSER_CODE is not _path_expanduser_code
-            or _path_resolve is not _path_resolve
+            or _CANONICAL_PATH_RESOLVE is not _path_resolve
             or _CANONICAL_PATH_RESOLVE_CODE is not _path_resolve_code
-            or _path_read_text is not _path_read_text
+            or _CANONICAL_PATH_READ_TEXT is not _path_read_text
             or _CANONICAL_PATH_READ_TEXT_CODE is not _path_read_text_code
         ):
             raise DeploymentRuntimeAuthorityError(

@@ -883,3 +883,36 @@ def test_workflow_run_status_rejects_unknown_state(monkeypatch) -> None:
 
     with pytest.raises(CancellationError, match="invalid workflow-run status"):
         api.workflow_run_status(123)
+
+def test_cancel_wrapper_defers_only_frozen_active_conflict_message(monkeypatch) -> None:
+    class ActiveConflictApi:
+        def cancel(self, run_id: int) -> None:
+            assert run_id == 321
+            raise CancellationError(
+                "workflow run cancellation conflicted while run remains active"
+            )
+
+    assert not scoped_controller._cancel_run_or_defer_active_conflict(
+        ActiveConflictApi(),  # type: ignore[arg-type]
+        321,
+    )
+
+    class FatalApi:
+        def cancel(self, run_id: int) -> None:
+            assert run_id == 322
+            raise CancellationError("different fatal cancellation error")
+
+    # A runtime module-global injection must not widen the one exact conflict that the
+    # composed helper is allowed to defer.
+    monkeypatch.setattr(
+        scoped_controller,
+        "_ACTIVE_CANCELLATION_CONFLICT_MESSAGE",
+        "different fatal cancellation error",
+        raising=False,
+    )
+    with pytest.raises(CancellationError, match="different fatal cancellation error"):
+        scoped_controller._cancel_run_or_defer_active_conflict(
+            FatalApi(),  # type: ignore[arg-type]
+            322,
+        )
+

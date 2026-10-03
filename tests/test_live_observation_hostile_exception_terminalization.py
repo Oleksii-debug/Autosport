@@ -3,6 +3,7 @@ from __future__ import annotations
 import time
 from unittest import mock
 
+import autosport.live_observation as live_observation
 from autosport.live_observation import OneShotObservationWorker
 from autosport.localization import text
 
@@ -141,6 +142,81 @@ def test_renderer_failure_uses_secret_free_terminal_fallback_and_releases_busy()
 
     assert message.result is None
     assert message.error == "BaseException: exception details unavailable"
+    assert worker.busy is False
+
+
+def test_renderer_rebinding_cannot_publish_plausible_unredacted_text() -> None:
+    worker = OneShotObservationWorker()
+    secret = "renderer-rebind-secret-2056"
+
+    def task():
+        raise RuntimeError(f"Authorization: Bearer {secret}")
+
+    with mock.patch(
+        "autosport.live_observation.safe_exception_text",
+        return_value=f"RuntimeError: Authorization: Bearer {secret}",
+    ) as forged_renderer:
+        assert worker.start(task) is True
+        message = _wait_for_terminal(worker)
+
+    assert message.result is None
+    assert message.error == "BaseException: exception details unavailable"
+    assert secret not in message.error
+    forged_renderer.assert_not_called()
+    assert worker.busy is False
+
+
+def test_renderer_in_place_code_mutation_fails_closed_before_publication() -> None:
+    worker = OneShotObservationWorker()
+    original_code = live_observation.safe_exception_text.__code__
+
+    def forged_renderer(
+        exc,
+        *,
+        unavailable_detail="exception details unavailable",
+        extra_secret_values=(),
+    ):
+        return "forged terminal diagnostic"
+
+    try:
+        live_observation.safe_exception_text.__code__ = forged_renderer.__code__
+
+        def task():
+            raise RuntimeError("provider-timeout")
+
+        assert worker.start(task) is True
+        message = _wait_for_terminal(worker)
+    finally:
+        live_observation.safe_exception_text.__code__ = original_code
+
+    assert message.result is None
+    assert message.error == "BaseException: exception details unavailable"
+    assert worker.busy is False
+
+
+def test_terminal_bound_globals_cannot_widen_published_diagnostic() -> None:
+    worker = OneShotObservationWorker()
+    oversized = "bounded-" + ("z" * 10_000)
+
+    with (
+        mock.patch("autosport.live_observation._TERMINAL_ERROR_MAX_CHARS", 100_000),
+        mock.patch(
+            "autosport.live_observation._TERMINAL_ERROR_TRUNCATION",
+            "attacker-controlled-marker",
+        ),
+    ):
+
+        def task():
+            raise RuntimeError(oversized)
+
+        assert worker.start(task) is True
+        message = _wait_for_terminal(worker)
+
+    assert message.result is None
+    assert message.error is not None
+    assert len(message.error) == 2048
+    assert message.error.endswith("... [truncated]")
+    assert "attacker-controlled-marker" not in message.error
     assert worker.busy is False
 
 

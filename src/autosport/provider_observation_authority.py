@@ -7,6 +7,8 @@ import math
 import os
 import secrets
 import weakref
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -405,12 +407,17 @@ def assert_complete_game_board_authoritative(snapshot: CompleteGameBoardSnapshot
         )
 
 
-def _parse_sse_event(event_name: str | None, data_lines: list[str]) -> Mapping[str, object] | None:
+def _parse_sse_event(
+    event_name: str | None,
+    data_lines: list[str],
+    *,
+    _loads=strict_json_loads,
+) -> Mapping[str, object] | None:
     if not data_lines:
         return None
     raw = "\n".join(data_lines)
     try:
-        payload = strict_json_loads(raw)
+        payload = _loads(raw)
     except (TypeError, ValueError) as exc:
         raise ProviderObservationIntegrityError("provider SSE returned invalid JSON") from exc
     if not isinstance(payload, dict):
@@ -430,11 +437,16 @@ def _read_production_initial_state(
     *,
     api_key: str,
     timeout_seconds: float,
+    _request_factory=Request,
+    _open_url=urlopen,
+    _parse_event=_parse_sse_event,
+    _sse_url=CompleteGameBoardRequest.sse_url,
+    _loads=strict_json_loads,
 ) -> Mapping[str, object]:
     """Read one bounded initial_state from the fixed production ParlayAPI SSE origin."""
 
-    request = Request(
-        request_scope.sse_url(),
+    request = _request_factory(
+        _sse_url(request_scope),
         headers={
             "Accept": "text/event-stream",
             "X-API-Key": api_key,
@@ -446,7 +458,7 @@ def _read_production_initial_state(
     event_name: str | None = None
     data_lines: list[str] = []
     try:
-        with urlopen(request, timeout=timeout_seconds) as response:  # nosec B310 - fixed HTTPS origin
+        with _open_url(request, timeout=timeout_seconds) as response:  # nosec B310 - fixed HTTPS origin
             if int(getattr(response, "status", 0)) != 200:
                 raise ProviderObservationUnsupportedError("provider SSE did not return HTTP 200")
             headers = getattr(response, "headers", None)
@@ -468,7 +480,7 @@ def _read_production_initial_state(
                         "provider SSE returned invalid UTF-8"
                     ) from exc
                 if not line:
-                    result = _parse_sse_event(event_name, data_lines)
+                    result = _parse_event(event_name, data_lines, _loads=_loads)
                     if result is not None:
                         return result
                     event_name = None
@@ -480,7 +492,7 @@ def _read_production_initial_state(
                     event_name = line[6:].strip()
                 elif line.startswith("data:"):
                     data_lines.append(line[5:].lstrip())
-            result = _parse_sse_event(event_name, data_lines)
+            result = _parse_event(event_name, data_lines, _loads=_loads)
             if result is not None:
                 return result
     except ProviderObservationAuthorityError:
@@ -492,6 +504,88 @@ def _read_production_initial_state(
     raise ProviderObservationUnsupportedError(
         "provider SSE ended before an initial_state frame was available"
     )
+
+
+_TEST_ACQUISITION_CAPABILITY = object()
+_TEST_ACQUISITION_ORIGIN = ContextVar(
+    "autosport_provider_observation_test_origin",
+    default=None,
+)
+
+_CANONICAL_HTTP_REQUEST = Request
+_CANONICAL_URLOPEN = urlopen
+_CANONICAL_STRICT_JSON_LOADS = strict_json_loads
+_CANONICAL_PARSE_SSE_EVENT = _parse_sse_event
+_CANONICAL_PARSE_SSE_EVENT_CODE = _CANONICAL_PARSE_SSE_EVENT.__code__
+_CANONICAL_READ_PRODUCTION_INITIAL_STATE = _read_production_initial_state
+_CANONICAL_READ_PRODUCTION_INITIAL_STATE_CODE = (
+    _CANONICAL_READ_PRODUCTION_INITIAL_STATE.__code__
+)
+_CANONICAL_DEFAULT_CLOCK = _default_clock
+_CANONICAL_DEFAULT_CLOCK_CODE = _CANONICAL_DEFAULT_CLOCK.__code__
+_CANONICAL_SNAPSHOT_CLASS = CompleteGameBoardSnapshot
+_CANONICAL_REQUEST_CLASS = CompleteGameBoardRequest
+_CANONICAL_REQUEST_SSE_URL = CompleteGameBoardRequest.sse_url
+_CANONICAL_REQUEST_SSE_URL_CODE = _CANONICAL_REQUEST_SSE_URL.__code__
+_CANONICAL_CANONICAL_JSON = _canonical_json
+_CANONICAL_CANONICAL_JSON_CODE = _CANONICAL_CANONICAL_JSON.__code__
+_CANONICAL_REMEMBER = _remember
+_CANONICAL_REMEMBER_CODE = _CANONICAL_REMEMBER.__code__
+_CANONICAL_TEST_ACQUISITION_ORIGIN = _TEST_ACQUISITION_ORIGIN
+_CANONICAL_TEST_ACQUISITION_CAPABILITY = _TEST_ACQUISITION_CAPABILITY
+
+
+def _require_production_capture_origin_integrity() -> None:
+    if (
+        Request is not _CANONICAL_HTTP_REQUEST
+        or urlopen is not _CANONICAL_URLOPEN
+        or strict_json_loads is not _CANONICAL_STRICT_JSON_LOADS
+        or CompleteGameBoardRequest is not _CANONICAL_REQUEST_CLASS
+        or CompleteGameBoardSnapshot is not _CANONICAL_SNAPSHOT_CLASS
+        or _parse_sse_event is not _CANONICAL_PARSE_SSE_EVENT
+        or _read_production_initial_state
+        is not _CANONICAL_READ_PRODUCTION_INITIAL_STATE
+        or _default_clock is not _CANONICAL_DEFAULT_CLOCK
+        or _canonical_json is not _CANONICAL_CANONICAL_JSON
+        or _remember is not _CANONICAL_REMEMBER
+        or _TEST_ACQUISITION_ORIGIN is not _CANONICAL_TEST_ACQUISITION_ORIGIN
+        or _TEST_ACQUISITION_CAPABILITY
+        is not _CANONICAL_TEST_ACQUISITION_CAPABILITY
+    ):
+        raise ProviderObservationIntegrityError(
+            "provider production acquisition origin is rebound"
+        )
+    if (
+        _CANONICAL_PARSE_SSE_EVENT.__code__
+        is not _CANONICAL_PARSE_SSE_EVENT_CODE
+        or _CANONICAL_READ_PRODUCTION_INITIAL_STATE.__code__
+        is not _CANONICAL_READ_PRODUCTION_INITIAL_STATE_CODE
+        or _CANONICAL_DEFAULT_CLOCK.__code__ is not _CANONICAL_DEFAULT_CLOCK_CODE
+        or _CANONICAL_REQUEST_SSE_URL.__code__
+        is not _CANONICAL_REQUEST_SSE_URL_CODE
+        or _CANONICAL_CANONICAL_JSON.__code__
+        is not _CANONICAL_CANONICAL_JSON_CODE
+        or _CANONICAL_REMEMBER.__code__ is not _CANONICAL_REMEMBER_CODE
+        or CompleteGameBoardRequest.sse_url is not _CANONICAL_REQUEST_SSE_URL
+    ):
+        raise ProviderObservationIntegrityError(
+            "provider production acquisition origin code changed"
+        )
+
+
+@contextmanager
+def _test_acquisition_origin(*, _capability: object):
+    """Enable live test transport/time only under the private test capability."""
+
+    if _capability is not _CANONICAL_TEST_ACQUISITION_CAPABILITY:
+        raise TypeError("provider test acquisition origin requires private capability")
+    token = _CANONICAL_TEST_ACQUISITION_ORIGIN.set(
+        _CANONICAL_TEST_ACQUISITION_CAPABILITY
+    )
+    try:
+        yield
+    finally:
+        _CANONICAL_TEST_ACQUISITION_ORIGIN.reset(token)
 
 
 def capture_parlay_complete_game_board(
@@ -506,24 +600,49 @@ def capture_parlay_complete_game_board(
         raise ValueError("api_key must be non-empty trimmed text")
     if any(character.isspace() for character in api_key):
         raise ValueError("api_key must not contain whitespace")
-    if not isinstance(request, CompleteGameBoardRequest):
+    if not isinstance(request, _CANONICAL_REQUEST_CLASS):
         raise TypeError("request must be CompleteGameBoardRequest")
     if isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, (int, float)):
         raise ValueError("timeout_seconds must be a positive finite number")
     timeout = float(timeout_seconds)
     if not math.isfinite(timeout) or timeout <= 0:
         raise ValueError("timeout_seconds must be a positive finite number")
-    frame = _read_production_initial_state(
-        request,
-        api_key=api_key,
-        timeout_seconds=timeout,
+
+    test_origin = (
+        _CANONICAL_TEST_ACQUISITION_ORIGIN.get()
+        is _CANONICAL_TEST_ACQUISITION_CAPABILITY
     )
-    snapshot = CompleteGameBoardSnapshot(
+    if test_origin:
+        frame = _CANONICAL_READ_PRODUCTION_INITIAL_STATE(
+            request,
+            api_key=api_key,
+            timeout_seconds=timeout,
+            _request_factory=Request,
+            _open_url=urlopen,
+            _parse_event=_parse_sse_event,
+            _sse_url=CompleteGameBoardRequest.sse_url,
+            _loads=strict_json_loads,
+        )
+        captured_at = _default_clock()
+    else:
+        _require_production_capture_origin_integrity()
+        frame = _CANONICAL_READ_PRODUCTION_INITIAL_STATE(
+            request,
+            api_key=api_key,
+            timeout_seconds=timeout,
+        )
+        captured_at = _CANONICAL_DEFAULT_CLOCK()
+        _require_production_capture_origin_integrity()
+
+    snapshot = _CANONICAL_SNAPSHOT_CLASS(
         request=request,
-        captured_at=_default_clock(),
-        frame_json=_canonical_json(dict(frame)),
+        captured_at=captured_at,
+        frame_json=_CANONICAL_CANONICAL_JSON(dict(frame)),
     )
-    return _remember(snapshot)
+    result = _CANONICAL_REMEMBER(snapshot)
+    if not test_origin:
+        _require_production_capture_origin_integrity()
+    return result
 
 
 class CompleteGameBoardEvidenceStore:

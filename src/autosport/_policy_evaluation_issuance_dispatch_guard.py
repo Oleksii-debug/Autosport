@@ -260,6 +260,14 @@ class _DispatchState:
                 ("datetime", issuance_module.datetime),
                 ("timezone", issuance_module.timezone),
                 ("EvaluationContractFamily", issuance_module.EvaluationContractFamily),
+                (
+                    "CANONICAL_PAPER_ABSTENTION_ACTIONS",
+                    issuance_module.CANONICAL_PAPER_ABSTENTION_ACTIONS,
+                ),
+                (
+                    "CANONICAL_PAPER_MATERIAL_ACTIONS",
+                    issuance_module.CANONICAL_PAPER_MATERIAL_ACTIONS,
+                ),
                 ("_Target", issuance_module._Target),
                 ("_SourceEvaluation", issuance_module._SourceEvaluation),
                 ("_BOOTSTRAP_REPLICATES", issuance_module._BOOTSTRAP_REPLICATES),

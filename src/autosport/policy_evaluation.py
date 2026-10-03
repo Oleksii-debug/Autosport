@@ -23,6 +23,10 @@ from .transparent_bandit_policy import BanditPolicyState
 _HEX = frozenset("0123456789abcdef")
 _CANONICAL_PAPER_ABSTENTION_ACTIONS = frozenset({"NO_BET", "WAIT"})
 _CANONICAL_PAPER_MATERIAL_ACTIONS = frozenset({"BET"})
+# Public immutable aliases let downstream product evidence reuse the same taxonomy
+# without copying semantic literals into a parallel authority.
+CANONICAL_PAPER_ABSTENTION_ACTIONS = _CANONICAL_PAPER_ABSTENTION_ACTIONS
+CANONICAL_PAPER_MATERIAL_ACTIONS = _CANONICAL_PAPER_MATERIAL_ACTIONS
 
 
 def _text(value: object, name: str) -> str:
@@ -769,6 +773,8 @@ def evaluate_policy_pair(
 
 
 __all__ = [
+    "CANONICAL_PAPER_ABSTENTION_ACTIONS",
+    "CANONICAL_PAPER_MATERIAL_ACTIONS",
     "QualifiedCounterfactualAuthority",
     "PolicyEvaluationCase",
     "PolicyEvaluationConfig",

@@ -348,3 +348,21 @@ def test_policy_guard_fails_closed_on_internal_checker_class_rebind(monkeypatch)
             None,
             source_evaluation_bundle_id="caller-forged",
         )
+
+
+def test_product_issue_rejects_abstention_taxonomy_rebind_before_arguments(monkeypatch):
+    monkeypatch.setattr(
+        issuance,
+        "CANONICAL_PAPER_ABSTENTION_ACTIONS",
+        frozenset({"WAIT"}),
+    )
+
+    with pytest.raises(
+        issuance.ProductPolicyEvaluationIssuanceError,
+        match=r"transitive helper global \(CANONICAL_PAPER_ABSTENTION_ACTIONS\)",
+    ):
+        issuance.issue_product_policy_evaluation(
+            None,
+            None,
+            source_evaluation_bundle_id="caller-forged",
+        )

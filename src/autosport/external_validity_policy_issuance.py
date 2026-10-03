@@ -30,6 +30,10 @@ from .external_validity_baseline import (
     PolicyEvaluation,
 )
 from .monotonic_workspace_authority import resolve_monotonic_authority_root
+from .policy_evaluation import (
+    CANONICAL_PAPER_ABSTENTION_ACTIONS,
+    CANONICAL_PAPER_MATERIAL_ACTIONS,
+)
 from .monotonic_workspace_binding import (
     WorkspaceBindingConflictError,
     WorkspaceBindingIntegrityError,
@@ -1270,6 +1274,13 @@ def _derive_policy_evaluation(
     abstain_action = _text(
         source.evaluator_config.get("abstain_action"), "source abstain_action"
     )
+    if abstain_action in CANONICAL_PAPER_MATERIAL_ACTIONS:
+        raise ProductPolicyEvaluationIssuanceError(
+            "source abstain_action names a canonical material PAPER action"
+        )
+    abstention_actions = CANONICAL_PAPER_ABSTENTION_ACTIONS | frozenset(
+        {abstain_action}
+    )
     sample_ids: list[str] = []
     rows: list[tuple[str, str, Decimal]] = []
     total_cost = Decimal(0)
@@ -1304,7 +1315,7 @@ def _derive_policy_evaluation(
             sample_ids.append(sample_id)
             rows.append((sample_id, regime_id, net))
             total_cost += cost
-            if action == abstain_action:
+            if action in abstention_actions:
                 abstention_count += 1
 
         if len(sample_ids) != len(set(sample_ids)):

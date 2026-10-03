@@ -39,8 +39,11 @@ from .forward_evaluation_universe_binding import (
 )
 from .forward_evidence_completeness import (
     AuthoritativeSourceReceipt,
+    CampaignEvidence,
     ForwardEvidenceProtocolEnvelope,
     ForwardOpportunityEnvelope,
+    VerificationResult,
+    verify_campaign,
 )
 from .forward_universe_precommit_authority import ForwardUniversePrecommitLocator
 from .provider_evaluation_universe import (
@@ -64,6 +67,9 @@ _LOAD_PROVIDER_EVIDENCE = CompleteGameBoardEvidenceStore.load
 _GUARDED_UNIVERSE_LOAD = load_guarded_provider_evaluation_universe
 _RESOLVE_FORWARD_IDENTITY = resolve_forward_universe_authority_identity
 _AUTHORIZE_FORWARD_RECEIPTS = authorize_forward_source_receipts
+_VERIFY_FORWARD_EVIDENCE = verify_campaign
+_CANONICAL_CAMPAIGN_EVIDENCE = CampaignEvidence
+_CANONICAL_VERIFICATION_RESULT = VerificationResult
 
 _CAPTURED_CALLABLES = (
     ("_ESTABLISH_CAMPAIGN", _ESTABLISH_CAMPAIGN, _ESTABLISH_CAMPAIGN.__code__),
@@ -87,6 +93,11 @@ _CAPTURED_CALLABLES = (
         "_AUTHORIZE_FORWARD_RECEIPTS",
         _AUTHORIZE_FORWARD_RECEIPTS,
         _AUTHORIZE_FORWARD_RECEIPTS.__code__,
+    ),
+    (
+        "_VERIFY_FORWARD_EVIDENCE",
+        _VERIFY_FORWARD_EVIDENCE,
+        _VERIFY_FORWARD_EVIDENCE.__code__,
     ),
 )
 _CANONICAL_COLLECTOR_ARTIFACT_RESOLVER = inspect.getattr_static(
@@ -1014,6 +1025,85 @@ def authorize_campaign_forward_source_receipts(
             "forward source authorization returned noncanonical receipts"
         )
     return receipts
+
+
+def verify_campaign_forward_evidence(
+    *,
+    precommit_locator: ForwardUniversePrecommitLocator,
+    collector_store: CollectorDeltaStore,
+    source_spec: CampaignInceptionSourceSpec,
+    cycle_receipt: CampaignCompleteBoardCycleReceipt,
+    provider_evidence_store: CompleteGameBoardEvidenceStore,
+    universe_store: ProviderEvaluationUniverseStore,
+    event_lifecycle: ContinuousEventLifecycle | None,
+    evidence: CampaignEvidence,
+) -> VerificationResult:
+    """Run structural #879 verification only over cycle-authorized source receipts.
+
+    This is composition, not promotion authority. Caller-supplied authoritative
+    receipts are replaced by receipts re-issued from the exact campaign/cycle/provider
+    universe before the structural verifier is invoked.
+    """
+
+    campaign_evidence_type = _CANONICAL_CAMPAIGN_EVIDENCE
+    verification_result_type = _CANONICAL_VERIFICATION_RESULT
+    if type(evidence) is not campaign_evidence_type:
+        raise TypeError("evidence must be exact CampaignEvidence")
+
+    protocol = evidence.protocol
+    before = resolve_campaign_forward_universe_cycle_authority(
+        precommit_locator=precommit_locator,
+        collector_store=collector_store,
+        source_spec=source_spec,
+        cycle_receipt=cycle_receipt,
+        provider_evidence_store=provider_evidence_store,
+        universe_store=universe_store,
+        protocol=protocol,
+        event_lifecycle=event_lifecycle,
+    )
+    receipts = authorize_campaign_forward_source_receipts(
+        precommit_locator=precommit_locator,
+        collector_store=collector_store,
+        source_spec=source_spec,
+        cycle_receipt=cycle_receipt,
+        provider_evidence_store=provider_evidence_store,
+        universe_store=universe_store,
+        protocol=protocol,
+        event_lifecycle=event_lifecycle,
+        opportunities=evidence.opportunities,
+    )
+    canonical_evidence = campaign_evidence_type(
+        protocol=evidence.protocol,
+        opportunities=evidence.opportunities,
+        cohort_roots=evidence.cohort_roots,
+        closes=evidence.closes,
+        reveal_boundaries=evidence.reveal_boundaries,
+        authoritative_receipts=receipts,
+        denominator_sequences=evidence.denominator_sequences,
+        cost_evidence=evidence.cost_evidence,
+        safety_margin=evidence.safety_margin,
+        stopping_rule_satisfied=evidence.stopping_rule_satisfied,
+    )
+    result = _VERIFY_FORWARD_EVIDENCE(canonical_evidence)
+    if type(result) is not verification_result_type:
+        raise CampaignForwardUniverseCycleBindingError(
+            "structural forward verifier returned noncanonical result"
+        )
+    after = resolve_campaign_forward_universe_cycle_authority(
+        precommit_locator=precommit_locator,
+        collector_store=collector_store,
+        source_spec=source_spec,
+        cycle_receipt=cycle_receipt,
+        provider_evidence_store=provider_evidence_store,
+        universe_store=universe_store,
+        protocol=protocol,
+        event_lifecycle=event_lifecycle,
+    )
+    if after != before:
+        raise CampaignForwardUniverseCycleBindingError(
+            "campaign/cycle/provider/universe authority changed during structural verification"
+        )
+    return result
 
 
 _INTERNAL_CALLABLES = tuple(

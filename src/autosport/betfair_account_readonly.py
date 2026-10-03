@@ -1328,8 +1328,9 @@ def _install_execution_readback_authority() -> None:
 
     def seal_function_graph(
         roots: tuple[object, ...],
-    ) -> dict[str, tuple[object, object | None]]:
-        sealed: dict[str, tuple[object, object | None]] = {}
+    ) -> tuple[tuple[str, object, object | None], ...]:
+        sealed: list[tuple[str, object, object | None]] = []
+        sealed_names: set[str] = set()
         pending = list(roots)
         visited: set[int] = set()
         while pending:
@@ -1341,17 +1342,18 @@ def _install_execution_readback_authority() -> None:
             if code is None or getattr(function, "__globals__", None) is not module_globals:
                 continue
             for name in code.co_names:
-                if name not in module_globals or name in sealed:
+                if name not in module_globals or name in sealed_names:
                     continue
                 value = module_globals[name]
                 value_code = getattr(value, "__code__", None)
-                sealed[name] = (value, value_code)
+                sealed.append((name, value, value_code))
+                sealed_names.add(name)
                 if (
                     value_code is not None
                     and getattr(value, "__globals__", None) is module_globals
                 ):
                     pending.append(value)
-        return sealed
+        return tuple(sealed)
 
     sealed_readback_graph = seal_function_graph(
         (
@@ -1425,7 +1427,7 @@ def _install_execution_readback_authority() -> None:
                     expected_code is not None
                     and getattr(expected, "__code__", None) is not expected_code
                 )
-                for name, (expected, expected_code) in sealed_readback_graph.items()
+                for name, expected, expected_code in sealed_readback_graph
             )
         ):
             raise BetfairReadOnlyError(

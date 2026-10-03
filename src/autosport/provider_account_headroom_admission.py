@@ -2014,6 +2014,17 @@ def assess_provider_account_headroom(
         "__code__",
         None,
     ),
+    _generation_lock_wrapped_kwdefaults=tuple(
+        (key, value)
+        for key, value in (
+            getattr(
+                getattr(_current_balance_generation_lock, "__wrapped__", None),
+                "__kwdefaults__",
+                {},
+            )
+            or {}
+        ).items()
+    ),
 ) -> ProviderAccountHeadroomAssessment:
     """Issue conservative capital-axis evidence from exact canonical truth."""
     if type(ledger) is not RealExecutionLedger:
@@ -2029,6 +2040,13 @@ def assess_provider_account_headroom(
         or getattr(_generation_lock, "__wrapped__", None) is not _generation_lock_wrapped
         or getattr(_generation_lock_wrapped, "__code__", None)
         is not _generation_lock_wrapped_code
+        or tuple(
+            (key, value)
+            for key, value in (
+                getattr(_generation_lock_wrapped, "__kwdefaults__", {}) or {}
+            ).items()
+        )
+        != _generation_lock_wrapped_kwdefaults
     ):
         raise ProviderAccountHeadroomError(
             "current balance generation lock authority changed"
@@ -2213,6 +2231,17 @@ def reserve_observed_provider_headroom(
         "__code__",
         None,
     ),
+    _generation_lock_wrapped_kwdefaults=tuple(
+        (key, value)
+        for key, value in (
+            getattr(
+                getattr(_current_balance_generation_lock, "__wrapped__", None),
+                "__kwdefaults__",
+                {},
+            )
+            or {}
+        ).items()
+    ),
 ) -> ProductInternalHeadroomReservation:
     """Atomically consume product-internal headroom against exact ledger bytes.
 
@@ -2232,6 +2261,13 @@ def reserve_observed_provider_headroom(
         or getattr(_generation_lock, "__wrapped__", None) is not _generation_lock_wrapped
         or getattr(_generation_lock_wrapped, "__code__", None)
         is not _generation_lock_wrapped_code
+        or tuple(
+            (key, value)
+            for key, value in (
+                getattr(_generation_lock_wrapped, "__kwdefaults__", {}) or {}
+            ).items()
+        )
+        != _generation_lock_wrapped_kwdefaults
     ):
         raise ProviderAccountHeadroomError(
             "current balance generation lock authority changed"

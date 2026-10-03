@@ -213,3 +213,39 @@ def test_main_rejects_output_writer_rebind_from_live_qualification(
     ) == 2
 
     assert forged_calls == []
+
+
+def test_positive_admission_is_revoked_by_head_move_during_confirmation() -> None:
+    snapshots = iter(((HEAD_B, True), (HEAD_A, True)))
+
+    class MovingApi:
+        def live_pr_qualification(self, pr_number: int) -> tuple[str, bool]:
+            assert pr_number == 2008
+            return next(snapshots)
+
+    assert controller_module.admit_current_head(
+        api=MovingApi(),
+        pr_number=2008,
+        event_head_sha=HEAD_B,
+    ) == CancellationResult(
+        current_head=False,
+        cancelled_run_ids=(),
+    )
+
+
+def test_positive_admission_is_revoked_by_lifecycle_move_during_confirmation() -> None:
+    snapshots = iter(((HEAD_B, True), (HEAD_B, False)))
+
+    class MovingApi:
+        def live_pr_qualification(self, pr_number: int) -> tuple[str, bool]:
+            assert pr_number == 2008
+            return next(snapshots)
+
+    assert controller_module.admit_current_head(
+        api=MovingApi(),
+        pr_number=2008,
+        event_head_sha=HEAD_B,
+    ) == CancellationResult(
+        current_head=False,
+        cancelled_run_ids=(),
+    )

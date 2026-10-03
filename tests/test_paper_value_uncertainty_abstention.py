@@ -863,6 +863,63 @@ class PaperValueUncertaintyAbstentionTests(unittest.TestCase):
                 any("insufficient_conservative_edge" in note for note in context.notes)
             )
 
+    def test_sizing_evidence_class_method_rebind_cannot_mint_eligible(
+        self,
+    ) -> None:
+        goal = self._goal()
+        event = self._event()
+        forecast = self._forecast(event, uncertainty=Decimal("0.01"))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            authorized_ref = self._resolver_authorized_ref(root, event, forecast)
+            abstain_evidence = self._sizing_evidence(
+                event,
+                forecast,
+                net_win_profit_per_stake=Decimal("0.50"),
+            )
+            eligible_evidence = self._sizing_evidence(event, forecast)
+            policy = self._sizing_policy()
+            forged_decision = self._sizing_decision(
+                goal,
+                event,
+                forecast,
+                eligible_evidence,
+                policy,
+            )
+            self.assertEqual(forged_decision.action, SizingAction.ELIGIBLE)
+            context, ledger_path = self._context(root, event)
+
+            forged_called = False
+            original = UncertaintySizingEvidence.evaluate_canonical
+
+            def forged_class_dispatch(self, request, sizing_policy):
+                nonlocal forged_called
+                forged_called = True
+                return forged_decision
+
+            try:
+                UncertaintySizingEvidence.evaluate_canonical = forged_class_dispatch
+                self._agent(
+                    goal,
+                    forecast,
+                    predictive_ref=authorized_ref,
+                    sizing_evidence=abstain_evidence,
+                    sizing_policy=policy,
+                ).on_market_event(event, context)
+            finally:
+                UncertaintySizingEvidence.evaluate_canonical = original
+
+            self.assertFalse(
+                forged_called,
+                "mutable evidence class dispatch must not be a PAPER sizing authority",
+            )
+            self.assertEqual(context.paper_book.tickets, {})
+            self.assertFalse(ledger_path.exists())
+            self.assertTrue(
+                any("insufficient_conservative_edge" in note for note in context.notes)
+            )
+
     def test_coordinated_predictive_witness_rebind_cannot_authorize_ref(
         self,
     ) -> None:

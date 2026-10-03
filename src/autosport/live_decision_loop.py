@@ -1670,7 +1670,18 @@ class PersistentLiveDecisionLoop:
     ) -> LiveCycleResult:
         decision_ts = now.isoformat()
         affected = self.dependencies.input_ids
-        self._capture_input_views(affected, now, incremental=False)
+        try:
+            self._capture_input_views(affected, now, incremental=False)
+        except _ConcurrentDecisionSnapshot as exc:
+            self._needs_cache_rebuild = True
+            return LiveCycleResult(
+                LiveCycleStatus.BACKPRESSURE,
+                affected_input_ids=affected,
+                detail=(
+                    "provider gap snapshot was not causally coherent; "
+                    f"retrying before ZERO decision: {exc}"
+                ),
+            )
         market_sha = self._market_state_sha256()
         self._write_pending(
             decision_ts=decision_ts,

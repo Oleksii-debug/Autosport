@@ -38,14 +38,17 @@ from .provider_observation_authority import (
 ARTIFACT_KIND = "parlay-complete-game-board-v1"
 _SCHEMA_VERSION = 1
 _HEX = frozenset("0123456789abcdef")
+_CANONICAL_TYPE = type
+_CANONICAL_CALLABLE = callable
+_CANONICAL_GETATTR = getattr
 
 _CAPTURE = capture_parlay_complete_game_board
 _EVIDENCE_SAVE = CompleteGameBoardEvidenceStore.save
 _EVIDENCE_PATH = CompleteGameBoardEvidenceStore._path
 _CANONICAL_PATH_EQUALITY = Path.__eq__
-_CANONICAL_PATH_EQUALITY_CODE = getattr(_CANONICAL_PATH_EQUALITY, "__code__", None)
+_CANONICAL_PATH_EQUALITY_CODE = _CANONICAL_GETATTR(_CANONICAL_PATH_EQUALITY, "__code__", None)
 _CANONICAL_PATH_JOIN = Path.__truediv__
-_CANONICAL_PATH_JOIN_CODE = getattr(_CANONICAL_PATH_JOIN, "__code__", None)
+_CANONICAL_PATH_JOIN_CODE = _CANONICAL_GETATTR(_CANONICAL_PATH_JOIN, "__code__", None)
 _CANONICAL_OBJECT_GETATTRIBUTE = object.__getattribute__
 _CANONICAL_MODULE_GLOBALS = globals()
 _CANONICAL_GETATTR_STATIC = inspect.getattr_static
@@ -55,7 +58,7 @@ _CANONICAL_GETATTR_STATIC_GLOBAL_ITEMS = tuple(
     (
         name,
         _CANONICAL_GETATTR_STATIC_GLOBALS[name],
-        getattr(_CANONICAL_GETATTR_STATIC_GLOBALS[name], "__code__", None),
+        _CANONICAL_GETATTR(_CANONICAL_GETATTR_STATIC_GLOBALS[name], "__code__", None),
     )
     for name in _CANONICAL_GETATTR_STATIC_CODE.co_names
     if name in _CANONICAL_GETATTR_STATIC_GLOBALS
@@ -95,8 +98,8 @@ _STORE_CLASS_SEAMS = {
     name: _CANONICAL_GETATTR_STATIC(CollectorDeltaStore, name) for name in _STORE_SEAMS
 }
 _STORE_CLASS_SEAM_CODES = {
-    name: getattr(
-        getattr(target, "__func__", target),
+    name: _CANONICAL_GETATTR(
+        _CANONICAL_GETATTR(target, "__func__", target),
         "__code__",
         None,
     )
@@ -107,8 +110,8 @@ _EVIDENCE_CLASS_SEAMS = {
     "_path": _CANONICAL_GETATTR_STATIC(CompleteGameBoardEvidenceStore, "_path"),
 }
 _EVIDENCE_CLASS_SEAM_CODES = {
-    name: getattr(
-        getattr(target, "__func__", target),
+    name: _CANONICAL_GETATTR(
+        _CANONICAL_GETATTR(target, "__func__", target),
         "__code__",
         None,
     )
@@ -141,7 +144,7 @@ class CampaignProviderCycleCaptureIntegrityError(CampaignProviderCycleCaptureErr
 
 def _text(value: object, name: str) -> str:
     if (
-        type(value) is not str
+        _CANONICAL_TYPE(value) is not str
         or not value
         or value != value.strip()
         or "\x00" in value
@@ -225,9 +228,9 @@ def _require_canonical_seams(
     store: CollectorDeltaStore,
     evidence_store: CompleteGameBoardEvidenceStore,
 ) -> None:
-    if type(store) is not CollectorDeltaStore:
+    if _CANONICAL_TYPE(store) is not CollectorDeltaStore:
         raise TypeError("store must be the exact canonical CollectorDeltaStore")
-    if type(evidence_store) is not CompleteGameBoardEvidenceStore:
+    if _CANONICAL_TYPE(evidence_store) is not CompleteGameBoardEvidenceStore:
         raise TypeError(
             "evidence_store must be the exact CompleteGameBoardEvidenceStore"
         )
@@ -243,8 +246,8 @@ def _require_canonical_seams(
     code_changed = sorted(
         name
         for name, expected in _STORE_CLASS_SEAMS.items()
-        if getattr(
-            getattr(expected, "__func__", expected),
+        if _CANONICAL_GETATTR(
+            _CANONICAL_GETATTR(expected, "__func__", expected),
             "__code__",
             None,
         )
@@ -269,8 +272,8 @@ def _require_canonical_seams(
     code_changed = sorted(
         name
         for name, expected in _EVIDENCE_CLASS_SEAMS.items()
-        if getattr(
-            getattr(expected, "__func__", expected),
+        if _CANONICAL_GETATTR(
+            _CANONICAL_GETATTR(expected, "__func__", expected),
             "__code__",
             None,
         )
@@ -336,6 +339,8 @@ def _build_provider_evidence_campaign_scope_guard(
     path_equal,
     path_join,
     getattr_static,
+    type_fn,
+    getattr_fn,
     error_type,
 ):
     """Capture positive provider-routing authority outside mutable module globals."""
@@ -344,17 +349,17 @@ def _build_provider_evidence_campaign_scope_guard(
     routing_descriptors = dict(routing_items)
     workspace_descriptor = routing_descriptors["workspace"]
     authority_root_descriptor = routing_descriptors["authority_root"]
-    path_equal_code = getattr(path_equal, "__code__", None)
-    path_join_code = getattr(path_join, "__code__", None)
-    getattr_static_code = getattr(getattr_static, "__code__", None)
-    getattr_static_globals = getattr(getattr_static, "__globals__", None)
-    if type(getattr_static_globals) is not dict:
+    path_equal_code = getattr_fn(path_equal, "__code__", None)
+    path_join_code = getattr_fn(path_join, "__code__", None)
+    getattr_static_code = getattr_fn(getattr_static, "__code__", None)
+    getattr_static_globals = getattr_fn(getattr_static, "__globals__", None)
+    if type_fn(getattr_static_globals) is not dict:
         raise error_type("provider evidence scope reflection globals unavailable")
     getattr_static_global_items = tuple(
         (
             name,
             getattr_static_globals[name],
-            getattr(getattr_static_globals[name], "__code__", None),
+            getattr_fn(getattr_static_globals[name], "__code__", None),
         )
         for name in getattr_static_code.co_names
         if name in getattr_static_globals
@@ -366,22 +371,22 @@ def _build_provider_evidence_campaign_scope_guard(
     ) -> None:
         """Bind provider evidence routing to the exact prospective campaign trust root."""
 
-        if type(precommit_locator) is not locator_type:
+        if type_fn(precommit_locator) is not locator_type:
             raise TypeError(
                 "precommit_locator must be exact ForwardUniversePrecommitLocator"
             )
-        if type(evidence_store) is not evidence_store_type:
+        if type_fn(evidence_store) is not evidence_store_type:
             raise TypeError(
                 "evidence_store must be the exact CompleteGameBoardEvidenceStore"
             )
         if (
-            getattr(path_equal, "__code__", None) is not path_equal_code
-            or getattr(path_join, "__code__", None) is not path_join_code
-            or getattr(getattr_static, "__code__", None) is not getattr_static_code
-            or getattr(getattr_static, "__globals__", None) is not getattr_static_globals
+            getattr_fn(path_equal, "__code__", None) is not path_equal_code
+            or getattr_fn(path_join, "__code__", None) is not path_join_code
+            or getattr_fn(getattr_static, "__code__", None) is not getattr_static_code
+            or getattr_fn(getattr_static, "__globals__", None) is not getattr_static_globals
             or any(
                 getattr_static_globals.get(name) is not target
-                or getattr(target, "__code__", None) is not code
+                or getattr_fn(target, "__code__", None) is not code
                 for name, target, code in getattr_static_global_items
             )
         ):
@@ -410,7 +415,7 @@ def _build_provider_evidence_campaign_scope_guard(
             locator_type,
         )
         state = object_getattribute(evidence_store, "__dict__")
-        if type(state) is not dict:
+        if type_fn(state) is not dict:
             raise error_type("provider evidence store routing state is unavailable")
         if set(("workspace", "root", "authority_root")) - set(state):
             raise error_type("provider evidence store routing state is incomplete")
@@ -419,7 +424,7 @@ def _build_provider_evidence_campaign_scope_guard(
         authority_root = state["authority_root"]
 
         if (
-            type(locator_workspace) is not type(workspace)
+            type_fn(locator_workspace) is not type_fn(workspace)
             or path_equal(workspace, locator_workspace) is not True
         ):
             raise error_type(
@@ -427,7 +432,7 @@ def _build_provider_evidence_campaign_scope_guard(
             )
         expected_root = path_join(workspace, evidence_directory_surface)
         if (
-            type(root) is not type(expected_root)
+            type_fn(root) is not type_fn(expected_root)
             or path_equal(root, expected_root) is not True
         ):
             raise error_type(
@@ -439,7 +444,7 @@ def _build_provider_evidence_campaign_scope_guard(
                     "provider evidence authority root does not match campaign precommit authority"
                 )
         elif (
-            type(authority_root) is not type(locator_authority_root)
+            type_fn(authority_root) is not type_fn(locator_authority_root)
             or path_equal(authority_root, locator_authority_root) is not True
         ):
             raise error_type(
@@ -458,7 +463,9 @@ _require_provider_evidence_campaign_scope = (
         object_getattribute=_CANONICAL_OBJECT_GETATTRIBUTE,
         path_equal=_CANONICAL_PATH_EQUALITY,
         path_join=_CANONICAL_PATH_JOIN,
-        getattr_static=inspect.getattr_static,
+        getattr_static=_CANONICAL_GETATTR_STATIC,
+        type_fn=_CANONICAL_TYPE,
+        getattr_fn=_CANONICAL_GETATTR,
         error_type=CampaignProviderCycleCaptureIntegrityError,
     )
 )
@@ -514,7 +521,7 @@ class CampaignCompleteBoardCycleReceipt:
             raise TypeError(
                 "campaign cycle receipt issuance is resolver-private"
             )
-        if type(payload) is not dict or set(payload) != set(_RECEIPT_FIELD_NAMES):
+        if _CANONICAL_TYPE(payload) is not dict or set(payload) != set(_RECEIPT_FIELD_NAMES):
             raise CampaignProviderCycleCaptureIntegrityError(
                 "campaign cycle receipt payload is noncanonical"
             )
@@ -525,7 +532,7 @@ class CampaignCompleteBoardCycleReceipt:
 
     def to_dict(self) -> dict[str, object]:
         return {
-            name: getattr(self, name)
+            name: _CANONICAL_GETATTR(self, name)
             for name in _RECEIPT_FIELD_NAMES
         }
 
@@ -610,11 +617,11 @@ def capture_campaign_complete_game_board(
 ) -> tuple[CompleteGameBoardSnapshot, CampaignCompleteBoardCycleReceipt]:
     """Capture one provider board only after the exact campaign START is authorized."""
 
-    if type(source_spec) is not CampaignInceptionSourceSpec:
+    if _CANONICAL_TYPE(source_spec) is not CampaignInceptionSourceSpec:
         raise TypeError("source_spec must be exact CampaignInceptionSourceSpec")
-    if type(request) is not CompleteGameBoardRequest:
+    if _CANONICAL_TYPE(request) is not CompleteGameBoardRequest:
         raise TypeError("request must be exact CompleteGameBoardRequest")
-    if not callable(clock):
+    if not _CANONICAL_CALLABLE(clock):
         raise TypeError("clock must be callable")
     test_clock_origin = (
         _CANONICAL_TEST_CAMPAIGN_CLOCK_ORIGIN.get()
@@ -665,7 +672,7 @@ def capture_campaign_complete_game_board(
         ("_issue_receipt", issue_receipt),
     )
     expected_codes = tuple(
-        (name, target, getattr(getattr(target, "__func__", target), "__code__", None))
+        (name, target, _CANONICAL_GETATTR(_CANONICAL_GETATTR(target, "__func__", target), "__code__", None))
         for name, target in expected_dispatch
     )
     expected_inspect = inspect
@@ -700,8 +707,19 @@ def capture_campaign_complete_game_board(
     expected_evidence_directory_surface = _EVIDENCE_DIRECTORY_SURFACE
     expected_precommit_routing_seams = _PRECOMMIT_ROUTING_SEAMS
     expected_precommit_routing_items = _PRECOMMIT_ROUTING_SEAM_ITEMS
+    expected_type = _CANONICAL_TYPE
+    expected_callable = _CANONICAL_CALLABLE
+    expected_getattr = _CANONICAL_GETATTR
 
     def require_stable_dispatch() -> None:
+        if (
+            module_globals.get("_CANONICAL_TYPE") is not expected_type
+            or module_globals.get("_CANONICAL_CALLABLE") is not expected_callable
+            or module_globals.get("_CANONICAL_GETATTR") is not expected_getattr
+        ):
+            raise CampaignProviderCycleCaptureIntegrityError(
+                "campaign provider-cycle builtin dispatch changed"
+            )
         if (
             module_globals.get("inspect") is not expected_inspect
             or expected_inspect.getattr_static is not expected_getattr_static
@@ -709,7 +727,7 @@ def capture_campaign_complete_game_board(
             or expected_getattr_static.__globals__ is not expected_getattr_static_globals
             or any(
                 expected_getattr_static_globals.get(name) is not target
-                or getattr(target, "__code__", None) is not code
+                or _CANONICAL_GETATTR(target, "__code__", None) is not code
                 for name, target, code in expected_getattr_static_global_items
             )
         ):
@@ -857,8 +875,8 @@ def capture_campaign_complete_game_board(
                 raise CampaignProviderCycleCaptureIntegrityError(
                     "campaign provider-cycle dispatch authority is rebound: " + name
                 )
-            function = getattr(target, "__func__", target)
-            if getattr(function, "__code__", None) is not code:
+            function = _CANONICAL_GETATTR(target, "__func__", target)
+            if _CANONICAL_GETATTR(function, "__code__", None) is not code:
                 raise CampaignProviderCycleCaptureIntegrityError(
                     "campaign provider-cycle dispatch code changed: " + name
                 )
@@ -880,11 +898,11 @@ def capture_campaign_complete_game_board(
         run_id=source_spec.run_id,
     )
     if (
-        type(slot) is not dict
+        _CANONICAL_TYPE(slot) is not dict
         or slot.get("schedule_id") != campaign.schedule_id
         or slot.get("stream_epoch") != source_spec.stream_epoch
         or slot.get("max_items") != source_spec.max_items
-        or type(slot.get("slot_ordinal")) is not int
+        or _CANONICAL_TYPE(slot.get("slot_ordinal")) is not int
         or slot.get("slot_ordinal") < source_spec.evaluation_start_slot_ordinal
         or slot.get("slot_ordinal") > source_spec.evaluation_end_slot_ordinal
     ):
@@ -953,7 +971,7 @@ def capture_campaign_complete_game_board(
             timeout_seconds=timeout_seconds,
         )
         require_stable_dispatch()
-        if type(snapshot) is not CompleteGameBoardSnapshot:
+        if _CANONICAL_TYPE(snapshot) is not CompleteGameBoardSnapshot:
             raise CampaignProviderCycleCaptureIntegrityError(
                 "provider capture returned noncanonical snapshot type"
             )
@@ -996,8 +1014,8 @@ def capture_campaign_complete_game_board(
             snapshot.evidence_sha256,
         )
         if (
-            type(evidence_path) is not type(expected_evidence_path)
-            or type(repeated_path) is not type(expected_evidence_path)
+            _CANONICAL_TYPE(evidence_path) is not _CANONICAL_TYPE(expected_evidence_path)
+            or _CANONICAL_TYPE(repeated_path) is not _CANONICAL_TYPE(expected_evidence_path)
             or path_equal(evidence_path, repeated_path) is not True
             or path_equal(evidence_path, expected_evidence_path) is not True
         ):
@@ -1012,7 +1030,7 @@ def capture_campaign_complete_game_board(
             artifact_sha256=snapshot.evidence_sha256,
         )
         if (
-            type(artifact) is not dict
+            _CANONICAL_TYPE(artifact) is not dict
             or artifact.get("artifact_kind") != ARTIFACT_KIND
             or artifact.get("artifact_sha256") != snapshot.evidence_sha256
         ):
@@ -1071,9 +1089,9 @@ def capture_campaign_complete_game_board(
                     raw_failure_completed_at = effective_clock()
                 except BaseException:
                     raw_failure_completed_at = attempted_at
-                instant_function = getattr(instant, "__func__", instant)
-                finish_function = getattr(finish_cycle, "__func__", finish_cycle)
-                require_seams_function = getattr(
+                instant_function = _CANONICAL_GETATTR(instant, "__func__", instant)
+                finish_function = _CANONICAL_GETATTR(finish_cycle, "__func__", finish_cycle)
+                require_seams_function = _CANONICAL_GETATTR(
                     require_seams,
                     "__func__",
                     require_seams,
@@ -1104,13 +1122,13 @@ def capture_campaign_complete_game_board(
                     or module_globals.get("UTC") is not expected_utc
                     or module_globals.get("_require_canonical_seams")
                     is not require_seams
-                    or getattr(require_seams_function, "__code__", None)
+                    or _CANONICAL_GETATTR(require_seams_function, "__code__", None)
                     is not expected_require_seams_code
                     or module_globals.get("_instant") is not instant
-                    or getattr(instant_function, "__code__", None)
+                    or _CANONICAL_GETATTR(instant_function, "__code__", None)
                     is not expected_instant_code
                     or module_globals.get("_FINISH_CYCLE") is not finish_cycle
-                    or getattr(finish_function, "__code__", None)
+                    or _CANONICAL_GETATTR(finish_function, "__code__", None)
                     is not expected_finish_code
                 ):
                     raise CampaignProviderCycleCaptureIntegrityError(
@@ -1136,13 +1154,13 @@ def capture_campaign_complete_game_board(
                     observed_delta_ids=(),
                     committed_delta_ids=(),
                     duplicate_delta_ids=(),
-                    error_code=type(exc).__name__,
+                    error_code=_CANONICAL_TYPE(exc).__name__,
                 )
             except BaseException as terminal_error:
                 try:
                     exc.add_note(
                         "collector campaign capture failure terminal also failed: "
-                        f"{type(terminal_error).__name__}: {terminal_error}"
+                        f"{_CANONICAL_TYPE(terminal_error).__name__}: {terminal_error}"
                     )
                 except BaseException:
                     pass
@@ -1216,6 +1234,9 @@ def _seal_campaign_provider_cycle_capture_dispatch() -> None:
         "_CANONICAL_PATH_JOIN_CODE": _CANONICAL_PATH_JOIN_CODE,
         "_CANONICAL_OBJECT_GETATTRIBUTE": _CANONICAL_OBJECT_GETATTRIBUTE,
         "_CANONICAL_MODULE_GLOBALS": _CANONICAL_MODULE_GLOBALS,
+        "_CANONICAL_TYPE": _CANONICAL_TYPE,
+        "_CANONICAL_CALLABLE": _CANONICAL_CALLABLE,
+        "_CANONICAL_GETATTR": _CANONICAL_GETATTR,
         "_CANONICAL_GETATTR_STATIC": _CANONICAL_GETATTR_STATIC,
         "_CANONICAL_GETATTR_STATIC_CODE": _CANONICAL_GETATTR_STATIC_CODE,
         "_CANONICAL_GETATTR_STATIC_GLOBALS": _CANONICAL_GETATTR_STATIC_GLOBALS,
@@ -1229,7 +1250,7 @@ def _seal_campaign_provider_cycle_capture_dispatch() -> None:
         (
             name,
             target,
-            getattr(getattr(target, "__func__", target), "__code__", None),
+            _CANONICAL_GETATTR(_CANONICAL_GETATTR(target, "__func__", target), "__code__", None),
         )
         for name, target in (
             ("_CAPTURE", _CAPTURE),
@@ -1257,12 +1278,12 @@ def _seal_campaign_provider_cycle_capture_dispatch() -> None:
         CampaignCompleteBoardCycleReceipt,
         "_issue",
     )
-    expected_issue_function = getattr(
+    expected_issue_function = _CANONICAL_GETATTR(
         expected_issue_surface,
         "__func__",
         expected_issue_surface,
     )
-    expected_issue_code = getattr(expected_issue_function, "__code__", None)
+    expected_issue_code = _CANONICAL_GETATTR(expected_issue_function, "__code__", None)
 
     def require_dispatch_integrity() -> None:
         for name, expected in expected_values.items():
@@ -1276,7 +1297,7 @@ def _seal_campaign_provider_cycle_capture_dispatch() -> None:
             or expected_getattr_static.__globals__ is not expected_getattr_static_globals
             or any(
                 expected_getattr_static_globals.get(name) is not target
-                or getattr(target, "__code__", None) is not code
+                or _CANONICAL_GETATTR(target, "__code__", None) is not code
                 for name, target, code in expected_getattr_static_global_items
             )
         ):
@@ -1331,8 +1352,8 @@ def _seal_campaign_provider_cycle_capture_dispatch() -> None:
                 raise expected_error(
                     "campaign provider-cycle dispatch authority is rebound: " + name
                 )
-            function = getattr(expected, "__func__", expected)
-            if getattr(function, "__code__", None) is not code:
+            function = _CANONICAL_GETATTR(expected, "__func__", expected)
+            if _CANONICAL_GETATTR(function, "__code__", None) is not code:
                 raise expected_error(
                     "campaign provider-cycle dispatch code changed: " + name
                 )
@@ -1344,14 +1365,14 @@ def _seal_campaign_provider_cycle_capture_dispatch() -> None:
             raise expected_error(
                 "campaign provider-cycle receipt issuer is rebound"
             )
-        current_issue_function = getattr(
+        current_issue_function = _CANONICAL_GETATTR(
             current_issue_surface,
             "__func__",
             current_issue_surface,
         )
         if (
             current_issue_function is not expected_issue_function
-            or getattr(current_issue_function, "__code__", None)
+            or _CANONICAL_GETATTR(current_issue_function, "__code__", None)
             is not expected_issue_code
         ):
             raise expected_error(

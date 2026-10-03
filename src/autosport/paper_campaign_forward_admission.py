@@ -30,7 +30,16 @@ def _build_sealed_forward_admission():
     coordinator_type = admission_module.PaperCampaignAdmissionCoordinator
     legacy_admit = getattr_static(coordinator_type, "admit")
     legacy_admit_code = getattr(legacy_admit, "__code__", None)
-    forward_context = admission_module._ACTIVE_FORWARD_VERIFICATION
+    forward_context_reader = admission_module._CURRENT_FORWARD_VERIFICATION
+    forward_context_reader_code = getattr(
+        forward_context_reader,
+        "__code__",
+        None,
+    )
+    installer = admission_module._install_forward_verification_runner
+    run_with_forward = installer()
+    run_with_forward_code = getattr(run_with_forward, "__code__", None)
+    delattr(admission_module, "_install_forward_verification_runner")
     decision_field = admission_module._FORWARD_VERIFICATION_DECISION_FIELD
     action_parameter = admission_module._FORWARD_VERIFICATION_ACTION_PARAMETER
 
@@ -77,8 +86,18 @@ def _build_sealed_forward_admission():
             or getattr_static(coordinator_type, "admit") is not legacy_admit
             or exact_getattr(legacy_admit, "__code__", None)
             is not legacy_admit_code
-            or admission_module._ACTIVE_FORWARD_VERIFICATION
-            is not forward_context
+            or admission_module._CURRENT_FORWARD_VERIFICATION
+            is not forward_context_reader
+            or exact_getattr(forward_context_reader, "__code__", None)
+            is not forward_context_reader_code
+            or exact_getattr(run_with_forward, "__code__", None)
+            is not run_with_forward_code
+            or exact_getattr(
+                admission_module,
+                "_install_forward_verification_runner",
+                None,
+            )
+            is not None
             or admission_module._FORWARD_VERIFICATION_DECISION_FIELD
             != decision_field
             or admission_module._FORWARD_VERIFICATION_ACTION_PARAMETER
@@ -256,9 +275,8 @@ def _build_sealed_forward_admission():
                 "campaign forward verification changed before admission"
             )
 
-        token = forward_context.set(exact_dict(before))
-        try:
-            result = legacy_admit(
+        def invoke_admission():
+            return legacy_admit(
                 coordinator,
                 admission_id=admission_id,
                 observation=observation,
@@ -276,8 +294,8 @@ def _build_sealed_forward_admission():
                 decision_payload=decision_payload,
                 action_parameters=action_parameters,
             )
-        finally:
-            forward_context.reset(token)
+
+        result = run_with_forward(exact_dict(before), invoke_admission)
 
         after = resolve_payload(
             precommit_locator=precommit_locator,

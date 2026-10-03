@@ -55,7 +55,14 @@ def _initial_seal():
         PaperCampaignAdmissionCoordinator.admit,
         _admission_module._FORWARD_VERIFICATION_DECISION_FIELD,
         _admission_module._FORWARD_VERIFICATION_ACTION_PARAMETER,
-        _admission_module._ACTIVE_FORWARD_VERIFICATION,
+        (
+            _admission_module._CURRENT_FORWARD_VERIFICATION,
+            getattr(
+                _admission_module._CURRENT_FORWARD_VERIFICATION,
+                "__code__",
+                None,
+            ),
+        ),
         WeakKeyDictionary(),
         RLock(),
     )
@@ -74,7 +81,9 @@ def _build_guard(seal):
     original_admit = seal[9]
     forward_decision_field = seal[10]
     forward_action_parameter = seal[11]
-    forward_context = seal[12]
+    forward_context_reader = seal[12]
+    forward_context = forward_context_reader[0]
+    forward_context_code = forward_context_reader[1]
     path_bindings = seal[13]
     path_bindings_lock = seal[14]
     path_cls = Path
@@ -146,7 +155,8 @@ def _build_guard(seal):
             != forward_decision_field
             or _admission_module._FORWARD_VERIFICATION_ACTION_PARAMETER
             != forward_action_parameter
-            or _admission_module._ACTIVE_FORWARD_VERIFICATION is not forward_context
+            or _admission_module._CURRENT_FORWARD_VERIFICATION is not forward_context
+            or getattr(forward_context, "__code__", None) is not forward_context_code
         ):
             raise PaperCampaignAdmissionError(
                 "PAPER admission forward-verification routing changed after guard installation"

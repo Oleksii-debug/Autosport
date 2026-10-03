@@ -89,10 +89,57 @@ _ACTIVE_EXECUTION_BINDING: ContextVar[_ExecutionAdmissionBinding | None] = Conte
     "autosport_paper_campaign_execution_binding",
     default=None,
 )
-_ACTIVE_FORWARD_VERIFICATION: ContextVar[dict[str, object] | None] = ContextVar(
-    "autosport_paper_campaign_forward_verification",
-    default=None,
+def _build_forward_verification_context():
+    context: ContextVar[dict[str, object] | None] = ContextVar(
+        "autosport_paper_campaign_forward_verification",
+        default=None,
+    )
+    claimed = False
+    exact_type = type
+    exact_dict = dict
+
+    def current() -> dict[str, object] | None:
+        value = context.get()
+        if value is None:
+            return None
+        if exact_type(value) is not exact_dict:
+            raise PaperCampaignAdmissionError(
+                "campaign forward verification context is invalid"
+            )
+        return exact_dict(value)
+
+    def claim_runner():
+        nonlocal claimed
+        if claimed:
+            raise RuntimeError(
+                "campaign forward verification context runner is already claimed"
+            )
+        claimed = True
+
+        def run(payload: dict[str, object], invoke):
+            if exact_type(payload) is not exact_dict:
+                raise TypeError(
+                    "campaign forward verification payload must be exact dict"
+                )
+            if context.get() is not None:
+                raise PaperCampaignAdmissionError(
+                    "campaign forward verification context is already active"
+                )
+            token = context.set(exact_dict(payload))
+            try:
+                return invoke()
+            finally:
+                context.reset(token)
+
+        return run
+
+    return current, claim_runner
+
+
+_CURRENT_FORWARD_VERIFICATION, _install_forward_verification_runner = (
+    _build_forward_verification_context()
 )
+del _build_forward_verification_context
 
 
 class PaperCampaignAdmissionCoordinator(_base.PaperCampaignAdmissionCoordinator):
@@ -597,15 +644,9 @@ class PaperCampaignAdmissionCoordinator(_base.PaperCampaignAdmissionCoordinator)
             raise PaperCampaignAdmissionError(
                 "decision_payload cannot claim campaign forward verification authority"
             )
-        forward_verification = _ACTIVE_FORWARD_VERIFICATION.get()
+        forward_verification = _CURRENT_FORWARD_VERIFICATION()
         if forward_verification is not None:
-            if type(forward_verification) is not dict:
-                raise PaperCampaignAdmissionError(
-                    "campaign forward verification context is invalid"
-                )
-            payload[_FORWARD_VERIFICATION_DECISION_FIELD] = dict(
-                forward_verification
-            )
+            payload[_FORWARD_VERIFICATION_DECISION_FIELD] = forward_verification
         payload.update(
             {
                 _EXECUTION_DECISION_ID: binding.decision_id,

@@ -314,7 +314,7 @@ def test_legacy_admit_rejects_forward_routing_constant_rebind(
     assert _admissions(fixture) == {}
 
 
-def test_legacy_admit_rejects_forward_context_rebind(
+def test_legacy_admit_rejects_forward_context_reader_rebind(
     tmp_path,
     monkeypatch,
 ):
@@ -323,8 +323,8 @@ def test_legacy_admit_rejects_forward_context_rebind(
 
     monkeypatch.setattr(
         admission_module,
-        "_ACTIVE_FORWARD_VERIFICATION",
-        object(),
+        "_CURRENT_FORWARD_VERIFICATION",
+        lambda: {"receipt_sha256": "a" * 64},
     )
 
     with pytest.raises(
@@ -334,3 +334,11 @@ def test_legacy_admit_rejects_forward_context_rebind(
         fixture.admit(coordinator)
 
     assert _admissions(fixture) == {}
+
+
+def test_forward_context_has_no_public_setter():
+    assert not hasattr(admission_module, "_ACTIVE_FORWARD_VERIFICATION")
+    assert not hasattr(
+        admission_module,
+        "_install_forward_verification_runner",
+    )

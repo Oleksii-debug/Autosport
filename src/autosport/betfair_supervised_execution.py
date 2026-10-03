@@ -904,8 +904,8 @@ def read_betfair_supervised_action_readback(
 ) -> BetfairExecutionReadbackEnvelope:
     """Query the exact durable provider order reference used by placeOrders."""
 
-    if not isinstance(client, BetfairReadOnlyClient):
-        raise TypeError("client must be BetfairReadOnlyClient")
+    if type(client) is not BetfairReadOnlyClient:
+        raise TypeError("client must be exact BetfairReadOnlyClient")
     saga = ledger.saga(bound.execution_plan.plan_id)
     action_id = saga.attempt_action_ids.get(attempt_id)
     if action_id is None:
@@ -921,13 +921,20 @@ def read_betfair_supervised_action_readback(
         raise BetfairSupervisedExecutionError(
             "attempt lacks durable provider order reference"
         )
-    return client.read_execution_readback(
+    capture = client.read_execution_readback(
         action_id=action.action_id,
         provider_order_ref=provider_order_ref,
         market_id=action.market_id,
         page_size=page_size,
         max_pages=max_pages,
     )
+    try:
+        capture.assert_authoritative()
+    except BetfairReadOnlyError as exc:
+        raise BetfairSupervisedExecutionError(
+            "supervised Betfair readback lacks authenticated product origin"
+        ) from exc
+    return capture
 
 
 def execute_betfair_supervised_action(

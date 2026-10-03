@@ -88,6 +88,84 @@ def test_composed_verification_receipt_fixes_nonpromotion_truth() -> None:
     assert len(receipt.receipt_sha256) == 64
 
 
+def test_composed_verification_receipt_rejects_true_failure_codes() -> None:
+    identity = ForwardUniverseAuthorityIdentity(
+        precommit_authority_sha256="a" * 64,
+        prospective_evaluation_plan_sha256="b" * 64,
+        backing_locator_sha256="c" * 64,
+        universe_sha256="d" * 64,
+        membership_sha256="e" * 64,
+        member_count=1,
+    )
+    authority = binding.CampaignForwardUniverseCycleAuthority._issue(
+        _issuance_capability=binding._AUTHORITY_ISSUANCE_CAPABILITY,
+        campaign_id="campaign-1",
+        source_id="parlayapi:table_tennis",
+        cycle_receipt_sha256="1" * 64,
+        campaign_receipt_sha256="2" * 64,
+        provider_evidence_sha256="3" * 64,
+        provider_frame_sha256="4" * 64,
+        collector_artifact_evidence_sha256="5" * 64,
+        forward_identity=identity,
+    )
+    contradictory = VerificationResult(
+        ok=True,
+        codes=(VerificationCode.ECONOMICS_INCOMPLETE,),
+        protocol_sha256="6" * 64,
+        terminal_root_sha256=None,
+        candidate_count=1,
+    )
+
+    with pytest.raises(
+        binding.CampaignForwardUniverseCycleBindingError,
+        match="ok flag conflicts",
+    ):
+        binding.CampaignForwardEvidenceVerification._issue(
+            _issuance_capability=binding._VERIFICATION_ISSUANCE_CAPABILITY,
+            authority=authority,
+            structural_result=contradictory,
+        )
+
+
+def test_composed_verification_receipt_rejects_false_pass_code() -> None:
+    identity = ForwardUniverseAuthorityIdentity(
+        precommit_authority_sha256="a" * 64,
+        prospective_evaluation_plan_sha256="b" * 64,
+        backing_locator_sha256="c" * 64,
+        universe_sha256="d" * 64,
+        membership_sha256="e" * 64,
+        member_count=1,
+    )
+    authority = binding.CampaignForwardUniverseCycleAuthority._issue(
+        _issuance_capability=binding._AUTHORITY_ISSUANCE_CAPABILITY,
+        campaign_id="campaign-1",
+        source_id="parlayapi:table_tennis",
+        cycle_receipt_sha256="1" * 64,
+        campaign_receipt_sha256="2" * 64,
+        provider_evidence_sha256="3" * 64,
+        provider_frame_sha256="4" * 64,
+        collector_artifact_evidence_sha256="5" * 64,
+        forward_identity=identity,
+    )
+    contradictory = VerificationResult(
+        ok=False,
+        codes=(VerificationCode.PASS,),
+        protocol_sha256="6" * 64,
+        terminal_root_sha256=None,
+        candidate_count=1,
+    )
+
+    with pytest.raises(
+        binding.CampaignForwardUniverseCycleBindingError,
+        match="ok flag conflicts",
+    ):
+        binding.CampaignForwardEvidenceVerification._issue(
+            _issuance_capability=binding._VERIFICATION_ISSUANCE_CAPABILITY,
+            authority=authority,
+            structural_result=contradictory,
+        )
+
+
 def test_composed_verification_receipt_preserves_negative_structural_verdict() -> None:
     identity = ForwardUniverseAuthorityIdentity(
         precommit_authority_sha256="a" * 64,

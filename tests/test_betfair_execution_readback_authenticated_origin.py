@@ -422,6 +422,42 @@ def test_same_code_reconstruction_with_foreign_raw_read_cannot_mint_origin(
     with pytest.raises(BetfairReadOnlyError, match="product-origin authority"):
         capture.assert_authoritative()
 
+def test_readback_network_predicate_has_no_mutable_closure_authority() -> None:
+    predicate = _closure_value(
+        BetfairReadOnlyClient.read_execution_readback,
+        "origin_dispatch_current",
+    )
+    assert predicate.__closure__ is None
+    assert type(predicate.__defaults__) is tuple
+
+
+def test_equal_network_predicate_defaults_replacement_revokes_readback_wrapper(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    predicate = _closure_value(
+        BetfairReadOnlyClient.read_execution_readback,
+        "origin_dispatch_current",
+    )
+    defaults = predicate.__defaults__
+    assert type(defaults) is tuple
+    replacement = (*defaults,)
+    assert replacement == defaults
+    assert replacement is not defaults
+    monkeypatch.setattr(predicate, "__defaults__", replacement)
+
+    client = BetfairReadOnlyClient(
+        BetfairSessionCredentials("app-key", "session-token"),
+        transport=_CustomTransport(),
+        venue_id="betfair",
+        account_id="acct-1",
+    )
+    with pytest.raises(
+        BetfairReadOnlyError,
+        match="origin authority implementation changed",
+    ):
+        _read(client)
+
+
 @pytest.mark.parametrize(
     ("owner", "name"),
     (

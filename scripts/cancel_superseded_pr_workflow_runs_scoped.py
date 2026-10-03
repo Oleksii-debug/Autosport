@@ -473,6 +473,12 @@ class WorkflowScopedGitHubApi(GitHubApi):
                         run.head_sha,
                         head_branch,
                     )
+                else:
+                    # active_runs() queries statuses sequentially, so the same run can
+                    # transition between requests. A later explicit PR observation is
+                    # stronger than an earlier unbound observation for that exact run id
+                    # and must revoke the stale orphan candidate before cleanup.
+                    self._unbound_active_runs.pop(run.run_id, None)
                 runs.append(self._recover_candidate_run_reference(run))
             total_count = payload["total_count"]
             # Active-run collections are inherently moving while a controller scans

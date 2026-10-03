@@ -10,6 +10,7 @@ from scripts.cancel_superseded_pr_workflow_runs import (
     WorkflowRun,
 )
 from scripts.cancel_superseded_pr_workflow_runs_scoped import (
+    WorkflowScopedGitHubApi,
     _cancel_triggering_run_if_stale_or_nonqualifying,
     _explicit_singleton_pr_for_current_run,
     cancel_superseded_explicit_pr_runs,
@@ -168,6 +169,67 @@ def test_current_run_snapshot_identity_requires_one_consistent_singleton() -> No
         current_run_id=91,
         event_head_sha=HEAD,
     ) is None
+
+
+def test_later_explicit_observation_revokes_stale_unbound_candidate(monkeypatch) -> None:
+    api = WorkflowScopedGitHubApi(
+        repository="owner/repo",
+        token="token",
+        workflow_id=356678400,
+        workflow_name="CI",
+    )
+
+    def run_payload(*, status: str, pr_numbers: tuple[int, ...]) -> dict[str, object]:
+        return {
+            "id": 7007,
+            "head_sha": HEAD,
+            "name": "CI",
+            "status": status,
+            "pull_requests": [{"number": number} for number in pr_numbers],
+            "head_branch": "feature/head",
+            "head_repository": {"full_name": "owner/repo"},
+        }
+
+    def fake_request(
+        path: str,
+        *,
+        method: str = "GET",
+        allowed_http_errors: frozenset[int] = frozenset(),
+    ) -> object:
+        assert method == "GET"
+        assert not allowed_http_errors
+        if "status=queued" in path:
+            return {
+                "total_count": 1,
+                "workflow_runs": [run_payload(status="queued", pr_numbers=())],
+            }
+        if "status=in_progress" in path:
+            return {
+                "total_count": 1,
+                "workflow_runs": [
+                    run_payload(status="in_progress", pr_numbers=(2050,))
+                ],
+            }
+        return {"total_count": 0, "workflow_runs": []}
+
+    monkeypatch.setattr(api, "_request", fake_request)
+
+    runs = api.active_runs()
+
+    assert tuple(
+        run.pr_numbers for run in runs if run.run_id == 7007
+    ) == ((), (2050,))
+    assert 7007 not in api._unbound_active_runs
+
+    def stale_orphan_lookup(_head_sha: str) -> int:
+        raise AssertionError("later explicit identity must revoke stale orphan cleanup")
+
+    monkeypatch.setattr(
+        api,
+        "_historical_associated_pr_number",
+        stale_orphan_lookup,
+    )
+    assert api.cancel_historical_unbound_runs() == ()
 
 
 def test_controller_scheduler_coalesces_all_prs_per_source_workflow() -> None:

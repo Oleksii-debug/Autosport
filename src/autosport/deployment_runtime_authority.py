@@ -55,6 +55,7 @@ _CANONICAL_JSON_DUMPS: Final = json.dumps
 _CANONICAL_JSON_DUMPS_CODE: Final = getattr(json.dumps, "__code__", None)
 _CANONICAL_JSON_LOADS: Final = json.loads
 _CANONICAL_JSON_LOADS_CODE: Final = getattr(json.loads, "__code__", None)
+_CANONICAL_JSON_DECODE_ERROR: Final = json.JSONDecodeError
 _CANONICAL_UUID_MODULE: Final = uuid
 _CANONICAL_UUID4: Final = uuid.uuid4
 _CANONICAL_UUID4_CODE: Final = getattr(uuid.uuid4, "__code__", None)
@@ -913,7 +914,7 @@ class DeploymentRuntimeAuthorityStore:
             )
         try:
             payload = _CANONICAL_JSON_LOADS(raw)
-        except json.JSONDecodeError as exc:
+        except _CANONICAL_JSON_DECODE_ERROR as exc:
             raise DeploymentRuntimeAuthorityError(
                 "runtime authority store is not valid JSON"
             ) from exc

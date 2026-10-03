@@ -378,3 +378,29 @@ def test_from_dict_rejects_unknown_fields_and_noncanonical_decimal() -> None:
     noncanonical["utility_value"] = "1.500"
     with pytest.raises(PolicyUtilityError, match="canonical decimal text"):
         PolicyUtilityEvidence.from_dict(noncanonical)
+
+def test_store_rejects_duplicate_json_authority_key_even_when_last_value_is_valid(
+    tmp_path,
+) -> None:
+    path = tmp_path / "utility.jsonl"
+    evidence = _evidence(currency="EUR", utility_value=Decimal("0.20"))
+    assert PolicyUtilityStore(path).append(evidence) is True
+
+    # Keep the final canonical value and its existing evidence digest intact,
+    # but prepend a conflicting duplicate authority key. Plain json.loads()
+    # silently applies last-wins semantics and used to accept these ambiguous
+    # durable bytes as canonical policy-utility evidence.
+    raw = path.read_text(encoding="utf-8").rstrip("\n")
+    marker = json.dumps("risk_fingerprint") + ":" + json.dumps(SHA_D)
+    duplicated = (
+        json.dumps("risk_fingerprint")
+        + ":"
+        + json.dumps("7" * 64)
+        + ","
+        + marker
+    )
+    assert marker in raw
+    path.write_text(raw.replace(marker, duplicated, 1) + "\n", encoding="utf-8")
+
+    with pytest.raises(PolicyUtilityError, match="invalid policy utility store JSON"):
+        PolicyUtilityStore(path)

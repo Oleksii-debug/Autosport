@@ -381,6 +381,58 @@ class ProductClockBoundaryTests(unittest.TestCase):
             with self.assertRaises(RiskDayWindowMismatchError):
                 ProductDayRiskWindowStore.require_current(store, forged)
 
+    def test_current_rejects_store_subclass_before_internal_dispatch(self) -> None:
+        class DerivedStore(ProductDayRiskWindowStore):
+            pass
+
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            store = DerivedStore(
+                root / "workspace",
+                authority_root=root / "machine-authority",
+            )
+            with self.assertRaisesRegex(
+                RiskDayWindowIntegrityError,
+                "canonical exact store type",
+            ):
+                ProductDayRiskWindowStore.current(store)
+
+    def test_current_bypasses_instance_publish_day_shadow(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            store = ProductDayRiskWindowStore(
+                root / "workspace",
+                authority_root=root / "machine-authority",
+            )
+
+            def hostile_publish(*args, **kwargs):
+                del args, kwargs
+                raise AssertionError("instance publish shadow executed")
+
+            store._publish_day = hostile_publish
+            evidence = ProductDayRiskWindowStore.current(store)
+
+            self.assertTrue(store.state_path.exists())
+            self.assertTrue(evidence.product_clock_authoritative)
+
+    def test_current_bypasses_instance_evidence_shadow(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            store = ProductDayRiskWindowStore(
+                root / "workspace",
+                authority_root=root / "machine-authority",
+            )
+            canonical = ProductDayRiskWindowStore.current(store)
+
+            def hostile_evidence(*args, **kwargs):
+                del args, kwargs
+                raise AssertionError("instance evidence shadow executed")
+
+            store._evidence = hostile_evidence
+            observed = ProductDayRiskWindowStore.current(store)
+
+            self.assertEqual(observed, canonical)
+
     def test_runtime_product_clock_rebind_is_downgraded(self) -> None:
         original = day_window._PRODUCT_TIME_NS
         try:

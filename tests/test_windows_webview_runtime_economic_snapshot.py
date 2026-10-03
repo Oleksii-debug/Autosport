@@ -376,6 +376,24 @@ def test_economic_snapshot_rejects_malformed_freshness_and_money(
         replace(valid, balance=Decimal("NaN"))
     with pytest.raises(ValueError, match="SHA"):
         replace(valid, paper_book_sha256="not-a-sha")
+    with pytest.raises(ValueError, match="committed stake"):
+        replace(valid, committed_stake=Decimal("9"))
+    with pytest.raises(ValueError, match="portfolio bounds"):
+        replace(
+            valid,
+            portfolio_worst_case=Decimal("11"),
+            portfolio_best_case=Decimal("10"),
+        )
+
+
+def test_runtime_snapshot_rejects_noncanonical_paperbook_path(
+    tmp_path: Path,
+) -> None:
+    runtime = _runtime(tmp_path)
+    runtime.coordinator.paper_book_path = tmp_path / "redirected-book.json"
+
+    with pytest.raises(RuntimeError, match="PaperBook path"):
+        _capture_runtime_economic_snapshot(runtime, _tick())
 
 
 def test_unprofiled_exact_runtime_tick_cannot_mint_economic_snapshot(

@@ -964,3 +964,69 @@ def test_module_state_cannot_mint_underreported_risk_authority(
     ):
         forged.assert_issued_current(ledger)
 
+def test_public_closure_graph_cannot_mint_underreported_risk_authority(
+    tmp_path,
+) -> None:
+    ledger, plan = _ledger(tmp_path, _action(stake="10"))
+    evidence = resolve_execution_capital_at_risk(ledger, plan.plan_id)
+    original = evidence.attempts[0]
+
+    forged_attempt = replace(
+        original,
+        requested_stake=Decimal("1"),
+        requested_capital_at_limit=Decimal("1"),
+        contingent_unknown_capital=Decimal("1"),
+        max_plausible_capital_at_risk=Decimal("1"),
+    )
+    provisional = replace(
+        evidence,
+        attempts=(forged_attempt,),
+        contingent_unknown_capital=Decimal("1"),
+        max_plausible_capital_at_risk=Decimal("1"),
+        evidence_sha256="0" * 64,
+    )
+    forged = replace(
+        provisional,
+        evidence_sha256=capital_risk_module._evidence_digest(provisional),
+    )
+
+    # Regression for the prior positive bypass: the public wrapped resolver exposed
+    # register_product_issued through __closure__, whose own closure carried the
+    # mutable issuance dict. A caller could invoke that registrar for this forged
+    # same-snapshot evidence and make assert_issued_current() accept understated risk.
+    pending = [
+        capital_risk_module.resolve_execution_capital_at_risk,
+        ExecutionCapitalAtRiskEvidence.assert_issued_current,
+    ]
+    seen: set[int] = set()
+    reachable_function_names: set[str] = set()
+    while pending:
+        current = pending.pop()
+        identity = id(current)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        closure = getattr(current, "__closure__", None)
+        if not closure:
+            continue
+        for cell in closure:
+            try:
+                value = cell.cell_contents
+            except ValueError:
+                continue
+            if callable(value):
+                name = getattr(value, "__name__", "")
+                if name:
+                    reachable_function_names.add(name)
+                if hasattr(value, "__closure__"):
+                    pending.append(value)
+
+    assert "register_product_issued" not in reachable_function_names
+    assert "require_product_issued" not in reachable_function_names
+
+    with pytest.raises(
+        ExecutionCapitalAtRiskError,
+        match="not current product-issued authority",
+    ):
+        forged.assert_issued_current(ledger)
+

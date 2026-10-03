@@ -439,3 +439,60 @@ def test_clock_rollback_does_not_free_sms_throttle():
     assert snap.can_send_verification_code is False
     ctl.send_verification_code()
     assert len(transport.send_calls) == 1
+
+
+def test_surface_contract_has_stable_accessible_names_and_secret_masking():
+    ctl, _, _, _ = controller()
+
+    surface = ctl.surface_contract()
+
+    assert dict(surface.field_accessible_names) == {
+        "email": "Email",
+        "password": "Password",
+        "verification_code": "Verification code",
+        "access_key": "Access key",
+        "secret_key": "Secret key",
+    }
+    assert surface.masked_fields == ("password", "secret_key")
+    assert surface.verification_code_input_mode == "single_text_input"
+    assert surface.status_region_id == "prophetx-account-link-status"
+    assert surface.status_live_mode == "polite"
+
+
+def test_surface_contract_moves_2fa_focus_without_exposing_secret_context():
+    ctl, transport, _, _ = controller()
+    make_2fa(ctl, transport)
+
+    required = ctl.surface_contract()
+    assert required.focus_target == "send_verification_code"
+    assert required.primary_action == "send_verification_code"
+
+    ctl.send_verification_code()
+    code_entry = ctl.surface_contract()
+    assert code_entry.focus_target == "verification_code"
+    assert code_entry.primary_action == "verify_two_factor"
+
+
+def test_authenticated_surface_never_offers_unverified_direct_key_generation():
+    ctl, _, _, _ = controller()
+    ctl.submit_login(email="operator@example.test", password="PASSWORD_SECRET")
+
+    surface = ctl.surface_contract()
+
+    assert surface.focus_target == "manual_api_token_import"
+    assert surface.primary_action == "import_approved_api_token"
+    assert "generate" not in (surface.primary_action or "")
+
+
+def test_linked_surface_focuses_plain_status_and_has_no_secret_action():
+    ctl, _, _, _ = controller()
+    ctl.import_approved_api_token(
+        access_key="ACCESS_SECRET",
+        secret_key="SUPER_SECRET",
+        environment="sandbox",
+    )
+
+    surface = ctl.surface_contract()
+
+    assert surface.focus_target == "linked_status"
+    assert surface.primary_action is None

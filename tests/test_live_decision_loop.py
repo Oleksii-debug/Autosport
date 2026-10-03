@@ -1551,6 +1551,50 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
                 1,
             )
 
+    def test_wrapped_observation_health_disagreement_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            event = self._event(selection="selection-a", sequence=1)
+
+            def observer(updates):
+                store = SQLiteMarketStore(workspace / "market.db")
+                try:
+                    bus = MarketEventBus(store)
+                    bus.subscribe(updates.accept_persisted)
+                    bus.publish(event)
+                finally:
+                    store.close()
+                return SimpleNamespace(
+                    stats=IngestionStats(
+                        source_id=event.source_id,
+                        received=1,
+                        accepted=1,
+                        rejected=0,
+                        elapsed_seconds=0.01,
+                        cursor="1",
+                        quality_flags=(),
+                        health_status="healthy",
+                    ),
+                    health=SimpleNamespace(status="degraded"),
+                )
+
+            factory = _EmptyIntentFactory()
+            loop = self._loop(
+                workspace,
+                observer=observer,
+                factory=factory,
+                clock=_ManualClock(self.START + timedelta(seconds=1)),
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+
+            result = loop.run_cycle()
+
+            self.assertEqual(result.status, LiveCycleStatus.BACKPRESSURE)
+            self.assertIn("quality is degraded", result.detail)
+            self.assertEqual(factory.calls, [])
+            self.assertEqual(loop.mirror_updates.pending_count, 1)
+            self.assertFalse((workspace / "decisions.jsonl").exists())
+
     def test_degraded_observation_blocks_economic_cut_until_healthy_rebuild(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

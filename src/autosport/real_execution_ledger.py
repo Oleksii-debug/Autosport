@@ -472,7 +472,7 @@ class RealExecutionLedger:
                 domain="execution.real-ledger",
                 key=authority_key,
             )
-        except (OSError, MonotonicWorkspaceAuthorityError) as exc:
+        except (OSError, RuntimeError, MonotonicWorkspaceAuthorityError) as exc:
             raise ExecutionLedgerIntegrityError(
                 "execution ledger monotonic authority could not be initialized"
             ) from exc

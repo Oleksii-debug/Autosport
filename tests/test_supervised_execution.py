@@ -821,6 +821,106 @@ def test_class_rebound_ledger_method_fails_before_hostile_dispatch(
     assert hostile_calls == []
 
 
+
+@pytest.mark.parametrize(
+    "helper_name",
+    (
+        "_canonical_bound_plan_authority_dispatch",
+        "_canonical_supervised_ledger_dispatch",
+        "_canonical_bound_plan_witness",
+        "_require_bound_plan_structure",
+        "_require_approval",
+        "_require_durable_approval",
+        "_durable_reserved_plan_fingerprint",
+        "_require_reserved",
+        "_attempt_action",
+        "_require_attempt_provider_order_reference",
+        "_validate_slippage",
+        "_require_verified_profile",
+    ),
+)
+def test_supervised_composition_helper_alias_rebinding_fails_before_mutation(
+    monkeypatch,
+    tmp_path,
+    helper_name,
+) -> None:
+    bound, approval, _, _ = _bound()
+    hostile_calls: list[object] = []
+
+    def hostile(*args, **kwargs):
+        hostile_calls.append((args, kwargs))
+        return None
+
+    monkeypatch.setattr(supervised_execution, helper_name, hostile)
+    ledger = RealExecutionLedger(tmp_path / f"helper-{helper_name}.jsonl")
+
+    with pytest.raises(
+        SupervisedExecutionError,
+        match="canonical supervised execution composition changed",
+    ):
+        reserve_supervised_plan(ledger, bound, approval)
+
+    assert hostile_calls == []
+    with pytest.raises(KeyError):
+        ledger.saga(bound.execution_plan.plan_id)
+
+
+@pytest.mark.parametrize(
+    "helper_name",
+    (
+        "_canonical_bound_plan_authority_dispatch",
+        "_canonical_supervised_ledger_dispatch",
+        "_durable_reserved_plan_fingerprint",
+        "_require_reserved",
+    ),
+)
+def test_supervised_composition_helper_code_replacement_fails_before_mutation(
+    monkeypatch,
+    tmp_path,
+    helper_name,
+) -> None:
+    bound, approval, _, _ = _bound()
+    target = getattr(supervised_execution, helper_name)
+
+    def hostile(*args, **kwargs):
+        raise AssertionError("hostile helper code executed")
+
+    monkeypatch.setattr(target, "__code__", hostile.__code__)
+    ledger = RealExecutionLedger(tmp_path / f"helper-code-{helper_name}.jsonl")
+
+    with pytest.raises(
+        SupervisedExecutionError,
+        match="canonical supervised execution composition changed",
+    ):
+        reserve_supervised_plan(ledger, bound, approval)
+
+    with pytest.raises(KeyError):
+        ledger.saga(bound.execution_plan.plan_id)
+
+
+def test_supervised_entrypoint_raw_code_replacement_fails_before_mutation(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    bound, approval, _, _ = _bound()
+    raw = reserve_supervised_plan.__wrapped__
+
+    def hostile(*args, **kwargs):
+        raise AssertionError("hostile reserve code executed")
+
+    monkeypatch.setattr(raw, "__code__", hostile.__code__)
+    ledger = RealExecutionLedger(tmp_path / "entrypoint-code-rebound.jsonl")
+
+    with pytest.raises(
+        SupervisedExecutionError,
+        match="canonical supervised execution entrypoint changed",
+    ):
+        reserve_supervised_plan(ledger, bound, approval)
+
+    with pytest.raises(KeyError):
+        ledger.saga(bound.execution_plan.plan_id)
+
+
 def test_approval_binds_exact_route_and_slippage_terms() -> None:
     intent, policy, book = _intent()
     graph = PortfolioDependencyGraph.for_inputs(book, (intent,))

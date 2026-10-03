@@ -59,6 +59,47 @@ class _StopRequested(RuntimeError):
     """Internal control-flow signal for a requested bounded stop."""
 
 
+def _source_callable_witness(source: object, name: str) -> tuple[object, object | None, object | None]:
+    """Capture one source callable without depending on fresh bound-method objects."""
+
+    value = getattr(source, name, None)
+    if not callable(value):
+        raise TypeError(f"source.{name} must be callable")
+    bound_self = getattr(value, "__self__", None)
+    bound_func = getattr(value, "__func__", None)
+    if bound_self is source and bound_func is not None:
+        return bound_func, getattr(bound_func, "__code__", None), source
+    return value, getattr(value, "__code__", None), None
+
+
+def _require_source_callable_witness(
+    source: object,
+    name: str,
+    witness: tuple[object, object | None, object | None],
+) -> Callable[..., object]:
+    """Return the captured callable only while the source surface is unchanged."""
+
+    expected_callable, expected_code, expected_bound_self = witness
+    current = getattr(source, name, None)
+    if expected_bound_self is source:
+        current_callable = getattr(current, "__func__", None)
+        current_bound_self = getattr(current, "__self__", None)
+        if current_bound_self is not source or current_callable is not expected_callable:
+            raise CollectorServiceError(
+                f"source.{name} authority changed during collector service run"
+            )
+        if getattr(current_callable, "__code__", None) is not expected_code:
+            raise CollectorServiceError(
+                f"source.{name} code changed during collector service run"
+            )
+        return getattr(source, name)
+    if current is not expected_callable or getattr(current, "__code__", None) is not expected_code:
+        raise CollectorServiceError(
+            f"source.{name} authority changed during collector service run"
+        )
+    return expected_callable  # type: ignore[return-value]
+
+
 class _SignalStopRequest:
     """Signal handler target that performs no I/O and defers STOP to safe code."""
 
@@ -491,21 +532,38 @@ class HeadlessCollectorService:
             raise ValueError("source.source_id must be a non-empty string")
         if not isinstance(stream_epoch, str) or not stream_epoch.strip():
             raise ValueError("source.stream_epoch must be a non-empty string")
-        if not callable(getattr(source, "fetch_catalog_page", None)):
-            raise TypeError("source.fetch_catalog_page must be callable")
-        if not callable(getattr(source, "fetch_deltas", None)):
-            raise TypeError("source.fetch_deltas must be callable")
+        fetch_catalog_witness = _source_callable_witness(
+            source, "fetch_catalog_page"
+        )
+        fetch_deltas_witness = _source_callable_witness(source, "fetch_deltas")
+        binder = getattr(source, "bind_collector_store", None)
+        binder_witness = (
+            _source_callable_witness(source, "bind_collector_store")
+            if binder is not None
+            else None
+        )
+        resolve_event_witness = (
+            _source_callable_witness(source, "resolve_event")
+            if binder is not None
+            else None
+        )
         self.delta_store = delta_store
         self.lifecycle = lifecycle
         self.source = source
         self._source_identity = source
         self._source_id = source_id
-        binder = getattr(source, "bind_collector_store", None)
-        if binder is not None:
-            if not callable(binder):
-                raise TypeError("source.bind_collector_store must be callable")
+        self._source_fetch_catalog_witness = fetch_catalog_witness
+        self._source_fetch_deltas_witness = fetch_deltas_witness
+        self._source_bind_store_witness = binder_witness
+        self._source_resolve_event_witness = resolve_event_witness
+        if binder_witness is not None:
             try:
-                binder(delta_store)
+                bound_binder = _require_source_callable_witness(
+                    source,
+                    "bind_collector_store",
+                    binder_witness,
+                )
+                bound_binder(delta_store)
             except CollectorStorageBackpressureError as exc:
                 raise CollectorRetentionRequiredError(
                     "RETENTION_REQUIRED: collector event migration reached the "
@@ -519,7 +577,14 @@ class HeadlessCollectorService:
                 raise CollectorServiceError(
                     "source identity changed while binding canonical collector store"
                 )
-        self._archives_canonical_events = binder is not None
+            _require_source_callable_witness(
+                source, "bind_collector_store", binder_witness
+            )
+            assert resolve_event_witness is not None
+            _require_source_callable_witness(
+                source, "resolve_event", resolve_event_witness
+            )
+        self._archives_canonical_events = binder_witness is not None
         self.config = config or CollectorServiceConfig()
         self.clock = clock or (lambda: datetime.now(timezone.utc).isoformat())
         self.sleep = sleep or time.sleep
@@ -575,6 +640,28 @@ class HeadlessCollectorService:
             raise CollectorServiceError(
                 "source.stream_epoch changed during active collector cycle"
             )
+        _require_source_callable_witness(
+            source,
+            "fetch_catalog_page",
+            self._source_fetch_catalog_witness,
+        )
+        _require_source_callable_witness(
+            source,
+            "fetch_deltas",
+            self._source_fetch_deltas_witness,
+        )
+        if self._source_bind_store_witness is not None:
+            _require_source_callable_witness(
+                source,
+                "bind_collector_store",
+                self._source_bind_store_witness,
+            )
+            assert self._source_resolve_event_witness is not None
+            _require_source_callable_witness(
+                source,
+                "resolve_event",
+                self._source_resolve_event_witness,
+            )
         return source
 
     def _append_admitted_delta(self, delta: CollectorDelta) -> bool:
@@ -594,12 +681,18 @@ class HeadlessCollectorService:
         _CollectorServiceState._instant(activated_at, "activated_at")
         event = None
         if self._archives_canonical_events:
-            resolver = getattr(source, "resolve_event", None)
-            if not callable(resolver):
-                raise CollectorServiceError(
-                    "collector-bound source must provide resolve_event"
-                )
+            assert self._source_resolve_event_witness is not None
+            resolver = _require_source_callable_witness(
+                source,
+                "resolve_event",
+                self._source_resolve_event_witness,
+            )
             event = resolver(delta)
+            _require_source_callable_witness(
+                source,
+                "resolve_event",
+                self._source_resolve_event_witness,
+            )
             if not isinstance(event, MarketEvent):
                 raise CollectorServiceError(
                     "collector-bound source resolve_event must return MarketEvent"
@@ -751,9 +844,14 @@ class HeadlessCollectorService:
 
         try:
             self._check_storage_budget()
+            catalog_reader = _require_source_callable_witness(
+                cycle_source,
+                "fetch_catalog_page",
+                self._source_fetch_catalog_witness,
+            )
             refreshed = self._bounded_provider_call(
                 lambda: self.lifecycle.refresh_once(
-                    cycle_source.fetch_catalog_page,
+                    catalog_reader,
                     source_id=self.source_id,
                     discovered_at=self.clock(),
                 )
@@ -772,8 +870,13 @@ class HeadlessCollectorService:
             checkpoint = self.delta_store.stream_checkpoint(
                 self.source_id, cycle_stream_epoch
             )
+            delta_reader = _require_source_callable_witness(
+                cycle_source,
+                "fetch_deltas",
+                self._source_fetch_deltas_witness,
+            )
             raw_deltas = self._bounded_provider_call(
-                lambda: cycle_source.fetch_deltas(
+                lambda: delta_reader(
                     checkpoint,
                     records,
                     self.config.max_items,

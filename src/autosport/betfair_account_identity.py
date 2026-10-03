@@ -17,6 +17,7 @@ from enum import Enum
 from hashlib import sha256
 import hmac
 import json
+from sys import _getframe
 import urllib.request as _urllib_request
 from secrets import token_bytes, token_hex
 from threading import RLock
@@ -167,6 +168,11 @@ def _make_account_identity_authority():
     hmac_compare_digest = hmac.compare_digest
     token_hex_fn = token_hex
     weakref_fn = ref
+    getframe_fn = _getframe
+    object_id = id
+    exact_type = type
+    string_type = str
+    integer_type = int
 
     canonical_client_init = client_type.__init__
     canonical_read_account_details = client_type.read_account_details
@@ -565,7 +571,128 @@ def _make_account_identity_authority():
         assert type(value) is identity_type
         return value
 
-    return build_client, resolve_identity, is_authoritative, require_authoritative
+    def bind_execution_readback_origin_authority(caller_code: object):
+        """Bind one readback-origin proof issuer to the canonical acquisition wrapper.
+
+        The returned issuer can mint a proof only while called from the exact code
+        object supplied by the readback composition layer.  The proof is keyed by
+        K07's existing process authority and binds the exact live client/session,
+        evidence object identity and immutable capture fingerprint.
+        """
+
+        if not hasattr(caller_code, "co_code"):
+            raise identity_error_type(
+                "execution readback origin requires canonical caller code"
+            )
+
+        caller_marker = "__AUTOSPORT_BETFAIR_READBACK_ORIGIN_CALLER_CODE__"
+
+        def issue_origin(
+            client: BetfairReadOnlyClient,
+            identity: BetfairAuthenticatedAccountIdentity,
+            *,
+            capture_identity: int,
+            capture_fingerprint: str,
+        ) -> str:
+            expected_caller = "__AUTOSPORT_BETFAIR_READBACK_ORIGIN_CALLER_CODE__"
+            if getframe_fn(1).f_code is not expected_caller:
+                raise identity_error_type(
+                    "execution readback origin proof may only be issued by canonical acquisition"
+                )
+            require_authoritative(identity, client=client)
+            if (
+                exact_type(capture_identity) is not integer_type
+                or capture_identity <= 0
+                or exact_type(capture_fingerprint) is not string_type
+            ):
+                raise identity_error_type(
+                    "execution readback origin proof inputs are invalid"
+                )
+            validate_sha256(capture_fingerprint, "capture_fingerprint")
+            context = context_for(client)
+            if context.session_context_id != identity.session_context_id:
+                raise identity_error_type(
+                    "execution readback origin session context changed"
+                )
+            payload = json_dumps(
+                {
+                    "schema": "autosport.betfair_execution_readback_origin",
+                    "schema_version": 1,
+                    "client_identity": object_id(client),
+                    "session_context_id": context.session_context_id,
+                    "account_identity_id": identity.identity_id,
+                    "capture_identity": capture_identity,
+                    "capture_fingerprint": capture_fingerprint,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+                allow_nan=False,
+            ).encode("utf-8")
+            return hmac_digest(process_hmac_key, payload, "sha256").hex()
+
+        constants = issue_origin.__code__.co_consts
+        if sum(item == caller_marker for item in constants) != 1:
+            raise identity_error_type(
+                "execution readback origin caller anchor is ambiguous"
+            )
+        issue_origin.__code__ = issue_origin.__code__.replace(
+            co_consts=tuple(
+                caller_code if item == caller_marker else item
+                for item in constants
+            )
+        )
+
+        def verify_origin(
+            proof: object,
+            client: BetfairReadOnlyClient,
+            identity: BetfairAuthenticatedAccountIdentity,
+            *,
+            capture_identity: int,
+            capture_fingerprint: str,
+        ) -> bool:
+            try:
+                require_authoritative(identity, client=client)
+                if (
+                    exact_type(proof) is not string_type
+                    or exact_type(capture_identity) is not integer_type
+                    or capture_identity <= 0
+                    or exact_type(capture_fingerprint) is not string_type
+                ):
+                    return False
+                validate_sha256(capture_fingerprint, "capture_fingerprint")
+                context = context_for(client)
+                if context.session_context_id != identity.session_context_id:
+                    return False
+                payload = json_dumps(
+                    {
+                        "schema": "autosport.betfair_execution_readback_origin",
+                        "schema_version": 1,
+                        "client_identity": object_id(client),
+                        "session_context_id": context.session_context_id,
+                        "account_identity_id": identity.identity_id,
+                        "capture_identity": capture_identity,
+                        "capture_fingerprint": capture_fingerprint,
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=True,
+                    allow_nan=False,
+                ).encode("utf-8")
+                expected = hmac_digest(process_hmac_key, payload, "sha256").hex()
+                return hmac_compare_digest(proof, expected)
+            except (AttributeError, TypeError, ValueError, identity_error_type):
+                return False
+
+        return issue_origin, verify_origin
+
+    return (
+        build_client,
+        resolve_identity,
+        is_authoritative,
+        require_authoritative,
+        bind_execution_readback_origin_authority,
+    )
 
 
 def _canonical_json(value: object) -> bytes:
@@ -618,5 +745,6 @@ def _canonical_timestamp(value: str) -> str:
     resolve_betfair_authenticated_account_identity,
     is_authoritative_betfair_account_identity,
     require_authoritative_betfair_account_identity,
+    _bind_betfair_execution_readback_origin_authority,
 ) = _make_account_identity_authority()
 del _make_account_identity_authority

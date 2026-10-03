@@ -661,10 +661,38 @@ _CANONICAL_JSON = json
 _CANONICAL_JSON_DUMPS = json.dumps
 _CANONICAL_DATETIME = datetime
 _CANONICAL_TIMEZONE = timezone
+_CANONICAL_INSPECT = inspect
+_CANONICAL_GETATTR_STATIC = inspect.getattr_static
+_CANONICAL_GETATTR_STATIC_CODE = _CANONICAL_GETATTR_STATIC.__code__
+_CANONICAL_GETATTR_STATIC_GLOBALS = _CANONICAL_GETATTR_STATIC.__globals__
+_CANONICAL_GETATTR_STATIC_GLOBAL_ITEMS = tuple(
+    (
+        name,
+        _CANONICAL_GETATTR_STATIC_GLOBALS[name],
+        getattr(_CANONICAL_GETATTR_STATIC_GLOBALS[name], "__code__", None),
+    )
+    for name in _CANONICAL_GETATTR_STATIC_CODE.co_names
+    if name in _CANONICAL_GETATTR_STATIC_GLOBALS
+)
 
 
 def _require_dispatch_integrity() -> None:
     module_globals = globals()
+    if (
+        module_globals.get("inspect") is not _CANONICAL_INSPECT
+        or _CANONICAL_INSPECT.getattr_static is not _CANONICAL_GETATTR_STATIC
+        or _CANONICAL_GETATTR_STATIC.__code__ is not _CANONICAL_GETATTR_STATIC_CODE
+        or _CANONICAL_GETATTR_STATIC.__globals__
+        is not _CANONICAL_GETATTR_STATIC_GLOBALS
+        or any(
+            _CANONICAL_GETATTR_STATIC_GLOBALS.get(name) is not target
+            or getattr(target, "__code__", None) is not code
+            for name, target, code in _CANONICAL_GETATTR_STATIC_GLOBAL_ITEMS
+        )
+    ):
+        raise CampaignForwardUniverseCycleBindingError(
+            "campaign forward-cycle reflection dispatch changed"
+        )
     if (
         module_globals.get("CampaignForwardUniverseCycleAuthority")
         is not _CANONICAL_AUTHORITY_CLASS
@@ -949,8 +977,11 @@ def resolve_campaign_forward_universe_cycle_authority(
     expected_json_dumps = json.dumps
     expected_datetime = datetime
     expected_timezone = timezone
-    expected_inspect = inspect
-    expected_getattr_static = inspect.getattr_static
+    expected_inspect = _CANONICAL_INSPECT
+    expected_getattr_static = _CANONICAL_GETATTR_STATIC
+    expected_getattr_static_code = _CANONICAL_GETATTR_STATIC_CODE
+    expected_getattr_static_globals = _CANONICAL_GETATTR_STATIC_GLOBALS
+    expected_getattr_static_global_items = _CANONICAL_GETATTR_STATIC_GLOBAL_ITEMS
     expected_internal_callables = _INTERNAL_CALLABLES
     expected_captured_callables = _CAPTURED_CALLABLES
     expected_provider_callables = _PROVIDER_UNIVERSE_CALLABLES
@@ -988,7 +1019,23 @@ def resolve_campaign_forward_universe_cycle_authority(
             )
         if (
             module_globals.get("inspect") is not expected_inspect
+            or module_globals.get("_CANONICAL_INSPECT") is not expected_inspect
+            or module_globals.get("_CANONICAL_GETATTR_STATIC")
+            is not expected_getattr_static
+            or module_globals.get("_CANONICAL_GETATTR_STATIC_CODE")
+            is not expected_getattr_static_code
+            or module_globals.get("_CANONICAL_GETATTR_STATIC_GLOBALS")
+            is not expected_getattr_static_globals
+            or module_globals.get("_CANONICAL_GETATTR_STATIC_GLOBAL_ITEMS")
+            is not expected_getattr_static_global_items
             or expected_inspect.getattr_static is not expected_getattr_static
+            or expected_getattr_static.__code__ is not expected_getattr_static_code
+            or expected_getattr_static.__globals__ is not expected_getattr_static_globals
+            or any(
+                expected_getattr_static_globals.get(name) is not target
+                or getattr(target, "__code__", None) is not code
+                for name, target, code in expected_getattr_static_global_items
+            )
             or module_globals.get("_INTERNAL_CALLABLES") is not expected_internal_callables
             or module_globals.get("_CAPTURED_CALLABLES") is not expected_captured_callables
             or module_globals.get("_PROVIDER_UNIVERSE_CALLABLES") is not expected_provider_callables
@@ -1241,8 +1288,11 @@ def authorize_campaign_forward_source_receipts(
     expected_json_dumps = json.dumps
     expected_datetime = datetime
     expected_timezone = timezone
-    expected_inspect = inspect
-    expected_getattr_static = inspect.getattr_static
+    expected_inspect = _CANONICAL_INSPECT
+    expected_getattr_static = _CANONICAL_GETATTR_STATIC
+    expected_getattr_static_code = _CANONICAL_GETATTR_STATIC_CODE
+    expected_getattr_static_globals = _CANONICAL_GETATTR_STATIC_GLOBALS
+    expected_getattr_static_global_items = _CANONICAL_GETATTR_STATIC_GLOBAL_ITEMS
     expected_internal_callables = _INTERNAL_CALLABLES
     expected_captured_callables = _CAPTURED_CALLABLES
     expected_provider_callables = _PROVIDER_UNIVERSE_CALLABLES
@@ -1288,7 +1338,23 @@ def authorize_campaign_forward_source_receipts(
             )
         if (
             module_globals.get("inspect") is not expected_inspect
+            or module_globals.get("_CANONICAL_INSPECT") is not expected_inspect
+            or module_globals.get("_CANONICAL_GETATTR_STATIC")
+            is not expected_getattr_static
+            or module_globals.get("_CANONICAL_GETATTR_STATIC_CODE")
+            is not expected_getattr_static_code
+            or module_globals.get("_CANONICAL_GETATTR_STATIC_GLOBALS")
+            is not expected_getattr_static_globals
+            or module_globals.get("_CANONICAL_GETATTR_STATIC_GLOBAL_ITEMS")
+            is not expected_getattr_static_global_items
             or expected_inspect.getattr_static is not expected_getattr_static
+            or expected_getattr_static.__code__ is not expected_getattr_static_code
+            or expected_getattr_static.__globals__ is not expected_getattr_static_globals
+            or any(
+                expected_getattr_static_globals.get(name) is not target
+                or getattr(target, "__code__", None) is not code
+                for name, target, code in expected_getattr_static_global_items
+            )
             or module_globals.get("_INTERNAL_CALLABLES") is not expected_internal_callables
             or module_globals.get("_CAPTURED_CALLABLES") is not expected_captured_callables
             or module_globals.get("_PROVIDER_UNIVERSE_CALLABLES") is not expected_provider_callables
@@ -1530,8 +1596,11 @@ def _seal_campaign_forward_universe_cycle_dispatch() -> None:
     expected_verification_result_field_descriptors = (
         _CANONICAL_VERIFICATION_RESULT_FIELD_DESCRIPTORS
     )
-    expected_inspect = inspect
-    expected_getattr_static = inspect.getattr_static
+    expected_inspect = _CANONICAL_INSPECT
+    expected_getattr_static = _CANONICAL_GETATTR_STATIC
+    expected_getattr_static_code = _CANONICAL_GETATTR_STATIC_CODE
+    expected_getattr_static_globals = _CANONICAL_GETATTR_STATIC_GLOBALS
+    expected_getattr_static_global_items = _CANONICAL_GETATTR_STATIC_GLOBAL_ITEMS
     expected_hashlib = hashlib
     expected_sha256 = hashlib.sha256
     expected_json = json
@@ -1695,7 +1764,23 @@ def _seal_campaign_forward_universe_cycle_dispatch() -> None:
             )
         if (
             module_globals.get("inspect") is not expected_inspect
+            or module_globals.get("_CANONICAL_INSPECT") is not expected_inspect
+            or module_globals.get("_CANONICAL_GETATTR_STATIC")
+            is not expected_getattr_static
+            or module_globals.get("_CANONICAL_GETATTR_STATIC_CODE")
+            is not expected_getattr_static_code
+            or module_globals.get("_CANONICAL_GETATTR_STATIC_GLOBALS")
+            is not expected_getattr_static_globals
+            or module_globals.get("_CANONICAL_GETATTR_STATIC_GLOBAL_ITEMS")
+            is not expected_getattr_static_global_items
             or expected_inspect.getattr_static is not expected_getattr_static
+            or expected_getattr_static.__code__ is not expected_getattr_static_code
+            or expected_getattr_static.__globals__ is not expected_getattr_static_globals
+            or any(
+                expected_getattr_static_globals.get(name) is not target
+                or getattr(target, "__code__", None) is not code
+                for name, target, code in expected_getattr_static_global_items
+            )
         ):
             raise expected_error(
                 "campaign forward-cycle reflection dispatch changed"

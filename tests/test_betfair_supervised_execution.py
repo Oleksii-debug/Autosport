@@ -901,6 +901,95 @@ def test_full_match_persists_provider_report_and_canonical_ack() -> None:
         assert ledger.verify_integrity() > 0
 
 
+def test_better_than_requested_back_limit_preserves_distinct_submit_and_accept() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
+        accepted_odds = action.requested_odds + Decimal("0.01")
+        transport = _Transport(
+            lambda request: _response(
+                request,
+                matched=action.requested_stake,
+                average=accepted_odds,
+            )
+        )
+        client = _enabled_client(profile, transport, store=goal_store)
+
+        result = execute_betfair_supervised_action(
+            ledger,
+            bound,
+            approval,
+            action_id=action.action_id,
+            attempt_id="attempt-better-price",
+            profile=profile,
+            client=client,
+            clock=lambda: SUBMITTED_AT,
+        )
+
+        assert result.outcome is PlaceOrdersOutcome.ACCEPTED
+        request = transport.calls[0]["request"]
+        submitted_price = Decimal(
+            request["params"]["instructions"][0]["limitOrder"]["price"]
+        )
+        assert submitted_price == action.requested_odds
+        assert accepted_odds > submitted_price
+
+        attempt = RealExecutionLedger(
+            Path(tmp) / "real.jsonl"
+        ).verified_execution_view(bound.execution_plan.plan_id).attempts[0]
+        assert attempt.action.requested_odds == action.requested_odds
+        assert attempt.acknowledgement is not None
+        assert attempt.acknowledgement.accepted_odds == accepted_odds
+        assert attempt.acknowledgement.accepted_stake == action.requested_stake
+        assert attempt.submitted_request_sha256 is not None
+
+
+def test_worse_than_requested_standard_back_limit_is_unknown_contradiction() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
+        impossible_odds = action.requested_odds - Decimal("0.01")
+        transport = _Transport(
+            lambda request: _response(
+                request,
+                matched=action.requested_stake,
+                average=impossible_odds,
+            )
+        )
+        client = _enabled_client(profile, transport, store=goal_store)
+
+        result = execute_betfair_supervised_action(
+            ledger,
+            bound,
+            approval,
+            action_id=action.action_id,
+            attempt_id="attempt-impossible-price",
+            profile=profile,
+            client=client,
+            clock=lambda: SUBMITTED_AT,
+        )
+
+        assert result.outcome is PlaceOrdersOutcome.UNKNOWN
+        assert result.attempt_state is AttemptState.UNKNOWN
+        assert result.evidence_id is not None
+        assert result.external_receipt_id == "bet-123"
+
+        attempt = RealExecutionLedger(
+            Path(tmp) / "real.jsonl"
+        ).verified_execution_view(bound.execution_plan.plan_id).attempts[0]
+        assert attempt.state is AttemptState.UNKNOWN
+        assert (
+            attempt.unknown_reason
+            == "betfair_standard_back_limit_price_contradiction_requires_readback"
+        )
+        assert attempt.provider_evidence is not None
+        assert attempt.provider_evidence.evidence_id == result.evidence_id
+        assert attempt.acknowledgement is None
+        assert attempt.submitted_request_sha256 is not None
+        assert not ledger.can_retry_action(
+            plan_id=bound.execution_plan.plan_id,
+            action_id=action.action_id,
+        )
+
+
 def test_processed_with_errors_single_success_maps_partial_exactly() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         profile, bound, approval, ledger, action, goal_store = _prepared(tmp)

@@ -706,8 +706,10 @@ _CANONICAL_DURABLE_PUBLICATION_FINALIZER_CODE: Final = (
 
 
 def _environment_payload(environment: EnvironmentIdentity) -> dict[str, object]:
-    if not isinstance(environment, EnvironmentIdentity):
-        raise DeploymentRuntimeAuthorityError("environment must be EnvironmentIdentity")
+    if type(environment) is not _CANONICAL_ENVIRONMENT_IDENTITY_TYPE:
+        raise DeploymentRuntimeAuthorityError(
+            "environment must be exact EnvironmentIdentity"
+        )
     return {
         "schema": environment.schema,
         "schema_version": environment.schema_version,
@@ -722,8 +724,10 @@ def _environment_payload(environment: EnvironmentIdentity) -> dict[str, object]:
 
 
 def _episode_payload(episode: Episode) -> dict[str, object]:
-    if not isinstance(episode, Episode):
-        raise DeploymentRuntimeAuthorityError("episode must be Episode")
+    if type(episode) is not _CANONICAL_EPISODE_TYPE:
+        raise DeploymentRuntimeAuthorityError(
+            "episode must be exact Episode"
+        )
     return {
         "environment_id": episode.environment_id,
         "episode_key": episode.episode_key,
@@ -783,6 +787,20 @@ def _action_semantics_payload(
 def _environment_from_payload(raw: object) -> EnvironmentIdentity:
     if type(raw) is not dict:
         raise DeploymentRuntimeAuthorityError("environment payload must be an object")
+    if set(raw) != {
+        "schema",
+        "schema_version",
+        "source_id",
+        "config_id",
+        "data_id",
+        "protocol_id",
+        "cutoff_ts",
+        "seed",
+        "environment_id",
+    }:
+        raise DeploymentRuntimeAuthorityError(
+            "environment payload envelope is not canonical"
+        )
     seed = raw.get("seed")
     schema_version = raw.get("schema_version")
     if type(seed) is not int or type(schema_version) is not int:
@@ -805,6 +823,16 @@ def _environment_from_payload(raw: object) -> EnvironmentIdentity:
 def _episode_from_payload(raw: object) -> Episode:
     if type(raw) is not dict:
         raise DeploymentRuntimeAuthorityError("episode payload must be an object")
+    if set(raw) != {
+        "environment_id",
+        "episode_key",
+        "policy_id",
+        "admissible_actions",
+        "episode_id",
+    }:
+        raise DeploymentRuntimeAuthorityError(
+            "episode payload envelope is not canonical"
+        )
     actions = raw.get("admissible_actions")
     if type(actions) is not list:
         raise DeploymentRuntimeAuthorityError("episode admissible_actions must be a list")
@@ -822,6 +850,15 @@ def _episode_from_payload(raw: object) -> Episode:
 def _action_semantics_from_payload(raw: object) -> tuple[str, tuple[tuple[str, str], ...], str, str]:
     if type(raw) is not dict:
         raise DeploymentRuntimeAuthorityError("action semantics payload must be an object")
+    if set(raw) != {
+        "version",
+        "meanings",
+        "definition_sha256",
+        "action_semantics_id",
+    }:
+        raise DeploymentRuntimeAuthorityError(
+            "action semantics payload envelope is not canonical"
+        )
     raw_meanings = raw.get("meanings")
     if type(raw_meanings) is not list:
         raise DeploymentRuntimeAuthorityError("action semantics meanings must be a list")
@@ -871,10 +908,14 @@ class DeploymentRuntimeAuthorityRecord:
     def __post_init__(self) -> None:
         _sha(self.runtime_authority_id, "runtime_authority_id")
         _timestamp(self.available_at, "available_at")
-        if not isinstance(self.environment, EnvironmentIdentity):
-            raise DeploymentRuntimeAuthorityError("environment must be EnvironmentIdentity")
-        if not isinstance(self.episode, Episode):
-            raise DeploymentRuntimeAuthorityError("episode must be Episode")
+        if type(self.environment) is not _CANONICAL_ENVIRONMENT_IDENTITY_TYPE:
+            raise DeploymentRuntimeAuthorityError(
+                "environment must be exact EnvironmentIdentity"
+            )
+        if type(self.episode) is not _CANONICAL_EPISODE_TYPE:
+            raise DeploymentRuntimeAuthorityError(
+                "episode must be exact Episode"
+            )
         if self.episode.environment_id != self.environment.environment_id:
             raise DeploymentRuntimeAuthorityError("episode belongs to another environment")
         semantics = _action_semantics_payload(
@@ -978,6 +1019,20 @@ class DeploymentRuntimeAuthorityRecord:
     def from_dict(cls, raw: object) -> "DeploymentRuntimeAuthorityRecord":
         if type(raw) is not dict:
             raise DeploymentRuntimeAuthorityError("runtime authority record must be an object")
+        if set(raw) != {
+            "schema",
+            "schema_version",
+            "environment",
+            "episode",
+            "action_semantics",
+            "runtime_authority_id",
+            "available_at",
+            "previous_record_sha256",
+            "record_sha256",
+        }:
+            raise DeploymentRuntimeAuthorityError(
+                "runtime authority record envelope is not canonical"
+            )
         if raw.get("schema") != RECORD_SCHEMA or raw.get("schema_version") != RECORD_SCHEMA_VERSION:
             raise DeploymentRuntimeAuthorityError("unsupported runtime authority record schema")
         environment = _environment_from_payload(raw.get("environment"))

@@ -168,17 +168,32 @@ def _reject_nonstandard_json_constant(value: str) -> object:
     )
 
 
-def parse_run(payload: object) -> WorkflowRun:
+def parse_run(
+    payload: object,
+    *,
+    _positive_int=_require_positive_int,
+    _positive_int_code=_require_positive_int.__code__,
+    _sha_validator=_require_sha,
+    _sha_validator_code=_require_sha.__code__,
+    _active_statuses: tuple[str, ...] = _ACTIVE_STATUSES,
+) -> WorkflowRun:
+    if (
+        getattr(_positive_int, "__code__", None) is not _positive_int_code
+        or getattr(_sha_validator, "__code__", None) is not _sha_validator_code
+        or type(_active_statuses) is not tuple
+        or not _active_statuses
+    ):
+        raise CancellationError("workflow run parser authority changed")
     if not isinstance(payload, dict):
         raise CancellationError("workflow run must be an object")
-    run_id = _require_positive_int(payload.get("id"), field="run id")
-    head_sha = _require_sha(payload.get("head_sha"), field="run head_sha")
+    run_id = _positive_int(payload.get("id"), field="run id")
+    head_sha = _sha_validator(payload.get("head_sha"), field="run head_sha")
     name = payload.get("name")
     status = payload.get("status")
     pulls = payload.get("pull_requests")
     if not isinstance(name, str) or not name:
         raise CancellationError("invalid workflow name")
-    if status not in _ACTIVE_STATUSES:
+    if status not in _active_statuses:
         raise CancellationError("invalid active workflow status")
     if not isinstance(pulls, list):
         raise CancellationError("invalid pull_requests")
@@ -187,7 +202,7 @@ def parse_run(payload: object) -> WorkflowRun:
         if not isinstance(item, dict):
             raise CancellationError("invalid pull request reference")
         pr_numbers.append(
-            _require_positive_int(item.get("number"), field="pull request number")
+            _positive_int(item.get("number"), field="pull request number")
         )
     return WorkflowRun(
         run_id=run_id,
@@ -311,7 +326,17 @@ class GitHubApi:
             raise CancellationError("invalid pull request response")
         return payload
 
-    def associated_pr_number(self, head_sha: str) -> int:
+    def associated_pr_number(
+        self,
+        head_sha: str,
+        *,
+        _pulls_per_page: int = _PULLS_PER_PAGE,
+        _encode_query=urlencode,
+        _sha_validator=_require_sha,
+        _sha_validator_code=_require_sha.__code__,
+        _positive_int=_require_positive_int,
+        _positive_int_code=_require_positive_int.__code__,
+    ) -> int:
         """Resolve a missing workflow_run PR reference from its exact source head.
 
         GitHub may omit workflow_run.pull_requests for close/merge lifecycle runs. The
@@ -320,15 +345,45 @@ class GitHubApi:
         later advanced. Cancellation authority is therefore granted only when the commit
         is associated with exactly one PR in total and that same PR still names the exact
         event head. Historical cross-PR reuse, zero matches, and ambiguity fail closed.
+
+        The provider page bound, query encoder and primitive validators are frozen at
+        composition. The bound request executable is captured before the first external
+        read so a callback cannot redirect a later association page.
         """
 
-        head_sha = _require_sha(head_sha, field="event head sha")
+        request_impl = self._request
+        request_func = getattr(request_impl, "__func__", request_impl)
+        request_code = getattr(request_func, "__code__", None)
+
+        def request_dispatch_current() -> bool:
+            bound = self._request
+            bound_func = getattr(bound, "__func__", bound)
+            return (
+                request_code is not None
+                and bound_func is request_func
+                and getattr(request_func, "__code__", None) is request_code
+            )
+
+        if (
+            type(_pulls_per_page) is not int
+            or _pulls_per_page <= 0
+            or _pulls_per_page > 100
+            or not callable(_encode_query)
+            or getattr(_sha_validator, "__code__", None) is not _sha_validator_code
+            or getattr(_positive_int, "__code__", None) is not _positive_int_code
+            or not request_dispatch_current()
+        ):
+            raise CancellationError("commit association authority is unavailable")
+
+        head_sha = _sha_validator(head_sha, field="event head sha")
         associated_numbers: set[int] = set()
         exact_numbers: set[int] = set()
         page = 1
         while True:
-            query = urlencode({"per_page": _PULLS_PER_PAGE, "page": page})
-            payload = self._request(f"/commits/{head_sha}/pulls?{query}")
+            query = _encode_query({"per_page": _pulls_per_page, "page": page})
+            payload = request_impl(f"/commits/{head_sha}/pulls?{query}")
+            if not request_dispatch_current():
+                raise CancellationError("commit association request dispatch changed")
             if not isinstance(payload, list):
                 raise CancellationError("invalid commit pull-requests response")
             for item in payload:
@@ -337,16 +392,16 @@ class GitHubApi:
                 head = item.get("head")
                 if not isinstance(head, dict):
                     raise CancellationError("invalid associated pull request head")
-                candidate_sha = _require_sha(
+                candidate_sha = _sha_validator(
                     head.get("sha"), field="associated pull request head"
                 )
-                candidate_number = _require_positive_int(
+                candidate_number = _positive_int(
                     item.get("number"), field="associated pull request number"
                 )
                 associated_numbers.add(candidate_number)
                 if candidate_sha == head_sha:
                     exact_numbers.add(candidate_number)
-            if len(payload) < _PULLS_PER_PAGE:
+            if len(payload) < _pulls_per_page:
                 break
             page += 1
         if (
@@ -410,21 +465,61 @@ class GitHubApi:
             self.live_pr_qualification(pr_number)
         )[1]
 
-    def _active_runs_for_status(self, status: str) -> tuple[WorkflowRun, ...]:
-        if status not in _ACTIVE_STATUSES:
+    def _active_runs_for_status(
+        self,
+        status: str,
+        *,
+        _active_statuses: tuple[str, ...] = _ACTIVE_STATUSES,
+        _runs_per_page: int = _RUNS_PER_PAGE,
+        _encode_query=urlencode,
+        _run_parser=parse_run,
+        _run_parser_code=parse_run.__code__,
+    ) -> tuple[WorkflowRun, ...]:
+        if (
+            type(_active_statuses) is not tuple
+            or not _active_statuses
+            or status not in _active_statuses
+        ):
             raise CancellationError("invalid active workflow status")
+        if (
+            type(_runs_per_page) is not int
+            or _runs_per_page <= 0
+            or _runs_per_page > 100
+            or not callable(_encode_query)
+            or getattr(_run_parser, "__code__", None) is not _run_parser_code
+        ):
+            raise CancellationError("workflow-runs pagination authority is unavailable")
+
+        request_impl = self._request
+        request_func = getattr(request_impl, "__func__", request_impl)
+        request_code = getattr(request_func, "__code__", None)
+
+        def request_dispatch_current() -> bool:
+            bound = self._request
+            bound_func = getattr(bound, "__func__", bound)
+            return (
+                request_code is not None
+                and bound_func is request_func
+                and getattr(request_func, "__code__", None) is request_code
+            )
+
+        if not request_dispatch_current():
+            raise CancellationError("workflow-runs request dispatch changed")
+
         runs: list[WorkflowRun] = []
         page = 1
         while True:
-            query = urlencode(
+            query = _encode_query(
                 {
                     "event": "pull_request",
                     "status": status,
-                    "per_page": _RUNS_PER_PAGE,
+                    "per_page": _runs_per_page,
                     "page": page,
                 }
             )
-            payload = self._request(f"/actions/runs?{query}")
+            payload = request_impl(f"/actions/runs?{query}")
+            if not request_dispatch_current():
+                raise CancellationError("workflow-runs request dispatch changed")
             if (
                 not isinstance(payload, dict)
                 or type(payload.get("total_count")) is not int
@@ -433,21 +528,42 @@ class GitHubApi:
             ):
                 raise CancellationError("invalid workflow-runs response")
             page_runs = payload["workflow_runs"]
-            runs.extend(parse_run(item) for item in page_runs)
+            runs.extend(_run_parser(item) for item in page_runs)
             total_count = payload["total_count"]
             if not page_runs or len(runs) >= total_count:
                 break
-            if len(page_runs) < _RUNS_PER_PAGE:
+            if len(page_runs) < _runs_per_page:
                 raise CancellationError(
                     "workflow-runs pagination ended before reported total_count"
                 )
             page += 1
         return tuple(runs)
 
-    def active_runs(self) -> tuple[WorkflowRun, ...]:
+    def active_runs(
+        self,
+        *,
+        _active_statuses: tuple[str, ...] = _ACTIVE_STATUSES,
+    ) -> tuple[WorkflowRun, ...]:
+        if (
+            type(_active_statuses) is not tuple
+            or not _active_statuses
+            or any(type(item) is not str or not item for item in _active_statuses)
+        ):
+            raise CancellationError("active workflow status authority is unavailable")
+        status_reader = self._active_runs_for_status
+        status_reader_func = getattr(status_reader, "__func__", status_reader)
+        status_reader_code = getattr(status_reader_func, "__code__", None)
+        if status_reader_code is None:
+            raise CancellationError("active workflow reader authority is unavailable")
         runs: list[WorkflowRun] = []
-        for status in _ACTIVE_STATUSES:
-            runs.extend(self._active_runs_for_status(status))
+        for status in _active_statuses:
+            bound = self._active_runs_for_status
+            if (
+                getattr(bound, "__func__", bound) is not status_reader_func
+                or getattr(status_reader_func, "__code__", None) is not status_reader_code
+            ):
+                raise CancellationError("active workflow reader authority changed")
+            runs.extend(status_reader(status))
         return tuple(runs)
 
     def workflow_run_status(self, run_id: int) -> str:

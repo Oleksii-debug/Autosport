@@ -180,6 +180,10 @@ def _make_account_identity_authority():
     missing_value = object()
 
     canonical_client_init = client_type.__init__
+    canonical_clock = readonly_module._canonical_utc_now
+    canonical_clock_code = getattr(canonical_clock, "__code__", None)
+    canonical_datetime = readonly_module.datetime
+    canonical_timezone = readonly_module.timezone
     canonical_read_account_details = client_type.read_account_details
     canonical_rpc = client_type._rpc
     canonical_next_request_id = client_type._next_request_id
@@ -269,6 +273,10 @@ def _make_account_identity_authority():
         _transport_type=transport_type,
         _canonical_network_post=canonical_network_post,
         _canonical_network_post_code=canonical_network_post_code,
+        _canonical_clock=canonical_clock,
+        _canonical_clock_code=canonical_clock_code,
+        _canonical_datetime=canonical_datetime,
+        _canonical_timezone=canonical_timezone,
         _client_type=client_type,
         _canonical_rpc=canonical_rpc,
         _canonical_rpc_code=canonical_rpc_code,
@@ -301,6 +309,11 @@ def _make_account_identity_authority():
                 _transport_type.post is not _canonical_network_post
                 or _getattr(_canonical_network_post, "__code__", None)
                 is not _canonical_network_post_code
+                or _readonly_module._canonical_utc_now is not _canonical_clock
+                or _getattr(_canonical_clock, "__code__", None)
+                is not _canonical_clock_code
+                or _readonly_module.datetime is not _canonical_datetime
+                or _readonly_module.timezone is not _canonical_timezone
                 or _client_type._rpc is not _canonical_rpc
                 or _getattr(_canonical_rpc, "__code__", None)
                 is not _canonical_rpc_code
@@ -432,6 +445,10 @@ def _make_account_identity_authority():
     def client_class_dispatch_is_current() -> bool:
         return (
             client_type.__init__ is canonical_client_init
+            and readonly_module._canonical_utc_now is canonical_clock
+            and getattr(canonical_clock, "__code__", None) is canonical_clock_code
+            and readonly_module.datetime is canonical_datetime
+            and readonly_module.timezone is canonical_timezone
             and client_type.read_account_details
             is canonical_read_account_details
             and client_type._rpc is canonical_rpc
@@ -481,6 +498,7 @@ def _make_account_identity_authority():
                 or not client_dispatch_is_current(client)
                 or not canonical_network_transport(client._transport)
                 or client._transport is not origin.transport
+                or client._clock is not canonical_clock
                 or client._clock is not origin.clock
                 or client._credentials is not origin.credentials
                 or client._venue_id != venue_id
@@ -598,6 +616,7 @@ def _make_account_identity_authority():
             type(client) is not client_type
             or not client_dispatch_is_current(client)
             or not canonical_network_transport(client._transport)
+            or client._clock is not canonical_clock
             or client._credentials is not credentials
         ):
             raise identity_error_type(

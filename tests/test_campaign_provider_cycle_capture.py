@@ -1711,3 +1711,148 @@ def test_receipt_field_witness_rebind_rejects_before_provider_io(
         )
 
     assert provider_calls == []
+
+
+
+def test_completion_clock_cannot_rebind_provider_snapshot_authority(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    locator, store, spec, provider_store = _setup(tmp_path)
+    monkeypatch.setattr(
+        provider_module,
+        "urlopen",
+        lambda _request, _timeout: _FakeSseResponse(_frame()),
+    )
+    monkeypatch.setattr(provider_module, "_default_clock", lambda: CAPTURED_AT)
+    original = vars(provider_module.CompleteGameBoardSnapshot)["evidence_sha256"]
+    calls = 0
+
+    def mutating_clock() -> str:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            type.__setattr__(
+                provider_module.CompleteGameBoardSnapshot,
+                "evidence_sha256",
+                property(lambda _self: "f" * 64),
+            )
+            return "2100-01-01T06:00:01+00:00"
+        return "2100-01-01T06:00:00+00:00"
+
+    try:
+        with pytest.raises(
+            CampaignProviderCycleCaptureIntegrityError,
+            match="campaign provider acquisition authority changed",
+        ):
+            capture_campaign_complete_game_board(
+                precommit_locator=locator,
+                store=store,
+                source_spec=spec,
+                evidence_store=provider_store,
+                request=_request(),
+                api_key="secret-value",
+                timeout_seconds=3.0,
+                clock=mutating_clock,
+            )
+    finally:
+        type.__setattr__(
+            provider_module.CompleteGameBoardSnapshot,
+            "evidence_sha256",
+            original,
+        )
+
+
+def test_completion_clock_cannot_double_rebind_provider_assertion_witness(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    locator, store, spec, provider_store = _setup(tmp_path)
+    monkeypatch.setattr(
+        provider_module,
+        "urlopen",
+        lambda _request, _timeout: _FakeSseResponse(_frame()),
+    )
+    monkeypatch.setattr(provider_module, "_default_clock", lambda: CAPTURED_AT)
+    hostile_calls: list[str] = []
+    calls = 0
+
+    def hostile_assert(_snapshot) -> None:
+        hostile_calls.append("assert")
+        raise AssertionError("hostile provider assertion executed")
+
+    def mutating_clock() -> str:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            monkeypatch.setattr(
+                provider_module,
+                "_CANONICAL_ASSERT_COMPLETE_GAME_BOARD_AUTHORITATIVE",
+                hostile_assert,
+            )
+            monkeypatch.setattr(
+                capture_module,
+                "_PROVIDER_CANONICAL_ASSERT",
+                hostile_assert,
+            )
+            monkeypatch.setattr(
+                capture_module,
+                "_PROVIDER_CANONICAL_ASSERT_CODE",
+                hostile_assert.__code__,
+            )
+            return "2100-01-01T06:00:01+00:00"
+        return "2100-01-01T06:00:00+00:00"
+
+    with pytest.raises(
+        CampaignProviderCycleCaptureIntegrityError,
+        match="campaign provider acquisition authority changed",
+    ):
+        capture_campaign_complete_game_board(
+            precommit_locator=locator,
+            store=store,
+            source_spec=spec,
+            evidence_store=provider_store,
+            request=_request(),
+            api_key="secret-value",
+            timeout_seconds=3.0,
+            clock=mutating_clock,
+        )
+
+    assert hostile_calls == []
+
+
+def test_public_provider_assert_rebind_is_not_used_by_durable_save(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    locator, store, spec, provider_store = _setup(tmp_path)
+    monkeypatch.setattr(
+        provider_module,
+        "urlopen",
+        lambda _request, _timeout: _FakeSseResponse(_frame()),
+    )
+    monkeypatch.setattr(provider_module, "_default_clock", lambda: CAPTURED_AT)
+    hostile_calls: list[str] = []
+
+    def hostile_assert(_snapshot) -> None:
+        hostile_calls.append("assert")
+        raise AssertionError("hostile public assertion executed")
+
+    monkeypatch.setattr(
+        provider_module,
+        "assert_complete_game_board_authoritative",
+        hostile_assert,
+    )
+    snapshot, receipt = capture_campaign_complete_game_board(
+        precommit_locator=locator,
+        store=store,
+        source_spec=spec,
+        evidence_store=provider_store,
+        request=_request(),
+        api_key="secret-value",
+        timeout_seconds=3.0,
+        clock=_clock(),
+    )
+
+    assert receipt.provider_evidence_sha256 == snapshot.evidence_sha256
+    assert hostile_calls == []

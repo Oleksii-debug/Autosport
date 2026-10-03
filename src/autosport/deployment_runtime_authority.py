@@ -1051,7 +1051,11 @@ class DeploymentRuntimeAuthorityStore:
     ) -> None:
         self._assert_static_authority_contract()
         if (
-            _new_local_lock is not _CANONICAL_NEW_LOCAL_LOCK_HELPER
+            _digest is not _CANONICAL_DIGEST
+            or _CANONICAL_DIGEST.__code__ is not _CANONICAL_DIGEST_CODE
+            or _sha is not _CANONICAL_SHA_VALIDATOR
+            or _CANONICAL_SHA_VALIDATOR.__code__ is not _CANONICAL_SHA_VALIDATOR_CODE
+            or _new_local_lock is not _CANONICAL_NEW_LOCAL_LOCK_HELPER
             or _CANONICAL_NEW_LOCAL_LOCK_HELPER.__code__
             is not _CANONICAL_NEW_LOCAL_LOCK_HELPER_CODE
             or _workspace_economic_lock is not _CANONICAL_WORKSPACE_LOCK_HELPER
@@ -1094,7 +1098,7 @@ class DeploymentRuntimeAuthorityStore:
             "_binding_root_selection_store_root",
             self._authority.authority_root_selection.context.store_root,
         )
-        self._semantic_binding_sha256 = _digest(
+        self._semantic_binding_sha256 = _CANONICAL_DIGEST(
             {
                 "schema": _AUTHORITY_BINDING_SCHEMA,
                 "schema_version": _AUTHORITY_BINDING_SCHEMA_VERSION,
@@ -1131,7 +1135,11 @@ class DeploymentRuntimeAuthorityStore:
             raise TypeError(
                 "runtime authority store must be exact DeploymentRuntimeAuthorityStore"
             )
-        destination = Path(path).expanduser().resolve(strict=False)
+        if Path is not _CANONICAL_PATH_TYPE:
+            raise DeploymentRuntimeAuthorityError(
+                "runtime authority static contract was replaced"
+            )
+        destination = _CANONICAL_PATH_TYPE(path).expanduser().resolve(strict=False)
         destination.parent.mkdir(parents=True, exist_ok=True)
         payload = {
             "schema": STORE_SCHEMA,
@@ -1144,7 +1152,7 @@ class DeploymentRuntimeAuthorityStore:
                     "runtime authority store already exists"
                 )
 
-            store = cls.__new__(cls)
+            store = _CANONICAL_OBJECT_NEW(cls)
             store._configure(destination, authority_root=authority_root)
             store._assert_binding_integrity()
             recovery = store._authority.recover(observed_state_sha256=None)
@@ -1736,8 +1744,11 @@ class DeploymentRuntimeAuthorityStore:
         self,
         runtime_authority_id: str,
     ) -> DeploymentRuntimeAuthorityRecord | None:
-        identity = _sha(runtime_authority_id, "runtime_authority_id")
         self._assert_binding_integrity()
+        identity = _CANONICAL_SHA_VALIDATOR(
+            runtime_authority_id,
+            "runtime_authority_id",
+        )
         with self._lock, _workspace_economic_lock(self.workspace):
             for record in self._read_validated_records_locked():
                 if record.runtime_authority_id == identity:

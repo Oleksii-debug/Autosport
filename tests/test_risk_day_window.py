@@ -90,6 +90,40 @@ class ProductDayRiskWindowStoreTests(unittest.TestCase):
             _test_clock=self.clock,
         )
 
+    def test_workspace_lock_acquire_rebind_fails_before_day_authority(self) -> None:
+        store = self._store()
+        original_acquire = WorkspaceEconomicLock.acquire
+
+        def hostile_acquire(_self) -> None:
+            raise AssertionError("mutated workspace lock acquire executed")
+
+        try:
+            WorkspaceEconomicLock.acquire = hostile_acquire
+            with self.assertRaisesRegex(
+                RiskDayWindowIntegrityError,
+                "workspace economic lock executable authority changed",
+            ):
+                store.current()
+        finally:
+            WorkspaceEconomicLock.acquire = original_acquire
+
+        self.assertFalse(store.state_path.exists())
+
+    def test_current_under_lock_rejects_unheld_workspace_lock(self) -> None:
+        store = self._store()
+        unheld = WorkspaceEconomicLock(self.workspace)
+
+        with self.assertRaisesRegex(
+            RiskDayWindowIntegrityError,
+            "requires the canonical held workspace economic lock",
+        ):
+            ProductDayRiskWindowStore._current_under_lock(
+                store,
+                workspace_lock=unheld,
+            )
+
+        self.assertFalse(store.state_path.exists())
+
     def test_issues_complete_utc_day_without_headroom_authority(self) -> None:
         evidence = self._store().current()
 

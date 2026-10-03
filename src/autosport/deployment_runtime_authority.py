@@ -43,6 +43,8 @@ _AUTHORITY_DOMAIN: Final = "deployment-runtime-authority"
 _AUTHORITY_BINDING_SCHEMA: Final = "autosport.deployment_runtime_authority.monotonic_binding"
 _AUTHORITY_BINDING_SCHEMA_VERSION: Final = 1
 _CANONICAL_MONOTONIC_AUTHORITY_TYPE: Final = MonotonicWorkspaceAuthority
+_CANONICAL_RLOCK_FACTORY: Final = RLock
+_CANONICAL_WORKSPACE_ECONOMIC_LOCK_TYPE: Final = WorkspaceEconomicLock
 _CANONICAL_MONOTONIC_AUTHORITY_INIT: Final = MonotonicWorkspaceAuthority.__init__
 _CANONICAL_OBJECT_NEW: Final = object.__new__
 _MISSING_AUTHORITY_CLASS_SLOT: Final = object()
@@ -64,6 +66,22 @@ _CANONICAL_MONOTONIC_AUTHORITY_CLASS_SURFACE: Final = tuple(
 
 class DeploymentRuntimeAuthorityError(ValueError):
     """Durable runtime authority is missing, malformed, or conflicting."""
+
+
+def _new_local_lock() -> object:
+    if RLock is not _CANONICAL_RLOCK_FACTORY:
+        raise DeploymentRuntimeAuthorityError(
+            "runtime authority local lock constructor dispatch was replaced"
+        )
+    return _CANONICAL_RLOCK_FACTORY()
+
+
+def _workspace_economic_lock(workspace: Path) -> WorkspaceEconomicLock:
+    if WorkspaceEconomicLock is not _CANONICAL_WORKSPACE_ECONOMIC_LOCK_TYPE:
+        raise DeploymentRuntimeAuthorityError(
+            "runtime authority workspace lock constructor dispatch was replaced"
+        )
+    return _CANONICAL_WORKSPACE_ECONOMIC_LOCK_TYPE(workspace)
 
 
 def _assert_canonical_monotonic_authority_constructor() -> None:
@@ -617,7 +635,7 @@ class DeploymentRuntimeAuthorityStore:
     ) -> None:
         self.path = Path(path).expanduser().resolve(strict=False)
         self.workspace = self.path.parent
-        self._lock = RLock()
+        self._lock = _new_local_lock()
         self._authority = _construct_monotonic_authority(
             workspace=self.workspace,
             domain=_AUTHORITY_DOMAIN,
@@ -646,7 +664,7 @@ class DeploymentRuntimeAuthorityStore:
                 "runtime authority store must be exact DeploymentRuntimeAuthorityStore"
             )
         self._configure(path, authority_root=authority_root)
-        with self._lock, WorkspaceEconomicLock(self.workspace):
+        with self._lock, _workspace_economic_lock(self.workspace):
             self._read_validated_records_locked()
 
     @classmethod
@@ -667,7 +685,7 @@ class DeploymentRuntimeAuthorityStore:
             "schema_version": STORE_SCHEMA_VERSION,
             "records": [],
         }
-        with WorkspaceEconomicLock(destination.parent):
+        with _workspace_economic_lock(destination.parent):
             if destination.exists():
                 raise DeploymentRuntimeAuthorityError(
                     "runtime authority store already exists"
@@ -882,7 +900,7 @@ class DeploymentRuntimeAuthorityStore:
         action_semantics_version: str,
         action_semantics_meanings: tuple[tuple[str, str], ...],
     ) -> DeploymentRuntimeAuthorityRecord:
-        with self._lock, WorkspaceEconomicLock(self.workspace):
+        with self._lock, _workspace_economic_lock(self.workspace):
             records = self._read_validated_records_locked()
             current_payload = {
                 "schema": STORE_SCHEMA,
@@ -975,13 +993,13 @@ class DeploymentRuntimeAuthorityStore:
         runtime_authority_id: str,
     ) -> DeploymentRuntimeAuthorityRecord | None:
         identity = _sha(runtime_authority_id, "runtime_authority_id")
-        with self._lock, WorkspaceEconomicLock(self.workspace):
+        with self._lock, _workspace_economic_lock(self.workspace):
             for record in self._read_validated_records_locked():
                 if record.runtime_authority_id == identity:
                     return record
         return None
 
     def records(self) -> tuple[DeploymentRuntimeAuthorityRecord, ...]:
-        with self._lock, WorkspaceEconomicLock(self.workspace):
+        with self._lock, _workspace_economic_lock(self.workspace):
             return self._read_validated_records_locked()
 

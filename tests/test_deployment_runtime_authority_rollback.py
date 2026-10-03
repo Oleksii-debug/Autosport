@@ -243,6 +243,35 @@ def test_runtime_authority_rejects_monotonic_authority_alias_replacement_before_
     assert hostile_calls == []
 
 
+@pytest.mark.parametrize(
+    ("attribute", "message"),
+    (
+        ("RLock", "local lock constructor dispatch was replaced"),
+        ("WorkspaceEconomicLock", "workspace lock constructor dispatch was replaced"),
+    ),
+)
+def test_runtime_authority_rejects_lock_constructor_alias_replacement_before_dispatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    attribute: str,
+    message: str,
+) -> None:
+    hostile_calls = []
+
+    def hostile(*args: object, **kwargs: object) -> object:
+        hostile_calls.append((args, kwargs))
+        raise AssertionError("hostile lock constructor executed")
+
+    monkeypatch.setattr(deployment_runtime_authority, attribute, hostile)
+    with pytest.raises(DeploymentRuntimeAuthorityError, match=message):
+        DeploymentRuntimeAuthorityStore.initialize_pristine(
+            tmp_path / "deployment-runtime-authority.json",
+            authority_root=_authority_root(tmp_path),
+        )
+
+    assert hostile_calls == []
+
+
 @pytest.mark.parametrize("attribute", ("__init__", "__new__"))
 def test_runtime_authority_rejects_monotonic_constructor_surface_replacement(
     tmp_path: Path,

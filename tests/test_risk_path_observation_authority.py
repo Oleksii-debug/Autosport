@@ -8,6 +8,7 @@ import pytest
 
 import autosport.risk_membership_publication as publication
 import autosport.risk_randomization_precommit as randomization
+import autosport.risk_path_observation_authority as authority
 from autosport.agent_loop import AgentLoopPhase, AgentLoopRuntime, ExternalEffectState
 from autosport.continuous_session import SettlementResolution
 from autosport.decision_ledger import (
@@ -28,6 +29,7 @@ from autosport.paper import PaperBook
 from autosport.paper_settlement_learning import PaperSettlementLearningBridge
 from autosport.risk import PaperRiskPolicy
 from autosport.risk_path_observation_authority import (
+    ProductRunCapitalPathEvidence,
     ProductRunCapitalPathError,
     _conservative_minimum_equity,
     resolve_product_run_capital_path_evidence,
@@ -131,6 +133,8 @@ def _product_precommit(tmp_path, monkeypatch):
 
 def _completed_run_with_settlement_bridge(
     workspace,
+    *,
+    open_before_run: bool = False,
 ):
     goal = EconomicGoalContract(
         goal_id="risk-path-goal",
@@ -147,6 +151,15 @@ def _completed_run_with_settlement_bridge(
         locked_odds=Decimal("2.00"),
         sport="table_tennis",
     )
+    ticket = None
+    if open_before_run:
+        ticket = book.open_ticket(
+            (leg,),
+            Decimal("10"),
+            placed_at="2026-09-03T10:00:10+00:00",
+            bankroll_id=goal.bankroll_id,
+            currency=goal.currency,
+        )
     book_path = workspace / "paper_book.json"
     book.save(book_path)
     base_book_sha = hashlib.sha256(book_path.read_bytes()).hexdigest()
@@ -175,13 +188,16 @@ def _completed_run_with_settlement_bridge(
         base_decision_ledger_sha256=base_ledger_sha,
     )
     book = PaperBook.load(book_path)
-    ticket = book.open_ticket(
-        (leg,),
-        Decimal("10"),
-        placed_at="2026-09-03T10:00:10+00:00",
-        bankroll_id=goal.bankroll_id,
-        currency=goal.currency,
-    )
+    if ticket is None:
+        ticket = book.open_ticket(
+            (leg,),
+            Decimal("10"),
+            placed_at="2026-09-03T10:00:10+00:00",
+            bankroll_id=goal.bankroll_id,
+            currency=goal.currency,
+        )
+    else:
+        ticket = book.tickets[ticket.ticket_id]
 
     identity = EnvironmentIdentity(
         source_id="risk-path-source",
@@ -458,3 +474,128 @@ def test_conservative_minimum_never_relies_on_settlement_order(tmp_path) -> None
 
     assert final.balance == Decimal("100")
     assert _conservative_minimum_equity(base_loaded, final) == Decimal("0")
+
+def test_bridge_must_use_exact_completed_run_ledger(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    membership, workspace, registry_path, authority_root, manifest = (
+        _product_precommit(tmp_path, monkeypatch)
+    )
+    _tx, bridge, _ticket = _completed_run_with_settlement_bridge(workspace)
+    bridge.decision_ledger = JsonlDecisionLedger(workspace / "foreign-run.jsonl")
+
+    with pytest.raises(
+        ProductRunCapitalPathError,
+        match="Decision Ledger is not this run ledger",
+    ):
+        resolve_product_run_capital_path_evidence(
+            workspace=workspace,
+            run_id=RUN_ID,
+            member_index=0,
+            membership=membership,
+            registry_path=registry_path,
+            sampling_manifest_json=manifest,
+            settlement_bridge=bridge,
+            authority_root=authority_root,
+        )
+
+
+def test_bridge_agent_loop_must_belong_to_same_workspace(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    membership, workspace, registry_path, authority_root, manifest = (
+        _product_precommit(tmp_path, monkeypatch)
+    )
+    _tx, bridge, _ticket = _completed_run_with_settlement_bridge(workspace)
+    bridge.agent_loop.path = workspace / "foreign" / "agent-loop.json"
+
+    with pytest.raises(
+        ProductRunCapitalPathError,
+        match="AgentLoop belongs to another workspace",
+    ):
+        resolve_product_run_capital_path_evidence(
+            workspace=workspace,
+            run_id=RUN_ID,
+            member_index=0,
+            membership=membership,
+            registry_path=registry_path,
+            sampling_manifest_json=manifest,
+            settlement_bridge=bridge,
+            authority_root=authority_root,
+        )
+
+
+def test_replay_dispatch_rebinding_fails_before_attacker_executes(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    membership, workspace, registry_path, authority_root, manifest = (
+        _product_precommit(tmp_path, monkeypatch)
+    )
+    _tx, bridge, _ticket = _completed_run_with_settlement_bridge(workspace)
+    attacker_called = False
+
+    def forged_replay(*_args, **_kwargs):
+        nonlocal attacker_called
+        attacker_called = True
+        raise AssertionError("attacker replay executed")
+
+    monkeypatch.setattr(
+        authority,
+        "replay_paper_book_equity_path",
+        forged_replay,
+    )
+    with pytest.raises(
+        ProductRunCapitalPathError,
+        match="authority dispatch changed",
+    ):
+        authority.resolve_product_run_capital_path_evidence(
+            workspace=workspace,
+            run_id=RUN_ID,
+            member_index=0,
+            membership=membership,
+            registry_path=registry_path,
+            sampling_manifest_json=manifest,
+            settlement_bridge=bridge,
+            authority_root=authority_root,
+        )
+    assert attacker_called is False
+
+
+def test_product_run_capital_path_evidence_truth_cannot_be_subclassed() -> None:
+    with pytest.raises(TypeError, match="must not be subclassed"):
+        class ForgedProductRunCapitalPathEvidence(ProductRunCapitalPathEvidence):
+            @property
+            def iid_qualified(self) -> bool:
+                return True
+
+
+def test_base_open_ticket_cannot_mint_run_opening_ancestry(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    membership, workspace, registry_path, authority_root, manifest = (
+        _product_precommit(tmp_path, monkeypatch)
+    )
+    _tx, bridge, _ticket = _completed_run_with_settlement_bridge(
+        workspace,
+        open_before_run=True,
+    )
+
+    with pytest.raises(
+        ProductRunCapitalPathError,
+        match="only tickets opened and completed inside the exact run",
+    ):
+        resolve_product_run_capital_path_evidence(
+            workspace=workspace,
+            run_id=RUN_ID,
+            member_index=0,
+            membership=membership,
+            registry_path=registry_path,
+            sampling_manifest_json=manifest,
+            settlement_bridge=bridge,
+            authority_root=authority_root,
+        )
+

@@ -1152,15 +1152,24 @@ _IMMUTABLE_STORE_ROOT_SURFACE: Final = frozenset(
 
 
 class _DeploymentRuntimeAuthorityStoreMeta(type):
-    def __setattr__(cls, name: str, value: object) -> None:
-        if name in _IMMUTABLE_STORE_ROOT_SURFACE:
+    def __setattr__(
+        cls,
+        name: str,
+        value: object,
+        _protected: frozenset[str] = _IMMUTABLE_STORE_ROOT_SURFACE,
+    ) -> None:
+        if name in _protected:
             raise TypeError(
                 f"runtime authority store root surface is immutable: {name}"
             )
         super().__setattr__(name, value)
 
-    def __delattr__(cls, name: str) -> None:
-        if name in _IMMUTABLE_STORE_ROOT_SURFACE:
+    def __delattr__(
+        cls,
+        name: str,
+        _protected: frozenset[str] = _IMMUTABLE_STORE_ROOT_SURFACE,
+    ) -> None:
+        if name in _protected:
             raise TypeError(
                 f"runtime authority store root surface is immutable: {name}"
             )

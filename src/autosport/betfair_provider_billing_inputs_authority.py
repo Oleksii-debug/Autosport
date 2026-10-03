@@ -29,11 +29,13 @@ store, economic classifier, allocation authority, or durable cost record.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from hashlib import sha256
 import hmac
 from secrets import token_bytes
 import urllib.request as _urllib_request
+from weakref import ReferenceType, ref
 
 from . import betfair_account_readonly as _readonly
 from . import betfair_provider_billing_inputs as _inputs
@@ -148,12 +150,41 @@ def _build_observation_authority():
     hash_ctor = sha256
     session_binding_key = token_bytes(32)
 
-    # Strongly retaining the issued observation prevents id reuse while its issuance
-    # is authoritative.  The third tuple element is a process-local HMAC binding of
-    # the authenticated credential values; raw credentials are deliberately not
-    # retained by the issuance registry or exported into evidence.
-    issued: dict[int, tuple[object, tuple[object, ...], bytes]] = {}
-    traversals: dict[int, tuple[object, bytes]] = {}
+    @dataclass(frozen=True, slots=True, weakref_slot=True)
+    class TraversalCapability:
+        """Private possession capability for one exact product-owned page sweep."""
+
+        pages: tuple[object, ...]
+
+        def __post_init__(self) -> None:
+            if type(self.pages) is not tuple or not self.pages:
+                raise error_cls("provider billing traversal pages must be non-empty")
+
+        def __len__(self) -> int:
+            return len(self.pages)
+
+        def __iter__(self):
+            return iter(self.pages)
+
+        def __getitem__(self, index):
+            return self.pages[index]
+
+    # Issuance must not become a process-lifetime owner. Weak references preserve
+    # exact-object authority while callers hold the capability and remove stale
+    # registry entries when the corresponding observation/traversal is released.
+    # Opaque session bindings never enter durable/public evidence.
+    issued: dict[
+        int,
+        tuple[ReferenceType[object], tuple[object, ...], bytes],
+    ] = {}
+    traversals: dict[
+        int,
+        tuple[
+            ReferenceType[TraversalCapability],
+            tuple[int, ...],
+            bytes,
+        ],
+    ] = {}
 
     def assert_executable_authority() -> None:
         """Fail fast on known executable drift inside the trusted-process boundary."""
@@ -262,8 +293,20 @@ def _build_observation_authority():
         # opaque session binding is retained; raw credentials/session tokens are not
         # stored in the registry and the binding never enters durable evidence.
         validate_structure(source)
-        issued[id(source)] = (
-            source,
+        source_id = id(source)
+
+        def discard_source(
+            dead_ref: ReferenceType[object],
+            *,
+            registered_id: int = source_id,
+        ) -> None:
+            current = issued.get(registered_id)
+            if current is not None and current[0] is dead_ref:
+                issued.pop(registered_id, None)
+
+        source_ref = ref(source, discard_source)
+        issued[source_id] = (
+            source_ref,
             projection(source),
             binding,
         )
@@ -350,7 +393,7 @@ def _build_observation_authority():
         # tampering from replacing the exact issued identity.
         validate_structure(source)
         registered = issued.get(id(source))
-        if registered is None or registered[0] is not source:
+        if registered is None or registered[0]() is not source:
             raise error_cls(
                 "provider billing observation must be issued by canonical provider read"
             )
@@ -401,9 +444,25 @@ def _build_observation_authority():
             more_available = get_attr(statement, "more_available")
             items = get_attr(statement, "items")
             if not more_available:
-                result = tuple(pages)
-                traversals[id(result)] = (result, binding)
-                return result
+                capability = TraversalCapability(tuple(pages))
+                traversal_id = id(capability)
+
+                def discard_traversal(
+                    dead_ref: ReferenceType[TraversalCapability],
+                    *,
+                    registered_id: int = traversal_id,
+                ) -> None:
+                    current = traversals.get(registered_id)
+                    if current is not None and current[0] is dead_ref:
+                        traversals.pop(registered_id, None)
+
+                capability_ref = ref(capability, discard_traversal)
+                traversals[traversal_id] = (
+                    capability_ref,
+                    tuple(id(page) for page in capability.pages),
+                    binding,
+                )
+                return capability
             item_count = len(items)
             if item_count <= 0:
                 raise error_cls(
@@ -417,25 +476,31 @@ def _build_observation_authority():
             "within max_pages"
         )
 
-    def validate_traversal(pages: object):
+    def validate_traversal(capability: object):
         """Validate one exact product-owned authenticated pagination sweep.
 
-        The tuple itself must have been issued by the canonical traversal reader.
-        Therefore a consumer cannot mint positive traversal evidence by splicing
-        separately issued pages, even when those pages used the same authenticated
-        session. This remains weaker than a stable cross-session account identity.
+        The private capability object itself must have been issued by the canonical
+        traversal reader. A consumer therefore cannot mint positive traversal
+        evidence by reconstructing or splicing the underlying page tuple, even when
+        the pages used the same authenticated session. Registry ownership is weak:
+        releasing the capability also releases its traversal-authority entry.
         """
 
-        if type(pages) is not tuple or not pages:
-            raise TypeError("pages must be a non-empty exact tuple")
-        traversal = traversals.get(id(pages))
-        if traversal is None or traversal[0] is not pages:
+        if type(capability) is not TraversalCapability:
+            raise TypeError("traversal must be exact canonical capability")
+        traversal = traversals.get(id(capability))
+        if traversal is None or traversal[0]() is not capability:
             raise error_cls(
                 "provider billing traversal must be issued by canonical "
                 "pagination acquisition"
             )
+        pages = capability.pages
+        if tuple(id(source) for source in pages) != traversal[1]:
+            raise error_cls(
+                "provider billing traversal changed after canonical acquisition"
+            )
 
-        traversal_binding = traversal[1]
+        traversal_binding = traversal[2]
         for source in pages:
             current = validate(source)
             registered = issued[id(current)]

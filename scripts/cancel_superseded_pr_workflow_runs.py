@@ -300,6 +300,8 @@ class GitHubApi:
         allowed_http_errors: frozenset[int] = frozenset(),
         _json_loads=json.loads,
         _json_loads_code=json.loads.__code__,
+        _json_loads_globals=json.loads.__globals__,
+        _json_decoder_type=json.JSONDecoder,
         _json_decode_error=json.JSONDecodeError,
         _strict_object_hook=_strict_json_object,
         _strict_object_hook_code=_strict_json_object.__code__,
@@ -356,6 +358,7 @@ class GitHubApi:
         def json_parser_authority_current() -> bool:
             return (
                 getattr(_json_loads, "__code__", None) is _json_loads_code
+                and _json_loads_globals.get("JSONDecoder") is _json_decoder_type
                 and getattr(_strict_object_hook, "__code__", None)
                 is _strict_object_hook_code
                 and getattr(_reject_constant_hook, "__code__", None)
@@ -367,6 +370,7 @@ class GitHubApi:
         try:
             payload = _json_loads(
                 body,
+                cls=_json_decoder_type,
                 object_pairs_hook=_strict_object_hook,
                 parse_constant=_reject_constant_hook,
             )

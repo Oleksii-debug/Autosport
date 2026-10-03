@@ -406,6 +406,7 @@ def test_stale_or_foreign_attempt_cannot_complete(tmp_path):
         lifecycle.complete_login_success(
             attempt_id="a" * 64,
             now=NOW,
+            access_expires_at=NOW + timedelta(minutes=10),
         )
 
 

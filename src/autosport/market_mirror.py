@@ -505,17 +505,20 @@ class MarketMirror:
 
     @classmethod
     def from_store(cls, store: SQLiteMarketStore) -> "MarketMirror":
-        """Restore latest source-specific mirror state from authoritative history.
+        """Restore latest source-specific state from the canonical current projection.
 
-        The canonical store remains the only writer/owner of durable market history.
-        Replaying ``store.events()`` reconstructs source-local sequence protection after
-        restart without letting this mirror mutate the store's shared current projection.
+        SQLiteMarketStore rebuilds and validates current_quotes from append-only history
+        when it opens. The mirror needs only the latest provider sequence for each
+        source/quote key to preserve stale-update protection after restart, so replaying
+        every historical observation here would add unbounded startup cost without
+        adding authority.
         """
         if not isinstance(store, SQLiteMarketStore):
             raise TypeError("store must be a SQLiteMarketStore")
         mirror = cls()
-        for event in store.events():
-            mirror.apply(event)
+        current = store.current_by_source()
+        for key in sorted(current):
+            mirror.apply(current[key])
         return mirror
 
     def __len__(self) -> int:

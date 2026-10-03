@@ -3,6 +3,7 @@ from decimal import Decimal
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from autosport.domain import MarketEvent
 from autosport.market_mirror import MarketMirror, MarketMirrorRevisionChanged, MirrorUpdate
@@ -512,6 +513,56 @@ class MarketMirrorTests(unittest.TestCase):
                 )
             finally:
                 reopened_store.close()
+
+    def test_from_store_uses_validated_current_projection_not_full_history_scan(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            try:
+                store.append_many(
+                    [
+                        self.event(sequence=1, odds="2.00"),
+                        self.event(sequence=2, odds="2.20"),
+                        self.event(
+                            source="provider-b",
+                            sequence=1,
+                            odds="1.80",
+                        ),
+                    ]
+                )
+                with patch.object(
+                    store,
+                    "events",
+                    side_effect=AssertionError(
+                        "restart mirror must not scan append-only history"
+                    ),
+                ):
+                    restored = MarketMirror.from_store(store)
+
+                self.assertEqual(len(restored), 2)
+                self.assertEqual(
+                    restored.get(
+                        "provider-a",
+                        "event-1",
+                        "market-1",
+                        "selection-1",
+                    ).sequence,
+                    2,
+                )
+                self.assertEqual(
+                    restored.get(
+                        "provider-b",
+                        "event-1",
+                        "market-1",
+                        "selection-1",
+                    ).sequence,
+                    1,
+                )
+                stale = restored.apply(
+                    self.event(sequence=1, odds="9.00")
+                )
+                self.assertEqual(stale.status, MirrorUpdate.STALE)
+            finally:
+                store.close()
 
     def test_from_store_reconstructs_multiple_providers_from_authoritative_history(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

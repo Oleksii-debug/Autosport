@@ -7,9 +7,9 @@ order execution, or real-money authorization.
 
 The provider contract behind this boundary is conservative: a login can allocate
 an additional per-access-key session slot, so restart/crash ambiguity must never
-be treated as proof that a slot is free. Until the exact market-maker refresh
-contract is qualified, near-expiry sessions fail closed rather than using another
-login or the participant extend-session flow as a renewal substitute.
+be treated as proof that a slot is free. Market-maker refresh is coordinated as a
+separate effect; this module never substitutes another login or the participant
+Direct-Link extend-session flow for provider renewal.
 """
 
 from __future__ import annotations
@@ -800,6 +800,10 @@ class ProphetXSessionLifecycle:
                         self._require_role_compatible(current)
                         generation = current.generation + 1
                         hold = current.slot_hold_until
+                        if current.state is ProphetXSessionState.RENEWING:
+                            renewal_hold = self._renewal_uncertainty_deadline(current)
+                            if hold is None or renewal_hold > hold:
+                                hold = renewal_hold
                         if hold is not None and hold <= timestamp:
                             hold = None
                         failures = current.transient_failures

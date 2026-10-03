@@ -34,6 +34,7 @@ from .real_execution_ledger import (
     AttemptState,
     ExecutionAction,
     ExecutionAttempt,
+    ExecutionLedgerIntegrityError,
     ExecutionStateError,
     RealExecutionLedger,
     VerifiedExecutionPlanView,
@@ -44,6 +45,9 @@ _VERIFIED_SNAPSHOT = RealExecutionLedger.verified_snapshot
 _VERIFIED_EXECUTION_VIEW = RealExecutionLedger.verified_execution_view
 _BEGIN_ATTEMPT = RealExecutionLedger.begin_attempt
 _ATTEMPT_STATE = RealExecutionLedger.attempt_state
+_PARSE_VERIFIED_LEDGER = RealExecutionLedger._parse
+_PARSE_VERIFIED_LEDGER_FUNC = getattr(_PARSE_VERIFIED_LEDGER, "__func__", None)
+_PARSE_VERIFIED_LEDGER_CODE = getattr(_PARSE_VERIFIED_LEDGER_FUNC, "__code__", None)
 _VERIFIED_SNAPSHOT_CODE = getattr(_VERIFIED_SNAPSHOT, "__code__", None)
 _VERIFIED_EXECUTION_VIEW_CODE = getattr(_VERIFIED_EXECUTION_VIEW, "__code__", None)
 _BEGIN_ATTEMPT_CODE = getattr(_BEGIN_ATTEMPT, "__code__", None)
@@ -307,19 +311,25 @@ def _read_headroom_utc_now(
 
 
 def _ledger_plan_ids(snapshot_payload: bytes) -> tuple[str, ...]:
-    """Enumerate plans only from bytes already verified by RealExecutionLedger."""
+    """Enumerate plans through the canonical RealExecutionLedger envelope parser."""
     if type(snapshot_payload) is not bytes:
         raise ProviderAccountHeadroomError("verified ledger payload must be exact bytes")
+    parse_func = getattr(_PARSE_VERIFIED_LEDGER, "__func__", None)
+    if (
+        parse_func is not _PARSE_VERIFIED_LEDGER_FUNC
+        or getattr(parse_func, "__code__", None) is not _PARSE_VERIFIED_LEDGER_CODE
+    ):
+        raise ProviderAccountHeadroomError(
+            "canonical execution ledger parser authority changed"
+        )
+    try:
+        events = _PARSE_VERIFIED_LEDGER(snapshot_payload)
+    except ExecutionLedgerIntegrityError as exc:
+        raise ProviderAccountHeadroomError(
+            "verified ledger payload could not be enumerated canonically"
+        ) from exc
     plan_ids: set[str] = set()
-    for raw_line in snapshot_payload.splitlines():
-        if not raw_line:
-            continue
-        try:
-            event = json.loads(raw_line)
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise ProviderAccountHeadroomError(
-                "verified ledger payload could not be enumerated"
-            ) from exc
+    for event in events:
         if type(event) is not dict:
             raise ProviderAccountHeadroomError("verified ledger event must be an object")
         plan_id = event.get("plan_id")

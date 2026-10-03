@@ -87,7 +87,8 @@ def test_explicit_trigger_pr_identity_is_not_scheduler_authority() -> None:
     assert "github.event.workflow_run.pull_requests" not in concurrency
     assert direct_identity in job
     assert "PR metadata is deliberately not scheduler authority" in workflow
-    assert "explicit singleton run identity" in workflow
+    assert "same-run/same-head singleton snapshot" in workflow
+    assert "multi-reference remains permanently" in workflow
 
 
 def test_empty_or_ambiguous_ref_controller_is_bounded_without_gaining_pr_authority() -> None:
@@ -100,7 +101,8 @@ def test_empty_or_ambiguous_ref_controller_is_bounded_without_gaining_pr_authori
     assert "format('non-pr-{0}', github.event.workflow_run.id)" in concurrency
     assert "Empty/multi-reference source" in workflow
     assert "cannot grant PR cancellation authority" in workflow
-    assert "historical association/branch recovery" in workflow
+    assert "Historical recovery remains" in workflow
+    assert "fail-closed and re-resolves identity" in workflow
 
 
 def test_controller_does_not_skip_close_merge_run_when_pr_identity_is_unresolved() -> None:
@@ -112,6 +114,9 @@ def test_controller_does_not_skip_close_merge_run_when_pr_identity_is_unresolved
     assert '--pr-number "${{' in job
     assert "github.event.workflow_run.pull_requests[1].number" in job
     assert "|| 0 }}\"" in job
+    assert '--event-pr-reference-mode "${{' in job
+    assert "pull_requests[1].number && 'ambiguous'" in job
+    assert "pull_requests[0].number && 'singleton' || 'empty'" in job
     assert "resolves identity" in workflow
 
 

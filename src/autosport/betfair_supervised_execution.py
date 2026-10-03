@@ -2222,6 +2222,13 @@ def execute_betfair_supervised_action(
         )
     else:
         if receipt is None:
+            ledger.bind_provider_evidence(
+                attempt_id=attempt_id,
+                evidence_id=evidence_id,
+                observed_at=report.observed_at,
+                source=evidence_source,
+                request_sha256=report.request_sha256,
+            )
             ledger.mark_unknown(
                 attempt_id,
                 reason=(

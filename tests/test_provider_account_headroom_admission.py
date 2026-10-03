@@ -1365,6 +1365,109 @@ def test_duplicate_bound_plan_denomination_identity_is_rejected(
         )
 
 
+def test_mutated_intent_currency_revokes_bound_denomination_identity(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    acquired, _ = _acquire_balance(monkeypatch, tmp_path, "100")
+    target = _plan("target", _action("target-action", "10"))
+    ledger = _ledger_with_plans(tmp_path, target)
+    intent = ledger._test_intents[0]
+
+    object.__setattr__(intent.risk_context, "currency", "USD")
+
+    with pytest.raises(
+        ProviderAccountHeadroomUnsupported,
+        match="lacks exact OpportunityIntent denomination evidence",
+    ):
+        _assess(
+            ledger,
+            acquired,
+            plan_id="target",
+            action_id="target-action",
+        )
+
+
+def test_intent_hash_payload_rebinding_cannot_forge_denomination(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    acquired, _ = _acquire_balance(monkeypatch, tmp_path, "100")
+    target = _plan(
+        "target",
+        _action("target-action", "10"),
+        intent_currency="USD",
+    )
+    ledger = _ledger_with_plans(tmp_path, target)
+    intent = ledger._test_intents[0]
+    original_sha256 = intent.intent_sha256
+    object.__setattr__(intent.risk_context, "currency", "GBP")
+    hostile_calls: list[object] = []
+
+    def hostile_payload(payload):
+        hostile_calls.append(payload)
+        return original_sha256
+
+    monkeypatch.setattr(
+        headroom_module._portfolio_plan,
+        "_sha256_payload",
+        hostile_payload,
+    )
+
+    with pytest.raises(
+        ProviderAccountHeadroomError,
+        match="canonical opportunity-intent denomination authority changed",
+    ):
+        _assess(
+            ledger,
+            acquired,
+            plan_id="target",
+            action_id="target-action",
+        )
+
+    assert hostile_calls == []
+
+
+def test_risk_candidate_dispatch_rebinding_cannot_forge_denomination(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    acquired, _ = _acquire_balance(monkeypatch, tmp_path, "100")
+    target = _plan(
+        "target",
+        _action("target-action", "10"),
+        intent_currency="USD",
+    )
+    ledger = _ledger_with_plans(tmp_path, target)
+    intent = ledger._test_intents[0]
+    original_candidate_sha256 = intent.candidate_sha256
+    object.__setattr__(intent.risk_context, "currency", "GBP")
+    hostile_calls: list[object] = []
+
+    def hostile_candidate(_context):
+        hostile_calls.append(True)
+        return original_candidate_sha256
+
+    monkeypatch.setattr(
+        headroom_module._risk.PaperRiskPolicy,
+        "risk_of_ruin_candidate_sha256",
+        staticmethod(hostile_candidate),
+    )
+
+    with pytest.raises(
+        ProviderAccountHeadroomError,
+        match="canonical opportunity-intent denomination authority changed",
+    ):
+        _assess(
+            ledger,
+            acquired,
+            plan_id="target",
+            action_id="target-action",
+        )
+
+    assert hostile_calls == []
+
+
 def test_economic_goal_store_alias_rebinding_cannot_forge_denomination(
     monkeypatch,
     tmp_path,

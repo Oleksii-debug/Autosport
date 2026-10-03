@@ -653,7 +653,10 @@ def test_posting_identity_ignores_unrelated_sibling_rows_in_response(monkeypatch
     second = client.read_account_postings(start, end)
 
     assert first.evidence.evidence_id != second.evidence.evidence_id
-    assert first.postings[0].provider_content_dict() == second.postings[0].provider_content_dict()
+    assert (
+        first.postings[0].provider_content_dict()
+        == second.postings[0].provider_content_dict()
+    )
     assert first.postings[0].observation_id == second.postings[0].observation_id
     assert [item.transaction_id for item in coalesce_posting_replays(first, second)] == [
         "9001",
@@ -673,7 +676,10 @@ def test_cross_response_same_transaction_conflict_fails_closed(monkeypatch):
     first = client.read_account_postings(start, end)
     conflicting = client.read_account_postings_by_id(9000)
 
-    assert first.postings[0].transaction_identity == conflicting.postings[0].transaction_identity
+    assert (
+        first.postings[0].transaction_identity
+        == conflicting.postings[0].transaction_identity
+    )
     assert first.postings[0].observation_id != conflicting.postings[0].observation_id
     with pytest.raises(
         BetdaqEconomicReadbackError,
@@ -695,13 +701,16 @@ def test_cross_response_currency_drift_is_economic_conflict(monkeypatch):
     euro = client.read_account_postings(start, end)
     usd = client.read_account_postings_by_id(9000)
 
-    assert euro.postings[0].transaction_identity == usd.postings[0].transaction_identity
+    assert (
+        euro.postings[0].transaction_identity
+        == usd.postings[0].transaction_identity
+    )
     assert euro.postings[0].currency == "EUR"
     assert usd.postings[0].currency == "USD"
     assert euro.postings[0].observation_id != usd.postings[0].observation_id
     with pytest.raises(
         BetdaqEconomicReadbackError,
-        match="transaction id has conflicting economic content",
+        match="different provider currencies",
     ):
         coalesce_posting_replays(euro, usd)
 

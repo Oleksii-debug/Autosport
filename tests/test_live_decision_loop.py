@@ -812,7 +812,7 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
                 boundaries = original_capture(*args, **kwargs)
                 health_store.record_failure(
                     "provider-a",
-                    now=(self.START + timedelta(milliseconds=750)).isoformat(),
+                    now=(decision_time + timedelta(milliseconds=250)).isoformat(),
                     error=TimeoutError("health advanced after decision capture"),
                 )
                 return boundaries

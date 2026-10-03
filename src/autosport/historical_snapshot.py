@@ -30,6 +30,7 @@ from urllib.request import (
 
 from .domain import MarketEvent
 from .integrity import atomic_write_json, durable_path_lock
+from .parlay_sport_provider import ParlayApiSportProvider, _canonical_sport_key
 from .parlayapi_provider import (
     HttpJsonResponse,
     ParlayApiTableTennisProvider,
@@ -366,12 +367,29 @@ def capture_historical_snapshot(
 def _build_historical_snapshot_provider_origin_authority():
     """Build one lexical live-only issuer for canonical Parlay historical capture."""
 
-    provider_type = ParlayApiTableTennisProvider
+    provider_type = ParlayApiSportProvider
+    base_provider_type = ParlayApiTableTennisProvider
     canonical_provider_init = provider_type.__init__
+    canonical_base_provider_init = base_provider_type.__init__
     canonical_provider_request = provider_type._request
     canonical_event_quotes = provider_type._event_quotes
+    canonical_base_event_quotes = base_provider_type._event_quotes
+    canonical_sport_descriptor = provider_type.__dict__.get("sport_key")
+    canonical_source_descriptor = provider_type.__dict__.get("source_id")
+    canonical_sport_validator = _canonical_sport_key
+    canonical_sport_validator_code = getattr(
+        canonical_sport_validator,
+        "__code__",
+        None,
+    )
+    canonical_sport_pattern = canonical_sport_validator.__globals__.get(
+        "_SPORT_KEY_PATTERN"
+    )
+    canonical_reserved_sports = canonical_sport_validator.__globals__.get(
+        "_RESERVED_DATASET_SCOPE_SPORT_KEYS"
+    )
     canonical_capture = capture_historical_snapshot
-    canonical_defaults = canonical_provider_init.__kwdefaults__
+    canonical_defaults = canonical_base_provider_init.__kwdefaults__
     if type(canonical_defaults) is not dict:
         raise RuntimeError("canonical Parlay provider defaults are unavailable")
     canonical_default_transport = canonical_defaults.get("transport")
@@ -1353,21 +1371,38 @@ def _build_historical_snapshot_provider_origin_authority():
         if current is not None and current[0] is reference:
             issued.pop(capture_id, None)
 
+    def provider_definition_is_current() -> bool:
+        return (
+            provider_type.__init__ is canonical_provider_init
+            and base_provider_type.__init__ is canonical_base_provider_init
+            and provider_type._request is canonical_provider_request
+            and provider_type._event_quotes is canonical_event_quotes
+            and base_provider_type._event_quotes is canonical_base_event_quotes
+            and provider_type.__dict__.get("sport_key")
+            is canonical_sport_descriptor
+            and provider_type.__dict__.get("source_id")
+            is canonical_source_descriptor
+            and canonical_provider_init.__globals__.get("_canonical_sport_key")
+            is canonical_sport_validator
+            and getattr(canonical_sport_validator, "__code__", None)
+            is canonical_sport_validator_code
+            and canonical_sport_validator.__globals__.get("_SPORT_KEY_PATTERN")
+            is canonical_sport_pattern
+            and canonical_sport_validator.__globals__.get(
+                "_RESERVED_DATASET_SCOPE_SPORT_KEYS"
+            )
+            is canonical_reserved_sports
+        )
+
     def provider_state_is_current(
-        provider: ParlayApiTableTennisProvider,
+        provider: ParlayApiSportProvider,
         *,
+        sport_key: str,
         regions: tuple[str, ...],
         markets: tuple[str, ...],
         expected_transport: object,
     ) -> bool:
-        if (
-            type(provider) is not provider_type
-            or provider_type.__init__ is not canonical_provider_init
-            or provider_type._request is not canonical_provider_request
-            or provider_type._event_quotes is not canonical_event_quotes
-            or provider_type.source_id != "parlayapi:table_tennis"
-            or provider_type.sport_key != "table_tennis"
-        ):
+        if type(provider) is not provider_type or not provider_definition_is_current():
             return False
         instance_dict = getattr(provider, "__dict__", None)
         if type(instance_dict) is not dict or any(
@@ -1381,7 +1416,11 @@ def _build_historical_snapshot_provider_origin_authority():
         ):
             return False
         return (
-            provider.public_preview is False
+            instance_dict.get("_sport_key") == sport_key
+            and instance_dict.get("_source_id") == f"parlayapi:{sport_key}"
+            and provider.sport_key == sport_key
+            and provider.source_id == f"parlayapi:{sport_key}"
+            and provider.public_preview is False
             and provider.base_url == "https://parlay-api.com"
             and provider.transport is expected_transport
             and provider.clock is canonical_clock
@@ -1410,11 +1449,21 @@ def _build_historical_snapshot_provider_origin_authority():
         requested_at: str,
         output_path: str | Path,
         evidence_path: str | Path | None = None,
+        sport_key: str = "table_tennis",
         regions: tuple[str, ...] = ("us",),
         markets: tuple[str, ...] = ("h2h", "spreads", "totals"),
     ) -> HistoricalSnapshotCapture:
-        """Acquire through the fixed production Parlay boundary and issue live origin authority."""
+        """Acquire one exact sport through the fixed production Parlay boundary."""
 
+        if not provider_definition_is_current():
+            raise ProviderPayloadError(
+                "canonical Parlay historical provider authority changed before acquisition"
+            )
+        canonical_sport = canonical_sport_validator(sport_key)
+        if not provider_definition_is_current():
+            raise ProviderPayloadError(
+                "canonical Parlay historical sport authority changed before acquisition"
+            )
         if type(api_key) is not str or not api_key or api_key != api_key.strip():
             raise ValueError("api_key must be non-empty trimmed text")
         if any(character.isspace() for character in api_key):
@@ -1434,6 +1483,7 @@ def _build_historical_snapshot_provider_origin_authority():
         provider = object.__new__(provider_type)
         canonical_provider_init(
             provider,
+            canonical_sport,
             api_key,
             public_preview=False,
             regions=regions,
@@ -1445,6 +1495,7 @@ def _build_historical_snapshot_provider_origin_authority():
         )
         if not provider_state_is_current(
             provider,
+            sport_key=canonical_sport,
             regions=regions,
             markets=markets,
             expected_transport=product_transport,
@@ -1462,6 +1513,7 @@ def _build_historical_snapshot_provider_origin_authority():
         require_network_authority()
         if not provider_state_is_current(
             provider,
+            sport_key=canonical_sport,
             regions=regions,
             markets=markets,
             expected_transport=product_transport,
@@ -1605,7 +1657,12 @@ def _sha256(path: Path) -> str:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python -m autosport.historical_snapshot",
-        description="Capture one authenticated point-in-time table-tennis historical odds snapshot.",
+        description="Capture one authenticated point-in-time Parlay historical odds snapshot.",
+    )
+    parser.add_argument(
+        "--sport",
+        default="table_tennis",
+        help="canonical Parlay sport key (default: table_tennis)",
     )
     parser.add_argument("--at", required=True, help="requested historical snapshot timestamp (ISO-8601 with timezone)")
     parser.add_argument(
@@ -1631,6 +1688,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         report = capture_product_owned_historical_snapshot(
             api_key=api_key,
+            sport_key=args.sport,
             regions=regions,
             markets=markets,
             requested_at=args.at,

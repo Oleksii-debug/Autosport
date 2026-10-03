@@ -439,5 +439,30 @@ class MarketOutcomeAuthorityIntegrityTests(unittest.TestCase):
         self.assertEqual(hostile_calls, [])
 
 
+    def test_durable_readback_rejects_subclass_before_hostile_dispatch(
+        self,
+    ) -> None:
+        authority = self._authority()
+        raw = authority.to_dict()
+        hostile_calls: list[str] = []
+
+        class HostileAuthority(MarketSettlementOutcomeAuthority):
+            def __getattribute__(self, name: str):
+                hostile_calls.append(name)
+                raise AssertionError("hostile subclass dispatch executed")
+
+        forged = object.__new__(HostileAuthority)
+        with self.assertRaisesRegex(
+            ValueError,
+            "exact canonical source authority",
+        ):
+            MarketSettlementOutcomeAuthority.from_dict(
+                raw,
+                verified_authority=forged,
+            )
+
+        self.assertEqual(hostile_calls, [])
+
+
 if __name__ == "__main__":
     unittest.main()

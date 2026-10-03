@@ -86,6 +86,14 @@ PROTOCOL_SHA = "9" * 64
 FRESHNESS_SHA = "8" * 64
 
 
+@pytest.fixture(autouse=True)
+def _private_provider_acquisition_origin():
+    with provider_module._test_acquisition_origin(
+        _capability=provider_module._TEST_ACQUISITION_CAPABILITY,
+    ):
+        yield
+
+
 class _FakeSseResponse:
     def __init__(self, frame: dict[str, object]) -> None:
         self.status = 200

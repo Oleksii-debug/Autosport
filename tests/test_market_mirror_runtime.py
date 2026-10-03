@@ -291,6 +291,66 @@ class BoundedMirrorInvalidationBufferTests(unittest.TestCase):
             dependencies.all_matching_keys(),
         )
 
+    def test_coherent_incremental_views_share_one_exact_mirror_revision(self) -> None:
+        mirror = MarketMirror()
+        runtime = BoundedMirrorInvalidationBuffer(mirror)
+        dependencies = FocusedMirrorDependencyIndex(mirror)
+        dependencies.register("decision-a", selection_ids="selection-a")
+        dependencies.register("decision-b", selection_ids="selection-b")
+
+        runtime.accept_persisted(
+            self.event(selection="selection-a", sequence=1, odds="2.00")
+        )
+        runtime.accept_persisted(
+            self.event(selection="selection-b", sequence=1, odds="3.00")
+        )
+        runtime.accept_persisted(
+            self.event(selection="unrelated", sequence=1, odds="9.00")
+        )
+        affected = dependencies.affected_inputs(runtime.drain())
+        self.assertEqual(affected, ("decision-a", "decision-b"))
+
+        with (
+            patch.object(
+                mirror,
+                "snapshot",
+                side_effect=AssertionError("whole mirror snapshot is forbidden"),
+            ),
+            patch.object(
+                mirror,
+                "view",
+                side_effect=AssertionError("whole mirror view is forbidden"),
+            ),
+        ):
+            views = dependencies.coherent_decision_views(
+                ("decision-a", "decision-b"),
+                as_of=datetime(2026, 9, 16, 19, 0, 10, tzinfo=timezone.utc),
+                max_age=timedelta(minutes=1),
+                incremental=True,
+            )
+
+        self.assertEqual(set(views), {"decision-a", "decision-b"})
+        self.assertEqual(
+            {snapshot.revision for snapshot in views.values()},
+            {mirror.revision},
+        )
+        self.assertEqual(
+            tuple(event.selection_id for event in views["decision-a"].events),
+            ("selection-a",),
+        )
+        self.assertEqual(
+            tuple(event.selection_id for event in views["decision-b"].events),
+            ("selection-b",),
+        )
+        self.assertNotIn(
+            "unrelated",
+            {
+                event.selection_id
+                for snapshot in views.values()
+                for event in snapshot.events
+            },
+        )
+
     def test_focused_dependency_overflow_fails_safe_to_all_registered_inputs(self) -> None:
         mirror = MarketMirror()
         runtime = BoundedMirrorInvalidationBuffer(mirror, max_dirty_keys=1)

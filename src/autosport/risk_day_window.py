@@ -464,19 +464,21 @@ def _decode_state(
 class _ProductDayRiskWindowStoreMeta(type):
     """Prevent runtime replacement/deletion of positive day-authority entrypoints."""
 
-    _SEALED_METHOD_NAMES: Final = frozenset(
-        {"__init__", "current", "require_current", "_publish_day", "_evidence"}
-    )
-
     def __setattr__(cls, name: str, value: object) -> None:
-        if name in cls._SEALED_METHOD_NAMES and name in cls.__dict__:
+        if (
+            name in {"__init__", "current", "require_current", "_publish_day", "_evidence"}
+            and name in cls.__dict__
+        ):
             raise TypeError(
                 "canonical ProductDayRiskWindowStore authority method is sealed"
             )
         super().__setattr__(name, value)
 
     def __delattr__(cls, name: str) -> None:
-        if name in cls._SEALED_METHOD_NAMES and name in cls.__dict__:
+        if (
+            name in {"__init__", "current", "require_current", "_publish_day", "_evidence"}
+            and name in cls.__dict__
+        ):
             raise TypeError(
                 "canonical ProductDayRiskWindowStore authority method is sealed"
             )

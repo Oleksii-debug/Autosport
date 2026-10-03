@@ -22,6 +22,13 @@ from .monotonic_workspace_authority import (
 SCHEMA_VERSION = 1
 _T = TypeVar("_T")
 
+# Consume the canonical monotonic authority through function objects captured once.
+# This prevents a caller-owned instance attribute from substituting recover/prepare/
+# commit while keeping the durable transition implementation in its existing module.
+_MONOTONIC_RECOVER = MonotonicWorkspaceAuthority.recover
+_MONOTONIC_PREPARE = MonotonicWorkspaceAuthority.prepare
+_MONOTONIC_COMMIT = MonotonicWorkspaceAuthority.commit
+
 
 class ExecutionLedgerError(RuntimeError):
     pass
@@ -768,9 +775,10 @@ class RealExecutionLedger:
         observed = self._monotonic_state_sha256(raw)
         try:
             if observed is None:
-                self._monotonic_authority.recover(observed_state_sha256=None)
+                _MONOTONIC_RECOVER(self._monotonic_authority, observed_state_sha256=None)
             else:
-                self._monotonic_authority.recover(
+                _MONOTONIC_RECOVER(
+                    self._monotonic_authority,
                     observed_state_sha256=observed,
                     tx_id=self._monotonic_tx_id(observed),
                     semantic_binding_sha256=self._monotonic_semantic_binding_sha256,
@@ -839,7 +847,8 @@ class RealExecutionLedger:
         intended_sha256 = hashlib.sha256(intended_raw).hexdigest()
         tx_id = self._monotonic_tx_id(intended_sha256)
         try:
-            self._monotonic_authority.prepare(
+            _MONOTONIC_PREPARE(
+                self._monotonic_authority,
                 tx_id=tx_id,
                 observed_state_sha256=observed_sha256,
                 intended_state_sha256=intended_sha256,
@@ -871,7 +880,8 @@ class RealExecutionLedger:
             )
         self._path_durable = True
         try:
-            self._monotonic_authority.commit(
+            _MONOTONIC_COMMIT(
+                self._monotonic_authority,
                 tx_id=tx_id,
                 observed_state_sha256=intended_sha256,
                 semantic_binding_sha256=self._monotonic_semantic_binding_sha256,

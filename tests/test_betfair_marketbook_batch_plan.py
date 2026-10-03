@@ -265,3 +265,22 @@ def test_matched_since_requires_canonical_timezone_aware_instant():
     assert offset.matched_since == utc.matched_since
     assert offset.request_contract_id == utc.request_contract_id
     assert offset.plan_id == utc.plan_id
+
+def test_customer_strategy_refs_enforce_provider_length_limit():
+    accepted = plan(
+        1,
+        order_projection="ALL",
+        customer_strategy_refs=("x" * 15,),
+    )
+    assert accepted.customer_strategy_refs == ("x" * 15,)
+
+    with pytest.raises(
+        MarketBookBatchPlanError,
+        match="customer_strategy_refs values must be at most 15 characters",
+    ):
+        plan(
+            1,
+            order_projection="ALL",
+            customer_strategy_refs=("x" * 16,),
+        )
+

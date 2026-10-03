@@ -324,6 +324,28 @@ def test_betdaq_issuer_rejects_class_dispatch_mutation_before_io(monkeypatch):
     assert calls == []
 
 
+def test_betdaq_issuer_rejects_mutated_secure_endpoint_before_io(monkeypatch):
+    client, calls = _canonical_betdaq_balance_client(monkeypatch)
+    monkeypatch.setattr(
+        betdaq_account_module,
+        "_SECURE_ENDPOINT",
+        "https://attacker.invalid/SecureService.asmx",
+    )
+
+    with pytest.raises(
+        CapabilityEvidenceError,
+        match="issuance surface changed",
+    ):
+        issue_betdaq_authenticated_capability_evidence(
+            client,
+            BookmakerCapability.BALANCE_READ,
+            committed_at="2026-09-21T10:01:00+00:00",
+            review_due_at="2026-09-21T11:01:00+00:00",
+        )
+
+    assert calls == []
+
+
 def test_betdaq_issuer_rejects_mutated_canonical_transport_root_before_io(monkeypatch):
     client, calls = _canonical_betdaq_balance_client(monkeypatch)
     monkeypatch.setattr(

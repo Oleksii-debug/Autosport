@@ -289,16 +289,6 @@ class ExecutionCapitalAtRiskEvidence:
             raise ExecutionCapitalAtRiskError(
                 "ledger must be exact RealExecutionLedger"
             )
-        with _ISSUED_LOCK:
-            issued = _ISSUED.get(id(self))
-            if (
-                issued is None
-                or issued[0]() is not self
-                or issued[1] != self.evidence_sha256
-            ):
-                raise ExecutionCapitalAtRiskError(
-                    "capital-at-risk evidence was not canonically issued"
-                )
         if _evidence_digest(self) != self.evidence_sha256:
             raise ExecutionCapitalAtRiskError(
                 "capital-at-risk evidence identity is invalid"
@@ -390,16 +380,6 @@ def _install_ledger_read_authority():
     _READ_VERIFIED_SNAPSHOT,
 ) = _install_ledger_read_authority()
 del _install_ledger_read_authority
-
-
-_ISSUED_LOCK = threading.RLock()
-_ISSUED: dict[
-    int,
-    tuple[
-        weakref.ReferenceType[ExecutionCapitalAtRiskEvidence],
-        str,
-    ],
-] = {}
 
 
 _MAX_EXACT_PRECISION = 4096
@@ -646,20 +626,6 @@ def _evidence_digest(value: ExecutionCapitalAtRiskEvidence) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
-def _issue(value: ExecutionCapitalAtRiskEvidence) -> None:
-    key = id(value)
-
-    def cleanup(reference: weakref.ReferenceType[ExecutionCapitalAtRiskEvidence]) -> None:
-        with _ISSUED_LOCK:
-            current = _ISSUED.get(key)
-            if current is not None and current[0] is reference:
-                _ISSUED.pop(key, None)
-
-    reference = weakref.ref(value, cleanup)
-    with _ISSUED_LOCK:
-        _ISSUED[key] = (reference, value.evidence_sha256)
-
-
 def resolve_execution_capital_at_risk(
     ledger: RealExecutionLedger,
     plan_id: str,
@@ -740,7 +706,6 @@ def resolve_execution_capital_at_risk(
         raise ExecutionCapitalAtRiskStale(
             "execution ledger changed during capital-at-risk resolution"
         )
-    _issue(evidence)
     return evidence
 
 

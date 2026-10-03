@@ -222,3 +222,51 @@ def test_threshold_result_is_immutable():
     result = assess()
     with pytest.raises((AttributeError, TypeError)):
         result.state = BetfairCurrencyThresholdState.SNAPSHOT_BELOW_THRESHOLDS  # type: ignore[misc]
+
+class _HostileDecimal(Decimal):
+    def is_finite(self):
+        raise AssertionError("hostile Decimal is_finite executed")
+
+
+class _HostileStr(str):
+    def isascii(self):
+        raise AssertionError("hostile str isascii executed")
+
+    def __hash__(self):
+        raise AssertionError("hostile str hash executed")
+
+
+def test_snapshot_ingress_rejects_subclasses_before_virtual_dispatch():
+    with pytest.raises(BetfairCurrencyThresholdError, match="currency_code"):
+        evaluate_standard_limit_currency_thresholds(
+            currency_code=_HostileStr("GBP"),
+            side="BACK",
+            price=Decimal("2"),
+            size=Decimal("2"),
+        )
+
+    with pytest.raises(BetfairCurrencyThresholdError, match="positive finite Decimal"):
+        evaluate_standard_limit_currency_thresholds(
+            currency_code="GBP",
+            side="BACK",
+            price=_HostileDecimal("2"),
+            size=Decimal("2"),
+        )
+
+    with pytest.raises(BetfairCurrencyThresholdError, match="side"):
+        evaluate_standard_limit_currency_thresholds(
+            currency_code="GBP",
+            side=_HostileStr("BACK"),
+            price=Decimal("2"),
+            size=Decimal("2"),
+        )
+
+    with pytest.raises(BetfairCurrencyThresholdError, match="bet_target_type"):
+        evaluate_standard_limit_currency_thresholds(
+            currency_code="GBP",
+            side="BACK",
+            price=Decimal("2"),
+            size=Decimal("2"),
+            bet_target_type=_HostileStr("PAYOUT"),
+        )
+

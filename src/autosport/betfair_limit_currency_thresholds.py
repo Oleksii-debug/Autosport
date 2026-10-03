@@ -41,7 +41,7 @@ class BetfairCurrencyThresholdError(ValueError):
 
 def _currency_code(value: object) -> str:
     if (
-        not isinstance(value, str)
+        type(value) is not str
         or len(value) != 3
         or not value.isascii()
         or not value.isalpha()
@@ -54,7 +54,7 @@ def _currency_code(value: object) -> str:
 
 
 def _positive_decimal(value: object, field: str) -> Decimal:
-    if not isinstance(value, Decimal) or not value.is_finite() or value <= 0:
+    if type(value) is not Decimal or not value.is_finite() or value <= 0:
         raise BetfairCurrencyThresholdError(
             f"{field} must be a positive finite Decimal"
         )
@@ -148,12 +148,12 @@ class BetfairCurrencyThresholdAssessment:
     ruleset_effective_interval_proven: bool = RULESET_EFFECTIVE_INTERVAL_PROVEN
 
     def __post_init__(self) -> None:
-        if not isinstance(self.state, BetfairCurrencyThresholdState):
+        if type(self.state) is not BetfairCurrencyThresholdState:
             raise BetfairCurrencyThresholdError(
                 "state must be BetfairCurrencyThresholdState"
             )
         _currency_code(self.currency_code)
-        if self.side not in {"BACK", "LAY"}:
+        if type(self.side) is not str or self.side not in {"BACK", "LAY"}:
             raise BetfairCurrencyThresholdError("side must be exactly BACK or LAY")
         _positive_decimal(self.price, "price")
         if self.price <= Decimal("1"):
@@ -166,7 +166,7 @@ class BetfairCurrencyThresholdAssessment:
         ):
             if value is not None:
                 _positive_decimal(value, field)
-        if self.ruleset_id != RULESET_ID:
+        if type(self.ruleset_id) is not str or self.ruleset_id != RULESET_ID:
             raise BetfairCurrencyThresholdError("ruleset_id is product-owned")
         if self.ruleset_effective_interval_proven is not False:
             raise BetfairCurrencyThresholdError(
@@ -265,12 +265,15 @@ def evaluate_standard_limit_currency_thresholds(
     """
 
     code = _currency_code(currency_code)
-    if side not in {"BACK", "LAY"}:
+    if type(side) is not str or side not in {"BACK", "LAY"}:
         raise BetfairCurrencyThresholdError("side must be exactly BACK or LAY")
     value_price = _positive_decimal(price, "price")
     if value_price <= Decimal("1"):
         raise BetfairCurrencyThresholdError("price must be greater than 1")
-    if bet_target_type not in {None, "PAYOUT", "BACKERS_PROFIT"}:
+    if bet_target_type is not None and (
+        type(bet_target_type) is not str
+        or bet_target_type not in {"PAYOUT", "BACKERS_PROFIT"}
+    ):
         raise BetfairCurrencyThresholdError(
             "bet_target_type must be PAYOUT, BACKERS_PROFIT, or None"
         )

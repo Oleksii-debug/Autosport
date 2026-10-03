@@ -111,6 +111,23 @@ def _bind_provider(
     )
 
 
+def _acknowledgement(
+    *,
+    status: AcknowledgementStatus = AcknowledgementStatus.ACCEPTED,
+    accepted_odds: Decimal | None = Decimal("2.08"),
+    accepted_stake: Decimal | None = Decimal("5.00"),
+    acknowledged_at: str = ACKED,
+) -> ExternalAcknowledgement:
+    return ExternalAcknowledgement(
+        attempt_id="attempt-1",
+        external_receipt_id="receipt-1",
+        status=status,
+        acknowledged_at=acknowledged_at,
+        accepted_odds=accepted_odds,
+        accepted_stake=accepted_stake,
+    )
+
+
 def _ack(
     ledger: RealExecutionLedger,
     *,
@@ -119,16 +136,20 @@ def _ack(
     accepted_stake: Decimal | None = Decimal("5.00"),
     acknowledged_at: str = ACKED,
 ) -> None:
-    ledger.acknowledge(
-        ExternalAcknowledgement(
-            attempt_id="attempt-1",
-            external_receipt_id="receipt-1",
-            status=status,
-            acknowledged_at=acknowledged_at,
-            accepted_odds=accepted_odds,
-            accepted_stake=accepted_stake,
-        )
+    acknowledgement = _acknowledgement(
+        status=status,
+        accepted_odds=accepted_odds,
+        accepted_stake=accepted_stake,
+        acknowledged_at=acknowledged_at,
     )
+    ledger._bind_provider_acknowledgement_evidence(
+        attempt_id="attempt-1",
+        evidence_id=EVIDENCE_ID,
+        observed_at=acknowledged_at,
+        source="provider-response",
+        acknowledgement=acknowledgement,
+    )
+    ledger.acknowledge(acknowledgement)
 
 
 def _reconciled_not_found_ledger(tmp_path) -> RealExecutionLedger:
@@ -152,7 +173,6 @@ def _reconciled_not_found_ledger(tmp_path) -> RealExecutionLedger:
 
 def _accepted_evidence(tmp_path):
     ledger = _ledger(tmp_path)
-    _bind_provider(ledger)
     _ack(ledger)
     return build_empirical_execution_evidence(
         ledger,
@@ -176,7 +196,7 @@ def test_terminal_accepted_record_keeps_provider_correlation_but_slippage_unknow
     assert evidence.censor_reason is None
     assert evidence.censor_cutoff_recorded_at is None
     assert evidence.provider_evidence_id == EVIDENCE_ID
-    assert evidence.provider_evidence_observed_at == PROVIDER
+    assert evidence.provider_evidence_observed_at == ACKED
 
     assert evidence.slippage_status == SLIPPAGE_STATUS_UNKNOWN
     assert evidence.accepted_odds is None
@@ -282,28 +302,33 @@ def test_provider_evidence_does_not_turn_nonterminal_attempt_into_slippage_sampl
     assert evidence.accepted_odds is None
 
 
-def test_terminal_ack_without_separate_provider_evidence_still_has_attempt_record(
+def test_terminal_ack_without_exact_provider_evidence_is_rejected_before_projection(
     tmp_path,
 ):
     ledger = _ledger(tmp_path)
-    _ack(ledger)
+    acknowledgement = _acknowledgement()
+
+    with pytest.raises(
+        ExecutionStateError,
+        match="requires exact provider-bound acknowledgement evidence",
+    ):
+        ledger.acknowledge(acknowledgement)
 
     evidence = build_empirical_execution_evidence(
         ledger,
         attempt_id="attempt-1",
     )
 
-    assert evidence.attempt_state == "ACCEPTED"
-    assert evidence.ledger_terminal is True
+    assert evidence.attempt_state == "SUBMITTED"
+    assert evidence.ledger_terminal is False
     assert evidence.provider_evidence_id is None
     assert evidence.provider_outcome_verified is False
     assert (
         evidence.provider_outcome_verification_reason
-        == PROVIDER_OUTCOME_UNVERIFIED_ACK
+        == PROVIDER_OUTCOME_NOT_APPLICABLE
     )
+    assert evidence.right_censored is True
     assert evidence.slippage_status == SLIPPAGE_STATUS_UNKNOWN
-    assert evidence.accepted_odds is None
-    assert evidence.adverse_odds_delta is None
 
 
 def test_reconciled_not_found_is_unverified_right_censored_evidence(tmp_path):
@@ -367,7 +392,7 @@ def test_reconciled_not_found_direct_construction_requires_reconciliation_identi
         replace(evidence, reconciliation_evidence_id=None)
 
 
-def test_generic_provider_evidence_cannot_mint_known_slippage_by_direct_construction(
+def test_exact_provider_provenance_cannot_mint_known_slippage_without_root_authority(
     tmp_path,
 ):
     evidence = _accepted_evidence(tmp_path)
@@ -390,7 +415,6 @@ def test_generic_provider_evidence_cannot_mint_known_slippage_by_direct_construc
 
 def test_partial_acceptance_keeps_unproven_slippage_unknown(tmp_path):
     ledger = _ledger(tmp_path)
-    _bind_provider(ledger)
     _ack(
         ledger,
         status=AcknowledgementStatus.PARTIAL,
@@ -421,7 +445,6 @@ def test_partial_acceptance_keeps_unproven_slippage_unknown(tmp_path):
 
 def test_rejected_attempt_is_not_a_fake_zero_slippage_sample(tmp_path):
     ledger = _ledger(tmp_path)
-    _bind_provider(ledger)
     _ack(
         ledger,
         status=AcknowledgementStatus.REJECTED,
@@ -447,12 +470,13 @@ def test_rejected_attempt_is_not_a_fake_zero_slippage_sample(tmp_path):
     assert evidence.unaccepted_stake is None
 
 
-def test_generic_provider_evidence_cannot_mint_lay_slippage(tmp_path):
+def test_exact_provider_provenance_cannot_mint_lay_slippage_without_root_authority(
+    tmp_path,
+):
     ledger = _ledger(
         tmp_path,
         action=_action(side="LAY", requested_odds=Decimal("3.00")),
     )
-    _bind_provider(ledger)
     _ack(ledger, accepted_odds=Decimal("3.05"))
 
     evidence = build_empirical_execution_evidence(
@@ -465,9 +489,8 @@ def test_generic_provider_evidence_cannot_mint_lay_slippage(tmp_path):
     assert evidence.adverse_odds_delta is None
 
 
-def test_generic_provider_evidence_does_not_require_price_side_semantics(tmp_path):
+def test_exact_provider_provenance_does_not_require_price_side_semantics(tmp_path):
     ledger = _ledger(tmp_path, action=_action(side="CUSTOM"))
-    _bind_provider(ledger)
     _ack(ledger)
 
     evidence = build_empirical_execution_evidence(
@@ -500,20 +523,22 @@ def test_caller_ack_cannot_upgrade_provider_outcome_authority(tmp_path):
         )
 
 
-def test_wall_clock_cross_stage_inversion_is_rejected_before_projection(tmp_path):
+def test_provider_ack_binding_rejects_cross_stage_wall_clock_inversion(tmp_path):
     ledger = _ledger(tmp_path)
-    _bind_provider(
-        ledger,
-        observed_at="2026-09-21T10:00:01.900000+00:00",
+    acknowledgement = _acknowledgement(
+        acknowledged_at="2026-09-21T10:00:01.800000+00:00",
     )
 
     with pytest.raises(
         ExecutionStateError,
-        match="acknowledgement precedes attempt causal boundary",
+        match="provider evidence time must equal acknowledgement time",
     ):
-        _ack(
-            ledger,
-            acknowledged_at="2026-09-21T10:00:01.800000+00:00",
+        ledger._bind_provider_acknowledgement_evidence(
+            attempt_id="attempt-1",
+            evidence_id=EVIDENCE_ID,
+            observed_at="2026-09-21T10:00:01.900000+00:00",
+            source="provider-response",
+            acknowledgement=acknowledgement,
         )
 
 
@@ -577,7 +602,6 @@ def test_direct_construction_rejects_slippage_forgery(tmp_path):
 
 def test_restart_rebuild_is_byte_identical_for_terminal_record(tmp_path):
     ledger = _ledger(tmp_path)
-    _bind_provider(ledger)
     _ack(ledger)
     first = build_empirical_execution_evidence(
         ledger,
@@ -650,7 +674,6 @@ def test_missing_attempt_is_unavailable_not_synthetic_censor_record(tmp_path):
 
 def test_tampered_ledger_fails_before_empirical_projection(tmp_path):
     ledger = _ledger(tmp_path)
-    _bind_provider(ledger)
     _ack(ledger)
     raw = ledger.path.read_text(encoding="utf-8")
     assert "receipt-1" in raw
@@ -673,13 +696,11 @@ def test_attempt_projection_ignores_rebound_ledger_snapshot_seams(tmp_path):
         tmp_path / "canonical-attempt",
         action=_action(selection_id="canonical-selection"),
     )
-    _bind_provider(canonical)
     _ack(canonical)
     decoy = _ledger(
         tmp_path / "decoy-attempt",
         action=_action(selection_id="decoy-selection"),
     )
-    _bind_provider(decoy)
     _ack(decoy)
 
     canonical_snapshot = RealExecutionLedger.verified_snapshot(canonical)

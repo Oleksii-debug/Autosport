@@ -2804,3 +2804,158 @@ def test_runtime_authority_rejects_path_construction_dispatch_replacement(
         )
 
     assert hostile_calls == []
+
+
+@pytest.mark.parametrize("method_name", ("recover", "read_history"))
+def test_runtime_authority_rejects_monotonic_read_instance_shadow(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    method_name: str,
+) -> None:
+    path = tmp_path / "deployment-runtime-authority.json"
+    store = DeploymentRuntimeAuthorityStore.initialize_pristine(
+        path,
+        authority_root=_authority_root(tmp_path),
+    )
+    hostile_calls: list[object] = []
+
+    def hostile(*args: object, **kwargs: object) -> object:
+        hostile_calls.append((args, kwargs))
+        raise AssertionError("hostile monotonic read instance shadow executed")
+
+    monkeypatch.setattr(store._authority, method_name, hostile)
+    with pytest.raises(
+        DeploymentRuntimeAuthorityError,
+        match="monotonic read instance dispatch was replaced",
+    ):
+        store.records()
+
+    assert hostile_calls == []
+
+
+@pytest.mark.parametrize("method_name", ("recover", "read_history"))
+def test_runtime_authority_rejects_monotonic_read_class_replacement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    method_name: str,
+) -> None:
+    path = tmp_path / "deployment-runtime-authority.json"
+    store = DeploymentRuntimeAuthorityStore.initialize_pristine(
+        path,
+        authority_root=_authority_root(tmp_path),
+    )
+    hostile_calls: list[object] = []
+
+    def hostile(*args: object, **kwargs: object) -> object:
+        hostile_calls.append((args, kwargs))
+        raise AssertionError("hostile monotonic read class dispatch executed")
+
+    monkeypatch.setattr(MonotonicWorkspaceAuthority, method_name, hostile)
+    with pytest.raises(
+        DeploymentRuntimeAuthorityError,
+        match="monotonic read dispatch was replaced",
+    ):
+        store.records()
+
+    assert hostile_calls == []
+
+
+@pytest.mark.parametrize("method_name", ("recover", "read_history"))
+def test_runtime_authority_rejects_monotonic_read_code_replacement(
+    tmp_path: Path,
+    method_name: str,
+) -> None:
+    path = tmp_path / "deployment-runtime-authority.json"
+    store = DeploymentRuntimeAuthorityStore.initialize_pristine(
+        path,
+        authority_root=_authority_root(tmp_path),
+    )
+    target = vars(MonotonicWorkspaceAuthority)[method_name]
+    original_code = target.__code__
+
+    def hostile(*args: object, **kwargs: object) -> object:
+        del args, kwargs
+        raise AssertionError("hostile monotonic read code executed")
+
+    assert hostile.__code__.co_freevars == original_code.co_freevars
+    target.__code__ = hostile.__code__
+    try:
+        with pytest.raises(
+            DeploymentRuntimeAuthorityError,
+            match="monotonic read dispatch was replaced",
+        ):
+            store.records()
+    finally:
+        target.__code__ = original_code
+
+
+@pytest.mark.parametrize(
+    "helper_name",
+    (
+        "_assert_monotonic_read_recovery_dispatch",
+        "_monotonic_recover",
+        "_monotonic_read_history",
+        "_assert_monotonic_read_helpers",
+    ),
+)
+def test_runtime_authority_rejects_monotonic_read_helper_alias_replacement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    helper_name: str,
+) -> None:
+    path = tmp_path / "deployment-runtime-authority.json"
+    store = DeploymentRuntimeAuthorityStore.initialize_pristine(
+        path,
+        authority_root=_authority_root(tmp_path),
+    )
+    hostile_calls: list[object] = []
+
+    def hostile(*args: object, **kwargs: object) -> object:
+        hostile_calls.append((args, kwargs))
+        raise AssertionError("hostile monotonic read helper executed")
+
+    monkeypatch.setattr(deployment_runtime_authority, helper_name, hostile)
+    with pytest.raises(
+        DeploymentRuntimeAuthorityError,
+        match="monotonic read helper",
+    ):
+        store.records()
+
+    assert hostile_calls == []
+
+
+@pytest.mark.parametrize(
+    "helper_name",
+    (
+        "_assert_monotonic_read_recovery_dispatch",
+        "_monotonic_recover",
+        "_monotonic_read_history",
+        "_assert_monotonic_read_helpers",
+    ),
+)
+def test_runtime_authority_rejects_monotonic_read_helper_code_replacement(
+    tmp_path: Path,
+    helper_name: str,
+) -> None:
+    path = tmp_path / "deployment-runtime-authority.json"
+    store = DeploymentRuntimeAuthorityStore.initialize_pristine(
+        path,
+        authority_root=_authority_root(tmp_path),
+    )
+    target = getattr(deployment_runtime_authority, helper_name)
+    original_code = target.__code__
+
+    def hostile(*args: object, **kwargs: object) -> object:
+        del args, kwargs
+        raise AssertionError("hostile monotonic read helper code executed")
+
+    assert hostile.__code__.co_freevars == original_code.co_freevars
+    target.__code__ = hostile.__code__
+    try:
+        with pytest.raises(
+            DeploymentRuntimeAuthorityError,
+            match="monotonic read helper",
+        ):
+            store.records()
+    finally:
+        target.__code__ = original_code

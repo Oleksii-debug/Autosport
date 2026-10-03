@@ -599,7 +599,11 @@ def _parse_bookmaker_block_freshness(
     stale_seconds: float | None = None
     if "stale_seconds" in bookmaker:
         raw_stale = bookmaker["stale_seconds"]
-        if isinstance(raw_stale, bool) or not isinstance(raw_stale, (int, float)):
+        if isinstance(raw_stale, bool) or not isinstance(raw_stale, (int, float, Decimal)):
+            raise ProviderPayloadError(
+                "bookmaker stale_seconds must be a finite non-negative number"
+            )
+        if isinstance(raw_stale, Decimal) and not raw_stale.is_finite():
             raise ProviderPayloadError(
                 "bookmaker stale_seconds must be a finite non-negative number"
             )

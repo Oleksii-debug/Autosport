@@ -1,6 +1,7 @@
 import copy
 import json
 import unittest
+from decimal import Decimal
 
 from autosport.parlayapi_provider import (
     HttpJsonResponse,
@@ -304,6 +305,18 @@ class ParlayApiProviderStateTests(unittest.TestCase):
         )
         self.assertTrue(batch.quotes[0].metadata["provider_block_topped_up"])
         self.assertFalse(batch.quotes[0].metadata["provider_block_freshness_complete"])
+
+    def test_decimal_decoded_block_age_remains_json_safe_and_observable(self):
+        event = copy.deepcopy(EVENT)
+        event["bookmakers"][0]["stale_seconds"] = Decimal("1.25")
+        batch = self._provider(
+            HttpJsonResponse([event], 200, {"X-Provider-State": provider_state_header()})
+        ).read_batch()
+        self.assertEqual(batch.quality_flags, ())
+        self.assertEqual(batch.quotes[0].metadata["provider_block_stale_seconds"], 1.25)
+        self.assertIsInstance(
+            batch.quotes[0].metadata["provider_block_stale_seconds"], float
+        )
 
     def test_malformed_block_freshness_fails_closed(self):
         invalid = (

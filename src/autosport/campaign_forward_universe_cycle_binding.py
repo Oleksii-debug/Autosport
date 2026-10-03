@@ -11,7 +11,7 @@ import hashlib
 import inspect
 import json
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Sequence
 
 from . import provider_evaluation_universe as _provider_universe_module
@@ -264,6 +264,24 @@ def _require_cycle_observation_chronology(
         "collector completed_at",
     )
     captured = _instant(snapshot.captured_at, "provider captured_at")
+    slot_due = _instant(
+        collector_evidence.get("due_at"),
+        "collector due_at",
+    )
+    try:
+        slot_deadline = slot_due + timedelta(seconds=source_spec.interval_seconds)
+    except (OverflowError, ValueError) as exc:
+        raise CampaignForwardUniverseCycleBindingError(
+            "collector fixed schedule slot window is not representable"
+        ) from exc
+    if attempted < slot_due or attempted >= slot_deadline:
+        raise CampaignForwardUniverseCycleBindingError(
+            "collector START is outside precommitted fixed schedule slot window"
+        )
+    if captured >= slot_deadline:
+        raise CampaignForwardUniverseCycleBindingError(
+            "provider observation is outside precommitted fixed schedule slot window"
+        )
     not_before = _instant(
         campaign.observation_not_before,
         "campaign observation_not_before",

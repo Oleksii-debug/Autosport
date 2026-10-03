@@ -36,6 +36,41 @@ class HttpJsonResponse:
 
 
 @dataclass(frozen=True, slots=True)
+class ProviderSourceState:
+    source: str
+    age_seconds: float | None
+    role: str
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderStateSnapshot:
+    server_timestamp: int
+    sources: tuple[ProviderSourceState, ...]
+    truncated: bool = False
+
+    def for_source(self, source: str) -> ProviderSourceState | None:
+        for state in self.sources:
+            if state.source == source:
+                return state
+        return None
+
+
+@dataclass(frozen=True, slots=True)
+class BookmakerBlockFreshness:
+    stale_seconds: float | None
+    last_update_ms: int | None
+    topped_up: bool | None
+
+    @property
+    def complete(self) -> bool:
+        return (
+            self.stale_seconds is not None
+            and self.last_update_ms is not None
+            and self.topped_up is not None
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class HistoricalCoverageSource:
     source: str
     rows: int
@@ -199,6 +234,7 @@ class ParlayApiTableTennisProvider:
         self._pending_quotes: Iterator[ProviderQuote] | None = None
         self._pending_quote: ProviderQuote | None = None
         self._pending_cursor: str | None = None
+        self._pending_quality_flags: tuple[str, ...] = ()
 
     def read_batch(self, max_items: int = 1000) -> ProviderBatch:
         max_items = _positive_nonboolean_int(max_items, field="max_items")
@@ -206,15 +242,19 @@ class ParlayApiTableTennisProvider:
             observed_ts = self.clock()
             response = self._fetch()
             events = self._event_list(response.payload)
+            provider_state = _parse_provider_state(response.headers)
+            self._pending_quality_flags = _provider_state_quality_flags(events, provider_state)
             self._pending_quotes = self._snapshot_quotes(
                 events,
                 observed_ts,
                 response.status_code,
+                provider_state,
             )
             self._pending_quote = None
             self._pending_cursor = observed_ts
 
         cursor = self._pending_cursor
+        base_quality_flags = self._pending_quality_flags
         try:
             quotes: list[ProviderQuote] = []
             if self._pending_quote is not None:
@@ -226,15 +266,20 @@ class ParlayApiTableTennisProvider:
                     quotes.append(next(self._pending_quotes))
                 except StopIteration:
                     self._clear_pending_snapshot()
-                    return ProviderBatch(self.source_id, tuple(quotes), cursor=cursor)
+                    return ProviderBatch(
+                        self.source_id,
+                        tuple(quotes),
+                        cursor=cursor,
+                        quality_flags=base_quality_flags,
+                    )
 
             try:
                 self._pending_quote = next(self._pending_quotes)
             except StopIteration:
                 self._clear_pending_snapshot()
-                quality_flags: tuple[str, ...] = ()
+                quality_flags = base_quality_flags
             else:
-                quality_flags = ("TRUNCATED_BATCH",)
+                quality_flags = tuple(sorted((*base_quality_flags, "TRUNCATED_BATCH")))
             return ProviderBatch(
                 self.source_id,
                 tuple(quotes),
@@ -254,14 +299,16 @@ class ParlayApiTableTennisProvider:
         events: list[dict[str, Any]],
         observed_ts: str,
         http_status: int,
+        provider_state: ProviderStateSnapshot | None,
     ) -> Iterator[ProviderQuote]:
         for event in events:
-            yield from self._event_quotes(event, observed_ts, http_status)
+            yield from self._event_quotes(event, observed_ts, http_status, provider_state)
 
     def _clear_pending_snapshot(self) -> None:
         self._pending_quotes = None
         self._pending_quote = None
         self._pending_cursor = None
+        self._pending_quality_flags = ()
 
     def historical_coverage(self, date_from: str, date_to: str) -> HistoricalCoverageReport:
         """Verify the authenticated key's requested historical window and actual source coverage.
@@ -365,7 +412,16 @@ class ParlayApiTableTennisProvider:
             headers["X-API-Key"] = self.api_key
         for attempt in range(1, self.max_attempts + 1):
             try:
-                return self.transport(url, headers, self.timeout_seconds)
+                response = self.transport(url, headers, self.timeout_seconds)
+                if type(response.status_code) is not int or not 100 <= response.status_code <= 599:
+                    raise ProviderPayloadError("provider transport returned invalid HTTP status")
+                if not 200 <= response.status_code < 300:
+                    raise ProviderTransportError(
+                        f"provider HTTP {response.status_code}",
+                        response.status_code,
+                        _parse_retry_after(_header(response.headers, "retry-after")),
+                    )
+                return response
             except ProviderTransportError as exc:
                 retryable = exc.status_code == 429 or (exc.status_code is not None and exc.status_code >= 500)
                 if not retryable or attempt >= self.max_attempts:
@@ -405,7 +461,13 @@ class ParlayApiTableTennisProvider:
             raise ProviderPayloadError("provider events must be objects")
         return events
 
-    def _event_quotes(self, event: dict[str, Any], observed_ts: str, http_status: int) -> list[ProviderQuote]:
+    def _event_quotes(
+        self,
+        event: dict[str, Any],
+        observed_ts: str,
+        http_status: int,
+        provider_state: ProviderStateSnapshot | None,
+    ) -> list[ProviderQuote]:
         if "id" in event:
             raw_event_id = event["id"]
         elif "canonical_event_id" in event:
@@ -440,6 +502,10 @@ class ParlayApiTableTennisProvider:
             else:
                 raise ProviderPayloadError("bookmaker is missing key/title identity")
             book_key = _provider_identity(raw_book_key, field="bookmaker identity")
+            source_state = provider_state.for_source(book_key) if provider_state is not None else None
+            if provider_state is not None and (source_state is None or source_state.role == "offline"):
+                continue
+            block_freshness = _parse_bookmaker_block_freshness(bookmaker)
             markets = bookmaker.get("markets", [])
             if not isinstance(markets, list):
                 raise ProviderPayloadError("bookmaker markets must be a list")
@@ -475,6 +541,34 @@ class ParlayApiTableTennisProvider:
                         raise ProviderPayloadError("outcome point must be a finite decimal")
                     provider_market_id = _market_identity(book_key, market_key, point)
                     sequence = _sequence_from_timestamp(source_ts or observed_ts)
+                    metadata = {
+                        "provider": "parlayapi",
+                        "sport_key": event_sport_key,
+                        "sport_title": event.get("sport_title"),
+                        "commence_time": event.get("commence_time"),
+                        "home_team": event.get("home_team"),
+                        "away_team": event.get("away_team"),
+                        "bookmaker_key": book_key,
+                        "bookmaker_title": bookmaker.get("title"),
+                        "market_key": market_key,
+                        "line": str(point) if point is not None else None,
+                        "requested_odds_format": "decimal",
+                        "public_preview": self.public_preview,
+                        "http_status": http_status,
+                        "provider_block_stale_seconds": block_freshness.stale_seconds,
+                        "provider_block_last_update_ms": block_freshness.last_update_ms,
+                        "provider_block_topped_up": block_freshness.topped_up,
+                        "provider_block_freshness_complete": block_freshness.complete,
+                    }
+                    if source_state is not None and provider_state is not None:
+                        metadata.update(
+                            {
+                                "provider_state_role": source_state.role,
+                                "provider_state_age_seconds": source_state.age_seconds,
+                                "provider_state_server_timestamp": provider_state.server_timestamp,
+                                "provider_state_truncated": provider_state.truncated,
+                            }
+                        )
                     output.append(
                         ProviderQuote(
                             provider_event_id=event_id,
@@ -486,26 +580,141 @@ class ParlayApiTableTennisProvider:
                             market_type=_market_type(market_key),
                             status="open",
                             source_ts=source_ts,
-                            metadata={
-                                "provider": "parlayapi",
-                                "sport_key": event_sport_key,
-                                "sport_title": event.get("sport_title"),
-                                "commence_time": event.get("commence_time"),
-                                "home_team": event.get("home_team"),
-                                "away_team": event.get("away_team"),
-                                "bookmaker_key": book_key,
-                                "bookmaker_title": bookmaker.get("title"),
-                                "market_key": market_key,
-                                "line": str(point) if point is not None else None,
-                                "requested_odds_format": "decimal",
-                                "public_preview": self.public_preview,
-                                "http_status": http_status,
-                            },
+                            metadata=metadata,
                             sport=self.sport_key,
                         )
                     )
         return output
 
+
+def _parse_bookmaker_block_freshness(
+    bookmaker: Mapping[str, Any],
+) -> BookmakerBlockFreshness:
+    for alias in ("staleSeconds", "lastUpdateMs", "toppedUp"):
+        if alias in bookmaker:
+            raise ProviderPayloadError(
+                "bookmaker freshness metadata must use canonical snake_case field names"
+            )
+
+    stale_seconds: float | None = None
+    if "stale_seconds" in bookmaker:
+        raw_stale = bookmaker["stale_seconds"]
+        if isinstance(raw_stale, bool) or not isinstance(raw_stale, (int, float)):
+            raise ProviderPayloadError(
+                "bookmaker stale_seconds must be a finite non-negative number"
+            )
+        stale_seconds = float(raw_stale)
+        if not math.isfinite(stale_seconds) or stale_seconds < 0:
+            raise ProviderPayloadError(
+                "bookmaker stale_seconds must be a finite non-negative number"
+            )
+
+    last_update_ms: int | None = None
+    if "last_update_ms" in bookmaker:
+        raw_last_update_ms = bookmaker["last_update_ms"]
+        if type(raw_last_update_ms) is not int or raw_last_update_ms < 0:
+            raise ProviderPayloadError(
+                "bookmaker last_update_ms must be a non-negative integer"
+            )
+        last_update_ms = raw_last_update_ms
+
+    topped_up: bool | None = None
+    if "topped_up" in bookmaker:
+        raw_topped_up = bookmaker["topped_up"]
+        if type(raw_topped_up) is not bool:
+            raise ProviderPayloadError("bookmaker topped_up must be boolean")
+        topped_up = raw_topped_up
+
+    return BookmakerBlockFreshness(
+        stale_seconds=stale_seconds,
+        last_update_ms=last_update_ms,
+        topped_up=topped_up,
+    )
+
+
+def _parse_provider_state(headers: Mapping[str, str]) -> ProviderStateSnapshot | None:
+    raw = _header(headers, "x-provider-state")
+    if raw is None:
+        return None
+    payload = _decode_provider_json(raw.encode("utf-8"))
+    if not isinstance(payload, dict):
+        raise ProviderPayloadError("x-provider-state must be a JSON object")
+    server_timestamp = payload.get("ts")
+    if type(server_timestamp) is not int or server_timestamp <= 0:
+        raise ProviderPayloadError("x-provider-state ts must be a positive integer unix timestamp")
+    raw_sources = payload.get("src")
+    if not isinstance(raw_sources, dict):
+        raise ProviderPayloadError("x-provider-state src must be an object")
+    truncated = payload.get("truncated", False)
+    if type(truncated) is not bool:
+        raise ProviderPayloadError("x-provider-state truncated must be boolean")
+
+    sources: list[ProviderSourceState] = []
+    for raw_source, raw_state in sorted(raw_sources.items(), key=lambda item: str(item[0])):
+        source = _provider_identity(raw_source, field="provider state source")
+        if not isinstance(raw_state, dict):
+            raise ProviderPayloadError(f"provider state for {source!r} must be an object")
+        role = raw_state.get("role")
+        if type(role) is not str or role not in {"primary", "degraded", "offline"}:
+            raise ProviderPayloadError(f"provider state role for {source!r} is invalid")
+        raw_age = raw_state.get("age_s")
+        if raw_age is None:
+            age_seconds = None
+        else:
+            if isinstance(raw_age, bool) or not isinstance(raw_age, (int, float)):
+                raise ProviderPayloadError(f"provider state age_s for {source!r} must be a number or null")
+            age_seconds = float(raw_age)
+            if not math.isfinite(age_seconds) or age_seconds < 0:
+                raise ProviderPayloadError(f"provider state age_s for {source!r} must be finite and non-negative")
+        if age_seconds is None and role != "offline":
+            raise ProviderPayloadError(
+                f"provider state age_s for {source!r} may be null only when role is offline"
+            )
+        sources.append(ProviderSourceState(source, age_seconds, role))
+    return ProviderStateSnapshot(server_timestamp, tuple(sources), truncated)
+
+
+def _provider_state_quality_flags(
+    events: list[dict[str, Any]],
+    provider_state: ProviderStateSnapshot | None,
+) -> tuple[str, ...]:
+    flags: set[str] = set()
+    if provider_state is None:
+        flags.add("PROVIDER_STATE_MISSING")
+    else:
+        if provider_state.truncated:
+            flags.add("PROVIDER_STATE_TRUNCATED")
+        if any(state.role == "degraded" for state in provider_state.sources):
+            flags.add("UPSTREAM_SOURCE_DEGRADED")
+        if any(state.role == "offline" for state in provider_state.sources):
+            flags.add("UPSTREAM_SOURCE_OFFLINE")
+
+    # Bind per-bookmaker retention/age evidence independently of source-level state.
+    # No product staleness threshold is invented here: exact age is persisted on each
+    # quote, while missing fields and provider-declared top-up remain conservative flags.
+    for event in events:
+        bookmakers = event.get("bookmakers")
+        if not isinstance(bookmakers, list):
+            continue
+        for bookmaker in bookmakers:
+            if not isinstance(bookmaker, dict):
+                continue
+            freshness = _parse_bookmaker_block_freshness(bookmaker)
+            if not freshness.complete:
+                flags.add("BOOKMAKER_BLOCK_FRESHNESS_MISSING")
+            elif freshness.topped_up:
+                flags.add("UPSTREAM_BOOKMAKER_TOPPED_UP")
+
+            if provider_state is None:
+                continue
+            raw_book_key = bookmaker.get("key", bookmaker.get("title"))
+            if not isinstance(raw_book_key, str) or not raw_book_key or raw_book_key != raw_book_key.strip():
+                continue
+            if "|" in raw_book_key:
+                continue
+            if provider_state.for_source(raw_book_key) is None:
+                flags.add("PROVIDER_STATE_UNCOVERED_SOURCE")
+    return tuple(sorted(flags))
 
 def _market_type(key: str) -> MarketType:
     normalized = key.strip().lower()

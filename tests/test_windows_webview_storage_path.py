@@ -315,7 +315,7 @@ def test_webview_storage_probe_classifies_write_failure_without_raw_detail(
         raise PermissionError(secret)
 
     monkeypatch.setattr(
-        "autosport.windows_webview_shell.tempfile.NamedTemporaryFile",
+        "autosport.storage_preflight.tempfile.NamedTemporaryFile",
         deny_probe,
     )
 

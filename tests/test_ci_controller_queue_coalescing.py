@@ -189,6 +189,33 @@ def test_trigger_boundary_run_identity_change_revokes_cancellation() -> None:
     assert api.cancelled == []
 
 
+def test_trigger_boundary_run_identity_read_failure_revokes_cancellation() -> None:
+    qualification = PullRequestQualification(
+        head_sha=HEAD,
+        integration_capable=False,
+    )
+
+    class IdentityReadFailureApi(FakeApi):
+        def _explicit_run_identity_matches(self, **_kwargs) -> bool:
+            raise CancellationError("fixture run identity reread unavailable")
+
+        def live_pr_qualification(self, pr_number: int) -> PullRequestQualification:
+            raise AssertionError(
+                "identity reread failure must stop before PR qualification reread"
+            )
+
+    api = IdentityReadFailureApi(qualification)
+
+    assert not _cancel_triggering_run_if_stale_or_nonqualifying(
+        api,  # type: ignore[arg-type]
+        pr_number=2039,
+        event_head_sha=HEAD,
+        current_run_id=91,
+        qualification=qualification,
+    )
+    assert api.cancelled == []
+
+
 def test_current_ready_source_run_is_preserved() -> None:
     qualification = PullRequestQualification(
         head_sha=HEAD,
@@ -862,6 +889,53 @@ def test_boundary_run_identity_change_revokes_only_that_sweep_candidate() -> Non
     ]
     # The revoked run never consumes a final PR-qualification reread. The independent
     # second group still receives both its initial and immediate pre-POST checks.
+    assert api.reads == [101, 202, 202]
+
+
+def test_boundary_run_identity_read_failure_does_not_starve_other_pr_group() -> None:
+    one = PullRequestQualification(
+        head_sha="1" * 40,
+        integration_capable=True,
+    )
+    two = PullRequestQualification(
+        head_sha="2" * 40,
+        integration_capable=True,
+    )
+
+    class IdentityReadFailureApi(SweepApi):
+        def _explicit_run_identity_matches(
+            self,
+            *,
+            run_id: int,
+            expected_head_sha: str,
+            pr_number: int,
+        ) -> bool:
+            self.identity_reads.append((run_id, expected_head_sha, pr_number))
+            if run_id == 10:
+                raise CancellationError("fixture run identity reread unavailable")
+            return True
+
+    api = IdentityReadFailureApi(
+        (
+            _run(10, "3" * 40, (101,)),
+            _run(20, "4" * 40, (202,)),
+        ),
+        {
+            101: [one],
+            202: [two, two],
+        },
+    )
+
+    assert cancel_superseded_explicit_pr_runs(
+        api,  # type: ignore[arg-type]
+        workflow_name="CI",
+        current_run_id=99,
+    ) == (20,)
+    assert api.cancelled == [20]
+    assert api.identity_reads == [
+        (10, "3" * 40, 101),
+        (20, "4" * 40, 202),
+    ]
     assert api.reads == [101, 202, 202]
 
 

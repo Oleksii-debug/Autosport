@@ -595,6 +595,100 @@ def test_durable_imported_provider_scope_guard_rejects_coordinated_source_rebind
     assert hostile_calls == []
 
 
+def test_durable_resolver_scope_guard_survives_coordinated_source_rebind(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    locator, store, spec, provider_store = _setup(tmp_path)
+    monkeypatch.setattr(
+        provider_module,
+        "urlopen",
+        lambda _request, _timeout: _FakeSseResponse(_empty_frame()),
+    )
+    monkeypatch.setattr(provider_module, "_default_clock", lambda: CAPTURED_AT)
+    _snapshot, cycle_receipt = capture_campaign_complete_game_board(
+        precommit_locator=locator,
+        store=store,
+        source_spec=spec,
+        evidence_store=provider_store,
+        request=_request(),
+        api_key="secret-value",
+        timeout_seconds=3.0,
+        clock=_clock(),
+    )
+
+    alternate = CompleteGameBoardEvidenceStore(
+        tmp_path / "coordinated-resolver-foreign-provider-workspace",
+        authority_root=provider_store.authority_root,
+    )
+    universe_store = ProviderEvaluationUniverseStore(
+        tmp_path / "coordinated-resolver-unused-provider-universe-workspace",
+        authority_id="coordinated-resolver-unused-provider-universe",
+        source_id=spec.source_id,
+        authority_root=tmp_path / "coordinated-resolver-unused-provider-universe-authority",
+    )
+    protocol = ForwardEvidenceProtocolEnvelope(
+        campaign_id="campaign-cycle-capture-test",
+        scientific_protocol_sha256=PROTOCOL_SHA,
+        candidate_universe_rule_id=FORWARD_UNIVERSE_RULE_ID,
+        candidate_universe_rule_sha256=FORWARD_UNIVERSE_RULE_SHA256,
+        forward_evaluation_policy_sha256="7" * 64,
+        runtime_identity_sha256="6" * 64,
+        baseline_set_sha256="5" * 64,
+        protective_metric_set_sha256="4" * 64,
+        cost_policy_sha256="3" * 64,
+        precommit_anchor_lower=datetime(2099, 12, 31, 19, 0, tzinfo=timezone.utc),
+        precommit_anchor_upper=datetime(2099, 12, 31, 19, 30, tzinfo=timezone.utc),
+    )
+    hostile_calls: list[str] = []
+
+    def forged_path_equality(_left, _right):
+        hostile_calls.append("path-equality")
+        return True
+
+    def forged_path_join(_left, _right):
+        hostile_calls.append("path-join")
+        return alternate.root
+
+    monkeypatch.setattr(
+        capture_module,
+        "_CANONICAL_PATH_EQUALITY",
+        forged_path_equality,
+    )
+    monkeypatch.setattr(
+        capture_module,
+        "_CANONICAL_PATH_EQUALITY_CODE",
+        forged_path_equality.__code__,
+    )
+    monkeypatch.setattr(
+        capture_module,
+        "_CANONICAL_PATH_JOIN",
+        forged_path_join,
+    )
+    monkeypatch.setattr(
+        capture_module,
+        "_CANONICAL_PATH_JOIN_CODE",
+        forged_path_join.__code__,
+    )
+
+    with pytest.raises(
+        CampaignForwardUniverseCycleBindingError,
+        match="provider evidence routing does not match campaign precommit authority",
+    ):
+        resolve_campaign_forward_universe_cycle_authority(
+            precommit_locator=locator,
+            collector_store=store,
+            source_spec=spec,
+            cycle_receipt=cycle_receipt,
+            provider_evidence_store=alternate,
+            universe_store=universe_store,
+            protocol=protocol,
+            event_lifecycle=None,
+        )
+
+    assert hostile_calls == []
+
+
 def test_first_clock_cannot_redirect_provider_evidence_authority_root(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -15,6 +15,7 @@ from .betfair_marketbook_request_budget import (
 )
 
 MAX_COMBINED_IDENTIFIERS = 250
+MAX_CUSTOMER_STRATEGY_REF_LENGTH = 15
 PLAN_POLICY_VERSION = "betfair-marketbook-batch-plan-v1"
 _ORDER = {"EXECUTABLE", "EXECUTION_COMPLETE", "ALL"}
 _MATCH = {"NO_ROLLUP", "ROLLED_UP_BY_PRICE", "ROLLED_UP_BY_AVG_PRICE"}
@@ -181,6 +182,13 @@ class MarketBookReadPlan:
             self.customer_strategy_refs,
             "customer_strategy_refs",
         )
+        if any(
+            len(strategy_ref) > MAX_CUSTOMER_STRATEGY_REF_LENGTH
+            for strategy_ref in customer_strategy_refs
+        ):
+            raise MarketBookBatchPlanError(
+                "customer_strategy_refs values must be at most 15 characters"
+            )
         matched_since = _instant(self.matched_since, "matched_since")
         bet_ids = _tokens(self.bet_ids, "bet_ids")
         if order is None:

@@ -394,8 +394,10 @@ class HealthGatedMirrorDecisionIndexTests(unittest.TestCase):
 
             health_store.record_failure(
                 "provider-a",
-                now="2026-09-17T12:00:08+00:00",
-                error=TimeoutError("late failure before publication"),
+                now="2026-09-17T12:00:11+00:00",
+                error=TimeoutError(
+                    "post-cut failure became durable before publication"
+                ),
             )
 
             with self.assertRaisesRegex(

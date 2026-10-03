@@ -762,3 +762,4 @@ for _method_name in (
     )
 del _method_name
 del _raw_method
+del _RISK_DAY_FROZEN_GLOBALS

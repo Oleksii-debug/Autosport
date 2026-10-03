@@ -12,6 +12,8 @@ collector cycle terminal.
 import hashlib
 import inspect
 import json
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Callable
@@ -149,6 +151,30 @@ def _instant(value: object, name: str) -> str:
 
 def _default_clock() -> str:
     return datetime.now(UTC).isoformat()
+
+
+_CANONICAL_CAMPAIGN_CLOCK = _default_clock
+_CANONICAL_CAMPAIGN_CLOCK_CODE = _CANONICAL_CAMPAIGN_CLOCK.__code__
+_TEST_CAMPAIGN_CLOCK_CAPABILITY = object()
+_TEST_CAMPAIGN_CLOCK_ORIGIN = ContextVar(
+    "autosport_campaign_provider_cycle_test_clock",
+    default=None,
+)
+_CANONICAL_TEST_CAMPAIGN_CLOCK_ORIGIN = _TEST_CAMPAIGN_CLOCK_ORIGIN
+_CANONICAL_TEST_CAMPAIGN_CLOCK_CAPABILITY = _TEST_CAMPAIGN_CLOCK_CAPABILITY
+
+
+@contextmanager
+def _test_campaign_clock_origin(*, _capability: object):
+    if _capability is not _CANONICAL_TEST_CAMPAIGN_CLOCK_CAPABILITY:
+        raise TypeError("campaign test clock requires private capability")
+    token = _CANONICAL_TEST_CAMPAIGN_CLOCK_ORIGIN.set(
+        _CANONICAL_TEST_CAMPAIGN_CLOCK_CAPABILITY
+    )
+    try:
+        yield
+    finally:
+        _CANONICAL_TEST_CAMPAIGN_CLOCK_ORIGIN.reset(token)
 
 
 def _digest(value: object) -> str:
@@ -386,6 +412,15 @@ def capture_campaign_complete_game_board(
         raise TypeError("request must be exact CompleteGameBoardRequest")
     if not callable(clock):
         raise TypeError("clock must be callable")
+    test_clock_origin = (
+        _CANONICAL_TEST_CAMPAIGN_CLOCK_ORIGIN.get()
+        is _CANONICAL_TEST_CAMPAIGN_CLOCK_CAPABILITY
+    )
+    if not test_clock_origin and clock is not _CANONICAL_CAMPAIGN_CLOCK:
+        raise CampaignProviderCycleCaptureIntegrityError(
+            "campaign collector clock must be product-owned"
+        )
+    effective_clock = clock if test_clock_origin else _CANONICAL_CAMPAIGN_CLOCK
     if request.source_id != source_spec.source_id:
         raise CampaignProviderCycleCaptureIntegrityError(
             "provider request source_id does not match campaign collector source"
@@ -431,6 +466,10 @@ def capture_campaign_complete_game_board(
     expected_json_dumps = json.dumps
     expected_datetime = datetime
     expected_utc = UTC
+    expected_campaign_clock = _CANONICAL_CAMPAIGN_CLOCK
+    expected_campaign_clock_code = _CANONICAL_CAMPAIGN_CLOCK_CODE
+    expected_test_clock_origin = _CANONICAL_TEST_CAMPAIGN_CLOCK_ORIGIN
+    expected_test_clock_capability = _CANONICAL_TEST_CAMPAIGN_CLOCK_CAPABILITY
     expected_provider_module = _provider_observation_module
     expected_provider_request_seams = _PROVIDER_REQUEST_SEAMS
     expected_provider_snapshot_seams = _PROVIDER_SNAPSHOT_SEAMS
@@ -446,7 +485,20 @@ def capture_campaign_complete_game_board(
                 "campaign provider-cycle reflection dispatch changed"
             )
         if (
-            module_globals.get("_provider_observation_module")
+            module_globals.get("_CANONICAL_CAMPAIGN_CLOCK")
+            is not expected_campaign_clock
+            or module_globals.get("_CANONICAL_CAMPAIGN_CLOCK_CODE")
+            is not expected_campaign_clock_code
+            or expected_campaign_clock.__code__ is not expected_campaign_clock_code
+            or module_globals.get("_TEST_CAMPAIGN_CLOCK_ORIGIN")
+            is not expected_test_clock_origin
+            or module_globals.get("_TEST_CAMPAIGN_CLOCK_CAPABILITY")
+            is not expected_test_clock_capability
+            or module_globals.get("_CANONICAL_TEST_CAMPAIGN_CLOCK_ORIGIN")
+            is not expected_test_clock_origin
+            or module_globals.get("_CANONICAL_TEST_CAMPAIGN_CLOCK_CAPABILITY")
+            is not expected_test_clock_capability
+            or module_globals.get("_provider_observation_module")
             is not expected_provider_module
             or module_globals.get("_PROVIDER_REQUEST_SEAMS")
             is not expected_provider_request_seams
@@ -556,7 +608,7 @@ def capture_campaign_complete_game_board(
         raise CampaignProviderCycleCaptureIntegrityError(
             "campaign collector next slot does not match inception receipt"
         )
-    raw_attempted_at = clock()
+    raw_attempted_at = effective_clock()
     require_stable_dispatch()
     require_seams(store, evidence_store)
     attempted_at = instant(raw_attempted_at, "collector attempted_at")
@@ -608,7 +660,7 @@ def capture_campaign_complete_game_board(
             raise CampaignProviderCycleCaptureIntegrityError(
                 "provider observation predates authorized collector START"
             )
-        raw_completed_at = clock()
+        raw_completed_at = effective_clock()
         require_stable_dispatch()
         require_seams(store, evidence_store)
         completed_at = instant(raw_completed_at, "collector completed_at")
@@ -699,7 +751,7 @@ def capture_campaign_complete_game_board(
         if not terminal_written:
             try:
                 try:
-                    raw_failure_completed_at = clock()
+                    raw_failure_completed_at = effective_clock()
                 except BaseException:
                     raw_failure_completed_at = attempted_at
                 instant_function = getattr(instant, "__func__", instant)
@@ -819,6 +871,12 @@ def _seal_campaign_provider_cycle_capture_dispatch() -> None:
         "_INCEPTION_RECEIPT_FIELD_NAMES": expected_inception_field_names,
         "_INCEPTION_RECEIPT_FIELD_DESCRIPTORS": expected_inception_field_descriptors,
         "ARTIFACT_KIND": ARTIFACT_KIND,
+        "_CANONICAL_CAMPAIGN_CLOCK": _CANONICAL_CAMPAIGN_CLOCK,
+        "_CANONICAL_CAMPAIGN_CLOCK_CODE": _CANONICAL_CAMPAIGN_CLOCK_CODE,
+        "_TEST_CAMPAIGN_CLOCK_ORIGIN": _TEST_CAMPAIGN_CLOCK_ORIGIN,
+        "_TEST_CAMPAIGN_CLOCK_CAPABILITY": _TEST_CAMPAIGN_CLOCK_CAPABILITY,
+        "_CANONICAL_TEST_CAMPAIGN_CLOCK_ORIGIN": _CANONICAL_TEST_CAMPAIGN_CLOCK_ORIGIN,
+        "_CANONICAL_TEST_CAMPAIGN_CLOCK_CAPABILITY": _CANONICAL_TEST_CAMPAIGN_CLOCK_CAPABILITY,
         "_provider_observation_module": _provider_observation_module,
         "_PROVIDER_REQUEST_SEAMS": _PROVIDER_REQUEST_SEAMS,
         "_PROVIDER_SNAPSHOT_SEAMS": _PROVIDER_SNAPSHOT_SEAMS,

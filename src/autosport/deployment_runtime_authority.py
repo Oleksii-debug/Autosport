@@ -417,6 +417,33 @@ class DeploymentRuntimeAuthorityStore:
     bytes while its separate machine-state root survives.
     """
 
+    _WRITE_ONCE_AUTHORITY_BINDINGS: Final = frozenset(
+        {
+            "path",
+            "workspace",
+            "_lock",
+            "_authority",
+            "_semantic_binding_sha256",
+        }
+    )
+
+    def __setattr__(self, name: str, value: object) -> None:
+        if (
+            name in self._WRITE_ONCE_AUTHORITY_BINDINGS
+            and name in vars(self)
+        ):
+            raise AttributeError(
+                "deployment runtime authority bindings are write-once"
+            )
+        object.__setattr__(self, name, value)
+
+    def __delattr__(self, name: str) -> None:
+        if name in self._WRITE_ONCE_AUTHORITY_BINDINGS and name in vars(self):
+            raise AttributeError(
+                "deployment runtime authority bindings are write-once"
+            )
+        object.__delattr__(self, name)
+
     def _configure(
         self,
         path: str | Path,

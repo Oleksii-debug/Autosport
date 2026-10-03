@@ -823,8 +823,7 @@ def test_class_rebound_ledger_internal_method_fails_before_hostile_dispatch(
         reserve_supervised_plan(ledger, bound, approval)
 
     assert hostile_calls == []
-    with pytest.raises(KeyError):
-        ledger.saga(bound.execution_plan.plan_id)
+    assert not ledger.path.exists()
 
 
 @pytest.mark.parametrize(
@@ -862,8 +861,7 @@ def test_instance_shadowed_ledger_internal_method_fails_before_hostile_dispatch(
         reserve_supervised_plan(ledger, bound, approval)
 
     assert hostile_calls == []
-    with pytest.raises(KeyError):
-        RealExecutionLedger.saga(ledger, bound.execution_plan.plan_id)
+    assert not ledger.path.exists()
 
 
 def test_class_rebound_ledger_method_fails_before_hostile_dispatch(

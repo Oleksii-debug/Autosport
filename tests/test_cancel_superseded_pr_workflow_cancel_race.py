@@ -219,6 +219,31 @@ def test_cancel_conflict_fails_closed_while_run_remains_active(monkeypatch) -> N
         api.cancel(123)
 
 
+def test_cancel_conflict_status_reread_ignores_shadowed_helper(monkeypatch) -> None:
+    api = GitHubApi(repository="owner/repo", token="token")
+
+    def fake_urlopen(request, *, timeout: int):
+        del timeout
+        if request.get_method() == "POST":
+            raise HTTPError(
+                request.full_url,
+                409,
+                "Conflict",
+                hdrs=None,
+                fp=None,
+            )
+        return _FakeSuccessResponse(200, b'{"status":"in_progress"}')
+
+    monkeypatch.setattr(controller_module, "urlopen", fake_urlopen)
+    monkeypatch.setattr(api, "workflow_run_status", lambda _run_id: "completed")
+
+    with pytest.raises(
+        CancellationError,
+        match="cancellation conflicted while run remains active",
+    ):
+        api.cancel(123)
+
+
 def test_workflow_run_status_rejects_unknown_state(monkeypatch) -> None:
     api = GitHubApi(repository="owner/repo", token="token")
     monkeypatch.setattr(

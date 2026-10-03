@@ -101,12 +101,15 @@ def test_active_unexpired_session_reuses_local_token(tmp_path):
     assert admission.login_authorized is False
 
 
-def test_restart_without_local_token_waits_for_natural_expiry(tmp_path):
+def test_restart_without_local_token_waits_for_conservative_slot_horizon(tmp_path):
     original = _lifecycle(tmp_path)
     active = _active(original)
     restarted = _lifecycle(tmp_path)
 
-    for minute in (1, 5, 9):
+    assert active.access_expires_at == NOW + timedelta(minutes=10)
+    assert active.slot_hold_until == NOW + CONSERVATIVE_SESSION_SLOT_HOLD
+
+    for minute in (1, 5, 9, 11, 19):
         admission = restarted.begin_login(
             now=NOW + timedelta(minutes=minute),
             access_token_available=False,
@@ -119,7 +122,7 @@ def test_restart_without_local_token_waits_for_natural_expiry(tmp_path):
         assert admission.login_authorized is False
 
     successor = restarted.begin_login(
-        now=active.access_expires_at + timedelta(seconds=1),
+        now=active.slot_hold_until,
         access_token_available=False,
     )
     assert successor.action is ProphetXLoginAdmissionAction.CREATE_LOGIN
@@ -221,16 +224,32 @@ def test_near_expiry_requires_renewal_without_login_fallback(tmp_path):
     assert admission.login_authorized is False
 
 
-def test_expired_active_session_permits_one_successor_login(tmp_path):
+def test_expired_access_token_cannot_bypass_conservative_slot_hold(tmp_path):
     lifecycle = _lifecycle(tmp_path)
     active = _active(lifecycle)
 
-    successor = lifecycle.begin_login(
+    blocked = lifecycle.begin_login(
         now=active.access_expires_at + timedelta(seconds=1),
         access_token_available=False,
     )
+    assert (
+        blocked.action
+        is ProphetXLoginAdmissionAction.WAIT_FOR_PROVIDER_SESSION_EXPIRY
+    )
+    assert blocked.retry_at == active.slot_hold_until
+
+    persisted = lifecycle.read_snapshot()
+    assert persisted.state is ProphetXSessionState.WAIT_FOR_PROVIDER_SESSION_EXPIRY
+    assert persisted.session_lineage_id is None
+    assert persisted.access_expires_at is None
+    assert persisted.slot_hold_until == active.slot_hold_until
+
+    successor = lifecycle.begin_login(
+        now=active.slot_hold_until,
+        access_token_available=False,
+    )
     assert successor.action is ProphetXLoginAdmissionAction.CREATE_LOGIN
-    assert successor.snapshot.generation == active.generation + 1
+    assert successor.snapshot.generation == persisted.generation + 1
 
 
 def test_ambiguous_provider_result_preserves_conservative_slot_horizon(tmp_path):
@@ -463,7 +482,7 @@ def test_admission_never_claims_real_money_authority(tmp_path):
     assert admission.real_money_execution is False
 
 
-def test_provider_response_owns_access_expiry_not_local_lifetime_guess(tmp_path):
+def test_provider_response_owns_access_expiry_but_not_shorter_slot_horizon(tmp_path):
     lifecycle = _lifecycle(tmp_path)
     admission = lifecycle.begin_login(now=NOW, access_token_available=False)
 
@@ -475,14 +494,36 @@ def test_provider_response_owns_access_expiry_not_local_lifetime_guess(tmp_path)
     )
 
     assert active.access_expires_at == exact_expiry
-    assert active.slot_hold_until == exact_expiry
-    assert (
-        lifecycle.begin_login(
-            now=exact_expiry + timedelta(seconds=1),
-            access_token_available=False,
-        ).action
-        is ProphetXLoginAdmissionAction.CREATE_LOGIN
+    assert active.slot_hold_until == NOW + CONSERVATIVE_SESSION_SLOT_HOLD
+    blocked = lifecycle.begin_login(
+        now=exact_expiry + timedelta(seconds=1),
+        access_token_available=False,
     )
+    assert (
+        blocked.action
+        is ProphetXLoginAdmissionAction.WAIT_FOR_PROVIDER_SESSION_EXPIRY
+    )
+    assert blocked.retry_at == active.slot_hold_until
+
+
+def test_long_provider_expiry_extends_slot_hold_beyond_conservative_floor(tmp_path):
+    lifecycle = _lifecycle(tmp_path)
+    admission = lifecycle.begin_login(now=NOW, access_token_available=False)
+
+    exact_expiry = NOW + timedelta(minutes=30)
+    active = lifecycle.complete_login_success(
+        attempt_id=admission.attempt_id,
+        now=NOW,
+        access_expires_at=exact_expiry,
+    )
+
+    assert active.access_expires_at == exact_expiry
+    assert active.slot_hold_until == exact_expiry
+    successor = lifecycle.begin_login(
+        now=exact_expiry + timedelta(seconds=1),
+        access_token_available=False,
+    )
+    assert successor.action is ProphetXLoginAdmissionAction.CREATE_LOGIN
 
 
 def test_provider_expiry_must_be_future_of_login_completion(tmp_path):
@@ -766,7 +807,7 @@ def test_credential_rejected_during_renewal_stays_fail_closed(tmp_path):
     )
 
 
-def test_unambiguous_renewal_failure_after_original_expiry_allows_fresh_login(tmp_path):
+def test_renewal_failure_after_short_expiry_preserves_provider_slot_hold(tmp_path):
     lifecycle = _lifecycle(tmp_path)
     active = _active(lifecycle)
     due_at = active.access_expires_at - timedelta(minutes=1)
@@ -785,9 +826,20 @@ def test_unambiguous_renewal_failure_after_original_expiry_allows_fresh_login(tm
         failure=ProphetXRenewalFailureClass.PROVIDER_UNAVAILABLE,
     )
 
-    assert failed.state is ProphetXSessionState.EXPIRED
-    fresh = lifecycle.begin_login(
+    assert failed.state is ProphetXSessionState.WAIT_FOR_PROVIDER_SESSION_EXPIRY
+    assert failed.slot_hold_until == active.slot_hold_until
+    blocked = lifecycle.begin_login(
         now=active.access_expires_at + timedelta(seconds=2),
+        access_token_available=False,
+    )
+    assert (
+        blocked.action
+        is ProphetXLoginAdmissionAction.WAIT_FOR_PROVIDER_SESSION_EXPIRY
+    )
+    assert blocked.retry_at == active.slot_hold_until
+
+    fresh = lifecycle.begin_login(
+        now=active.slot_hold_until,
         access_token_available=False,
     )
     assert fresh.action is ProphetXLoginAdmissionAction.CREATE_LOGIN

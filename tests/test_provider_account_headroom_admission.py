@@ -1156,3 +1156,199 @@ def test_existing_attempt_replay_does_not_require_new_denomination_authority(
     assert replay.attempt_fingerprint == first.attempt_fingerprint
     assert replay.post_reservation_ledger_sha256 == first.post_reservation_ledger_sha256
 
+
+def test_missing_durable_goal_store_fails_closed_before_headroom_arithmetic(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    acquired, _ = _acquire_balance(monkeypatch, tmp_path, "100")
+    target = _plan("target", _action("target-action", "10"))
+    ledger = _ledger_with_plans(tmp_path, target)
+    EconomicGoalStore(tmp_path).path.unlink()
+
+    with pytest.raises(
+        ProviderAccountHeadroomUnsupported,
+        match="durable economic-goal denomination authority is unavailable",
+    ):
+        _assess(
+            ledger,
+            acquired,
+            plan_id="target",
+            action_id="target-action",
+        )
+
+
+def test_target_plan_without_bound_denomination_coverage_fails_closed(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    acquired, _ = _acquire_balance(monkeypatch, tmp_path, "100")
+    target = _plan("target", _action("target-action", "10"))
+    foreign = _plan(
+        "foreign",
+        _action("foreign-action", "20", account_id="acct-2"),
+    )
+    ledger = _ledger_with_plans(tmp_path, target, foreign)
+
+    with pytest.raises(
+        ProviderAccountHeadroomUnsupported,
+        match="relevant execution plan lacks exact supervised denomination binding",
+    ):
+        assess_provider_account_headroom(
+            ledger,
+            acquired,
+            plan_id=_actual_plan_id(ledger, "target"),
+            action_id="target-action",
+            bound_plans=(ledger._test_bound_plans[1],),
+        )
+
+
+def test_duplicate_bound_plan_denomination_identity_is_rejected(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    acquired, _ = _acquire_balance(monkeypatch, tmp_path, "100")
+    target = _plan("target", _action("target-action", "10"))
+    ledger = _ledger_with_plans(tmp_path, target)
+    bound = ledger._test_bound_plans[0]
+
+    with pytest.raises(
+        ProviderAccountHeadroomError,
+        match="duplicated execution plan identity",
+    ):
+        assess_provider_account_headroom(
+            ledger,
+            acquired,
+            plan_id=_actual_plan_id(ledger, "target"),
+            action_id="target-action",
+            bound_plans=(bound, bound),
+        )
+
+
+def test_economic_goal_store_alias_rebinding_cannot_forge_denomination(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    acquired, _ = _acquire_balance(monkeypatch, tmp_path, "100")
+    target = _plan("target", _action("target-action", "10"))
+    ledger = _ledger_with_plans(tmp_path, target)
+    hostile_calls: list[object] = []
+
+    class HostileStore:
+        def __init__(self, workspace) -> None:
+            hostile_calls.append(workspace)
+
+        def load(self):
+            raise AssertionError("hostile economic-goal store executed")
+
+    monkeypatch.setattr(headroom_module, "EconomicGoalStore", HostileStore)
+
+    with pytest.raises(
+        ProviderAccountHeadroomError,
+        match="canonical monetary denomination authority changed",
+    ):
+        _assess(
+            ledger,
+            acquired,
+            plan_id="target",
+            action_id="target-action",
+        )
+
+    assert hostile_calls == []
+
+
+def test_economic_goal_provenance_alias_rebinding_cannot_forge_denomination(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    acquired, _ = _acquire_balance(monkeypatch, tmp_path, "100")
+    target = _plan("target", _action("target-action", "10"))
+    ledger = _ledger_with_plans(tmp_path, target)
+    hostile_calls: list[object] = []
+
+    def hostile_provenance(goal):
+        hostile_calls.append(goal)
+        raise AssertionError("hostile economic-goal provenance executed")
+
+    monkeypatch.setattr(headroom_module, "provenance_for", hostile_provenance)
+
+    with pytest.raises(
+        ProviderAccountHeadroomError,
+        match="canonical monetary denomination authority changed",
+    ):
+        _assess(
+            ledger,
+            acquired,
+            plan_id="target",
+            action_id="target-action",
+        )
+
+    assert hostile_calls == []
+
+
+def test_bound_plan_verify_rebinding_cannot_forge_denomination(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    acquired, _ = _acquire_balance(monkeypatch, tmp_path, "100")
+    target = _plan("target", _action("target-action", "10"))
+    ledger = _ledger_with_plans(tmp_path, target)
+    hostile_calls: list[object] = []
+
+    def hostile_verify(self) -> None:
+        hostile_calls.append(self)
+
+    monkeypatch.setattr(
+        BoundSupervisedExecutionPlan,
+        "verify_binding",
+        hostile_verify,
+    )
+
+    with pytest.raises(
+        ProviderAccountHeadroomError,
+        match="canonical monetary denomination authority changed",
+    ):
+        _assess(
+            ledger,
+            acquired,
+            plan_id="target",
+            action_id="target-action",
+        )
+
+    assert hostile_calls == []
+
+
+def test_workspace_lock_alias_rebinding_cannot_bypass_goal_revision_fence(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    acquired, _ = _acquire_balance(monkeypatch, tmp_path, "100")
+    target = _plan("target", _action("target-action", "10"))
+    ledger = _ledger_with_plans(tmp_path, target)
+    hostile_calls: list[object] = []
+
+    class HostileLock:
+        def __init__(self, workspace) -> None:
+            hostile_calls.append(workspace)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc_value, traceback) -> None:
+            return None
+
+    monkeypatch.setattr(headroom_module, "WorkspaceEconomicLock", HostileLock)
+
+    with pytest.raises(
+        ProviderAccountHeadroomError,
+        match="canonical monetary denomination authority changed",
+    ):
+        _assess(
+            ledger,
+            acquired,
+            plan_id="target",
+            action_id="target-action",
+        )
+
+    assert hostile_calls == []
+

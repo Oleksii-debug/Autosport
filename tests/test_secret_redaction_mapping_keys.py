@@ -30,6 +30,38 @@ def test_known_secret_reversible_base64_spellings_are_redacted() -> None:
         assert REDACTED in rendered
 
 
+def test_known_secret_url_percent_spelling_is_redacted() -> None:
+    secret = "AS+URL/SECRET=7f31"
+    variants = (
+        "AS%2BURL%2FSECRET%3D7f31",
+        "AS%2bURL%2fSECRET%3d7f31",
+        "AS%2BURL%2FSECRET%3D7f31".replace("%20", "+"),
+    )
+
+    for encoded in variants:
+        rendered = redact_operator_text(
+            f"https://provider.invalid/error?detail={encoded}",
+            extra_secret_values=(secret,),
+        )
+        assert encoded not in rendered
+        assert secret not in rendered
+        assert REDACTED in rendered
+
+
+def test_known_secret_url_plus_spelling_is_redacted() -> None:
+    secret = "AS URL SECRET + 291c"
+    encoded = "AS+URL+SECRET+%2B+291c"
+
+    rendered = redact_operator_text(
+        f"provider_error={encoded}",
+        extra_secret_values=(secret,),
+    )
+
+    assert encoded not in rendered
+    assert secret not in rendered
+    assert REDACTED in rendered
+
+
 def test_environment_secret_base64_spelling_is_redacted(monkeypatch) -> None:
     secret = "AS-RUNTIME-ENV-BASE64-SECRET-291c"
     monkeypatch.setenv("AUTOSPORT_TEST_API_KEY", secret)

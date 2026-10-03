@@ -1771,6 +1771,52 @@ def _cancel_triggering_run_if_stale_or_nonqualifying(
 
 
 def main(argv: list[str] | None = None) -> int:
+    # Capture the complete orchestration dispatch before any network-capable controller
+    # callback can run. Test fixtures may replace these globals before main() entry;
+    # production callbacks cannot replace the invocation's already-captured authorities.
+    api_type = WorkflowScopedGitHubApi
+    sweep_impl = cancel_superseded_explicit_pr_runs
+    trigger_impl = _cancel_triggering_run_if_stale_or_nonqualifying
+    snapshot_identity_impl = _explicit_singleton_pr_for_current_run
+    trusted_qualification_impl = _trusted_live_pr_qualification
+    orphan_impl = getattr(api_type, "cancel_historical_unbound_runs", None)
+    dispatch = (
+        ("sweep", sweep_impl, getattr(sweep_impl, "__code__", None)),
+        ("trigger", trigger_impl, getattr(trigger_impl, "__code__", None)),
+        (
+            "snapshot_identity",
+            snapshot_identity_impl,
+            getattr(snapshot_identity_impl, "__code__", None),
+        ),
+        (
+            "trusted_qualification",
+            trusted_qualification_impl,
+            getattr(trusted_qualification_impl, "__code__", None),
+        ),
+        ("orphan", orphan_impl, getattr(orphan_impl, "__code__", None)),
+    )
+
+    def require_main_dispatch(*names: str) -> None:
+        for name in names:
+            matches = tuple(item for item in dispatch if item[0] == name)
+            if len(matches) != 1:
+                raise CancellationError("controller orchestration authority changed")
+            _, executable, expected_code = matches[0]
+            if (
+                expected_code is None
+                or executable is None
+                or getattr(executable, "__code__", None) is not expected_code
+            ):
+                raise CancellationError("controller orchestration authority changed")
+
+    require_main_dispatch(
+        "sweep",
+        "trigger",
+        "snapshot_identity",
+        "trusted_qualification",
+        "orphan",
+    )
+
     parser = argparse.ArgumentParser()
     parser.add_argument("--pr-number", type=int, required=True)
     parser.add_argument(
@@ -1784,7 +1830,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--current-run-id", type=int, required=True)
     args = parser.parse_args(argv)
     try:
-        api = WorkflowScopedGitHubApi(
+        api = api_type(
             repository=os.environ.get("GITHUB_REPOSITORY", ""),
             token=os.environ.get("GITHUB_TOKEN", ""),
             workflow_id=args.workflow_id,
@@ -1816,13 +1862,15 @@ def main(argv: list[str] | None = None) -> int:
         snapshot_trigger_pr_number: int | None = None
         if trigger_pr_number is None and not event_identity_ambiguous:
             sweep_runs = api.active_runs()
-            snapshot_trigger_pr_number = _explicit_singleton_pr_for_current_run(
+            require_main_dispatch("snapshot_identity")
+            snapshot_trigger_pr_number = snapshot_identity_impl(
                 sweep_runs,
                 workflow_name=args.workflow_name,
                 current_run_id=current_run_id,
                 event_head_sha=event_head_sha,
             )
-        sweep_cancelled = cancel_superseded_explicit_pr_runs(
+        require_main_dispatch("sweep")
+        sweep_cancelled = sweep_impl(
             api,
             workflow_name=args.workflow_name,
             current_run_id=current_run_id,
@@ -1843,7 +1891,15 @@ def main(argv: list[str] | None = None) -> int:
             if trigger_pr_number is not None or event_identity_ambiguous
             else sweep_cancelled
         )
-        orphan_cancelled = api.cancel_historical_unbound_runs(
+        require_main_dispatch("orphan")
+        bound_orphan = getattr(api, "cancel_historical_unbound_runs", None)
+        if (
+            getattr(bound_orphan, "__self__", None) is not api
+            or getattr(bound_orphan, "__func__", None) is not orphan_impl
+        ):
+            raise CancellationError("controller orphan dispatch changed")
+        orphan_cancelled = orphan_impl(
+            api,
             exclude_run_ids=orphan_excluded_run_ids,
         )
 
@@ -1851,16 +1907,19 @@ def main(argv: list[str] | None = None) -> int:
             # Refresh after the potentially long sweep; the helper itself rereads once
             # more immediately before cancelling this exact triggering source run.
             try:
-                trigger_qualification = _trusted_live_pr_qualification(
+                require_main_dispatch("trusted_qualification")
+                trigger_qualification = trusted_qualification_impl(
                     api, trigger_pr_number
                 )
+                require_main_dispatch("trusted_qualification")
             except CancellationError:
                 # Trigger qualification is authority for this one source run only.
                 # Failure proves no cancellation authority and must not turn already
                 # completed workflow-wide reconciliation into a controller failure.
                 trigger_qualification = None
             if trigger_qualification is not None:
-                _cancel_triggering_run_if_stale_or_nonqualifying(
+                require_main_dispatch("trigger")
+                trigger_impl(
                     api,
                     pr_number=trigger_pr_number,
                     event_head_sha=event_head_sha,

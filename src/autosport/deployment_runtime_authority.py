@@ -77,6 +77,7 @@ _SEALED_STORE_DISPATCH_NAMES: Final = frozenset(
         "_state_sha256",
         "_recover_state",
         "_read_validated_records_locked",
+        "_assert_binding_integrity",
         "_new_transaction_id",
     }
 )
@@ -712,6 +713,7 @@ class DeploymentRuntimeAuthorityStore:
                 "runtime authority store must be exact DeploymentRuntimeAuthorityStore"
             )
         self._configure(path, authority_root=authority_root)
+        self._assert_binding_integrity()
         with self._lock, _workspace_economic_lock(self.workspace):
             self._read_validated_records_locked()
 
@@ -741,6 +743,7 @@ class DeploymentRuntimeAuthorityStore:
 
             store = cls.__new__(cls)
             store._configure(destination, authority_root=authority_root)
+            store._assert_binding_integrity()
             recovery = store._authority.recover(observed_state_sha256=None)
             if recovery.committed_state_sha256 is not None:
                 raise DeploymentRuntimeAuthorityError(
@@ -891,12 +894,65 @@ class DeploymentRuntimeAuthorityStore:
             previous_available_at = current_available_at
         return tuple(records)
 
+    def _assert_binding_integrity(self) -> None:
+        path = object.__getattribute__(self, "_binding_path")
+        workspace = object.__getattribute__(self, "_binding_workspace")
+        authority = object.__getattribute__(self, "_binding_authority")
+        semantic_binding_sha256 = object.__getattribute__(
+            self,
+            "_binding_semantic_binding_sha256",
+        )
+        if not isinstance(path, Path) or not isinstance(workspace, Path):
+            raise DeploymentRuntimeAuthorityError(
+                "runtime authority binding integrity mismatch"
+            )
+        if type(authority) is not _CANONICAL_MONOTONIC_AUTHORITY_TYPE:
+            raise DeploymentRuntimeAuthorityError(
+                "runtime authority binding integrity mismatch"
+            )
+        if (
+            path.parent != workspace
+            or authority.workspace != workspace
+            or authority.domain != _AUTHORITY_DOMAIN
+            or authority.key != path.name
+        ):
+            raise DeploymentRuntimeAuthorityError(
+                "runtime authority binding integrity mismatch"
+            )
+        expected_semantic_binding_sha256 = _digest(
+            {
+                "schema": _AUTHORITY_BINDING_SCHEMA,
+                "schema_version": _AUTHORITY_BINDING_SCHEMA_VERSION,
+                "workspace_instance_id": authority.workspace_instance_id,
+                "store_schema": STORE_SCHEMA,
+                "store_schema_version": STORE_SCHEMA_VERSION,
+                "key": path.name,
+            }
+        )
+        if (
+            _sha(
+                semantic_binding_sha256,
+                "runtime authority semantic binding",
+            )
+            != expected_semantic_binding_sha256
+        ):
+            raise DeploymentRuntimeAuthorityError(
+                "runtime authority binding integrity mismatch"
+            )
+
     def _recover_state(
         self,
         payload: Mapping[str, object],
     ) -> None:
         state_sha256 = self._state_sha256(payload)
         history = self._authority.read_history()
+        if any(
+            record.semantic_binding_sha256 != self._semantic_binding_sha256
+            for record in history
+        ):
+            raise DeploymentRuntimeAuthorityError(
+                "runtime authority semantic binding history mismatch"
+            )
         latest = history[-1] if history else None
         pending_tx_id = (
             latest.tx_id
@@ -948,6 +1004,7 @@ class DeploymentRuntimeAuthorityStore:
         action_semantics_version: str,
         action_semantics_meanings: tuple[tuple[str, str], ...],
     ) -> DeploymentRuntimeAuthorityRecord:
+        self._assert_binding_integrity()
         with self._lock, _workspace_economic_lock(self.workspace):
             records = self._read_validated_records_locked()
             current_payload = {
@@ -1041,6 +1098,7 @@ class DeploymentRuntimeAuthorityStore:
         runtime_authority_id: str,
     ) -> DeploymentRuntimeAuthorityRecord | None:
         identity = _sha(runtime_authority_id, "runtime_authority_id")
+        self._assert_binding_integrity()
         with self._lock, _workspace_economic_lock(self.workspace):
             for record in self._read_validated_records_locked():
                 if record.runtime_authority_id == identity:
@@ -1048,6 +1106,7 @@ class DeploymentRuntimeAuthorityStore:
         return None
 
     def records(self) -> tuple[DeploymentRuntimeAuthorityRecord, ...]:
+        self._assert_binding_integrity()
         with self._lock, _workspace_economic_lock(self.workspace):
             return self._read_validated_records_locked()
 

@@ -1,13 +1,73 @@
 from __future__ import annotations
 
 import inspect
+from types import SimpleNamespace
 
 import pytest
 
 import autosport.campaign_forward_universe_cycle_binding as binding
-from autosport.campaign_inception import CampaignInceptionReceipt
+from autosport.campaign_inception import (
+    CampaignInceptionReceipt,
+    CampaignInceptionSourceSpec,
+)
 from autosport.forward_evaluation_universe_binding import ForwardUniverseAuthorityIdentity
 from autosport.forward_evidence_completeness import VerificationCode, VerificationResult
+
+
+@pytest.mark.parametrize(
+    ("attempted_at", "captured_at", "expected"),
+    [
+        (
+            "2100-01-01T06:00:10+00:00",
+            "2100-01-01T06:00:10+00:00",
+            "collector START is outside precommitted fixed schedule slot window",
+        ),
+        (
+            "2100-01-01T06:00:09+00:00",
+            "2100-01-01T06:00:10+00:00",
+            "provider observation is outside precommitted fixed schedule slot window",
+        ),
+    ],
+)
+def test_durable_cycle_chronology_rejects_legacy_cross_slot_observation(
+    tmp_path,
+    attempted_at: str,
+    captured_at: str,
+    expected: str,
+) -> None:
+    spec = CampaignInceptionSourceSpec(
+        expected_store_path=tmp_path / "collector.db",
+        source_id="parlayapi:table_tennis",
+        run_id="run-1",
+        stream_epoch="epoch-1",
+        anchor_at="2100-01-01T06:00:00+00:00",
+        interval_seconds=10,
+        max_items=250,
+        evaluation_start_slot_ordinal=0,
+        evaluation_end_slot_ordinal=1,
+    )
+    campaign = SimpleNamespace(
+        observation_not_before="2100-01-01T06:00:00+00:00",
+        observation_not_after="2100-01-01T07:00:00+00:00",
+    )
+    snapshot = SimpleNamespace(captured_at=captured_at)
+    collector_evidence = {
+        "attempted_at": attempted_at,
+        "completed_at": "2100-01-01T06:00:11+00:00",
+        "slot_ordinal": 0,
+        "due_at": "2100-01-01T06:00:00+00:00",
+    }
+
+    with pytest.raises(
+        binding.CampaignForwardUniverseCycleBindingError,
+        match=expected,
+    ):
+        binding._require_cycle_observation_chronology(
+            campaign=campaign,
+            source_spec=spec,
+            snapshot=snapshot,
+            collector_evidence=collector_evidence,
+        )
 
 
 def test_authority_preserves_distinct_plan_and_realized_universe_identity() -> None:

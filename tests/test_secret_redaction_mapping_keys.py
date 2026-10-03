@@ -508,3 +508,15 @@ def test_custom_container_subclasses_fail_closed_without_dispatching_user_code()
         "tuple": REDACTED,
     }
     assert "provider-secret" not in repr(redacted)
+
+
+def test_composite_mapping_keys_share_global_value_node_budget() -> None:
+    # Every key stays within the per-key 256-node fence, while the aggregate
+    # composite-key traversal exceeds the shared 10,000-node presentation
+    # budget. Before global key-node accounting this returned a large mapping.
+    payload = {
+        tuple([index, *([0] * 254)]): "ordinary-value"
+        for index in range(40)
+    }
+
+    assert redact_operator_value(payload) == REDACTED

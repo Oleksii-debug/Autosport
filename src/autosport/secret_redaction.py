@@ -346,6 +346,7 @@ def _redact_operator_mapping_key(
     secrets: tuple[str, ...],
     _depth: int = 0,
     _remaining_nodes: list[int] | None = None,
+    _global_remaining_nodes: list[int] | None = None,
 ) -> tuple[object, bool, bool]:
     """Return one safe hashable presentation key plus sensitivity/transform flags.
 
@@ -362,6 +363,10 @@ def _redact_operator_mapping_key(
         _remaining_nodes = [_MAPPING_KEY_MAX_NODES]
     if _depth > _MAPPING_KEY_MAX_TUPLE_DEPTH or _remaining_nodes[0] <= 0:
         return REDACTED, True, True
+    if _global_remaining_nodes is not None:
+        if _global_remaining_nodes[0] <= 0:
+            return REDACTED, True, True
+        _global_remaining_nodes[0] -= 1
     _remaining_nodes[0] -= 1
 
     if type(key) is str:
@@ -397,6 +402,7 @@ def _redact_operator_mapping_key(
                     secrets=secrets,
                     _depth=_depth + 1,
                     _remaining_nodes=_remaining_nodes,
+                    _global_remaining_nodes=_global_remaining_nodes,
                 )
             )
             safe_parts.append(safe_part)
@@ -495,6 +501,7 @@ def redact_operator_value(
                             _redact_operator_mapping_key(
                                 key,
                                 secrets=secrets,
+                                _global_remaining_nodes=remaining_nodes,
                             )
                         )
                         prepared.append(

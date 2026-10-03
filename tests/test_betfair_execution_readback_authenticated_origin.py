@@ -96,6 +96,8 @@ def _install_https_test_dispatch(monkeypatch: pytest.MonkeyPatch) -> None:
             timeout=getattr(request, "timeout", 0),
         )
         response.code = 200
+        response.status = 200
+        response.url = request.full_url
         response.msg = "OK"
         response.info = lambda: {}
         return response
@@ -594,6 +596,22 @@ def test_execution_origin_predicate_rejects_clock_code_mutation(
 
     assert len(hostile_clock.__code__.co_freevars) == len(original_code.co_freevars)
     monkeypatch.setattr(clock, "__code__", hostile_clock.__code__)
+    assert predicate() is False
+
+
+def test_execution_origin_predicate_rejects_redirect_handler_rebind(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    predicate = _closure_value(
+        BetfairReadOnlyClient.read_execution_readback,
+        "origin_dispatch_current",
+    )
+    assert predicate() is True
+    monkeypatch.setattr(
+        readonly_module,
+        "_RejectBetfairRedirects",
+        _urllib_request.HTTPRedirectHandler,
+    )
     assert predicate() is False
 
 

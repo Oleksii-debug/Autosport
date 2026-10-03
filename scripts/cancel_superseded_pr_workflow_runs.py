@@ -149,6 +149,7 @@ class GitHubApi:
         )
         try:
             with urlopen(request, timeout=20) as response:
+                status_code = response.status
                 body = response.read()
         except HTTPError as exc:
             if exc.code in allowed_http_errors:
@@ -160,6 +161,15 @@ class GitHubApi:
             raise CancellationError(
                 f"GitHub API request failed: {type(exc).__name__}"
             ) from exc
+        if (
+            method == "POST"
+            and path.startswith("/actions/runs/")
+            and path.endswith("/cancel")
+            and (type(status_code) is not int or status_code != 202)
+        ):
+            raise CancellationError(
+                "workflow run cancellation returned unexpected HTTP status"
+            )
         if not body:
             return None
         try:
@@ -326,11 +336,10 @@ class GitHubApi:
             raise CancellationError(
                 "workflow run cancellation conflicted while run remains active"
             )
-        # urllib only reaches this branch for a successful HTTP response.
-        # GitHub defines workflow-run cancellation success by HTTP 202 Accepted;
-        # any response body is non-authoritative and may vary independently of that
-        # status contract.  Do not convert an already-accepted cancellation into a
-        # controller failure merely because GitHub supplied JSON content.
+        # _request() has already required the documented HTTP 202 Accepted
+        # contract for this endpoint. Any success body is non-authoritative and may
+        # vary independently of that status, so do not turn accepted cancellation
+        # into controller failure merely because GitHub supplied JSON content.
         del payload
 
 

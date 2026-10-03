@@ -50,8 +50,8 @@ class BetdaqEconomicReadbackError(RuntimeError):
     """BETDAQ settlement/posting readback contract or evidence error."""
 
 
-def _require_canonical_economic_transport_dispatch() -> None:
-    """Fail closed before any authority-bearing BETDAQ transport alias executes."""
+def _canonical_economic_transport_dispatch():
+    """Return witnessed transport callables before any authority-bearing dispatch."""
 
     live_post = globals().get("_CANONICAL_ACCOUNT_HTTPS_POST")
     live_require = globals().get("_REQUIRE_CANONICAL_ACCOUNT_TRANSPORT")
@@ -69,6 +69,21 @@ def _require_canonical_economic_transport_dispatch() -> None:
         raise BetdaqEconomicReadbackError(
             "canonical BETDAQ economic transport dispatch was replaced"
         )
+    # Return exact local references so a module-global rebind after this witness
+    # cannot redirect this individual acquisition between check and dispatch.
+    return live_require, live_post
+
+
+def _canonical_terminal_order_status_codes() -> frozenset[int]:
+    """Resolve the existing account adapter's exact terminal-order authority."""
+
+    live_codes = globals().get("_TERMINAL_ORDER_STATUS_CODES")
+    account_codes = getattr(_account, "_TERMINAL_STATUS_CODES", None)
+    if live_codes is not account_codes or type(live_codes) is not frozenset:
+        raise BetdaqEconomicReadbackError(
+            "canonical BETDAQ terminal order status authority was replaced"
+        )
+    return live_codes
 
 
 @dataclass(frozen=True, slots=True)
@@ -227,8 +242,9 @@ class BetdaqOrderSettlementObservation:
             raise BetdaqEconomicReadbackError(
                 "scalar economic use requires independently proven denomination"
             )
+        terminal_status_codes = _canonical_terminal_order_status_codes()
         expected_final = (
-            self.order_status_code in _TERMINAL_ORDER_STATUS_CODES
+            self.order_status_code in terminal_status_codes
             and self.gross_settlement_amount is not None
             and (
                 self.order_commission is not None
@@ -585,8 +601,9 @@ class BetdaqEconomicReadbackClient:
             else _optional_timestamp_attr(settlement, "MarketSettledDate")
         )
         status = _unsigned_byte_attr(result, "OrderStatus")
+        terminal_status_codes = _canonical_terminal_order_status_codes()
         final = (
-            status in _TERMINAL_ORDER_STATUS_CODES
+            status in terminal_status_codes
             and gross is not None
             and (order_commission is not None or market_commission is not None)
             and market_settled_at is not None
@@ -692,14 +709,14 @@ class BetdaqEconomicReadbackClient:
         with client._call_lock:
             transport = client._transport
             try:
-                _require_canonical_economic_transport_dispatch()
-                _REQUIRE_CANONICAL_ACCOUNT_TRANSPORT(transport)
+                require_transport, https_post = _canonical_economic_transport_dispatch()
+                require_transport(transport)
             except Exception:
                 raise BetdaqEconomicReadbackError(
                     "canonical BETDAQ economic evidence requires product-owned HTTPS transport"
                 ) from None
             try:
-                payload = _CANONICAL_ACCOUNT_HTTPS_POST(
+                payload = https_post(
                     transport,
                     _account._SECURE_ENDPOINT,
                     headers=headers,

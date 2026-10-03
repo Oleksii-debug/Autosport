@@ -153,6 +153,55 @@ class RunTransactionRetainedBaseCrashGuardTests(unittest.TestCase):
             self.assertEqual(tx.base_book_snapshot_path.read_bytes(), base_payload)
             self.assertTrue(tx.terminal_book_snapshot_path.is_file())
 
+    def test_stripped_retained_contract_cannot_backfill_after_canonical_base_moves(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            tx, experiment_key, book_path, _base_payload = self._prepared(
+                root,
+                run_id="stripped-contract-after-base-move",
+            )
+
+            manifest = json.loads(tx.manifest_path.read_text(encoding="utf-8"))
+            manifest.pop("retained", None)
+            tx.manifest_path.write_text(
+                json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            tx.base_book_snapshot_path.unlink()
+
+            # Simulate a different canonical economic generation becoming current.
+            moved = PaperBook.load(book_path)
+            moved.open_ticket(
+                [
+                    TicketLeg(
+                        event_id="event-moved",
+                        market_id="market-moved",
+                        selection_id="selection-moved",
+                        locked_odds=Decimal("2.2"),
+                        sport="soccer",
+                    )
+                ],
+                Decimal("50"),
+                reason="different canonical generation",
+                placed_at="2026-09-25T19:00:00+00:00",
+                bankroll_id="paper-main",
+                currency="EUR",
+            )
+            moved.save(book_path)
+
+            with self.assertRaisesRegex(
+                RunTransactionError,
+                "base PaperBook SHA-256 canonical hash is not the expected transaction state",
+            ):
+                tx.precommit(self._summary(tx.run_id, experiment_key))
+
+            self.assertFalse(tx.base_book_snapshot_path.exists())
+            self.assertFalse(tx.terminal_book_snapshot_path.exists())
+            after = json.loads(tx.manifest_path.read_text(encoding="utf-8"))
+            self.assertEqual(after["phase"], "staging")
+            self.assertNotIn("retained", after)
+            self.assertEqual(after["new"], {})
+
     def test_base_sidecar_loss_after_precommit_blocks_economic_commit(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

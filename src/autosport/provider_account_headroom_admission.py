@@ -17,6 +17,7 @@ import hashlib
 import json
 import os
 import threading
+from types import MappingProxyType
 import weakref
 
 from . import account_snapshot_acquisition as _account_acquisition
@@ -1005,12 +1006,29 @@ def _canonical_account_snapshot_authority(
 def _current_balance_generation_lock(
     workspace,
     acquired: AuthoritativeAccountSnapshot,
+    *,
+    _account_authority=_canonical_account_snapshot_authority,
+    _account_authority_code=getattr(_canonical_account_snapshot_authority, "__code__", None),
+    _economic_lock=_canonical_economic_lock,
+    _economic_lock_code=getattr(_canonical_economic_lock, "__code__", None),
 ):
     """Serialize product economic truth with the current BALANCE_READ generation."""
 
-    _, hold_current = _canonical_account_snapshot_authority()
+    if (
+        globals().get("_canonical_account_snapshot_authority") is not _account_authority
+        or getattr(_account_authority, "__code__", None) is not _account_authority_code
+        or globals().get("_canonical_economic_lock") is not _economic_lock
+        or getattr(_economic_lock, "__code__", None) is not _economic_lock_code
+    ):
+        raise ProviderAccountHeadroomError(
+            "current balance generation lock dependency authority changed"
+        )
+    _, hold_current = _account_authority()
     required = frozenset({BookmakerCapability.BALANCE_READ})
-    with _current_balance_generation_lock(workspace, acquired):
+    # Lock order is deliberate: serialize the durable economic workspace first,
+    # then hold the exact current BALANCE_READ generation while the caller reads or
+    # commits product-economic state.
+    with _economic_lock(workspace):
         try:
             with hold_current(acquired, required):
                 yield
@@ -1989,6 +2007,25 @@ def assess_provider_account_headroom(
     intents: tuple[OpportunityIntent, ...],
     _digest_authority=_assert_headroom_digest_authority,
     _digest_authority_code=getattr(_assert_headroom_digest_authority, "__code__", None),
+    _generation_lock=_current_balance_generation_lock,
+    _generation_lock_code=getattr(_current_balance_generation_lock, "__code__", None),
+    _generation_lock_wrapped=getattr(_current_balance_generation_lock, "__wrapped__", None),
+    _generation_lock_wrapped_code=getattr(
+        getattr(_current_balance_generation_lock, "__wrapped__", None),
+        "__code__",
+        None,
+    ),
+    _generation_lock_wrapped_kwdefaults=tuple(
+        (key, value)
+        for key, value in (
+            getattr(
+                getattr(_current_balance_generation_lock, "__wrapped__", None),
+                "__kwdefaults__",
+                {},
+            )
+            or {}
+        ).items()
+    ),
 ) -> ProviderAccountHeadroomAssessment:
     """Issue conservative capital-axis evidence from exact canonical truth."""
     if type(ledger) is not RealExecutionLedger:
@@ -1998,6 +2035,23 @@ def assess_provider_account_headroom(
             "canonical provider-account headroom digest guard changed"
         )
     _digest_authority()
+    if (
+        globals().get("_current_balance_generation_lock") is not _generation_lock
+        or getattr(_generation_lock, "__code__", None) is not _generation_lock_code
+        or getattr(_generation_lock, "__wrapped__", None) is not _generation_lock_wrapped
+        or getattr(_generation_lock_wrapped, "__code__", None)
+        is not _generation_lock_wrapped_code
+        or tuple(
+            (key, value)
+            for key, value in (
+                getattr(_generation_lock_wrapped, "__kwdefaults__", {}) or {}
+            ).items()
+        )
+        != _generation_lock_wrapped_kwdefaults
+    ):
+        raise ProviderAccountHeadroomError(
+            "current balance generation lock authority changed"
+        )
     plan_id = _text(plan_id, "plan_id")
     action_id = _text(action_id, "action_id")
     verified_snapshot, verified_execution_view, _, _ = _canonical_ledger_dispatch()
@@ -2010,7 +2064,7 @@ def assess_provider_account_headroom(
     intent_denomination_by_identity = _validated_intent_denomination_map(intents)
     workspace = _canonical_ledger_workspace(ledger)
 
-    with _current_balance_generation_lock(workspace, acquired):
+    with _generation_lock(workspace, acquired):
         (
             economic_goal_contract_sha256,
             economic_goal_bankroll_id,
@@ -2170,6 +2224,25 @@ def reserve_observed_provider_headroom(
     intents: tuple[OpportunityIntent, ...] = (),
     _digest_authority=_assert_headroom_digest_authority,
     _digest_authority_code=getattr(_assert_headroom_digest_authority, "__code__", None),
+    _generation_lock=_current_balance_generation_lock,
+    _generation_lock_code=getattr(_current_balance_generation_lock, "__code__", None),
+    _generation_lock_wrapped=getattr(_current_balance_generation_lock, "__wrapped__", None),
+    _generation_lock_wrapped_code=getattr(
+        getattr(_current_balance_generation_lock, "__wrapped__", None),
+        "__code__",
+        None,
+    ),
+    _generation_lock_wrapped_kwdefaults=tuple(
+        (key, value)
+        for key, value in (
+            getattr(
+                getattr(_current_balance_generation_lock, "__wrapped__", None),
+                "__kwdefaults__",
+                {},
+            )
+            or {}
+        ).items()
+    ),
 ) -> ProductInternalHeadroomReservation:
     """Atomically consume product-internal headroom against exact ledger bytes.
 
@@ -2183,6 +2256,23 @@ def reserve_observed_provider_headroom(
             "canonical provider-account headroom digest guard changed"
         )
     _digest_authority()
+    if (
+        globals().get("_current_balance_generation_lock") is not _generation_lock
+        or getattr(_generation_lock, "__code__", None) is not _generation_lock_code
+        or getattr(_generation_lock, "__wrapped__", None) is not _generation_lock_wrapped
+        or getattr(_generation_lock_wrapped, "__code__", None)
+        is not _generation_lock_wrapped_code
+        or tuple(
+            (key, value)
+            for key, value in (
+                getattr(_generation_lock_wrapped, "__kwdefaults__", {}) or {}
+            ).items()
+        )
+        != _generation_lock_wrapped_kwdefaults
+    ):
+        raise ProviderAccountHeadroomError(
+            "current balance generation lock authority changed"
+        )
     (
         verified_snapshot,
         verified_execution_view,
@@ -2227,7 +2317,10 @@ def reserve_observed_provider_headroom(
         bound_by_plan_id = _validated_bound_plan_map(bound_plans)
         intent_denomination_by_identity = _validated_intent_denomination_map(intents)
         workspace = _canonical_ledger_workspace(ledger)
-        with _canonical_economic_lock(workspace):
+        # New product-internal capital consumption must keep the exact provider
+        # BALANCE_READ generation current through the ledger CAS. The helper acquires
+        # the workspace economic lock first, then the provider-generation hold.
+        with _generation_lock(workspace, acquired):
             (
                 current_goal_sha256,
                 current_goal_bankroll_id,
@@ -2349,26 +2442,17 @@ def reserve_observed_provider_headroom(
     return reservation
 
 def _install_headroom_issuance_authority() -> None:
-    assessment_lock = threading.RLock()
     assessment_fields = tuple(ProviderAccountHeadroomAssessment.__dataclass_fields__)
     reservation_fields = tuple(ProductInternalHeadroomReservation.__dataclass_fields__)
-    assessment_issued: dict[
-        int,
-        tuple[weakref.ReferenceType[ProviderAccountHeadroomAssessment], tuple[object, ...]],
-    ] = {}
-    reservation_lock = threading.RLock()
-    reservation_issued: dict[
-        int,
-        tuple[
-            weakref.ReferenceType[ProductInternalHeadroomReservation],
-            tuple[object, ...],
-        ],
-    ] = {}
-
     raw_assess = assess_provider_account_headroom
     raw_reserve = reserve_observed_provider_headroom
     digest_authority = _assert_headroom_digest_authority
     digest_authority_code = getattr(digest_authority, "__code__", None)
+    immutable_mapping_type = MappingProxyType
+    assessment_issued = immutable_mapping_type({})
+    reservation_issued = immutable_mapping_type({})
+    assessment_lock = threading.RLock()
+    reservation_lock = threading.RLock()
 
     def require_digest_authority() -> None:
         if getattr(digest_authority, "__code__", None) is not digest_authority_code:
@@ -2386,29 +2470,6 @@ def _install_headroom_issuance_authority() -> None:
         value: ProductInternalHeadroomReservation,
     ) -> tuple[object, ...]:
         return tuple(getattr(value, field) for field in reservation_fields)
-
-    def issue_assessment(value: ProviderAccountHeadroomAssessment) -> None:
-        require_digest_authority()
-        digest = _assessment_digest(value)
-        if digest != value.evidence_sha256:
-            raise ProviderAccountHeadroomError(
-                "headroom assessment identity changed before canonical issuance"
-            )
-        identity = id(value)
-
-        def clear(
-            reference: weakref.ReferenceType[ProviderAccountHeadroomAssessment],
-            *,
-            _identity: int = identity,
-        ) -> None:
-            with assessment_lock:
-                current = assessment_issued.get(_identity)
-                if current is not None and current[0] is reference:
-                    assessment_issued.pop(_identity, None)
-
-        reference = weakref.ref(value, clear)
-        with assessment_lock:
-            assessment_issued[identity] = (reference, assessment_state(value))
 
     def assert_issued(value: ProviderAccountHeadroomAssessment) -> None:
         if type(value) is not ProviderAccountHeadroomAssessment:
@@ -2433,25 +2494,6 @@ def _install_headroom_issuance_authority() -> None:
             raise ProviderAccountHeadroomError(
                 "headroom assessment was not canonically issued"
             )
-
-    def issue_reservation(value: ProductInternalHeadroomReservation) -> None:
-        require_digest_authority()
-        _reservation_digest(value)
-        identity = id(value)
-
-        def clear(
-            reference: weakref.ReferenceType[ProductInternalHeadroomReservation],
-            *,
-            _identity: int = identity,
-        ) -> None:
-            with reservation_lock:
-                current = reservation_issued.get(_identity)
-                if current is not None and current[0] is reference:
-                    reservation_issued.pop(_identity, None)
-
-        reference = weakref.ref(value, clear)
-        with reservation_lock:
-            reservation_issued[identity] = (reference, reservation_state(value))
 
     def reservation_is_issued(value: ProductInternalHeadroomReservation) -> bool:
         if type(value) is not ProductInternalHeadroomReservation:
@@ -2478,6 +2520,7 @@ def _install_headroom_issuance_authority() -> None:
         bound_plans: tuple[BoundSupervisedExecutionPlan, ...],
         intents: tuple[OpportunityIntent, ...],
     ) -> ProviderAccountHeadroomAssessment:
+        nonlocal assessment_issued
         value = raw_assess(
             ledger,
             acquired,
@@ -2486,7 +2529,32 @@ def _install_headroom_issuance_authority() -> None:
             bound_plans=bound_plans,
             intents=intents,
         )
-        issue_assessment(value)
+        require_digest_authority()
+        digest = _assessment_digest(value)
+        if digest != value.evidence_sha256:
+            raise ProviderAccountHeadroomError(
+                "headroom assessment identity changed before canonical issuance"
+            )
+        identity = id(value)
+
+        def clear(
+            reference: weakref.ReferenceType[ProviderAccountHeadroomAssessment],
+            *,
+            _identity: int = identity,
+        ) -> None:
+            nonlocal assessment_issued
+            with assessment_lock:
+                current = assessment_issued.get(_identity)
+                if current is not None and current[0] is reference:
+                    updated = dict(assessment_issued)
+                    updated.pop(_identity, None)
+                    assessment_issued = immutable_mapping_type(updated)
+
+        reference = weakref.ref(value, clear)
+        with assessment_lock:
+            updated = dict(assessment_issued)
+            updated[identity] = (reference, assessment_state(value))
+            assessment_issued = immutable_mapping_type(updated)
         return value
 
     def authoritative_reserve(
@@ -2498,6 +2566,7 @@ def _install_headroom_issuance_authority() -> None:
         bound_plans: tuple[BoundSupervisedExecutionPlan, ...],
         intents: tuple[OpportunityIntent, ...] = (),
     ) -> ProductInternalHeadroomReservation:
+        nonlocal reservation_issued
         assert_issued(assessment)
         value = raw_reserve(
             ledger,
@@ -2507,7 +2576,28 @@ def _install_headroom_issuance_authority() -> None:
             bound_plans=bound_plans,
             intents=intents,
         )
-        issue_reservation(value)
+        require_digest_authority()
+        _reservation_digest(value)
+        identity = id(value)
+
+        def clear(
+            reference: weakref.ReferenceType[ProductInternalHeadroomReservation],
+            *,
+            _identity: int = identity,
+        ) -> None:
+            nonlocal reservation_issued
+            with reservation_lock:
+                current = reservation_issued.get(_identity)
+                if current is not None and current[0] is reference:
+                    updated = dict(reservation_issued)
+                    updated.pop(_identity, None)
+                    reservation_issued = immutable_mapping_type(updated)
+
+        reference = weakref.ref(value, clear)
+        with reservation_lock:
+            updated = dict(reservation_issued)
+            updated[identity] = (reference, reservation_state(value))
+            reservation_issued = immutable_mapping_type(updated)
         return value
 
     setattr(

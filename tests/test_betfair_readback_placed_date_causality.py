@@ -212,7 +212,7 @@ def _verify(action: ExecutionAction, *, placed_date: str):
     )
 
 
-def test_current_order_placed_after_quote_can_still_mint_effect_evidence() -> None:
+def test_current_order_placed_after_quote_is_semantically_admissible() -> None:
     action = _action()
 
     evidence = _verify(
@@ -224,7 +224,7 @@ def test_current_order_placed_after_quote_can_still_mint_effect_evidence() -> No
     assert evidence.accepted_stake == Decimal("1.0")
 
 
-def test_current_order_placed_before_quote_cannot_mint_effect_evidence() -> None:
+def test_current_order_placed_before_quote_fails_semantic_causality() -> None:
     action = _action()
 
     # An order attributed to this durable action cannot have been placed before
@@ -237,7 +237,7 @@ def test_current_order_placed_before_quote_cannot_mint_effect_evidence() -> None
             placed_date="2026-09-21T17:59:59+00:00",
         )
 
-def test_current_order_placed_after_capture_cannot_mint_effect_evidence() -> None:
+def test_current_order_placed_after_capture_fails_semantic_causality() -> None:
     action = _action()
 
     with pytest.raises(ProviderEvidenceError):
@@ -247,7 +247,7 @@ def test_current_order_placed_after_capture_cannot_mint_effect_evidence() -> Non
         )
 
 
-def test_current_order_placed_at_capture_boundary_is_admissible() -> None:
+def test_current_order_placed_at_capture_boundary_is_semantically_admissible() -> None:
     action = _action()
 
     evidence = _verify(
@@ -280,7 +280,7 @@ def test_cleared_order_settlement_cannot_postdate_capture() -> None:
         )
 
 
-def test_cleared_order_equal_chronology_boundaries_are_admissible() -> None:
+def test_cleared_order_equal_chronology_boundaries_are_semantically_admissible() -> None:
     action = _action()
 
     evidence = _verify_cleared(

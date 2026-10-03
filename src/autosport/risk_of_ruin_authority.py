@@ -23,11 +23,38 @@ from .scientific_registry import RegistryEntry, ScientificRegistry
 _AUTHORITY_KIND = "autosport.risk-of-ruin-product-authority.v2"
 _BOUND_SEMANTICS = "probability_upper_bound"
 _CONFIDENCE_SEMANTICS = "protocol_defined_upper_bound"
+_MAX_FIXED_POINT_MATERIALIZATION_LENGTH = 512
+_MAX_SUPPORTED_EVALUATED_STAKES = 10_000
+
+
+def _fixed_point_materialization_length(value: Decimal) -> int:
+    """Return fixed-point text size without materializing attacker-scaled text."""
+
+    if value.is_zero():
+        return 1
+    sign, digits, exponent = value.as_tuple()
+    sign_length = 1 if sign else 0
+    digit_count = len(digits)
+    if exponent >= 0:
+        return sign_length + digit_count + exponent
+    if digit_count + exponent > 0:
+        return sign_length + digit_count + 1
+    return sign_length + 2 - exponent
 
 
 def _canonical_decimal(value: Decimal) -> str:
     if type(value) is not Decimal or not value.is_finite():
         raise ValueError("risk-of-ruin authority requires finite Decimal values")
+    if value.is_zero():
+        return "0"
+    if (
+        _fixed_point_materialization_length(value)
+        > _MAX_FIXED_POINT_MATERIALIZATION_LENGTH
+    ):
+        raise ValueError(
+            "risk-of-ruin authority Decimal fixed-point representation exceeds "
+            "supported canonical size"
+        )
     text = format(value, "f")
     if "." in text:
         text = text.rstrip("0").rstrip(".")
@@ -62,6 +89,10 @@ def _payload(evidence: object, *, kind: str) -> dict[str, Any]:
         stakes = getattr(evidence, "evaluated_stakes")
         if type(stakes) is not tuple:
             raise ValueError("vector risk-of-ruin authority requires tuple stakes")
+        if len(stakes) > _MAX_SUPPORTED_EVALUATED_STAKES:
+            raise ValueError(
+                "vector risk-of-ruin authority stake vector exceeds supported size"
+            )
         candidate = {
             "candidate_vector_sha256": getattr(evidence, "candidate_vector_sha256"),
             "evaluated_stakes": [_canonical_decimal(value) for value in stakes],

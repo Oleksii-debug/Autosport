@@ -42,6 +42,15 @@ _HEX: Final = frozenset("0123456789abcdef")
 _AUTHORITY_DOMAIN: Final = "deployment-runtime-authority"
 _AUTHORITY_BINDING_SCHEMA: Final = "autosport.deployment_runtime_authority.monotonic_binding"
 _AUTHORITY_BINDING_SCHEMA_VERSION: Final = 1
+_CANONICAL_STORE_SCHEMA_VALUE: Final = STORE_SCHEMA
+_CANONICAL_STORE_SCHEMA_VERSION_VALUE: Final = STORE_SCHEMA_VERSION
+_CANONICAL_RECORD_SCHEMA_VALUE: Final = RECORD_SCHEMA
+_CANONICAL_RECORD_SCHEMA_VERSION_VALUE: Final = RECORD_SCHEMA_VERSION
+_CANONICAL_EMPTY_CHAIN_SHA256_VALUE: Final = _EMPTY_CHAIN_SHA256
+_CANONICAL_HEX_VALUE: Final = _HEX
+_CANONICAL_AUTHORITY_DOMAIN_VALUE: Final = _AUTHORITY_DOMAIN
+_CANONICAL_AUTHORITY_BINDING_SCHEMA_VALUE: Final = _AUTHORITY_BINDING_SCHEMA
+_CANONICAL_AUTHORITY_BINDING_SCHEMA_VERSION_VALUE: Final = _AUTHORITY_BINDING_SCHEMA_VERSION
 _CANONICAL_MONOTONIC_AUTHORITY_TYPE: Final = MonotonicWorkspaceAuthority
 _CANONICAL_RLOCK_FACTORY: Final = RLock
 _CANONICAL_WORKSPACE_ECONOMIC_LOCK_TYPE: Final = WorkspaceEconomicLock
@@ -85,6 +94,7 @@ _SEALED_STORE_DISPATCH_NAMES: Final = frozenset(
         "get",
         "records",
         "_configure",
+        "_assert_static_authority_contract",
         "_read_payload",
         "_records_from_payload",
         "_state_sha256",
@@ -729,12 +739,32 @@ class DeploymentRuntimeAuthorityStore:
             )
         object.__delattr__(self, name)
 
+    @staticmethod
+    def _assert_static_authority_contract() -> None:
+        if (
+            STORE_SCHEMA != _CANONICAL_STORE_SCHEMA_VALUE
+            or STORE_SCHEMA_VERSION != _CANONICAL_STORE_SCHEMA_VERSION_VALUE
+            or RECORD_SCHEMA != _CANONICAL_RECORD_SCHEMA_VALUE
+            or RECORD_SCHEMA_VERSION != _CANONICAL_RECORD_SCHEMA_VERSION_VALUE
+            or _EMPTY_CHAIN_SHA256 != _CANONICAL_EMPTY_CHAIN_SHA256_VALUE
+            or _HEX != _CANONICAL_HEX_VALUE
+            or _AUTHORITY_DOMAIN != _CANONICAL_AUTHORITY_DOMAIN_VALUE
+            or _AUTHORITY_BINDING_SCHEMA
+            != _CANONICAL_AUTHORITY_BINDING_SCHEMA_VALUE
+            or _AUTHORITY_BINDING_SCHEMA_VERSION
+            != _CANONICAL_AUTHORITY_BINDING_SCHEMA_VERSION_VALUE
+        ):
+            raise DeploymentRuntimeAuthorityError(
+                "runtime authority static contract was replaced"
+            )
+
     def _configure(
         self,
         path: str | Path,
         *,
         authority_root: str | Path | None,
     ) -> None:
+        self._assert_static_authority_contract()
         self.path = Path(path).expanduser().resolve(strict=False)
         self.workspace = self.path.parent
         self._lock = _new_local_lock()
@@ -988,6 +1018,7 @@ class DeploymentRuntimeAuthorityStore:
         return tuple(records)
 
     def _assert_binding_integrity(self) -> None:
+        self._assert_static_authority_contract()
         if (
             _sha is not _CANONICAL_SHA_VALIDATOR
             or _CANONICAL_SHA_VALIDATOR.__code__ is not _CANONICAL_SHA_VALIDATOR_CODE

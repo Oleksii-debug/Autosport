@@ -2060,30 +2060,100 @@ def admit_paper_ticket(
             )
         day_admission_permit: object | None = None
         if day_authority is not None:
-            # Refresh the positive product-day authority at the last reversible point.
-            # If UTC day authority advanced since evaluation, deny before PaperBook
-            # balance/ticket mutation instead of leaving a partially-opened caller view.
+            # Refresh both day authority and the product-owned action instant at the
+            # last reversible point.  The earlier instant was used for risk work that
+            # can itself consume wall time; reusing it here would let a quote age past
+            # its owner freshness ceiling before the irreversible PaperBook mutation.
             _require_product_day_turnover_dispatch()
             _require_day_authority_data_descriptors()
+            window_store = _canonical_day_authority_field(
+                day_authority,
+                _ProductDayAdmissionAuthority,
+                "window_store",
+            )
+            window_evidence = _canonical_day_authority_field(
+                day_authority,
+                _ProductDayAdmissionAuthority,
+                "window_evidence",
+            )
+            prior_admission_ts = _canonical_day_authority_field(
+                day_authority,
+                _ProductDayAdmissionAuthority,
+                "admission_ts",
+            )
+            fresh_admission_ts = _product_clock_admission_timestamp(
+                window_store=window_store,
+                current_window=window_evidence,
+            )
+            prior_admission_time = _parse_utc_timestamp(prior_admission_ts)
+            fresh_admission_time = (
+                None
+                if fresh_admission_ts is None
+                else _parse_utc_timestamp(fresh_admission_ts)
+            )
+            if (
+                prior_admission_time is None
+                or fresh_admission_time is None
+                or fresh_admission_time < prior_admission_time
+            ):
+                return PaperAdmissionResult(
+                    risk=RiskDecision(
+                        False,
+                        "economic goal product action time changed before PAPER mutation",
+                    ),
+                    ticket=None,
+                    book=working_book,
+                )
+
+            # Quote freshness is a mutation-time gate.  Re-run it on the refreshed
+            # product instant, not merely on the earlier product-time snapshot.
+            if goal is not None and context is not None:
+                if not _admission_risk_helper_authority_valid():
+                    return PaperAdmissionResult(
+                        risk=RiskDecision(
+                            False,
+                            "virtual bankroll risk helper authority is invalid",
+                        ),
+                        ticket=None,
+                        book=working_book,
+                    )
+                try:
+                    final_quote_context = _quote_context_with_product_admission_time(
+                        context,
+                        fresh_admission_ts,
+                    )
+                except (TypeError, ValueError):
+                    return PaperAdmissionResult(
+                        risk=RiskDecision(
+                            False,
+                            "economic goal product-time quote evidence is invalid",
+                        ),
+                        ticket=None,
+                        book=working_book,
+                    )
+                final_quote_decision = _RISK_QUOTE_FROZEN(
+                    goal,
+                    final_quote_context,
+                )
+                if final_quote_decision is not None:
+                    final_quote_allowed, _ = _canonical_risk_decision_state(
+                        final_quote_decision
+                    )
+                    if not final_quote_allowed:
+                        return PaperAdmissionResult(
+                            risk=final_quote_decision,
+                            ticket=None,
+                            book=working_book,
+                        )
+
+            effective_placed_at = fresh_admission_ts
             try:
                 day_admission_permit = (
                     _PAPERBOOK_PREPARE_PRODUCT_DAY_ADMISSION_FUNCTION(
                         working_book,
-                        admission_ts=_canonical_day_authority_field(
-                            day_authority,
-                            _ProductDayAdmissionAuthority,
-                            "admission_ts",
-                        ),
-                        window_store=_canonical_day_authority_field(
-                            day_authority,
-                            _ProductDayAdmissionAuthority,
-                            "window_store",
-                        ),
-                        window_evidence=_canonical_day_authority_field(
-                            day_authority,
-                            _ProductDayAdmissionAuthority,
-                            "window_evidence",
-                        ),
+                        admission_ts=fresh_admission_ts,
+                        window_store=window_store,
+                        window_evidence=window_evidence,
                         workspace_lock=workspace_lock,
                     )
                 )

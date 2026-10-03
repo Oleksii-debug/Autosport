@@ -594,8 +594,9 @@ def test_module_snapshot_class_rebind_cannot_redefine_canonical_ingress(
     )
     assert isinstance(forged, BookmakerAccountSnapshot)
 
-    # The reconciliation module's imported class name is caller-mutable. Rebinding
-    # it must not redefine which concrete type the durable boundary trusts.
+    # The imported class binding is part of the durable composition graph. A
+    # runtime rebind must fail before the forged subclass can become decode/ingress
+    # authority.
     monkeypatch.setattr(
         reconciliation_module,
         "BookmakerAccountSnapshot",
@@ -606,7 +607,7 @@ def test_module_snapshot_class_rebind_cannot_redefine_canonical_ingress(
 
     with pytest.raises(
         AccountReconciliationIntegrityError,
-        match="exact canonical BookmakerAccountSnapshot",
+        match="canonical DTO class binding changed",
     ):
         store.append_snapshot(forged)
 
@@ -621,7 +622,8 @@ def test_runtime_snapshot_validator_rebind_cannot_suppress_revalidation(
     object.__setattr__(forged, "observed_capabilities", frozenset())
 
     # Preserve the exact canonical object type while replacing the live class
-    # validator. The reconciliation boundary must call its import-time capture.
+    # validator. Store admission must reject dispatch drift before traversing the
+    # incoming DTO graph.
     monkeypatch.setattr(
         BookmakerAccountSnapshot,
         "__post_init__",
@@ -632,7 +634,7 @@ def test_runtime_snapshot_validator_rebind_cannot_suppress_revalidation(
 
     with pytest.raises(
         AccountReconciliationIntegrityError,
-        match="failed current-state revalidation",
+        match="canonical DTO class dispatch changed",
     ):
         store.append_snapshot(forged)
 
@@ -875,6 +877,76 @@ def test_module_stable_reader_rebind_cannot_forge_empty_history(
     "binding_name",
     ("_decode_snapshot", "snapshot_fingerprint", "strict_json_loads"),
 )
+def test_dto_constructor_rebind_fails_before_durable_decode_callback(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    path = tmp_path / "account.json"
+    store = BookmakerAccountReconciliationStore(
+        path,
+        authority_root=_authority_root(tmp_path, "authority"),
+    )
+    expected = _snapshot(Decimal("10"))
+    assert store.append_snapshot(expected)
+
+    canonical_init = BookmakerAccountSnapshot.__init__
+    callback_reached = False
+
+    def hostile_init(self, *args, **kwargs):
+        nonlocal callback_reached
+        callback_reached = True
+        return canonical_init(self, *args, **kwargs)
+
+    monkeypatch.setattr(BookmakerAccountSnapshot, "__init__", hostile_init)
+
+    with pytest.raises(
+        AccountReconciliationIntegrityError,
+        match="canonical DTO class dispatch changed",
+    ):
+        store.latest_snapshot()
+
+    assert callback_reached is False
+
+
+def test_incoming_dto_field_descriptor_rebind_fails_before_callback(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    path = tmp_path / "account.json"
+    store = BookmakerAccountReconciliationStore(
+        path,
+        authority_root=_authority_root(tmp_path, "authority"),
+    )
+    incoming = _snapshot(Decimal("10"))
+    callback_reached = False
+
+    class HostileProfileDescriptor:
+        def __get__(self, instance, owner=None):
+            nonlocal callback_reached
+            callback_reached = True
+            raise AssertionError("hostile profile descriptor executed")
+
+        def __set__(self, instance, value):
+            nonlocal callback_reached
+            callback_reached = True
+            raise AssertionError("hostile profile descriptor executed")
+
+    monkeypatch.setattr(
+        BookmakerAccountSnapshot,
+        "profile",
+        HostileProfileDescriptor(),
+    )
+
+    with pytest.raises(
+        AccountReconciliationIntegrityError,
+        match="canonical DTO field descriptor changed",
+    ):
+        store.append_snapshot(incoming)
+
+    assert callback_reached is False
+    assert not path.exists()
+
+
 def test_transitive_module_dispatch_rebind_fails_before_forged_read(
     monkeypatch,
     tmp_path,

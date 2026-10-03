@@ -191,8 +191,8 @@ class CompleteGameBoardRequest:
                 "complete game-board request payload is incomplete"
             ) from exc
 
-    def sse_url(self) -> str:
-        query = urlencode(
+    def sse_url(self, *, _urlencode=urlencode) -> str:
+        query = _urlencode(
             {
                 "bookmakers": ",".join(self.bookmakers),
                 "kinds": self.kind,
@@ -442,6 +442,7 @@ def _read_production_initial_state(
     _parse_event=_parse_sse_event,
     _sse_url=CompleteGameBoardRequest.sse_url,
     _loads=strict_json_loads,
+    _max_sse_bytes=_MAX_SSE_BYTES,
 ) -> Mapping[str, object]:
     """Read one bounded initial_state from the fixed production ParlayAPI SSE origin."""
 
@@ -469,7 +470,7 @@ def _read_production_initial_state(
                 )
             for raw_line in response:
                 consumed += len(raw_line)
-                if consumed > _MAX_SSE_BYTES:
+                if consumed > _max_sse_bytes:
                     raise ProviderObservationUnsupportedError(
                         "provider SSE exceeded bounded initial-state evidence budget"
                     )
@@ -622,6 +623,7 @@ def capture_parlay_complete_game_board(
             _parse_event=_parse_sse_event,
             _sse_url=CompleteGameBoardRequest.sse_url,
             _loads=strict_json_loads,
+            _max_sse_bytes=_MAX_SSE_BYTES,
         )
         captured_at = _default_clock()
     else:

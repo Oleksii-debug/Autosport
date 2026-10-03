@@ -680,6 +680,7 @@ class PaperExposureScopeProvenanceGuardTests(unittest.TestCase):
             (
                 "_ensure_existing_path_durable",
                 "_load_unlocked",
+                "_read_anchor_unlocked",
                 "_write_anchor_unlocked",
                 "_sync_parent_directory",
                 "_with_writer_lock",
@@ -691,6 +692,152 @@ class PaperExposureScopeProvenanceGuardTests(unittest.TestCase):
         self.assertFalse(
             any(type(entry) in {dict, list, set} for entry in witnesses)
         )
+
+    def test_ledger_writer_lock_identity_swap_fails_before_publication(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger, runtime = self._runtime(Path(tmp))
+            prepared = _caller_prepared(runtime)
+            runtime._mint_prepared(prepared)
+            _seed_scope_authority_for_lower_layer(runtime, prepared)
+            ledger._lock = object()
+            with self.assertRaisesRegex(
+                PaperExecutionIntegrityError,
+                "ledger origin changed",
+            ):
+                runtime._publish_exposure_scope(
+                    prepared=prepared,
+                    trigger_id=prepared.execution_plan.decision_id,
+                    run_id=runtime.expected_run_id(
+                        prepared,
+                        prepared.execution_plan.decision_id,
+                    ),
+                )
+            self.assertEqual(ledger.events(), ())
+
+    def test_os_open_rebind_fails_before_writer_lock_dispatch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger, runtime = self._runtime(Path(tmp))
+            prepared = _caller_prepared(runtime)
+            runtime._mint_prepared(prepared)
+            _seed_scope_authority_for_lower_layer(runtime, prepared)
+            original_open = scope_guard._ledger_impl.os.open
+            forged_calls: list[str] = []
+
+            def forged_open(*args: object, **kwargs: object) -> int:
+                forged_calls.append("open")
+                raise AssertionError("hostile os.open executed")
+
+            scope_guard._ledger_impl.os.open = forged_open
+            try:
+                with self.assertRaisesRegex(
+                    PaperExecutionIntegrityError,
+                    "ledger durability dispatch was rebound",
+                ):
+                    runtime._publish_exposure_scope(
+                        prepared=prepared,
+                        trigger_id=prepared.execution_plan.decision_id,
+                        run_id=runtime.expected_run_id(
+                            prepared,
+                            prepared.execution_plan.decision_id,
+                        ),
+                    )
+            finally:
+                scope_guard._ledger_impl.os.open = original_open
+            self.assertEqual(forged_calls, [])
+            self.assertEqual(ledger.events(), ())
+
+    def test_os_replace_rebind_fails_before_anchor_publication(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger, runtime = self._runtime(Path(tmp))
+            prepared = _caller_prepared(runtime)
+            runtime._mint_prepared(prepared)
+            _seed_scope_authority_for_lower_layer(runtime, prepared)
+            original_replace = scope_guard._ledger_impl.os.replace
+            forged_calls: list[str] = []
+
+            def forged_replace(*args: object, **kwargs: object) -> None:
+                forged_calls.append("replace")
+
+            scope_guard._ledger_impl.os.replace = forged_replace
+            try:
+                with self.assertRaisesRegex(
+                    PaperExecutionIntegrityError,
+                    "ledger durability dispatch was rebound",
+                ):
+                    runtime._publish_exposure_scope(
+                        prepared=prepared,
+                        trigger_id=prepared.execution_plan.decision_id,
+                        run_id=runtime.expected_run_id(
+                            prepared,
+                            prepared.execution_plan.decision_id,
+                        ),
+                    )
+            finally:
+                scope_guard._ledger_impl.os.replace = original_replace
+            self.assertEqual(forged_calls, [])
+            self.assertEqual(ledger.events(), ())
+
+    def test_read_anchor_dispatch_rebind_fails_before_publication(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger, runtime = self._runtime(Path(tmp))
+            prepared = _caller_prepared(runtime)
+            runtime._mint_prepared(prepared)
+            _seed_scope_authority_for_lower_layer(runtime, prepared)
+            original = PaperExecutionLedger._read_anchor_unlocked
+            forged_calls: list[str] = []
+
+            def forged_read_anchor(_self):
+                forged_calls.append("read-anchor")
+                return None
+
+            PaperExecutionLedger._read_anchor_unlocked = forged_read_anchor
+            try:
+                with self.assertRaisesRegex(
+                    PaperExecutionIntegrityError,
+                    "ledger _read_anchor_unlocked dispatch was rebound",
+                ):
+                    runtime._publish_exposure_scope(
+                        prepared=prepared,
+                        trigger_id=prepared.execution_plan.decision_id,
+                        run_id=runtime.expected_run_id(
+                            prepared,
+                            prepared.execution_plan.decision_id,
+                        ),
+                    )
+            finally:
+                PaperExecutionLedger._read_anchor_unlocked = original
+            self.assertEqual(forged_calls, [])
+            self.assertEqual(ledger.events(), ())
+
+    def test_ledger_digest_code_mutation_fails_before_publication(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger, runtime = self._runtime(Path(tmp))
+            prepared = _caller_prepared(runtime)
+            runtime._mint_prepared(prepared)
+            _seed_scope_authority_for_lower_layer(runtime, prepared)
+            digest = scope_guard._ledger_impl._digest
+            original_code = digest.__code__
+
+            def forged_digest(_value: object) -> str:
+                return "0" * 64
+
+            digest.__code__ = forged_digest.__code__
+            try:
+                with self.assertRaisesRegex(
+                    PaperExecutionIntegrityError,
+                    "ledger digest authority was rebound",
+                ):
+                    runtime._publish_exposure_scope(
+                        prepared=prepared,
+                        trigger_id=prepared.execution_plan.decision_id,
+                        run_id=runtime.expected_run_id(
+                            prepared,
+                            prepared.execution_plan.decision_id,
+                        ),
+                    )
+            finally:
+                digest.__code__ = original_code
+            self.assertEqual(ledger.events(), ())
 
     def test_lower_ledger_method_code_mutation_fails_before_publication(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

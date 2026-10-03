@@ -169,6 +169,7 @@ def bind_canonical_execute(execute_function):
             object,
             object,
             object,
+            object,
         ],
         ...,
     ] = ()
@@ -200,6 +201,7 @@ def bind_canonical_execute(execute_function):
                 self.ledger.path,
                 self.ledger._lock_path,
                 self.ledger._anchor_path,
+                self.ledger._lock,
             ),
         )
 
@@ -212,12 +214,13 @@ def bind_canonical_execute(execute_function):
             raise PaperExecutionIntegrityError(
                 f"canonical PAPER exposure-scope runtime origin is unavailable {stage}"
             )
-        _, ledger, path, lock_path, anchor_path = origin
+        _, ledger, path, lock_path, anchor_path, writer_lock = origin
         if (
             self.ledger is not ledger
             or ledger.path is not path
             or ledger._lock_path is not lock_path
             or ledger._anchor_path is not anchor_path
+            or ledger._lock is not writer_lock
         ):
             raise PaperExecutionIntegrityError(
                 f"canonical PAPER exposure-scope ledger origin changed {stage}"
@@ -310,6 +313,15 @@ def bind_canonical_execute(execute_function):
     canonical_json_globals = _snapshot_function_globals(canonical_json)
     canonical_json_metadata = _snapshot_function_metadata(canonical_json)
     fsync = _ledger_impl.os.fsync
+    os_open = _ledger_impl.os.open
+    os_close = _ledger_impl.os.close
+    os_replace = _ledger_impl.os.replace
+    ledger_digest = _ledger_impl._digest
+    ledger_digest_globals = _snapshot_function_globals(ledger_digest)
+    ledger_digest_metadata = _snapshot_function_metadata(ledger_digest)
+    parse_json_object = _ledger_impl._parse_json_object
+    parse_json_globals = _snapshot_function_globals(parse_json_object)
+    parse_json_metadata = _snapshot_function_metadata(parse_json_object)
     sha256_digest = sha256
 
     # The reserved publisher replicates the canonical append algorithm because the
@@ -324,6 +336,15 @@ def bind_canonical_execute(execute_function):
     ledger_path_open = ledger_path_type.open
     ledger_path_open_globals = _snapshot_function_globals(ledger_path_open)
     ledger_path_open_metadata = _snapshot_function_metadata(ledger_path_open)
+    ledger_path_read_text = ledger_path_type.read_text
+    ledger_path_read_text_globals = _snapshot_function_globals(ledger_path_read_text)
+    ledger_path_read_text_metadata = _snapshot_function_metadata(ledger_path_read_text)
+    ledger_path_with_name = ledger_path_type.with_name
+    ledger_path_with_name_globals = _snapshot_function_globals(ledger_path_with_name)
+    ledger_path_with_name_metadata = _snapshot_function_metadata(ledger_path_with_name)
+    ledger_path_unlink = ledger_path_type.unlink
+    ledger_path_unlink_globals = _snapshot_function_globals(ledger_path_unlink)
+    ledger_path_unlink_metadata = _snapshot_function_metadata(ledger_path_unlink)
 
     ledger_methods = tuple(
         (
@@ -335,6 +356,7 @@ def bind_canonical_execute(execute_function):
         for name in (
             "_ensure_existing_path_durable",
             "_load_unlocked",
+            "_read_anchor_unlocked",
             "_write_anchor_unlocked",
             "_sync_parent_directory",
             "_with_writer_lock",
@@ -523,15 +545,39 @@ def bind_canonical_execute(execute_function):
             raise PaperExecutionIntegrityError(
                 "canonical PAPER event constructor metadata was rebound"
             )
-        if _ledger_impl.os.fsync is not fsync:
+        if (
+            _ledger_impl.os.fsync is not fsync
+            or _ledger_impl.os.open is not os_open
+            or _ledger_impl.os.close is not os_close
+            or _ledger_impl.os.replace is not os_replace
+        ):
             raise PaperExecutionIntegrityError(
                 "canonical PAPER ledger durability dispatch was rebound"
+            )
+        if (
+            _ledger_impl._digest is not ledger_digest
+            or not _function_globals_match(ledger_digest, ledger_digest_globals)
+            or not _function_metadata_match(ledger_digest, ledger_digest_metadata)
+        ):
+            raise PaperExecutionIntegrityError(
+                "canonical PAPER ledger digest authority was rebound"
+            )
+        if (
+            _ledger_impl._parse_json_object is not parse_json_object
+            or not _function_globals_match(parse_json_object, parse_json_globals)
+            or not _function_metadata_match(parse_json_object, parse_json_metadata)
+        ):
+            raise PaperExecutionIntegrityError(
+                "canonical PAPER ledger parser authority was rebound"
             )
         ledger_path = self.ledger.path
         if (
             type(ledger_path) is not ledger_path_type
             or ledger_path_type.exists is not ledger_path_exists
             or ledger_path_type.open is not ledger_path_open
+            or ledger_path_type.read_text is not ledger_path_read_text
+            or ledger_path_type.with_name is not ledger_path_with_name
+            or ledger_path_type.unlink is not ledger_path_unlink
             or not _function_globals_match(
                 ledger_path_exists, ledger_path_exists_globals
             )
@@ -543,6 +589,24 @@ def bind_canonical_execute(execute_function):
             )
             or not _function_metadata_match(
                 ledger_path_open, ledger_path_open_metadata
+            )
+            or not _function_globals_match(
+                ledger_path_read_text, ledger_path_read_text_globals
+            )
+            or not _function_metadata_match(
+                ledger_path_read_text, ledger_path_read_text_metadata
+            )
+            or not _function_globals_match(
+                ledger_path_with_name, ledger_path_with_name_globals
+            )
+            or not _function_metadata_match(
+                ledger_path_with_name, ledger_path_with_name_metadata
+            )
+            or not _function_globals_match(
+                ledger_path_unlink, ledger_path_unlink_globals
+            )
+            or not _function_metadata_match(
+                ledger_path_unlink, ledger_path_unlink_metadata
             )
         ):
             raise PaperExecutionIntegrityError(
@@ -634,9 +698,9 @@ def bind_canonical_execute(execute_function):
 
         ensure_existing = ledger_methods[0][1]
         load_unlocked = ledger_methods[1][1]
-        write_anchor = ledger_methods[2][1]
-        sync_parent = ledger_methods[3][1]
-        with_writer_lock = ledger_methods[4][1]
+        write_anchor = ledger_methods[3][1]
+        sync_parent = ledger_methods[4][1]
+        with_writer_lock = ledger_methods[5][1]
 
         def mutate_reserved_scope() -> None:
             ensure_existing(self.ledger)

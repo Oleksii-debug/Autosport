@@ -121,6 +121,43 @@ _OPPORTUNITY_INTENT_SHA_GETTER_CODE = getattr(
     "__code__",
     None,
 )
+_OPPORTUNITY_INTENT_CANDIDATE_DESCRIPTOR = vars(OpportunityIntent).get(
+    "candidate_sha256"
+)
+_OPPORTUNITY_INTENT_CANDIDATE_GETTER = getattr(
+    _OPPORTUNITY_INTENT_CANDIDATE_DESCRIPTOR,
+    "fget",
+    None,
+)
+_OPPORTUNITY_INTENT_CANDIDATE_GETTER_CODE = getattr(
+    _OPPORTUNITY_INTENT_CANDIDATE_GETTER,
+    "__code__",
+    None,
+)
+_PORTFOLIO_INTENT_SHA256_PAYLOAD = getattr(_portfolio_plan, "_sha256_payload", None)
+_PORTFOLIO_INTENT_SHA256_PAYLOAD_CODE = getattr(
+    _PORTFOLIO_INTENT_SHA256_PAYLOAD,
+    "__code__",
+    None,
+)
+_PAPER_RISK_POLICY_TYPE = getattr(_risk, "PaperRiskPolicy", None)
+_PAPER_RISK_CANDIDATE_DESCRIPTOR = (
+    vars(_PAPER_RISK_POLICY_TYPE).get("risk_of_ruin_candidate_sha256")
+    if _PAPER_RISK_POLICY_TYPE is not None
+    else None
+)
+_PAPER_RISK_CANDIDATE_SHA256 = (
+    getattr(_PAPER_RISK_POLICY_TYPE, "risk_of_ruin_candidate_sha256", None)
+    if _PAPER_RISK_POLICY_TYPE is not None
+    else None
+)
+_PAPER_RISK_CANDIDATE_SHA256_CODE = getattr(
+    _PAPER_RISK_CANDIDATE_SHA256,
+    "__code__",
+    None,
+)
+_RISK_SHA256_PAYLOAD = getattr(_risk, "_sha256_payload", None)
+_RISK_SHA256_PAYLOAD_CODE = getattr(_RISK_SHA256_PAYLOAD, "__code__", None)
 _PROPOSED_RISK_CONTEXT_TYPE = ProposedTicketRiskContext
 _RISK_CONTEXT_BANKROLL_DESCRIPTOR = vars(ProposedTicketRiskContext).get("bankroll_id")
 _RISK_CONTEXT_CURRENCY_DESCRIPTOR = vars(ProposedTicketRiskContext).get("currency")
@@ -297,12 +334,25 @@ def _canonical_intent_denomination_dispatch(
     _intent_sha_descriptor=_OPPORTUNITY_INTENT_SHA_DESCRIPTOR,
     _intent_sha_getter=_OPPORTUNITY_INTENT_SHA_GETTER,
     _intent_sha_getter_code=_OPPORTUNITY_INTENT_SHA_GETTER_CODE,
+    _intent_candidate_descriptor=_OPPORTUNITY_INTENT_CANDIDATE_DESCRIPTOR,
+    _intent_candidate_getter=_OPPORTUNITY_INTENT_CANDIDATE_GETTER,
+    _intent_candidate_getter_code=_OPPORTUNITY_INTENT_CANDIDATE_GETTER_CODE,
+    _intent_hash_payload=_PORTFOLIO_INTENT_SHA256_PAYLOAD,
+    _intent_hash_payload_code=_PORTFOLIO_INTENT_SHA256_PAYLOAD_CODE,
+    _risk_policy_type=_PAPER_RISK_POLICY_TYPE,
+    _risk_candidate_descriptor=_PAPER_RISK_CANDIDATE_DESCRIPTOR,
+    _risk_candidate_sha=_PAPER_RISK_CANDIDATE_SHA256,
+    _risk_candidate_sha_code=_PAPER_RISK_CANDIDATE_SHA256_CODE,
+    _risk_hash_payload=_RISK_SHA256_PAYLOAD,
+    _risk_hash_payload_code=_RISK_SHA256_PAYLOAD_CODE,
     _context_type=_PROPOSED_RISK_CONTEXT_TYPE,
     _bankroll_descriptor=_RISK_CONTEXT_BANKROLL_DESCRIPTOR,
     _currency_descriptor=_RISK_CONTEXT_CURRENCY_DESCRIPTOR,
 ):
     live_intent_type = getattr(_portfolio_plan, "OpportunityIntent", None)
     live_context_type = getattr(_risk, "ProposedTicketRiskContext", None)
+    live_risk_policy_type = getattr(_risk, "PaperRiskPolicy", None)
+    portfolio_risk_policy_type = getattr(_portfolio_plan, "PaperRiskPolicy", None)
     if (
         live_intent_type is not _intent_type
         or globals().get("OpportunityIntent") is not _intent_type
@@ -311,6 +361,24 @@ def _canonical_intent_denomination_dispatch(
         or vars(_intent_type).get("intent_sha256") is not _intent_sha_descriptor
         or getattr(_intent_sha_descriptor, "fget", None) is not _intent_sha_getter
         or getattr(_intent_sha_getter, "__code__", None) is not _intent_sha_getter_code
+        or vars(_intent_type).get("candidate_sha256") is not _intent_candidate_descriptor
+        or getattr(_intent_candidate_descriptor, "fget", None)
+        is not _intent_candidate_getter
+        or getattr(_intent_candidate_getter, "__code__", None)
+        is not _intent_candidate_getter_code
+        or getattr(_portfolio_plan, "_sha256_payload", None) is not _intent_hash_payload
+        or getattr(_intent_hash_payload, "__code__", None)
+        is not _intent_hash_payload_code
+        or live_risk_policy_type is not _risk_policy_type
+        or portfolio_risk_policy_type is not _risk_policy_type
+        or vars(_risk_policy_type).get("risk_of_ruin_candidate_sha256")
+        is not _risk_candidate_descriptor
+        or getattr(_risk_policy_type, "risk_of_ruin_candidate_sha256", None)
+        is not _risk_candidate_sha
+        or getattr(_risk_candidate_sha, "__code__", None)
+        is not _risk_candidate_sha_code
+        or getattr(_risk, "_sha256_payload", None) is not _risk_hash_payload
+        or getattr(_risk_hash_payload, "__code__", None) is not _risk_hash_payload_code
         or live_context_type is not _context_type
         or globals().get("ProposedTicketRiskContext") is not _context_type
         or vars(_context_type).get("bankroll_id") is not _bankroll_descriptor

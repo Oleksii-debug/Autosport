@@ -20,6 +20,10 @@ from .bookmaker_capability import (
 _BETDAQ_CLIENT_TYPE = _betdaq_account.BetdaqAccountReadOnlyClient
 _BETDAQ_ACCOUNT_EVIDENCE_TYPE = _betdaq_account.BetdaqAccountEvidence
 _BETDAQ_ACCOUNT_CONTEXT_TYPE = _betdaq_account.BetdaqAuthenticatedAccountContext
+_BETDAQ_CREDENTIAL_TYPE = _betdaq_account.BetdaqCredentials
+_BETDAQ_TRANSPORT_TYPE = _betdaq_account.UrllibBetdaqSoapTransport
+_BETDAQ_CANONICAL_HTTPS_POST = _betdaq_account._CANONICAL_HTTPS_POST
+_BETDAQ_CANONICAL_HTTPS_POST_CODE = _BETDAQ_CANONICAL_HTTPS_POST.__code__
 _BETDAQ_ERROR_TYPE = _betdaq_account.BetdaqAccountReadOnlyError
 _BETDAQ_READ_ACCOUNT_EVIDENCE = _BETDAQ_CLIENT_TYPE.read_account_evidence
 _BETDAQ_READ_ACCOUNT_EVIDENCE_CODE = _BETDAQ_READ_ACCOUNT_EVIDENCE.__code__
@@ -298,6 +302,13 @@ class BetdaqAuthenticatedCapabilityIssuance:
 def _require_current_betdaq_issuance_surface() -> None:
     if (
         _betdaq_account.BetdaqAccountReadOnlyClient is not _BETDAQ_CLIENT_TYPE
+        or _betdaq_account.BetdaqCredentials is not _BETDAQ_CREDENTIAL_TYPE
+        or _betdaq_account.UrllibBetdaqSoapTransport is not _BETDAQ_TRANSPORT_TYPE
+        or getattr(_betdaq_account, "_CANONICAL_HTTPS_POST", None)
+        is not _BETDAQ_CANONICAL_HTTPS_POST
+        or _BETDAQ_TRANSPORT_TYPE.post is not _BETDAQ_CANONICAL_HTTPS_POST
+        or _BETDAQ_CANONICAL_HTTPS_POST.__code__
+        is not _BETDAQ_CANONICAL_HTTPS_POST_CODE
         or _BETDAQ_CLIENT_TYPE.read_account_evidence is not _BETDAQ_READ_ACCOUNT_EVIDENCE
         or _BETDAQ_READ_ACCOUNT_EVIDENCE.__code__
         is not _BETDAQ_READ_ACCOUNT_EVIDENCE_CODE
@@ -335,6 +346,28 @@ def issue_betdaq_authenticated_capability_evidence(
     if type(client) is not _BETDAQ_CLIENT_TYPE:
         raise CapabilityEvidenceError(
             "BETDAQ capability issuance requires exact canonical read-only client"
+        )
+    if getattr(client, "_venue_id", None) != _BETDAQ_VENUE_ID:
+        raise CapabilityEvidenceError(
+            "BETDAQ capability issuance requires the canonical betdaq venue"
+        )
+    credentials = getattr(client, "_credentials", None)
+    if type(credentials) is not _BETDAQ_CREDENTIAL_TYPE:
+        raise CapabilityEvidenceError(
+            "BETDAQ capability issuance requires canonical credentials"
+        )
+    transport = getattr(client, "_transport", None)
+    if type(transport) is not _BETDAQ_TRANSPORT_TYPE:
+        raise CapabilityEvidenceError(
+            "BETDAQ capability issuance requires canonical HTTPS transport"
+        )
+    bound_post = getattr(transport, "post", None)
+    if (
+        getattr(bound_post, "__self__", None) is not transport
+        or getattr(bound_post, "__func__", None) is not _BETDAQ_CANONICAL_HTTPS_POST
+    ):
+        raise CapabilityEvidenceError(
+            "BETDAQ capability issuance transport was replaced or shadowed"
         )
     if not isinstance(capability, BookmakerCapability):
         raise CapabilityEvidenceError("capability must be BookmakerCapability")

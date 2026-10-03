@@ -52,7 +52,9 @@ class _BetdaqHttpResponse:
         return self.payload
 
 
-def _canonical_betdaq_balance_client(monkeypatch):
+def _canonical_betdaq_balance_client(
+    monkeypatch, *, observed_minute=0, venue_id="betdaq"
+):
     payload = (
         f'<?xml version="1.0" encoding="utf-8"?>'
         f'<soap:Envelope xmlns:soap="{_BETDAQ_SOAP}" xmlns="{_BETDAQ_NS}">'
@@ -72,19 +74,27 @@ def _canonical_betdaq_balance_client(monkeypatch):
     monkeypatch.setattr(betdaq_account_module, "urlopen", opener)
     value = BetdaqAccountReadOnlyClient(
         BetdaqCredentials("alice", "secret-pass", "app-id"),
-        clock=lambda: datetime(2026, 9, 21, 10, 0, tzinfo=timezone.utc),
+        clock=lambda: datetime(
+            2026, 9, 21, 10, observed_minute, tzinfo=timezone.utc
+        ),
+        venue_id=venue_id,
         account_id="caller-label-must-not-be-authority",
     )
     return value, calls
 
 
-def _betdaq_authenticated_issuance(monkeypatch):
-    client, calls = _canonical_betdaq_balance_client(monkeypatch)
+def _betdaq_authenticated_issuance(
+    monkeypatch, *, observed_minute=0, predecessor_id=None
+):
+    client, calls = _canonical_betdaq_balance_client(
+        monkeypatch, observed_minute=observed_minute
+    )
     issuance = issue_betdaq_authenticated_capability_evidence(
         client,
         BookmakerCapability.BALANCE_READ,
-        committed_at="2026-09-21T10:01:00+00:00",
-        review_due_at="2026-09-21T11:01:00+00:00",
+        committed_at=f"2026-09-21T10:{observed_minute + 1:02d}:00+00:00",
+        review_due_at=f"2026-09-21T11:{observed_minute + 1:02d}:00+00:00",
+        predecessor_id=predecessor_id,
     )
     return issuance, calls
 
@@ -211,6 +221,86 @@ def test_betdaq_issuer_rejects_noncanonical_client_before_provider_io(monkeypatc
 
     assert calls == []
 
+
+
+
+
+def test_betdaq_issuer_rejects_noncanonical_venue_before_provider_io(monkeypatch):
+    client, calls = _canonical_betdaq_balance_client(
+        monkeypatch, venue_id="caller-betdaq-alias"
+    )
+
+    with pytest.raises(
+        CapabilityEvidenceError,
+        match="canonical betdaq venue",
+    ):
+        issue_betdaq_authenticated_capability_evidence(
+            client,
+            BookmakerCapability.BALANCE_READ,
+            committed_at="2026-09-21T10:01:00+00:00",
+            review_due_at="2026-09-21T11:01:00+00:00",
+        )
+
+    assert calls == []
+
+
+def test_betdaq_issuer_rejects_mutated_canonical_transport_root_before_io(monkeypatch):
+    client, calls = _canonical_betdaq_balance_client(monkeypatch)
+    monkeypatch.setattr(
+        betdaq_account_module,
+        "_CANONICAL_HTTPS_POST",
+        lambda *args, **kwargs: b"",
+    )
+
+    with pytest.raises(
+        CapabilityEvidenceError,
+        match="issuance surface changed",
+    ):
+        issue_betdaq_authenticated_capability_evidence(
+            client,
+            BookmakerCapability.BALANCE_READ,
+            committed_at="2026-09-21T10:01:00+00:00",
+            review_due_at="2026-09-21T11:01:00+00:00",
+        )
+
+    assert calls == []
+
+
+def test_restart_can_recover_only_after_fresh_canonical_betdaq_reacquisition(
+    monkeypatch,
+):
+    first, _ = _betdaq_authenticated_issuance(monkeypatch)
+    journal = CapabilityEvidenceJournal()
+    journal.publish(first.evidence)
+    restored = CapabilityEvidenceJournal.from_json(journal.to_json())
+
+    stale_decision = restored.resolve(
+        _betdaq_authenticated_requirement(first),
+        {first.profile.profile_id: first.profile},
+        as_of="2026-09-21T10:02:00+00:00",
+    )
+    assert not stale_decision.allowed
+
+    fresh, calls = _betdaq_authenticated_issuance(
+        monkeypatch,
+        observed_minute=5,
+        predecessor_id=first.evidence.evidence_id,
+    )
+    assert len(calls) == 1
+    assert (
+        fresh.evidence.scope.credential_identity
+        == first.evidence.scope.credential_identity
+    )
+    restored.publish(fresh.evidence)
+
+    recovered = restored.resolve(
+        _betdaq_authenticated_requirement(fresh),
+        {fresh.profile.profile_id: fresh.profile},
+        as_of="2026-09-21T10:07:00+00:00",
+    )
+    assert recovered.allowed
+    assert recovered.evidence_id == fresh.evidence.evidence_id
+    assert "product-issued authenticated" in recovered.reason
 
 
 def _profile(

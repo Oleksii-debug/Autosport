@@ -126,7 +126,7 @@ class PaperBookCanonicalDurableStateTests(unittest.TestCase):
                 )
 
                 with self.assertRaisesRegex(ValueError, "snapshot placed_at"):
-                    PaperBook.load(self.path)
+                    PaperBook.load_bytes(self.path.read_bytes())
 
     def test_save_rejects_mutated_invalid_timestamp_without_replacing_snapshot(self) -> None:
         book = PaperBook("100")
@@ -139,7 +139,10 @@ class PaperBookCanonicalDurableStateTests(unittest.TestCase):
         last_good = self.path.read_bytes()
         ticket.placed_at = ""
 
-        with self.assertRaisesRegex(ValueError, "snapshot placed_at"):
+        with self.assertRaisesRegex(
+            ValueError,
+            "ticket opening economic identity changed after admission",
+        ):
             book.save(self.path)
 
         self.assertEqual(self.path.read_bytes(), last_good)
@@ -166,7 +169,7 @@ class PaperBookCanonicalDurableStateTests(unittest.TestCase):
                     selection_id=selection_id,
                 )
                 with self.assertRaisesRegex(ValueError, message):
-                    PaperBook.load(self.path)
+                    PaperBook.load_bytes(self.path.read_bytes())
 
     def test_settlement_arithmetic_failure_does_not_partially_mutate_ticket_or_balance(self) -> None:
         book = PaperBook("9E+999999")
@@ -203,7 +206,10 @@ class PaperBookCanonicalDurableStateTests(unittest.TestCase):
 
         ticket.legs = (TicketLeg("event|alias", "winner", "alice", Decimal("2")),)
 
-        with self.assertRaisesRegex(ValueError, "quote-key delimiter"):
+        with self.assertRaisesRegex(
+            ValueError,
+            "ticket opening economic identity changed after admission",
+        ):
             book.save(self.path)
 
         self.assertEqual(self.path.read_bytes(), last_good)
@@ -217,7 +223,10 @@ class PaperBookCanonicalDurableStateTests(unittest.TestCase):
         last_good = self.path.read_bytes()
         book.tickets["alias-ticket-id"] = book.tickets.pop(ticket.ticket_id)
 
-        with self.assertRaisesRegex(ValueError, "mapping key must match ticket_id"):
+        with self.assertRaisesRegex(
+            ValueError,
+            "ticket set changed outside product-issued opening authority",
+        ):
             book.save(self.path)
 
         self.assertEqual(self.path.read_bytes(), last_good)

@@ -81,7 +81,7 @@ class WindowsEntrypointFailClosedTests(unittest.TestCase):
                 2,
             )
 
-    def test_no_args_requires_preflight_before_webview_startup(self) -> None:
+    def test_no_args_requires_workspace_preflight_before_runtime_and_webview_startup(self) -> None:
         calls: list[str] = []
         fake_emergency_stop = types.ModuleType(
             "autosport.windows_webview_emergency_stop"
@@ -130,8 +130,33 @@ class WindowsEntrypointFailClosedTests(unittest.TestCase):
 
         self.assertEqual(
             calls,
-            ["deployment", "workspace", "controller", "bridge", "webview"],
+            ["workspace", "deployment", "controller", "bridge", "webview"],
         )
+
+    def test_workspace_failure_precedes_runtime_dependency_check(self) -> None:
+        workspace = Path.cwd().resolve() / ".autosport-entry-test-workspace"
+        storage_error = PermissionError("synthetic workspace denied")
+        deployment = self._deployment_module(
+            exc=AssertionError("runtime dependency must not mask workspace failure")
+        )
+
+        with (
+            patch("autosport.paths.default_workspace", return_value=workspace),
+            patch.object(
+                windows_entry,
+                "_probe_workspace_writable",
+                side_effect=storage_error,
+            ) as workspace_probe,
+            patch.object(windows_entry, "_show_workspace_access_error") as show_storage_error,
+            patch.dict(
+                sys.modules,
+                {"autosport.webview2_runtime_deployment": deployment},
+            ),
+        ):
+            self.assertEqual(main([]), 2)
+
+        workspace_probe.assert_called_once_with(workspace)
+        show_storage_error.assert_called_once_with(workspace, storage_error)
 
     def test_unavailable_runtime_fails_before_webview_shell_start(self) -> None:
         calls: list[str] = []
@@ -164,7 +189,7 @@ class WindowsEntrypointFailClosedTests(unittest.TestCase):
             self.assertEqual(main([]), 3)
 
         self.assertEqual(calls, [])
-        workspace_probe.assert_not_called()
+        workspace_probe.assert_called_once()
         show_error.assert_called_once_with(windows_entry._WEBVIEW2_STARTUP_ERROR)
 
     def test_preflight_exception_fails_closed_without_detail_leak(self) -> None:
@@ -186,7 +211,7 @@ class WindowsEntrypointFailClosedTests(unittest.TestCase):
         ):
             self.assertEqual(main([]), 3)
 
-        workspace_probe.assert_not_called()
+        workspace_probe.assert_called_once()
         shown = show_error.call_args.args[0]
         self.assertEqual(shown, windows_entry._WEBVIEW2_STARTUP_ERROR)
         self.assertNotIn(secret, shown)

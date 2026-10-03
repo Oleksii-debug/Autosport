@@ -154,6 +154,15 @@ def _run_interactive_gui() -> int:
         _show_workspace_configuration_error(str(exc))
         return 2
 
+    # Establish local durable-state writability before checking the optional GUI
+    # runtime dependency. A missing WebView2 runtime must not mask a damaged or
+    # inaccessible canonical workspace as a dependency-only startup failure.
+    try:
+        _probe_workspace_writable(workspace)
+    except OSError as exc:
+        _show_workspace_access_error(workspace, exc)
+        return 2
+
     try:
         from autosport.webview2_runtime_deployment import ensure_webview2_runtime
 
@@ -165,12 +174,6 @@ def _run_interactive_gui() -> int:
     if runtime_preflight.available is not True:
         _show_startup_error(_WEBVIEW2_STARTUP_ERROR)
         return 3
-
-    try:
-        _probe_workspace_writable(workspace)
-    except OSError as exc:
-        _show_workspace_access_error(workspace, exc)
-        return 2
 
     from autosport.windows_webview_emergency_stop import EmergencyStopWebController
     from autosport.windows_webview_shell import (

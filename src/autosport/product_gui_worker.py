@@ -283,7 +283,7 @@ class ProductGuiEconomicSnapshot:
     session_id: str
     source_id: str
     cycle_index: int
-    as_of: str | None
+    cycle_last_success_at: str | None
     paper_book_sha256: str | None
     balance: Decimal
     committed_stake: Decimal
@@ -365,7 +365,7 @@ def _capture_runtime_economic_snapshot(
         session_id=tick.session_id,
         source_id=tick.source_id,
         cycle_index=tick.cycle_index,
-        as_of=tick.last_success_at,
+        cycle_last_success_at=tick.last_success_at,
         paper_book_sha256=paper_book_sha256,
         balance=book.balance,
         committed_stake=committed_stake,

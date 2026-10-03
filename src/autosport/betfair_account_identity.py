@@ -203,7 +203,11 @@ def _make_account_identity_authority():
             "do_open",
             _urllib_request.AbstractHTTPHandler.do_open,
         ),
-        (_http_client, "_create_https_context", _http_client._create_https_context),
+        (
+            _http_client,
+            "_create_https_context",
+            getattr(_http_client, "_create_https_context", None),
+        ),
         (_http_client.HTTPSConnection, "__init__", _http_client.HTTPSConnection.__init__),
         (_http_client.HTTPSConnection, "connect", _http_client.HTTPSConnection.connect),
         (_http_client.HTTPConnection, "connect", _http_client.HTTPConnection.connect),
@@ -211,7 +215,7 @@ def _make_account_identity_authority():
         (
             _http_client.HTTPConnection,
             "_send_request",
-            _http_client.HTTPConnection._send_request,
+            getattr(_http_client.HTTPConnection, "_send_request", None),
         ),
         (_http_client.HTTPConnection, "send", _http_client.HTTPConnection.send),
         (
@@ -220,7 +224,7 @@ def _make_account_identity_authority():
             _http_client.HTTPConnection.getresponse,
         ),
         (_ssl.SSLContext, "wrap_socket", _ssl.SSLContext.wrap_socket),
-        (_ssl.SSLSocket, "_create", _ssl.SSLSocket._create),
+        (_ssl.SSLSocket, "_create", getattr(_ssl.SSLSocket, "_create", None)),
         (_socket, "create_connection", _socket.create_connection),
         (_socket, "getaddrinfo", _socket.getaddrinfo),
         (_socket.socket, "connect", _socket.socket.connect),

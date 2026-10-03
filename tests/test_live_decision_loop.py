@@ -276,11 +276,20 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
     ) -> PersistentLiveDecisionLoop:
         selected_strategy = strategy_version or self._strategy_version()
         registry = self._scientific_registry(workspace, selected_strategy)
+        if book is None:
+            canonical_book_path = workspace / "paper_book.json"
+            selected_book = (
+                PaperBook.load(canonical_book_path)
+                if canonical_book_path.exists()
+                else PaperBook("1000")
+            )
+        else:
+            selected_book = book
         return PersistentLiveDecisionLoop(
             workspace,
             loop_id="live-test-loop",
             mode=LiveDecisionMode.PAPER,
-            book=PaperBook("1000") if book is None else book,
+            book=selected_book,
             authority=self._authority() if authority is None else authority,
             intent_factory=factory,
             scientific_registry=registry,

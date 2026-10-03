@@ -118,11 +118,15 @@ class PortfolioScenarioSnapshotIntegrityTests(unittest.TestCase):
             "scenario winners must be frozen before mutable ticket snapshot work",
         )
 
-    def test_direct_scenario_profit_rejects_malformed_winner_collection(self) -> None:
+    def test_direct_scenario_profit_normalizes_winners_with_paperbook_contract(self) -> None:
         _book, ticket, leg = self._open_ticket()
 
-        with self.assertRaisesRegex(ValueError, "exact set"):
-            PortfolioEngine.scenario_profit([ticket], (leg.quote_key,))
+        self.assertEqual(
+            PortfolioEngine.scenario_profit([ticket], (leg.quote_key,)),
+            Decimal("10"),
+        )
+        with self.assertRaisesRegex(ValueError, "collection of quote keys"):
+            PortfolioEngine.scenario_profit([ticket], leg.quote_key)
         with self.assertRaisesRegex(ValueError, "non-empty string"):
             PortfolioEngine.scenario_profit([ticket], {""})
 

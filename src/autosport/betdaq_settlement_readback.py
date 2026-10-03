@@ -978,6 +978,7 @@ class BetdaqEconomicReadbackClient:
             # rotates/rebinds the mutable account client while network I/O is in flight.
             credentials = client._credentials
             venue_id = client._venue_id
+            clock = client._clock
             if type(credentials) is not _account.BetdaqCredentials:
                 raise BetdaqEconomicReadbackError(
                     "BETDAQ economic read requires canonical credentials"
@@ -1049,13 +1050,37 @@ class BetdaqEconomicReadbackClient:
                 raise BetdaqEconomicReadbackError(
                     "BETDAQ authenticated account context changed during economic acquisition"
                 )
+            if client._clock is not clock:
+                raise BetdaqEconomicReadbackError(
+                    "BETDAQ economic evidence clock changed during acquisition"
+                )
+            try:
+                observed_value = clock()
+                if (
+                    not isinstance(observed_value, datetime)
+                    or observed_value.tzinfo is None
+                    or observed_value.utcoffset() is None
+                ):
+                    raise ValueError("clock must return timezone-aware datetime")
+                observed_at = (
+                    observed_value.astimezone(timezone.utc)
+                    .isoformat()
+                    .replace("+00:00", "Z")
+                )
+            except Exception:
+                raise BetdaqEconomicReadbackError(
+                    "BETDAQ economic response failed canonical validation"
+                ) from None
+            if client._clock is not clock:
+                raise BetdaqEconomicReadbackError(
+                    "BETDAQ economic evidence clock changed during acquisition"
+                )
         if type(payload) is not bytes:
             raise BetdaqEconomicReadbackError(
                 "BETDAQ economic read transport must return bytes"
             )
         try:
             result = _parse_economic_soap_result(payload, method)
-            observed_at = client._observed_at()
         except Exception:
             raise BetdaqEconomicReadbackError(
                 "BETDAQ economic response failed canonical validation"

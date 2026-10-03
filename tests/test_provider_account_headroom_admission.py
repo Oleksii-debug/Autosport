@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -515,6 +516,374 @@ def test_same_snapshot_two_writer_race_only_one_reserves(monkeypatch, tmp_path) 
     assert recomputed.lower_headroom == Decimal("20")
     assert recomputed.upper_headroom == Decimal("20")
     assert recomputed.decision is HeadroomDecision.INSUFFICIENT_UPPER_BOUND
+
+
+
+def test_newer_balance_generation_stales_assessment_before_new_reservation(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    acquired, _ = _acquire_balance(monkeypatch, tmp_path, "100")
+    action = _action("generation-target", "80")
+    ledger = _ledger_with_plans(tmp_path, _plan("target", action))
+    assessment = _assess(
+        ledger,
+        acquired,
+        plan_id="target",
+        action_id="generation-target",
+    )
+    assert assessment.decision is HeadroomDecision.SUFFICIENT_LOWER_BOUND
+
+    newer, _ = _acquire_balance(monkeypatch, tmp_path, "10")
+
+    with pytest.raises(
+        ProviderAccountHeadroomStale,
+        match="balance generation changed",
+    ):
+        _reserve(
+            ledger,
+            acquired,
+            assessment,
+            attempt_id="generation-stale-attempt",
+        )
+    with pytest.raises(KeyError):
+        ledger.attempt_state("generation-stale-attempt")
+
+    with pytest.raises(
+        ProviderAccountHeadroomStale,
+        match="balance generation changed",
+    ):
+        _assess(
+            ledger,
+            acquired,
+            plan_id="target",
+            action_id="generation-target",
+        )
+
+    recomputed = _assess(
+        ledger,
+        newer,
+        plan_id="target",
+        action_id="generation-target",
+    )
+    assert recomputed.provider_available_to_bet == Decimal("10")
+    assert recomputed.decision is HeadroomDecision.INSUFFICIENT_UPPER_BOUND
+
+
+def test_generation_lock_helper_rebinding_cannot_bypass_new_reservation(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    acquired, _ = _acquire_balance(monkeypatch, tmp_path, "100")
+    action = _action("generation-helper-target", "10")
+    ledger = _ledger_with_plans(tmp_path, _plan("target", action))
+    assessment = _assess(
+        ledger,
+        acquired,
+        plan_id="target",
+        action_id="generation-helper-target",
+    )
+    hostile_calls = []
+
+    @contextmanager
+    def hostile_guard(*args, **kwargs):
+        hostile_calls.append((args, kwargs))
+        yield
+
+    monkeypatch.setattr(
+        headroom_module,
+        "_current_balance_generation_lock",
+        hostile_guard,
+    )
+
+    with pytest.raises(
+        ProviderAccountHeadroomError,
+        match="generation lock authority changed",
+    ):
+        _reserve(
+            ledger,
+            acquired,
+            assessment,
+            attempt_id="generation-helper-attempt",
+        )
+    assert hostile_calls == []
+    with pytest.raises(KeyError):
+        ledger.attempt_state("generation-helper-attempt")
+
+
+def test_generation_lock_wrapped_kwdefault_rebind_fails_before_execution(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    acquired, _ = _acquire_balance(monkeypatch, tmp_path, "100")
+    action = _action("generation-kwdefault-target", "10")
+    ledger = _ledger_with_plans(tmp_path, _plan("target", action))
+    wrapped = headroom_module._current_balance_generation_lock.__wrapped__
+    original = dict(wrapped.__kwdefaults__ or {})
+    hostile_calls = []
+
+    def hostile_lock(_workspace):
+        hostile_calls.append("executed")
+        raise AssertionError("hostile economic lock executed")
+
+    try:
+        wrapped.__kwdefaults__["_economic_lock"] = hostile_lock
+        with pytest.raises(
+            ProviderAccountHeadroomError,
+            match="generation lock authority changed",
+        ):
+            _assess(
+                ledger,
+                acquired,
+                plan_id="target",
+                action_id="generation-kwdefault-target",
+            )
+    finally:
+        wrapped.__kwdefaults__.clear()
+        wrapped.__kwdefaults__.update(original)
+
+    assert hostile_calls == []
+
+
+def test_generation_lock_wrapped_code_rebind_fails_before_execution(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    acquired, _ = _acquire_balance(monkeypatch, tmp_path, "100")
+    action = _action("generation-wrapped-target", "10")
+    ledger = _ledger_with_plans(tmp_path, _plan("target", action))
+    wrapped = headroom_module._current_balance_generation_lock.__wrapped__
+    original_code = wrapped.__code__
+    hostile_calls = []
+
+    def forged(
+        workspace,
+        acquired,
+        *,
+        _account_authority=None,
+        _account_authority_code=None,
+        _economic_lock=None,
+        _economic_lock_code=None,
+    ):
+        del (
+            workspace,
+            acquired,
+            _account_authority,
+            _account_authority_code,
+            _economic_lock,
+            _economic_lock_code,
+        )
+        hostile_calls.append("executed")
+        yield
+
+    assert len(forged.__code__.co_freevars) == len(original_code.co_freevars)
+    try:
+        wrapped.__code__ = forged.__code__
+        with pytest.raises(
+            ProviderAccountHeadroomError,
+            match="generation lock authority changed",
+        ):
+            _assess(
+                ledger,
+                acquired,
+                plan_id="target",
+                action_id="generation-wrapped-target",
+            )
+    finally:
+        wrapped.__code__ = original_code
+
+    assert hostile_calls == []
+
+
+def test_generation_lock_helper_rebinding_cannot_bypass_assessment(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    acquired, _ = _acquire_balance(monkeypatch, tmp_path, "100")
+    action = _action("generation-assess-helper-target", "10")
+    ledger = _ledger_with_plans(tmp_path, _plan("target", action))
+    hostile_calls = []
+
+    @contextmanager
+    def hostile_guard(*args, **kwargs):
+        hostile_calls.append((args, kwargs))
+        yield
+
+    monkeypatch.setattr(
+        headroom_module,
+        "_current_balance_generation_lock",
+        hostile_guard,
+    )
+
+    with pytest.raises(
+        ProviderAccountHeadroomError,
+        match="generation lock authority changed",
+    ):
+        _assess(
+            ledger,
+            acquired,
+            plan_id="target",
+            action_id="generation-assess-helper-target",
+        )
+    assert hostile_calls == []
+
+
+def test_exact_existing_attempt_replay_does_not_require_current_balance_generation(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    acquired, _ = _acquire_balance(monkeypatch, tmp_path, "100")
+    action = _action("replay-target", "10")
+    ledger = _ledger_with_plans(tmp_path, _plan("target", action))
+    assessment = _assess(
+        ledger,
+        acquired,
+        plan_id="target",
+        action_id="replay-target",
+    )
+    first = _reserve(
+        ledger,
+        acquired,
+        assessment,
+        attempt_id="generation-replay-attempt",
+    )
+
+    _acquire_balance(monkeypatch, tmp_path, "1")
+
+    replay = _reserve(
+        ledger,
+        acquired,
+        assessment,
+        attempt_id="generation-replay-attempt",
+    )
+    assert replay == first
+    assert ledger.attempt_state("generation-replay-attempt") is AttemptState.RESERVED
+
+
+@pytest.mark.parametrize(
+    "dependency_name",
+    ("_canonical_account_snapshot_authority", "_canonical_economic_lock"),
+)
+def test_generation_lock_rejects_transitive_dependency_rebinding(
+    monkeypatch,
+    dependency_name,
+) -> None:
+    hostile_calls = []
+
+    def hostile(*args, **kwargs):
+        hostile_calls.append((args, kwargs))
+        raise AssertionError("hostile generation dependency executed")
+
+    monkeypatch.setattr(headroom_module, dependency_name, hostile)
+
+    with pytest.raises(
+        ProviderAccountHeadroomError,
+        match="generation lock dependency authority changed",
+    ):
+        with headroom_module._current_balance_generation_lock(
+            object(),
+            object(),  # type: ignore[arg-type]
+        ):
+            raise AssertionError("generation body must not execute")
+
+    assert hostile_calls == []
+
+
+def test_current_generation_guard_alias_rebinding_cannot_admit_stale_balance(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    acquired, _ = _acquire_balance(monkeypatch, tmp_path, "100")
+    action = _action("guard-alias-target", "10")
+    ledger = _ledger_with_plans(tmp_path, _plan("target", action))
+    hostile_calls = []
+
+    def hostile_guard(*args, **kwargs):
+        hostile_calls.append((args, kwargs))
+        raise AssertionError("hostile generation guard executed")
+
+    monkeypatch.setattr(
+        headroom_module,
+        "hold_current_account_snapshot_acquisition",
+        hostile_guard,
+    )
+
+    with pytest.raises(
+        ProviderAccountHeadroomError,
+        match="account snapshot headroom authority changed",
+    ):
+        _assess(
+            ledger,
+            acquired,
+            plan_id="target",
+            action_id="guard-alias-target",
+        )
+
+    assert hostile_calls == []
+
+
+def test_current_generation_guard_module_rebinding_fails_before_hostile_code(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    acquired, _ = _acquire_balance(monkeypatch, tmp_path, "100")
+    action = _action("guard-module-target", "10")
+    ledger = _ledger_with_plans(tmp_path, _plan("target", action))
+    hostile_calls = []
+
+    def hostile_guard(*args, **kwargs):
+        hostile_calls.append((args, kwargs))
+        raise AssertionError("hostile module generation guard executed")
+
+    monkeypatch.setattr(
+        headroom_module._account_acquisition,
+        "hold_current_account_snapshot_acquisition",
+        hostile_guard,
+    )
+
+    with pytest.raises(
+        ProviderAccountHeadroomError,
+        match="account snapshot headroom authority changed",
+    ):
+        _assess(
+            ledger,
+            acquired,
+            plan_id="target",
+            action_id="guard-module-target",
+        )
+
+    assert hostile_calls == []
+
+
+def test_current_generation_boundary_dispatch_rebinding_fails_closed(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    acquired, _ = _acquire_balance(monkeypatch, tmp_path, "100")
+    action = _action("guard-boundary-target", "10")
+    ledger = _ledger_with_plans(tmp_path, _plan("target", action))
+    hostile_calls = []
+
+    def hostile_hold(*args, **kwargs):
+        hostile_calls.append((args, kwargs))
+        raise AssertionError("hostile boundary generation guard executed")
+
+    boundary_type = headroom_module._ACCOUNT_SNAPSHOT_AUTHORITY_BOUNDARY_TYPE
+    assert boundary_type is not None
+    monkeypatch.setattr(boundary_type, "hold_current", hostile_hold)
+
+    with pytest.raises(
+        ProviderAccountHeadroomError,
+        match="account snapshot headroom authority changed",
+    ):
+        _assess(
+            ledger,
+            acquired,
+            plan_id="target",
+            action_id="guard-boundary-target",
+        )
+
+    assert hostile_calls == []
 
 
 @pytest.mark.parametrize(

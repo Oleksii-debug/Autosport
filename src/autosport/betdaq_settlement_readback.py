@@ -412,9 +412,13 @@ class BetdaqPostingsReadback:
                 )
             provider_content = posting.provider_content_dict()
             previous = seen.get(posting.transaction_id)
-            if previous is not None and previous != provider_content:
+            if previous is not None:
+                if previous != provider_content:
+                    raise BetdaqEconomicReadbackError(
+                        "same BETDAQ transaction id has conflicting economic content"
+                    )
                 raise BetdaqEconomicReadbackError(
-                    "same BETDAQ transaction id has conflicting economic content"
+                    "canonical postings readback must not retain duplicate transaction ids"
                 )
             seen[posting.transaction_id] = provider_content
 

@@ -9,7 +9,10 @@ import pytest
 
 import autosport.betfair_account_readonly as betfair_readonly
 import autosport.provider_account_headroom_admission as headroom_module
-from autosport.account_snapshot_acquisition import BetfairAccountSnapshotAcquirer
+from autosport.account_snapshot_acquisition import (
+    AuthoritativeAccountSnapshot,
+    BetfairAccountSnapshotAcquirer,
+)
 from autosport.betfair_account_readonly import BetfairSessionCredentials
 from autosport.bookmaker_capability import BookmakerCapability
 from autosport.provider_account_headroom_admission import (
@@ -267,6 +270,47 @@ def test_submitted_liability_with_unknown_balance_coverage_forces_wait(
     assert second.lower_headroom == Decimal("30")
     assert second.upper_headroom == Decimal("100")
     assert second.decision is HeadroomDecision.WAIT_COVERAGE
+
+
+def test_account_authority_alias_rebinding_cannot_forge_available_balance(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    acquired, _ = _acquire_balance(monkeypatch, tmp_path, "5")
+    assert acquired.snapshot.balance is not None
+    forged_balance = replace(
+        acquired.snapshot.balance,
+        available_balance=Decimal("1000000"),
+    )
+    forged = AuthoritativeAccountSnapshot(
+        replace(acquired.snapshot, balance=forged_balance),
+        acquired.receipt,
+    )
+    action = _action("a1", "10")
+    ledger = _ledger_with_plans(tmp_path, _plan("p1", action))
+    hostile_calls = []
+
+    def forged_authority(_acquired):
+        hostile_calls.append(True)
+
+    monkeypatch.setattr(
+        headroom_module,
+        "assert_account_snapshot_acquisition_authoritative",
+        forged_authority,
+    )
+
+    with pytest.raises(
+        ProviderAccountHeadroomError,
+        match="account snapshot headroom authority changed",
+    ):
+        assess_provider_account_headroom(
+            ledger,
+            forged,
+            plan_id="p1",
+            action_id="a1",
+        )
+
+    assert hostile_calls == []
 
 
 def test_other_provider_account_cannot_donate_headroom(monkeypatch, tmp_path) -> None:

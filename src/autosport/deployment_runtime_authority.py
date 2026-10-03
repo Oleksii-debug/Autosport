@@ -56,6 +56,11 @@ _CANONICAL_AUTHORITY_BINDING_SCHEMA_VALUE: Final = _AUTHORITY_BINDING_SCHEMA
 _CANONICAL_AUTHORITY_BINDING_SCHEMA_VERSION_VALUE: Final = _AUTHORITY_BINDING_SCHEMA_VERSION
 _CANONICAL_MONOTONIC_AUTHORITY_TYPE: Final = MonotonicWorkspaceAuthority
 _CANONICAL_MONOTONIC_AUTHORITY_ID: Final = MONOTONIC_AUTHORITY_ID
+_CANONICAL_AUTHORITY_PHASE_TYPE: Final = AuthorityPhase
+_CANONICAL_RECOVERY_DISPOSITION_TYPE: Final = RecoveryDisposition
+_CANONICAL_PATH_TYPE: Final = Path
+_CANONICAL_DATETIME_TYPE: Final = datetime
+_CANONICAL_TIMEZONE_MODULE: Final = timezone
 _CANONICAL_WORKSPACE_IDENTITY_BINDING_TYPE: Final = WorkspaceIdentityBinding
 _CANONICAL_AUTHORITY_ROOT_SELECTION_BINDING_TYPE: Final = AuthorityRootSelectionBinding
 _CANONICAL_WORKSPACE_BINDING_SURFACE: Final = tuple(
@@ -83,6 +88,7 @@ _CANONICAL_ROOT_SELECTION_SURFACE: Final = tuple(
     for descriptor in (vars(AuthorityRootSelectionBinding)[name],)
 )
 _CANONICAL_RLOCK_FACTORY: Final = RLock
+_CANONICAL_RLOCK_TYPE: Final = type(RLock())
 _CANONICAL_WORKSPACE_ECONOMIC_LOCK_TYPE: Final = WorkspaceEconomicLock
 _CANONICAL_MONOTONIC_AUTHORITY_INIT: Final = MonotonicWorkspaceAuthority.__init__
 _CANONICAL_OBJECT_NEW: Final = object.__new__
@@ -181,6 +187,12 @@ def _assert_canonical_monotonic_authority_constructor() -> None:
             )
 
 
+_CANONICAL_MONOTONIC_CONSTRUCTOR_ASSERT: Final = _assert_canonical_monotonic_authority_constructor
+_CANONICAL_MONOTONIC_CONSTRUCTOR_ASSERT_CODE: Final = (
+    _assert_canonical_monotonic_authority_constructor.__code__
+)
+
+
 def _construct_monotonic_authority(
     *,
     workspace: Path,
@@ -188,7 +200,16 @@ def _construct_monotonic_authority(
     key: str,
     authority_root: str | Path | None,
 ) -> MonotonicWorkspaceAuthority:
-    _assert_canonical_monotonic_authority_constructor()
+    if (
+        _assert_canonical_monotonic_authority_constructor
+        is not _CANONICAL_MONOTONIC_CONSTRUCTOR_ASSERT
+        or _CANONICAL_MONOTONIC_CONSTRUCTOR_ASSERT.__code__
+        is not _CANONICAL_MONOTONIC_CONSTRUCTOR_ASSERT_CODE
+    ):
+        raise DeploymentRuntimeAuthorityError(
+            "monotonic workspace authority constructor guard dispatch was replaced"
+        )
+    _CANONICAL_MONOTONIC_CONSTRUCTOR_ASSERT()
     authority = _CANONICAL_OBJECT_NEW(_CANONICAL_MONOTONIC_AUTHORITY_TYPE)
     _CANONICAL_MONOTONIC_AUTHORITY_INIT(
         authority,
@@ -197,12 +218,20 @@ def _construct_monotonic_authority(
         key=key,
         authority_root=authority_root,
     )
-    _assert_canonical_monotonic_authority_constructor()
+    _CANONICAL_MONOTONIC_CONSTRUCTOR_ASSERT()
     if type(authority) is not _CANONICAL_MONOTONIC_AUTHORITY_TYPE:
         raise DeploymentRuntimeAuthorityError(
             "monotonic workspace authority construction returned noncanonical type"
         )
     return authority
+
+
+_CANONICAL_NEW_LOCAL_LOCK_HELPER: Final = _new_local_lock
+_CANONICAL_NEW_LOCAL_LOCK_HELPER_CODE: Final = _new_local_lock.__code__
+_CANONICAL_WORKSPACE_LOCK_HELPER: Final = _workspace_economic_lock
+_CANONICAL_WORKSPACE_LOCK_HELPER_CODE: Final = _workspace_economic_lock.__code__
+_CANONICAL_MONOTONIC_CONSTRUCTOR_HELPER: Final = _construct_monotonic_authority
+_CANONICAL_MONOTONIC_CONSTRUCTOR_HELPER_CODE: Final = _construct_monotonic_authority.__code__
 
 
 def _text(value: object, name: str) -> str:
@@ -622,6 +651,7 @@ _CANONICAL_RECORD_HELPERS: Final = (
     ("_action_semantics_from_payload", _action_semantics_from_payload, _action_semantics_from_payload.__code__),
 )
 _RECORD_CODEC_NAMES: Final = (
+    "__init__",
     "__post_init__",
     "identity_payload",
     "computed_runtime_authority_id",
@@ -658,6 +688,8 @@ def _assert_canonical_record_codec() -> None:
     if (
         EnvironmentIdentity is not _CANONICAL_ENVIRONMENT_IDENTITY_TYPE
         or Episode is not _CANONICAL_EPISODE_TYPE
+        or datetime is not _CANONICAL_DATETIME_TYPE
+        or timezone is not _CANONICAL_TIMEZONE_MODULE
     ):
         raise DeploymentRuntimeAuthorityError(
             "runtime authority semantic type dispatch was replaced"
@@ -901,6 +933,10 @@ class DeploymentRuntimeAuthorityStore:
             != _CANONICAL_AUTHORITY_BINDING_SCHEMA_VALUE
             or _AUTHORITY_BINDING_SCHEMA_VERSION
             != _CANONICAL_AUTHORITY_BINDING_SCHEMA_VERSION_VALUE
+            or MONOTONIC_AUTHORITY_ID != _CANONICAL_MONOTONIC_AUTHORITY_ID
+            or AuthorityPhase is not _CANONICAL_AUTHORITY_PHASE_TYPE
+            or RecoveryDisposition is not _CANONICAL_RECOVERY_DISPOSITION_TYPE
+            or Path is not _CANONICAL_PATH_TYPE
         ):
             raise DeploymentRuntimeAuthorityError(
                 "runtime authority static contract was replaced"
@@ -913,10 +949,25 @@ class DeploymentRuntimeAuthorityStore:
         authority_root: str | Path | None,
     ) -> None:
         self._assert_static_authority_contract()
-        self.path = Path(path).expanduser().resolve(strict=False)
+        if (
+            _new_local_lock is not _CANONICAL_NEW_LOCAL_LOCK_HELPER
+            or _CANONICAL_NEW_LOCAL_LOCK_HELPER.__code__
+            is not _CANONICAL_NEW_LOCAL_LOCK_HELPER_CODE
+            or _workspace_economic_lock is not _CANONICAL_WORKSPACE_LOCK_HELPER
+            or _CANONICAL_WORKSPACE_LOCK_HELPER.__code__
+            is not _CANONICAL_WORKSPACE_LOCK_HELPER_CODE
+            or _construct_monotonic_authority
+            is not _CANONICAL_MONOTONIC_CONSTRUCTOR_HELPER
+            or _CANONICAL_MONOTONIC_CONSTRUCTOR_HELPER.__code__
+            is not _CANONICAL_MONOTONIC_CONSTRUCTOR_HELPER_CODE
+        ):
+            raise DeploymentRuntimeAuthorityError(
+                "runtime authority construction helper dispatch was replaced"
+            )
+        self.path = _CANONICAL_PATH_TYPE(path).expanduser().resolve(strict=False)
         self.workspace = self.path.parent
-        self._lock = _new_local_lock()
-        self._authority = _construct_monotonic_authority(
+        self._lock = _CANONICAL_NEW_LOCAL_LOCK_HELPER()
+        self._authority = _CANONICAL_MONOTONIC_CONSTRUCTOR_HELPER(
             workspace=self.workspace,
             domain=_AUTHORITY_DOMAIN,
             key=self.path.name,
@@ -1237,7 +1288,12 @@ class DeploymentRuntimeAuthorityStore:
             self,
             "_binding_root_selection_store_root",
         )
-        if not isinstance(path, Path) or not isinstance(workspace, Path):
+        lock = object.__getattribute__(self, "_binding_lock")
+        if (
+            type(path) is not _CANONICAL_PATH_TYPE
+            or type(workspace) is not _CANONICAL_PATH_TYPE
+            or type(lock) is not _CANONICAL_RLOCK_TYPE
+        ):
             raise DeploymentRuntimeAuthorityError(
                 "runtime authority binding integrity mismatch"
             )

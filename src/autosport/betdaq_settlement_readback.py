@@ -406,6 +406,10 @@ class BetdaqPostingsReadback:
                 raise BetdaqEconomicReadbackError(
                     "posting evidence does not match readback authenticated context"
                 )
+            if posting.currency != self.currency:
+                raise BetdaqEconomicReadbackError(
+                    "posting currency does not match readback currency"
+                )
             provider_content = posting.provider_content_dict()
             previous = seen.get(posting.transaction_id)
             if previous is not None and previous != provider_content:

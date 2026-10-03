@@ -72,6 +72,7 @@ from autosport.provider_observation_authority import (
     ProviderObservationUnsupportedError,
 )
 from autosport.decision_ledger import JsonlDecisionLedger
+from autosport.paper_campaign_admission import PaperCampaignAdmissionError
 from autosport.paper_campaign_forward_admission import admit_forward_verified
 from paper_campaign_admission_test_support import AdmissionFixture
 
@@ -1346,8 +1347,58 @@ def test_cycle_bound_forward_verification_drives_durable_paper_admission(
 
     admission_root = tmp_path / "admission"
     admission_root.mkdir()
-    fixture = AdmissionFixture(admission_root)
+
+    # A canonical forward receipt cannot retroactively qualify an unrelated
+    # predecision/execution chain that was created without this campaign inception.
+    unbound_root = tmp_path / "unbound-admission"
+    unbound_root.mkdir()
+    unbound = AdmissionFixture(unbound_root)
+    with pytest.raises(
+        PaperCampaignAdmissionError,
+        match="predecision learning Observation is not bound",
+    ):
+        admit_forward_verified(
+            unbound.coordinator(),
+            precommit_locator=locator,
+            collector_store=store,
+            source_spec=spec,
+            cycle_receipt=cycle_receipt,
+            provider_evidence_store=provider_store,
+            universe_store=universe_store,
+            event_lifecycle=None,
+            evidence=evidence,
+            admission_id="unbound-admission",
+            observation=unbound.observation,
+            action_type="PAPER_PROPOSAL",
+            decision_action="OPEN_PAPER_TICKET",
+            decision_at="2026-09-20T05:00:05+00:00",
+            at="2026-09-20T05:00:05+00:00",
+            replay_run_id="unbound-run",
+            agent="admission-test",
+            execution_decision_id=unbound.execution_decision_id,
+            execution_run_id=unbound.execution_run_id,
+            execution_attempt_id=unbound.execution_attempt_id,
+            execution_ticket_id=unbound.execution_ticket_id,
+        )
+
+    fixture = AdmissionFixture(
+        admission_root,
+        campaign_precommit_locator=locator,
+        campaign_collector_store=store,
+        campaign_source_spec=spec,
+    )
     coordinator = fixture.coordinator()
+    learning_evidence = dict(fixture.observation.evidence)
+    assert learning_evidence["campaign_forward_campaign_id"] == expected.campaign_id
+    assert learning_evidence["campaign_forward_source_id"] == expected.source_id
+    assert (
+        learning_evidence["campaign_forward_inception_receipt_sha256"]
+        == expected.campaign_receipt_sha256
+    )
+    assert (
+        learning_evidence["campaign_forward_evaluation_plan_sha256"]
+        == expected.prospective_evaluation_plan_sha256
+    )
 
     receipt = admit_forward_verified(
         coordinator,
@@ -1389,6 +1440,11 @@ def test_cycle_bound_forward_verification_drives_durable_paper_admission(
     forward_payload = durable[0].payload["campaign_forward_verification"]
     assert forward_payload["receipt_sha256"] == expected.receipt_sha256
     assert forward_payload["campaign_id"] == expected.campaign_id
+    assert forward_payload["source_id"] == expected.source_id
+    assert (
+        forward_payload["campaign_receipt_sha256"]
+        == expected.campaign_receipt_sha256
+    )
     assert forward_payload["verification_scope"] == expected.verification_scope
     assert forward_payload["provider_universe_authority_resolved"] is True
     assert forward_payload["structural_ok"] is True

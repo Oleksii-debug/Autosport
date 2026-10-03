@@ -172,6 +172,8 @@ def test_composed_verification_receipt_fixes_nonpromotion_truth() -> None:
 
     assert receipt.structural_ok is True
     assert receipt.structural_codes == ("PASS",)
+    assert receipt.source_id == authority.source_id
+    assert receipt.campaign_receipt_sha256 == authority.campaign_receipt_sha256
     assert receipt.campaign_cycle_authority_sha256 == authority.authority_sha256
     assert receipt.prospective_evaluation_plan_sha256 == "b" * 64
     assert receipt.universe_sha256 == "d" * 64

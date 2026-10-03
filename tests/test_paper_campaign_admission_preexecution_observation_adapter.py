@@ -101,3 +101,34 @@ def test_execution_observation_evidence_cannot_become_learning_observation_ident
     assert "accepted_odds" not in learning_evidence
     assert "accepted_stake" not in learning_evidence
     assert set(execution_evidence_ids.values()).isdisjoint(learning_evidence.values())
+
+
+
+@pytest.mark.parametrize(
+    "reserved_key",
+    [
+        "campaign_forward_campaign_id",
+        "campaign_forward_source_id",
+        "campaign_forward_inception_receipt_sha256",
+        "campaign_forward_evaluation_plan_sha256",
+    ],
+)
+def test_predecision_issuer_rejects_caller_campaign_binding_keys(
+    tmp_path,
+    reserved_key,
+):
+    fixture = AdmissionFixture(tmp_path)
+    issuer = getattr(
+        fixture.execution_runtime,
+        "_autosport_issue_predecision_learning_observation",
+    )
+
+    with pytest.raises(
+        Exception,
+        match="product-owned",
+    ):
+        issuer(
+            observed_at="2026-09-20T05:00:00+00:00",
+            available_at="2026-09-20T05:00:01+00:00",
+            evidence=((reserved_key, "a" * 64),),
+        )

@@ -136,6 +136,9 @@ class AdmissionFixture:
         execution_stake: str = "10.00",
         seed_execution_decision: bool = True,
         decision_plan_fingerprint: str | None = None,
+        campaign_precommit_locator=None,
+        campaign_collector_store=None,
+        campaign_source_spec=None,
     ) -> None:
         self.workspace = base / "workspace"
         self.workspace.mkdir()
@@ -200,7 +203,11 @@ class AdmissionFixture:
             max_quote_age=timedelta(seconds=60),
             paper_book_path=self.workspace / "paper_book.json",
             learning_environment=self.environment,
+            campaign_precommit_locator=campaign_precommit_locator,
+            campaign_collector_store=campaign_collector_store,
+            campaign_source_spec=campaign_source_spec,
         )
+        self.execution_runtime = execution_runtime
         if seed_execution_decision:
             issuer = getattr(
                 execution_runtime,

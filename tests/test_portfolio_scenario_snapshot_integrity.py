@@ -66,6 +66,37 @@ class PortfolioScenarioSnapshotIntegrityTests(unittest.TestCase):
         self.assertEqual(report.worst_case, Decimal("-10"))
         self.assertEqual(report.best_case, Decimal("10"))
 
+    def test_direct_scenario_profit_uses_frozen_open_ticket_cut(self) -> None:
+        book, ticket, leg = self._open_ticket()
+        original_profit = __import__(
+            "autosport.portfolio",
+            fromlist=["_scenario_profit_in_context"],
+        )._scenario_profit_in_context
+
+        def settle_source_then_calculate(tickets, winning_quote_keys):
+            book.settle(
+                ticket.ticket_id,
+                {leg.quote_key},
+                settled_at="2026-09-21T08:00:01+00:00",
+            )
+            return original_profit(tickets, winning_quote_keys)
+
+        with patch(
+            "autosport.portfolio._scenario_profit_in_context",
+            side_effect=settle_source_then_calculate,
+        ):
+            profit = PortfolioEngine.scenario_profit(
+                [ticket],
+                {leg.quote_key},
+            )
+
+        self.assertEqual(ticket.status, TicketStatus.WON)
+        self.assertEqual(
+            profit,
+            Decimal("10"),
+            "direct scenario profit must use the OPEN-ticket cut captured before evaluation",
+        )
+
     def test_snapshot_fails_closed_if_settlement_crosses_capture_window(self) -> None:
         book = PaperBook("100")
         first_leg = TicketLeg("event-1", "winner", "alice", Decimal("2"))

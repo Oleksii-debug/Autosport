@@ -220,7 +220,7 @@ class StrategyProofContract:
 
 @dataclass(frozen=True, slots=True)
 class StrategyProofEvaluation:
-    """Deterministic proof-presence evaluation, never execution authority."""
+    """Deterministic requirement-label coverage, never evidence/action authority."""
 
     strategy_class: StrategyClass
     claims_probability_edge: bool
@@ -271,23 +271,18 @@ class StrategyProofEvaluation:
             raise StrategyProofContractError(
                 "proof_contract_satisfied does not match missing_proofs"
             )
-        if self.positive_action_candidate is not expected_satisfied:
+        if self.positive_action_candidate is not False:
             raise StrategyProofContractError(
-                "positive_action_candidate does not match proof state"
+                "requirement labels cannot mint a positive action candidate"
             )
 
         if not isinstance(self.proof_gate_decision, OpportunityDecision):
             raise StrategyProofContractError(
                 "proof_gate_decision must be an OpportunityDecision"
             )
-        expected_decision = (
-            OpportunityDecision.ACTIONABLE
-            if expected_satisfied
-            else OpportunityDecision.WAIT
-        )
-        if self.proof_gate_decision is not expected_decision:
+        if self.proof_gate_decision is not OpportunityDecision.WAIT:
             raise StrategyProofContractError(
-                "proof_gate_decision must fail closed to WAIT"
+                "requirement labels cannot mint an actionable decision"
             )
 
         if type(self.execution_authorized) is not bool:
@@ -321,7 +316,7 @@ def evaluate_strategy_proofs(
     *,
     claims_probability_edge: bool,
 ) -> StrategyProofEvaluation:
-    """Evaluate proof-class presence without widening downstream authority."""
+    """Evaluate required-label coverage without treating labels as proof evidence."""
 
     contract = proof_contract_for(
         strategy_class,
@@ -339,11 +334,7 @@ def evaluate_strategy_proofs(
         present_proofs=_ordered(canonical_present),
         missing_proofs=_ordered(missing),
         proof_contract_satisfied=satisfied,
-        positive_action_candidate=satisfied,
-        proof_gate_decision=(
-            OpportunityDecision.ACTIONABLE
-            if satisfied
-            else OpportunityDecision.WAIT
-        ),
+        positive_action_candidate=False,
+        proof_gate_decision=OpportunityDecision.WAIT,
         execution_authorized=False,
     )

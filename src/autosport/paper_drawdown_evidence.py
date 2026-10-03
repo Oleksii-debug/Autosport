@@ -292,6 +292,38 @@ class PaperRealizedDrawdownEvidence:
                     "drawdown evidence equity transition does not match realized delta"
                 )
             previous_point = point
+
+        path_running_peak = self.points[0]
+        path_maximum_drawdown = Decimal("0")
+        path_maximum_peak_id: str | None = None
+        path_maximum_trough_id: str | None = None
+        for point in self.points[1:]:
+            if point.equity > path_running_peak.equity:
+                path_running_peak = point
+                continue
+            drawdown = _exact_shape_sum(
+                (path_running_peak.equity, point.equity.copy_negate())
+            )
+            if drawdown > path_maximum_drawdown:
+                path_maximum_drawdown = drawdown
+                path_maximum_peak_id = path_running_peak.point_id
+                path_maximum_trough_id = point.point_id
+
+        path_current_drawdown = _exact_shape_sum(
+            (path_running_peak.equity, self.points[-1].equity.copy_negate())
+        )
+        if self.current_drawdown_amount != path_current_drawdown:
+            raise PaperDrawdownEvidenceError(
+                "drawdown evidence current drawdown does not match the path"
+            )
+        if (
+            self.historical_max_drawdown_amount != path_maximum_drawdown
+            or self.historical_max_drawdown_peak_id != path_maximum_peak_id
+            or self.historical_max_drawdown_trough_id != path_maximum_trough_id
+        ):
+            raise PaperDrawdownEvidenceError(
+                "drawdown evidence historical maximum drawdown does not match the path"
+            )
         if self.points[0].action != "initial":
             raise PaperDrawdownEvidenceError("drawdown evidence path must begin at initial equity")
         if self.points[0].equity != self.initial_equity:

@@ -2134,6 +2134,8 @@ class DeploymentRuntimeAuthorityStore(metaclass=_DeploymentRuntimeAuthorityStore
         _sha_validator_code: object = _sha.__code__,
         _digest_helper: object = _digest,
         _digest_helper_code: object = _digest.__code__,
+        _workspace_lock_helper: object = _workspace_economic_lock,
+        _workspace_lock_helper_code: object = _workspace_economic_lock.__code__,
     ) -> None:
         self._assert_static_authority_contract()
         if (
@@ -2162,6 +2164,17 @@ class DeploymentRuntimeAuthorityStore(metaclass=_DeploymentRuntimeAuthorityStore
                 "runtime authority record codec requirement dispatch was replaced"
             )
         _record_codec_requirement()
+        if (
+            _workspace_economic_lock is not _workspace_lock_helper
+            or _CANONICAL_WORKSPACE_LOCK_HELPER is not _workspace_lock_helper
+            or getattr(_workspace_lock_helper, "__code__", None)
+            is not _workspace_lock_helper_code
+            or _CANONICAL_WORKSPACE_LOCK_HELPER_CODE
+            is not _workspace_lock_helper_code
+        ):
+            raise DeploymentRuntimeAuthorityError(
+                "runtime authority workspace lock helper dispatch was replaced"
+            )
         if (
             _sha is not _sha_validator
             or _CANONICAL_SHA_VALIDATOR is not _sha_validator
@@ -2439,27 +2452,41 @@ class DeploymentRuntimeAuthorityStore(metaclass=_DeploymentRuntimeAuthorityStore
         self._recover_state(payload)
         return records
 
-    def _observed_now(self) -> str:
+    def _observed_now(
+        self,
+        _clock: Any = _utc_now_timestamp,
+        _clock_code: object = _utc_now_timestamp.__code__,
+        _timestamp_validator: Any = _timestamp,
+        _timestamp_validator_code: object = _timestamp.__code__,
+        _datetime_type: type = datetime,
+        _timezone_module: object = timezone,
+    ) -> str:
         if (
-            datetime is not _CANONICAL_DATETIME_TYPE
-            or timezone is not _CANONICAL_TIMEZONE_MODULE
-            or _utc_now_timestamp is not _CANONICAL_UTC_NOW_TIMESTAMP
-            or _CANONICAL_UTC_NOW_TIMESTAMP.__code__
-            is not _CANONICAL_UTC_NOW_TIMESTAMP_CODE
-            or _timestamp is not _CANONICAL_TIMESTAMP_VALIDATOR
-            or _CANONICAL_TIMESTAMP_VALIDATOR.__code__
-            is not _CANONICAL_TIMESTAMP_VALIDATOR_CODE
+            datetime is not _datetime_type
+            or _CANONICAL_DATETIME_TYPE is not _datetime_type
+            or timezone is not _timezone_module
+            or _CANONICAL_TIMEZONE_MODULE is not _timezone_module
+            or _utc_now_timestamp is not _clock
+            or _CANONICAL_UTC_NOW_TIMESTAMP is not _clock
+            or getattr(_clock, "__code__", None) is not _clock_code
+            or _CANONICAL_UTC_NOW_TIMESTAMP_CODE is not _clock_code
+            or _timestamp is not _timestamp_validator
+            or _CANONICAL_TIMESTAMP_VALIDATOR is not _timestamp_validator
+            or getattr(_timestamp_validator, "__code__", None)
+            is not _timestamp_validator_code
+            or _CANONICAL_TIMESTAMP_VALIDATOR_CODE
+            is not _timestamp_validator_code
         ):
             raise DeploymentRuntimeAuthorityError(
                 "runtime authority clock dispatch was replaced"
             )
         try:
-            value = _CANONICAL_UTC_NOW_TIMESTAMP()
+            value = _clock()
         except Exception as exc:
             raise DeploymentRuntimeAuthorityError(
                 "runtime authority store clock failed"
             ) from exc
-        return _CANONICAL_TIMESTAMP_VALIDATOR(
+        return _timestamp_validator(
             value,
             "runtime authority store clock",
         )

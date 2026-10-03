@@ -622,9 +622,19 @@ def capture_campaign_complete_game_board(
     api_key: str,
     timeout_seconds: float = 10.0,
     clock: Callable[[], str] = _default_clock,
+    _public_surface_guard: Callable[[], None] | None = None,
 ) -> tuple[CompleteGameBoardSnapshot, CampaignCompleteBoardCycleReceipt]:
     """Capture one provider board only after the exact campaign START is authorized."""
 
+    if _public_surface_guard is None:
+        raise CampaignProviderCycleCaptureIntegrityError(
+            "campaign provider-cycle sealed public surface guard is required"
+        )
+
+    def require_public_surface() -> None:
+        _public_surface_guard()
+
+    require_public_surface()
     if _CANONICAL_TYPE(source_spec) is not CampaignInceptionSourceSpec:
         raise TypeError("source_spec must be exact CampaignInceptionSourceSpec")
     if _CANONICAL_TYPE(request) is not CompleteGameBoardRequest:
@@ -925,6 +935,7 @@ def capture_campaign_complete_game_board(
             "campaign collector next slot does not match inception receipt"
         )
     raw_attempted_at = effective_clock()
+    require_public_surface()
     require_stable_dispatch()
     require_seams(store, evidence_store)
     attempted_at = instant(raw_attempted_at, "collector attempted_at")
@@ -962,6 +973,7 @@ def capture_campaign_complete_game_board(
         raise CampaignProviderCycleCaptureIntegrityError(
             "collector START falls outside precommitted campaign observation window"
         )
+    require_public_surface()
     try:
         cycle_seq = begin_scheduled(
             store,
@@ -985,6 +997,7 @@ def capture_campaign_complete_game_board(
             request=request,
             timeout_seconds=timeout_seconds,
         )
+        require_public_surface()
         require_stable_dispatch()
         if _CANONICAL_TYPE(snapshot) is not CompleteGameBoardSnapshot:
             raise CampaignProviderCycleCaptureIntegrityError(
@@ -1004,6 +1017,7 @@ def capture_campaign_complete_game_board(
                 "provider observation falls outside precommitted fixed schedule slot window"
             )
         raw_completed_at = effective_clock()
+        require_public_surface()
         require_stable_dispatch()
         require_seams(store, evidence_store)
         completed_at = instant(raw_completed_at, "collector completed_at")
@@ -1020,8 +1034,11 @@ def capture_campaign_complete_game_board(
             raise CampaignProviderCycleCaptureIntegrityError(
                 "provider cycle falls outside precommitted campaign observation window"
             )
+        require_public_surface()
         evidence_path = evidence_save(evidence_store, snapshot)
+        require_public_surface()
         repeated_path = evidence_save(evidence_store, snapshot)
+        require_public_surface()
         require_stable_dispatch()
         require_seams(store, evidence_store)
         expected_evidence_path = evidence_path_for(
@@ -1037,6 +1054,7 @@ def capture_campaign_complete_game_board(
             raise CampaignProviderCycleCaptureIntegrityError(
                 "provider evidence store did not retain exact captured identity"
             )
+        require_public_surface()
         artifact = record_artifact(
             store,
             source_id=source_spec.source_id,
@@ -1044,6 +1062,7 @@ def capture_campaign_complete_game_board(
             artifact_kind=ARTIFACT_KIND,
             artifact_sha256=snapshot.evidence_sha256,
         )
+        require_public_surface()
         if (
             _CANONICAL_TYPE(artifact) is not dict
             or artifact.get("artifact_kind") != ARTIFACT_KIND
@@ -1052,6 +1071,7 @@ def capture_campaign_complete_game_board(
             raise CampaignProviderCycleCaptureIntegrityError(
                 "collector artifact append returned noncanonical identity"
             )
+        require_public_surface()
         finish_cycle(
             store,
             source_id=source_spec.source_id,
@@ -1064,6 +1084,7 @@ def capture_campaign_complete_game_board(
             duplicate_delta_ids=(),
         )
         terminal_written = True
+        require_public_surface()
         collector_evidence = resolve_artifact(
             store,
             source_id=source_spec.source_id,
@@ -1071,6 +1092,7 @@ def capture_campaign_complete_game_board(
             artifact_kind=ARTIFACT_KIND,
             artifact_sha256=snapshot.evidence_sha256,
         )
+        require_public_surface()
         if (
             collector_evidence.get("source_id") != source_spec.source_id
             or collector_evidence.get("run_id") != source_spec.run_id
@@ -1090,13 +1112,17 @@ def capture_campaign_complete_game_board(
             raise CampaignProviderCycleCaptureIntegrityError(
                 "collector artifact evidence does not bind exact campaign authority"
             )
+        require_public_surface()
         require_stable_dispatch()
         require_seams(store, evidence_store)
-        return snapshot, issue_receipt(
+        require_public_surface()
+        receipt = issue_receipt(
             campaign=campaign,
             snapshot=snapshot,
             collector_evidence=collector_evidence,
         )
+        require_public_surface()
+        return snapshot, receipt
     except BaseException as exc:
         if not terminal_written:
             try:
@@ -1418,9 +1444,17 @@ def _seal_campaign_provider_cycle_capture_dispatch() -> None:
             )
 
     def sealed_capture_campaign_complete_game_board(*args, **kwargs):
+        if "_public_surface_guard" in kwargs:
+            raise TypeError(
+                "_public_surface_guard is private to the sealed campaign capture"
+            )
         require_public_capture_surface()
         require_dispatch_integrity()
-        result = expected_capture(*args, **kwargs)
+        result = expected_capture(
+            *args,
+            _public_surface_guard=require_public_capture_surface,
+            **kwargs,
+        )
         require_dispatch_integrity()
         require_public_capture_surface()
         return result

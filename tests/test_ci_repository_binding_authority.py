@@ -632,3 +632,46 @@ def test_trigger_current_run_coordinate_cannot_be_redirected_by_validator_rebind
     assert checked == [123]
     assert cancelled == [123]
 
+def test_commit_association_rejects_repository_drift_before_next_page(
+    monkeypatch,
+) -> None:
+    api = base_controller.GitHubApi(repository="owner/repo", token="token")
+    requested_urls: list[str] = []
+
+    class FakeResponse:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, _exc_type, _exc, _tb):
+            return False
+
+        def read(self) -> bytes:
+            api.__dict__["_GitHubApi__repository"] = "other/repo"
+            rows = ",".join(
+                (
+                    '{"number":2008,"head":{"sha":"' + HEAD + '"}}'
+                    for _ in range(100)
+                )
+            )
+            return ("[" + rows + "]").encode("ascii")
+
+    def drifting_urlopen(request, *, timeout: int):
+        assert timeout == 20
+        requested_urls.append(request.full_url)
+        return FakeResponse()
+
+    monkeypatch.setattr(base_controller, "urlopen", drifting_urlopen)
+
+    with pytest.raises(
+        CancellationError,
+        match="GitHub API repository binding changed",
+    ):
+        api.associated_pr_number(HEAD)
+
+    assert len(requested_urls) == 1
+    assert requested_urls[0].startswith(
+        "https://api.github.com/repos/owner/repo/commits/"
+    )
+

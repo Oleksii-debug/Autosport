@@ -6,6 +6,7 @@ from decimal import Decimal
 import pytest
 
 import autosport.execution_quote_chain as execution_quote_chain
+import autosport.real_execution_ledger as real_execution_ledger
 
 from autosport.execution_quote_chain import (
     ACCEPTED_PRICE_ACKNOWLEDGED_UNVERIFIED,
@@ -978,3 +979,34 @@ def test_hard_false_quote_chain_authority_constants_are_class_sealed(
     payload = evidence.to_dict()
     assert payload["accepted_price_verified"] is False
     assert payload["chain_complete"] is False
+
+
+@pytest.mark.parametrize(
+    "upstream_type_name",
+    (
+        "VerifiedExecutionPlanView",
+        "ExecutionAttemptReadView",
+        "ProviderEvidenceBindingView",
+        "ExecutionAttempt",
+        "ExecutionAction",
+        "ExternalAcknowledgement",
+        "ExecutionPlan",
+    ),
+)
+def test_quote_chain_rejects_upstream_verified_view_type_alias_rebinding(
+    tmp_path,
+    monkeypatch,
+    upstream_type_name: str,
+) -> None:
+    ledger = _submitted(tmp_path, request_sha256=REQUEST_SHA256)
+    monkeypatch.setattr(
+        real_execution_ledger,
+        upstream_type_name,
+        object(),
+    )
+
+    with pytest.raises(
+        ExecutionQuoteChainUnavailable,
+        match="canonical verified execution view authority is unavailable",
+    ):
+        _project(ledger)

@@ -807,6 +807,7 @@ def capture_parlay_complete_game_board(
 
 def _seal_provider_observation_capture_dispatch() -> None:
     module_globals = _CANONICAL_MODULE_GLOBALS
+    expected_error = ProviderObservationIntegrityError
     expected_any = any
     expected_math = _CANONICAL_MATH
     expected_math_isfinite = _CANONICAL_MATH_ISFINITE
@@ -816,6 +817,7 @@ def _seal_provider_observation_capture_dispatch() -> None:
     expected_guard_code = expected_guard.__code__
     expected_witnesses = {
         "_CANONICAL_MODULE_GLOBALS": _CANONICAL_MODULE_GLOBALS,
+        "ProviderObservationIntegrityError": expected_error,
         "_CANONICAL_INSPECT": _CANONICAL_INSPECT,
         "_CANONICAL_MATH": _CANONICAL_MATH,
         "_CANONICAL_MATH_ISFINITE": _CANONICAL_MATH_ISFINITE,
@@ -872,14 +874,14 @@ def _seal_provider_observation_capture_dispatch() -> None:
                 "TypeError",
             )
         ):
-            raise ProviderObservationIntegrityError(
+            raise expected_error(
                 "provider production acquisition builtin dispatch shadowed"
             )
         if (
             module_globals.get("math") is not expected_math
             or expected_math.isfinite is not expected_math_isfinite
         ):
-            raise ProviderObservationIntegrityError(
+            raise expected_error(
                 "provider production acquisition numeric validation changed"
             )
         if (
@@ -888,14 +890,14 @@ def _seal_provider_observation_capture_dispatch() -> None:
             or expected_guard.__code__ is not expected_guard_code
             or expected_capture.__code__ is not expected_capture_code
         ):
-            raise ProviderObservationIntegrityError(
+            raise expected_error(
                 "provider production acquisition guard changed"
             )
         if expected_any(
             module_globals.get(name) is not expected
             for name, expected in expected_witness_items
         ):
-            raise ProviderObservationIntegrityError(
+            raise expected_error(
                 "provider production acquisition witness changed"
             )
 
@@ -904,7 +906,7 @@ def _seal_provider_observation_capture_dispatch() -> None:
             module_globals.get("capture_parlay_complete_game_board")
             is not sealed_capture_parlay_complete_game_board
         ):
-            raise ProviderObservationIntegrityError(
+            raise expected_error(
                 "provider production acquisition public surface changed"
             )
 

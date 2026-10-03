@@ -350,6 +350,36 @@ def test_legacy_admit_rejects_forward_routing_constant_rebind(
     assert _admissions(fixture) == {}
 
 
+@pytest.mark.parametrize(
+    "name",
+    [
+        "_FORWARD_OBSERVATION_PROTOCOL_SHA256",
+        "_FORWARD_OBSERVATION_BINDING_KEYS",
+    ],
+)
+def test_legacy_admit_rejects_forward_observation_binding_rebind(
+    tmp_path,
+    monkeypatch,
+    name,
+):
+    fixture = AdmissionFixture(tmp_path)
+    coordinator = fixture.coordinator()
+    value = (
+        "hostile_campaign_forward_protocol_sha256"
+        if name == "_FORWARD_OBSERVATION_PROTOCOL_SHA256"
+        else frozenset()
+    )
+    monkeypatch.setattr(admission_module, name, value)
+
+    with pytest.raises(
+        PaperCampaignAdmissionError,
+        match="forward-verification routing changed",
+    ):
+        fixture.admit(coordinator)
+
+    assert _admissions(fixture) == {}
+
+
 def test_legacy_admit_rejects_forward_context_reader_rebind(
     tmp_path,
     monkeypatch,

@@ -214,6 +214,7 @@ def _install() -> None:
     campaign_receipt_key = _FORWARD_OBSERVATION_INCEPTION_RECEIPT_SHA256
     campaign_plan_key = _FORWARD_OBSERVATION_EVALUATION_PLAN_SHA256
     campaign_protocol_key = _FORWARD_OBSERVATION_PROTOCOL_SHA256
+    protocol_hash_chars = frozenset("0123456789abcdef")
     json_loads = json.loads
     json_dumps = json.dumps
 
@@ -296,7 +297,12 @@ def _install() -> None:
                     "forward protocol campaign differs from campaign inception"
                 )
             protocol_sha256 = campaign_forward_protocol.protocol_sha256
-            if type(protocol_sha256) is not str or len(protocol_sha256) != 64:
+            if (
+                type(protocol_sha256) is not str
+                or len(protocol_sha256) != 64
+                or protocol_sha256 != protocol_sha256.lower()
+                or any(character not in protocol_hash_chars for character in protocol_sha256)
+            ):
                 raise _origin.PaperExecutionDecisionOriginError(
                     "forward protocol identity is invalid"
                 )

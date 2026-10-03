@@ -301,6 +301,48 @@ def test_caller_reconstructed_assessment_cannot_reserve(monkeypatch, tmp_path) -
         )
 
 
+def test_module_attempt_state_rebinding_cannot_bypass_headroom_gate(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    acquired, _ = _acquire_balance(monkeypatch, tmp_path, "5")
+    action = _action("a1", "10")
+    ledger = _ledger_with_plans(tmp_path, _plan("p1", action))
+    assessment = assess_provider_account_headroom(
+        ledger,
+        acquired,
+        plan_id="p1",
+        action_id="a1",
+    )
+    assert assessment.decision is HeadroomDecision.INSUFFICIENT_UPPER_BOUND
+    hostile_calls = []
+
+    def hostile_attempt_state(_ledger, _attempt_id):
+        hostile_calls.append(True)
+        return AttemptState.RESERVED
+
+    monkeypatch.setattr(
+        headroom_module,
+        "_ATTEMPT_STATE",
+        hostile_attempt_state,
+    )
+
+    with pytest.raises(
+        ProviderAccountHeadroomError,
+        match="execution ledger headroom authority changed",
+    ):
+        reserve_observed_provider_headroom(
+            ledger,
+            acquired,
+            assessment,
+            attempt_id="attempt-1",
+        )
+
+    assert hostile_calls == []
+    with pytest.raises(KeyError):
+        ledger.attempt_state("attempt-1")
+
+
 def test_exact_attempt_retry_is_idempotent_after_reservation(monkeypatch, tmp_path) -> None:
     acquired, _ = _acquire_balance(monkeypatch, tmp_path, "100")
     action = _action("a1", "10")

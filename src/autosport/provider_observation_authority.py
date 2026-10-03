@@ -1486,10 +1486,14 @@ def _seal_provider_evidence_store_dispatch() -> None:
                 "provider evidence filesystem path dispatch changed"
             )
 
-    def require_store_surface(name, expected_surface) -> None:
-        if expected_store_surface_reader(store_type, name) is not expected_surface:
+    def require_store_public_surfaces() -> None:
+        if expected_store_surface_reader(store_type, "save") is not sealed_save:
             raise expected_error(
-                f"provider evidence store {name} surface changed"
+                "provider evidence store save surface changed"
+            )
+        if expected_store_surface_reader(store_type, "load") is not sealed_load:
+            raise expected_error(
+                "provider evidence store load surface changed"
             )
 
     def sealed_save(self, snapshot):
@@ -1497,11 +1501,11 @@ def _seal_provider_evidence_store_dispatch() -> None:
             raise expected_type_error(
                 "provider evidence save requires exact CompleteGameBoardEvidenceStore"
             )
-        require_store_surface("save", sealed_save)
+        require_store_public_surfaces()
         require_store_authority()
         result = expected_save(self, snapshot)
         require_store_authority()
-        require_store_surface("save", sealed_save)
+        require_store_public_surfaces()
         return result
 
     def sealed_load(self, evidence_sha256):
@@ -1509,11 +1513,11 @@ def _seal_provider_evidence_store_dispatch() -> None:
             raise expected_type_error(
                 "provider evidence load requires exact CompleteGameBoardEvidenceStore"
             )
-        require_store_surface("load", sealed_load)
+        require_store_public_surfaces()
         require_store_authority()
         result = expected_load(self, evidence_sha256)
         require_store_authority()
-        require_store_surface("load", sealed_load)
+        require_store_public_surfaces()
         return result
 
     if hasattr(sealed_save, "__wrapped__") or hasattr(sealed_load, "__wrapped__"):

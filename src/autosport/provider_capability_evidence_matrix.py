@@ -678,6 +678,13 @@ def _install_provider_capability_authority():
             raise ProviderCapabilityEvidenceMatrixError(
                 "BETDAQ authenticated evidence requires a valid lifecycle predecessor chain"
             ) from exc
+        if (
+            validation_journal.latest_evidence_id_for(lifecycle)
+            != lifecycle.evidence_id
+        ):
+            raise ProviderCapabilityEvidenceMatrixError(
+                "BETDAQ lifecycle evidence is superseded by newer same-scope evidence"
+            )
         requirement = CapabilityRequirement(
             lifecycle.capability,
             CapabilityEvidenceStrength.OBSERVED_AUTHENTICATED,

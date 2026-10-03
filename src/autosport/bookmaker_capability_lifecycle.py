@@ -1078,13 +1078,14 @@ def _availability_from_payload(raw: object) -> CapabilityAvailability:
     )
 
 
-def _evaluate(
+def _evaluate_unsealed(
     evidence: CapabilityEvidence,
     evidence_id: str,
     profile: BookmakerCapabilityProfile,
     requirement: CapabilityRequirement,
     as_of: datetime,
     availability: CapabilityAvailabilityState,
+    product_issued_checker,
 ) -> CapabilityDecision:
     def deny(lifecycle: CapabilityLifecycleState, reason: str) -> CapabilityDecision:
         return CapabilityDecision(False, lifecycle, availability, evidence_id, reason)
@@ -1159,7 +1160,7 @@ def _evaluate(
             "authenticated/account observation requires product-owned upstream authority; stable account-scoped authority is not proven",
         )
     if evidence.strength is CapabilityEvidenceStrength.OBSERVED_AUTHENTICATED:
-        if not _is_product_issued(evidence, evidence_id):
+        if not product_issued_checker(evidence, evidence_id):
             return deny(
                 CapabilityLifecycleState.REVALIDATION_REQUIRED,
                 "authenticated observation requires product-owned upstream authority",
@@ -1178,3 +1179,31 @@ def _evaluate(
             else "current exact-scope capability evidence"
         ),
     )
+
+
+def _build_evaluator(core_evaluate, product_issued_checker):
+    def evaluate(
+        evidence: CapabilityEvidence,
+        evidence_id: str,
+        profile: BookmakerCapabilityProfile,
+        requirement: CapabilityRequirement,
+        as_of: datetime,
+        availability: CapabilityAvailabilityState,
+    ) -> CapabilityDecision:
+        return core_evaluate(
+            evidence,
+            evidence_id,
+            profile,
+            requirement,
+            as_of,
+            availability,
+            product_issued_checker,
+        )
+
+    return evaluate
+
+
+_evaluate = _build_evaluator(_evaluate_unsealed, _is_product_issued)
+del _build_evaluator
+del _evaluate_unsealed
+del _is_product_issued

@@ -38,6 +38,12 @@ from .execution_stop_authority import (
 )
 
 
+_CANONICAL_EXECUTION_STOP_AUTHORITY = ExecutionStopAuthority
+_CANONICAL_PRODUCT_STOP_AUTHORITY_ROOT = (
+    ExecutionStopAuthority._product_monotonic_authority_root
+)
+
+
 _SCHEMA = "autosport.betdaq-heartbeat-safety"
 _SCHEMA_VERSION = 1
 _ANCHOR_SCHEMA = "autosport.betdaq-heartbeat-safety-anchor"
@@ -366,9 +372,10 @@ def _account_owner_lease_path(
     """Return a secret-safe lease path for one local BETDAQ Punter authority.
 
     BETDAQ heartbeat registration is Punter-scoped, not application-scoped. The
-    caller-selected heartbeat state path therefore cannot define ownership. Anchor
-    the lease next to the canonical STOP journal and key it by a one-way digest of
-    venue + authenticated username. No credential text is persisted in the path.
+    caller-selected heartbeat state path or STOP journal path therefore cannot
+    define ownership. Anchor the lease below the existing product-owned STOP
+    machine-state root and key it by a one-way digest of venue + authenticated
+    username. No credential text is persisted in the path.
     """
 
     credentials = account_client._credentials
@@ -383,9 +390,39 @@ def _account_owner_lease_path(
             "username": username,
         }
     )
-    authority_path = Path(stop_authority.path).resolve(strict=False)
-    return authority_path.with_name(
-        f".{authority_path.name}.betdaq-heartbeat.{account_scope}.owner.lock"
+    if ExecutionStopAuthority is not _CANONICAL_EXECUTION_STOP_AUTHORITY:
+        raise BetdaqHeartbeatSafetyError(
+            "canonical STOP authority class binding changed"
+        )
+    if type(stop_authority) is not _CANONICAL_EXECUTION_STOP_AUTHORITY:
+        raise TypeError("stop_authority must be canonical ExecutionStopAuthority")
+    if (
+        getattr(
+            _CANONICAL_EXECUTION_STOP_AUTHORITY,
+            "_product_monotonic_authority_root",
+            None,
+        )
+        is not _CANONICAL_PRODUCT_STOP_AUTHORITY_ROOT
+    ):
+        raise BetdaqHeartbeatSafetyError(
+            "canonical STOP product authority root resolver changed"
+        )
+    try:
+        authority_root = _CANONICAL_PRODUCT_STOP_AUTHORITY_ROOT()
+    except Exception as exc:
+        raise BetdaqHeartbeatSafetyError(
+            "cannot resolve canonical STOP product authority root"
+        ) from exc
+    if not isinstance(authority_root, Path) or not authority_root.is_absolute():
+        raise BetdaqHeartbeatSafetyError(
+            "canonical STOP product authority root is invalid"
+        )
+    return (
+        authority_root
+        / "consumer-locks"
+        / "betdaq-heartbeat"
+        / account_scope[:2]
+        / f"{account_scope}.owner.lock"
     )
 
 

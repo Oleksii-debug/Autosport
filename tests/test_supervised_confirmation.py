@@ -445,7 +445,7 @@ def test_nonempty_confirmation_state_fails_closed_after_monotonic_authority_loss
 
     with pytest.raises(
         SupervisedConfirmationIntegrityError,
-        match="independent monotonic authority",
+        match="activated monotonic authority history is missing under selected root",
     ):
         SupervisedConfirmationAuthority(path, clock=clock)
 
@@ -478,6 +478,7 @@ def test_copied_nonempty_confirmation_state_cannot_be_adopted_in_fresh_namespace
     ):
         SupervisedConfirmationAuthority(copied, clock=clock)
 
+
 def test_audit_only_receipt_resolution_does_not_advance_clock_authority(
     tmp_path,
     monkeypatch,
@@ -488,7 +489,7 @@ def test_audit_only_receipt_resolution_does_not_advance_clock_authority(
         str(machine_root.resolve()),
     )
     clock = FakeClock()
-    path = tmp_path / "operator-confirmations.jsonl"
+    path = tmp_path / "workspace" / "operator-confirmations.jsonl"
     authority = SupervisedConfirmationAuthority(path, clock=clock)
     review = _prepare(authority)
 

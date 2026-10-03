@@ -133,3 +133,83 @@ def test_owner_lease_path_persists_no_plaintext_credentials(tmp_path) -> None:
         assert "arbitrary" not in lease_path
     finally:
         controller.close()
+
+def test_same_punter_different_stop_paths_cannot_mint_parallel_owner(
+    tmp_path,
+) -> None:
+    """#1735 falsifier 16: caller STOP path cannot split one Punter owner."""
+    account = _client()
+    first = BetdaqHeartbeatSafetyController(
+        account_client=account,
+        stop_authority=ExecutionStopAuthority(
+            tmp_path / "workspace-a" / "stop-a.jsonl"
+        ),
+        state_path=tmp_path / "owner-a" / "heartbeat.json",
+    )
+    second = None
+    try:
+        with pytest.raises(BetdaqHeartbeatSafetyError):
+            second = BetdaqHeartbeatSafetyController(
+                account_client=account,
+                stop_authority=ExecutionStopAuthority(
+                    tmp_path / "workspace-b" / "stop-b.jsonl"
+                ),
+                state_path=tmp_path / "owner-b" / "heartbeat.json",
+            )
+    finally:
+        if second is not None:
+            second.close()
+        first.close()
+
+
+def test_different_punters_with_different_stop_paths_remain_independent(
+    tmp_path,
+) -> None:
+    """The machine-root lease is Punter-scoped, never a BETDAQ global singleton."""
+    first = BetdaqHeartbeatSafetyController(
+        account_client=_client("account-root-a"),
+        stop_authority=ExecutionStopAuthority(
+            tmp_path / "workspace-a" / "stop-a.jsonl"
+        ),
+        state_path=tmp_path / "owner-a" / "heartbeat.json",
+    )
+    second = BetdaqHeartbeatSafetyController(
+        account_client=_client("account-root-b"),
+        stop_authority=ExecutionStopAuthority(
+            tmp_path / "workspace-b" / "stop-b.jsonl"
+        ),
+        state_path=tmp_path / "owner-b" / "heartbeat.json",
+    )
+    try:
+        assert first.status().provider_registration_active is False
+        assert second.status().provider_registration_active is False
+    finally:
+        second.close()
+        first.close()
+
+
+def test_owner_lease_rejects_rebound_product_root_resolver(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """Caller class mutation cannot redirect the canonical machine-root lease."""
+    stop = ExecutionStopAuthority(tmp_path / "stop.jsonl")
+
+    def hostile_root():
+        raise AssertionError("hostile product-root resolver executed")
+
+    monkeypatch.setattr(
+        ExecutionStopAuthority,
+        "_product_monotonic_authority_root",
+        staticmethod(hostile_root),
+    )
+    with pytest.raises(
+        BetdaqHeartbeatSafetyError,
+        match="product authority root resolver changed",
+    ):
+        BetdaqHeartbeatSafetyController(
+            account_client=_client("resolver-guard-user"),
+            stop_authority=stop,
+            state_path=tmp_path / "heartbeat.json",
+        )
+

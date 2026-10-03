@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from .integrity import atomic_write_json, durable_path_lock
+from .json_integrity import strict_json_loads
 from .opponent_intelligence import OpponentIntelligenceStore
 from .participant_identity import ParticipantIdentityRegistry
 from .sport_memory_runtime import SportMemoryRuntime
@@ -93,8 +94,8 @@ def _opponent_source_root(path: Path) -> str:
     """
 
     try:
-        raw: Any = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+        raw: Any = strict_json_loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError) as exc:
         raise SportMemoryCheckpointError(
             "cannot read opponent canonical store"
         ) from exc
@@ -319,8 +320,8 @@ def _checkpoint_from_raw(raw: object) -> SportMemoryAuthorityCheckpoint:
 
 def _read_checkpoint(path: Path) -> SportMemoryAuthorityCheckpoint:
     try:
-        raw: Any = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+        raw: Any = strict_json_loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError) as exc:
         raise SportMemoryCheckpointError(
             "cannot load sport-memory authority checkpoint"
         ) from exc
@@ -417,11 +418,51 @@ def _verify_runtime_snapshot_bindings(
     return runtime
 
 
+@dataclass(frozen=True, slots=True)
+class _BoundSportMemoryBindingSeal:
+    """Immutable construction-time identity for a bound sport-memory runtime."""
+
+    runtime_path: Path
+    checkpoint_path: Path
+    identity_selector: ParticipantIdentityRegistry
+    identity_path: Path
+    opponent_selector: OpponentIntelligenceStore
+    opponent_path: Path
+    authority_generation_sha256: str
+
+
 class BoundSportMemoryRuntime(SportMemoryRuntime):
     """Product-owned runtime that refreshes canonical source authority per write."""
 
+    __slots__ = ("_binding_seal",)
+
+    _PROTECTED_BINDING_FIELDS = frozenset(
+        {
+            "_bound_checkpoint_path",
+            "_bound_identity_selector",
+            "_bound_opponent_selector",
+            "path",
+            "opponent_authority",
+            "authority_generation_sha256",
+        }
+    )
+
     def __setattr__(self, name: str, value: object) -> None:
         # Positive authority is dispatched through this exact concrete runtime.
+        # After construction, authority-binding state is immutable to callers.
+        # The only legitimate opponent-authority refresh bypasses this method
+        # after re-verifying the frozen selectors against durable roots.
+        try:
+            object.__getattribute__(self, "_binding_seal")
+        except AttributeError:
+            sealed = False
+        else:
+            sealed = True
+        if sealed and name in self._PROTECTED_BINDING_FIELDS:
+            raise SportMemoryCheckpointError(
+                f"bound sport-memory runtime binding is immutable: {name}"
+            )
+
         # Never allow an instance attribute to shadow a class/inherited member:
         # doing so could replace verification/write methods while preserving the
         # exact BoundSportMemoryRuntime type checked by product binders.
@@ -467,26 +508,111 @@ class BoundSportMemoryRuntime(SportMemoryRuntime):
             opponent_authority,
             authority_generation_sha256=authority_generation_sha256,
         )
+        seal = _BoundSportMemoryBindingSeal(
+            runtime_path=Path(object.__getattribute__(self, "path")),
+            checkpoint_path=Path(checkpoint_path),
+            identity_selector=identity_registry,
+            identity_path=Path(identity_registry.path),
+            opponent_selector=opponent_store,
+            opponent_path=Path(opponent_store.path),
+            authority_generation_sha256=object.__getattribute__(
+                self, "authority_generation_sha256"
+            ),
+        )
+        object.__setattr__(self, "_binding_seal", seal)
+        self._assert_binding_seal()
+
+    def _assert_binding_seal(self) -> _BoundSportMemoryBindingSeal:
+        try:
+            seal = object.__getattribute__(self, "_binding_seal")
+        except AttributeError as exc:
+            raise SportMemoryCheckpointError(
+                "bound sport-memory runtime binding seal is missing"
+            ) from exc
+        state = object.__getattribute__(self, "__dict__")
+        if "_binding_seal" in state:
+            raise SportMemoryCheckpointError(
+                "bound sport-memory runtime binding seal shadow detected"
+            )
+
+        if (
+            state.get("_bound_checkpoint_path") != seal.checkpoint_path
+            or state.get("_bound_identity_selector") is not seal.identity_selector
+            or state.get("_bound_opponent_selector") is not seal.opponent_selector
+            or state.get("authority_generation_sha256")
+            != seal.authority_generation_sha256
+        ):
+            raise SportMemoryCheckpointError(
+                "bound sport-memory runtime binding seal mismatch"
+            )
+        try:
+            runtime_path = Path(state["path"])
+            identity_path = Path(seal.identity_selector.path)
+            opponent_path = Path(seal.opponent_selector.path)
+        except (KeyError, TypeError, ValueError, OSError) as exc:
+            raise SportMemoryCheckpointError(
+                "bound sport-memory runtime binding path drift"
+            ) from exc
+        if (
+            runtime_path != seal.runtime_path
+            or identity_path != seal.identity_path
+            or opponent_path != seal.opponent_path
+            or seal.opponent_selector.identity_registry is not seal.identity_selector
+        ):
+            raise SportMemoryCheckpointError(
+                "bound sport-memory runtime binding path drift"
+            )
+
+        current_opponent = state.get("opponent_authority")
+        if type(current_opponent) is not OpponentIntelligenceStore:
+            raise SportMemoryCheckpointError(
+                "bound sport-memory runtime opponent authority drift"
+            )
+        try:
+            current_opponent_path = Path(current_opponent.path)
+            current_identity_path = Path(current_opponent.identity_registry.path)
+        except (TypeError, ValueError, OSError, AttributeError) as exc:
+            raise SportMemoryCheckpointError(
+                "bound sport-memory runtime opponent authority drift"
+            ) from exc
+        if (
+            current_opponent_path != seal.opponent_path
+            or current_identity_path != seal.identity_path
+        ):
+            raise SportMemoryCheckpointError(
+                "bound sport-memory runtime opponent authority drift"
+            )
+        return seal
+
+    def _require_durable_positive_authority(self) -> None:
+        # Every inherited positive-authority entry point must verify the frozen
+        # binding even if a caller explicitly dispatches through the base class.
+        self._assert_binding_seal()
+        super()._require_durable_positive_authority()
 
     def _refresh_bound_authority(self) -> OpponentIntelligenceStore:
+        seal = self._assert_binding_seal()
         authority, verified_opponent = _load_verified_checkpoint_and_opponent(
-            self._bound_checkpoint_path,
-            self._bound_identity_selector,
-            self._bound_opponent_selector,
+            seal.checkpoint_path,
+            seal.identity_selector,
+            seal.opponent_selector,
         )
-        if authority.generation_sha256 != self.authority_generation_sha256:
+        if authority.generation_sha256 != seal.authority_generation_sha256:
             raise SportMemoryCheckpointError(
                 "bound sport-memory authority generation changed"
             )
-        self.opponent_authority = verified_opponent
+        # This is the sole mutable binding field. It is replaced only with the
+        # freshly verified canonical object whose durable paths match the seal.
+        object.__setattr__(self, "opponent_authority", verified_opponent)
+        self._assert_binding_seal()
         return verified_opponent
 
     def matchup_as_of(self, *args, **kwargs):
         """Read decision-time memory only under the current canonical roots."""
-        identity_path = Path(self._bound_identity_selector.path)
-        opponent_path = Path(self._bound_opponent_selector.path)
+        seal = self._assert_binding_seal()
         first_path, second_path = sorted(
-            (identity_path, opponent_path), key=lambda path: str(_resolved(path))
+            (seal.identity_path, seal.opponent_path),
+            key=lambda path: str(_resolved(path)),
         )
         with durable_path_lock(first_path):
             with durable_path_lock(second_path):
@@ -502,10 +628,10 @@ class BoundSportMemoryRuntime(SportMemoryRuntime):
         # generation. Fence both canonical stores for the complete verified
         # publication transaction. Sorting resolved paths gives every caller the
         # same lock order, while atomic_write_json can safely re-enter either lock.
-        identity_path = Path(self._bound_identity_selector.path)
-        opponent_path = Path(self._bound_opponent_selector.path)
+        seal = self._assert_binding_seal()
         first_path, second_path = sorted(
-            (identity_path, opponent_path), key=lambda path: str(_resolved(path))
+            (seal.identity_path, seal.opponent_path),
+            key=lambda path: str(_resolved(path)),
         )
         with durable_path_lock(first_path):
             with durable_path_lock(second_path):

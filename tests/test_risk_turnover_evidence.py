@@ -637,3 +637,55 @@ def test_noncanonical_day_store_path_fails_closed_before_window_read(tmp_path):
             window_evidence=window,
         )
 
+
+def test_turnover_resolver_subclass_cannot_resolve_product_evidence(tmp_path):
+    class DerivedResolver(PaperDayTurnoverResolver):
+        pass
+
+    store = _store(tmp_path)
+    window = store.current()
+    goal_store = _goal_store(store)
+    book = _book()
+
+    with pytest.raises(
+        PaperDayTurnoverEvidenceIncompleteError,
+        match="canonical exact resolver class",
+    ):
+        DerivedResolver.resolve(
+            book=book,
+            goal_store=goal_store,
+            window_store=store,
+            window_evidence=window,
+        )
+
+
+def test_turnover_require_current_rejects_subclass_before_override_dispatch(tmp_path):
+    class DerivedResolver(PaperDayTurnoverResolver):
+        @classmethod
+        def resolve(cls, **kwargs):
+            del cls, kwargs
+            raise AssertionError("resolver subclass override executed")
+
+    store = _store(tmp_path)
+    window = store.current()
+    goal_store = _goal_store(store)
+    book = _book()
+    candidate = PaperDayTurnoverResolver.resolve(
+        book=book,
+        goal_store=goal_store,
+        window_store=store,
+        window_evidence=window,
+    )
+
+    with pytest.raises(
+        PaperDayTurnoverEvidenceMismatchError,
+        match="canonical exact resolver class",
+    ):
+        DerivedResolver.require_current(
+            candidate,
+            book=book,
+            goal_store=goal_store,
+            window_store=store,
+            window_evidence=window,
+        )
+

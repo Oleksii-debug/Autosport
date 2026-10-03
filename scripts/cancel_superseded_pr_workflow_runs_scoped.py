@@ -877,14 +877,21 @@ class WorkflowScopedGitHubApi(GitHubApi):
             self,
             "_WorkflowScopedGitHubApi__workflow_name",
         )
+        request_reader = self._request
+        request_func = getattr(request_reader, "__func__", request_reader)
+        request_code = getattr(request_func, "__code__", None)
         recovery_reader = self._recover_candidate_run_reference
         recovery_func = getattr(recovery_reader, "__func__", recovery_reader)
         recovery_code = getattr(recovery_func, "__code__", None)
 
         def snapshot_helpers_current() -> bool:
+            bound_request = self._request
             bound_recovery = self._recover_candidate_run_reference
             return (
-                getattr(_encode_query, "__code__", None) is _encode_query_code
+                request_code is not None
+                and getattr(bound_request, "__func__", bound_request) is request_func
+                and getattr(request_func, "__code__", None) is request_code
+                and getattr(_encode_query, "__code__", None) is _encode_query_code
                 and getattr(_run_parser, "__code__", None) is _run_parser_code
                 and recovery_code is not None
                 and getattr(bound_recovery, "__func__", bound_recovery) is recovery_func
@@ -905,7 +912,7 @@ class WorkflowScopedGitHubApi(GitHubApi):
                     "page": page,
                 }
             )
-            payload = self._request(
+            payload = request_reader(
                 f"/actions/workflows/{workflow_id}/runs?{query}"
             )
             if not snapshot_helpers_current():

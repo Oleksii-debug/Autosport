@@ -173,6 +173,8 @@ def _make_account_identity_authority():
     exact_type = type
     string_type = str
     integer_type = int
+    tuple_type = tuple
+    missing_value = object()
 
     canonical_client_init = client_type.__init__
     canonical_read_account_details = client_type.read_account_details
@@ -571,7 +573,10 @@ def _make_account_identity_authority():
         assert type(value) is identity_type
         return value
 
-    def bind_execution_readback_origin_authority(caller_code: object):
+    def bind_execution_readback_origin_authority(
+        caller_code: object,
+        caller_witnesses: tuple[tuple[str, object], ...],
+    ):
         """Bind one readback-origin proof issuer to the canonical acquisition wrapper.
 
         The returned issuer can mint a proof only while called from the exact code
@@ -584,6 +589,20 @@ def _make_account_identity_authority():
             raise identity_error_type(
                 "execution readback origin requires canonical caller code"
             )
+        if (
+            exact_type(caller_witnesses) is not tuple_type
+            or not caller_witnesses
+            or any(
+                exact_type(item) is not tuple_type
+                or len(item) != 2
+                or exact_type(item[0]) is not string_type
+                or not item[0]
+                for item in caller_witnesses
+            )
+        ):
+            raise identity_error_type(
+                "execution readback origin caller witnesses are invalid"
+            )
 
         caller_marker = "__AUTOSPORT_BETFAIR_READBACK_ORIGIN_CALLER_CODE__"
 
@@ -595,10 +614,17 @@ def _make_account_identity_authority():
             capture_fingerprint: str,
         ) -> str:
             expected_caller = "__AUTOSPORT_BETFAIR_READBACK_ORIGIN_CALLER_CODE__"
-            if getframe_fn(1).f_code is not expected_caller:
+            caller_frame = getframe_fn(1)
+            if caller_frame.f_code is not expected_caller:
                 raise identity_error_type(
                     "execution readback origin proof may only be issued by canonical acquisition"
                 )
+            caller_locals = caller_frame.f_locals
+            for witness_name, witness_value in caller_witnesses:
+                if caller_locals.get(witness_name, missing_value) is not witness_value:
+                    raise identity_error_type(
+                        "execution readback origin caller composition changed"
+                    )
             require_authoritative(identity, client=client)
             if (
                 exact_type(capture_identity) is not integer_type

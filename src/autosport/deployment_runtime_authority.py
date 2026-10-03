@@ -627,6 +627,26 @@ def _assert_canonical_record_codec() -> None:
             )
 
 
+_CANONICAL_RECORD_CODEC_GUARD: Final = _assert_canonical_record_codec
+_CANONICAL_RECORD_CODEC_GUARD_CODE: Final = _assert_canonical_record_codec.__code__
+
+
+def _require_canonical_record_codec() -> None:
+    if (
+        _assert_canonical_record_codec is not _CANONICAL_RECORD_CODEC_GUARD
+        or _CANONICAL_RECORD_CODEC_GUARD.__code__
+        is not _CANONICAL_RECORD_CODEC_GUARD_CODE
+    ):
+        raise DeploymentRuntimeAuthorityError(
+            "runtime authority record codec guard dispatch was replaced"
+        )
+    _CANONICAL_RECORD_CODEC_GUARD()
+
+
+_CANONICAL_RECORD_CODEC_REQUIREMENT: Final = _require_canonical_record_codec
+_CANONICAL_RECORD_CODEC_REQUIREMENT_CODE: Final = _require_canonical_record_codec.__code__
+
+
 class DeploymentRuntimeAuthorityStore:
     """Rollback-resistant append-only runtime authority file.
 
@@ -1042,7 +1062,15 @@ class DeploymentRuntimeAuthorityStore:
     def _records_from_payload(
         payload: Mapping[str, object],
     ) -> tuple[DeploymentRuntimeAuthorityRecord, ...]:
-        _assert_canonical_record_codec()
+        if (
+            _require_canonical_record_codec is not _CANONICAL_RECORD_CODEC_REQUIREMENT
+            or _CANONICAL_RECORD_CODEC_REQUIREMENT.__code__
+            is not _CANONICAL_RECORD_CODEC_REQUIREMENT_CODE
+        ):
+            raise DeploymentRuntimeAuthorityError(
+                "runtime authority record codec requirement dispatch was replaced"
+            )
+        _CANONICAL_RECORD_CODEC_REQUIREMENT()
         records_raw = payload["records"]
         assert isinstance(records_raw, list)
         previous = _EMPTY_CHAIN_SHA256
@@ -1075,7 +1103,15 @@ class DeploymentRuntimeAuthorityStore:
 
     def _assert_binding_integrity(self) -> None:
         self._assert_static_authority_contract()
-        _assert_canonical_record_codec()
+        if (
+            _require_canonical_record_codec is not _CANONICAL_RECORD_CODEC_REQUIREMENT
+            or _CANONICAL_RECORD_CODEC_REQUIREMENT.__code__
+            is not _CANONICAL_RECORD_CODEC_REQUIREMENT_CODE
+        ):
+            raise DeploymentRuntimeAuthorityError(
+                "runtime authority record codec requirement dispatch was replaced"
+            )
+        _CANONICAL_RECORD_CODEC_REQUIREMENT()
         if (
             _sha is not _CANONICAL_SHA_VALIDATOR
             or _CANONICAL_SHA_VALIDATOR.__code__ is not _CANONICAL_SHA_VALIDATOR_CODE

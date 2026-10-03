@@ -818,6 +818,67 @@ def test_explicit_run_boundary_checker_rejects_in_place_request_code_mutation(
     )
 
 
+def test_explicit_run_boundary_checker_rejects_request_code_mutation_during_get(
+    monkeypatch,
+) -> None:
+    api = WorkflowScopedGitHubApi(
+        repository="owner/repo",
+        token="token",
+        workflow_id=356678400,
+        workflow_name="CI",
+    )
+    canonical_request = scoped_controller.GitHubApi._request
+
+    def forged_request(
+        self,
+        _path: str,
+        *,
+        method: str = "GET",
+        allowed_http_errors: frozenset[int] = frozenset(),
+    ):
+        raise AssertionError("mutated request executable must not gain authority")
+
+    class FakeResponse:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, _exc_type, _exc, _tb):
+            return False
+
+        def read(self) -> bytes:
+            return (
+                b'{"id":7012,"workflow_id":356678400,'
+                b'"event":"pull_request","head_sha":"'
+                + HEAD.encode("ascii")
+                + b'","name":"CI","status":"queued",'
+                b'"pull_requests":[{"number":303}]}'
+            )
+
+    def mutating_urlopen(_request, *, timeout: int):
+        assert timeout == 20
+        monkeypatch.setattr(canonical_request, "__code__", forged_request.__code__)
+        return FakeResponse()
+
+    monkeypatch.setattr(
+        scoped_controller,
+        "urlopen",
+        mutating_urlopen,
+        raising=False,
+    )
+    # _request is defined in the canonical sibling module, so mutate its urlopen
+    # global there rather than relying on the scoped-module alias.
+    monkeypatch.setitem(canonical_request.__globals__, "urlopen", mutating_urlopen)
+
+    assert not _explicit_run_identity_is_current(
+        api,
+        run_id=7012,
+        expected_head_sha=HEAD,
+        pr_number=303,
+    )
+
+
 def test_live_pr_boundary_rejects_transitive_request_shadow(monkeypatch) -> None:
     api = WorkflowScopedGitHubApi(
         repository="owner/repo",

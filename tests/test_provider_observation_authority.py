@@ -422,6 +422,7 @@ def test_production_reader_defaults_capture_transport_origin():
     assert defaults["_parse_event"] is authority_module._CANONICAL_PARSE_SSE_EVENT
     assert defaults["_sse_url"] is authority_module._CANONICAL_REQUEST_SSE_URL
     assert defaults["_loads"] is authority_module._CANONICAL_STRICT_JSON_LOADS
+    assert defaults["_max_sse_bytes"] == authority_module._MAX_SSE_BYTES
 
 
 def test_public_capture_has_no_transport_or_clock_injection_parameters():
@@ -429,3 +430,87 @@ def test_public_capture_has_no_transport_or_clock_injection_parameters():
 
     parameters = inspect.signature(capture_parlay_complete_game_board).parameters
     assert set(parameters) == {"api_key", "request", "timeout_seconds"}
+
+
+
+def test_capture_rejects_request_subclass_even_in_test_origin():
+    class HostileRequest(CompleteGameBoardRequest):
+        pass
+
+    with pytest.raises(TypeError, match="exact CompleteGameBoardRequest"):
+        capture_parlay_complete_game_board(
+            api_key="secret-value",
+            request=HostileRequest(
+                sport_key="table_tennis",
+                bookmakers=("bovada",),
+            ),
+        )
+
+
+def test_sealed_capture_rejects_clock_and_witness_double_rebind(monkeypatch):
+    hostile = lambda: "2200-01-01T00:00:00Z"
+    monkeypatch.setattr(authority_module, "_default_clock", hostile)
+    monkeypatch.setattr(authority_module, "_CANONICAL_DEFAULT_CLOCK", hostile)
+
+    with pytest.raises(
+        ProviderObservationIntegrityError,
+        match="production acquisition witness changed",
+    ):
+        capture_parlay_complete_game_board(
+            api_key="secret-value",
+            request=_request(),
+        )
+
+
+def test_sealed_capture_rejects_transport_and_witness_double_rebind(monkeypatch):
+    def hostile(*_args, **_kwargs):
+        raise AssertionError("hostile transport executed")
+
+    monkeypatch.setattr(authority_module, "urlopen", hostile)
+    monkeypatch.setattr(authority_module, "_CANONICAL_URLOPEN", hostile)
+
+    with pytest.raises(
+        ProviderObservationIntegrityError,
+        match="production acquisition witness changed",
+    ):
+        capture_parlay_complete_game_board(
+            api_key="secret-value",
+            request=_request(),
+        )
+
+
+def test_sealed_capture_rejects_guard_rebind_before_execution(monkeypatch):
+    calls: list[str] = []
+
+    def hostile_guard():
+        calls.append("guard")
+        raise AssertionError("hostile guard executed")
+
+    monkeypatch.setattr(
+        authority_module,
+        "_require_production_capture_origin_integrity",
+        hostile_guard,
+    )
+    with pytest.raises(
+        ProviderObservationIntegrityError,
+        match="production acquisition guard changed",
+    ):
+        capture_parlay_complete_game_board(
+            api_key="secret-value",
+            request=_request(),
+        )
+    assert calls == []
+
+
+def test_sealed_capture_rejects_public_surface_rebind(monkeypatch):
+    saved = capture_parlay_complete_game_board
+    monkeypatch.setattr(
+        authority_module,
+        "capture_parlay_complete_game_board",
+        lambda **_kwargs: None,
+    )
+    with pytest.raises(
+        ProviderObservationIntegrityError,
+        match="public surface changed",
+    ):
+        saved(api_key="secret-value", request=_request())

@@ -117,7 +117,7 @@ def _require_workspace_lock_dispatch() -> None:
                 global_name not in expected_globals
                 or expected_globals[global_name] is not expected_binding
             ):
-            raise RuntimeError("workspace economic lock dependency authority changed")
+                raise RuntimeError("workspace economic lock dependency authority changed")
 
 
 @dataclass(frozen=True, slots=True)

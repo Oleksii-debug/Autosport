@@ -7,7 +7,13 @@ from pathlib import Path
 from unittest.mock import patch
 
 import autosport.product_source as product_source_module
-from autosport.causal_collector import CollectorDeltaStore, StreamCheckpoint
+from autosport.causal_collector import (
+    CollectorDeltaStore,
+    DesktopApplicationReceipt,
+    DesktopDeltaCheckpointStore,
+    StreamCheckpoint,
+)
+from autosport.collector_retention import CollectorRetentionManager
 from autosport.domain import MarketType
 from autosport.event_lifecycle import CatalogCheckpoint, EventPhase
 from autosport.parlayapi_provider import ParlayApiTableTennisProvider
@@ -38,9 +44,14 @@ class _Provider:
         return self.batches.pop(0)
 
 
-def _quote(*, odds: str = "1.80", sequence: int = 1) -> ProviderQuote:
+def _quote(
+    *,
+    odds: str = "1.80",
+    sequence: int = 1,
+    provider_event_id: str = "event-1",
+) -> ProviderQuote:
     return ProviderQuote(
-        provider_event_id="event-1",
+        provider_event_id=provider_event_id,
         provider_market_id="book:h2h",
         provider_selection_id="player-a",
         decimal_odds=Decimal(odds),
@@ -62,10 +73,22 @@ def _quote(*, odds: str = "1.80", sequence: int = 1) -> ProviderQuote:
     )
 
 
-def _batch(*, cursor: str, odds: str = "1.80", sequence: int = 1) -> ProviderBatch:
+def _batch(
+    *,
+    cursor: str,
+    odds: str = "1.80",
+    sequence: int = 1,
+    provider_event_id: str = "event-1",
+) -> ProviderBatch:
     return ProviderBatch(
         source_id=_SOURCE_ID,
-        quotes=(_quote(odds=odds, sequence=sequence),),
+        quotes=(
+            _quote(
+                odds=odds,
+                sequence=sequence,
+                provider_event_id=provider_event_id,
+            ),
+        ),
         cursor=cursor,
     )
 
@@ -97,6 +120,24 @@ def _archive_pending_delta(source: ParlayApiProductSource, delta) -> None:
         delta,
         activated_at=delta.collector_committed_at,
         event=event,
+    )
+
+
+def _ack_retention_delta(
+    checkpoint: DesktopDeltaCheckpointStore,
+    delta,
+    *,
+    ordinal: int,
+) -> None:
+    checkpoint.ack(
+        delta,
+        application_receipt=DesktopApplicationReceipt(
+            delta_id=delta.delta_id,
+            canonical_event_digest=delta.canonical_event_digest,
+            receipt_id=f"product-source-retention:{ordinal}:{delta.delta_id}",
+            applied_at=f"2026-09-20T17:40:0{ordinal}+00:00",
+        ),
+        acknowledged_at=f"2026-09-20T17:41:0{ordinal}+00:00",
     )
 
 
@@ -292,6 +333,126 @@ class ParlayApiProductSourceTests(unittest.TestCase):
             self.assertEqual(migrated["last_committed_quote_digests"], {})
             self.assertEqual(migrated["last_committed_dedupe_digests"], {})
             self.assertEqual(store.resolve_event(delta), event)
+
+    def test_legacy_migration_accepts_canonical_retention_tombstone_without_resurrection(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory) / "workspace"
+            authority_root = Path(directory) / "authority"
+            source = ParlayApiProductSource(
+                _Provider(
+                    [
+                        _batch(
+                            cursor="snapshot-1",
+                            sequence=1,
+                            provider_event_id="event-1",
+                        ),
+                        _batch(
+                            cursor="snapshot-2",
+                            sequence=2,
+                            provider_event_id="event-2",
+                        ),
+                    ]
+                ),
+                workspace=workspace,
+                authority_root=authority_root,
+                lawful_terms_ref="terms:parlayapi:v1",
+                retention_ref="retention:parlayapi:v1",
+                clock=lambda: "2026-09-20T17:34:02+00:00",
+            )
+
+            first_page = source.fetch_catalog_page(None)
+            first = source.fetch_deltas(None, (), 1)[0]
+            first_event = source.resolve_event(first)
+            _archive_pending_delta(source, first)
+            source.fetch_deltas(_stream_checkpoint(first), (), 1)
+
+            source.fetch_catalog_page(_catalog_checkpoint(first_page))
+            second = source.fetch_deltas(_stream_checkpoint(first), (), 1)[0]
+            second_event = source.resolve_event(second)
+            _archive_pending_delta(source, second)
+            store = source._require_collector_store()
+
+            legacy = source._read_state()
+            legacy["pending"] = None
+            legacy["event_cache"] = {first.delta_id: first_event.to_dict()}
+            legacy["last_committed_quote_digests"] = {
+                first_event.quote_key: first.canonical_event_digest
+            }
+            legacy["last_committed_dedupe_digests"] = {
+                first_event.dedupe_key: first.canonical_event_digest
+            }
+            source._write_state(legacy)
+
+            desktop = DesktopDeltaCheckpointStore(
+                workspace / "desktop-retention-checkpoint.json"
+            )
+            _ack_retention_delta(desktop, first, ordinal=1)
+            _ack_retention_delta(desktop, second, ordinal=2)
+
+            connection = store._connect()
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                generation = connection.execute(
+                    "SELECT MAX(generation) FROM collector_epoch_activations_v1 "
+                    "WHERE source_id=?",
+                    (source.source_id,),
+                ).fetchone()[0]
+                self.assertIsInstance(generation, int)
+                connection.execute(
+                    "INSERT INTO collector_epoch_activations_v1("
+                    "source_id, generation, stream_epoch, activated_at"
+                    ") VALUES(?,?,?,?)",
+                    (
+                        source.source_id,
+                        int(generation) + 1,
+                        "post-retention-test-epoch",
+                        "2026-09-20T17:42:00+00:00",
+                    ),
+                )
+                connection.commit()
+            finally:
+                if connection.in_transaction:
+                    connection.rollback()
+                connection.close()
+
+            manager = CollectorRetentionManager(store)
+            plan = manager.preview(
+                source_id=source.source_id,
+                stream_epoch=source.stream_epoch,
+                desktop_checkpoint=desktop,
+            )
+            self.assertEqual(plan.delete_delta_ids, (first.delta_id,))
+            self.assertIn(second.delta_id, plan.retained_delta_ids)
+            result = manager.compact(
+                plan,
+                desktop_checkpoint=desktop,
+                compacted_at="2026-09-20T17:43:00+00:00",
+            )
+            self.assertEqual(result.deleted_delta_ids, (first.delta_id,))
+            self.assertIsNone(store.get(first.delta_id))
+            with self.assertRaisesRegex(ValueError, "not retained exactly"):
+                store.resolve_event(first)
+            self.assertEqual(store.resolve_event(second), second_event)
+
+            restored = ParlayApiProductSource(
+                _Provider([]),
+                workspace=workspace,
+                authority_root=authority_root,
+                lawful_terms_ref="terms:parlayapi:v1",
+                retention_ref="retention:parlayapi:v1",
+            )
+            restored.bind_collector_store(store)
+
+            migrated = restored._read_state()
+            self.assertEqual(migrated["event_cache"], {})
+            self.assertEqual(migrated["last_committed_quote_digests"], {})
+            self.assertEqual(migrated["last_committed_dedupe_digests"], {})
+            self.assertIsNone(store.get(first.delta_id))
+            with self.assertRaisesRegex(ValueError, "not retained exactly"):
+                store.resolve_event(first)
+            self.assertEqual(store.resolve_event(second), second_event)
 
     def test_legacy_digest_migration_verifies_in_bounded_chunks(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

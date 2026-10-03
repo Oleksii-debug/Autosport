@@ -111,6 +111,8 @@ class _HostileAuthorityRef:
 def test_module_decimal_rebind_cannot_replace_exact_numeric_root(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    baseline = _estimated_evidence(Decimal("1"))
+    wire = baseline.to_dict()
     hostile = _AdversarialEffectiveSampleSize("1000")
     monkeypatch.setattr(
         utility_module,
@@ -120,6 +122,10 @@ def test_module_decimal_rebind_cannot_replace_exact_numeric_root(
 
     with pytest.raises(PolicyUtilityError, match="effective_sample_size"):
         _estimated_evidence(hostile)
+
+    restored = PolicyUtilityEvidence.from_dict(wire)
+    assert type(restored.effective_sample_size) is Decimal
+    assert restored.effective_sample_size == Decimal("1")
 
 
 def test_module_authority_ref_rebind_cannot_replace_exact_reference_root(
@@ -158,3 +164,7 @@ def test_decimal_identity_is_independent_of_ambient_context_precision() -> None:
         assert first.payload()["utility_value"] == "1.2345671"
         assert second.payload()["utility_value"] == "1.2345672"
         assert first.evidence_id != second.evidence_id
+
+        restored = PolicyUtilityEvidence.from_dict(first.to_dict())
+        assert restored.utility_value == Decimal("1.2345671")
+        assert restored.evidence_id == first.evidence_id

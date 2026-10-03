@@ -159,8 +159,21 @@ class ManualNvdaAcceptanceResolution:
         raise TypeError("ManualNvdaAcceptanceResolution may not be subclassed")
 
 
+@dataclass(frozen=True, slots=True)
+class _IssuedResolutionWitness:
+    resolution: ManualNvdaAcceptanceResolution
+    fingerprint: str
+    ledger: object
+    path: object
+    anchor_path: object
+    pending_path: object
+    lock_path: object
+    events_reader: object
+    events_reader_code: object
+
+
 _ISSUED_RESOLUTIONS: OrderedDict[
-    int, tuple[ManualNvdaAcceptanceResolution, str, object, str]
+    int, _IssuedResolutionWitness
 ] = OrderedDict()
 
 
@@ -541,12 +554,12 @@ def verify_manual_nvda_acceptance_resolution(
             "manual NVDA resolution must be the exact canonical type"
         )
     issued = _ISSUED_RESOLUTIONS.get(id(resolution))
-    if issued is None or issued[0] is not resolution:
+    if issued is None or issued.resolution is not resolution:
         raise NvdaManualAcceptanceStateError(
             "manual NVDA resolution is not a live resolver-issued authority"
         )
     fingerprint = _resolution_fingerprint(resolution)
-    if fingerprint != issued[1]:
+    if fingerprint != issued.fingerprint:
         raise NvdaManualAcceptanceStateError(
             "manual NVDA resolution changed after issuance"
         )
@@ -560,16 +573,22 @@ def verify_manual_nvda_acceptance_resolution(
             "manual NVDA resolution does not match the expected candidate"
         )
 
-    issued_ledger = issued[2]
-    issued_ledger_path = issued[3]
+    issued_ledger = issued.ledger
     if (
         type(issued_ledger) is not ManualNvdaAcceptanceLedger
-        or str(issued_ledger.path) != issued_ledger_path
+        or issued_ledger.path is not issued.path
+        or issued_ledger._anchor_path is not issued.anchor_path
+        or issued_ledger._pending_path is not issued.pending_path
+        or issued_ledger._lock_path is not issued.lock_path
+        or "events" in vars(issued_ledger)
+        or ManualNvdaAcceptanceLedger.events is not issued.events_reader
+        or getattr(issued.events_reader, "__code__", None)
+        is not issued.events_reader_code
     ):
         raise NvdaManualAcceptanceStateError(
             "manual NVDA resolution ledger authority changed after issuance"
         )
-    current_records = issued_ledger.events()
+    current_records = issued.events_reader(issued_ledger)
     current_matching = [
         current
         for current in current_records
@@ -1075,11 +1094,17 @@ class ManualNvdaAcceptanceLedger:
         fingerprint = _resolution_fingerprint(resolution)
         while len(_ISSUED_RESOLUTIONS) >= _MAX_LIVE_RESOLUTIONS:
             _ISSUED_RESOLUTIONS.popitem(last=False)
-        _ISSUED_RESOLUTIONS[id(resolution)] = (
-            resolution,
-            fingerprint,
-            self,
-            str(self.path),
+        events_reader = ManualNvdaAcceptanceLedger.events
+        _ISSUED_RESOLUTIONS[id(resolution)] = _IssuedResolutionWitness(
+            resolution=resolution,
+            fingerprint=fingerprint,
+            ledger=self,
+            path=self.path,
+            anchor_path=self._anchor_path,
+            pending_path=self._pending_path,
+            lock_path=self._lock_path,
+            events_reader=events_reader,
+            events_reader_code=events_reader.__code__,
         )
         return resolution
 

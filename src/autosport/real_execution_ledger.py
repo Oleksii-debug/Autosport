@@ -462,7 +462,11 @@ class RealExecutionLedger:
         # False until this instance has proven both the visible file contents and,
         # on POSIX, the directory entry naming the ledger durable.
         self._path_durable = False
-        self._serialization_held = False
+        # Serialization ownership is thread-specific. A process-wide boolean lets a
+        # second thread on the same ledger instance bypass the RLock/sidecar while a
+        # writer is inside PREPARE -> publish -> COMMIT and can incorrectly recover/
+        # abort that live transaction.
+        self._serialization_owner_thread_id: int | None = None
         try:
             authority_path = self.path.resolve(strict=False)
             authority_workspace = authority_path.parent
@@ -625,10 +629,10 @@ class RealExecutionLedger:
             data_fd: int | None = None
             try:
                 data_fd = self._acquire_posix_ledger_read_lock()
-                self._serialization_held = True
+                self._serialization_owner_thread_id = threading.get_ident()
                 return operation()
             finally:
-                self._serialization_held = False
+                self._serialization_owner_thread_id = None
                 if data_fd is not None:
                     os.close(data_fd)
                 os.close(fd)
@@ -651,10 +655,10 @@ class RealExecutionLedger:
             data_fd: int | None = None
             try:
                 data_fd = self._acquire_posix_ledger_lock()
-                self._serialization_held = True
+                self._serialization_owner_thread_id = threading.get_ident()
                 return operation()
             finally:
-                self._serialization_held = False
+                self._serialization_owner_thread_id = None
                 if data_fd is not None:
                     os.close(data_fd)
                 os.close(fd)
@@ -789,7 +793,7 @@ class RealExecutionLedger:
             ) from exc
 
     def _read_verified_state(self) -> tuple[bytes, list[dict[str, Any]]]:
-        if not self._serialization_held:
+        if self._serialization_owner_thread_id != threading.get_ident():
             return self._read_serialized(self._read_verified_state)
         if not self.path.exists():
             raw = b""
@@ -817,7 +821,7 @@ class RealExecutionLedger:
         attempt_id: str | None,
         payload: dict[str, Any],
     ) -> None:
-        if not self._serialization_held:
+        if self._serialization_owner_thread_id != threading.get_ident():
             self._mutate(
                 lambda: self._append(
                     kind,

@@ -722,7 +722,7 @@ class ParlayApiProductSource:
         # Historical-event migration/lookup is durable evidence authority.  A subclass
         # could override migration or digest-resolution methods while still passing an
         # isinstance check, so canonical product composition requires the exact store.
-        if type(store) is not CollectorDeltaStore:
+        if type(store) is not _CANONICAL_COLLECTOR_STORE_TYPE:
             raise TypeError("store must be exact canonical CollectorDeltaStore")
         expected = (self.workspace / "collector_deltas.json").resolve(strict=False)
         observed = store.path.resolve(strict=False)
@@ -757,7 +757,9 @@ class ParlayApiProductSource:
             # HeadlessCollectorService before any source I/O.  Keep direct/unit
             # source use available without mutating collector storage merely by
             # constructing the source.
-            store = CollectorDeltaStore(self.workspace / "collector_deltas.json")
+            store = _CANONICAL_COLLECTOR_STORE_TYPE(
+                self.workspace / "collector_deltas.json"
+            )
             self._collector_store = store
             try:
                 self._migrate_legacy_history_to_collector_store()

@@ -274,6 +274,46 @@ class ReleasePackageInputSymlinkFenceTests(unittest.TestCase):
         ):
             release_package._release_example_destination_name(Path("CON"))
 
+    def test_builder_rejects_windows_invalid_nested_example_member(self) -> None:
+        if os.name == "nt":
+            self.skipTest("Windows cannot create the invalid source filename")
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paths = self._make_inputs(root)
+            (paths["example"] / "bad:name.json").write_text(
+                '{"unsafe":true}\n',
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "release package contains Windows-invalid path character",
+            ):
+                self._build(paths)
+
+            self.assertFalse(paths["package"].exists())
+
+    def test_builder_rejects_casefolded_windows_member_collision(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paths = self._make_inputs(root)
+            upper = paths["example"] / "Case.txt"
+            lower = paths["example"] / "case.TXT"
+            upper.write_text("first\n", encoding="utf-8")
+            lower.write_text("second\n", encoding="utf-8")
+            observed_names = {entry.name for entry in os.scandir(paths["example"])}
+            if not {"Case.txt", "case.TXT"}.issubset(observed_names):
+                self.skipTest("filesystem is case-insensitive")
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "release package contains Windows path collision",
+            ):
+                self._build(paths)
+
+            self.assertFalse(paths["package"].exists())
+
     def test_top_level_symlink_fails_before_existing_staging_is_deleted(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

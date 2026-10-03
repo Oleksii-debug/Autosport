@@ -74,9 +74,9 @@ def _decimal_from_form(name: str, value: object, *, optional: bool = False) -> D
     if not isinstance(value, str):
         raise OwnerEconomicAuthorityError(text("ui.windows.owner_authority.error.text", field=_field_label(name)))
     candidate = value.strip()
-    if optional and not candidate:
+    if optional and not candidate and value == candidate:
         return None
-    if not candidate:
+    if not candidate or value != candidate:
         raise OwnerEconomicAuthorityError(text("ui.windows.owner_authority.error.required", field=_field_label(name)))
     try:
         parsed = Decimal(candidate)
@@ -92,9 +92,9 @@ def _decimal_from_form(name: str, value: object, *, optional: bool = False) -> D
 
 
 def _positive_int_from_form(name: str, value: object) -> int:
-    if not isinstance(value, str) or not value.strip():
+    if not isinstance(value, str) or not value or value != value.strip():
         raise OwnerEconomicAuthorityError(text("ui.windows.owner_authority.error.required", field=_field_label(name)))
-    candidate = value.strip()
+    candidate = value
     if not candidate.isascii() or not candidate.isdecimal() or str(int(candidate)) != candidate:
         raise OwnerEconomicAuthorityError(text("ui.windows.owner_authority.error.integer", field=_field_label(name)))
     result = int(candidate)
@@ -104,11 +104,11 @@ def _positive_int_from_form(name: str, value: object) -> int:
 
 
 def _nonnegative_int_from_form(name: str, value: object) -> int:
-    if not isinstance(value, str) or not value.strip():
+    if not isinstance(value, str) or not value or value != value.strip():
         raise OwnerEconomicAuthorityError(
             text("ui.windows.owner_authority.error.required", field=_field_label(name))
         )
-    candidate = value.strip()
+    candidate = value
     if (
         not candidate.isascii()
         or not candidate.isdecimal()
@@ -209,9 +209,9 @@ def build_initial_owner_contract(
 
 
 def _positive_or_zero_int(name: str, value: object) -> int:
-    if not isinstance(value, str) or not value.strip():
-        raise ValueError(f"{name} is missing")
-    candidate = value.strip()
+    if not isinstance(value, str) or not value or value != value.strip():
+        raise ValueError(f"{name} is missing or non-canonical")
+    candidate = value
     if not candidate.isascii() or not candidate.isdecimal() or str(int(candidate)) != candidate:
         raise ValueError(f"{name} is invalid")
     return int(candidate)

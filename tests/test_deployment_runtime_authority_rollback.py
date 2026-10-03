@@ -2959,3 +2959,116 @@ def test_runtime_authority_rejects_monotonic_read_helper_code_replacement(
             store.records()
     finally:
         target.__code__ = original_code
+
+
+@pytest.mark.parametrize(
+    "method_name",
+    (
+        "_validate_authority_root_selection",
+        "_validate_authority_root_activation",
+        "_validate_workspace_binding",
+        "_ensure_authority_root_bound",
+        "_ensure_authority_root_activated",
+        "_load_bound_history",
+        "_new_terminal_record",
+        "_append_record",
+        "_load_history",
+        "_validate_namespace_marker",
+        "_ensure_namespace_marker",
+        "_decode_record",
+        "_payload",
+        "_namespace_payload",
+    ),
+)
+def test_runtime_authority_rejects_monotonic_read_internal_class_replacement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    method_name: str,
+) -> None:
+    path = tmp_path / "deployment-runtime-authority.json"
+    store = DeploymentRuntimeAuthorityStore.initialize_pristine(
+        path,
+        authority_root=_authority_root(tmp_path),
+    )
+    hostile_calls: list[object] = []
+
+    def hostile(*args: object, **kwargs: object) -> object:
+        hostile_calls.append((args, kwargs))
+        raise AssertionError("hostile monotonic internal dispatch executed")
+
+    current = vars(MonotonicWorkspaceAuthority)[method_name]
+    replacement: object = (
+        staticmethod(hostile) if isinstance(current, staticmethod) else hostile
+    )
+    monkeypatch.setattr(MonotonicWorkspaceAuthority, method_name, replacement)
+
+    with pytest.raises(
+        DeploymentRuntimeAuthorityError,
+        match="monotonic read internal dispatch was replaced",
+    ):
+        store.records()
+
+    assert hostile_calls == []
+
+
+@pytest.mark.parametrize(
+    "method_name",
+    ("_load_bound_history", "_decode_record", "_append_record"),
+)
+def test_runtime_authority_rejects_monotonic_read_internal_code_replacement(
+    tmp_path: Path,
+    method_name: str,
+) -> None:
+    path = tmp_path / "deployment-runtime-authority.json"
+    store = DeploymentRuntimeAuthorityStore.initialize_pristine(
+        path,
+        authority_root=_authority_root(tmp_path),
+    )
+    descriptor = vars(MonotonicWorkspaceAuthority)[method_name]
+    target = descriptor.__func__ if isinstance(descriptor, staticmethod) else descriptor
+    original_code = target.__code__
+
+    def hostile(*args: object, **kwargs: object) -> object:
+        del args, kwargs
+        raise AssertionError("hostile monotonic internal code executed")
+
+    assert hostile.__code__.co_freevars == original_code.co_freevars
+    target.__code__ = hostile.__code__
+    try:
+        with pytest.raises(
+            DeploymentRuntimeAuthorityError,
+            match="monotonic read internal dispatch was replaced",
+        ):
+            store.records()
+    finally:
+        target.__code__ = original_code
+
+
+@pytest.mark.parametrize(
+    "method_name",
+    ("_load_bound_history", "_decode_record", "_append_record"),
+)
+def test_runtime_authority_rejects_monotonic_read_internal_instance_shadow(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    method_name: str,
+) -> None:
+    path = tmp_path / "deployment-runtime-authority.json"
+    store = DeploymentRuntimeAuthorityStore.initialize_pristine(
+        path,
+        authority_root=_authority_root(tmp_path),
+    )
+    hostile_calls: list[object] = []
+
+    def hostile(*args: object, **kwargs: object) -> object:
+        hostile_calls.append((args, kwargs))
+        raise AssertionError("hostile monotonic internal instance shadow executed")
+
+    monkeypatch.setattr(store._authority, method_name, hostile)
+    with pytest.raises(
+        DeploymentRuntimeAuthorityError,
+        match="monotonic read instance dispatch was replaced",
+    ):
+        store.records()
+
+    assert hostile_calls == []

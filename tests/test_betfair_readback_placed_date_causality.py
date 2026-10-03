@@ -6,7 +6,7 @@ import json
 
 import pytest
 
-from betfair_execution_readback_test_support import authoritative_execution_readback
+from betfair_execution_readback_test_support import semantic_execution_readback
 
 from autosport.betfair_account_readonly import (
     BetfairReadOnlyClient,
@@ -22,7 +22,7 @@ from autosport.real_execution_ledger import ExecutionAction
 from autosport.supervised_provider_evidence import (
     ProviderEvidenceError,
     VerifiedProviderEffectEvidence,
-    verify_betfair_provider_state,
+    _evaluate_betfair_provider_state_semantics,
 )
 
 
@@ -119,7 +119,7 @@ def _capture(action: ExecutionAction, *, placed_date: str):
             )
         )
 
-    return authoritative_execution_readback(
+    return semantic_execution_readback(
         responses,
         action_id=action.action_id,
         market_id=action.market_id,
@@ -171,7 +171,7 @@ def _capture_cleared(
             )
         )
 
-    return authoritative_execution_readback(
+    return semantic_execution_readback(
         responses,
         action_id=action.action_id,
         market_id=action.market_id,
@@ -192,7 +192,7 @@ def _verify_cleared(
         placed_date=placed_date,
         settled_date=settled_date,
     )
-    return verify_betfair_provider_state(
+    return _evaluate_betfair_provider_state_semantics(
         action,
         profile,
         expected_profile_sha256=profile.profile_id,
@@ -203,7 +203,7 @@ def _verify_cleared(
 def _verify(action: ExecutionAction, *, placed_date: str):
     profile = _profile()
     capture = _capture(action, placed_date=placed_date)
-    return verify_betfair_provider_state(
+    return _evaluate_betfair_provider_state_semantics(
         action,
         profile,
         expected_profile_sha256=profile.profile_id,

@@ -1013,6 +1013,14 @@ def resolve_campaign_forward_universe_cycle_authority(
             or module_globals.get("_CANONICAL_ARTIFACT_KIND") != expected_artifact_kind
             or module_globals.get("_CANONICAL_COLLECTOR_ARTIFACT_RESOLVER") is not expected_collector_artifact_resolver
             or module_globals.get("_CANONICAL_PROVIDER_EVIDENCE_LOADER") is not expected_provider_evidence_loader
+            or module_globals.get("_PROVIDER_EVIDENCE_SCOPE")
+            is not expected_provider_evidence_scope
+            or expected_provider_evidence_scope.__code__
+            is not expected_provider_evidence_scope_code
+            or module_globals.get("_PROVIDER_EVIDENCE_SCOPE_ERROR")
+            is not expected_provider_evidence_scope_error
+            or module_globals.get("CampaignProviderCycleCaptureIntegrityError")
+            is not expected_provider_evidence_scope_error
             or module_globals.get("_CANONICAL_ISSUED_UNIVERSES") is not expected_issued_universes
             or module_globals.get("_provider_universe_module") is not expected_provider_universe_module
             or expected_provider_universe_module._ISSUED_UNIVERSES is not expected_issued_universes
@@ -1256,6 +1264,9 @@ def authorize_campaign_forward_source_receipts(
     expected_artifact_kind = _CANONICAL_ARTIFACT_KIND
     expected_collector_artifact_resolver = _CANONICAL_COLLECTOR_ARTIFACT_RESOLVER
     expected_provider_evidence_loader = _CANONICAL_PROVIDER_EVIDENCE_LOADER
+    expected_provider_evidence_scope = _PROVIDER_EVIDENCE_SCOPE
+    expected_provider_evidence_scope_code = expected_provider_evidence_scope.__code__
+    expected_provider_evidence_scope_error = _PROVIDER_EVIDENCE_SCOPE_ERROR
     expected_issued_universes = _CANONICAL_ISSUED_UNIVERSES
     expected_provider_universe_module = _provider_universe_module
 

@@ -1184,6 +1184,7 @@ def _install_account_snapshot_acquisition_authority() -> None:
     raw_resolve = _AccountSnapshotStore.resolve
     raw_resolve_request = _AccountSnapshotStore.resolve_request
     canonical_snapshot_read = BetfairReadOnlyClient.read_account_snapshot
+    immutable_mapping_type = MappingProxyType
 
     class _AccountSnapshotAuthorityBoundary:
         """Own live provider-origin authority without an independently callable mint."""
@@ -1214,8 +1215,8 @@ def _install_account_snapshot_acquisition_authority() -> None:
             object.__setattr__(self, name, value)
 
         def __init__(self) -> None:
-            self.__issued = MappingProxyType({})
-            self.__live = MappingProxyType({})
+            self.__issued = immutable_mapping_type({})
+            self.__live = immutable_mapping_type({})
             self.__lock = RLock()
 
         @staticmethod
@@ -1297,7 +1298,7 @@ def _install_account_snapshot_acquisition_authority() -> None:
                         object.__setattr__(
                             self,
                             "_AccountSnapshotAuthorityBoundary__issued",
-                            MappingProxyType(updated),
+                            immutable_mapping_type(updated),
                         )
 
             with self.__lock:
@@ -1311,7 +1312,7 @@ def _install_account_snapshot_acquisition_authority() -> None:
                 object.__setattr__(
                     self,
                     "_AccountSnapshotAuthorityBoundary__issued",
-                    MappingProxyType(updated),
+                    immutable_mapping_type(updated),
                 )
 
         def acquire(
@@ -1402,7 +1403,7 @@ def _install_account_snapshot_acquisition_authority() -> None:
                             object.__setattr__(
                                 self,
                                 "_AccountSnapshotAuthorityBoundary__live",
-                                MappingProxyType(updated),
+                                immutable_mapping_type(updated),
                             )
                         elif (
                             type(value) is not AuthoritativeAccountSnapshot
@@ -1413,7 +1414,7 @@ def _install_account_snapshot_acquisition_authority() -> None:
                             object.__setattr__(
                                 self,
                                 "_AccountSnapshotAuthorityBoundary__live",
-                                MappingProxyType(updated),
+                                immutable_mapping_type(updated),
                             )
                             raise AccountSnapshotAcquisitionError(
                                 "live account snapshot authority integrity changed"
@@ -1537,7 +1538,7 @@ def _install_account_snapshot_acquisition_authority() -> None:
                         object.__setattr__(
                             self,
                             "_AccountSnapshotAuthorityBoundary__live",
-                            MappingProxyType(updated),
+                            immutable_mapping_type(updated),
                         )
                     elif (
                         type(value) is not AuthoritativeAccountSnapshot
@@ -1548,7 +1549,7 @@ def _install_account_snapshot_acquisition_authority() -> None:
                         object.__setattr__(
                             self,
                             "_AccountSnapshotAuthorityBoundary__live",
-                            MappingProxyType(updated),
+                            immutable_mapping_type(updated),
                         )
                         raise AccountSnapshotAcquisitionError(
                             "live account snapshot authority integrity changed"
@@ -1574,7 +1575,7 @@ def _install_account_snapshot_acquisition_authority() -> None:
                             object.__setattr__(
                                 self,
                                 "_AccountSnapshotAuthorityBoundary__live",
-                                MappingProxyType(updated),
+                                immutable_mapping_type(updated),
                             )
 
                 updated = dict(self.__live)
@@ -1586,7 +1587,7 @@ def _install_account_snapshot_acquisition_authority() -> None:
                 object.__setattr__(
                     self,
                     "_AccountSnapshotAuthorityBoundary__live",
-                    MappingProxyType(updated),
+                    immutable_mapping_type(updated),
                 )
                 return acquired
 

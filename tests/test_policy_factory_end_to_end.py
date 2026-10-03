@@ -131,12 +131,17 @@ def _digest(payload: object) -> str:
     ).hexdigest()
 
 
-def _cases(store: FactoryArtifactStore) -> tuple[PolicyEvaluationCase, ...]:
+def _cases(
+    store: FactoryArtifactStore,
+    *,
+    wait_cost: str = "0",
+) -> tuple[PolicyEvaluationCase, ...]:
     authority_id="mechanical-paper-settlement:v1"
+    canonical_wait_cost = str(Decimal(wait_cost))
     def build(sample_id: str, observed_at: str) -> PolicyEvaluationCase:
-        bound_case={"sample_id":sample_id,"observed_at":observed_at,"reward_available_at":HOLDOUT_REVEAL_AT,"admissible_actions":["BET","HEDGE","WAIT"],"action_rewards":[["BET","0"],["HEDGE","2"],["WAIT","1"]],"action_costs":[["BET","0"],["HEDGE","0"],["WAIT","0"]],"behavior_propensities":[["BET","0.34"],["HEDGE","0.33"],["WAIT","0.33"]],"reward_truth":EvidenceTruth.OBSERVED.value,"reward_mode":PolicyRewardMode.MECHANICAL_PAPER.value,"regime_id":"table-tennis:pre-match","historical_action":None,"counterfactual_source_id":authority_id}
+        bound_case={"sample_id":sample_id,"observed_at":observed_at,"reward_available_at":HOLDOUT_REVEAL_AT,"admissible_actions":["BET","HEDGE","WAIT"],"action_rewards":[["BET","0"],["HEDGE","2"],["WAIT","1"]],"action_costs":[["BET","0"],["HEDGE","0"],["WAIT",canonical_wait_cost]],"behavior_propensities":[["BET","0.34"],["HEDGE","0.33"],["WAIT","0.33"]],"reward_truth":EvidenceTruth.OBSERVED.value,"reward_mode":PolicyRewardMode.MECHANICAL_PAPER.value,"regime_id":"table-tennis:pre-match","historical_action":None,"counterfactual_source_id":authority_id}
         source_sha=_digest({"schema_version":1,"kind":"autosport-counterfactual-source-evidence-v1","authority_id":authority_id,"authority_version":"1","case":bound_case})
-        return PolicyEvaluationCase(sample_id,observed_at,HOLDOUT_REVEAL_AT,("BET","HEDGE","WAIT"),(("BET",Decimal("0")),("HEDGE",Decimal("2")),("WAIT",Decimal("1"))),(("BET",Decimal("0")),("HEDGE",Decimal("0")),("WAIT",Decimal("0"))),(("BET",Decimal("0.34")),("HEDGE",Decimal("0.33")),("WAIT",Decimal("0.33"))),EvidenceTruth.OBSERVED,PolicyRewardMode.MECHANICAL_PAPER,source_sha,"table-tennis:pre-match",None,authority_id)
+        return PolicyEvaluationCase(sample_id,observed_at,HOLDOUT_REVEAL_AT,("BET","HEDGE","WAIT"),(("BET",Decimal("0")),("HEDGE",Decimal("2")),("WAIT",Decimal("1"))),(("BET",Decimal("0")),("HEDGE",Decimal("0")),("WAIT",Decimal(canonical_wait_cost))),(("BET",Decimal("0.34")),("HEDGE",Decimal("0.33")),("WAIT",Decimal("0.33"))),EvidenceTruth.OBSERVED,PolicyRewardMode.MECHANICAL_PAPER,source_sha,"table-tennis:pre-match",None,authority_id)
     return (build("holdout-1","2026-09-19T09:05:00Z"),build("holdout-2","2026-09-19T09:06:00Z"))
 
 
@@ -179,11 +184,16 @@ def _policy_successor(
     return predecessor.update(action=action, reward=reward, transition=transition)
 
 
-def _foundation(tmp_path, *, artifact_directory: str = "artifacts"):
+def _foundation(
+    tmp_path,
+    *,
+    artifact_directory: str = "artifacts",
+    wait_cost: str = "0",
+):
     artifact_root = tmp_path / artifact_directory
     clock = _FixtureClock()
     store = FactoryArtifactStore(artifact_root, clock=clock)
-    cases = _cases(store)
+    cases = _cases(store, wait_cost=wait_cost)
     dataset_manifest = policy_evaluation_cases_manifest_sha256(cases)
     qualification_evidence_sha256 = store.materialize(
         "counterfactual-qualification",
@@ -1319,7 +1329,11 @@ def test_product_issued_no_action_baseline_cannot_receive_hindsight_wait_utility
         predecessor_model_id,
         cases,
         rule,
-    ) = _foundation(workspace, artifact_directory="factory-artifacts")
+    ) = _foundation(
+        workspace,
+        artifact_directory="factory-artifacts",
+        wait_cost="0.25",
+    )
 
     no_action_policy, update = _policy_successor(
         predecessor,
@@ -1412,8 +1426,11 @@ def test_product_issued_no_action_baseline_cannot_receive_hindsight_wait_utility
     assert issued.observed_count == len(cases)
     assert issued.scored_count == 0
     assert issued.abstention_count == len(cases)
+    assert Decimal(issued.total_cost) == Decimal("0.5")
 
-    # The frozen cases intentionally assign WAIT a positive counterfactual reward.
+    # The frozen cases intentionally assign WAIT a positive counterfactual reward
+    # and explicit applicable WAIT cost. NO_ACTION issuance must keep the latter
+    # as economic evidence while excluding the former from factual action utility.
     # That value is useful for ordinary policy evaluation but is not factual profit
     # earned by taking NO_ACTION.  Baseline issuance must not convert it into
     # hindsight "avoided loss" utility or a non-zero action uncertainty interval.

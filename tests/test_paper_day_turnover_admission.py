@@ -245,6 +245,50 @@ def test_admission_rejects_workspace_lock_rebinding_before_mutation(tmp_path):
     assert persisted.tickets == {}
 
 
+def test_goal_store_constructor_rebinding_cannot_mint_day_headroom(tmp_path):
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    old = now - timedelta(days=2)
+    goal = _goal()
+    EconomicGoalStore(tmp_path).initialize_owner(goal)
+    book = _book_with_settled_turnover(placed_at=_timestamp(old), stake="50")
+    book.save(tmp_path / "paper_book.json")
+    candidate = _leg("goal-store-constructor")
+    context = _context(candidate, _timestamp(now))
+    policy = _policy(goal)
+
+    original_init = EconomicGoalStore.__init__
+    hostile_called = False
+
+    def hostile_init(self, workspace):
+        nonlocal hostile_called
+        hostile_called = True
+        original_init(self, workspace)
+
+    try:
+        EconomicGoalStore.__init__ = hostile_init
+        result = admit_paper_ticket(
+            workspace=tmp_path,
+            book=book,
+            risk_policy=policy,
+            stake=Decimal("0.01"),
+            legs=(candidate,),
+            reason="goal store constructor must remain canonical",
+            placed_at=_timestamp(now),
+            context=context,
+            provider_source_ids=("provider-1",),
+            bankroll_id="paper-bankroll",
+            currency="USD",
+        )
+    finally:
+        EconomicGoalStore.__init__ = original_init
+
+    assert hostile_called is False
+    assert result.admitted is False
+    assert result.risk.reason == "economic goal turnover limit exceeded"
+    persisted = PaperBook.load(tmp_path / "paper_book.json")
+    assert persisted.tickets.keys() == book.tickets.keys()
+
+
 def test_product_issued_current_utc_day_releases_old_day_turnover(tmp_path):
     now = datetime.now(timezone.utc).replace(microsecond=0)
     old = now - timedelta(days=2)

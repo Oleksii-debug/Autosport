@@ -1532,6 +1532,16 @@ class DeploymentRuntimeAuthorityStore:
     def _assert_binding_integrity(self) -> None:
         self._assert_static_authority_contract()
         if (
+            _assert_monotonic_read_helpers
+            is not _CANONICAL_MONOTONIC_READ_HELPER_ASSERT
+            or _CANONICAL_MONOTONIC_READ_HELPER_ASSERT.__code__
+            is not _CANONICAL_MONOTONIC_READ_HELPER_ASSERT_CODE
+        ):
+            raise DeploymentRuntimeAuthorityError(
+                "runtime authority monotonic read helper guard was replaced"
+            )
+        _CANONICAL_MONOTONIC_READ_HELPER_ASSERT()
+        if (
             _require_canonical_record_codec is not _CANONICAL_RECORD_CODEC_REQUIREMENT
             or _CANONICAL_RECORD_CODEC_REQUIREMENT.__code__
             is not _CANONICAL_RECORD_CODEC_REQUIREMENT_CODE

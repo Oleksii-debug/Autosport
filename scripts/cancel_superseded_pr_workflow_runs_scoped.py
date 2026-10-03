@@ -846,6 +846,8 @@ class WorkflowScopedGitHubApi(GitHubApi):
         self,
         *,
         exclude_run_ids: tuple[int, ...] = (),
+        _cancel_effect=None,
+        _cancel_effect_code=None,
     ) -> tuple[int, ...]:
         """Cancel uniquely-associated active runs whose PR metadata disappeared.
 
@@ -857,6 +859,15 @@ class WorkflowScopedGitHubApi(GitHubApi):
         identity is recorded so cancel() repeats both the commit association and live PR
         qualification immediately before the irreversible POST.
         """
+
+        if _cancel_effect is None:
+            _cancel_effect = _cancel_run_or_defer_active_conflict
+            _cancel_effect_code = getattr(_cancel_effect, "__code__", None)
+        if (
+            _cancel_effect_code is None
+            or getattr(_cancel_effect, "__code__", None) is not _cancel_effect_code
+        ):
+            raise CancellationError("canonical cancel effect authority changed")
 
         if any(type(run_id) is not int or run_id <= 0 for run_id in exclude_run_ids):
             raise CancellationError("invalid excluded run id")
@@ -886,7 +897,9 @@ class WorkflowScopedGitHubApi(GitHubApi):
                     head_branch,
                 )
                 try:
-                    did_cancel = _cancel_run_or_defer_active_conflict(self, run_id)
+                    if getattr(_cancel_effect, "__code__", None) is not _cancel_effect_code:
+                        raise CancellationError("canonical cancel effect authority changed")
+                    did_cancel = _cancel_effect(self, run_id)
                 except _CancellationAuthorityChanged:
                     self._zero_association_recovered_runs.pop(run_id, None)
                     continue
@@ -914,7 +927,9 @@ class WorkflowScopedGitHubApi(GitHubApi):
                 continue
             self._recovered_runs[run_id] = (pr_number, candidate_head_sha)
             try:
-                did_cancel = _cancel_run_or_defer_active_conflict(self, run_id)
+                if getattr(_cancel_effect, "__code__", None) is not _cancel_effect_code:
+                    raise CancellationError("canonical cancel effect authority changed")
+                did_cancel = _cancel_effect(self, run_id)
             except _CancellationAuthorityChanged:
                 self._recovered_runs.pop(run_id, None)
                 continue
@@ -1287,6 +1302,8 @@ def cancel_superseded_explicit_pr_runs(
     workflow_name: str,
     current_run_id: int,
     runs: tuple[WorkflowRun, ...] | None = None,
+    _cancel_effect=_cancel_run_or_defer_active_conflict,
+    _cancel_effect_code=_cancel_run_or_defer_active_conflict.__code__,
 ) -> tuple[int, ...]:
     """Sweep superseded runs for every explicit singleton PR in one workflow snapshot.
 
@@ -1299,6 +1316,9 @@ def cancel_superseded_explicit_pr_runs(
     cleanup remains owned by cancel_historical_unbound_runs and keeps its existing
     association/branch boundary checks.
     """
+
+    if getattr(_cancel_effect, "__code__", None) is not _cancel_effect_code:
+        raise CancellationError("canonical cancel effect authority changed")
 
     def qualification_state_from_trusted_read(value) -> tuple[str, bool]:
         # The production trusted reader already returns a primitive canonical tuple.
@@ -1445,7 +1465,9 @@ def cancel_superseded_explicit_pr_runs(
                 != qualification_state
             ):
                 break
-            if not _cancel_run_or_defer_active_conflict(api, run_id):
+            if getattr(_cancel_effect, "__code__", None) is not _cancel_effect_code:
+                raise CancellationError("canonical cancel effect authority changed")
+            if not _cancel_effect(api, run_id):
                 continue
             cancelled.append(run_id)
             cancelled_ids.add(run_id)
@@ -1459,6 +1481,8 @@ def _cancel_triggering_run_if_stale_or_nonqualifying(
     event_head_sha: str,
     current_run_id: int,
     qualification,
+    _cancel_effect=_cancel_run_or_defer_active_conflict,
+    _cancel_effect_code=_cancel_run_or_defer_active_conflict.__code__,
 ) -> bool:
     """Cancel a source run proven stale or same-head non-integration-capable.
 
@@ -1468,6 +1492,9 @@ def _cancel_triggering_run_if_stale_or_nonqualifying(
     allowed only after a fresh live qualification snapshot still matches the snapshot
     used for the decision.
     """
+
+    if getattr(_cancel_effect, "__code__", None) is not _cancel_effect_code:
+        raise CancellationError("canonical cancel effect authority changed")
 
     def qualification_state_from_trusted_read(value) -> tuple[str, bool]:
         if type(value) is tuple:
@@ -1512,10 +1539,17 @@ def _cancel_triggering_run_if_stale_or_nonqualifying(
         != qualification_state
     ):
         return False
-    return _cancel_run_or_defer_active_conflict(api, current_run_id)
+    if getattr(_cancel_effect, "__code__", None) is not _cancel_effect_code:
+        raise CancellationError("canonical cancel effect authority changed")
+    return _cancel_effect(api, current_run_id)
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(
+    argv: list[str] | None = None,
+    *,
+    _cancel_effect=_cancel_run_or_defer_active_conflict,
+    _cancel_effect_code=_cancel_run_or_defer_active_conflict.__code__,
+) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--pr-number", type=int, required=True)
     parser.add_argument(
@@ -1529,6 +1563,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--current-run-id", type=int, required=True)
     args = parser.parse_args(argv)
     try:
+        if getattr(_cancel_effect, "__code__", None) is not _cancel_effect_code:
+            raise CancellationError("canonical cancel effect authority changed")
         api = WorkflowScopedGitHubApi(
             repository=os.environ.get("GITHUB_REPOSITORY", ""),
             token=os.environ.get("GITHUB_TOKEN", ""),
@@ -1572,6 +1608,8 @@ def main(argv: list[str] | None = None) -> int:
             workflow_name=args.workflow_name,
             current_run_id=current_run_id,
             runs=sweep_runs,
+            _cancel_effect=_cancel_effect,
+            _cancel_effect_code=_cancel_effect_code,
         )
         if trigger_pr_number is None and snapshot_trigger_pr_number is not None:
             trigger_pr_number = snapshot_trigger_pr_number
@@ -1590,6 +1628,8 @@ def main(argv: list[str] | None = None) -> int:
         )
         orphan_cancelled = api.cancel_historical_unbound_runs(
             exclude_run_ids=orphan_excluded_run_ids,
+            _cancel_effect=_cancel_effect,
+            _cancel_effect_code=_cancel_effect_code,
         )
 
         if trigger_pr_number is not None:
@@ -1611,6 +1651,8 @@ def main(argv: list[str] | None = None) -> int:
                     event_head_sha=event_head_sha,
                     current_run_id=current_run_id,
                     qualification=trigger_qualification,
+                    _cancel_effect=_cancel_effect,
+                    _cancel_effect_code=_cancel_effect_code,
                 )
     except CancellationError as exc:
         print(f"superseded-run cancellation failed: {exc}", file=sys.stderr)

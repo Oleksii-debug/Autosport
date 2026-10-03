@@ -964,25 +964,24 @@ def _parse_economic_soap_result(payload: bytes, method: str) -> ET.Element:
         for child in result
         if child.tag == f"{{{_account._EXTERNAL_NS}}}ReturnStatus"
     ]
-    if len(statuses) > 1:
+    if len(statuses) != 1:
         raise BetdaqEconomicReadbackError(
-            "BETDAQ economic result has duplicate ReturnStatus"
+            "BETDAQ economic result must contain exactly one ReturnStatus"
         )
-    if statuses:
-        raw_code = statuses[0].attrib.get("Code")
-        if (
-            type(raw_code) is not str
-            or raw_code != raw_code.strip()
-            or not raw_code
-            or not raw_code.lstrip("-").isdigit()
-        ):
-            raise BetdaqEconomicReadbackError(
-                "BETDAQ economic ReturnStatus Code must be provider integer text"
-            )
-        if int(raw_code) != 0:
-            raise BetdaqEconomicReadbackError(
-                f"BETDAQ economic ReturnStatus reported failure code {int(raw_code)}"
-            )
+    raw_code = statuses[0].attrib.get("Code")
+    if (
+        type(raw_code) is not str
+        or raw_code != raw_code.strip()
+        or not raw_code
+        or not raw_code.lstrip("-").isdigit()
+    ):
+        raise BetdaqEconomicReadbackError(
+            "BETDAQ economic ReturnStatus Code must be provider integer text"
+        )
+    if int(raw_code) != 0:
+        raise BetdaqEconomicReadbackError(
+            f"BETDAQ economic ReturnStatus reported failure code {int(raw_code)}"
+        )
 
     allowed_children = {
         f"{{{_account._EXTERNAL_NS}}}ReturnStatus",

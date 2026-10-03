@@ -5,6 +5,7 @@ import queue
 import re
 import threading
 from dataclasses import dataclass
+from datetime import datetime
 from decimal import Decimal
 from hashlib import sha256
 from pathlib import Path
@@ -316,7 +317,7 @@ class ProductGuiEconomicSnapshot:
     portfolio_mean_case: Decimal
 
     def __post_init__(self) -> None:
-        if type(self.workspace) is not Path or not self.workspace.is_absolute():
+        if not isinstance(self.workspace, Path) or not self.workspace.is_absolute():
             raise ValueError("economic snapshot workspace must be an absolute Path")
         for field_name, value in (
             ("session_id", self.session_id),
@@ -332,14 +333,26 @@ class ProductGuiEconomicSnapshot:
             or self.cycle_index < 0
         ):
             raise ValueError("economic snapshot cycle_index must be a nonnegative int")
-        if self.cycle_last_success_at is not None and (
-            type(self.cycle_last_success_at) is not str
-            or not self.cycle_last_success_at
-            or self.cycle_last_success_at.strip() != self.cycle_last_success_at
-        ):
-            raise ValueError(
-                "economic snapshot cycle_last_success_at must be canonical text or None"
-            )
+        if self.cycle_last_success_at is not None:
+            value = self.cycle_last_success_at
+            if (
+                type(value) is not str
+                or not value
+                or value.strip() != value
+            ):
+                raise ValueError(
+                    "economic snapshot cycle_last_success_at must be canonical timestamp or None"
+                )
+            try:
+                parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            except ValueError as exc:
+                raise ValueError(
+                    "economic snapshot cycle_last_success_at must be valid ISO-8601"
+                ) from exc
+            if parsed.tzinfo is None or parsed.utcoffset() is None:
+                raise ValueError(
+                    "economic snapshot cycle_last_success_at must be timezone-aware"
+                )
         if self.paper_book_sha256 is not None and (
             type(self.paper_book_sha256) is not str
             or len(self.paper_book_sha256) != 64

@@ -700,7 +700,7 @@ class WorkflowScopedGitHubApi(GitHubApi):
                 continue
 
             try:
-                qualification = self.live_pr_qualification(pr_number)
+                qualification = _trusted_live_pr_qualification(self, pr_number)
             except CancellationError:
                 continue
             if (
@@ -721,9 +721,10 @@ class WorkflowScopedGitHubApi(GitHubApi):
         return tuple(cancelled)
 
 
-def _build_explicit_run_identity_checker(resolver):
+def _build_explicit_run_identity_checker(resolver, request_impl):
     resolver_code = getattr(resolver, "__code__", None)
-    if resolver_code is None:
+    request_code = getattr(request_impl, "__code__", None)
+    if resolver_code is None or request_code is None:
         raise RuntimeError("explicit run identity resolver executable is unavailable")
 
     def check(
@@ -733,21 +734,27 @@ def _build_explicit_run_identity_checker(resolver):
         expected_head_sha: str,
         pr_number: int,
     ) -> bool:
-        """Fail closed when an explicit run no longer matches its scanned identity."""
+        """Fail closed when explicit identity or its transport dispatch changes."""
 
+        production_dispatch_current = None
         if isinstance(api, WorkflowScopedGitHubApi):
-            bound = getattr(api, "_explicit_run_identity_matches", None)
-            if (
-                getattr(resolver, "__code__", None) is not resolver_code
-                or getattr(bound, "__self__", None) is not api
-                or getattr(bound, "__func__", None) is not resolver
-            ):
+            def production_dispatch_current() -> bool:
+                bound = getattr(api, "_explicit_run_identity_matches", None)
+                bound_request = getattr(api, "_request", None)
+                return (
+                    getattr(resolver, "__code__", None) is resolver_code
+                    and getattr(request_impl, "__code__", None) is request_code
+                    and getattr(bound, "__self__", None) is api
+                    and getattr(bound, "__func__", None) is resolver
+                    and getattr(bound_request, "__self__", None) is api
+                    and getattr(bound_request, "__func__", None) is request_impl
+                )
+
+            if not production_dispatch_current():
                 return False
             candidate = resolver
             receiver = (api,)
         else:
-            # Keep deliberately small focused unit-test doubles usable without
-            # weakening the production dispatch check above.
             candidate = getattr(api, "_explicit_run_identity_matches", None)
             if candidate is None:
                 return True
@@ -755,7 +762,7 @@ def _build_explicit_run_identity_checker(resolver):
                 return False
             receiver = ()
         try:
-            return (
+            matched = (
                 candidate(
                     *receiver,
                     run_id=run_id,
@@ -766,14 +773,65 @@ def _build_explicit_run_identity_checker(resolver):
             )
         except CancellationError:
             return False
+        if production_dispatch_current is not None and not production_dispatch_current():
+            return False
+        return matched
 
     return check
 
 
+def _build_live_pr_qualification_reader(
+    live_pr_qualification,
+    pull_request,
+    request_impl,
+):
+    live_code = getattr(live_pr_qualification, "__code__", None)
+    pull_code = getattr(pull_request, "__code__", None)
+    request_code = getattr(request_impl, "__code__", None)
+    if live_code is None or pull_code is None or request_code is None:
+        raise RuntimeError("live PR qualification executable is unavailable")
+
+    def read(api: WorkflowScopedGitHubApi, pr_number: int):
+        if not isinstance(api, WorkflowScopedGitHubApi):
+            return api.live_pr_qualification(pr_number)
+
+        def production_dispatch_current() -> bool:
+            bound_live = getattr(api, "live_pr_qualification", None)
+            bound_pull = getattr(api, "_pull_request", None)
+            bound_request = getattr(api, "_request", None)
+            return (
+                getattr(live_pr_qualification, "__code__", None) is live_code
+                and getattr(pull_request, "__code__", None) is pull_code
+                and getattr(request_impl, "__code__", None) is request_code
+                and getattr(bound_live, "__self__", None) is api
+                and getattr(bound_live, "__func__", None) is live_pr_qualification
+                and getattr(bound_pull, "__self__", None) is api
+                and getattr(bound_pull, "__func__", None) is pull_request
+                and getattr(bound_request, "__self__", None) is api
+                and getattr(bound_request, "__func__", None) is request_impl
+            )
+
+        if not production_dispatch_current():
+            raise CancellationError("live PR qualification dispatch changed")
+        qualification = live_pr_qualification(api, pr_number)
+        if not production_dispatch_current():
+            raise CancellationError("live PR qualification dispatch changed")
+        return qualification
+
+    return read
+
+
 _explicit_run_identity_is_current = _build_explicit_run_identity_checker(
-    WorkflowScopedGitHubApi._explicit_run_identity_matches
+    WorkflowScopedGitHubApi._explicit_run_identity_matches,
+    GitHubApi._request,
+)
+_trusted_live_pr_qualification = _build_live_pr_qualification_reader(
+    GitHubApi.live_pr_qualification,
+    GitHubApi._pull_request,
+    GitHubApi._request,
 )
 del _build_explicit_run_identity_checker
+del _build_live_pr_qualification_reader
 
 
 def _explicit_singleton_pr_for_current_run(
@@ -914,7 +972,7 @@ def cancel_superseded_explicit_pr_runs(
     cancelled_ids: set[int] = set()
     for pr_number in pr_numbers:
         try:
-            qualification = api.live_pr_qualification(pr_number)
+            qualification = _trusted_live_pr_qualification(api, pr_number)
         except CancellationError:
             # Qualification authority is scoped to one PR group. Failure to resolve
             # one group must fail that group closed without starving independent PRs
@@ -943,7 +1001,7 @@ def cancel_superseded_explicit_pr_runs(
             # live PR head/lifecycle qualification as the final external authority
             # check before the irreversible cancellation.
             try:
-                current_qualification = api.live_pr_qualification(pr_number)
+                current_qualification = _trusted_live_pr_qualification(api, pr_number)
             except CancellationError:
                 break
             if current_qualification != qualification:
@@ -989,7 +1047,7 @@ def _cancel_triggering_run_if_stale_or_nonqualifying(
     ):
         return False
     try:
-        current_qualification = api.live_pr_qualification(pr_number)
+        current_qualification = _trusted_live_pr_qualification(api, pr_number)
     except CancellationError:
         # A failed authority reread grants no trigger cancellation authority, but it
         # must not invalidate independently completed workflow-wide cleanup.
@@ -1081,7 +1139,9 @@ def main(argv: list[str] | None = None) -> int:
             # Refresh after the potentially long sweep; the helper itself rereads once
             # more immediately before cancelling this exact triggering source run.
             try:
-                trigger_qualification = api.live_pr_qualification(trigger_pr_number)
+                trigger_qualification = _trusted_live_pr_qualification(
+                    api, trigger_pr_number
+                )
             except CancellationError:
                 # Trigger qualification is authority for this one source run only.
                 # Failure proves no cancellation authority and must not turn already

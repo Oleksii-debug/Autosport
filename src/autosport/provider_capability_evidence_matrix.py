@@ -678,9 +678,13 @@ def _install_provider_capability_authority():
                 "BETDAQ lifecycle evidence is not current product-issued authenticated proof"
             )
 
-        observed = _time(lifecycle.observed_at, "lifecycle.observed_at")
+        provider_observed = _time(lifecycle.observed_at, "lifecycle.observed_at")
+        authority_available = max(
+            _time(lifecycle.committed_at, "lifecycle.committed_at"),
+            _time(integration.observed_at, "integration.observed_at"),
+        )
         expiry_candidates = [
-            observed
+            provider_observed
             + timedelta(seconds=BETDAQ_AUTHENTICATED_MAX_OBSERVATION_AGE_SECONDS),
             _time(lifecycle.review_due_at, "lifecycle.review_due_at"),
         ]
@@ -688,7 +692,12 @@ def _install_provider_capability_authority():
             expiry_candidates.append(
                 _time(lifecycle.provider_expires_at, "lifecycle.provider_expires_at")
             )
-        expires_at = min(expiry_candidates).isoformat()
+        expiry = min(expiry_candidates)
+        if authority_available >= expiry:
+            raise ProviderCapabilityEvidenceMatrixError(
+                "BETDAQ lifecycle authority became available at or after its expiry"
+            )
+        expires_at = expiry.isoformat()
 
         fact = ProviderCapabilityEvidence(
             capability=lifecycle.capability,
@@ -698,7 +707,7 @@ def _install_provider_capability_authority():
             integration_evidence_id=integration.evidence_id,
             environment=lifecycle.scope.environment,
             application_mode="betdaq-authenticated-readonly",
-            observed_at=lifecycle.observed_at,
+            observed_at=authority_available.isoformat(),
             expires_at=expires_at,
             evidence_ref=f"capability-lifecycle://{lifecycle.evidence_id}",
             evidence_sha256=lifecycle.evidence_id,

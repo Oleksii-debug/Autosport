@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from contextvars import ContextVar
 
 import pytest
 
@@ -388,4 +389,31 @@ def test_extracted_forward_context_runner_cannot_bypass_canonical_verifier(tmp_p
         runner((None,) * 8, hostile_invoke)
 
     assert invoked == []
+    assert _admissions(fixture) == {}
+
+
+def test_extracted_forward_context_var_cannot_forge_verification(tmp_path):
+    fixture = AdmissionFixture(tmp_path)
+    coordinator = fixture.coordinator()
+    closure = admission_module._CURRENT_FORWARD_VERIFICATION.__closure__ or ()
+    context = next(
+        cell.cell_contents
+        for cell in closure
+        if type(cell.cell_contents) is ContextVar
+    )
+    token = context.set(
+        (
+            (None,) * 8,
+            {
+                "receipt_sha256": "a" * 64,
+                "campaign_id": "forged-campaign",
+            },
+        )
+    )
+    try:
+        with pytest.raises((TypeError, RuntimeError)):
+            fixture.admit(coordinator)
+    finally:
+        context.reset(token)
+
     assert _admissions(fixture) == {}

@@ -146,10 +146,7 @@ class CollectorSQLiteStoreTests(unittest.TestCase):
             except OSError as exc:
                 self.skipTest(f"hardlink creation is unavailable: {exc}")
 
-            with self.assertRaisesRegex(
-                ValueError,
-                "canonical collector store file identity is unavailable",
-            ):
+            with self.assertRaisesRegex(ValueError, "invalid causal collector store"):
                 CollectorDeltaStore(alias)
 
     def test_event_payload_schema_marker_prevents_silent_recreation_after_loss(self):

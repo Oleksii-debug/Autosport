@@ -559,8 +559,147 @@ def test_successor_binds_predecessor_exact_version_scope_and_time():
     with pytest.raises(ProviderCapabilityEvidenceMatrixError, match="advance by one"):
         validate_capability_matrix_successor(first, replace(second, matrix_version=3))
     other_scope = matrix(version=2, predecessor=first.matrix_id, as_of=T4, environment="sandbox")
-    with pytest.raises(ProviderCapabilityEvidenceMatrixError, match="scope changed"):
+    with pytest.raises(
+        ProviderCapabilityEvidenceMatrixError,
+        match="authority scope or integration mechanism changed",
+    ):
         validate_capability_matrix_successor(first, other_scope)
+
+
+def test_successor_rejects_adapter_identity_or_version_drift():
+    first_profile = profile()
+    first = matrix(p=first_profile)
+
+    changed_adapter = replace(first_profile, adapter_id="different-adapter")
+    changed_adapter_matrix = matrix(
+        p=changed_adapter,
+        version=2,
+        predecessor=first.matrix_id,
+        as_of=T4,
+    )
+    with pytest.raises(
+        ProviderCapabilityEvidenceMatrixError,
+        match="authority scope or integration mechanism changed",
+    ):
+        validate_capability_matrix_successor(first, changed_adapter_matrix)
+
+    changed_version = replace(first_profile, adapter_version="2")
+    changed_version_matrix = matrix(
+        p=changed_version,
+        version=2,
+        predecessor=first.matrix_id,
+        as_of=T4,
+    )
+    with pytest.raises(
+        ProviderCapabilityEvidenceMatrixError,
+        match="authority scope or integration mechanism changed",
+    ):
+        validate_capability_matrix_successor(first, changed_version_matrix)
+
+
+def test_successor_rejects_integration_mechanism_drift():
+    p = profile()
+    official = integration(p)
+    first = build_provider_capability_evidence_matrix(
+        p,
+        official,
+        environment="production",
+        application_mode="live-key-readonly",
+        matrix_version=1,
+        as_of=T3,
+        matrix_ref="official-first",
+    )
+    browser = bind_bookmaker_integration(
+        p,
+        integration_kind=BookmakerIntegrationKind.BROWSER_AUTOMATION,
+        observed_at=T2,
+        source_ref="browser-integration",
+        source_payload_sha256="d" * 64,
+    )
+    second = build_provider_capability_evidence_matrix(
+        p,
+        browser,
+        environment="production",
+        application_mode="live-key-readonly",
+        matrix_version=2,
+        as_of=T4,
+        matrix_ref="browser-second",
+        predecessor_matrix_id=first.matrix_id,
+    )
+
+    with pytest.raises(
+        ProviderCapabilityEvidenceMatrixError,
+        match="authority scope or integration mechanism changed",
+    ):
+        validate_capability_matrix_successor(first, second)
+
+
+def test_successor_rejects_profile_version_and_observation_regression():
+    first_profile = replace(profile(), profile_version=2, observed_at=T1)
+    first = matrix(p=first_profile)
+
+    version_regressed = replace(first_profile, profile_version=1, observed_at=T2)
+    version_regressed_matrix = matrix(
+        p=version_regressed,
+        version=2,
+        predecessor=first.matrix_id,
+        as_of=T4,
+    )
+    with pytest.raises(
+        ProviderCapabilityEvidenceMatrixError,
+        match="profile version regressed",
+    ):
+        validate_capability_matrix_successor(first, version_regressed_matrix)
+
+    observation_regressed = replace(first_profile, observed_at=T0)
+    observation_regressed_matrix = matrix(
+        p=observation_regressed,
+        version=2,
+        predecessor=first.matrix_id,
+        as_of=T4,
+    )
+    with pytest.raises(
+        ProviderCapabilityEvidenceMatrixError,
+        match="profile observation moved backwards",
+    ):
+        validate_capability_matrix_successor(first, observation_regressed_matrix)
+
+
+def test_successor_rejects_integration_observation_regression():
+    p = profile()
+    later_integration = bind_bookmaker_integration(
+        p,
+        integration_kind=BookmakerIntegrationKind.OFFICIAL_API,
+        observed_at=T2,
+        source_ref="integration-later",
+        source_payload_sha256="d" * 64,
+    )
+    first = build_provider_capability_evidence_matrix(
+        p,
+        later_integration,
+        environment="production",
+        application_mode="live-key-readonly",
+        matrix_version=1,
+        as_of=T3,
+        matrix_ref="later-integration-first",
+    )
+    earlier_integration = integration(p)
+    second = build_provider_capability_evidence_matrix(
+        p,
+        earlier_integration,
+        environment="production",
+        application_mode="live-key-readonly",
+        matrix_version=2,
+        as_of=T4,
+        matrix_ref="earlier-integration-second",
+        predecessor_matrix_id=first.matrix_id,
+    )
+
+    with pytest.raises(
+        ProviderCapabilityEvidenceMatrixError,
+        match="integration observation moved backwards",
+    ):
+        validate_capability_matrix_successor(first, second)
 
 
 def test_successor_validation_rejects_post_build_matrix_mutation():

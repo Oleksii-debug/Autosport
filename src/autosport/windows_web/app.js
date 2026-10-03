@@ -413,6 +413,18 @@
       byId("product-runtime-status"),
       productRuntime.status || "Тривала симуляційна робота не запущена.",
     );
+    setValueIfChanged(
+      byId("product-runtime-workspace"),
+      productRuntime.workspace || "—",
+    );
+    setValueIfChanged(
+      byId("product-runtime-session-id"),
+      productRuntime.session_id || "—",
+    );
+    setValueIfChanged(
+      byId("product-runtime-source-id"),
+      productRuntime.source_id || "—",
+    );
     syncRuntimeActionAvailability(
       byId("product-runtime-start"),
       byId("product-runtime-stop"),

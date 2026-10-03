@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 from pathlib import Path
+import inspect
 import threading
 from types import SimpleNamespace
 
-from autosport.windows_webview_shell import AutosportWebController
+from autosport.windows_webview_shell import AutosportWebController, web_shell_index_path
 
 
 class _IdleWorker:
@@ -15,10 +16,10 @@ class _IdleWorker:
 
 
 class _QueuedProductWorker:
-    busy = False
-
-    def __init__(self, message: object) -> None:
+    def __init__(self, message: object, *, busy: bool = False) -> None:
         self._message = message
+        self.busy = busy
+        self.stop_reasons: list[str] = []
 
     def poll(self):
         message = self._message
@@ -26,8 +27,8 @@ class _QueuedProductWorker:
         return message
 
     def request_stop(self, reason: str = "operator_stop") -> bool:
-        del reason
-        return False
+        self.stop_reasons.append(reason)
+        return True
 
 
 def _controller(tmp_path: Path, message: object) -> AutosportWebController:
@@ -43,6 +44,7 @@ def _controller(tmp_path: Path, message: object) -> AutosportWebController:
     controller.evidence_export_worker = _IdleWorker()
     controller.product_worker = _QueuedProductWorker(message)
     controller.product_runtime_status = ""
+    controller._product_runtime_identity = None
     controller.status = ""
     controller.last_error = ""
     controller.log = []
@@ -62,7 +64,11 @@ def test_started_runtime_status_uses_ukrainian_operator_copy(tmp_path: Path) -> 
         tmp_path,
         SimpleNamespace(
             kind="STARTED",
-            status=SimpleNamespace(source_id="source-1", cycles_completed=0),
+            status=SimpleNamespace(
+                session_id="session-1",
+                source_id="source-1",
+                cycles_completed=0,
+            ),
             tick=None,
             stop_reason=None,
             error_type=None,
@@ -80,6 +86,8 @@ def test_tick_runtime_status_does_not_expose_internal_english_terms(tmp_path: Pa
             kind="TICK",
             status=None,
             tick=SimpleNamespace(
+                session_id="session-1",
+                source_id="source-1",
                 cycle_index=7,
                 committed_delta_ids=("delta-1", "delta-2"),
                 settled_ticket_ids=("ticket-1",),
@@ -101,7 +109,11 @@ def test_stopped_runtime_status_uses_ukrainian_operator_copy(tmp_path: Path) -> 
         tmp_path,
         SimpleNamespace(
             kind="STOPPED",
-            status=SimpleNamespace(source_id="source-1", cycles_completed=3),
+            status=SimpleNamespace(
+                session_id="session-1",
+                source_id="source-1",
+                cycles_completed=3,
+            ),
             tick=None,
             stop_reason="operator_stop",
             error_type=None,
@@ -130,3 +142,102 @@ def test_error_runtime_status_localizes_copy_without_python_type_leakage(
     assert "RuntimeError" not in status
     assert "BaseException" not in status
     assert "віднов" in status.casefold()
+
+
+def test_runtime_identity_projection_comes_from_canonical_started_status(
+    tmp_path: Path,
+) -> None:
+    controller = _controller(
+        tmp_path,
+        SimpleNamespace(
+            kind="STARTED",
+            status=SimpleNamespace(
+                session_id="session-1",
+                source_id="source-1",
+                cycles_completed=0,
+            ),
+            tick=None,
+            stop_reason=None,
+            error_type=None,
+        ),
+    )
+
+    controller._poll_workers()
+
+    assert controller._product_runtime_identity_projection() == {
+        "workspace": str(tmp_path),
+        "session_id": "session-1",
+        "source_id": "source-1",
+    }
+
+
+def test_runtime_identity_drift_quarantines_workspace_and_requests_stop(
+    tmp_path: Path,
+) -> None:
+    controller = _controller(
+        tmp_path,
+        SimpleNamespace(
+            kind="STARTED",
+            status=SimpleNamespace(
+                session_id="session-1",
+                source_id="source-1",
+                cycles_completed=0,
+            ),
+            tick=None,
+            stop_reason=None,
+            error_type=None,
+        ),
+    )
+    controller._poll_workers()
+
+    drift_worker = _QueuedProductWorker(
+        SimpleNamespace(
+            kind="TICK",
+            status=None,
+            tick=SimpleNamespace(
+                session_id="session-2",
+                source_id="source-1",
+                cycle_index=1,
+                committed_delta_ids=(),
+                settled_ticket_ids=(),
+            ),
+            stop_reason=None,
+            error_type=None,
+        ),
+        busy=True,
+    )
+    controller.product_worker = drift_worker
+
+    controller._poll_workers()
+
+    assert tmp_path in controller._recovery_required_workspaces
+    assert drift_worker.stop_reasons == ["runtime_error"]
+    assert "віднов" in controller.product_runtime_status.casefold()
+    assert controller._product_runtime_identity_projection()["session_id"] == "session-1"
+
+
+def test_runtime_state_contract_projects_canonical_identity_fields() -> None:
+    source = inspect.getsource(AutosportWebController.state)
+
+    assert '"workspace": runtime_identity["workspace"]' in source
+    assert '"session_id": runtime_identity["session_id"]' in source
+    assert '"source_id": runtime_identity["source_id"]' in source
+
+
+def test_runtime_identity_is_keyboard_readable_in_semantic_shell() -> None:
+    index = web_shell_index_path()
+    html = index.read_text(encoding="utf-8")
+    javascript = index.with_name("app.js").read_text(encoding="utf-8")
+
+    for control_id in (
+        "product-runtime-workspace",
+        "product-runtime-session-id",
+        "product-runtime-source-id",
+    ):
+        assert f'<label for="{control_id}">' in html
+        assert f'id="{control_id}" type="text" readonly' in html
+        assert f'byId("{control_id}")' in javascript
+
+    assert 'productRuntime.workspace || "—"' in javascript
+    assert 'productRuntime.session_id || "—"' in javascript
+    assert 'productRuntime.source_id || "—"' in javascript

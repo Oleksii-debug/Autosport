@@ -356,6 +356,7 @@ class AutosportWebController:
         self.evidence_export_worker = OneShotEvidenceExportWorker()
         self.product_worker = ProductGuiWorker()
         self.product_runtime_status = "Тривалий імітаційний режим не запущено."
+        self._product_runtime_identity: tuple[Path, str, str] | None = None
         # Request identity/replay bookkeeping is intentionally separate from the
         # ordinary controller lock. Reservations are brief; handlers never run
         # while this lock is held, so the emergency lane can preserve one global
@@ -538,6 +539,58 @@ class AutosportWebController:
         except Exception:
             return False
         return workspace not in self._recovery_required_workspaces
+
+    def _product_runtime_identity_projection(self) -> dict[str, str]:
+        identity = getattr(self, "_product_runtime_identity", None)
+        if identity is None:
+            return {"workspace": "", "session_id": "", "source_id": ""}
+        workspace, session_id, source_id = identity
+        return {
+            "workspace": str(workspace),
+            "session_id": session_id,
+            "source_id": source_id,
+        }
+
+    def _reject_product_runtime_identity(self, workspace: Path) -> None:
+        resolved_workspace = Path(workspace)
+        self._recovery_required_workspaces.add(resolved_workspace)
+        self.product_runtime_status = text(
+            "ui.windows.product_runtime.error.recovery_required"
+        )
+        if self.product_worker.busy:
+            self.product_worker.request_stop("runtime_error")
+        self._fail(self.product_runtime_status)
+
+    def _bind_product_runtime_identity(
+        self,
+        *,
+        workspace: Path,
+        session_id: object,
+        source_id: object,
+    ) -> bool:
+        resolved_workspace = Path(workspace)
+        if (
+            type(session_id) is not str
+            or not session_id
+            or session_id.strip() != session_id
+            or type(source_id) is not str
+            or not source_id
+            or source_id.strip() != source_id
+        ):
+            self._reject_product_runtime_identity(resolved_workspace)
+            return False
+
+        candidate = (resolved_workspace, session_id, source_id)
+        existing = getattr(self, "_product_runtime_identity", None)
+        if (
+            existing is not None
+            and existing[0] == resolved_workspace
+            and existing != candidate
+        ):
+            self._reject_product_runtime_identity(resolved_workspace)
+            return False
+        self._product_runtime_identity = candidate
+        return True
 
     def _refresh_economic_projection(self) -> None:
         strategy_id = self.strategy_id
@@ -732,6 +785,12 @@ class AutosportWebController:
             if product_message is None:
                 break
             if product_message.kind == "STARTED" and product_message.status is not None:
+                if not self._bind_product_runtime_identity(
+                    workspace=Path(self._active_workspace),
+                    session_id=product_message.status.session_id,
+                    source_id=product_message.status.source_id,
+                ):
+                    continue
                 self.product_runtime_status = (
                     "Тривалий імітаційний режим активний: "
                     f"джерело {product_message.status.source_id}; "
@@ -739,6 +798,12 @@ class AutosportWebController:
                 )
                 self._ok(self.product_runtime_status)
             elif product_message.kind == "TICK" and product_message.tick is not None:
+                if not self._bind_product_runtime_identity(
+                    workspace=Path(self._active_workspace),
+                    session_id=product_message.tick.session_id,
+                    source_id=product_message.tick.source_id,
+                ):
+                    continue
                 self.product_runtime_status = (
                     "Тривалий імітаційний режим: завершено цикл "
                     f"{product_message.tick.cycle_index}; "
@@ -747,6 +812,12 @@ class AutosportWebController:
                 )
                 self.status = self.product_runtime_status
             elif product_message.kind == "STOPPED" and product_message.status is not None:
+                if not self._bind_product_runtime_identity(
+                    workspace=Path(self._active_workspace),
+                    session_id=product_message.status.session_id,
+                    source_id=product_message.status.source_id,
+                ):
+                    continue
                 reason = {
                     "operator_stop": "операторська зупинка",
                     "app_close": "закриття програми",
@@ -797,6 +868,7 @@ class AutosportWebController:
                 source_selection,
                 source_entry,
             )
+            runtime_identity = self._product_runtime_identity_projection()
             return {
                 "status": self.status,
                 "last_error": self._bridge_validation_error or self.last_error,
@@ -854,6 +926,9 @@ class AutosportWebController:
                         source_ready=source_entry is not None
                     ),
                     "can_stop": self.product_worker.busy,
+                    "workspace": runtime_identity["workspace"],
+                    "session_id": runtime_identity["session_id"],
+                    "source_id": runtime_identity["source_id"],
                 },
                 "surface_key": self.surface_key,
                 "surfaces": surfaces,
@@ -1207,6 +1282,9 @@ class AutosportWebController:
             return self._fail(_safe_exception_text(exc))
         if not started:
             return self._fail("Тривалий імітаційний режим уже запущено.")
+        existing_identity = getattr(self, "_product_runtime_identity", None)
+        if existing_identity is not None and existing_identity[0] != Path(workspace):
+            self._product_runtime_identity = None
         self._active_workspace = workspace
         self.product_runtime_status = "Запускається канонічний тривалий імітаційний режим…"
         return self._ok(self.product_runtime_status, focus_id="product-runtime-status")

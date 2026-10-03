@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.util
 import tempfile
 import unittest
 from datetime import timedelta
@@ -24,7 +25,19 @@ from autosport.paper_execution_reality import (
     PaperExecutionModelConfig,
 )
 from autosport.paper_strategy import Forecast, PaperValueAgent
+from autosport.predictive_authority import resolve_authoritative_forecast_ref
 from autosport.risk import PaperRiskPolicy
+
+
+_PREDICTIVE_HELPER_PATH = Path(__file__).with_name("test_predictive_authority.py")
+_PREDICTIVE_SPEC = importlib.util.spec_from_file_location(
+    "_autosport_predictive_authority_helpers_for_paper_value",
+    _PREDICTIVE_HELPER_PATH,
+)
+if _PREDICTIVE_SPEC is None or _PREDICTIVE_SPEC.loader is None:
+    raise RuntimeError("cannot load predictive-authority test helpers")
+_PREDICTIVE_HELPERS = importlib.util.module_from_spec(_PREDICTIVE_SPEC)
+_PREDICTIVE_SPEC.loader.exec_module(_PREDICTIVE_HELPERS)
 
 
 class PaperValueUncertaintyAbstentionTests(unittest.TestCase):
@@ -291,6 +304,80 @@ class PaperValueUncertaintyAbstentionTests(unittest.TestCase):
                     in note
                     for note in context.notes
                 )
+            )
+
+    def test_resolver_minted_predictive_authority_uses_conservative_probability_and_persists_binding(
+        self,
+    ) -> None:
+        event = MarketEvent(
+            event_id="event-authority-paper",
+            market_id="market-authority-paper",
+            selection_id="selection-authority-paper",
+            decimal_odds=Decimal("2"),
+            observed_ts=_PREDICTIVE_HELPERS._DECISION_TIME,
+            source_id="provider-1",
+            sequence=1,
+            source_ts="2026-01-04T00:01:59+00:00",
+            ingest_ts=_PREDICTIVE_HELPERS._DECISION_TIME,
+            sport="soccer",
+        )
+        forecast = ForecastRecord(
+            quote_key=event.quote_key,
+            probability=Decimal("0.60"),
+            model_id="fixture-model",
+            model_version="model-1",
+            strategy_version="strategy-1",
+            model_training_cutoff_ts=_PREDICTIVE_HELPERS._HELPERS.T1,
+            input_cutoff_ts="2026-01-03T12:00:00+00:00",
+            generated_at=_PREDICTIVE_HELPERS._FORECAST_TIME,
+            uncertainty=Decimal("0.04"),
+            market_snapshot_hash="a" * 64,
+        )
+        quote = QuoteRef.from_market_event(
+            event,
+            market_snapshot_hash=forecast.market_snapshot_hash,
+        )
+        policy = _PREDICTIVE_HELPERS._policy()
+        qualification = _PREDICTIVE_HELPERS._qualification()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry, _ = _PREDICTIVE_HELPERS._promoted_registry(
+                root,
+                qualification,
+                policy,
+            )
+            authorized_ref = resolve_authoritative_forecast_ref(
+                registry,
+                forecast,
+                quote,
+                decision_time=event.observed_ts,
+                policy=policy,
+                qualification=qualification,
+            )
+            context, ledger_path = self._context(root, event)
+
+            self._agent(
+                self._goal(),
+                forecast,
+                predictive_ref=authorized_ref,
+            ).on_market_event(event, context)
+
+            self.assertEqual(len(context.paper_book.tickets), 1)
+            self.assertTrue(ledger_path.exists())
+            records = context.decision_ledger.verified_records()
+            self.assertEqual(len(records), 1)
+            payload = records[0].payload
+            self.assertEqual(payload["probability"], "0.60")
+            self.assertEqual(payload["uncertainty"], "0.04")
+            self.assertEqual(payload["qualified_probability"], "0.56")
+            self.assertEqual(
+                payload["predictive_forecast_ref"],
+                authorized_ref.to_dict(),
+            )
+            self.assertEqual(
+                payload["expected_profit_per_unit"],
+                "0.12",
             )
 
     def test_predictive_reference_mapping_is_snapshotted_and_key_bound(self) -> None:

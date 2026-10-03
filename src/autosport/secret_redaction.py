@@ -5,7 +5,7 @@ import builtins
 import os
 import re
 from collections.abc import Iterable
-from urllib.parse import unquote_plus
+from urllib.parse import quote, quote_plus, unquote_plus
 from typing import Any
 
 REDACTED = "[REDACTED]"
@@ -239,6 +239,29 @@ def _reversible_base64_secret_values(secrets: Iterable[str]) -> tuple[str, ...]:
     return tuple(sorted(values, key=lambda item: (-len(item), item)))
 
 
+def _reversible_url_secret_values(secrets: Iterable[str]) -> tuple[str, ...]:
+    """Return single-pass URL spellings only for already-known secret values."""
+
+    values: set[str] = set()
+    for secret in secrets:
+        for encoded in (
+            quote(secret, safe=""),
+            quote_plus(secret, safe=""),
+        ):
+            if encoded != secret:
+                values.add(encoded)
+                # Percent-hex is case-insensitive. Preserve literal non-percent text
+                # while covering the common lowercase-hex spelling as well.
+                lowered = re.sub(
+                    r"%[0-9A-Fa-f]{2}",
+                    lambda match: match.group(0).lower(),
+                    encoded,
+                )
+                values.add(lowered)
+    values.discard("")
+    return tuple(sorted(values, key=lambda item: (-len(item), item)))
+
+
 def _decode_query_key_for_classification(value: str) -> tuple[str, bool]:
     """Return a bounded decoded query key plus unresolved-nesting truth."""
 
@@ -323,14 +346,17 @@ def redact_operator_text(
             parts[index] = part
         rendered = REDACTED.join(parts)
 
-        # Base64 is reversible credential material, not a redaction.  Derive
-        # only spellings of secrets that are already authoritative for this
-        # redaction call; do not attempt to classify arbitrary opaque tokens.
-        encoded_secrets = _reversible_base64_secret_values(secrets)
-        if encoded_secrets:
+        # Base64 and URL percent-encoding are reversible credential material,
+        # not redaction. Derive only spellings of secrets already authoritative
+        # for this call; never decode/classify arbitrary opaque values.
+        reversible_secrets = (
+            *_reversible_base64_secret_values(secrets),
+            *_reversible_url_secret_values(secrets),
+        )
+        if reversible_secrets:
             parts = rendered.split(REDACTED)
             for index, part in enumerate(parts):
-                for encoded_secret in encoded_secrets:
+                for encoded_secret in reversible_secrets:
                     part = part.replace(encoded_secret, REDACTED)
                 parts[index] = part
             rendered = REDACTED.join(parts)

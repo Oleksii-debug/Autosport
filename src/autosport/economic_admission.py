@@ -9,7 +9,10 @@ from types import FunctionType, MappingProxyType
 from .domain import MarketEvent, PaperTicket, TicketLeg
 from .economic_goal_provenance import provenance_for
 from .economic_goal_store import EconomicGoalStore
-from .monotonic_workspace_authority import MonotonicWorkspaceAuthority
+from .monotonic_workspace_authority import (
+    AuthorityRecovery,
+    MonotonicWorkspaceAuthority,
+)
 from .paper import PaperBook
 from .recovery import transaction_history_requires_recovery
 from .risk import (
@@ -665,6 +668,7 @@ _DAY_AUTHORITY_FIELD_DESCRIPTOR_WITNESSES = tuple(
         _ProductDayAdmissionAuthority,
         PaperDayTurnoverEvidence,
         ProductDayRiskWindow,
+        AuthorityRecovery,
     )
 )
 
@@ -696,6 +700,13 @@ _DAY_AUTHORITY_EXECUTABLE_DESCRIPTOR_WITNESSES = (
         _capture_executable_descriptor_witnesses(
             ProductDayRiskWindow,
             ("__init__", "__post_init__", "__eq__"),
+        ),
+    ),
+    (
+        AuthorityRecovery,
+        _capture_executable_descriptor_witnesses(
+            AuthorityRecovery,
+            ("__init__",),
         ),
     ),
 )

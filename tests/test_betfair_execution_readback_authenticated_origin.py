@@ -119,11 +119,9 @@ def _read(client: BetfairReadOnlyClient):
     )
 
 
-def test_k07_product_client_issues_authoritative_execution_readback(
+def test_mocked_https_dispatch_cannot_issue_provider_origin(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # Keep the canonical Autosport urlopen function/transport intact. Replace only
-    # stdlib's process opener below that frozen boundary, matching existing K07 tests.
     _install_https_test_dispatch(monkeypatch)
     client = build_betfair_authenticated_client(
         BetfairSessionCredentials("app-key", "session-token"),
@@ -132,10 +130,12 @@ def test_k07_product_client_issues_authoritative_execution_readback(
 
     capture = _read(client)
 
-    capture.assert_authoritative()
+    capture._validate()
+    with pytest.raises(BetfairReadOnlyError, match="product-origin authority"):
+        capture.assert_authoritative()
+    assert capture._authority_origin_proof is None
 
-
-def test_equal_dataclass_copy_loses_readback_origin_authority(
+def test_mocked_capture_and_equal_copy_both_lack_origin_authority(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _install_https_test_dispatch(monkeypatch)
@@ -147,9 +147,9 @@ def test_equal_dataclass_copy_loses_readback_origin_authority(
     copied = replace(capture)
 
     assert copied == capture
-    with pytest.raises(BetfairReadOnlyError, match="product-origin authority"):
-        copied.assert_authoritative()
-
+    for candidate in (capture, copied):
+        with pytest.raises(BetfairReadOnlyError, match="product-origin authority"):
+            candidate.assert_authoritative()
 
 def test_direct_custom_transport_capture_cannot_mint_provider_origin() -> None:
     client = BetfairReadOnlyClient(
@@ -167,7 +167,7 @@ def test_direct_custom_transport_capture_cannot_mint_provider_origin() -> None:
         capture.assert_authoritative()
 
 
-def test_k07_client_transport_rotation_revokes_existing_readback_authority(
+def test_mocked_capture_stays_non_authoritative_after_transport_rotation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _install_https_test_dispatch(monkeypatch)
@@ -176,13 +176,14 @@ def test_k07_client_transport_rotation_revokes_existing_readback_authority(
         account_label="acct-1",
     )
     capture = _read(client)
-    capture.assert_authoritative()
+
+    with pytest.raises(BetfairReadOnlyError, match="product-origin authority"):
+        capture.assert_authoritative()
 
     client._transport = UrllibBetfairHttpTransport()
 
-    with pytest.raises(BetfairReadOnlyError, match="no longer authoritative"):
+    with pytest.raises(BetfairReadOnlyError):
         capture.assert_authoritative()
-
 
 def test_lower_readback_wrapper_has_no_direct_mutable_issuance_registry() -> None:
     roots = (
@@ -289,7 +290,7 @@ def _cell(value):
     return capture.__closure__[0]
 
 
-def test_origin_proof_cannot_be_replayed_onto_equal_capture_object(
+def test_mocked_capture_has_no_origin_proof_to_replay(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _install_https_test_dispatch(monkeypatch)
@@ -298,9 +299,9 @@ def test_origin_proof_cannot_be_replayed_onto_equal_capture_object(
         account_label="acct-1",
     )
     capture = _read(client)
-    capture.assert_authoritative()
     copied = replace(capture)
 
+    assert capture._authority_origin_proof is None
     object.__setattr__(copied, "_authority_client", capture._authority_client)
     object.__setattr__(
         copied,
@@ -320,7 +321,6 @@ def test_origin_proof_cannot_be_replayed_onto_equal_capture_object(
 
     with pytest.raises(BetfairReadOnlyError, match="product-origin authority"):
         copied.assert_authoritative()
-
 
 def test_closure_recovered_origin_issuer_rejects_external_call(
     monkeypatch: pytest.MonkeyPatch,
@@ -405,19 +405,17 @@ def test_same_code_reconstruction_with_foreign_raw_read_cannot_mint_origin(
     )
     reconstructed.__kwdefaults__ = lower.__kwdefaults__
 
-    with pytest.raises(
-        BetfairReadOnlyError,
-        match="origin proof could not be issued",
-    ):
-        reconstructed(
-            client,
-            action_id=ACTION_ID,
-            market_id=MARKET_ID,
-            provider_order_ref=PROVIDER_REF,
-        )
+    capture = reconstructed(
+        client,
+        action_id=ACTION_ID,
+        market_id=MARKET_ID,
+        provider_order_ref=PROVIDER_REF,
+    )
+    assert capture is structural
+    with pytest.raises(BetfairReadOnlyError, match="product-origin authority"):
+        capture.assert_authoritative()
 
-
-def test_process_global_urllib_opener_cannot_mint_readback_origin(
+def test_process_global_urllib_opener_and_mocked_do_open_cannot_mint_origin(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _install_https_test_dispatch(monkeypatch)
@@ -442,4 +440,6 @@ def test_process_global_urllib_opener_cannot_mint_readback_origin(
     capture = _read(client)
 
     assert hostile.calls == 0
-    capture.assert_authoritative()
+    capture._validate()
+    with pytest.raises(BetfairReadOnlyError, match="product-origin authority"):
+        capture.assert_authoritative()

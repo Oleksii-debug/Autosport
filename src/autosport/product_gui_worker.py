@@ -451,11 +451,10 @@ def _capture_runtime_economic_snapshot(
 
     if type(runtime) is not _runtime_type or type(tick) is not _tick_type:
         raise RuntimeError("economic snapshot requires exact canonical runtime tick")
-    workspace = _path_type(runtime.workspace)
+    workspace = _path_type(runtime.workspace).resolve(strict=False)
     coordinator = runtime.coordinator
     if (
-        not workspace.is_absolute()
-        or _path_type(coordinator.workspace) != workspace
+        _path_type(coordinator.workspace).resolve(strict=False) != workspace
         or tick.session_id != coordinator.session_id
         or tick.source_id != runtime.manifest.source_id
         or tick.cycle_index < 0
@@ -463,7 +462,7 @@ def _capture_runtime_economic_snapshot(
         raise RuntimeError("economic snapshot runtime identity mismatch")
 
     with _economic_lock_type(workspace):
-        book_path = _path_type(coordinator.paper_book_path)
+        book_path = _path_type(coordinator.paper_book_path).resolve(strict=False)
         if book_path != workspace / "paper_book.json":
             raise RuntimeError(
                 "economic snapshot PaperBook path is not canonical for runtime workspace"

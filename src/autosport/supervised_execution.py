@@ -1216,6 +1216,12 @@ def _require_approval(
     at: str,
 ) -> None:
     _require_bound_plan_structure(bound)
+    now = _time(at, "approval check time")
+    created = _time(bound.execution_plan.created_at, "execution plan created_at")
+    if created > now:
+        raise SupervisedExecutionError(
+            "execution plan creation is in the future relative to trusted clock"
+        )
     approval.require_active(at)
     if (
         approval.portfolio_plan_sha256 != bound.portfolio_plan_sha256

@@ -311,6 +311,66 @@ def test_scoped_production_api_rejects_in_place_base_cancel_code_rebind() -> Non
         GitHubApi.cancel.__code__ = original_code
 
 
+def test_scoped_cancel_rechecks_base_cancel_code_after_external_revalidation(
+    monkeypatch,
+) -> None:
+    api = WorkflowScopedGitHubApi(
+        repository="owner/repo",
+        token="token",
+        workflow_id=1,
+        workflow_name="CI",
+    )
+    candidate_head = "a" * 40
+    api._recovered_runs[123] = (7, candidate_head)
+    original_code = GitHubApi.cancel.__code__
+
+    def make_forged_cancel():
+        allowed_http_error_type = object()
+        cancellation_accepted = object()
+        request_impl = object()
+        request_impl_code = object()
+
+        def forged_cancel(self, run_id):
+            del self, run_id
+            return (
+                allowed_http_error_type,
+                cancellation_accepted,
+                request_impl,
+                request_impl_code,
+            )
+
+        return forged_cancel
+
+    forged_code = make_forged_cancel().__code__
+    assert len(forged_code.co_freevars) == len(original_code.co_freevars)
+
+    def fake_urlopen(request, *, timeout: int):
+        del timeout
+        url = request.full_url
+        if "/commits/" in url and "/pulls?" in url:
+            GitHubApi.cancel.__code__ = forged_code
+            return _FakeSuccessResponse(200, b'[{"number":7}]')
+        if url.endswith("/pulls/7"):
+            body = (
+                '{"head":{"sha":"' + ("b" * 40)
+                + '","repo":{"full_name":"owner/repo"}},'
+                + '"base":{"repo":{"full_name":"owner/repo"}},'
+                + '"state":"open","draft":false}'
+            ).encode()
+            return _FakeSuccessResponse(200, body)
+        raise AssertionError("mutated base cancellation transport must not execute")
+
+    monkeypatch.setattr(controller_module, "urlopen", fake_urlopen)
+    try:
+        with pytest.raises(
+            CancellationError,
+            match="canonical base cancellation authority changed",
+        ):
+            api.cancel(123)
+    finally:
+        GitHubApi.cancel.__code__ = original_code
+
+
 @pytest.mark.parametrize(
     "helper_name",
     [

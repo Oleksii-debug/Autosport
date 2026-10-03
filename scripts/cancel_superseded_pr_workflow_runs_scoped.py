@@ -402,6 +402,10 @@ class WorkflowScopedGitHubApi(GitHubApi):
                     raise _CancellationAuthorityChanged(
                         "recovered workflow run live qualification changed"
                     )
+            if getattr(base_cancel, "__code__", None) is not base_cancel_code:
+                raise CancellationError(
+                    "canonical base cancellation authority changed"
+                )
             base_cancel(self, run_id)
     
         return cancel

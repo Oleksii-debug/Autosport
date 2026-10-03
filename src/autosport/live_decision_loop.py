@@ -1154,6 +1154,8 @@ class PersistentLiveDecisionLoop:
             and self._progress.gate == _GATE_NORMAL
             and self._progress.market_state_sha256 == current_market_sha
             and self._progress.registered_input_ids == registered_input_ids
+            and self._progress.decision_context_sha256
+            == decision_context_sha256
             and not batch_affected
             and not batch.full_refresh_required
             and not freshness_expired
@@ -1263,6 +1265,18 @@ class PersistentLiveDecisionLoop:
             and left._settlement_times == right._settlement_times
         )
 
+    def _input_registry_sha256(self) -> str:
+        return _canonical_json_sha256(
+            {
+                "schema": "autosport.live_dependency_registry_identity",
+                "schema_version": 1,
+                "inputs": [
+                    spec.to_dict()
+                    for spec in self._input_specs.values()
+                ],
+            }
+        )
+
     def _decision_context_sha256_for_book(self, book: PaperBook) -> str:
         self._verify_intent_factory_provenance()
         if not isinstance(book, PaperBook):
@@ -1278,7 +1292,7 @@ class PersistentLiveDecisionLoop:
         return _canonical_json_sha256(
             {
                 "schema": "autosport.live_decision_runtime_context",
-                "schema_version": 2,
+                "schema_version": 3,
                 "mode": self.mode.value,
                 "intent_strategy_version_id": provenance.strategy_version_id,
                 "intent_model_version_id": provenance.model_version_id,
@@ -1288,6 +1302,7 @@ class PersistentLiveDecisionLoop:
                 ).contract_sha256,
                 "risk_policy_sha256": self.authority.risk_policy.provenance_sha256,
                 "book_state_sha256": book_state_sha256,
+                "input_registry_sha256": self._input_registry_sha256(),
                 "max_quote_age_seconds": str(
                     _timedelta_decimal_seconds(self.max_quote_age)
                 ),
@@ -2040,8 +2055,8 @@ class PersistentLiveDecisionLoop:
                 )
             if live_context_sha256 != expected_context_sha256:
                 raise _ConcurrentDecisionSnapshot(
-                    "PaperBook/risk context advanced during decision snapshot capture; "
-                    "retrying before economic action"
+                    "portfolio/risk/dependency context advanced during decision "
+                    "snapshot capture; retrying before economic action"
                 )
             snapshot = self.authority.risk_policy._shadow_book_for_allocation(
                 self.book

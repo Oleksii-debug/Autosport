@@ -175,3 +175,58 @@ def test_every_permutation_has_one_deterministic_evidence_identity():
         for order in itertools.permutations(projections)
     }
     assert len(ids) == 1
+
+
+
+@pytest.mark.parametrize(
+    ("field", "bad_value"),
+    [
+        ("market_ids", ()),
+        ("price_data", ("EX_FAKE",)),
+        ("best_prices_depth", 99),
+        ("operation", "listMarketCatalogue"),
+    ],
+)
+@pytest.mark.parametrize(
+    "derived_property",
+    [
+        "effective_price_data",
+        "weight_per_market",
+        "total_points",
+        "status",
+        "allowed",
+        "evidence_payload",
+        "evidence_id",
+    ],
+)
+def test_every_derived_property_revalidates_tampered_state(
+    field,
+    bad_value,
+    derived_property,
+):
+    request = budget(1, ("EX_BEST_OFFERS",))
+    object.__setattr__(request, field, bad_value)
+    with pytest.raises(MarketBookBudgetError):
+        getattr(request, derived_property)
+
+
+def test_constructor_bypass_cannot_mint_zero_weight_positive_evidence():
+    forged = object.__new__(MarketBookRequestBudget)
+    object.__setattr__(forged, "market_ids", ())
+    object.__setattr__(forged, "price_data", ("EX_FAKE",))
+    object.__setattr__(forged, "best_prices_depth", None)
+    object.__setattr__(forged, "operation", "listMarketBook")
+
+    with pytest.raises(MarketBookBudgetError):
+        _ = forged.allowed
+    with pytest.raises(MarketBookBudgetError):
+        _ = forged.evidence_payload
+    with pytest.raises(MarketBookBudgetError):
+        _ = forged.evidence_id
+
+
+def test_non_sequence_tamper_fails_as_budget_error_not_incidental_type_error():
+    request = budget(1)
+    object.__setattr__(request, "market_ids", 1)
+    with pytest.raises(MarketBookBudgetError, match="sequence"):
+        _ = request.allowed

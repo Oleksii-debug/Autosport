@@ -11,7 +11,8 @@ from typing import Any, BinaryIO
 
 from autosport.release_package import (
     _decode_json_object,
-    _validate_windows_member,
+    _read_regular_source_bytes,
+    _validate_windows_member_set,
     _write_canonical_zip,
     verify_windows_package,
 )
@@ -44,23 +45,18 @@ def _json_bytes(payload: dict[str, Any]) -> bytes:
 
 def _read_members(package_zip: str | Path | BinaryIO) -> dict[str, bytes]:
     members: dict[str, bytes] = {}
-    windows_keys: dict[str, str] = {}
     with zipfile.ZipFile(package_zip, "r") as archive:
-        for info in archive.infolist():
+        infos = archive.infolist()
+        names: list[str] = []
+        for info in infos:
             if info.is_dir():
                 raise ValueError(
                     f"release package contains unsupported directory entry: {info.filename}"
                 )
-            name = info.filename
-            relative, windows_key = _validate_windows_member(name)
-            previous = windows_keys.get(windows_key)
-            if previous is not None:
-                raise ValueError(
-                    "release package contains Windows path collision: "
-                    f"{previous} vs {name}"
-                )
-            windows_keys[windows_key] = name
-            members[relative] = archive.read(name)
+            names.append(info.filename)
+        validated_names = _validate_windows_member_set(names)
+        for info in infos:
+            members[validated_names[info.filename]] = archive.read(info.filename)
     return members
 
 
@@ -71,6 +67,7 @@ def _write_deterministic(package_zip: Path, members: dict[str, bytes]) -> str:
         _PREFIX + relative: payload
         for relative, payload in members.items()
     }
+    _validate_windows_member_set(list(archive_members))
     return _write_canonical_zip(package_zip, archive_members)
 
 
@@ -87,7 +84,10 @@ def _verified_base_members(
             label="expected_base_package_sha256",
         )
 
-    base_bytes = package.read_bytes()
+    base_bytes = _read_regular_source_bytes(
+        package,
+        label="base release package input",
+    )
     captured_sha = _sha256_bytes(base_bytes)
     if (
         expected_package_sha256 is not None
@@ -141,7 +141,10 @@ def bind_portable_data_tool(
 
     package = Path(package_zip)
     data_path = Path(data_exe)
-    data_bytes = data_path.read_bytes()
+    data_bytes = _read_regular_source_bytes(
+        data_path,
+        label="portable data tool executable input",
+    )
     if not data_bytes:
         raise ValueError("portable data tool executable is empty")
 

@@ -115,7 +115,10 @@ def _nonnegative_int_from_form(name: str, value: object) -> int:
         or str(int(candidate)) != candidate
     ):
         raise OwnerEconomicAuthorityError(
-            text("ui.windows.owner_authority.error.integer", field=_field_label(name))
+            text(
+                "ui.windows.owner_authority.error.nonnegative_integer",
+                field=_field_label(name),
+            )
         )
     return int(candidate)
 

@@ -5,7 +5,7 @@ import json
 import pytest
 
 from autosport.prophetx_session_lifecycle import (
-    ACCESS_TOKEN_LIFETIME,
+    CONSERVATIVE_SESSION_SLOT_HOLD,
     ProphetXLoginAdmissionAction,
     ProphetXLoginFailureClass,
     ProphetXSessionLifecycle,
@@ -50,6 +50,7 @@ def _active(lifecycle: ProphetXSessionLifecycle, at: datetime = NOW):
     snapshot = lifecycle.complete_login_success(
         attempt_id=admission.attempt_id,
         now=at,
+        access_expires_at=at + timedelta(minutes=10),
     )
     assert snapshot.state is ProphetXSessionState.ACTIVE
     return snapshot
@@ -103,7 +104,7 @@ def test_restart_without_local_token_waits_for_natural_expiry(tmp_path):
     active = _active(original)
     restarted = _lifecycle(tmp_path)
 
-    for minute in (1, 5, 10, 19):
+    for minute in (1, 5, 9):
         admission = restarted.begin_login(
             now=NOW + timedelta(minutes=minute),
             access_token_available=False,
@@ -116,7 +117,7 @@ def test_restart_without_local_token_waits_for_natural_expiry(tmp_path):
         assert admission.login_authorized is False
 
     successor = restarted.begin_login(
-        now=NOW + ACCESS_TOKEN_LIFETIME + timedelta(seconds=1),
+        now=active.access_expires_at + timedelta(seconds=1),
         access_token_available=False,
     )
     assert successor.action is ProphetXLoginAdmissionAction.CREATE_LOGIN
@@ -132,7 +133,7 @@ def test_session_pool_exhaustion_is_distinct_and_not_tight_retry(tmp_path):
     )
 
     assert failed.state is ProphetXSessionState.SESSION_POOL_EXHAUSTED
-    assert failed.slot_hold_until == NOW + ACCESS_TOKEN_LIFETIME
+    assert failed.slot_hold_until == NOW + CONSERVATIVE_SESSION_SLOT_HOLD
 
     retry = lifecycle.begin_login(
         now=NOW + timedelta(minutes=1),
@@ -199,7 +200,7 @@ def test_same_access_key_across_roles_is_explicit_conflict(tmp_path):
     assert conflict.login_authorized is False
 
 
-def test_near_expiry_fails_closed_when_partner_refresh_contract_unqualified(tmp_path):
+def test_near_expiry_requires_renewal_without_login_fallback(tmp_path):
     lifecycle = _lifecycle(tmp_path)
     active = _active(lifecycle)
 
@@ -210,7 +211,7 @@ def test_near_expiry_fails_closed_when_partner_refresh_contract_unqualified(tmp_
 
     assert (
         admission.action
-        is ProphetXLoginAdmissionAction.RENEWAL_CONTRACT_UNQUALIFIED
+        is ProphetXLoginAdmissionAction.RENEWAL_REQUIRED
     )
     assert admission.snapshot is not None
     assert admission.snapshot.state is ProphetXSessionState.RENEWAL_DUE
@@ -239,7 +240,7 @@ def test_ambiguous_provider_result_preserves_conservative_slot_horizon(tmp_path)
     )
 
     assert failed.state is ProphetXSessionState.WAIT_FOR_PROVIDER_SESSION_EXPIRY
-    assert failed.slot_hold_until == NOW + timedelta(seconds=2) + ACCESS_TOKEN_LIFETIME
+    assert failed.slot_hold_until == NOW + timedelta(seconds=2) + CONSERVATIVE_SESSION_SLOT_HOLD
 
     retry = lifecycle.begin_login(
         now=NOW + timedelta(minutes=10),
@@ -456,3 +457,40 @@ def test_admission_never_claims_real_money_authority(tmp_path):
     admission = lifecycle.begin_login(now=NOW, access_token_available=False)
 
     assert admission.real_money_execution is False
+
+
+def test_provider_response_owns_access_expiry_not_local_lifetime_guess(tmp_path):
+    lifecycle = _lifecycle(tmp_path)
+    admission = lifecycle.begin_login(now=NOW, access_token_available=False)
+
+    exact_expiry = NOW + timedelta(minutes=7)
+    active = lifecycle.complete_login_success(
+        attempt_id=admission.attempt_id,
+        now=NOW,
+        access_expires_at=exact_expiry,
+    )
+
+    assert active.access_expires_at == exact_expiry
+    assert active.slot_hold_until == exact_expiry
+    assert (
+        lifecycle.begin_login(
+            now=exact_expiry + timedelta(seconds=1),
+            access_token_available=False,
+        ).action
+        is ProphetXLoginAdmissionAction.CREATE_LOGIN
+    )
+
+
+def test_provider_expiry_must_be_future_of_login_completion(tmp_path):
+    lifecycle = _lifecycle(tmp_path)
+    admission = lifecycle.begin_login(now=NOW, access_token_available=False)
+
+    with pytest.raises(
+        ProphetXSessionLifecycleError,
+        match="must be later than login completion",
+    ):
+        lifecycle.complete_login_success(
+            attempt_id=admission.attempt_id,
+            now=NOW,
+            access_expires_at=NOW,
+        )

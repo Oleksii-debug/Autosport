@@ -1,0 +1,1207 @@
+from __future__ import annotations
+
+"""Bind one campaign-gated provider capture to the exact durable forward universe.
+
+This module is composition only. It does not own a scheduler, provider session,
+collector chronology, universe store, or observation ledger. Positive authority is
+re-resolved from those existing product-owned authorities every time.
+"""
+
+import hashlib
+import inspect
+import json
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from typing import Sequence
+
+from . import provider_evaluation_universe as _provider_universe_module
+from ._forward_universe_backing_guard import (
+    ForwardUniverseBackingGuardError,
+    load_guarded_provider_evaluation_universe,
+)
+from .campaign_inception import (
+    CampaignInceptionReceipt,
+    CampaignInceptionSourceSpec,
+    establish_campaign_inception,
+)
+from .campaign_provider_cycle_capture import (
+    ARTIFACT_KIND,
+    CampaignCompleteBoardCycleReceipt,
+)
+from .causal_collector import CollectorDeltaStore
+from .evaluation_universe import EvaluationUniverseLedger
+from .event_lifecycle import ContinuousEventLifecycle
+from .forward_evaluation_universe_binding import (
+    ForwardEvaluationUniverseBindingError,
+    ForwardUniverseAuthorityIdentity,
+    authorize_forward_source_receipts,
+    resolve_forward_universe_authority_identity,
+)
+from .forward_evidence_completeness import (
+    AuthoritativeSourceReceipt,
+    ForwardEvidenceProtocolEnvelope,
+    ForwardOpportunityEnvelope,
+)
+from .forward_universe_precommit_authority import ForwardUniversePrecommitLocator
+from .provider_evaluation_universe import (
+    ProviderEvaluationUniverseStore,
+    ProviderEvaluationUniverseError,
+    _ISSUED_UNIVERSES,
+)
+from .provider_observation_authority import (
+    CompleteGameBoardEvidenceStore,
+    CompleteGameBoardSnapshot,
+)
+
+
+_SCHEMA_VERSION = 1
+_DOMAIN = "autosport.campaign-forward-universe-cycle-authority.v1"
+_HEX = frozenset("0123456789abcdef")
+
+_ESTABLISH_CAMPAIGN = establish_campaign_inception
+_RESOLVE_ARTIFACT = CollectorDeltaStore.collector_cycle_observation_artifact_evidence
+_LOAD_PROVIDER_EVIDENCE = CompleteGameBoardEvidenceStore.load
+_GUARDED_UNIVERSE_LOAD = load_guarded_provider_evaluation_universe
+_RESOLVE_FORWARD_IDENTITY = resolve_forward_universe_authority_identity
+_AUTHORIZE_FORWARD_RECEIPTS = authorize_forward_source_receipts
+
+_CAPTURED_CALLABLES = (
+    ("_ESTABLISH_CAMPAIGN", _ESTABLISH_CAMPAIGN, _ESTABLISH_CAMPAIGN.__code__),
+    ("_RESOLVE_ARTIFACT", _RESOLVE_ARTIFACT, _RESOLVE_ARTIFACT.__code__),
+    (
+        "_LOAD_PROVIDER_EVIDENCE",
+        _LOAD_PROVIDER_EVIDENCE,
+        _LOAD_PROVIDER_EVIDENCE.__code__,
+    ),
+    (
+        "_GUARDED_UNIVERSE_LOAD",
+        _GUARDED_UNIVERSE_LOAD,
+        _GUARDED_UNIVERSE_LOAD.__code__,
+    ),
+    (
+        "_RESOLVE_FORWARD_IDENTITY",
+        _RESOLVE_FORWARD_IDENTITY,
+        _RESOLVE_FORWARD_IDENTITY.__code__,
+    ),
+    (
+        "_AUTHORIZE_FORWARD_RECEIPTS",
+        _AUTHORIZE_FORWARD_RECEIPTS,
+        _AUTHORIZE_FORWARD_RECEIPTS.__code__,
+    ),
+)
+_CANONICAL_COLLECTOR_ARTIFACT_RESOLVER = inspect.getattr_static(
+    CollectorDeltaStore,
+    "collector_cycle_observation_artifact_evidence",
+)
+_CANONICAL_PROVIDER_EVIDENCE_LOADER = inspect.getattr_static(
+    CompleteGameBoardEvidenceStore,
+    "load",
+)
+_CANONICAL_ISSUED_UNIVERSES = _ISSUED_UNIVERSES
+_PROVIDER_UNIVERSE_VALUES = {
+    "_ISSUED_UNIVERSES": _provider_universe_module._ISSUED_UNIVERSES,
+    "EvaluationRow": _provider_universe_module.EvaluationRow,
+    "ObservationIntakeSnapshot": _provider_universe_module.ObservationIntakeSnapshot,
+    "EvaluationUniverse": _provider_universe_module.EvaluationUniverse,
+    "CompleteGameBoardSnapshot": _provider_universe_module.CompleteGameBoardSnapshot,
+    "ContinuousEventLifecycle": _provider_universe_module.ContinuousEventLifecycle,
+    "CompleteBoardMemberSpec": _provider_universe_module.CompleteBoardMemberSpec,
+    "SlotState": _provider_universe_module.SlotState,
+    "_CONSUMER_KIND": _provider_universe_module._CONSUMER_KIND,
+    "_PROVIDER_ID": _provider_universe_module._PROVIDER_ID,
+}
+_PROVIDER_UNIVERSE_CALLABLES = tuple(
+    (
+        name,
+        target,
+        getattr(target, "__code__", None),
+    )
+    for name, target in (
+        (
+            "assert_complete_game_board_authoritative",
+            _provider_universe_module.assert_complete_game_board_authoritative,
+        ),
+        (
+            "complete_game_board_member_specs",
+            _provider_universe_module.complete_game_board_member_specs,
+        ),
+        (
+            "_resolve_event_reveal_binding",
+            _provider_universe_module._resolve_event_reveal_binding,
+        ),
+        ("_selection_labels", _provider_universe_module._selection_labels),
+        (
+            "_validate_row_against_member",
+            _provider_universe_module._validate_row_against_member,
+        ),
+        (
+            "_row_semantic_sha256",
+            _provider_universe_module._row_semantic_sha256,
+        ),
+        ("_remember_issued", _provider_universe_module._remember_issued),
+        ("_text", _provider_universe_module._text),
+        ("_sha", _provider_universe_module._sha),
+        ("_instant", _provider_universe_module._instant),
+        ("_digest", _provider_universe_module._digest),
+    )
+)
+_INTERNAL_CALLABLES: tuple[tuple[str, object, object], ...] = ()
+
+
+class CampaignForwardUniverseCycleBindingError(RuntimeError):
+    """Campaign/cycle/provider/universe authority does not compose exactly."""
+
+
+def _text(value: object, field: str) -> str:
+    if (
+        type(value) is not str
+        or not value
+        or value != value.strip()
+        or "\x00" in value
+    ):
+        raise CampaignForwardUniverseCycleBindingError(
+            f"{field} must be non-empty canonical text"
+        )
+    value.encode("utf-8")
+    return value
+
+
+def _sha(value: object, field: str) -> str:
+    raw = _text(value, field)
+    if (
+        len(raw) != 64
+        or raw != raw.lower()
+        or any(character not in _HEX for character in raw)
+    ):
+        raise CampaignForwardUniverseCycleBindingError(
+            f"{field} must be lowercase SHA-256 hex"
+        )
+    return raw
+
+
+def _digest(value: object) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _instant(value: object, field: str) -> datetime:
+    raw = _text(value, field)
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise CampaignForwardUniverseCycleBindingError(
+            f"{field} must be ISO-8601"
+        ) from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise CampaignForwardUniverseCycleBindingError(
+            f"{field} must include timezone"
+        )
+    return parsed.astimezone(timezone.utc)
+
+
+def _require_cycle_observation_chronology(
+    *,
+    campaign: CampaignInceptionReceipt,
+    source_spec: CampaignInceptionSourceSpec,
+    snapshot: CompleteGameBoardSnapshot,
+    collector_evidence: dict[str, object],
+) -> None:
+    attempted = _instant(
+        collector_evidence.get("attempted_at"),
+        "collector attempted_at",
+    )
+    completed = _instant(
+        collector_evidence.get("completed_at"),
+        "collector completed_at",
+    )
+    captured = _instant(snapshot.captured_at, "provider captured_at")
+    not_before = _instant(
+        campaign.observation_not_before,
+        "campaign observation_not_before",
+    )
+    not_after = _instant(
+        campaign.observation_not_after,
+        "campaign observation_not_after",
+    )
+    slot_ordinal = collector_evidence.get("slot_ordinal")
+    if (
+        type(slot_ordinal) is not int
+        or slot_ordinal < source_spec.evaluation_start_slot_ordinal
+        or slot_ordinal > source_spec.evaluation_end_slot_ordinal
+    ):
+        raise CampaignForwardUniverseCycleBindingError(
+            "collector cycle lies outside frozen campaign evaluation slots"
+        )
+    if completed < attempted:
+        raise CampaignForwardUniverseCycleBindingError(
+            "collector cycle completion predates authorized START"
+        )
+    if captured < attempted or captured > completed:
+        raise CampaignForwardUniverseCycleBindingError(
+            "provider observation is outside authorized collector cycle chronology"
+        )
+    if (
+        attempted < not_before
+        or attempted > not_after
+        or captured < not_before
+        or captured > not_after
+        or completed > not_after
+    ):
+        raise CampaignForwardUniverseCycleBindingError(
+            "provider cycle is outside precommitted campaign observation window"
+        )
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class CampaignForwardUniverseCycleAuthority:
+    """Resolver-issued proof that one #1185 universe uses one gated provider artifact."""
+
+    schema_version: int
+    campaign_id: str
+    source_id: str
+    cycle_receipt_sha256: str
+    campaign_receipt_sha256: str
+    provider_evidence_sha256: str
+    provider_frame_sha256: str
+    collector_artifact_evidence_sha256: str
+    precommit_authority_sha256: str
+    backing_locator_sha256: str
+    universe_sha256: str
+    membership_sha256: str
+    member_count: int
+    authority_sha256: str
+
+    def __new__(cls, *args: object, **kwargs: object):
+        raise TypeError(
+            "CampaignForwardUniverseCycleAuthority is resolver-issued; "
+            "call resolve_campaign_forward_universe_cycle_authority"
+        )
+
+    @classmethod
+    def _issue(
+        cls,
+        *,
+        campaign_id: str,
+        source_id: str,
+        cycle_receipt_sha256: str,
+        campaign_receipt_sha256: str,
+        provider_evidence_sha256: str,
+        provider_frame_sha256: str,
+        collector_artifact_evidence_sha256: str,
+        forward_identity: ForwardUniverseAuthorityIdentity,
+    ) -> "CampaignForwardUniverseCycleAuthority":
+        payload = {
+            "schema_version": _SCHEMA_VERSION,
+            "campaign_id": _text(campaign_id, "campaign_id"),
+            "source_id": _text(source_id, "source_id"),
+            "cycle_receipt_sha256": _sha(
+                cycle_receipt_sha256,
+                "cycle_receipt_sha256",
+            ),
+            "campaign_receipt_sha256": _sha(
+                campaign_receipt_sha256,
+                "campaign_receipt_sha256",
+            ),
+            "provider_evidence_sha256": _sha(
+                provider_evidence_sha256,
+                "provider_evidence_sha256",
+            ),
+            "provider_frame_sha256": _sha(
+                provider_frame_sha256,
+                "provider_frame_sha256",
+            ),
+            "collector_artifact_evidence_sha256": _sha(
+                collector_artifact_evidence_sha256,
+                "collector_artifact_evidence_sha256",
+            ),
+            "precommit_authority_sha256": _sha(
+                forward_identity.precommit_authority_sha256,
+                "precommit_authority_sha256",
+            ),
+            "backing_locator_sha256": _sha(
+                forward_identity.backing_locator_sha256,
+                "backing_locator_sha256",
+            ),
+            "universe_sha256": _sha(
+                forward_identity.universe_sha256,
+                "universe_sha256",
+            ),
+            "membership_sha256": _sha(
+                forward_identity.membership_sha256,
+                "membership_sha256",
+            ),
+            "member_count": forward_identity.member_count,
+        }
+        if type(payload["member_count"]) is not int or payload["member_count"] <= 0:
+            raise CampaignForwardUniverseCycleBindingError(
+                "member_count must be a positive integer"
+            )
+        payload["authority_sha256"] = _digest(
+            {"domain": _DOMAIN, "authority": payload}
+        )
+        instance = object.__new__(cls)
+        for name in _AUTHORITY_FIELD_NAMES:
+            object.__setattr__(instance, name, payload[name])
+        return instance
+
+
+_CANONICAL_AUTHORITY_CLASS = CampaignForwardUniverseCycleAuthority
+_AUTHORITY_FIELD_NAMES = tuple(
+    CampaignForwardUniverseCycleAuthority.__dataclass_fields__
+)
+_CANONICAL_AUTHORITY_FIELD_DESCRIPTORS = tuple(
+    (
+        name,
+        inspect.getattr_static(CampaignForwardUniverseCycleAuthority, name),
+    )
+    for name in _AUTHORITY_FIELD_NAMES
+)
+_CANONICAL_AUTHORITY_ISSUER = inspect.getattr_static(
+    CampaignForwardUniverseCycleAuthority,
+    "_issue",
+)
+_CANONICAL_AUTHORITY_ISSUER_FUNCTION = _CANONICAL_AUTHORITY_ISSUER.__func__
+_CANONICAL_AUTHORITY_ISSUER_CODE = _CANONICAL_AUTHORITY_ISSUER_FUNCTION.__code__
+_CYCLE_RECEIPT_FIELD_NAMES = tuple(
+    CampaignCompleteBoardCycleReceipt.__dataclass_fields__
+)
+_CANONICAL_CYCLE_RECEIPT_FIELD_DESCRIPTORS = tuple(
+    (
+        name,
+        inspect.getattr_static(CampaignCompleteBoardCycleReceipt, name),
+    )
+    for name in _CYCLE_RECEIPT_FIELD_NAMES
+)
+_INCEPTION_RECEIPT_FIELD_NAMES = tuple(
+    CampaignInceptionReceipt.__dataclass_fields__
+)
+_CANONICAL_INCEPTION_RECEIPT_FIELD_DESCRIPTORS = tuple(
+    (
+        name,
+        inspect.getattr_static(CampaignInceptionReceipt, name),
+    )
+    for name in _INCEPTION_RECEIPT_FIELD_NAMES
+)
+_CANONICAL_ARTIFACT_KIND = ARTIFACT_KIND
+_CANONICAL_HASHLIB = hashlib
+_CANONICAL_SHA256 = hashlib.sha256
+_CANONICAL_JSON = json
+_CANONICAL_JSON_DUMPS = json.dumps
+_CANONICAL_DATETIME = datetime
+_CANONICAL_TIMEZONE = timezone
+
+
+def _require_dispatch_integrity() -> None:
+    module_globals = globals()
+    if (
+        module_globals.get("CampaignForwardUniverseCycleAuthority")
+        is not _CANONICAL_AUTHORITY_CLASS
+        or module_globals.get("ARTIFACT_KIND") != _CANONICAL_ARTIFACT_KIND
+    ):
+        raise CampaignForwardUniverseCycleBindingError(
+            "campaign forward-cycle authority class or artifact kind changed"
+        )
+    if (
+        module_globals.get("hashlib") is not _CANONICAL_HASHLIB
+        or _CANONICAL_HASHLIB.sha256 is not _CANONICAL_SHA256
+        or module_globals.get("json") is not _CANONICAL_JSON
+        or _CANONICAL_JSON.dumps is not _CANONICAL_JSON_DUMPS
+        or module_globals.get("datetime") is not _CANONICAL_DATETIME
+        or module_globals.get("timezone") is not _CANONICAL_TIMEZONE
+    ):
+        raise CampaignForwardUniverseCycleBindingError(
+            "campaign forward-cycle chronology/digest primitives changed"
+        )
+    current_issuer = inspect.getattr_static(
+        _CANONICAL_AUTHORITY_CLASS,
+        "_issue",
+    )
+    if (
+        current_issuer is not _CANONICAL_AUTHORITY_ISSUER
+        or current_issuer.__func__ is not _CANONICAL_AUTHORITY_ISSUER_FUNCTION
+        or current_issuer.__func__.__code__ is not _CANONICAL_AUTHORITY_ISSUER_CODE
+    ):
+        raise CampaignForwardUniverseCycleBindingError(
+            "campaign forward-cycle authority issuer is rebound"
+        )
+    for name, descriptor in _CANONICAL_AUTHORITY_FIELD_DESCRIPTORS:
+        if inspect.getattr_static(_CANONICAL_AUTHORITY_CLASS, name) is not descriptor:
+            raise CampaignForwardUniverseCycleBindingError(
+                "campaign forward-cycle authority field descriptor changed: " + name
+            )
+    for name, descriptor in _CANONICAL_CYCLE_RECEIPT_FIELD_DESCRIPTORS:
+        if inspect.getattr_static(CampaignCompleteBoardCycleReceipt, name) is not descriptor:
+            raise CampaignForwardUniverseCycleBindingError(
+                "campaign cycle receipt field descriptor changed: " + name
+            )
+    for name, descriptor in _CANONICAL_INCEPTION_RECEIPT_FIELD_DESCRIPTORS:
+        if inspect.getattr_static(CampaignInceptionReceipt, name) is not descriptor:
+            raise CampaignForwardUniverseCycleBindingError(
+                "campaign inception receipt field descriptor changed: " + name
+            )
+    if (
+        module_globals.get("_provider_universe_module")
+        is not _provider_universe_module
+        or _provider_universe_module._ISSUED_UNIVERSES
+        is not _CANONICAL_ISSUED_UNIVERSES
+        or module_globals.get("_ISSUED_UNIVERSES")
+        is not _CANONICAL_ISSUED_UNIVERSES
+    ):
+        raise CampaignForwardUniverseCycleBindingError(
+            "provider-universe issued-object cleanup authority changed"
+        )
+    for name, expected in _PROVIDER_UNIVERSE_VALUES.items():
+        if getattr(_provider_universe_module, name, None) is not expected:
+            raise CampaignForwardUniverseCycleBindingError(
+                "provider-universe transitive authority is rebound: " + name
+            )
+    for name, expected, code in _PROVIDER_UNIVERSE_CALLABLES:
+        if getattr(_provider_universe_module, name, None) is not expected:
+            raise CampaignForwardUniverseCycleBindingError(
+                "provider-universe transitive dispatch is rebound: " + name
+            )
+        if getattr(expected, "__code__", None) is not code:
+            raise CampaignForwardUniverseCycleBindingError(
+                "provider-universe transitive dispatch code changed: " + name
+            )
+    for name, expected, code in _INTERNAL_CALLABLES:
+        if module_globals.get(name) is not expected:
+            raise CampaignForwardUniverseCycleBindingError(
+                "campaign forward-cycle internal dispatch is rebound: " + name
+            )
+        if getattr(expected, "__code__", None) is not code:
+            raise CampaignForwardUniverseCycleBindingError(
+                "campaign forward-cycle internal dispatch code changed: " + name
+            )
+    if (
+        inspect.getattr_static(
+            CollectorDeltaStore,
+            "collector_cycle_observation_artifact_evidence",
+        )
+        is not _CANONICAL_COLLECTOR_ARTIFACT_RESOLVER
+    ):
+        raise CampaignForwardUniverseCycleBindingError(
+            "collector artifact resolver authority changed"
+        )
+    if (
+        inspect.getattr_static(CompleteGameBoardEvidenceStore, "load")
+        is not _CANONICAL_PROVIDER_EVIDENCE_LOADER
+    ):
+        raise CampaignForwardUniverseCycleBindingError(
+            "provider evidence load authority changed"
+        )
+    for name, expected, code in _CAPTURED_CALLABLES:
+        if module_globals.get(name) is not expected:
+            raise CampaignForwardUniverseCycleBindingError(
+                "campaign forward-cycle dispatch authority is rebound: " + name
+            )
+        if getattr(expected, "__code__", None) is not code:
+            raise CampaignForwardUniverseCycleBindingError(
+                "campaign forward-cycle dispatch code changed: " + name
+            )
+
+
+def _expected_cycle_receipt_payload(
+    *,
+    campaign,
+    snapshot: CompleteGameBoardSnapshot,
+    collector_evidence: dict[str, object],
+) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "schema_version": 1,
+        "campaign_id": campaign.campaign_id,
+        "campaign_receipt_sha256": campaign.receipt_sha256,
+        "campaign_authority_record_sha256": campaign.authority_record_sha256,
+        "source_id": collector_evidence["source_id"],
+        "run_id": collector_evidence["run_id"],
+        "stream_epoch": collector_evidence["stream_epoch"],
+        "schedule_id": collector_evidence["schedule_id"],
+        "gate_binding_sha256": collector_evidence["gate_binding_sha256"],
+        "cycle_seq": collector_evidence["cycle_seq"],
+        "slot_ordinal": collector_evidence["slot_ordinal"],
+        "artifact_id": collector_evidence["artifact_id"],
+        "artifact_kind": collector_evidence["artifact_kind"],
+        "provider_evidence_sha256": snapshot.evidence_sha256,
+        "provider_frame_sha256": snapshot.frame_sha256,
+        "provider_captured_at": snapshot.captured_at,
+        "collector_artifact_evidence_sha256": collector_evidence["evidence_sha256"],
+    }
+    payload["receipt_sha256"] = _digest(payload)
+    return payload
+
+
+def _assert_cycle_receipt_exact(
+    receipt: CampaignCompleteBoardCycleReceipt,
+    expected: dict[str, object],
+) -> None:
+    if type(receipt) is not CampaignCompleteBoardCycleReceipt:
+        raise TypeError(
+            "cycle_receipt must be exact CampaignCompleteBoardCycleReceipt"
+        )
+    for name in _CYCLE_RECEIPT_FIELD_NAMES:
+        if getattr(receipt, name) != expected.get(name):
+            raise CampaignForwardUniverseCycleBindingError(
+                "cycle receipt does not re-resolve from campaign/provider/collector "
+                f"authority: {name}"
+            )
+
+
+def _verify_exact_provider_universe_snapshot(
+    *,
+    ledger: EvaluationUniverseLedger,
+    snapshot: CompleteGameBoardSnapshot,
+    event_lifecycle: ContinuousEventLifecycle | None,
+):
+    """Read-only proof that durable universe membership came from this snapshot.
+
+    The provider-universe constructor is an issuance boundary guarded by the
+    product-owned pre-evaluation semantic capability.  A verifier must never
+    reissue that authority merely to compare provenance.  Instead, derive the
+    canonical complete-board members from the already-authoritative snapshot and
+    require the durable rows/intake metadata to match them exactly.
+    """
+
+    universe = ledger.universe
+    try:
+        _provider_universe_module.assert_complete_game_board_authoritative(snapshot)
+        members = _provider_universe_module.complete_game_board_member_specs(
+            snapshot,
+            event_lifecycle=event_lifecycle,
+        )
+        rows = tuple(universe.rows)
+        if not rows or not all(
+            type(row) is _provider_universe_module.EvaluationRow for row in rows
+        ):
+            raise ProviderEvaluationUniverseError(
+                "durable provider universe rows are not canonical EvaluationRow values"
+            )
+        by_key = {row.row_key: row for row in rows}
+        if len(by_key) != len(rows):
+            raise ProviderEvaluationUniverseError(
+                "durable provider universe row_key values are not unique"
+            )
+        expected_keys = tuple(member.row_key for member in members)
+        if tuple(sorted(by_key)) != tuple(sorted(expected_keys)):
+            raise ProviderEvaluationUniverseError(
+                "durable provider universe membership does not equal exact provider snapshot"
+            )
+        if tuple(universe.intake_snapshot.expected_row_keys) != tuple(
+            sorted(expected_keys)
+        ):
+            raise ProviderEvaluationUniverseError(
+                "durable provider intake membership does not equal exact provider snapshot"
+            )
+        if _instant(
+            universe.intake_snapshot.committed_at,
+            "durable provider intake committed_at",
+        ) != _instant(snapshot.captured_at, "provider captured_at"):
+            raise ProviderEvaluationUniverseError(
+                "durable provider intake capture time does not equal exact provider snapshot"
+            )
+        if universe.intake_snapshot.source_id != snapshot.request.source_id:
+            raise ProviderEvaluationUniverseError(
+                "durable provider intake source does not equal exact provider snapshot"
+            )
+        for member in members:
+            _provider_universe_module._validate_row_against_member(
+                row=by_key[member.row_key],
+                member=member,
+                snapshot=snapshot,
+                evaluation_not_before=universe.intake_snapshot.evaluation_not_before,
+            )
+    except ProviderEvaluationUniverseError as exc:
+        raise CampaignForwardUniverseCycleBindingError(
+            "durable forward universe is not derived from the exact "
+            "campaign-bound provider snapshot"
+        ) from exc
+    return universe
+
+
+def resolve_campaign_forward_universe_cycle_authority(
+    *,
+    precommit_locator: ForwardUniversePrecommitLocator,
+    collector_store: CollectorDeltaStore,
+    source_spec: CampaignInceptionSourceSpec,
+    cycle_receipt: CampaignCompleteBoardCycleReceipt,
+    provider_evidence_store: CompleteGameBoardEvidenceStore,
+    universe_store: ProviderEvaluationUniverseStore,
+    protocol: ForwardEvidenceProtocolEnvelope,
+    event_lifecycle: ContinuousEventLifecycle | None,
+) -> CampaignForwardUniverseCycleAuthority:
+    """Re-resolve exact campaign -> cycle -> provider snapshot -> #1185 universe."""
+
+    module_globals = globals()
+    integrity_guard = _require_dispatch_integrity
+    integrity_guard_code = integrity_guard.__code__
+    expected_hashlib = hashlib
+    expected_sha256 = hashlib.sha256
+    expected_json = json
+    expected_json_dumps = json.dumps
+    expected_datetime = datetime
+    expected_timezone = timezone
+    expected_inspect = inspect
+    expected_getattr_static = inspect.getattr_static
+    expected_internal_callables = _INTERNAL_CALLABLES
+    expected_captured_callables = _CAPTURED_CALLABLES
+    expected_provider_callables = _PROVIDER_UNIVERSE_CALLABLES
+    expected_provider_values = _PROVIDER_UNIVERSE_VALUES
+    expected_provider_value_items = tuple(expected_provider_values.items())
+    expected_authority_class = _CANONICAL_AUTHORITY_CLASS
+    expected_authority_field_descriptors = _CANONICAL_AUTHORITY_FIELD_DESCRIPTORS
+    expected_authority_issuer = _CANONICAL_AUTHORITY_ISSUER
+    expected_authority_issuer_function = _CANONICAL_AUTHORITY_ISSUER_FUNCTION
+    expected_authority_issuer_code = _CANONICAL_AUTHORITY_ISSUER_CODE
+    expected_cycle_receipt_field_descriptors = _CANONICAL_CYCLE_RECEIPT_FIELD_DESCRIPTORS
+    expected_inception_receipt_field_descriptors = (
+        _CANONICAL_INCEPTION_RECEIPT_FIELD_DESCRIPTORS
+    )
+    expected_artifact_kind = _CANONICAL_ARTIFACT_KIND
+    expected_collector_artifact_resolver = _CANONICAL_COLLECTOR_ARTIFACT_RESOLVER
+    expected_provider_evidence_loader = _CANONICAL_PROVIDER_EVIDENCE_LOADER
+    expected_issued_universes = _CANONICAL_ISSUED_UNIVERSES
+    expected_provider_universe_module = _provider_universe_module
+
+    def require_stable_integrity() -> None:
+        if (
+            module_globals.get("_require_dispatch_integrity") is not integrity_guard
+            or integrity_guard.__code__ is not integrity_guard_code
+        ):
+            raise CampaignForwardUniverseCycleBindingError(
+                "campaign forward-cycle integrity guard changed mid-resolution"
+            )
+        if (
+            module_globals.get("inspect") is not expected_inspect
+            or expected_inspect.getattr_static is not expected_getattr_static
+            or module_globals.get("_INTERNAL_CALLABLES") is not expected_internal_callables
+            or module_globals.get("_CAPTURED_CALLABLES") is not expected_captured_callables
+            or module_globals.get("_PROVIDER_UNIVERSE_CALLABLES") is not expected_provider_callables
+            or module_globals.get("_PROVIDER_UNIVERSE_VALUES") is not expected_provider_values
+            or tuple(expected_provider_values.items()) != expected_provider_value_items
+            or module_globals.get("_CANONICAL_AUTHORITY_CLASS") is not expected_authority_class
+            or module_globals.get("_CANONICAL_AUTHORITY_FIELD_DESCRIPTORS") is not expected_authority_field_descriptors
+            or module_globals.get("_CANONICAL_AUTHORITY_ISSUER") is not expected_authority_issuer
+            or module_globals.get("_CANONICAL_AUTHORITY_ISSUER_FUNCTION") is not expected_authority_issuer_function
+            or module_globals.get("_CANONICAL_AUTHORITY_ISSUER_CODE") is not expected_authority_issuer_code
+            or module_globals.get("_CANONICAL_CYCLE_RECEIPT_FIELD_DESCRIPTORS") is not expected_cycle_receipt_field_descriptors
+            or module_globals.get("_CANONICAL_INCEPTION_RECEIPT_FIELD_DESCRIPTORS")
+            is not expected_inception_receipt_field_descriptors
+            or module_globals.get("_CANONICAL_ARTIFACT_KIND") != expected_artifact_kind
+            or module_globals.get("_CANONICAL_COLLECTOR_ARTIFACT_RESOLVER") is not expected_collector_artifact_resolver
+            or module_globals.get("_CANONICAL_PROVIDER_EVIDENCE_LOADER") is not expected_provider_evidence_loader
+            or module_globals.get("_CANONICAL_ISSUED_UNIVERSES") is not expected_issued_universes
+            or module_globals.get("_provider_universe_module") is not expected_provider_universe_module
+            or expected_provider_universe_module._ISSUED_UNIVERSES is not expected_issued_universes
+        ):
+            raise CampaignForwardUniverseCycleBindingError(
+                "campaign forward-cycle authority witness changed mid-resolution"
+            )
+        if (
+            module_globals.get("hashlib") is not expected_hashlib
+            or expected_hashlib.sha256 is not expected_sha256
+            or module_globals.get("json") is not expected_json
+            or expected_json.dumps is not expected_json_dumps
+            or module_globals.get("datetime") is not expected_datetime
+            or module_globals.get("timezone") is not expected_timezone
+        ):
+            raise CampaignForwardUniverseCycleBindingError(
+                "campaign forward-cycle chronology/digest primitives changed"
+            )
+        integrity_guard()
+
+    require_stable_integrity()
+    if type(precommit_locator) is not ForwardUniversePrecommitLocator:
+        raise TypeError("precommit_locator must be exact ForwardUniversePrecommitLocator")
+    if type(collector_store) is not CollectorDeltaStore:
+        raise TypeError("collector_store must be exact CollectorDeltaStore")
+    if type(source_spec) is not CampaignInceptionSourceSpec:
+        raise TypeError("source_spec must be exact CampaignInceptionSourceSpec")
+    if type(provider_evidence_store) is not CompleteGameBoardEvidenceStore:
+        raise TypeError(
+            "provider_evidence_store must be exact CompleteGameBoardEvidenceStore"
+        )
+    if type(universe_store) is not ProviderEvaluationUniverseStore:
+        raise TypeError("universe_store must be exact ProviderEvaluationUniverseStore")
+    if type(protocol) is not ForwardEvidenceProtocolEnvelope:
+        raise TypeError("protocol must be exact ForwardEvidenceProtocolEnvelope")
+    if event_lifecycle is not None and type(event_lifecycle) is not ContinuousEventLifecycle:
+        raise TypeError(
+            "event_lifecycle must be exact ContinuousEventLifecycle or None"
+        )
+    if type(cycle_receipt) is not CampaignCompleteBoardCycleReceipt:
+        raise TypeError(
+            "cycle_receipt must be exact CampaignCompleteBoardCycleReceipt"
+        )
+
+    campaign = _ESTABLISH_CAMPAIGN(
+        precommit_locator=precommit_locator,
+        store=collector_store,
+        source_spec=source_spec,
+    )
+    require_stable_integrity()
+
+    collector_evidence = _RESOLVE_ARTIFACT(
+        collector_store,
+        source_id=cycle_receipt.source_id,
+        cycle_seq=cycle_receipt.cycle_seq,
+        artifact_kind=ARTIFACT_KIND,
+        artifact_sha256=cycle_receipt.provider_evidence_sha256,
+    )
+    if type(collector_evidence) is not dict:
+        raise CampaignForwardUniverseCycleBindingError(
+            "collector artifact resolver returned noncanonical evidence"
+        )
+    require_stable_integrity()
+
+    snapshot = _LOAD_PROVIDER_EVIDENCE(
+        provider_evidence_store,
+        cycle_receipt.provider_evidence_sha256,
+    )
+    if type(snapshot) is not CompleteGameBoardSnapshot:
+        raise CampaignForwardUniverseCycleBindingError(
+            "provider evidence resolver returned noncanonical snapshot"
+        )
+    require_stable_integrity()
+    _require_cycle_observation_chronology(
+        campaign=campaign,
+        source_spec=source_spec,
+        snapshot=snapshot,
+        collector_evidence=collector_evidence,
+    )
+    require_stable_integrity()
+
+    expected_receipt = _expected_cycle_receipt_payload(
+        campaign=campaign,
+        snapshot=snapshot,
+        collector_evidence=collector_evidence,
+    )
+    _assert_cycle_receipt_exact(cycle_receipt, expected_receipt)
+
+    if (
+        collector_evidence.get("authorization_sha256")
+        != campaign.authority_record_sha256
+        or cycle_receipt.source_id != campaign.source_id
+        or cycle_receipt.source_id != source_spec.source_id
+        or cycle_receipt.source_id != snapshot.request.source_id
+        or cycle_receipt.source_id != universe_store.source_id
+        or cycle_receipt.campaign_id != campaign.campaign_id
+        or cycle_receipt.campaign_id != protocol.campaign_id
+    ):
+        raise CampaignForwardUniverseCycleBindingError(
+            "campaign/cycle/provider/universe source or campaign identity conflicts"
+        )
+
+    try:
+        ledger, _backing = _GUARDED_UNIVERSE_LOAD(universe_store)
+    except ForwardUniverseBackingGuardError as exc:
+        raise CampaignForwardUniverseCycleBindingError(
+            "durable provider universe backing authority cannot be resolved"
+        ) from exc
+    if type(ledger) is not EvaluationUniverseLedger:
+        raise CampaignForwardUniverseCycleBindingError(
+            "durable provider evaluation universe is unavailable"
+        )
+    require_stable_integrity()
+
+    universe = _verify_exact_provider_universe_snapshot(
+        ledger=ledger,
+        snapshot=snapshot,
+        event_lifecycle=event_lifecycle,
+    )
+    if (
+        universe.campaign_id != campaign.campaign_id
+        or universe.campaign_id != protocol.campaign_id
+        or universe.intake_snapshot.source_id != cycle_receipt.source_id
+        or campaign.evaluation_universe_sha256 != universe.universe_sha256
+    ):
+        raise CampaignForwardUniverseCycleBindingError(
+            "campaign precommit does not bind the exact cycle-derived provider universe"
+        )
+
+    try:
+        forward_identity = _RESOLVE_FORWARD_IDENTITY(
+            store=universe_store,
+            protocol=protocol,
+            precommit=precommit_locator,
+        )
+    except ForwardEvaluationUniverseBindingError as exc:
+        raise CampaignForwardUniverseCycleBindingError(
+            "forward universe authority cannot be re-resolved"
+        ) from exc
+    if type(forward_identity) is not ForwardUniverseAuthorityIdentity:
+        raise CampaignForwardUniverseCycleBindingError(
+            "forward universe resolver returned noncanonical authority identity"
+        )
+    if (
+        forward_identity.universe_sha256 != universe.universe_sha256
+        or forward_identity.membership_sha256 != universe.membership_sha256
+        or forward_identity.member_count != len(universe.rows)
+    ):
+        raise CampaignForwardUniverseCycleBindingError(
+            "forward universe identity conflicts with cycle-derived durable universe"
+        )
+
+    require_stable_integrity()
+    return CampaignForwardUniverseCycleAuthority._issue(
+        campaign_id=campaign.campaign_id,
+        source_id=cycle_receipt.source_id,
+        cycle_receipt_sha256=cycle_receipt.receipt_sha256,
+        campaign_receipt_sha256=campaign.receipt_sha256,
+        provider_evidence_sha256=snapshot.evidence_sha256,
+        provider_frame_sha256=snapshot.frame_sha256,
+        collector_artifact_evidence_sha256=collector_evidence["evidence_sha256"],
+        forward_identity=forward_identity,
+    )
+
+
+def authorize_campaign_forward_source_receipts(
+    *,
+    precommit_locator: ForwardUniversePrecommitLocator,
+    collector_store: CollectorDeltaStore,
+    source_spec: CampaignInceptionSourceSpec,
+    cycle_receipt: CampaignCompleteBoardCycleReceipt,
+    provider_evidence_store: CompleteGameBoardEvidenceStore,
+    universe_store: ProviderEvaluationUniverseStore,
+    protocol: ForwardEvidenceProtocolEnvelope,
+    event_lifecycle: ContinuousEventLifecycle | None,
+    opportunities: Sequence[ForwardOpportunityEnvelope],
+) -> tuple[AuthoritativeSourceReceipt, ...]:
+    """Authorize #1185 receipts only while the cycle-bound provider authority is stable."""
+
+    module_globals = globals()
+    integrity_guard = _require_dispatch_integrity
+    integrity_guard_code = integrity_guard.__code__
+    resolve_authority = resolve_campaign_forward_universe_cycle_authority
+    resolve_authority_code = resolve_authority.__code__
+    expected_hashlib = hashlib
+    expected_sha256 = hashlib.sha256
+    expected_json = json
+    expected_json_dumps = json.dumps
+    expected_datetime = datetime
+    expected_timezone = timezone
+    expected_inspect = inspect
+    expected_getattr_static = inspect.getattr_static
+    expected_internal_callables = _INTERNAL_CALLABLES
+    expected_captured_callables = _CAPTURED_CALLABLES
+    expected_provider_callables = _PROVIDER_UNIVERSE_CALLABLES
+    expected_provider_values = _PROVIDER_UNIVERSE_VALUES
+    expected_provider_value_items = tuple(expected_provider_values.items())
+    expected_authority_class = _CANONICAL_AUTHORITY_CLASS
+    expected_authority_field_descriptors = _CANONICAL_AUTHORITY_FIELD_DESCRIPTORS
+    expected_authority_issuer = _CANONICAL_AUTHORITY_ISSUER
+    expected_authority_issuer_function = _CANONICAL_AUTHORITY_ISSUER_FUNCTION
+    expected_authority_issuer_code = _CANONICAL_AUTHORITY_ISSUER_CODE
+    expected_cycle_receipt_field_descriptors = _CANONICAL_CYCLE_RECEIPT_FIELD_DESCRIPTORS
+    expected_inception_receipt_field_descriptors = (
+        _CANONICAL_INCEPTION_RECEIPT_FIELD_DESCRIPTORS
+    )
+    expected_artifact_kind = _CANONICAL_ARTIFACT_KIND
+    expected_collector_artifact_resolver = _CANONICAL_COLLECTOR_ARTIFACT_RESOLVER
+    expected_provider_evidence_loader = _CANONICAL_PROVIDER_EVIDENCE_LOADER
+    expected_issued_universes = _CANONICAL_ISSUED_UNIVERSES
+    expected_provider_universe_module = _provider_universe_module
+
+    def require_stable_authorization_dispatch() -> None:
+        if (
+            module_globals.get("_require_dispatch_integrity") is not integrity_guard
+            or integrity_guard.__code__ is not integrity_guard_code
+        ):
+            raise CampaignForwardUniverseCycleBindingError(
+                "campaign forward-cycle integrity guard changed during authorization"
+            )
+        if (
+            module_globals.get("resolve_campaign_forward_universe_cycle_authority")
+            is not resolve_authority
+            or resolve_authority.__code__ is not resolve_authority_code
+        ):
+            raise CampaignForwardUniverseCycleBindingError(
+                "campaign forward-cycle resolver changed during authorization"
+            )
+        if (
+            module_globals.get("inspect") is not expected_inspect
+            or expected_inspect.getattr_static is not expected_getattr_static
+            or module_globals.get("_INTERNAL_CALLABLES") is not expected_internal_callables
+            or module_globals.get("_CAPTURED_CALLABLES") is not expected_captured_callables
+            or module_globals.get("_PROVIDER_UNIVERSE_CALLABLES") is not expected_provider_callables
+            or module_globals.get("_PROVIDER_UNIVERSE_VALUES") is not expected_provider_values
+            or tuple(expected_provider_values.items()) != expected_provider_value_items
+            or module_globals.get("_CANONICAL_AUTHORITY_CLASS") is not expected_authority_class
+            or module_globals.get("_CANONICAL_AUTHORITY_FIELD_DESCRIPTORS") is not expected_authority_field_descriptors
+            or module_globals.get("_CANONICAL_AUTHORITY_ISSUER") is not expected_authority_issuer
+            or module_globals.get("_CANONICAL_AUTHORITY_ISSUER_FUNCTION") is not expected_authority_issuer_function
+            or module_globals.get("_CANONICAL_AUTHORITY_ISSUER_CODE") is not expected_authority_issuer_code
+            or module_globals.get("_CANONICAL_CYCLE_RECEIPT_FIELD_DESCRIPTORS") is not expected_cycle_receipt_field_descriptors
+            or module_globals.get("_CANONICAL_INCEPTION_RECEIPT_FIELD_DESCRIPTORS")
+            is not expected_inception_receipt_field_descriptors
+            or module_globals.get("_CANONICAL_ARTIFACT_KIND") != expected_artifact_kind
+            or module_globals.get("_CANONICAL_COLLECTOR_ARTIFACT_RESOLVER") is not expected_collector_artifact_resolver
+            or module_globals.get("_CANONICAL_PROVIDER_EVIDENCE_LOADER") is not expected_provider_evidence_loader
+            or module_globals.get("_CANONICAL_ISSUED_UNIVERSES") is not expected_issued_universes
+            or module_globals.get("_provider_universe_module") is not expected_provider_universe_module
+            or expected_provider_universe_module._ISSUED_UNIVERSES is not expected_issued_universes
+        ):
+            raise CampaignForwardUniverseCycleBindingError(
+                "campaign forward-cycle authority witness changed during authorization"
+            )
+        if (
+            module_globals.get("hashlib") is not expected_hashlib
+            or expected_hashlib.sha256 is not expected_sha256
+            or module_globals.get("json") is not expected_json
+            or expected_json.dumps is not expected_json_dumps
+            or module_globals.get("datetime") is not expected_datetime
+            or module_globals.get("timezone") is not expected_timezone
+        ):
+            raise CampaignForwardUniverseCycleBindingError(
+                "campaign forward-cycle chronology/digest primitives changed"
+            )
+        integrity_guard()
+
+    require_stable_authorization_dispatch()
+    before = resolve_authority(
+        precommit_locator=precommit_locator,
+        collector_store=collector_store,
+        source_spec=source_spec,
+        cycle_receipt=cycle_receipt,
+        provider_evidence_store=provider_evidence_store,
+        universe_store=universe_store,
+        protocol=protocol,
+        event_lifecycle=event_lifecycle,
+    )
+    require_stable_authorization_dispatch()
+    try:
+        receipts = _AUTHORIZE_FORWARD_RECEIPTS(
+            store=universe_store,
+            protocol=protocol,
+            precommit=precommit_locator,
+            opportunities=opportunities,
+        )
+    except ForwardEvaluationUniverseBindingError as exc:
+        raise CampaignForwardUniverseCycleBindingError(
+            "forward source receipt authorization failed"
+        ) from exc
+    require_stable_authorization_dispatch()
+    after = resolve_authority(
+        precommit_locator=precommit_locator,
+        collector_store=collector_store,
+        source_spec=source_spec,
+        cycle_receipt=cycle_receipt,
+        provider_evidence_store=provider_evidence_store,
+        universe_store=universe_store,
+        protocol=protocol,
+        event_lifecycle=event_lifecycle,
+    )
+    if after != before:
+        raise CampaignForwardUniverseCycleBindingError(
+            "campaign/cycle/provider/universe authority changed during authorization"
+        )
+    if not isinstance(receipts, tuple) or not all(
+        type(receipt) is AuthoritativeSourceReceipt for receipt in receipts
+    ):
+        raise CampaignForwardUniverseCycleBindingError(
+            "forward source authorization returned noncanonical receipts"
+        )
+    return receipts
+
+
+_INTERNAL_CALLABLES = tuple(
+    (name, target, getattr(target, "__code__", None))
+    for name, target in (
+        ("_text", _text),
+        ("_sha", _sha),
+        ("_digest", _digest),
+        ("_instant", _instant),
+        (
+            "_require_cycle_observation_chronology",
+            _require_cycle_observation_chronology,
+        ),
+        (
+            "_expected_cycle_receipt_payload",
+            _expected_cycle_receipt_payload,
+        ),
+        ("_assert_cycle_receipt_exact", _assert_cycle_receipt_exact),
+        ("_verify_exact_provider_universe_snapshot", _verify_exact_provider_universe_snapshot),
+    )
+)
+
+
+def _seal_campaign_forward_universe_cycle_dispatch() -> None:
+    """Seal exported composite authority paths around the private integrity guard."""
+
+    module_globals = globals()
+    expected_error = CampaignForwardUniverseCycleBindingError
+    expected_guard = _require_dispatch_integrity
+    expected_guard_code = expected_guard.__code__
+    expected_resolve = resolve_campaign_forward_universe_cycle_authority
+    expected_resolve_code = expected_resolve.__code__
+    expected_authorize = authorize_campaign_forward_source_receipts
+    expected_authorize_code = expected_authorize.__code__
+    expected_inspect = inspect
+    expected_getattr_static = inspect.getattr_static
+    expected_hashlib = hashlib
+    expected_sha256 = hashlib.sha256
+    expected_json = json
+    expected_json_dumps = json.dumps
+    expected_datetime = datetime
+    expected_timezone = timezone
+    expected_authority_class = _CANONICAL_AUTHORITY_CLASS
+    expected_authority_field_descriptors = _CANONICAL_AUTHORITY_FIELD_DESCRIPTORS
+    expected_authority_issuer = _CANONICAL_AUTHORITY_ISSUER
+    expected_authority_issuer_function = _CANONICAL_AUTHORITY_ISSUER_FUNCTION
+    expected_authority_issuer_code = _CANONICAL_AUTHORITY_ISSUER_CODE
+    expected_cycle_receipt_field_descriptors = _CANONICAL_CYCLE_RECEIPT_FIELD_DESCRIPTORS
+    expected_inception_receipt_field_descriptors = (
+        _CANONICAL_INCEPTION_RECEIPT_FIELD_DESCRIPTORS
+    )
+    expected_artifact_kind = _CANONICAL_ARTIFACT_KIND
+    expected_collector_artifact_resolver = _CANONICAL_COLLECTOR_ARTIFACT_RESOLVER
+    expected_provider_evidence_loader = _CANONICAL_PROVIDER_EVIDENCE_LOADER
+    expected_issued_universes = _CANONICAL_ISSUED_UNIVERSES
+    expected_provider_universe_module = _provider_universe_module
+    expected_internal_callables = _INTERNAL_CALLABLES
+    expected_captured_callables = _CAPTURED_CALLABLES
+    expected_provider_callables = _PROVIDER_UNIVERSE_CALLABLES
+    expected_provider_values = _PROVIDER_UNIVERSE_VALUES
+    expected_provider_value_items = tuple(expected_provider_values.items())
+
+    def require_sealed_surface() -> None:
+        if (
+            module_globals.get("_require_dispatch_integrity") is not expected_guard
+            or expected_guard.__code__ is not expected_guard_code
+        ):
+            raise expected_error(
+                "campaign forward-cycle integrity guard changed"
+            )
+        if (
+            module_globals.get("_CANONICAL_AUTHORITY_CLASS") is not expected_authority_class
+            or module_globals.get("_CANONICAL_AUTHORITY_FIELD_DESCRIPTORS") is not expected_authority_field_descriptors
+            or module_globals.get("_CANONICAL_AUTHORITY_ISSUER") is not expected_authority_issuer
+            or module_globals.get("_CANONICAL_AUTHORITY_ISSUER_FUNCTION") is not expected_authority_issuer_function
+            or module_globals.get("_CANONICAL_AUTHORITY_ISSUER_CODE") is not expected_authority_issuer_code
+            or module_globals.get("_CANONICAL_CYCLE_RECEIPT_FIELD_DESCRIPTORS") is not expected_cycle_receipt_field_descriptors
+            or module_globals.get("_CANONICAL_INCEPTION_RECEIPT_FIELD_DESCRIPTORS")
+            is not expected_inception_receipt_field_descriptors
+            or module_globals.get("_CANONICAL_ARTIFACT_KIND") != expected_artifact_kind
+            or module_globals.get("_CANONICAL_COLLECTOR_ARTIFACT_RESOLVER") is not expected_collector_artifact_resolver
+            or module_globals.get("_CANONICAL_PROVIDER_EVIDENCE_LOADER") is not expected_provider_evidence_loader
+            or module_globals.get("_CANONICAL_ISSUED_UNIVERSES") is not expected_issued_universes
+            or module_globals.get("_provider_universe_module") is not expected_provider_universe_module
+            or expected_provider_universe_module._ISSUED_UNIVERSES is not expected_issued_universes
+        ):
+            raise expected_error(
+                "campaign forward-cycle authority witness globals changed"
+            )
+        if (
+            module_globals.get("_INTERNAL_CALLABLES") is not expected_internal_callables
+            or module_globals.get("_CAPTURED_CALLABLES")
+            is not expected_captured_callables
+            or module_globals.get("_PROVIDER_UNIVERSE_CALLABLES")
+            is not expected_provider_callables
+            or module_globals.get("_PROVIDER_UNIVERSE_VALUES")
+            is not expected_provider_values
+            or tuple(expected_provider_values.items())
+            != expected_provider_value_items
+        ):
+            raise expected_error(
+                "campaign forward-cycle witness tables changed"
+            )
+        if (
+            module_globals.get("inspect") is not expected_inspect
+            or expected_inspect.getattr_static is not expected_getattr_static
+        ):
+            raise expected_error(
+                "campaign forward-cycle reflection dispatch changed"
+            )
+        if (
+            module_globals.get("hashlib") is not expected_hashlib
+            or expected_hashlib.sha256 is not expected_sha256
+            or module_globals.get("json") is not expected_json
+            or expected_json.dumps is not expected_json_dumps
+            or module_globals.get("datetime") is not expected_datetime
+            or module_globals.get("timezone") is not expected_timezone
+        ):
+            raise expected_error(
+                "campaign forward-cycle chronology/digest primitives changed"
+            )
+        if expected_resolve.__code__ is not expected_resolve_code:
+            raise expected_error(
+                "campaign forward-cycle resolver implementation changed"
+            )
+        if expected_authorize.__code__ is not expected_authorize_code:
+            raise expected_error(
+                "campaign forward-cycle authorizer implementation changed"
+            )
+        expected_guard()
+
+    def sealed_resolve_campaign_forward_universe_cycle_authority(*args, **kwargs):
+        if (
+            module_globals.get(
+                "resolve_campaign_forward_universe_cycle_authority"
+            )
+            is not sealed_resolve_campaign_forward_universe_cycle_authority
+        ):
+            raise expected_error(
+                "campaign forward-cycle resolver surface changed"
+            )
+        require_sealed_surface()
+        result = expected_resolve(*args, **kwargs)
+        require_sealed_surface()
+        return result
+
+    def sealed_authorize_campaign_forward_source_receipts(*args, **kwargs):
+        if (
+            module_globals.get("authorize_campaign_forward_source_receipts")
+            is not sealed_authorize_campaign_forward_source_receipts
+            or module_globals.get(
+                "resolve_campaign_forward_universe_cycle_authority"
+            )
+            is not sealed_resolve_campaign_forward_universe_cycle_authority
+        ):
+            raise expected_error(
+                "campaign forward-cycle public authority surface changed"
+            )
+        require_sealed_surface()
+        result = expected_authorize(*args, **kwargs)
+        require_sealed_surface()
+        return result
+
+    sealed_resolve_campaign_forward_universe_cycle_authority.__name__ = (
+        expected_resolve.__name__
+    )
+    sealed_resolve_campaign_forward_universe_cycle_authority.__qualname__ = (
+        expected_resolve.__qualname__
+    )
+    sealed_resolve_campaign_forward_universe_cycle_authority.__doc__ = (
+        expected_resolve.__doc__
+    )
+    sealed_authorize_campaign_forward_source_receipts.__name__ = (
+        expected_authorize.__name__
+    )
+    sealed_authorize_campaign_forward_source_receipts.__qualname__ = (
+        expected_authorize.__qualname__
+    )
+    sealed_authorize_campaign_forward_source_receipts.__doc__ = (
+        expected_authorize.__doc__
+    )
+    module_globals["resolve_campaign_forward_universe_cycle_authority"] = (
+        sealed_resolve_campaign_forward_universe_cycle_authority
+    )
+    module_globals["authorize_campaign_forward_source_receipts"] = (
+        sealed_authorize_campaign_forward_source_receipts
+    )
+
+
+_seal_campaign_forward_universe_cycle_dispatch()
+
+
+__all__ = [
+    "CampaignForwardUniverseCycleAuthority",
+    "CampaignForwardUniverseCycleBindingError",
+    "authorize_campaign_forward_source_receipts",
+    "resolve_campaign_forward_universe_cycle_authority",
+]

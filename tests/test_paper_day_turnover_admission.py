@@ -361,6 +361,148 @@ def test_monotonic_transition_global_helper_code_mutation_cannot_mint_day_headro
         helper.__code__ = original_code
 
 
+def _same_day_offset(now: datetime, seconds: int) -> datetime:
+    candidate = now + timedelta(seconds=seconds)
+    if candidate.date() != now.date():
+        candidate = now - timedelta(seconds=seconds)
+    assert candidate.date() == now.date()
+    return candidate
+
+
+def test_within_day_backdating_cannot_refresh_stale_quote(tmp_path):
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    requested = _same_day_offset(now, -60)
+    goal = replace(
+        _goal(),
+        max_turnover_fraction=Decimal("1"),
+        max_quote_age_seconds=Decimal("5"),
+    )
+    EconomicGoalStore(tmp_path).initialize_owner(goal)
+    book = PaperBook("100")
+    book.save(tmp_path / "paper_book.json")
+    candidate = _leg("caller-time-stale-quote")
+    context = _context(candidate, _timestamp(requested))
+    policy = _policy(goal)
+
+    # The caller-authored timestamp makes this quote look only three seconds old.
+    baseline = policy.evaluate(book, Decimal("0.01"), context=context)
+    assert baseline.allowed
+
+    result = admit_paper_ticket(
+        workspace=tmp_path,
+        book=book,
+        risk_policy=policy,
+        stake=Decimal("0.01"),
+        legs=(candidate,),
+        reason="product time must govern quote freshness",
+        placed_at=_timestamp(requested),
+        context=context,
+        provider_source_ids=("provider-1",),
+        bankroll_id="paper-bankroll",
+        currency="USD",
+    )
+
+    assert result.admitted is False
+    assert result.risk.reason in {
+        "quote exceeds economic goal maximum age",
+        "quote timestamp is after proposal timestamp",
+    }
+    assert PaperBook.load(tmp_path / "paper_book.json").tickets == {}
+
+
+def test_within_day_backdating_cannot_hide_newer_bankroll_history(tmp_path):
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    day_start = now.replace(hour=0, minute=0, second=0)
+    if now - day_start < timedelta(seconds=90):
+        pytest.skip("needs ninety seconds of current UTC-day history")
+
+    requested = now - timedelta(seconds=60)
+    prior_time = now - timedelta(seconds=10)
+    goal = replace(
+        _goal(),
+        max_session_loss_fraction=Decimal("0.05"),
+        max_turnover_fraction=Decimal("1"),
+        max_quote_age_seconds=Decimal("120"),
+    )
+    EconomicGoalStore(tmp_path).initialize_owner(goal)
+
+    book = PaperBook("100")
+    prior = _leg("recent-open")
+    book.open_ticket(
+        [prior],
+        Decimal("4"),
+        placed_at=_timestamp(prior_time),
+        bankroll_id="paper-bankroll",
+        currency="USD",
+    )
+    book.save(tmp_path / "paper_book.json")
+
+    candidate = _leg("caller-time-history-cutoff")
+    context = _context(candidate, _timestamp(requested))
+    policy = _policy(goal)
+
+    # Caller time predates the open stake, so the old causal-cutoff path hides it.
+    baseline = policy.evaluate(book, Decimal("2"), context=context)
+    assert baseline.allowed
+
+    result = admit_paper_ticket(
+        workspace=tmp_path,
+        book=book,
+        risk_policy=policy,
+        stake=Decimal("2"),
+        legs=(candidate,),
+        reason="product time must govern bankroll causal cutoff",
+        placed_at=_timestamp(requested),
+        context=context,
+        provider_source_ids=("provider-1",),
+        bankroll_id="paper-bankroll",
+        currency="USD",
+    )
+
+    assert result.admitted is False
+    assert result.risk.reason == "economic goal conservative session loss limit exceeded"
+    persisted = PaperBook.load(tmp_path / "paper_book.json")
+    assert tuple(persisted.tickets) == tuple(book.tickets)
+
+
+def test_positive_economic_admission_persists_product_action_time(tmp_path):
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    requested = _same_day_offset(now, -1)
+    goal = replace(
+        _goal(),
+        max_turnover_fraction=Decimal("1"),
+        max_quote_age_seconds=Decimal("30"),
+    )
+    EconomicGoalStore(tmp_path).initialize_owner(goal)
+    book = PaperBook("100")
+    book.save(tmp_path / "paper_book.json")
+    candidate = _leg("product-action-time")
+    context = _context(candidate, _timestamp(requested))
+    policy = _policy(goal)
+
+    result = admit_paper_ticket(
+        workspace=tmp_path,
+        book=book,
+        risk_policy=policy,
+        stake=Decimal("0.01"),
+        legs=(candidate,),
+        reason="persist product-owned admission time",
+        placed_at=_timestamp(requested),
+        context=context,
+        provider_source_ids=("provider-1",),
+        bankroll_id="paper-bankroll",
+        currency="USD",
+    )
+
+    assert result.admitted is True
+    assert result.ticket is not None
+    persisted_time = datetime.fromisoformat(
+        result.ticket.placed_at.replace("Z", "+00:00")
+    ).astimezone(timezone.utc)
+    assert persisted_time > requested
+    assert persisted_time.date() == now.date()
+
+
 def test_admission_rejects_lock_validator_dependency_rebinding(tmp_path):
     book = PaperBook("100")
     book.save(tmp_path / "paper_book.json")

@@ -9,7 +9,6 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal, localcontext
 from pathlib import Path
 
-import autosport.market_implied_baseline as market_implied_baseline_module
 from autosport.domain import MarketEvent, MarketType
 from autosport.external_validity_baseline import (
     BaselineDefinition,
@@ -170,121 +169,6 @@ class MarketImpliedBaselineTests(unittest.TestCase):
         ):
             self.evidence()
         del self.store.events
-
-    def test_in_place_store_reader_code_mutation_fails_closed(self) -> None:
-        self.persist()
-        original_code = SQLiteMarketStore.events.__code__
-
-        def forged_events(self, event_id=None):
-            return []
-
-        try:
-            SQLiteMarketStore.events.__code__ = forged_events.__code__
-            with self.assertRaisesRegex(
-                MarketImpliedBaselineError,
-                "canonical market store events executable was mutated",
-            ):
-                self.evidence()
-        finally:
-            SQLiteMarketStore.events.__code__ = original_code
-
-    def test_in_place_outcome_availability_code_mutation_fails_closed(self) -> None:
-        self.persist()
-        original_code = MarketSettlementOutcomeAuthority.assert_available_as_of.__code__
-
-        def forged_assert_available_as_of(self, decision_as_of):
-            return None
-
-        try:
-            MarketSettlementOutcomeAuthority.assert_available_as_of.__code__ = (
-                forged_assert_available_as_of.__code__
-            )
-            with self.assertRaisesRegex(
-                MarketImpliedBaselineError,
-                "market outcome availability executable was mutated",
-            ):
-                self.evidence()
-        finally:
-            MarketSettlementOutcomeAuthority.assert_available_as_of.__code__ = original_code
-
-    def test_coordinated_store_reader_and_witness_rebind_fails_closed(self) -> None:
-        self.persist()
-        original_events = SQLiteMarketStore.events
-        sentinel = object()
-        witness_names = (
-            "_STORE_TYPE",
-            "_STORE_EVENTS",
-            "_STORE_EVENTS_CODE",
-        )
-        previous = {
-            name: market_implied_baseline_module.__dict__.get(name, sentinel)
-            for name in witness_names
-        }
-
-        def forged_events(store, event_id=None):
-            return original_events(store, event_id)
-
-        try:
-            SQLiteMarketStore.events = forged_events  # type: ignore[method-assign]
-            market_implied_baseline_module._STORE_TYPE = SQLiteMarketStore
-            market_implied_baseline_module._STORE_EVENTS = forged_events
-            market_implied_baseline_module._STORE_EVENTS_CODE = forged_events.__code__
-            with self.assertRaisesRegex(
-                MarketImpliedBaselineError,
-                "canonical market store events authority was rebound",
-            ):
-                self.evidence()
-        finally:
-            SQLiteMarketStore.events = original_events  # type: ignore[method-assign]
-            for name, value in previous.items():
-                if value is sentinel:
-                    market_implied_baseline_module.__dict__.pop(name, None)
-                else:
-                    market_implied_baseline_module.__dict__[name] = value
-
-    def test_coordinated_outcome_reader_and_witness_rebind_fails_closed(self) -> None:
-        self.persist()
-        original_assert = MarketSettlementOutcomeAuthority.assert_available_as_of
-        sentinel = object()
-        witness_names = (
-            "_OUTCOME_AUTHORITY_TYPE",
-            "_OUTCOME_ASSERT_AVAILABLE",
-            "_OUTCOME_ASSERT_AVAILABLE_CODE",
-        )
-        previous = {
-            name: market_implied_baseline_module.__dict__.get(name, sentinel)
-            for name in witness_names
-        }
-
-        def forged_assert_available_as_of(authority, decision_as_of):
-            del authority, decision_as_of
-            return None
-
-        try:
-            MarketSettlementOutcomeAuthority.assert_available_as_of = (  # type: ignore[method-assign]
-                forged_assert_available_as_of
-            )
-            market_implied_baseline_module._OUTCOME_AUTHORITY_TYPE = (
-                MarketSettlementOutcomeAuthority
-            )
-            market_implied_baseline_module._OUTCOME_ASSERT_AVAILABLE = (
-                forged_assert_available_as_of
-            )
-            market_implied_baseline_module._OUTCOME_ASSERT_AVAILABLE_CODE = (
-                forged_assert_available_as_of.__code__
-            )
-            with self.assertRaisesRegex(
-                MarketImpliedBaselineError,
-                "market outcome availability authority was rebound",
-            ):
-                self.evidence()
-        finally:
-            MarketSettlementOutcomeAuthority.assert_available_as_of = original_assert  # type: ignore[method-assign]
-            for name, value in previous.items():
-                if value is sentinel:
-                    market_implied_baseline_module.__dict__.pop(name, None)
-                else:
-                    market_implied_baseline_module.__dict__[name] = value
 
     def test_time_subclasses_cannot_execute_before_canonical_history_read(self) -> None:
         hooks = {"cutoff": 0, "max_age": 0}

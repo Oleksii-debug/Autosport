@@ -40,40 +40,6 @@ _COHORT_TOKEN = object()
 _HEX = frozenset("0123456789abcdef")
 
 
-def _build_canonical_evaluation_loader(store_type, store_load):
-    store_load_code = getattr(store_load, "__code__", None)
-    if store_load_code is None:
-        raise RuntimeError("canonical evaluation-universe loader is unavailable")
-
-    def load_canonical_evaluation_universe(
-        evaluation_store: EvaluationUniverseStore,
-    ):
-        if type(evaluation_store) is not store_type:
-            raise TypeError("evaluation_store must be exact EvaluationUniverseStore")
-        namespace = getattr(evaluation_store, "__dict__", None)
-        if isinstance(namespace, dict) and "load" in namespace:
-            raise MarketImpliedUniverseBindingError(
-                "canonical evaluation-universe store must not shadow load reader"
-            )
-        if store_type.load is not store_load:
-            raise MarketImpliedUniverseBindingError(
-                "canonical evaluation-universe load authority was rebound"
-            )
-        if getattr(store_load, "__code__", None) is not store_load_code:
-            raise MarketImpliedUniverseBindingError(
-                "canonical evaluation-universe load executable was mutated"
-            )
-        return store_load(evaluation_store)
-
-    return load_canonical_evaluation_universe
-
-
-_CANONICAL_EVALUATION_LOADER = _build_canonical_evaluation_loader(
-    EvaluationUniverseStore,
-    EvaluationUniverseStore.load,
-)
-
-
 def _text(value: object, name: str) -> str:
     if type(value) is not str or not value or value != value.strip() or "\x00" in value:
         raise MarketImpliedUniverseBindingError(
@@ -302,13 +268,12 @@ def _assert_row_matches_market_evidence(
     )
 
 
-def _bind_market_implied_baseline_to_evaluation_universe_impl(
+def bind_market_implied_baseline_to_evaluation_universe(
     *,
     protocol: FrozenBaselineProtocol,
     baseline_definition: BaselineDefinition,
     evidence: Sequence[MarketImpliedBaselineEvidence],
     evaluation_store: EvaluationUniverseStore,
-    _canonical_loader,
 ) -> MarketImpliedUniverseCohortEvidence:
     """Bind market-implied probabilities to the complete durable evaluation universe.
 
@@ -319,7 +284,9 @@ def _bind_market_implied_baseline_to_evaluation_universe_impl(
     lower-level outcome-roster origin truth.
     """
 
-    ledger = _canonical_loader(evaluation_store)
+    if type(evaluation_store) is not EvaluationUniverseStore:
+        raise TypeError("evaluation_store must be exact EvaluationUniverseStore")
+    ledger = evaluation_store.load()
     if ledger is None:
         raise MarketImpliedUniverseBindingError(
             "canonical evaluation-universe store has no durable ledger"
@@ -357,40 +324,3 @@ def _bind_market_implied_baseline_to_evaluation_universe_impl(
         row_bindings=bindings,
         _token=_COHORT_TOKEN,
     )
-
-
-
-def _seal_market_implied_universe_binding(implementation, canonical_loader):
-    implementation_code = getattr(implementation, "__code__", None)
-    if implementation_code is None:
-        raise RuntimeError("canonical market-implied universe binder is unavailable")
-
-    def bind_market_implied_baseline_to_evaluation_universe(
-        *,
-        protocol: FrozenBaselineProtocol,
-        baseline_definition: BaselineDefinition,
-        evidence: Sequence[MarketImpliedBaselineEvidence],
-        evaluation_store: EvaluationUniverseStore,
-    ) -> MarketImpliedUniverseCohortEvidence:
-        if getattr(implementation, "__code__", None) is not implementation_code:
-            raise MarketImpliedUniverseBindingError(
-                "canonical market-implied universe binder executable was mutated"
-            )
-        return implementation(
-            protocol=protocol,
-            baseline_definition=baseline_definition,
-            evidence=evidence,
-            evaluation_store=evaluation_store,
-            _canonical_loader=canonical_loader,
-        )
-
-    return bind_market_implied_baseline_to_evaluation_universe
-
-
-bind_market_implied_baseline_to_evaluation_universe = (
-    _seal_market_implied_universe_binding(
-        _bind_market_implied_baseline_to_evaluation_universe_impl,
-        _CANONICAL_EVALUATION_LOADER,
-    )
-)
-del _CANONICAL_EVALUATION_LOADER

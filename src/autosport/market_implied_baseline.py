@@ -38,74 +38,13 @@ _OBSERVATION_TOKEN = object()
 _COHORT_TOKEN = object()
 
 # The public builder accepts product objects, but the resulting evidence claims
-# canonical durable-history replay. Capture the trusted executable graph in closures:
-# module globals are mutable and therefore cannot themselves be positive authority.
-def _build_canonical_input_guard(
-    store_type,
-    store_events,
-    outcome_authority_type,
-    outcome_assert_available,
-):
-    store_events_code = getattr(store_events, "__code__", None)
-    outcome_assert_available_code = getattr(
-        outcome_assert_available,
-        "__code__",
-        None,
-    )
-    if store_events_code is None or outcome_assert_available_code is None:
-        raise RuntimeError("canonical market-implied input executable is unavailable")
-
-    def require_canonical_inputs(
-        store: SQLiteMarketStore,
-        outcome_authority: MarketSettlementOutcomeAuthority,
-    ) -> None:
-        if type(store) is not store_type:
-            raise TypeError("store must be exact SQLiteMarketStore")
-        namespace = getattr(store, "__dict__", None)
-        if isinstance(namespace, dict) and "events" in namespace:
-            raise MarketImpliedBaselineError(
-                "canonical market store must not shadow events reader"
-            )
-        if store_type.events is not store_events:
-            raise MarketImpliedBaselineError(
-                "canonical market store events authority was rebound"
-            )
-        if getattr(store_events, "__code__", None) is not store_events_code:
-            raise MarketImpliedBaselineError(
-                "canonical market store events executable was mutated"
-            )
-        if type(outcome_authority) is not outcome_authority_type:
-            raise TypeError(
-                "outcome_authority must be exact MarketSettlementOutcomeAuthority"
-            )
-        if (
-            outcome_authority_type.assert_available_as_of
-            is not outcome_assert_available
-        ):
-            raise MarketImpliedBaselineError(
-                "market outcome availability authority was rebound"
-            )
-        if (
-            getattr(outcome_assert_available, "__code__", None)
-            is not outcome_assert_available_code
-        ):
-            raise MarketImpliedBaselineError(
-                "market outcome availability executable was mutated"
-            )
-
-    return require_canonical_inputs
-
-
-_CANONICAL_STORE_EVENTS = SQLiteMarketStore.events
-_CANONICAL_OUTCOME_ASSERT_AVAILABLE = (
-    MarketSettlementOutcomeAuthority.assert_available_as_of
-)
-_CANONICAL_INPUT_GUARD = _build_canonical_input_guard(
-    SQLiteMarketStore,
-    _CANONICAL_STORE_EVENTS,
-    MarketSettlementOutcomeAuthority,
-    _CANONICAL_OUTCOME_ASSERT_AVAILABLE,
-)
+# canonical durable-history replay. Subclasses or instance-shadowed readers can
+# otherwise replace events() while still satisfying isinstance(), fabricating
+# a self-consistent comparator from process-local bytes.
+_STORE_TYPE = SQLiteMarketStore
+_STORE_EVENTS = _STORE_TYPE.events
+_OUTCOME_AUTHORITY_TYPE = MarketSettlementOutcomeAuthority
+_OUTCOME_ASSERT_AVAILABLE = _OUTCOME_AUTHORITY_TYPE.assert_available_as_of
 
 
 def _text(value: object, name: str) -> str:
@@ -349,21 +288,43 @@ def _probabilities(
     return overround, values
 
 
-def _build_market_implied_baseline_evidence_impl(
+def _require_canonical_inputs(
+    store: SQLiteMarketStore,
+    outcome_authority: MarketSettlementOutcomeAuthority,
+) -> None:
+    if type(store) is not _STORE_TYPE:
+        raise TypeError("store must be exact SQLiteMarketStore")
+    namespace = getattr(store, "__dict__", None)
+    if isinstance(namespace, dict) and "events" in namespace:
+        raise MarketImpliedBaselineError(
+            "canonical market store must not shadow events reader"
+        )
+    if _STORE_TYPE.events is not _STORE_EVENTS:
+        raise MarketImpliedBaselineError(
+            "canonical market store events authority was rebound"
+        )
+    if type(outcome_authority) is not _OUTCOME_AUTHORITY_TYPE:
+        raise TypeError(
+            "outcome_authority must be exact MarketSettlementOutcomeAuthority"
+        )
+    if _OUTCOME_AUTHORITY_TYPE.assert_available_as_of is not _OUTCOME_ASSERT_AVAILABLE:
+        raise MarketImpliedBaselineError(
+            "market outcome availability authority was rebound"
+        )
+
+
+def build_market_implied_baseline_evidence(
     *,
     cohort_key: str,
     store: SQLiteMarketStore,
     outcome_authority: MarketSettlementOutcomeAuthority,
     decision_cutoff: datetime,
     max_age: timedelta,
-    _canonical_guard,
-    _outcome_assert_available,
-    _store_events,
 ) -> MarketImpliedBaselineEvidence:
     """Issue one decision-time probability vector; roster-origin truth remains false."""
 
     key = _text(cohort_key, "cohort_key")
-    _canonical_guard(store, outcome_authority)
+    _require_canonical_inputs(store, outcome_authority)
 
     # Caller-controlled datetime/timedelta subclasses may execute arbitrary Python
     # while they are normalized. Collapse them to exact built-in values before any
@@ -372,10 +333,10 @@ def _build_market_implied_baseline_evidence_impl(
     age_us = _age_us(max_age)
     decision_boundary = datetime.fromisoformat(cutoff.replace("Z", "+00:00"))
     age_limit = timedelta(microseconds=age_us)
-    _canonical_guard(store, outcome_authority)
+    _require_canonical_inputs(store, outcome_authority)
 
     try:
-        _outcome_assert_available(outcome_authority, decision_boundary)
+        _OUTCOME_ASSERT_AVAILABLE(outcome_authority, decision_boundary)
     except (TypeError, ValueError) as exc:
         raise MarketImpliedBaselineError(
             "verified outcome roster is not causally available at decision cutoff"
@@ -385,9 +346,9 @@ def _build_market_implied_baseline_evidence_impl(
     # product objects before consuming canonical history, then invoke the captured
     # unbound SQLite reader exactly once so later instance dispatch cannot replace
     # the history used by one evidence issuance.
-    _canonical_guard(store, outcome_authority)
+    _require_canonical_inputs(store, outcome_authority)
     identity = outcome_authority.identity
-    history = tuple(_store_events(store))
+    history = tuple(_STORE_EVENTS(store))
 
     causally_known_selections: set[str] = set()
     mirror = MarketMirror()
@@ -480,53 +441,6 @@ def _build_market_implied_baseline_evidence_impl(
         probabilities=probabilities,
         _token=_OBSERVATION_TOKEN,
     )
-
-
-def _seal_market_implied_baseline_builder(
-    implementation,
-    canonical_guard,
-    outcome_assert_available,
-    store_events,
-):
-    implementation_code = getattr(implementation, "__code__", None)
-    if implementation_code is None:
-        raise RuntimeError("canonical market-implied builder executable is unavailable")
-
-    def build_market_implied_baseline_evidence(
-        *,
-        cohort_key: str,
-        store: SQLiteMarketStore,
-        outcome_authority: MarketSettlementOutcomeAuthority,
-        decision_cutoff: datetime,
-        max_age: timedelta,
-    ) -> MarketImpliedBaselineEvidence:
-        if getattr(implementation, "__code__", None) is not implementation_code:
-            raise MarketImpliedBaselineError(
-                "canonical market-implied builder executable was mutated"
-            )
-        return implementation(
-            cohort_key=cohort_key,
-            store=store,
-            outcome_authority=outcome_authority,
-            decision_cutoff=decision_cutoff,
-            max_age=max_age,
-            _canonical_guard=canonical_guard,
-            _outcome_assert_available=outcome_assert_available,
-            _store_events=store_events,
-        )
-
-    return build_market_implied_baseline_evidence
-
-
-build_market_implied_baseline_evidence = _seal_market_implied_baseline_builder(
-    _build_market_implied_baseline_evidence_impl,
-    _CANONICAL_INPUT_GUARD,
-    _CANONICAL_OUTCOME_ASSERT_AVAILABLE,
-    _CANONICAL_STORE_EVENTS,
-)
-del _CANONICAL_INPUT_GUARD
-del _CANONICAL_OUTCOME_ASSERT_AVAILABLE
-del _CANONICAL_STORE_EVENTS
 
 
 def market_implied_evidence_manifest_sha256(

@@ -1,3 +1,5 @@
+import dis
+
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -267,6 +269,33 @@ def _admission_current_binding_consumer():
     inner = _closure_cell(admit_paper_ticket, "expected_function").cell_contents
     assert callable(inner)
     return inner
+
+
+def test_sealed_admission_rechecks_product_time_and_quote_before_mutation():
+    consumer = _admission_current_binding_consumer()
+    inner_code = _closure_cell(consumer, "inner_code").cell_contents
+    instructions = tuple(dis.get_instructions(inner_code))
+
+    def load_offsets(name):
+        return [
+            instruction.offset
+            for instruction in instructions
+            if instruction.opname.startswith("LOAD_")
+            and instruction.argval == name
+        ]
+
+    clock_offsets = load_offsets("_product_clock_admission_timestamp")
+    quote_offsets = load_offsets("_RISK_QUOTE_FROZEN")
+    prepare_offsets = load_offsets("_PAPERBOOK_PREPARE_PRODUCT_DAY_ADMISSION_FUNCTION")
+    open_offsets = load_offsets("_PAPERBOOK_OPEN_TICKET_FUNCTION")
+
+    assert clock_offsets, "sealed admission must refresh product time before mutation"
+    assert len(quote_offsets) >= 2, (
+        "sealed admission must retain the initial product-time quote check and "
+        "repeat quote freshness immediately before mutation"
+    )
+    assert prepare_offsets and open_offsets
+    assert clock_offsets[-1] < quote_offsets[-1] < prepare_offsets[-1] < open_offsets[-1]
 
 
 def test_turnover_resolver_closure_binding_rebind_cannot_mint_headroom(tmp_path):

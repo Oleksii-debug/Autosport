@@ -514,3 +514,94 @@ def test_sealed_capture_rejects_public_surface_rebind(monkeypatch):
         match="public surface changed",
     ):
         saved(api_key="secret-value", request=_request())
+
+
+
+def test_ephemeral_issuance_registry_is_not_module_mutable():
+    assert not hasattr(authority_module, "_ISSUED")
+
+
+def test_store_save_uses_captured_assertion_not_live_public_alias(
+    tmp_path,
+    monkeypatch,
+):
+    snapshot = _capture(monkeypatch)
+    hostile_calls: list[str] = []
+
+    def hostile_assert(_snapshot) -> None:
+        hostile_calls.append("assert")
+        raise AssertionError("hostile public assertion executed")
+
+    monkeypatch.setattr(
+        authority_module,
+        "assert_complete_game_board_authoritative",
+        hostile_assert,
+    )
+    path = _store(tmp_path).save(snapshot)
+    assert path.name == f"{snapshot.evidence_sha256}.json"
+    assert hostile_calls == []
+
+
+def test_store_save_rejects_canonical_assert_witness_rebind(
+    tmp_path,
+    monkeypatch,
+):
+    snapshot = _capture(monkeypatch)
+    hostile_calls: list[str] = []
+
+    def hostile_assert(_snapshot) -> None:
+        hostile_calls.append("assert")
+        raise AssertionError("hostile canonical assertion executed")
+
+    monkeypatch.setattr(
+        authority_module,
+        "_CANONICAL_ASSERT_COMPLETE_GAME_BOARD_AUTHORITATIVE",
+        hostile_assert,
+    )
+    with pytest.raises(
+        ProviderObservationIntegrityError,
+        match="provider evidence store authority witness changed",
+    ):
+        _store(tmp_path).save(snapshot)
+    assert hostile_calls == []
+
+
+def test_store_save_requires_exact_store_type(tmp_path, monkeypatch):
+    snapshot = _capture(monkeypatch)
+
+    class HostileStore(CompleteGameBoardEvidenceStore):
+        pass
+
+    store = HostileStore(
+        tmp_path / "workspace",
+        authority_root=tmp_path / "machine-authority",
+    )
+    with pytest.raises(
+        TypeError,
+        match="save requires exact CompleteGameBoardEvidenceStore",
+    ):
+        store.save(snapshot)
+
+
+def test_store_load_requires_exact_store_type(tmp_path):
+    class HostileStore(CompleteGameBoardEvidenceStore):
+        pass
+
+    store = HostileStore(
+        tmp_path / "workspace",
+        authority_root=tmp_path / "machine-authority",
+    )
+    with pytest.raises(
+        TypeError,
+        match="load requires exact CompleteGameBoardEvidenceStore",
+    ):
+        store.load("a" * 64)
+
+
+def test_store_load_implementation_uses_canonical_remember():
+    import inspect
+
+    descriptor = inspect.getattr_static(CompleteGameBoardEvidenceStore, "load")
+    original = descriptor.__wrapped__
+    assert "_CANONICAL_REMEMBER" in original.__code__.co_names
+    assert "_remember" not in original.__code__.co_names

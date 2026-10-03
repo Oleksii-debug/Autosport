@@ -1393,6 +1393,106 @@ def test_unmatched_success_is_unknown_until_readback() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "wrong_handicap",
+        "missing_handicap",
+        "wrong_persistence",
+        "missing_persistence",
+    ),
+)
+def test_placeorders_exact_echo_binds_handicap_and_persistence(
+    mutation: str,
+) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
+
+        def mismatched_echo_response(request: dict[str, object]) -> bytes:
+            payload = json.loads(
+                _response(
+                    request,
+                    matched=action.requested_stake,
+                    average=action.requested_odds,
+                ).decode("utf-8")
+            )
+            instruction = payload["result"]["instructionReports"][0][
+                "instruction"
+            ]
+            if mutation == "wrong_handicap":
+                instruction["handicap"] = 1.5
+            elif mutation == "missing_handicap":
+                del instruction["handicap"]
+            elif mutation == "wrong_persistence":
+                instruction["limitOrder"]["persistenceType"] = "PERSIST"
+            elif mutation == "missing_persistence":
+                del instruction["limitOrder"]["persistenceType"]
+            else:  # pragma: no cover - parameter list is closed above
+                raise AssertionError(f"unexpected mutation: {mutation}")
+            return json.dumps(payload).encode("utf-8")
+
+        transport = _Transport(mismatched_echo_response)
+        client = _enabled_client(profile, transport, store=goal_store)
+
+        result = execute_betfair_supervised_action(
+            ledger,
+            bound,
+            approval,
+            action_id=action.action_id,
+            attempt_id=f"attempt-echo-{mutation}",
+            profile=profile,
+            client=client,
+            clock=lambda: SUBMITTED_AT,
+        )
+
+        assert result.outcome is PlaceOrdersOutcome.UNKNOWN
+        assert result.attempt_state is AttemptState.UNKNOWN
+        assert result.evidence_id is None
+        assert result.external_receipt_id is None
+        assert not ledger.can_retry_action(
+            plan_id=bound.execution_plan.plan_id,
+            action_id=action.action_id,
+        )
+        assert len(transport.calls) == 1
+
+
+def test_placeorders_exact_echo_accepts_numeric_zero_handicap() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
+
+        def numeric_zero_echo_response(request: dict[str, object]) -> bytes:
+            payload = json.loads(
+                _response(
+                    request,
+                    matched=action.requested_stake,
+                    average=action.requested_odds,
+                ).decode("utf-8")
+            )
+            payload["result"]["instructionReports"][0]["instruction"][
+                "handicap"
+            ] = 0.0
+            return json.dumps(payload).encode("utf-8")
+
+        transport = _Transport(numeric_zero_echo_response)
+        client = _enabled_client(profile, transport, store=goal_store)
+
+        result = execute_betfair_supervised_action(
+            ledger,
+            bound,
+            approval,
+            action_id=action.action_id,
+            attempt_id="attempt-echo-zero-handicap",
+            profile=profile,
+            client=client,
+            clock=lambda: SUBMITTED_AT,
+        )
+
+        assert result.outcome is PlaceOrdersOutcome.ACCEPTED
+        assert result.attempt_state is AttemptState.ACCEPTED
+        assert result.evidence_id is not None
+        assert result.external_receipt_id == "bet-123"
+
+
 def test_duplicate_provider_json_key_is_unknown_not_terminal() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         profile, bound, approval, ledger, action, goal_store = _prepared(tmp)

@@ -697,7 +697,8 @@ def _prepare_paper_day_turnover_snapshot(
         goal_store = _canonical_economic_goal_store(root)
         if _ECONOMIC_GOAL_LOAD_FROZEN(goal_store) != goal:
             return None
-        snapshot_book = PaperBook.load(book_path)
+        _require_paperbook_admission_authority()
+        snapshot_book = _PAPERBOOK_LOAD_FUNCTION(PaperBook, book_path)
         window_store = ProductDayRiskWindowStore(root)
         window = window_store.current()
         if not window.product_clock_authoritative:
@@ -953,6 +954,47 @@ _RISK_POLICY_TRANSITION_METHOD_WITNESS, _RISK_POLICY_TRANSITION_GLOBAL_WITNESS =
         ),
     )
 )
+
+
+_PAPERBOOK_LOAD_DESCRIPTOR = PaperBook.__dict__["load"]
+if type(_PAPERBOOK_LOAD_DESCRIPTOR) is not classmethod:
+    raise RuntimeError("canonical PaperBook load authority is unavailable")
+_PAPERBOOK_LOAD_FUNCTION = _PAPERBOOK_LOAD_DESCRIPTOR.__func__
+_PAPERBOOK_SAVE_FUNCTION = PaperBook.__dict__["save"]
+_PAPERBOOK_OPEN_TICKET_FUNCTION = PaperBook.__dict__["open_ticket"]
+if (
+    type(_PAPERBOOK_LOAD_FUNCTION) is not FunctionType
+    or type(_PAPERBOOK_SAVE_FUNCTION) is not FunctionType
+    or type(_PAPERBOOK_OPEN_TICKET_FUNCTION) is not FunctionType
+):
+    raise RuntimeError("canonical PaperBook admission mutation authority is unavailable")
+_PAPERBOOK_GATE_METHOD_WITNESS, _PAPERBOOK_GATE_GLOBAL_WITNESS = (
+    _capture_class_transition_graph(
+        PaperBook,
+        ("load", "save", "open_ticket"),
+    )
+)
+
+
+def _require_paperbook_admission_authority() -> None:
+    """Bind approved PAPER economics to the exact durable mutation graph."""
+
+    _require_class_transition_graph(
+        PaperBook,
+        methods=_PAPERBOOK_GATE_METHOD_WITNESS,
+        globals_witness=_PAPERBOOK_GATE_GLOBAL_WITNESS,
+        error="economic admission PaperBook mutation authority changed",
+    )
+    load_descriptor = PaperBook.__dict__.get("load")
+    if (
+        load_descriptor is not _PAPERBOOK_LOAD_DESCRIPTOR
+        or type(load_descriptor) is not classmethod
+        or load_descriptor.__func__ is not _PAPERBOOK_LOAD_FUNCTION
+        or PaperBook.__dict__.get("save") is not _PAPERBOOK_SAVE_FUNCTION
+        or PaperBook.__dict__.get("open_ticket")
+        is not _PAPERBOOK_OPEN_TICKET_FUNCTION
+    ):
+        raise RuntimeError("economic admission PaperBook mutation authority changed")
 
 
 _RUN_REGISTRY_GATE_METHOD_WITNESS, _RUN_REGISTRY_GATE_GLOBAL_WITNESS = (
@@ -1257,7 +1299,8 @@ def admit_paper_ticket(
                 "canonical paper_book.json must already exist; "
                 "bootstrap/recovery belongs to the product lifecycle"
             )
-        canonical_book = PaperBook.load(book_path)
+        _require_paperbook_admission_authority()
+        canonical_book = _PAPERBOOK_LOAD_FUNCTION(PaperBook, book_path)
 
         try:
             _REQUIRE_CURRENT_BINDING(book, book_path)
@@ -1376,7 +1419,9 @@ def admit_paper_ticket(
         # Positive mutation may only occur while the crash/recovery blockers still
         # resolve through the exact graph inspected at the beginning of this lock.
         _require_admission_recovery_gate_authority()
-        opened = working_book.open_ticket(
+        _require_paperbook_admission_authority()
+        opened = _PAPERBOOK_OPEN_TICKET_FUNCTION(
+            working_book,
             legs,
             amount,
             reason=reason,
@@ -1386,8 +1431,9 @@ def admit_paper_ticket(
             bankroll_id=bankroll_id,
             currency=currency,
         )
-        working_book.save(book_path)
-        persisted = PaperBook.load(book_path)
+        _PAPERBOOK_SAVE_FUNCTION(working_book, book_path)
+        _require_paperbook_admission_authority()
+        persisted = _PAPERBOOK_LOAD_FUNCTION(PaperBook, book_path)
         persisted_ticket = persisted.tickets.get(opened.ticket_id)
         if persisted_ticket is None:
             raise RuntimeError(

@@ -378,6 +378,25 @@ def _require_regular_source_tree(path: Path, *, label: str) -> None:
     _scan_regular_source_tree(path, label=label)
 
 
+def _release_example_destination_name(path: Path) -> str:
+    """Return one Windows-safe staging component for the example source tree."""
+
+    name = path.name
+    if not name or name in {".", ".."}:
+        raise ValueError(
+            "release example tree must have a safe destination basename"
+        )
+    try:
+        _validate_windows_member(
+            f"{_PACKAGE_PREFIX}examples/{name}/example-entry"
+        )
+    except ValueError as exc:
+        raise ValueError(
+            "release example tree has an unsafe Windows destination basename"
+        ) from exc
+    return name
+
+
 def _copy_regular_source_file(
     source: str | Path,
     destination: str | Path,
@@ -884,6 +903,7 @@ def build_windows_package(
     keyboard_path = Path(keyboard_path)
     restart_recovery_path = Path(restart_recovery_path)
     output_zip = Path(output_zip)
+    example_destination_name = _release_example_destination_name(example_dir)
 
     exe_snapshot = _require_regular_source_file(
         exe_path,
@@ -953,7 +973,7 @@ def build_windows_package(
     )
     _copy_regular_source_tree(
         example_dir,
-        package_dir / "examples" / example_dir.name,
+        package_dir / "examples" / example_destination_name,
         label="release example tree",
     )
     _require_regular_source_tree(package_dir, label="release package staging tree")

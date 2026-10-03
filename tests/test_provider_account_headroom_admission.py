@@ -2167,3 +2167,82 @@ def test_bound_plan_digest_rebinding_cannot_forge_denomination_identity(
 
     assert hostile_calls == []
 
+def test_economic_goal_store_new_cannot_return_hostile_reader(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    acquired, _ = _acquire_balance(monkeypatch, tmp_path, "100")
+    target = _plan("target", _action("target-action", "10"))
+    ledger = _ledger_with_plans(tmp_path, target)
+    hostile_calls: list[object] = []
+
+    class HostileStore:
+        workspace = tmp_path
+        path = tmp_path / EconomicGoalStore.FILE_NAME
+
+    def hostile_new(cls, workspace):
+        hostile_calls.append(workspace)
+        return HostileStore()
+
+    monkeypatch.setattr(
+        EconomicGoalStore,
+        "__new__",
+        staticmethod(hostile_new),
+    )
+
+    with pytest.raises(
+        ProviderAccountHeadroomError,
+        match="canonical economic-goal store path authority changed",
+    ):
+        _assess(
+            ledger,
+            acquired,
+            plan_id="target",
+            action_id="target-action",
+        )
+
+    assert hostile_calls == [tmp_path]
+
+
+def test_workspace_lock_new_cannot_return_hostile_context(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    acquired, _ = _acquire_balance(monkeypatch, tmp_path, "100")
+    target = _plan("target", _action("target-action", "10"))
+    ledger = _ledger_with_plans(tmp_path, target)
+    hostile_entries: list[object] = []
+
+    class HostileLock:
+        workspace = tmp_path
+        path = tmp_path / WorkspaceEconomicLock.FILE_NAME
+
+        def __enter__(self):
+            hostile_entries.append(self)
+            return self
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            return None
+
+    def hostile_new(cls, workspace):
+        return HostileLock()
+
+    monkeypatch.setattr(
+        WorkspaceEconomicLock,
+        "__new__",
+        staticmethod(hostile_new),
+    )
+
+    with pytest.raises(
+        ProviderAccountHeadroomError,
+        match="canonical economic lock construction authority changed",
+    ):
+        _assess(
+            ledger,
+            acquired,
+            plan_id="target",
+            action_id="target-action",
+        )
+
+    assert hostile_entries == []
+

@@ -605,3 +605,161 @@ def test_store_load_implementation_uses_canonical_remember():
     original = descriptor.__wrapped__
     assert "_CANONICAL_REMEMBER" in original.__code__.co_names
     assert "_remember" not in original.__code__.co_names
+
+def test_store_save_rejects_atomic_writer_rebind_before_dispatch(
+    tmp_path,
+    monkeypatch,
+):
+    snapshot = _capture(monkeypatch)
+    hostile_calls: list[str] = []
+
+    def hostile_writer(*_args, **_kwargs):
+        hostile_calls.append("write")
+        raise AssertionError("hostile atomic writer executed")
+
+    monkeypatch.setattr(authority_module, "atomic_write_json", hostile_writer)
+    with pytest.raises(
+        ProviderObservationIntegrityError,
+        match="provider evidence store authority witness changed",
+    ):
+        _store(tmp_path).save(snapshot)
+    assert hostile_calls == []
+
+
+def test_store_save_rejects_hmac_dispatch_rebind_before_dispatch(
+    tmp_path,
+    monkeypatch,
+):
+    snapshot = _capture(monkeypatch)
+    hostile_calls: list[str] = []
+
+    def hostile_hmac(*_args, **_kwargs):
+        hostile_calls.append("hmac")
+        raise AssertionError("hostile HMAC executed")
+
+    monkeypatch.setattr(authority_module.hmac, "new", hostile_hmac)
+    with pytest.raises(
+        ProviderObservationIntegrityError,
+        match="provider evidence store authority witness changed",
+    ):
+        _store(tmp_path).save(snapshot)
+    assert hostile_calls == []
+
+
+def test_store_save_rejects_internal_receipt_writer_rebind_before_dispatch(
+    tmp_path,
+    monkeypatch,
+):
+    snapshot = _capture(monkeypatch)
+    hostile_calls: list[str] = []
+
+    def hostile_write_receipt(_self, _snapshot):
+        hostile_calls.append("receipt")
+        raise AssertionError("hostile receipt writer executed")
+
+    monkeypatch.setattr(
+        CompleteGameBoardEvidenceStore,
+        "_write_receipt",
+        hostile_write_receipt,
+    )
+    with pytest.raises(
+        ProviderObservationIntegrityError,
+        match="provider evidence store internal dispatch changed",
+    ):
+        _store(tmp_path).save(snapshot)
+    assert hostile_calls == []
+
+
+def test_store_save_rejects_monotonic_commit_rebind_before_dispatch(
+    tmp_path,
+    monkeypatch,
+):
+    snapshot = _capture(monkeypatch)
+    hostile_calls: list[str] = []
+
+    def hostile_commit(_self, **_kwargs):
+        hostile_calls.append("commit")
+        raise AssertionError("hostile monotonic commit executed")
+
+    monkeypatch.setattr(
+        authority_module.MonotonicWorkspaceAuthority,
+        "commit",
+        hostile_commit,
+    )
+    with pytest.raises(
+        ProviderObservationIntegrityError,
+        match="provider evidence monotonic authority dispatch changed",
+    ):
+        _store(tmp_path).save(snapshot)
+    assert hostile_calls == []
+
+
+def test_store_save_rejects_workspace_lock_enter_rebind_before_dispatch(
+    tmp_path,
+    monkeypatch,
+):
+    snapshot = _capture(monkeypatch)
+    hostile_calls: list[str] = []
+
+    def hostile_enter(_self):
+        hostile_calls.append("lock")
+        raise AssertionError("hostile workspace lock executed")
+
+    monkeypatch.setattr(
+        authority_module.WorkspaceEconomicLock,
+        "__enter__",
+        hostile_enter,
+    )
+    with pytest.raises(
+        ProviderObservationIntegrityError,
+        match="provider evidence workspace lock dispatch changed",
+    ):
+        _store(tmp_path).save(snapshot)
+    assert hostile_calls == []
+
+
+def test_store_save_rejects_snapshot_payload_dispatch_rebind_before_dispatch(
+    tmp_path,
+    monkeypatch,
+):
+    snapshot = _capture(monkeypatch)
+    hostile_calls: list[str] = []
+
+    def hostile_to_payload(_self):
+        hostile_calls.append("snapshot")
+        raise AssertionError("hostile snapshot payload executed")
+
+    monkeypatch.setattr(
+        CompleteGameBoardSnapshot,
+        "to_payload",
+        hostile_to_payload,
+    )
+    with pytest.raises(
+        ProviderObservationIntegrityError,
+        match="provider evidence snapshot dispatch changed",
+    ):
+        _store(tmp_path).save(snapshot)
+    assert hostile_calls == []
+
+
+def test_store_load_rejects_json_reader_rebind_before_dispatch(
+    tmp_path,
+    monkeypatch,
+):
+    snapshot = _capture(monkeypatch)
+    store = _store(tmp_path)
+    store.save(snapshot)
+    hostile_calls: list[str] = []
+
+    def hostile_json_reader(_payload):
+        hostile_calls.append("json")
+        raise AssertionError("hostile JSON reader executed")
+
+    monkeypatch.setattr(authority_module, "strict_json_loads", hostile_json_reader)
+    with pytest.raises(
+        ProviderObservationIntegrityError,
+        match="provider evidence store authority witness changed",
+    ):
+        store.load(snapshot.evidence_sha256)
+    assert hostile_calls == []
+

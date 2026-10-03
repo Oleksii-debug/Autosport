@@ -24,8 +24,12 @@ from .monotonic_workspace_authority import (
     MonotonicWorkspaceAuthority,
     MonotonicWorkspaceAuthorityError,
 )
+from .deployment_runtime_authority import DeploymentRuntimeAuthorityStore
 from .paper_campaign_runtime import PaperCampaignRuntime
+from .policy_deployment import PolicyDeploymentError, load_deployment_authority
+from .policy_deployment_semantic_bridge import CrossSessionSemanticInputs
 from .scientific_registry import ScientificRegistry
+from .storage import SQLiteMarketStore
 from .strategy_model_factory import FactoryArtifactStore
 from .workspace_lock import WorkspaceEconomicLock
 
@@ -553,6 +557,9 @@ class PaperCampaignEpisodeHandoff:
         risk_fingerprint: str,
         source_sha256: str,
         at: str,
+        semantic_inputs: CrossSessionSemanticInputs | None = None,
+        market_store: SQLiteMarketStore | None = None,
+        runtime_authority_store: DeploymentRuntimeAuthorityStore | None = None,
     ) -> PaperCampaignEpisodeHandoffResult:
         """Create exactly one fresh same-environment child episode from CHECKPOINT.
 
@@ -582,6 +589,45 @@ class PaperCampaignEpisodeHandoff:
             raise PaperCampaignEpisodeHandoffError(
                 "next episode cannot begin before the sealed parent CHECKPOINT"
             )
+
+        resolver_values = (
+            semantic_inputs,
+            market_store,
+            runtime_authority_store,
+        )
+        deployment_kwargs: dict[str, object] = {}
+        if parent_snapshot.activation_binding_id is None:
+            if any(value is not None for value in resolver_values):
+                raise PaperCampaignEpisodeHandoffError(
+                    "legacy parent cannot accept deployment resolver inputs"
+                )
+        else:
+            if any(value is None for value in resolver_values):
+                raise PaperCampaignEpisodeHandoffError(
+                    "deployment-bound parent requires canonical deployment resolver inputs"
+                )
+            try:
+                parent_authority = load_deployment_authority(
+                    self.campaign.agent_loop.path,
+                    expected_binding_id=parent_snapshot.activation_binding_id,
+                )
+            except (PolicyDeploymentError, OSError, RuntimeError, ValueError) as exc:
+                raise PaperCampaignEpisodeHandoffError(
+                    "parent deployment authority is not durably resolvable"
+                ) from exc
+            if parent_authority.deployment_identity != identity:
+                raise PaperCampaignEpisodeHandoffError(
+                    "parent deployment authority conflicts with child environment"
+                )
+            deployment_kwargs = {
+                "training_identity": parent_authority.training_identity,
+                "deployment_scope": parent_authority.scope,
+                "activation_binding": parent_authority.binding,
+                "semantic_inputs": semantic_inputs,
+                "market_store": market_store,
+                "runtime_authority_store": runtime_authority_store,
+            }
+
         if identity.environment_id != parent_checkpoint.environment_id:
             raise PaperCampaignEpisodeHandoffError(
                 "same-environment handoff cannot change environment identity"
@@ -680,6 +726,7 @@ class PaperCampaignEpisodeHandoff:
                 risk_fingerprint=canonical_risk,
                 source_sha256=canonical_source,
                 at=prepared_semantic["prepared_at"],
+                **deployment_kwargs,
             )
         except ChampionAgentEpisodeError as exc:
             raise PaperCampaignEpisodeHandoffError(
@@ -701,6 +748,8 @@ class PaperCampaignEpisodeHandoff:
             or child_snapshot.economic_goal_fingerprint != canonical_goal
             or child_snapshot.risk_fingerprint != canonical_risk
             or child_snapshot.source_sha256 != canonical_source
+            or child_snapshot.activation_binding_id
+            != parent_snapshot.activation_binding_id
         ):
             raise PaperCampaignEpisodeHandoffError(
                 "canonical child episode does not satisfy the frozen handoff witness"

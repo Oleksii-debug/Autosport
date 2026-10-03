@@ -341,6 +341,12 @@ class PaperAbstentionLearningRuntime:
             raise TypeError("observation must be Observation")
         if type(parameters) is not tuple:
             raise TypeError("parameters must be a canonical tuple")
+        try:
+            effective_parameters = self.agent_loop.bind_action_parameters(parameters)
+        except AgentLoopError as exc:
+            raise PaperAbstentionLearningError(
+                "abstention parameters conflict with deployment identity"
+            ) from exc
         now = _timestamp(at, "at")
         _timestamp(decision_at, "decision_at")
 
@@ -372,7 +378,7 @@ class PaperAbstentionLearningRuntime:
                 observation_id=observation.observation_id,
                 action_type=action_type,
                 decided_at=decision_at,
-                parameters=parameters,
+                parameters=effective_parameters,
             )
         except LearningEnvironmentError as exc:
             raise PaperAbstentionLearningError(
@@ -413,7 +419,7 @@ class PaperAbstentionLearningRuntime:
                 observation,
                 action_type=action_type,
                 decision_at=decision_at,
-                parameters=parameters,
+                parameters=effective_parameters,
             )
         except LearningEnvironmentError as exc:
             raise PaperAbstentionLearningError(

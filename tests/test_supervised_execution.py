@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import gc
 import json
 import tempfile
+import weakref
 from dataclasses import replace
 from datetime import datetime
 from decimal import Decimal
@@ -330,6 +332,17 @@ def test_builder_issues_exact_bound_plan_product_authority() -> None:
     bound, _, _, _ = _bound()
 
     assert_bound_supervised_execution_plan_authoritative(bound)
+
+
+def test_product_issuance_registry_does_not_retain_dead_plans() -> None:
+    bound, _, _, _ = _bound()
+    reference = weakref.ref(bound)
+    assert reference() is bound
+
+    del bound
+    gc.collect()
+
+    assert reference() is None
 
 
 def test_reconstructed_bound_plan_cannot_mint_product_authority() -> None:

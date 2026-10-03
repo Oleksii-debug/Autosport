@@ -291,6 +291,33 @@ class BoundedMirrorInvalidationBufferTests(unittest.TestCase):
             dependencies.all_matching_keys(),
         )
 
+    def test_dependency_registration_retries_if_mirror_advances_after_snapshot(self) -> None:
+        mirror = MarketMirror()
+        dependencies = FocusedMirrorDependencyIndex(mirror)
+        event = self.event(selection="selection-a", sequence=1, odds="2.10")
+        real_view = mirror.view
+        injected = {"done": False}
+
+        def capture_then_advance(*args, **kwargs):
+            captured = real_view(*args, **kwargs)
+            if not injected["done"]:
+                injected["done"] = True
+                mirror.apply(event)
+            return captured
+
+        with patch.object(mirror, "view", side_effect=capture_then_advance):
+            dependency = dependencies.register(
+                "decision-a",
+                selection_ids="selection-a",
+            )
+
+        self.assertTrue(injected["done"])
+        self.assertEqual(dependency.input_id, "decision-a")
+        self.assertEqual(
+            dependencies.matching_keys("decision-a"),
+            ((event.source_id, event.quote_key),),
+        )
+
     def test_coherent_incremental_views_share_one_exact_mirror_revision(self) -> None:
         mirror = MarketMirror()
         runtime = BoundedMirrorInvalidationBuffer(mirror)

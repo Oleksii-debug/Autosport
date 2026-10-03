@@ -417,7 +417,9 @@ def test_execution_readback_authority_cannot_be_imported_or_forged():
         provider_order_ref=None,
         account_id="default-account",
     )
-    capture.assert_authoritative()
+    capture._validate()
+    with pytest.raises(BetfairReadOnlyError, match="product-origin authority"):
+        capture.assert_authoritative()
 
     assert not hasattr(BetfairExecutionReadbackEnvelope, "_from_client")
     assert not hasattr(betfair_readonly, "_EXECUTION_READBACK_SEAL")
@@ -466,7 +468,7 @@ def test_execution_readback_detects_post_capture_origin_tampering():
     )
 
     object.__setattr__(capture, "observed_at", "2026-09-17T17:31:00+00:00")
-    with pytest.raises(BetfairReadOnlyError, match="changed after authenticated provider capture"):
+    with pytest.raises(BetfairReadOnlyError, match="product-origin authority"):
         capture.assert_authoritative()
 
 

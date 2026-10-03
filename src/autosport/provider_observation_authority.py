@@ -1145,8 +1145,17 @@ def _seal_provider_evidence_store_dispatch() -> None:
     store_type = CompleteGameBoardEvidenceStore
     expected_error = ProviderObservationIntegrityError
     expected_type = type
+    expected_type_error = TypeError
     expected_getattr = getattr
     expected_any = any
+    expected_unshadowed_builtins = (
+        "any",
+        "len",
+        "str",
+        "dict",
+        "set",
+        "isinstance",
+    )
     expected_store_surface_reader = _CANONICAL_GETATTR_STATIC
     expected_store_surface_reader_code = expected_getattr(
         expected_store_surface_reader,
@@ -1298,6 +1307,12 @@ def _seal_provider_evidence_store_dispatch() -> None:
         return True
 
     def require_store_authority() -> None:
+        if expected_any(
+            name in module_globals for name in expected_unshadowed_builtins
+        ):
+            raise expected_error(
+                "provider evidence store builtin dispatch shadowed"
+            )
         if (
             module_globals.get("inspect") is not expected_inspect
             or expected_inspect.getattr_static is not expected_getattr_static
@@ -1386,7 +1401,7 @@ def _seal_provider_evidence_store_dispatch() -> None:
 
     def sealed_save(self, snapshot):
         if expected_type(self) is not store_type:
-            raise TypeError(
+            raise expected_type_error(
                 "provider evidence save requires exact CompleteGameBoardEvidenceStore"
             )
         if expected_store_surface_reader(store_type, "save") is not sealed_save:
@@ -1400,7 +1415,7 @@ def _seal_provider_evidence_store_dispatch() -> None:
 
     def sealed_load(self, evidence_sha256):
         if expected_type(self) is not store_type:
-            raise TypeError(
+            raise expected_type_error(
                 "provider evidence load requires exact CompleteGameBoardEvidenceStore"
             )
         if expected_store_surface_reader(store_type, "load") is not sealed_load:

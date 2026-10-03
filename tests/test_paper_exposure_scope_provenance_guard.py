@@ -855,12 +855,13 @@ class PaperExposureScopeProvenanceGuardTests(unittest.TestCase):
             )
             guarded = PaperExecutionLedger._sync_parent_directory
             original_code = guarded.__code__
-            forged_calls: list[str] = []
-
-            def forged_sync_parent(_self) -> None:
-                forged_calls.append("sync")
-
-            guarded.__code__ = forged_sync_parent.__code__
+            # Current canonical ledger hardening may close over captured filesystem
+            # dispatch. Mutate to a distinct but closure-compatible code object so
+            # assignment itself succeeds and the provenance metadata guard is the
+            # component that must reject publication.
+            guarded.__code__ = original_code.replace(
+                co_firstlineno=original_code.co_firstlineno + 1
+            )
             try:
                 with self.assertRaisesRegex(
                     PaperExecutionIntegrityError,
@@ -873,7 +874,6 @@ class PaperExposureScopeProvenanceGuardTests(unittest.TestCase):
                     )
             finally:
                 guarded.__code__ = original_code
-            self.assertEqual(forged_calls, [])
             self.assertEqual(ledger.events(), ())
 
     def test_hidden_require_minted_code_rebinding_fails_before_publication(self) -> None:

@@ -256,6 +256,24 @@ def _require_source_tree_directory(
     return metadata
 
 
+def _source_tree_entry_names(
+    path: Path,
+    *,
+    label: str,
+    relative: str | None,
+) -> tuple[str, ...]:
+    """Return one exact directory-name snapshot without following entries."""
+
+    try:
+        with os.scandir(path) as iterator:
+            return tuple(sorted(entry.name for entry in iterator))
+    except OSError as exc:
+        target = relative or str(path)
+        raise ValueError(
+            f"{label} contains an inaccessible entry: {target}"
+        ) from exc
+
+
 def _scan_regular_source_tree(
     path: Path,
     *,
@@ -328,6 +346,14 @@ def _scan_regular_source_tree(
         else:
             raise ValueError(f"{label} contains a non-regular entry: {child_text}")
 
+    final_names = _source_tree_entry_names(
+        path,
+        label=label,
+        relative=relative_text,
+    )
+    if final_names != tuple(entry.name for entry in entries):
+        target = relative_text or "."
+        raise ValueError(f"{label} directory changed during traversal: {target}")
     after = _require_source_tree_directory(
         path,
         label=label,
@@ -456,6 +482,16 @@ def _copy_regular_source_tree(
                     f"{label} contains a non-regular entry: {child_text}"
                 )
 
+        final_names = _source_tree_entry_names(
+            source_dir,
+            label=label,
+            relative=relative_text,
+        )
+        if final_names != tuple(entry.name for entry in entries):
+            target = relative_text or "."
+            raise ValueError(
+                f"{label} directory changed during traversal: {target}"
+            )
         after = _require_source_tree_directory(
             source_dir,
             label=label,

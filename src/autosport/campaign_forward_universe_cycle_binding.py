@@ -213,6 +213,8 @@ def _instant(value: object, field: str) -> datetime:
 
 def _require_cycle_observation_chronology(
     *,
+    campaign: CampaignInceptionReceipt,
+    source_spec: CampaignInceptionSourceSpec,
     snapshot: CompleteGameBoardSnapshot,
     collector_evidence: dict[str, object],
 ) -> None:
@@ -225,6 +227,23 @@ def _require_cycle_observation_chronology(
         "collector completed_at",
     )
     captured = _instant(snapshot.captured_at, "provider captured_at")
+    not_before = _instant(
+        campaign.observation_not_before,
+        "campaign observation_not_before",
+    )
+    not_after = _instant(
+        campaign.observation_not_after,
+        "campaign observation_not_after",
+    )
+    slot_ordinal = collector_evidence.get("slot_ordinal")
+    if (
+        type(slot_ordinal) is not int
+        or slot_ordinal < source_spec.evaluation_start_slot_ordinal
+        or slot_ordinal > source_spec.evaluation_end_slot_ordinal
+    ):
+        raise CampaignForwardUniverseCycleBindingError(
+            "collector cycle lies outside frozen campaign evaluation slots"
+        )
     if completed < attempted:
         raise CampaignForwardUniverseCycleBindingError(
             "collector cycle completion predates authorized START"
@@ -232,6 +251,16 @@ def _require_cycle_observation_chronology(
     if captured < attempted or captured > completed:
         raise CampaignForwardUniverseCycleBindingError(
             "provider observation is outside authorized collector cycle chronology"
+        )
+    if (
+        attempted < not_before
+        or attempted > not_after
+        or captured < not_before
+        or captured > not_after
+        or completed > not_after
+    ):
+        raise CampaignForwardUniverseCycleBindingError(
+            "provider cycle is outside precommitted campaign observation window"
         )
 
 
@@ -650,6 +679,8 @@ def resolve_campaign_forward_universe_cycle_authority(
         )
     require_stable_integrity()
     _require_cycle_observation_chronology(
+        campaign=campaign,
+        source_spec=source_spec,
         snapshot=snapshot,
         collector_evidence=collector_evidence,
     )

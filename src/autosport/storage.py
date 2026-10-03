@@ -97,6 +97,22 @@ def _projection_order_key(event: MarketEvent) -> tuple[int, str]:
     return (event.sequence, event.dedupe_key)
 
 
+def _stream_semantic_identity(event: MarketEvent) -> tuple[str, str | None]:
+    """Stable market-rule identity for one provider/source quote stream."""
+    return (event.market_type.value, event.market_semantics_id)
+
+
+def _assert_stream_semantic_identity(
+    expected: tuple[str, str | None],
+    event: MarketEvent,
+) -> None:
+    if _stream_semantic_identity(event) != expected:
+        raise ValueError(
+            "market quote stream semantic identity changed: "
+            f"{event.source_id}|{event.quote_key}"
+        )
+
+
 def _canonical_json(raw: object) -> str:
     return json.dumps(
         raw,
@@ -626,6 +642,7 @@ class SQLiteMarketStore:
         """Repair provider-aware current projection from one write-locked history snapshot."""
         latest: dict[tuple[str, str], tuple[tuple[int, str], MarketEvent]] = {}
         history_by_dedupe: dict[str, MarketEvent] = {}
+        stream_semantics: dict[tuple[str, str], tuple[str, str | None]] = {}
         self.connection.execute("BEGIN IMMEDIATE")
         try:
             rows = self.connection.execute(
@@ -636,6 +653,11 @@ class SQLiteMarketStore:
                 history_by_dedupe[event.dedupe_key] = event
                 order_key = _projection_order_key(event)
                 projection_key = (event.source_id, event.quote_key)
+                expected_semantics = stream_semantics.get(projection_key)
+                if expected_semantics is None:
+                    stream_semantics[projection_key] = _stream_semantic_identity(event)
+                else:
+                    _assert_stream_semantic_identity(expected_semantics, event)
                 previous = latest.get(projection_key)
                 if previous is None or order_key > previous[0]:
                     latest[projection_key] = (order_key, event)
@@ -723,7 +745,71 @@ class SQLiteMarketStore:
             (event.source_id, event.quote_key),
         ).fetchone()
         previous_event = _event_from_current_row(previous) if previous is not None else None
+        projection_was_missing = previous_event is None
+        if previous_event is not None:
+            # current_quotes is a derived acceleration structure, never semantic
+            # authority by itself. Prove its exact source payload still exists in
+            # authoritative history before using it as the stream witness.
+            history_witness = self.connection.execute(
+                f"SELECT {_HISTORY_COLUMNS_SQL} FROM market_events WHERE dedupe_key=?",
+                (previous_event.dedupe_key,),
+            ).fetchone()
+            if history_witness is None:
+                raise ValueError(
+                    "current market quote projection is not backed by authoritative history"
+                )
+            history_event = _event_from_history_row(history_witness)
+            if _source_payload(history_event) != _source_payload(previous_event):
+                raise ValueError(
+                    "current market quote projection conflicts with authoritative history"
+                )
+            _assert_stream_semantic_identity(
+                _stream_semantic_identity(history_event),
+                event,
+            )
+        else:
+            # A missing/corrupt projection row must not erase immutable stream
+            # semantics. The incoming history row was inserted above, so exclude it
+            # and reconstruct the semantic witness from all prior authoritative rows.
+            prior_rows = self.connection.execute(
+                f"""SELECT {_HISTORY_COLUMNS_SQL} FROM market_events
+                    WHERE source_id=? AND quote_key=? AND dedupe_key<>?""",
+                (event.source_id, event.quote_key, event.dedupe_key),
+            ).fetchall()
+            expected_semantics: tuple[str, str | None] | None = None
+            latest_prior_event: MarketEvent | None = None
+            for prior_row in prior_rows:
+                prior_event = _event_from_history_row(prior_row)
+                if expected_semantics is None:
+                    expected_semantics = _stream_semantic_identity(prior_event)
+                else:
+                    _assert_stream_semantic_identity(
+                        expected_semantics,
+                        prior_event,
+                    )
+                if (
+                    latest_prior_event is None
+                    or _projection_order_key(prior_event)
+                    > _projection_order_key(latest_prior_event)
+                ):
+                    latest_prior_event = prior_event
+            if expected_semantics is not None:
+                _assert_stream_semantic_identity(expected_semantics, event)
+            previous_event = latest_prior_event
+
+        projection_event: MarketEvent | None = None
+        projection_payload: str | None = None
         if previous_event is None or incoming_key > _projection_order_key(previous_event):
+            projection_event = event
+            projection_payload = payload
+        elif projection_was_missing:
+            # Restore a missing derived projection from the authoritative latest
+            # historical event instead of allowing a stale incoming row to regress it.
+            projection_event = previous_event
+            projection_payload = _validate_incoming_event(previous_event)
+
+        if projection_event is not None:
+            assert projection_payload is not None
             self.connection.execute(
                 """INSERT INTO current_quotes
                    (source_id,quote_key,observed_ts,sequence,payload_json)
@@ -733,11 +819,11 @@ class SQLiteMarketStore:
                    sequence=excluded.sequence,
                    payload_json=excluded.payload_json""",
                 (
-                    event.source_id,
-                    event.quote_key,
-                    event.observed_ts,
-                    event.sequence,
-                    payload,
+                    projection_event.source_id,
+                    projection_event.quote_key,
+                    projection_event.observed_ts,
+                    projection_event.sequence,
+                    projection_payload,
                 ),
             )
         return True

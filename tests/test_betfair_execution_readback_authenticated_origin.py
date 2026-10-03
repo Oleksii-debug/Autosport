@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import http.client as _http_client
 import json
+import socket as _socket
 from types import FunctionType
 import urllib.request as _urllib_request
 
@@ -414,6 +416,37 @@ def test_same_code_reconstruction_with_foreign_raw_read_cannot_mint_origin(
     assert capture is structural
     with pytest.raises(BetfairReadOnlyError, match="product-origin authority"):
         capture.assert_authoritative()
+
+@pytest.mark.parametrize(
+    ("owner", "name"),
+    (
+        (_urllib_request.HTTPSHandler, "https_open"),
+        (_urllib_request.AbstractHTTPHandler, "do_open"),
+        (_http_client.HTTPSConnection, "connect"),
+        (_http_client.HTTPConnection, "connect"),
+        (_socket, "create_connection"),
+    ),
+)
+def test_execution_origin_predicate_rejects_transitive_network_dispatch_rebind(
+    monkeypatch: pytest.MonkeyPatch,
+    owner,
+    name: str,
+) -> None:
+    predicate = _closure_value(
+        BetfairReadOnlyClient.read_execution_readback,
+        "origin_dispatch_current",
+    )
+    assert predicate() is True
+    original = getattr(owner, name)
+
+    def hostile(*args, **kwargs):
+        del args, kwargs
+        raise AssertionError("hostile network dispatch must not become origin authority")
+
+    monkeypatch.setattr(owner, name, hostile)
+    assert getattr(owner, name) is not original
+    assert predicate() is False
+
 
 def test_process_global_urllib_opener_and_mocked_do_open_cannot_mint_origin(
     monkeypatch: pytest.MonkeyPatch,

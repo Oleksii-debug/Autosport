@@ -9,6 +9,7 @@ from autosport.deployment_runtime_authority import (
     STORE_SCHEMA,
     STORE_SCHEMA_VERSION,
     DeploymentRuntimeAuthorityError,
+    DeploymentRuntimeAuthorityRecord,
     DeploymentRuntimeAuthorityStore,
 )
 from autosport.learning_environment import EnvironmentIdentity, Episode

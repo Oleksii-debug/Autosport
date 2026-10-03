@@ -517,9 +517,14 @@ class PolicyUtilityStore:
         by_semantic: dict[str, PolicyUtilityEvidence] = {}
         if self.path.exists():
             try:
-                lines = self.path.read_text(encoding="utf-8").splitlines()
-            except OSError as exc:
+                payload = self.path.read_text(encoding="utf-8")
+            except (OSError, UnicodeError) as exc:
                 raise PolicyUtilityError("unable to read policy utility store") from exc
+            if payload and not payload.endswith("\n"):
+                raise PolicyUtilityError(
+                    "policy utility store lacks canonical trailing record boundary"
+                )
+            lines = payload.splitlines()
             for line_number, line in enumerate(lines, start=1):
                 if not line:
                     raise PolicyUtilityError(

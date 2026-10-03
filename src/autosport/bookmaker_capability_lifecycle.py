@@ -64,6 +64,7 @@ BETDAQ_AUTHENTICATED_VALIDATION_POLICY_VERSION = "betdaq-authenticated-readonly-
 BETDAQ_AUTHENTICATED_SOURCE_CONTRACT_REF = (
     f"betdaq-secure-account-readonly/{_BETDAQ_ADAPTER_VERSION}"
 )
+BETDAQ_AUTHENTICATED_MAX_OBSERVATION_AGE_SECONDS = 3600
 
 
 class CapabilityEvidenceError(ValueError):
@@ -862,6 +863,18 @@ def _evaluate(
     profile_observed_at = _time(profile.observed_at, "profile.observed_at")
     if profile_observed_at != _time(evidence.observed_at, "evidence.observed_at"):
         return deny(CapabilityLifecycleState.UNKNOWN, "observation identity mismatch")
+    if (
+        evidence.strength is CapabilityEvidenceStrength.OBSERVED_AUTHENTICATED
+        and evidence.validation_policy_version
+        == BETDAQ_AUTHENTICATED_VALIDATION_POLICY_VERSION
+        and evidence.source_contract_ref == BETDAQ_AUTHENTICATED_SOURCE_CONTRACT_REF
+        and requirement.max_observation_age_seconds
+        > BETDAQ_AUTHENTICATED_MAX_OBSERVATION_AGE_SECONDS
+    ):
+        return deny(
+            CapabilityLifecycleState.REVALIDATION_REQUIRED,
+            "requested observation age exceeds BETDAQ product policy",
+        )
     observation_age = (as_of - profile_observed_at).total_seconds()
     if observation_age >= requirement.max_observation_age_seconds:
         return deny(

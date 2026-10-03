@@ -759,7 +759,11 @@ class CapabilityEvidenceJournal:
     @classmethod
     def from_json(cls, payload: str) -> "CapabilityEvidenceJournal":
         try:
-            raw = json.loads(_text(payload, "payload"))
+            raw = json.loads(
+                _text(payload, "payload"),
+                object_pairs_hook=_strict_json_object,
+                parse_constant=_reject_nonstandard_json_constant,
+            )
         except json.JSONDecodeError as exc:
             raise CapabilityEvidenceError("payload must be valid JSON") from exc
         if not isinstance(raw, dict):
@@ -808,6 +812,21 @@ class CapabilityEvidenceJournal:
         for item in availability_items:
             journal.publish_availability(item)
         return journal
+
+
+def _strict_json_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    value: dict[str, object] = {}
+    for key, item in pairs:
+        if key in value:
+            raise CapabilityEvidenceError("payload contains duplicate JSON object key")
+        value[key] = item
+    return value
+
+
+def _reject_nonstandard_json_constant(value: str) -> object:
+    raise CapabilityEvidenceError(
+        f"payload contains non-standard JSON constant: {value}"
+    )
 
 
 def _require_exact_object_keys(

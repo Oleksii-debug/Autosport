@@ -408,28 +408,19 @@ def test_transplant_rejects_monotonic_read_history_instance_shadow(
     monkeypatch: pytest.MonkeyPatch,
 ):
     target_path = _transplanted_registry_path(tmp_path)
-    original_factory = integrity._scientific_registry_authority
+    authority = integrity._scientific_registry_authority(target_path)
     hostile_calls: list[object] = []
 
     def hostile_read_history() -> tuple[object, ...]:
         hostile_calls.append(None)
         return (object(),)
 
-    def shadowing_factory(destination):
-        authority = original_factory(destination)
-        monkeypatch.setattr(authority, "read_history", hostile_read_history)
-        return authority
-
-    monkeypatch.setattr(
-        integrity,
-        "_scientific_registry_authority",
-        shadowing_factory,
-    )
+    monkeypatch.setattr(authority, "read_history", hostile_read_history)
     with pytest.raises(
         RuntimeError,
         match="ScientificRegistry monotonic read/recovery instance dispatch changed",
     ):
-        ScientificRegistry(target_path)
+        integrity._authority_read_history(authority)
 
     assert hostile_calls == []
 

@@ -168,6 +168,10 @@ class _IssuedResolutionWitness:
     anchor_path: object
     pending_path: object
     lock_path: object
+    ledger_type: object
+    reader_method_witnesses: object
+    writer_lock_type: object
+    writer_lock_method_witnesses: object
     events_reader: object
     events_reader_code: object
 
@@ -186,6 +190,10 @@ def _make_resolution_witness_registry():
         anchor_path: object,
         pending_path: object,
         lock_path: object,
+        ledger_type: object,
+        reader_method_witnesses: object,
+        writer_lock_type: object,
+        writer_lock_method_witnesses: object,
         events_reader: object,
         events_reader_code: object,
     ) -> None:
@@ -199,6 +207,10 @@ def _make_resolution_witness_registry():
             anchor_path=anchor_path,
             pending_path=pending_path,
             lock_path=lock_path,
+            ledger_type=ledger_type,
+            reader_method_witnesses=reader_method_witnesses,
+            writer_lock_type=writer_lock_type,
+            writer_lock_method_witnesses=writer_lock_method_witnesses,
             events_reader=events_reader,
             events_reader_code=events_reader_code,
         )
@@ -613,14 +625,49 @@ def _make_resolution_verifier(lookup_witness):
             )
 
         issued_ledger = issued.ledger
+        issued_ledger_type = issued.ledger_type
         if (
-            type(issued_ledger) is not ManualNvdaAcceptanceLedger
+            type(issued_ledger) is not issued_ledger_type
             or issued_ledger.path is not issued.path
             or issued_ledger._anchor_path is not issued.anchor_path
             or issued_ledger._pending_path is not issued.pending_path
             or issued_ledger._lock_path is not issued.lock_path
-            or "events" in vars(issued_ledger)
-            or ManualNvdaAcceptanceLedger.events is not issued.events_reader
+            or issued.events_reader.__globals__.get("_ManualNvdaWriterLock")
+            is not issued.writer_lock_type
+        ):
+            raise NvdaManualAcceptanceStateError(
+                "manual NVDA resolution ledger authority changed after issuance"
+            )
+        for (
+            name,
+            expected_descriptor,
+            expected_callable,
+            expected_code,
+        ) in issued.reader_method_witnesses:
+            current_descriptor = issued_ledger_type.__dict__.get(name)
+            current_callable = getattr(issued_ledger_type, name, None)
+            if (
+                current_descriptor is not expected_descriptor
+                or current_callable is not expected_callable
+                or getattr(current_callable, "__code__", None) is not expected_code
+                or name in vars(issued_ledger)
+            ):
+                raise NvdaManualAcceptanceStateError(
+                    "manual NVDA resolution ledger reader changed after issuance: "
+                    + name
+                )
+        for name, expected_callable, expected_code in issued.writer_lock_method_witnesses:
+            current_callable = getattr(issued.writer_lock_type, name, None)
+            if (
+                current_callable is not expected_callable
+                or getattr(current_callable, "__code__", None) is not expected_code
+            ):
+                raise NvdaManualAcceptanceStateError(
+                    "manual NVDA resolution writer-lock dispatch changed after issuance: "
+                    + name
+                )
+        if (
+            issued_ledger_type.events is not issued.events_reader
             or getattr(issued.events_reader, "__code__", None)
             is not issued.events_reader_code
         ):
@@ -1146,8 +1193,82 @@ def _seal_resolution_issuance(register_witness) -> None:
     ledger_type = ManualNvdaAcceptanceLedger
     implementation = ledger_type.resolve_current
     implementation_code = implementation.__code__
+    reader_method_names = (
+        "events",
+        "_recover_pending_locked",
+        "_events_locked",
+        "_read_pending",
+        "_read_ledger_unanchored",
+        "_read_anchor",
+        "_anchor_matches",
+        "_remove_pending",
+        "_write_anchor",
+        "_sync_parent_directory",
+    )
+    reader_method_witnesses = tuple(
+        (
+            name,
+            ledger_type.__dict__.get(name),
+            getattr(ledger_type, name),
+            getattr(getattr(ledger_type, name), "__code__", None),
+        )
+        for name in reader_method_names
+    )
     events_reader = ledger_type.events
     events_reader_code = events_reader.__code__
+    writer_lock_type = _ManualNvdaWriterLock
+    writer_lock_method_names = (
+        "__init__",
+        "__enter__",
+        "__exit__",
+        "acquire",
+        "release",
+    )
+    writer_lock_method_witnesses = tuple(
+        (
+            name,
+            getattr(writer_lock_type, name),
+            getattr(getattr(writer_lock_type, name), "__code__", None),
+        )
+        for name in writer_lock_method_names
+    )
+
+    def require_reader_graph(self) -> None:
+        if (
+            type(self) is not ledger_type
+            or events_reader.__globals__.get("_ManualNvdaWriterLock")
+            is not writer_lock_type
+        ):
+            raise NvdaManualAcceptanceStateError(
+                "manual NVDA resolution durable-reader authority changed"
+            )
+        for (
+            name,
+            expected_descriptor,
+            expected_callable,
+            expected_code,
+        ) in reader_method_witnesses:
+            current_descriptor = ledger_type.__dict__.get(name)
+            current_callable = getattr(ledger_type, name, None)
+            if (
+                current_descriptor is not expected_descriptor
+                or current_callable is not expected_callable
+                or getattr(current_callable, "__code__", None) is not expected_code
+                or name in vars(self)
+            ):
+                raise NvdaManualAcceptanceStateError(
+                    "manual NVDA resolution durable-reader authority changed: "
+                    + name
+                )
+        for name, expected_callable, expected_code in writer_lock_method_witnesses:
+            current_callable = getattr(writer_lock_type, name, None)
+            if (
+                current_callable is not expected_callable
+                or getattr(current_callable, "__code__", None) is not expected_code
+            ):
+                raise NvdaManualAcceptanceStateError(
+                    "manual NVDA resolution writer-lock authority changed: " + name
+                )
 
     def resolve_current(
         self,
@@ -1158,17 +1279,14 @@ def _seal_resolution_issuance(register_witness) -> None:
         protocol_version: str = PROTOCOL_VERSION,
     ) -> ManualNvdaAcceptanceResolution | None:
         if (
-            type(self) is not ledger_type
-            or ledger_type.resolve_current is not resolve_current
+            ledger_type.resolve_current is not resolve_current
             or implementation.__code__ is not implementation_code
-            or ledger_type.events is not events_reader
-            or events_reader.__code__ is not events_reader_code
             or "resolve_current" in vars(self)
-            or "events" in vars(self)
         ):
             raise NvdaManualAcceptanceStateError(
                 "manual NVDA resolution issuance authority changed"
             )
+        require_reader_graph(self)
         resolution = implementation(
             self,
             transcript=transcript,
@@ -1176,6 +1294,7 @@ def _seal_resolution_issuance(register_witness) -> None:
             expected_source_sha=expected_source_sha,
             protocol_version=protocol_version,
         )
+        require_reader_graph(self)
         if resolution is None:
             return None
         fingerprint = _resolution_fingerprint(resolution)
@@ -1187,6 +1306,10 @@ def _seal_resolution_issuance(register_witness) -> None:
             anchor_path=self._anchor_path,
             pending_path=self._pending_path,
             lock_path=self._lock_path,
+            ledger_type=ledger_type,
+            reader_method_witnesses=reader_method_witnesses,
+            writer_lock_type=writer_lock_type,
+            writer_lock_method_witnesses=writer_lock_method_witnesses,
             events_reader=events_reader,
             events_reader_code=events_reader_code,
         )

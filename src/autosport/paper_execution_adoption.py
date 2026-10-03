@@ -582,6 +582,7 @@ class PaperExecutionAdoptionRuntime:
         trigger_id: str,
         started_at: str,
         materialize_exposure: bool,
+        suspended_action_ids: frozenset[str] = frozenset(),
     ) -> None:
         """Reject restart state not explained by the exact durable #623 run."""
         if not isinstance(pre_action_book, PaperBook):
@@ -607,6 +608,7 @@ class PaperExecutionAdoptionRuntime:
             config=self.config,
             started_at=started_at,
             observation_evidence_ids={},
+            suspended_action_ids=suspended_action_ids,
         )
         if run is None:
             raise PaperExecutionAdoptionError(

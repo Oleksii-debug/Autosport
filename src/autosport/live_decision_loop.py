@@ -32,6 +32,7 @@ from .market_mirror_runtime import (
     BoundedMirrorInvalidationBuffer,
     FocusedMirrorDependency,
     FocusedMirrorDependencyIndex,
+    FocusedMirrorRegistryChanged,
 )
 from .paper import PaperBook
 from .paper_execution_adoption import (
@@ -993,8 +994,8 @@ class PersistentLiveDecisionLoop:
         try:
             self._persist_input_registry(expected_previous=previous_specs)
         except BaseException:
-            self._input_specs.pop(candidate.input_id, None)
             self.dependencies.unregister(candidate.input_id)
+            self._input_specs.pop(candidate.input_id, None)
             raise
         self._pending_affected[dependency.input_id] = None
         self._needs_cache_rebuild = True
@@ -1015,7 +1016,6 @@ class PersistentLiveDecisionLoop:
         try:
             self._persist_input_registry(expected_previous=previous_specs)
         except BaseException:
-            self._input_specs[normalized_id] = existing
             self.dependencies.register(
                 existing.input_id,
                 source_ids=existing.source_ids,
@@ -1024,6 +1024,7 @@ class PersistentLiveDecisionLoop:
                 market_ids=existing.market_ids,
                 selection_ids=existing.selection_ids,
             )
+            self._input_specs[normalized_id] = existing
             raise
         self._pending_affected.pop(normalized_id, None)
         self._intent_cache.pop(normalized_id, None)
@@ -2231,19 +2232,30 @@ class PersistentLiveDecisionLoop:
                 ledger_offset=None,
                 gate=gate,
             )
-            if expected_mirror_revision is None:
-                atomic_write_json(self.progress_path, pending.to_dict())
-            else:
-                try:
-                    with self.mirror_updates.mirror.hold_revision(
-                        expected_mirror_revision
-                    ):
+            try:
+                with self.dependencies.hold_input_ids(
+                    expected_registered_input_ids
+                ):
+                    if expected_mirror_revision is None:
                         atomic_write_json(self.progress_path, pending.to_dict())
-                except MarketMirrorRevisionChanged as exc:
-                    raise _ConcurrentDecisionSnapshot(
-                        "market revision advanced after decision snapshot capture; "
-                        "retrying before economic action"
-                    ) from exc
+                    else:
+                        with self.mirror_updates.mirror.hold_revision(
+                            expected_mirror_revision
+                        ):
+                            atomic_write_json(
+                                self.progress_path,
+                                pending.to_dict(),
+                            )
+            except FocusedMirrorRegistryChanged as exc:
+                raise _ConcurrentDecisionSnapshot(
+                    "dependency registry advanced after decision snapshot capture; "
+                    "retrying before economic action"
+                ) from exc
+            except MarketMirrorRevisionChanged as exc:
+                raise _ConcurrentDecisionSnapshot(
+                    "market revision advanced after decision snapshot capture; "
+                    "retrying before economic action"
+                ) from exc
         self._progress = pending
         return durable_pre_action
 

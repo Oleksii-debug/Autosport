@@ -726,6 +726,23 @@ class ParlayApiProductSource:
                 delta = CollectorDelta.from_dict(item["delta"])
                 pending_delta_ids.add(delta.delta_id)
 
+        retired_quote_digests: dict[str, str] = {}
+        retired_dedupe_digests: dict[str, str] = {}
+
+        def remember_retired(
+            mapping: dict[str, str],
+            *,
+            key: str,
+            digest: str,
+            kind: str,
+        ) -> None:
+            previous = mapping.get(key)
+            if previous is not None and previous != digest:
+                raise ProductSourceStateError(
+                    f"canonically retired legacy {kind} identity conflicts"
+                )
+            mapping[key] = digest
+
         cache_items = iter(cache.items())
         while True:
             cache_chunk = tuple(
@@ -745,8 +762,10 @@ class ParlayApiProductSource:
                         "legacy historical event cache is invalid"
                     ) from exc
             try:
-                store.migrate_event_payloads(
+                _, retired_delta_ids = store.migrate_legacy_event_payloads(
                     migrate,
+                    source_id=self.source_id,
+                    stream_epoch=self.stream_epoch,
                     allow_missing_delta_ids=tuple(sorted(pending_delta_ids)),
                 )
             except (TypeError, ValueError) as exc:
@@ -754,12 +773,29 @@ class ParlayApiProductSource:
                     "legacy historical event cache conflicts with canonical collector retention"
                 ) from exc
 
+            for delta_id in retired_delta_ids:
+                event = migrate[delta_id]
+                digest = canonical_event_digest(event)
+                remember_retired(
+                    retired_quote_digests,
+                    key=event.quote_key,
+                    digest=digest,
+                    kind="quote",
+                )
+                remember_retired(
+                    retired_dedupe_digests,
+                    key=event.dedupe_key,
+                    digest=digest,
+                    kind="dedupe",
+                )
+
         def verify_history(
             history: dict[str, object],
             *,
             quote: bool,
         ) -> None:
             items = iter(history.items())
+            retired = retired_quote_digests if quote else retired_dedupe_digests
             while True:
                 chunk = tuple(
                     islice(
@@ -783,11 +819,16 @@ class ParlayApiProductSource:
                     ) from exc
                 observed = quote_map if quote else dedupe_map
                 for key, digest in chunk:
-                    if observed.get(key) != digest:
-                        kind = "quote" if quote else "dedupe"
-                        raise ProductSourceStateError(
-                            f"legacy {kind} history conflicts with canonical collector history"
-                        )
+                    retained_digest = observed.get(key)
+                    if retained_digest is not None:
+                        if retained_digest == digest:
+                            continue
+                    elif retired.get(key) == digest:
+                        continue
+                    kind = "quote" if quote else "dedupe"
+                    raise ProductSourceStateError(
+                        f"legacy {kind} history conflicts with canonical collector history"
+                    )
 
         verify_history(quote_history, quote=True)
         verify_history(dedupe_history, quote=False)

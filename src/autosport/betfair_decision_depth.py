@@ -4,7 +4,8 @@ from __future__ import annotations
 
 The authority in this module is intentionally narrow. It parses one
 caller-supplied Betfair-shaped MarketBook payload and records only the returned
-exchange ladder for an exact market, selection, optional handicap and side. The parser does not
+exchange ladder for an exact market, selection, handicap and side. The parser does
+not
 prove that the payload originated from Betfair or that the caller-supplied time
 was the network observation instant. Returned liquidity is also racy: it can
 disappear before an order reaches the exchange. Therefore this module never

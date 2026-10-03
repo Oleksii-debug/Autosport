@@ -32,6 +32,8 @@ _PATH_LOCK_LOCAL = threading.local()
 
 _SCIENTIFIC_REGISTRY_AUTHORITY_DOMAIN = "autosport.scientific-registry.v1"
 _CANONICAL_MONOTONIC_AUTHORITY_TYPE = MonotonicWorkspaceAuthority
+_CANONICAL_MONOTONIC_INIT = MonotonicWorkspaceAuthority.__init__
+_CANONICAL_MONOTONIC_INIT_CODE = MonotonicWorkspaceAuthority.__init__.__code__
 _CANONICAL_MONOTONIC_READ_HISTORY = MonotonicWorkspaceAuthority.read_history
 _CANONICAL_MONOTONIC_READ_HISTORY_CODE = MonotonicWorkspaceAuthority.read_history.__code__
 _CANONICAL_MONOTONIC_RECOVER = MonotonicWorkspaceAuthority.recover
@@ -178,6 +180,10 @@ def _assert_scientific_registry_monotonic_read_dispatch(
     if (
         MonotonicWorkspaceAuthority is not _CANONICAL_MONOTONIC_AUTHORITY_TYPE
         or type(authority) is not _CANONICAL_MONOTONIC_AUTHORITY_TYPE
+        or vars(_CANONICAL_MONOTONIC_AUTHORITY_TYPE).get("__init__")
+        is not _CANONICAL_MONOTONIC_INIT
+        or _CANONICAL_MONOTONIC_INIT.__code__
+        is not _CANONICAL_MONOTONIC_INIT_CODE
         or vars(_CANONICAL_MONOTONIC_AUTHORITY_TYPE).get("read_history")
         is not _CANONICAL_MONOTONIC_READ_HISTORY
         or _CANONICAL_MONOTONIC_READ_HISTORY.__code__
@@ -282,6 +288,42 @@ def _recover_or_bootstrap_scientific_registry_authority(
     )
 
 
+_CANONICAL_SCIENTIFIC_REGISTRY_AUTHORITY_FACTORY = _scientific_registry_authority
+_CANONICAL_SCIENTIFIC_REGISTRY_AUTHORITY_FACTORY_CODE = (
+    _scientific_registry_authority.__code__
+)
+_CANONICAL_AUTHORITY_READ_HISTORY_HELPER = _authority_read_history
+_CANONICAL_AUTHORITY_READ_HISTORY_HELPER_CODE = _authority_read_history.__code__
+_CANONICAL_AUTHORITY_RECOVER_HELPER = _authority_recover
+_CANONICAL_AUTHORITY_RECOVER_HELPER_CODE = _authority_recover.__code__
+_CANONICAL_RECOVER_OR_BOOTSTRAP_HELPER = (
+    _recover_or_bootstrap_scientific_registry_authority
+)
+_CANONICAL_RECOVER_OR_BOOTSTRAP_HELPER_CODE = (
+    _recover_or_bootstrap_scientific_registry_authority.__code__
+)
+
+
+def _assert_scientific_registry_authority_helpers() -> None:
+    if (
+        _scientific_registry_authority
+        is not _CANONICAL_SCIENTIFIC_REGISTRY_AUTHORITY_FACTORY
+        or _CANONICAL_SCIENTIFIC_REGISTRY_AUTHORITY_FACTORY.__code__
+        is not _CANONICAL_SCIENTIFIC_REGISTRY_AUTHORITY_FACTORY_CODE
+        or _authority_read_history is not _CANONICAL_AUTHORITY_READ_HISTORY_HELPER
+        or _CANONICAL_AUTHORITY_READ_HISTORY_HELPER.__code__
+        is not _CANONICAL_AUTHORITY_READ_HISTORY_HELPER_CODE
+        or _authority_recover is not _CANONICAL_AUTHORITY_RECOVER_HELPER
+        or _CANONICAL_AUTHORITY_RECOVER_HELPER.__code__
+        is not _CANONICAL_AUTHORITY_RECOVER_HELPER_CODE
+        or _recover_or_bootstrap_scientific_registry_authority
+        is not _CANONICAL_RECOVER_OR_BOOTSTRAP_HELPER
+        or _CANONICAL_RECOVER_OR_BOOTSTRAP_HELPER.__code__
+        is not _CANONICAL_RECOVER_OR_BOOTSTRAP_HELPER_CODE
+    ):
+        raise RuntimeError("ScientificRegistry authority helper dispatch changed")
+
+
 def read_verified_scientific_registry_text(path: str | Path) -> str:
     """Read one stable ScientificRegistry candidate image under its path fence.
 
@@ -337,13 +379,14 @@ def establish_validated_scientific_registry_read_baseline(
             # authority when its first real scientific record is published.
             return
 
+        _assert_scientific_registry_authority_helpers()
         observed = hashlib.sha256(current_bytes).hexdigest()
-        authority = _scientific_registry_authority(destination)
-        if not _authority_read_history(authority):
+        authority = _CANONICAL_SCIENTIFIC_REGISTRY_AUTHORITY_FACTORY(destination)
+        if not _CANONICAL_AUTHORITY_READ_HISTORY_HELPER(authority):
             raise MonotonicAuthorityRollbackError(
                 "validated non-pristine scientific registry lacks independent authority history"
             )
-        _recover_or_bootstrap_scientific_registry_authority(
+        _CANONICAL_RECOVER_OR_BOOTSTRAP_HELPER(
             authority,
             destination,
             observed,

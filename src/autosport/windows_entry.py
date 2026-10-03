@@ -38,8 +38,9 @@ def _show_workspace_configuration_error(detail: str) -> None:
     title = "Автоспорт — помилка конфігурації workspace"
     message = (
         "Автоспорт не відкрив interactive workspace через недійсну конфігурацію.\n\n"
-        "Вкажіть абсолютний шлях у AUTOSPORT_WORKSPACE або виправте LOCALAPPDATA, "
-        "потім перезапустіть Автоспорт. Economic і live state не змінено."
+        "Вкажіть абсолютний шлях у AUTOSPORT_WORKSPACE, окремий від сховища WebView2, "
+        "або виправте LOCALAPPDATA, потім перезапустіть Автоспорт. "
+        "Economic і live state не змінено."
     )
     ctypes.windll.user32.MessageBoxW(None, message, title, 0x00000010)
 
@@ -141,7 +142,11 @@ def _show_startup_error(message: str) -> None:
 
 
 def _run_interactive_gui() -> int:
-    from autosport.paths import default_workspace
+    from autosport.paths import (
+        default_webview_storage_path,
+        default_workspace,
+        validate_product_storage_roots,
+    )
 
     try:
         workspace = default_workspace()
@@ -150,6 +155,8 @@ def _run_interactive_gui() -> int:
                 "Resolved Autosport workspace must be an absolute path; "
                 "configure an absolute AUTOSPORT_WORKSPACE or LOCALAPPDATA value"
             )
+        webview_storage = default_webview_storage_path()
+        validate_product_storage_roots(workspace, webview_storage)
     except ValueError as exc:
         _show_workspace_configuration_error(str(exc))
         return 2

@@ -1364,6 +1364,87 @@ def test_paper_ticket_descriptor_rebind_cannot_understate_economic_history(
     assert set(persisted.tickets) == set(book.tickets)
 
 
+def test_paperbook_instance_state_class_witness_inventory_is_complete():
+    observed = tuple(
+        name
+        for name, _present, _value in (
+            economic_admission._PAPERBOOK_INSTANCE_STATE_CLASS_WITNESSES
+        )
+    )
+    assert observed == (
+        "initial_bankroll",
+        "balance",
+        "tickets",
+        "_lifecycle",
+        "_settlement_times",
+    )
+    assert all(
+        present is False and value is None
+        for _name, present, value in (
+            economic_admission._PAPERBOOK_INSTANCE_STATE_CLASS_WITNESSES
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    ("field_name", "forged_value"),
+    (
+        ("initial_bankroll", Decimal("1000000")),
+        ("balance", Decimal("1000000")),
+        ("tickets", {}),
+        ("_lifecycle", []),
+        ("_settlement_times", {}),
+    ),
+)
+def test_paperbook_class_shadow_cannot_forge_economic_state(
+    tmp_path,
+    field_name,
+    forged_value,
+):
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    old = now - timedelta(days=2)
+    goal = _goal()
+    EconomicGoalStore(tmp_path).initialize_owner(goal)
+    book = _book_with_settled_turnover(placed_at=_timestamp(old), stake="50")
+    book.save(tmp_path / "paper_book.json")
+    candidate = _leg(f"paperbook-shadow-{field_name}")
+    context = _context(candidate, _timestamp(now))
+    policy = _policy(goal)
+    assert field_name not in PaperBook.__dict__
+    hostile_called = False
+
+    def forged_field(_self):
+        nonlocal hostile_called
+        hostile_called = True
+        return forged_value
+
+    try:
+        setattr(PaperBook, field_name, property(forged_field))
+        with pytest.raises(
+            RuntimeError,
+            match="economic admission PaperBook state descriptor authority changed",
+        ):
+            admit_paper_ticket(
+                workspace=tmp_path,
+                book=book,
+                risk_policy=policy,
+                stake=Decimal("0.01"),
+                legs=(candidate,),
+                reason="PaperBook class shadow must fail closed",
+                placed_at=_timestamp(now),
+                context=context,
+                provider_source_ids=("provider-1",),
+                bankroll_id="paper-bankroll",
+                currency="USD",
+            )
+    finally:
+        delattr(PaperBook, field_name)
+
+    assert hostile_called is False
+    persisted = PaperBook.load(tmp_path / "paper_book.json")
+    assert set(persisted.tickets) == set(book.tickets)
+
+
 def test_risk_policy_limit_descriptor_rebind_cannot_widen_ticket_cap(tmp_path):
     now = datetime.now(timezone.utc).replace(microsecond=0)
     old = now - timedelta(days=2)

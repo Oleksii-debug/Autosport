@@ -49,7 +49,12 @@ class _BetdaqHttpResponse:
         return self.payload
 
 
-def _product_issued_betdaq_balance(monkeypatch) -> BetdaqAuthenticatedCapabilityIssuance:
+def _product_issued_betdaq_balance(
+    monkeypatch,
+    *,
+    committed_at: str = "2026-09-21T10:01:00+00:00",
+    review_due_at: str = "2026-09-21T11:01:00+00:00",
+) -> BetdaqAuthenticatedCapabilityIssuance:
     payload = (
         f'<?xml version="1.0" encoding="utf-8"?>'
         f'<soap:Envelope xmlns:soap="{_BETDAQ_SOAP}" xmlns="{_BETDAQ_NS}">'
@@ -72,8 +77,8 @@ def _product_issued_betdaq_balance(monkeypatch) -> BetdaqAuthenticatedCapability
     return issue_betdaq_authenticated_capability_evidence(
         client,
         BookmakerCapability.BALANCE_READ,
-        committed_at="2026-09-21T10:01:00+00:00",
-        review_due_at="2026-09-21T11:01:00+00:00",
+        committed_at=committed_at,
+        review_due_at=review_due_at,
     )
 
 
@@ -213,3 +218,67 @@ def test_betdaq_lifecycle_requires_official_api_integration(monkeypatch) -> None
         match="requires official API integration",
     ):
         issue_betdaq_authenticated_read_evidence(issuance, browser)
+
+
+def test_stale_betdaq_lifecycle_cannot_be_laundered_into_current_matrix_fact(
+    monkeypatch,
+) -> None:
+    issuance = _product_issued_betdaq_balance(
+        monkeypatch,
+        committed_at="2026-09-21T11:00:00+00:00",
+        review_due_at="2026-09-21T12:00:00+00:00",
+    )
+    integration = bind_bookmaker_integration(
+        issuance.profile,
+        integration_kind=BookmakerIntegrationKind.OFFICIAL_API,
+        observed_at="2026-09-21T10:01:30+00:00",
+        source_ref="betdaq-secure-api",
+        source_payload_sha256="d" * 64,
+    )
+
+    with pytest.raises(
+        ProviderCapabilityEvidenceMatrixError,
+        match="not current product-issued authenticated proof",
+    ):
+        issue_betdaq_authenticated_read_evidence(issuance, integration)
+
+
+def test_matrix_fact_expiry_never_outlives_lifecycle_review_boundary(
+    monkeypatch,
+) -> None:
+    issuance = _product_issued_betdaq_balance(
+        monkeypatch,
+        review_due_at="2026-09-21T10:30:00+00:00",
+    )
+    integration = bind_bookmaker_integration(
+        issuance.profile,
+        integration_kind=BookmakerIntegrationKind.OFFICIAL_API,
+        observed_at="2026-09-21T10:01:30+00:00",
+        source_ref="betdaq-secure-api",
+        source_payload_sha256="d" * 64,
+    )
+
+    fact = issue_betdaq_authenticated_read_evidence(issuance, integration)
+    assert fact.expires_at == "2026-09-21T10:30:00+00:00"
+
+    matrix = build_provider_capability_evidence_matrix(
+        issuance.profile,
+        integration,
+        environment="production",
+        application_mode="betdaq-authenticated-readonly",
+        matrix_version=1,
+        as_of="2026-09-21T10:30:00+00:00",
+        matrix_ref="betdaq-review-boundary",
+        evidence=(fact,),
+    )
+    accepted = frozenset({ProviderCapabilityTruthGrade.AUTHENTICATED_READ_PROVEN})
+    assert matrix.qualifies(
+        BookmakerCapability.BALANCE_READ,
+        accepted_grades=accepted,
+        at_time="2026-09-21T10:29:59+00:00",
+    )
+    assert not matrix.qualifies(
+        BookmakerCapability.BALANCE_READ,
+        accepted_grades=accepted,
+        at_time="2026-09-21T10:30:00+00:00",
+    )

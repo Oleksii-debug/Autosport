@@ -1048,6 +1048,19 @@ def cancel_superseded_explicit_pr_runs(
     association/branch boundary checks.
     """
 
+    def qualification_state_from_trusted_read(value) -> tuple[str, bool]:
+        # The production trusted reader already returns a primitive canonical tuple.
+        # Consume that tuple directly so a later module-global fixture adapter rebind
+        # cannot rewrite READY/non-READY authority after the external read.
+        if type(value) is tuple:
+            if len(value) != 2 or type(value[1]) is not bool:
+                raise CancellationError("invalid trusted pull request qualification")
+            return (
+                _require_sha(value[0], field="pull request head sha"),
+                value[1],
+            )
+        return _pull_request_qualification_state(value)
+
     current_run_id = _require_positive_int(current_run_id, field="current run id")
     if (
         type(workflow_name) is not str
@@ -1105,7 +1118,7 @@ def cancel_superseded_explicit_pr_runs(
             # one group must fail that group closed without starving independent PRs
             # whose own live authority can still be proven.
             continue
-        qualification_state = _pull_request_qualification_state(qualification)
+        qualification_state = qualification_state_from_trusted_read(qualification)
         qualification_head, integration_capable = qualification_state
         selected = select_superseded_runs(
             explicit_singleton_runs,
@@ -1169,7 +1182,7 @@ def cancel_superseded_explicit_pr_runs(
             except CancellationError:
                 break
             if (
-                _pull_request_qualification_state(current_qualification)
+                qualification_state_from_trusted_read(current_qualification)
                 != qualification_state
             ):
                 break
@@ -1197,9 +1210,19 @@ def _cancel_triggering_run_if_stale_or_nonqualifying(
     used for the decision.
     """
 
+    def qualification_state_from_trusted_read(value) -> tuple[str, bool]:
+        if type(value) is tuple:
+            if len(value) != 2 or type(value[1]) is not bool:
+                raise CancellationError("invalid trusted pull request qualification")
+            return (
+                _require_sha(value[0], field="pull request head sha"),
+                value[1],
+            )
+        return _pull_request_qualification_state(value)
+
     event_head_sha = _require_sha(event_head_sha, field="event head sha")
     current_run_id = _require_positive_int(current_run_id, field="current run id")
-    qualification_state = _pull_request_qualification_state(qualification)
+    qualification_state = qualification_state_from_trusted_read(qualification)
     qualification_head, integration_capable = qualification_state
     stale = qualification_head != event_head_sha
     same_head_nonqualifying = (
@@ -1222,7 +1245,7 @@ def _cancel_triggering_run_if_stale_or_nonqualifying(
         # must not invalidate independently completed workflow-wide cleanup.
         return False
     if (
-        _pull_request_qualification_state(current_qualification)
+        qualification_state_from_trusted_read(current_qualification)
         != qualification_state
     ):
         return False

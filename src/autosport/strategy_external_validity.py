@@ -11,7 +11,14 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Sequence
 
-from .evaluation_universe import EvaluationUniverseLedger, FunnelStage, SlotState
+from .evaluation_universe import (
+    EvaluationRow,
+    EvaluationUniverse,
+    EvaluationUniverseLedger,
+    FunnelEvent,
+    FunnelStage,
+    SlotState,
+)
 from .external_validity_baseline import (
     EvaluationContractFamily,
     FrozenBaselineProtocol,
@@ -52,11 +59,46 @@ _PAPER_OUTCOME_STAGES = {
     FunnelStage.VOID,
 }
 
+# Freeze the exact denominator dispatch consumed by this descriptive evaluator.
+# EvaluationUniverseLedger is an authority-bearing object: accepting a later class
+# monkeypatch of cohort()/current_stage() would let mutable process code hide frozen
+# rows or launder ATTEMPTED/UNKNOWN into a stronger stage while preserving exact
+# object identity.  The evaluator therefore fails closed if that canonical surface
+# changes after this module is imported, and invokes only the captured functions.
+_CANONICAL_LEDGER_COHORT = EvaluationUniverseLedger.cohort
+_CANONICAL_LEDGER_CURRENT_STAGE = EvaluationUniverseLedger.current_stage
+
 
 def _digest(value: object) -> str:
     return hashlib.sha256(json.dumps(
         value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False
     ).encode("utf-8")).hexdigest()
+
+
+def _require_denominator_dispatch_authority(
+    ledger: EvaluationUniverseLedger,
+) -> None:
+    """Reject mutable/subclass denominator surfaces before deriving evidence."""
+
+    if type(ledger.universe) is not EvaluationUniverse:
+        raise StrategyExternalValidityError(
+            "ledger universe must be exact canonical EvaluationUniverse"
+        )
+    if any(type(row) is not EvaluationRow for row in ledger.universe.rows):
+        raise StrategyExternalValidityError(
+            "ledger rows must be exact canonical EvaluationRow values"
+        )
+    if any(type(event) is not FunnelEvent for event in ledger.events):
+        raise StrategyExternalValidityError(
+            "ledger events must be exact canonical FunnelEvent values"
+        )
+    if (
+        EvaluationUniverseLedger.cohort is not _CANONICAL_LEDGER_COHORT
+        or EvaluationUniverseLedger.current_stage is not _CANONICAL_LEDGER_CURRENT_STAGE
+    ):
+        raise StrategyExternalValidityError(
+            "EvaluationUniverseLedger denominator dispatch changed"
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -148,6 +190,8 @@ def evaluate_strategy_external_validity(
     if type(candidate) is not PolicyEvaluation:
         raise StrategyExternalValidityError("candidate must be exact PolicyEvaluation")
 
+    _require_denominator_dispatch_authority(ledger)
+
     family = _SUPPORTED.get(protocol.strategy_class)
     if family is None:
         raise StrategyExternalValidityError(
@@ -156,7 +200,7 @@ def evaluate_strategy_external_validity(
     if protocol.evaluation_contract_family is not family:
         raise StrategyExternalValidityError("strategy/evaluation-contract mismatch")
 
-    cohort = ledger.cohort()
+    cohort = _CANONICAL_LEDGER_COHORT(ledger)
     if protocol.evidence_scope.cohort_keys != cohort.row_ids:
         raise StrategyExternalValidityError(
             "baseline cohort must equal exact frozen EvaluationUniverse row_ids"
@@ -176,7 +220,10 @@ def evaluate_strategy_external_validity(
         raise StrategyExternalValidityError("frozen denominator mixes config_sha256 values")
 
     candidate_rows = tuple(row for row in rows if row.slot_state is SlotState.CANDIDATE)
-    stages = tuple(ledger.current_stage(row.row_id) for row in candidate_rows)
+    stages = tuple(
+        _CANONICAL_LEDGER_CURRENT_STAGE(ledger, row.row_id)
+        for row in candidate_rows
+    )
     gaps = {
         "generic_product_evaluation_issuance_not_verified",
         "real_provider_execution_authority_not_substituted",

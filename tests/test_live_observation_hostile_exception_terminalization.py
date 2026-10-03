@@ -135,6 +135,7 @@ def test_renderer_failure_uses_secret_free_terminal_fallback_and_releases_busy()
 
     with mock.patch(
         "autosport.live_observation.safe_exception_text",
+        create=True,
         side_effect=RuntimeError("renderer failed"),
     ):
         assert worker.start(task) is True
@@ -154,6 +155,7 @@ def test_renderer_rebinding_cannot_publish_plausible_unredacted_text() -> None:
 
     with mock.patch(
         "autosport.live_observation.safe_exception_text",
+        create=True,
         return_value=f"RuntimeError: Authorization: Bearer {secret}",
     ) as forged_renderer:
         assert worker.start(task) is True
@@ -166,68 +168,69 @@ def test_renderer_rebinding_cannot_publish_plausible_unredacted_text() -> None:
     assert worker.busy is False
 
 
-def test_renderer_in_place_code_mutation_fails_closed_before_publication() -> None:
+def test_rebound_terminal_helper_is_not_on_publication_path() -> None:
     worker = OneShotObservationWorker()
-    original_code = live_observation.safe_exception_text.__code__
-
-    def forged_renderer(
-        exc,
-        *,
-        unavailable_detail="exception details unavailable",
-        extra_secret_values=(),
-    ):
-        return "forged terminal diagnostic"
-
-    try:
-        live_observation.safe_exception_text.__code__ = forged_renderer.__code__
-
-        def task():
-            raise RuntimeError("provider-timeout")
-
-        assert worker.start(task) is True
-        message = _wait_for_terminal(worker)
-    finally:
-        live_observation.safe_exception_text.__code__ = original_code
-
-    assert message.result is None
-    assert message.error == "BaseException: exception details unavailable"
-    assert worker.busy is False
-
-
-def test_coordinated_renderer_and_kwdefaults_rebind_cannot_publish_secret() -> None:
-    worker = OneShotObservationWorker()
-    secret = "coordinated-renderer-secret-2056"
-    original_renderer = live_observation.safe_exception_text
-    original_kwdefaults = OneShotObservationWorker._safe_terminal_error.__kwdefaults__
+    secret = "rebound-helper-secret-2056"
+    hostile_calls: list[BaseException] = []
 
     def forged_renderer(exc):
+        hostile_calls.append(exc)
         return f"RuntimeError: Authorization: Bearer {secret}"
 
-    try:
-        live_observation.safe_exception_text = forged_renderer
-        # Reproduce the former attack even though these names are no longer
-        # parameters consumed by the terminal helper.
-        OneShotObservationWorker._safe_terminal_error.__kwdefaults__ = {
-            "_renderer": forged_renderer,
-            "_renderer_code": forged_renderer.__code__,
-        }
-
+    with mock.patch.object(
+        OneShotObservationWorker,
+        "_safe_terminal_error",
+        staticmethod(forged_renderer),
+        create=True,
+    ):
         def task():
             raise RuntimeError(f"Authorization: Bearer {secret}")
 
         assert worker.start(task) is True
         message = _wait_for_terminal(worker)
-    finally:
-        live_observation.safe_exception_text = original_renderer
-        OneShotObservationWorker._safe_terminal_error.__kwdefaults__ = (
-            original_kwdefaults
-        )
+
+    assert message.result is None
+    assert message.error == "BaseException: exception details unavailable"
+    assert secret not in message.error
+    assert hostile_calls == []
+    assert worker.busy is False
+
+
+def test_coordinated_renderer_and_helper_rebind_cannot_publish_secret() -> None:
+    worker = OneShotObservationWorker()
+    secret = "coordinated-renderer-secret-2056"
+    hostile_calls: list[BaseException] = []
+
+    def forged_renderer(exc):
+        hostile_calls.append(exc)
+        return f"RuntimeError: Authorization: Bearer {secret}"
+
+    assert "_safe_terminal_error" not in OneShotObservationWorker.__dict__
+    with (
+        mock.patch(
+            "autosport.live_observation.safe_exception_text",
+            forged_renderer,
+            create=True,
+        ),
+        mock.patch.object(
+            OneShotObservationWorker,
+            "_safe_terminal_error",
+            staticmethod(forged_renderer),
+            create=True,
+        ),
+    ):
+        def task():
+            raise RuntimeError(f"Authorization: Bearer {secret}")
+
+        assert worker.start(task) is True
+        message = _wait_for_terminal(worker)
 
     assert message.result is None
     assert message.error == "BaseException: exception details unavailable"
     assert secret not in message.error
     rendered = text("ui.error.live.snapshot", detail=message.error)
     assert secret not in rendered
+    assert hostile_calls == []
     assert worker.busy is False
 
 
@@ -236,10 +239,15 @@ def test_terminal_bound_globals_cannot_widen_published_diagnostic() -> None:
     oversized = "bounded-" + ("z" * 10_000)
 
     with (
-        mock.patch("autosport.live_observation._TERMINAL_ERROR_MAX_CHARS", 100_000),
+        mock.patch(
+            "autosport.live_observation._TERMINAL_ERROR_MAX_CHARS",
+            100_000,
+            create=True,
+        ),
         mock.patch(
             "autosport.live_observation._TERMINAL_ERROR_TRUNCATION",
             "attacker-controlled-marker",
+            create=True,
         ),
     ):
 
@@ -264,6 +272,7 @@ def test_renderer_invalid_return_uses_secret_free_terminal_fallback() -> None:
 
     with mock.patch(
         "autosport.live_observation.safe_exception_text",
+        create=True,
         return_value=None,
     ):
         assert worker.start(task) is True
@@ -281,6 +290,7 @@ def test_renderer_hostile_str_subclass_uses_secret_free_terminal_fallback() -> N
 
     with mock.patch(
         "autosport.live_observation.safe_exception_text",
+        create=True,
         return_value=_HostileRenderedText("provider-timeout"),
     ):
         assert worker.start(task) is True

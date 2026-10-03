@@ -314,6 +314,34 @@ def test_catalogue_market_type_must_match_getprices_provider_type(
         provider.read_batch()
 
     assert provider.last_request_evidence is None
+    assert provider.last_catalogue_evidence is None
+
+
+def test_failed_successor_keeps_last_successful_evidence_pair(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    router = _CanonicalUrlopenRouter()
+    provider = _provider(tmp_path, monkeypatch, router)
+
+    provider.read_batch()
+    first_request_evidence = provider.last_request_evidence
+    first_catalogue_evidence = provider.last_catalogue_evidence
+    assert first_request_evidence is not None
+    assert first_catalogue_evidence is not None
+
+    router.event_payload = _event_response(event_name="Fixture B")
+    router.prices_payload = b"not xml"
+
+    with pytest.raises(BetdaqSoapProtocolError):
+        provider.read_batch()
+
+    assert provider.last_request_evidence is first_request_evidence
+    assert provider.last_catalogue_evidence is first_catalogue_evidence
+    assert (
+        provider.last_request_evidence.catalogue_response_sha256
+        == provider.last_catalogue_evidence.response_sha256
+    )
 
 
 def test_caller_event_scope_must_contain_returned_market(

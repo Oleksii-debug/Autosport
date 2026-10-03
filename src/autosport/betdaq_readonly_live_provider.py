@@ -118,7 +118,14 @@ class BetdaqLiveReadOnlyProvider(BetdaqReadOnlyProvider):
             tuple(self._bindings.values())
         )
         self._catalogue_bindings = dict(resolved)
-        self._last_catalogue_evidence = catalogue_evidence
+        previous_publication = (
+            self._pending,
+            self._offset,
+            self._cursor,
+            self._flags,
+            self._evidence,
+            self._last_catalogue_evidence,
+        )
         try:
             super()._load()
             self._flags = (
@@ -133,7 +140,7 @@ class BetdaqLiveReadOnlyProvider(BetdaqReadOnlyProvider):
             aggregate.update(bytes.fromhex(self._evidence.aggregate_sha256))
             aggregate.update(bytes.fromhex(catalogue_evidence.request_fingerprint))
             aggregate.update(bytes.fromhex(catalogue_evidence.response_sha256))
-            self._evidence = replace(
+            combined_evidence = replace(
                 self._evidence,
                 aggregate_sha256=aggregate.hexdigest(),
                 catalogue_request_fingerprint=(
@@ -147,6 +154,21 @@ class BetdaqLiveReadOnlyProvider(BetdaqReadOnlyProvider):
                     catalogue_evidence.requested_event_classifier_ids
                 ),
             )
+            # Publish the request/catalogue evidence pair only after the full live
+            # snapshot succeeds. A failed successor acquisition must not splice a
+            # fresh catalogue witness onto an older successful GetPrices witness.
+            self._evidence = combined_evidence
+            self._last_catalogue_evidence = catalogue_evidence
+        except Exception:
+            (
+                self._pending,
+                self._offset,
+                self._cursor,
+                self._flags,
+                self._evidence,
+                self._last_catalogue_evidence,
+            ) = previous_publication
+            raise
         finally:
             # Never leave a stale provider-tree mapping available for a later load.
             self._catalogue_bindings = {}

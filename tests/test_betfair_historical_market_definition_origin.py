@@ -428,5 +428,73 @@ class BetfairHistoricalMarketDefinitionOriginTests(unittest.TestCase):
             bound.market_definition()
 
 
+    def test_unissued_copy_cannot_bypass_registry_by_method_substitution(self) -> None:
+        raw = _raw(_line(1000, self.MARKET_ID, self.definition(status="OPEN", version=1)))
+        witness = self.witness(raw)
+        bound = self.bind_with_upstream_authority_stub(witness, raw, cutoff=1000)
+        copied = copy.copy(bound)
+        original = vars(BetfairHistoricalMarketDefinitionOrigin)[
+            "assert_issued_integrity"
+        ]
+        hostile_calls: list[object] = []
+
+        def hostile(instance):
+            hostile_calls.append(instance)
+
+        type.__setattr__(
+            BetfairHistoricalMarketDefinitionOrigin,
+            "assert_issued_integrity",
+            hostile,
+        )
+        try:
+            with patch.object(
+                HistoricalProviderOriginWitness,
+                "assert_authoritative",
+                autospec=True,
+                return_value=None,
+            ):
+                with self.assertRaisesRegex(
+                    BetfairHistoricalMarketDefinitionOriginError,
+                    "class dispatch was replaced",
+                ):
+                    _ = copied.provider_origin_verified
+        finally:
+            type.__setattr__(
+                BetfairHistoricalMarketDefinitionOrigin,
+                "assert_issued_integrity",
+                original,
+            )
+
+        self.assertEqual(hostile_calls, [])
+        bound.assert_issued_integrity()
+
+    def test_origin_dispatch_rejects_in_place_integrity_code_replacement(self) -> None:
+        raw = _raw(_line(1000, self.MARKET_ID, self.definition(status="OPEN", version=1)))
+        witness = self.witness(raw)
+        bound = self.bind_with_upstream_authority_stub(witness, raw, cutoff=1000)
+        target = vars(BetfairHistoricalMarketDefinitionOrigin)[
+            "assert_issued_integrity"
+        ]
+        original_code = target.__code__
+
+        def hostile(instance):
+            del instance
+            raise AssertionError("hostile origin integrity code executed")
+
+        self.assertEqual(original_code.co_freevars, ())
+        self.assertEqual(hostile.__code__.co_freevars, ())
+        target.__code__ = hostile.__code__
+        try:
+            with self.assertRaisesRegex(
+                BetfairHistoricalMarketDefinitionOriginError,
+                "class dispatch was replaced",
+            ):
+                _ = bound.evidence_sha256
+        finally:
+            target.__code__ = original_code
+
+        self.assertEqual(len(bound.evidence_sha256), 64)
+
+
 if __name__ == "__main__":
     unittest.main()

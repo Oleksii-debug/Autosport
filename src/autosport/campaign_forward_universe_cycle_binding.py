@@ -769,16 +769,108 @@ _INTERNAL_CALLABLES = tuple(
         ),
         ("_assert_cycle_receipt_exact", _assert_cycle_receipt_exact),
         ("_rebuild_exact_provider_universe", _rebuild_exact_provider_universe),
-        (
-            "resolve_campaign_forward_universe_cycle_authority",
-            resolve_campaign_forward_universe_cycle_authority,
-        ),
-        (
-            "authorize_campaign_forward_source_receipts",
-            authorize_campaign_forward_source_receipts,
-        ),
     )
 )
+
+
+def _seal_campaign_forward_universe_cycle_dispatch() -> None:
+    """Seal exported composite authority paths around the private integrity guard."""
+
+    module_globals = globals()
+    expected_error = CampaignForwardUniverseCycleBindingError
+    expected_guard = _require_dispatch_integrity
+    expected_guard_code = expected_guard.__code__
+    expected_resolve = resolve_campaign_forward_universe_cycle_authority
+    expected_resolve_code = expected_resolve.__code__
+    expected_authorize = authorize_campaign_forward_source_receipts
+    expected_authorize_code = expected_authorize.__code__
+    expected_inspect = inspect
+    expected_getattr_static = inspect.getattr_static
+
+    def require_sealed_surface() -> None:
+        if (
+            module_globals.get("_require_dispatch_integrity") is not expected_guard
+            or expected_guard.__code__ is not expected_guard_code
+        ):
+            raise expected_error(
+                "campaign forward-cycle integrity guard changed"
+            )
+        if (
+            module_globals.get("inspect") is not expected_inspect
+            or expected_inspect.getattr_static is not expected_getattr_static
+        ):
+            raise expected_error(
+                "campaign forward-cycle reflection dispatch changed"
+            )
+        if expected_resolve.__code__ is not expected_resolve_code:
+            raise expected_error(
+                "campaign forward-cycle resolver implementation changed"
+            )
+        if expected_authorize.__code__ is not expected_authorize_code:
+            raise expected_error(
+                "campaign forward-cycle authorizer implementation changed"
+            )
+        expected_guard()
+
+    def sealed_resolve_campaign_forward_universe_cycle_authority(*args, **kwargs):
+        if (
+            module_globals.get(
+                "resolve_campaign_forward_universe_cycle_authority"
+            )
+            is not sealed_resolve_campaign_forward_universe_cycle_authority
+        ):
+            raise expected_error(
+                "campaign forward-cycle resolver surface changed"
+            )
+        require_sealed_surface()
+        result = expected_resolve(*args, **kwargs)
+        require_sealed_surface()
+        return result
+
+    def sealed_authorize_campaign_forward_source_receipts(*args, **kwargs):
+        if (
+            module_globals.get("authorize_campaign_forward_source_receipts")
+            is not sealed_authorize_campaign_forward_source_receipts
+            or module_globals.get(
+                "resolve_campaign_forward_universe_cycle_authority"
+            )
+            is not sealed_resolve_campaign_forward_universe_cycle_authority
+        ):
+            raise expected_error(
+                "campaign forward-cycle public authority surface changed"
+            )
+        require_sealed_surface()
+        result = expected_authorize(*args, **kwargs)
+        require_sealed_surface()
+        return result
+
+    sealed_resolve_campaign_forward_universe_cycle_authority.__name__ = (
+        expected_resolve.__name__
+    )
+    sealed_resolve_campaign_forward_universe_cycle_authority.__qualname__ = (
+        expected_resolve.__qualname__
+    )
+    sealed_resolve_campaign_forward_universe_cycle_authority.__doc__ = (
+        expected_resolve.__doc__
+    )
+    sealed_authorize_campaign_forward_source_receipts.__name__ = (
+        expected_authorize.__name__
+    )
+    sealed_authorize_campaign_forward_source_receipts.__qualname__ = (
+        expected_authorize.__qualname__
+    )
+    sealed_authorize_campaign_forward_source_receipts.__doc__ = (
+        expected_authorize.__doc__
+    )
+    module_globals["resolve_campaign_forward_universe_cycle_authority"] = (
+        sealed_resolve_campaign_forward_universe_cycle_authority
+    )
+    module_globals["authorize_campaign_forward_source_receipts"] = (
+        sealed_authorize_campaign_forward_source_receipts
+    )
+
+
+_seal_campaign_forward_universe_cycle_dispatch()
 
 
 __all__ = [

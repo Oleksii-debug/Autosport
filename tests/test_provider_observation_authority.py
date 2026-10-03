@@ -813,3 +813,82 @@ def test_store_save_rejects_path_constructor_rebind_before_hostile_dispatch(
         store.save(snapshot)
     assert hostile_calls == []
 
+
+
+
+def test_store_save_rejects_shadowed_runtime_builtin_before_dispatch(
+    tmp_path,
+    monkeypatch,
+):
+    snapshot = _capture(monkeypatch)
+    store = _store(tmp_path)
+    hostile_calls: list[str] = []
+
+    def hostile_any(*_args, **_kwargs):
+        hostile_calls.append("any")
+        raise AssertionError("hostile any executed")
+
+    monkeypatch.setattr(authority_module, "any", hostile_any, raising=False)
+
+    with pytest.raises(
+        ProviderObservationIntegrityError,
+        match="provider evidence store builtin dispatch shadowed",
+    ):
+        store.save(snapshot)
+
+    assert hostile_calls == []
+
+
+def test_store_save_uses_captured_type_and_getattr_primitives(
+    tmp_path,
+    monkeypatch,
+):
+    snapshot = _capture(monkeypatch)
+    store = _store(tmp_path)
+    hostile_calls: list[str] = []
+
+    def hostile(*_args, **_kwargs):
+        hostile_calls.append("primitive")
+        raise AssertionError("hostile primitive executed")
+
+    monkeypatch.setattr(authority_module, "type", hostile, raising=False)
+    monkeypatch.setattr(authority_module, "getattr", hostile, raising=False)
+
+    path = store.save(snapshot)
+
+    assert path.name == f"{snapshot.evidence_sha256}.json"
+    assert hostile_calls == []
+
+
+def test_store_save_rejects_getattr_static_helper_rebind_before_execution(
+    tmp_path,
+    monkeypatch,
+):
+    snapshot = _capture(monkeypatch)
+    store = _store(tmp_path)
+    reader = authority_module._CANONICAL_GETATTR_STATIC
+    helper_globals = reader.__globals__
+    name = next(
+        candidate
+        for candidate in reader.__code__.co_names
+        if candidate in helper_globals
+        and getattr(helper_globals[candidate], "__code__", None) is not None
+    )
+    original = helper_globals[name]
+    hostile_calls: list[str] = []
+
+    def hostile(*_args, **_kwargs):
+        hostile_calls.append(name)
+        raise AssertionError("hostile inspect helper executed")
+
+    helper_globals[name] = hostile
+    try:
+        with pytest.raises(
+            ProviderObservationIntegrityError,
+            match="provider evidence store authority witness changed",
+        ):
+            store.save(snapshot)
+    finally:
+        helper_globals[name] = original
+
+    assert hostile_calls == []

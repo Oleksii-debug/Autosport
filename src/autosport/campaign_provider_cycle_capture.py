@@ -712,11 +712,6 @@ def capture_campaign_complete_game_board(
         "__code__",
         None,
     )
-    expected_instant_code = _CANONICAL_GETATTR(
-        _CANONICAL_GETATTR(instant, "__func__", instant),
-        "__code__",
-        None,
-    )
     expected_finish_code = _CANONICAL_GETATTR(
         _CANONICAL_GETATTR(finish_cycle, "__func__", finish_cycle),
         "__code__",

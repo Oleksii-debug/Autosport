@@ -139,6 +139,24 @@ def _open(
     )
 
 
+def _resolve_current(
+    *,
+    book: PaperBook,
+    goal_store: EconomicGoalStore,
+    window_store: ProductDayRiskWindowStore,
+    window_evidence,
+):
+    """Persist the test book before exercising product-issued turnover evidence."""
+
+    book.save(window_store.workspace / "paper_book.json")
+    return PaperDayTurnoverResolver.resolve(
+        book=book,
+        goal_store=goal_store,
+        window_store=window_store,
+        window_evidence=window_evidence,
+    )
+
+
 def test_current_day_turnover_counts_ticket_stake_once_for_parlay(tmp_path):
     store = _store(tmp_path)
     window = store.current()
@@ -151,7 +169,7 @@ def test_current_day_turnover_counts_ticket_stake_once_for_parlay(tmp_path):
         legs=(_leg("a", "2"), _leg("b", "1.5")),
     )
 
-    evidence = PaperDayTurnoverResolver.resolve(
+    evidence = _resolve_current(
         book=book,
         goal_store=_goal_store(store, max_turnover="1"),
         window_store=store,
@@ -175,7 +193,7 @@ def test_evidence_value_contract_rejects_scalar_subclasses_before_hooks(tmp_path
     window = store.current()
     book = _book()
     _open(book, window, stake="25", suffix="scalar-fence")
-    evidence = PaperDayTurnoverResolver.resolve(
+    evidence = _resolve_current(
         book=book,
         goal_store=_goal_store(store),
         window_store=store,
@@ -224,7 +242,7 @@ def test_previous_day_ticket_does_not_enter_current_utc_day(tmp_path):
     )
     _open(book, window, stake="20", suffix="current")
 
-    evidence = PaperDayTurnoverResolver.resolve(
+    evidence = _resolve_current(
         book=book,
         goal_store=_goal_store(store),
         window_store=store,
@@ -247,7 +265,7 @@ def test_settlement_and_payout_do_not_erase_or_inflate_accepted_turnover(tmp_pat
         legs=(_leg("settle-a", "2"), _leg("settle-b", "1.5")),
     )
 
-    before = PaperDayTurnoverResolver.resolve(
+    before = _resolve_current(
         book=book,
         goal_store=_goal_store(store),
         window_store=store,
@@ -258,7 +276,7 @@ def test_settlement_and_payout_do_not_erase_or_inflate_accepted_turnover(tmp_pat
         {leg.quote_key for leg in ticket.legs},
         settled_at=_inside(window, hours=2),
     )
-    after = PaperDayTurnoverResolver.resolve(
+    after = _resolve_current(
         book=book,
         goal_store=_goal_store(store),
         window_store=store,
@@ -276,7 +294,7 @@ def test_breach_truth_is_reported_not_discarded(tmp_path):
     book = _book()
     _open(book, window, stake="60", suffix="breach")
 
-    evidence = PaperDayTurnoverResolver.resolve(
+    evidence = _resolve_current(
         book=book,
         goal_store=_goal_store(store, max_turnover="0.5"),
         window_store=store,
@@ -306,7 +324,7 @@ def test_current_day_ticket_requires_exact_goal_bankroll_and_currency(tmp_path):
         PaperDayTurnoverEvidenceIncompleteError,
         match="bankroll identity",
     ):
-        PaperDayTurnoverResolver.resolve(
+        _resolve_current(
             book=book,
             goal_store=_goal_store(store),
             window_store=store,
@@ -324,7 +342,7 @@ def test_cross_currency_ticket_cannot_be_silently_aggregated(tmp_path):
         PaperDayTurnoverEvidenceIncompleteError,
         match="currency identity",
     ):
-        PaperDayTurnoverResolver.resolve(
+        _resolve_current(
             book=book,
             goal_store=_goal_store(store, currency="USD"),
             window_store=store,
@@ -338,7 +356,7 @@ def test_require_current_rejects_caller_forged_turnover_scalar(tmp_path):
     book = _book()
     _open(book, window, stake="10", suffix="forgery")
 
-    canonical = PaperDayTurnoverResolver.resolve(
+    canonical = _resolve_current(
         book=book,
         goal_store=_goal_store(store),
         window_store=store,
@@ -362,13 +380,14 @@ def test_new_ticket_invalidates_old_evidence_on_reresolution(tmp_path):
     book = _book()
     _open(book, window, stake="10", suffix="one")
 
-    first = PaperDayTurnoverResolver.resolve(
+    first = _resolve_current(
         book=book,
         goal_store=_goal_store(store),
         window_store=store,
         window_evidence=window,
     )
     _open(book, window, stake="5", suffix="two", placed_at=_inside(window, hours=2))
+    book.save(store.workspace / "paper_book.json")
 
     with pytest.raises(PaperDayTurnoverEvidenceMismatchError):
         PaperDayTurnoverResolver.require_current(
@@ -379,7 +398,7 @@ def test_new_ticket_invalidates_old_evidence_on_reresolution(tmp_path):
             window_evidence=window,
         )
 
-    second = PaperDayTurnoverResolver.resolve(
+    second = _resolve_current(
         book=book,
         goal_store=_goal_store(store),
         window_store=store,
@@ -388,6 +407,70 @@ def test_new_ticket_invalidates_old_evidence_on_reresolution(tmp_path):
     assert second.confirmed_turnover == Decimal("15")
     assert second.constituent_count == 2
     assert second.evidence_sha256 != first.evidence_sha256
+
+
+def test_caller_selected_empty_book_cannot_erase_durable_day_turnover(tmp_path):
+    store = _store(tmp_path)
+    window = store.current()
+    goal_store = _goal_store(store)
+    durable_book = _book()
+    _open(durable_book, window, stake="40", suffix="durable-turnover")
+    durable_book.save(store.workspace / "paper_book.json")
+
+    caller_selected_empty = _book()
+
+    with pytest.raises(
+        PaperDayTurnoverEvidenceIncompleteError,
+        match="current durable workspace authority",
+    ):
+        PaperDayTurnoverResolver.resolve(
+            book=caller_selected_empty,
+            goal_store=goal_store,
+            window_store=store,
+            window_evidence=window,
+        )
+
+    canonical = PaperBook.load(store.workspace / "paper_book.json")
+    evidence = PaperDayTurnoverResolver.resolve(
+        book=canonical,
+        goal_store=goal_store,
+        window_store=store,
+        window_evidence=window,
+    )
+    assert evidence.confirmed_turnover == Decimal("40")
+    assert evidence.residual_headroom == Decimal("60")
+
+
+def test_stale_bound_book_cannot_revalidate_after_durable_generation_advances(tmp_path):
+    store = _store(tmp_path)
+    window = store.current()
+    goal_store = _goal_store(store)
+    writer = _book()
+    _open(writer, window, stake="10", suffix="first-generation")
+    writer.save(store.workspace / "paper_book.json")
+    stale = PaperBook.load(store.workspace / "paper_book.json")
+
+    _open(writer, window, stake="15", suffix="second-generation")
+    writer.save(store.workspace / "paper_book.json")
+
+    with pytest.raises(
+        PaperDayTurnoverEvidenceIncompleteError,
+        match="current durable workspace authority",
+    ):
+        PaperDayTurnoverResolver.resolve(
+            book=stale,
+            goal_store=goal_store,
+            window_store=store,
+            window_evidence=window,
+        )
+
+    evidence = PaperDayTurnoverResolver.resolve(
+        book=writer,
+        goal_store=goal_store,
+        window_store=store,
+        window_evidence=window,
+    )
+    assert evidence.confirmed_turnover == Decimal("25")
 
 
 def test_synthetic_day_clock_cannot_mint_positive_turnover_evidence(tmp_path):
@@ -405,7 +488,7 @@ def test_synthetic_day_clock_cannot_mint_positive_turnover_evidence(tmp_path):
         PaperDayTurnoverEvidenceIncompleteError,
         match="not current product authority",
     ):
-        PaperDayTurnoverResolver.resolve(
+        _resolve_current(
             book=book,
             goal_store=_goal_store(store),
             window_store=store,
@@ -440,7 +523,7 @@ def test_durable_goal_tightening_invalidates_old_turnover_evidence(tmp_path):
     book = _book()
     _open(book, window, stake="60", suffix="goal-tighten")
 
-    first = PaperDayTurnoverResolver.resolve(
+    first = _resolve_current(
         book=book,
         goal_store=goal_store,
         window_store=store,
@@ -465,7 +548,7 @@ def test_durable_goal_tightening_invalidates_old_turnover_evidence(tmp_path):
             window_evidence=window,
         )
 
-    second = PaperDayTurnoverResolver.resolve(
+    second = _resolve_current(
         book=book,
         goal_store=goal_store,
         window_store=store,
@@ -489,7 +572,7 @@ def test_goal_and_day_authority_must_share_workspace(tmp_path):
         PaperDayTurnoverEvidenceIncompleteError,
         match="share one canonical workspace",
     ):
-        PaperDayTurnoverResolver.resolve(
+        _resolve_current(
             book=book,
             goal_store=foreign_goal_store,
             window_store=store,
@@ -505,7 +588,7 @@ def test_ticket_mapping_permutation_preserves_turnover_identity(tmp_path):
     _open(book, window, stake="10", suffix="perm-a")
     _open(book, window, stake="20", suffix="perm-b", placed_at=_inside(window, hours=2))
 
-    first = PaperDayTurnoverResolver.resolve(
+    first = _resolve_current(
         book=book,
         goal_store=goal_store,
         window_store=store,
@@ -516,7 +599,7 @@ def test_ticket_mapping_permutation_preserves_turnover_identity(tmp_path):
     # to agree; reversing only one side correctly represents corruption.
     book.tickets = dict(reversed(tuple(book.tickets.items())))
     book._lifecycle = list(reversed(book._lifecycle))
-    second = PaperDayTurnoverResolver.resolve(
+    second = _resolve_current(
         book=book,
         goal_store=goal_store,
         window_store=store,
@@ -535,14 +618,14 @@ def test_decimal_scale_alias_preserves_turnover_identity(tmp_path):
     book = _book()
     ticket = _open(book, window, stake="10", suffix="scale")
 
-    first = PaperDayTurnoverResolver.resolve(
+    first = _resolve_current(
         book=book,
         goal_store=goal_store,
         window_store=store,
         window_evidence=window,
     )
     ticket.stake = Decimal("10.00")
-    second = PaperDayTurnoverResolver.resolve(
+    second = _resolve_current(
         book=book,
         goal_store=goal_store,
         window_store=store,
@@ -561,7 +644,7 @@ def test_goal_store_instance_load_shadow_cannot_mint_turnover_headroom(tmp_path)
     book = _book()
     _open(book, window, stake="20", suffix="goal-shadow")
 
-    canonical = PaperDayTurnoverResolver.resolve(
+    canonical = _resolve_current(
         book=book,
         goal_store=goal_store,
         window_store=store,
@@ -569,7 +652,7 @@ def test_goal_store_instance_load_shadow_cannot_mint_turnover_headroom(tmp_path)
     )
     goal_store.load = lambda: _goal(max_turnover="999")
 
-    observed = PaperDayTurnoverResolver.resolve(
+    observed = _resolve_current(
         book=book,
         goal_store=goal_store,
         window_store=store,
@@ -594,7 +677,7 @@ def test_day_store_instance_require_current_shadow_cannot_accept_forged_window(t
         PaperDayTurnoverEvidenceIncompleteError,
         match="not current product authority",
     ):
-        PaperDayTurnoverResolver.resolve(
+        _resolve_current(
             book=book,
             goal_store=goal_store,
             window_store=store,
@@ -613,7 +696,7 @@ def test_noncanonical_goal_store_path_fails_closed_before_goal_read(tmp_path):
         PaperDayTurnoverEvidenceIncompleteError,
         match="economic goal store path is not canonical",
     ):
-        PaperDayTurnoverResolver.resolve(
+        _resolve_current(
             book=book,
             goal_store=goal_store,
             window_store=store,
@@ -632,7 +715,7 @@ def test_noncanonical_day_store_path_fails_closed_before_window_read(tmp_path):
         PaperDayTurnoverEvidenceIncompleteError,
         match="risk day store path is not canonical",
     ):
-        PaperDayTurnoverResolver.resolve(
+        _resolve_current(
             book=book,
             goal_store=goal_store,
             window_store=store,
@@ -672,7 +755,7 @@ def test_turnover_require_current_rejects_subclass_before_override_dispatch(tmp_
     window = store.current()
     goal_store = _goal_store(store)
     book = _book()
-    candidate = PaperDayTurnoverResolver.resolve(
+    candidate = _resolve_current(
         book=book,
         goal_store=goal_store,
         window_store=store,
@@ -699,7 +782,7 @@ def test_resolver_ignores_runtime_economic_goal_store_module_rebind(tmp_path):
     goal_store = _goal_store(store, max_turnover="0.5")
     book = _book()
     _open(book, window, stake="10", suffix="goal-module-rebind")
-    expected = PaperDayTurnoverResolver.resolve(
+    expected = _resolve_current(
         book=book,
         goal_store=goal_store,
         window_store=store,
@@ -709,7 +792,7 @@ def test_resolver_ignores_runtime_economic_goal_store_module_rebind(tmp_path):
     original = turnover_evidence.EconomicGoalStore
     try:
         turnover_evidence.EconomicGoalStore = object()
-        observed = PaperDayTurnoverResolver.resolve(
+        observed = _resolve_current(
             book=book,
             goal_store=goal_store,
             window_store=store,
@@ -727,7 +810,7 @@ def test_resolver_ignores_runtime_day_store_module_rebind(tmp_path):
     goal_store = _goal_store(store, max_turnover="0.5")
     book = _book()
     _open(book, window, stake="10", suffix="day-store-module-rebind")
-    expected = PaperDayTurnoverResolver.resolve(
+    expected = _resolve_current(
         book=book,
         goal_store=goal_store,
         window_store=store,
@@ -737,7 +820,7 @@ def test_resolver_ignores_runtime_day_store_module_rebind(tmp_path):
     original = turnover_evidence.ProductDayRiskWindowStore
     try:
         turnover_evidence.ProductDayRiskWindowStore = object()
-        observed = PaperDayTurnoverResolver.resolve(
+        observed = _resolve_current(
             book=book,
             goal_store=goal_store,
             window_store=store,
@@ -755,7 +838,7 @@ def test_resolver_ignores_runtime_captured_dependency_alias_rebind(tmp_path):
     goal_store = _goal_store(store, max_turnover="0.5")
     book = _book()
     _open(book, window, stake="10", suffix="dependency-alias-rebind")
-    expected = PaperDayTurnoverResolver.resolve(
+    expected = _resolve_current(
         book=book,
         goal_store=goal_store,
         window_store=store,
@@ -771,7 +854,7 @@ def test_resolver_ignores_runtime_captured_dependency_alias_rebind(tmp_path):
                 product_clock_authoritative=True,
             )
         )
-        observed = PaperDayTurnoverResolver.resolve(
+        observed = _resolve_current(
             book=book,
             goal_store=goal_store,
             window_store=store,

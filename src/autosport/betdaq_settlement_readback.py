@@ -509,17 +509,25 @@ class BetdaqPostingsReadback:
             raise BetdaqEconomicReadbackError(
                 "postings evidence method does not match readback method"
             )
+        request_attributes: dict[str, str]
         if self.method == "ListAccountPostings":
+            start_value = self.query_start_at
+            end_value = self.query_end_at
+            if type(start_value) is not str or type(end_value) is not str:
+                raise BetdaqEconomicReadbackError(
+                    "postings readback window query is not canonical request text"
+                )
             request_attributes = {
-                "StartTime": self.query_start_at,
-                "EndTime": self.query_end_at,
+                "StartTime": start_value,
+                "EndTime": end_value,
             }
         else:
-            request_attributes = {"TransactionId": self.query_transaction_id}
-        if any(type(value) is not str for value in request_attributes.values()):
-            raise BetdaqEconomicReadbackError(
-                "postings readback query is not canonical request text"
-            )
+            transaction_value = self.query_transaction_id
+            if type(transaction_value) is not str:
+                raise BetdaqEconomicReadbackError(
+                    "postings readback transaction query is not canonical request text"
+                )
+            request_attributes = {"TransactionId": transaction_value}
         expected_request_identity = _economic_request_identity(
             self.method,
             request_attributes,

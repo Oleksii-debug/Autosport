@@ -573,6 +573,18 @@ class DeploymentRuntimeAuthorityRecord:
 
 
 _CANONICAL_RECORD_TYPE: Final = DeploymentRuntimeAuthorityRecord
+_CANONICAL_RECORD_HELPERS: Final = (
+    ("_text", _text, _text.__code__),
+    ("_sha", _sha, _sha.__code__),
+    ("_timestamp", _timestamp, _timestamp.__code__),
+    ("_digest", _digest, _digest.__code__),
+    ("_environment_payload", _environment_payload, _environment_payload.__code__),
+    ("_episode_payload", _episode_payload, _episode_payload.__code__),
+    ("_action_semantics_payload", _action_semantics_payload, _action_semantics_payload.__code__),
+    ("_environment_from_payload", _environment_from_payload, _environment_from_payload.__code__),
+    ("_episode_from_payload", _episode_from_payload, _episode_from_payload.__code__),
+    ("_action_semantics_from_payload", _action_semantics_from_payload, _action_semantics_from_payload.__code__),
+)
 _RECORD_CODEC_NAMES: Final = (
     "__post_init__",
     "identity_payload",
@@ -607,6 +619,16 @@ def _assert_canonical_record_codec() -> None:
         raise DeploymentRuntimeAuthorityError(
             "runtime authority record type dispatch was replaced"
         )
+    namespace = globals()
+    for name, expected_helper, expected_code in _CANONICAL_RECORD_HELPERS:
+        current_helper = namespace.get(name)
+        if (
+            current_helper is not expected_helper
+            or getattr(current_helper, "__code__", None) is not expected_code
+        ):
+            raise DeploymentRuntimeAuthorityError(
+                "runtime authority record helper dispatch was replaced"
+            )
     class_dict = vars(_CANONICAL_RECORD_TYPE)
     for name, expected_descriptor, expected_code in _CANONICAL_RECORD_CODEC_DESCRIPTORS:
         current = class_dict.get(name)

@@ -1184,6 +1184,9 @@ if ([StringComparer]::OrdinalIgnoreCase.Equals([string]$freshFirstRunEvidenceA.w
 if ([StringComparer]::OrdinalIgnoreCase.Equals([string]$freshFirstRunEvidenceA.launch_cwd, [string]$freshFirstRunEvidenceB.launch_cwd)) {
   throw 'Fresh-extracted first-run audit did not execute from distinct working directories'
 }
+if ($freshFirstRunEvidenceA.webview_environment_overrides_clear -ne $true -or $freshFirstRunEvidenceB.webview_environment_overrides_clear -ne $true) {
+  throw 'Fresh-extracted first-run storage audit did not prove a clean WebView2 release environment'
+}
 if ($freshFirstRunEvidenceA.real_money_execution -ne $false -or $freshFirstRunEvidenceA.human_tested -ne $false -or $freshFirstRunEvidenceA.nvda_verified -ne $false) {
   throw 'Fresh-extracted first-run storage audit violated release truth labels'
 }

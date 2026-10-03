@@ -663,18 +663,17 @@ def _install_provider_capability_authority():
 
         lifecycle = issuance.evidence
         caller_journal = journal
-        if caller_journal is None:
-            validation_journal = CapabilityEvidenceJournal()
-        elif type(caller_journal) is not CapabilityEvidenceJournal:
+        if caller_journal is not None and type(caller_journal) is not CapabilityEvidenceJournal:
             raise ProviderCapabilityEvidenceMatrixError(
                 "BETDAQ authenticated evidence journal must be exact CapabilityEvidenceJournal"
             )
-        else:
-            validation_journal = CapabilityEvidenceJournal.from_json(
-                caller_journal.to_json()
-            )
+        source_journal = (
+            CapabilityEvidenceJournal()
+            if caller_journal is None
+            else caller_journal
+        )
         try:
-            validation_journal.publish(lifecycle)
+            validation_journal = source_journal.staged_with_exact_evidence(lifecycle)
         except CapabilityEvidenceError as exc:
             raise ProviderCapabilityEvidenceMatrixError(
                 "BETDAQ authenticated evidence requires a valid lifecycle predecessor chain"

@@ -472,6 +472,27 @@ def test_evidence_shape_rejects_lifecycle_and_path_claim_drift(tmp_path):
         )
 
 
+def test_evidence_shape_rejects_noncanonical_equity_point_objects(tmp_path):
+    _initialize(tmp_path)
+    evidence = resolve_paper_drawdown_evidence(tmp_path)
+    canonical = evidence.points[0]
+
+    class _PointProxy:
+        sequence = canonical.sequence
+        point_id = canonical.point_id
+        action = canonical.action
+        ticket_id = canonical.ticket_id
+        equity = canonical.equity
+        realized_delta = canonical.realized_delta
+        event_time = canonical.event_time
+
+    with pytest.raises(
+        PaperDrawdownEvidenceError,
+        match="path requires canonical equity points",
+    ):
+        replace(evidence, points=(_PointProxy(),))
+
+
 def test_resolver_rejects_in_place_captured_helper_code_rebinding(tmp_path):
     _initialize(tmp_path)
 

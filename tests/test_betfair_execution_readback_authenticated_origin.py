@@ -551,6 +551,52 @@ def test_execution_readback_rejects_helper_instance_shadow(
         _read(client)
 
 
+def test_authenticated_client_clock_code_mutation_revokes_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = build_betfair_authenticated_client(
+        BetfairSessionCredentials("app-key", "session-token"),
+        account_label="acct-1",
+    )
+    clock = client._clock
+    original_code = clock.__code__
+
+    def hostile_clock():
+        raise AssertionError("mutated provider evidence clock must not remain authoritative")
+
+    assert len(hostile_clock.__code__.co_freevars) == len(original_code.co_freevars)
+    monkeypatch.setattr(clock, "__code__", hostile_clock.__code__)
+
+    with pytest.raises(
+        BetfairAccountIdentityError,
+        match="origin changed",
+    ):
+        resolve_betfair_authenticated_account_identity(client)
+
+
+def test_execution_origin_predicate_rejects_clock_code_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    predicate = _closure_value(
+        BetfairReadOnlyClient.read_execution_readback,
+        "origin_dispatch_current",
+    )
+    assert predicate() is True
+    client = build_betfair_authenticated_client(
+        BetfairSessionCredentials("app-key", "session-token"),
+        account_label="acct-1",
+    )
+    clock = client._clock
+    original_code = clock.__code__
+
+    def hostile_clock():
+        raise AssertionError("mutated clock must not become readback origin authority")
+
+    assert len(hostile_clock.__code__.co_freevars) == len(original_code.co_freevars)
+    monkeypatch.setattr(clock, "__code__", hostile_clock.__code__)
+    assert predicate() is False
+
+
 def test_execution_origin_predicate_rejects_default_tls_context_rebind(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

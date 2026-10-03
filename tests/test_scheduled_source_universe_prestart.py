@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import autosport.collector_sqlite_active_store as active_store_module
 import autosport.scheduled_source_universe as scheduled_module
 
 from autosport.causal_collector import CollectorDeltaStore
@@ -317,6 +318,109 @@ class ScheduledSourceUniversePrestartTests(unittest.TestCase):
                 )
             )
 
+
+
+    def test_prestart_collector_text_global_rebind_fails_before_schedule_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "collector.db"
+            store = CollectorDeltaStore(path)
+            original = active_store_module._text
+            hostile_calls: list[str] = []
+
+            def hostile(*_args, **_kwargs):
+                hostile_calls.append("called")
+                raise AssertionError("hostile pre-START text parser executed")
+
+            active_store_module._text = hostile
+            try:
+                with self.assertRaisesRegex(
+                    ScheduledSourceUniverseError,
+                    "collector text authority is rebound or mutated",
+                ):
+                    self._prepare(store, path)
+            finally:
+                active_store_module._text = original
+
+            self.assertEqual(hostile_calls, [])
+            self.assertIsNone(
+                store._collector_schedule_start_gate_status(
+                    source_id="source-x",
+                    run_id="run-1",
+                )
+            )
+
+    def test_prestart_collector_time_global_rebind_fails_before_schedule_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "collector.db"
+            store = CollectorDeltaStore(path)
+            original = active_store_module._instant
+            hostile_calls: list[str] = []
+
+            def hostile(*_args, **_kwargs):
+                hostile_calls.append("called")
+                raise AssertionError("hostile pre-START time parser executed")
+
+            active_store_module._instant = hostile
+            try:
+                with self.assertRaisesRegex(
+                    ScheduledSourceUniverseError,
+                    "collector time authority is rebound or mutated",
+                ):
+                    self._prepare(store, path)
+            finally:
+                active_store_module._instant = original
+
+            self.assertEqual(hostile_calls, [])
+            self.assertIsNone(
+                store._collector_schedule_start_gate_status(
+                    source_id="source-x",
+                    run_id="run-1",
+                )
+            )
+
+    def test_prestart_schedule_policy_rebind_fails_before_schedule_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "collector.db"
+            store = CollectorDeltaStore(path)
+            original = active_store_module._SCHEDULE_POLICY
+            active_store_module._SCHEDULE_POLICY = "hostile-policy"
+            try:
+                with self.assertRaisesRegex(
+                    ScheduledSourceUniverseError,
+                    "schedule constants drifted",
+                ):
+                    self._prepare(store, path)
+            finally:
+                active_store_module._SCHEDULE_POLICY = original
+
+            self.assertIsNone(
+                store._collector_schedule_start_gate_status(
+                    source_id="source-x",
+                    run_id="run-1",
+                )
+            )
+
+    def test_prestart_sqlite_global_rebind_fails_before_schedule_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "collector.db"
+            store = CollectorDeltaStore(path)
+            original = active_store_module.sqlite3
+            active_store_module.sqlite3 = object()
+            try:
+                with self.assertRaisesRegex(
+                    ScheduledSourceUniverseError,
+                    "SQLite connection authority drifted",
+                ):
+                    self._prepare(store, path)
+            finally:
+                active_store_module.sqlite3 = original
+
+            self.assertIsNone(
+                store._collector_schedule_start_gate_status(
+                    source_id="source-x",
+                    run_id="run-1",
+                )
+            )
 
 if __name__ == "__main__":
     unittest.main()

@@ -1082,7 +1082,7 @@ def test_attribution_must_bind_exact_reward_and_unknown_cannot_invent_credit(
         AttributionFinding(
             component=AttributionComponent.RANDOMNESS,
             status=AttributionStatus.UNKNOWN,
-                evidence_grade=AttributionEvidenceGrade.NOT_IDENTIFIABLE,
+            evidence_grade=AttributionEvidenceGrade.NOT_IDENTIFIABLE,
             evidence_sha256=RANDOMNESS_SHA,
             evidence_available_at="2026-09-19T13:05:03Z",
             contribution=Decimal("1"),

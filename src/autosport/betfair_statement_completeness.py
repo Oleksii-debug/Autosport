@@ -181,29 +181,23 @@ def _build_authority():
     evidence_cls = BetfairStatementPaginationEvidence
     issued: dict[int, _IssuedRecord] = {}
 
-    def resolve(
-        pages: tuple[BetfairProviderBillingInputsObservation, ...],
-    ) -> BetfairStatementPaginationEvidence:
-        if type(pages) is not tuple or not pages:
-            raise BetfairStatementCompletenessError(
-                "pages must be a non-empty exact tuple"
-            )
-        for page in pages:
-            if type(page) is not source_cls:
-                raise BetfairStatementCompletenessError(
-                    "pages must contain exact canonical provider-billing observations"
-                )
+    def resolve(traversal: object) -> BetfairStatementPaginationEvidence:
         try:
-            accepted_pages = traversal_validator(pages)
+            accepted_pages = traversal_validator(traversal)
         except (BetfairReadOnlyError, TypeError, ValueError) as exc:
             raise BetfairStatementCompletenessError(
                 "statement pages lack one canonical authenticated-session traversal"
             ) from exc
-        if accepted_pages is not pages:
+        if type(accepted_pages) is not tuple or not accepted_pages:
             raise BetfairStatementCompletenessError(
-                "statement traversal validator returned a different tuple"
+                "statement traversal validator returned invalid pages"
             )
-        evidence = _derive_from_verified_pages(pages)
+        for page in accepted_pages:
+            if type(page) is not source_cls:
+                raise BetfairStatementCompletenessError(
+                    "pages must contain exact canonical provider-billing observations"
+                )
+        evidence = _derive_from_verified_pages(accepted_pages)
         identity = id(evidence)
 
         def discard(

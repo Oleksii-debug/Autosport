@@ -30,6 +30,7 @@ from .bookmaker_capability_lifecycle import (
     BETDAQ_AUTHENTICATED_SOURCE_CONTRACT_REF,
     BETDAQ_AUTHENTICATED_VALIDATION_POLICY_VERSION,
     BetdaqAuthenticatedCapabilityIssuance,
+    CapabilityAvailabilityState,
     CapabilityEvidenceError,
     CapabilityEvidenceJournal,
     CapabilityEvidenceStrength,
@@ -685,6 +686,11 @@ def _install_provider_capability_authority():
             raise ProviderCapabilityEvidenceMatrixError(
                 "BETDAQ lifecycle evidence is superseded by newer same-scope evidence"
             )
+        provider_observed = _time(lifecycle.observed_at, "lifecycle.observed_at")
+        authority_available = max(
+            _time(lifecycle.committed_at, "lifecycle.committed_at"),
+            _time(integration.observed_at, "integration.observed_at"),
+        )
         requirement = CapabilityRequirement(
             lifecycle.capability,
             CapabilityEvidenceStrength.OBSERVED_AUTHENTICATED,
@@ -697,7 +703,7 @@ def _install_provider_capability_authority():
         decision = validation_journal.resolve(
             requirement,
             {issuance.profile.profile_id: issuance.profile},
-            as_of=lifecycle.committed_at,
+            as_of=authority_available.isoformat(),
         )
         if (
             not decision.allowed
@@ -707,12 +713,14 @@ def _install_provider_capability_authority():
             raise ProviderCapabilityEvidenceMatrixError(
                 "BETDAQ lifecycle evidence is not current product-issued authenticated proof"
             )
+        if decision.availability in {
+            CapabilityAvailabilityState.DEGRADED,
+            CapabilityAvailabilityState.TEMPORARILY_UNAVAILABLE,
+        }:
+            raise ProviderCapabilityEvidenceMatrixError(
+                "BETDAQ lifecycle evidence has negative runtime availability"
+            )
 
-        provider_observed = _time(lifecycle.observed_at, "lifecycle.observed_at")
-        authority_available = max(
-            _time(lifecycle.committed_at, "lifecycle.committed_at"),
-            _time(integration.observed_at, "integration.observed_at"),
-        )
         expiry_candidates = [
             provider_observed
             + timedelta(seconds=BETDAQ_AUTHENTICATED_MAX_OBSERVATION_AGE_SECONDS),

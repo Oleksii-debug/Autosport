@@ -520,7 +520,7 @@ def test_availability_same_time_conflict_fails_but_identical_is_idempotent():
     conflicting = _availability(
         evidence,
         CapabilityAvailabilityState.TEMPORARILY_UNAVAILABLE,
-        observed_at=degraded.observed_at,
+        observed_at="2026-09-21T12:02:00+02:00",
     )
     with pytest.raises(
         CapabilityEvidenceError,
@@ -841,6 +841,22 @@ def test_subclass_and_execution_authority_cannot_be_minted():
         CapabilityEvidenceJournal().publish(forged)
     with pytest.raises(CapabilityEvidenceError, match="real execution authority"):
         _evidence(profile, strength=CapabilityEvidenceStrength.EXECUTION_PROVEN)
+
+
+def test_equivalent_commit_instant_spelling_cannot_bypass_conflict():
+    profile = _profile()
+    first = _evidence(profile)
+    journal = CapabilityEvidenceJournal()
+    journal.publish(first)
+    equivalent_instant = _evidence(
+        profile,
+        committed_at="2026-09-21T12:01:00+02:00",
+        review_due_at="2026-09-22T12:01:00+02:00",
+        source_payload_sha256="b" * 64,
+    )
+
+    with pytest.raises(CapabilityEvidenceError, match="conflicting"):
+        journal.publish(equivalent_instant)
 
 
 def test_identical_revalidation_is_idempotent_but_same_time_conflict_fails():

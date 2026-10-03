@@ -657,6 +657,98 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             ).verified_records()
             self.assertEqual(len(records), 1)
 
+    def test_drained_unrouted_key_retries_before_decision_publication(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            clock = _ManualClock(self.START + timedelta(seconds=1))
+            observer = _DurableObserver(
+                workspace,
+                [
+                    (self._event(selection="selection-a", sequence=1),),
+                    (),
+                ],
+            )
+            factory = _EmptyIntentFactory()
+            loop = self._loop(
+                workspace,
+                observer=observer,
+                factory=factory,
+                clock=clock,
+            )
+            loop.register_input("input-all", source_ids="provider-a")
+
+            real_capture = loop.dependencies.coherent_decision_views
+            real_write_pending = loop._write_pending
+            state = {"injected": False, "routed": False, "batch": None}
+            concurrent = self._event(
+                selection="selection-b",
+                sequence=2,
+                odds="3.20",
+                observed=self.START + timedelta(milliseconds=500),
+            )
+
+            def inject_and_drain_before_capture(*args, **kwargs):
+                if not state["injected"]:
+                    state["injected"] = True
+                    store = SQLiteMarketStore(workspace / "market.db")
+                    try:
+                        store.append(concurrent)
+                    finally:
+                        store.close()
+                    loop.mirror_updates.accept_persisted(concurrent)
+                    state["batch"] = loop.mirror_updates.drain()
+                    self.assertEqual(loop.mirror_updates.pending_count, 0)
+                return real_capture(*args, **kwargs)
+
+            def route_before_pending_publication(*args, **kwargs):
+                if not state["routed"]:
+                    state["routed"] = True
+                    affected = loop.dependencies.affected_inputs(state["batch"])
+                    self.assertEqual(affected, ("input-all",))
+                return real_write_pending(*args, **kwargs)
+
+            with (
+                patch.object(
+                    loop.dependencies,
+                    "coherent_decision_views",
+                    side_effect=inject_and_drain_before_capture,
+                ),
+                patch.object(
+                    loop,
+                    "_write_pending",
+                    side_effect=route_before_pending_publication,
+                ),
+            ):
+                first = loop.run_cycle()
+
+            self.assertTrue(state["injected"])
+            self.assertTrue(state["routed"])
+            self.assertEqual(first.status, LiveCycleStatus.BACKPRESSURE)
+            self.assertIn("dependency routing changed", first.detail)
+            self.assertEqual(factory.calls, [])
+            self.assertFalse((workspace / "decisions.jsonl").exists())
+            self.assertFalse(loop.progress_path.exists())
+
+            clock.value = self.START + timedelta(seconds=2)
+            second = loop.run_cycle()
+
+            self.assertEqual(second.status, LiveCycleStatus.DECIDED)
+            self.assertEqual(len(factory.calls), 1)
+            self.assertEqual(factory.calls[0][0], "input-all")
+            self.assertEqual(
+                {item[0] for item in factory.calls[0][1]},
+                {"selection-a", "selection-b"},
+            )
+            self.assertEqual(
+                len(
+                    JsonlDecisionLedger(
+                        workspace / "decisions.jsonl"
+                    ).verified_records()
+                ),
+                1,
+            )
+
+
     def test_external_canonical_paperbook_advance_retries_before_decision(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

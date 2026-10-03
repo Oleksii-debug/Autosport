@@ -340,6 +340,163 @@ def test_provider_io_occurs_only_after_authorized_scheduled_start(
 
 
 
+
+def test_campaign_capture_rejects_provider_store_from_other_workspace_before_io(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    locator, store, spec, provider_store = _setup(tmp_path)
+    provider_calls: list[str] = []
+
+    def hostile_urlopen(*_args, **_kwargs):
+        provider_calls.append("provider")
+        raise AssertionError("provider I/O executed for cross-workspace evidence store")
+
+    monkeypatch.setattr(provider_module, "urlopen", hostile_urlopen)
+    alternate = CompleteGameBoardEvidenceStore(
+        tmp_path / "other-workspace",
+        authority_root=provider_store.authority_root,
+    )
+    with pytest.raises(
+        CampaignProviderCycleCaptureIntegrityError,
+        match="workspace does not match campaign precommit workspace",
+    ):
+        capture_campaign_complete_game_board(
+            precommit_locator=locator,
+            store=store,
+            source_spec=spec,
+            evidence_store=alternate,
+            request=_request(),
+            api_key="secret-value",
+            timeout_seconds=3.0,
+            clock=_clock(),
+        )
+    assert provider_calls == []
+
+
+def test_campaign_capture_rejects_provider_store_from_other_authority_root_before_io(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    locator, store, spec, provider_store = _setup(tmp_path)
+    provider_calls: list[str] = []
+
+    def hostile_urlopen(*_args, **_kwargs):
+        provider_calls.append("provider")
+        raise AssertionError("provider I/O executed for cross-authority evidence store")
+
+    monkeypatch.setattr(provider_module, "urlopen", hostile_urlopen)
+    alternate = CompleteGameBoardEvidenceStore(
+        provider_store.workspace,
+        authority_root=tmp_path / "other-machine-authority",
+    )
+    with pytest.raises(
+        CampaignProviderCycleCaptureIntegrityError,
+        match="authority root does not match campaign precommit authority",
+    ):
+        capture_campaign_complete_game_board(
+            precommit_locator=locator,
+            store=store,
+            source_spec=spec,
+            evidence_store=alternate,
+            request=_request(),
+            api_key="secret-value",
+            timeout_seconds=3.0,
+            clock=_clock(),
+        )
+    assert provider_calls == []
+
+
+def test_campaign_capture_rejects_mutated_provider_evidence_root_before_io(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    locator, store, spec, provider_store = _setup(tmp_path)
+    provider_calls: list[str] = []
+
+    def hostile_urlopen(*_args, **_kwargs):
+        provider_calls.append("provider")
+        raise AssertionError("provider I/O executed for redirected evidence root")
+
+    monkeypatch.setattr(provider_module, "urlopen", hostile_urlopen)
+    provider_store.root = tmp_path / "redirected-provider-evidence"
+    with pytest.raises(
+        CampaignProviderCycleCaptureIntegrityError,
+        match="root does not match canonical campaign workspace",
+    ):
+        capture_campaign_complete_game_board(
+            precommit_locator=locator,
+            store=store,
+            source_spec=spec,
+            evidence_store=provider_store,
+            request=_request(),
+            api_key="secret-value",
+            timeout_seconds=3.0,
+            clock=_clock(),
+        )
+    assert provider_calls == []
+
+
+def test_durable_resolver_rejects_cross_workspace_provider_evidence_store(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    locator, store, spec, provider_store = _setup(tmp_path)
+    monkeypatch.setattr(
+        provider_module,
+        "urlopen",
+        lambda _request, _timeout: _FakeSseResponse(_empty_frame()),
+    )
+    monkeypatch.setattr(provider_module, "_default_clock", lambda: CAPTURED_AT)
+    _snapshot, cycle_receipt = capture_campaign_complete_game_board(
+        precommit_locator=locator,
+        store=store,
+        source_spec=spec,
+        evidence_store=provider_store,
+        request=_request(),
+        api_key="secret-value",
+        timeout_seconds=3.0,
+        clock=_clock(),
+    )
+
+    alternate = CompleteGameBoardEvidenceStore(
+        tmp_path / "other-provider-workspace",
+        authority_root=provider_store.authority_root,
+    )
+    universe_store = ProviderEvaluationUniverseStore(
+        tmp_path / "unused-provider-universe-workspace",
+        authority_id="unused-provider-universe",
+        source_id=spec.source_id,
+        authority_root=tmp_path / "unused-provider-universe-authority",
+    )
+    protocol = ForwardEvidenceProtocolEnvelope(
+        campaign_id="campaign-cycle-capture-test",
+        scientific_protocol_sha256=PROTOCOL_SHA,
+        candidate_universe_rule_id=FORWARD_UNIVERSE_RULE_ID,
+        candidate_universe_rule_sha256=FORWARD_UNIVERSE_RULE_SHA256,
+        forward_evaluation_policy_sha256="7" * 64,
+        runtime_identity_sha256="6" * 64,
+        baseline_set_sha256="5" * 64,
+        protective_metric_set_sha256="4" * 64,
+        cost_policy_sha256="3" * 64,
+        precommit_anchor_lower=datetime(2099, 12, 31, 19, 0, tzinfo=timezone.utc),
+        precommit_anchor_upper=datetime(2099, 12, 31, 19, 30, tzinfo=timezone.utc),
+    )
+    with pytest.raises(
+        CampaignForwardUniverseCycleBindingError,
+        match="provider evidence routing does not match campaign precommit authority",
+    ):
+        resolve_campaign_forward_universe_cycle_authority(
+            precommit_locator=locator,
+            collector_store=store,
+            source_spec=spec,
+            cycle_receipt=cycle_receipt,
+            provider_evidence_store=alternate,
+            universe_store=universe_store,
+            protocol=protocol,
+            event_lifecycle=None,
+        )
+
 def test_campaign_capture_uses_captured_path_equality_after_runtime_rebind(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

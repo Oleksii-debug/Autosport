@@ -56,8 +56,13 @@ def test_valid_workspace_configuration_delegates_to_webview_shell(tmp_path: Path
     shell_module.WindowsWebViewUnavailable = RuntimeError
     shell_module.launch_windows_shell = launch_shell
 
+    webview_storage = tmp_path / "webview2"
     with (
         patch("autosport.paths.default_workspace", return_value=workspace) as validate_workspace,
+        patch(
+            "autosport.paths.default_webview_storage_path",
+            return_value=webview_storage,
+        ) as validate_webview_storage,
         patch.object(windows_entry, "_probe_workspace_writable") as probe_workspace,
         patch.object(windows_entry, "_show_workspace_configuration_error") as show_error,
         patch.dict(
@@ -73,12 +78,49 @@ def test_valid_workspace_configuration_delegates_to_webview_shell(tmp_path: Path
 
     assert exit_code == 7
     validate_workspace.assert_called_once_with()
+    validate_webview_storage.assert_called_once_with()
     show_error.assert_not_called()
     runtime_preflight.assert_called_once_with()
     probe_workspace.assert_called_once_with(workspace)
     build_controller.assert_called_once_with(workspace)
     build_bridge.assert_called_once_with(controller)
     launch_shell.assert_called_once_with(bridge)
+
+
+def test_overlapping_workspace_and_webview_roots_fail_before_writability_or_runtime(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "shared"
+    webview_storage = workspace / "webview2"
+
+    with (
+        patch("autosport.paths.default_workspace", return_value=workspace),
+        patch(
+            "autosport.paths.default_webview_storage_path",
+            return_value=webview_storage,
+        ),
+        patch.object(
+            windows_entry,
+            "_probe_workspace_writable",
+            side_effect=AssertionError("overlap must fail before workspace mutation"),
+        ),
+        patch.object(windows_entry, "_show_workspace_configuration_error") as show_error,
+        patch.dict(
+            sys.modules,
+            {
+                "autosport.webview2_runtime_deployment": types.SimpleNamespace(
+                    ensure_webview2_runtime=lambda: (_ for _ in ()).throw(
+                        AssertionError("overlap must fail before runtime deployment")
+                    )
+                )
+            },
+        ),
+    ):
+        exit_code = windows_entry._run_interactive_gui()
+
+    assert exit_code == 2
+    show_error.assert_called_once()
+    assert "disjoint trees" in show_error.call_args.args[0]
 
 
 def test_machine_mode_does_not_validate_interactive_workspace() -> None:

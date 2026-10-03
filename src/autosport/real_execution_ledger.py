@@ -1288,6 +1288,7 @@ class RealExecutionLedger:
                     payload["approval_id"] != prior[0]
                     or payload["approval_fingerprint"] != prior[1]
                     or revoked_at < prior[2]
+                    or prior[4]
                 ):
                     raise ExecutionLedgerIntegrityError(
                         "supervised approval revocation identity/chronology mismatch"

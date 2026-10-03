@@ -645,16 +645,6 @@ def test_execution_origin_predicate_rejects_http_client_ssl_module_rebind(
     assert predicate() is False
 
 
-@pytest.mark.parametrize(
-    "name",
-    (
-        "_execution_request_scope",
-        "_execution_evidence_payload",
-        "_canonical_sha256",
-        "_parse_current_order",
-        "_parse_cleared_order",
-    ),
-)
 def test_execution_readback_rejects_cleared_history_default_mutation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -699,6 +689,16 @@ def test_execution_readback_rejects_equal_kwdefaults_replacement(
         _read(client)
 
 
+@pytest.mark.parametrize(
+    "name",
+    (
+        "_execution_request_scope",
+        "_execution_evidence_payload",
+        "_canonical_sha256",
+        "_parse_current_order",
+        "_parse_cleared_order",
+    ),
+)
 def test_execution_readback_rejects_module_helper_rebind(
     monkeypatch: pytest.MonkeyPatch,
     name: str,

@@ -349,6 +349,39 @@ def test_caller_cannot_self_register_authenticated_positive_provenance(
     assert "product-owned upstream authority" in decision.reason
 
 
+def test_forged_global_provenance_checker_cannot_authorize_copied_evidence(
+    monkeypatch,
+):
+    issuance, _ = _betdaq_authenticated_issuance(monkeypatch)
+    copied = CapabilityEvidence(
+        **{
+            field: getattr(issuance.evidence, field)
+            for field in issuance.evidence.__dataclass_fields__
+            if field != "__weakref__"
+        }
+    )
+    journal = CapabilityEvidenceJournal()
+    journal.publish(copied)
+
+    # Re-introducing the old global name after module initialization must not affect
+    # the closure-bound evaluation authority.
+    monkeypatch.setattr(
+        lifecycle_module,
+        "_is_product_issued",
+        lambda *args, **kwargs: True,
+        raising=False,
+    )
+    decision = journal.resolve(
+        _betdaq_authenticated_requirement(issuance),
+        {issuance.profile.profile_id: issuance.profile},
+        as_of="2026-09-21T10:02:00+00:00",
+    )
+
+    assert not decision.allowed
+    assert decision.lifecycle is CapabilityLifecycleState.REVALIDATION_REQUIRED
+    assert "product-owned upstream authority" in decision.reason
+
+
 def test_betdaq_positive_provenance_is_not_restored_from_serialized_journal(
     monkeypatch,
 ):

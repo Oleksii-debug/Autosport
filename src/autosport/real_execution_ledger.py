@@ -13,6 +13,11 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, TypeVar
 
+from .monotonic_workspace_authority import (
+    MonotonicWorkspaceAuthority,
+    MonotonicWorkspaceAuthorityError,
+)
+
 
 SCHEMA_VERSION = 1
 _T = TypeVar("_T")
@@ -450,6 +455,24 @@ class RealExecutionLedger:
         # False until this instance has proven both the visible file contents and,
         # on POSIX, the directory entry naming the ledger durable.
         self._path_durable = False
+        try:
+            authority_workspace = self.path.parent.resolve(strict=False)
+            self._monotonic_authority = MonotonicWorkspaceAuthority(
+                workspace=authority_workspace,
+                domain="execution.real-ledger",
+                key=self.path.name,
+            )
+        except (OSError, MonotonicWorkspaceAuthorityError) as exc:
+            raise ExecutionLedgerIntegrityError(
+                "execution ledger monotonic authority could not be initialized"
+            ) from exc
+        self._monotonic_semantic_binding_sha256 = _digest(
+            {
+                "schema": "autosport.real_execution_ledger.monotonic-binding",
+                "schema_version": 1,
+                "ledger_name": self.path.name,
+            }
+        )
 
     def _sync_parent_directory(self) -> None:
         """Durably publish this ledger pathname on platforms that require it."""
@@ -656,11 +679,47 @@ class RealExecutionLedger:
         cls._validate_semantics(events)
         return events
 
-    def _events(self) -> list[dict[str, Any]]:
+    @staticmethod
+    def _monotonic_state_sha256(raw: bytes) -> str | None:
+        return None if not raw else hashlib.sha256(raw).hexdigest()
+
+    def _monotonic_tx_id(self, state_sha256: str) -> str:
+        return f"real-execution-ledger:{state_sha256}"
+
+    def _recover_monotonic_state(self, raw: bytes) -> None:
+        observed = self._monotonic_state_sha256(raw)
+        try:
+            if observed is None:
+                self._monotonic_authority.recover(observed_state_sha256=None)
+            else:
+                self._monotonic_authority.recover(
+                    observed_state_sha256=observed,
+                    tx_id=self._monotonic_tx_id(observed),
+                    semantic_binding_sha256=self._monotonic_semantic_binding_sha256,
+                )
+        except MonotonicWorkspaceAuthorityError as exc:
+            raise ExecutionLedgerIntegrityError(
+                "execution ledger rollback/monotonic authority check failed"
+            ) from exc
+
+    def _read_verified_state(self) -> tuple[bytes, list[dict[str, Any]]]:
         if not self.path.exists():
-            return []
-        self._ensure_existing_path_durable()
-        return self._parse(self.path.read_bytes())
+            raw = b""
+        else:
+            self._ensure_existing_path_durable()
+            try:
+                raw = self.path.read_bytes()
+            except OSError as exc:
+                raise ExecutionLedgerIntegrityError(
+                    "execution ledger could not be read"
+                ) from exc
+        events = self._parse(raw)
+        self._recover_monotonic_state(raw)
+        return raw, events
+
+    def _events(self) -> list[dict[str, Any]]:
+        _raw, events = self._read_verified_state()
+        return events
 
     def _append(
         self,
@@ -682,20 +741,54 @@ class RealExecutionLedger:
         }
         self._validate_event(event)
         envelope = _canonical({"sha256": _digest(event), "event": event})
+        raw_before, _events_before = self._read_verified_state()
+        encoded_event = (envelope + "\n").encode("utf-8")
+        intended_raw = raw_before + encoded_event
+        observed_sha256 = self._monotonic_state_sha256(raw_before)
+        intended_sha256 = hashlib.sha256(intended_raw).hexdigest()
+        tx_id = self._monotonic_tx_id(intended_sha256)
+        try:
+            self._monotonic_authority.prepare(
+                tx_id=tx_id,
+                observed_state_sha256=observed_sha256,
+                intended_state_sha256=intended_sha256,
+                semantic_binding_sha256=self._monotonic_semantic_binding_sha256,
+            )
+        except MonotonicWorkspaceAuthorityError as exc:
+            raise ExecutionLedgerIntegrityError(
+                "execution ledger monotonic PREPARE failed"
+            ) from exc
+
         path_existed_before = self.path.exists()
         try:
-            with self.path.open("a", encoding="utf-8", newline="\n") as handle:
-                handle.write(envelope + "\n")
+            with self.path.open("ab") as handle:
+                handle.write(encoded_event)
                 handle.flush()
                 os.fsync(handle.fileno())
             if not path_existed_before or not self._path_durable:
                 self._sync_parent_directory()
+            actual_raw = self.path.read_bytes()
         except OSError as exc:
             self._path_durable = False
             raise ExecutionLedgerIntegrityError(
                 "execution ledger durability barrier failed"
             ) from exc
+        if actual_raw != intended_raw:
+            self._path_durable = False
+            raise ExecutionLedgerIntegrityError(
+                "execution ledger changed during durable append"
+            )
         self._path_durable = True
+        try:
+            self._monotonic_authority.commit(
+                tx_id=tx_id,
+                observed_state_sha256=intended_sha256,
+                semantic_binding_sha256=self._monotonic_semantic_binding_sha256,
+            )
+        except MonotonicWorkspaceAuthorityError as exc:
+            raise ExecutionLedgerIntegrityError(
+                "execution ledger monotonic COMMIT failed"
+            ) from exc
 
     @staticmethod
     def _plan_event(
@@ -2158,9 +2251,7 @@ class RealExecutionLedger:
                 events = self._events()
                 current_snapshot_sha256 = None
             else:
-                self._ensure_existing_path_durable()
-                raw = self.path.read_bytes() if self.path.exists() else b""
-                events = self._parse(raw)
+                raw, events = self._read_verified_state()
                 current_snapshot_sha256 = hashlib.sha256(raw).hexdigest()
             plan_event, action = self._action_payload(
                 events, plan_id, action_id
@@ -2708,8 +2799,7 @@ class RealExecutionLedger:
         self._mutate(operation)
 
     def verified_snapshot(self) -> VerifiedExecutionLedgerSnapshot:
-        raw = self.path.read_bytes() if self.path.exists() else b""
-        events = self._parse(raw)
+        raw, events = self._read_verified_state()
         return VerifiedExecutionLedgerSnapshot(
             raw, hashlib.sha256(raw).hexdigest(), len(events)
         )

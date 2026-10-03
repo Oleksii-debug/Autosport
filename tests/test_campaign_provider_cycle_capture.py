@@ -511,6 +511,59 @@ def test_provider_failure_records_terminal_failure_without_artifact(
     )
 
 
+def test_provider_failure_clock_regression_still_records_terminal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    locator, store, spec, provider_store = _setup(tmp_path)
+
+    def fail_urlopen(_request, _timeout):
+        raise OSError("forced provider transport failure")
+
+    times = iter(
+        [
+            "2100-01-01T06:00:00+00:00",
+            "2099-12-31T23:59:59+00:00",
+        ]
+    )
+    monkeypatch.setattr(provider_module, "urlopen", fail_urlopen)
+    monkeypatch.setattr(provider_module, "_default_clock", lambda: CAPTURED_AT)
+
+    with pytest.raises(
+        ProviderObservationUnsupportedError,
+        match="provider SSE initial-state acquisition failed",
+    ):
+        capture_campaign_complete_game_board(
+            precommit_locator=locator,
+            store=store,
+            source_spec=spec,
+            evidence_store=provider_store,
+            request=_request(),
+            api_key="secret-value",
+            timeout_seconds=3.0,
+            clock=lambda: next(times),
+        )
+
+    evidence = store.collector_cycle_evidence(
+        source_id=spec.source_id,
+        start_cycle_seq=1,
+        end_cycle_seq=1,
+    )
+    assert len(evidence) == 1
+    terminal = evidence[0]["terminal"]
+    assert terminal["status"] == "LOCAL_FAILURE"
+    assert terminal["attempted_at"] == "2100-01-01T06:00:00+00:00"
+    assert terminal["completed_at"] == terminal["attempted_at"]
+    assert "observed_artifacts" not in terminal
+    assert (
+        store._next_collector_schedule_slot(
+            source_id=spec.source_id,
+            run_id=spec.run_id,
+        )["slot_ordinal"]
+        == 1
+    )
+
+
 def test_source_mismatch_rejects_before_provider_io(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

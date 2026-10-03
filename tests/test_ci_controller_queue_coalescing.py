@@ -97,6 +97,34 @@ def test_trigger_cancel_effect_failure_is_not_swallowed() -> None:
         )
 
 
+def test_cancel_conflict_message_in_subclass_is_not_swallowed() -> None:
+    qualification = PullRequestQualification(
+        head_sha=HEAD,
+        integration_capable=False,
+    )
+
+    class TypedBoundaryError(CancellationError):
+        pass
+
+    class TypedFailureApi(FakeApi):
+        def cancel(self, run_id: int) -> None:
+            assert run_id == 91
+            raise TypedBoundaryError(
+                "workflow run cancellation conflicted while run remains active"
+            )
+
+    api = TypedFailureApi(qualification)
+
+    with pytest.raises(TypedBoundaryError):
+        _cancel_triggering_run_if_stale_or_nonqualifying(
+            api,  # type: ignore[arg-type]
+            pr_number=2039,
+            event_head_sha=HEAD,
+            current_run_id=91,
+            qualification=qualification,
+        )
+
+
 def test_trigger_active_cancel_conflict_is_deferred_without_false_success() -> None:
     qualification = PullRequestQualification(
         head_sha=HEAD,

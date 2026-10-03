@@ -15,6 +15,7 @@ from scripts.cancel_superseded_pr_workflow_runs_scoped import (
     _cancel_triggering_run_if_stale_or_nonqualifying,
     _explicit_run_identity_is_current,
     _explicit_singleton_pr_for_current_run,
+    _trusted_live_pr_qualification,
     _validated_event_pr_identity,
     cancel_superseded_explicit_pr_runs,
 )
@@ -719,6 +720,65 @@ def test_explicit_run_boundary_checker_rejects_instance_dispatch_shadow(
     )
 
 
+def test_explicit_run_boundary_checker_rejects_transitive_request_shadow(
+    monkeypatch,
+) -> None:
+    api = WorkflowScopedGitHubApi(
+        repository="owner/repo",
+        token="token",
+        workflow_id=356678400,
+        workflow_name="CI",
+    )
+    invoked = {"value": False}
+
+    def forged_request(_path: str, **_kwargs):
+        invoked["value"] = True
+        return {
+            "id": 7012,
+            "workflow_id": 356678400,
+            "event": "pull_request",
+            "head_sha": HEAD,
+            "name": "CI",
+            "status": "queued",
+            "pull_requests": [{"number": 303}],
+        }
+
+    monkeypatch.setattr(api, "_request", forged_request)
+
+    assert not _explicit_run_identity_is_current(
+        api,
+        run_id=7012,
+        expected_head_sha=HEAD,
+        pr_number=303,
+    )
+    assert not invoked["value"]
+
+
+def test_live_pr_boundary_rejects_transitive_request_shadow(monkeypatch) -> None:
+    api = WorkflowScopedGitHubApi(
+        repository="owner/repo",
+        token="token",
+        workflow_id=356678400,
+        workflow_name="CI",
+    )
+    invoked = {"value": False}
+
+    def forged_request(_path: str, **_kwargs):
+        invoked["value"] = True
+        return {
+            "number": 303,
+            "state": "open",
+            "draft": False,
+            "head": {"sha": HEAD},
+        }
+
+    monkeypatch.setattr(api, "_request", forged_request)
+
+    with pytest.raises(CancellationError, match="live PR qualification dispatch changed"):
+        _trusted_live_pr_qualification(api, 303)
+    assert not invoked["value"]
+
+
 def test_controller_scheduler_coalesces_all_prs_per_source_workflow() -> None:
     text = Path(".github/workflows/pr-qualification-supersession.yml").read_text(
         encoding="utf-8"
@@ -1191,7 +1251,7 @@ def test_controller_main_uses_workflow_wide_sweep_and_trigger_boundary() -> None
     assert "cancel_superseded_explicit_pr_runs(" in text
     assert "runs = api.active_runs()" in text
     assert text.index("sweep_cancelled = cancel_superseded_explicit_pr_runs(") < text.index(
-        "trigger_qualification = api.live_pr_qualification(trigger_pr_number)"
+        "trigger_qualification = _trusted_live_pr_qualification("
     )
     assert "_cancel_triggering_run_if_stale_or_nonqualifying(" in text
 
@@ -1204,6 +1264,10 @@ def test_workflow_wide_sweep_preserves_sealed_scoped_cancel_boundary() -> None:
     assert "canonical base cancellation authority changed" in text
     assert "scoped cancellation revalidation dispatch changed" in text
     assert "base_cancel(self, run_id)" in text
-    assert text.index("current_qualification = api.live_pr_qualification(pr_number)") < text.index(
-        "api.cancel(run_id)"
+    assert "_trusted_live_pr_qualification(" in text
+    sweep = text.split("def cancel_superseded_explicit_pr_runs(", 1)[1].split(
+        "def _cancel_triggering_run_if_stale_or_nonqualifying(", 1
+    )[0]
+    assert sweep.index("current_qualification = _trusted_live_pr_qualification(") < sweep.index(
+        "_cancel_run_or_defer_active_conflict(api, run_id)"
     )

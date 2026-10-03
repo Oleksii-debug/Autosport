@@ -146,6 +146,42 @@ def test_source_spec_rejects_virtual_interval_before_numeric_dispatch(
     assert calls == []
 
 
+def test_source_spec_rejects_path_subclass_before_virtual_dispatch(
+    tmp_path: Path,
+) -> None:
+    calls: list[str] = []
+    ConcretePath = type(Path())
+
+    class HostilePath(ConcretePath):
+        def is_absolute(self) -> bool:
+            calls.append("is_absolute")
+            return True
+
+        def __fspath__(self) -> str:
+            calls.append("__fspath__")
+            return super().__fspath__()
+
+    hostile_path = HostilePath(tmp_path / "collector.db")
+
+    with pytest.raises(
+        TypeError,
+        match="exact platform pathlib path type",
+    ):
+        CampaignInceptionSourceSpec(
+            expected_store_path=hostile_path,
+            source_id="betfair:exchange",
+            run_id="run-1",
+            stream_epoch="epoch-1",
+            anchor_at="2100-01-01T06:00:00+00:00",
+            interval_seconds=10,
+            max_items=250,
+            evaluation_start_slot_ordinal=0,
+            evaluation_end_slot_ordinal=1,
+        )
+
+    assert calls == []
+
+
 def _inception_authority(
     *,
     locator: ForwardUniversePrecommitLocator,

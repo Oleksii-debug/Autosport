@@ -171,6 +171,103 @@ def test_runtime_authority_instance_dict_cannot_shadow_bindings(
     assert len(store.records()) == 1
 
 
+def test_runtime_authority_direct_slot_semantic_rebinding_fails_closed(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "deployment-runtime-authority.json"
+    store = DeploymentRuntimeAuthorityStore.initialize_pristine(
+        path,
+        authority_root=_authority_root(tmp_path),
+    )
+    _append(store, 0)
+
+    object.__setattr__(
+        store,
+        "_binding_semantic_binding_sha256",
+        "0" * 64,
+    )
+
+    with pytest.raises(
+        DeploymentRuntimeAuthorityError,
+        match="binding integrity mismatch",
+    ):
+        store.records()
+
+
+def test_runtime_authority_direct_slot_path_rebinding_fails_before_read(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "deployment-runtime-authority.json"
+    store = DeploymentRuntimeAuthorityStore.initialize_pristine(
+        path,
+        authority_root=_authority_root(tmp_path),
+    )
+    _append(store, 0)
+    redirected = tmp_path / "redirected-runtime-authority.json"
+    redirected.write_bytes(path.read_bytes())
+
+    object.__setattr__(store, "_binding_path", redirected)
+
+    with pytest.raises(
+        DeploymentRuntimeAuthorityError,
+        match="binding integrity mismatch",
+    ):
+        store.records()
+
+
+def test_runtime_authority_direct_authority_key_rebinding_fails_closed(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "deployment-runtime-authority.json"
+    store = DeploymentRuntimeAuthorityStore.initialize_pristine(
+        path,
+        authority_root=_authority_root(tmp_path),
+    )
+    _append(store, 0)
+
+    object.__setattr__(store._authority, "key", "redirected-runtime-authority.json")
+
+    with pytest.raises(
+        DeploymentRuntimeAuthorityError,
+        match="binding integrity mismatch",
+    ):
+        store.records()
+
+
+def test_runtime_authority_rejects_semantic_binding_history_drift(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "deployment-runtime-authority.json"
+    store = DeploymentRuntimeAuthorityStore.initialize_pristine(
+        path,
+        authority_root=_authority_root(tmp_path),
+    )
+    _append(store, 0)
+
+    history = store._authority.read_history()
+    assert history
+    original = history[-1].semantic_binding_sha256
+    object.__setattr__(
+        store,
+        "_binding_semantic_binding_sha256",
+        original,
+    )
+    assert store.records()
+
+    # A different in-memory semantic binding may not inherit CURRENT authority
+    # merely because the workspace payload digest still matches.
+    object.__setattr__(
+        store,
+        "_binding_semantic_binding_sha256",
+        "f" * 64,
+    )
+    with pytest.raises(
+        DeploymentRuntimeAuthorityError,
+        match="binding integrity mismatch",
+    ):
+        store.records()
+
+
 def test_instance_dictionary_cannot_shadow_monotonic_verification_dispatch(
     tmp_path: Path,
 ) -> None:

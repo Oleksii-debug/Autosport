@@ -22,6 +22,14 @@ from autosport.provider_observation_authority import (
 CAPTURED_AT = "2026-09-20T08:00:00Z"
 
 
+@pytest.fixture(autouse=True)
+def _private_test_acquisition_origin():
+    with authority_module._test_acquisition_origin(
+        _capability=authority_module._TEST_ACQUISITION_CAPABILITY,
+    ):
+        yield
+
+
 class _FakeSseResponse:
     def __init__(
         self,
@@ -341,3 +349,83 @@ def test_persisted_digest_tamper_is_rejected(tmp_path, monkeypatch):
         match="frame_sha256 does not bind exact provider frame",
     ):
         _store(tmp_path).load(snapshot.evidence_sha256)
+
+
+
+def test_test_acquisition_origin_rejects_wrong_capability():
+    with pytest.raises(TypeError, match="private capability"):
+        with authority_module._test_acquisition_origin(_capability=object()):
+            pass
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "urlopen",
+        "Request",
+        "strict_json_loads",
+        "_parse_sse_event",
+        "_read_production_initial_state",
+        "_default_clock",
+        "_canonical_json",
+        "_remember",
+    ],
+)
+def test_production_origin_guard_rejects_global_rebind(
+    monkeypatch,
+    name,
+):
+    monkeypatch.setattr(authority_module, name, object())
+    with pytest.raises(
+        ProviderObservationIntegrityError,
+        match="production acquisition origin is rebound",
+    ):
+        authority_module._require_production_capture_origin_integrity()
+
+
+def test_production_origin_guard_rejects_request_url_surface_rebind(monkeypatch):
+    monkeypatch.setattr(
+        CompleteGameBoardRequest,
+        "sse_url",
+        lambda _self: "https://attacker.invalid/",
+    )
+    with pytest.raises(
+        ProviderObservationIntegrityError,
+        match="production acquisition origin code changed",
+    ):
+        authority_module._require_production_capture_origin_integrity()
+
+
+def test_production_origin_guard_rejects_reader_code_mutation():
+    target = authority_module._CANONICAL_READ_PRODUCTION_INITIAL_STATE
+    original = target.__code__
+
+    def hostile(*_args, **_kwargs):
+        raise AssertionError("hostile provider reader executed")
+
+    target.__code__ = hostile.__code__
+    try:
+        with pytest.raises(
+            ProviderObservationIntegrityError,
+            match="production acquisition origin code changed",
+        ):
+            authority_module._require_production_capture_origin_integrity()
+    finally:
+        target.__code__ = original
+
+
+def test_production_reader_defaults_capture_transport_origin():
+    defaults = authority_module._CANONICAL_READ_PRODUCTION_INITIAL_STATE.__kwdefaults__
+    assert defaults is not None
+    assert defaults["_request_factory"] is authority_module._CANONICAL_HTTP_REQUEST
+    assert defaults["_open_url"] is authority_module._CANONICAL_URLOPEN
+    assert defaults["_parse_event"] is authority_module._CANONICAL_PARSE_SSE_EVENT
+    assert defaults["_sse_url"] is authority_module._CANONICAL_REQUEST_SSE_URL
+    assert defaults["_loads"] is authority_module._CANONICAL_STRICT_JSON_LOADS
+
+
+def test_public_capture_has_no_transport_or_clock_injection_parameters():
+    import inspect
+
+    parameters = inspect.signature(capture_parlay_complete_game_board).parameters
+    assert set(parameters) == {"api_key", "request", "timeout_seconds"}

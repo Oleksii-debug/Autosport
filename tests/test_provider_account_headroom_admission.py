@@ -350,3 +350,141 @@ def test_instance_shadow_cannot_bypass_snapshot_or_reservation_cas(
     assert calls == {"snapshot": 0, "begin": 0}
     assert reserved.product_internal_reservation_proven is True
     assert ledger.attempt_state("attempt-1") is AttemptState.RESERVED
+
+
+
+class _SequencedDateTime(datetime):
+    values: list[datetime] = []
+
+    @classmethod
+    def now(cls, tz=None):
+        if not cls.values:
+            raise AssertionError("unexpected provider clock read")
+        value = cls.values.pop(0)
+        if tz is None:
+            return cls(
+                value.year,
+                value.month,
+                value.day,
+                value.hour,
+                value.minute,
+                value.second,
+                value.microsecond,
+            )
+        return cls.fromtimestamp(value.timestamp(), tz=tz)
+
+
+def test_freshness_is_bound_to_balance_observation_not_later_snapshot_time(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    now = datetime.now(timezone.utc)
+    old = now - timedelta(minutes=2)
+    # read_account_details evidence, read_account_funds evidence, final snapshot time.
+    _SequencedDateTime.values = [old, old, now]
+    monkeypatch.setattr(betfair_readonly, "datetime", _SequencedDateTime)
+
+    acquired, _ = _acquire_balance(monkeypatch, tmp_path, "100")
+    assert acquired.snapshot.balance is not None
+    assert acquired.snapshot.balance.observed_at != acquired.receipt.acquired_at
+
+    ledger = _ledger_with_plans(
+        tmp_path,
+        _plan("p1", _action("a1", "10")),
+    )
+    with pytest.raises(
+        ProviderAccountHeadroomStale,
+        match="provider balance observation exceeds",
+    ):
+        assess_provider_account_headroom(
+            ledger,
+            acquired,
+            plan_id="p1",
+            action_id="a1",
+        )
+
+
+def test_unrelated_provider_attempt_does_not_block_betfair_account_scope(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    acquired, _ = _acquire_balance(monkeypatch, tmp_path, "100")
+    target = _action("target", "20")
+    foreign = ExecutionAction(
+        action_id="foreign",
+        bookmaker_id="betdaq",
+        account_id="betdaq-account",
+        event_id="event-foreign",
+        market_id="market-foreign",
+        selection_id="selection-foreign",
+        side="BACK",
+        requested_odds="2.00",
+        requested_stake="900",
+        quote_id="quote-foreign",
+        quote_observed_at=(datetime.now(timezone.utc) - timedelta(seconds=2)).isoformat(),
+        expires_at=(datetime.now(timezone.utc) + timedelta(minutes=2)).isoformat(),
+    )
+    ledger = _ledger_with_plans(
+        tmp_path,
+        _plan("target-plan", target),
+        _plan("foreign-plan", foreign),
+    )
+    ledger.begin_attempt(
+        plan_id="foreign-plan",
+        action_id="foreign",
+        attempt_id="foreign-attempt",
+    )
+    ledger.mark_submitted("foreign-attempt")
+
+    assessment = assess_provider_account_headroom(
+        ledger,
+        acquired,
+        plan_id="target-plan",
+        action_id="target",
+    )
+
+    assert assessment.definitely_unreflected_product_liability == 0
+    assert assessment.unknown_reflection_product_liability == 0
+    assert assessment.lower_headroom == Decimal("100")
+    assert assessment.upper_headroom == Decimal("100")
+    assert assessment.decision is HeadroomDecision.SUFFICIENT_LOWER_BOUND
+
+
+def test_recomputed_insufficient_assessment_can_resolve_exact_existing_attempt(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    acquired, _ = _acquire_balance(monkeypatch, tmp_path, "100")
+    action = _action("a1", "100")
+    ledger = _ledger_with_plans(tmp_path, _plan("p1", action))
+    initial = assess_provider_account_headroom(
+        ledger,
+        acquired,
+        plan_id="p1",
+        action_id="a1",
+    )
+    first = reserve_observed_provider_headroom(
+        ledger,
+        acquired,
+        initial,
+        attempt_id="attempt-1",
+    )
+
+    recomputed = assess_provider_account_headroom(
+        ledger,
+        acquired,
+        plan_id="p1",
+        action_id="a1",
+    )
+    assert recomputed.decision is HeadroomDecision.INSUFFICIENT_UPPER_BOUND
+    assert recomputed.definitely_unreflected_product_liability == Decimal("100")
+
+    replay = reserve_observed_provider_headroom(
+        ledger,
+        acquired,
+        recomputed,
+        attempt_id="attempt-1",
+    )
+    assert replay.attempt_fingerprint == first.attempt_fingerprint
+    assert replay.reserved_at == first.reserved_at
+    assert ledger.attempt_state("attempt-1") is AttemptState.RESERVED

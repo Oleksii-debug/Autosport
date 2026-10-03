@@ -17,6 +17,7 @@ from autosport.betfair_account_readonly import BetfairSessionCredentials
 from autosport.bookmaker_capability import BookmakerCapability
 from autosport.provider_account_headroom_admission import (
     HeadroomDecision,
+    ProductInternalHeadroomReservation,
     ProviderAccountHeadroomError,
     ProviderAccountHeadroomStale,
     ProviderAccountHeadroomUnsupported,
@@ -413,6 +414,48 @@ def test_module_attempt_state_rebinding_cannot_bypass_headroom_gate(
     assert hostile_calls == []
     with pytest.raises(KeyError):
         ledger.attempt_state("attempt-1")
+
+
+def test_caller_constructed_internal_reservation_cannot_claim_product_proof() -> None:
+    forged = ProductInternalHeadroomReservation(
+        assessment_sha256="a" * 64,
+        attempt_id="forged-attempt",
+        attempt_fingerprint="b" * 64,
+        reserved_at="2026-10-03T10:00:00+00:00",
+        post_reservation_ledger_sha256="c" * 64,
+        post_reservation_event_count=1,
+    )
+
+    assert forged.product_internal_reservation_proven is False
+    assert forged.provider_atomicity_proven is False
+    assert forged.execution_authority is False
+    assert forged.real_money_readiness is False
+
+
+def test_copied_or_mutated_internal_reservation_loses_product_proof(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    acquired, _ = _acquire_balance(monkeypatch, tmp_path, "100")
+    action = _action("a1", "10")
+    ledger = _ledger_with_plans(tmp_path, _plan("p1", action))
+    assessment = assess_provider_account_headroom(
+        ledger, acquired, plan_id="p1", action_id="a1"
+    )
+    issued = reserve_observed_provider_headroom(
+        ledger, acquired, assessment, attempt_id="attempt-issued"
+    )
+
+    assert issued.product_internal_reservation_proven is True
+    copied = replace(issued)
+    assert copied.product_internal_reservation_proven is False
+
+    object.__setattr__(
+        issued,
+        "post_reservation_event_count",
+        issued.post_reservation_event_count + 1,
+    )
+    assert issued.product_internal_reservation_proven is False
 
 
 def test_exact_attempt_retry_is_idempotent_after_reservation(monkeypatch, tmp_path) -> None:

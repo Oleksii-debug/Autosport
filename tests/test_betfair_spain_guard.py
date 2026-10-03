@@ -3,6 +3,7 @@ from decimal import Decimal
 
 import pytest
 
+import autosport.betfair_spain_guard as spain_guard
 from autosport.betfair_spain_guard import (
     ACCOUNTS_JSON_RPC_ENDPOINT,
     BETTING_JSON_RPC_ENDPOINT,
@@ -296,3 +297,72 @@ def test_write_acceptance_probe_is_not_a_supported_minimum_source_kind():
 
 def test_spain_guard_exposes_no_positive_admission_state_without_source_authority():
     assert {item.value for item in SpainOrderAdmission} == {"REJECTED", "UNKNOWN"}
+
+
+def test_endpoint_guard_cannot_be_redirected_by_public_constant_rebinding(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        spain_guard,
+        "SPANISH_INTERACTIVE_API_LOGIN_ENDPOINT",
+        "https://attacker.invalid/api/login",
+    )
+    monkeypatch.setattr(
+        spain_guard,
+        "SPANISH_KEEPALIVE_ENDPOINT",
+        "https://attacker.invalid/api/keepAlive",
+    )
+    monkeypatch.setattr(
+        spain_guard,
+        "BETTING_JSON_RPC_ENDPOINT",
+        "https://attacker.invalid/exchange/betting/json-rpc/v1",
+    )
+    monkeypatch.setattr(
+        spain_guard,
+        "ACCOUNTS_JSON_RPC_ENDPOINT",
+        "https://attacker.invalid/exchange/account/json-rpc/v1",
+    )
+
+    forged = BetfairSpainEndpointConfig(
+        login_mode=SpainLoginMode.INTERACTIVE_API,
+        login_endpoint=spain_guard.SPANISH_INTERACTIVE_API_LOGIN_ENDPOINT,
+        keepalive_endpoint=spain_guard.SPANISH_KEEPALIVE_ENDPOINT,
+        betting_endpoint=spain_guard.BETTING_JSON_RPC_ENDPOINT,
+        accounts_endpoint=spain_guard.ACCOUNTS_JSON_RPC_ENDPOINT,
+    )
+    with pytest.raises(BetfairSpainGuardError, match="login_endpoint"):
+        assert_betfair_spain_endpoint_config(forged)
+
+    canonical = BetfairSpainEndpointConfig(
+        login_mode=SpainLoginMode.INTERACTIVE_API,
+        login_endpoint="https://identitysso.betfair.es/api/login",
+        keepalive_endpoint="https://identitysso.betfair.es/api/keepAlive",
+        betting_endpoint="https://api.betfair.com/exchange/betting/json-rpc/v1",
+        accounts_endpoint="https://api.betfair.com/exchange/account/json-rpc/v1",
+    )
+    assert_betfair_spain_endpoint_config(canonical)
+
+
+def test_session_currentness_cannot_be_extended_by_public_lifetime_rebinding(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        spain_guard,
+        "SPANISH_SESSION_LIFETIME",
+        timedelta(days=365),
+    )
+
+    assert (
+        betfair_spain_session_is_current(
+            issued_at=T0,
+            as_of=T0 + timedelta(minutes=20),
+        )
+        is False
+    )
+    assert (
+        betfair_spain_session_is_current(
+            issued_at=T0,
+            as_of=T0 + timedelta(minutes=19, seconds=59),
+        )
+        is True
+    )

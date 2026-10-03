@@ -144,16 +144,19 @@ def assert_betfair_spain_endpoint_config(
         raise BetfairSpainGuardError(
             "config must be exact BetfairSpainEndpointConfig"
         )
+    # The exported constants are descriptive API compatibility, not mutable
+    # authority roots. Keep positive validation bound to the qualified contract
+    # even if a same-process caller rebinds public module symbols.
     expected_login = (
-        SPANISH_NON_INTERACTIVE_LOGIN_ENDPOINT
+        "https://identitysso-cert.betfair.es/api/certlogin"
         if config.login_mode is SpainLoginMode.NON_INTERACTIVE
-        else SPANISH_INTERACTIVE_API_LOGIN_ENDPOINT
+        else "https://identitysso.betfair.es/api/login"
     )
     expected = {
         "login_endpoint": expected_login,
-        "keepalive_endpoint": SPANISH_KEEPALIVE_ENDPOINT,
-        "betting_endpoint": BETTING_JSON_RPC_ENDPOINT,
-        "accounts_endpoint": ACCOUNTS_JSON_RPC_ENDPOINT,
+        "keepalive_endpoint": "https://identitysso.betfair.es/api/keepAlive",
+        "betting_endpoint": "https://api.betfair.com/exchange/betting/json-rpc/v1",
+        "accounts_endpoint": "https://api.betfair.com/exchange/account/json-rpc/v1",
     }
     for name, value in expected.items():
         if getattr(config, name) != value:
@@ -173,7 +176,9 @@ def betfair_spain_session_is_current(
     current = _utc(as_of, "as_of")
     if current < issued:
         raise BetfairSpainGuardError("as_of cannot precede issued_at")
-    return current - issued < SPANISH_SESSION_LIFETIME
+    # Do not let rebinding the descriptive export widen positive session
+    # currentness. The qualified Spain contract is exactly twenty minutes.
+    return current - issued < timedelta(minutes=20)
 
 
 def assess_betfair_spain_limit_order(

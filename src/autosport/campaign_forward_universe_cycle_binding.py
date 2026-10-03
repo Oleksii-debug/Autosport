@@ -42,6 +42,7 @@ from .forward_evidence_completeness import (
     CampaignEvidence,
     ForwardEvidenceProtocolEnvelope,
     ForwardOpportunityEnvelope,
+    VerificationCode,
     VerificationResult,
     verify_campaign,
 )
@@ -59,6 +60,8 @@ from .provider_observation_authority import (
 
 _SCHEMA_VERSION = 1
 _DOMAIN = "autosport.campaign-forward-universe-cycle-authority.v1"
+_COMPOSED_VERIFICATION_DOMAIN = "autosport.campaign-forward-evidence-verification.v1"
+_COMPOSED_VERIFICATION_SCOPE = "CYCLE_BOUND_PROVIDER_UNIVERSE_STRUCTURAL_ONLY"
 _HEX = frozenset("0123456789abcdef")
 
 _ESTABLISH_CAMPAIGN = establish_campaign_inception
@@ -368,6 +371,141 @@ class CampaignForwardUniverseCycleAuthority:
         return instance
 
 
+@dataclass(frozen=True, slots=True, init=False)
+class CampaignForwardEvidenceVerification:
+    """Resolver-issued machine truth for cycle-bound structural verification.
+
+    This receipt proves that the structural #879 verdict was computed with source
+    receipts re-issued from one exact campaign/cycle/provider/universe authority.
+    It is deliberately not a promotion, execution, settlement, or profit authority.
+    """
+
+    schema_version: int
+    campaign_id: str
+    protocol_sha256: str
+    structural_result_sha256: str
+    structural_ok: bool
+    structural_codes: tuple[str, ...]
+    terminal_root_sha256: str | None
+    candidate_count: int
+    campaign_cycle_authority_sha256: str
+    prospective_evaluation_plan_sha256: str
+    universe_sha256: str
+    membership_sha256: str
+    verification_scope: str
+    provider_universe_authority_resolved: bool
+    promotion_ready: bool
+    real_money_ready: bool
+    receipt_sha256: str
+
+    def __new__(cls, *args: object, **kwargs: object):
+        raise TypeError(
+            "CampaignForwardEvidenceVerification is resolver-issued; "
+            "call verify_campaign_forward_evidence"
+        )
+
+    @classmethod
+    def _issue(
+        cls,
+        *,
+        authority: CampaignForwardUniverseCycleAuthority,
+        structural_result: VerificationResult,
+    ) -> "CampaignForwardEvidenceVerification":
+        if type(authority) is not CampaignForwardUniverseCycleAuthority:
+            raise TypeError(
+                "authority must be exact CampaignForwardUniverseCycleAuthority"
+            )
+        if type(structural_result) is not VerificationResult:
+            raise TypeError("structural_result must be exact VerificationResult")
+        if type(structural_result.ok) is not bool:
+            raise CampaignForwardUniverseCycleBindingError(
+                "structural result ok flag must be boolean"
+            )
+        if (
+            type(structural_result.codes) is not tuple
+            or not structural_result.codes
+            or not all(type(code) is VerificationCode for code in structural_result.codes)
+        ):
+            raise CampaignForwardUniverseCycleBindingError(
+                "structural result codes must be canonical VerificationCode values"
+            )
+        if (
+            type(structural_result.candidate_count) is not int
+            or structural_result.candidate_count < 0
+        ):
+            raise CampaignForwardUniverseCycleBindingError(
+                "structural result candidate_count must be a non-negative integer"
+            )
+        if type(structural_result.details) is not tuple or not all(
+            type(item) is tuple
+            and len(item) == 2
+            and type(item[0]) is str
+            and type(item[1]) is str
+            for item in structural_result.details
+        ):
+            raise CampaignForwardUniverseCycleBindingError(
+                "structural result details must be canonical text pairs"
+            )
+        protocol_sha256 = _sha(structural_result.protocol_sha256, "protocol_sha256")
+        terminal_root_sha256 = structural_result.terminal_root_sha256
+        if terminal_root_sha256 is not None:
+            terminal_root_sha256 = _sha(
+                terminal_root_sha256,
+                "terminal_root_sha256",
+            )
+        structural_codes = tuple(code.value for code in structural_result.codes)
+        structural_result_sha256 = _digest(
+            {
+                "domain": "autosport.forward-evidence-structural-result.v1",
+                "result": {
+                    "ok": structural_result.ok,
+                    "codes": structural_codes,
+                    "protocol_sha256": protocol_sha256,
+                    "terminal_root_sha256": terminal_root_sha256,
+                    "candidate_count": structural_result.candidate_count,
+                    "details": tuple(structural_result.details),
+                },
+            }
+        )
+        payload = {
+            "schema_version": _SCHEMA_VERSION,
+            "campaign_id": _text(authority.campaign_id, "campaign_id"),
+            "protocol_sha256": protocol_sha256,
+            "structural_result_sha256": structural_result_sha256,
+            "structural_ok": structural_result.ok,
+            "structural_codes": structural_codes,
+            "terminal_root_sha256": terminal_root_sha256,
+            "candidate_count": structural_result.candidate_count,
+            "campaign_cycle_authority_sha256": _sha(
+                authority.authority_sha256,
+                "campaign_cycle_authority_sha256",
+            ),
+            "prospective_evaluation_plan_sha256": _sha(
+                authority.prospective_evaluation_plan_sha256,
+                "prospective_evaluation_plan_sha256",
+            ),
+            "universe_sha256": _sha(authority.universe_sha256, "universe_sha256"),
+            "membership_sha256": _sha(
+                authority.membership_sha256,
+                "membership_sha256",
+            ),
+            "verification_scope": _COMPOSED_VERIFICATION_SCOPE,
+            "provider_universe_authority_resolved": True,
+            "promotion_ready": False,
+            "real_money_ready": False,
+        }
+        payload["receipt_sha256"] = _digest(
+            {
+                "domain": _COMPOSED_VERIFICATION_DOMAIN,
+                "verification": payload,
+            }
+        )
+        instance = object.__new__(cls)
+        for name in _VERIFICATION_RECEIPT_FIELD_NAMES:
+            object.__setattr__(instance, name, payload[name])
+        return instance
+
+
 _CANONICAL_AUTHORITY_CLASS = CampaignForwardUniverseCycleAuthority
 _AUTHORITY_FIELD_NAMES = tuple(
     CampaignForwardUniverseCycleAuthority.__dataclass_fields__
@@ -385,6 +523,23 @@ _CANONICAL_AUTHORITY_ISSUER = inspect.getattr_static(
 )
 _CANONICAL_AUTHORITY_ISSUER_FUNCTION = _CANONICAL_AUTHORITY_ISSUER.__func__
 _CANONICAL_AUTHORITY_ISSUER_CODE = _CANONICAL_AUTHORITY_ISSUER_FUNCTION.__code__
+_CANONICAL_VERIFICATION_CLASS = CampaignForwardEvidenceVerification
+_VERIFICATION_RECEIPT_FIELD_NAMES = tuple(
+    CampaignForwardEvidenceVerification.__dataclass_fields__
+)
+_CANONICAL_VERIFICATION_FIELD_DESCRIPTORS = tuple(
+    (
+        name,
+        inspect.getattr_static(CampaignForwardEvidenceVerification, name),
+    )
+    for name in _VERIFICATION_RECEIPT_FIELD_NAMES
+)
+_CANONICAL_VERIFICATION_ISSUER = inspect.getattr_static(
+    CampaignForwardEvidenceVerification,
+    "_issue",
+)
+_CANONICAL_VERIFICATION_ISSUER_FUNCTION = _CANONICAL_VERIFICATION_ISSUER.__func__
+_CANONICAL_VERIFICATION_ISSUER_CODE = _CANONICAL_VERIFICATION_ISSUER_FUNCTION.__code__
 _CYCLE_RECEIPT_FIELD_NAMES = tuple(
     CampaignCompleteBoardCycleReceipt.__dataclass_fields__
 )
@@ -419,6 +574,12 @@ def _require_dispatch_integrity() -> None:
     if (
         module_globals.get("CampaignForwardUniverseCycleAuthority")
         is not _CANONICAL_AUTHORITY_CLASS
+        or module_globals.get("CampaignForwardEvidenceVerification")
+        is not _CANONICAL_VERIFICATION_CLASS
+        or module_globals.get("_COMPOSED_VERIFICATION_DOMAIN")
+        != _COMPOSED_VERIFICATION_DOMAIN
+        or module_globals.get("_COMPOSED_VERIFICATION_SCOPE")
+        != _COMPOSED_VERIFICATION_SCOPE
         or module_globals.get("ARTIFACT_KIND") != _CANONICAL_ARTIFACT_KIND
     ):
         raise CampaignForwardUniverseCycleBindingError(
@@ -451,6 +612,28 @@ def _require_dispatch_integrity() -> None:
         if inspect.getattr_static(_CANONICAL_AUTHORITY_CLASS, name) is not descriptor:
             raise CampaignForwardUniverseCycleBindingError(
                 "campaign forward-cycle authority field descriptor changed: " + name
+            )
+    current_verification_issuer = inspect.getattr_static(
+        _CANONICAL_VERIFICATION_CLASS,
+        "_issue",
+    )
+    if (
+        current_verification_issuer is not _CANONICAL_VERIFICATION_ISSUER
+        or current_verification_issuer.__func__
+        is not _CANONICAL_VERIFICATION_ISSUER_FUNCTION
+        or current_verification_issuer.__func__.__code__
+        is not _CANONICAL_VERIFICATION_ISSUER_CODE
+    ):
+        raise CampaignForwardUniverseCycleBindingError(
+            "campaign forward verification issuer is rebound"
+        )
+    for name, descriptor in _CANONICAL_VERIFICATION_FIELD_DESCRIPTORS:
+        if (
+            inspect.getattr_static(_CANONICAL_VERIFICATION_CLASS, name)
+            is not descriptor
+        ):
+            raise CampaignForwardUniverseCycleBindingError(
+                "campaign forward verification field descriptor changed: " + name
             )
     for name, descriptor in _CANONICAL_CYCLE_RECEIPT_FIELD_DESCRIPTORS:
         if inspect.getattr_static(CampaignCompleteBoardCycleReceipt, name) is not descriptor:

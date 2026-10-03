@@ -86,6 +86,17 @@ def test_cancel_ignores_arbitrary_202_response_body(monkeypatch) -> None:
     api.cancel(123)
 
 
+def test_cancel_rejects_missing_transport_acceptance_authority(monkeypatch) -> None:
+    api = GitHubApi(repository="owner/repo", token="token")
+    monkeypatch.setattr(api, "_request", lambda *_args, **_kwargs: None)
+
+    with pytest.raises(
+        CancellationError,
+        match="missing HTTP 202 acceptance authority",
+    ):
+        api.cancel(123)
+
+
 @pytest.mark.parametrize(
     ("status", "body"),
     [

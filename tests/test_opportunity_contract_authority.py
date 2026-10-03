@@ -14,6 +14,7 @@ from autosport.opportunity import (
     OpportunitySet,
     PlanAllocation,
     PortfolioPlan,
+    PredictiveEligibilityEvidence,
     QuoteRef,
     StrategyClass,
 )
@@ -148,3 +149,85 @@ def test_opportunity_set_rejects_conflicting_decisions_for_same_facts() -> None:
         match="conflicting decisions for the same canonical opportunity",
     ):
         OpportunitySet((waiting, actionable))
+
+class _HostileDecimal(Decimal):
+    def is_finite(self) -> bool:
+        raise AssertionError("Decimal subclass virtual dispatch must not execute")
+
+
+def test_decimal_subclasses_fail_closed_before_virtual_dispatch() -> None:
+    with pytest.raises(
+        OpportunityContractError,
+        match="allocation stake must be an exact finite Decimal",
+    ):
+        PlanAllocation(_HASH, _HostileDecimal("1"))
+
+    with pytest.raises(
+        OpportunityContractError,
+        match="quote decimal_odds must be an exact finite Decimal",
+    ):
+        QuoteRef(
+            event_id="event-hostile-decimal",
+            market_id="market-hostile-decimal",
+            selection_id="selection-hostile-decimal",
+            source_id="provider-hostile-decimal",
+            sequence=1,
+            decimal_odds=_HostileDecimal("2"),
+            observed_ts="2026-09-16T16:00:00+00:00",
+            source_ts="2026-09-16T15:59:59+00:00",
+            ingest_ts="2026-09-16T16:00:01+00:00",
+            market_event_hash=_HASH,
+        )
+
+    with pytest.raises(
+        OpportunityContractError,
+        match="forecast probability must be an exact finite Decimal",
+    ):
+        ForecastRef(
+            forecast_id="forecast-hostile-probability",
+            forecast_hash=_HASH,
+            quote_key="event|market|selection",
+            probability=_HostileDecimal("0.5"),
+            input_cutoff_ts="2026-09-16T16:00:00+00:00",
+            market_snapshot_hash=_HASH,
+            quote_market_event_hash=_HASH,
+        )
+
+    with pytest.raises(
+        OpportunityContractError,
+        match="forecast uncertainty must be an exact finite Decimal",
+    ):
+        ForecastRef(
+            forecast_id="forecast-hostile-uncertainty",
+            forecast_hash=_HASH,
+            quote_key="event|market|selection",
+            probability=Decimal("0.5"),
+            input_cutoff_ts="2026-09-16T16:00:00+00:00",
+            market_snapshot_hash=_HASH,
+            quote_market_event_hash=_HASH,
+            model_id="model",
+            model_version="1",
+            strategy_version="1",
+            uncertainty=_HostileDecimal("0.1"),
+        )
+
+    with pytest.raises(
+        OpportunityContractError,
+        match="predictive maximum_uncertainty must be an exact finite Decimal",
+    ):
+        PredictiveEligibilityEvidence(
+            evaluation_id="evaluation-hostile-decimal",
+            evaluation_sha256=_HASH,
+            protocol_sha256=_HASH,
+            admission_policy_sha256=_HASH,
+            model_id="model",
+            model_version="1",
+            strategy_version="1",
+            uncertainty_kind="absolute_probability_radius_v1",
+            sample_size=100,
+            minimum_sample_size=50,
+            maximum_uncertainty=_HostileDecimal("0.1"),
+            as_of="2026-09-16T16:00:00+00:00",
+            valid_until="2026-09-17T16:00:00+00:00",
+        )
+

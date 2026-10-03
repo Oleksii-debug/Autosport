@@ -445,6 +445,64 @@ class HistoricalMatchCaptureTests(unittest.TestCase):
             self.assertFalse(output.exists())
             self.assertFalse(evidence_path.exists())
 
+    def test_retry_preserves_existing_valid_capture_evidence_pair(self) -> None:
+        first_transport = _Transport([{"provider_defined_id": "original-match"}])
+        retry_transport = _Transport([{"provider_defined_id": "replacement-match"}])
+        with tempfile.TemporaryDirectory() as temp:
+            output = Path(temp) / "matches.json"
+            evidence = Path(temp) / "matches.evidence.json"
+            capture_historical_matches(
+                self._provider(first_transport),
+                requested_date="2026-09-10",
+                output_path=output,
+                evidence_path=evidence,
+            )
+            original_output = output.read_bytes()
+            original_evidence = evidence.read_bytes()
+
+            with self.assertRaisesRegex(
+                ProviderPayloadError,
+                "historical match capture destinations already exist",
+            ):
+                capture_historical_matches(
+                    self._provider(retry_transport),
+                    requested_date="2026-09-10",
+                    output_path=output,
+                    evidence_path=evidence,
+                )
+
+            self.assertEqual(output.read_bytes(), original_output)
+            self.assertEqual(evidence.read_bytes(), original_evidence)
+        self.assertEqual(len(first_transport.urls), 1)
+        self.assertEqual(retry_transport.urls, [])
+
+    def test_half_existing_capture_pair_fails_before_network_without_clobber(self) -> None:
+        for occupied in ("output", "evidence"):
+            with self.subTest(occupied=occupied):
+                transport = _Transport([{"provider_defined_id": "must-not-be-fetched"}])
+                with tempfile.TemporaryDirectory() as temp:
+                    output = Path(temp) / "matches.json"
+                    evidence = Path(temp) / "matches.evidence.json"
+                    occupied_path = output if occupied == "output" else evidence
+                    absent_path = evidence if occupied == "output" else output
+                    sentinel = f"pre-existing-{occupied}".encode("utf-8")
+                    occupied_path.write_bytes(sentinel)
+
+                    with self.assertRaisesRegex(
+                        ProviderPayloadError,
+                        "historical match capture destinations already exist",
+                    ):
+                        capture_historical_matches(
+                            self._provider(transport),
+                            requested_date="2026-09-10",
+                            output_path=output,
+                            evidence_path=evidence,
+                        )
+
+                    self.assertEqual(occupied_path.read_bytes(), sentinel)
+                    self.assertFalse(absent_path.exists())
+                self.assertEqual(transport.urls, [])
+
     def test_priced_only_maps_to_documented_boolean_parameter(self) -> None:
         transport = _Transport([])
         with tempfile.TemporaryDirectory() as temp:

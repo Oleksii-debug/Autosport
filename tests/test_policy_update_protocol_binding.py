@@ -4,9 +4,14 @@ from datetime import datetime, timezone
 from decimal import Decimal
 import hashlib
 
+import pytest
+
+import autosport.policy_update_authority as policy_update_module
+
 from autosport.learning_environment import Action, EvidenceTruth, RewardEvidence, Transition
 from autosport.policy_update_authority import (
     UTILITY_AUTHORITY_UNRESOLVED,
+    UtilityBoundUpdateEvidence,
     attempt_utility_bound_update,
 )
 from autosport.policy_utility_evidence import (
@@ -122,4 +127,95 @@ def test_exact_protocol_binding_does_not_mint_a_false_mismatch() -> None:
     )
 
     assert successor == policy
+    assert evidence.reason_codes == (UTILITY_AUTHORITY_UNRESOLVED,)
+
+
+
+class _HostileAction(Action):
+    __slots__ = ()
+
+
+def test_module_global_action_rebind_cannot_redefine_exact_canonical_type(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    policy, action, reward, transition, utility = _case(
+        utility_protocol="governed-protocol-v1"
+    )
+    hostile = _HostileAction(
+        environment_id=action.environment_id,
+        observation_id=action.observation_id,
+        action_type=action.action_type,
+        decided_at=action.decided_at,
+        parameters=action.parameters,
+    )
+    assert hostile.action_id == action.action_id
+
+    monkeypatch.setattr(policy_update_module, "Action", _HostileAction)
+
+    with pytest.raises(
+        TypeError,
+        match="action/reward evidence must use exact canonical types",
+    ):
+        attempt_utility_bound_update(
+            policy=policy,
+            action=hostile,
+            reward=reward,
+            transition=transition,
+            utility=utility,
+        )
+
+
+def test_update_authority_ignores_rebound_module_trust_roots(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    policy, action, reward, transition, utility = _case(
+        utility_protocol="governed-protocol-v1"
+    )
+
+    def poison(*_args, **_kwargs):
+        raise AssertionError("rebound update authority executed")
+
+    class _PoisonEvidence:
+        def __init__(self, **_kwargs) -> None:
+            raise AssertionError("rebound evidence constructor executed")
+
+    class _PoisonHashlib:
+        sha256 = staticmethod(poison)
+
+    for name in (
+        "BanditPolicyState",
+        "Action",
+        "RewardEvidence",
+        "Transition",
+        "PolicyUtilityEvidence",
+        "PolicyUtilityError",
+    ):
+        monkeypatch.setattr(policy_update_module, name, object())
+    monkeypatch.setattr(
+        policy_update_module,
+        "_validate_canonical_causal_witnesses",
+        poison,
+    )
+    monkeypatch.setattr(
+        policy_update_module,
+        "UtilityBoundUpdateEvidence",
+        _PoisonEvidence,
+    )
+    monkeypatch.setattr(
+        policy_update_module,
+        "UTILITY_AUTHORITY_UNRESOLVED",
+        "forged-unresolved-reason",
+    )
+    monkeypatch.setattr(policy_update_module, "hashlib", _PoisonHashlib)
+
+    successor, evidence = attempt_utility_bound_update(
+        policy=policy,
+        action=action,
+        reward=reward,
+        transition=transition,
+        utility=utility,
+    )
+
+    assert successor is policy
+    assert type(evidence) is UtilityBoundUpdateEvidence
     assert evidence.reason_codes == (UTILITY_AUTHORITY_UNRESOLVED,)

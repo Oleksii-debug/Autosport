@@ -105,74 +105,97 @@ def _validate_canonical_causal_witnesses(
         raise LearningEnvironmentError("resolved action is outside immutable policy identity")
 
 
-def attempt_utility_bound_update(
+def _build_attempt_utility_bound_update(
     *,
-    policy: BanditPolicyState,
-    action: Action,
-    reward: RewardEvidence,
-    transition: Transition,
-    utility: PolicyUtilityEvidence,
-) -> tuple[BanditPolicyState, UtilityBoundUpdateEvidence]:
-    """Return an unchanged policy until owner-utility authority is resolved.
+    _policy_type: type[BanditPolicyState] = BanditPolicyState,
+    _action_type: type[Action] = Action,
+    _reward_type: type[RewardEvidence] = RewardEvidence,
+    _transition_type: type[Transition] = Transition,
+    _utility_type: type[PolicyUtilityEvidence] = PolicyUtilityEvidence,
+    _causal_validator=_validate_canonical_causal_witnesses,
+    _utility_error_type: type[PolicyUtilityError] = PolicyUtilityError,
+    _evidence_type: type[UtilityBoundUpdateEvidence] = UtilityBoundUpdateEvidence,
+    _unresolved_reason: str = UTILITY_AUTHORITY_UNRESOLVED,
+    _sha256=hashlib.sha256,
+):
+    """Compose the fail-closed update gate from immutable authority roots."""
 
-    Authority-bearing inputs must be the exact canonical concrete types. Accepting
-    subclasses here would let a caller replace trusted properties/method dispatch
-    while still passing ``isinstance`` checks, bypassing the exact-capability fence
-    already enforced by the terminalizer composition boundary.
-    """
+    def attempt_utility_bound_update(
+        *,
+        policy: BanditPolicyState,
+        action: Action,
+        reward: RewardEvidence,
+        transition: Transition,
+        utility: PolicyUtilityEvidence,
+    ) -> tuple[BanditPolicyState, UtilityBoundUpdateEvidence]:
+        """Return an unchanged policy until owner-utility authority is resolved.
 
-    if type(policy) is not BanditPolicyState:
-        raise TypeError("policy must be exact BanditPolicyState")
-    if type(action) is not Action or type(reward) is not RewardEvidence:
-        raise TypeError("action/reward evidence must use exact canonical types")
-    if type(transition) is not Transition or type(utility) is not PolicyUtilityEvidence:
-        raise TypeError("transition/utility evidence must use exact canonical types")
+        Authority-bearing inputs must be the exact canonical concrete types.
+        The expected types and helper authorities are captured when this module
+        composes the gate, so later module-global rebinding cannot redefine
+        what "exact canonical" means.
+        """
 
-    _validate_canonical_causal_witnesses(
-        policy=policy,
-        action=action,
-        reward=reward,
-        transition=transition,
-    )
+        if type(policy) is not _policy_type:
+            raise TypeError("policy must be exact BanditPolicyState")
+        if type(action) is not _action_type or type(reward) is not _reward_type:
+            raise TypeError("action/reward evidence must use exact canonical types")
+        if type(transition) is not _transition_type or type(utility) is not _utility_type:
+            raise TypeError("transition/utility evidence must use exact canonical types")
 
-    reasons: set[str] = set()
-    if utility.environment_id != policy.environment_id:
-        reasons.add("utility_environment_mismatch")
-    if utility.action_id != action.action_id:
-        reasons.add("utility_action_mismatch")
-    if utility.outcome_id != reward.outcome_id:
-        reasons.add("utility_outcome_mismatch")
-    if utility.reward_id != reward.reward_id:
-        reasons.add("utility_reward_mismatch")
-    if utility.transition_id != transition.transition_id:
-        reasons.add("utility_transition_mismatch")
-    if utility.episode_id != transition.episode_id:
-        reasons.add("utility_episode_mismatch")
-    if utility.policy_id != policy.policy_id:
-        reasons.add("utility_policy_mismatch")
-    if utility.config_sha256 != policy.config_sha256:
-        reasons.add("utility_config_mismatch")
-    expected_protocol_sha256 = hashlib.sha256(policy.protocol_id.encode("utf-8")).hexdigest()
-    if utility.protocol_sha256 != expected_protocol_sha256:
-        reasons.add("utility_protocol_mismatch")
+        _causal_validator(
+            policy=policy,
+            action=action,
+            reward=reward,
+            transition=transition,
+        )
 
-    try:
-        utility.require_policy_update_eligible()
-    except PolicyUtilityError:
-        reasons.add(UTILITY_AUTHORITY_UNRESOLVED)
-    else:  # schema v1 cannot authorize a product policy update
-        reasons.add(UTILITY_AUTHORITY_UNRESOLVED)
+        reasons: set[str] = set()
+        if utility.environment_id != policy.environment_id:
+            reasons.add("utility_environment_mismatch")
+        if utility.action_id != action.action_id:
+            reasons.add("utility_action_mismatch")
+        if utility.outcome_id != reward.outcome_id:
+            reasons.add("utility_outcome_mismatch")
+        if utility.reward_id != reward.reward_id:
+            reasons.add("utility_reward_mismatch")
+        if utility.transition_id != transition.transition_id:
+            reasons.add("utility_transition_mismatch")
+        if utility.episode_id != transition.episode_id:
+            reasons.add("utility_episode_mismatch")
+        if utility.policy_id != policy.policy_id:
+            reasons.add("utility_policy_mismatch")
+        if utility.config_sha256 != policy.config_sha256:
+            reasons.add("utility_config_mismatch")
 
-    evidence = UtilityBoundUpdateEvidence(
-        environment_id=policy.environment_id,
-        episode_id=transition.episode_id,
-        transition_id=transition.transition_id,
-        action_id=action.action_id,
-        reward_id=reward.reward_id,
-        utility_evidence_id=utility.evidence_id,
-        utility_semantic_key=utility.semantic_key,
-        predecessor_policy_id=policy.policy_id,
-        successor_policy_id=policy.policy_id,
-        reason_codes=tuple(sorted(reasons)),
-    )
-    return policy, evidence
+        expected_protocol_sha256 = _sha256(
+            policy.protocol_id.encode("utf-8")
+        ).hexdigest()
+        if utility.protocol_sha256 != expected_protocol_sha256:
+            reasons.add("utility_protocol_mismatch")
+
+        try:
+            utility.require_policy_update_eligible()
+        except _utility_error_type:
+            reasons.add(_unresolved_reason)
+        else:  # schema v1 cannot authorize a product policy update
+            reasons.add(_unresolved_reason)
+
+        evidence = _evidence_type(
+            environment_id=policy.environment_id,
+            episode_id=transition.episode_id,
+            transition_id=transition.transition_id,
+            action_id=action.action_id,
+            reward_id=reward.reward_id,
+            utility_evidence_id=utility.evidence_id,
+            utility_semantic_key=utility.semantic_key,
+            predecessor_policy_id=policy.policy_id,
+            successor_policy_id=policy.policy_id,
+            reason_codes=tuple(sorted(reasons)),
+        )
+        return policy, evidence
+
+    return attempt_utility_bound_update
+
+
+attempt_utility_bound_update = _build_attempt_utility_bound_update()

@@ -218,7 +218,7 @@ class ExecutionLegConstraint:
             )
         _time(self.quote_expires_at, "quote_expires_at")
         if (
-            not isinstance(self.max_slippage_fraction, Decimal)
+            type(self.max_slippage_fraction) is not Decimal
             or not self.max_slippage_fraction.is_finite()
             or self.max_slippage_fraction < 0
             or self.max_slippage_fraction >= 1
@@ -425,10 +425,10 @@ class ProviderReadback:
             raise SupervisedExecutionError("terminal_settlement_exact must be bool")
         if self.status in {AcknowledgementStatus.ACCEPTED, AcknowledgementStatus.PARTIAL}:
             if (
-                not isinstance(self.accepted_odds, Decimal)
+                type(self.accepted_odds) is not Decimal
                 or not self.accepted_odds.is_finite()
                 or self.accepted_odds <= 0
-                or not isinstance(self.accepted_stake, Decimal)
+                or type(self.accepted_stake) is not Decimal
                 or not self.accepted_stake.is_finite()
                 or self.accepted_stake <= 0
             ):

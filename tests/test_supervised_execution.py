@@ -1185,3 +1185,42 @@ def test_bridge_rejects_caller_asserted_terminal_settlement_exactness() -> None:
                 attempt_id="attempt-1",
                 readback=readback,
             )
+
+def test_execution_money_inputs_reject_decimal_subclasses_before_virtual_dispatch() -> None:
+    class HostileDecimal(Decimal):
+        def is_finite(self):
+            raise AssertionError("hostile Decimal is_finite executed")
+
+    with pytest.raises(
+        SupervisedExecutionError,
+        match="max_slippage_fraction must be exact Decimal",
+    ):
+        ExecutionLegConstraint(
+            leg_id="a" * 64,
+            side="BACK",
+            quote_expires_at=QUOTE_EXPIRES_AT,
+            max_slippage_fraction=HostileDecimal("0.01"),
+        )
+
+    with pytest.raises(
+        SupervisedExecutionError,
+        match="accepted/partial readback requires exact positive odds/stake",
+    ):
+        ProviderReadback(
+            bookmaker_id="betfair",
+            account_id="account-1",
+            action_id="action-1",
+            adapter_id="betfair-rest-v1",
+            adapter_version="1",
+            profile_version=1,
+            event_id="event-1",
+            market_id="1.23456789",
+            selection_id="42",
+            external_receipt_id="receipt-1",
+            observed_at=READBACK_AT,
+            source_payload_sha256="b" * 64,
+            status=AcknowledgementStatus.ACCEPTED,
+            accepted_odds=HostileDecimal("2.00"),
+            accepted_stake=Decimal("10.00"),
+        )
+

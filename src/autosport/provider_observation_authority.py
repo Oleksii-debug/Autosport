@@ -1144,8 +1144,33 @@ def _seal_provider_evidence_store_dispatch() -> None:
     module_globals = globals()
     store_type = CompleteGameBoardEvidenceStore
     expected_error = ProviderObservationIntegrityError
+    expected_type = type
+    expected_getattr = getattr
+    expected_any = any
     expected_store_surface_reader = _CANONICAL_GETATTR_STATIC
-    expected_store_surface_reader_code = getattr(expected_store_surface_reader, "__code__", None)
+    expected_store_surface_reader_code = expected_getattr(
+        expected_store_surface_reader,
+        "__code__",
+        None,
+    )
+    expected_store_surface_reader_globals = expected_getattr(
+        expected_store_surface_reader,
+        "__globals__",
+        None,
+    )
+    expected_store_surface_reader_global_items = tuple(
+        (
+            name,
+            expected_store_surface_reader_globals[name],
+            expected_getattr(
+                expected_store_surface_reader_globals[name],
+                "__code__",
+                None,
+            ),
+        )
+        for name in expected_store_surface_reader_code.co_names
+        if name in expected_store_surface_reader_globals
+    )
     expected_inspect = inspect
     expected_getattr_static = inspect.getattr_static
     expected_save = store_type.save
@@ -1159,8 +1184,13 @@ def _seal_provider_evidence_store_dispatch() -> None:
 
     def _surface_witness(owner, name):
         surface = expected_getattr_static(owner, name)
-        function = getattr(surface, "__func__", surface)
-        return name, surface, function, getattr(function, "__code__", None)
+        function = expected_getattr(surface, "__func__", surface)
+        return (
+            name,
+            surface,
+            function,
+            expected_getattr(function, "__code__", None),
+        )
 
     expected_store_internal = tuple(
         _surface_witness(store_type, name)
@@ -1232,7 +1262,11 @@ def _seal_provider_evidence_store_dispatch() -> None:
         (
             name,
             target,
-            getattr(getattr(target, "__func__", target), "__code__", None),
+            expected_getattr(
+                expected_getattr(target, "__func__", target),
+                "__code__",
+                None,
+            ),
         )
         for name, target in (
             ("resolve_monotonic_authority_root", resolve_monotonic_authority_root),
@@ -1256,10 +1290,10 @@ def _seal_provider_evidence_store_dispatch() -> None:
             current = expected_getattr_static(owner, name)
             if current is not surface:
                 return False
-            current_function = getattr(current, "__func__", current)
+            current_function = expected_getattr(current, "__func__", current)
             if current_function is not function:
                 return False
-            if getattr(current_function, "__code__", None) is not code:
+            if expected_getattr(current_function, "__code__", None) is not code:
                 return False
         return True
 
@@ -1278,11 +1312,18 @@ def _seal_provider_evidence_store_dispatch() -> None:
             or module_globals.get("_CANONICAL_REMEMBER_CODE")
             is not expected_remember_code
             or expected_remember.__code__ is not expected_remember_code
-            or getattr(expected_store_surface_reader, "__code__", None)
+            or expected_getattr(expected_store_surface_reader, "__code__", None)
             is not expected_store_surface_reader_code
+            or expected_getattr(expected_store_surface_reader, "__globals__", None)
+            is not expected_store_surface_reader_globals
+            or expected_any(
+                expected_store_surface_reader_globals.get(name) is not target
+                or expected_getattr(target, "__code__", None) is not code
+                for name, target, code in expected_store_surface_reader_global_items
+            )
             or expected_save.__code__ is not expected_save_code
             or expected_load.__code__ is not expected_load_code
-            or any(
+            or expected_any(
                 module_globals.get(name) is not expected
                 for name, expected in expected_runtime_global_items
             )
@@ -1302,8 +1343,8 @@ def _seal_provider_evidence_store_dispatch() -> None:
                 raise expected_error(
                     "provider evidence store authority witness changed"
                 )
-            function = getattr(target, "__func__", target)
-            if getattr(function, "__code__", None) is not code:
+            function = expected_getattr(target, "__func__", target)
+            if expected_getattr(function, "__code__", None) is not code:
                 raise expected_error(
                     "provider evidence store authority witness changed"
                 )
@@ -1344,7 +1385,7 @@ def _seal_provider_evidence_store_dispatch() -> None:
             )
 
     def sealed_save(self, snapshot):
-        if type(self) is not store_type:
+        if expected_type(self) is not store_type:
             raise TypeError(
                 "provider evidence save requires exact CompleteGameBoardEvidenceStore"
             )
@@ -1358,7 +1399,7 @@ def _seal_provider_evidence_store_dispatch() -> None:
         return result
 
     def sealed_load(self, evidence_sha256):
-        if type(self) is not store_type:
+        if expected_type(self) is not store_type:
             raise TypeError(
                 "provider evidence load requires exact CompleteGameBoardEvidenceStore"
             )

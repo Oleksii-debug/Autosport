@@ -218,6 +218,20 @@ class PortfolioScenarioSnapshotIntegrityTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "ticket_id values must be unique"):
             PortfolioEngine().analyse([first, second])
 
+    def test_affected_tickets_uses_validated_snapshot_boundary(self) -> None:
+        _book, ticket, leg = self._open_ticket()
+
+        self.assertEqual(
+            PortfolioEngine.affected_tickets([ticket], leg.quote_key),
+            [ticket.ticket_id],
+        )
+        with self.assertRaisesRegex(ValueError, "canonical non-empty text"):
+            PortfolioEngine.affected_tickets([ticket], "")
+
+        ticket.status = "open"
+        with self.assertRaisesRegex(ValueError, "status must be exact TicketStatus"):
+            PortfolioEngine.affected_tickets([ticket], leg.quote_key)
+
     def test_snapshot_fails_closed_if_settlement_crosses_capture_window(self) -> None:
         book = PaperBook("100")
         first_leg = TicketLeg("event-1", "winner", "alice", Decimal("2"))

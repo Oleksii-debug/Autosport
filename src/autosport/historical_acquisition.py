@@ -11,6 +11,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Sequence
 
+from .domain import MarketEvent
 from .historical_matches import capture_historical_matches, historical_match_request_url
 from .historical_snapshot import capture_historical_snapshot
 from .integrity import atomic_write_json, durable_path_lock, sha256_file
@@ -378,8 +379,11 @@ def _require_snapshot_market_semantics(
     *,
     expected_quote_count: int,
     expected_captured_at: str,
+    expected_source_id: str,
     field: str,
 ) -> None:
+    """Reconstruct staged rows through the canonical MarketEvent authority."""
+
     try:
         raw = path.read_bytes().decode("utf-8")
     except (OSError, UnicodeError) as exc:
@@ -390,11 +394,34 @@ def _require_snapshot_market_semantics(
         raise ProviderPayloadError(
             f"{field} row count does not match staged child evidence"
         )
+
+    dedupe_keys: set[str] = set()
+    previous_sort_key: tuple[str, int, str, str, str] | None = None
     for line_number, line in enumerate(lines, start=1):
         if not line:
             raise ProviderPayloadError(f"{field} contains an empty JSONL row")
+
+        def reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+            row: dict[str, Any] = {}
+            for key, value in pairs:
+                if key in row:
+                    raise ProviderPayloadError(
+                        f"{field} row {line_number} contains duplicate JSON key {key!r}"
+                    )
+                row[key] = value
+            return row
+
+        def reject_non_finite(value: str) -> None:
+            raise ProviderPayloadError(
+                f"{field} row {line_number} contains non-finite JSON constant {value!r}"
+            )
+
         try:
-            row = json.loads(line)
+            row = json.loads(
+                line,
+                object_pairs_hook=reject_duplicate_keys,
+                parse_constant=reject_non_finite,
+            )
         except json.JSONDecodeError as exc:
             raise ProviderPayloadError(
                 f"{field} row {line_number} must be valid JSON"
@@ -403,10 +430,55 @@ def _require_snapshot_market_semantics(
             raise ProviderPayloadError(
                 f"{field} row {line_number} must be a JSON object"
             )
-        if row.get("ingest_ts") != expected_captured_at:
+
+        try:
+            event = MarketEvent.from_dict(row)
+        except (ArithmeticError, TypeError, ValueError) as exc:
+            raise ProviderPayloadError(
+                f"{field} row {line_number} is not a canonical MarketEvent"
+            ) from exc
+        canonical_row = event.to_dict()
+        if canonical_row != row:
+            raise ProviderPayloadError(
+                f"{field} row {line_number} is not canonical MarketEvent serialization"
+            )
+        canonical_line = json.dumps(
+            canonical_row,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+        if canonical_line != line:
+            raise ProviderPayloadError(
+                f"{field} row {line_number} JSON encoding is not canonical"
+            )
+        if event.source_id != expected_source_id:
+            raise ProviderPayloadError(
+                f"{field} row {line_number} source_id does not match frozen provider scope"
+            )
+        if event.ingest_ts != expected_captured_at:
             raise ProviderPayloadError(
                 f"{field} row {line_number} ingest_ts does not match child evidence"
             )
+        if event.dedupe_key in dedupe_keys:
+            raise ProviderPayloadError(
+                f"{field} contains duplicate canonical quote identity"
+            )
+        dedupe_keys.add(event.dedupe_key)
+
+        sort_key = (
+            event.observed_ts,
+            event.sequence,
+            event.event_id,
+            event.market_id,
+            event.selection_id,
+        )
+        if previous_sort_key is not None and sort_key < previous_sort_key:
+            raise ProviderPayloadError(
+                f"{field} canonical rows are not in deterministic snapshot order"
+            )
+        previous_sort_key = sort_key
 
 
 def _require_match_result_capture_semantics(
@@ -749,6 +821,7 @@ def capture_historical_acquisition_bundle(
                 market_path,
                 expected_quote_count=int(snapshot_semantics["quote_count"]),
                 expected_captured_at=str(snapshot_semantics["captured_at"]),
+                expected_source_id=str(request_scope["source_id"]),
                 field=f"snapshot[{index}].market",
             )
             entry.clear()

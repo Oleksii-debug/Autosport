@@ -441,6 +441,63 @@ class HistoricalAcquisitionBundleTests(unittest.TestCase):
                     )
             self.assertFalse(root.exists())
 
+    def test_mutually_consistent_forged_snapshot_row_fails_closed(self) -> None:
+        transport = _Transport()
+        real_capture = historical_acquisition.capture_historical_snapshot
+
+        def forge_market_evidence_and_report(*args, **kwargs):
+            report = real_capture(*args, **kwargs)
+            market_path = Path(kwargs["output_path"])
+            evidence_path = Path(kwargs["evidence_path"])
+
+            forged_row = {"ingest_ts": report.captured_at}
+            forged_market_bytes = (
+                json.dumps(
+                    forged_row,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                + "\n"
+            ).encode("utf-8")
+            market_path.write_bytes(forged_market_bytes)
+            forged_market_sha256 = hashlib.sha256(forged_market_bytes).hexdigest()
+
+            evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+            evidence["market_sha256"] = forged_market_sha256
+            evidence["quote_count"] = 1
+            evidence["has_data"] = True
+            evidence["point_in_time_snapshot_contains_odds"] = True
+            evidence_path.write_text(
+                json.dumps(evidence, ensure_ascii=False, indent=2, sort_keys=True)
+                + "\n",
+                encoding="utf-8",
+            )
+            return replace(
+                report,
+                market_sha256=forged_market_sha256,
+                quote_count=1,
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "acquisition"
+            with patch.object(
+                historical_acquisition,
+                "capture_historical_snapshot",
+                side_effect=forge_market_evidence_and_report,
+            ):
+                with self.assertRaisesRegex(
+                    ProviderPayloadError,
+                    r"snapshot\[1\]\.market row 1 is not a canonical MarketEvent",
+                ):
+                    capture_historical_acquisition_bundle(
+                        self._provider(transport),
+                        requested_at=("2026-09-12T10:03:00Z",),
+                        results_date="2026-09-10",
+                        output_dir=root,
+                    )
+            self.assertFalse(root.exists())
+
     def test_mutated_snapshot_evidence_quote_count_fails_closed(self) -> None:
         transport = _Transport()
         real_capture = historical_acquisition.capture_historical_snapshot

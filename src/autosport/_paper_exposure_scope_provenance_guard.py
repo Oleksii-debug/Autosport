@@ -159,8 +159,18 @@ def bind_canonical_execute(execute_function):
     # dictionaries. Immutable tuple replacement keeps the registry itself free of
     # mutation methods. Reflected closure-cell/code-object mutation remains outside
     # this project's TRUSTED_PRODUCT_INTERPRETER boundary.
+    # Runtime origin includes the exact durable ledger location tuple. The ledger
+    # object alone is not sufficient because its path/lock/anchor attributes are
+    # ordinary mutable Python instance state.
     runtime_origins: tuple[
-        tuple[PaperExecutionAdoptionRuntime, PaperExecutionLedger], ...
+        tuple[
+            PaperExecutionAdoptionRuntime,
+            PaperExecutionLedger,
+            object,
+            object,
+            object,
+        ],
+        ...,
     ] = ()
     scope_authorities: tuple[
         tuple[
@@ -182,18 +192,44 @@ def bind_canonical_execute(execute_function):
             raise PaperExecutionIntegrityError(
                 "canonical PAPER runtime construction requires exact runtime and ledger"
             )
-        runtime_origins = (*runtime_origins, (self, self.ledger))
+        runtime_origins = (
+            *runtime_origins,
+            (
+                self,
+                self.ledger,
+                self.ledger.path,
+                self.ledger._lock_path,
+                self.ledger._anchor_path,
+            ),
+        )
+
+    def require_runtime_origin(self, *, stage: str):
+        origin = next(
+            (entry for entry in runtime_origins if entry[0] is self),
+            None,
+        )
+        if origin is None:
+            raise PaperExecutionIntegrityError(
+                f"canonical PAPER exposure-scope runtime origin is unavailable {stage}"
+            )
+        _, ledger, path, lock_path, anchor_path = origin
+        if (
+            self.ledger is not ledger
+            or ledger.path is not path
+            or ledger._lock_path is not lock_path
+            or ledger._anchor_path is not anchor_path
+        ):
+            raise PaperExecutionIntegrityError(
+                f"canonical PAPER exposure-scope ledger origin changed {stage}"
+            )
+        return ledger
 
     def prepare_with_scope_authority(self, *args, **kwargs):
         nonlocal scope_authorities
-        origin_ledger = next(
-            (ledger for runtime, ledger in runtime_origins if runtime is self),
-            None,
+        origin_ledger = require_runtime_origin(
+            self,
+            stage="before preparation",
         )
-        if origin_ledger is None or self.ledger is not origin_ledger:
-            raise PaperExecutionIntegrityError(
-                "canonical PAPER exposure-scope ledger origin changed before preparation"
-            )
         prepared = base_prepare(self, *args, **kwargs)
         if prepared is not None:
             if type(prepared) is not prepared_type:
@@ -208,14 +244,10 @@ def bind_canonical_execute(execute_function):
 
     def authorize_descriptor_with_scope_authority(self, *args, **kwargs):
         nonlocal scope_authorities
-        origin_ledger = next(
-            (ledger for runtime, ledger in runtime_origins if runtime is self),
-            None,
+        origin_ledger = require_runtime_origin(
+            self,
+            stage="before authorization",
         )
-        if origin_ledger is None or self.ledger is not origin_ledger:
-            raise PaperExecutionIntegrityError(
-                "canonical PAPER exposure-scope ledger origin changed before authorization"
-            )
         prepared = base_authorize_descriptor(self, *args, **kwargs)
         if type(prepared) is not prepared_type:
             raise PaperExecutionIntegrityError(
@@ -531,14 +563,10 @@ def bind_canonical_execute(execute_function):
             )
 
         require_minted(self, prepared)
-        origin_ledger = next(
-            (ledger for runtime, ledger in runtime_origins if runtime is self),
-            None,
+        origin_ledger = require_runtime_origin(
+            self,
+            stage="during publication",
         )
-        if origin_ledger is None or self.ledger is not origin_ledger:
-            raise PaperExecutionIntegrityError(
-                "canonical PAPER exposure-scope ledger origin changed"
-            )
         if not any(
             runtime is self and candidate is prepared and ledger is origin_ledger
             for runtime, candidate, ledger in scope_authorities

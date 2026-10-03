@@ -111,11 +111,15 @@ def test_overlapping_conflicting_current_records_fail_closed() -> None:
 
 def test_replay_cannot_see_evidence_before_product_availability() -> None:
     future = observation(available_at=T0 + timedelta(days=2))
+    cutoff = T0 + timedelta(days=1)
 
-    result = resolve(future, as_of=T0 + timedelta(days=1))
+    future_only = resolve(future, as_of=cutoff)
+    empty = resolve(as_of=cutoff)
 
-    assert result.state is BetfairConstraintResolutionState.CAUSALLY_UNAVAILABLE
-    assert result.min_standard_size is None
+    assert future_only.state is BetfairConstraintResolutionState.NO_EVIDENCE
+    assert future_only.candidate_generation_sha256s == ()
+    assert future_only.min_standard_size is None
+    assert future_only.resolution_sha256 == empty.resolution_sha256
 
 
 def test_expired_review_does_not_remain_current() -> None:

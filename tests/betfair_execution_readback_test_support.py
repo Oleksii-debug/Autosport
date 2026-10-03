@@ -44,29 +44,30 @@ def _coherence_complete_empty_exact_ref_fixture(
 
     current: list[bytes] = []
     cleared: list[bytes] = []
+    all_scope_pages_empty = True
     for payload in prepared:
         decoded = json.loads(payload.decode("utf-8"))
         result = decoded.get("result")
         if not isinstance(result, dict):
             continue
-        if (
-            "currentOrders" in result
-            and result.get("currentOrders") == []
-            and result.get("moreAvailable") is False
-        ):
-            current.append(payload)
-        elif (
-            "clearedOrders" in result
-            and result.get("clearedOrders") == []
-            and result.get("moreAvailable") is False
-        ):
-            cleared.append(payload)
+        if "currentOrders" in result:
+            orders = result.get("currentOrders")
+            if orders != []:
+                all_scope_pages_empty = False
+            if orders == [] and result.get("moreAvailable") is False:
+                current.append(payload)
+        elif "clearedOrders" in result:
+            orders = result.get("clearedOrders")
+            if orders != []:
+                all_scope_pages_empty = False
+            if orders == [] and result.get("moreAvailable") is False:
+                cleared.append(payload)
 
     # The canonical exact-ref sweep is one terminal current page plus the four
-    # terminal cleared-status pages. Add only the second stable-empty sweep that
-    # production now requires; transition/coherence falsifiers provide their own
-    # explicit second-pass responses and therefore do not match this shape.
-    if len(current) == 1 and len(cleared) == 4:
+    # terminal cleared-status pages and no observed order on either surface.
+    # Add only the second stable-empty sweep that production now requires.
+    # Positive or paginated fixtures must remain byte-for-byte caller-controlled.
+    if all_scope_pages_empty and len(current) == 1 and len(cleared) == 4:
         prepared.extend((current[0], *cleared))
     return prepared
 

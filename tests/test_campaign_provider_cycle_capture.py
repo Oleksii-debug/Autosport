@@ -339,6 +339,83 @@ def test_provider_io_occurs_only_after_authorized_scheduled_start(
     assert exact["artifact_id"] == receipt.artifact_id
 
 
+def test_provider_io_rejects_slot_zero_start_at_next_slot_boundary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    locator, store, spec, provider_store = _setup(tmp_path)
+    provider_calls: list[int] = []
+
+    def fake_urlopen(request, timeout):
+        del request, timeout
+        provider_calls.append(1)
+        return _FakeSseResponse(_frame())
+
+    monkeypatch.setattr(provider_module, "urlopen", fake_urlopen)
+    monkeypatch.setattr(provider_module, "_default_clock", lambda: CAPTURED_AT)
+
+    with pytest.raises(
+        CampaignProviderCycleCaptureIntegrityError,
+        match="fixed schedule slot window",
+    ):
+        capture_campaign_complete_game_board(
+            precommit_locator=locator,
+            store=store,
+            source_spec=spec,
+            evidence_store=provider_store,
+            request=_request(),
+            api_key="secret-value",
+            timeout_seconds=3.0,
+            clock=lambda: "2100-01-01T06:00:10+00:00",
+        )
+
+    assert provider_calls == []
+
+
+def test_provider_observation_cannot_cross_next_slot_boundary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    locator, store, spec, provider_store = _setup(tmp_path)
+    provider_calls: list[int] = []
+
+    def fake_urlopen(request, timeout):
+        del request, timeout
+        provider_calls.append(1)
+        return _FakeSseResponse(_frame())
+
+    monkeypatch.setattr(provider_module, "urlopen", fake_urlopen)
+    monkeypatch.setattr(
+        provider_module,
+        "_default_clock",
+        lambda: "2100-01-01T06:00:10+00:00",
+    )
+
+    with pytest.raises(
+        CampaignProviderCycleCaptureIntegrityError,
+        match="fixed schedule slot window",
+    ):
+        capture_campaign_complete_game_board(
+            precommit_locator=locator,
+            store=store,
+            source_spec=spec,
+            evidence_store=provider_store,
+            request=_request(),
+            api_key="secret-value",
+            timeout_seconds=3.0,
+            clock=lambda: "2100-01-01T06:00:09+00:00",
+        )
+
+    assert provider_calls == [1]
+    evidence = store.collector_cycle_evidence(
+        source_id=spec.source_id,
+        start_cycle_seq=1,
+        end_cycle_seq=1,
+    )
+    assert len(evidence) == 1
+    assert evidence[0]["terminal"]["status"] == "LOCAL_FAILURE"
+
+
 def test_cycle_bound_structural_verifier_replaces_caller_receipts_and_fixes_scope(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -70,7 +70,20 @@ def _build_pull_request_qualification_state_reader(
     )
 
     def read(qualification: object) -> tuple[str, bool]:
-        """Read one qualification without mutable module-global trust roots."""
+        """Normalize exact primitive production state or the frozen fixture DTO."""
+
+        if type(qualification) is tuple:
+            if len(qualification) != 2:
+                raise CancellationError("invalid pull request qualification state")
+            head_sha, integration_capable = qualification
+            if type(head_sha) is not str or len(head_sha) != 40:
+                raise CancellationError("invalid live pull request head")
+            head_sha = head_sha.lower()
+            if any(ch not in "0123456789abcdef" for ch in head_sha):
+                raise CancellationError("invalid live pull request head")
+            if type(integration_capable) is not bool:
+                raise CancellationError("invalid pull request integration capability")
+            return head_sha, integration_capable
 
         if (
             qualification_type.__dict__.get("__dict__")
@@ -338,7 +351,7 @@ class GitHubApi:
             )
         return next(iter(exact_numbers))
 
-    def live_pr_qualification(self, pr_number: int) -> PullRequestQualification:
+    def live_pr_qualification(self, pr_number: int) -> tuple[str, bool]:
         payload = self._pull_request(pr_number)
         head = payload.get("head")
         base = payload.get("base")
@@ -358,13 +371,11 @@ class GitHubApi:
             isinstance(head_repo, dict)
             and head_repo.get("full_name") == self._repository
         )
-        return PullRequestQualification(
-            head_sha=_require_sha(head.get("sha"), field="live pull request head"),
-            integration_capable=(
-                state == "open"
-                and draft is False
-                and same_repository_head
-            ),
+        return (
+            _require_sha(head.get("sha"), field="live pull request head"),
+            state == "open"
+            and draft is False
+            and same_repository_head,
         )
 
     def live_pr_head(self, pr_number: int) -> str:

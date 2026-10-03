@@ -674,6 +674,69 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
                 loop.authority.risk_policy.risk_of_ruin_portfolio_sha256(book),
             )
 
+    def test_dependency_registry_change_during_market_cut_retries_before_decision(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            clock = _ManualClock(self.START + timedelta(seconds=1))
+            factory = _EmptyIntentFactory()
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(
+                    workspace,
+                    [
+                        (
+                            self._event(selection="selection-a", sequence=1),
+                            self._event(selection="selection-b", sequence=1),
+                        ),
+                        (),
+                    ],
+                ),
+                factory=factory,
+                clock=clock,
+            )
+            self._register_two(loop)
+
+            real_capture = loop.dependencies.coherent_decision_views
+            injected = {"done": False}
+
+            def capture_then_retire_input(*args, **kwargs):
+                snapshots = real_capture(*args, **kwargs)
+                if not injected["done"]:
+                    injected["done"] = True
+                    self.assertTrue(loop.unregister_input("input-b"))
+                return snapshots
+
+            with patch.object(
+                loop.dependencies,
+                "coherent_decision_views",
+                side_effect=capture_then_retire_input,
+            ):
+                first = loop.run_cycle()
+
+            self.assertEqual(first.status, LiveCycleStatus.BACKPRESSURE)
+            self.assertIn("dependency registry advanced", first.detail)
+            self.assertEqual(factory.calls, [])
+            self.assertFalse((workspace / "decisions.jsonl").exists())
+            self.assertFalse(loop.progress_path.exists())
+            self.assertEqual(loop.dependencies.input_ids, ("input-a",))
+
+            clock.value = self.START + timedelta(seconds=2)
+            second = loop.run_cycle()
+
+            self.assertEqual(second.status, LiveCycleStatus.DECIDED)
+            self.assertEqual(
+                factory.calls,
+                [("input-a", (("selection-a", 1, "open"),))],
+            )
+            self.assertEqual(
+                len(
+                    JsonlDecisionLedger(
+                        workspace / "decisions.jsonl"
+                    ).verified_records()
+                ),
+                1,
+            )
+
     def test_update_during_final_coherence_getter_retries_before_decision(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

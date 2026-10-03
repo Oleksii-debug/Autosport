@@ -1178,6 +1178,7 @@ class PersistentLiveDecisionLoop:
                 affected_input_ids=affected,
                 gate=_GATE_NORMAL,
                 expected_decision_context_sha256=decision_context_sha256,
+                expected_registered_input_ids=registered_input_ids,
             )
         except _ConcurrentDecisionSnapshot as exc:
             return LiveCycleResult(
@@ -1702,6 +1703,7 @@ class PersistentLiveDecisionLoop:
                 affected_input_ids=affected,
                 gate=_GATE_PROVIDER_GAP,
                 expected_decision_context_sha256=decision_context_sha256,
+                expected_registered_input_ids=affected,
             )
         except _ConcurrentDecisionSnapshot as exc:
             self._needs_cache_rebuild = True
@@ -2005,6 +2007,7 @@ class PersistentLiveDecisionLoop:
         affected_input_ids: tuple[str, ...],
         gate: str,
         expected_decision_context_sha256: str,
+        expected_registered_input_ids: tuple[str, ...],
     ) -> PaperBook:
         _, decision_time = _canonical_timestamp("decision_ts", decision_ts)
         self.intent_provenance.assert_available_at(decision_time)
@@ -2012,6 +2015,10 @@ class PersistentLiveDecisionLoop:
             "expected decision_context_sha256",
             expected_decision_context_sha256,
         )
+        if type(expected_registered_input_ids) is not tuple or any(
+            type(input_id) is not str for input_id in expected_registered_input_ids
+        ):
+            raise TypeError("expected_registered_input_ids must be a tuple of strings")
         with WorkspaceEconomicLock(self.workspace):
             # The snapshot is written before the cursor: a crash before cursor
             # publication leaves only ignorable stale snapshot bytes, while every
@@ -2026,6 +2033,11 @@ class PersistentLiveDecisionLoop:
             # authority but no live generation/path binding.  Its first save
             # therefore establishes only the dedicated recovery-snapshot lineage.
             live_context_sha256 = self._decision_context_sha256()
+            if self.dependencies.input_ids != expected_registered_input_ids:
+                raise _ConcurrentDecisionSnapshot(
+                    "live dependency registry advanced during decision snapshot capture; "
+                    "retrying before economic action"
+                )
             if live_context_sha256 != expected_context_sha256:
                 raise _ConcurrentDecisionSnapshot(
                     "PaperBook/risk context advanced during decision snapshot capture; "
@@ -2069,6 +2081,7 @@ class PersistentLiveDecisionLoop:
                 or durable_context_sha256 != live_context_sha256
                 or current_context_sha256 != live_context_sha256
                 or live_context_sha256 != expected_context_sha256
+                or self.dependencies.input_ids != expected_registered_input_ids
             ):
                 raise LiveDecisionProgressError(
                     "pre-action PaperBook durability verification failed"

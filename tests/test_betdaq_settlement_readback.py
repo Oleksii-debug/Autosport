@@ -405,12 +405,26 @@ def test_duplicate_transaction_id_is_idempotent_only_for_identical_content(
         )
 
 
+
 def test_same_context_query_and_provider_payload_reresolve_same_evidence_id(monkeypatch):
     payload = postings_by_id(posting(9001))
-    first, _ = economic_client(monkeypatch, payload, clock=clock_one)
-    first_value = first.read_account_postings_by_id(9000)
-    second, _ = economic_client(monkeypatch, payload, clock=clock_two)
-    second_value = second.read_account_postings_by_id(9000)
+    client, _ = economic_client(monkeypatch, payload)
+    first_value = client.read_account_postings_by_id(9000)
+
+    shifted_evidence = replace(
+        first_value.evidence,
+        observed_at="2026-09-23T00:20:00Z",
+    )
+    shifted_postings = tuple(
+        replace(item, evidence=shifted_evidence)
+        for item in first_value.postings
+    )
+    second_value = replace(
+        first_value,
+        evidence=shifted_evidence,
+        postings=shifted_postings,
+    )
+
     assert first_value.evidence.evidence_id == second_value.evidence.evidence_id
     assert first_value.readback_id == second_value.readback_id
     assert (
@@ -419,7 +433,6 @@ def test_same_context_query_and_provider_payload_reresolve_same_evidence_id(monk
     )
     assert first_value.evidence.observed_at != second_value.evidence.observed_at
     assert first_value.evidence.acquisition_id != second_value.evidence.acquisition_id
-
 
 def test_economic_acquisition_identity_binds_product_receive_time(monkeypatch):
     payload = postings_by_id(posting(9001))
@@ -436,14 +449,26 @@ def test_economic_acquisition_identity_binds_product_receive_time(monkeypatch):
     assert shifted.acquisition_id != value.evidence.acquisition_id
 
 
+
 def test_readback_rejects_row_from_different_acquisition_with_same_evidence_id(
     monkeypatch,
 ):
     payload = postings_by_id(posting(9001))
-    first, _ = economic_client(monkeypatch, payload, clock=clock_one)
-    first_value = first.read_account_postings_by_id(9000)
-    second, _ = economic_client(monkeypatch, payload, clock=clock_two)
-    second_value = second.read_account_postings_by_id(9000)
+    client, _ = economic_client(monkeypatch, payload)
+    first_value = client.read_account_postings_by_id(9000)
+    second_evidence = replace(
+        first_value.evidence,
+        observed_at="2026-09-23T00:20:00Z",
+    )
+    second_postings = tuple(
+        replace(item, evidence=second_evidence)
+        for item in first_value.postings
+    )
+    second_value = replace(
+        first_value,
+        evidence=second_evidence,
+        postings=second_postings,
+    )
 
     assert first_value.evidence.evidence_id == second_value.evidence.evidence_id
     assert first_value.evidence != second_value.evidence
@@ -452,7 +477,6 @@ def test_readback_rejects_row_from_different_acquisition_with_same_evidence_id(
         match="posting evidence does not match exact readback acquisition",
     ):
         replace(second_value, postings=first_value.postings)
-
 
 def test_distinct_authenticated_contexts_cannot_collapse_same_economic_payload(
     monkeypatch,
@@ -527,7 +551,31 @@ def test_economic_read_rejects_authenticated_context_rotation_during_dispatch(
     assert len(opener.calls) == 1
 
 
-def test_economic_read_rejects_clock_rotation_during_dispatch(monkeypatch):
+
+def test_economic_read_ignores_preconfigured_caller_clock(monkeypatch):
+    payload = postings_by_id(posting(9001))
+    caller_clock_calls = []
+
+    def caller_clock():
+        caller_clock_calls.append(True)
+        return datetime(2001, 1, 1, tzinfo=timezone.utc)
+
+    account = BetdaqAccountReadOnlyClient(
+        BetdaqCredentials("alice", "secret-pass", "secret-app"),
+        clock=caller_clock,
+    )
+    opener = QueueUrlopen(payload)
+    _install_https_test_dispatch(monkeypatch, opener)
+    client = BetdaqEconomicReadbackClient(account)
+
+    value = client.read_account_postings_by_id(9000)
+
+    assert len(opener.calls) == 1
+    assert caller_clock_calls == []
+    assert value.evidence.observed_at != "2001-01-01T00:00:00Z"
+
+
+def test_economic_read_ignores_account_clock_rotation_during_dispatch(monkeypatch):
     payload = postings_by_id(posting(9001))
     account = BetdaqAccountReadOnlyClient(
         BetdaqCredentials("alice", "secret-pass", "secret-app"),
@@ -537,7 +585,7 @@ def test_economic_read_rejects_clock_rotation_during_dispatch(monkeypatch):
 
     def hostile_clock():
         hostile_calls.append(True)
-        raise AssertionError("rotated evidence clock executed")
+        raise AssertionError("rotated caller clock executed")
 
     class RotatingClockUrlopen:
         def __init__(self):
@@ -552,57 +600,36 @@ def test_economic_read_rejects_clock_rotation_during_dispatch(monkeypatch):
     _install_https_test_dispatch(monkeypatch, opener)
     client = BetdaqEconomicReadbackClient(account)
 
-    with pytest.raises(
-        BetdaqEconomicReadbackError,
-        match="economic evidence clock changed during acquisition",
-    ):
-        client.read_account_postings_by_id(9000)
+    value = client.read_account_postings_by_id(9000)
 
     assert len(opener.calls) == 1
     assert hostile_calls == []
+    assert value.evidence.observed_at != "2026-09-23T00:10:00Z"
 
 
-def test_economic_read_rejects_in_place_clock_code_mutation_during_dispatch(
+def test_economic_read_rejects_product_clock_code_mutation_before_dispatch(
     monkeypatch,
 ):
     payload = postings_by_id(posting(9001))
-    def mutable_clock():
-        return datetime(2026, 10, 3, 10, 0, tzinfo=timezone.utc)
+    client, opener = economic_client(monkeypatch, payload)
+    product_clock = settlement_module._product_receive_time
+    original_code = product_clock.__code__
 
-    original_code = mutable_clock.__code__
+    def hostile_clock(_datetime=None, _utc=None):
+        raise AssertionError("mutated product receive clock executed")
 
-    def hostile_clock():
-        raise AssertionError("mutated evidence clock executed")
-
-    account = BetdaqAccountReadOnlyClient(
-        BetdaqCredentials("alice", "secret-pass", "secret-app"),
-        clock=mutable_clock,
-    )
-
-    class MutatingClockUrlopen:
-        def __init__(self):
-            self.calls = []
-
-        def __call__(self, request, *, timeout):
-            self.calls.append((request, timeout))
-            mutable_clock.__code__ = hostile_clock.__code__
-            return _FakeHttpResponse(payload)
-
-    opener = MutatingClockUrlopen()
-    _install_https_test_dispatch(monkeypatch, opener)
-    client = BetdaqEconomicReadbackClient(account)
-
+    assert len(hostile_clock.__code__.co_freevars) == len(original_code.co_freevars)
     try:
+        product_clock.__code__ = hostile_clock.__code__
         with pytest.raises(
             BetdaqEconomicReadbackError,
-            match="economic evidence clock changed during acquisition",
+            match="product clock authority was replaced",
         ):
             client.read_account_postings_by_id(9000)
     finally:
-        mutable_clock.__code__ = original_code
+        product_clock.__code__ = original_code
 
-    assert len(opener.calls) == 1
-
+    assert opener.calls == []
 
 def test_economic_private_call_cannot_be_widened_to_provider_write_by_globals(
     monkeypatch,

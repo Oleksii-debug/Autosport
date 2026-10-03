@@ -1212,10 +1212,10 @@ class RealExecutionLedger:
                         raise ExecutionLedgerIntegrityError(
                             "supervised approval binding schema is invalid"
                         )
-                elif payload_fields not in {
+                elif frozenset(payload_fields) not in (
                     frozenset(required_fields),
                     frozenset(required_fields | {"expires_at"}),
-                }:
+                ):
                     raise ExecutionLedgerIntegrityError(
                         "supervised approval binding schema is invalid"
                     )

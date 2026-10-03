@@ -106,7 +106,7 @@ def _finite_decimal(
     *,
     nonnegative: bool = False,
 ) -> Decimal:
-    if not isinstance(value, Decimal) or not value.is_finite():
+    if type(value) is not Decimal or not value.is_finite():
         raise OpportunityContractError(
             f"{field_name} must be an exact finite Decimal"
         )

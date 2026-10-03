@@ -202,6 +202,10 @@ class PaperAbstentionLearningTests(unittest.TestCase):
                 raw["attributions"][0]["simulation_model_id"],
                 "abstention-counterfactual-v1",
             )
+            self.assertEqual(
+                raw["attributions"][0]["findings"][0]["evidence_grade"],
+                "NOT_IDENTIFIABLE",
+            )
 
     def test_wait_cannot_bypass_externally_admissible_action_set(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

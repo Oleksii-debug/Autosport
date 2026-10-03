@@ -84,6 +84,37 @@ def test_store_roundtrip_survives_fresh_restart_instance(tmp_path) -> None:
     assert restarted_store.path.read_bytes() == first_bytes
 
 
+def test_owner_initialization_external_create_race_never_replaces_new_authority(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import autosport.economic_goal_store as goal_store
+
+    store = EconomicGoalStore(tmp_path)
+    raced_bytes = b"external-authority-won\n"
+    real_open = goal_store._open_exclusive_write_descriptor
+    raced = False
+
+    def create_before_exclusive_open(path: Path) -> int:
+        nonlocal raced
+        if not raced:
+            raced = True
+            path.write_bytes(raced_bytes)
+        return real_open(path)
+
+    monkeypatch.setattr(
+        goal_store,
+        "_open_exclusive_write_descriptor",
+        create_before_exclusive_open,
+    )
+
+    with pytest.raises(EconomicGoalContractError, match="already exists"):
+        store.initialize_owner(_goal())
+
+    assert raced is True
+    assert store.path.read_bytes() == raced_bytes
+
+
 def test_owner_initialization_is_creation_only_and_preserves_existing_bytes(tmp_path) -> None:
     goal = _goal()
     store = EconomicGoalStore(tmp_path)

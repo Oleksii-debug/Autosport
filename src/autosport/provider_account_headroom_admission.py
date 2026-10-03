@@ -239,6 +239,9 @@ _PAPER_RISK_CANDIDATE_SHA256_CODE = getattr(
 _RISK_SHA256_PAYLOAD = getattr(_risk, "_sha256_payload", None)
 _RISK_SHA256_PAYLOAD_CODE = getattr(_RISK_SHA256_PAYLOAD, "__code__", None)
 _PROPOSED_RISK_CONTEXT_TYPE = ProposedTicketRiskContext
+_RISK_CONTEXT_PROVIDER_ACCOUNTS_DESCRIPTOR = vars(ProposedTicketRiskContext).get(
+    "provider_accounts"
+)
 _RISK_CONTEXT_BANKROLL_DESCRIPTOR = vars(ProposedTicketRiskContext).get("bankroll_id")
 _RISK_CONTEXT_CURRENCY_DESCRIPTOR = vars(ProposedTicketRiskContext).get("currency")
 _WORKSPACE_ECONOMIC_LOCK_TYPE = WorkspaceEconomicLock
@@ -542,6 +545,7 @@ def _canonical_intent_denomination_dispatch(
     _risk_hash_payload=_RISK_SHA256_PAYLOAD,
     _risk_hash_payload_code=_RISK_SHA256_PAYLOAD_CODE,
     _context_type=_PROPOSED_RISK_CONTEXT_TYPE,
+    _provider_accounts_descriptor=_RISK_CONTEXT_PROVIDER_ACCOUNTS_DESCRIPTOR,
     _bankroll_descriptor=_RISK_CONTEXT_BANKROLL_DESCRIPTOR,
     _currency_descriptor=_RISK_CONTEXT_CURRENCY_DESCRIPTOR,
 ):
@@ -577,6 +581,8 @@ def _canonical_intent_denomination_dispatch(
         or getattr(_risk_hash_payload, "__code__", None) is not _risk_hash_payload_code
         or live_context_type is not _context_type
         or globals().get("ProposedTicketRiskContext") is not _context_type
+        or vars(_context_type).get("provider_accounts")
+        is not _provider_accounts_descriptor
         or vars(_context_type).get("bankroll_id") is not _bankroll_descriptor
         or vars(_context_type).get("currency") is not _currency_descriptor
     ):
@@ -589,6 +595,7 @@ def _canonical_intent_denomination_dispatch(
         _intent_context_descriptor,
         _intent_sha_descriptor,
         _context_type,
+        _provider_accounts_descriptor,
         _bankroll_descriptor,
         _currency_descriptor,
     )
@@ -1272,13 +1279,17 @@ def _validated_bound_plan_map(
 
 def _validated_intent_denomination_map(
     intents: tuple[OpportunityIntent, ...],
-) -> dict[tuple[str, str], tuple[str, str]]:
+) -> dict[
+    tuple[str, str],
+    tuple[str, str, tuple[tuple[str, str], ...]],
+]:
     (
         intent_type,
         intent_id_descriptor,
         intent_context_descriptor,
         intent_sha_descriptor,
         context_type,
+        provider_accounts_descriptor,
         bankroll_descriptor,
         currency_descriptor,
     ) = _canonical_intent_denomination_dispatch()
@@ -1286,7 +1297,10 @@ def _validated_intent_denomination_map(
         raise ProviderAccountHeadroomUnsupported(
             "exact OpportunityIntent denomination evidence is required"
         )
-    result: dict[tuple[str, str], tuple[str, str]] = {}
+    result: dict[
+        tuple[str, str],
+        tuple[str, str, tuple[tuple[str, str], ...]],
+    ] = {}
     for intent in intents:
         if type(intent) is not intent_type:
             raise ProviderAccountHeadroomUnsupported(
@@ -1304,6 +1318,24 @@ def _validated_intent_denomination_map(
             context = intent_context_descriptor.__get__(intent, intent_type)
             if type(context) is not context_type:
                 raise TypeError("risk context is not canonical")
+            provider_accounts = provider_accounts_descriptor.__get__(
+                context,
+                context_type,
+            )
+            if type(provider_accounts) is not tuple:
+                raise TypeError("provider_accounts is not canonical tuple")
+            canonical_provider_accounts: list[tuple[str, str]] = []
+            for binding in provider_accounts:
+                if type(binding) is not tuple or len(binding) != 2:
+                    raise TypeError("provider account binding is not canonical")
+                canonical_provider_accounts.append(
+                    (
+                        _text(binding[0], "opportunity intent provider source_id"),
+                        _text(binding[1], "opportunity intent provider account_id"),
+                    )
+                )
+            if tuple(canonical_provider_accounts) != provider_accounts:
+                raise TypeError("provider account bindings are not canonical")
             bankroll_id = _text(
                 bankroll_descriptor.__get__(context, context_type),
                 "opportunity intent bankroll_id",
@@ -1321,7 +1353,7 @@ def _validated_intent_denomination_map(
             raise ProviderAccountHeadroomError(
                 "denomination evidence duplicated opportunity intent identity"
             )
-        result[key] = (bankroll_id, currency)
+        result[key] = (bankroll_id, currency, provider_accounts)
     return result
 
 
@@ -1366,11 +1398,16 @@ def _require_plan_denomination(
     view: VerifiedExecutionPlanView,
     *,
     bound_by_plan_id: dict[str, BoundSupervisedExecutionPlan],
-    intent_denomination_by_identity: dict[tuple[str, str], tuple[str, str]],
+    intent_denomination_by_identity: dict[
+        tuple[str, str],
+        tuple[str, str, tuple[tuple[str, str], ...]],
+    ],
     economic_goal_contract_sha256: str,
     economic_goal_bankroll_id: str,
     provider_currency: str,
-) -> tuple[str, str, str, str, str, str]:
+    provider_id: str,
+    account_id: str,
+) -> tuple[str, str, str, str, str, str, str, str]:
     bound = bound_by_plan_id.get(view.plan.plan_id)
     if bound is None:
         raise ProviderAccountHeadroomUnsupported(
@@ -1404,13 +1441,19 @@ def _require_plan_denomination(
         raise ProviderAccountHeadroomUnsupported(
             "relevant supervised plan lacks exact OpportunityIntent denomination evidence"
         )
-    intent_bankroll_id, intent_currency = intent_denomination
+    intent_bankroll_id, intent_currency, intent_provider_accounts = (
+        intent_denomination
+    )
     if (
         intent_bankroll_id != economic_goal_bankroll_id
         or intent_currency != provider_currency
     ):
         raise ProviderAccountHeadroomUnsupported(
             "intent denomination does not match current durable economic goal"
+        )
+    if (provider_id, account_id) not in intent_provider_accounts:
+        raise ProviderAccountHeadroomUnsupported(
+            "intent provider-account scope does not cover execution account"
         )
     return (
         view.plan.plan_id,
@@ -1419,6 +1462,8 @@ def _require_plan_denomination(
         bound.intent_sha256,
         intent_bankroll_id,
         intent_currency,
+        provider_id,
+        account_id,
     )
 
 
@@ -1427,7 +1472,10 @@ def _denomination_authority_sha256(
     currency: str,
     economic_goal_contract_sha256: str,
     economic_goal_bankroll_id: str,
-    plan_bindings: tuple[tuple[str, str, str, str, str, str], ...],
+    plan_bindings: tuple[
+        tuple[str, str, str, str, str, str, str, str],
+        ...,
+    ],
 ) -> str:
     ordered = tuple(sorted(set(plan_bindings)))
     if not ordered:
@@ -1437,7 +1485,7 @@ def _denomination_authority_sha256(
     return _canonical_digest(
         {
             "schema": "autosport.provider_account_headroom_denomination_authority",
-            "schema_version": 2,
+            "schema_version": 3,
             "currency": currency,
             "economic_goal_contract_sha256": economic_goal_contract_sha256,
             "economic_goal_bankroll_id": economic_goal_bankroll_id,
@@ -1449,6 +1497,8 @@ def _denomination_authority_sha256(
                     "intent_sha256": intent_sha256,
                     "intent_bankroll_id": intent_bankroll_id,
                     "intent_currency": intent_currency,
+                    "provider_id": provider_id,
+                    "account_id": account_id,
                 }
                 for (
                     plan_id,
@@ -1457,6 +1507,8 @@ def _denomination_authority_sha256(
                     intent_sha256,
                     intent_bankroll_id,
                     intent_currency,
+                    provider_id,
+                    account_id,
                 ) in ordered
             ],
         }
@@ -1471,11 +1523,18 @@ def _resolve_account_liability_lattice(
     expected_snapshot_sha256: str,
     expected_event_count: int,
     bound_by_plan_id: dict[str, BoundSupervisedExecutionPlan],
-    intent_denomination_by_identity: dict[tuple[str, str], tuple[str, str]],
+    intent_denomination_by_identity: dict[
+        tuple[str, str],
+        tuple[str, str, tuple[tuple[str, str], ...]],
+    ],
     economic_goal_contract_sha256: str,
     economic_goal_bankroll_id: str,
     provider_currency: str,
-) -> tuple[Decimal, Decimal, tuple[tuple[str, str, str, str, str, str], ...]]:
+) -> tuple[
+    Decimal,
+    Decimal,
+    tuple[tuple[str, str, str, str, str, str, str, str], ...],
+]:
     """Return (definitely-unreflected, unknown-reflection) liability.
 
     RESERVED is definitely product-side only: it has not crossed the provider
@@ -1496,7 +1555,9 @@ def _resolve_account_liability_lattice(
         )
     definitely_unreflected = _ZERO
     unknown_reflection = _ZERO
-    denomination_bindings: list[tuple[str, str, str, str, str, str]] = []
+    denomination_bindings: list[
+        tuple[str, str, str, str, str, str, str, str]
+    ] = []
 
     for plan_id in _ledger_plan_ids(start.payload):
         try:
@@ -1517,6 +1578,8 @@ def _resolve_account_liability_lattice(
                     economic_goal_contract_sha256=economic_goal_contract_sha256,
                     economic_goal_bankroll_id=economic_goal_bankroll_id,
                     provider_currency=provider_currency,
+                    provider_id=provider_id,
+                    account_id=account_id,
                 )
             )
             capital: ExecutionCapitalAtRiskEvidence = resolve_capital(
@@ -1606,6 +1669,8 @@ def assess_provider_account_headroom(
         ) = _current_economic_goal_denomination(
             ledger,
             provider_currency=currency,
+            provider_id=action.bookmaker_id,
+            account_id=action.account_id,
         )
         snapshot = verified_snapshot(ledger)
         try:
@@ -1628,6 +1693,8 @@ def assess_provider_account_headroom(
             economic_goal_contract_sha256=economic_goal_contract_sha256,
             economic_goal_bankroll_id=economic_goal_bankroll_id,
             provider_currency=currency,
+            provider_id=action.bookmaker_id,
+            account_id=action.account_id,
         )
         action = _find_action(target_view, action_id)
         if action.bookmaker_id != "betfair" or action.side != "BACK":
@@ -1662,6 +1729,8 @@ def assess_provider_account_headroom(
             economic_goal_contract_sha256=economic_goal_contract_sha256,
             economic_goal_bankroll_id=economic_goal_bankroll_id,
             provider_currency=currency,
+            provider_id=action.bookmaker_id,
+            account_id=action.account_id,
         )
         denomination_authority_sha256 = _denomination_authority_sha256(
             currency=currency,
@@ -1816,6 +1885,8 @@ def reserve_observed_provider_headroom(
             ) = _current_economic_goal_denomination(
                 ledger,
                 provider_currency=current_currency,
+                provider_id=assessment.provider_id,
+                account_id=assessment.account_id,
             )
             if current_goal_sha256 != assessment.economic_goal_contract_sha256:
                 raise ProviderAccountHeadroomStale(
@@ -1842,6 +1913,8 @@ def reserve_observed_provider_headroom(
                 economic_goal_contract_sha256=current_goal_sha256,
                 economic_goal_bankroll_id=current_goal_bankroll_id,
                 provider_currency=current_currency,
+                provider_id=assessment.provider_id,
+                account_id=assessment.account_id,
             )
             (
                 definitely_unreflected,
@@ -1858,6 +1931,8 @@ def reserve_observed_provider_headroom(
                 economic_goal_contract_sha256=current_goal_sha256,
                 economic_goal_bankroll_id=current_goal_bankroll_id,
                 provider_currency=current_currency,
+                provider_id=assessment.provider_id,
+                account_id=assessment.account_id,
             )
             if (
                 definitely_unreflected

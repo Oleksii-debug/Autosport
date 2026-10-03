@@ -99,6 +99,7 @@ def _install_guard() -> None:
     canonical_path_lock = _availability.durable_path_lock
     canonical_read = registry_type._read
     canonical_trust_bindings = registry_type._outcome_lineage_trust_bindings
+    canonical_lineage_parser = _run_registry.outcome_lineage_binding_from_payload
     canonical_public_clock = _run_registry._utc_now
     canonical_begin = registry_type.begin
 
@@ -238,6 +239,7 @@ def _install_guard() -> None:
             "_path_lock",
             "_read_state",
             "_trust_bindings",
+            "_lineage_parser",
             "_fence_context",
             "_canonical_timestamp",
             "_parse_timestamp",
@@ -259,6 +261,7 @@ def _install_guard() -> None:
             path_lock,
             read_state,
             trust_bindings,
+            lineage_parser,
             fence_context,
             canonicalize,
             parse,
@@ -276,6 +279,7 @@ def _install_guard() -> None:
             self._path_lock = path_lock
             self._read_state = read_state
             self._trust_bindings = trust_bindings
+            self._lineage_parser = lineage_parser
             self._fence_context = fence_context
             self._canonical_timestamp = canonicalize
             self._parse_timestamp = parse
@@ -297,6 +301,20 @@ def _install_guard() -> None:
                 raise self._error_type("RunRegistry read authority dispatch was rebound")
             if self._registry_type._outcome_lineage_trust_bindings is not self._trust_bindings:
                 raise self._error_type("RunRegistry outcome trust parser dispatch was rebound")
+            if (
+                self._run_registry_module.outcome_lineage_binding_from_payload
+                is not self._lineage_parser
+            ):
+                raise self._error_type(
+                    "RunRegistry outcome lineage payload parser dispatch was rebound"
+                )
+            if (
+                self._availability_module._outcome_trust.outcome_lineage_binding_from_payload
+                is not self._lineage_parser
+            ):
+                raise self._error_type(
+                    "outcome trust lineage payload parser dispatch was rebound"
+                )
             if self._run_registry_module._utc_now is not self._canonical_public_clock:
                 raise self._error_type("product UTC clock authority was rebound")
             if self._availability_module._sealed_product_utc_now is not self._clock:
@@ -360,6 +378,7 @@ def _install_guard() -> None:
         canonical_path_lock,
         canonical_read,
         canonical_trust_bindings,
+        canonical_lineage_parser,
         _REGISTRY_AVAILABILITY_FENCE,
         canonical_timestamp,
         parse_timestamp,

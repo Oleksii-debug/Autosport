@@ -610,6 +610,56 @@ def test_generation_lock_helper_rebinding_cannot_bypass_new_reservation(
         ledger.attempt_state("generation-helper-attempt")
 
 
+def test_generation_lock_wrapped_code_rebind_fails_before_execution(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    acquired, _ = _acquire_balance(monkeypatch, tmp_path, "100")
+    action = _action("generation-wrapped-target", "10")
+    ledger = _ledger_with_plans(tmp_path, _plan("target", action))
+    wrapped = headroom_module._current_balance_generation_lock.__wrapped__
+    original_code = wrapped.__code__
+    hostile_calls = []
+
+    def forged(
+        workspace,
+        acquired,
+        *,
+        _account_authority=None,
+        _account_authority_code=None,
+        _economic_lock=None,
+        _economic_lock_code=None,
+    ):
+        del (
+            workspace,
+            acquired,
+            _account_authority,
+            _account_authority_code,
+            _economic_lock,
+            _economic_lock_code,
+        )
+        hostile_calls.append("executed")
+        yield
+
+    assert len(forged.__code__.co_freevars) == len(original_code.co_freevars)
+    try:
+        wrapped.__code__ = forged.__code__
+        with pytest.raises(
+            ProviderAccountHeadroomError,
+            match="generation lock authority changed",
+        ):
+            _assess(
+                ledger,
+                acquired,
+                plan_id="target",
+                action_id="generation-wrapped-target",
+            )
+    finally:
+        wrapped.__code__ = original_code
+
+    assert hostile_calls == []
+
+
 def test_generation_lock_helper_rebinding_cannot_bypass_assessment(
     monkeypatch,
     tmp_path,

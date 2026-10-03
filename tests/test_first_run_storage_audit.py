@@ -78,6 +78,29 @@ def test_audit_uses_windows_known_folder_when_localappdata_is_absent(
     assert resolve_known_folder.call_count == 2
 
 
+def test_audit_rejects_workspace_nested_inside_webview_storage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    local_app_data = tmp_path / "Local"
+    output = tmp_path / "audit.json"
+    webview_storage = local_app_data / "Autosport" / "webview2"
+    monkeypatch.setenv("LOCALAPPDATA", str(local_app_data))
+    monkeypatch.setenv(
+        "AUTOSPORT_WORKSPACE",
+        str(webview_storage / "economic-state"),
+    )
+
+    assert run_first_run_storage_audit(output) == 1
+
+    evidence = _read(output)
+    assert evidence["status"] == "FAIL"
+    assert evidence["error_type"] == "ValueError"
+    assert evidence["real_money_execution"] is False
+    assert evidence["human_tested"] is False
+    assert evidence["nvda_verified"] is False
+
+
 def test_audit_failure_is_bounded_and_does_not_echo_invalid_path(
     tmp_path: Path,
 ) -> None:

@@ -378,35 +378,56 @@ class CompleteGameBoardSnapshot:
         return snapshot
 
 
-_ISSUED: dict[int, tuple[weakref.ReferenceType, str]] = {}
+def _build_ephemeral_issuance_registry():
+    issued: dict[int, tuple[weakref.ReferenceType, str, object]] = {}
+    issuance_token = object()
+    reference_factory = weakref.ref
+    snapshot_type = CompleteGameBoardSnapshot
 
+    def forget(snapshot_id: int, reference: weakref.ReferenceType) -> None:
+        current = issued.get(snapshot_id)
+        if current is not None and current[0] is reference:
+            issued.pop(snapshot_id, None)
 
-def _forget_issued(snapshot_id: int, reference: weakref.ReferenceType) -> None:
-    current = _ISSUED.get(snapshot_id)
-    if current is not None and current[0] is reference:
-        _ISSUED.pop(snapshot_id, None)
-
-
-def _remember(snapshot: CompleteGameBoardSnapshot) -> CompleteGameBoardSnapshot:
-    snapshot_id = id(snapshot)
-    reference = weakref.ref(
-        snapshot,
-        lambda current, snapshot_id=snapshot_id: _forget_issued(snapshot_id, current),
-    )
-    _ISSUED[snapshot_id] = (reference, snapshot.evidence_sha256)
-    return snapshot
-
-
-def assert_complete_game_board_authoritative(snapshot: CompleteGameBoardSnapshot) -> None:
-    if not isinstance(snapshot, CompleteGameBoardSnapshot):
-        raise ProviderObservationUnsupportedError(
-            "complete provider authority requires CompleteGameBoardSnapshot"
+    def remember(snapshot: CompleteGameBoardSnapshot) -> CompleteGameBoardSnapshot:
+        if type(snapshot) is not snapshot_type:
+            raise ProviderObservationUnsupportedError(
+                "complete provider authority requires exact CompleteGameBoardSnapshot"
+            )
+        snapshot_id = id(snapshot)
+        reference = reference_factory(
+            snapshot,
+            lambda current, snapshot_id=snapshot_id: forget(snapshot_id, current),
         )
-    issued = _ISSUED.get(id(snapshot))
-    if issued is None or issued[0]() is not snapshot or issued[1] != snapshot.evidence_sha256:
-        raise ProviderObservationUnsupportedError(
-            "snapshot was not issued by canonical provider acquisition evidence"
+        issued[snapshot_id] = (
+            reference,
+            snapshot.evidence_sha256,
+            issuance_token,
         )
+        return snapshot
+
+    def assert_authoritative(snapshot: CompleteGameBoardSnapshot) -> None:
+        if type(snapshot) is not snapshot_type:
+            raise ProviderObservationUnsupportedError(
+                "complete provider authority requires exact CompleteGameBoardSnapshot"
+            )
+        current = issued.get(id(snapshot))
+        if (
+            current is None
+            or current[0]() is not snapshot
+            or current[1] != snapshot.evidence_sha256
+            or current[2] is not issuance_token
+        ):
+            raise ProviderObservationUnsupportedError(
+                "snapshot was not issued by canonical provider acquisition evidence"
+            )
+
+    return remember, assert_authoritative
+
+
+_remember, assert_complete_game_board_authoritative = (
+    _build_ephemeral_issuance_registry()
+)
 
 
 def _parse_sse_event(

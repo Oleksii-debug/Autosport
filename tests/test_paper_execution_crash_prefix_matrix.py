@@ -14,8 +14,10 @@ from autosport.paper_execution_adoption import (
 from autosport.paper_execution_reality import (
     EvidenceGrade,
     PaperAttemptOutcome,
+    PaperExecutionIntegrityError,
     PaperExecutionLedger,
     PaperExecutionModelConfig,
+    PaperExecutionStateError,
     RecoveryDecision,
 )
 from autosport.real_execution_ledger import ExecutionAction, ExecutionPlan
@@ -289,6 +291,119 @@ class PaperExecutionCrashPrefixMatrixTests(unittest.TestCase):
         self.assertEqual(str(run.worst_case_exposure), "7.00")
         self.assertEqual(baseline["book_semantics"][1], "93.00")
         self.assertEqual(len(baseline["book_semantics"][2]), 1)
+
+    def test_nonempty_suspension_is_bound_to_durable_reservation_identity(
+        self,
+    ) -> None:
+        actions = (
+            _action("suspension-bound-action-1", stake="7.00"),
+            _action("suspension-bound-action-2", stake="11.00"),
+        )
+        suspended = frozenset({"suspension-bound-action-2"})
+        model = _config()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            book = PaperBook("100.00")
+            runtime = _runtime(root, book, model=model)
+            prepared = _prepared(runtime, *actions)
+            result = runtime.execute(
+                prepared=prepared,
+                trigger_id=TRIGGER_ID,
+                started_at=STARTED_AT,
+                materialize_exposure=False,
+                suspended_action_ids=suspended,
+            )
+
+            reservations = [
+                event
+                for event in runtime.ledger.events(result.run.run_id)
+                if event["event_type"] == "RUN_RESERVED"
+            ]
+            self.assertEqual(len(reservations), 1)
+            self.assertEqual(
+                reservations[0]["payload"]["suspended_action_ids"],
+                ["suspension-bound-action-2"],
+            )
+
+            reopened_ledger = PaperExecutionLedger(root / "paper-execution.jsonl")
+            with self.assertRaisesRegex(
+                PaperExecutionStateError,
+                "run identity conflicts with durable reservation",
+            ):
+                reopened_ledger.load_run(
+                    run_id=result.run.run_id,
+                    trigger_id=TRIGGER_ID,
+                    plan=prepared.execution_plan,
+                    config=model,
+                    started_at=STARTED_AT,
+                    observation_evidence_ids={},
+                    suspended_action_ids=frozenset(),
+                )
+
+    def test_changed_suspension_after_restart_cannot_reinterpret_or_materialize(
+        self,
+    ) -> None:
+        actions = (
+            _action("suspension-restart-action-1", stake="7.00"),
+            _action("suspension-restart-action-2", stake="11.00"),
+        )
+        suspended = frozenset({"suspension-restart-action-2"})
+        model = _config()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            book_path = root / "paper_book.json"
+            book = PaperBook("100.00")
+            runtime = _runtime(root, book, model=model)
+            first = runtime.execute(
+                prepared=_prepared(runtime, *actions),
+                trigger_id=TRIGGER_ID,
+                started_at=STARTED_AT,
+                materialize_exposure=False,
+                suspended_action_ids=suspended,
+            )
+            self.assertEqual(
+                tuple(attempt.outcome for attempt in first.run.attempts),
+                (PaperAttemptOutcome.ACCEPTED, PaperAttemptOutcome.REJECTED),
+            )
+            pre_retry_book_bytes = book_path.read_bytes()
+
+            recovered_book = PaperBook.load(book_path)
+            recovered_runtime = _runtime(root, recovered_book, model=model)
+            with self.assertRaisesRegex(
+                PaperExecutionIntegrityError,
+                "event_key already has different payload",
+            ):
+                recovered_runtime.execute(
+                    prepared=_prepared(recovered_runtime, *actions),
+                    trigger_id=TRIGGER_ID,
+                    started_at=STARTED_AT,
+                    materialize_exposure=True,
+                    suspended_action_ids=frozenset(),
+                )
+
+            self.assertEqual(recovered_book.tickets, {})
+            self.assertEqual(book_path.read_bytes(), pre_retry_book_bytes)
+
+    def test_empty_suspension_keeps_legacy_reservation_payload_shape(self) -> None:
+        model = _config()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            book = PaperBook("100.00")
+            runtime = _runtime(root, book, model=model)
+            result = runtime.execute(
+                prepared=_prepared(runtime),
+                trigger_id=TRIGGER_ID,
+                started_at=STARTED_AT,
+                materialize_exposure=False,
+            )
+            reservation = next(
+                event
+                for event in runtime.ledger.events(result.run.run_id)
+                if event["event_type"] == "RUN_RESERVED"
+            )
+            self.assertNotIn("suspended_action_ids", reservation["payload"])
 
     def test_unknown_attempt_remains_negative_evidence_without_ghost_exposure(self) -> None:
         states = {

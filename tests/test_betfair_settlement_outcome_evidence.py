@@ -6,6 +6,7 @@ import json
 
 import pytest
 
+from autosport import betfair_settlement_outcome_evidence as outcome_module
 from autosport.betfair_account_readonly import (
     BetfairReadOnlyClient,
     BetfairSessionCredentials,
@@ -310,3 +311,147 @@ def test_settlement_correction_invalidates_previous_outcome_evidence(tmp_path) -
     current = _resolve(store)
     assert current.settlement_revision_id == corrected.revision_id
     assert current.target_value == 0
+
+def test_outcome_dispatch_guard_root_rebind_fails_before_hostile_checker(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    store, ledger, plan, action, ref, _transport, client = _context(tmp_path)
+    _ingest(store, ledger, plan, action, _capture(client, ref))
+    captured_resolve = resolve_current_binary_selection_outcome
+    hostile_calls: list[str] = []
+
+    def hostile_guard() -> None:
+        hostile_calls.append("guard")
+        raise AssertionError("hostile dispatch checker executed")
+
+    monkeypatch.setattr(outcome_module, "_require_dispatch", hostile_guard)
+
+    with pytest.raises(
+        BetfairOutcomeEvidenceError,
+        match="public dispatch changed",
+    ):
+        captured_resolve(
+            store,
+            bookmaker_id="betfair",
+            account_id="acct-1",
+            external_bet_id="bet-777",
+        )
+
+    assert hostile_calls == []
+
+
+def test_outcome_dispatch_guard_code_mutation_fails_before_projection(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    store, ledger, plan, action, ref, _transport, client = _context(tmp_path)
+    _ingest(store, ledger, plan, action, _capture(client, ref))
+    guard = outcome_module._require_dispatch
+    original_code = guard.__code__
+
+    monkeypatch.setattr(
+        guard,
+        "__code__",
+        original_code.replace(co_name="hostile_dispatch_checker"),
+    )
+
+    with pytest.raises(
+        BetfairOutcomeEvidenceError,
+        match="public dispatch changed",
+    ):
+        resolve_current_binary_selection_outcome(
+            store,
+            bookmaker_id="betfair",
+            account_id="acct-1",
+            external_bet_id="bet-777",
+        )
+
+
+def test_outcome_project_and_expected_witness_rebind_cannot_move_together(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    store, ledger, plan, action, ref, _transport, client = _context(tmp_path)
+    _ingest(store, ledger, plan, action, _capture(client, ref))
+    hostile_calls: list[str] = []
+
+    def hostile_project(_revision):
+        hostile_calls.append("project")
+        raise AssertionError("hostile projection executed")
+
+    monkeypatch.setattr(outcome_module, "_project", hostile_project)
+    monkeypatch.setattr(outcome_module, "_PROJECT", hostile_project)
+    monkeypatch.setattr(outcome_module, "_PROJECT_CODE", hostile_project.__code__)
+
+    with pytest.raises(
+        BetfairOutcomeEvidenceError,
+        match="authority dispatch changed",
+    ):
+        resolve_current_binary_selection_outcome(
+            store,
+            bookmaker_id="betfair",
+            account_id="acct-1",
+            external_bet_id="bet-777",
+        )
+
+    assert hostile_calls == []
+
+
+def test_captured_require_rejects_public_resolver_root_rebind(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    store, ledger, plan, action, ref, _transport, client = _context(tmp_path)
+    _ingest(store, ledger, plan, action, _capture(client, ref))
+    evidence = _resolve(store)
+    captured_require = require_current_binary_selection_outcome
+    hostile_calls: list[str] = []
+
+    def hostile_resolve(*_args, **_kwargs):
+        hostile_calls.append("resolve")
+        raise AssertionError("hostile public resolver executed")
+
+    monkeypatch.setattr(
+        outcome_module,
+        "resolve_current_binary_selection_outcome",
+        hostile_resolve,
+    )
+
+    with pytest.raises(
+        BetfairOutcomeEvidenceError,
+        match="public dispatch changed",
+    ):
+        captured_require(store, evidence)
+
+    assert hostile_calls == []
+
+
+def test_captured_resolve_rejects_public_require_root_rebind(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    store, ledger, plan, action, ref, _transport, client = _context(tmp_path)
+    _ingest(store, ledger, plan, action, _capture(client, ref))
+    captured_resolve = resolve_current_binary_selection_outcome
+
+    def hostile_require(*_args, **_kwargs):
+        raise AssertionError("hostile public require executed")
+
+    monkeypatch.setattr(
+        outcome_module,
+        "require_current_binary_selection_outcome",
+        hostile_require,
+    )
+
+    with pytest.raises(
+        BetfairOutcomeEvidenceError,
+        match="public dispatch changed",
+    ):
+        captured_resolve(
+            store,
+            bookmaker_id="betfair",
+            account_id="acct-1",
+            external_bet_id="bet-777",
+        )
+

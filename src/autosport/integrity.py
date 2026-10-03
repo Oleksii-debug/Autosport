@@ -288,8 +288,8 @@ def read_verified_scientific_registry_text(path: str | Path) -> str:
     Record/schema validation must run before monotonic authority judges the image.
     That ordering preserves precise corruption diagnostics without weakening
     rollback protection: after validation, the baseline helper reacquires this
-    same path lock, exact-matches the validated bytes, and then bootstraps or
-    recovers the independent authority against their digest.
+    same path lock, exact-matches the validated bytes, and requires existing
+    independent authority for every non-pristine image before recovery.
     """
 
     destination = Path(path)

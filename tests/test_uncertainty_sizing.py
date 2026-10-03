@@ -624,32 +624,12 @@ class UncertaintySizingTests(unittest.TestCase):
     ) -> None:
         evaluator = uncertainty_sizing_module.evaluate_uncertainty_sizing
         original_code = evaluator.__code__
-        hostile_called = False
-
-        def hostile(evidence, request, policy):
-            nonlocal hostile_called
-            hostile_called = True
-            return None
-
-        self.assertEqual(
-            evaluator.__code__.co_freevars,
-            (),
-        )
-        self.assertEqual(
-            hostile.__code__.co_freevars,
-            ("hostile_called",),
-        )
-
-        # CPython only permits __code__ replacement with a matching closure shape;
-        # use a no-closure hostile executable so the mutation is mechanically valid.
-        calls: list[str] = []
 
         def hostile_no_closure(evidence, request, policy):
-            calls.append("hostile")
-            return None
+            raise AssertionError("hostile evaluator code executed")
 
-        original_calls = hostile_no_closure.__globals__.get("calls")
-        hostile_no_closure.__globals__["calls"] = calls
+        self.assertEqual(evaluator.__code__.co_freevars, ())
+        self.assertEqual(hostile_no_closure.__code__.co_freevars, ())
         try:
             evaluator.__code__ = hostile_no_closure.__code__
             with self.assertRaisesRegex(
@@ -663,12 +643,6 @@ class UncertaintySizingTests(unittest.TestCase):
                 )
         finally:
             evaluator.__code__ = original_code
-            if original_calls is None:
-                hostile_no_closure.__globals__.pop("calls", None)
-            else:
-                hostile_no_closure.__globals__["calls"] = original_calls
-
-        self.assertEqual(calls, [])
 
 
 if __name__ == "__main__":

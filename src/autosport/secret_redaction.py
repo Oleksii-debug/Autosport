@@ -240,7 +240,7 @@ def _reversible_base64_secret_values(secrets: Iterable[str]) -> tuple[str, ...]:
 
 
 def _reversible_url_secret_values(secrets: Iterable[str]) -> tuple[str, ...]:
-    """Return single-pass URL spellings only for already-known secret values."""
+    """Return canonical single-pass URL spellings of known secret values."""
 
     values: set[str] = set()
     for secret in secrets:
@@ -250,16 +250,37 @@ def _reversible_url_secret_values(secrets: Iterable[str]) -> tuple[str, ...]:
         ):
             if encoded != secret:
                 values.add(encoded)
-                # Percent-hex is case-insensitive. Preserve literal non-percent text
-                # while covering the common lowercase-hex spelling as well.
-                lowered = re.sub(
-                    r"%[0-9A-Fa-f]{2}",
-                    lambda match: match.group(0).lower(),
-                    encoded,
-                )
-                values.add(lowered)
     values.discard("")
     return tuple(sorted(values, key=lambda item: (-len(item), item)))
+
+
+def _normalize_percent_escape_case(value: str) -> str:
+    """Canonicalize only percent-hex case while preserving literal text case."""
+
+    return re.sub(
+        r"%[0-9A-Fa-f]{2}",
+        lambda match: "%" + match.group(0)[1:].upper(),
+        value,
+    )
+
+
+def _replace_url_encoded_secret(text: str, encoded_secret: str) -> str:
+    """Redact one encoded secret with percent-hex case-insensitive matching."""
+
+    normalized_secret = _normalize_percent_escape_case(encoded_secret)
+    rendered = text
+    search_from = 0
+    while True:
+        normalized_rendered = _normalize_percent_escape_case(rendered)
+        index = normalized_rendered.find(normalized_secret, search_from)
+        if index < 0:
+            return rendered
+        rendered = (
+            rendered[:index]
+            + REDACTED
+            + rendered[index + len(encoded_secret) :]
+        )
+        search_from = index + len(REDACTED)
 
 
 def _decode_query_key_for_classification(value: str) -> tuple[str, bool]:
@@ -349,15 +370,15 @@ def redact_operator_text(
         # Base64 and URL percent-encoding are reversible credential material,
         # not redaction. Derive only spellings of secrets already authoritative
         # for this call; never decode/classify arbitrary opaque values.
-        reversible_secrets = (
-            *_reversible_base64_secret_values(secrets),
-            *_reversible_url_secret_values(secrets),
-        )
-        if reversible_secrets:
+        reversible_base64_secrets = _reversible_base64_secret_values(secrets)
+        reversible_url_secrets = _reversible_url_secret_values(secrets)
+        if reversible_base64_secrets or reversible_url_secrets:
             parts = rendered.split(REDACTED)
             for index, part in enumerate(parts):
-                for encoded_secret in reversible_secrets:
+                for encoded_secret in reversible_base64_secrets:
                     part = part.replace(encoded_secret, REDACTED)
+                for encoded_secret in reversible_url_secrets:
+                    part = _replace_url_encoded_secret(part, encoded_secret)
                 parts[index] = part
             rendered = REDACTED.join(parts)
 

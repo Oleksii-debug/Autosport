@@ -135,6 +135,9 @@ def test_mocked_https_dispatch_cannot_issue_provider_origin(
     capture._validate()
     with pytest.raises(BetfairReadOnlyError, match="product-origin authority"):
         capture.assert_authoritative()
+    assert capture._authority_client is None
+    assert capture._authority_account_identity is None
+    assert capture._authority_capture_fingerprint is None
     assert capture._authority_origin_proof is None
 
 def test_mocked_capture_and_equal_copy_both_lack_origin_authority(

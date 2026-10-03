@@ -14,6 +14,7 @@ if __package__:
         CancellationError,
         GitHubApi,
         WorkflowRun,
+        _pull_request_qualification_state,
         _require_positive_int,
         _require_sha,
         cancel_superseded,
@@ -32,6 +33,7 @@ else:
         CancellationError,
         GitHubApi,
         WorkflowRun,
+        _pull_request_qualification_state,
         _require_positive_int,
         _require_sha,
         cancel_superseded,
@@ -317,8 +319,14 @@ class WorkflowScopedGitHubApi(GitHubApi):
         canonical_branch_head,
         live_pr_qualification,
         pull_request,
+        qualification_state_reader,
     ):
         base_cancel_code = getattr(base_cancel, "__code__", None)
+        qualification_state_reader_code = getattr(
+            qualification_state_reader,
+            "__code__",
+            None,
+        )
         helper_dispatch = (
             (
                 "_request",
@@ -351,9 +359,12 @@ class WorkflowScopedGitHubApi(GitHubApi):
                 getattr(pull_request, "__code__", None),
             ),
         )
-        if any(
-            implementation_code is None
-            for _, _, implementation_code in helper_dispatch
+        if (
+            qualification_state_reader_code is None
+            or any(
+                implementation_code is None
+                for _, _, implementation_code in helper_dispatch
+            )
         ):
             raise RuntimeError(
                 "canonical scoped cancellation executable is unavailable"
@@ -452,8 +463,25 @@ class WorkflowScopedGitHubApi(GitHubApi):
                 require_helper_dispatch("live_pr_qualification")
                 require_helper_dispatch("_pull_request")
                 if (
-                    qualification.head_sha == candidate_head_sha
-                    and qualification.integration_capable
+                    getattr(qualification_state_reader, "__code__", None)
+                    is not qualification_state_reader_code
+                ):
+                    raise CancellationError(
+                        "pull request qualification reader authority changed"
+                    )
+                qualification_head, integration_capable = (
+                    qualification_state_reader(qualification)
+                )
+                if (
+                    getattr(qualification_state_reader, "__code__", None)
+                    is not qualification_state_reader_code
+                ):
+                    raise CancellationError(
+                        "pull request qualification reader authority changed"
+                    )
+                if (
+                    qualification_head == candidate_head_sha
+                    and integration_capable
                 ):
                     raise _CancellationAuthorityChanged(
                         "recovered workflow run live qualification changed"
@@ -474,6 +502,7 @@ class WorkflowScopedGitHubApi(GitHubApi):
         _canonical_branch_head,
         GitHubApi.live_pr_qualification,
         GitHubApi._pull_request,
+        _pull_request_qualification_state,
     )
     del _build_cancel
 
@@ -604,9 +633,12 @@ class WorkflowScopedGitHubApi(GitHubApi):
                 qualification = self.live_pr_qualification(pr_number)
             except CancellationError:
                 continue
+            qualification_head, integration_capable = (
+                _pull_request_qualification_state(qualification)
+            )
             if (
-                qualification.head_sha == candidate_head_sha
-                and qualification.integration_capable
+                qualification_head == candidate_head_sha
+                and integration_capable
             ):
                 continue
             self._recovered_runs[run_id] = (pr_number, candidate_head_sha)
@@ -638,14 +670,21 @@ def _cancel_triggering_run_if_stale_or_nonqualifying(
 
     event_head_sha = _require_sha(event_head_sha, field="event head sha")
     current_run_id = _require_positive_int(current_run_id, field="current run id")
-    stale = qualification.head_sha != event_head_sha
+    qualification_state = _pull_request_qualification_state(qualification)
+    qualification_head, integration_capable = qualification_state
+    stale = qualification_head != event_head_sha
     same_head_nonqualifying = (
-        qualification.head_sha == event_head_sha
-        and not qualification.integration_capable
+        qualification_head == event_head_sha
+        and not integration_capable
     )
     if not stale and not same_head_nonqualifying:
         return False
-    if api.live_pr_qualification(pr_number) != qualification:
+    if (
+        _pull_request_qualification_state(
+            api.live_pr_qualification(pr_number)
+        )
+        != qualification_state
+    ):
         return False
     api.cancel(current_run_id)
     return True
@@ -677,6 +716,9 @@ def main(argv: list[str] | None = None) -> int:
         # before canonical cancellation selects candidates, same-head selection is
         # disabled there; if its head changes, canonical cancellation returns stale.
         qualification = api.live_pr_qualification(pr_number)
+        qualification_head, integration_capable = (
+            _pull_request_qualification_state(qualification)
+        )
         event_head_sha = _require_sha(args.event_head_sha, field="event head sha")
         api.configure_historical_candidate_recovery(
             pr_number=pr_number,
@@ -684,8 +726,8 @@ def main(argv: list[str] | None = None) -> int:
             current_run_id=args.current_run_id,
         )
         if (
-            qualification.head_sha == event_head_sha
-            and not qualification.integration_capable
+            qualification_head == event_head_sha
+            and not integration_capable
         ):
             api.configure_same_head_candidate_recovery(
                 pr_number=pr_number,
@@ -702,7 +744,7 @@ def main(argv: list[str] | None = None) -> int:
         result = cancel_superseded(
             api=api,
             pr_number=pr_number,
-            event_head_sha=qualification.head_sha,
+            event_head_sha=qualification_head,
             workflow_name=args.workflow_name,
             current_run_id=args.current_run_id,
         )

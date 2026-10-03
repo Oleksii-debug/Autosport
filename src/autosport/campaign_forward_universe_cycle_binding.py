@@ -20,6 +20,7 @@ from ._forward_universe_backing_guard import (
     load_guarded_provider_evaluation_universe,
 )
 from .campaign_inception import (
+    CampaignInceptionReceipt,
     CampaignInceptionSourceSpec,
     establish_campaign_inception,
 )

@@ -441,8 +441,8 @@
         : "—",
     );
     setValueIfChanged(
-      byId("product-runtime-economic-as-of"),
-      runtimeEconomic.as_of || "—",
+      byId("product-runtime-economic-cycle-last-success"),
+      runtimeEconomic.cycle_last_success_at || "—",
     );
     setValueIfChanged(
       byId("product-runtime-paper-book-sha"),

@@ -5,6 +5,7 @@ from urllib.error import HTTPError
 import pytest
 
 import scripts.cancel_superseded_pr_workflow_runs as controller_module
+import scripts.cancel_superseded_pr_workflow_runs_scoped as scoped_controller
 from scripts.cancel_superseded_pr_workflow_runs import (
     CancellationError,
     GitHubApi,
@@ -67,6 +68,62 @@ def test_cancel_accepts_nonempty_202_success_response_body(monkeypatch) -> None:
 
     assert calls == [
         ("https://api.github.com/repos/owner/repo/actions/runs/123/cancel", "POST", 20),
+    ]
+
+
+def test_base_cancel_run_id_cannot_be_redirected_by_validator_rebind(
+    monkeypatch,
+) -> None:
+    api = GitHubApi(repository="owner/repo", token="token")
+    calls: list[tuple[str, str]] = []
+
+    def redirect_run_id(value, *, field: str):
+        assert field == "run id"
+        return 999 if value == 123 else value
+
+    def fake_urlopen(request, *, timeout: int):
+        assert timeout == 20
+        calls.append((request.full_url, request.get_method()))
+        return _FakeSuccessResponse(202, b"accepted")
+
+    monkeypatch.setattr(controller_module, "_require_positive_int", redirect_run_id)
+    monkeypatch.setattr(controller_module, "urlopen", fake_urlopen)
+
+    api.cancel(123)
+
+    assert calls == [
+        ("https://api.github.com/repos/owner/repo/actions/runs/123/cancel", "POST"),
+    ]
+
+
+def test_scoped_cancel_run_id_cannot_be_redirected_by_validator_rebind(
+    monkeypatch,
+) -> None:
+    api = WorkflowScopedGitHubApi(
+        repository="owner/repo",
+        token="token",
+        workflow_id=1,
+        workflow_name="CI",
+    )
+    calls: list[tuple[str, str]] = []
+
+    def redirect_run_id(value, *, field: str):
+        assert field == "run id"
+        return 999 if value == 123 else value
+
+    def fake_urlopen(request, *, timeout: int):
+        assert timeout == 20
+        calls.append((request.full_url, request.get_method()))
+        return _FakeSuccessResponse(202, b"accepted")
+
+    monkeypatch.setattr(controller_module, "_require_positive_int", redirect_run_id)
+    monkeypatch.setattr(scoped_controller, "_require_positive_int", redirect_run_id)
+    monkeypatch.setattr(controller_module, "urlopen", fake_urlopen)
+
+    api.cancel(123)
+
+    assert calls == [
+        ("https://api.github.com/repos/owner/repo/actions/runs/123/cancel", "POST"),
     ]
 
 

@@ -6,6 +6,7 @@ import json
 
 import pytest
 
+import autosport.nvda_manual_acceptance as nvda_manual_module
 from autosport.nvda_human_acceptance import (
     HUMAN_NVDA_ORIGIN,
     REQUIRED_JOURNEY_IDS,
@@ -425,6 +426,112 @@ def test_resolution_verifier_rejects_instance_events_override(tmp_path):
         )
 
     assert hostile_called is False
+
+
+def test_resolution_registry_is_not_module_visible() -> None:
+    assert not hasattr(nvda_manual_module, "_ISSUED_RESOLUTIONS")
+    assert not hasattr(nvda_manual_module, "_REGISTER_RESOLUTION_WITNESS")
+    assert not hasattr(nvda_manual_module, "_LOOKUP_RESOLUTION_WITNESS")
+
+
+def test_fake_lookup_global_cannot_override_private_resolution_registry(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    transcript = _transcript()
+    ledger = _ledger(tmp_path)
+    _record(ledger, transcript, reviewed_at=T0)
+    resolution = _resolve(ledger, transcript)
+    assert resolution is not None
+    hostile_called = False
+
+    def hostile_lookup(_resolution):
+        nonlocal hostile_called
+        hostile_called = True
+        raise AssertionError("module-global hostile lookup executed")
+
+    monkeypatch.setattr(
+        nvda_manual_module,
+        "_LOOKUP_RESOLUTION_WITNESS",
+        hostile_lookup,
+        raising=False,
+    )
+
+    assert (
+        verify_manual_nvda_acceptance_resolution(
+            resolution,
+            expected_artifact_sha256=ARTIFACT_SHA,
+            expected_source_sha=SOURCE_SHA,
+            expected_transcript_sha256=resolution.record.transcript_sha256,
+        )
+        is resolution
+    )
+    assert hostile_called is False
+
+
+def test_fake_register_global_cannot_override_private_resolution_issuance(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    transcript = _transcript()
+    ledger = _ledger(tmp_path)
+    _record(ledger, transcript, reviewed_at=T0)
+    hostile_called = False
+
+    def hostile_register(**_kwargs):
+        nonlocal hostile_called
+        hostile_called = True
+        raise AssertionError("module-global hostile register executed")
+
+    monkeypatch.setattr(
+        nvda_manual_module,
+        "_REGISTER_RESOLUTION_WITNESS",
+        hostile_register,
+        raising=False,
+    )
+
+    resolution = _resolve(ledger, transcript)
+    assert resolution is not None
+    assert hostile_called is False
+    assert (
+        verify_manual_nvda_acceptance_resolution(
+            resolution,
+            expected_artifact_sha256=ARTIFACT_SHA,
+            expected_source_sha=SOURCE_SHA,
+            expected_transcript_sha256=resolution.record.transcript_sha256,
+        )
+        is resolution
+    )
+
+
+def test_fake_registry_global_cannot_mint_a_copied_resolution(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    transcript = _transcript()
+    ledger = _ledger(tmp_path)
+    _record(ledger, transcript, reviewed_at=T0)
+    resolution = _resolve(ledger, transcript)
+    assert resolution is not None
+    cloned = copy(resolution)
+
+    monkeypatch.setattr(
+        nvda_manual_module,
+        "_ISSUED_RESOLUTIONS",
+        {id(cloned): object()},
+        raising=False,
+    )
+
+    with pytest.raises(
+        NvdaManualAcceptanceStateError,
+        match="not a live resolver-issued authority",
+    ):
+        verify_manual_nvda_acceptance_resolution(
+            cloned,
+            expected_artifact_sha256=ARTIFACT_SHA,
+            expected_source_sha=SOURCE_SHA,
+            expected_transcript_sha256=resolution.record.transcript_sha256,
+        )
 
 
 def test_new_decision_must_not_backdate_or_reuse_timestamp(tmp_path):

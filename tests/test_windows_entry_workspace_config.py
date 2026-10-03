@@ -85,6 +85,8 @@ def test_valid_workspace_configuration_delegates_to_webview_shell(tmp_path: Path
     build_controller.assert_called_once_with(workspace)
     build_bridge.assert_called_once_with(controller)
     launch_shell.assert_called_once_with(bridge)
+    assert (workspace / ".interactive-run.lock").is_file()
+    assert (webview_storage.parent / ".interactive-run.lock").is_file()
 
 
 def test_overlapping_workspace_and_webview_roots_fail_before_writability_or_runtime(

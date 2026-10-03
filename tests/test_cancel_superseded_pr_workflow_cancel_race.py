@@ -239,6 +239,60 @@ def test_scoped_production_api_rejects_in_place_base_cancel_code_rebind() -> Non
 
 
 @pytest.mark.parametrize(
+    "helper_name",
+    [
+        "_historical_associated_pr_number",
+        "_historical_head_has_no_associated_prs",
+        "_canonical_branch_head",
+        "live_pr_qualification",
+        "_pull_request",
+    ],
+)
+def test_scoped_cancel_rejects_rebound_revalidation_helper(
+    monkeypatch,
+    helper_name: str,
+) -> None:
+    api = WorkflowScopedGitHubApi(
+        repository="owner/repo",
+        token="token",
+        workflow_id=1,
+        workflow_name="CI",
+    )
+    monkeypatch.setattr(
+        WorkflowScopedGitHubApi,
+        helper_name,
+        lambda *_args, **_kwargs: None,
+    )
+
+    with pytest.raises(
+        CancellationError,
+        match="scoped cancellation revalidation dispatch changed",
+    ):
+        api.cancel(123)
+
+
+def test_scoped_cancel_rejects_mutated_helper_code_identity() -> None:
+    api = WorkflowScopedGitHubApi(
+        repository="owner/repo",
+        token="token",
+        workflow_id=1,
+        workflow_name="CI",
+    )
+    helper = WorkflowScopedGitHubApi._canonical_branch_head
+    original_code = helper.__code__
+    replacement_code = (lambda self, branch: None).__code__
+    try:
+        helper.__code__ = replacement_code
+        with pytest.raises(
+            CancellationError,
+            match="scoped cancellation revalidation dispatch changed",
+        ):
+            api.cancel(123)
+    finally:
+        helper.__code__ = original_code
+
+
+@pytest.mark.parametrize(
     ("status", "body"),
     [
         (200, b'{"message":"ok"}'),

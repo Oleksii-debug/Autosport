@@ -226,6 +226,9 @@ class PaperCampaignAdmissionCoordinator(_base.PaperCampaignAdmissionCoordinator)
     def _write(self, admissions: dict[str, object]) -> None:
         """Keep the base journal protocol while retaining patchable atomic I/O."""
 
+        # A forward admission must re-resolve its canonical verification at the
+        # exact durable journal boundary, not only in the outer composition wrapper.
+        _CURRENT_FORWARD_VERIFICATION()
         if self.state_path.exists():
             current = self._read()
             generation = current["generation"] + 1
@@ -240,6 +243,7 @@ class PaperCampaignAdmissionCoordinator(_base.PaperCampaignAdmissionCoordinator)
         records = self._read_witnesses()
         _, pending = self._witness_status(records)
         if pending is None:
+            _CURRENT_FORWARD_VERIFICATION()
             self._append_witness(
                 event=_WITNESS_PREPARE,
                 generation=generation,
@@ -252,13 +256,16 @@ class PaperCampaignAdmissionCoordinator(_base.PaperCampaignAdmissionCoordinator)
             raise PaperCampaignAdmissionError(
                 "pending admission witness conflicts with recovered publication"
             )
+        _CURRENT_FORWARD_VERIFICATION()
         atomic_write_json(self.state_path, state)
+        _CURRENT_FORWARD_VERIFICATION()
         self._append_witness(
             event=_WITNESS_COMMIT,
             generation=generation,
             state_sha256=state["state_sha256"],
         )
         self._read()
+        _CURRENT_FORWARD_VERIFICATION()
 
     @staticmethod
     def _reservation_payload(event: object) -> Mapping[str, object]:

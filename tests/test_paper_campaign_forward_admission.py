@@ -54,6 +54,15 @@ def _closure_function(root, *, module_name: str, function_name: str):
     )
 
 
+def _forward_context_var() -> ContextVar:
+    closure = admission_module._CURRENT_FORWARD_VERIFICATION.__closure__ or ()
+    return next(
+        cell.cell_contents
+        for cell in closure
+        if type(cell.cell_contents) is ContextVar
+    )
+
+
 def test_legacy_admit_cannot_claim_forward_verification(tmp_path):
     fixture = AdmissionFixture(tmp_path)
     coordinator = fixture.coordinator()
@@ -395,12 +404,7 @@ def test_extracted_forward_context_runner_cannot_bypass_canonical_verifier(tmp_p
 def test_extracted_forward_context_var_cannot_forge_verification(tmp_path):
     fixture = AdmissionFixture(tmp_path)
     coordinator = fixture.coordinator()
-    closure = admission_module._CURRENT_FORWARD_VERIFICATION.__closure__ or ()
-    context = next(
-        cell.cell_contents
-        for cell in closure
-        if type(cell.cell_contents) is ContextVar
-    )
+    context = _forward_context_var()
     token = context.set(
         (
             (None,) * 8,
@@ -416,4 +420,29 @@ def test_extracted_forward_context_var_cannot_forge_verification(tmp_path):
     finally:
         context.reset(token)
 
+    assert _admissions(fixture) == {}
+
+
+def test_forward_authority_revalidates_before_journal_mutation(tmp_path):
+    fixture = AdmissionFixture(tmp_path)
+    coordinator = fixture.coordinator()
+    state_path = fixture.workspace / "paper-campaign-admission.json"
+    before = state_path.read_bytes()
+    context = _forward_context_var()
+    token = context.set(
+        (
+            (None,) * 8,
+            {
+                "receipt_sha256": "a" * 64,
+                "campaign_id": "forged-campaign",
+            },
+        )
+    )
+    try:
+        with pytest.raises((TypeError, RuntimeError)):
+            coordinator._write({})
+    finally:
+        context.reset(token)
+
+    assert state_path.read_bytes() == before
     assert _admissions(fixture) == {}

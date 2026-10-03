@@ -36,6 +36,12 @@ _READ_METHOD_ENDPOINT = MappingProxyType({
 })
 
 
+def _canonical_utc_now() -> datetime:
+    """Product-owned UTC clock for authenticated provider evidence."""
+
+    return datetime.now(timezone.utc)
+
+
 class BetfairReadOnlyError(RuntimeError):
     """Raised when provider read evidence cannot be accepted safely."""
 
@@ -539,7 +545,7 @@ class BetfairReadOnlyClient:
         self._credentials = credentials
         self._transport = transport or UrllibBetfairHttpTransport()
         self._timeout_seconds = float(timeout_seconds)
-        self._clock = clock or (lambda: datetime.now(timezone.utc))
+        self._clock = clock or _canonical_utc_now
         self._request_id = 0
         self._request_lock = Lock()
         self._venue_id = _required_text(venue_id, "venue_id")

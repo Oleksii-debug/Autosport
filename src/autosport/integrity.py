@@ -32,6 +32,16 @@ _PATH_LOCK_LOCAL = threading.local()
 
 _SCIENTIFIC_REGISTRY_AUTHORITY_DOMAIN = "autosport.scientific-registry.v1"
 _CANONICAL_MONOTONIC_AUTHORITY_TYPE = MonotonicWorkspaceAuthority
+_MISSING_MONOTONIC_CLASS_MEMBER = object()
+_CANONICAL_MONOTONIC_NEW = vars(MonotonicWorkspaceAuthority).get(
+    "__new__",
+    _MISSING_MONOTONIC_CLASS_MEMBER,
+)
+_CANONICAL_MONOTONIC_NEW_CODE = getattr(
+    _CANONICAL_MONOTONIC_NEW,
+    "__code__",
+    None,
+)
 _CANONICAL_MONOTONIC_INIT = MonotonicWorkspaceAuthority.__init__
 _CANONICAL_MONOTONIC_INIT_CODE = MonotonicWorkspaceAuthority.__init__.__code__
 _CANONICAL_MONOTONIC_READ_HISTORY = MonotonicWorkspaceAuthority.read_history
@@ -177,10 +187,18 @@ def _looks_like_scientific_registry_state(payload: dict[str, Any]) -> bool:
 def _assert_scientific_registry_monotonic_read_dispatch(
     authority: MonotonicWorkspaceAuthority,
 ) -> None:
+    class_dict = vars(_CANONICAL_MONOTONIC_AUTHORITY_TYPE)
+    current_new = class_dict.get("__new__", _MISSING_MONOTONIC_CLASS_MEMBER)
     if (
         MonotonicWorkspaceAuthority is not _CANONICAL_MONOTONIC_AUTHORITY_TYPE
         or type(authority) is not _CANONICAL_MONOTONIC_AUTHORITY_TYPE
-        or vars(_CANONICAL_MONOTONIC_AUTHORITY_TYPE).get("__init__")
+        or current_new is not _CANONICAL_MONOTONIC_NEW
+        or (
+            _CANONICAL_MONOTONIC_NEW_CODE is not None
+            and getattr(current_new, "__code__", None)
+            is not _CANONICAL_MONOTONIC_NEW_CODE
+        )
+        or class_dict.get("__init__")
         is not _CANONICAL_MONOTONIC_INIT
         or _CANONICAL_MONOTONIC_INIT.__code__
         is not _CANONICAL_MONOTONIC_INIT_CODE
@@ -324,6 +342,14 @@ def _assert_scientific_registry_authority_helpers() -> None:
         raise RuntimeError("ScientificRegistry authority helper dispatch changed")
 
 
+_CANONICAL_SCIENTIFIC_AUTHORITY_HELPER_GUARD = (
+    _assert_scientific_registry_authority_helpers
+)
+_CANONICAL_SCIENTIFIC_AUTHORITY_HELPER_GUARD_CODE = (
+    _assert_scientific_registry_authority_helpers.__code__
+)
+
+
 def read_verified_scientific_registry_text(path: str | Path) -> str:
     """Read one stable ScientificRegistry candidate image under its path fence.
 
@@ -379,7 +405,16 @@ def establish_validated_scientific_registry_read_baseline(
             # authority when its first real scientific record is published.
             return
 
-        _assert_scientific_registry_authority_helpers()
+        if (
+            _assert_scientific_registry_authority_helpers
+            is not _CANONICAL_SCIENTIFIC_AUTHORITY_HELPER_GUARD
+            or _CANONICAL_SCIENTIFIC_AUTHORITY_HELPER_GUARD.__code__
+            is not _CANONICAL_SCIENTIFIC_AUTHORITY_HELPER_GUARD_CODE
+        ):
+            raise RuntimeError(
+                "ScientificRegistry authority helper guard dispatch changed"
+            )
+        _CANONICAL_SCIENTIFIC_AUTHORITY_HELPER_GUARD()
         observed = hashlib.sha256(current_bytes).hexdigest()
         authority = _CANONICAL_SCIENTIFIC_REGISTRY_AUTHORITY_FACTORY(destination)
         if not _CANONICAL_AUTHORITY_READ_HISTORY_HELPER(authority):

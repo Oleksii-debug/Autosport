@@ -258,6 +258,7 @@ class BetdaqPostingObservation:
     order_id: str | None
     market_id: str | None
     transaction_id: str
+    currency: str
     evidence: BetdaqEconomicEvidence
 
     def __post_init__(self) -> None:
@@ -275,12 +276,22 @@ class BetdaqPostingObservation:
         if self.market_id is not None:
             _provider_id(self.market_id, "market_id")
         _provider_id(self.transaction_id, "transaction_id")
+        if (
+            type(self.currency) is not str
+            or not self.currency
+            or self.currency != self.currency.strip()
+        ):
+            raise BetdaqEconomicReadbackError(
+                "posting currency must be non-empty trimmed provider text"
+            )
         if type(self.evidence) is not BetdaqEconomicEvidence:
             raise BetdaqEconomicReadbackError(
                 "posting evidence must be canonical BETDAQ economic evidence"
             )
 
-    def canonical_dict(self) -> dict[str, object]:
+    def provider_content_dict(self) -> dict[str, object]:
+        """Return immutable provider-row economics without per-call envelope provenance."""
+
         return {
             "posted_at": self.posted_at,
             "description": self.description,
@@ -290,12 +301,37 @@ class BetdaqPostingObservation:
             "order_id": self.order_id,
             "market_id": self.market_id,
             "transaction_id": self.transaction_id,
+            "currency": self.currency,
+        }
+
+    def canonical_dict(self) -> dict[str, object]:
+        return {
+            **self.provider_content_dict(),
             "evidence_id": self.evidence.evidence_id,
         }
 
     @property
+    def transaction_identity(self) -> str:
+        """Stable transaction identity inside one authenticated BETDAQ account context."""
+
+        return "betdaq-posting-transaction:" + _canonical_sha256(
+            {
+                "account_context_id": self.evidence.account_context_id,
+                "transaction_id": self.transaction_id,
+            }
+        )
+
+    @property
     def observation_id(self) -> str:
-        return "betdaq-posting:" + _canonical_sha256(self.canonical_dict())
+        # Request/window and sibling-row differences are per-call provenance, not
+        # transaction economics. This identity therefore remains stable when BETDAQ
+        # deliberately overlaps a page boundary or the row is re-resolved ById.
+        return "betdaq-posting:" + _canonical_sha256(
+            {
+                "transaction_identity": self.transaction_identity,
+                "provider_content": self.provider_content_dict(),
+            }
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -370,13 +406,13 @@ class BetdaqPostingsReadback:
                 raise BetdaqEconomicReadbackError(
                     "posting evidence does not match readback authenticated context"
                 )
-            canonical = posting.canonical_dict()
+            provider_content = posting.provider_content_dict()
             previous = seen.get(posting.transaction_id)
-            if previous is not None and previous != canonical:
+            if previous is not None and previous != provider_content:
                 raise BetdaqEconomicReadbackError(
                     "same BETDAQ transaction id has conflicting economic content"
                 )
-            seen[posting.transaction_id] = canonical
+            seen[posting.transaction_id] = provider_content
 
     @property
     def readback_id(self) -> str:
@@ -396,6 +432,49 @@ class BetdaqPostingsReadback:
                 "evidence_id": self.evidence.evidence_id,
             }
         )
+
+
+def coalesce_posting_replays(
+    *readbacks: BetdaqPostingsReadback,
+) -> tuple[BetdaqPostingObservation, ...]:
+    """Deduplicate repeated provider transactions across exact read responses.
+
+    BETDAQ time-window paging may overlap rows at an equal PostedAt boundary, and
+    ListAccountPostingsById can re-resolve an already observed transaction. Per-call
+    evidence remains attached to the retained observation, but request/response
+    envelope differences cannot create a second economic effect. Conflicting content
+    for the same account-context + TransactionId fails closed.
+    """
+
+    if not readbacks:
+        return ()
+    account_context_id: str | None = None
+    seen: dict[str, BetdaqPostingObservation] = {}
+    order: list[str] = []
+    for readback in readbacks:
+        if type(readback) is not BetdaqPostingsReadback:
+            raise BetdaqEconomicReadbackError(
+                "posting replay coalescence requires canonical readbacks"
+            )
+        current_context = readback.evidence.account_context_id
+        if account_context_id is None:
+            account_context_id = current_context
+        elif current_context != account_context_id:
+            raise BetdaqEconomicReadbackError(
+                "posting replays belong to different authenticated account contexts"
+            )
+        for posting in readback.postings:
+            identity = posting.transaction_identity
+            previous = seen.get(identity)
+            if previous is not None:
+                if previous.provider_content_dict() != posting.provider_content_dict():
+                    raise BetdaqEconomicReadbackError(
+                        "same BETDAQ transaction id has conflicting economic content"
+                    )
+                continue
+            seen[identity] = posting
+            order.append(identity)
+    return tuple(seen[identity] for identity in order)
 
 
 class BetdaqEconomicReadbackClient:
@@ -737,6 +816,7 @@ def _parse_postings_result(
         raise BetdaqEconomicReadbackError(
             "BETDAQ postings result must contain exactly one Orders element"
         )
+    currency = _required_attr(result, "Currency")
     deduped: dict[str, BetdaqPostingObservation] = {}
     ordered_ids: list[str] = []
     for child in containers[0]:
@@ -756,11 +836,12 @@ def _parse_postings_result(
             order_id=_optional_provider_attr(child, "OrderId"),
             market_id=_optional_provider_attr(child, "MarketId"),
             transaction_id=transaction_id,
+            currency=currency,
             evidence=evidence,
         )
         previous = deduped.get(transaction_id)
         if previous is not None:
-            if previous.canonical_dict() != posting.canonical_dict():
+            if previous.provider_content_dict() != posting.provider_content_dict():
                 raise BetdaqEconomicReadbackError(
                     "same BETDAQ transaction id has conflicting economic content"
                 )
@@ -772,7 +853,7 @@ def _parse_postings_result(
         query_start_at=query_start_at,
         query_end_at=query_end_at,
         query_transaction_id=query_transaction_id,
-        currency=_required_attr(result, "Currency"),
+        currency=currency,
         available_funds=_decimal_attr(result, "AvailableFunds"),
         balance=_decimal_attr(result, "Balance"),
         credit=_decimal_attr(result, "Credit"),

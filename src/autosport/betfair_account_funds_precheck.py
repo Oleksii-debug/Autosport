@@ -19,6 +19,7 @@ import json
 from threading import RLock
 from weakref import ReferenceType, ref
 
+from . import betfair_account_readonly as _readonly_module
 from .betfair_account_identity import (
     BetfairAccountIdentityError,
     BetfairAuthenticatedAccountIdentity,
@@ -126,20 +127,35 @@ def _make_authority():
     build_client = build_betfair_authenticated_client
     resolve_identity = resolve_betfair_authenticated_account_identity
     require_identity = require_authoritative_betfair_account_identity
+    readonly_module = _readonly_module
     canonical_read_funds = client_type.read_account_funds
     canonical_observed_at = client_type._observed_at
+    canonical_mapping = readonly_module._mapping
+    canonical_number = readonly_module._number
+    canonical_funds_type_binding = readonly_module.BetfairAccountFundsObservation
+    canonical_funds_init = funds_type.__init__
+    canonical_funds_post = getattr(funds_type, "__post_init__", None)
     money = _money
     currency = _currency
     context_id = _context_id
     sha = _sha
     provider_time = _provider_time
     temporal = _temporal
+    utc = _utc
+    decimal_text = _decimal_text
+    datetime_text = _datetime_text
     digest = _digest
+    venue_id = VENUE_ID
+    adapter_id = ADAPTER_ID
+    adapter_version = ADAPTER_VERSION
+    source_family = SOURCE_FAMILY
+    context_prefix = _CONTEXT_PREFIX
     max_evidence_age = MAX_EVIDENCE_AGE
     max_capture_skew = MAX_CAPTURE_SKEW
     max_future_skew = _MAX_FUTURE_SKEW
     canonical_result_init = result_type.__init__
     canonical_result_post = result_type.__post_init__
+    canonical_stable = result_type.stable_account_identity_proven
     canonical_numeric = result_type.numeric_sufficient
     canonical_unit = result_type.liability_unit_proven
     canonical_passed = result_type.passed
@@ -152,6 +168,7 @@ def _make_authority():
         return (
             result_type.__init__ is canonical_result_init
             and result_type.__post_init__ is canonical_result_post
+            and result_type.stable_account_identity_proven is canonical_stable
             and result_type.numeric_sufficient is canonical_numeric
             and result_type.liability_unit_proven is canonical_unit
             and result_type.passed is canonical_passed
@@ -159,13 +176,26 @@ def _make_authority():
             and result_type.precheck_id is canonical_id
             and client_type.read_account_funds is canonical_read_funds
             and client_type._observed_at is canonical_observed_at
+            and readonly_module._mapping is canonical_mapping
+            and readonly_module._number is canonical_number
+            and readonly_module.BetfairAccountFundsObservation is canonical_funds_type_binding
+            and funds_type.__init__ is canonical_funds_init
+            and getattr(funds_type, "__post_init__", None) is canonical_funds_post
             and _money is money
             and _currency is currency
             and _context_id is context_id
             and _sha is sha
             and _provider_time is provider_time
             and _temporal is temporal
+            and _utc is utc
+            and _decimal_text is decimal_text
+            and _datetime_text is datetime_text
             and _digest is digest
+            and VENUE_ID == venue_id
+            and ADAPTER_ID == adapter_id
+            and ADAPTER_VERSION == adapter_version
+            and SOURCE_FAMILY == source_family
+            and _CONTEXT_PREFIX == context_prefix
             and MAX_EVIDENCE_AGE == max_evidence_age
             and MAX_CAPTURE_SKEW == max_capture_skew
             and _MAX_FUTURE_SKEW == max_future_skew
@@ -237,10 +267,10 @@ def _make_authority():
         temporal(account_time, funds_time, evaluated)
 
         value = result_type(
-            venue_id=VENUE_ID,
+            venue_id=venue_id,
             account_id=context_id(identity.session_context_id),
-            adapter_id=ADAPTER_ID,
-            adapter_version=ADAPTER_VERSION,
+            adapter_id=adapter_id,
+            adapter_version=adapter_version,
             required_liability=liability,
             available_to_bet_balance=available,
             currency_code=required_currency,
@@ -250,7 +280,14 @@ def _make_authority():
             account_details_sha256=sha(identity.account_details_sha256, "account_details_sha256"),
             account_funds_sha256=sha(funds.evidence.source_payload_sha256, "account_funds_sha256"),
         )
-        if value.passed or value.liability_unit_proven or value.execution_authorized:
+        if not class_is_current():
+            raise precheck_error("account-funds authority changed during issuance")
+        if (
+            value.stable_account_identity_proven
+            or value.passed
+            or value.liability_unit_proven
+            or value.execution_authorized
+        ):
             raise precheck_error("fail-closed funds result was widened")
         identity = require_identity(identity, client=client)
         remember(value, client, identity)
@@ -275,7 +312,12 @@ def _make_authority():
             temporal(value.account_observed_at, value.funds_observed_at, current)
             if digest(value) != record.fingerprint:
                 return False
-            return not value.passed and not value.liability_unit_proven and not value.execution_authorized
+            return (
+                not value.stable_account_identity_proven
+                and not value.passed
+                and not value.liability_unit_proven
+                and not value.execution_authorized
+            )
         except (AttributeError, TypeError, ValueError, identity_error, readonly_error, precheck_error):
             return False
 

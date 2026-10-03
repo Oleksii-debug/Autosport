@@ -11,6 +11,7 @@ import urllib.request as _urllib_request
 import pytest
 
 from autosport import betfair_account_funds_precheck as subject
+from autosport import betfair_account_readonly as readonly
 from autosport.betfair_account_readonly import (
     ACCOUNT_JSON_RPC_ENDPOINT,
     BetfairReadOnlyClient,
@@ -250,3 +251,35 @@ def test_precheck_identity_binds_context_and_economic_fields(monkeypatch):
         creds("b"), Decimal("2"), required_currency_code="EUR"
     )
     assert first.precheck_id != second.precheck_id
+
+
+def test_rebound_readonly_number_parser_cannot_mint_funds_authority(monkeypatch):
+    calls = install_provider(monkeypatch)
+
+    def fake_number(*args, **kwargs):
+        return Decimal("999999")
+
+    monkeypatch.setattr(readonly, "_number", fake_number)
+    with pytest.raises(subject.BetfairAccountFundsPrecheckError, match="rebound|authority"):
+        subject.evaluate_betfair_account_funds(
+            creds(), Decimal("1"), required_currency_code="EUR"
+        )
+    assert calls == []
+
+
+def test_rebound_stable_identity_descriptor_cannot_widen_semantics(monkeypatch):
+    calls = install_provider(monkeypatch)
+
+    def claim_stable(self):
+        return True
+
+    monkeypatch.setattr(
+        subject.BetfairAccountFundsPrecheck,
+        "stable_account_identity_proven",
+        property(claim_stable),
+    )
+    with pytest.raises(subject.BetfairAccountFundsPrecheckError, match="rebound|authority"):
+        subject.evaluate_betfair_account_funds(
+            creds(), Decimal("1"), required_currency_code="EUR"
+        )
+    assert calls == []

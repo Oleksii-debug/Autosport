@@ -31,6 +31,7 @@ from .bookmaker_capability_lifecycle import (
     BETDAQ_AUTHENTICATED_VALIDATION_POLICY_VERSION,
     BetdaqAuthenticatedCapabilityIssuance,
     CapabilityAvailabilityState,
+    CapabilityEvidence,
     CapabilityEvidenceError,
     CapabilityEvidenceJournal,
     CapabilityEvidenceStrength,
@@ -635,7 +636,7 @@ def _install_provider_capability_authority():
         int,
         tuple[
             CapabilityEvidenceJournal,
-            object,
+            CapabilityEvidence,
             CapabilityRequirement,
         ],
     ] = {}
@@ -883,7 +884,10 @@ def _install_provider_capability_authority():
                         "authenticated matrix fact lifecycle context is invalid"
                     ) from exc
                 if (
-                    validation_journal.latest_evidence_id_for(lifecycle)
+                    validation_journal.latest_evidence_id_for(
+                        lifecycle,
+                        as_of=as_of,
+                    )
                     != lifecycle.evidence_id
                 ):
                     raise ProviderCapabilityEvidenceMatrixError(

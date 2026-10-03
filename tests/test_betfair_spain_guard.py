@@ -292,3 +292,7 @@ def test_write_acceptance_probe_is_not_a_supported_minimum_source_kind():
         "READ_ONLY_PROVIDER_SURFACE",
         "PROVIDER_DOCUMENTATION_SNAPSHOT",
     }
+
+
+def test_spain_guard_exposes_no_positive_admission_state_without_source_authority():
+    assert {item.value for item in SpainOrderAdmission} == {"REJECTED", "UNKNOWN"}

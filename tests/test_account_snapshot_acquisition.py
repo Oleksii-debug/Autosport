@@ -535,6 +535,46 @@ def test_durable_current_generation_advances_for_each_new_balance_read(
     assert row == (second.receipt.acquisition_id, 2)
 
 
+def test_live_idempotent_retry_does_not_advance_durable_generation(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    database = tmp_path / "durable-generation-retry.sqlite3"
+    _install_transport(monkeypatch, [_DEVELOPER_APPS, _DETAILS, _FUNDS])
+    acquirer = BetfairAccountSnapshotAcquirer(database, _credentials())
+    first = acquirer.acquire(
+        _balance_capabilities(),
+        acquisition_id="durable-retry",
+    )
+
+    retry_calls = _install_transport(monkeypatch, [])
+    retry = acquirer.acquire(
+        _balance_capabilities(),
+        acquisition_id="durable-retry",
+    )
+    assert retry_calls == []
+    assert retry is first
+
+    with sqlite3.connect(database) as connection:
+        row = connection.execute(
+            """
+            SELECT acquisition_id, generation
+            FROM account_snapshot_current_capability_generation
+            WHERE venue_id = ?
+              AND account_id = ?
+              AND authenticated_account_identity_sha256 = ?
+              AND capability = ?
+            """,
+            (
+                first.receipt.venue_id,
+                first.receipt.account_id,
+                first.receipt.authenticated_account_identity_sha256,
+                BookmakerCapability.BALANCE_READ.value,
+            ),
+        ).fetchone()
+    assert row == (first.receipt.acquisition_id, 1)
+
+
 def test_durable_generation_is_scoped_per_capability(
     tmp_path,
     monkeypatch,

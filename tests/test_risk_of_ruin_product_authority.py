@@ -932,3 +932,89 @@ def test_vector_evidence_subclass_cannot_enter_policy_authority() -> None:
     )
     assert decision.action != "STAKE_VECTOR"
     assert "vector evidence is invalid" in decision.reason
+
+
+def test_result_digest_rejects_oversize_fixed_point_stake() -> None:
+    policy = _policy()
+    book = PaperBook("100")
+    context = _context(1)
+    evidence = replace(
+        _single_evidence(policy, book, context),
+        evaluated_stake=Decimal("1E+600"),
+    )
+
+    try:
+        risk_of_ruin_result_sha256(
+            evidence,
+            kind="single",
+            evaluator_source_sha256=EVALUATOR_SOURCE,
+            dataset_snapshot_id="risk-dataset",
+            dataset_manifest_sha256=DATASET_MANIFEST,
+            effective_sample_size=SAMPLE_SIZE,
+            evaluation_available_at=EVALUATED_AT,
+        )
+    except ValueError as exc:
+        assert "fixed-point representation exceeds supported canonical size" in str(exc)
+    else:
+        raise AssertionError("oversize stake entered canonical authority digest")
+
+
+def test_result_digest_rejects_oversize_fixed_point_probability_bound() -> None:
+    policy = _policy()
+    book = PaperBook("100")
+    context = _context(1)
+    evidence = replace(
+        _single_evidence(policy, book, context),
+        upper_bound=Decimal("1E-600"),
+    )
+
+    try:
+        risk_of_ruin_result_sha256(
+            evidence,
+            kind="single",
+            evaluator_source_sha256=EVALUATOR_SOURCE,
+            dataset_snapshot_id="risk-dataset",
+            dataset_manifest_sha256=DATASET_MANIFEST,
+            effective_sample_size=SAMPLE_SIZE,
+            evaluation_available_at=EVALUATED_AT,
+        )
+    except ValueError as exc:
+        assert "fixed-point representation exceeds supported canonical size" in str(exc)
+    else:
+        raise AssertionError("oversize probability bound entered canonical authority digest")
+
+
+def test_result_digest_rejects_oversize_vector_before_materialization() -> None:
+    policy = _policy()
+    book = PaperBook("100")
+    portfolio = policy.risk_of_ruin_portfolio_sha256(book)
+    assert portfolio is not None
+    evidence = RiskOfRuinVectorEvidence(
+        evidence_id="oversize-vector",
+        research_protocol_sha256="c" * 64,
+        reproducibility_bundle_sha256="d" * 64,
+        producer_identity="canonical-vector-risk-evaluator",
+        causal_cutoff=CAUSAL_CUTOFF,
+        evaluated_at=EVALUATED_AT,
+        bankroll_id="paper-bankroll",
+        currency="USD",
+        base_portfolio_sha256=portfolio,
+        candidate_vector_sha256="f" * 64,
+        evaluated_stakes=(Decimal("0"),) * 10_000 + (Decimal("1"),),
+        upper_bound=Decimal("0.005"),
+    )
+
+    try:
+        risk_of_ruin_result_sha256(
+            evidence,
+            kind="vector",
+            evaluator_source_sha256=EVALUATOR_SOURCE,
+            dataset_snapshot_id="risk-dataset",
+            dataset_manifest_sha256=DATASET_MANIFEST,
+            effective_sample_size=SAMPLE_SIZE,
+            evaluation_available_at=EVALUATED_AT,
+        )
+    except ValueError as exc:
+        assert "stake vector exceeds supported size" in str(exc)
+    else:
+        raise AssertionError("oversize stake vector entered canonical authority digest")

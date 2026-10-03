@@ -809,6 +809,10 @@ def capture_campaign_complete_game_board(
     expected_precommit_routing_seams = _PRECOMMIT_ROUTING_SEAMS
     expected_precommit_routing_items = _PRECOMMIT_ROUTING_SEAM_ITEMS
     expected_integrity_error = integrity_error
+    expected_collector_store_type = CollectorDeltaStore
+    expected_store_seams = _STORE_SEAMS
+    expected_store_class_seam_witnesses = _STORE_CLASS_SEAM_WITNESSES
+    expected_object_getattribute = _CANONICAL_OBJECT_GETATTRIBUTE
     expected_artifact_kind = artifact_kind
     expected_schema_version = _SCHEMA_VERSION
     expected_hex = _HEX
@@ -827,6 +831,18 @@ def capture_campaign_complete_game_board(
         ):
             raise integrity_error(
                 "campaign provider-cycle integrity error authority changed"
+            )
+        if (
+            module_globals.get("CollectorDeltaStore")
+            is not expected_collector_store_type
+            or module_globals.get("_STORE_SEAMS") is not expected_store_seams
+            or module_globals.get("_STORE_CLASS_SEAM_WITNESSES")
+            is not expected_store_class_seam_witnesses
+            or module_globals.get("_CANONICAL_OBJECT_GETATTRIBUTE")
+            is not expected_object_getattribute
+        ):
+            raise integrity_error(
+                "campaign provider-cycle collector seam authority changed"
             )
         if module_globals.get("ARTIFACT_KIND") != expected_artifact_kind:
             raise integrity_error(
@@ -1261,6 +1277,13 @@ def capture_campaign_complete_game_board(
                         None,
                     )
                     is not expected_failure_terminal_seams_code
+                    or module_globals.get("CollectorDeltaStore")
+                    is not expected_collector_store_type
+                    or module_globals.get("_STORE_SEAMS") is not expected_store_seams
+                    or module_globals.get("_STORE_CLASS_SEAM_WITNESSES")
+                    is not expected_store_class_seam_witnesses
+                    or module_globals.get("_CANONICAL_OBJECT_GETATTRIBUTE")
+                    is not expected_object_getattribute
                     or module_globals.get("_CANONICAL_SORTED") is not expected_sorted
                     or module_globals.get("_CANONICAL_TYPE_ERROR")
                     is not expected_type_error_alias
@@ -1372,6 +1395,8 @@ def _seal_campaign_provider_cycle_capture_dispatch() -> None:
         "_CANONICAL_GETATTR_STATIC_CODE": _CANONICAL_GETATTR_STATIC_CODE,
         "_CANONICAL_GETATTR_STATIC_GLOBALS": _CANONICAL_GETATTR_STATIC_GLOBALS,
         "_CANONICAL_GETATTR_STATIC_GLOBAL_ITEMS": _CANONICAL_GETATTR_STATIC_GLOBAL_ITEMS,
+        "_STORE_SEAMS": _STORE_SEAMS,
+        "_STORE_CLASS_SEAM_WITNESSES": _STORE_CLASS_SEAM_WITNESSES,
         "_EVIDENCE_DIRECTORY": _EVIDENCE_DIRECTORY,
         "_EVIDENCE_DIRECTORY_SURFACE": _EVIDENCE_DIRECTORY_SURFACE,
         "_PRECOMMIT_ROUTING_SEAMS": _PRECOMMIT_ROUTING_SEAMS,
@@ -1398,6 +1423,7 @@ def _seal_campaign_provider_cycle_capture_dispatch() -> None:
             ("_RESOLVE_ARTIFACT", _RESOLVE_ARTIFACT),
             ("establish_campaign_inception", establish_campaign_inception),
             ("_require_canonical_seams", _require_canonical_seams),
+            ("_require_failure_terminal_seams", _require_failure_terminal_seams),
             ("_issue_receipt", _issue_receipt),
             ("_text", _text),
             ("_sha", _sha),

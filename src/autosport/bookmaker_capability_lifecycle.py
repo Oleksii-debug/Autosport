@@ -273,39 +273,6 @@ class CapabilityEvidence:
         return _hash(self.payload())
 
 
-_PRODUCT_ISSUED_POSITIVE: dict[
-    int, tuple[weakref.ReferenceType[CapabilityEvidence], str]
-] = {}
-
-
-def _forget_product_issued(
-    evidence_id: int, reference: weakref.ReferenceType[CapabilityEvidence]
-) -> None:
-    current = _PRODUCT_ISSUED_POSITIVE.get(evidence_id)
-    if current is not None and current[0] is reference:
-        _PRODUCT_ISSUED_POSITIVE.pop(evidence_id, None)
-
-
-def _remember_product_issued(evidence: CapabilityEvidence) -> CapabilityEvidence:
-    identity = id(evidence)
-    reference = weakref.ref(
-        evidence,
-        lambda current, identity=identity: _forget_product_issued(identity, current),
-    )
-    _PRODUCT_ISSUED_POSITIVE[identity] = (reference, evidence.evidence_id)
-    return evidence
-
-
-def _is_product_issued(evidence: CapabilityEvidence, evidence_id: str) -> bool:
-    issued = _PRODUCT_ISSUED_POSITIVE.get(id(evidence))
-    return (
-        issued is not None
-        and issued[0]() is evidence
-        and issued[1] == evidence_id
-        and evidence.evidence_id == evidence_id
-    )
-
-
 @dataclass(frozen=True, slots=True)
 class BetdaqAuthenticatedCapabilityIssuance:
     """One canonical BETDAQ authenticated-context capability observation."""
@@ -378,7 +345,7 @@ def _require_exact_betdaq_client_dispatch(client: object) -> None:
             )
 
 
-def issue_betdaq_authenticated_capability_evidence(
+def _issue_betdaq_authenticated_capability_evidence_unsealed(
     client: object,
     capability: BookmakerCapability,
     *,
@@ -485,8 +452,70 @@ def issue_betdaq_authenticated_capability_evidence(
         source_payload_sha256=profile.source_payload_sha256,
         predecessor_id=predecessor_id,
     )
-    _remember_product_issued(evidence)
     return BetdaqAuthenticatedCapabilityIssuance(profile, evidence)
+
+
+def _build_betdaq_authenticated_issuer(core_issuer):
+    product_issued: dict[
+        int, tuple[weakref.ReferenceType[CapabilityEvidence], str]
+    ] = {}
+
+    def forget_product_issued(
+        evidence_identity: int,
+        reference: weakref.ReferenceType[CapabilityEvidence],
+    ) -> None:
+        current = product_issued.get(evidence_identity)
+        if current is not None and current[0] is reference:
+            product_issued.pop(evidence_identity, None)
+
+    def remember_product_issued(evidence: CapabilityEvidence) -> None:
+        evidence_identity = id(evidence)
+        reference = weakref.ref(
+            evidence,
+            lambda current, evidence_identity=evidence_identity: forget_product_issued(
+                evidence_identity, current
+            ),
+        )
+        product_issued[evidence_identity] = (reference, evidence.evidence_id)
+
+    def is_product_issued(evidence: CapabilityEvidence, evidence_id: str) -> bool:
+        issued = product_issued.get(id(evidence))
+        return (
+            issued is not None
+            and issued[0]() is evidence
+            and issued[1] == evidence_id
+            and evidence.evidence_id == evidence_id
+        )
+
+    def issue_betdaq_authenticated_capability_evidence(
+        client: object,
+        capability: BookmakerCapability,
+        *,
+        committed_at: str,
+        review_due_at: str,
+        predecessor_id: str | None = None,
+    ) -> BetdaqAuthenticatedCapabilityIssuance:
+        issuance = core_issuer(
+            client,
+            capability,
+            committed_at=committed_at,
+            review_due_at=review_due_at,
+            predecessor_id=predecessor_id,
+        )
+        remember_product_issued(issuance.evidence)
+        return issuance
+
+    return issue_betdaq_authenticated_capability_evidence, is_product_issued
+
+
+(
+    issue_betdaq_authenticated_capability_evidence,
+    _is_product_issued,
+) = _build_betdaq_authenticated_issuer(
+    _issue_betdaq_authenticated_capability_evidence_unsealed
+)
+del _build_betdaq_authenticated_issuer
+del _issue_betdaq_authenticated_capability_evidence_unsealed
 
 
 @dataclass(frozen=True, slots=True)

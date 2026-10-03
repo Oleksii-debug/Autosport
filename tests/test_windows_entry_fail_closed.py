@@ -159,10 +159,12 @@ class WindowsEntrypointFailClosedTests(unittest.TestCase):
             [
                 "workspace",
                 "instance_lock",
+                "instance_lock",
                 "deployment",
                 "controller",
                 "bridge",
                 "webview",
+                "instance_unlock",
                 "instance_unlock",
             ],
         )
@@ -215,7 +217,16 @@ class WindowsEntrypointFailClosedTests(unittest.TestCase):
         ):
             self.assertEqual(main([]), 3)
 
-        self.assertEqual(calls, ["workspace", "instance_lock", "instance_unlock"])
+        self.assertEqual(
+            calls,
+            [
+                "workspace",
+                "instance_lock",
+                "instance_lock",
+                "instance_unlock",
+                "instance_unlock",
+            ],
+        )
         show_error.assert_called_once_with(windows_entry._WEBVIEW2_STARTUP_ERROR)
 
     def test_second_interactive_instance_fails_before_runtime_or_controller(self) -> None:

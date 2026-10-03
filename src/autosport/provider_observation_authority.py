@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import inspect
 import json
 import math
 import os
@@ -10,6 +11,7 @@ import weakref
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
+from functools import wraps
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Mapping
@@ -513,9 +515,23 @@ _TEST_ACQUISITION_ORIGIN = ContextVar(
     default=None,
 )
 
+_CANONICAL_INSPECT = inspect
+_CANONICAL_GETATTR_STATIC = inspect.getattr_static
 _CANONICAL_HTTP_REQUEST = Request
+_CANONICAL_HTTP_REQUEST_INIT = inspect.getattr_static(Request, "__init__")
+_CANONICAL_HTTP_REQUEST_INIT_CODE = getattr(
+    _CANONICAL_HTTP_REQUEST_INIT,
+    "__code__",
+    None,
+)
 _CANONICAL_URLOPEN = urlopen
+_CANONICAL_URLOPEN_CODE = getattr(_CANONICAL_URLOPEN, "__code__", None)
 _CANONICAL_STRICT_JSON_LOADS = strict_json_loads
+_CANONICAL_STRICT_JSON_LOADS_CODE = getattr(
+    _CANONICAL_STRICT_JSON_LOADS,
+    "__code__",
+    None,
+)
 _CANONICAL_PARSE_SSE_EVENT = _parse_sse_event
 _CANONICAL_PARSE_SSE_EVENT_CODE = _CANONICAL_PARSE_SSE_EVENT.__code__
 _CANONICAL_READ_PRODUCTION_INITIAL_STATE = _read_production_initial_state
@@ -536,9 +552,57 @@ _CANONICAL_TEST_ACQUISITION_ORIGIN = _TEST_ACQUISITION_ORIGIN
 _CANONICAL_TEST_ACQUISITION_CAPABILITY = _TEST_ACQUISITION_CAPABILITY
 
 
+def _surface_code(surface: object) -> object:
+    target = getattr(surface, "__func__", None)
+    if target is None and isinstance(surface, property):
+        target = surface.fget
+    if target is None:
+        target = surface
+    return getattr(target, "__code__", None)
+
+
+_CANONICAL_SURFACE_CODE = _surface_code
+_CANONICAL_SURFACE_CODE_CODE = _surface_code.__code__
+_REQUEST_ORIGIN_SURFACE_NAMES = (
+    "__init__",
+    "__post_init__",
+    "source_id",
+    "to_payload",
+    "sse_url",
+)
+_SNAPSHOT_ORIGIN_SURFACE_NAMES = (
+    "__init__",
+    "__post_init__",
+    "_validate_frame",
+    "frame",
+    "frame_sha256",
+    "row_sha256s",
+    "evidence_sha256",
+    "to_payload",
+)
+_CANONICAL_REQUEST_ORIGIN_SURFACES = tuple(
+    (
+        name,
+        inspect.getattr_static(CompleteGameBoardRequest, name),
+        _surface_code(inspect.getattr_static(CompleteGameBoardRequest, name)),
+    )
+    for name in _REQUEST_ORIGIN_SURFACE_NAMES
+)
+_CANONICAL_SNAPSHOT_ORIGIN_SURFACES = tuple(
+    (
+        name,
+        inspect.getattr_static(CompleteGameBoardSnapshot, name),
+        _surface_code(inspect.getattr_static(CompleteGameBoardSnapshot, name)),
+    )
+    for name in _SNAPSHOT_ORIGIN_SURFACE_NAMES
+)
+
+
 def _require_production_capture_origin_integrity() -> None:
     if (
-        Request is not _CANONICAL_HTTP_REQUEST
+        inspect is not _CANONICAL_INSPECT
+        or _CANONICAL_INSPECT.getattr_static is not _CANONICAL_GETATTR_STATIC
+        or Request is not _CANONICAL_HTTP_REQUEST
         or urlopen is not _CANONICAL_URLOPEN
         or strict_json_loads is not _CANONICAL_STRICT_JSON_LOADS
         or CompleteGameBoardRequest is not _CANONICAL_REQUEST_CLASS
@@ -552,6 +616,8 @@ def _require_production_capture_origin_integrity() -> None:
         or _TEST_ACQUISITION_ORIGIN is not _CANONICAL_TEST_ACQUISITION_ORIGIN
         or _TEST_ACQUISITION_CAPABILITY
         is not _CANONICAL_TEST_ACQUISITION_CAPABILITY
+        or _surface_code is not _CANONICAL_SURFACE_CODE
+        or _CANONICAL_SURFACE_CODE.__code__ is not _CANONICAL_SURFACE_CODE_CODE
     ):
         raise ProviderObservationIntegrityError(
             "provider production acquisition origin is rebound"
@@ -568,6 +634,26 @@ def _require_production_capture_origin_integrity() -> None:
         is not _CANONICAL_CANONICAL_JSON_CODE
         or _CANONICAL_REMEMBER.__code__ is not _CANONICAL_REMEMBER_CODE
         or CompleteGameBoardRequest.sse_url is not _CANONICAL_REQUEST_SSE_URL
+        or getattr(_CANONICAL_URLOPEN, "__code__", None)
+        is not _CANONICAL_URLOPEN_CODE
+        or getattr(_CANONICAL_STRICT_JSON_LOADS, "__code__", None)
+        is not _CANONICAL_STRICT_JSON_LOADS_CODE
+        or _CANONICAL_GETATTR_STATIC(Request, "__init__")
+        is not _CANONICAL_HTTP_REQUEST_INIT
+        or getattr(_CANONICAL_HTTP_REQUEST_INIT, "__code__", None)
+        is not _CANONICAL_HTTP_REQUEST_INIT_CODE
+        or any(
+            _CANONICAL_GETATTR_STATIC(_CANONICAL_REQUEST_CLASS, name)
+            is not descriptor
+            or _CANONICAL_SURFACE_CODE(descriptor) is not code
+            for name, descriptor, code in _CANONICAL_REQUEST_ORIGIN_SURFACES
+        )
+        or any(
+            _CANONICAL_GETATTR_STATIC(_CANONICAL_SNAPSHOT_CLASS, name)
+            is not descriptor
+            or _CANONICAL_SURFACE_CODE(descriptor) is not code
+            for name, descriptor, code in _CANONICAL_SNAPSHOT_ORIGIN_SURFACES
+        )
     ):
         raise ProviderObservationIntegrityError(
             "provider production acquisition origin code changed"
@@ -601,8 +687,8 @@ def capture_parlay_complete_game_board(
         raise ValueError("api_key must be non-empty trimmed text")
     if any(character.isspace() for character in api_key):
         raise ValueError("api_key must not contain whitespace")
-    if not isinstance(request, _CANONICAL_REQUEST_CLASS):
-        raise TypeError("request must be CompleteGameBoardRequest")
+    if type(request) is not _CANONICAL_REQUEST_CLASS:
+        raise TypeError("request must be exact CompleteGameBoardRequest")
     if isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, (int, float)):
         raise ValueError("timeout_seconds must be a positive finite number")
     timeout = float(timeout_seconds)
@@ -645,6 +731,85 @@ def capture_parlay_complete_game_board(
     if not test_origin:
         _require_production_capture_origin_integrity()
     return result
+
+
+def _seal_provider_observation_capture_dispatch() -> None:
+    module_globals = globals()
+    expected_capture = capture_parlay_complete_game_board
+    expected_capture_code = expected_capture.__code__
+    expected_guard = _require_production_capture_origin_integrity
+    expected_guard_code = expected_guard.__code__
+    expected_witnesses = {
+        "_CANONICAL_INSPECT": _CANONICAL_INSPECT,
+        "_CANONICAL_GETATTR_STATIC": _CANONICAL_GETATTR_STATIC,
+        "_CANONICAL_HTTP_REQUEST": _CANONICAL_HTTP_REQUEST,
+        "_CANONICAL_HTTP_REQUEST_INIT": _CANONICAL_HTTP_REQUEST_INIT,
+        "_CANONICAL_HTTP_REQUEST_INIT_CODE": _CANONICAL_HTTP_REQUEST_INIT_CODE,
+        "_CANONICAL_URLOPEN": _CANONICAL_URLOPEN,
+        "_CANONICAL_URLOPEN_CODE": _CANONICAL_URLOPEN_CODE,
+        "_CANONICAL_STRICT_JSON_LOADS": _CANONICAL_STRICT_JSON_LOADS,
+        "_CANONICAL_STRICT_JSON_LOADS_CODE": _CANONICAL_STRICT_JSON_LOADS_CODE,
+        "_CANONICAL_PARSE_SSE_EVENT": _CANONICAL_PARSE_SSE_EVENT,
+        "_CANONICAL_PARSE_SSE_EVENT_CODE": _CANONICAL_PARSE_SSE_EVENT_CODE,
+        "_CANONICAL_READ_PRODUCTION_INITIAL_STATE": _CANONICAL_READ_PRODUCTION_INITIAL_STATE,
+        "_CANONICAL_READ_PRODUCTION_INITIAL_STATE_CODE": _CANONICAL_READ_PRODUCTION_INITIAL_STATE_CODE,
+        "_CANONICAL_DEFAULT_CLOCK": _CANONICAL_DEFAULT_CLOCK,
+        "_CANONICAL_DEFAULT_CLOCK_CODE": _CANONICAL_DEFAULT_CLOCK_CODE,
+        "_CANONICAL_SNAPSHOT_CLASS": _CANONICAL_SNAPSHOT_CLASS,
+        "_CANONICAL_REQUEST_CLASS": _CANONICAL_REQUEST_CLASS,
+        "_CANONICAL_REQUEST_SSE_URL": _CANONICAL_REQUEST_SSE_URL,
+        "_CANONICAL_REQUEST_SSE_URL_CODE": _CANONICAL_REQUEST_SSE_URL_CODE,
+        "_CANONICAL_CANONICAL_JSON": _CANONICAL_CANONICAL_JSON,
+        "_CANONICAL_CANONICAL_JSON_CODE": _CANONICAL_CANONICAL_JSON_CODE,
+        "_CANONICAL_REMEMBER": _CANONICAL_REMEMBER,
+        "_CANONICAL_REMEMBER_CODE": _CANONICAL_REMEMBER_CODE,
+        "_CANONICAL_TEST_ACQUISITION_ORIGIN": _CANONICAL_TEST_ACQUISITION_ORIGIN,
+        "_CANONICAL_TEST_ACQUISITION_CAPABILITY": _CANONICAL_TEST_ACQUISITION_CAPABILITY,
+        "_CANONICAL_SURFACE_CODE": _CANONICAL_SURFACE_CODE,
+        "_CANONICAL_SURFACE_CODE_CODE": _CANONICAL_SURFACE_CODE_CODE,
+        "_CANONICAL_REQUEST_ORIGIN_SURFACES": _CANONICAL_REQUEST_ORIGIN_SURFACES,
+        "_CANONICAL_SNAPSHOT_ORIGIN_SURFACES": _CANONICAL_SNAPSHOT_ORIGIN_SURFACES,
+    }
+    expected_witness_items = tuple(expected_witnesses.items())
+
+    def require_sealed_surface() -> None:
+        if (
+            module_globals.get("_require_production_capture_origin_integrity")
+            is not expected_guard
+            or expected_guard.__code__ is not expected_guard_code
+            or expected_capture.__code__ is not expected_capture_code
+        ):
+            raise ProviderObservationIntegrityError(
+                "provider production acquisition guard changed"
+            )
+        if any(
+            module_globals.get(name) is not expected
+            for name, expected in expected_witness_items
+        ):
+            raise ProviderObservationIntegrityError(
+                "provider production acquisition witness changed"
+            )
+
+    @wraps(expected_capture)
+    def sealed_capture_parlay_complete_game_board(*args, **kwargs):
+        if (
+            module_globals.get("capture_parlay_complete_game_board")
+            is not sealed_capture_parlay_complete_game_board
+        ):
+            raise ProviderObservationIntegrityError(
+                "provider production acquisition public surface changed"
+            )
+        require_sealed_surface()
+        result = expected_capture(*args, **kwargs)
+        require_sealed_surface()
+        return result
+
+    module_globals["capture_parlay_complete_game_board"] = (
+        sealed_capture_parlay_complete_game_board
+    )
+
+
+_seal_provider_observation_capture_dispatch()
 
 
 class CompleteGameBoardEvidenceStore:

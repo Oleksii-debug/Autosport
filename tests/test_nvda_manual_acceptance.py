@@ -348,6 +348,35 @@ def test_verified_reject_becomes_stale_after_later_accept(tmp_path):
     )
 
 
+def test_unrelated_candidate_successor_does_not_stale_current_resolution(tmp_path):
+    transcript = _transcript()
+    ledger = _ledger(tmp_path)
+    _record(ledger, transcript, reviewed_at=T0)
+    resolution = _resolve(ledger, transcript)
+    assert resolution is not None
+
+    other = deepcopy(transcript)
+    other["journeys"][0]["steps"][0]["actual_nvda_speech"] = (
+        "Different physical NVDA observation for another transcript candidate."
+    )
+    _record(
+        ledger,
+        other,
+        decision=ManualNvdaDecision.REJECT_PHYSICAL_NVDA,
+        reviewed_at=T1,
+    )
+
+    assert (
+        verify_manual_nvda_acceptance_resolution(
+            resolution,
+            expected_artifact_sha256=ARTIFACT_SHA,
+            expected_source_sha=SOURCE_SHA,
+            expected_transcript_sha256=resolution.record.transcript_sha256,
+        )
+        is resolution
+    )
+
+
 def test_new_decision_must_not_backdate_or_reuse_timestamp(tmp_path):
     transcript = _transcript()
     ledger = _ledger(tmp_path)

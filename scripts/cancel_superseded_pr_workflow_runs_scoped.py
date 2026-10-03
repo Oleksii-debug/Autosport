@@ -310,8 +310,15 @@ class WorkflowScopedGitHubApi(GitHubApi):
         return _require_sha(target.get("sha"), field="canonical branch head")
 
     def _build_cancel(base_cancel):
+        base_cancel_code = getattr(base_cancel, "__code__", None)
+
         def cancel(self, run_id: int) -> None:
             """Revalidate synthetic candidate identity at the irreversible boundary."""
+
+            if getattr(base_cancel, "__code__", None) is not base_cancel_code:
+                raise CancellationError(
+                    "canonical base cancellation authority changed"
+                )
     
             run_id = _require_positive_int(run_id, field="run id")
             zero_association = self._zero_association_recovered_runs.get(run_id)

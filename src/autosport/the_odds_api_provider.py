@@ -201,7 +201,7 @@ def _decode_provider_json(raw: bytes) -> Any:
             parse_float=Decimal,
             parse_constant=reject_non_finite,
         )
-    except (json.JSONDecodeError, InvalidOperation, RecursionError) as exc:
+    except (json.JSONDecodeError, InvalidOperation, RecursionError, ValueError) as exc:
         raise TheOddsApiPayloadError("provider returned invalid JSON") from exc
 
 

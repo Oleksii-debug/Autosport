@@ -66,6 +66,12 @@ class TheOddsApiProviderTests(unittest.TestCase):
         with self.assertRaisesRegex(TheOddsApiPayloadError, "invalid JSON"):
             odds_api_module._decode_provider_json(raw)
 
+    def test_oversized_integer_provider_json_fails_as_typed_payload_error(self):
+        raw = b"[" + (b"9" * 10_000) + b"]"
+
+        with self.assertRaisesRegex(TheOddsApiPayloadError, "invalid JSON"):
+            odds_api_module._decode_provider_json(raw)
+
     def test_current_read_uses_market_timestamp_exact_decimal_quota_and_terms_evidence(self):
         calls = []
 

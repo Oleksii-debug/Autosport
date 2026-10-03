@@ -241,8 +241,11 @@ class MarketMirror:
                 raise MarketMirrorRevisionChanged(
                     "market mirror persistence is blocked during decision publication"
                 )
-        store.append(event)
-        return self.apply(event)
+            # Keep durable append and live revision advance in one mirror critical
+            # section. A decision publication guard can therefore linearize before
+            # the append or after the applied revision, never between them.
+            store.append(event)
+            return self.apply(event)
 
     def view(
         self,

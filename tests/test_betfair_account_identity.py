@@ -33,6 +33,25 @@ from autosport.betfair_account_readonly import (
 )
 
 
+def _install_https_test_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+    fake_open,
+) -> None:
+    """Intercept below a freshly-built urllib opener without using global _opener."""
+
+    def fake_do_open(_self, _http_class, request, **_kwargs):
+        response = fake_open(request, getattr(request, "timeout", 0))
+        response.code = 200
+        response.msg = "OK"
+        return response
+
+    monkeypatch.setattr(
+        _urllib_request.AbstractHTTPHandler,
+        "do_open",
+        fake_do_open,
+    )
+
+
 def _details_result(*, currency_code: str = "EUR") -> dict[str, object]:
     return {
         "currencyCode": currency_code,
@@ -91,15 +110,9 @@ def _install_details_transport(
         ).encode("utf-8")
         return Response(raw)
 
-    class Opener:
-        def open(self, request, data=None, timeout: float = 0):
-            assert data is None
-            return fake_open(request, timeout)
-
-    # Preserve the exact autosport.betfair_account_readonly.urlopen function that
-    # K07 treats as part of the canonical provider-origin dependency. Replace only
-    # stdlib's process opener below that function for deterministic unit I/O.
-    monkeypatch.setattr(_urllib_request, "_opener", Opener())
+    # Keep the authority-bearing fresh opener intact; intercept only the
+    # lower HTTPS test seam so deterministic unit I/O cannot become origin authority.
+    _install_https_test_dispatch(monkeypatch, fake_open)
 
 
 def _client(
@@ -112,6 +125,31 @@ def _client(
         BetfairSessionCredentials(application_key, session_token),
         account_label=account_label,
     )
+
+
+def test_process_global_urllib_opener_cannot_mint_k07_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_details_transport(monkeypatch)
+
+    class HostileGlobalOpener:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def open(self, *args, **kwargs):
+            self.calls += 1
+            raise AssertionError(
+                "process-global urllib opener must not serve authenticated K07 I/O"
+            )
+
+    hostile = HostileGlobalOpener()
+    monkeypatch.setattr(_urllib_request, "_opener", hostile)
+
+    client = _client()
+    identity = resolve_betfair_authenticated_account_identity(client)
+
+    assert hostile.calls == 0
+    assert is_authoritative_betfair_account_identity(identity, client=client)
 
 
 def test_k07_import_order_does_not_patch_client_constructor() -> None:
@@ -465,6 +503,55 @@ def test_provider_error_is_generic_and_does_not_echo_credentials(
     message = str(caught.value)
     assert application_key not in message
     assert session_token not in message
+
+
+def test_provider_error_direct_diagnostic_redacts_exact_configured_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    application_key = "direct-diagnostic-application-key"
+    session_token = "direct-diagnostic-session-token"
+    _install_details_transport(
+        monkeypatch,
+        error_message=f"provider leaked {application_key} {session_token}",
+    )
+    client = _client(
+        application_key=application_key,
+        session_token=session_token,
+    )
+
+    with pytest.raises(_readonly.BetfairReadOnlyError) as caught:
+        client.read_account_details()
+
+    message = str(caught.value)
+    assert application_key not in message
+    assert session_token not in message
+
+
+@pytest.mark.parametrize(
+    ("provider_message", "secret_fragment"),
+    (
+        ("session_token=provider-labelled-token", "provider-labelled-token"),
+        ("Authorization: Bearer provider-bearer-token", "provider-bearer-token"),
+        (
+            "https://provider.invalid/error?application_key=provider-query-key",
+            "provider-query-key",
+        ),
+    ),
+)
+def test_provider_error_direct_diagnostic_uses_canonical_secret_redaction(
+    monkeypatch: pytest.MonkeyPatch,
+    provider_message: str,
+    secret_fragment: str,
+) -> None:
+    _install_details_transport(monkeypatch, error_message=provider_message)
+    client = _client()
+
+    with pytest.raises(_readonly.BetfairReadOnlyError) as caught:
+        client.read_account_details()
+
+    message = str(caught.value)
+    assert secret_fragment not in message
+    assert "[REDACTED]" in message
 
 
 def test_identity_repr_and_digest_do_not_contain_credentials(

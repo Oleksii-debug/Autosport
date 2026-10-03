@@ -23,6 +23,25 @@ from autosport.betfair_account_readonly import (
 )
 
 
+def _install_https_test_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+    fake_open,
+) -> None:
+    """Intercept below a freshly-built urllib opener without using global _opener."""
+
+    def fake_do_open(_self, _http_class, request, **_kwargs):
+        response = fake_open(request, getattr(request, "timeout", 0))
+        response.code = 200
+        response.msg = "OK"
+        return response
+
+    monkeypatch.setattr(
+        _urllib_request.AbstractHTTPHandler,
+        "do_open",
+        fake_do_open,
+    )
+
+
 def _reachable_functions(root: FunctionType) -> tuple[FunctionType, ...]:
     pending: list[object] = [root]
     seen: set[int] = set()
@@ -128,12 +147,7 @@ def test_transient_clock_substitution_during_provider_io_cannot_backdate_identit
         ).encode("utf-8")
         return Response(payload)
 
-    class Opener:
-        def open(self, request, data=None, timeout: float = 0):
-            assert data is None
-            return fake_open(request, timeout)
-
-    monkeypatch.setattr(_urllib_request, "_opener", Opener())
+    _install_https_test_dispatch(monkeypatch, fake_open)
     client = build_betfair_authenticated_client(
         BetfairSessionCredentials("app-key", "session-token")
     )
@@ -212,18 +226,13 @@ def test_transient_parser_currency_substitution_cannot_launder_k07_identity(
             ).encode("utf-8")
         )
 
-    class Opener:
-        def open(self, request, data=None, timeout: float = 0):
-            assert data is None
-            return fake_open(request, timeout)
-
     def forged_provider_text(raw, key: str, field: str):
         forged_parser_entered.set()
         if field == "currency_code":
             return "GBP"
         return original_provider_text(raw, key, field)
 
-    monkeypatch.setattr(_urllib_request, "_opener", Opener())
+    _install_https_test_dispatch(monkeypatch, fake_open)
     client = build_betfair_authenticated_client(
         BetfairSessionCredentials("app-key", "session-token")
     )
@@ -294,11 +303,6 @@ def test_json_codec_rebinding_cannot_redirect_or_forge_k07_rpc(monkeypatch) -> N
             ).encode("utf-8")
         )
 
-    class Opener:
-        def open(self, request, data=None, timeout: float = 0):
-            assert data is None
-            return fake_open(request, timeout)
-
     def forged_dumps(value, *args, **kwargs):
         if type(value) is dict and value.get("jsonrpc") == "2.0" and "method" in value:
             forged = dict(value)
@@ -316,7 +320,7 @@ def test_json_codec_rebinding_cannot_redirect_or_forge_k07_rpc(monkeypatch) -> N
             return forged
         return decoded
 
-    monkeypatch.setattr(_urllib_request, "_opener", Opener())
+    _install_https_test_dispatch(monkeypatch, fake_open)
     client = build_betfair_authenticated_client(
         BetfairSessionCredentials("app-key", "session-token")
     )
@@ -398,11 +402,6 @@ def test_transient_private_rpc_decode_swap_during_io_cannot_launder_identity(
             ).encode("utf-8")
         )
 
-    class Opener:
-        def open(self, request, data=None, timeout: float = 0):
-            assert data is None
-            return fake_open(request, timeout)
-
     def forged_decode(payload: bytes):
         decoded = original_decode(payload)
         forged = dict(decoded)
@@ -411,7 +410,7 @@ def test_transient_private_rpc_decode_swap_during_io_cannot_launder_identity(
         forged["result"] = forged_result
         return forged
 
-    monkeypatch.setattr(_urllib_request, "_opener", Opener())
+    _install_https_test_dispatch(monkeypatch, fake_open)
     client = build_betfair_authenticated_client(
         BetfairSessionCredentials("app-key", "session-token")
     )

@@ -142,6 +142,8 @@ def _acquisition_provenance(
         "response_headers": response_headers,
         "canonical_response_payload_bound": True,
         "raw_response_bytes_bound": False,
+        "provider_origin_authority_persisted": False,
+        "provider_origin_requires_live_product_capture": True,
     }
     return provenance, _canonical_sha256(provenance)
 
@@ -376,8 +378,12 @@ def test_explicit_second_sport_enters_existing_governed_historical_pipeline(tmp_
     assert manifest["governance"]["coverage"]["source_ids"] == ["parlayapi:basketball"]
     assert provenance["product_kind"] == "POINT_IN_TIME_ODDS"
     assert provenance["causal_classification"] == "RETROSPECTIVE_POINT_IN_TIME_PRICE"
-    assert provenance["qualification_scope"] == "selected_point_in_time_snapshot_corpus_v1"
+    assert provenance["qualification_scope"] == "selected_point_in_time_snapshot_corpus_structural_v2"
     assert provenance["prospective_authority"] is False
+    assert provenance["provider_origin_verified"] is False
+    assert provenance["provider_origin_authority_persisted"] is False
+    assert provenance["provider_origin_requires_live_product_capture"] is True
+    assert provenance["scientific_qualification"] == "PROVIDER_ORIGIN_UNVERIFIED"
     assert provenance["canonical_response_payload_digest_bound"] is True
     assert provenance["raw_response_bytes_bound"] is False
     assert provenance["normalized_request_scope_bound"] is False
@@ -389,7 +395,7 @@ def test_explicit_second_sport_enters_existing_governed_historical_pipeline(tmp_
         "outcome_identity",
         "acquisition_identity",
         "governance_identity",
-        "qualified_corpus_identity",
+        "structural_corpus_identity",
     ):
         assert len(provenance[key]) == 64
         int(provenance[key], 16)
@@ -414,6 +420,9 @@ def test_validated_acquisition_provenance_is_bound_into_corpus_identity(tmp_path
 
     assert acquisition_evidence["validated_acquisition_provenance_count"] == 1
     assert provenance["validated_acquisition_provenance_count"] == 1
+    assert provenance["provider_origin_verified"] is False
+    assert provenance["provider_origin_authority_persisted"] is False
+    assert provenance["scientific_qualification"] == "PROVIDER_ORIGIN_UNVERIFIED"
     assert provenance["normalized_request_scope_bound"] is True
     assert provenance["provider_response_metadata_bound"] is True
     assert provenance["raw_response_bytes_bound"] is False
@@ -687,8 +696,8 @@ def test_acquisition_drift_changes_only_acquisition_and_qualified_identity(tmp_p
     assert first_provenance["governance_identity"] == second_provenance["governance_identity"]
     assert first_provenance["acquisition_identity"] != second_provenance["acquisition_identity"]
     assert (
-        first_provenance["qualified_corpus_identity"]
-        != second_provenance["qualified_corpus_identity"]
+        first_provenance["structural_corpus_identity"]
+        != second_provenance["structural_corpus_identity"]
     )
 
 
@@ -723,12 +732,12 @@ def test_governance_drift_changes_only_governance_and_qualified_identity(tmp_pat
     assert first_provenance["acquisition_identity"] == second_provenance["acquisition_identity"]
     assert first_provenance["governance_identity"] != second_provenance["governance_identity"]
     assert (
-        first_provenance["qualified_corpus_identity"]
-        != second_provenance["qualified_corpus_identity"]
+        first_provenance["structural_corpus_identity"]
+        != second_provenance["structural_corpus_identity"]
     )
 
 
-def test_qualified_corpus_identity_binds_sealed_terminal_outcomes(
+def test_structural_corpus_identity_binds_sealed_terminal_outcomes(
     tmp_path: Path,
 ) -> None:
     snapshot = _write_snapshot(
@@ -770,7 +779,7 @@ def test_qualified_corpus_identity_binds_sealed_terminal_outcomes(
     assert first["acquisition_identity"] == second["acquisition_identity"]
     assert first["governance_identity"] == second["governance_identity"]
     assert first["outcome_identity"] != second["outcome_identity"]
-    assert first["qualified_corpus_identity"] != second["qualified_corpus_identity"]
+    assert first["structural_corpus_identity"] != second["structural_corpus_identity"]
     assert first_manifest["results_sha256"] != second_manifest["results_sha256"]
     assert first_manifest["import_identity"] != second_manifest["import_identity"]
 
@@ -920,8 +929,8 @@ def test_same_snapshot_set_reversed_is_identity_idempotent(tmp_path: Path) -> No
     assert first_provenance["acquisition_identity"] == second_provenance["acquisition_identity"]
     assert first_provenance["governance_identity"] == second_provenance["governance_identity"]
     assert (
-        first_provenance["qualified_corpus_identity"]
-        == second_provenance["qualified_corpus_identity"]
+        first_provenance["structural_corpus_identity"]
+        == second_provenance["structural_corpus_identity"]
     )
 
 
@@ -1078,7 +1087,7 @@ def test_reacquiring_identical_provider_market_content_changes_only_acquisition_
     assert first["outcome_identity"] == second["outcome_identity"]
     assert first["governance_identity"] == second["governance_identity"]
     assert first["acquisition_identity"] != second["acquisition_identity"]
-    assert first["qualified_corpus_identity"] != second["qualified_corpus_identity"]
+    assert first["structural_corpus_identity"] != second["structural_corpus_identity"]
     assert (
         first["content_identity_scope"]
         == "market_snapshot_semantics_excluding_product_ingest_time"
@@ -1124,6 +1133,103 @@ def test_identity_fields_reject_normalized_aliases(
             governance_proof_path=proof,
             output_dir=tmp_path / f"blocked-alias-{field}",
             name="blocked",
+            outcome_reveal_after=REVEAL_AT,
+            imported_at=IMPORTED_AT,
+        )
+
+
+
+def test_persisted_acquisition_cannot_claim_provider_origin_authority(
+    tmp_path: Path,
+) -> None:
+    market, evidence, event = _write_snapshot(
+        tmp_path,
+        sport="basketball",
+        suffix="forged-origin-authority",
+        acquisition_api_version="3.2.0",
+    )
+    payload = json.loads(evidence.read_text(encoding="utf-8"))
+    acquisition = payload["acquisition_provenance"]
+    acquisition["provider_origin_authority_persisted"] = True
+    payload["acquisition_sha256"] = _canonical_sha256(acquisition)
+    evidence.write_text(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True),
+        encoding="utf-8",
+    )
+
+    proof = _write_governance(
+        tmp_path,
+        ("parlayapi:basketball",),
+        suffix="forged-origin-authority",
+    )
+    with pytest.raises(
+        ValueError,
+        match="cannot claim persisted provider-origin authority",
+    ):
+        assemble_historical_corpus(
+            [(market, evidence)],
+            results_path=_write_results(
+                tmp_path,
+                (event,),
+                suffix="forged-origin-authority",
+            ),
+            governance_proof_path=proof,
+            output_dir=tmp_path / "forged-origin-authority-corpus",
+            name="forged origin authority corpus",
+            outcome_reveal_after=REVEAL_AT,
+            imported_at=IMPORTED_AT,
+        )
+
+
+def test_synthetic_https_origin_cannot_mint_parlay_source_attribution(
+    tmp_path: Path,
+) -> None:
+    market, evidence, event = _write_snapshot(
+        tmp_path,
+        sport="basketball",
+        suffix="synthetic-origin",
+        acquisition_api_version="3.2.0",
+    )
+    payload = json.loads(evidence.read_text(encoding="utf-8"))
+    acquisition = payload["acquisition_provenance"]
+    request = acquisition["request"]
+    synthetic_origin = "https://synthetic.example"
+    request["origin"] = synthetic_origin
+    request["base_url_sha256"] = hashlib.sha256(
+        synthetic_origin.encode("utf-8")
+    ).hexdigest()
+    request_url = (
+        f"{synthetic_origin}{request['endpoint_path']}?"
+        f"{request['query_string']}"
+    )
+    request["request_url_sha256"] = hashlib.sha256(
+        request_url.encode("utf-8")
+    ).hexdigest()
+    payload["acquisition_sha256"] = _canonical_sha256(acquisition)
+    evidence.write_text(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True),
+        encoding="utf-8",
+    )
+
+    proof = _write_governance(
+        tmp_path,
+        ("parlayapi:basketball",),
+        suffix="synthetic-origin",
+    )
+    with pytest.raises(
+        ValueError,
+        match="not canonical Parlay production origin",
+    ):
+        assemble_historical_corpus(
+            [(market, evidence)],
+            results_path=_write_results(
+                tmp_path,
+                (event,),
+                suffix="synthetic-origin",
+            ),
+            governance_proof_path=proof,
+            output_dir=tmp_path / "synthetic-origin-corpus",
+            name="synthetic origin corpus",
             outcome_reveal_after=REVEAL_AT,
             imported_at=IMPORTED_AT,
         )

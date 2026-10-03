@@ -68,6 +68,85 @@ def client_for(*responses: bytes):
     return client, transport
 
 
+class _StrictHttpResponse:
+    def __init__(self, *, status: int, url: str, payload: bytes = b"{}") -> None:
+        self.status = status
+        self.code = status
+        self.url = url
+        self._payload = payload
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, traceback):
+        return False
+
+    def geturl(self) -> str:
+        return self.url
+
+    def read(self, limit: int) -> bytes:
+        assert limit >= len(self._payload)
+        return self._payload
+
+
+class _StrictOpener:
+    def __init__(self, response: _StrictHttpResponse) -> None:
+        self.response = response
+
+    def open(self, request, timeout: float):
+        assert request.full_url
+        assert timeout > 0
+        return self.response
+
+
+def test_urllib_transport_refuses_redirect_before_follow() -> None:
+    handler = betfair_readonly._RejectBetfairRedirects()
+    with pytest.raises(BetfairReadOnlyError, match="redirect refused"):
+        handler.redirect_request(
+            object(),
+            object(),
+            302,
+            "Found",
+            {},
+            "https://example.invalid/redirect",
+        )
+
+
+@pytest.mark.parametrize(
+    ("status", "final_url", "message"),
+    (
+        (201, BETTING_JSON_RPC_ENDPOINT, "exactly 200"),
+        (200, "https://example.invalid/json-rpc", "origin changed"),
+    ),
+)
+def test_urllib_transport_requires_exact_status_and_final_origin(
+    monkeypatch: pytest.MonkeyPatch,
+    status: int,
+    final_url: str,
+    message: str,
+) -> None:
+    response = _StrictHttpResponse(status=status, url=final_url)
+    opener = _StrictOpener(response)
+    seen_handlers: list[object] = []
+
+    def fake_build_opener(*handlers):
+        seen_handlers.extend(handlers)
+        return opener
+
+    monkeypatch.setattr(betfair_readonly, "build_opener", fake_build_opener)
+    transport = betfair_readonly.UrllibBetfairHttpTransport()
+
+    with pytest.raises(BetfairReadOnlyError, match=message):
+        transport.post(
+            BETTING_JSON_RPC_ENDPOINT,
+            headers={"X-Application": "a", "X-Authentication": "b"},
+            body=b"{}",
+            timeout_seconds=1.0,
+        )
+    assert len(seen_handlers) == 1
+    assert isinstance(seen_handlers[0], betfair_readonly._RejectBetfairRedirects)
+
+
 def test_credentials_and_client_repr_never_expose_secrets():
     credentials = BetfairSessionCredentials("app-secret", "session-secret")
     client = BetfairReadOnlyClient(

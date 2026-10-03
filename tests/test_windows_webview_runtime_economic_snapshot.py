@@ -6,6 +6,10 @@ from hashlib import sha256
 import inspect
 from pathlib import Path
 import threading
+from types import SimpleNamespace
+
+import pytest
+import autosport.product_gui_worker as worker_module
 
 from autosport.causal_collector import GapState, SyncState
 from autosport.continuous_session import ContinuousTickResult
@@ -359,13 +363,165 @@ def test_lower_runtime_economic_cycle_fails_closed(tmp_path: Path) -> None:
     assert controller.product_worker.stop_reasons == ["runtime_error"]
 
 
+def test_economic_snapshot_rejects_malformed_freshness_and_money(
+    tmp_path: Path,
+) -> None:
+    valid = _snapshot(tmp_path)
+
+    with pytest.raises(ValueError, match="absolute Path"):
+        replace(valid, workspace=Path("relative"))
+    with pytest.raises(ValueError, match="timezone-aware"):
+        replace(valid, cycle_last_success_at="2026-10-03T08:00:00")
+    with pytest.raises(ValueError, match="finite Decimal"):
+        replace(valid, balance=Decimal("NaN"))
+    with pytest.raises(ValueError, match="SHA"):
+        replace(valid, paper_book_sha256="not-a-sha")
+
+
+def test_unprofiled_exact_runtime_tick_cannot_mint_economic_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _runtime(tmp_path)
+    object.__setattr__(runtime, "_operation_fence", threading.RLock())
+    worker = ProductGuiWorker(runtime_builder=lambda *_args: runtime)
+    status = SimpleNamespace(session_id="session-1", source_id="source-1")
+    calls = 0
+
+    def tick(_self):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            worker._stop_event.set()
+        return _tick(cycle_index=calls)
+
+    monkeypatch.setattr(AutonomousProductRuntime, "start", lambda _self: status)
+    monkeypatch.setattr(AutonomousProductRuntime, "tick", tick)
+    monkeypatch.setattr(AutonomousProductRuntime, "stop", lambda _self, _reason: status)
+    monkeypatch.setattr(AutonomousProductRuntime, "close", lambda _self: None)
+
+    worker._run(
+        workspace=tmp_path,
+        source_factory="test.module:source",
+        expected_source_id=None,
+        initial_bankroll="100",
+        poll_seconds=0.001,
+    )
+
+    messages = []
+    while True:
+        message = worker.poll()
+        if message is None:
+            break
+        messages.append(message)
+
+    tick_messages = [message for message in messages if message.kind == "TICK"]
+    assert len(tick_messages) == 1
+    assert tick_messages[0].economic is None
+    assert messages[-1].kind == "STOPPED"
+
+
+def test_profile_revocation_during_tick_preserves_stop_not_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _runtime(tmp_path)
+    object.__setattr__(runtime, "_operation_fence", threading.RLock())
+    worker = ProductGuiWorker()
+    status = SimpleNamespace(session_id="session-1", source_id="source-1")
+    profile = object()
+
+    monkeypatch.setattr(
+        worker_module,
+        "_register_started_product_runtime_origin",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        worker_module,
+        "issue_trusted_runtime_code_profile",
+        lambda _runtime: profile,
+    )
+    monkeypatch.setattr(
+        worker_module,
+        "revoke_trusted_runtime_code_profile",
+        lambda _profile: True,
+    )
+    monkeypatch.setattr(
+        worker_module,
+        "_clear_started_product_runtime_origin",
+        lambda _runtime: None,
+    )
+    monkeypatch.setattr(
+        worker_module,
+        "require_authoritative_trusted_runtime_code_profile",
+        lambda _profile, **_kwargs: _profile,
+    )
+    monkeypatch.setattr(AutonomousProductRuntime, "start", lambda _self: status)
+
+    def tick(_self):
+        worker._stop_event.set()
+        worker._stop_reason = "operator_stop"
+        return _tick(cycle_index=1)
+
+    monkeypatch.setattr(AutonomousProductRuntime, "tick", tick)
+    monkeypatch.setattr(AutonomousProductRuntime, "stop", lambda _self, _reason: status)
+    monkeypatch.setattr(AutonomousProductRuntime, "close", lambda _self: None)
+
+    worker._run(
+        workspace=tmp_path,
+        source_factory="autosport.product_source:create_parlay_product_source",
+        expected_source_id="source-1",
+        initial_bankroll="100",
+        poll_seconds=1,
+        _profiled_runtime_builder=lambda *_args, **_kwargs: runtime,
+    )
+
+    messages = []
+    while True:
+        message = worker.poll()
+        if message is None:
+            break
+        messages.append(message)
+
+    assert [message.kind for message in messages] == ["STARTED", "STOPPED"]
+    assert messages[-1].stop_reason == "operator_stop"
+    assert all(message.kind != "ERROR" for message in messages)
+    assert all(message.economic is None for message in messages)
+
+
+def test_semantic_shell_exposes_readonly_economic_freshness_controls() -> None:
+    root = Path(__file__).resolve().parents[1]
+    html = (root / "src/autosport/windows_web/index.html").read_text(encoding="utf-8")
+    js = (root / "src/autosport/windows_web/app.js").read_text(encoding="utf-8")
+    audit = (root / "src/autosport/windows_webview_audit.py").read_text(
+        encoding="utf-8"
+    )
+
+    for control_id in (
+        "product-runtime-economic-cycle",
+        "product-runtime-economic-cycle-last-success",
+        "product-runtime-paper-book-sha",
+    ):
+        assert f'id="{control_id}"' in html
+        assert f'for="{control_id}"' in html
+        assert f'byId("{control_id}")' in js
+        assert f'"{control_id}": "input"' in audit
+        assert f'"{control_id}",' in audit
+    assert "runtimeEconomic.cycle_last_success_at" in js
+    assert "runtimeEconomic.paper_book_sha256" in js
+
+
 def test_runtime_worker_keeps_tick_and_snapshot_inside_one_operation_fence() -> None:
     source = inspect.getsource(ProductGuiWorker._run)
 
     assert "with runtime._operation_fence:" in source
     assert "tick = runtime.tick()" in source
     assert "economic = _economic_snapshot_builder(runtime, tick)" in source
+    assert "runtime_profile is not None" in source
+    assert "require_authoritative_trusted_runtime_code_profile" in source
     assert source.index("tick = runtime.tick()") < source.index(
         "economic = _economic_snapshot_builder(runtime, tick)"
     )
+    assert _capture_runtime_economic_snapshot.__kwdefaults__ is None
+    assert type(_capture_runtime_economic_snapshot.__defaults__) is tuple
     assert "AutosportSession" not in source

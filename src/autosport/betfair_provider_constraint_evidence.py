@@ -28,6 +28,7 @@ SCHEMA_VERSION = 1
 _MAX_DECIMAL_DIGITS = 64
 _MAX_ABS_EXPONENT = 18
 _MAX_OBSERVATIONS = 256
+_MAX_CANONICAL_TEXT_LENGTH = 4096
 
 
 class BetfairProviderConstraintError(ValueError):
@@ -48,9 +49,10 @@ def _canonical_text(value: object, field: str) -> str:
         or not value
         or value != value.strip()
         or "\x00" in value
+        or len(value) > _MAX_CANONICAL_TEXT_LENGTH
     ):
         raise BetfairProviderConstraintError(
-            f"{field} must be canonical non-empty text"
+            f"{field} must be bounded canonical non-empty text"
         )
     return value
 

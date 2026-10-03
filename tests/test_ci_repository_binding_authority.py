@@ -15,6 +15,33 @@ from scripts.cancel_superseded_pr_workflow_runs_scoped import (
 HEAD = "a" * 40
 
 
+def test_scoped_authority_readers_reject_production_api_subclass() -> None:
+    class ForgedScopedApi(WorkflowScopedGitHubApi):
+        pass
+
+    api = ForgedScopedApi(
+        repository="owner/repo",
+        token="token",
+        workflow_id=356678400,
+        workflow_name="CI",
+    )
+
+    assert (
+        _explicit_run_identity_is_current(
+            api,
+            run_id=123,
+            expected_head_sha=HEAD,
+            pr_number=303,
+        )
+        is False
+    )
+    with pytest.raises(
+        CancellationError,
+        match="live PR qualification API type changed",
+    ):
+        _trusted_live_pr_qualification(api, 303)
+
+
 def test_repository_coordinate_rejects_direct_instance_rebind() -> None:
     api = base_controller.GitHubApi(repository="owner/repo", token="token")
 

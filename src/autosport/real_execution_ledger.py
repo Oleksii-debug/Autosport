@@ -534,6 +534,8 @@ class VerifiedExecutionPlanView:
 
     snapshot_sha256: str
     event_count: int
+    plan_reserved_event_id: str
+    plan_reserved_at: str
     plan: ExecutionPlan
     plan_fingerprint: str
     stale: bool
@@ -3437,6 +3439,8 @@ class RealExecutionLedger:
         return VerifiedExecutionPlanView(
             snapshot_sha256=snapshot.sha256,
             event_count=snapshot.event_count,
+            plan_reserved_event_id=plan_event["event_id"],
+            plan_reserved_at=plan_event["recorded_at"],
             plan=plan,
             plan_fingerprint=plan_event["payload"]["plan_fingerprint"],
             stale=self._stale(events, plan_id),

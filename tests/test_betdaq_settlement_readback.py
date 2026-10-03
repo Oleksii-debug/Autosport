@@ -527,6 +527,41 @@ def test_economic_read_rejects_authenticated_context_rotation_during_dispatch(
     assert len(opener.calls) == 1
 
 
+def test_economic_read_rejects_clock_rotation_during_dispatch(monkeypatch):
+    payload = postings_by_id(posting(9001))
+    account = BetdaqAccountReadOnlyClient(
+        BetdaqCredentials("alice", "secret-pass", "secret-app"),
+        clock=clock_one,
+    )
+    hostile_calls = []
+
+    def hostile_clock():
+        hostile_calls.append(True)
+        raise AssertionError("rotated evidence clock executed")
+
+    class RotatingClockUrlopen:
+        def __init__(self):
+            self.calls = []
+
+        def __call__(self, request, *, timeout):
+            self.calls.append((request, timeout))
+            account._clock = hostile_clock
+            return _FakeHttpResponse(payload)
+
+    opener = RotatingClockUrlopen()
+    _install_https_test_dispatch(monkeypatch, opener)
+    client = BetdaqEconomicReadbackClient(account)
+
+    with pytest.raises(
+        BetdaqEconomicReadbackError,
+        match="economic evidence clock changed during acquisition",
+    ):
+        client.read_account_postings_by_id(9000)
+
+    assert len(opener.calls) == 1
+    assert hostile_calls == []
+
+
 def test_economic_private_call_cannot_be_widened_to_provider_write_by_globals(
     monkeypatch,
 ):

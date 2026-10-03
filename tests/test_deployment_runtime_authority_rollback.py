@@ -989,7 +989,7 @@ def test_reopen_aborts_prepare_when_publish_never_happened(
     assert len(reopened.records()) == 2
 
 
-def test_byte_identical_retry_after_aborted_prepare_uses_fresh_transaction(
+def test_retry_after_aborted_prepare_uses_fresh_transaction(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1000,26 +1000,38 @@ def test_byte_identical_retry_after_aborted_prepare_uses_fresh_transaction(
         authority_root=authority_root,
     )
     _append(store, 0)
-    fixed_first_seen = "2100-01-01T00:00:00Z"
-    monkeypatch.setattr(store, "_observed_now", lambda: fixed_first_seen)
 
     def crash_before_publish(
         _path: Path,
         _payload: object,
     ) -> None:
-        raise RuntimeError("simulated crash before byte-identical publish")
+        raise RuntimeError("simulated crash before publish")
 
     monkeypatch.setattr(store, "_write_atomic_path", crash_before_publish)
-    with pytest.raises(RuntimeError, match="byte-identical"):
+    with pytest.raises(RuntimeError, match="before publish"):
         _append(store, 1)
+
+    first_prepare_ids = [
+        record.tx_id
+        for record in store._authority.read_history()
+        if record.phase is AuthorityPhase.PREPARE
+    ]
+    assert len(first_prepare_ids) == 2
+    aborted_tx_id = first_prepare_ids[-1]
 
     reopened = DeploymentRuntimeAuthorityStore(
         path,
         authority_root=authority_root,
     )
-    monkeypatch.setattr(reopened, "_observed_now", lambda: fixed_first_seen)
     second_id = _append(reopened, 1)
 
+    prepare_ids = [
+        record.tx_id
+        for record in reopened._authority.read_history()
+        if record.phase is AuthorityPhase.PREPARE
+    ]
+    assert len(prepare_ids) == 3
+    assert prepare_ids[-1] != aborted_tx_id
     assert len(reopened.records()) == 2
     assert reopened.records()[-1].runtime_authority_id == second_id
 
@@ -3187,5 +3199,114 @@ def test_runtime_authority_rejects_monotonic_helper_code_replacement(
             match="monotonic helper was replaced",
         ):
             store.records()
+    finally:
+        target.__code__ = original_code
+
+
+def test_runtime_authority_rejects_observed_now_instance_shadow(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "deployment-runtime-authority.json"
+    store = DeploymentRuntimeAuthorityStore.initialize_pristine(
+        path,
+        authority_root=_authority_root(tmp_path),
+    )
+    hostile_calls: list[None] = []
+
+    def hostile_clock() -> str:
+        hostile_calls.append(None)
+        return "2100-01-01T00:00:00Z"
+
+    monkeypatch.setattr(store, "_observed_now", hostile_clock)
+    with pytest.raises(
+        DeploymentRuntimeAuthorityError,
+        match="method dispatch was replaced",
+    ):
+        _append(store, 0)
+
+    assert hostile_calls == []
+
+
+def test_runtime_authority_rejects_observed_now_class_replacement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "deployment-runtime-authority.json"
+    store = DeploymentRuntimeAuthorityStore.initialize_pristine(
+        path,
+        authority_root=_authority_root(tmp_path),
+    )
+    hostile_calls: list[object] = []
+
+    def hostile_clock(self: object) -> str:
+        hostile_calls.append(self)
+        return "2100-01-01T00:00:00Z"
+
+    monkeypatch.setattr(
+        DeploymentRuntimeAuthorityStore,
+        "_observed_now",
+        hostile_clock,
+    )
+    with pytest.raises(
+        DeploymentRuntimeAuthorityError,
+        match="method dispatch was replaced",
+    ):
+        _append(store, 0)
+
+    assert hostile_calls == []
+
+
+def test_runtime_authority_rejects_clock_helper_alias_rebinding(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "deployment-runtime-authority.json"
+    store = DeploymentRuntimeAuthorityStore.initialize_pristine(
+        path,
+        authority_root=_authority_root(tmp_path),
+    )
+    hostile_calls: list[None] = []
+
+    def hostile_clock() -> str:
+        hostile_calls.append(None)
+        return "2100-01-01T00:00:00Z"
+
+    monkeypatch.setattr(
+        deployment_runtime_authority,
+        "_utc_now_timestamp",
+        hostile_clock,
+    )
+    with pytest.raises(
+        DeploymentRuntimeAuthorityError,
+        match="clock dispatch was replaced",
+    ):
+        _append(store, 0)
+
+    assert hostile_calls == []
+
+
+def test_runtime_authority_rejects_clock_helper_code_replacement(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "deployment-runtime-authority.json"
+    store = DeploymentRuntimeAuthorityStore.initialize_pristine(
+        path,
+        authority_root=_authority_root(tmp_path),
+    )
+    target = deployment_runtime_authority._utc_now_timestamp
+    original_code = target.__code__
+
+    def hostile_clock() -> str:
+        raise AssertionError("hostile clock helper code executed")
+
+    assert hostile_clock.__code__.co_freevars == original_code.co_freevars
+    target.__code__ = hostile_clock.__code__
+    try:
+        with pytest.raises(
+            DeploymentRuntimeAuthorityError,
+            match="clock dispatch was replaced",
+        ):
+            _append(store, 0)
     finally:
         target.__code__ = original_code

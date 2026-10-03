@@ -2629,3 +2629,68 @@ def test_strict_json_validator_rebinding_cannot_forge_owner_goal(
 
     assert hostile_calls == []
 
+def test_economic_goal_provenance_json_rebinding_cannot_forge_contract_hash(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    acquired, _ = _acquire_balance(monkeypatch, tmp_path, "100")
+    target = _plan("target", _action("target-action", "10"))
+    ledger = _ledger_with_plans(tmp_path, target)
+    hostile_calls: list[object] = []
+
+    def hostile_dumps(*args, **kwargs):
+        hostile_calls.append((args, kwargs))
+        return "{}"
+
+    monkeypatch.setattr(
+        headroom_module._economic_goal_provenance.json,
+        "dumps",
+        hostile_dumps,
+    )
+
+    with pytest.raises(
+        ProviderAccountHeadroomError,
+        match="canonical monetary denomination authority changed",
+    ):
+        _assess(
+            ledger,
+            acquired,
+            plan_id="target",
+            action_id="target-action",
+        )
+
+    assert hostile_calls == []
+
+
+def test_economic_goal_provenance_sha256_rebinding_cannot_forge_contract_hash(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    acquired, _ = _acquire_balance(monkeypatch, tmp_path, "100")
+    target = _plan("target", _action("target-action", "10"))
+    ledger = _ledger_with_plans(tmp_path, target)
+    hostile_calls: list[object] = []
+
+    def hostile_sha256(*args, **kwargs):
+        hostile_calls.append((args, kwargs))
+        raise AssertionError("hostile provenance sha256 executed")
+
+    monkeypatch.setattr(
+        headroom_module._economic_goal_provenance.hashlib,
+        "sha256",
+        hostile_sha256,
+    )
+
+    with pytest.raises(
+        ProviderAccountHeadroomError,
+        match="canonical monetary denomination authority changed",
+    ):
+        _assess(
+            ledger,
+            acquired,
+            plan_id="target",
+            action_id="target-action",
+        )
+
+    assert hostile_calls == []
+

@@ -133,6 +133,96 @@ class OutcomeAvailabilityGlobalStrictFenceTests(unittest.TestCase):
                 {entry["run_id"] for entry in durable["runs"].values()},
             )
 
+    def test_in_place_registry_read_code_mutation_fails_before_attacker_dispatch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            registry = self._new_registry(tmp)
+            binding = self._binding(
+                source_identity="official-results:read-code",
+                record_id="event:read-code",
+                label="read-code",
+            )
+            target = RunRegistry._read
+            original_code = target.__code__
+            hostile_calls = 0
+
+            def hostile_read(_registry):
+                nonlocal hostile_calls
+                hostile_calls += 1
+                raise AssertionError("mutated RunRegistry._read must not execute")
+
+            self.assertEqual(original_code.co_freevars, hostile_read.__code__.co_freevars)
+            try:
+                target.__code__ = hostile_read.__code__
+                with self.assertRaisesRegex(
+                    OutcomeLineageTrustError,
+                    "read authority dispatch was rebound",
+                ):
+                    self._begin(registry, binding, "run-read-code")
+            finally:
+                target.__code__ = original_code
+
+            self.assertEqual(hostile_calls, 0)
+
+    def test_in_place_strict_fence_code_mutation_fails_before_attacker_dispatch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            registry = self._new_registry(tmp)
+            binding = self._binding(
+                source_identity="official-results:strict-code",
+                record_id="event:strict-code",
+                label="strict-code",
+            )
+            target = availability_guard._strictly_after_registry_fence
+            original_code = target.__code__
+            hostile_calls = 0
+
+            def hostile_strict(candidate, fence, *, canonical_timestamp, parse_timestamp, error_type):
+                nonlocal hostile_calls
+                hostile_calls += 1
+                return candidate
+
+            self.assertEqual(original_code.co_freevars, hostile_strict.__code__.co_freevars)
+            try:
+                target.__code__ = hostile_strict.__code__
+                with self.assertRaisesRegex(
+                    OutcomeLineageTrustError,
+                    "clock dependency implementation changed",
+                ):
+                    self._begin(registry, binding, "run-strict-code")
+            finally:
+                target.__code__ = original_code
+
+            self.assertEqual(hostile_calls, 0)
+
+    def test_in_place_fence_reader_code_mutation_fails_before_attacker_dispatch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            registry = self._new_registry(tmp)
+            binding = self._binding(
+                source_identity="official-results:fence-reader-code",
+                record_id="event:fence-reader-code",
+                label="fence-reader-code",
+            )
+            target = availability_guard._registry_availability_fence
+            original_code = target.__code__
+            hostile_calls = 0
+
+            def hostile_fence_reader(registry, *, read_state, trust_bindings, canonical_timestamp, parse_timestamp):
+                nonlocal hostile_calls
+                hostile_calls += 1
+                return None
+
+            self.assertEqual(original_code.co_freevars, hostile_fence_reader.__code__.co_freevars)
+            try:
+                target.__code__ = hostile_fence_reader.__code__
+                with self.assertRaisesRegex(
+                    OutcomeLineageTrustError,
+                    "fence dependency implementation changed",
+                ):
+                    self._begin(registry, binding, "run-fence-reader-code")
+            finally:
+                target.__code__ = original_code
+
+            self.assertEqual(hostile_calls, 0)
+
     def test_rebound_registry_read_fails_before_attacker_dispatch(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             registry = self._new_registry(tmp)

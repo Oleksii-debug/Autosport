@@ -1181,3 +1181,38 @@ def test_upstream_classmethod_code_mutation_is_rejected_before_execution(
     ):
         resolve_execution_capital_at_risk(ledger, plan.plan_id)
 
+def test_upstream_view_field_descriptor_substitution_cannot_hide_attempts(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    ledger, plan = _ledger(tmp_path, _action(stake="10"))
+    _attempt(ledger, plan)
+
+    ledger_globals = RealExecutionLedger.verified_execution_view.__globals__
+    view_type = ledger_globals["VerifiedExecutionPlanView"]
+    calls: list[str] = []
+
+    class EmptyAttemptsDescriptor:
+        def __get__(self, instance, owner=None):
+            if instance is None:
+                return self
+            calls.append("get")
+            return ()
+
+        def __set__(self, instance, value):
+            calls.append("set")
+
+    monkeypatch.setattr(
+        view_type,
+        "attempts",
+        EmptyAttemptsDescriptor(),
+    )
+
+    with pytest.raises(
+        ExecutionCapitalAtRiskError,
+        match="canonical execution read-view type authority changed",
+    ):
+        resolve_execution_capital_at_risk(ledger, plan.plan_id)
+
+    assert calls == []
+

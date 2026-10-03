@@ -335,6 +335,7 @@ def _install_ledger_read_authority():
     snapshot_globals = verified_snapshot.__globals__
     exact_globals = globals
     exact_getattr = getattr
+    exact_vars = vars
     missing = object()
 
     # Reuse the canonical #2090 read-view authority pattern: pin the constructor
@@ -387,6 +388,68 @@ def _install_ledger_read_authority():
             value = value.__func__
         return exact_getattr(value, "__code__", None)
 
+    # Exact constructor aliases are not sufficient when the classes themselves
+    # remain mutable Python objects.  Pin the dataclass constructor/post-init code
+    # and every slot descriptor that carries ledger-derived authority, so an
+    # in-place class mutation cannot turn a canonical exact-type view into an
+    # underreported projection.
+    read_view_types = (
+        verified_plan_view_type,
+        attempt_read_view_type,
+        provider_evidence_view_type,
+        execution_attempt_type,
+        execution_action_type,
+        external_acknowledgement_type,
+        execution_plan_type,
+        snapshot_type,
+    )
+    read_view_type_authorities = []
+    for owner in read_view_types:
+        owner_vars = exact_vars(owner)
+        fields = owner_vars.get("__dataclass_fields__", missing)
+        init = owner_vars.get("__init__", missing)
+        init_code = descriptor_code(init)
+        post_init = owner_vars.get("__post_init__", missing)
+        post_init_code = (
+            descriptor_code(post_init) if post_init is not missing else None
+        )
+        if (
+            type(fields) is not dict
+            or init is missing
+            or init_code is None
+        ):
+            raise ExecutionCapitalAtRiskError(
+                "canonical execution read-view type authority is incomplete"
+            )
+        field_authorities = tuple(
+            (
+                name,
+                field,
+                owner_vars.get(name, missing),
+            )
+            for name, field in fields.items()
+        )
+        if any(
+            descriptor is missing
+            for _, _, descriptor in field_authorities
+        ):
+            raise ExecutionCapitalAtRiskError(
+                "canonical execution read-view field authority is incomplete"
+            )
+        read_view_type_authorities.append(
+            (
+                owner,
+                fields,
+                field_authorities,
+                init,
+                init_code,
+                post_init,
+                post_init_code,
+                exact_getattr(owner, "__getattribute__", missing),
+            )
+        )
+    read_view_type_authorities = tuple(read_view_type_authorities)
+
     ledger_methods = tuple(
         (
             name,
@@ -434,6 +497,41 @@ def _install_ledger_read_authority():
             raise ExecutionCapitalAtRiskError(
                 "canonical execution-ledger read authority changed"
             )
+        for (
+            owner,
+            fields,
+            field_authorities,
+            init,
+            init_code,
+            post_init,
+            post_init_code,
+            getattribute,
+        ) in read_view_type_authorities:
+            owner_vars = exact_vars(owner)
+            current_fields = owner_vars.get("__dataclass_fields__", missing)
+            current_init = owner_vars.get("__init__", missing)
+            current_post_init = owner_vars.get("__post_init__", missing)
+            if (
+                current_fields is not fields
+                or current_init is not init
+                or descriptor_code(current_init) is not init_code
+                or current_post_init is not post_init
+                or (
+                    post_init is not missing
+                    and descriptor_code(current_post_init) is not post_init_code
+                )
+                or exact_getattr(owner, "__getattribute__", missing)
+                is not getattribute
+                or any(
+                    current_fields.get(name, missing) is not field
+                    or owner_vars.get(name, missing) is not descriptor
+                    for name, field, descriptor in field_authorities
+                )
+            ):
+                raise ExecutionCapitalAtRiskError(
+                    "canonical execution read-view type authority changed"
+                )
+
         for name, expected, expected_code in ledger_methods:
             current = ledger_type.__dict__.get(name, missing)
             if (

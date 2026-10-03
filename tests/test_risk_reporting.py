@@ -9,6 +9,10 @@ import autosport.risk_reporting as risk_reporting
 from autosport.domain import TicketLeg
 from autosport.economic_goal import EconomicGoalContract
 from autosport.paper import PaperBook
+from autosport.paper_drawdown_evidence import (
+    DRAW_DOWN_ECONOMIC_BASIS,
+    DRAW_DOWN_HISTORY_MODE,
+)
 from autosport.risk import PaperRiskPolicy
 from autosport.risk_reporting import (
     DRAWDOWN_METRIC_REALIZED_SETTLED_EQUITY,
@@ -58,6 +62,13 @@ class PaperRiskReportingTests(unittest.TestCase):
             report.drawdown_metric_class,
             DRAWDOWN_METRIC_REALIZED_SETTLED_EQUITY,
         )
+        self.assertEqual(report.drawdown_economic_basis, DRAW_DOWN_ECONOMIC_BASIS)
+        self.assertEqual(report.drawdown_history_mode, DRAW_DOWN_HISTORY_MODE)
+        self.assertFalse(report.drawdown_net_cost_evidence_complete)
+        self.assertFalse(report.marked_equity_drawdown_supported)
+        self.assertFalse(report.drawdown_capital_at_risk_included)
+        self.assertFalse(report.stress_drawdown_included)
+        self.assertFalse(report.drawdown_as_known_at_supported)
         self.assertFalse(report.includes_live_execution_exposure)
         self.assertFalse(report.live_execution_headroom_authoritative)
         self.assertEqual(
@@ -114,6 +125,8 @@ class PaperRiskReportingTests(unittest.TestCase):
         self.assertEqual(report.peak_equity, Decimal("100"))
         self.assertEqual(report.current_drawdown_amount, Decimal("0"))
         self.assertEqual(report.committed_stake, Decimal("10"))
+        self.assertFalse(report.drawdown_capital_at_risk_included)
+        self.assertFalse(report.marked_equity_drawdown_supported)
         self.assertEqual(report.drawdown_loss_room, Decimal("10.00"))
 
     def test_settled_loss_reports_exact_drawdown_and_same_enforcement_headroom(self) -> None:
@@ -296,6 +309,56 @@ class PaperRiskReportingTests(unittest.TestCase):
             report.historical_max_drawdown_trough_id,
             f"paper-lifecycle:5:settle:{second_loser.ticket_id}",
         )
+
+    def test_fractional_max_is_independent_of_largest_absolute_episode(self) -> None:
+        book = PaperBook("100")
+        first_loser = book.open_ticket(
+            (self._leg(33),),
+            Decimal("50"),
+            placed_at="2026-09-21T09:30:00+00:00",
+        )
+        book.settle(
+            first_loser.ticket_id,
+            set(),
+            settled_at="2026-09-21T09:35:00+00:00",
+        )
+        new_peak = book.open_ticket(
+            (self._leg(34, odds="24"),),
+            Decimal("50"),
+            placed_at="2026-09-21T09:40:00+00:00",
+        )
+        book.settle(
+            new_peak.ticket_id,
+            {new_peak.legs[0].quote_key},
+            settled_at="2026-09-21T09:45:00+00:00",
+        )
+        second_loser = book.open_ticket(
+            (self._leg(35),),
+            Decimal("60"),
+            placed_at="2026-09-21T09:50:00+00:00",
+        )
+        book.settle(
+            second_loser.ticket_id,
+            set(),
+            settled_at="2026-09-21T09:55:00+00:00",
+        )
+
+        report = build_paper_risk_report(book, self._goal())
+
+        self.assertEqual(report.peak_equity, Decimal("1200"))
+        self.assertEqual(report.current_equity, Decimal("1140"))
+        self.assertEqual(report.current_drawdown_amount, Decimal("60"))
+        self.assertEqual(report.historical_max_drawdown_amount, Decimal("60"))
+        self.assertEqual(report.historical_max_drawdown_fraction, Decimal("0.5"))
+        self.assertEqual(
+            report.historical_max_drawdown_peak_id,
+            f"paper-lifecycle:3:settle:{new_peak.ticket_id}",
+        )
+        self.assertEqual(
+            report.historical_max_drawdown_trough_id,
+            f"paper-lifecycle:5:settle:{second_loser.ticket_id}",
+        )
+
 
     def test_equal_max_drawdowns_keep_earliest_causal_episode_across_restart(self) -> None:
         book = PaperBook("100")

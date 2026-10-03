@@ -800,7 +800,7 @@ class AutosportWebController:
             return {
                 "available": False,
                 "cycle_index": None,
-                "as_of": None,
+                "cycle_last_success_at": None,
                 "paper_book_sha256": None,
                 "balance": None,
                 "committed_stake": None,
@@ -815,7 +815,7 @@ class AutosportWebController:
         return {
             "available": True,
             "cycle_index": snapshot.cycle_index,
-            "as_of": snapshot.as_of,
+            "cycle_last_success_at": snapshot.cycle_last_success_at,
             "paper_book_sha256": snapshot.paper_book_sha256,
             "balance": str(snapshot.balance),
             "committed_stake": str(snapshot.committed_stake),
@@ -862,7 +862,7 @@ class AutosportWebController:
             previous is not None
             and previous.workspace == snapshot.workspace
             and previous.session_id == snapshot.session_id
-            and snapshot.cycle_index <= previous.cycle_index
+            and snapshot.cycle_index < previous.cycle_index
         ):
             self._quarantine_product_runtime_truth(workspace)
             return False
@@ -887,13 +887,16 @@ class AutosportWebController:
             for ticket in snapshot.tickets
         ] or [text("ui.ticket.empty")]
 
-        as_of = snapshot.as_of or "не підтверджено успішним циклом"
+        cycle_success = (
+            snapshot.cycle_last_success_at
+            or "успішний цикл ще не підтверджено"
+        )
         book_identity = snapshot.paper_book_sha256 or "відсутній durable PaperBook"
         self.evaluation = [
             (
-                "Економічний знімок тривалої симуляції: "
-                f"цикл {snapshot.cycle_index}; стан на {as_of}; "
-                f"PaperBook {book_identity}."
+                "Економічний знімок тривалої симуляції отримано після "
+                f"циклу {snapshot.cycle_index}; останній успішний цикл: "
+                f"{cycle_success}; точний PaperBook: {book_identity}."
             ),
             (
                 "Поточний PAPER-портфель: "

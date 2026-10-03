@@ -823,6 +823,31 @@ def _seal_scheduled_source_universe_dispatch() -> None:
     expected_schedule_evidence_code = getattr(
         expected_schedule_evidence, "__code__", None
     )
+    # The schedule reader and its witnessed helper methods share one defining-module
+    # globals dictionary.  Seal the authority-bearing bindings used for frozen scope,
+    # due-time classification and commitment construction so unchanged method code
+    # cannot late-dispatch through a hostile module-global replacement.
+    expected_schedule_globals = expected_schedule_evidence.__globals__
+    expected_schedule_text = expected_schedule_globals.get("_text")
+    expected_schedule_text_code = getattr(expected_schedule_text, "__code__", None)
+    expected_schedule_instant = expected_schedule_globals.get("_instant")
+    expected_schedule_instant_code = getattr(
+        expected_schedule_instant, "__code__", None
+    )
+    expected_schedule_policy = expected_schedule_globals.get("_SCHEDULE_POLICY")
+    expected_schedule_max_slots = expected_schedule_globals.get(
+        "_MAX_SCHEDULE_EVIDENCE_SLOTS"
+    )
+    expected_schedule_hashlib = expected_schedule_globals.get("hashlib")
+    expected_schedule_sha256 = getattr(expected_schedule_hashlib, "sha256", None)
+    expected_schedule_json = expected_schedule_globals.get("json")
+    expected_schedule_json_dumps = getattr(expected_schedule_json, "dumps", None)
+    expected_schedule_json_dumps_code = getattr(
+        expected_schedule_json_dumps, "__code__", None
+    )
+    expected_schedule_math = expected_schedule_globals.get("math")
+    expected_schedule_isfinite = getattr(expected_schedule_math, "isfinite", None)
+    expected_schedule_timedelta = expected_schedule_globals.get("timedelta")
     expected_schedule_read_names = _CANONICAL_SCHEDULE_READ_SEAMS
     expected_schedule_class_seams = _CANONICAL_SCHEDULE_CLASS_READ_SEAMS
     expected_schedule_class_witnesses = tuple(
@@ -838,6 +863,38 @@ def _seal_scheduled_source_universe_dispatch() -> None:
         )
         for name, expected in sorted(expected_schedule_class_seams.items())
     )
+    expected_store_base_type = expected_store_type.__mro__[1]
+    expected_base_connect_surface = expected_getattr_static(
+        expected_store_base_type, "_connect"
+    )
+    expected_base_connect_callable = getattr(
+        expected_base_connect_surface, "__func__", expected_base_connect_surface
+    )
+    expected_base_connect_code = getattr(
+        expected_base_connect_callable, "__code__", None
+    )
+    expected_base_connect_path_surface = expected_getattr_static(
+        expected_store_base_type, "_connect_path"
+    )
+    expected_base_connect_path_callable = getattr(
+        expected_base_connect_path_surface,
+        "__func__",
+        expected_base_connect_path_surface,
+    )
+    expected_base_connect_path_code = getattr(
+        expected_base_connect_path_callable, "__code__", None
+    )
+    expected_base_connect_path_globals = expected_base_connect_path_callable.__globals__
+    expected_base_sqlite3 = expected_base_connect_path_globals.get("sqlite3")
+    expected_base_sqlite_connect = getattr(expected_base_sqlite3, "connect", None)
+    expected_base_sqlite_row = getattr(expected_base_sqlite3, "Row", None)
+    expected_path_identity_surface = expected_schedule_class_seams["_path_file_identity"]
+    expected_path_identity_callable = getattr(
+        expected_path_identity_surface, "__func__", expected_path_identity_surface
+    )
+    expected_path_identity_globals = expected_path_identity_callable.__globals__
+    expected_path_os = expected_path_identity_globals.get("os")
+    expected_path_os_stat = getattr(expected_path_os, "stat", None)
     expected_schedule_keys = _SCHEDULE_KEYS
     expected_slot_keys = _SLOT_KEYS
     expected_hex = _HEX
@@ -958,6 +1015,68 @@ def _seal_scheduled_source_universe_dispatch() -> None:
             raise expected_error_type(
                 "scheduled source-universe schedule evidence authority is rebound"
             )
+        current_schedule_globals = getattr(
+            expected_schedule_evidence, "__globals__", None
+        )
+        if current_schedule_globals is not expected_schedule_globals:
+            raise expected_error_type(
+                "scheduled source-universe collector global authority drifted"
+            )
+        if (
+            current_schedule_globals.get("_text") is not expected_schedule_text
+            or getattr(expected_schedule_text, "__code__", None)
+            is not expected_schedule_text_code
+        ):
+            raise expected_error_type(
+                "scheduled source-universe collector text authority is rebound or mutated"
+            )
+        if (
+            current_schedule_globals.get("_instant") is not expected_schedule_instant
+            or getattr(expected_schedule_instant, "__code__", None)
+            is not expected_schedule_instant_code
+        ):
+            raise expected_error_type(
+                "scheduled source-universe collector time authority is rebound or mutated"
+            )
+        if (
+            current_schedule_globals.get("_SCHEDULE_POLICY")
+            is not expected_schedule_policy
+            or current_schedule_globals.get("_MAX_SCHEDULE_EVIDENCE_SLOTS")
+            is not expected_schedule_max_slots
+        ):
+            raise expected_error_type(
+                "scheduled source-universe collector schedule constants drifted"
+            )
+        if (
+            current_schedule_globals.get("hashlib") is not expected_schedule_hashlib
+            or getattr(expected_schedule_hashlib, "sha256", None)
+            is not expected_schedule_sha256
+        ):
+            raise expected_error_type(
+                "scheduled source-universe collector digest authority is rebound"
+            )
+        current_schedule_json = current_schedule_globals.get("json")
+        if (
+            current_schedule_json is not expected_schedule_json
+            or getattr(expected_schedule_json, "dumps", None)
+            is not expected_schedule_json_dumps
+            or getattr(expected_schedule_json_dumps, "__code__", None)
+            is not expected_schedule_json_dumps_code
+        ):
+            raise expected_error_type(
+                "scheduled source-universe collector JSON authority is rebound or mutated"
+            )
+        current_schedule_math = current_schedule_globals.get("math")
+        if (
+            current_schedule_math is not expected_schedule_math
+            or getattr(expected_schedule_math, "isfinite", None)
+            is not expected_schedule_isfinite
+            or current_schedule_globals.get("timedelta")
+            is not expected_schedule_timedelta
+        ):
+            raise expected_error_type(
+                "scheduled source-universe collector due-time authority is rebound"
+            )
         if (
             module_globals.get("_CANONICAL_SCHEDULE_READ_SEAMS")
             is not expected_schedule_read_names
@@ -998,6 +1117,72 @@ def _seal_scheduled_source_universe_dispatch() -> None:
                 raise expected_error_type(
                     "scheduled source-universe canonical read seam drifted: " + name
                 )
+        if expected_store_type.__mro__[1] is not expected_store_base_type:
+            raise expected_error_type(
+                "scheduled source-universe collector base type authority is rebound"
+            )
+        current_base_connect_surface = expected_getattr_static(
+            expected_store_base_type, "_connect", None
+        )
+        current_base_connect_callable = getattr(
+            current_base_connect_surface,
+            "__func__",
+            current_base_connect_surface,
+        )
+        if (
+            current_base_connect_surface is not expected_base_connect_surface
+            or current_base_connect_callable is not expected_base_connect_callable
+            or getattr(current_base_connect_callable, "__code__", None)
+            is not expected_base_connect_code
+        ):
+            raise expected_error_type(
+                "scheduled source-universe collector base connection authority is rebound or mutated"
+            )
+        current_base_connect_path_surface = expected_getattr_static(
+            expected_store_base_type, "_connect_path", None
+        )
+        current_base_connect_path_callable = getattr(
+            current_base_connect_path_surface,
+            "__func__",
+            current_base_connect_path_surface,
+        )
+        if (
+            current_base_connect_path_surface is not expected_base_connect_path_surface
+            or current_base_connect_path_callable
+            is not expected_base_connect_path_callable
+            or getattr(current_base_connect_path_callable, "__code__", None)
+            is not expected_base_connect_path_code
+            or getattr(current_base_connect_path_callable, "__globals__", None)
+            is not expected_base_connect_path_globals
+            or expected_base_connect_path_globals.get("sqlite3")
+            is not expected_base_sqlite3
+            or getattr(expected_base_sqlite3, "connect", None)
+            is not expected_base_sqlite_connect
+            or getattr(expected_base_sqlite3, "Row", None)
+            is not expected_base_sqlite_row
+        ):
+            raise expected_error_type(
+                "scheduled source-universe collector SQLite connection authority drifted"
+            )
+        current_path_identity_surface = expected_getattr_static(
+            expected_store_type, "_path_file_identity", None
+        )
+        current_path_identity_callable = getattr(
+            current_path_identity_surface,
+            "__func__",
+            current_path_identity_surface,
+        )
+        if (
+            current_path_identity_surface is not expected_path_identity_surface
+            or current_path_identity_callable is not expected_path_identity_callable
+            or getattr(current_path_identity_callable, "__globals__", None)
+            is not expected_path_identity_globals
+            or expected_path_identity_globals.get("os") is not expected_path_os
+            or getattr(expected_path_os, "stat", None) is not expected_path_os_stat
+        ):
+            raise expected_error_type(
+                "scheduled source-universe collector file-identity authority drifted"
+            )
         if module_globals.get("_SCHEDULE_KEYS") is not expected_schedule_keys:
             raise expected_error_type(
                 "scheduled source-universe schedule schema authority is rebound"

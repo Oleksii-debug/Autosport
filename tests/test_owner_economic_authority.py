@@ -198,6 +198,33 @@ def test_corrupt_contract_is_visible_but_never_overwritten_by_owner_initializati
     assert path.read_text(encoding="utf-8") == before
 
 
+def test_broken_owner_contract_alias_is_corrupt_not_absent(
+    tmp_path: Path,
+) -> None:
+    service = OwnerEconomicAuthorityService(tmp_path)
+    target = tmp_path / "missing-owner-contract.json"
+    try:
+        service.store.path.symlink_to(target)
+    except OSError as exc:
+        pytest.skip(f"symlinks unavailable on this runner: {exc}")
+
+    view = service.read_view()
+
+    assert view.state == "corrupt"
+    assert view.can_initialize is False
+    with pytest.raises(
+        OwnerEconomicAuthorityError,
+        match="лише коли збереження відсутнє",
+    ):
+        service.initialize_from_form(
+            _values(),
+            emergency_stop=False,
+            confirmed=True,
+        )
+    assert service.store.path.is_symlink()
+    assert not target.exists()
+
+
 def test_owner_initialization_persists_only_authority_even_with_supervised_ceiling(
     tmp_path: Path,
 ) -> None:

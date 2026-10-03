@@ -1591,7 +1591,13 @@ class PersistentLiveDecisionLoop:
 
         if not isinstance(snapshot, MirrorSnapshot):
             raise TypeError("intent factory snapshot must be MirrorSnapshot")
-        return MirrorSnapshot(revision=0, events=snapshot.events)
+        return MirrorSnapshot(
+            revision=0,
+            events=tuple(
+                MarketEvent.from_dict(event.to_dict())
+                for event in snapshot.events
+            ),
+        )
 
     def _refresh_intents_from_replay(
         self,

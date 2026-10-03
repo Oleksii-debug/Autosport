@@ -138,8 +138,11 @@ class UrllibBetfairHttpTransport:
         return payload
 
 
-def _system_utc_now() -> datetime:
-    return datetime.now(timezone.utc)
+def _system_utc_now(_datetime=datetime, _timezone=timezone) -> datetime:
+    # Capture the standard-library clock dependencies at definition time. This
+    # prevents later module-global rebinding from silently changing the evidence
+    # clock while the function object's identity remains unchanged.
+    return _datetime.now(_timezone.utc)
 
 
 _CANONICAL_URLLIB_POST = UrllibBetfairHttpTransport.post
@@ -1468,6 +1471,8 @@ def _install_market_book_depth_authority():
     canonical_client_type = BetfairReadOnlyClient
     canonical_transport_type = UrllibBetfairHttpTransport
     canonical_clock = _CANONICAL_MARKET_BOOK_CLOCK
+    canonical_clock_code = canonical_clock.__code__
+    canonical_clock_defaults = canonical_clock.__defaults__
     canonical_datetime_type = datetime
     canonical_utc = timezone.utc
     canonical_post = canonical_transport_type.post
@@ -1504,7 +1509,9 @@ def _install_market_book_depth_authority():
         if "post" in vars(transport):
             return False
         return (
-            canonical_rpc_dispatch(source)
+            canonical_clock.__code__ is canonical_clock_code
+            and canonical_clock.__defaults__ == canonical_clock_defaults
+            and canonical_rpc_dispatch(source)
             and type(transport).post is canonical_post
             and canonical_post.__code__ is canonical_post_code
             and (canonical_post.__kwdefaults__ or {}).get("_urlopen")
@@ -1536,12 +1543,18 @@ def _install_market_book_depth_authority():
             raise BetfairReadOnlyError(
                 "canonical MarketBook RPC dispatch changed"
             )
+        # Snapshot whether this read begins on the canonical production origin.
+        # Parser/test reads with injected transport/clock remain usable but are
+        # deliberately not entered into the positive-authority issuance registry.
+        origin_at_read_start = source_origin_authoritative(self)
         # listMarketBook does not carry an authoritative provider publish instant.
         # Capture the local request-start boundary before network IO so downstream
         # freshness can conservatively include the entire REST acquisition interval
         # rather than treating response receipt as if it were source observation.
         acquisition_started_at = canonical_now("acquisition-start instant")
         observation = raw_read(self, market_id, selection_id)
+        if not origin_at_read_start or not source_origin_authoritative(self):
+            return observation
         observation_id = id(observation)
 
         def forget(current: object, *, key: int = observation_id) -> None:

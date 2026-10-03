@@ -644,6 +644,56 @@ def test_post_issuance_rpc_rebind_revokes_market_book_authority(
             )
 
 
+
+def test_temporary_transport_substitution_cannot_be_restored_into_authority() -> None:
+    source = _canonical_client()
+    canonical_transport = source._transport
+    source._transport = MarketBookTransport()
+    receipt = source.read_market_book_depth("1.234", 42)
+    source._transport = canonical_transport
+
+    with pytest.raises(
+        BetfairReadOnlyError,
+        match="lacks canonical direct Betfair provider IO origin",
+    ):
+        betfair_account_readonly.assert_market_book_depth_authoritative(receipt)
+
+
+def test_temporary_clock_substitution_cannot_be_restored_into_authority() -> None:
+    source = _canonical_client()
+    canonical_clock = source._clock
+    original_opener = urllib_request._opener
+    try:
+        urllib_request._opener = _CanonicalUrlOpenerHarness(MarketBookTransport())
+        source._clock = lambda: READ_AT
+        receipt = source.read_market_book_depth("1.234", 42)
+    finally:
+        source._clock = canonical_clock
+        urllib_request._opener = original_opener
+
+    with pytest.raises(
+        BetfairReadOnlyError,
+        match="lacks canonical direct Betfair provider IO origin",
+    ):
+        betfair_account_readonly.assert_market_book_depth_authoritative(receipt)
+
+
+def test_market_book_clock_module_global_rebind_cannot_change_authority_clock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    canonical_clock = betfair_account_readonly._CANONICAL_MARKET_BOOK_CLOCK
+    monkeypatch.setattr(
+        betfair_account_readonly,
+        "datetime",
+        object(),
+    )
+    # Definition-time defaults keep the standard-library datetime/timezone
+    # dependencies authoritative despite the module-global alias substitution.
+    value = canonical_clock()
+    assert isinstance(value, datetime)
+    assert value.tzinfo is not None and value.utcoffset() is not None
+
+
 def test_market_book_authority_exposes_no_module_level_mint_or_registry() -> None:
     assert not hasattr(betfair_account_readonly, "_issue_market_book_depth")
     assert not hasattr(betfair_account_readonly, "_MARKET_BOOK_DEPTH_ISSUED")

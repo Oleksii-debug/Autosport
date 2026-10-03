@@ -598,13 +598,17 @@ def test_store_load_requires_exact_store_type(tmp_path):
         store.load("a" * 64)
 
 
-def test_store_load_implementation_uses_canonical_remember():
+def test_store_load_implementation_uses_canonical_remember_without_unsealed_delegate():
     import inspect
 
-    descriptor = inspect.getattr_static(CompleteGameBoardEvidenceStore, "load")
-    original = descriptor.__wrapped__
-    assert "_CANONICAL_REMEMBER" in original.__code__.co_names
-    assert "_remember" not in original.__code__.co_names
+    load_descriptor = inspect.getattr_static(CompleteGameBoardEvidenceStore, "load")
+    save_descriptor = inspect.getattr_static(CompleteGameBoardEvidenceStore, "save")
+    assert not hasattr(load_descriptor, "__wrapped__")
+    assert not hasattr(save_descriptor, "__wrapped__")
+    original_code = authority_module._CANONICAL_EVIDENCE_STORE_LOAD_IMPLEMENTATION_CODE
+    assert "_CANONICAL_REMEMBER" in original_code.co_names
+    assert "_remember" not in original_code.co_names
+
 
 def test_store_save_rejects_atomic_writer_rebind_before_dispatch(
     tmp_path,

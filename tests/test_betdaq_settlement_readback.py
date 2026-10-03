@@ -1038,6 +1038,56 @@ def test_by_id_rejects_transaction_at_cursor(monkeypatch):
         client.read_account_postings_by_id(9001)
 
 
+def test_window_readback_rejects_reordered_rows_after_construction(monkeypatch):
+    client, _ = economic_client(
+        monkeypatch,
+        postings_window(
+            posting(9001, posted_at="2026-09-22T23:59:00Z"),
+            posting(9002, balance="102.50", posted_at="2026-09-22T23:59:01Z"),
+            complete="true",
+        ),
+    )
+    readback = client.read_account_postings(
+        datetime(2026, 9, 22, tzinfo=timezone.utc),
+        datetime(2026, 9, 23, tzinfo=timezone.utc),
+    )
+
+    with pytest.raises(
+        BetdaqEconomicReadbackError,
+        match="canonical ListAccountPostings readback is not ordered",
+    ):
+        replace(readback, postings=tuple(reversed(readback.postings)))
+
+
+def test_by_id_readback_rejects_reordered_rows_after_construction(monkeypatch):
+    client, _ = economic_client(
+        monkeypatch,
+        postings_by_id(
+            posting(9001),
+            posting(9002, balance="102.50"),
+        ),
+    )
+    readback = client.read_account_postings_by_id(9000)
+
+    with pytest.raises(
+        BetdaqEconomicReadbackError,
+        match="canonical ListAccountPostingsById readback is not strictly ordered",
+    ):
+        replace(readback, postings=tuple(reversed(readback.postings)))
+
+
+def test_by_id_readback_rejects_row_moved_to_cursor_after_construction(monkeypatch):
+    client, _ = economic_client(monkeypatch, postings_by_id(posting(9001)))
+    readback = client.read_account_postings_by_id(9000)
+    forged = replace(readback.postings[0], transaction_id="9000")
+
+    with pytest.raises(
+        BetdaqEconomicReadbackError,
+        match="canonical ListAccountPostingsById readback contains transaction at/before cursor",
+    ):
+        replace(readback, postings=(forged,))
+
+
 def test_multiple_settlement_and_commission_postings_are_not_collapsed(monkeypatch):
     payload = postings_by_id(
         posting(

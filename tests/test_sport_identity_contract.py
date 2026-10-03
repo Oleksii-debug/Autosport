@@ -253,7 +253,7 @@ class SportIdentityContractTests(unittest.TestCase):
             ):
                 dataset.load_market_events()
 
-    def test_paperbook_schema_v6_round_trip_and_v5_backward_compatibility(self) -> None:
+    def test_paperbook_schema_v7_round_trip_and_v5_backward_compatibility(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "paper_book.json"
             book = PaperBook("100")
@@ -268,7 +268,7 @@ class SportIdentityContractTests(unittest.TestCase):
             book.save(path)
 
             raw = json.loads(path.read_text(encoding="utf-8"))
-            self.assertEqual(raw["schema_version"], 6)
+            self.assertEqual(raw["schema_version"], 7)
             self.assertEqual(raw["tickets"][0]["legs"][0]["sport"], "table_tennis")
 
             restored = PaperBook.load(path)
@@ -278,8 +278,9 @@ class SportIdentityContractTests(unittest.TestCase):
             for item in raw["tickets"]:
                 for item_leg in item["legs"]:
                     item_leg.pop("sport", None)
-            path.write_text(json.dumps(raw), encoding="utf-8")
-            legacy = PaperBook.load(path)
+                    item_leg.pop("exchange_side", None)
+            legacy_payload = json.dumps(raw).encode("utf-8")
+            legacy = PaperBook.load_bytes(legacy_payload)
             self.assertIsNone(legacy.tickets[ticket.ticket_id].legs[0].sport)
 
     def test_encoded_sport_identity_cannot_alias_legacy_pipe_identity(self) -> None:

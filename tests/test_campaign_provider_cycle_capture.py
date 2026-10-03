@@ -618,6 +618,120 @@ def test_module_dispatch_rebind_rejects_before_hostile_or_provider_execution(
     assert calls == []
 
 
+def test_first_clock_cannot_mutate_provider_capture_dispatch_before_io(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    locator, store, spec, provider_store = _setup(tmp_path)
+    provider_calls: list[str] = []
+    target = capture_module._CAPTURE
+    original_code = target.__code__
+
+    def hostile(*_args, **_kwargs):
+        raise AssertionError("hostile provider capture executed")
+
+    assert original_code.co_freevars == hostile.__code__.co_freevars
+
+    def mutating_clock() -> str:
+        target.__code__ = hostile.__code__
+        return "2100-01-01T06:00:00+00:00"
+
+    monkeypatch.setattr(
+        provider_module,
+        "urlopen",
+        lambda _request, _timeout: provider_calls.append("provider"),
+    )
+    try:
+        with pytest.raises(
+            CampaignProviderCycleCaptureIntegrityError,
+            match="dispatch code changed: _CAPTURE",
+        ):
+            capture_campaign_complete_game_board(
+                precommit_locator=locator,
+                store=store,
+                source_spec=spec,
+                evidence_store=provider_store,
+                request=_request(),
+                api_key="secret-value",
+                timeout_seconds=3.0,
+                clock=mutating_clock,
+            )
+    finally:
+        target.__code__ = original_code
+
+    assert provider_calls == []
+    assert store.collector_cycle_evidence(
+        source_id=spec.source_id,
+        start_cycle_seq=1,
+        end_cycle_seq=1,
+    ) == ()
+
+
+def test_completion_clock_cannot_redirect_evidence_save_dispatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    locator, store, spec, provider_store = _setup(tmp_path)
+    provider_calls: list[str] = []
+    target = capture_module._EVIDENCE_SAVE
+    original_code = target.__code__
+
+    def hostile(*_args, **_kwargs):
+        raise AssertionError("hostile evidence save executed")
+
+    assert original_code.co_freevars == hostile.__code__.co_freevars
+    values = iter(
+        (
+            "2100-01-01T06:00:00+00:00",
+            "2100-01-01T06:00:01+00:00",
+            "2100-01-01T06:00:02+00:00",
+        )
+    )
+    calls = 0
+
+    def mutating_clock() -> str:
+        nonlocal calls
+        calls += 1
+        value = next(values)
+        if calls == 2:
+            target.__code__ = hostile.__code__
+        return value
+
+    def fake_urlopen(_request, _timeout):
+        provider_calls.append("provider")
+        return _FakeSseResponse(_frame())
+
+    monkeypatch.setattr(provider_module, "urlopen", fake_urlopen)
+    monkeypatch.setattr(provider_module, "_default_clock", lambda: CAPTURED_AT)
+    try:
+        with pytest.raises(
+            CampaignProviderCycleCaptureIntegrityError,
+            match="dispatch code changed: _EVIDENCE_SAVE",
+        ):
+            capture_campaign_complete_game_board(
+                precommit_locator=locator,
+                store=store,
+                source_spec=spec,
+                evidence_store=provider_store,
+                request=_request(),
+                api_key="secret-value",
+                timeout_seconds=3.0,
+                clock=mutating_clock,
+            )
+    finally:
+        target.__code__ = original_code
+
+    assert provider_calls == ["provider"]
+    evidence = store.collector_cycle_evidence(
+        source_id=spec.source_id,
+        start_cycle_seq=1,
+        end_cycle_seq=1,
+    )
+    assert len(evidence) == 1
+    assert evidence[0]["terminal"]["status"] == "LOCAL_FAILURE"
+    assert "observed_artifacts" not in evidence[0]["terminal"]
+
+
 def test_module_dispatch_in_place_code_mutation_rejects_before_execution(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -1108,6 +1108,53 @@ def test_store_save_rejects_snapshot_payload_dispatch_rebind_before_dispatch(
     assert hostile_calls == []
 
 
+@pytest.mark.parametrize(
+    ("owner", "method_name", "expected_message"),
+    [
+        (
+            CompleteGameBoardSnapshot,
+            "__post_init__",
+            "provider evidence snapshot dispatch changed",
+        ),
+        (
+            CompleteGameBoardSnapshot,
+            "_validate_frame",
+            "provider evidence snapshot dispatch changed",
+        ),
+        (
+            CompleteGameBoardRequest,
+            "__post_init__",
+            "provider evidence request dispatch changed",
+        ),
+    ],
+)
+def test_store_load_rejects_deserialization_validator_rebind(
+    tmp_path,
+    monkeypatch,
+    owner,
+    method_name: str,
+    expected_message: str,
+):
+    snapshot = _capture(monkeypatch)
+    store = _store(tmp_path)
+    store.save(snapshot)
+    hostile_calls: list[str] = []
+
+    def hostile(*_args, **_kwargs):
+        hostile_calls.append(method_name)
+        raise AssertionError(f"hostile deserialization validator executed: {method_name}")
+
+    monkeypatch.setattr(owner, method_name, hostile)
+
+    with pytest.raises(
+        ProviderObservationIntegrityError,
+        match=expected_message,
+    ):
+        store.load(snapshot.evidence_sha256)
+
+    assert hostile_calls == []
+
+
 def test_store_load_rejects_json_reader_rebind_before_dispatch(
     tmp_path,
     monkeypatch,

@@ -779,18 +779,6 @@ def _install_quote_chain_evidence_authority() -> None:
         payload, _fingerprint = _issued_payload(self)
         return bool(payload["acknowledgement_binding_matches"])
 
-    def accepted_price_verified(
-        self: ExecutionQuoteChainEvidence,
-    ) -> bool:
-        payload, _fingerprint = _issued_payload(self)
-        return bool(payload["accepted_price_verified"])
-
-    def chain_complete(
-        self: ExecutionQuoteChainEvidence,
-    ) -> bool:
-        payload, _fingerprint = _issued_payload(self)
-        return bool(payload["chain_complete"])
-
     def evidence_sha256(self: ExecutionQuoteChainEvidence) -> str:
         _payload, fingerprint = _issued_payload(self)
         return fingerprint
@@ -894,10 +882,6 @@ def _install_quote_chain_evidence_authority() -> None:
     ExecutionQuoteChainEvidence.acknowledgement_binding_matches = property(
         acknowledgement_binding_matches
     )
-    ExecutionQuoteChainEvidence.accepted_price_verified = property(
-        accepted_price_verified
-    )
-    ExecutionQuoteChainEvidence.chain_complete = property(chain_complete)
     ExecutionQuoteChainEvidence.evidence_sha256 = property(evidence_sha256)
     ExecutionQuoteChainEvidence.to_dict = to_dict
     globals()["build_execution_quote_chain_evidence"] = issue

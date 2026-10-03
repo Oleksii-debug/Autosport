@@ -1130,6 +1130,47 @@ def test_cycle_receipt_is_not_caller_constructible() -> None:
         CampaignCompleteBoardCycleReceipt()
 
 
+def test_cycle_receipt_private_issuer_rejects_wrong_capability() -> None:
+    with pytest.raises(TypeError, match="resolver-private"):
+        CampaignCompleteBoardCycleReceipt._issue(
+            {},
+            _issuance_capability=object(),
+        )
+
+
+def test_cycle_receipt_private_issuer_rejects_subclass() -> None:
+    class HostileReceipt(CampaignCompleteBoardCycleReceipt):
+        pass
+
+    with pytest.raises(TypeError, match="exact canonical class"):
+        HostileReceipt._issue(
+            {},
+            _issuance_capability=capture_module._RECEIPT_ISSUANCE_CAPABILITY,
+        )
+
+
+def test_cycle_receipt_private_issuer_rejects_mapping_subclass() -> None:
+    class HostilePayload(dict):
+        pass
+
+    with pytest.raises(
+        CampaignProviderCycleCaptureIntegrityError,
+        match="payload is noncanonical",
+    ):
+        CampaignCompleteBoardCycleReceipt._issue(
+            HostilePayload(),
+            _issuance_capability=capture_module._RECEIPT_ISSUANCE_CAPABILITY,
+        )
+
+
+def test_cycle_receipt_builder_uses_captured_issuer_only() -> None:
+    names = capture_module._issue_receipt.__code__.co_names
+    assert "_CANONICAL_CYCLE_RECEIPT_ISSUER_FUNCTION" in names
+    assert "_CANONICAL_CYCLE_RECEIPT_CLASS" in names
+    assert "_CANONICAL_RECEIPT_ISSUANCE_CAPABILITY" in names
+    assert "_issue" not in names
+
+
 def test_instance_rebound_collector_seam_rejects_before_provider_io(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1960,3 +2001,57 @@ def test_campaign_clock_witness_double_rebind_fails_before_clock_execution(
         )
 
     assert calls == []
+
+
+
+def test_completion_clock_cannot_rebind_cycle_receipt_issuer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    locator, store, spec, provider_store = _setup(tmp_path)
+    monkeypatch.setattr(
+        provider_module,
+        "urlopen",
+        lambda _request, _timeout: _FakeSseResponse(_frame()),
+    )
+    monkeypatch.setattr(provider_module, "_default_clock", lambda: CAPTURED_AT)
+    hostile_calls: list[str] = []
+    calls = 0
+
+    def hostile_issuer(*_args, **_kwargs):
+        hostile_calls.append("issuer")
+        raise AssertionError("hostile receipt issuer executed")
+
+    def mutating_clock() -> str:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            monkeypatch.setattr(
+                capture_module,
+                "_CANONICAL_CYCLE_RECEIPT_ISSUER_FUNCTION",
+                hostile_issuer,
+            )
+            monkeypatch.setattr(
+                capture_module,
+                "_CANONICAL_CYCLE_RECEIPT_ISSUER_CODE",
+                hostile_issuer.__code__,
+            )
+            return "2100-01-01T06:00:01+00:00"
+        return "2100-01-01T06:00:00+00:00"
+
+    with pytest.raises(
+        CampaignProviderCycleCaptureIntegrityError,
+        match="campaign cycle receipt issuance authority changed",
+    ):
+        capture_campaign_complete_game_board(
+            precommit_locator=locator,
+            store=store,
+            source_spec=spec,
+            evidence_store=provider_store,
+            request=_request(),
+            api_key="secret-value",
+            timeout_seconds=3.0,
+            clock=mutating_clock,
+        )
+
+    assert hostile_calls == []

@@ -138,6 +138,10 @@ class BetfairHistoricalMarketDefinitionOrigin:
     _witness: HistoricalProviderOriginWitness = field(repr=False, compare=False)
     _token: object = field(repr=False, compare=False)
 
+    def __getattribute__(self, name: str) -> object:
+        _assert_canonical_market_definition_origin_dispatch()
+        return object.__getattribute__(self, name)
+
     def __post_init__(self) -> None:
         if self._token is not _TOKEN:
             raise TypeError(
@@ -303,6 +307,97 @@ class BetfairHistoricalMarketDefinitionOrigin:
         if self.provider_pt_ms > cutoff_pt_ms:
             raise BetfairHistoricalMarketDefinitionOriginError(
                 "marketDefinition revision was published after the requested provider cutoff"
+            )
+
+
+
+
+_MISSING_ORIGIN_CLASS_SLOT = object()
+_CANONICAL_MARKET_DEFINITION_ORIGIN_TYPE = BetfairHistoricalMarketDefinitionOrigin
+
+
+def _origin_descriptor_code_identity(member: object) -> tuple[object, ...]:
+    if isinstance(member, property):
+        return tuple(
+            None if accessor is None else getattr(accessor, "__code__", None)
+            for accessor in (member.fget, member.fset, member.fdel)
+        )
+    if isinstance(member, (classmethod, staticmethod)):
+        return (getattr(member.__func__, "__code__", None),)
+    return (getattr(member, "__code__", None),)
+
+
+_CANONICAL_MARKET_DEFINITION_ORIGIN_CLASS_SURFACE = tuple(
+    (
+        name,
+        member,
+        _origin_descriptor_code_identity(member),
+    )
+    for name in (
+        "provider_origin_witness_sha256",
+        "transport_contract_sha256",
+        "download_file_identity_sha256",
+        "provider_path",
+        "raw_file_sha256",
+        "entitlement_snapshot_sha256",
+        "download_retrieved_at",
+        "replay_source_identity",
+        "source_ordinal",
+        "provider_pt_ms",
+        "line_sha256",
+        "record_payload_sha256",
+        "market_id",
+        "market_definition_sha256",
+        "market_definition_json",
+        "package_tier",
+        "representation",
+        "_witness",
+        "_token",
+        "__post_init__",
+        "__getattribute__",
+        "__setattr__",
+        "__delattr__",
+        "_calculated_evidence_sha256",
+        "assert_issued_integrity",
+        "provider_origin_verified",
+        "evidence_sha256",
+        "_identity_payload",
+        "to_dict",
+        "market_definition",
+        "assert_provider_origin",
+        "assert_published_by",
+    )
+    for member in (
+        vars(BetfairHistoricalMarketDefinitionOrigin).get(
+            name,
+            _MISSING_ORIGIN_CLASS_SLOT,
+        ),
+    )
+)
+
+
+def _assert_canonical_market_definition_origin_dispatch() -> None:
+    class_dict = vars(_CANONICAL_MARKET_DEFINITION_ORIGIN_TYPE)
+    for name, expected, expected_code in (
+        _CANONICAL_MARKET_DEFINITION_ORIGIN_CLASS_SURFACE
+    ):
+        current = class_dict.get(name, _MISSING_ORIGIN_CLASS_SLOT)
+        if current is not expected:
+            raise BetfairHistoricalMarketDefinitionOriginError(
+                "canonical historical marketDefinition origin class dispatch was replaced"
+            )
+        if isinstance(current, property):
+            current_code = tuple(
+                None if accessor is None else getattr(accessor, "__code__", None)
+                for accessor in (current.fget, current.fset, current.fdel)
+            )
+        elif isinstance(current, (classmethod, staticmethod)):
+            current_code = (getattr(current.__func__, "__code__", None),)
+        else:
+            current_code = (getattr(current, "__code__", None),)
+        if current_code != expected_code:
+            raise BetfairHistoricalMarketDefinitionOriginError(
+                "canonical historical marketDefinition origin class dispatch was replaced"
             )
 
 

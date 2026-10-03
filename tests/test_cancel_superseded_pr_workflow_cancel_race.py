@@ -1,38 +1,39 @@
 from __future__ import annotations
 
+from urllib.error import HTTPError
+
 import pytest
 
 import scripts.cancel_superseded_pr_workflow_runs as controller_module
 from scripts.cancel_superseded_pr_workflow_runs import (
     CancellationError,
     GitHubApi,
-    _AllowedHttpError,
 )
 
 
 def test_cancel_conflict_is_benign_after_run_completed(monkeypatch) -> None:
     api = GitHubApi(repository="owner/repo", token="token")
-    calls: list[tuple[str, str, frozenset[int]]] = []
+    calls: list[tuple[str, str]] = []
 
-    def fake_request(
-        path: str,
-        *,
-        method: str = "GET",
-        allowed_http_errors: frozenset[int] = frozenset(),
-    ) -> object:
-        calls.append((path, method, allowed_http_errors))
-        if method == "POST":
-            assert allowed_http_errors == frozenset({409})
-            return _AllowedHttpError(409)
-        assert path == "/actions/runs/123"
-        return {"status": "completed"}
+    def fake_urlopen(request, *, timeout: int):
+        del timeout
+        calls.append((request.full_url, request.get_method()))
+        if request.get_method() == "POST":
+            raise HTTPError(
+                request.full_url,
+                409,
+                "Conflict",
+                hdrs=None,
+                fp=None,
+            )
+        return _FakeSuccessResponse(200, b'{"status":"completed"}')
 
-    monkeypatch.setattr(api, "_request", fake_request)
+    monkeypatch.setattr(controller_module, "urlopen", fake_urlopen)
     api.cancel(123)
 
     assert calls == [
-        ("/actions/runs/123/cancel", "POST", frozenset({409})),
-        ("/actions/runs/123", "GET", frozenset()),
+        ("https://api.github.com/repos/owner/repo/actions/runs/123/cancel", "POST"),
+        ("https://api.github.com/repos/owner/repo/actions/runs/123", "GET"),
     ]
 
 
@@ -86,13 +87,28 @@ def test_cancel_ignores_arbitrary_202_response_body(monkeypatch) -> None:
     api.cancel(123)
 
 
-def test_cancel_rejects_missing_transport_acceptance_authority(monkeypatch) -> None:
+def test_cancel_rejects_instance_shadowed_request_dispatch(monkeypatch) -> None:
     api = GitHubApi(repository="owner/repo", token="token")
     monkeypatch.setattr(api, "_request", lambda *_args, **_kwargs: None)
 
     with pytest.raises(
         CancellationError,
-        match="missing HTTP 202 acceptance authority",
+        match="cancellation request dispatch changed",
+    ):
+        api.cancel(123)
+
+
+def test_cancel_rejects_class_mutated_request_dispatch(monkeypatch) -> None:
+    api = GitHubApi(repository="owner/repo", token="token")
+    monkeypatch.setattr(
+        GitHubApi,
+        "_request",
+        lambda *_args, **_kwargs: controller_module._CANCELLATION_ACCEPTED,
+    )
+
+    with pytest.raises(
+        CancellationError,
+        match="cancellation request dispatch changed",
     ):
         api.cancel(123)
 
@@ -123,18 +139,19 @@ def test_cancel_rejects_undocumented_success_status(monkeypatch, status, body) -
 def test_cancel_conflict_fails_closed_while_run_remains_active(monkeypatch) -> None:
     api = GitHubApi(repository="owner/repo", token="token")
 
-    def fake_request(
-        path: str,
-        *,
-        method: str = "GET",
-        allowed_http_errors: frozenset[int] = frozenset(),
-    ) -> object:
-        del path, allowed_http_errors
-        if method == "POST":
-            return _AllowedHttpError(409)
-        return {"status": "in_progress"}
+    def fake_urlopen(request, *, timeout: int):
+        del timeout
+        if request.get_method() == "POST":
+            raise HTTPError(
+                request.full_url,
+                409,
+                "Conflict",
+                hdrs=None,
+                fp=None,
+            )
+        return _FakeSuccessResponse(200, b'{"status":"in_progress"}')
 
-    monkeypatch.setattr(api, "_request", fake_request)
+    monkeypatch.setattr(controller_module, "urlopen", fake_urlopen)
     with pytest.raises(
         CancellationError,
         match="cancellation conflicted while run remains active",

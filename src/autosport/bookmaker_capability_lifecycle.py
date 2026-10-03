@@ -762,14 +762,24 @@ class CapabilityEvidenceJournal:
             raw = json.loads(_text(payload, "payload"))
         except json.JSONDecodeError as exc:
             raise CapabilityEvidenceError("payload must be valid JSON") from exc
-        if not isinstance(raw, dict) or raw.get("schema_version") != 1:
+        if not isinstance(raw, dict):
+            raise CapabilityEvidenceError("journal payload must be an object")
+        if type(raw.get("schema_version")) is not int or raw.get("schema_version") != 1:
             raise CapabilityEvidenceError("unsupported journal schema")
+        _require_exact_object_keys(
+            raw,
+            frozenset({"schema_version", "evidence", "availability"}),
+            "journal",
+        )
         raw_evidence = raw.get("evidence")
         raw_availability = raw.get("availability")
         if not isinstance(raw_evidence, list) or not isinstance(raw_availability, list):
             raise CapabilityEvidenceError("journal lists are malformed")
 
         pending = [_evidence_from_payload(item) for item in raw_evidence]
+        evidence_ids = [evidence.evidence_id for evidence in pending]
+        if len(evidence_ids) != len(set(evidence_ids)):
+            raise CapabilityEvidenceError("journal contains duplicate evidence entries")
         journal = cls()
         while pending:
             deferred: list[CapabilityEvidence] = []
@@ -786,14 +796,48 @@ class CapabilityEvidenceJournal:
             if not progress:
                 raise CapabilityEvidenceError("missing or cyclic predecessor evidence")
             pending = deferred
-        for item in raw_availability:
-            journal.publish_availability(_availability_from_payload(item))
+
+        availability_items = [
+            _availability_from_payload(item) for item in raw_availability
+        ]
+        availability_ids = [item.availability_id for item in availability_items]
+        if len(availability_ids) != len(set(availability_ids)):
+            raise CapabilityEvidenceError(
+                "journal contains duplicate availability entries"
+            )
+        for item in availability_items:
+            journal.publish_availability(item)
         return journal
+
+
+def _require_exact_object_keys(
+    raw: dict[str, object], expected: frozenset[str], field: str
+) -> None:
+    if frozenset(raw) != expected:
+        raise CapabilityEvidenceError(
+            f"{field} contains unexpected or missing fields"
+        )
 
 
 def _scope_from_payload(raw: object) -> CapabilityScope:
     if not isinstance(raw, dict):
         raise CapabilityEvidenceError("scope must be an object")
+    _require_exact_object_keys(
+        raw,
+        frozenset(
+            {
+                "venue_id",
+                "account_id",
+                "environment",
+                "jurisdiction",
+                "sport",
+                "market_family",
+                "live_mode",
+                "credential_identity",
+            }
+        ),
+        "scope",
+    )
     return CapabilityScope(
         venue_id=_text(raw.get("venue_id"), "venue_id"),
         account_id=_optional_text(raw.get("account_id"), "account_id"),
@@ -811,6 +855,28 @@ def _scope_from_payload(raw: object) -> CapabilityScope:
 def _evidence_from_payload(raw: object) -> CapabilityEvidence:
     if not isinstance(raw, dict):
         raise CapabilityEvidenceError("evidence must be an object")
+    _require_exact_object_keys(
+        raw,
+        frozenset(
+            {
+                "profile_id",
+                "capability",
+                "support_state",
+                "strength",
+                "source",
+                "scope",
+                "observed_at",
+                "committed_at",
+                "review_due_at",
+                "validation_policy_version",
+                "source_contract_ref",
+                "source_payload_sha256",
+                "provider_expires_at",
+                "predecessor_id",
+            }
+        ),
+        "evidence",
+    )
     try:
         capability = BookmakerCapability(_text(raw.get("capability"), "capability"))
         support = BookmakerCapabilityState(
@@ -849,6 +915,19 @@ def _evidence_from_payload(raw: object) -> CapabilityEvidence:
 def _availability_from_payload(raw: object) -> CapabilityAvailability:
     if not isinstance(raw, dict):
         raise CapabilityEvidenceError("availability must be an object")
+    _require_exact_object_keys(
+        raw,
+        frozenset(
+            {
+                "evidence_id",
+                "state",
+                "observed_at",
+                "source_ref",
+                "source_payload_sha256",
+            }
+        ),
+        "availability",
+    )
     try:
         state = CapabilityAvailabilityState(_text(raw.get("state"), "state"))
     except ValueError as exc:

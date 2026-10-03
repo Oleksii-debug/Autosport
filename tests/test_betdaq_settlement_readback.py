@@ -993,6 +993,7 @@ def test_multiple_settlement_and_commission_postings_are_not_collapsed(monkeypat
             balance="101.50",
             category=1,
             order_id="123",
+            market_id=None,
         ),
         posting(
             9003,
@@ -1007,6 +1008,7 @@ def test_multiple_settlement_and_commission_postings_are_not_collapsed(monkeypat
             amount="-0.25",
             balance="100.75",
             category=2,
+            order_id=None,
             market_id="200",
         ),
     )

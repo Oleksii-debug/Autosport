@@ -27,6 +27,8 @@ from .campaign_inception import (
 from .campaign_provider_cycle_capture import (
     ARTIFACT_KIND,
     CampaignCompleteBoardCycleReceipt,
+    CampaignProviderCycleCaptureIntegrityError,
+    _require_provider_evidence_campaign_scope,
 )
 from .causal_collector import CollectorDeltaStore
 from .evaluation_universe import EvaluationUniverseLedger
@@ -70,6 +72,7 @@ _ESTABLISH_CAMPAIGN = establish_campaign_inception
 _RESOLVE_ARTIFACT = CollectorDeltaStore.collector_cycle_observation_artifact_evidence
 _SCHEDULE_DUE_AT = CollectorDeltaStore._collector_schedule_due_at
 _LOAD_PROVIDER_EVIDENCE = CompleteGameBoardEvidenceStore.load
+_PROVIDER_EVIDENCE_SCOPE = _require_provider_evidence_campaign_scope
 _GUARDED_UNIVERSE_LOAD = load_guarded_provider_evaluation_universe
 _RESOLVE_FORWARD_IDENTITY = resolve_forward_universe_authority_identity
 _AUTHORIZE_FORWARD_RECEIPTS = authorize_forward_source_receipts
@@ -111,6 +114,11 @@ _CAPTURED_CALLABLES = (
         "_LOAD_PROVIDER_EVIDENCE",
         _LOAD_PROVIDER_EVIDENCE,
         _LOAD_PROVIDER_EVIDENCE.__code__,
+    ),
+    (
+        "_PROVIDER_EVIDENCE_SCOPE",
+        _PROVIDER_EVIDENCE_SCOPE,
+        _PROVIDER_EVIDENCE_SCOPE.__code__,
     ),
     (
         "_GUARDED_UNIVERSE_LOAD",
@@ -959,6 +967,8 @@ def resolve_campaign_forward_universe_cycle_authority(
     expected_artifact_kind = _CANONICAL_ARTIFACT_KIND
     expected_collector_artifact_resolver = _CANONICAL_COLLECTOR_ARTIFACT_RESOLVER
     expected_provider_evidence_loader = _CANONICAL_PROVIDER_EVIDENCE_LOADER
+    expected_provider_evidence_scope = _PROVIDER_EVIDENCE_SCOPE
+    expected_provider_evidence_scope_code = expected_provider_evidence_scope.__code__
     expected_issued_universes = _CANONICAL_ISSUED_UNIVERSES
     expected_provider_universe_module = _provider_universe_module
 
@@ -1016,6 +1026,24 @@ def resolve_campaign_forward_universe_cycle_authority(
                 "campaign forward-cycle chronology/digest primitives changed"
             )
         integrity_guard()
+        if (
+            module_globals.get("_PROVIDER_EVIDENCE_SCOPE")
+            is not expected_provider_evidence_scope
+            or expected_provider_evidence_scope.__code__
+            is not expected_provider_evidence_scope_code
+        ):
+            raise CampaignForwardUniverseCycleBindingError(
+                "provider evidence routing guard changed"
+            )
+        try:
+            expected_provider_evidence_scope(
+                precommit_locator,
+                provider_evidence_store,
+            )
+        except CampaignProviderCycleCaptureIntegrityError as exc:
+            raise CampaignForwardUniverseCycleBindingError(
+                "provider evidence routing does not match campaign precommit authority"
+            ) from exc
 
     require_stable_integrity()
     if type(precommit_locator) is not ForwardUniversePrecommitLocator:

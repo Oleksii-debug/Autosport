@@ -74,6 +74,7 @@ def _build_execution_quote_chain_evidence_meta():
             "submit_instruction_identity_bound",
             "provider_request_correlation_bound",
             "actual_submitted_instruction_bound",
+            "acknowledgement_binding_matches",
             "accepted_price_verified",
             "chain_complete",
             "evidence_sha256",
@@ -196,7 +197,7 @@ class ExecutionQuoteChainEvidence(metaclass=_ExecutionQuoteChainEvidenceMeta):
     provider_evidence_source: str | None
     provider_request_sha256: str | None
     provider_acknowledgement_sha256: str | None
-    acknowledgement_binding_matches: bool
+    _acknowledgement_binding_matches: bool = field(repr=False)
 
     external_receipt_id: str | None
     acknowledgement_status: str | None
@@ -232,7 +233,7 @@ class ExecutionQuoteChainEvidence(metaclass=_ExecutionQuoteChainEvidenceMeta):
         except ValueError as exc:
             raise ExecutionQuoteChainError(str(exc)) from exc
 
-        if type(self.acknowledgement_binding_matches) is not bool:
+        if type(self._acknowledgement_binding_matches) is not bool:
             raise ExecutionQuoteChainError(
                 "acknowledgement_binding_matches must be bool"
             )
@@ -318,11 +319,11 @@ class ExecutionQuoteChainEvidence(metaclass=_ExecutionQuoteChainEvidenceMeta):
             )
 
         if self.provider_acknowledgement_sha256 is None:
-            if self.acknowledgement_binding_matches:
+            if self._acknowledgement_binding_matches:
                 raise ExecutionQuoteChainError(
                     "missing provider acknowledgement digest cannot match"
                 )
-        elif not has_ack and self.acknowledgement_binding_matches:
+        elif not has_ack and self._acknowledgement_binding_matches:
             raise ExecutionQuoteChainError(
                 "provider acknowledgement digest cannot match without acknowledgement"
             )
@@ -362,6 +363,12 @@ class ExecutionQuoteChainEvidence(metaclass=_ExecutionQuoteChainEvidenceMeta):
         """
 
         return self.provider_request_correlation_bound
+
+    @property
+    def acknowledgement_binding_matches(self) -> bool:
+        """Whether provider evidence binds the exact durable acknowledgement."""
+
+        return self._acknowledgement_binding_matches
 
     @property
     def accepted_price_verified(self) -> bool:
@@ -426,7 +433,7 @@ class ExecutionQuoteChainEvidence(metaclass=_ExecutionQuoteChainEvidenceMeta):
             "provider_evidence_source": self.provider_evidence_source,
             "provider_request_sha256": self.provider_request_sha256,
             "provider_acknowledgement_sha256": self.provider_acknowledgement_sha256,
-            "acknowledgement_binding_matches": self.acknowledgement_binding_matches,
+            "acknowledgement_binding_matches": self._acknowledgement_binding_matches,
             "external_receipt_id": self.external_receipt_id,
             "acknowledgement_status": self.acknowledgement_status,
             "acknowledged_at": self.acknowledged_at,
@@ -585,7 +592,7 @@ def build_execution_quote_chain_evidence(
         provider_evidence_source=(provider.source if provider is not None else None),
         provider_request_sha256=provider_request_sha256,
         provider_acknowledgement_sha256=provider_acknowledgement_sha256,
-        acknowledgement_binding_matches=acknowledgement_binding_matches,
+        _acknowledgement_binding_matches=acknowledgement_binding_matches,
         external_receipt_id=external_receipt_id,
         acknowledgement_status=acknowledgement_status,
         acknowledged_at=acknowledged_at,
@@ -755,6 +762,12 @@ def _install_quote_chain_evidence_authority() -> None:
             and self.provider_request_sha256 == self.submission_instruction_sha256
         )
 
+    def acknowledgement_binding_matches(
+        self: ExecutionQuoteChainEvidence,
+    ) -> bool:
+        _lookup(self, require_fingerprint=True)
+        return self._acknowledgement_binding_matches
+
     def evidence_sha256(self: ExecutionQuoteChainEvidence) -> str:
         assert_projection_issued(self)
         return self._evidence_sha256
@@ -852,6 +865,9 @@ def _install_quote_chain_evidence_authority() -> None:
     )
     ExecutionQuoteChainEvidence.actual_submitted_instruction_bound = property(
         actual_submitted_instruction_bound
+    )
+    ExecutionQuoteChainEvidence.acknowledgement_binding_matches = property(
+        acknowledgement_binding_matches
     )
     ExecutionQuoteChainEvidence.evidence_sha256 = property(evidence_sha256)
     ExecutionQuoteChainEvidence.to_dict = to_dict

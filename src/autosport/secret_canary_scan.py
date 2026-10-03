@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import binascii
 import hashlib
 import json
 import os
@@ -135,6 +137,7 @@ def _open_readonly_no_follow(path: Path) -> int:
 
 _PERCENT_HEX = re.compile(r"%[0-9A-F]{2}")
 _PERCENT_HEX_BYTES = re.compile(rb"%[0-9A-Fa-f]{2}")
+_BASE64_RUN_BYTES = re.compile(rb"[A-Za-z0-9+/_-]{4,}={0,2}")
 _HEX_DIGITS = frozenset(b"0123456789abcdefABCDEF")
 
 
@@ -164,6 +167,37 @@ def _percent_decode_bytes(value: bytes) -> bytes:
         decoded.append(value[index])
         index += 1
     return bytes(decoded)
+
+
+def _base64_decoded_contains(value: bytes, needle: bytes) -> bool:
+    """Detect a secret inside reversible standard/URL-safe Base64 runs.
+
+    Windows/provider diagnostics can serialize credentials as Base64 (notably
+    Authorization: Basic payloads).  Decode only private bounded scan windows,
+    try every quantum alignment so chunk boundaries cannot hide an embedded
+    canary, and never return decoded material to the report.
+    """
+
+    if not needle:
+        return False
+    for match in _BASE64_RUN_BYTES.finditer(value):
+        token = match.group(0)
+        for offset in range(min(4, len(token))):
+            candidate = token[offset:]
+            if len(candidate) < 4:
+                continue
+            padded = candidate + (b"=" * ((-len(candidate)) % 4))
+            try:
+                decoded = base64.b64decode(
+                    padded,
+                    altchars=b"-_",
+                    validate=True,
+                )
+            except (binascii.Error, ValueError):
+                continue
+            if needle in decoded:
+                return True
+    return False
 
 
 def _json_string_unescape_bytes(value: bytes) -> bytes:
@@ -242,6 +276,8 @@ def _json_string_unescape_bytes(value: bytes) -> bytes:
 
 def _encoded_needles(canary: str) -> tuple[tuple[bytes, tuple[str, ...]], ...]:
     raw = canary.encode("utf-8")
+    base64_standard = base64.b64encode(raw)
+    base64_urlsafe = base64.urlsafe_b64encode(raw)
     percent_encoded = quote_from_bytes(raw, safe="")
     json_utf8 = json.dumps(canary, ensure_ascii=False)[1:-1].encode("utf-8")
     json_ascii = json.dumps(canary, ensure_ascii=True)[1:-1].encode("ascii")
@@ -249,6 +285,10 @@ def _encoded_needles(canary: str) -> tuple[tuple[bytes, tuple[str, ...]], ...]:
         ("utf-8", raw),
         ("utf-16le", canary.encode("utf-16le")),
         ("utf-16be", canary.encode("utf-16be")),
+        ("base64-standard", base64_standard),
+        ("base64-standard-unpadded", base64_standard.rstrip(b"=")),
+        ("base64-urlsafe", base64_urlsafe),
+        ("base64-urlsafe-unpadded", base64_urlsafe.rstrip(b"=")),
         ("url-percent-utf8-upper", percent_encoded.encode("ascii")),
         ("url-percent-utf8-lower", _lower_percent_hex(percent_encoded).encode("ascii")),
         ("json-string-utf8", json_utf8),
@@ -328,6 +368,17 @@ def _scan_file(
                     and semantic_utf8 in _percent_decode_bytes(window)
                 ):
                     found.add("url-percent-utf8-semantic")
+
+                # Base64 is reversible credential material, not a redaction.
+                # Decode private bounded runs so an embedded canary (for example
+                # user:<canary> inside an Authorization: Basic token) cannot hide
+                # merely because its exact standalone Base64 spelling is absent.
+                if (
+                    "base64-semantic" not in found
+                    and semantic_utf8 not in window
+                    and _base64_decoded_contains(window, semantic_utf8)
+                ):
+                    found.add("base64-semantic")
 
                 # JSON permits equivalent escape spellings beyond Python's
                 # json.dumps output (for example \\u escapes for ASCII, escaped

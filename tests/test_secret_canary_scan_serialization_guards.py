@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import os
 from pathlib import Path
@@ -7,6 +8,95 @@ from pathlib import Path
 import pytest
 
 import autosport.secret_canary_scan as secret_canary_scan
+
+
+@pytest.mark.parametrize(
+    "variant",
+    (
+        "standard",
+        "standard-unpadded",
+        "urlsafe",
+        "urlsafe-unpadded",
+    ),
+)
+def test_reversible_direct_base64_cannot_hide_canary(
+    tmp_path: Path,
+    variant: str,
+) -> None:
+    canary = "oauth-S3/😀-А/+_secret"
+    raw = canary.encode("utf-8")
+    if variant.startswith("urlsafe"):
+        payload = base64.urlsafe_b64encode(raw)
+    else:
+        payload = base64.b64encode(raw)
+    if variant.endswith("unpadded"):
+        payload = payload.rstrip(b"=")
+    assert raw not in payload
+
+    (tmp_path / "credential-cache.txt").write_bytes(
+        b"token_b64=" + payload + b"\n"
+    )
+
+    report = secret_canary_scan.scan_secret_canary(
+        tmp_path,
+        canary,
+        chunk_size=3,
+    )
+
+    assert report.status == "LEAK"
+    assert report.exit_code == 2
+    assert len(report.findings) == 1
+    assert f"base64-{variant}" in report.findings[0].encodings
+    assert canary not in repr(report)
+
+
+def test_basic_authorization_base64_cannot_hide_embedded_canary_across_chunks(
+    tmp_path: Path,
+) -> None:
+    canary = "S3/😀-А-secret"
+    raw = canary.encode("utf-8")
+    payload = base64.b64encode(b"user:" + raw)
+    assert raw not in payload
+    assert base64.b64encode(raw) not in payload
+
+    (tmp_path / "http-diagnostic.txt").write_bytes(
+        b"Authorization: Basic " + payload + b"\r\n"
+    )
+
+    report = secret_canary_scan.scan_secret_canary(
+        tmp_path,
+        canary,
+        chunk_size=5,
+    )
+
+    assert report.status == "LEAK"
+    assert report.exit_code == 2
+    assert len(report.findings) == 1
+    assert "base64-semantic" in report.findings[0].encodings
+    assert canary not in repr(report)
+
+
+def test_urlsafe_unpadded_base64_wrapper_cannot_hide_embedded_canary(
+    tmp_path: Path,
+) -> None:
+    canary = "url-safe-credential-😀"
+    raw = canary.encode("utf-8")
+    payload = base64.urlsafe_b64encode(b"p:" + raw + b":s").rstrip(b"=")
+    assert raw not in payload
+    assert base64.urlsafe_b64encode(raw).rstrip(b"=") not in payload
+
+    (tmp_path / "session-token.txt").write_bytes(b"session=" + payload + b"\n")
+
+    report = secret_canary_scan.scan_secret_canary(
+        tmp_path,
+        canary,
+        chunk_size=4,
+    )
+
+    assert report.status == "LEAK"
+    assert report.exit_code == 2
+    assert "base64-semantic" in report.findings[0].encodings
+    assert canary not in repr(report)
 
 
 @pytest.mark.parametrize("ensure_ascii", [False, True])

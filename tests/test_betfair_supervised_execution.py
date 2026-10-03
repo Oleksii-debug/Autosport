@@ -309,6 +309,7 @@ def _response(
     matched: Decimal | str = "0",
     average: Decimal | str = "0",
     bet_id: str | None = "bet-123",
+    placed_date: str | None = READBACK_AT,
     order_status: str | None = None,
 ) -> bytes:
     params = request["params"]
@@ -316,10 +317,11 @@ def _response(
     report: dict[str, object] = {
         "status": instruction_status,
         "instruction": instruction,
-        "placedDate": READBACK_AT,
         "averagePriceMatched": str(average),
         "sizeMatched": str(matched),
     }
+    if placed_date is not None:
+        report["placedDate"] = placed_date
     result: dict[str, object] = {
         "status": execution_status,
         "marketId": params["marketId"],
@@ -1201,6 +1203,7 @@ def test_provider_failure_report_is_rejected_not_inferred_from_absence() -> None
                 matched="0",
                 average="0",
                 bet_id=None,
+                placed_date=None,
             )
         )
         client = _enabled_client(profile, transport, store=goal_store)
@@ -1225,6 +1228,68 @@ def test_provider_failure_report_is_rejected_not_inferred_from_absence() -> None
         )
         assert provider_ref is not None
         assert result.external_receipt_id == provider_ref
+
+
+@pytest.mark.parametrize(
+    ("bet_id", "placed_date", "average", "order_status"),
+    (
+        ("bet-contradictory", None, "0", None),
+        (None, READBACK_AT, "0", None),
+        (None, None, "1.01", None),
+        (None, None, "0", "EXECUTABLE"),
+        (None, None, "0", "EXECUTION_COMPLETE"),
+    ),
+)
+def test_provider_failure_with_placement_evidence_requires_readback(
+    bet_id: str | None,
+    placed_date: str | None,
+    average: str,
+    order_status: str | None,
+) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
+        transport = _Transport(
+            lambda request: _response(
+                request,
+                execution_status="FAILURE",
+                instruction_status="FAILURE",
+                matched="0",
+                average=average,
+                bet_id=bet_id,
+                placed_date=placed_date,
+                order_status=order_status,
+            )
+        )
+        client = _enabled_client(profile, transport, store=goal_store)
+
+        result = execute_betfair_supervised_action(
+            ledger,
+            bound,
+            approval,
+            action_id=action.action_id,
+            attempt_id="attempt-ambiguous-failure",
+            profile=profile,
+            client=client,
+            clock=lambda: SUBMITTED_AT,
+        )
+
+        assert result.outcome is PlaceOrdersOutcome.UNKNOWN
+        assert result.attempt_state is AttemptState.UNKNOWN
+        assert result.evidence_id is None
+        assert result.external_receipt_id is None
+
+        view = ledger.verified_execution_view(
+            bound.execution_plan.plan_id
+        ).attempts[0]
+        assert view.state is AttemptState.UNKNOWN
+        assert view.submitted_at == SUBMITTED_AT
+        assert view.submitted_request_sha256 is not None
+        assert view.provider_evidence is None
+        assert view.acknowledgement is None
+        assert (
+            view.unknown_reason
+            == "betfair_placeOrders_ambiguous_effect_requires_readback"
+        )
 
 
 def test_transport_timeout_readback_stays_non_authoritative_for_retry(

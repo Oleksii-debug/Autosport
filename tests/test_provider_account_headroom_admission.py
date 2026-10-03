@@ -168,6 +168,19 @@ def _ledger_with_plans(tmp_path, *plans: ExecutionPlan) -> RealExecutionLedger:
     return ledger
 
 
+def test_liability_plan_enumeration_reads_canonical_ledger_envelopes(tmp_path) -> None:
+    first = _action("a1", "10")
+    second = _action("a2", "20")
+    ledger = _ledger_with_plans(
+        tmp_path,
+        _plan("p2", second),
+        _plan("p1", first),
+    )
+    snapshot = ledger.verified_snapshot()
+
+    assert headroom_module._ledger_plan_ids(snapshot.payload) == ("p1", "p2")
+
+
 def test_provider_exposure_is_not_double_subtracted(monkeypatch, tmp_path) -> None:
     acquired, _ = _acquire_balance(monkeypatch, tmp_path, "100.10")
     action = _action("a1", "95")

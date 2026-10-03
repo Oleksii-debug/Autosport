@@ -2,11 +2,15 @@ import json
 import os
 import tempfile
 import unittest
+from decimal import Decimal
 from pathlib import Path
+from unittest.mock import patch
 
 from autosport.decision_ledger import DecisionRecord, JsonlDecisionLedger
+from autosport.domain import TicketLeg
 from autosport.integrity import sha256_file
 from autosport.paper import PaperBook
+import autosport.run_transaction as run_transaction_module
 from autosport.run_transaction import RunTransaction, RunTransactionError
 
 
@@ -42,7 +46,23 @@ class RunTransactionCanonicalTargetIndirectionTests(unittest.TestCase):
                 context_hash="c" * 64,
             )
         )
-        tx.stage_outputs(PaperBook("10001"), ledger.path)
+        staged_book = PaperBook.load(book_path)
+        staged_book.open_ticket(
+            [
+                TicketLeg(
+                    event_id="canonical-target-fixture:event",
+                    market_id="canonical-target-fixture:winner",
+                    selection_id="canonical-target-fixture:home",
+                    locked_odds=Decimal("2"),
+                    sport="motorsport",
+                    exchange_side="back",
+                )
+            ],
+            Decimal("1"),
+            reason="canonical-target-bound-new",
+            placed_at="2000-01-01T00:00:00+00:00",
+        )
+        tx.stage_outputs(staged_book, ledger.path)
         tx.precommit(
             {
                 "schema_version": 2,
@@ -62,6 +82,241 @@ class RunTransactionCanonicalTargetIndirectionTests(unittest.TestCase):
             target.symlink_to(external)
         except (OSError, NotImplementedError) as exc:
             self.skipTest(f"file symlinks are unavailable on this platform: {exc}")
+
+    def test_canonical_paperbook_semantics_are_checked_on_captured_bytes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "paper_book.json"
+            target.write_bytes(b"{}")
+
+            with patch.object(
+                PaperBook,
+                "load",
+                return_value=PaperBook("10000"),
+            ) as hostile_path_load:
+                with self.assertRaisesRegex(
+                    RunTransactionError,
+                    "canonical PaperBook semantic validation failed",
+                ):
+                    RunTransaction._verified_canonical_paper_book_snapshot(
+                        target,
+                        "PaperBook",
+                    )
+
+            hostile_path_load.assert_not_called()
+
+    def test_canonical_paperbook_semantics_do_not_dispatch_mutable_load_bytes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "paper_book.json"
+            target.write_bytes(b"{}")
+
+            with patch.object(
+                PaperBook,
+                "load_bytes",
+                return_value=PaperBook("10000"),
+            ) as hostile_load_bytes:
+                with self.assertRaisesRegex(
+                    RunTransactionError,
+                    "canonical PaperBook semantic validation failed",
+                ):
+                    RunTransaction._verified_canonical_paper_book_snapshot(
+                        target,
+                        "PaperBook",
+                    )
+
+            hostile_load_bytes.assert_not_called()
+
+    def test_canonical_snapshot_primary_open_does_not_follow_swap_to_symlink(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "canonical.json"
+            external = root / "external.json"
+            backup = root / "canonical.backup.json"
+            target.write_bytes(b'{"canonical":true}')
+            external.write_bytes(b'{"external":true}')
+            canonical_open = run_transaction_module._open_read_only_descriptor
+            calls = 0
+
+            def swap_then_open(path: Path) -> int:
+                nonlocal calls
+                calls += 1
+                if calls == 1:
+                    target.replace(backup)
+                    try:
+                        target.symlink_to(external)
+                    except (OSError, NotImplementedError) as exc:
+                        backup.replace(target)
+                        self.skipTest(
+                            f"file symlink replacement is unavailable on this platform: {exc}"
+                        )
+                return canonical_open(path)
+
+            with patch.object(
+                run_transaction_module,
+                "_open_read_only_descriptor",
+                side_effect=swap_then_open,
+            ):
+                with self.assertRaisesRegex(
+                    RunTransactionError,
+                    "canonical file is unreadable|canonical path changed|canonical path must be a stable regular non-symlink file",
+                ):
+                    RunTransaction._read_canonical_file_snapshot(
+                        target,
+                        "fixture",
+                    )
+
+            self.assertEqual(calls, 1)
+            self.assertEqual(external.read_bytes(), b'{"external":true}')
+
+    def test_canonical_snapshot_verification_reopen_does_not_follow_swap_to_symlink(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "canonical.json"
+            external = root / "external.json"
+            backup = root / "canonical.backup.json"
+            target.write_bytes(b'{"canonical":true}')
+            external.write_bytes(b'{"external":true}')
+            canonical_open = run_transaction_module._open_read_only_descriptor
+            calls = 0
+
+            def swap_on_verification_open(path: Path) -> int:
+                nonlocal calls
+                calls += 1
+                if calls == 2:
+                    target.replace(backup)
+                    try:
+                        target.symlink_to(external)
+                    except (OSError, NotImplementedError) as exc:
+                        backup.replace(target)
+                        self.skipTest(
+                            f"file symlink replacement is unavailable on this platform: {exc}"
+                        )
+                return canonical_open(path)
+
+            with patch.object(
+                run_transaction_module,
+                "_open_read_only_descriptor",
+                side_effect=swap_on_verification_open,
+            ):
+                with self.assertRaisesRegex(
+                    RunTransactionError,
+                    "canonical path must be a stable regular non-symlink file",
+                ):
+                    RunTransaction._read_canonical_file_snapshot(
+                        target,
+                        "fixture",
+                    )
+
+            self.assertEqual(calls, 2)
+            self.assertEqual(external.read_bytes(), b'{"external":true}')
+
+
+    def test_canonical_snapshot_verification_regular_replacement_ignores_hostile_sameopenfile(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "canonical.json"
+            replacement = root / "replacement.json"
+            backup = root / "canonical.backup.json"
+            target.write_bytes(b'{"canonical":1}')
+            replacement.write_bytes(b'{"replace___":1}')
+            original_stat = os.stat(target, follow_symlinks=False)
+            os.utime(
+                replacement,
+                ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns),
+            )
+            canonical_open = run_transaction_module._open_read_only_descriptor
+            hostile_sameopenfile_executed = False
+            calls = 0
+
+            def swap_on_verification_open(path: Path) -> int:
+                nonlocal calls
+                calls += 1
+                if calls == 2:
+                    target.replace(backup)
+                    replacement.replace(target)
+                return canonical_open(path)
+
+            def hostile_sameopenfile(left: int, right: int) -> bool:
+                del left, right
+                nonlocal hostile_sameopenfile_executed
+                hostile_sameopenfile_executed = True
+                return True
+
+            with patch.object(
+                run_transaction_module,
+                "_open_read_only_descriptor",
+                side_effect=swap_on_verification_open,
+            ), patch.object(
+                run_transaction_module.os.path,
+                "sameopenfile",
+                side_effect=hostile_sameopenfile,
+            ):
+                with self.assertRaisesRegex(
+                    RunTransactionError,
+                    "canonical path must be a stable regular non-symlink file",
+                ):
+                    RunTransaction._read_canonical_file_snapshot(
+                        target,
+                        "fixture",
+                    )
+
+            self.assertEqual(calls, 2)
+            self.assertFalse(hostile_sameopenfile_executed)
+            self.assertEqual(backup.read_bytes(), b'{"canonical":1}')
+            self.assertEqual(target.read_bytes(), b'{"replace___":1}')
+
+    def test_canonical_snapshot_primary_open_binds_initial_regular_file_identity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "canonical.json"
+            replacement = root / "replacement.json"
+            backup = root / "canonical.backup.json"
+            target.write_bytes(b'{"canonical":1}')
+            replacement.write_bytes(b'{"replacement":1}')
+            original_stat = os.stat(target, follow_symlinks=False)
+            os.utime(
+                replacement,
+                ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns),
+            )
+            canonical_open = run_transaction_module._open_read_only_descriptor
+            hostile_samestat_executed = False
+            calls = 0
+
+            def swap_regular_then_open(path: Path) -> int:
+                nonlocal calls
+                calls += 1
+                if calls == 1:
+                    target.replace(backup)
+                    replacement.replace(target)
+                return canonical_open(path)
+
+            def hostile_samestat(left: os.stat_result, right: os.stat_result) -> bool:
+                del left, right
+                nonlocal hostile_samestat_executed
+                hostile_samestat_executed = True
+                return True
+
+            with patch.object(
+                run_transaction_module,
+                "_open_read_only_descriptor",
+                side_effect=swap_regular_then_open,
+            ), patch.object(
+                run_transaction_module.os.path,
+                "samestat",
+                side_effect=hostile_samestat,
+            ):
+                with self.assertRaisesRegex(
+                    RunTransactionError,
+                    "canonical path must be a stable regular non-symlink file",
+                ):
+                    RunTransaction._read_canonical_file_snapshot(
+                        target,
+                        "fixture",
+                    )
+
+            self.assertEqual(calls, 1)
+            self.assertFalse(hostile_samestat_executed)
+            self.assertEqual(backup.read_bytes(), b'{"canonical":1}')
+            self.assertEqual(target.read_bytes(), b'{"replacement":1}')
 
     def test_commit_rejects_symlinked_paper_book_even_when_target_has_exact_new_bytes(self):
         with tempfile.TemporaryDirectory() as tmp:

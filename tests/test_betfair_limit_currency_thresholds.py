@@ -32,7 +32,7 @@ def test_ruleset_is_explicitly_not_currentness_or_execution_authority():
     result = assess()
     assert RULESET_EFFECTIVE_INTERVAL_PROVEN is False
     assert result.ruleset_effective_interval_proven is False
-    assert result.currency_thresholds_satisfied is True
+    assert result.snapshot_standard_minimum_met is True
     assert result.account_currency_bound is False
     assert result.jurisdiction_bound is False
     assert result.market_admissibility_proven is False
@@ -73,7 +73,7 @@ def test_currency_parameter_snapshot_values(code, minimum, payout):
 @pytest.mark.parametrize("side", ["BACK", "LAY"])
 def test_standard_stake_at_currency_minimum_satisfies_thresholds(side):
     result = assess(side=side, size="2", price="1.01")
-    assert result.state is BetfairCurrencyThresholdState.THRESHOLDS_SATISFIED
+    assert result.state is BetfairCurrencyThresholdState.SNAPSHOT_STANDARD_MINIMUM_MET
     assert result.gross_payout == Decimal("2.02")
 
 
@@ -81,16 +81,16 @@ def test_below_minimum_with_exact_payout_threshold_needs_jurisdiction():
     result = assess(size="1", price="10")
     assert (
         result.state
-        is BetfairCurrencyThresholdState.BELOW_MINIMUM_PAYOUT_EXCEPTION_REQUIRES_JURISDICTION
+        is BetfairCurrencyThresholdState.SNAPSHOT_LOWER_PAYOUT_MECHANIC_MET_REQUIRES_JURISDICTION
     )
     assert result.low_stake_exception_candidate is True
-    assert result.currency_thresholds_satisfied is False
+    assert result.snapshot_standard_minimum_met is False
     assert result.jurisdiction_bound is False
 
 
 def test_below_minimum_and_payout_is_rejected_by_currency_thresholds():
     result = assess(size="1", price="9.99")
-    assert result.state is BetfairCurrencyThresholdState.BELOW_CURRENCY_THRESHOLDS
+    assert result.state is BetfairCurrencyThresholdState.SNAPSHOT_BELOW_THRESHOLDS
     assert result.gross_payout == Decimal("9.99")
 
 
@@ -107,7 +107,7 @@ def test_jurisdiction_excluded_currency_never_launders_low_stake_exception(curre
     )
     assert (
         result.state
-        is BetfairCurrencyThresholdState.BELOW_MINIMUM_PAYOUT_EXCEPTION_REQUIRES_JURISDICTION
+        is BetfairCurrencyThresholdState.SNAPSHOT_LOWER_PAYOUT_MECHANIC_MET_REQUIRES_JURISDICTION
     )
     assert result.execution_authorized is False
 
@@ -208,7 +208,7 @@ def test_exact_payout_is_independent_of_ambient_decimal_precision():
     assert result.gross_payout == Decimal("4000.00299999")
     assert (
         result.state
-        is BetfairCurrencyThresholdState.BELOW_MINIMUM_PAYOUT_EXCEPTION_REQUIRES_JURISDICTION
+        is BetfairCurrencyThresholdState.SNAPSHOT_LOWER_PAYOUT_MECHANIC_MET_REQUIRES_JURISDICTION
     )
 
 
@@ -220,4 +220,4 @@ def test_oversized_decimal_shape_fails_before_expensive_arithmetic():
 def test_threshold_result_is_immutable():
     result = assess()
     with pytest.raises((AttributeError, TypeError)):
-        result.state = BetfairCurrencyThresholdState.BELOW_CURRENCY_THRESHOLDS  # type: ignore[misc]
+        result.state = BetfairCurrencyThresholdState.SNAPSHOT_BELOW_THRESHOLDS  # type: ignore[misc]

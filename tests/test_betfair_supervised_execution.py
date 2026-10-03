@@ -1134,6 +1134,29 @@ def test_full_match_persists_provider_report_and_canonical_ack() -> None:
         )
         assert binding is not None
         assert binding["evidence_id"] == result.evidence_id
+        assert binding["request_sha256"] is not None
+        assert binding["acknowledgement_sha256"] is not None
+        execution_view = ledger.verified_execution_view(
+            bound.execution_plan.plan_id
+        )
+        accepted_attempt = next(
+            attempt
+            for attempt in execution_view.attempts
+            if attempt.attempt_id == "attempt-accepted"
+        )
+        assert (
+            accepted_attempt.submitted_request_sha256
+            == binding["request_sha256"]
+        )
+        assert accepted_attempt.provider_evidence is not None
+        assert (
+            accepted_attempt.provider_evidence.request_sha256
+            == accepted_attempt.submitted_request_sha256
+        )
+        assert (
+            accepted_attempt.provider_evidence.acknowledgement_sha256
+            == binding["acknowledgement_sha256"]
+        )
         request = transport.calls[0]["request"]
         assert request["method"] == "SportsAPING/v1.0/placeOrders"
         assert request["params"]["async"] is False
@@ -1531,6 +1554,17 @@ def test_transport_timeout_readback_stays_non_authoritative_for_retry(
             restarted.attempt_state("attempt-timeout")
             is AttemptState.UNKNOWN
         )
+        timeout_view = restarted.verified_execution_view(
+            bound.execution_plan.plan_id
+        )
+        timeout_attempt = next(
+            attempt
+            for attempt in timeout_view.attempts
+            if attempt.attempt_id == "attempt-timeout"
+        )
+        assert timeout_attempt.submitted_request_sha256 is not None
+        assert timeout_attempt.provider_evidence is None
+        assert timeout_attempt.acknowledgement is None
         assert not restarted.can_retry_action(
             plan_id=bound.execution_plan.plan_id,
             action_id=action.action_id,

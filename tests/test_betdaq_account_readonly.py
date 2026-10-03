@@ -640,6 +640,58 @@ def test_private_account_rpc_allowlist_cannot_be_widened_by_injected_global(
     assert transport.calls == []
 
 
+def test_caller_cannot_override_canonical_account_publication_authorities():
+    value, transport = client(balance())
+    hostile_calls = []
+
+    def hostile_require(_transport):
+        hostile_calls.append(_transport)
+
+    with pytest.raises(
+        BetdaqAccountReadOnlyError,
+        match="does not accept caller authority overrides",
+    ):
+        value.read_account_evidence(
+            frozenset({BookmakerCapability.BALANCE_READ}),
+            _require_transport=hostile_require,
+        )
+
+    assert hostile_calls == []
+    assert transport.calls == []
+
+
+def test_transport_rotation_during_canonical_account_io_fails_without_using_replacement(
+    monkeypatch,
+):
+    replacement = QueueTransport(balance())
+    holder = {}
+
+    class RebindingDispatch(QueueUrlopen):
+        def __call__(self, request, *, timeout):
+            response = super().__call__(request, timeout=timeout)
+            holder["client"]._transport = replacement
+            return response
+
+    opener = RebindingDispatch(balance())
+    _install_https_test_dispatch(monkeypatch, opener)
+    value = BetdaqAccountReadOnlyClient(
+        BetdaqCredentials("alice", "p@ss", "app-id"),
+        clock=clock,
+    )
+    holder["client"] = value
+
+    with pytest.raises(
+        BetdaqAccountReadOnlyError,
+        match="canonical account transport changed during acquisition",
+    ):
+        value.read_account_evidence(
+            frozenset({BookmakerCapability.BALANCE_READ})
+        )
+
+    assert len(opener.calls) == 1
+    assert replacement.calls == []
+
+
 def test_injected_transport_cannot_publish_canonical_account_evidence():
     value, transport = client(balance())
 

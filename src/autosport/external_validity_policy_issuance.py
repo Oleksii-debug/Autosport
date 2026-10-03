@@ -1358,8 +1358,10 @@ def _derive_policy_evaluation(
         "source challenger action_rate",
         nonnegative=True,
     )
+    # Match the canonical paired evaluator's _policy_metrics arithmetic exactly.
+    # Using a different precision would reject valid non-terminating rates such as 1/3.
     with localcontext() as context:
-        context.prec = 80
+        context.prec = 50
         expected_abstention_rate = Decimal(abstention_count) / Decimal(observed_count)
         expected_action_rate = Decimal(scored_count) / Decimal(observed_count)
     if (
@@ -1367,7 +1369,6 @@ def _derive_policy_evaluation(
         or action_rate > 1
         or abstention_rate != expected_abstention_rate
         or action_rate != expected_action_rate
-        or abstention_rate + action_rate != 1
     ):
         raise ProductPolicyEvaluationIssuanceError(
             "source policy evaluator abstention metrics do not reconcile to canonical samples"

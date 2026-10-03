@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+from decimal import Decimal, localcontext
 
 import pytest
 
@@ -83,6 +84,12 @@ def _source(
         }
         for sample_id, action in actions
     ]
+    abstention_actions = {"NO_BET", "WAIT", configured_abstain_action}
+    abstention_count = sum(action in abstention_actions for _sample_id, action in actions)
+    with localcontext() as context:
+        context.prec = 50
+        abstention_rate = Decimal(abstention_count) / Decimal(len(actions))
+        action_rate = Decimal(len(actions) - abstention_count) / Decimal(len(actions))
     return issuance._SourceEvaluation(
         evaluation_bundle_id="bundle",
         evaluation_bundle_sha256=_sha("bundle"),
@@ -102,18 +109,8 @@ def _source(
             "samples": samples,
             "challenger_metrics": {
                 "policy_loss": "0",
-                "abstention_rate": (
-                    "1"
-                    if all(action in {"NO_BET", "WAIT", configured_abstain_action}
-                           for _sample_id, action in actions)
-                    else "0"
-                ),
-                "action_rate": (
-                    "0"
-                    if all(action in {"NO_BET", "WAIT", configured_abstain_action}
-                           for _sample_id, action in actions)
-                    else "1"
-                ),
+                "abstention_rate": str(abstention_rate),
+                "action_rate": str(action_rate),
             },
         },
         evaluator_config={"abstain_action": configured_abstain_action},
@@ -198,3 +195,22 @@ def test_product_issuance_rejects_abstention_metric_disagreement():
             _target(),
             source,
         )
+
+
+def test_product_issuance_matches_canonical_nonterminating_rate_precision():
+    actions = (
+        ("case-a", "NO_BET"),
+        ("case-b", "BET"),
+        ("case-c", "BET"),
+    )
+    protocol = _protocol(("case-a", "case-b", "case-c"))
+
+    issued, _projection = issuance._derive_policy_evaluation(
+        protocol,
+        _target(),
+        _source(actions),
+    )
+
+    assert issued.observed_count == 3
+    assert issued.abstention_count == 1
+    assert issued.scored_count == 2

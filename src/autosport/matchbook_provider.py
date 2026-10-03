@@ -11,7 +11,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any, Callable
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from .domain import MarketType, utc_now_iso
 from .providers import ProviderBatch, ProviderQuote, ProviderUnavailableError
@@ -133,33 +133,67 @@ def _parse_retry_after(value: str | None) -> float | None:
     return parsed
 
 
-def _default_transport(
-    url: str,
-    headers: Mapping[str, str],
-    timeout: float,
-) -> MatchbookHttpJsonResponse:
-    request = Request(url, headers=dict(headers), method="GET")
-    try:
-        with urlopen(request, timeout=timeout) as response:  # nosec B310 - fixed HTTPS host/path
-            raw = response.read()
-            return MatchbookHttpJsonResponse(
-                payload=_decode_provider_json(raw),
-                status_code=int(response.status),
-                headers=dict(response.headers.items()),
-                body_sha256=hashlib.sha256(raw).hexdigest(),
-                body_size_bytes=len(raw),
+class _NoRedirectHandler(HTTPRedirectHandler):
+    """Reject every HTTP redirect before authenticated headers can reach Location."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def _build_default_transport() -> Transport:
+    # Retain the concrete request constructor and opener callable in the transport
+    # closure.  Positive provider-origin truth must not depend on mutable module
+    # globals such as urllib.request.urlopen/Request after construction/import.
+    request_type = Request
+    open_request = build_opener(_NoRedirectHandler()).open
+    decode_provider_json = _decode_provider_json
+    response_type = MatchbookHttpJsonResponse
+    parse_retry_after = _parse_retry_after
+    sha256 = hashlib.sha256
+    http_error_type = HTTPError
+    url_error_type = URLError
+    transport_error_type = MatchbookTransportError
+
+    def transport(
+        url: str,
+        headers: Mapping[str, str],
+        timeout: float,
+    ) -> MatchbookHttpJsonResponse:
+        request = request_type(url, headers=dict(headers), method="GET")
+        try:
+            with open_request(request, timeout=timeout) as response:
+                raw = response.read()
+                return response_type(
+                    payload=decode_provider_json(raw),
+                    status_code=int(response.status),
+                    headers=dict(response.headers.items()),
+                    body_sha256=sha256(raw).hexdigest(),
+                    body_size_bytes=len(raw),
+                )
+        except http_error_type as exc:
+            retry_after = parse_retry_after(
+                exc.headers.get("Retry-After") if exc.headers is not None else None
             )
-    except HTTPError as exc:
-        retry_after = _parse_retry_after(
-            exc.headers.get("Retry-After") if exc.headers is not None else None
-        )
-        raise MatchbookTransportError(
-            f"Matchbook HTTP {int(exc.code)}",
-            status_code=int(exc.code),
-            retry_after=retry_after,
-        ) from exc
-    except (URLError, TimeoutError, OSError) as exc:
-        raise MatchbookTransportError("Matchbook transport unavailable") from exc
+            raise transport_error_type(
+                f"Matchbook HTTP {int(exc.code)}",
+                status_code=int(exc.code),
+                retry_after=retry_after,
+            ) from exc
+        except (url_error_type, TimeoutError, OSError) as exc:
+            raise transport_error_type("Matchbook transport unavailable") from exc
+
+    return transport
+
+
+_default_transport = _build_default_transport()
+_DEFAULT_TRANSPORT_CODE = _default_transport.__code__
+
+
+def _is_canonical_default_transport(value: object) -> bool:
+    return (
+        value is _default_transport
+        and _default_transport.__code__ is _DEFAULT_TRANSPORT_CODE
+    )
 
 
 def _positive_int(value: object, *, field: str, maximum: int | None = None) -> int:
@@ -494,7 +528,7 @@ class MatchbookReadOnlyProvider:
             max_backoff_seconds, field="max_backoff_seconds", positive=False
         )
         self.transport = transport
-        self._provider_origin_verified = transport is _default_transport
+        self._provider_origin_verified = _is_canonical_default_transport(transport)
         self.clock = clock
         self.sleeper = sleeper
         if sequence_allocator is None or not callable(sequence_allocator):
@@ -538,7 +572,7 @@ class MatchbookReadOnlyProvider:
             (type(self.source_id), self.source_id),
             (type(self.request_query_sha256), self.request_query_sha256),
             (type(self._provider_origin_verified), self._provider_origin_verified),
-            (self.transport is _default_transport, id(self.transport)),
+            (_is_canonical_default_transport(self.transport), id(self.transport)),
         )
 
     def _assert_request_configuration_unchanged(self) -> None:
@@ -567,7 +601,7 @@ class MatchbookReadOnlyProvider:
             observed_ts = _observation_timestamp(self.clock())
             body_sha256 = _optional_sha256(response.body_sha256)
             body_size_bytes = _optional_body_size(response.body_size_bytes)
-            provider_origin_verified = self.transport is _default_transport
+            provider_origin_verified = _is_canonical_default_transport(self.transport)
             if provider_origin_verified != self._provider_origin_verified:
                 raise MatchbookPayloadError(
                     "Matchbook provider-origin transport identity changed after construction"

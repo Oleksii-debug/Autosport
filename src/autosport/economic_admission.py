@@ -19,6 +19,62 @@ from .run_transaction import RunTransaction
 from .workspace_lock import WorkspaceEconomicLock
 
 
+# The admission critical section is only atomic while the exact reviewed
+# WorkspaceEconomicLock executable graph remains installed. Freezing this module's
+# globals preserves the class object, not its mutable Python class attributes, so
+# witness the lock dispatch before entering the economic mutation boundary.
+_WORKSPACE_LOCK_FILE_NAME = WorkspaceEconomicLock.FILE_NAME
+_WORKSPACE_LOCK_METHOD_NAMES = (
+    "__init__",
+    "acquire",
+    "release",
+    "__enter__",
+    "__exit__",
+    "_open_lock_handle",
+    "_open_new_lock_handle",
+    "_validate_existing_lock_path",
+    "_validate_open_handle_identity",
+    "_require_regular_file",
+    "_require_single_link",
+    "_lock_handle",
+    "_unlock_handle",
+)
+_WORKSPACE_LOCK_DISPATCH_WITNESSES = tuple(
+    (
+        name,
+        WorkspaceEconomicLock.__dict__[name],
+        (
+            WorkspaceEconomicLock.__dict__[name].__func__.__code__
+            if type(WorkspaceEconomicLock.__dict__[name]) is staticmethod
+            else WorkspaceEconomicLock.__dict__[name].__code__
+        ),
+    )
+    for name in _WORKSPACE_LOCK_METHOD_NAMES
+)
+
+
+def _require_workspace_lock_dispatch() -> None:
+    if (
+        WorkspaceEconomicLock.__dict__.get("FILE_NAME") != _WORKSPACE_LOCK_FILE_NAME
+        or WorkspaceEconomicLock.FILE_NAME != _WORKSPACE_LOCK_FILE_NAME
+    ):
+        raise RuntimeError("workspace economic lock authority changed")
+    for name, expected_descriptor, expected_code in _WORKSPACE_LOCK_DISPATCH_WITNESSES:
+        current_descriptor = WorkspaceEconomicLock.__dict__.get(name)
+        if current_descriptor is not expected_descriptor:
+            raise RuntimeError("workspace economic lock executable authority changed")
+        current_function = (
+            current_descriptor.__func__
+            if type(current_descriptor) is staticmethod
+            else current_descriptor
+        )
+        if (
+            type(current_function) is not FunctionType
+            or current_function.__code__ is not expected_code
+        ):
+            raise RuntimeError("workspace economic lock executable authority changed")
+
+
 @dataclass(frozen=True, slots=True)
 class PaperAdmissionResult:
     """Result of one risk-evaluate + PAPER ticket-open critical section."""
@@ -460,6 +516,7 @@ def admit_paper_ticket(
         risk_policy=risk_policy,
     )
 
+    _require_workspace_lock_dispatch()
     with WorkspaceEconomicLock(root) as workspace_lock:
         registry_path = root / "run_registry.json"
         registry_missing = False

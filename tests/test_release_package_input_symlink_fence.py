@@ -189,6 +189,54 @@ class ReleasePackageInputSymlinkFenceTests(unittest.TestCase):
             self.assertEqual(original.read_bytes(), b"approved")
             self.assertEqual(source.read_bytes(), b"outside-substitute")
 
+    def test_top_level_regular_replacement_after_preflight_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paths = self._make_inputs(root)
+            executable = paths["exe"]
+            original = root / "Autosport-original.exe"
+            replacement = root / "Autosport-replacement.exe"
+            replacement.write_bytes(b"outside-substitute")
+            real_copy = release_package._copy_regular_source_file
+            swapped = False
+
+            def replace_then_copy(
+                source: str | Path,
+                destination: str | Path,
+                *,
+                label: str,
+                expected_snapshot: os.stat_result | None = None,
+            ) -> None:
+                nonlocal swapped
+                source_path = Path(source)
+                if source_path == executable and not swapped:
+                    swapped = True
+                    source_path.replace(original)
+                    replacement.replace(source_path)
+                real_copy(
+                    source_path,
+                    destination,
+                    label=label,
+                    expected_snapshot=expected_snapshot,
+                )
+
+            with patch.object(
+                release_package,
+                "_copy_regular_source_file",
+                side_effect=replace_then_copy,
+            ):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "Autosport executable input changed during open",
+                ):
+                    self._build(paths)
+
+            self.assertTrue(swapped)
+            self.assertEqual(original.read_bytes(), b"exe")
+            self.assertEqual(executable.read_bytes(), b"outside-substitute")
+            self.assertFalse((root / "Autosport-V1" / "Autosport.exe").exists())
+            self.assertFalse(paths["package"].exists())
+
     def test_top_level_symlink_fails_before_existing_staging_is_deleted(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

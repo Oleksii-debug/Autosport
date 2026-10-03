@@ -1,8 +1,10 @@
 from dataclasses import replace
 from datetime import datetime, timezone
-from decimal import Decimal
+from decimal import Decimal, localcontext
 
 import pytest
+
+import autosport.policy_utility_evidence as utility_module
 
 from autosport.policy_utility_evidence import (
     DecisionKind,
@@ -98,3 +100,71 @@ def test_decimal_subclass_cannot_enter_other_policy_utility_numeric_fields() -> 
             baseline,
             uncertainty=hostile_uncertainty,
         )
+
+
+
+class _HostileAuthorityRef:
+    def __lt__(self, other: object) -> bool:
+        raise AssertionError("hostile AuthorityRef ordering executed")
+
+
+def test_module_decimal_rebind_cannot_replace_exact_numeric_root(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    baseline = _estimated_evidence(Decimal("1"))
+    wire = baseline.to_dict()
+    hostile = _AdversarialEffectiveSampleSize("1000")
+    monkeypatch.setattr(
+        utility_module,
+        "Decimal",
+        _AdversarialEffectiveSampleSize,
+    )
+
+    with pytest.raises(PolicyUtilityError, match="effective_sample_size"):
+        _estimated_evidence(hostile)
+
+    restored = PolicyUtilityEvidence.from_dict(wire)
+    assert type(restored.effective_sample_size) is Decimal
+    assert restored.effective_sample_size == Decimal("1")
+
+
+def test_module_authority_ref_rebind_cannot_replace_exact_reference_root(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    baseline = _estimated_evidence(Decimal("1"))
+    hostile = _HostileAuthorityRef()
+    monkeypatch.setattr(utility_module, "AuthorityRef", _HostileAuthorityRef)
+
+    with pytest.raises(
+        PolicyUtilityError,
+        match="authority_refs must contain exact AuthorityRef values",
+    ):
+        replace(
+            baseline,
+            authority_refs=(hostile,),  # type: ignore[arg-type]
+        )
+
+
+def test_decimal_identity_is_independent_of_ambient_context_precision() -> None:
+    baseline = _estimated_evidence(Decimal("1"))
+
+    with localcontext() as context:
+        context.prec = 6
+        first = replace(
+            baseline,
+            currency="EUR",
+            utility_value=Decimal("1.2345671"),
+        )
+        second = replace(
+            baseline,
+            currency="EUR",
+            utility_value=Decimal("1.2345672"),
+        )
+
+        assert first.payload()["utility_value"] == "1.2345671"
+        assert second.payload()["utility_value"] == "1.2345672"
+        assert first.evidence_id != second.evidence_id
+
+        restored = PolicyUtilityEvidence.from_dict(first.to_dict())
+        assert restored.utility_value == Decimal("1.2345671")
+        assert restored.evidence_id == first.evidence_id

@@ -512,26 +512,6 @@ def test_supervised_issuance_ledger_dispatch_rebinding_fails_before_hostile_code
         ledger.saga(bound.execution_plan.plan_id)
 
 
-@pytest.mark.parametrize(
-    "method_name",
-    (
-        "reserve_plan",
-        "saga",
-        "_bind_supervised_plan_issuance",
-        "supervised_plan_issuance_is_current",
-        "bind_supervised_approval",
-        "supervised_approval_is_active",
-        "begin_attempt",
-        "revoke_supervised_approval",
-        "provider_order_reference",
-        "provider_evidence_binding",
-        "acknowledge",
-        "reconcile_found",
-        "bind_provider_evidence",
-        "attempt_state",
-        "reconcile_not_found",
-    ),
-)
 def test_supervised_ledger_dispatch_in_place_code_replacement_fails_before_mutation(
     monkeypatch,
     tmp_path,
@@ -558,6 +538,26 @@ def test_supervised_ledger_dispatch_in_place_code_replacement_fails_before_mutat
         ledger.saga(bound.execution_plan.plan_id)
 
 
+@pytest.mark.parametrize(
+    "method_name",
+    (
+        "reserve_plan",
+        "saga",
+        "_bind_supervised_plan_issuance",
+        "supervised_plan_issuance_is_current",
+        "bind_supervised_approval",
+        "supervised_approval_is_active",
+        "begin_attempt",
+        "revoke_supervised_approval",
+        "provider_order_reference",
+        "provider_evidence_binding",
+        "acknowledge",
+        "reconcile_found",
+        "bind_provider_evidence",
+        "attempt_state",
+        "reconcile_not_found",
+    ),
+)
 def test_supervised_ledger_dispatch_surface_rebinding_fails_closed(
     method_name,
     monkeypatch,

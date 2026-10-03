@@ -752,7 +752,7 @@ def test_currentness_rejects_snapshot_class_replacement_before_dispatch(
     )
     with pytest.raises(
         ExecutionCapitalAtRiskError,
-        match="capital-risk ledger read dispatch changed",
+        match="canonical execution-ledger read authority changed",
     ):
         evidence.assert_issued_current(ledger)
 
@@ -929,7 +929,7 @@ def test_currentness_rejects_coordinated_snapshot_witness_rebinding(
 
     assert called is False
 
-def test_public_issue_helper_cannot_mint_underreported_risk_authority(
+def test_module_state_cannot_mint_underreported_risk_authority(
     tmp_path,
 ) -> None:
     ledger, plan = _ledger(tmp_path, _action(stake="10"))
@@ -955,10 +955,9 @@ def test_public_issue_helper_cannot_mint_underreported_risk_authority(
         evidence_sha256=capital_risk_module._evidence_digest(provisional),
     )
 
-    # The legacy helper remains for compatibility with the raw resolver, but it
-    # is no longer sufficient to mint the closure-owned product issuance token.
-    capital_risk_module._issue(forged)
-
+    assert not hasattr(capital_risk_module, "_ISSUED")
+    assert not hasattr(capital_risk_module, "_ISSUED_LOCK")
+    assert not hasattr(capital_risk_module, "_issue")
     with pytest.raises(
         ExecutionCapitalAtRiskError,
         match="not current product-issued authority",

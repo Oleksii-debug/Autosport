@@ -455,7 +455,10 @@ def test_failed_unlink_keeps_existing_credential_authoritative_and_blocks_relink
 
 
 def test_invalid_store_receipt_quarantines_secret_lifecycle_until_reconciliation():
-    ctl, _, sink, _ = controller()
+    ctl, transport, sink, _ = controller()
+    # Exercise the ambiguous receipt while transient 2FA authority exists. Quarantine
+    # must discard/cancel that context as well as blocking future credential writes.
+    make_2fa(ctl, transport)
     # Model a sink that may have committed the secret but violated its receipt
     # contract. The controller cannot safely address or remove that possible write.
     sink.result = " invalid-credential-reference "
@@ -473,6 +476,9 @@ def test_invalid_store_receipt_quarantines_secret_lifecycle_until_reconciliation
     assert snap.credential_present is False
     assert snap.can_submit_login is False
     assert snap.can_import_approved_api_token is False
+    assert snap.can_send_verification_code is False
+    assert snap.can_verify_two_factor is False
+    assert transport.cancel_calls == ["challenge-ref-1"]
     assert ctl.surface_contract().focus_target == "prophetx-account-link-status"
     assert ctl.surface_contract().primary_action is None
 
@@ -480,6 +486,10 @@ def test_invalid_store_receipt_quarantines_secret_lifecycle_until_reconciliation
         ctl.open_login()
     with pytest.raises(AccountLinkStateError, match="secret-store reconciliation"):
         ctl.submit_login(email="operator@example.test", password="PASSWORD_SECRET")
+    with pytest.raises(AccountLinkStateError, match="secret-store reconciliation"):
+        ctl.send_verification_code()
+    with pytest.raises(AccountLinkStateError, match="secret-store reconciliation"):
+        ctl.verify_two_factor(code="123456")
     with pytest.raises(AccountLinkStateError, match="secret-store reconciliation"):
         ctl.import_approved_api_token(
             access_key="SECOND_ACCESS",

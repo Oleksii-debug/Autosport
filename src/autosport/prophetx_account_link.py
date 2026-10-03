@@ -393,6 +393,7 @@ class ProphetXAccountLinkController:
         self._accept_login_outcome(outcome)
 
     def send_verification_code(self) -> None:
+        self._require_credential_lifecycle_resolved()
         if self._state not in {
             AccountLinkState.TWO_FACTOR_REQUIRED,
             AccountLinkState.TWO_FACTOR_CODE_ENTRY,
@@ -425,6 +426,7 @@ class ProphetXAccountLinkController:
         self._state = AccountLinkState.TWO_FACTOR_CODE_ENTRY
 
     def verify_two_factor(self, *, code: str) -> None:
+        self._require_credential_lifecycle_resolved()
         if self._state not in {
             AccountLinkState.TWO_FACTOR_CODE_ENTRY,
             AccountLinkState.AUTH_ERROR,
@@ -454,6 +456,7 @@ class ProphetXAccountLinkController:
         self._accept_login_outcome(outcome)
 
     def request_direct_key_generation(self) -> None:
+        self._require_credential_lifecycle_resolved()
         if self._state not in {
             AccountLinkState.AUTHENTICATED_SESSION,
             AccountLinkState.KEY_GENERATION_BLOCKED_UNVERIFIED_TOKEN_CONTRACT,
@@ -502,6 +505,7 @@ class ProphetXAccountLinkController:
             secret_value = ""
 
         if not _opaque_ref(credential_ref):
+            self._clear_auth_context(cancel_challenge=True)
             self._credential_ref = None
             self._credential_lifecycle_uncertain = True
             self._state = AccountLinkState.AUTH_ERROR
@@ -623,7 +627,8 @@ class ProphetXAccountLinkController:
                 }
             ),
             can_send_verification_code=bool(
-                challenge_available
+                not self._credential_lifecycle_uncertain
+                and challenge_available
                 and state
                 in {
                     AccountLinkState.TWO_FACTOR_REQUIRED,
@@ -634,7 +639,8 @@ class ProphetXAccountLinkController:
                 and remaining_ns == 0
             ),
             can_verify_two_factor=bool(
-                challenge_available
+                not self._credential_lifecycle_uncertain
+                and challenge_available
                 and state
                 in {
                     AccountLinkState.TWO_FACTOR_CODE_ENTRY,

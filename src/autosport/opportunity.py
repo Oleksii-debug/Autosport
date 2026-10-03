@@ -36,6 +36,22 @@ class OpportunityDecision(str, Enum):
     ACTIONABLE = "actionable"
 
 
+def _strategy_class_from_serialized(
+    value: object,
+    *,
+    _strategy_type: type[StrategyClass] = StrategyClass,
+) -> StrategyClass:
+    return _strategy_type(value)
+
+
+def _opportunity_decision_from_serialized(
+    value: object,
+    *,
+    _decision_type: type[OpportunityDecision] = OpportunityDecision,
+) -> OpportunityDecision:
+    return _decision_type(value)
+
+
 def _canonical_text(value: object, field_name: str) -> str:
     if type(value) is not str or not value or value.strip() != value:
         raise OpportunityContractError(
@@ -175,6 +191,14 @@ class EvidenceRef:
             authority=_canonical_text(raw["authority"], "evidence authority"),
             reference=_canonical_text(raw["reference"], "evidence reference"),
         )
+
+
+def _evidence_ref_from_dict(
+    raw: object,
+    *,
+    _evidence_ref_type: type[EvidenceRef] = EvidenceRef,
+) -> EvidenceRef:
+    return _evidence_ref_type.from_dict(raw)
 
 
 def _sorted_unique_evidence(
@@ -370,6 +394,14 @@ class QuoteRef:
             ),
             sport=_optional_sport(raw.get("sport")),
         )
+
+
+def _quote_ref_from_dict(
+    raw: object,
+    *,
+    _quote_ref_type: type[QuoteRef] = QuoteRef,
+) -> QuoteRef:
+    return _quote_ref_type.from_dict(raw)
 
 
 @dataclass(frozen=True, slots=True)
@@ -829,6 +861,14 @@ class ForecastRef:
         )
 
 
+def _forecast_ref_from_dict(
+    raw: object,
+    *,
+    _forecast_ref_type: type[ForecastRef] = ForecastRef,
+) -> ForecastRef:
+    return _forecast_ref_type.from_dict(raw)
+
+
 @dataclass(frozen=True, slots=True)
 class Opportunity:
     strategy_class: StrategyClass
@@ -1036,8 +1076,8 @@ class Opportunity:
                 "opportunity must contain canonical fields"
             )
         try:
-            strategy_class = StrategyClass(raw["strategy_class"])
-            decision = OpportunityDecision(raw["decision"])
+            strategy_class = _strategy_class_from_serialized(raw["strategy_class"])
+            decision = _opportunity_decision_from_serialized(raw["decision"])
         except (TypeError, ValueError) as exc:
             raise OpportunityContractError(
                 "opportunity enum value is unsupported"
@@ -1058,14 +1098,14 @@ class Opportunity:
             strategy_class=strategy_class,
             decision=decision,
             quotes=tuple(
-                QuoteRef.from_dict(item) for item in raw["quotes"]
+                _quote_ref_from_dict(item) for item in raw["quotes"]
             ),
             claims_probability_edge=raw["claims_probability_edge"],
             forecasts=tuple(
-                ForecastRef.from_dict(item) for item in raw["forecasts"]
+                _forecast_ref_from_dict(item) for item in raw["forecasts"]
             ),
             evidence_refs=tuple(
-                EvidenceRef.from_dict(item)
+                _evidence_ref_from_dict(item)
                 for item in raw["evidence_refs"]
             ),
         )

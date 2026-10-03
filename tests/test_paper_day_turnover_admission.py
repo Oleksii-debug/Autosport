@@ -1,6 +1,8 @@
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
+import pytest
+
 import autosport.economic_admission as economic_admission
 import autosport.risk as risk_module
 
@@ -10,6 +12,7 @@ from autosport.economic_goal import EconomicGoalContract
 from autosport.economic_goal_store import EconomicGoalStore
 from autosport.paper import PaperBook
 from autosport.risk import PaperRiskPolicy, ProposedTicketRiskContext
+from autosport.workspace_lock import WorkspaceEconomicLock
 
 
 def _timestamp(value: datetime) -> str:
@@ -113,6 +116,42 @@ def _admit(tmp_path, book: PaperBook, goal: EconomicGoalContract, placed_at: str
         currency="USD",
     )
     return baseline, result
+
+
+def test_admission_rejects_workspace_lock_rebinding_before_mutation(tmp_path):
+    book = PaperBook("100")
+    book.save(tmp_path / "paper_book.json")
+    policy = PaperRiskPolicy(
+        max_ticket_fraction=Decimal("1"),
+        max_committed_fraction=Decimal("1"),
+        minimum_cash_reserve_fraction=Decimal("0"),
+    )
+    candidate = _leg("lock-dispatch")
+    original_acquire = WorkspaceEconomicLock.acquire
+
+    def hostile_acquire(_self) -> None:
+        raise AssertionError("mutated admission lock acquire executed")
+
+    try:
+        WorkspaceEconomicLock.acquire = hostile_acquire
+        with pytest.raises(
+            RuntimeError,
+            match="workspace economic lock executable authority changed",
+        ):
+            admit_paper_ticket(
+                workspace=tmp_path,
+                book=book,
+                risk_policy=policy,
+                stake=Decimal("1"),
+                legs=(candidate,),
+                reason="lock dispatch must remain canonical",
+                placed_at="2026-10-03T06:30:00Z",
+            )
+    finally:
+        WorkspaceEconomicLock.acquire = original_acquire
+
+    persisted = PaperBook.load(tmp_path / "paper_book.json")
+    assert persisted.tickets == {}
 
 
 def test_product_issued_current_utc_day_releases_old_day_turnover(tmp_path):

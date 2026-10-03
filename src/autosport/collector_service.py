@@ -1064,25 +1064,38 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.max_store_bytes,
             )
         )
-        service = HeadlessCollectorService(
-            delta_store=delta_store,
-            lifecycle=ContinuousEventLifecycle(root / "collector_catalog.json"),
-            source=source,
-            state_path=root / "collector_service_state.json",
-            run_id=args.run_id,
-            config=CollectorServiceConfig(
-                max_items=args.max_items,
-                poll_interval_seconds=args.poll_seconds,
-                evaluation_slot_count=args.evaluation_slots,
-                retry_attempts=args.retry_attempts,
-                initial_backoff_seconds=args.initial_backoff_seconds,
-                max_backoff_seconds=args.max_backoff_seconds,
-                jitter_fraction=args.jitter_fraction,
-                max_store_bytes=effective_max_store_bytes,
-            ),
-            stop_requested=signal_stop,
-            stop_reason=signal_stop.reason,
-        )
+        try:
+            service = HeadlessCollectorService(
+                delta_store=delta_store,
+                lifecycle=ContinuousEventLifecycle(root / "collector_catalog.json"),
+                source=source,
+                state_path=root / "collector_service_state.json",
+                run_id=args.run_id,
+                config=CollectorServiceConfig(
+                    max_items=args.max_items,
+                    poll_interval_seconds=args.poll_seconds,
+                    evaluation_slot_count=args.evaluation_slots,
+                    retry_attempts=args.retry_attempts,
+                    initial_backoff_seconds=args.initial_backoff_seconds,
+                    max_backoff_seconds=args.max_backoff_seconds,
+                    jitter_fraction=args.jitter_fraction,
+                    max_store_bytes=effective_max_store_bytes,
+                ),
+                stop_requested=signal_stop,
+                stop_reason=signal_stop.reason,
+            )
+        except CollectorRetentionRequiredError as exc:
+            print(
+                json.dumps(
+                    {
+                        "error_code": exc.code,
+                        "source_id": getattr(source, "source_id", None),
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                )
+            )
+            return 4
         if args.resume_stopped_run:
             service.resume()
         try:

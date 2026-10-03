@@ -811,8 +811,55 @@ class AutosportWebController:
                 "portfolio_worst_case": None,
                 "portfolio_best_case": None,
                 "portfolio_mean_case": None,
+                "paper_risk": {
+                    "available": False,
+                    "includes_live_execution_exposure": False,
+                    "live_execution_headroom_authoritative": False,
+                    "risk_of_ruin_upper_bound": None,
+                },
                 "risk_policy_evaluated": False,
                 "real_money_authorized": False,
+            }
+        risk = snapshot.paper_risk
+        risk_projection: dict[str, object]
+        if risk is None:
+            risk_projection = {
+                "available": False,
+                "includes_live_execution_exposure": False,
+                "live_execution_headroom_authoritative": False,
+                "risk_of_ruin_upper_bound": None,
+            }
+        else:
+            risk_projection = {
+                "available": True,
+                "scope": risk.scope,
+                "goal_id": risk.goal_id,
+                "goal_revision": risk.goal_revision,
+                "goal_contract_sha256": risk.goal_contract_sha256,
+                "portfolio_risk_state_sha256": risk.portfolio_risk_state_sha256,
+                "bankroll_id": risk.bankroll_id,
+                "currency": risk.currency,
+                "current_equity": str(risk.current_equity),
+                "peak_equity": str(risk.peak_equity),
+                "committed_stake": str(risk.committed_stake),
+                "realized_gross_loss": str(risk.realized_gross_loss),
+                "turnover": str(risk.turnover),
+                "current_drawdown_amount": str(risk.current_drawdown_amount),
+                "historical_max_drawdown_amount": str(
+                    risk.historical_max_drawdown_amount
+                ),
+                "historical_max_drawdown_fraction": (
+                    None
+                    if risk.historical_max_drawdown_fraction is None
+                    else str(risk.historical_max_drawdown_fraction)
+                ),
+                "drawdown_loss_room": str(risk.drawdown_loss_room),
+                "max_drawdown_fraction": str(risk.max_drawdown_fraction),
+                "risk_of_ruin_limit": str(risk.risk_of_ruin_limit),
+                "risk_of_ruin_status": risk.risk_of_ruin_status,
+                "includes_live_execution_exposure": False,
+                "live_execution_headroom_authoritative": False,
+                "risk_of_ruin_upper_bound": None,
             }
         return {
             "available": True,
@@ -830,6 +877,7 @@ class AutosportWebController:
             "portfolio_worst_case": str(snapshot.portfolio_worst_case),
             "portfolio_best_case": str(snapshot.portfolio_best_case),
             "portfolio_mean_case": str(snapshot.portfolio_mean_case),
+            "paper_risk": risk_projection,
             "risk_policy_evaluated": False,
             "real_money_authorized": False,
         }
@@ -915,10 +963,29 @@ class AutosportWebController:
             (
                 "Відкрите PAPER-зобов'язання: "
                 f"{snapshot.committed_stake}. "
-                "Цей знімок не створює нового висновку політики ризику "
-                "і не надає реального грошового дозволу."
+                "Цей знімок не надає реального грошового дозволу."
             ),
         ]
+        risk = snapshot.paper_risk
+        if risk is None:
+            self.evaluation.append(
+                "PAPER-звіт ризику недоступний: канонічна ціль власника "
+                "не ініціалізована. Висновок політики ризику не вигадується."
+            )
+        else:
+            self.evaluation.append(
+                "Канонічний PAPER-звіт ризику: "
+                f"ціль {risk.goal_id} ревізія {risk.goal_revision}; "
+                f"поточний капітал {risk.current_equity}; "
+                f"поточна просадка {risk.current_drawdown_amount}; "
+                f"історична максимальна просадка "
+                f"{risk.historical_max_drawdown_amount}; "
+                f"додатковий простір втрати за drawdown-лімітом "
+                f"{risk.drawdown_loss_room}; статус risk-of-ruin "
+                f"{risk.risk_of_ruin_status}. "
+                "Жива execution-експозиція не включена, а live headroom "
+                "не є авторитетним."
+            )
         return True
 
     def _refresh_economic_projection(self) -> None:

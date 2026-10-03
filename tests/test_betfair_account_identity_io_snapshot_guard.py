@@ -33,6 +33,7 @@ def _install_https_test_dispatch(
         response = fake_open(request, getattr(request, "timeout", 0))
         response.code = 200
         response.msg = "OK"
+        response.info = lambda: {}
         return response
 
     monkeypatch.setattr(

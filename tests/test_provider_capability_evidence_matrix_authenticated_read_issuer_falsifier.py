@@ -923,6 +923,24 @@ def test_newer_lifecycle_successor_invalidates_reuse_of_old_authenticated_fact(
     )
     journal.publish(successor.evidence)
 
+    historical = build_provider_capability_evidence_matrix(
+        first.profile,
+        integration,
+        environment="production",
+        application_mode="betdaq-authenticated-readonly",
+        matrix_version=1,
+        as_of="2026-09-21T10:05:59+00:00",
+        matrix_ref="pre-successor-history",
+        evidence=(old_fact,),
+    )
+    assert historical.qualifies(
+        BookmakerCapability.BALANCE_READ,
+        accepted_grades=frozenset(
+            {ProviderCapabilityTruthGrade.AUTHENTICATED_READ_PROVEN}
+        ),
+        at_time="2026-09-21T10:05:59+00:00",
+    )
+
     with pytest.raises(
         ProviderCapabilityEvidenceMatrixError,
         match="lifecycle evidence is superseded",

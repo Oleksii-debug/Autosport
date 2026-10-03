@@ -596,6 +596,32 @@ def test_live_issued_plan_can_close_crash_window_after_raw_plan_reservation(
     )
 
 
+def test_forged_exact_issuance_token_cannot_mint_first_reservation(tmp_path) -> None:
+    bound, approval, _, _ = _bound()
+    reconstructed = replace(bound)
+    legitimate_token = object.__getattribute__(bound, "_product_issuance_token")
+    token_type = type(legitimate_token)
+
+    forged_token = object.__new__(token_type)
+    object.__setattr__(forged_token, "reference", weakref.ref(reconstructed))
+    object.__setattr__(
+        forged_token,
+        "witness",
+        reconstructed.execution_plan.plan_id.removeprefix("supervised-v2-"),
+    )
+    object.__setattr__(reconstructed, "_product_issuance_token", forged_token)
+
+    ledger = RealExecutionLedger(tmp_path / "forged-token-ledger.jsonl")
+    with pytest.raises(
+        SupervisedExecutionError,
+        match="not current canonical product issuance",
+    ):
+        reserve_supervised_plan(ledger, reconstructed, approval)
+
+    with pytest.raises(KeyError):
+        ledger.saga(reconstructed.execution_plan.plan_id)
+
+
 def test_reserved_plan_reconstruction_is_restart_idempotent(tmp_path) -> None:
     bound, approval, _, _ = _bound()
     ledger = RealExecutionLedger(tmp_path / "restart-plan-ledger.jsonl")

@@ -23,6 +23,7 @@ from .account_snapshot_acquisition import (
     AccountSnapshotAcquisitionError,
     AuthoritativeAccountSnapshot,
     assert_account_snapshot_acquisition_authoritative,
+    hold_current_account_snapshot_acquisition,
 )
 from .bookmaker_capability import BookmakerCapability
 from .economic_goal import EconomicGoalContractError
@@ -79,6 +80,12 @@ _LEDGER_CANONICAL_MONOTONIC_AUTHORITY_CODE = getattr(
 _ASSERT_ACCOUNT_SNAPSHOT_AUTHORITY = assert_account_snapshot_acquisition_authoritative
 _ASSERT_ACCOUNT_SNAPSHOT_AUTHORITY_CODE = getattr(
     _ASSERT_ACCOUNT_SNAPSHOT_AUTHORITY,
+    "__code__",
+    None,
+)
+_HOLD_CURRENT_ACCOUNT_SNAPSHOT_AUTHORITY = hold_current_account_snapshot_acquisition
+_HOLD_CURRENT_ACCOUNT_SNAPSHOT_AUTHORITY_CODE = getattr(
+    _HOLD_CURRENT_ACCOUNT_SNAPSHOT_AUTHORITY,
     "__code__",
     None,
 )
@@ -423,6 +430,8 @@ def _canonical_account_snapshot_authority(
     *,
     _assert=_ASSERT_ACCOUNT_SNAPSHOT_AUTHORITY,
     _assert_code=_ASSERT_ACCOUNT_SNAPSHOT_AUTHORITY_CODE,
+    _hold=_HOLD_CURRENT_ACCOUNT_SNAPSHOT_AUTHORITY,
+    _hold_code=_HOLD_CURRENT_ACCOUNT_SNAPSHOT_AUTHORITY_CODE,
 ):
     live_module = getattr(
         _account_acquisition,
@@ -430,15 +439,24 @@ def _canonical_account_snapshot_authority(
         None,
     )
     live_alias = globals().get("assert_account_snapshot_acquisition_authoritative")
+    live_hold = getattr(
+        _account_acquisition,
+        "hold_current_account_snapshot_acquisition",
+        None,
+    )
+    live_hold_alias = globals().get("hold_current_account_snapshot_acquisition")
     if (
         live_module is not _assert
         or live_alias is not _assert
         or getattr(_assert, "__code__", None) is not _assert_code
+        or live_hold is not _hold
+        or live_hold_alias is not _hold
+        or getattr(_hold, "__code__", None) is not _hold_code
     ):
         raise ProviderAccountHeadroomError(
             "canonical account snapshot headroom authority changed"
         )
-    return _assert
+    return _assert, _hold
 
 
 def _canonical_ledger_dispatch(
@@ -1005,7 +1023,7 @@ def _require_live_balance(
             "account evidence must be exact AuthoritativeAccountSnapshot"
         )
     try:
-        assert_live = _canonical_account_snapshot_authority()
+        assert_live, _ = _canonical_account_snapshot_authority()
         assert_live(acquired)
     except AccountSnapshotAcquisitionError as exc:
         raise ProviderAccountHeadroomError(
@@ -1387,7 +1405,7 @@ def _resolve_account_liability_lattice(
     )
 
 
-def assess_provider_account_headroom(
+def _assess_provider_account_headroom_current_generation(
     ledger: RealExecutionLedger,
     acquired: AuthoritativeAccountSnapshot,
     *,
@@ -1560,7 +1578,36 @@ def assess_provider_account_headroom(
         return assessment
 
 
-def reserve_observed_provider_headroom(
+def assess_provider_account_headroom(
+    ledger: RealExecutionLedger,
+    acquired: AuthoritativeAccountSnapshot,
+    *,
+    plan_id: str,
+    action_id: str,
+    bound_plans: tuple[BoundSupervisedExecutionPlan, ...],
+    intents: tuple[OpportunityIntent, ...],
+) -> ProviderAccountHeadroomAssessment:
+    """Issue headroom only while the exact BALANCE_READ generation stays current."""
+
+    _, hold_current = _canonical_account_snapshot_authority()
+    required = frozenset({BookmakerCapability.BALANCE_READ})
+    try:
+        with hold_current(acquired, required):
+            return _assess_provider_account_headroom_current_generation(
+                ledger,
+                acquired,
+                plan_id=plan_id,
+                action_id=action_id,
+                bound_plans=bound_plans,
+                intents=intents,
+            )
+    except AccountSnapshotAcquisitionError as exc:
+        raise ProviderAccountHeadroomStale(
+            "provider-account balance generation is no longer current"
+        ) from exc
+
+
+def _reserve_observed_provider_headroom_current_generation(
     ledger: RealExecutionLedger,
     acquired: AuthoritativeAccountSnapshot,
     assessment: ProviderAccountHeadroomAssessment,
@@ -1740,3 +1787,59 @@ def reserve_observed_provider_headroom(
     )
     _issue_reservation(reservation)
     return reservation
+
+
+def reserve_observed_provider_headroom(
+    ledger: RealExecutionLedger,
+    acquired: AuthoritativeAccountSnapshot,
+    assessment: ProviderAccountHeadroomAssessment,
+    *,
+    attempt_id: str,
+    bound_plans: tuple[BoundSupervisedExecutionPlan, ...],
+    intents: tuple[OpportunityIntent, ...] = (),
+) -> ProductInternalHeadroomReservation:
+    """Reserve new headroom only while the assessed BALANCE_READ is current.
+
+    Exact replay of an already-durable attempt consumes no new provider headroom and
+    therefore preserves the existing restart/idempotency path without requiring a live
+    current acquisition generation.
+    """
+
+    if type(ledger) is not RealExecutionLedger:
+        raise TypeError("ledger must be exact RealExecutionLedger")
+    _assert_issued(assessment)
+    attempt_id = _text(attempt_id, "attempt_id")
+    _, _, _, attempt_state = _canonical_ledger_dispatch()
+    try:
+        attempt_state(ledger, attempt_id)
+    except KeyError:
+        prior_exists = False
+    else:
+        prior_exists = True
+
+    if prior_exists:
+        return _reserve_observed_provider_headroom_current_generation(
+            ledger,
+            acquired,
+            assessment,
+            attempt_id=attempt_id,
+            bound_plans=bound_plans,
+            intents=intents,
+        )
+
+    _, hold_current = _canonical_account_snapshot_authority()
+    required = frozenset({BookmakerCapability.BALANCE_READ})
+    try:
+        with hold_current(acquired, required):
+            return _reserve_observed_provider_headroom_current_generation(
+                ledger,
+                acquired,
+                assessment,
+                attempt_id=attempt_id,
+                bound_plans=bound_plans,
+                intents=intents,
+            )
+    except AccountSnapshotAcquisitionError as exc:
+        raise ProviderAccountHeadroomStale(
+            "provider-account balance generation changed; recompute headroom"
+        ) from exc

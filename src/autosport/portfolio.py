@@ -54,6 +54,8 @@ def _analysis_ticket_fingerprint(
     tuple[TicketLeg, ...],
     str,
     TicketStatus,
+    Decimal,
+    str | None,
     tuple[str, ...],
 ]:
     """Return exactly the mutable ticket fields consumed by scenario analysis."""
@@ -64,6 +66,8 @@ def _analysis_ticket_fingerprint(
         ticket.legs,
         ticket.placed_at,
         ticket.status,
+        ticket.payout,
+        ticket.settled_at,
         ticket.provider_source_ids,
     )
 
@@ -118,6 +122,8 @@ def _snapshot_open_tickets_for_analysis(
             legs,
             placed_at,
             status,
+            payout,
+            settled_at,
             provider_source_ids,
         ) = fingerprint
         if type(ticket_id) is not str or not ticket_id or ticket_id != ticket_id.strip():
@@ -129,6 +135,19 @@ def _snapshot_open_tickets_for_analysis(
             raise ValueError("portfolio ticket status must be exact TicketStatus")
         if status is not TicketStatus.OPEN:
             continue
+        open_payout = _require_finite_decimal(
+            payout,
+            f"portfolio ticket {ticket_id} payout",
+        )
+        if open_payout != 0:
+            raise ValueError(
+                f"portfolio open ticket {ticket_id} payout must be zero"
+            )
+        if settled_at is not None:
+            raise ValueError(
+                f"portfolio open ticket {ticket_id} cannot have settled_at"
+            )
+        PaperBook._validate_placed_at(placed_at, snapshot=True)
         _validate_open_ticket_economics_for_analysis(
             ticket_id,
             stake,

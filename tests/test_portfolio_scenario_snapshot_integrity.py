@@ -287,3 +287,23 @@ class PortfolioScenarioSnapshotIntegrityTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+    def test_direct_scenario_profit_rejects_open_ticket_with_settlement_residue(self) -> None:
+        _book, ticket, leg = self._open_ticket()
+        ticket.payout = Decimal("5")
+
+        with self.assertRaisesRegex(ValueError, "open ticket .* payout must be zero"):
+            PortfolioEngine.scenario_profit([ticket], {leg.quote_key})
+
+        ticket.payout = Decimal("0")
+        ticket.settled_at = "2026-09-21T08:00:01+00:00"
+        with self.assertRaisesRegex(ValueError, "open ticket .* cannot have settled_at"):
+            PortfolioEngine.scenario_profit([ticket], {leg.quote_key})
+
+    def test_affected_tickets_rejects_open_ticket_with_settlement_residue(self) -> None:
+        _book, ticket, leg = self._open_ticket()
+        ticket.payout = Decimal("1")
+
+        with self.assertRaisesRegex(ValueError, "open ticket .* payout must be zero"):
+            PortfolioEngine.affected_tickets([ticket], leg.quote_key)

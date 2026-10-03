@@ -191,3 +191,12 @@ from . import _drift_decimal_resource_guard as _drift_decimal_resource_guard  # 
 # K07 authenticated account identity must acquire account details from a sealed
 # product-origin snapshot, not mutable live-client fields during provider I/O.
 from . import _betfair_account_identity_io_snapshot_guard as _betfair_account_identity_io_snapshot_guard  # noqa: F401,E402
+
+# Predictive-target provenance may trust a frozen ResearchProtocol only when the
+# factory manifest precommits the exact durable registry envelope and the resolver
+# re-reads that envelope through source-owned ScientificRegistry read authority.
+from . import _predictive_target_protocol_envelope_authority as _predictive_target_protocol_envelope_authority  # noqa: F401,E402
+
+# A frozen target population must not acquire a new identity merely because the
+# same causal instant is written with an equivalent ISO-8601 offset spelling.
+from . import _predictive_target_timestamp_canonicalization as _predictive_target_timestamp_canonicalization  # noqa: F401,E402

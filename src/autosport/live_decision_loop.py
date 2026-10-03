@@ -2468,6 +2468,9 @@ class PersistentLiveDecisionLoop:
         expected_previous_progress: _Progress | None,
         expected_mirror_revision: int | None,
         expected_dependency_routing_revision: int,
+        expected_provider_health_boundaries: tuple[
+            ProviderHealthReplayBoundary, ...
+        ],
     ) -> PaperBook:
         _, decision_time = _canonical_timestamp("decision_ts", decision_ts)
         self.intent_provenance.assert_available_at(decision_time)
@@ -2492,6 +2495,24 @@ class PersistentLiveDecisionLoop:
         ):
             raise TypeError(
                 "expected_dependency_routing_revision must be a non-negative integer"
+            )
+        if type(expected_provider_health_boundaries) is not tuple or any(
+            type(boundary) is not ProviderHealthReplayBoundary
+            for boundary in expected_provider_health_boundaries
+        ):
+            raise TypeError(
+                "expected_provider_health_boundaries must be an exact tuple of replay boundaries"
+            )
+        if expected_provider_health_boundaries != tuple(
+            sorted(
+                expected_provider_health_boundaries,
+                key=lambda item: item.source_id,
+            )
+        ) or len(
+            {item.source_id for item in expected_provider_health_boundaries}
+        ) != len(expected_provider_health_boundaries):
+            raise ValueError(
+                "expected_provider_health_boundaries must be unique and sorted"
             )
         with WorkspaceEconomicLock(self.workspace):
             durable_previous_progress = self._load_progress()
@@ -2607,29 +2628,48 @@ class PersistentLiveDecisionLoop:
                 plan_sha256=None,
                 ledger_offset=None,
                 gate=gate,
+                provider_health_boundaries=expected_provider_health_boundaries,
             )
-            try:
-                if expected_mirror_revision is None:
+            health_store = self._health_store_for_boundaries(
+                expected_provider_health_boundaries
+            )
+            health_gate = (
+                None
+                if health_store is None
+                else self._provider_health_gate(health_store)
+            )
+
+            def publish_pending() -> None:
+                if health_gate is None:
                     with self.dependencies.hold_input_ids(
                         expected_registered_input_ids,
                         expected_routing_revision=expected_dependency_routing_revision,
                     ):
                         atomic_write_json(self.progress_path, pending.to_dict())
+                    return
+                with health_gate.hold_replay_boundaries(
+                    expected_provider_health_boundaries,
+                    as_of=decision_time,
+                    require_eligible=(gate == _GATE_NORMAL),
+                ):
+                    with self.dependencies.hold_input_ids(
+                        expected_registered_input_ids,
+                        expected_routing_revision=expected_dependency_routing_revision,
+                    ):
+                        atomic_write_json(self.progress_path, pending.to_dict())
+
+            try:
+                if expected_mirror_revision is None:
+                    publish_pending()
                 else:
-                    # Canonical lock order is mirror -> focused dependency registry.
-                    # Registration uses the same order when installing its initial
-                    # matching-key snapshot, preventing publication/register deadlock.
+                    # Canonical publication order is mirror -> provider health ->
+                    # focused dependency registry. Ingestion publishes MarketMirror
+                    # invalidations before recording SourceHealthStore health, so
+                    # this order does not invert the live observation path.
                     with self.mirror_updates.mirror.hold_revision(
                         expected_mirror_revision
                     ):
-                        with self.dependencies.hold_input_ids(
-                            expected_registered_input_ids,
-                            expected_routing_revision=expected_dependency_routing_revision,
-                        ):
-                            atomic_write_json(
-                                self.progress_path,
-                                pending.to_dict(),
-                            )
+                        publish_pending()
             except FocusedMirrorRegistryChanged as exc:
                 raise _ConcurrentDecisionSnapshot(
                     "dependency registry/routing changed after decision snapshot capture; "
@@ -2638,6 +2678,11 @@ class PersistentLiveDecisionLoop:
             except MarketMirrorRevisionChanged as exc:
                 raise _ConcurrentDecisionSnapshot(
                     "market revision advanced after decision snapshot capture; "
+                    "retrying before economic action"
+                ) from exc
+            except ValueError as exc:
+                raise _ConcurrentDecisionSnapshot(
+                    "provider health advanced after decision snapshot capture; "
                     "retrying before economic action"
                 ) from exc
         self._progress = pending

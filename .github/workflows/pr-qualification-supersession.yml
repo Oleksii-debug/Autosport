@@ -20,10 +20,12 @@ permissions:
 # of O(PRs × source workflows) during mass draft/ready/head lifecycle churn.
 #
 # PR metadata is deliberately not scheduler authority. Empty/multi-reference source
-# events share the same workflow lane and cannot grant PR cancellation authority: the
-# helper still requires explicit singleton run identity or the existing fail-closed
-# historical association/branch recovery, which resolves identity again before any
-# effect. Different source workflows remain isolated by workflow_id. A delayed stale-head
+# events share the same workflow lane and cannot grant PR cancellation authority. Their
+# event-level identity classes remain distinct: empty may later recover one exact
+# same-run/same-head singleton snapshot, while multi-reference remains permanently
+# ambiguous for cancellation of that triggering source run. Historical recovery remains
+# fail-closed and re-resolves identity before any effect. Different source workflows
+# remain isolated by workflow_id. A delayed stale-head
 # event may be the surviving trigger; that controller still reconciles its source workflow
 # against fresh live PR qualification rather than trusting the trigger head.
 #
@@ -56,6 +58,7 @@ jobs:
         run: >-
           python scripts/cancel_superseded_pr_workflow_runs_scoped.py
           --pr-number "${{ github.event.workflow_run.pull_requests[0].number && !github.event.workflow_run.pull_requests[1].number && github.event.workflow_run.pull_requests[0].number || 0 }}"
+          --event-pr-reference-mode "${{ !github.event.workflow_run.pull_requests[0].number && 'empty' || (github.event.workflow_run.pull_requests[1].number && 'ambiguous' || 'singleton') }}"
           --event-head-sha "${{ github.event.workflow_run.head_sha }}"
           --workflow-name "${{ github.event.workflow_run.name }}"
           --workflow-id "${{ github.event.workflow_run.workflow_id }}"

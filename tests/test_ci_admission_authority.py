@@ -249,3 +249,90 @@ def test_positive_admission_is_revoked_by_lifecycle_move_during_confirmation() -
         current_head=False,
         cancelled_run_ids=(),
     )
+
+def test_admission_rejects_inflight_live_qualification_instance_shadow() -> None:
+    forged_calls: list[int] = []
+
+    class RebindingApi:
+        def live_pr_qualification(self, pr_number: int) -> tuple[str, bool]:
+            assert pr_number == 2008
+
+            def forged_resolver(next_pr_number: int) -> tuple[str, bool]:
+                forged_calls.append(next_pr_number)
+                return HEAD_B, True
+
+            self.live_pr_qualification = forged_resolver
+            return HEAD_B, True
+
+    with pytest.raises(
+        CancellationError,
+        match="pull request qualification resolver authority changed",
+    ):
+        controller_module.admit_current_head(
+            api=RebindingApi(),
+            pr_number=2008,
+            event_head_sha=HEAD_B,
+        )
+
+    assert forged_calls == []
+
+
+def test_admission_rejects_inflight_live_qualification_class_rebind(
+    monkeypatch,
+) -> None:
+    forged_calls: list[int] = []
+
+    class RebindingApi:
+        def live_pr_qualification(self, pr_number: int) -> tuple[str, bool]:
+            assert pr_number == 2008
+
+            def forged_resolver(_self, next_pr_number: int) -> tuple[str, bool]:
+                forged_calls.append(next_pr_number)
+                return HEAD_B, True
+
+            monkeypatch.setattr(
+                RebindingApi,
+                "live_pr_qualification",
+                forged_resolver,
+            )
+            return HEAD_B, True
+
+    with pytest.raises(
+        CancellationError,
+        match="pull request qualification resolver authority changed",
+    ):
+        controller_module.admit_current_head(
+            api=RebindingApi(),
+            pr_number=2008,
+            event_head_sha=HEAD_B,
+        )
+
+    assert forged_calls == []
+
+
+def test_admission_rejects_inflight_legacy_live_head_instance_shadow() -> None:
+    forged_calls: list[int] = []
+
+    class LegacyApi:
+        def live_pr_head(self, pr_number: int) -> str:
+            assert pr_number == 2008
+
+            def forged_resolver(next_pr_number: int) -> str:
+                forged_calls.append(next_pr_number)
+                return HEAD_B
+
+            self.live_pr_head = forged_resolver
+            return HEAD_B
+
+    with pytest.raises(
+        CancellationError,
+        match="pull request live-head resolver authority changed",
+    ):
+        controller_module.admit_current_head(
+            api=LegacyApi(),
+            pr_number=2008,
+            event_head_sha=HEAD_B,
+        )
+
+    assert forged_calls == []
+

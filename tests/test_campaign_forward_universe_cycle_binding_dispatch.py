@@ -550,6 +550,15 @@ def test_public_verifier_rejects_scope_constant_rebind_before_dispatch(
         )
 
 
+def test_forward_public_seals_do_not_expose_unsealed_delegates() -> None:
+    for sealed in (
+        binding.resolve_campaign_forward_universe_cycle_authority,
+        binding.authorize_campaign_forward_source_receipts,
+        binding.verify_campaign_forward_evidence,
+    ):
+        assert not hasattr(sealed, "__wrapped__")
+
+
 def test_positive_resolver_uses_captured_authority_issuer_not_live_class_lookup() -> None:
     sealed = binding.resolve_campaign_forward_universe_cycle_authority
     closure = {

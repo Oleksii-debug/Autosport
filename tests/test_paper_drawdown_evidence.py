@@ -685,6 +685,66 @@ def test_resolver_rejects_economic_goal_parser_rebinding_before_execution(
     assert hostile_called is False
 
 
+def test_resolver_rejects_paperbook_from_raw_rebinding_before_execution(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    _initialize(tmp_path)
+    hostile_called = False
+
+    def hostile_from_raw(cls, raw):
+        nonlocal hostile_called
+        del cls, raw
+        hostile_called = True
+        return PaperBook("1000000")
+
+    monkeypatch.setattr(
+        PaperBook,
+        "_from_raw_snapshot",
+        classmethod(hostile_from_raw),
+    )
+
+    with pytest.raises(
+        PaperDrawdownEvidenceError,
+        match="durable source resolver authority changed",
+    ):
+        resolve_paper_drawdown_evidence(tmp_path)
+
+    assert hostile_called is False
+
+
+@pytest.mark.parametrize(
+    "dependency_name",
+    ("strict_json_loads", "economic_goal_from_payload"),
+)
+def test_resolver_rejects_goal_parser_dependency_rebinding_before_execution(
+    tmp_path,
+    monkeypatch,
+    dependency_name,
+) -> None:
+    _initialize(tmp_path)
+    hostile_called = False
+
+    def hostile(*_args, **_kwargs):
+        nonlocal hostile_called
+        hostile_called = True
+        raise AssertionError("hostile goal parser dependency executed")
+
+    monkeypatch.setattr(
+        economic_goal_store_module,
+        dependency_name,
+        hostile,
+    )
+
+    with pytest.raises(
+        PaperDrawdownEvidenceError,
+        match="durable source resolver authority changed",
+    ):
+        resolve_paper_drawdown_evidence(tmp_path)
+
+    assert hostile_called is False
+
+
 def test_resolver_rejects_workspace_path_dispatch_rebinding(
     tmp_path,
     monkeypatch,

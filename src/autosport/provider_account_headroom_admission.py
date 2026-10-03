@@ -31,6 +31,7 @@ from .economic_goal_provenance import provenance_for
 from . import economic_goal_store as _economic_goal_store
 from .economic_goal_store import EconomicGoalStore
 from . import execution_capital_at_risk as _capital_risk
+from . import json_integrity as _json_integrity
 from .execution_capital_at_risk import (
     ExecutionCapitalAtRiskError,
     ExecutionCapitalAtRiskEvidence,
@@ -118,6 +119,31 @@ _ECONOMIC_GOAL_FROM_PAYLOAD_CODE = getattr(
 _ECONOMIC_GOAL_STRICT_JSON_LOADS = getattr(_economic_goal_store, "strict_json_loads", None)
 _ECONOMIC_GOAL_STRICT_JSON_LOADS_CODE = getattr(
     _ECONOMIC_GOAL_STRICT_JSON_LOADS,
+    "__code__",
+    None,
+)
+_STRICT_JSON_MODULE_LOADS = getattr(getattr(_json_integrity, "json", None), "loads", None)
+_STRICT_JSON_UNIQUE_OBJECT = getattr(_json_integrity, "_unique_json_object", None)
+_STRICT_JSON_UNIQUE_OBJECT_CODE = getattr(_STRICT_JSON_UNIQUE_OBJECT, "__code__", None)
+_STRICT_JSON_REJECT_CONSTANT = getattr(
+    _json_integrity,
+    "_reject_nonstandard_json_constant",
+    None,
+)
+_STRICT_JSON_REJECT_CONSTANT_CODE = getattr(
+    _STRICT_JSON_REJECT_CONSTANT,
+    "__code__",
+    None,
+)
+_STRICT_JSON_PARSE_INTEGER = getattr(_json_integrity, "_parse_bounded_json_integer", None)
+_STRICT_JSON_PARSE_INTEGER_CODE = getattr(
+    _STRICT_JSON_PARSE_INTEGER,
+    "__code__",
+    None,
+)
+_STRICT_JSON_VALIDATE_VALUE = getattr(_json_integrity, "_validate_strict_json_value", None)
+_STRICT_JSON_VALIDATE_VALUE_CODE = getattr(
+    _STRICT_JSON_VALIDATE_VALUE,
     "__code__",
     None,
 )
@@ -381,6 +407,15 @@ def _canonical_denomination_dispatch(
     _store_from_payload_code=_ECONOMIC_GOAL_FROM_PAYLOAD_CODE,
     _store_strict_json=_ECONOMIC_GOAL_STRICT_JSON_LOADS,
     _store_strict_json_code=_ECONOMIC_GOAL_STRICT_JSON_LOADS_CODE,
+    _strict_json_module_loads=_STRICT_JSON_MODULE_LOADS,
+    _strict_json_unique=_STRICT_JSON_UNIQUE_OBJECT,
+    _strict_json_unique_code=_STRICT_JSON_UNIQUE_OBJECT_CODE,
+    _strict_json_reject=_STRICT_JSON_REJECT_CONSTANT,
+    _strict_json_reject_code=_STRICT_JSON_REJECT_CONSTANT_CODE,
+    _strict_json_parse_int=_STRICT_JSON_PARSE_INTEGER,
+    _strict_json_parse_int_code=_STRICT_JSON_PARSE_INTEGER_CODE,
+    _strict_json_validate=_STRICT_JSON_VALIDATE_VALUE,
+    _strict_json_validate_code=_STRICT_JSON_VALIDATE_VALUE_CODE,
     _provenance=_ECONOMIC_GOAL_PROVENANCE_FOR,
     _provenance_code=_ECONOMIC_GOAL_PROVENANCE_FOR_CODE,
     _provenance_contract_sha=_ECONOMIC_GOAL_PROVENANCE_CONTRACT_SHA256,
@@ -464,6 +499,29 @@ def _canonical_denomination_dispatch(
         or getattr(_store_init, "__code__", None) is not _store_init_code
         or live_store_load is not _store_load
         or getattr(_store_load, "__code__", None) is not _store_load_code
+        or getattr(_economic_goal_store, "strict_json_loads", None)
+        is not _store_strict_json
+        or getattr(_json_integrity, "strict_json_loads", None) is not _store_strict_json
+        or getattr(_store_strict_json, "__code__", None)
+        is not _store_strict_json_code
+        or getattr(getattr(_json_integrity, "json", None), "loads", None)
+        is not _strict_json_module_loads
+        or getattr(_json_integrity, "_unique_json_object", None)
+        is not _strict_json_unique
+        or getattr(_strict_json_unique, "__code__", None)
+        is not _strict_json_unique_code
+        or getattr(_json_integrity, "_reject_nonstandard_json_constant", None)
+        is not _strict_json_reject
+        or getattr(_strict_json_reject, "__code__", None)
+        is not _strict_json_reject_code
+        or getattr(_json_integrity, "_parse_bounded_json_integer", None)
+        is not _strict_json_parse_int
+        or getattr(_strict_json_parse_int, "__code__", None)
+        is not _strict_json_parse_int_code
+        or getattr(_json_integrity, "_validate_strict_json_value", None)
+        is not _strict_json_validate
+        or getattr(_strict_json_validate, "__code__", None)
+        is not _strict_json_validate_code
         or getattr(_economic_goal_provenance, "provenance_for", None) is not _provenance
         or globals().get("provenance_for") is not _provenance
         or getattr(_provenance, "__code__", None) is not _provenance_code

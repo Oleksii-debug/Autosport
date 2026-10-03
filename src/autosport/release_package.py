@@ -1010,21 +1010,18 @@ def build_windows_package(
         ("\n".join(lines) + "\n").encode("utf-8")
     )
 
-    archive_members: dict[str, bytes] = {}
-    authored_windows_keys: dict[str, str] = {}
-    for path in _sorted_package_files(package_dir):
-        archive_name = (
-            Path("Autosport-V1") / path.relative_to(package_dir)
-        ).as_posix()
-        _, windows_key = _validate_windows_member(archive_name)
-        previous = authored_windows_keys.get(windows_key)
-        if previous is not None:
-            raise ValueError(
-                "release package contains Windows path collision: "
-                f"{previous} vs {archive_name}"
-            )
-        authored_windows_keys[windows_key] = archive_name
-        archive_members[archive_name] = path.read_bytes()
+    archive_paths = [
+        (
+            (Path("Autosport-V1") / path.relative_to(package_dir)).as_posix(),
+            path,
+        )
+        for path in _sorted_package_files(package_dir)
+    ]
+    _validate_windows_member_set([name for name, _ in archive_paths])
+    archive_members = {
+        name: path.read_bytes()
+        for name, path in archive_paths
+    }
     writer_sha = _write_canonical_zip(output_zip, archive_members)
     return output_zip, writer_sha
 
@@ -1065,17 +1062,9 @@ def verify_windows_package(
             if len(names) != len(set(names)):
                 raise ValueError("release package contains duplicate member names")
             members: dict[str, bytes] = {}
-            windows_keys: dict[str, str] = {}
+            validated_names = _validate_windows_member_set(names)
             for name in names:
-                relative, windows_key = _validate_windows_member(name)
-                previous = windows_keys.get(windows_key)
-                if previous is not None:
-                    raise ValueError(
-                        "release package contains Windows path collision: "
-                        f"{previous} vs {name}"
-                    )
-                windows_keys[windows_key] = name
-                members[relative] = archive.read(name)
+                members[validated_names[name]] = archive.read(name)
             _require_canonical_zip_local_headers(snapshot, infos)
 
     required = {
@@ -1245,6 +1234,36 @@ def _validate_windows_member(name: str) -> tuple[str, str]:
             raise ValueError(f"release package contains reserved Windows device name: {name}")
         normalized_parts.append(component.casefold())
     return relative, "/".join(normalized_parts)
+
+
+def _validate_windows_member_set(names: list[str]) -> dict[str, str]:
+    """Validate one complete Windows extraction file set and return relative names."""
+
+    relative_by_name: dict[str, str] = {}
+    normalized_to_name: dict[str, str] = {}
+    for name in names:
+        relative, windows_key = _validate_windows_member(name)
+        previous = normalized_to_name.get(windows_key)
+        if previous is not None:
+            raise ValueError(
+                "release package contains Windows path collision: "
+                f"{previous} vs {name}"
+            )
+        relative_by_name[name] = relative
+        normalized_to_name[windows_key] = name
+
+    for windows_key, name in normalized_to_name.items():
+        parts = windows_key.split("/")
+        for end in range(1, len(parts)):
+            file_prefix = "/".join(parts[:end])
+            conflicting_file = normalized_to_name.get(file_prefix)
+            if conflicting_file is not None:
+                raise ValueError(
+                    "release package contains Windows file/directory path collision: "
+                    f"{conflicting_file} vs {name}"
+                )
+
+    return relative_by_name
 
 
 def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:

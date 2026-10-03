@@ -2858,3 +2858,55 @@ def test_controller_event_head_validation_is_primitive_not_global() -> None:
     assert '_require_sha(event_head_sha, field="event head sha")' not in snapshot
     assert '_require_sha(event_head_sha, field="event head sha")' not in trigger
     assert '_require_sha(args.event_head_sha, field="event head sha")' not in main_source
+
+def test_scoped_active_run_scan_rejects_inflight_request_dispatch_rebind(
+    monkeypatch,
+) -> None:
+    api = WorkflowScopedGitHubApi(
+        repository="owner/repo",
+        token="token",
+        workflow_id=356678400,
+        workflow_name="CI",
+    )
+    forged_calls: list[str] = []
+
+    def forged_request(*_args, **_kwargs):
+        forged_calls.append("request")
+        return {"total_count": 0, "workflow_runs": []}
+
+    def first_request(
+        path: str,
+        *,
+        method: str = "GET",
+        allowed_http_errors: frozenset[int] = frozenset(),
+    ) -> object:
+        assert method == "GET"
+        assert not allowed_http_errors
+        assert "status=queued" in path
+        monkeypatch.setattr(api, "_request", forged_request)
+        return {
+            "total_count": 101,
+            "workflow_runs": [
+                {
+                    "id": run_id,
+                    "head_sha": HEAD,
+                    "name": "CI",
+                    "status": "queued",
+                    "pull_requests": [{"number": 303}],
+                    "head_branch": "feature/head",
+                    "head_repository": {"full_name": "owner/repo"},
+                }
+                for run_id in range(1, 101)
+            ],
+        }
+
+    monkeypatch.setattr(api, "_request", first_request)
+
+    with pytest.raises(
+        CancellationError,
+        match="active workflow snapshot authority changed",
+    ):
+        api._active_runs_for_status("queued")
+
+    assert forged_calls == []
+

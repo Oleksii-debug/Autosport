@@ -481,10 +481,21 @@ class ProphetXSessionLifecycle:
                             "credential revision changed before renewal"
                         )
                     if current.state is ProphetXSessionState.RENEWING:
-                        return ProphetXLoginAdmission(
-                            action=ProphetXLoginAdmissionAction.WAIT_FOR_EXISTING_RENEWAL,
-                            snapshot=current,
-                            retry_at=current.access_expires_at,
+                        uncertainty_deadline = self._renewal_uncertainty_deadline(current)
+                        if current.attempt_id in self._owned_attempts:
+                            return ProphetXLoginAdmission(
+                                action=ProphetXLoginAdmissionAction.WAIT_FOR_EXISTING_RENEWAL,
+                                snapshot=current,
+                                retry_at=uncertainty_deadline,
+                            )
+                        if timestamp < uncertainty_deadline:
+                            return ProphetXLoginAdmission(
+                                action=ProphetXLoginAdmissionAction.WAIT_FOR_PROVIDER_SESSION_EXPIRY,
+                                snapshot=current,
+                                retry_at=uncertainty_deadline,
+                            )
+                        raise ProphetXSessionLifecycleError(
+                            "stale renewal ambiguity must re-enter login admission"
                         )
                     if current.state not in {
                         ProphetXSessionState.ACTIVE,
@@ -872,10 +883,23 @@ class ProphetXSessionLifecycle:
             )
 
         if current.state is ProphetXSessionState.RENEWING:
-            return ProphetXLoginAdmission(
-                action=ProphetXLoginAdmissionAction.WAIT_FOR_EXISTING_RENEWAL,
-                snapshot=current,
-                retry_at=current.access_expires_at,
+            uncertainty_deadline = self._renewal_uncertainty_deadline(current)
+            if current.attempt_id in self._owned_attempts:
+                return ProphetXLoginAdmission(
+                    action=ProphetXLoginAdmissionAction.WAIT_FOR_EXISTING_RENEWAL,
+                    snapshot=current,
+                    retry_at=uncertainty_deadline,
+                )
+            if now < uncertainty_deadline:
+                return ProphetXLoginAdmission(
+                    action=ProphetXLoginAdmissionAction.WAIT_FOR_PROVIDER_SESSION_EXPIRY,
+                    snapshot=current,
+                    retry_at=uncertainty_deadline,
+                )
+            return self._grant_login(
+                now,
+                generation=current.generation + 1,
+                transient_failures=current.transient_failures,
             )
 
         if current.state in {
@@ -1016,6 +1040,22 @@ class ProphetXSessionLifecycle:
                 "login attempt no longer owns current session-pool admission"
             )
         return current
+
+    def _renewal_uncertainty_deadline(
+        self,
+        current: ProphetXSessionSnapshot,
+    ) -> datetime:
+        if (
+            current.state is not ProphetXSessionState.RENEWING
+            or current.attempt_started_at is None
+        ):
+            raise ProphetXSessionLifecycleError(
+                "renewal uncertainty deadline requires renewing attempt evidence"
+            )
+        candidate = current.attempt_started_at + CONSERVATIVE_SESSION_SLOT_HOLD
+        if current.slot_hold_until is not None and current.slot_hold_until > candidate:
+            return current.slot_hold_until
+        return candidate
 
     def _require_owned_renewal(
         self,

@@ -48,6 +48,40 @@ def test_known_secret_url_percent_spelling_is_redacted() -> None:
         assert REDACTED in rendered
 
 
+def test_known_secret_nested_url_percent_spellings_are_redacted() -> None:
+    secret = "AS+NESTED/SECRET=7f31"
+    variants = (
+        "AS%252BNESTED%252FSECRET%253D7f31",
+        "AS%25252BNESTED%25252FSECRET%25253D7f31",
+        "AS%252bNESTED%252fSECRET%253d7f31",
+    )
+
+    for encoded in variants:
+        rendered = redact_operator_text(
+            f"provider_opaque={encoded}",
+            extra_secret_values=(secret,),
+        )
+        assert encoded not in rendered
+        assert secret not in rendered
+        assert REDACTED in rendered
+
+
+def test_known_secret_nested_quote_plus_spelling_is_redacted() -> None:
+    secret = "AS URL/SECRET + 291c"
+    # quote_plus(secret) -> AS+URL%2FSECRET+%2B+291c,
+    # then quote(...) of that already encoded value.
+    encoded = "AS%2BURL%252FSECRET%2B%252B%2B291c"
+
+    rendered = redact_operator_text(
+        f"provider_error={encoded}",
+        extra_secret_values=(secret,),
+    )
+
+    assert encoded not in rendered
+    assert secret not in rendered
+    assert REDACTED in rendered
+
+
 def test_known_secret_mixed_case_percent_hex_spelling_is_redacted() -> None:
     secret = "Case+Sensitive/Token=AbC"
     encoded = "Case%2bSensitive%2FToken%3dAbC"

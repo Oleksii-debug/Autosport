@@ -6,6 +6,7 @@ from types import FunctionType
 import pytest
 
 import autosport.economic_goal_store as economic_goal_store_module
+import autosport.paper as paper_module
 from autosport.domain import TicketLeg
 from autosport.economic_goal import EconomicGoalContract
 from autosport.economic_goal_store import EconomicGoalStore
@@ -743,6 +744,61 @@ def test_resolver_rejects_goal_parser_dependency_rebinding_before_execution(
         resolve_paper_drawdown_evidence(tmp_path)
 
     assert hostile_called is False
+
+
+def test_resolver_rejects_paperbook_lifecycle_validator_rebinding_before_execution(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    _initialize(tmp_path)
+    hostile_called = False
+
+    def hostile_validate(cls, book):
+        nonlocal hostile_called
+        del cls, book
+        hostile_called = True
+
+    monkeypatch.setattr(
+        PaperBook,
+        "_validate_loaded_state",
+        classmethod(hostile_validate),
+    )
+
+    with pytest.raises(
+        PaperDrawdownEvidenceError,
+        match="PaperBook parse/validation authority changed: _validate_loaded_state",
+    ):
+        resolve_paper_drawdown_evidence(tmp_path)
+
+    assert hostile_called is False
+
+
+def test_resolver_rejects_paper_module_path_rebinding_before_execution(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    _initialize(tmp_path)
+    monkeypatch.setattr(paper_module, "Path", object())
+
+    with pytest.raises(
+        PaperDrawdownEvidenceError,
+        match="PaperBook durable load global changed: Path",
+    ):
+        resolve_paper_drawdown_evidence(tmp_path)
+
+
+def test_resolver_rejects_economic_goal_store_path_rebinding_before_execution(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    _initialize(tmp_path)
+    monkeypatch.setattr(economic_goal_store_module, "Path", object())
+
+    with pytest.raises(
+        PaperDrawdownEvidenceError,
+        match="economic-goal store authority changed",
+    ):
+        resolve_paper_drawdown_evidence(tmp_path)
 
 
 def test_resolver_rejects_workspace_path_dispatch_rebinding(

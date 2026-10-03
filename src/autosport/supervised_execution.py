@@ -83,9 +83,35 @@ def _sha(value: object, name: str) -> str:
     return raw
 
 
-def _digest(value: object) -> str:
+def _digest(
+    value: object,
+    *,
+    _json_module=json,
+    _json_dumps=json.dumps,
+    _json_dumps_code=getattr(json.dumps, "__code__", None),
+    _hashlib_module=hashlib,
+    _sha256=hashlib.sha256,
+    _sha256_code=getattr(hashlib.sha256, "__code__", None),
+) -> str:
+    if (
+        globals().get("json") is not _json_module
+        or _json_module.dumps is not _json_dumps
+        or (
+            _json_dumps_code is not None
+            and getattr(_json_dumps, "__code__", None) is not _json_dumps_code
+        )
+        or globals().get("hashlib") is not _hashlib_module
+        or _hashlib_module.sha256 is not _sha256
+        or (
+            _sha256_code is not None
+            and getattr(_sha256, "__code__", None) is not _sha256_code
+        )
+    ):
+        raise SupervisedExecutionError(
+            "canonical supervised execution digest authority changed"
+        )
     try:
-        raw = json.dumps(
+        raw = _json_dumps(
             value,
             ensure_ascii=False,
             sort_keys=True,
@@ -94,7 +120,7 @@ def _digest(value: object) -> str:
         ).encode("utf-8")
     except (TypeError, ValueError, UnicodeEncodeError) as exc:
         raise SupervisedExecutionError("bridge evidence is not canonical JSON") from exc
-    return hashlib.sha256(raw).hexdigest()
+    return _sha256(raw).hexdigest()
 
 
 def _trusted_now() -> str:
@@ -341,10 +367,57 @@ def _bound_binding_sha256(
     approval_fingerprint: str,
     profile_bindings: tuple[ProfileBinding, ...],
     constraints: tuple[ExecutionLegConstraint, ...],
+    *,
+    _plan_type=ExecutionPlan,
+    _plan_to_dict=ExecutionPlan.to_dict,
+    _plan_to_dict_code=getattr(ExecutionPlan.to_dict, "__code__", None),
+    _action_type=ExecutionAction,
+    _action_to_dict=ExecutionAction.to_dict,
+    _action_to_dict_code=getattr(ExecutionAction.to_dict, "__code__", None),
+    _constraint_type=ExecutionLegConstraint,
+    _constraint_to_dict=ExecutionLegConstraint.to_dict,
+    _constraint_to_dict_code=getattr(ExecutionLegConstraint.to_dict, "__code__", None),
+    _profile_type=ProfileBinding,
+    _digest_fn=_digest,
+    _digest_code=getattr(_digest, "__code__", None),
 ) -> str:
-    plan = execution_plan.to_dict()
+    if (
+        globals().get("ExecutionPlan") is not _plan_type
+        or type(execution_plan) is not _plan_type
+        or vars(_plan_type).get("to_dict") is not _plan_to_dict
+        or (
+            _plan_to_dict_code is not None
+            and getattr(_plan_to_dict, "__code__", None) is not _plan_to_dict_code
+        )
+        or globals().get("ExecutionAction") is not _action_type
+        or any(type(item) is not _action_type for item in execution_plan.actions)
+        or vars(_action_type).get("to_dict") is not _action_to_dict
+        or (
+            _action_to_dict_code is not None
+            and getattr(_action_to_dict, "__code__", None) is not _action_to_dict_code
+        )
+        or globals().get("ExecutionLegConstraint") is not _constraint_type
+        or any(type(item) is not _constraint_type for item in constraints)
+        or vars(_constraint_type).get("to_dict") is not _constraint_to_dict
+        or (
+            _constraint_to_dict_code is not None
+            and getattr(_constraint_to_dict, "__code__", None)
+            is not _constraint_to_dict_code
+        )
+        or globals().get("ProfileBinding") is not _profile_type
+        or any(type(item) is not _profile_type for item in profile_bindings)
+        or globals().get("_digest") is not _digest_fn
+        or (
+            _digest_code is not None
+            and getattr(_digest_fn, "__code__", None) is not _digest_code
+        )
+    ):
+        raise SupervisedExecutionError(
+            "canonical supervised execution binding authority changed"
+        )
+    plan = _plan_to_dict(execution_plan)
     plan.pop("plan_id")
-    return _digest(
+    return _digest_fn(
         {
             "schema": "autosport.supervised_execution_bridge_binding",
             "schema_version": 2,
@@ -365,18 +438,39 @@ def _bound_binding_sha256(
                 }
                 for item in profile_bindings
             ],
-            "constraints": [item.to_dict() for item in constraints],
+            "constraints": [_constraint_to_dict(item) for item in constraints],
         }
     )
 
 
-def _bound_plan_witness(value: BoundSupervisedExecutionPlan) -> str:
-    if type(value) is not BoundSupervisedExecutionPlan:
-        raise SupervisedExecutionError(
-            "supervised execution plan must be exact BoundSupervisedExecutionPlan"
+def _bound_plan_witness(
+    value: BoundSupervisedExecutionPlan,
+    *,
+    _bound_type=BoundSupervisedExecutionPlan,
+    _verify=BoundSupervisedExecutionPlan.verify_binding,
+    _verify_code=getattr(BoundSupervisedExecutionPlan.verify_binding, "__code__", None),
+    _binding=_bound_binding_sha256,
+    _binding_code=getattr(_bound_binding_sha256, "__code__", None),
+) -> str:
+    if (
+        globals().get("BoundSupervisedExecutionPlan") is not _bound_type
+        or type(value) is not _bound_type
+        or vars(_bound_type).get("verify_binding") is not _verify
+        or (
+            _verify_code is not None
+            and getattr(_verify, "__code__", None) is not _verify_code
         )
-    value.verify_binding()
-    return _bound_binding_sha256(
+        or globals().get("_bound_binding_sha256") is not _binding
+        or (
+            _binding_code is not None
+            and getattr(_binding, "__code__", None) is not _binding_code
+        )
+    ):
+        raise SupervisedExecutionError(
+            "canonical bound supervised execution plan binding changed"
+        )
+    _verify(value)
+    return _binding(
         value.execution_plan,
         value.portfolio_plan_sha256,
         value.economic_goal_contract_sha256,
@@ -1611,6 +1705,9 @@ def _install_supervised_execution_composition_guard() -> None:
         "_canonical_bound_plan_authority_dispatch",
         "_canonical_supervised_ledger_dispatch",
         "_canonical_bound_plan_witness",
+        "_digest",
+        "_time",
+        "_sha",
         "_require_bound_plan_structure",
         "_require_approval",
         "_require_durable_approval",

@@ -116,10 +116,9 @@ class WorkflowScopedGitHubApi(GitHubApi):
         workflow_name: str,
     ) -> None:
         super().__init__(repository=repository, token=token)
-        canonical_workflow_id = _require_positive_int(
-            workflow_id,
-            field="workflow id",
-        )
+        if type(workflow_id) is not int or workflow_id <= 0:
+            raise CancellationError("invalid workflow id")
+        canonical_workflow_id = workflow_id
         if not isinstance(workflow_name, str) or not workflow_name:
             raise CancellationError("workflow name is required")
         # Keep the source-workflow trust root separate from compatibility aliases.
@@ -840,10 +839,9 @@ class WorkflowScopedGitHubApi(GitHubApi):
         qualification immediately before the irreversible POST.
         """
 
-        excluded = {
-            _require_positive_int(run_id, field="excluded run id")
-            for run_id in exclude_run_ids
-        }
+        if any(type(run_id) is not int or run_id <= 0 for run_id in exclude_run_ids):
+            raise CancellationError("invalid excluded run id")
+        excluded = set(exclude_run_ids)
         cancelled: list[int] = []
         for run_id, candidate in sorted(self._unbound_active_runs.items()):
             if run_id in excluded:
@@ -1138,7 +1136,8 @@ def _explicit_singleton_pr_for_current_run(
     conflicting singleton identities for the current run, fail closed and return None.
     """
 
-    current_run_id = _require_positive_int(current_run_id, field="current run id")
+    if type(current_run_id) is not int or current_run_id <= 0:
+        raise CancellationError("invalid current run id")
     event_head_sha = _require_sha(event_head_sha, field="event head sha")
     if type(workflow_name) is not str or not workflow_name:
         raise CancellationError("workflow name is required")
@@ -1155,10 +1154,10 @@ def _explicit_singleton_pr_for_current_run(
     pr_numbers = {run.pr_numbers[0] for run in current_entries}
     if len(pr_numbers) != 1:
         return None
-    return _require_positive_int(
-        next(iter(pr_numbers)),
-        field="snapshot pull request number",
-    )
+    snapshot_pr_number = next(iter(pr_numbers))
+    if type(snapshot_pr_number) is not int or snapshot_pr_number <= 0:
+        raise CancellationError("invalid snapshot pull request number")
+    return snapshot_pr_number
 
 
 def _validated_event_pr_identity(
@@ -1177,10 +1176,9 @@ def _validated_event_pr_identity(
     if type(pr_number) is not int or pr_number < 0:
         raise CancellationError("pull request number cannot be negative")
     if reference_mode == "singleton":
-        return (
-            _require_positive_int(pr_number, field="pull request number"),
-            False,
-        )
+        if pr_number <= 0:
+            raise CancellationError("invalid pull request number")
+        return (pr_number, False)
     if reference_mode not in ("empty", "ambiguous"):
         raise CancellationError("invalid event pull request reference mode")
     if pr_number != 0:
@@ -1225,7 +1223,8 @@ def cancel_superseded_explicit_pr_runs(
             return (head_sha, value[1])
         return _pull_request_qualification_state(value)
 
-    current_run_id = _require_positive_int(current_run_id, field="current run id")
+    if type(current_run_id) is not int or current_run_id <= 0:
+        raise CancellationError("invalid current run id")
     if (
         type(workflow_name) is not str
         or not workflow_name
@@ -1391,7 +1390,8 @@ def _cancel_triggering_run_if_stale_or_nonqualifying(
         return _pull_request_qualification_state(value)
 
     event_head_sha = _require_sha(event_head_sha, field="event head sha")
-    current_run_id = _require_positive_int(current_run_id, field="current run id")
+    if type(current_run_id) is not int or current_run_id <= 0:
+        raise CancellationError("invalid current run id")
     qualification_state = qualification_state_from_trusted_read(qualification)
     qualification_head, integration_capable = qualification_state
     stale = qualification_head != event_head_sha
@@ -1443,10 +1443,9 @@ def main(argv: list[str] | None = None) -> int:
             workflow_name=args.workflow_name,
         )
         event_head_sha = _require_sha(args.event_head_sha, field="event head sha")
-        current_run_id = _require_positive_int(
-            args.current_run_id,
-            field="current run id",
-        )
+        if type(args.current_run_id) is not int or args.current_run_id <= 0:
+            raise CancellationError("invalid current run id")
+        current_run_id = args.current_run_id
         trigger_pr_number, event_identity_ambiguous = _validated_event_pr_identity(
             args.pr_number,
             reference_mode=args.event_pr_reference_mode,

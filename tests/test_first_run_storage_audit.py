@@ -126,7 +126,8 @@ def test_audit_failure_is_bounded_and_does_not_echo_invalid_path(
     raw = output.read_text(encoding="utf-8")
     evidence = json.loads(raw)
     assert evidence["status"] == "FAIL"
-    assert evidence["error"] == "first-run storage path resolution failed"
+    assert evidence["error"] == "first-run storage preflight failed"
+    assert evidence["failure_stage"] == "workspace_identity"
     assert evidence["error_type"] == "ValueError"
     assert secretish_invalid_value not in raw
     assert evidence["real_money_execution"] is False
@@ -187,6 +188,7 @@ def test_audit_fails_closed_before_webview_probe_when_workspace_is_unwritable(
     evidence = _read(output)
     assert calls == ["workspace"]
     assert evidence["status"] == "FAIL"
+    assert evidence["failure_stage"] == "workspace_writability"
     assert evidence["error_type"] == "PermissionError"
     assert "secret workspace detail" not in output.read_text(encoding="utf-8")
 
@@ -224,6 +226,7 @@ def test_audit_fails_closed_when_webview_storage_is_unwritable(
         ("webview", local_app_data / "Autosport" / "webview2"),
     ]
     assert evidence["status"] == "FAIL"
+    assert evidence["failure_stage"] == "webview_storage_writability"
     assert evidence["error_type"] == "PermissionError"
     assert "secret WebView detail" not in output.read_text(encoding="utf-8")
 
@@ -253,5 +256,6 @@ def test_audit_rejects_release_sensitive_webview_override_before_writability_pro
     evidence = _read(output)
     assert calls == []
     assert evidence["status"] == "FAIL"
+    assert evidence["failure_stage"] == "webview_release_environment"
     assert evidence["error_type"] == "ValueError"
     assert secretish_override not in output.read_text(encoding="utf-8")

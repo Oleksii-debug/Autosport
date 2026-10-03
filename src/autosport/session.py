@@ -255,7 +255,7 @@ class AutosportSession(metaclass=_AutosportSessionMeta):
         self,
     ) -> tuple[EconomicGoalContract | None, PaperRiskPolicy]:
         store = EconomicGoalStore(self.workspace)
-        goal = store.load() if store.path.exists() else None
+        goal = store.load_optional()
         policy = PaperRiskPolicy(economic_goal=goal)
         return goal, policy
 

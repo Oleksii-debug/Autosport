@@ -147,6 +147,32 @@ _ECONOMIC_GOAL_PROVENANCE_TO_PAYLOAD_CODE = getattr(
     None,
 )
 _BOUND_SUPERVISED_PLAN_TYPE = BoundSupervisedExecutionPlan
+_BOUND_SUPERVISED_BINDING_SHA256 = getattr(
+    _supervised_execution,
+    "_bound_binding_sha256",
+    None,
+)
+_BOUND_SUPERVISED_BINDING_SHA256_CODE = getattr(
+    _BOUND_SUPERVISED_BINDING_SHA256,
+    "__code__",
+    None,
+)
+_BOUND_SUPERVISED_PLAN_WITNESS = getattr(
+    _supervised_execution,
+    "_bound_plan_witness",
+    None,
+)
+_BOUND_SUPERVISED_PLAN_WITNESS_CODE = getattr(
+    _BOUND_SUPERVISED_PLAN_WITNESS,
+    "__code__",
+    None,
+)
+_BOUND_SUPERVISED_DIGEST = getattr(_supervised_execution, "_digest", None)
+_BOUND_SUPERVISED_DIGEST_CODE = getattr(
+    _BOUND_SUPERVISED_DIGEST,
+    "__code__",
+    None,
+)
 _BOUND_SUPERVISED_PLAN_VERIFY = BoundSupervisedExecutionPlan.verify_binding
 _BOUND_SUPERVISED_PLAN_VERIFY_CODE = getattr(
     _BOUND_SUPERVISED_PLAN_VERIFY,
@@ -347,6 +373,12 @@ def _canonical_denomination_dispatch(
     _provenance_to_payload=_ECONOMIC_GOAL_PROVENANCE_TO_PAYLOAD,
     _provenance_to_payload_code=_ECONOMIC_GOAL_PROVENANCE_TO_PAYLOAD_CODE,
     _bound_type=_BOUND_SUPERVISED_PLAN_TYPE,
+    _bound_binding_sha=_BOUND_SUPERVISED_BINDING_SHA256,
+    _bound_binding_sha_code=_BOUND_SUPERVISED_BINDING_SHA256_CODE,
+    _bound_witness=_BOUND_SUPERVISED_PLAN_WITNESS,
+    _bound_witness_code=_BOUND_SUPERVISED_PLAN_WITNESS_CODE,
+    _bound_digest=_BOUND_SUPERVISED_DIGEST,
+    _bound_digest_code=_BOUND_SUPERVISED_DIGEST_CODE,
     _bound_verify=_BOUND_SUPERVISED_PLAN_VERIFY,
     _bound_verify_code=_BOUND_SUPERVISED_PLAN_VERIFY_CODE,
     _bound_assert=_ASSERT_BOUND_SUPERVISED_PLAN_AUTHORITY,
@@ -428,6 +460,14 @@ def _canonical_denomination_dispatch(
         is not _provenance_to_payload_code
         or live_bound_type is not _bound_type
         or globals().get("BoundSupervisedExecutionPlan") is not _bound_type
+        or getattr(_supervised_execution, "_bound_binding_sha256", None)
+        is not _bound_binding_sha
+        or getattr(_bound_binding_sha, "__code__", None) is not _bound_binding_sha_code
+        or getattr(_supervised_execution, "_bound_plan_witness", None)
+        is not _bound_witness
+        or getattr(_bound_witness, "__code__", None) is not _bound_witness_code
+        or getattr(_supervised_execution, "_digest", None) is not _bound_digest
+        or getattr(_bound_digest, "__code__", None) is not _bound_digest_code
         or live_bound_verify is not _bound_verify
         or getattr(_bound_verify, "__code__", None) is not _bound_verify_code
         or live_bound_assert is not _bound_assert

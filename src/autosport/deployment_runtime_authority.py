@@ -2119,7 +2119,7 @@ class DeploymentRuntimeAuthorityStore:
             self._write_atomic_path(self.path, payload)
 
             published = self._read_payload()
-            published_records = self._records_from_payload(published)
+            self._records_from_payload(published)
             published_sha256 = self._state_sha256(published)
             if published_sha256 != intended_sha256:
                 raise DeploymentRuntimeAuthorityError(

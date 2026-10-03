@@ -1059,9 +1059,11 @@ class ProviderCapabilityEvidenceMatrixJournal:
             )
         cutoff = None if as_of is None else _time(as_of, "as_of")
 
-        # A matrix already published into this journal cannot be used as a mutable
-        # scope selector. Detect exact-object mutation before consulting its current
-        # payload-derived authority scope.
+        # This lookup is anchored in this journal's authority, not merely in a
+        # caller-supplied scope-shaped matrix. Require the exact unchanged published
+        # object so copied, reconstructed, or alternate unpublished roots cannot be
+        # used to obtain canonical journal authority.
+        published_anchor_id: str | None = None
         for stored_id, stored in self._matrices.items():
             if stored is anchor:
                 if (
@@ -1071,7 +1073,12 @@ class ProviderCapabilityEvidenceMatrixJournal:
                     raise ProviderCapabilityEvidenceMatrixError(
                         "journal anchor matrix was mutated after publication"
                     )
+                published_anchor_id = stored_id
                 break
+        if published_anchor_id is None:
+            raise ProviderCapabilityEvidenceMatrixError(
+                "matrix journal anchor is not an exact published matrix"
+            )
 
         scope = _matrix_authority_scope(anchor)
         latest_id = self._latest_by_scope.get(scope)

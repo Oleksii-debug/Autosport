@@ -160,6 +160,10 @@ class PaperAbstentionLearningTests(unittest.TestCase):
                 raw["attributions"][0]["findings"][0]["evidence_sha256"],
                 reward.reward_id,
             )
+            self.assertEqual(
+                raw["attributions"][0]["findings"][0]["evidence_grade"],
+                "NOT_IDENTIFIABLE",
+            )
             self.assertEqual(raw["research_handoffs"], [])
 
     def test_simulated_no_bet_remains_simulated(self) -> None:

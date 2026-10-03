@@ -29,15 +29,15 @@ Autosport може використовувати truth label `OUTCOME_INDEPENDE
 
 Якщо доказ неповний або sampled/approximate, потрібен слабший truth label, наприклад `THEORETICAL_ARBITRAGE_ONLY`, `EXECUTION_RISK_PRESENT`, `PARTIAL_COVERAGE`, `HEDGED_BUT_NOT_GUARANTEED` або `RISKED_PORTFOLIO`. Детальний live/outcome-independent contract — GitHub Issue #355; generic strategy-class decision contract — Issue #356.
 
-## V1 executable path
+## Current proof and qualification stage
 
-V1 навмисно є **non-money-moving proof release**. Він використовує replay, Virtual Bank, paper betting і live observation, щоб без ризику реальних коштів довести causal correctness, exact money/portfolio calculations, exact-vs-approximate scenario truth, stake sizing, risk control, learning/evaluation, restart/recovery та Windows/NVDA usability.
+Replay, Virtual Bank, paper betting, live observation, supervised execution scaffolding and release qualification are **safety/evidence stages inside the one final Autosport product**. They are not a separate product, version finish line or stopping target.
 
-Перший vertical slice — настільний теніс, але canonical domain має залишатися sport-generic. V1 — реальний Windows-продукт з агентами, high-speed Market Mirror, sealed historical replay без future leakage, Virtual Bank, singles/parlays, deterministic settlement, incremental Portfolio/Exposure Engine, evaluation/learning loop та keyboard/NVDA-oriented UI.
+The first practical vertical slice is table tennis, while the canonical domain remains sport-generic. The current product tree already contains the shared Market Mirror/replay path, deterministic money/portfolio/risk authorities, agent/learning surfaces, bookmaker/account capability surfaces, recovery machinery and Windows packaging/accessibility machinery. Each capability still requires its own current evidence before it is treated as usable or integrated.
 
-Live observation використовує той самий canonical market path, що й replay. Швидкий ingestion/storage/portfolio math не залежить від LLM. AI працює над нормалізованими структурами й не замінює deterministic calculations.
+Money-moving authority remains fail-closed while its required provider/legal capability, exact receipt/reconciliation, duplicate-prevention, partial-execution recovery, owner-limit and emergency-STOP evidence is incomplete. `REAL_MONEY_EXECUTION=false` is current qualification truth, not a permanent product boundary.
 
-У V1 реальні ставки **вимкнені**. Реальний bookmaker/account execution активується лише після окремих post-V1 доказів якості, risk control, прав/умов інтеграції та execution safety. Пріоритет інтеграцій: official API -> sanctioned integration -> permitted browser automation. Майбутній execution layer повинен підтримувати account/balance readback, event/market/selection verification, bet-slip preparation, stake-vector entry, odds/slippage recheck, bookmaker acknowledgement, external bet IDs, open/settled position readback, reconciliation, partial multi-leg recovery та duplicate-bet prevention.
+Live observation uses the same canonical market path as replay. Fast ingestion/storage/portfolio math remains deterministic and does not depend on an LLM. AI works over normalized structures and never replaces money arithmetic, quote-freshness, risk or irreversible execution authority.
 
 ### Run
 
@@ -63,14 +63,16 @@ powershell -ExecutionPolicy Bypass -File scripts/build_windows.ps1
 
 ## Development model
 
-- `PRODUCT-WIDE` — canonical contracts, sport/market/event model, storage, replay, portfolio math, agents, learning/evaluation, observability, Windows/accessibility, provider interfaces and future live/bookmaker/execution interfaces.
-- `V1-CRITICAL-PATH` — shortest path to the first runnable Windows proof release without money-moving execution.
-- `POST-V1 LIVE` — professional paper/live-observation qualification -> live price movement -> arbitrage/dutching/hedging -> whole-portfolio min-P&L.
-- `POST-V1 EXECUTION` — bookmaker capability/account read -> supervised execution -> real ledger/reconciliation -> bounded autonomy.
+All work contributes to one whole finished product. Internal lanes are dependency/convergence aids only:
+
+- `PRODUCT-WIDE` — canonical contracts, sport/market/event model, storage, replay, portfolio math, agents, learning/evaluation, observability, Windows/accessibility, provider and execution interfaces.
+- `PROOF-QUALIFICATION` — causal replay/live-observation, paper economics, recovery, packaging, exact-head tests and physical accessibility evidence required before stronger authority is enabled.
+- `LIVE-PORTFOLIO` — live price movement, arbitrage/dutching/hedging, coherent whole-portfolio minimum-P&L and exposure/risk.
+- `BOOKMAKER-EXECUTION` — provider/account capability, supervised execution, real ledger/reconciliation and bounded autonomy under explicit owner limits.
 
 ## Work labels / lane tags
 
-`PRODUCT-FOUNDATION`, `V1-CRITICAL`, `V1-QA`, `DATA`, `REPLAY`, `PORTFOLIO`, `AGENTS`, `LEARNING`, `PROVIDER`, `LIVE`, `ARBITRAGE`, `PERFORMANCE`, `WINDOWS`, `ACCESSIBILITY`, `RELEASE`, `BOOKMAKER`, `EXECUTION`, `DOCS`.
+`PRODUCT-FOUNDATION`, `PROOF-QUALIFICATION`, `DATA`, `REPLAY`, `PORTFOLIO`, `AGENTS`, `LEARNING`, `PROVIDER`, `LIVE`, `ARBITRAGE`, `PERFORMANCE`, `WINDOWS`, `ACCESSIBILITY`, `RELEASE`, `BOOKMAKER`, `EXECUTION`, `DOCS`. Historical `V1-*` / `POST-V1` labels may remain on old issues or commits for archaeology only; they do not define a product target or landing order.
 
 ## Canonical control
 
@@ -83,22 +85,27 @@ powershell -ExecutionPolicy Bypass -File scripts/build_windows.ps1
 - Long-horizon bookmaker execution program: GitHub Issue #353
 - Human-readable master specification: Google Drive folder `Автоспорт`, document `АВТОСПОРТ — MASTER TECHNICAL PROJECT`
 
-## Product progression
+## Capability progression
 
-- **V1 — Windows Paper/Replay/Live-Observation Proof Release**
-- **V1.0.x — Reliability / Bug Bash**
-- **Professional Paper + Live Qualification — bankroll/risk/live-opportunity proof**
-- **Live Portfolio Intelligence — arbitrage/dutching/hedging/min-P&L**
-- **Bookmaker Read-Only — capability, account/balance, limits, open/settled positions**
-- **Supervised Execution — prepared single/multi-action plan + human confirmation**
-- **Real Execution Ledger / Reconciliation — including partial multi-leg safety**
-- **Bounded Autonomous Execution — only inside explicit user limits and kill-switch policy**
-- **Continuous Mathematical Intelligence / Multi-Sport / Multi-Provider expansion**
+The dependency order below is sequencing inside one product, not a set of separate release goals:
+
+- causal replay + paper/live-observation proof and reliability qualification;
+- professional paper/live qualification with bankroll/risk/live-opportunity evidence;
+- live portfolio intelligence: arbitrage/dutching/hedging/minimum-P&L;
+- bookmaker read-only capability: account/balance, limits and open/settled positions;
+- supervised execution with exact quote/plan/receipt authority;
+- real execution ledger and reconciliation, including partial multi-leg safety;
+- bounded autonomous execution only inside explicit owner limits and kill-switch policy;
+- continual causal learning, multi-sport and multi-provider expansion.
+
+Whole-product completion is defined by `docs/WHOLE_PRODUCT_COMPLETION_AUTHORITY.md`, not by a version label.
 
 `HUMAN_TESTED=false`  
 `NVDA_VERIFIED=false`  
 `REAL_MONEY_EXECUTION=false`  
-`V1_READY=false`
+`WHOLE_PRODUCT_COMPLETE=false`
+
+The legacy compatibility flag `V1_READY=false` may still appear in historical automation/evidence, but it is not the product-completion criterion.
 
 ## Binding Windows accessibility architecture
 

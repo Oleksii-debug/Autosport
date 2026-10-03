@@ -505,6 +505,55 @@ def test_provider_error_is_generic_and_does_not_echo_credentials(
     assert session_token not in message
 
 
+def test_provider_error_direct_diagnostic_redacts_exact_configured_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    application_key = "direct-diagnostic-application-key"
+    session_token = "direct-diagnostic-session-token"
+    _install_details_transport(
+        monkeypatch,
+        error_message=f"provider leaked {application_key} {session_token}",
+    )
+    client = _client(
+        application_key=application_key,
+        session_token=session_token,
+    )
+
+    with pytest.raises(_readonly.BetfairReadOnlyError) as caught:
+        client.read_account_details()
+
+    message = str(caught.value)
+    assert application_key not in message
+    assert session_token not in message
+
+
+@pytest.mark.parametrize(
+    ("provider_message", "secret_fragment"),
+    (
+        ("session_token=provider-labelled-token", "provider-labelled-token"),
+        ("Authorization: Bearer provider-bearer-token", "provider-bearer-token"),
+        (
+            "https://provider.invalid/error?application_key=provider-query-key",
+            "provider-query-key",
+        ),
+    ),
+)
+def test_provider_error_direct_diagnostic_uses_canonical_secret_redaction(
+    monkeypatch: pytest.MonkeyPatch,
+    provider_message: str,
+    secret_fragment: str,
+) -> None:
+    _install_details_transport(monkeypatch, error_message=provider_message)
+    client = _client()
+
+    with pytest.raises(_readonly.BetfairReadOnlyError) as caught:
+        client.read_account_details()
+
+    message = str(caught.value)
+    assert secret_fragment not in message
+    assert "[REDACTED]" in message
+
+
 def test_identity_repr_and_digest_do_not_contain_credentials(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

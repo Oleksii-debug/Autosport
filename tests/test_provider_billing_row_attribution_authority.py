@@ -102,7 +102,10 @@ def _provider_payload(body: bytes) -> bytes:
     ).encode("utf-8")
 
 
-def _register_test_source_via_private_closure(source: object):
+def _register_test_source_via_private_closure(
+    source: object,
+    credentials: BetfairSessionCredentials,
+):
     """Register a deterministic fixture without exposing a product injection seam.
 
     Production code has no synthetic-response hook. Unit tests deliberately use
@@ -124,7 +127,8 @@ def _register_test_source_via_private_closure(source: object):
         )
     }
     register = cells["register"]
-    return register(source)
+    session_binding = cells["session_binding"]
+    return register(source, session_binding(credentials))
 
 
 def _source():
@@ -143,7 +147,7 @@ def _source():
         statement_from="2026-09-01T00:00:00Z",
         statement_to="2026-09-21T00:00:00Z",
     )
-    return _register_test_source_via_private_closure(source)
+    return _register_test_source_via_private_closure(source, credentials)
 
 
 def _combined_source_digest(entitlement: object, statement: object, observed_at: str) -> str:

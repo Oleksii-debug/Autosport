@@ -30,6 +30,9 @@ store, economic classifier, allocation authority, or durable cost record.
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from hashlib import sha256
+import hmac
+from secrets import token_bytes
 import urllib.request as _urllib_request
 
 from . import betfair_account_readonly as _readonly
@@ -140,10 +143,17 @@ def _build_observation_authority():
     error_cls = BetfairProviderBillingInputsAuthorityError
     get_attr = object.__getattribute__
     object_new = object.__new__
+    hmac_new = hmac.new
+    compare_digest = hmac.compare_digest
+    hash_ctor = sha256
+    session_binding_key = token_bytes(32)
 
-    # Strongly retaining the issued object prevents id reuse while its issuance is
-    # authoritative. The stored projection detects object.__setattr__ tampering.
-    issued: dict[int, tuple[object, tuple[object, ...]]] = {}
+    # Strongly retaining the issued observation prevents id reuse while its issuance
+    # is authoritative.  The third tuple element is a process-local HMAC binding of
+    # the authenticated credential values; raw credentials are deliberately not
+    # retained by the issuance registry or exported into evidence.
+    issued: dict[int, tuple[object, tuple[object, ...], bytes]] = {}
+    traversals: dict[int, tuple[object, bytes]] = {}
 
     def assert_executable_authority() -> None:
         """Fail fast on known executable drift inside the trusted-process boundary."""
@@ -224,15 +234,39 @@ def _build_observation_authority():
                 "provider billing observation failed canonical validation"
             ) from exc
 
-    def register(source: object):
+    def session_binding(credentials: BetfairSessionCredentials) -> bytes:
+        if type(credentials) is not credentials_cls:
+            raise error_cls(
+                "provider billing session capability must be exact canonical credentials"
+            )
+        application_key = credentials.application_key.encode("utf-8")
+        session_token = credentials.session_token.encode("utf-8")
+        payload = (
+            b"autosport.betfair.provider-billing-session-v1\x00"
+            + len(application_key).to_bytes(8, "big")
+            + application_key
+            + len(session_token).to_bytes(8, "big")
+            + session_token
+        )
+        return hmac_new(session_binding_key, payload, hash_ctor).digest()
+
+    def register(source: object, binding: bytes):
         if type(source) is not source_cls:
             raise error_cls(
                 "canonical provider billing read returned unexpected observation type"
             )
+        if type(binding) is not bytes or len(binding) != hash_ctor().digest_size:
+            raise error_cls("provider billing session binding is invalid")
         # Re-run the closure-backed canonical structural/digest validator before the
-        # observation enters the private issuance relation.
+        # observation enters the private issuance relation.  Only an authority-keyed
+        # opaque session binding is retained; raw credentials/session tokens are not
+        # stored in the registry and the binding never enters durable evidence.
         validate_structure(source)
-        issued[id(source)] = (source, projection(source))
+        issued[id(source)] = (
+            source,
+            projection(source),
+            binding,
+        )
         return source
 
     def read(
@@ -301,7 +335,7 @@ def _build_observation_authority():
         # A persistent executable/global-opener rebind that occurs during provider
         # I/O cannot be legitimized merely because the returned JSON is valid.
         assert_executable_authority()
-        return register(source)
+        return register(source, session_binding(credentials))
 
     def validate(source: object):
         """Return only an exact, untampered observation issued by ``read`` above."""
@@ -326,10 +360,98 @@ def _build_observation_authority():
             )
         return source
 
-    return read, validate
+    def read_traversal(
+        credentials: BetfairSessionCredentials,
+        *,
+        record_count: int = 100,
+        statement_from: str | None = None,
+        statement_to: str | None = None,
+        max_pages: int = 1000,
+    ):
+        """Acquire one bounded product-owned account-statement pagination sweep."""
+
+        if type(credentials) is not credentials_cls:
+            raise TypeError("credentials must be exact BetfairSessionCredentials")
+        if (
+            isinstance(max_pages, bool)
+            or not isinstance(max_pages, int)
+            or max_pages <= 0
+            or max_pages > 1000
+        ):
+            raise ValueError("max_pages must be an integer from 1 through 1000")
+
+        binding = session_binding(credentials)
+        pages: list[object] = []
+        from_record = 0
+        for _page_index in range(max_pages):
+            source = read(
+                credentials,
+                from_record=from_record,
+                record_count=record_count,
+                statement_from=statement_from,
+                statement_to=statement_to,
+            )
+            registered = issued[id(source)]
+            if not compare_digest(registered[2], binding):
+                raise error_cls(
+                    "provider billing authenticated session changed during traversal"
+                )
+            pages.append(source)
+            statement = get_attr(source, "statement")
+            more_available = get_attr(statement, "more_available")
+            items = get_attr(statement, "items")
+            if not more_available:
+                result = tuple(pages)
+                traversals[id(result)] = (result, binding)
+                return result
+            item_count = len(items)
+            if item_count <= 0:
+                raise error_cls(
+                    "provider billing traversal cannot progress from an empty "
+                    "non-terminal page"
+                )
+            from_record += item_count
+
+        raise error_cls(
+            "provider billing traversal did not reach a terminal page "
+            "within max_pages"
+        )
+
+    def validate_traversal(pages: object):
+        """Validate one exact product-owned authenticated pagination sweep.
+
+        The tuple itself must have been issued by the canonical traversal reader.
+        Therefore a consumer cannot mint positive traversal evidence by splicing
+        separately issued pages, even when those pages used the same authenticated
+        session. This remains weaker than a stable cross-session account identity.
+        """
+
+        if type(pages) is not tuple or not pages:
+            raise TypeError("pages must be a non-empty exact tuple")
+        traversal = traversals.get(id(pages))
+        if traversal is None or traversal[0] is not pages:
+            raise error_cls(
+                "provider billing traversal must be issued by canonical "
+                "pagination acquisition"
+            )
+
+        traversal_binding = traversal[1]
+        for source in pages:
+            current = validate(source)
+            registered = issued[id(current)]
+            if not compare_digest(registered[2], traversal_binding):
+                raise error_cls(
+                    "provider billing traversal pages must share one "
+                    "authenticated session capability"
+                )
+        return pages
+
+    return read, validate, read_traversal, validate_traversal
 
 
 (
     read_verified_betfair_provider_billing_inputs,
     validate_betfair_provider_billing_inputs_observation,
+    read_verified_betfair_provider_billing_inputs_traversal,
+    validate_betfair_provider_billing_inputs_traversal,
 ) = _build_observation_authority()

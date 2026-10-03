@@ -734,6 +734,19 @@ def _install_bound_supervised_execution_plan_authority() -> None:
         tuple[weakref.ReferenceType[BoundSupervisedExecutionPlan], str],
     ] = {}
     raw_build = build_supervised_execution_plan
+    raw_build_code = getattr(raw_build, "__code__", None)
+    witness_fn = _bound_plan_witness
+    witness_code = getattr(witness_fn, "__code__", None)
+
+    def require_internal_dispatch() -> None:
+        if (
+            getattr(raw_build, "__code__", None) is not raw_build_code
+            or globals().get("_bound_plan_witness") is not witness_fn
+            or getattr(witness_fn, "__code__", None) is not witness_code
+        ):
+            raise SupervisedExecutionError(
+                "canonical bound supervised execution plan issuer internals changed"
+            )
 
     def authoritative_build(
         portfolio_plan: PortfolioPlan,
@@ -745,6 +758,7 @@ def _install_bound_supervised_execution_plan_authority() -> None:
         *,
         created_at: str,
     ) -> BoundSupervisedExecutionPlan:
+        require_internal_dispatch()
         value = raw_build(
             portfolio_plan,
             intents,
@@ -754,7 +768,8 @@ def _install_bound_supervised_execution_plan_authority() -> None:
             constraints,
             created_at=created_at,
         )
-        witness = _bound_plan_witness(value)
+        require_internal_dispatch()
+        witness = witness_fn(value)
         identity = id(value)
 
         def clear(
@@ -773,8 +788,9 @@ def _install_bound_supervised_execution_plan_authority() -> None:
         return value
 
     def assert_authoritative(value: BoundSupervisedExecutionPlan) -> None:
+        require_internal_dispatch()
         try:
-            witness = _bound_plan_witness(value)
+            witness = witness_fn(value)
         except (SupervisedExecutionError, AttributeError, TypeError, ValueError) as exc:
             raise SupervisedExecutionError(
                 "bound supervised execution plan is not current canonical product issuance"
@@ -835,13 +851,23 @@ def _canonical_bound_plan_authority_dispatch(
     return _build, _assert
 
 
+def _require_bound_plan_structure(
+    bound: BoundSupervisedExecutionPlan,
+) -> None:
+    try:
+        _bound_plan_witness(bound)
+    except (SupervisedExecutionError, AttributeError, TypeError, ValueError) as exc:
+        raise SupervisedExecutionError(
+            "bound supervised execution plan is not a canonical structural binding"
+        ) from exc
+
+
 def _require_approval(
     bound: BoundSupervisedExecutionPlan,
     approval: SupervisedApproval,
     at: str,
 ) -> None:
-    _, assert_bound = _canonical_bound_plan_authority_dispatch()
-    assert_bound(bound)
+    _require_bound_plan_structure(bound)
     approval.require_active(at)
     if (
         approval.portfolio_plan_sha256 != bound.portfolio_plan_sha256
@@ -867,15 +893,24 @@ def _require_durable_approval(
         )
 
 
-def _require_reserved(ledger: RealExecutionLedger, bound: BoundSupervisedExecutionPlan) -> None:
-    _, assert_bound = _canonical_bound_plan_authority_dispatch()
-    assert_bound(bound)
+def _durable_reserved_plan_fingerprint(
+    ledger: RealExecutionLedger,
+    bound: BoundSupervisedExecutionPlan,
+) -> str | None:
+    _require_bound_plan_structure(bound)
+    _canonical_bound_plan_authority_dispatch()
     try:
         saga = ledger.saga(bound.execution_plan.plan_id)
-    except KeyError as exc:
-        raise SupervisedExecutionError("execution plan is not reserved") from exc
+    except KeyError:
+        return None
     if saga.plan_fingerprint != bound.execution_plan.fingerprint:
         raise SupervisedExecutionError("durable execution-plan fingerprint mismatch")
+    return saga.plan_fingerprint
+
+
+def _require_reserved(ledger: RealExecutionLedger, bound: BoundSupervisedExecutionPlan) -> None:
+    if _durable_reserved_plan_fingerprint(ledger, bound) is None:
+        raise SupervisedExecutionError("execution plan is not reserved")
 
 
 def reserve_supervised_plan(
@@ -885,7 +920,11 @@ def reserve_supervised_plan(
 ) -> str:
     now = _trusted_now()
     _require_approval(bound, approval, now)
-    fingerprint = ledger.reserve_plan(bound.execution_plan)
+    _, assert_bound = _canonical_bound_plan_authority_dispatch()
+    fingerprint = _durable_reserved_plan_fingerprint(ledger, bound)
+    if fingerprint is None:
+        assert_bound(bound)
+        fingerprint = ledger.reserve_plan(bound.execution_plan)
     ledger.bind_supervised_approval(
         plan_id=bound.execution_plan.plan_id,
         approval_id=approval.ledger_identity,

@@ -31,6 +31,32 @@ class LiveInputWaitReason(str, Enum):
     PRODUCT_ORIGIN_UNPROVEN = "product_origin_unproven"
 
 
+class LiveInputRecheckTrigger(str, Enum):
+    """Evidence transition that may justify re-evaluating one WAIT result.
+
+    A trigger is not proof that the successor state is actionable. It identifies the
+    canonical evidence change that must occur before re-evaluation is useful; no timer
+    or sleep duration can itself satisfy the live-state gate.
+    """
+
+    MATCHING_COMPONENT_CHANGE = "matching_component_change"
+    MARKET_STATUS_CHANGE = "market_status_change"
+    VALID_CAUSAL_OBSERVATION = "valid_causal_observation"
+    CAUSALLY_ADMISSIBLE_OBSERVATION = "causally_admissible_observation"
+    FRESH_OBSERVATION = "fresh_observation"
+    PRODUCT_ORIGIN_BINDING = "product_origin_binding"
+
+
+_RECHECK_TRIGGER_BY_REASON = {
+    LiveInputWaitReason.NO_COMPONENTS: LiveInputRecheckTrigger.MATCHING_COMPONENT_CHANGE,
+    LiveInputWaitReason.NON_OPEN_STATUS: LiveInputRecheckTrigger.MARKET_STATUS_CHANGE,
+    LiveInputWaitReason.INVALID_CAUSAL_TIMESTAMP: LiveInputRecheckTrigger.VALID_CAUSAL_OBSERVATION,
+    LiveInputWaitReason.FUTURE_CAUSALITY: LiveInputRecheckTrigger.CAUSALLY_ADMISSIBLE_OBSERVATION,
+    LiveInputWaitReason.STALE: LiveInputRecheckTrigger.FRESH_OBSERVATION,
+    LiveInputWaitReason.PRODUCT_ORIGIN_UNPROVEN: LiveInputRecheckTrigger.PRODUCT_ORIGIN_BINDING,
+}
+
+
 def _canonical_json_sha256(payload: object) -> str:
     encoded = json.dumps(
         payload,
@@ -112,6 +138,7 @@ class RegisteredLiveInputCurrentView:
     mirror_revision: int
     outcome: LiveInputCurrentViewOutcome
     wait_reasons: tuple[LiveInputWaitReason, ...]
+    recheck_triggers: tuple[LiveInputRecheckTrigger, ...]
     components: tuple[LiveMarketComponentEvidence, ...]
     evidence_sha256: str
 
@@ -269,6 +296,12 @@ def evaluate_registered_input_current_view(
         aggregate_reasons.add(LiveInputWaitReason.PRODUCT_ORIGIN_UNPROVEN)
 
     wait_reasons = tuple(sorted(aggregate_reasons, key=lambda item: item.value))
+    recheck_triggers = tuple(
+        sorted(
+            {_RECHECK_TRIGGER_BY_REASON[reason] for reason in wait_reasons},
+            key=lambda item: item.value,
+        )
+    )
     outcome = LiveInputCurrentViewOutcome.WAIT
     as_of_text = boundary.isoformat()
     max_age_microseconds = _timedelta_microseconds(age_limit)
@@ -282,6 +315,7 @@ def evaluate_registered_input_current_view(
         "mirror_revision": raw_snapshot.revision,
         "outcome": outcome.value,
         "wait_reasons": [reason.value for reason in wait_reasons],
+        "recheck_triggers": [trigger.value for trigger in recheck_triggers],
         "components": [
             {
                 "source_id": item.source_id,
@@ -316,6 +350,7 @@ def evaluate_registered_input_current_view(
         mirror_revision=raw_snapshot.revision,
         outcome=outcome,
         wait_reasons=wait_reasons,
+        recheck_triggers=recheck_triggers,
         components=components,
         evidence_sha256=evidence_sha256,
     )

@@ -928,3 +928,58 @@ def test_empty_terminal_state_cannot_hide_provider_slot_hold(tmp_path, state):
             now=NOW + timedelta(minutes=1),
             access_token_available=False,
         )
+
+
+def test_completion_clock_rollback_cannot_shorten_ambiguous_slot_hold(tmp_path):
+    lifecycle = _lifecycle(tmp_path)
+    admission = lifecycle.begin_login(now=NOW, access_token_available=False)
+
+    with pytest.raises(
+        ProphetXSessionLifecycleError,
+        match="cannot precede persisted lifecycle time",
+    ):
+        lifecycle.complete_login_failure(
+            attempt_id=admission.attempt_id,
+            now=NOW - timedelta(seconds=1),
+            failure=ProphetXLoginFailureClass.AMBIGUOUS_PROVIDER_RESULT,
+        )
+
+    restarted = _lifecycle(tmp_path)
+    blocked = restarted.begin_login(
+        now=NOW + timedelta(seconds=1),
+        access_token_available=False,
+    )
+    assert (
+        blocked.action
+        is ProphetXLoginAdmissionAction.WAIT_FOR_PROVIDER_SESSION_EXPIRY
+    )
+    assert blocked.retry_at == NOW + CONSERVATIVE_SESSION_SLOT_HOLD
+
+
+def test_state_changing_calls_reject_clock_rollback(tmp_path):
+    lifecycle = _lifecycle(tmp_path)
+    active = _active(lifecycle)
+
+    with pytest.raises(
+        ProphetXSessionLifecycleError,
+        match="cannot precede persisted lifecycle time",
+    ):
+        lifecycle.record_credential_revoked(
+            now=active.last_transition_at - timedelta(microseconds=1)
+        )
+
+
+def test_inflight_state_rejects_divergent_attempt_transition_time(tmp_path):
+    lifecycle = _lifecycle(tmp_path)
+    lifecycle.begin_login(now=NOW, access_token_available=False)
+    payload = json.loads(lifecycle.state_path.read_text(encoding="utf-8"))
+    payload["attempt_started_at"] = (
+        NOW - timedelta(seconds=1)
+    ).isoformat()
+    lifecycle.state_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(
+        ProphetXSessionLifecycleError,
+        match="attempt start must equal transition time",
+    ):
+        lifecycle.read_snapshot()

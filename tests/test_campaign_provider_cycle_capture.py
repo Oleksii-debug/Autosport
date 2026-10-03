@@ -895,3 +895,121 @@ def test_module_dispatch_in_place_code_mutation_rejects_before_execution(
         target.__code__ = original_code
     assert calls == []
 
+
+
+def test_first_clock_transitive_store_seam_code_mutation_fails_before_start(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    locator, store, spec, provider_store = _setup(tmp_path)
+    provider_calls: list[str] = []
+    hostile_calls: list[str] = []
+    target = capture_module._STORE_CLASS_SEAMS["_connect"]
+    function = getattr(target, "__func__", target)
+    original_code = function.__code__
+
+    def hostile(_self):
+        hostile_calls.append("connect")
+        raise AssertionError("hostile collector connect executed")
+
+    assert original_code.co_freevars == hostile.__code__.co_freevars
+
+    def mutating_clock() -> str:
+        function.__code__ = hostile.__code__
+        return "2100-01-01T06:00:00+00:00"
+
+    monkeypatch.setattr(
+        provider_module,
+        "urlopen",
+        lambda _request, _timeout: provider_calls.append("provider"),
+    )
+    try:
+        with pytest.raises(
+            CampaignProviderCycleCaptureIntegrityError,
+            match="collector campaign capture seam code changed: _connect",
+        ):
+            capture_campaign_complete_game_board(
+                precommit_locator=locator,
+                store=store,
+                source_spec=spec,
+                evidence_store=provider_store,
+                request=_request(),
+                api_key="secret-value",
+                timeout_seconds=3.0,
+                clock=mutating_clock,
+            )
+    finally:
+        function.__code__ = original_code
+
+    assert provider_calls == []
+    assert hostile_calls == []
+    assert store.collector_cycle_evidence(
+        source_id=spec.source_id,
+        start_cycle_seq=1,
+        end_cycle_seq=1,
+    ) == ()
+
+
+def test_failure_clock_transitive_store_seam_code_mutation_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    locator, store, spec, provider_store = _setup(tmp_path)
+    hostile_calls: list[str] = []
+    target = capture_module._STORE_CLASS_SEAMS["_connect"]
+    function = getattr(target, "__func__", target)
+    original_code = function.__code__
+    clock_calls = 0
+
+    def hostile(_self):
+        hostile_calls.append("connect")
+        raise AssertionError("hostile collector connect executed")
+
+    assert original_code.co_freevars == hostile.__code__.co_freevars
+
+    def fail_urlopen(_request, _timeout):
+        raise OSError("forced provider transport failure")
+
+    def mutating_clock() -> str:
+        nonlocal clock_calls
+        clock_calls += 1
+        if clock_calls == 2:
+            function.__code__ = hostile.__code__
+        return (
+            "2100-01-01T06:00:00+00:00"
+            if clock_calls == 1
+            else "2100-01-01T06:00:01+00:00"
+        )
+
+    monkeypatch.setattr(provider_module, "urlopen", fail_urlopen)
+    try:
+        with pytest.raises(
+            ProviderObservationUnsupportedError,
+            match="provider SSE initial-state acquisition failed",
+        ) as exc_info:
+            capture_campaign_complete_game_board(
+                precommit_locator=locator,
+                store=store,
+                source_spec=spec,
+                evidence_store=provider_store,
+                request=_request(),
+                api_key="secret-value",
+                timeout_seconds=3.0,
+                clock=mutating_clock,
+            )
+    finally:
+        function.__code__ = original_code
+
+    assert hostile_calls == []
+    assert any(
+        "failure terminal also failed" in note
+        and "collector campaign capture seam code changed: _connect" in note
+        for note in getattr(exc_info.value, "__notes__", ())
+    )
+    evidence = store.collector_cycle_evidence(
+        source_id=spec.source_id,
+        start_cycle_seq=1,
+        end_cycle_seq=1,
+    )
+    assert len(evidence) == 1
+    assert evidence[0]["terminal"] is None

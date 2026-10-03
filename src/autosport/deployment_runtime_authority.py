@@ -253,6 +253,7 @@ _SEALED_STORE_DISPATCH_NAMES: Final = frozenset(
         "_read_validated_records_locked",
         "_assert_binding_integrity",
         "_new_transaction_id",
+        "_observed_now",
     }
 )
 
@@ -539,8 +540,16 @@ def _timestamp(value: object, name: str) -> str:
     return _instant(value, name).isoformat().replace("+00:00", "Z")
 
 
+_CANONICAL_TIMESTAMP_VALIDATOR: Final = _timestamp
+_CANONICAL_TIMESTAMP_VALIDATOR_CODE: Final = _timestamp.__code__
+
+
 def _utc_now_timestamp() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+_CANONICAL_UTC_NOW_TIMESTAMP: Final = _utc_now_timestamp
+_CANONICAL_UTC_NOW_TIMESTAMP_CODE: Final = _utc_now_timestamp.__code__
 
 
 def _canonical_json(value: object) -> str:
@@ -2010,13 +2019,29 @@ class DeploymentRuntimeAuthorityStore:
         return records
 
     def _observed_now(self) -> str:
+        if (
+            datetime is not _CANONICAL_DATETIME_TYPE
+            or timezone is not _CANONICAL_TIMEZONE_MODULE
+            or _utc_now_timestamp is not _CANONICAL_UTC_NOW_TIMESTAMP
+            or _CANONICAL_UTC_NOW_TIMESTAMP.__code__
+            is not _CANONICAL_UTC_NOW_TIMESTAMP_CODE
+            or _timestamp is not _CANONICAL_TIMESTAMP_VALIDATOR
+            or _CANONICAL_TIMESTAMP_VALIDATOR.__code__
+            is not _CANONICAL_TIMESTAMP_VALIDATOR_CODE
+        ):
+            raise DeploymentRuntimeAuthorityError(
+                "runtime authority clock dispatch was replaced"
+            )
         try:
-            value = _utc_now_timestamp()
+            value = _CANONICAL_UTC_NOW_TIMESTAMP()
         except Exception as exc:
             raise DeploymentRuntimeAuthorityError(
                 "runtime authority store clock failed"
             ) from exc
-        return _timestamp(value, "runtime authority store clock")
+        return _CANONICAL_TIMESTAMP_VALIDATOR(
+            value,
+            "runtime authority store clock",
+        )
 
     def append(
         self,

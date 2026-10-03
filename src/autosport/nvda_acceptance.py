@@ -27,7 +27,10 @@ _REQUIRED_CHECKS = (
         "Keyboard-only strategy, research-plan, replay-speed and live-mode controls expose current selection/state and validation errors clearly through NVDA.",
     ),
     ("baseline_replay", "Packaged baseline replay state/completion/error is available without visual reading."),
-    ("evidence_surfaces", "F6/F7/F8 ticket, live quote and Evaluation surfaces receive predictable accessible focus."),
+    (
+        "evidence_surfaces",
+        "F2 shell navigation and Ctrl+Alt+Left/Right cycling, F6/F7/F8 ticket/live/Evaluation surfaces, F9 owner-economic authority and the F10 manual-calculation workbench/dialog receive predictable accessible focus; NVDA announces the current surface/state and closing a dialog returns focus predictably.",
+    ),
     ("research_missing_plan_error", "Research replay without a plan fails closed with an NVDA-accessible reason."),
     ("restart_persistence", "Restart returns to the same economic context without silent state loss/substitution."),
 )

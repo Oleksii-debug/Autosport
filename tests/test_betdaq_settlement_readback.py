@@ -1214,6 +1214,42 @@ def test_postings_readback_rejects_cross_method_evidence_laundering(monkeypatch)
         replace(by_id, evidence=window.evidence, postings=(forged_row,))
 
 
+def test_postings_reject_account_currency_validator_replacement_before_execution(
+    monkeypatch,
+):
+    client, _ = economic_client(monkeypatch, postings_by_id(posting(9001)))
+    hostile_calls = []
+
+    def hostile(value):
+        hostile_calls.append(value)
+        return value
+
+    monkeypatch.setattr(account_module, "_currency", hostile)
+
+    with pytest.raises(
+        BetdaqEconomicReadbackError,
+        match="canonical BETDAQ currency validator was replaced",
+    ):
+        client.read_account_postings_by_id(9000)
+
+    assert hostile_calls == []
+
+
+def test_postings_reject_account_currency_validator_code_mutation(monkeypatch):
+    client, _ = economic_client(monkeypatch, postings_by_id(posting(9001)))
+
+    def permissive(value):
+        return value
+
+    monkeypatch.setattr(account_module._currency, "__code__", permissive.__code__)
+
+    with pytest.raises(
+        BetdaqEconomicReadbackError,
+        match="canonical BETDAQ currency validator was replaced",
+    ):
+        client.read_account_postings_by_id(9000)
+
+
 @pytest.mark.parametrize(
     "attribute",
     ("_CANONICAL_ACCOUNT_HTTPS_POST", "_REQUIRE_CANONICAL_ACCOUNT_TRANSPORT"),

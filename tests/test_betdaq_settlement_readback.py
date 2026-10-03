@@ -90,6 +90,7 @@ def order_details(
         'OrderCommission="0.50" MarketCommission="0.25" '
         'MarketSettledDate="2026-09-22T23:58:00Z" />'
     ),
+    audit_log="",
 ):
     return soap(
         "GetOrderDetails",
@@ -102,7 +103,7 @@ def order_details(
             'MatchingTimeStamp="2026-09-22T22:00:05Z" Polarity="1" '
             f'SequenceNumber="{sequence}" PunterReferenceNumber="77"'
         ),
-        settlement,
+        settlement + audit_log,
     )
 
 
@@ -159,6 +160,46 @@ def economic_client(monkeypatch, *responses, clock=clock_one, credentials=None):
         clock=clock,
     )
     return BetdaqEconomicReadbackClient(account), opener
+
+
+def test_documented_order_audit_log_is_accepted_and_content_bound(monkeypatch):
+    first_audit = (
+        '<AuditLog><AuditLog Time="2026-09-22T23:58:00Z" '
+        'OrderActionType="1" RequestedStake="10.00" TotalStake="10.00" '
+        'TotalAgainstStake="4.00" RequestedPrice="2.50" AveragePrice="2.45">'
+        '<MatchedOrderInformation xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" '
+        'xsi:nil="true" /><CommissionInformation '
+        'xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:nil="true" />'
+        '</AuditLog></AuditLog>'
+    )
+    second_audit = first_audit.replace('TotalAgainstStake="4.00"', 'TotalAgainstStake="5.00"')
+    client, _ = economic_client(
+        monkeypatch,
+        order_details(audit_log=first_audit),
+        order_details(audit_log=second_audit),
+    )
+
+    first = client.read_order_details(123)
+    second = client.read_order_details(123)
+
+    assert first.gross_settlement_amount == second.gross_settlement_amount
+    assert first.order_commission == second.order_commission
+    assert first.evidence.source_payload_sha256 != second.evidence.source_payload_sha256
+    assert first.evidence.evidence_id != second.evidence.evidence_id
+    assert first.observation_id != second.observation_id
+
+
+def test_duplicate_order_audit_log_containers_fail_closed(monkeypatch):
+    client, _ = economic_client(
+        monkeypatch,
+        order_details(audit_log="<AuditLog /><AuditLog />"),
+    )
+
+    with pytest.raises(
+        BetdaqEconomicReadbackError,
+        match="failed canonical validation",
+    ):
+        client.read_order_details(123)
 
 
 def test_order_settlement_preserves_components_without_netting(monkeypatch):

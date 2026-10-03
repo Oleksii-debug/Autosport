@@ -961,6 +961,7 @@ class RealExecutionLedger:
         attempt_id: str | None,
         payload: dict[str, Any],
         *,
+        _event_id: str | None = None,
         _recorded_at: str | None = None,
     ) -> None:
         if self._serialization_owner_thread_id != threading.get_ident():
@@ -974,13 +975,13 @@ class RealExecutionLedger:
                 )
             )
             return
-        if _recorded_at is None:
+        if _event_id is None or _recorded_at is None:
             raise ExecutionLedgerIntegrityError(
-                "execution ledger canonical event clock is unavailable"
+                "execution ledger canonical event identity/clock is unavailable"
             )
         event = {
             "schema_version": SCHEMA_VERSION,
-            "event_id": str(uuid.uuid4()),
+            "event_id": _event_id,
             "event_type": kind.value,
             "recorded_at": _recorded_at,
             "plan_id": plan_id,
@@ -3538,6 +3539,10 @@ def _install_canonical_event_clock() -> None:
     exact_datetime_now = datetime.now
     exact_datetime_isoformat = datetime.isoformat
     exact_utc = timezone.utc
+    exact_urandom = os.urandom
+    exact_bytearray = bytearray
+    exact_bytes = bytes
+    exact_bytes_hex = bytes.hex
     wrapper_code = None
 
     def append_with_canonical_clock(
@@ -3556,6 +3561,21 @@ def _install_canonical_event_clock() -> None:
                 "execution ledger event-clock dispatch changed"
             )
         try:
+            raw_id = exact_bytearray(exact_urandom(16))
+            raw_id[6] = (raw_id[6] & 0x0F) | 0x40
+            raw_id[8] = (raw_id[8] & 0x3F) | 0x80
+            event_hex = exact_bytes_hex(exact_bytes(raw_id))
+            event_id = (
+                event_hex[:8]
+                + "-"
+                + event_hex[8:12]
+                + "-"
+                + event_hex[12:16]
+                + "-"
+                + event_hex[16:20]
+                + "-"
+                + event_hex[20:]
+            )
             instant = exact_datetime_now(exact_utc)
             recorded_at = exact_datetime_isoformat(
                 instant,
@@ -3563,7 +3583,7 @@ def _install_canonical_event_clock() -> None:
             )
         except (OSError, OverflowError, TypeError, ValueError) as exc:
             raise ExecutionLedgerIntegrityError(
-                "execution ledger event clock failed"
+                "execution ledger event identity/clock generation failed"
             ) from exc
         append_impl(
             self,
@@ -3572,6 +3592,7 @@ def _install_canonical_event_clock() -> None:
             action_id,
             attempt_id,
             payload,
+            _event_id=event_id,
             _recorded_at=recorded_at,
         )
         if (

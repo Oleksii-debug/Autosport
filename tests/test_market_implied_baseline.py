@@ -44,6 +44,14 @@ def _hash(seed: str) -> str:
     return hashlib.sha256(seed.encode("utf-8")).hexdigest()
 
 
+def _closure_cell(function: object, name: str):
+    closure = getattr(function, "__closure__", None)
+    code = getattr(function, "__code__", None)
+    if closure is None or code is None or name not in code.co_freevars:
+        raise AssertionError(f"closure cell is unavailable: {name}")
+    return closure[code.co_freevars.index(name)]
+
+
 class MarketImpliedBaselineTests(unittest.TestCase):
     CUTOFF = datetime(2026, 9, 18, 15, 5, tzinfo=timezone.utc)
     SOURCE_ID = "betfair_exchange_historical"
@@ -285,6 +293,91 @@ class MarketImpliedBaselineTests(unittest.TestCase):
                     market_implied_baseline_module.__dict__.pop(name, None)
                 else:
                     market_implied_baseline_module.__dict__[name] = value
+
+    def test_public_builder_closure_rewrite_cannot_mint_baseline(self) -> None:
+        self.persist()
+        builder = build_market_implied_baseline_evidence
+        guard_cell = _closure_cell(builder, "canonical_guard")
+        outcome_cell = _closure_cell(builder, "outcome_assert_available")
+        events_cell = _closure_cell(builder, "store_events")
+        original_guard = guard_cell.cell_contents
+        original_outcome = outcome_cell.cell_contents
+        original_events = events_cell.cell_contents
+        calls = {"guard": 0, "outcome": 0, "events": 0}
+
+        def forged_guard(*args, **kwargs):
+            del args, kwargs
+            calls["guard"] += 1
+
+        def forged_outcome(authority, decision_as_of):
+            del authority, decision_as_of
+            calls["outcome"] += 1
+
+        def forged_events(store, event_id=None):
+            del store, event_id
+            calls["events"] += 1
+            return ()
+
+        try:
+            guard_cell.cell_contents = forged_guard
+            outcome_cell.cell_contents = forged_outcome
+            events_cell.cell_contents = forged_events
+            with self.assertRaisesRegex(
+                MarketImpliedBaselineError,
+                "canonical market-implied builder authority changed",
+            ):
+                self.evidence()
+            self.assertEqual(calls, {"guard": 0, "outcome": 0, "events": 0})
+        finally:
+            guard_cell.cell_contents = original_guard
+            outcome_cell.cell_contents = original_outcome
+            events_cell.cell_contents = original_events
+
+    def test_canonical_guard_coordinated_closure_rewrite_fails_closed(self) -> None:
+        self.persist()
+        guard = _closure_cell(
+            build_market_implied_baseline_evidence,
+            "canonical_guard",
+        ).cell_contents
+        events_cell = _closure_cell(guard, "store_events")
+        events_code_cell = _closure_cell(guard, "store_events_code")
+        outcome_cell = _closure_cell(guard, "outcome_assert_available")
+        outcome_code_cell = _closure_cell(guard, "outcome_assert_available_code")
+        originals = (
+            events_cell.cell_contents,
+            events_code_cell.cell_contents,
+            outcome_cell.cell_contents,
+            outcome_code_cell.cell_contents,
+        )
+        calls = {"outcome": 0, "events": 0}
+
+        def forged_outcome(authority, decision_as_of):
+            del authority, decision_as_of
+            calls["outcome"] += 1
+
+        def forged_events(store, event_id=None):
+            del store, event_id
+            calls["events"] += 1
+            return ()
+
+        try:
+            events_cell.cell_contents = forged_events
+            events_code_cell.cell_contents = forged_events.__code__
+            outcome_cell.cell_contents = forged_outcome
+            outcome_code_cell.cell_contents = forged_outcome.__code__
+            with self.assertRaisesRegex(
+                MarketImpliedBaselineError,
+                "canonical market-implied input guard authority changed",
+            ):
+                self.evidence()
+            self.assertEqual(calls, {"outcome": 0, "events": 0})
+        finally:
+            (
+                events_cell.cell_contents,
+                events_code_cell.cell_contents,
+                outcome_cell.cell_contents,
+                outcome_code_cell.cell_contents,
+            ) = originals
 
     def test_time_subclasses_cannot_execute_before_canonical_history_read(self) -> None:
         hooks = {"cutoff": 0, "max_age": 0}

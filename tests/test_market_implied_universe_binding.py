@@ -72,6 +72,14 @@ class _Resolver:
         return self._witness.enumeration_id
 
 
+def _closure_cell(function: object, name: str):
+    closure = getattr(function, "__closure__", None)
+    code = getattr(function, "__code__", None)
+    if closure is None or code is None or name not in code.co_freevars:
+        raise AssertionError(f"closure cell is unavailable: {name}")
+    return closure[code.co_freevars.index(name)]
+
+
 class MarketImpliedUniverseBindingTests(unittest.TestCase):
     CUTOFF = datetime(2026, 9, 18, 15, 5, tzinfo=timezone.utc)
     SOURCE_ID = "betfair_exchange_historical"
@@ -461,6 +469,81 @@ class MarketImpliedUniverseBindingTests(unittest.TestCase):
                     market_implied_universe_binding_module.__dict__.pop(name, None)
                 else:
                     market_implied_universe_binding_module.__dict__[name] = value
+
+    def test_public_universe_binder_loader_closure_rewrite_fails_closed(self) -> None:
+        self.persist_market()
+        evidence = self.evidence()
+        protocol = self.protocol(evidence)
+        store = self.evaluation_store(self.evaluation_row())
+        loaded = store.load()
+        self.assertIsNotNone(loaded)
+
+        binder = bind_market_implied_baseline_to_evaluation_universe
+        loader_cell = _closure_cell(binder, "canonical_loader")
+        original_loader = loader_cell.cell_contents
+        calls = {"loader": 0}
+
+        def forged_loader(evaluation_store):
+            del evaluation_store
+            calls["loader"] += 1
+            return loaded
+
+        try:
+            loader_cell.cell_contents = forged_loader
+            with self.assertRaisesRegex(
+                MarketImpliedUniverseBindingError,
+                "canonical market-implied universe binder authority changed",
+            ):
+                bind_market_implied_baseline_to_evaluation_universe(
+                    protocol=protocol,
+                    baseline_definition=self.definition(protocol),
+                    evidence=(evidence,),
+                    evaluation_store=store,
+                )
+            self.assertEqual(calls["loader"], 0)
+        finally:
+            loader_cell.cell_contents = original_loader
+
+    def test_canonical_loader_coordinated_closure_rewrite_fails_closed(self) -> None:
+        self.persist_market()
+        evidence = self.evidence()
+        protocol = self.protocol(evidence)
+        store = self.evaluation_store(self.evaluation_row())
+        loaded = store.load()
+        self.assertIsNotNone(loaded)
+
+        loader = _closure_cell(
+            bind_market_implied_baseline_to_evaluation_universe,
+            "canonical_loader",
+        ).cell_contents
+        store_load_cell = _closure_cell(loader, "store_load")
+        store_load_code_cell = _closure_cell(loader, "store_load_code")
+        original_load = store_load_cell.cell_contents
+        original_code = store_load_code_cell.cell_contents
+        calls = {"loader": 0}
+
+        def forged_load(evaluation_store):
+            del evaluation_store
+            calls["loader"] += 1
+            return loaded
+
+        try:
+            store_load_cell.cell_contents = forged_load
+            store_load_code_cell.cell_contents = forged_load.__code__
+            with self.assertRaisesRegex(
+                MarketImpliedUniverseBindingError,
+                "canonical evaluation-universe loader authority changed",
+            ):
+                bind_market_implied_baseline_to_evaluation_universe(
+                    protocol=protocol,
+                    baseline_definition=self.definition(protocol),
+                    evidence=(evidence,),
+                    evaluation_store=store,
+                )
+            self.assertEqual(calls["loader"], 0)
+        finally:
+            store_load_cell.cell_contents = original_load
+            store_load_code_cell.cell_contents = original_code
 
     def test_unrelated_valid_market_cannot_be_relabelled_as_expected_row(self) -> None:
         self.persist_market(event_id="event-2")

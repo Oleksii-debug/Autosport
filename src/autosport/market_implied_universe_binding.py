@@ -45,26 +45,78 @@ def _build_canonical_evaluation_loader(store_type, store_load):
     if store_load_code is None:
         raise RuntimeError("canonical evaluation-universe loader is unavailable")
 
+    exact_type = type
+    exact_getattr = getattr
+
+    store_type_marker = "__AUTOSPORT_MARKET_UNIVERSE_STORE_TYPE_ANCHOR__"
+    store_load_marker = "__AUTOSPORT_MARKET_UNIVERSE_STORE_LOAD_ANCHOR__"
+    store_load_code_marker = "__AUTOSPORT_MARKET_UNIVERSE_STORE_LOAD_CODE_ANCHOR__"
+    exact_type_marker = "__AUTOSPORT_MARKET_UNIVERSE_EXACT_TYPE_ANCHOR__"
+    exact_getattr_marker = "__AUTOSPORT_MARKET_UNIVERSE_GETATTR_ANCHOR__"
+    failure_type_marker = "__AUTOSPORT_MARKET_UNIVERSE_ERROR_ANCHOR__"
+    type_error_marker = "__AUTOSPORT_MARKET_UNIVERSE_TYPE_ERROR_ANCHOR__"
+
     def load_canonical_evaluation_universe(
         evaluation_store: EvaluationUniverseStore,
     ):
-        if type(evaluation_store) is not store_type:
+        MarketImpliedUniverseBindingError = "__AUTOSPORT_MARKET_UNIVERSE_ERROR_ANCHOR__"  # noqa: N806
+        TypeError = "__AUTOSPORT_MARKET_UNIVERSE_TYPE_ERROR_ANCHOR__"  # noqa: N806
+        anchored_store_type = "__AUTOSPORT_MARKET_UNIVERSE_STORE_TYPE_ANCHOR__"
+        anchored_store_load = "__AUTOSPORT_MARKET_UNIVERSE_STORE_LOAD_ANCHOR__"
+        anchored_store_load_code = "__AUTOSPORT_MARKET_UNIVERSE_STORE_LOAD_CODE_ANCHOR__"
+        anchored_exact_type = "__AUTOSPORT_MARKET_UNIVERSE_EXACT_TYPE_ANCHOR__"
+        anchored_getattr = "__AUTOSPORT_MARKET_UNIVERSE_GETATTR_ANCHOR__"
+
+        if (
+            store_type is not anchored_store_type
+            or store_load is not anchored_store_load
+            or store_load_code is not anchored_store_load_code
+            or exact_type is not anchored_exact_type
+            or exact_getattr is not anchored_getattr
+        ):
+            raise MarketImpliedUniverseBindingError(
+                "canonical evaluation-universe loader authority changed"
+            )
+        if anchored_exact_type(evaluation_store) is not anchored_store_type:
             raise TypeError("evaluation_store must be exact EvaluationUniverseStore")
-        namespace = getattr(evaluation_store, "__dict__", None)
+        namespace = anchored_getattr(evaluation_store, "__dict__", None)
         if isinstance(namespace, dict) and "load" in namespace:
             raise MarketImpliedUniverseBindingError(
                 "canonical evaluation-universe store must not shadow load reader"
             )
-        if store_type.load is not store_load:
+        if anchored_store_type.load is not anchored_store_load:
             raise MarketImpliedUniverseBindingError(
                 "canonical evaluation-universe load authority was rebound"
             )
-        if getattr(store_load, "__code__", None) is not store_load_code:
+        if (
+            anchored_getattr(anchored_store_load, "__code__", None)
+            is not anchored_store_load_code
+        ):
             raise MarketImpliedUniverseBindingError(
                 "canonical evaluation-universe load executable was mutated"
             )
-        return store_load(evaluation_store)
+        return anchored_store_load(evaluation_store)
 
+    constants = load_canonical_evaluation_universe.__code__.co_consts
+    anchors = (
+        (store_type_marker, store_type),
+        (store_load_marker, store_load),
+        (store_load_code_marker, store_load_code),
+        (exact_type_marker, exact_type),
+        (exact_getattr_marker, exact_getattr),
+        (failure_type_marker, MarketImpliedUniverseBindingError),
+        (type_error_marker, TypeError),
+    )
+    if any(sum(item == marker for item in constants) != 1 for marker, _ in anchors):
+        raise RuntimeError("canonical evaluation-universe loader anchor is ambiguous")
+    load_canonical_evaluation_universe.__code__ = (
+        load_canonical_evaluation_universe.__code__.replace(
+            co_consts=tuple(
+                next((anchored for marker, anchored in anchors if item == marker), item)
+                for item in constants
+            )
+        )
+    )
     return load_canonical_evaluation_universe
 
 
@@ -362,8 +414,15 @@ def _bind_market_implied_baseline_to_evaluation_universe_impl(
 
 def _seal_market_implied_universe_binding(implementation, canonical_loader):
     implementation_code = getattr(implementation, "__code__", None)
-    if implementation_code is None:
+    canonical_loader_code = getattr(canonical_loader, "__code__", None)
+    if implementation_code is None or canonical_loader_code is None:
         raise RuntimeError("canonical market-implied universe binder is unavailable")
+
+    implementation_marker = "__AUTOSPORT_MARKET_UNIVERSE_BINDER_IMPL_ANCHOR__"
+    implementation_code_marker = "__AUTOSPORT_MARKET_UNIVERSE_BINDER_IMPL_CODE_ANCHOR__"
+    loader_marker = "__AUTOSPORT_MARKET_UNIVERSE_BINDER_LOADER_ANCHOR__"
+    loader_code_marker = "__AUTOSPORT_MARKET_UNIVERSE_BINDER_LOADER_CODE_ANCHOR__"
+    failure_type_marker = "__AUTOSPORT_MARKET_UNIVERSE_BINDER_ERROR_ANCHOR__"
 
     def bind_market_implied_baseline_to_evaluation_universe(
         *,
@@ -372,18 +431,51 @@ def _seal_market_implied_universe_binding(implementation, canonical_loader):
         evidence: Sequence[MarketImpliedBaselineEvidence],
         evaluation_store: EvaluationUniverseStore,
     ) -> MarketImpliedUniverseCohortEvidence:
-        if getattr(implementation, "__code__", None) is not implementation_code:
+        MarketImpliedUniverseBindingError = "__AUTOSPORT_MARKET_UNIVERSE_BINDER_ERROR_ANCHOR__"  # noqa: N806
+        anchored_implementation = "__AUTOSPORT_MARKET_UNIVERSE_BINDER_IMPL_ANCHOR__"
+        anchored_implementation_code = "__AUTOSPORT_MARKET_UNIVERSE_BINDER_IMPL_CODE_ANCHOR__"
+        anchored_loader = "__AUTOSPORT_MARKET_UNIVERSE_BINDER_LOADER_ANCHOR__"
+        anchored_loader_code = "__AUTOSPORT_MARKET_UNIVERSE_BINDER_LOADER_CODE_ANCHOR__"
+
+        if (
+            implementation is not anchored_implementation
+            or implementation_code is not anchored_implementation_code
+            or canonical_loader is not anchored_loader
+            or anchored_loader.__code__ is not anchored_loader_code
+        ):
+            raise MarketImpliedUniverseBindingError(
+                "canonical market-implied universe binder authority changed"
+            )
+        if anchored_implementation.__code__ is not anchored_implementation_code:
             raise MarketImpliedUniverseBindingError(
                 "canonical market-implied universe binder executable was mutated"
             )
-        return implementation(
+        return anchored_implementation(
             protocol=protocol,
             baseline_definition=baseline_definition,
             evidence=evidence,
             evaluation_store=evaluation_store,
-            _canonical_loader=canonical_loader,
+            _canonical_loader=anchored_loader,
         )
 
+    constants = bind_market_implied_baseline_to_evaluation_universe.__code__.co_consts
+    anchors = (
+        (implementation_marker, implementation),
+        (implementation_code_marker, implementation_code),
+        (loader_marker, canonical_loader),
+        (loader_code_marker, canonical_loader_code),
+        (failure_type_marker, MarketImpliedUniverseBindingError),
+    )
+    if any(sum(item == marker for item in constants) != 1 for marker, _ in anchors):
+        raise RuntimeError("canonical market-implied universe binder anchor is ambiguous")
+    bind_market_implied_baseline_to_evaluation_universe.__code__ = (
+        bind_market_implied_baseline_to_evaluation_universe.__code__.replace(
+            co_consts=tuple(
+                next((anchored for marker, anchored in anchors if item == marker), item)
+                for item in constants
+            )
+        )
+    )
     return bind_market_implied_baseline_to_evaluation_universe
 
 

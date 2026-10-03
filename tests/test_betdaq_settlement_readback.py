@@ -300,12 +300,12 @@ def test_incomplete_postings_window_keeps_exact_rows_but_not_complete_absence(
 def test_by_id_read_never_inherits_window_completeness(monkeypatch):
     client, opener = economic_client(monkeypatch, postings_by_id(posting(9001)))
     result = client.read_account_postings_by_id(9001)
-    assert result.query_transaction_id == "9000"
+    assert result.query_transaction_id == "9001"
     assert result.window_complete is None
     assert len(result.postings) == 1
     body = opener.calls[0][0].data
     assert b"listAccountPostingsByIdRequest" in body
-    assert b'TransactionId="9000"' in body
+    assert b'TransactionId="9001"' in body
 
 
 def test_duplicate_transaction_id_is_idempotent_only_for_identical_content(

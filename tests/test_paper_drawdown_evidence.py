@@ -1,0 +1,292 @@
+from dataclasses import replace
+from decimal import Decimal
+
+import pytest
+
+from autosport.domain import TicketLeg
+from autosport.economic_goal import EconomicGoalContract
+from autosport.economic_goal_store import EconomicGoalStore
+from autosport.paper import PaperBook
+from autosport.paper_drawdown_evidence import (
+    DRAW_DOWN_METRIC_CLASS,
+    DRAW_DOWN_SCOPE,
+    PaperDrawdownEvidenceError,
+    PaperDrawdownEvidenceMismatchError,
+    require_current_paper_drawdown_evidence,
+    resolve_paper_drawdown_evidence,
+)
+
+
+def _goal() -> EconomicGoalContract:
+    return EconomicGoalContract(
+        goal_id="goal-product-drawdown-evidence",
+        revision=1,
+        bankroll_id="paper-bankroll",
+        currency="USD",
+        max_stake_fraction=Decimal("1"),
+        max_session_loss_fraction=Decimal("1"),
+        max_day_loss_fraction=Decimal("1"),
+        max_drawdown_fraction=Decimal("1"),
+        max_capital_at_risk_fraction=Decimal("1"),
+        max_turnover_fraction=Decimal("1"),
+        max_risk_of_ruin=Decimal("1"),
+        max_concurrent_positions=10,
+    )
+
+
+def _leg(suffix: str) -> TicketLeg:
+    return TicketLeg(
+        event_id=f"event-{suffix}",
+        market_id=f"market-{suffix}",
+        selection_id=f"selection-{suffix}",
+        locked_odds=Decimal("2"),
+    )
+
+
+def _initialize(tmp_path) -> PaperBook:
+    EconomicGoalStore(tmp_path).initialize_owner(_goal())
+    book = PaperBook("100")
+    book.save(tmp_path / "paper_book.json")
+    return book
+
+
+def _open(
+    book: PaperBook,
+    suffix: str,
+    stake: str,
+    placed_at: str,
+    *,
+    bankroll_id: str = "paper-bankroll",
+    currency: str = "USD",
+):
+    return book.open_ticket(
+        [_leg(suffix)],
+        Decimal(stake),
+        placed_at=placed_at,
+        bankroll_id=bankroll_id,
+        currency=currency,
+    )
+
+
+def test_open_stake_is_not_realized_settled_drawdown(tmp_path):
+    book = _initialize(tmp_path)
+    _open(book, "open-only", "80", "2026-09-20T10:00:00+00:00")
+    book.save(tmp_path / "paper_book.json")
+
+    evidence = resolve_paper_drawdown_evidence(tmp_path)
+
+    assert book.balance == Decimal("20")
+    assert evidence.scope == DRAW_DOWN_SCOPE
+    assert evidence.metric_class == DRAW_DOWN_METRIC_CLASS
+    assert evidence.initial_equity == Decimal("100")
+    assert evidence.current_equity == Decimal("100")
+    assert evidence.minimum_equity == Decimal("100")
+    assert evidence.historical_max_drawdown_amount == Decimal("0")
+    assert evidence.historical_max_drawdown_fraction == Decimal("0")
+    assert evidence.current_drawdown_amount == Decimal("0")
+    assert evidence.open_position_count == 1
+    assert len(evidence.points) == 2
+    assert evidence.points[-1].action == "open"
+    assert evidence.points[-1].realized_delta == Decimal("0")
+    assert evidence.points[-1].equity == Decimal("100")
+
+
+def test_loss_creates_realized_drawdown_only_at_settlement(tmp_path):
+    book = _initialize(tmp_path)
+    ticket = _open(book, "loss", "80", "2026-09-20T10:00:00+00:00")
+    book.settle(
+        ticket.ticket_id,
+        set(),
+        settled_at="2026-09-20T11:00:00+00:00",
+    )
+    book.save(tmp_path / "paper_book.json")
+
+    evidence = resolve_paper_drawdown_evidence(tmp_path)
+
+    assert evidence.current_equity == Decimal("20")
+    assert evidence.minimum_equity == Decimal("20")
+    assert evidence.peak_equity == Decimal("100")
+    assert evidence.historical_max_drawdown_amount == Decimal("80")
+    assert evidence.historical_max_drawdown_fraction == Decimal("0.8")
+    assert evidence.current_drawdown_amount == Decimal("80")
+    assert evidence.historical_max_drawdown_peak_id == "paper-initial-equity"
+    assert evidence.historical_max_drawdown_trough_id == (
+        f"paper-lifecycle:1:settle:{ticket.ticket_id}"
+    )
+    assert evidence.points[1].action == "open"
+    assert evidence.points[1].equity == Decimal("100")
+    assert evidence.points[2].action == "settle"
+    assert evidence.points[2].realized_delta == Decimal("-80")
+    assert evidence.points[2].equity == Decimal("20")
+    assert evidence.settlement_availability_complete is True
+
+
+def test_void_does_not_create_realized_drawdown(tmp_path):
+    book = _initialize(tmp_path)
+    ticket = _open(book, "void", "80", "2026-09-20T10:00:00+00:00")
+    book.settle(
+        ticket.ticket_id,
+        set(),
+        {ticket.legs[0].quote_key},
+        settled_at="2026-09-20T11:00:00+00:00",
+    )
+    book.save(tmp_path / "paper_book.json")
+
+    evidence = resolve_paper_drawdown_evidence(tmp_path)
+
+    assert evidence.current_equity == Decimal("100")
+    assert evidence.historical_max_drawdown_amount == Decimal("0")
+    assert evidence.points[-1].realized_delta == Decimal("0")
+    assert evidence.open_position_count == 0
+
+
+def test_win_raises_realized_peak_without_transient_stake_drawdown(tmp_path):
+    book = _initialize(tmp_path)
+    ticket = _open(book, "win", "80", "2026-09-20T10:00:00+00:00")
+    book.settle(
+        ticket.ticket_id,
+        {ticket.legs[0].quote_key},
+        settled_at="2026-09-20T11:00:00+00:00",
+    )
+    book.save(tmp_path / "paper_book.json")
+
+    evidence = resolve_paper_drawdown_evidence(tmp_path)
+
+    assert evidence.current_equity == Decimal("180")
+    assert evidence.peak_equity == Decimal("180")
+    assert evidence.minimum_equity == Decimal("100")
+    assert evidence.historical_max_drawdown_amount == Decimal("0")
+    assert evidence.current_drawdown_amount == Decimal("0")
+    assert evidence.points[-1].realized_delta == Decimal("80")
+    assert evidence.recovered_to_peak is True
+
+
+def test_recovery_does_not_erase_historical_max_drawdown(tmp_path):
+    book = _initialize(tmp_path)
+    losing = _open(book, "first-loss", "50", "2026-09-20T10:00:00+00:00")
+    book.settle(
+        losing.ticket_id,
+        set(),
+        settled_at="2026-09-20T11:00:00+00:00",
+    )
+    winning = _open(book, "recovery", "50", "2026-09-20T12:00:00+00:00")
+    book.settle(
+        winning.ticket_id,
+        {winning.legs[0].quote_key},
+        settled_at="2026-09-20T13:00:00+00:00",
+    )
+    book.save(tmp_path / "paper_book.json")
+
+    evidence = resolve_paper_drawdown_evidence(tmp_path)
+
+    assert evidence.current_equity == Decimal("100")
+    assert evidence.current_drawdown_amount == Decimal("0")
+    assert evidence.historical_max_drawdown_amount == Decimal("50")
+    assert evidence.historical_max_drawdown_fraction == Decimal("0.5")
+    assert evidence.recovered_to_peak is True
+
+
+def test_restart_reresolves_identical_path_and_evidence_identity(tmp_path):
+    book = _initialize(tmp_path)
+    ticket = _open(book, "restart", "25", "2026-09-20T10:00:00+00:00")
+    book.settle(
+        ticket.ticket_id,
+        set(),
+        settled_at="2026-09-20T11:00:00+00:00",
+    )
+    book.save(tmp_path / "paper_book.json")
+
+    before = resolve_paper_drawdown_evidence(tmp_path)
+    after = resolve_paper_drawdown_evidence(tmp_path)
+
+    assert after == before
+    assert after.path_sha256 == before.path_sha256
+    assert after.source_state_sha256 == before.source_state_sha256
+    assert after.evidence_sha256 == before.evidence_sha256
+    assert require_current_paper_drawdown_evidence(tmp_path, before) == before
+
+
+def test_old_evidence_fails_current_reresolution_after_new_settlement(tmp_path):
+    book = _initialize(tmp_path)
+    before = resolve_paper_drawdown_evidence(tmp_path)
+
+    ticket = _open(book, "late-loss", "10", "2026-09-20T10:00:00+00:00")
+    book.settle(
+        ticket.ticket_id,
+        set(),
+        settled_at="2026-09-20T11:00:00+00:00",
+    )
+    book.save(tmp_path / "paper_book.json")
+
+    with pytest.raises(
+        PaperDrawdownEvidenceMismatchError,
+        match="not current canonical product authority",
+    ):
+        require_current_paper_drawdown_evidence(tmp_path, before)
+
+
+def test_caller_modified_scalar_cannot_pass_current_reresolution(tmp_path):
+    _initialize(tmp_path)
+    evidence = resolve_paper_drawdown_evidence(tmp_path)
+    forged = replace(
+        evidence,
+        historical_max_drawdown_amount=Decimal("1"),
+    )
+
+    with pytest.raises(PaperDrawdownEvidenceMismatchError):
+        require_current_paper_drawdown_evidence(tmp_path, forged)
+
+
+def test_missing_settlement_time_is_explicitly_not_as_known_authority(tmp_path):
+    book = _initialize(tmp_path)
+    ticket = _open(book, "untimed-loss", "10", "2026-09-20T10:00:00+00:00")
+    book.settle(ticket.ticket_id, set(), settled_at=None)
+    book.save(tmp_path / "paper_book.json")
+
+    evidence = resolve_paper_drawdown_evidence(tmp_path)
+
+    assert evidence.current_equity == Decimal("90")
+    assert evidence.settlement_availability_complete is False
+    assert evidence.as_known_at_supported is False
+    assert evidence.points[-1].event_time is None
+
+
+def test_ticket_denomination_must_match_durable_owner_goal(tmp_path):
+    book = _initialize(tmp_path)
+    _open(
+        book,
+        "wrong-denomination",
+        "10",
+        "2026-09-20T10:00:00+00:00",
+        bankroll_id="other-bankroll",
+        currency="EUR",
+    )
+    book.save(tmp_path / "paper_book.json")
+
+    with pytest.raises(
+        PaperDrawdownEvidenceError,
+        match="denomination is not bound to the durable goal",
+    ):
+        resolve_paper_drawdown_evidence(tmp_path)
+
+
+def test_open_event_changes_path_identity_without_minting_drawdown(tmp_path):
+    book = _initialize(tmp_path)
+    before = resolve_paper_drawdown_evidence(tmp_path)
+
+    _open(book, "identity-only", "10", "2026-09-20T10:00:00+00:00")
+    book.save(tmp_path / "paper_book.json")
+    after = resolve_paper_drawdown_evidence(tmp_path)
+
+    assert after.path_sha256 != before.path_sha256
+    assert after.source_state_sha256 != before.source_state_sha256
+    assert after.historical_max_drawdown_amount == before.historical_max_drawdown_amount
+    assert after.current_equity == before.current_equity
+
+
+def test_missing_durable_sources_fail_closed(tmp_path):
+    with pytest.raises(
+        PaperDrawdownEvidenceError,
+        match="canonical PAPER drawdown source cannot be resolved",
+    ):
+        resolve_paper_drawdown_evidence(tmp_path)

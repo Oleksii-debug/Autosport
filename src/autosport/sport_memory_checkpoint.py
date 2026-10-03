@@ -665,8 +665,22 @@ def _new_bound_runtime(
     return bound
 
 
-def _initialize_checkpoint_and_opponent(
+def _capture_checkpoint_and_opponent(
+    identity_registry: ParticipantIdentityRegistry,
+    opponent_store: OpponentIntelligenceStore,
+) -> tuple[SportMemoryAuthorityCheckpoint, OpponentIntelligenceStore]:
+    checkpoint = SportMemoryAuthorityCheckpoint.capture(
+        identity_registry, opponent_store
+    )
+    verified_opponent = _verify_checkpoint_against_authorities(
+        checkpoint, identity_registry, opponent_store
+    )
+    return checkpoint, verified_opponent
+
+
+def _persist_captured_checkpoint(
     path: Path,
+    checkpoint: SportMemoryAuthorityCheckpoint,
     identity_registry: ParticipantIdentityRegistry,
     opponent_store: OpponentIntelligenceStore,
 ) -> tuple[SportMemoryAuthorityCheckpoint, OpponentIntelligenceStore]:
@@ -680,10 +694,6 @@ def _initialize_checkpoint_and_opponent(
         raise SportMemoryCheckpointError(
             "sport-memory authority checkpoint already exists"
         )
-
-    checkpoint = SportMemoryAuthorityCheckpoint.capture(
-        identity_registry, opponent_store
-    )
     try:
         atomic_write_json(checkpoint_path, checkpoint.payload())
     except OSError as exc:
@@ -691,10 +701,9 @@ def _initialize_checkpoint_and_opponent(
             "cannot persist sport-memory authority checkpoint"
         ) from exc
 
-    # Re-read both the durable checkpoint and the canonical upstream stores after
-    # publication. This closes the checkpoint-publication window and returns the
-    # exact fresh opponent object whose source authority matches the committed
-    # generation.
+    # Re-read both the exact durable checkpoint and canonical upstream stores
+    # after publication.  A changed source root cannot silently authorize the
+    # runtime created from the earlier generation.
     persisted, verified_opponent = _load_verified_checkpoint_and_opponent(
         checkpoint_path, identity_registry, opponent_store
     )
@@ -703,6 +712,52 @@ def _initialize_checkpoint_and_opponent(
             "persisted sport-memory authority checkpoint changed during initialization"
         )
     return persisted, verified_opponent
+
+
+def _initialize_checkpoint_and_opponent(
+    path: Path,
+    identity_registry: ParticipantIdentityRegistry,
+    opponent_store: OpponentIntelligenceStore,
+) -> tuple[SportMemoryAuthorityCheckpoint, OpponentIntelligenceStore]:
+    checkpoint, _ = _capture_checkpoint_and_opponent(
+        identity_registry, opponent_store
+    )
+    return _persist_captured_checkpoint(
+        path,
+        checkpoint,
+        identity_registry,
+        opponent_store,
+    )
+
+
+def _verify_pristine_runtime_without_checkpoint(
+    runtime_path: Path,
+    authority: SportMemoryAuthorityCheckpoint,
+    verified_opponent: OpponentIntelligenceStore,
+) -> None:
+    """Adopt only the exact harmless crash prefix: pristine runtime, no checkpoint.
+
+    Full product bootstrap publishes the runtime before its authority checkpoint.
+    A process death in that narrow window may therefore leave one pristine runtime
+    file behind.  Anything with durable artifacts/consumptions, malformed bytes,
+    or a different authority generation is not a bootstrap prefix and must not be
+    re-authorized by recreating a checkpoint.
+    """
+
+    try:
+        orphan = SportMemoryRuntime(
+            Path(runtime_path),
+            verified_opponent,
+            authority_generation_sha256=authority.generation_sha256,
+        )
+    except Exception as exc:
+        raise SportMemoryCheckpointError(
+            "sport-memory runtime exists without canonical authority checkpoint"
+        ) from exc
+    if orphan._artifacts or orphan._consumptions:
+        raise SportMemoryCheckpointError(
+            "non-pristine sport-memory runtime exists without canonical authority checkpoint"
+        )
 
 
 def initialize_sport_memory_authority_checkpoint(
@@ -765,51 +820,75 @@ def initialize_or_open_bound_sport_memory_runtime(
     identity_registry: ParticipantIdentityRegistry,
     opponent_store: OpponentIntelligenceStore,
 ) -> SportMemoryRuntime:
-    """Crash-safe bounded composition of checkpoint then sport-memory runtime.
+    """Crash-safe composition without laundering a deleted runtime as pristine.
 
-    The checkpoint is committed first. If runtime creation then fails, a retry
-    verifies the exact same upstream source roots and can finish runtime creation.
-    A runtime without its checkpoint is never adopted because that would let a
-    caller-provided generation self-attest canonical upstream state.
+    A successful bootstrap linearizes as:
+
+        capture upstream roots -> persist pristine runtime -> persist checkpoint
+
+    Therefore a durable checkpoint is positive evidence that the runtime existed.
+    Once that checkpoint exists, a missing runtime is data loss and fails closed.
+    The only checkpoint-free runtime accepted on retry is an exact pristine file
+    from a crash between the first and second publication steps.
     """
 
     runtime = Path(runtime_path)
     checkpoint = Path(checkpoint_path)
+    identity_path = Path(identity_registry.path)
+    opponent_path = Path(opponent_store.path)
     _require_distinct_paths(
         runtime,
         checkpoint,
-        Path(identity_registry.path),
-        Path(opponent_store.path),
+        identity_path,
+        opponent_path,
     )
 
     if checkpoint.exists():
         authority, verified_opponent = _load_verified_checkpoint_and_opponent(
             checkpoint, identity_registry, opponent_store
         )
-    else:
-        if runtime.exists():
+        if not runtime.exists():
             raise SportMemoryCheckpointError(
-                "sport-memory runtime exists without canonical authority checkpoint"
+                "canonical authority checkpoint exists without sport-memory runtime"
             )
-        authority, verified_opponent = _initialize_checkpoint_and_opponent(
-            checkpoint, identity_registry, opponent_store
+    else:
+        first_path, second_path = sorted(
+            (identity_path, opponent_path),
+            key=lambda path: str(_resolved(path)),
         )
+        with durable_path_lock(first_path):
+            with durable_path_lock(second_path):
+                authority, verified_opponent = _capture_checkpoint_and_opponent(
+                    identity_registry, opponent_store
+                )
+                if runtime.exists():
+                    _verify_pristine_runtime_without_checkpoint(
+                        runtime,
+                        authority,
+                        verified_opponent,
+                    )
+                else:
+                    _new_bound_runtime(
+                        runtime,
+                        checkpoint,
+                        identity_registry,
+                        opponent_store,
+                        authority,
+                        verified_opponent,
+                    )
+                authority, verified_opponent = _persist_captured_checkpoint(
+                    checkpoint,
+                    authority,
+                    identity_registry,
+                    opponent_store,
+                )
 
-    if runtime.exists():
-        bound = BoundSportMemoryRuntime(
-            runtime,
-            verified_opponent,
-            authority_generation_sha256=authority.generation_sha256,
-            checkpoint_path=checkpoint,
-            identity_registry=identity_registry,
-            opponent_store=opponent_store,
-        )
-        return _verify_runtime_snapshot_bindings(bound, verified_opponent)
-    return _new_bound_runtime(
+    bound = BoundSportMemoryRuntime(
         runtime,
-        checkpoint,
-        identity_registry,
-        opponent_store,
-        authority,
         verified_opponent,
+        authority_generation_sha256=authority.generation_sha256,
+        checkpoint_path=checkpoint,
+        identity_registry=identity_registry,
+        opponent_store=opponent_store,
     )
+    return _verify_runtime_snapshot_bindings(bound, verified_opponent)

@@ -423,6 +423,44 @@ def test_repeated_active_run_scan_resets_snapshot_local_orphan_state(monkeypatch
     assert api._conflicted_unbound_run_ids == set()
 
 
+def test_orphan_recovery_active_cancel_conflict_clears_temporary_authority() -> None:
+    class OrphanConflictApi:
+        def __init__(self) -> None:
+            self._unbound_active_runs = {
+                7011: (STALE_HEAD, "feature/stale"),
+            }
+            self._recovered_runs: dict[int, tuple[int, str]] = {}
+            self._zero_association_recovered_runs: dict[int, tuple[str, str]] = {}
+
+        def _historical_associated_pr_number(self, head_sha: str) -> int:
+            assert head_sha == STALE_HEAD
+            return 303
+
+        def live_pr_qualification(
+            self,
+            pr_number: int,
+        ) -> PullRequestQualification:
+            assert pr_number == 303
+            return PullRequestQualification(
+                head_sha=HEAD,
+                integration_capable=True,
+            )
+
+        def cancel(self, run_id: int) -> None:
+            assert run_id == 7011
+            raise CancellationError(
+                "workflow run cancellation conflicted while run remains active"
+            )
+
+    api = OrphanConflictApi()
+
+    assert WorkflowScopedGitHubApi.cancel_historical_unbound_runs(
+        api,  # type: ignore[arg-type]
+    ) == ()
+    assert api._recovered_runs == {}
+    assert api._zero_association_recovered_runs == {}
+
+
 def test_controller_scheduler_coalesces_all_prs_per_source_workflow() -> None:
     text = Path(".github/workflows/pr-qualification-supersession.yml").read_text(
         encoding="utf-8"

@@ -9,6 +9,7 @@ then binds that evidence digest as an immutable observation artifact in the same
 collector cycle terminal.
 """
 
+import builtins
 import hashlib
 import inspect
 import json
@@ -160,6 +161,22 @@ _STORE_CLASS_SEAM_MODULE_ATTR_WITNESSES = tuple(
     if _CANONICAL_TYPE(module) is ModuleType
     for attribute_name in function.__code__.co_names
     if hasattr(module, attribute_name)
+)
+_STORE_CLASS_SEAM_BUILTIN_WITNESSES = tuple(
+    (
+        name,
+        function_globals,
+        builtins,
+        builtin_name,
+        _CANONICAL_GETATTR(builtins, builtin_name),
+    )
+    for name, function, function_globals, _global_items
+    in _STORE_CLASS_SEAM_GLOBAL_WITNESSES
+    for builtin_name in function.__code__.co_names
+    if (
+        builtin_name not in function_globals
+        and hasattr(builtins, builtin_name)
+    )
 )
 _EVIDENCE_CLASS_SEAMS = {
     "save": _CANONICAL_GETATTR_STATIC(CompleteGameBoardEvidenceStore, "save"),
@@ -359,6 +376,26 @@ def _require_canonical_seams(
             "collector campaign capture module dispatch changed: "
             + ", ".join(module_attr_changed)
         )
+    builtin_changed = _CANONICAL_SORTED(
+        name + ":" + builtin_name
+        for (
+            name,
+            function_globals,
+            builtin_module,
+            builtin_name,
+            expected,
+        ) in _STORE_CLASS_SEAM_BUILTIN_WITNESSES
+        if (
+            builtin_name in function_globals
+            or _CANONICAL_GETATTR(builtin_module, builtin_name, None)
+            is not expected
+        )
+    )
+    if builtin_changed:
+        raise CampaignProviderCycleCaptureIntegrityError(
+            "collector campaign capture builtin dispatch changed: "
+            + ", ".join(builtin_changed)
+        )
     rebound = _CANONICAL_SORTED(
         name
         for name, expected, _code in _EVIDENCE_CLASS_SEAM_WITNESSES
@@ -506,6 +543,26 @@ def _require_failure_terminal_seams(
         raise CampaignProviderCycleCaptureIntegrityError(
             "collector failure-terminal module dispatch changed: "
             + ", ".join(module_attr_changed)
+        )
+    builtin_changed = _CANONICAL_SORTED(
+        name + ":" + builtin_name
+        for (
+            name,
+            function_globals,
+            builtin_module,
+            builtin_name,
+            expected,
+        ) in _STORE_CLASS_SEAM_BUILTIN_WITNESSES
+        if (
+            builtin_name in function_globals
+            or _CANONICAL_GETATTR(builtin_module, builtin_name, None)
+            is not expected
+        )
+    )
+    if builtin_changed:
+        raise CampaignProviderCycleCaptureIntegrityError(
+            "collector failure-terminal builtin dispatch changed: "
+            + ", ".join(builtin_changed)
         )
     store_state = _CANONICAL_OBJECT_GETATTRIBUTE(store, "__dict__")
     rebound = _CANONICAL_SORTED(name for name in _STORE_SEAMS if name in store_state)

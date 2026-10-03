@@ -21,6 +21,7 @@ import inspect
 import json
 import math
 import os
+import stat
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -48,7 +49,7 @@ from .scheduled_source_universe import (
     ScheduledSourceUniverseError,
     prepare_scheduled_source_universe,
 )
-from .workspace_lock import WorkspaceEconomicLock
+from .workspace_lock import WorkspaceEconomicLock, _open_read_only_descriptor
 
 
 SCHEMA = "autosport.campaign_inception_receipt"
@@ -56,6 +57,7 @@ SCHEMA_VERSION = 1
 AUTHORITY_DOMAIN = "research.forward-campaign-inception-causality"
 _STATE_DIR = "campaign-inception-v1"
 _HEX = frozenset("0123456789abcdef")
+_MAX_STATE_BYTES = 1024 * 1024
 
 _CANONICAL_WITNESS_RESOLVER = resolve_campaign_precommit_publication_witness
 _CANONICAL_MANIFEST_LOADER = load_campaign_precommit_manifest
@@ -69,6 +71,7 @@ _CANONICAL_PATH_EQUALITY = Path.__eq__
 _CANONICAL_PATH_FSPATH = Path.__fspath__
 _CANONICAL_OS_FSPATH = os.fspath
 _CANONICAL_ABSPATH = os.path.abspath
+_CANONICAL_STATE_READ_OPEN = _open_read_only_descriptor
 _CANONICAL_STORE_SEAMS = frozenset(
     {
         "_next_collector_schedule_slot",
@@ -191,6 +194,10 @@ def _write_state(path: Path, payload: Mapping[str, object]) -> None:
 
     path.parent.mkdir(parents=True, exist_ok=True)
     encoded = _canonical_bytes(dict(payload)) + b"\n"
+    if len(encoded) > _MAX_STATE_BYTES:
+        raise CampaignInceptionIntegrityError(
+            "campaign inception state exceeds supported size"
+        )
     temporary = path.parent / f".{path.name}.{uuid.uuid4().hex}.tmp"
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
     if os.name != "nt":
@@ -219,15 +226,105 @@ def _write_state(path: Path, payload: Mapping[str, object]) -> None:
         raise
 
 
-def _read_state(path: Path) -> dict[str, object] | None:
+def _read_stable_state_bytes(path: Path) -> bytes | None:
+    """Read one bounded regular inception-state file from one stable identity."""
+
     try:
-        raw = path.read_bytes()
+        before = os.stat(path, follow_symlinks=False)
     except FileNotFoundError:
         return None
     except OSError as exc:
         raise CampaignInceptionIntegrityError(
+            "cannot inspect campaign inception state"
+        ) from exc
+    if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+        raise CampaignInceptionIntegrityError(
+            "campaign inception state must be one regular file"
+        )
+    if before.st_size > _MAX_STATE_BYTES:
+        raise CampaignInceptionIntegrityError(
+            "campaign inception state exceeds supported size"
+        )
+
+    descriptor: int | None = None
+    primary_error: BaseException | None = None
+    try:
+        descriptor = _CANONICAL_STATE_READ_OPEN(path)
+        opened = os.fstat(descriptor)
+        if (
+            opened.st_dev != before.st_dev
+            or opened.st_ino != before.st_ino
+            or not stat.S_ISREG(opened.st_mode)
+            or opened.st_nlink != 1
+        ):
+            raise CampaignInceptionIntegrityError(
+                "campaign inception state changed during open"
+            )
+
+        chunks: list[bytes] = []
+        remaining = _MAX_STATE_BYTES + 1
+        while remaining:
+            chunk = os.read(descriptor, min(1024 * 1024, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        payload = b"".join(chunks)
+        after_open = os.fstat(descriptor)
+        after = os.stat(path, follow_symlinks=False)
+    except CampaignInceptionIntegrityError as exc:
+        primary_error = exc
+        raise
+    except OSError as exc:
+        primary_error = exc
+        raise CampaignInceptionIntegrityError(
             "cannot read campaign inception state"
         ) from exc
+    finally:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError as close_error:
+                if primary_error is None:
+                    raise CampaignInceptionIntegrityError(
+                        "campaign inception state descriptor cleanup failed"
+                    ) from close_error
+                try:
+                    primary_error.add_note(
+                        "campaign inception state descriptor cleanup also failed"
+                    )
+                except BaseException:
+                    pass
+
+    if len(payload) > _MAX_STATE_BYTES:
+        raise CampaignInceptionIntegrityError(
+            "campaign inception state exceeds supported size"
+        )
+
+    def identity(
+        value: os.stat_result,
+    ) -> tuple[int, int, int, int, int, int, int]:
+        return (
+            value.st_dev,
+            value.st_ino,
+            value.st_mode,
+            value.st_size,
+            value.st_mtime_ns,
+            value.st_ctime_ns,
+            value.st_nlink,
+        )
+
+    if identity(before) != identity(after) or identity(opened) != identity(after_open):
+        raise CampaignInceptionIntegrityError(
+            "campaign inception state changed during stable read"
+        )
+    return payload
+
+
+def _read_state(path: Path) -> dict[str, object] | None:
+    raw = _read_stable_state_bytes(path)
+    if raw is None:
+        return None
     try:
         text = raw.decode("utf-8", errors="strict")
         payload = strict_json_loads(text)
@@ -1184,6 +1281,11 @@ def _seal_campaign_inception_dispatch() -> None:
     expected_os_fsync = os.fsync
     expected_os_replace = os.replace
     expected_os_close = os.close
+    expected_os_stat = os.stat
+    expected_os_fstat = os.fstat
+    expected_os_read = os.read
+    expected_stat = stat
+    expected_stat_isreg = stat.S_ISREG
     expected_uuid = uuid
     expected_uuid4 = uuid.uuid4
     expected_math = math
@@ -1197,6 +1299,7 @@ def _seal_campaign_inception_dispatch() -> None:
     expected_authority_domain = AUTHORITY_DOMAIN
     expected_state_dir = _STATE_DIR
     expected_hex = _HEX
+    expected_max_state_bytes = _MAX_STATE_BYTES
     expected_store_seam_names = _CANONICAL_STORE_SEAMS
     expected_store_seam_map = _CANONICAL_STORE_CLASS_SEAMS
 
@@ -1223,6 +1326,7 @@ def _seal_campaign_inception_dispatch() -> None:
             ("_CANONICAL_PATH_FSPATH", _CANONICAL_PATH_FSPATH),
             ("_CANONICAL_OS_FSPATH", _CANONICAL_OS_FSPATH),
             ("_CANONICAL_ABSPATH", _CANONICAL_ABSPATH),
+            ("_CANONICAL_STATE_READ_OPEN", _CANONICAL_STATE_READ_OPEN),
         )
     )
     helper_witnesses = tuple(
@@ -1237,6 +1341,7 @@ def _seal_campaign_inception_dispatch() -> None:
             ("_state_path", _state_path),
             ("_fsync_directory", _fsync_directory),
             ("_write_state", _write_state),
+            ("_read_stable_state_bytes", _read_stable_state_bytes),
             ("_read_state", _read_state),
             ("_require_store_seams", _require_store_seams),
             ("_resolve_precommit", _resolve_precommit),
@@ -1344,6 +1449,7 @@ def _seal_campaign_inception_dispatch() -> None:
             or module_globals.get("AUTHORITY_DOMAIN") != expected_authority_domain
             or module_globals.get("_STATE_DIR") != expected_state_dir
             or module_globals.get("_HEX") is not expected_hex
+            or module_globals.get("_MAX_STATE_BYTES") != expected_max_state_bytes
         ):
             raise expected_error_type("campaign inception schema/domain authority is rebound")
 
@@ -1402,9 +1508,19 @@ def _seal_campaign_inception_dispatch() -> None:
             or expected_os.fsync is not expected_os_fsync
             or expected_os.replace is not expected_os_replace
             or expected_os.close is not expected_os_close
+            or expected_os.stat is not expected_os_stat
+            or expected_os.fstat is not expected_os_fstat
+            or expected_os.read is not expected_os_read
         ):
             raise expected_error_type(
                 "campaign inception filesystem dispatch authority is rebound"
+            )
+        if (
+            module_globals.get("stat") is not expected_stat
+            or expected_stat.S_ISREG is not expected_stat_isreg
+        ):
+            raise expected_error_type(
+                "campaign inception file-type dispatch authority is rebound"
             )
         if (
             module_globals.get("uuid") is not expected_uuid

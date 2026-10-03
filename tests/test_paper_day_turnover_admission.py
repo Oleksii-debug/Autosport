@@ -173,3 +173,87 @@ def test_candidate_outside_current_product_day_cannot_spend_current_headroom(tmp
     assert result.admitted is False
     assert result.risk.reason == "economic goal turnover limit exceeded"
     assert len(result.book.tickets) == 1
+
+
+def test_day_turnover_override_does_not_bypass_local_ticket_limit(tmp_path):
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    old = now - timedelta(days=2)
+    goal = _goal()
+    EconomicGoalStore(tmp_path).initialize_owner(goal)
+    book = _book_with_settled_turnover(placed_at=_timestamp(old), stake="50")
+    book.save(tmp_path / "paper_book.json")
+    candidate = _leg("candidate")
+    context = _context(candidate, _timestamp(now))
+    policy = PaperRiskPolicy(
+        max_ticket_fraction=Decimal("0.00001"),
+        max_committed_fraction=Decimal("1"),
+        minimum_cash_reserve_fraction=Decimal("0"),
+        economic_goal=goal,
+    )
+
+    baseline = policy.evaluate(book, Decimal("0.01"), context=context)
+    result = admit_paper_ticket(
+        workspace=tmp_path,
+        book=book,
+        risk_policy=policy,
+        stake=Decimal("0.01"),
+        legs=(candidate,),
+        reason="post-turnover local risk gate",
+        placed_at=_timestamp(now),
+        context=context,
+        provider_source_ids=("provider-1",),
+        bankroll_id="paper-bankroll",
+        currency="USD",
+    )
+
+    assert baseline.reason == "economic goal turnover limit exceeded"
+    assert result.admitted is False
+    assert result.risk.reason == "ticket exceeds configured bankroll fraction"
+
+
+def test_day_turnover_override_does_not_bypass_quote_freshness(tmp_path):
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    old = now - timedelta(days=2)
+    goal = _goal()
+    EconomicGoalStore(tmp_path).initialize_owner(goal)
+    book = _book_with_settled_turnover(placed_at=_timestamp(old), stake="50")
+    book.save(tmp_path / "paper_book.json")
+    candidate = _leg("candidate")
+    stale_quote = MarketEvent(
+        event_id=candidate.event_id,
+        market_id=candidate.market_id,
+        selection_id=candidate.selection_id,
+        decimal_odds=candidate.locked_odds,
+        observed_ts=_timestamp(now - timedelta(hours=1)),
+        source_id="provider-1",
+        sequence=1,
+        source_ts=_timestamp(now - timedelta(hours=1, seconds=1)),
+        ingest_ts=_timestamp(now - timedelta(hours=1) + timedelta(seconds=1)),
+    )
+    context = ProposedTicketRiskContext(
+        legs=(candidate,),
+        quotes=(stale_quote,),
+        bankroll_id="paper-bankroll",
+        currency="USD",
+        proposal_ts=_timestamp(now),
+    )
+    policy = _policy(goal)
+
+    baseline = policy.evaluate(book, Decimal("0.01"), context=context)
+    result = admit_paper_ticket(
+        workspace=tmp_path,
+        book=book,
+        risk_policy=policy,
+        stake=Decimal("0.01"),
+        legs=(candidate,),
+        reason="post-turnover quote gate",
+        placed_at=_timestamp(now),
+        context=context,
+        provider_source_ids=("provider-1",),
+        bankroll_id="paper-bankroll",
+        currency="USD",
+    )
+
+    assert baseline.reason == "economic goal turnover limit exceeded"
+    assert result.admitted is False
+    assert "quote" in result.risk.reason

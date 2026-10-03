@@ -9,6 +9,7 @@ from enum import Enum
 from .market_mirror import MarketMirror
 from .market_mirror_runtime import (
     BoundedMirrorInvalidationBuffer,
+    FocusedMirrorDependency,
     FocusedMirrorDependencyIndex,
 )
 
@@ -111,6 +112,17 @@ def _canonical_max_age(value: object) -> timedelta:
 
 
 @dataclass(frozen=True, slots=True)
+class LiveInputDependencyEvidence:
+    """Immutable selector contract that defines the registered input evidence scope."""
+
+    source_ids: tuple[str, ...] | None
+    sports: tuple[str, ...] | None
+    event_ids: tuple[str, ...] | None
+    market_ids: tuple[str, ...] | None
+    selection_ids: tuple[str, ...] | None
+
+
+@dataclass(frozen=True, slots=True)
 class LiveMarketComponentEvidence:
     source_id: str
     quote_key: str
@@ -139,6 +151,7 @@ class RegisteredLiveInputCurrentView:
     outcome: LiveInputCurrentViewOutcome
     wait_reasons: tuple[LiveInputWaitReason, ...]
     recheck_triggers: tuple[LiveInputRecheckTrigger, ...]
+    dependency: LiveInputDependencyEvidence
     components: tuple[LiveMarketComponentEvidence, ...]
     evidence_sha256: str
 
@@ -230,10 +243,20 @@ def evaluate_registered_input_current_view(
         raise LiveMarketActionabilityError(
             f"unknown registered live input {normalized_input_id!r}"
         ) from exc
+    if type(dependency) is not FocusedMirrorDependency:
+        raise LiveMarketActionabilityError(
+            "registered live input dependency is not canonical"
+        )
 
-    raw_snapshot = updates.mirror.view(
-        **dependencies._selectors(dependency)
+    selectors = dependencies._selectors(dependency)
+    dependency_evidence = LiveInputDependencyEvidence(
+        source_ids=None if dependency.source_ids is None else tuple(sorted(dependency.source_ids)),
+        sports=None if dependency.sports is None else tuple(sorted(dependency.sports)),
+        event_ids=None if dependency.event_ids is None else tuple(sorted(dependency.event_ids)),
+        market_ids=None if dependency.market_ids is None else tuple(sorted(dependency.market_ids)),
+        selection_ids=None if dependency.selection_ids is None else tuple(sorted(dependency.selection_ids)),
     )
+    raw_snapshot = updates.mirror.view(**selectors)
 
     component_evidence: list[LiveMarketComponentEvidence] = []
     aggregate_reasons: set[LiveInputWaitReason] = set()
@@ -316,6 +339,13 @@ def evaluate_registered_input_current_view(
         "outcome": outcome.value,
         "wait_reasons": [reason.value for reason in wait_reasons],
         "recheck_triggers": [trigger.value for trigger in recheck_triggers],
+        "dependency": {
+            "source_ids": dependency_evidence.source_ids,
+            "sports": dependency_evidence.sports,
+            "event_ids": dependency_evidence.event_ids,
+            "market_ids": dependency_evidence.market_ids,
+            "selection_ids": dependency_evidence.selection_ids,
+        },
         "components": [
             {
                 "source_id": item.source_id,
@@ -351,6 +381,7 @@ def evaluate_registered_input_current_view(
         outcome=outcome,
         wait_reasons=wait_reasons,
         recheck_triggers=recheck_triggers,
+        dependency=dependency_evidence,
         components=components,
         evidence_sha256=evidence_sha256,
     )

@@ -1120,3 +1120,76 @@ def test_completion_clock_cannot_mutate_sha256_primitive_before_artifact(
     )
     assert len(evidence) == 1
     assert evidence[0]["terminal"] is None
+
+
+def test_receipt_field_descriptor_rebind_rejects_before_provider_io(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    locator, store, spec, provider_store = _setup(tmp_path)
+    provider_calls: list[str] = []
+
+    monkeypatch.setattr(
+        capture_module.CampaignCompleteBoardCycleReceipt,
+        "campaign_id",
+        property(lambda _self: "forged-campaign"),
+    )
+    monkeypatch.setattr(
+        provider_module,
+        "urlopen",
+        lambda _request, _timeout: provider_calls.append("provider"),
+    )
+
+    with pytest.raises(
+        CampaignProviderCycleCaptureIntegrityError,
+        match="receipt field authority changed",
+    ):
+        capture_campaign_complete_game_board(
+            precommit_locator=locator,
+            store=store,
+            source_spec=spec,
+            evidence_store=provider_store,
+            request=_request(),
+            api_key="secret-value",
+            timeout_seconds=3.0,
+            clock=_clock(),
+        )
+
+    assert provider_calls == []
+    assert store.collector_cycle_evidence(
+        source_id=spec.source_id,
+        start_cycle_seq=1,
+        end_cycle_seq=1,
+    ) == ()
+
+
+def test_receipt_field_witness_rebind_rejects_before_provider_io(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    locator, store, spec, provider_store = _setup(tmp_path)
+    provider_calls: list[str] = []
+
+    monkeypatch.setattr(capture_module, "_RECEIPT_FIELD_NAMES", ())
+    monkeypatch.setattr(
+        provider_module,
+        "urlopen",
+        lambda _request, _timeout: provider_calls.append("provider"),
+    )
+
+    with pytest.raises(
+        CampaignProviderCycleCaptureIntegrityError,
+        match="_RECEIPT_FIELD_NAMES",
+    ):
+        capture_campaign_complete_game_board(
+            precommit_locator=locator,
+            store=store,
+            source_spec=spec,
+            evidence_store=provider_store,
+            request=_request(),
+            api_key="secret-value",
+            timeout_seconds=3.0,
+            clock=_clock(),
+        )
+
+    assert provider_calls == []

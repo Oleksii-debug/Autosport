@@ -943,7 +943,7 @@ def test_future_profile_version_cannot_rebind_approved_plan() -> None:
     )
     binding = bound.profile_for(action.bookmaker_id, action.account_id)
     with pytest.raises(ProviderEvidenceError, match="exact bound profile"):
-        verify_betfair_provider_state(
+        _evaluate_betfair_provider_state_semantics(
             action,
             replace(_profile(), profile_version=2),
             expected_profile_sha256=binding.profile_sha256,
@@ -994,7 +994,7 @@ def test_provider_order_identity_conflict_fails_closed() -> None:
     )
     binding = bound.profile_for(action.bookmaker_id, action.account_id)
     with pytest.raises(ProviderEvidenceError, match="identity conflicts"):
-        verify_betfair_provider_state(
+        _evaluate_betfair_provider_state_semantics(
             action,
             _profile(),
             expected_profile_sha256=binding.profile_sha256,
@@ -1012,7 +1012,7 @@ def test_cross_account_capture_cannot_authorize_reconciliation() -> None:
     )
     binding = bound.profile_for(action.bookmaker_id, action.account_id)
     with pytest.raises(ProviderEvidenceError, match="scope conflicts"):
-        verify_betfair_provider_state(
+        _evaluate_betfair_provider_state_semantics(
             action,
             _profile(),
             expected_profile_sha256=binding.profile_sha256,
@@ -1030,7 +1030,7 @@ def test_provider_market_event_identity_conflict_fails_closed() -> None:
     )
     binding = bound.profile_for(action.bookmaker_id, action.account_id)
     with pytest.raises(ProviderEvidenceError, match="market-to-event identity"):
-        verify_betfair_provider_state(
+        _evaluate_betfair_provider_state_semantics(
             action,
             _profile(),
             expected_profile_sha256=binding.profile_sha256,
@@ -1048,7 +1048,7 @@ def test_non_settled_cleared_order_blocks_absence_retry_release() -> None:
     )
     binding = bound.profile_for(action.bookmaker_id, action.account_id)
     with pytest.raises(ProviderEvidenceError, match="non-settled cleared state"):
-        verify_betfair_provider_state(
+        _evaluate_betfair_provider_state_semantics(
             action,
             _profile(),
             expected_profile_sha256=binding.profile_sha256,
@@ -1067,7 +1067,7 @@ def test_cleared_provider_event_mismatch_fails_closed() -> None:
     )
     binding = bound.profile_for(action.bookmaker_id, action.account_id)
     with pytest.raises(ProviderEvidenceError, match="event identity conflicts"):
-        verify_betfair_provider_state(
+        _evaluate_betfair_provider_state_semantics(
             action,
             _profile(),
             expected_profile_sha256=binding.profile_sha256,
@@ -1088,7 +1088,7 @@ def test_closed_market_can_bind_event_from_cleared_bet_without_releasing_retry()
     assert capture.market_event.source == "cleared:CANCELLED"
     binding = bound.profile_for(action.bookmaker_id, action.account_id)
     with pytest.raises(ProviderEvidenceError, match="non-settled cleared state"):
-        verify_betfair_provider_state(
+        _evaluate_betfair_provider_state_semantics(
             action,
             _profile(),
             expected_profile_sha256=binding.profile_sha256,

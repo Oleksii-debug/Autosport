@@ -29,6 +29,7 @@ from .bookmaker_capability_lifecycle import (
     BETDAQ_AUTHENTICATED_SOURCE_CONTRACT_REF,
     BETDAQ_AUTHENTICATED_VALIDATION_POLICY_VERSION,
     BetdaqAuthenticatedCapabilityIssuance,
+    CapabilityEvidenceError,
     CapabilityEvidenceJournal,
     CapabilityEvidenceStrength,
     CapabilityLifecycleState,
@@ -630,6 +631,8 @@ def _install_provider_capability_authority():
     def issue_betdaq_authenticated_read_evidence(
         issuance: BetdaqAuthenticatedCapabilityIssuance,
         integration: BookmakerIntegrationEvidence,
+        *,
+        journal: CapabilityEvidenceJournal | None = None,
     ) -> ProviderCapabilityEvidence:
         """Compose matrix read authority from exact product-issued BETDAQ lifecycle proof."""
 
@@ -653,8 +656,18 @@ def _install_provider_capability_authority():
             )
 
         lifecycle = issuance.evidence
-        journal = CapabilityEvidenceJournal()
-        journal.publish(lifecycle)
+        if journal is None:
+            journal = CapabilityEvidenceJournal()
+        elif type(journal) is not CapabilityEvidenceJournal:
+            raise ProviderCapabilityEvidenceMatrixError(
+                "BETDAQ authenticated evidence journal must be exact CapabilityEvidenceJournal"
+            )
+        try:
+            journal.publish(lifecycle)
+        except CapabilityEvidenceError as exc:
+            raise ProviderCapabilityEvidenceMatrixError(
+                "BETDAQ authenticated evidence requires a valid lifecycle predecessor chain"
+            ) from exc
         requirement = CapabilityRequirement(
             lifecycle.capability,
             CapabilityEvidenceStrength.OBSERVED_AUTHENTICATED,

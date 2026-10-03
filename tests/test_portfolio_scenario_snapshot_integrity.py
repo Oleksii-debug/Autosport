@@ -285,10 +285,6 @@ class PortfolioScenarioSnapshotIntegrityTests(unittest.TestCase):
         self.assertEqual(second.status, TicketStatus.WON)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
     def test_direct_scenario_profit_rejects_open_ticket_with_settlement_residue(self) -> None:
         _book, ticket, leg = self._open_ticket()
         ticket.payout = Decimal("5")
@@ -307,3 +303,7 @@ if __name__ == "__main__":
 
         with self.assertRaisesRegex(ValueError, "open ticket .* payout must be zero"):
             PortfolioEngine.affected_tickets([ticket], leg.quote_key)
+
+
+if __name__ == "__main__":
+    unittest.main()

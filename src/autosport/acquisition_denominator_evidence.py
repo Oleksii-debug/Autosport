@@ -3,6 +3,8 @@ from __future__ import annotations
 import hashlib
 import inspect
 import json
+import threading
+import weakref
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import StrEnum
@@ -21,8 +23,6 @@ _CANONICAL_CYCLE_EVIDENCE_DESCRIPTOR = inspect.getattr_static(
     CollectorDeltaStore, "collector_cycle_evidence"
 )
 _CANONICAL_CYCLE_EVIDENCE_CODE = _CANONICAL_CYCLE_EVIDENCE.__code__
-_MAX_ISSUED = 2048
-_ISSUED: dict[int, tuple["AcquisitionDenominatorEvidence", str]] = {}
 
 
 class AcquisitionDenominatorEvidenceError(ValueError):
@@ -148,7 +148,7 @@ def _cycle_window_sha256(
     )
 
 
-@dataclass(frozen=True, slots=True, init=False)
+@dataclass(frozen=True, slots=True, init=False, weakref_slot=True)
 class AcquisitionDenominatorEvidence:
     """Product-issued acquisition coverage bound to one exact frozen universe.
 
@@ -239,12 +239,6 @@ class AcquisitionDenominatorEvidence:
         if include_digest:
             payload["evidence_sha256"] = self.evidence_sha256
         return payload
-
-
-def _remember_issued(evidence: AcquisitionDenominatorEvidence) -> None:
-    if len(_ISSUED) >= _MAX_ISSUED:
-        _ISSUED.pop(next(iter(_ISSUED)))
-    _ISSUED[id(evidence)] = (evidence, evidence.evidence_sha256)
 
 
 def _classify_as_of_freeze(
@@ -469,22 +463,20 @@ def build_acquisition_denominator_evidence(
     evidence = AcquisitionDenominatorEvidence._issue(
         {**payload, "evidence_sha256": evidence_sha256}
     )
-    _remember_issued(evidence)
     return evidence
 
 
 def require_complete_acquisition_coverage(
     evidence: AcquisitionDenominatorEvidence,
 ) -> AcquisitionDenominatorEvidence:
-    """Require the bounded scheduled-acquisition prerequisite only.
+    """Require structurally valid complete scheduled-acquisition evidence.
 
-    This does not authorize scientific promotion or prove that positive provider
-    observations are the exact acquisitions materialized in EvaluationUniverse.
+    Product issuance identity is enforced by the installed canonical wrapper below.
+    This raw implementation is retained only inside that closure.
     """
 
     if type(evidence) is not AcquisitionDenominatorEvidence:
         raise TypeError("evidence must be exact AcquisitionDenominatorEvidence")
-    issued = _ISSUED.get(id(evidence))
     try:
         expected_digest = _digest(
             {"schema": _SCHEMA, **evidence.to_payload(include_digest=False)}
@@ -493,14 +485,9 @@ def require_complete_acquisition_coverage(
         raise AcquisitionDenominatorEvidenceError(
             "acquisition denominator evidence structure is invalid"
         ) from exc
-    if (
-        issued is None
-        or issued[0] is not evidence
-        or issued[1] != evidence.evidence_sha256
-        or evidence.evidence_sha256 != expected_digest
-    ):
+    if evidence.evidence_sha256 != expected_digest:
         raise AcquisitionDenominatorEvidenceError(
-            "acquisition denominator evidence is not current product-issued authority"
+            "acquisition denominator evidence structure/digest is invalid"
         )
     if not evidence.acquisition_complete_by_universe_freeze:
         raise AcquisitionDenominatorEvidenceError(
@@ -508,6 +495,66 @@ def require_complete_acquisition_coverage(
             "or post-cutoff scheduled acquisition coverage"
         )
     return evidence
+
+
+def _install_acquisition_denominator_authority() -> None:
+    lock = threading.RLock()
+    issued: dict[
+        int,
+        tuple[weakref.ReferenceType[AcquisitionDenominatorEvidence], str],
+    ] = {}
+    raw_build = build_acquisition_denominator_evidence
+    raw_require = require_complete_acquisition_coverage
+
+    def authoritative_build(*args: object, **kwargs: object) -> AcquisitionDenominatorEvidence:
+        evidence = raw_build(*args, **kwargs)
+        identity = id(evidence)
+        digest = evidence.evidence_sha256
+
+        def clear(
+            reference: weakref.ReferenceType[AcquisitionDenominatorEvidence],
+            *,
+            _identity: int = identity,
+        ) -> None:
+            with lock:
+                record = issued.get(_identity)
+                if record is not None and record[0] is reference:
+                    issued.pop(_identity, None)
+
+        reference = weakref.ref(evidence, clear)
+        with lock:
+            issued[identity] = (reference, digest)
+        return evidence
+
+    def authoritative_require(
+        evidence: AcquisitionDenominatorEvidence,
+    ) -> AcquisitionDenominatorEvidence:
+        if type(evidence) is not AcquisitionDenominatorEvidence:
+            raise TypeError("evidence must be exact AcquisitionDenominatorEvidence")
+        try:
+            current_digest = evidence.evidence_sha256
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise AcquisitionDenominatorEvidenceError(
+                "acquisition denominator evidence structure is invalid"
+            ) from exc
+        with lock:
+            record = issued.get(id(evidence))
+        if (
+            record is None
+            or record[0]() is not evidence
+            or record[1] != current_digest
+        ):
+            raise AcquisitionDenominatorEvidenceError(
+                "acquisition denominator evidence is not current product-issued authority"
+            )
+        return raw_require(evidence)
+
+    globals()["build_acquisition_denominator_evidence"] = authoritative_build
+    globals()["require_complete_acquisition_coverage"] = authoritative_require
+
+
+_install_acquisition_denominator_authority()
+del _install_acquisition_denominator_authority
 
 
 __all__ = [

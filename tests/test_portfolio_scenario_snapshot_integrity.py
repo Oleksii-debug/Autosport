@@ -182,6 +182,38 @@ class PortfolioScenarioSnapshotIntegrityTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "duplicate quote_key leg"):
             PortfolioEngine.scenario_profit([ticket], {leg.quote_key})
 
+    def test_portfolio_snapshot_rejects_non_enum_ticket_status(self) -> None:
+        leg = TicketLeg("event", "winner", "alice", Decimal("2"))
+        ticket = portfolio_module.PaperTicket(
+            ticket_id="synthetic-bad-status",
+            stake=Decimal("10"),
+            legs=(leg,),
+            placed_at="2026-09-21T08:00:00+00:00",
+        )
+        ticket.status = "open"
+
+        with self.assertRaisesRegex(ValueError, "status must be exact TicketStatus"):
+            PortfolioEngine().analyse([ticket])
+
+    def test_portfolio_snapshot_rejects_duplicate_ticket_identity(self) -> None:
+        leg_a = TicketLeg("event-a", "winner", "alice", Decimal("2"))
+        leg_b = TicketLeg("event-b", "winner", "bob", Decimal("3"))
+        first = portfolio_module.PaperTicket(
+            ticket_id="duplicate-ticket",
+            stake=Decimal("10"),
+            legs=(leg_a,),
+            placed_at="2026-09-21T08:00:00+00:00",
+        )
+        second = portfolio_module.PaperTicket(
+            ticket_id="duplicate-ticket",
+            stake=Decimal("20"),
+            legs=(leg_b,),
+            placed_at="2026-09-21T08:00:01+00:00",
+        )
+
+        with self.assertRaisesRegex(ValueError, "ticket_id values must be unique"):
+            PortfolioEngine().analyse([first, second])
+
     def test_snapshot_fails_closed_if_settlement_crosses_capture_window(self) -> None:
         book = PaperBook("100")
         first_leg = TicketLeg("event-1", "winner", "alice", Decimal("2"))

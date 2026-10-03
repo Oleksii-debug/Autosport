@@ -273,6 +273,104 @@ def test_provider_io_occurs_only_after_authorized_scheduled_start(
     assert exact["artifact_id"] == receipt.artifact_id
 
 
+def test_delayed_collector_start_after_precommit_window_blocks_before_provider_io(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    locator, store, spec, provider_store = _setup(tmp_path)
+    provider_calls: list[str] = []
+
+    monkeypatch.setattr(
+        provider_module,
+        "urlopen",
+        lambda _request, _timeout: provider_calls.append("provider"),
+    )
+
+    with pytest.raises(
+        CampaignProviderCycleCaptureIntegrityError,
+        match="START falls outside precommitted campaign observation window",
+    ):
+        capture_campaign_complete_game_board(
+            precommit_locator=locator,
+            store=store,
+            source_spec=spec,
+            evidence_store=provider_store,
+            request=_request(),
+            api_key="secret-value",
+            timeout_seconds=3.0,
+            clock=lambda: "2100-01-09T06:00:00+00:00",
+        )
+
+    assert provider_calls == []
+    assert store.collector_cycle_evidence(
+        source_id=spec.source_id,
+        start_cycle_seq=1,
+        end_cycle_seq=1,
+    ) == ()
+
+
+def test_capture_refuses_slot_after_frozen_evaluation_range_before_provider_io(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    locator, store, spec, provider_store = _setup(tmp_path)
+    establish_campaign_inception(
+        precommit_locator=locator,
+        store=store,
+        source_spec=spec,
+    )
+    for ordinal in (0, 1):
+        slot = store._next_collector_schedule_slot(
+            source_id=spec.source_id,
+            run_id=spec.run_id,
+        )
+        assert slot["slot_ordinal"] == ordinal
+        cycle_seq = store._begin_scheduled_collector_cycle(
+            source_id=spec.source_id,
+            run_id=spec.run_id,
+            stream_epoch=spec.stream_epoch,
+            max_items=spec.max_items,
+            slot_ordinal=slot["slot_ordinal"],
+            due_at=slot["due_at"],
+            attempted_at=slot["due_at"],
+        )
+        store._finish_collector_cycle(
+            source_id=spec.source_id,
+            cycle_seq=cycle_seq,
+            status="LOCAL_FAILURE",
+            completed_at=slot["due_at"],
+            catalog_changes=(),
+            observed_delta_ids=(),
+            committed_delta_ids=(),
+            duplicate_delta_ids=(),
+            error_code="test-slot-retirement",
+        )
+
+    provider_calls: list[str] = []
+    monkeypatch.setattr(
+        provider_module,
+        "urlopen",
+        lambda _request, _timeout: provider_calls.append("provider"),
+    )
+
+    with pytest.raises(
+        CampaignProviderCycleCaptureIntegrityError,
+        match="next slot does not match inception receipt",
+    ):
+        capture_campaign_complete_game_board(
+            precommit_locator=locator,
+            store=store,
+            source_spec=spec,
+            evidence_store=provider_store,
+            request=_request(),
+            api_key="secret-value",
+            timeout_seconds=3.0,
+            clock=lambda: "2100-01-01T06:00:20+00:00",
+        )
+
+    assert provider_calls == []
+
+
 def test_provider_observation_cannot_predate_authorized_cycle_start(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -451,6 +549,105 @@ def test_durable_resolver_rejects_legacy_success_with_post_cycle_provider_time(
     with pytest.raises(
         CampaignForwardUniverseCycleBindingError,
         match="outside authorized collector cycle chronology",
+    ):
+        resolve_campaign_forward_universe_cycle_authority(
+            precommit_locator=locator,
+            collector_store=store,
+            source_spec=spec,
+            cycle_receipt=receipt,
+            provider_evidence_store=provider_store,
+            universe_store=universe_store,
+            protocol=protocol,
+            event_lifecycle=None,
+        )
+
+
+def test_durable_resolver_rejects_legacy_success_completed_after_campaign_window(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    locator, store, spec, provider_store = _setup(tmp_path)
+    campaign = establish_campaign_inception(
+        precommit_locator=locator,
+        store=store,
+        source_spec=spec,
+    )
+    slot = store._next_collector_schedule_slot(
+        source_id=spec.source_id,
+        run_id=spec.run_id,
+    )
+    cycle_seq = store._begin_scheduled_collector_cycle(
+        source_id=spec.source_id,
+        run_id=spec.run_id,
+        stream_epoch=spec.stream_epoch,
+        max_items=spec.max_items,
+        slot_ordinal=slot["slot_ordinal"],
+        due_at=slot["due_at"],
+        attempted_at="2100-01-01T06:00:00+00:00",
+    )
+
+    monkeypatch.setattr(
+        provider_module,
+        "urlopen",
+        lambda _request, _timeout: _FakeSseResponse(_frame()),
+    )
+    monkeypatch.setattr(provider_module, "_default_clock", lambda: CAPTURED_AT)
+    snapshot = provider_module.capture_parlay_complete_game_board(
+        api_key="secret-value",
+        request=_request(),
+        timeout_seconds=3.0,
+    )
+    provider_store.save(snapshot)
+    store._record_collector_cycle_observation_artifact(
+        source_id=spec.source_id,
+        cycle_seq=cycle_seq,
+        artifact_kind=ARTIFACT_KIND,
+        artifact_sha256=snapshot.evidence_sha256,
+    )
+    store._finish_collector_cycle(
+        source_id=spec.source_id,
+        cycle_seq=cycle_seq,
+        status="SUCCESS",
+        completed_at="2100-01-09T06:00:00+00:00",
+        catalog_changes=(),
+        observed_delta_ids=(),
+        committed_delta_ids=(),
+        duplicate_delta_ids=(),
+    )
+    collector_evidence = store.collector_cycle_observation_artifact_evidence(
+        source_id=spec.source_id,
+        cycle_seq=cycle_seq,
+        artifact_kind=ARTIFACT_KIND,
+        artifact_sha256=snapshot.evidence_sha256,
+    )
+    receipt = capture_module._issue_receipt(
+        campaign=campaign,
+        snapshot=snapshot,
+        collector_evidence=collector_evidence,
+    )
+    universe_store = ProviderEvaluationUniverseStore(
+        tmp_path / "window-workspace",
+        authority_id="legacy-window-test-authority",
+        source_id=spec.source_id,
+        authority_root=tmp_path / "window-machine-authority",
+    )
+    protocol = ForwardEvidenceProtocolEnvelope(
+        campaign_id=campaign.campaign_id,
+        scientific_protocol_sha256=A,
+        candidate_universe_rule_id="legacy-cycle-window",
+        candidate_universe_rule_sha256=B,
+        forward_evaluation_policy_sha256=C,
+        runtime_identity_sha256=D,
+        baseline_set_sha256=E,
+        protective_metric_set_sha256=F,
+        cost_policy_sha256=ZERO,
+        precommit_anchor_lower=datetime(2099, 12, 31, tzinfo=timezone.utc),
+        precommit_anchor_upper=datetime(2100, 1, 1, tzinfo=timezone.utc),
+    )
+
+    with pytest.raises(
+        CampaignForwardUniverseCycleBindingError,
+        match="outside precommitted campaign observation window",
     ):
         resolve_campaign_forward_universe_cycle_authority(
             precommit_locator=locator,

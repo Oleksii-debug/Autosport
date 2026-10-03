@@ -8,6 +8,7 @@ or whole-product real-money readiness.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, localcontext
@@ -23,6 +24,7 @@ from .account_snapshot_acquisition import (
     AccountSnapshotAcquisitionError,
     AuthoritativeAccountSnapshot,
     assert_account_snapshot_acquisition_authoritative,
+    hold_current_account_snapshot_acquisition,
 )
 from .bookmaker_capability import BookmakerCapability
 from .economic_goal import EconomicGoalContractError
@@ -79,6 +81,12 @@ _LEDGER_CANONICAL_MONOTONIC_AUTHORITY_CODE = getattr(
 _ASSERT_ACCOUNT_SNAPSHOT_AUTHORITY = assert_account_snapshot_acquisition_authoritative
 _ASSERT_ACCOUNT_SNAPSHOT_AUTHORITY_CODE = getattr(
     _ASSERT_ACCOUNT_SNAPSHOT_AUTHORITY,
+    "__code__",
+    None,
+)
+_HOLD_CURRENT_ACCOUNT_SNAPSHOT_AUTHORITY = hold_current_account_snapshot_acquisition
+_HOLD_CURRENT_ACCOUNT_SNAPSHOT_AUTHORITY_CODE = getattr(
+    _HOLD_CURRENT_ACCOUNT_SNAPSHOT_AUTHORITY,
     "__code__",
     None,
 )
@@ -598,6 +606,8 @@ def _canonical_account_snapshot_authority(
     *,
     _assert=_ASSERT_ACCOUNT_SNAPSHOT_AUTHORITY,
     _assert_code=_ASSERT_ACCOUNT_SNAPSHOT_AUTHORITY_CODE,
+    _hold=_HOLD_CURRENT_ACCOUNT_SNAPSHOT_AUTHORITY,
+    _hold_code=_HOLD_CURRENT_ACCOUNT_SNAPSHOT_AUTHORITY_CODE,
 ):
     live_module = getattr(
         _account_acquisition,
@@ -605,15 +615,43 @@ def _canonical_account_snapshot_authority(
         None,
     )
     live_alias = globals().get("assert_account_snapshot_acquisition_authoritative")
+    live_hold = getattr(
+        _account_acquisition,
+        "hold_current_account_snapshot_acquisition",
+        None,
+    )
+    live_hold_alias = globals().get("hold_current_account_snapshot_acquisition")
     if (
         live_module is not _assert
         or live_alias is not _assert
         or getattr(_assert, "__code__", None) is not _assert_code
+        or live_hold is not _hold
+        or live_hold_alias is not _hold
+        or getattr(_hold, "__code__", None) is not _hold_code
     ):
         raise ProviderAccountHeadroomError(
             "canonical account snapshot headroom authority changed"
         )
-    return _assert
+    return _assert, _hold
+
+
+@contextmanager
+def _current_balance_generation_lock(
+    workspace,
+    acquired: AuthoritativeAccountSnapshot,
+):
+    """Serialize economic truth with the exact current BALANCE_READ generation."""
+
+    _, hold_current = _canonical_account_snapshot_authority()
+    required = frozenset({BookmakerCapability.BALANCE_READ})
+    with _canonical_economic_lock(workspace):
+        try:
+            with hold_current(acquired, required):
+                yield
+        except AccountSnapshotAcquisitionError as exc:
+            raise ProviderAccountHeadroomStale(
+                "provider-account balance generation changed; recompute headroom"
+            ) from exc
 
 
 def _canonical_ledger_dispatch(
@@ -1180,7 +1218,7 @@ def _require_live_balance(
             "account evidence must be exact AuthoritativeAccountSnapshot"
         )
     try:
-        assert_live = _canonical_account_snapshot_authority()
+        assert_live, _ = _canonical_account_snapshot_authority()
         assert_live(acquired)
     except AccountSnapshotAcquisitionError as exc:
         raise ProviderAccountHeadroomError(
@@ -1599,7 +1637,7 @@ def assess_provider_account_headroom(
     intent_denomination_by_identity = _validated_intent_denomination_map(intents)
     workspace = _canonical_ledger_workspace(ledger)
 
-    with _canonical_economic_lock(workspace):
+    with _current_balance_generation_lock(workspace, acquired):
         (
             economic_goal_contract_sha256,
             economic_goal_bankroll_id,
@@ -1809,7 +1847,7 @@ def reserve_observed_provider_headroom(
         bound_by_plan_id = _validated_bound_plan_map(bound_plans)
         intent_denomination_by_identity = _validated_intent_denomination_map(intents)
         workspace = _canonical_ledger_workspace(ledger)
-        with _canonical_economic_lock(workspace):
+        with _current_balance_generation_lock(workspace, acquired):
             (
                 current_goal_sha256,
                 current_goal_bankroll_id,

@@ -101,6 +101,17 @@ def _digest(value: object) -> str:
     return hashlib.sha256(_canonical_json(value).encode("utf-8")).hexdigest()
 
 
+def _fsync_directory(path: Path) -> None:
+    if os.name == "nt":
+        return
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    descriptor = os.open(path, flags)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
 def _environment_payload(environment: EnvironmentIdentity) -> dict[str, object]:
     if not isinstance(environment, EnvironmentIdentity):
         raise DeploymentRuntimeAuthorityError("environment must be EnvironmentIdentity")
@@ -514,6 +525,7 @@ class DeploymentRuntimeAuthorityStore:
                 handle.flush()
                 os.fsync(handle.fileno())
             os.replace(temporary_name, path)
+            _fsync_directory(path.parent)
         finally:
             if temporary_name is not None:
                 try:

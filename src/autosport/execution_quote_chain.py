@@ -28,6 +28,7 @@ from .real_execution_ledger import (
 SCHEMA_VERSION = 1
 
 CHAIN_NOT_SUBMITTED = "NOT_SUBMITTED"
+CHAIN_SUBMISSION_UNKNOWN = "SUBMISSION_UNKNOWN"
 CHAIN_SUBMIT_INSTRUCTION_UNBOUND = "SUBMIT_INSTRUCTION_UNBOUND"
 
 ACCEPTED_PRICE_NOT_APPLICABLE = "NOT_APPLICABLE"
@@ -109,11 +110,12 @@ class ExecutionQuoteChainEvidence:
             raise ExecutionQuoteChainError(
                 "current ledger schema cannot bind submitted instruction identity"
             )
-        expected_chain_status = (
-            CHAIN_NOT_SUBMITTED
-            if self.submitted_at is None
-            else CHAIN_SUBMIT_INSTRUCTION_UNBOUND
-        )
+        if self.submitted_at is not None:
+            expected_chain_status = CHAIN_SUBMIT_INSTRUCTION_UNBOUND
+        elif self.attempt_state == AttemptState.RESERVED.value:
+            expected_chain_status = CHAIN_NOT_SUBMITTED
+        else:
+            expected_chain_status = CHAIN_SUBMISSION_UNKNOWN
         if self.chain_status != expected_chain_status:
             raise ExecutionQuoteChainError("chain_status mismatches durable submit truth")
 
@@ -278,14 +280,16 @@ def build_execution_quote_chain_evidence(
     acknowledgement = attempt_view.acknowledgement
     provider = attempt_view.provider_evidence
 
-    if attempt_view.state is AttemptState.RESERVED:
+    if attempt_view.submitted_at is not None:
+        chain_status = CHAIN_SUBMIT_INSTRUCTION_UNBOUND
+    elif attempt_view.state is AttemptState.RESERVED:
         chain_status = CHAIN_NOT_SUBMITTED
     else:
-        if attempt_view.submitted_at is None:
-            raise ExecutionQuoteChainUnavailable(
-                "post-reservation attempt lacks durable submission boundary"
-            )
-        chain_status = CHAIN_SUBMIT_INSTRUCTION_UNBOUND
+        # UNKNOWN can originate directly from RESERVED when process recovery or
+        # provider uncertainty cannot prove whether the irreversible submit
+        # boundary was crossed. RECONCILED_NOT_FOUND remains diagnostic only
+        # under the canonical ledger and likewise cannot mint "not submitted".
+        chain_status = CHAIN_SUBMISSION_UNKNOWN
 
     acknowledgement_binding_matches = False
     provider_acknowledgement_sha256: str | None = None

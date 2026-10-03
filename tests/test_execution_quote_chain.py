@@ -10,6 +10,7 @@ from autosport.execution_quote_chain import (
     ACCEPTED_PRICE_NOT_APPLICABLE,
     ACCEPTED_PRICE_UNKNOWN,
     CHAIN_NOT_SUBMITTED,
+    CHAIN_SUBMISSION_UNKNOWN,
     CHAIN_SUBMIT_INSTRUCTION_UNBOUND,
     ExecutionQuoteChainError,
     ExecutionQuoteChainUnavailable,
@@ -21,6 +22,7 @@ from autosport.real_execution_ledger import (
     ExecutionPlan,
     ExternalAcknowledgement,
     RealExecutionLedger,
+    ReconciliationSnapshot,
 )
 
 
@@ -221,6 +223,57 @@ def test_rejected_acknowledgement_has_no_accepted_price_claim(tmp_path) -> None:
     assert evidence.chain_complete is False
 
 
+def test_unknown_before_durable_submit_is_explicit_submission_uncertainty(
+    tmp_path,
+) -> None:
+    ledger = _reserved(tmp_path)
+    ledger.mark_unknown(
+        "attempt-1",
+        reason="process_restart_before_submit_boundary_was_proven",
+        observed_at="2026-10-03T12:00:02+00:00",
+    )
+
+    evidence = _project(ledger)
+
+    assert evidence.attempt_state == "UNKNOWN"
+    assert evidence.submitted_at is None
+    assert evidence.chain_status == CHAIN_SUBMISSION_UNKNOWN
+    assert evidence.submission_instruction_sha256 is None
+    assert evidence.actual_submitted_instruction_bound is False
+    assert evidence.accepted_price_status == ACCEPTED_PRICE_UNKNOWN
+    assert evidence.accepted_price_verified is False
+    assert evidence.chain_complete is False
+
+
+def test_not_found_after_unknown_before_submit_does_not_become_not_submitted(
+    tmp_path,
+) -> None:
+    ledger = _reserved(tmp_path)
+    ledger.mark_unknown(
+        "attempt-1",
+        reason="process_restart_before_submit_boundary_was_proven",
+        observed_at="2026-10-03T12:00:02+00:00",
+    )
+    ledger.reconcile_not_found(
+        ReconciliationSnapshot(
+            attempt_id="attempt-1",
+            evidence_id="n" * 64,
+            observed_at="2026-10-03T12:00:03+00:00",
+            external_effect_found=False,
+            source="provider-order-history",
+        )
+    )
+
+    evidence = _project(ledger)
+
+    assert evidence.attempt_state == "RECONCILED_NOT_FOUND"
+    assert evidence.submitted_at is None
+    assert evidence.chain_status == CHAIN_SUBMISSION_UNKNOWN
+    assert evidence.actual_submitted_instruction_bound is False
+    assert evidence.accepted_price_verified is False
+    assert evidence.chain_complete is False
+
+
 def test_unknown_attempt_cannot_invent_submit_instruction_identity(tmp_path) -> None:
     ledger = _submitted(tmp_path)
     ledger.mark_unknown(
@@ -340,6 +393,21 @@ def test_later_durable_fact_changes_snapshot_not_historical_request(tmp_path) ->
     assert after.requested_odds == before.requested_odds
     assert after.effect_fingerprint == before.effect_fingerprint
     assert after.chain_complete is False
+
+
+def test_evidence_invariant_rejects_not_submitted_label_for_unknown_state(
+    tmp_path,
+) -> None:
+    ledger = _reserved(tmp_path)
+    ledger.mark_unknown(
+        "attempt-1",
+        reason="ambiguous submit boundary",
+        observed_at="2026-10-03T12:00:02+00:00",
+    )
+    evidence = _project(ledger)
+
+    with pytest.raises(ExecutionQuoteChainError, match="chain_status"):
+        replace(evidence, chain_status=CHAIN_NOT_SUBMITTED)
 
 
 def test_evidence_shape_has_no_caller_settable_positive_chain_flags(tmp_path) -> None:

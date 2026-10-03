@@ -1307,6 +1307,13 @@ def _install_account_snapshot_acquisition_authority() -> None:
     raw_read = BetfairAccountSnapshotAcquirer._read_provider_snapshot
     raw_record = _AccountSnapshotStore.record
     raw_hold_current_generation = _AccountSnapshotStore._hold_current_capability_generation
+    raw_hold_current_generation_code = getattr(
+        raw_hold_current_generation,
+        "__code__",
+        None,
+    )
+    raw_store_connect = _AccountSnapshotStore._connect
+    raw_store_connect_code = getattr(raw_store_connect, "__code__", None)
     raw_resolve = _AccountSnapshotStore.resolve
     raw_resolve_request = _AccountSnapshotStore.resolve_request
     canonical_snapshot_read = BetfairReadOnlyClient.read_account_snapshot
@@ -1315,6 +1322,19 @@ def _install_account_snapshot_acquisition_authority() -> None:
     live_snapshot = immutable_mapping_type({})
     current_capability_snapshot = immutable_mapping_type({})
     state_lock = RLock()
+
+    def require_store_connection_authority():
+        live_connect = vars(_AccountSnapshotStore).get("_connect")
+        if (
+            live_connect is not raw_store_connect
+            or getattr(raw_store_connect, "__code__", None) is not raw_store_connect_code
+            or getattr(raw_hold_current_generation, "__code__", None)
+            is not raw_hold_current_generation_code
+        ):
+            raise AccountSnapshotAcquisitionError(
+                "canonical account snapshot durable-store dispatch changed"
+            )
+        return raw_store_connect
 
     class _AccountSnapshotAuthorityBoundary:
         """Own live provider-origin authority without an independently callable mint."""
@@ -1430,6 +1450,7 @@ def _install_account_snapshot_acquisition_authority() -> None:
                     )
                 store, client, origin_credentials = state[1], state[2], state[3]
 
+            require_store_connection_authority()
             client_credentials = getattr(client, "_credentials", None)
             if (
                 type(client_credentials) is not BetfairSessionCredentials
@@ -1602,6 +1623,7 @@ def _install_account_snapshot_acquisition_authority() -> None:
                     "canonical Betfair client credential origin changed during acquisition"
                 )
 
+            require_store_connection_authority()
             acquired = raw_record(
                 store,
                 snapshot,
@@ -1613,6 +1635,7 @@ def _install_account_snapshot_acquisition_authority() -> None:
                 ),
                 account_identity_observed_at=account_identity.observed_at,
             )
+            require_store_connection_authority()
             if type(acquired) is not AuthoritativeAccountSnapshot:
                 raise AccountSnapshotAcquisitionError(
                     "live account snapshot authority requires exact acquired evidence"
@@ -1730,6 +1753,7 @@ def _install_account_snapshot_acquisition_authority() -> None:
                         "live account snapshot durable generation authority is unavailable"
                     )
                 store = current[3]
+                require_store_connection_authority()
                 with raw_hold_current_generation(
                     store,
                     venue_id=receipt.venue_id,
@@ -1757,6 +1781,7 @@ def _install_account_snapshot_acquisition_authority() -> None:
                     # Keep both the process authority lock and the durable SQLite
                     # publication barrier held for the entire consumer critical section.
                     yield acquired
+                    require_store_connection_authority()
 
         def resolve(
             self,

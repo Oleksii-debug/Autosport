@@ -1920,7 +1920,6 @@ def reserve_observed_provider_headroom(
     attempt_id: str,
     bound_plans: tuple[BoundSupervisedExecutionPlan, ...],
     intents: tuple[OpportunityIntent, ...] = (),
-    _issued_assertion=None,
     _digest_authority=_assert_headroom_digest_authority,
     _digest_authority_code=getattr(_assert_headroom_digest_authority, "__code__", None),
 ) -> ProductInternalHeadroomReservation:
@@ -1942,11 +1941,6 @@ def reserve_observed_provider_headroom(
         begin_attempt,
         attempt_state,
     ) = _canonical_ledger_dispatch()
-    if _issued_assertion is None:
-        raise ProviderAccountHeadroomError(
-            "canonical headroom assessment issuance assertion is unavailable"
-        )
-    _issued_assertion(assessment)
     attempt_id = _text(attempt_id, "attempt_id")
     if type(acquired) is not AuthoritativeAccountSnapshot:
         raise ProviderAccountHeadroomError(
@@ -2256,6 +2250,7 @@ def _install_headroom_issuance_authority() -> None:
         bound_plans: tuple[BoundSupervisedExecutionPlan, ...],
         intents: tuple[OpportunityIntent, ...] = (),
     ) -> ProductInternalHeadroomReservation:
+        assert_issued(assessment)
         value = raw_reserve(
             ledger,
             acquired,
@@ -2263,7 +2258,6 @@ def _install_headroom_issuance_authority() -> None:
             attempt_id=attempt_id,
             bound_plans=bound_plans,
             intents=intents,
-            _issued_assertion=assert_issued,
         )
         issue_reservation(value)
         return value

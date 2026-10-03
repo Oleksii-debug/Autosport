@@ -960,6 +960,8 @@ class RealExecutionLedger:
         action_id: str | None,
         attempt_id: str | None,
         payload: dict[str, Any],
+        *,
+        _recorded_at: str | None = None,
     ) -> None:
         if self._serialization_owner_thread_id != threading.get_ident():
             self._mutate(
@@ -972,11 +974,15 @@ class RealExecutionLedger:
                 )
             )
             return
+        if _recorded_at is None:
+            raise ExecutionLedgerIntegrityError(
+                "execution ledger canonical event clock is unavailable"
+            )
         event = {
             "schema_version": SCHEMA_VERSION,
             "event_id": str(uuid.uuid4()),
             "event_type": kind.value,
-            "recorded_at": _now(),
+            "recorded_at": _recorded_at,
             "plan_id": plan_id,
             "action_id": action_id,
             "attempt_id": attempt_id,
@@ -3521,3 +3527,64 @@ class RealExecutionLedger:
             action_ids,
             receipts,
         )
+
+
+def _install_canonical_event_clock() -> None:
+    """Bind durable event time to definition-time native UTC primitives."""
+
+    ledger_type = RealExecutionLedger
+    append_impl = ledger_type._append
+    append_impl_code = append_impl.__code__
+    exact_datetime_now = datetime.now
+    exact_datetime_isoformat = datetime.isoformat
+    exact_utc = timezone.utc
+    wrapper_code = None
+
+    def append_with_canonical_clock(
+        self: RealExecutionLedger,
+        kind: EventType,
+        plan_id: str,
+        action_id: str | None,
+        attempt_id: str | None,
+        payload: dict[str, Any],
+    ) -> None:
+        if (
+            append_with_canonical_clock.__code__ is not wrapper_code
+            or append_impl.__code__ is not append_impl_code
+        ):
+            raise ExecutionLedgerIntegrityError(
+                "execution ledger event-clock dispatch changed"
+            )
+        try:
+            instant = exact_datetime_now(exact_utc)
+            recorded_at = exact_datetime_isoformat(
+                instant,
+                timespec="microseconds",
+            )
+        except (OSError, OverflowError, TypeError, ValueError) as exc:
+            raise ExecutionLedgerIntegrityError(
+                "execution ledger event clock failed"
+            ) from exc
+        append_impl(
+            self,
+            kind,
+            plan_id,
+            action_id,
+            attempt_id,
+            payload,
+            _recorded_at=recorded_at,
+        )
+        if (
+            append_with_canonical_clock.__code__ is not wrapper_code
+            or append_impl.__code__ is not append_impl_code
+        ):
+            raise ExecutionLedgerIntegrityError(
+                "execution ledger event-clock dispatch changed during append"
+            )
+
+    wrapper_code = append_with_canonical_clock.__code__
+    ledger_type._append = append_with_canonical_clock
+
+
+_install_canonical_event_clock()
+del _install_canonical_event_clock

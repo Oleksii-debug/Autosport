@@ -974,7 +974,7 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             result = loop.run_cycle()
 
             self.assertEqual(result.status, LiveCycleStatus.BACKPRESSURE)
-            self.assertIn("durable ineligible provider health evidence", result.detail)
+            self.assertIn("durable failed provider health evidence", result.detail)
             self.assertFalse((workspace / "decisions.jsonl").exists())
             self.assertFalse(
                 (workspace / PersistentLiveDecisionLoop.PROGRESS_FILE_NAME).exists()
@@ -1034,12 +1034,66 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
                 result = loop.run_cycle()
 
             self.assertEqual(result.status, LiveCycleStatus.BACKPRESSURE)
-            self.assertIn("durable ineligible provider health evidence", result.detail)
+            self.assertIn("durable failed provider health evidence", result.detail)
             self.assertFalse((workspace / "decisions.jsonl").exists())
             self.assertFalse(
                 (workspace / PersistentLiveDecisionLoop.PROGRESS_FILE_NAME).exists()
             )
             self.assertEqual(health_store.get("provider-a").status, "healthy")
+            loop.close()
+
+    def test_default_provider_first_failure_health_write_failure_cannot_mint_zero_boundary_gap(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            registry = self._scientific_registry(
+                workspace,
+                self._strategy_version(),
+            )
+
+            class FailingProvider:
+                source_id = "provider-a"
+
+                def read_batch(self, max_items=1000):
+                    del max_items
+                    raise ProviderUnavailableError("provider offline")
+
+            loop = PersistentLiveDecisionLoop(
+                workspace,
+                loop_id="live-test-loop",
+                mode=LiveDecisionMode.PAPER,
+                book=PaperBook("1000"),
+                authority=self._authority(),
+                intent_factory=_EmptyIntentFactory(),
+                scientific_registry=registry,
+                provider=FailingProvider(),
+                max_quote_age=timedelta(seconds=5),
+                clock=_ManualClock(self.START + timedelta(seconds=1)),
+            )
+            loop.register_input(
+                "input-a",
+                source_ids="provider-a",
+                selection_ids="selection-a",
+            )
+
+            with patch.object(
+                SourceHealthStore,
+                "record_failure",
+                side_effect=OSError("health failure publication failed"),
+            ):
+                result = loop.run_cycle()
+
+            self.assertEqual(result.status, LiveCycleStatus.BACKPRESSURE)
+            self.assertIn("durable failed provider health evidence", result.detail)
+            self.assertFalse((workspace / "decisions.jsonl").exists())
+            self.assertFalse(
+                (workspace / PersistentLiveDecisionLoop.PROGRESS_FILE_NAME).exists()
+            )
+            self.assertEqual(
+                SourceHealthStore(
+                    workspace / "source_health.json"
+                ).get("provider-a").status,
+                "unknown",
+            )
             loop.close()
 
     def test_custom_observer_corrupt_canonical_health_authority_fails_closed(self) -> None:

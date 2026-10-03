@@ -2219,27 +2219,47 @@ def admit_paper_ticket(
         # and advancing the existing binding through the canonical persistence
         # authority. Before this point caller state has remained untouched.
         if working_book is book:
-            book.initial_bankroll = mutation_book.initial_bankroll
-            book.balance = mutation_book.balance
-            book.tickets = dict(mutation_book.tickets)
-            book._lifecycle = list(mutation_book._lifecycle)
-            book._settlement_times = dict(mutation_book._settlement_times)
-            book._product_day_admissions = dict(
-                mutation_book._product_day_admissions
+            # Save releases the cross-process snapshot-publication lock. Reacquire
+            # that same canonical lock before promoting caller state, and first prove
+            # the staged mutation object is still bound to the exact durable
+            # generation it just published. A competing direct PaperBook writer in
+            # the save->promotion gap therefore makes this call fail closed instead
+            # of advancing caller binding to unrelated newer bytes.
+            promotion_lock = (
+                _paperbook_authority._acquire_snapshot_publication_lock(
+                    _paperbook_authority._witness_path(book_path)
+                )
             )
-            _paperbook_authority._call_witnessed_delegate(
-                _paperbook_authority._INSTALL_OPENING,
-                _paperbook_authority._INSTALL_OPENING_WITNESS,
-                "opening-authority installation",
-                book,
-            )
-            _paperbook_authority._call_witnessed_delegate(
-                _paperbook_authority._INSTALL_CAUSAL,
-                _paperbook_authority._INSTALL_CAUSAL_WITNESS,
-                "causal-authority installation",
-                book,
-            )
-            _paperbook_authority._advance_book_binding(book, book_path)
+            try:
+                _paperbook_authority._require_bound_book(
+                    mutation_book,
+                    book_path,
+                )
+                book.initial_bankroll = mutation_book.initial_bankroll
+                book.balance = mutation_book.balance
+                book.tickets = dict(mutation_book.tickets)
+                book._lifecycle = list(mutation_book._lifecycle)
+                book._settlement_times = dict(mutation_book._settlement_times)
+                book._product_day_admissions = dict(
+                    mutation_book._product_day_admissions
+                )
+                _paperbook_authority._call_witnessed_delegate(
+                    _paperbook_authority._INSTALL_OPENING,
+                    _paperbook_authority._INSTALL_OPENING_WITNESS,
+                    "opening-authority installation",
+                    book,
+                )
+                _paperbook_authority._call_witnessed_delegate(
+                    _paperbook_authority._INSTALL_CAUSAL,
+                    _paperbook_authority._INSTALL_CAUSAL_WITNESS,
+                    "causal-authority installation",
+                    book,
+                )
+                _paperbook_authority._advance_book_binding(book, book_path)
+            finally:
+                _paperbook_authority._release_snapshot_publication_lock(
+                    promotion_lock
+                )
 
         _require_paperbook_admission_authority()
         persisted = _PAPERBOOK_LOAD_FUNCTION(PaperBook, book_path)

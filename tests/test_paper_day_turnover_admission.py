@@ -2728,6 +2728,22 @@ def _assert_paperbook_mutation_gate_tamper_rejected(
         )
 
 
+def test_bound_caller_promotion_rechecks_under_snapshot_publication_lock():
+    text = Path("src/autosport/economic_admission.py").read_text(encoding="utf-8")
+    region = text.split(
+        "# Durable publication is the commit point.",
+        1,
+    )[1].split("_require_paperbook_admission_authority()", 1)[0]
+    markers = (
+        "_acquire_snapshot_publication_lock(",
+        "_require_bound_book(",
+        "_advance_book_binding(",
+        "_release_snapshot_publication_lock(",
+    )
+    positions = tuple(region.index(marker) for marker in markers)
+    assert positions == tuple(sorted(positions))
+
+
 def test_post_open_authority_failure_does_not_mutate_caller_book(tmp_path):
     """A failed positive commit must not leak a half-open ticket into caller state."""
 

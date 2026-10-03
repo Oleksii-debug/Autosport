@@ -710,6 +710,11 @@ def _validate_state(
         raise CampaignInceptionIntegrityError(
             "prepared schedule payload schema is noncanonical"
         )
+    prepared_schedule_id = _sha256(
+        prepared.get("schedule_id"),
+        "schedule_id",
+    )
+    expected_schedule_id = _expected_schedule_id(spec)
     try:
         expected_due_at = _CANONICAL_SCHEDULE_DUE_AT(
             anchor_at=spec.anchor_at,
@@ -727,6 +732,7 @@ def _validate_state(
         or prepared.get("run_id") != spec.run_id
         or prepared.get("stream_epoch") != spec.stream_epoch
         or prepared.get("schedule_policy") != "fixed_interval_v1"
+        or prepared_schedule_id != expected_schedule_id
         or prepared.get("anchor_at") != spec.anchor_at
         or prepared.get("interval_seconds") != repr(spec.interval_seconds)
         or type(prepared.get("max_items")) is not int
@@ -746,7 +752,6 @@ def _validate_state(
         raise CampaignInceptionIntegrityError(
             "prepared schedule does not match exact inception source specification"
         )
-    _sha256(prepared.get("schedule_id"), "schedule_id")
     claimed_prestart = _sha256(
         prepared.get("prestart_sha256"),
         "prestart_sha256",

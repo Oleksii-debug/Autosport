@@ -8,6 +8,7 @@ import scripts.cancel_superseded_pr_workflow_runs as controller_module
 from scripts.cancel_superseded_pr_workflow_runs import (
     CancellationError,
     GitHubApi,
+    _pull_request_qualification_state,
 )
 from scripts.cancel_superseded_pr_workflow_runs_scoped import WorkflowScopedGitHubApi
 
@@ -464,6 +465,56 @@ def test_scoped_cancel_rechecks_live_qualification_after_association_roundtrip(
             api.cancel(123)
     finally:
         helper.__code__ = original_code
+
+
+def test_scoped_cancel_rechecks_qualification_reader_after_live_roundtrip(
+    monkeypatch,
+) -> None:
+    api = WorkflowScopedGitHubApi(
+        repository="owner/repo",
+        token="token",
+        workflow_id=1,
+        workflow_name="CI",
+    )
+    candidate_head = "a" * 40
+    api._recovered_runs[123] = (7, candidate_head)
+    reader = _pull_request_qualification_state
+    original_code = reader.__code__
+
+    def forged_reader(_qualification):
+        return candidate_head, False
+
+    forged_code = forged_reader.__code__
+    assert len(forged_code.co_freevars) == len(original_code.co_freevars)
+
+    def fake_urlopen(request, *, timeout: int):
+        del timeout
+        url = request.full_url
+        if "/commits/" in url and "/pulls?" in url:
+            body = (
+                '[{"number":7,"head":{"sha":"' + candidate_head + '"}}]'
+            ).encode()
+            return _FakeSuccessResponse(200, body)
+        if url.endswith("/pulls/7"):
+            reader.__code__ = forged_code
+            body = (
+                '{"head":{"sha":"' + ("b" * 40)
+                + '","repo":{"full_name":"owner/repo"}},'
+                + '"base":{"repo":{"full_name":"owner/repo"}},'
+                + '"state":"open","draft":false}'
+            ).encode()
+            return _FakeSuccessResponse(200, body)
+        raise AssertionError("mutated qualification reader must not execute")
+
+    monkeypatch.setattr(controller_module, "urlopen", fake_urlopen)
+    try:
+        with pytest.raises(
+            CancellationError,
+            match="pull request qualification reader authority changed",
+        ):
+            api.cancel(123)
+    finally:
+        reader.__code__ = original_code
 
 
 def test_scoped_cancel_rechecks_base_cancel_code_after_external_revalidation(

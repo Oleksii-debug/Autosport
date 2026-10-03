@@ -50,6 +50,72 @@ class PullRequestQualification:
     integration_capable: bool
 
 
+_PULL_REQUEST_QUALIFICATION_TYPE = PullRequestQualification
+_PULL_REQUEST_QUALIFICATION_DICT_DESCRIPTOR = (
+    PullRequestQualification.__dict__["__dict__"]
+)
+_PULL_REQUEST_QUALIFICATION_INIT = PullRequestQualification.__dict__["__init__"]
+_PULL_REQUEST_QUALIFICATION_INIT_CODE = getattr(
+    _PULL_REQUEST_QUALIFICATION_INIT,
+    "__code__",
+    None,
+)
+_PULL_REQUEST_QUALIFICATION_FIELD_CLASS_WITNESSES = tuple(
+    (
+        name,
+        name in PullRequestQualification.__dict__,
+        PullRequestQualification.__dict__.get(name),
+    )
+    for name in ("head_sha", "integration_capable")
+)
+
+
+def _pull_request_qualification_state(
+    qualification: object,
+) -> tuple[str, bool]:
+    """Read one qualification without mutable attribute or dataclass equality dispatch."""
+
+    if (
+        PullRequestQualification is not _PULL_REQUEST_QUALIFICATION_TYPE
+        or PullRequestQualification.__dict__.get("__dict__")
+        is not _PULL_REQUEST_QUALIFICATION_DICT_DESCRIPTOR
+        or PullRequestQualification.__dict__.get("__init__")
+        is not _PULL_REQUEST_QUALIFICATION_INIT
+        or getattr(_PULL_REQUEST_QUALIFICATION_INIT, "__code__", None)
+        is not _PULL_REQUEST_QUALIFICATION_INIT_CODE
+        or type(qualification) is not _PULL_REQUEST_QUALIFICATION_TYPE
+    ):
+        raise CancellationError("pull request qualification authority changed")
+    for name, expected_present, expected_value in (
+        _PULL_REQUEST_QUALIFICATION_FIELD_CLASS_WITNESSES
+    ):
+        if (
+            (name in PullRequestQualification.__dict__) is not expected_present
+            or PullRequestQualification.__dict__.get(name) is not expected_value
+        ):
+            raise CancellationError("pull request qualification authority changed")
+
+    state = _PULL_REQUEST_QUALIFICATION_DICT_DESCRIPTOR.__get__(
+        qualification,
+        _PULL_REQUEST_QUALIFICATION_TYPE,
+    )
+    if type(state) is not dict or set(state) != {
+        "head_sha",
+        "integration_capable",
+    }:
+        raise CancellationError("invalid pull request qualification state")
+    head_sha = dict.__getitem__(state, "head_sha")
+    integration_capable = dict.__getitem__(state, "integration_capable")
+    if type(head_sha) is not str or len(head_sha) != 40:
+        raise CancellationError("invalid live pull request head")
+    head_sha = head_sha.lower()
+    if any(ch not in "0123456789abcdef" for ch in head_sha):
+        raise CancellationError("invalid live pull request head")
+    if type(integration_capable) is not bool:
+        raise CancellationError("invalid pull request integration capability")
+    return head_sha, integration_capable
+
+
 @dataclass(frozen=True)
 class CancellationResult:
     current_head: bool
@@ -306,7 +372,9 @@ class GitHubApi:
         return _require_sha(head.get("sha"), field="live pull request head")
 
     def pr_is_integration_capable(self, pr_number: int) -> bool:
-        return self.live_pr_qualification(pr_number).integration_capable
+        return _pull_request_qualification_state(
+            self.live_pr_qualification(pr_number)
+        )[1]
 
     def _active_runs_for_status(self, status: str) -> tuple[WorkflowRun, ...]:
         if status not in _ACTIVE_STATUSES:
@@ -428,16 +496,18 @@ def _qualification_snapshot(
     pr_number: int,
     *,
     legacy_cancel_same_head: bool | None = None,
-) -> PullRequestQualification:
+) -> tuple[str, bool]:
     resolver = getattr(api, "live_pr_qualification", None)
     if callable(resolver):
-        return resolver(pr_number)
-    # Preserve the deliberately small fake API used by focused unit tests. Production
-    # GitHubApi always exposes the atomic head/state/draft resolver above.
-    return PullRequestQualification(
-        head_sha=api.live_pr_head(pr_number),
-        integration_capable=not bool(legacy_cancel_same_head),
-    )
+        qualification = resolver(pr_number)
+    else:
+        # Preserve the deliberately small fake API used by focused unit tests.
+        # Production GitHubApi always exposes the atomic head/state/draft resolver.
+        qualification = PullRequestQualification(
+            head_sha=api.live_pr_head(pr_number),
+            integration_capable=not bool(legacy_cancel_same_head),
+        )
+    return _pull_request_qualification_state(qualification)
 
 
 def admit_current_head(
@@ -449,11 +519,11 @@ def admit_current_head(
     """Admit heavy work only for a current, live integration-capable PR snapshot."""
 
     event_head_sha = _require_sha(event_head_sha, field="event head sha")
-    qualification = _qualification_snapshot(api, pr_number)
+    live_head_sha, integration_capable = _qualification_snapshot(api, pr_number)
     return CancellationResult(
         current_head=(
-            event_head_sha == qualification.head_sha
-            and qualification.integration_capable
+            event_head_sha == live_head_sha
+            and integration_capable
         ),
         cancelled_run_ids=(),
     )
@@ -474,10 +544,10 @@ def cancel_superseded(
     qualification = _qualification_snapshot(
         api, pr_number, legacy_cancel_same_head=cancel_same_head
     )
-    live_head_sha = qualification.head_sha
+    live_head_sha, integration_capable = qualification
     if event_head_sha != live_head_sha:
         return CancellationResult(current_head=False, cancelled_run_ids=())
-    derived_cancel_same_head = not qualification.integration_capable
+    derived_cancel_same_head = not integration_capable
     if cancel_same_head is not None and cancel_same_head != derived_cancel_same_head:
         raise CancellationError("cancel_same_head conflicts with live PR qualification")
     active_runs = api.active_runs()

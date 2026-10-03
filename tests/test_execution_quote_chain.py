@@ -561,11 +561,16 @@ def test_reconstructed_quote_chain_cannot_mint_submit_binding(tmp_path) -> None:
         chain_status=CHAIN_SUBMIT_INSTRUCTION_BOUND,
     )
 
-    with pytest.raises(
-        ExecutionQuoteChainError,
-        match="not issued by canonical ledger projection",
+    for authority_name in (
+        "submit_instruction_identity_bound",
+        "provider_request_correlation_bound",
+        "actual_submitted_instruction_bound",
     ):
-        _ = forged.actual_submitted_instruction_bound
+        with pytest.raises(
+            ExecutionQuoteChainError,
+            match="not issued by canonical ledger projection",
+        ):
+            getattr(forged, authority_name)
 
     with pytest.raises(
         ExecutionQuoteChainError,

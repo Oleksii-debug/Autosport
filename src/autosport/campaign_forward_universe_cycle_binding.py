@@ -270,6 +270,15 @@ def _require_cycle_observation_chronology(
         collector_evidence.get("due_at"),
         "collector due_at",
     )
+    slot_ordinal = collector_evidence.get("slot_ordinal")
+    if (
+        type(slot_ordinal) is not int
+        or slot_ordinal < source_spec.evaluation_start_slot_ordinal
+        or slot_ordinal > source_spec.evaluation_end_slot_ordinal
+    ):
+        raise CampaignForwardUniverseCycleBindingError(
+            "collector cycle lies outside frozen campaign evaluation slots"
+        )
     try:
         slot_deadline = _instant(
             _SCHEDULE_DUE_AT(
@@ -299,15 +308,6 @@ def _require_cycle_observation_chronology(
         campaign.observation_not_after,
         "campaign observation_not_after",
     )
-    slot_ordinal = collector_evidence.get("slot_ordinal")
-    if (
-        type(slot_ordinal) is not int
-        or slot_ordinal < source_spec.evaluation_start_slot_ordinal
-        or slot_ordinal > source_spec.evaluation_end_slot_ordinal
-    ):
-        raise CampaignForwardUniverseCycleBindingError(
-            "collector cycle lies outside frozen campaign evaluation slots"
-        )
     if completed < attempted:
         raise CampaignForwardUniverseCycleBindingError(
             "collector cycle completion predates authorized START"

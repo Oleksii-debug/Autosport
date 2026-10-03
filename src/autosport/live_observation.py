@@ -118,12 +118,24 @@ class OneShotObservationWorker:
         if thread.ident is not None:
             thread.join()
 
+    @staticmethod
+    def _safe_terminal_error(exc: BaseException) -> str:
+        """Render one terminal diagnostic without letting the renderer wedge the worker."""
+
+        try:
+            rendered = safe_exception_text(exc)
+        except BaseException:
+            return "BaseException: exception details unavailable"
+        if not isinstance(rendered, str) or not rendered:
+            return "BaseException: exception details unavailable"
+        return rendered
+
     def _publish_setup_failure(self, exc: Exception) -> None:
         # Preserve the established caller contract: False means "already busy";
         # an ordinary setup failure returns True and publishes one terminal error.
         self._thread = None
         self._messages.put(
-            ObservationWorkerMessage(error=safe_exception_text(exc))
+            ObservationWorkerMessage(error=self._safe_terminal_error(exc))
         )
 
     def _release_unstarted_slot(self) -> None:
@@ -150,7 +162,7 @@ class OneShotObservationWorker:
             # not terminate the GUI process. Publish a terminal failure so poll()
             # clears the single-flight state instead of leaving live observation
             # permanently busy after the worker thread has already died.
-            message = ObservationWorkerMessage(error=safe_exception_text(exc))
+            message = ObservationWorkerMessage(error=self._safe_terminal_error(exc))
         self._messages.put(message)
 
     def poll(self) -> ObservationWorkerMessage | None:

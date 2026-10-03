@@ -11,7 +11,6 @@ import weakref
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
-from functools import wraps
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Mapping
@@ -900,7 +899,6 @@ def _seal_provider_observation_capture_dispatch() -> None:
                 "provider production acquisition witness changed"
             )
 
-    @wraps(expected_capture)
     def sealed_capture_parlay_complete_game_board(*args, **kwargs):
         if (
             module_globals.get("capture_parlay_complete_game_board")
@@ -913,6 +911,14 @@ def _seal_provider_observation_capture_dispatch() -> None:
         result = expected_capture(*args, **kwargs)
         require_sealed_surface()
         return result
+
+    sealed_capture_parlay_complete_game_board.__name__ = expected_capture.__name__
+    sealed_capture_parlay_complete_game_board.__qualname__ = expected_capture.__qualname__
+    sealed_capture_parlay_complete_game_board.__doc__ = expected_capture.__doc__
+    if hasattr(sealed_capture_parlay_complete_game_board, "__wrapped__"):
+        raise RuntimeError(
+            "provider acquisition seal must not expose unsealed delegate"
+        )
 
     module_globals["capture_parlay_complete_game_board"] = (
         sealed_capture_parlay_complete_game_board

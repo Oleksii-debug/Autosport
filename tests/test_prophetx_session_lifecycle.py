@@ -1078,3 +1078,42 @@ def test_same_process_stale_renewal_recovers_after_uncertainty_deadline(tmp_path
     assert recovered.action is ProphetXLoginAdmissionAction.CREATE_LOGIN
     assert recovered.attempt_id != started.attempt_id
     assert recovered.login_authorized is True
+
+
+def test_available_token_without_durable_state_fails_closed(tmp_path):
+    lifecycle = _lifecycle(tmp_path)
+
+    with pytest.raises(
+        ProphetXSessionLifecycleError,
+        match="cannot be reconciled without durable session state",
+    ):
+        lifecycle.begin_login(
+            now=NOW,
+            access_token_available=True,
+            access_token_lineage_id=sha256(b"orphan-token").hexdigest(),
+        )
+
+    assert lifecycle.read_snapshot() is None
+
+
+def test_same_process_stale_login_reservation_recovers_after_hold(tmp_path):
+    lifecycle = _lifecycle(tmp_path)
+    first = lifecycle.begin_login(now=NOW, access_token_available=False)
+    assert first.action is ProphetXLoginAdmissionAction.CREATE_LOGIN
+
+    recovered = lifecycle.begin_login(
+        now=NOW + CONSERVATIVE_SESSION_SLOT_HOLD + timedelta(seconds=1),
+        access_token_available=False,
+    )
+    assert recovered.action is ProphetXLoginAdmissionAction.CREATE_LOGIN
+    assert recovered.attempt_id != first.attempt_id
+
+    with pytest.raises(
+        ProphetXSessionLifecycleError,
+        match="login attempt no longer owns current session-pool admission",
+    ):
+        lifecycle.complete_login_failure(
+            attempt_id=first.attempt_id,
+            now=NOW + CONSERVATIVE_SESSION_SLOT_HOLD + timedelta(seconds=2),
+            failure=ProphetXLoginFailureClass.AMBIGUOUS_PROVIDER_RESULT,
+        )

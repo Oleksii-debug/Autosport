@@ -7,11 +7,33 @@ from enum import Enum, IntEnum
 from hashlib import sha256
 import json
 from typing import Mapping
+import weakref
 
+from . import betdaq_account_readonly as _betdaq_account
 from .bookmaker_capability import (
     BookmakerCapability,
     BookmakerCapabilityProfile,
     BookmakerCapabilityState,
+)
+
+
+_BETDAQ_CLIENT_TYPE = _betdaq_account.BetdaqAccountReadOnlyClient
+_BETDAQ_ACCOUNT_EVIDENCE_TYPE = _betdaq_account.BetdaqAccountEvidence
+_BETDAQ_ACCOUNT_CONTEXT_TYPE = _betdaq_account.BetdaqAuthenticatedAccountContext
+_BETDAQ_ERROR_TYPE = _betdaq_account.BetdaqAccountReadOnlyError
+_BETDAQ_READ_ACCOUNT_EVIDENCE = _BETDAQ_CLIENT_TYPE.read_account_evidence
+_BETDAQ_READ_ACCOUNT_EVIDENCE_CODE = _BETDAQ_READ_ACCOUNT_EVIDENCE.__code__
+_BETDAQ_REQUIRE_CANONICAL_TRANSPORT = _betdaq_account._require_canonical_account_transport
+_BETDAQ_REQUIRE_CANONICAL_TRANSPORT_CODE = _BETDAQ_REQUIRE_CANONICAL_TRANSPORT.__code__
+_BETDAQ_AUTHENTICATED_CONTEXT = _betdaq_account._authenticated_account_context
+_BETDAQ_AUTHENTICATED_CONTEXT_CODE = _BETDAQ_AUTHENTICATED_CONTEXT.__code__
+_BETDAQ_ADAPTER_ID = _betdaq_account.ADAPTER_ID
+_BETDAQ_ADAPTER_VERSION = _betdaq_account.ADAPTER_VERSION
+_BETDAQ_VENUE_ID = "betdaq"
+
+BETDAQ_AUTHENTICATED_VALIDATION_POLICY_VERSION = "betdaq-authenticated-readonly-v1"
+BETDAQ_AUTHENTICATED_SOURCE_CONTRACT_REF = (
+    f"betdaq-secure-account-readonly/{_BETDAQ_ADAPTER_VERSION}"
 )
 
 
@@ -122,7 +144,7 @@ class CapabilityScope:
         }
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, weakref_slot=True)
 class CapabilityEvidence:
     profile_id: str
     capability: BookmakerCapability
@@ -218,6 +240,167 @@ class CapabilityEvidence:
     @property
     def evidence_id(self) -> str:
         return _hash(self.payload())
+
+
+_PRODUCT_ISSUED_POSITIVE: dict[
+    int, tuple[weakref.ReferenceType[CapabilityEvidence], str]
+] = {}
+
+
+def _forget_product_issued(
+    evidence_id: int, reference: weakref.ReferenceType[CapabilityEvidence]
+) -> None:
+    current = _PRODUCT_ISSUED_POSITIVE.get(evidence_id)
+    if current is not None and current[0] is reference:
+        _PRODUCT_ISSUED_POSITIVE.pop(evidence_id, None)
+
+
+def _remember_product_issued(evidence: CapabilityEvidence) -> CapabilityEvidence:
+    identity = id(evidence)
+    reference = weakref.ref(
+        evidence,
+        lambda current, identity=identity: _forget_product_issued(identity, current),
+    )
+    _PRODUCT_ISSUED_POSITIVE[identity] = (reference, evidence.evidence_id)
+    return evidence
+
+
+def _is_product_issued(evidence: CapabilityEvidence, evidence_id: str) -> bool:
+    issued = _PRODUCT_ISSUED_POSITIVE.get(id(evidence))
+    return (
+        issued is not None
+        and issued[0]() is evidence
+        and issued[1] == evidence_id
+        and evidence.evidence_id == evidence_id
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class BetdaqAuthenticatedCapabilityIssuance:
+    """One canonical BETDAQ authenticated-context capability observation."""
+
+    profile: BookmakerCapabilityProfile
+    evidence: CapabilityEvidence
+
+    def __post_init__(self) -> None:
+        if type(self.profile) is not BookmakerCapabilityProfile:
+            raise CapabilityEvidenceError(
+                "issuance profile must be exact BookmakerCapabilityProfile"
+            )
+        if type(self.evidence) is not CapabilityEvidence:
+            raise CapabilityEvidenceError(
+                "issuance evidence must be exact CapabilityEvidence"
+            )
+        if self.evidence.profile_id != self.profile.profile_id:
+            raise CapabilityEvidenceError("issuance profile/evidence identity mismatch")
+
+
+def _require_current_betdaq_issuance_surface() -> None:
+    if (
+        _betdaq_account.BetdaqAccountReadOnlyClient is not _BETDAQ_CLIENT_TYPE
+        or _BETDAQ_CLIENT_TYPE.read_account_evidence is not _BETDAQ_READ_ACCOUNT_EVIDENCE
+        or _BETDAQ_READ_ACCOUNT_EVIDENCE.__code__
+        is not _BETDAQ_READ_ACCOUNT_EVIDENCE_CODE
+        or getattr(_betdaq_account, "_require_canonical_account_transport", None)
+        is not _BETDAQ_REQUIRE_CANONICAL_TRANSPORT
+        or _BETDAQ_REQUIRE_CANONICAL_TRANSPORT.__code__
+        is not _BETDAQ_REQUIRE_CANONICAL_TRANSPORT_CODE
+        or getattr(_betdaq_account, "_authenticated_account_context", None)
+        is not _BETDAQ_AUTHENTICATED_CONTEXT
+        or _BETDAQ_AUTHENTICATED_CONTEXT.__code__
+        is not _BETDAQ_AUTHENTICATED_CONTEXT_CODE
+    ):
+        raise CapabilityEvidenceError(
+            "canonical BETDAQ account-evidence issuance surface changed"
+        )
+
+
+def issue_betdaq_authenticated_capability_evidence(
+    client: object,
+    capability: BookmakerCapability,
+    *,
+    committed_at: str,
+    review_due_at: str,
+    predecessor_id: str | None = None,
+) -> BetdaqAuthenticatedCapabilityIssuance:
+    """Issue bounded positive lifecycle evidence from a fresh canonical BETDAQ read.
+
+    The upstream adapter proves only one live credential/application context. It does
+    not prove a stable provider account identity or cross-session equivalence, so this
+    issuer deliberately emits OBSERVED_AUTHENTICATED rather than
+    OBSERVED_ACCOUNT_SCOPED evidence.
+    """
+
+    _require_current_betdaq_issuance_surface()
+    if type(client) is not _BETDAQ_CLIENT_TYPE:
+        raise CapabilityEvidenceError(
+            "BETDAQ capability issuance requires exact canonical read-only client"
+        )
+    if not isinstance(capability, BookmakerCapability):
+        raise CapabilityEvidenceError("capability must be BookmakerCapability")
+    try:
+        acquisition = _BETDAQ_READ_ACCOUNT_EVIDENCE(
+            client, frozenset({capability})
+        )
+    except _BETDAQ_ERROR_TYPE as exc:
+        raise CapabilityEvidenceError(
+            "canonical BETDAQ account capability acquisition failed"
+        ) from exc
+    if type(acquisition) is not _BETDAQ_ACCOUNT_EVIDENCE_TYPE:
+        raise CapabilityEvidenceError(
+            "BETDAQ account acquisition did not return canonical evidence"
+        )
+    context = acquisition.account_context
+    if type(context) is not _BETDAQ_ACCOUNT_CONTEXT_TYPE:
+        raise CapabilityEvidenceError(
+            "BETDAQ account acquisition context is not canonical"
+        )
+    if (
+        context.stable_account_identity_proven is not False
+        or context.cross_session_equivalence_proven is not False
+    ):
+        raise CapabilityEvidenceError(
+            "BETDAQ authenticated context overclaims stable account identity"
+        )
+    profile = acquisition.snapshot.profile
+    if type(profile) is not BookmakerCapabilityProfile:
+        raise CapabilityEvidenceError(
+            "BETDAQ account acquisition profile is not canonical"
+        )
+    if (
+        profile.venue_id != _BETDAQ_VENUE_ID
+        or context.venue_id != _BETDAQ_VENUE_ID
+        or profile.account_id != context.session_context_id
+        or profile.adapter_id != _BETDAQ_ADAPTER_ID
+        or profile.adapter_version != _BETDAQ_ADAPTER_VERSION
+        or capability not in acquisition.snapshot.observed_capabilities
+        or profile.state_of(capability) is not BookmakerCapabilityState.SUPPORTED
+    ):
+        raise CapabilityEvidenceError(
+            "BETDAQ account acquisition does not prove exact requested capability"
+        )
+    evidence = CapabilityEvidence(
+        profile_id=profile.profile_id,
+        capability=capability,
+        support_state=BookmakerCapabilityState.SUPPORTED,
+        strength=CapabilityEvidenceStrength.OBSERVED_AUTHENTICATED,
+        source=CapabilityEvidenceSource.AUTHENTICATED_OBSERVATION,
+        scope=CapabilityScope(
+            venue_id=_BETDAQ_VENUE_ID,
+            account_id=None,
+            environment="production",
+            credential_identity=context.session_context_id,
+        ),
+        observed_at=profile.observed_at,
+        committed_at=committed_at,
+        review_due_at=review_due_at,
+        validation_policy_version=BETDAQ_AUTHENTICATED_VALIDATION_POLICY_VERSION,
+        source_contract_ref=BETDAQ_AUTHENTICATED_SOURCE_CONTRACT_REF,
+        source_payload_sha256=profile.source_payload_sha256,
+        predecessor_id=predecessor_id,
+    )
+    _remember_product_issued(evidence)
+    return BetdaqAuthenticatedCapabilityIssuance(profile, evidence)
 
 
 @dataclass(frozen=True, slots=True)
@@ -631,11 +814,17 @@ def _evaluate(
             CapabilityLifecycleState.UNKNOWN,
             "document/public observation requires product-owned provenance authority",
         )
-    if evidence.strength >= CapabilityEvidenceStrength.OBSERVED_AUTHENTICATED:
+    if evidence.strength is CapabilityEvidenceStrength.OBSERVED_ACCOUNT_SCOPED:
         return deny(
             CapabilityLifecycleState.REVALIDATION_REQUIRED,
-            "authenticated/account observation requires product-owned upstream authority",
+            "account-scoped observation requires stable product-owned account authority",
         )
+    if evidence.strength is CapabilityEvidenceStrength.OBSERVED_AUTHENTICATED:
+        if not _is_product_issued(evidence, evidence_id):
+            return deny(
+                CapabilityLifecycleState.REVALIDATION_REQUIRED,
+                "authenticated observation requires product-owned upstream authority",
+            )
     if requirement.require_available:
         if availability is not CapabilityAvailabilityState.AVAILABLE:
             return deny(CapabilityLifecycleState.CURRENT, "provider is not AVAILABLE")
@@ -644,5 +833,9 @@ def _evaluate(
         CapabilityLifecycleState.CURRENT,
         availability,
         evidence_id,
-        "current exact-scope capability evidence",
+        (
+            "current product-issued authenticated capability evidence"
+            if evidence.strength is CapabilityEvidenceStrength.OBSERVED_AUTHENTICATED
+            else "current exact-scope capability evidence"
+        ),
     )

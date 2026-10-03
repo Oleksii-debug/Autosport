@@ -1,5 +1,12 @@
+from datetime import datetime, timezone
+
 import pytest
 
+import autosport.betdaq_account_readonly as betdaq_account_module
+from autosport.betdaq_account_readonly import (
+    BetdaqAccountReadOnlyClient,
+    BetdaqCredentials,
+)
 from autosport.bookmaker_capability import (
     BookmakerCapability,
     BookmakerCapabilityFact,
@@ -7,6 +14,9 @@ from autosport.bookmaker_capability import (
     BookmakerCapabilityState,
 )
 from autosport.bookmaker_capability_lifecycle import (
+    BETDAQ_AUTHENTICATED_SOURCE_CONTRACT_REF,
+    BETDAQ_AUTHENTICATED_VALIDATION_POLICY_VERSION,
+    BetdaqAuthenticatedCapabilityIssuance,
     CapabilityAvailability,
     CapabilityAvailabilityState,
     CapabilityEvidence,
@@ -17,10 +27,190 @@ from autosport.bookmaker_capability_lifecycle import (
     CapabilityLifecycleState,
     CapabilityRequirement,
     CapabilityScope,
+    issue_betdaq_authenticated_capability_evidence,
 )
 
 _HASH = "a" * 64
 _TS = "2026-09-21T10:00:00+00:00"
+
+
+_BETDAQ_NS = "http://www.GlobalBettingExchange.com/ExternalAPI/"
+_BETDAQ_SOAP = "http://schemas.xmlsoap.org/soap/envelope/"
+
+
+class _BetdaqHttpResponse:
+    def __init__(self, payload):
+        self.payload = payload
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, traceback):
+        return False
+
+    def read(self):
+        return self.payload
+
+
+def _canonical_betdaq_balance_client(monkeypatch):
+    payload = (
+        f'<?xml version="1.0" encoding="utf-8"?>'
+        f'<soap:Envelope xmlns:soap="{_BETDAQ_SOAP}" xmlns="{_BETDAQ_NS}">'
+        f"<soap:Body><GetAccountBalancesResponse>"
+        f'<GetAccountBalancesResult Currency="EUR" Balance="120.02" '
+        f'Exposure="-20.01" AvailableFunds="100.01" Credit="0">'
+        f'<ReturnStatus Code="0" Description="fixture-status" CallId="fixture-call" />'
+        f"</GetAccountBalancesResult></GetAccountBalancesResponse>"
+        f"</soap:Body></soap:Envelope>"
+    ).encode()
+    calls = []
+
+    def opener(request, *, timeout):
+        calls.append((request, timeout))
+        return _BetdaqHttpResponse(payload)
+
+    monkeypatch.setattr(betdaq_account_module, "urlopen", opener)
+    value = BetdaqAccountReadOnlyClient(
+        BetdaqCredentials("alice", "secret-pass", "app-id"),
+        clock=lambda: datetime(2026, 9, 21, 10, 0, tzinfo=timezone.utc),
+        account_id="caller-label-must-not-be-authority",
+    )
+    return value, calls
+
+
+def _betdaq_authenticated_issuance(monkeypatch):
+    client, calls = _canonical_betdaq_balance_client(monkeypatch)
+    issuance = issue_betdaq_authenticated_capability_evidence(
+        client,
+        BookmakerCapability.BALANCE_READ,
+        committed_at="2026-09-21T10:01:00+00:00",
+        review_due_at="2026-09-21T11:01:00+00:00",
+    )
+    return issuance, calls
+
+
+def _betdaq_authenticated_requirement(issuance, *, require_available=False):
+    return CapabilityRequirement(
+        BookmakerCapability.BALANCE_READ,
+        CapabilityEvidenceStrength.OBSERVED_AUTHENTICATED,
+        issuance.evidence.scope,
+        BETDAQ_AUTHENTICATED_VALIDATION_POLICY_VERSION,
+        BETDAQ_AUTHENTICATED_SOURCE_CONTRACT_REF,
+        3600,
+        require_available=require_available,
+    )
+
+
+def test_product_issued_betdaq_authenticated_evidence_can_authorize_bounded_read_capability(
+    monkeypatch,
+):
+    issuance, calls = _betdaq_authenticated_issuance(monkeypatch)
+    assert type(issuance) is BetdaqAuthenticatedCapabilityIssuance
+    assert len(calls) == 1
+    assert issuance.evidence.strength is CapabilityEvidenceStrength.OBSERVED_AUTHENTICATED
+    assert issuance.evidence.scope.account_id is None
+    assert (
+        issuance.evidence.scope.credential_identity
+        == issuance.profile.account_id
+    )
+    assert "caller-label" not in issuance.profile.account_id
+
+    journal = CapabilityEvidenceJournal()
+    journal.publish(issuance.evidence)
+    decision = journal.resolve(
+        _betdaq_authenticated_requirement(issuance),
+        {issuance.profile.profile_id: issuance.profile},
+        as_of="2026-09-21T10:02:00+00:00",
+    )
+
+    assert decision.allowed
+    assert decision.lifecycle is CapabilityLifecycleState.CURRENT
+    assert decision.availability is CapabilityAvailabilityState.UNKNOWN
+    assert "product-issued authenticated" in decision.reason
+
+
+def test_product_issued_betdaq_evidence_does_not_mint_available_health(monkeypatch):
+    issuance, _ = _betdaq_authenticated_issuance(monkeypatch)
+    journal = CapabilityEvidenceJournal()
+    journal.publish(issuance.evidence)
+
+    decision = journal.resolve(
+        _betdaq_authenticated_requirement(issuance, require_available=True),
+        {issuance.profile.profile_id: issuance.profile},
+        as_of="2026-09-21T10:02:00+00:00",
+    )
+
+    assert not decision.allowed
+    assert decision.availability is CapabilityAvailabilityState.UNKNOWN
+    assert "not AVAILABLE" in decision.reason
+
+
+def test_copied_betdaq_issuance_payload_cannot_reuse_process_local_provenance(
+    monkeypatch,
+):
+    issuance, _ = _betdaq_authenticated_issuance(monkeypatch)
+    copied = CapabilityEvidence(
+        **{
+            field: getattr(issuance.evidence, field)
+            for field in issuance.evidence.__dataclass_fields__
+            if field != "__weakref__"
+        }
+    )
+    assert copied.evidence_id == issuance.evidence.evidence_id
+    journal = CapabilityEvidenceJournal()
+    journal.publish(copied)
+
+    decision = journal.resolve(
+        _betdaq_authenticated_requirement(issuance),
+        {issuance.profile.profile_id: issuance.profile},
+        as_of="2026-09-21T10:02:00+00:00",
+    )
+
+    assert not decision.allowed
+    assert decision.lifecycle is CapabilityLifecycleState.REVALIDATION_REQUIRED
+    assert "product-owned upstream authority" in decision.reason
+
+
+def test_betdaq_positive_provenance_is_not_restored_from_serialized_journal(
+    monkeypatch,
+):
+    issuance, _ = _betdaq_authenticated_issuance(monkeypatch)
+    journal = CapabilityEvidenceJournal()
+    journal.publish(issuance.evidence)
+    restored = CapabilityEvidenceJournal.from_json(journal.to_json())
+
+    decision = restored.resolve(
+        _betdaq_authenticated_requirement(issuance),
+        {issuance.profile.profile_id: issuance.profile},
+        as_of="2026-09-21T10:02:00+00:00",
+    )
+
+    assert not decision.allowed
+    assert decision.lifecycle is CapabilityLifecycleState.REVALIDATION_REQUIRED
+    assert "product-owned upstream authority" in decision.reason
+
+
+def test_betdaq_issuer_rejects_noncanonical_client_before_provider_io(monkeypatch):
+    canonical, calls = _canonical_betdaq_balance_client(monkeypatch)
+
+    class DerivedClient(BetdaqAccountReadOnlyClient):
+        pass
+
+    derived = DerivedClient(canonical._credentials)
+
+    with pytest.raises(
+        CapabilityEvidenceError,
+        match="exact canonical read-only client",
+    ):
+        issue_betdaq_authenticated_capability_evidence(
+            derived,
+            BookmakerCapability.BALANCE_READ,
+            committed_at="2026-09-21T10:01:00+00:00",
+            review_due_at="2026-09-21T11:01:00+00:00",
+        )
+
+    assert calls == []
+
 
 
 def _profile(

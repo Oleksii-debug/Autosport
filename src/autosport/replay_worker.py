@@ -8,6 +8,7 @@ from typing import Callable
 
 from .dataset import load_dataset
 from .research_strategy import ResearchStrategyPlan
+from .secret_redaction import safe_exception_text
 from .session import AutosportSession, SessionResult
 from .strategies import experiment_strategy_id
 
@@ -26,23 +27,9 @@ class ReplayWorkerMessage:
 
 
 def _terminal_error(exc: BaseException) -> str:
-    """Render a caught failure without trusting arbitrary exception metadata."""
+    """Render a terminal worker failure through the product redaction boundary."""
 
-    try:
-        # Bypass a custom metaclass __getattribute__: even exception type-name
-        # lookup must not be able to defeat terminal publication after the
-        # single-flight slot has been acquired.
-        exception_type = str.__str__(type.__getattribute__(type(exc), "__name__"))
-    except BaseException:
-        exception_type = "BaseException"
-    try:
-        # ``str(exc)`` may legally return a str subclass with hostile overridden
-        # methods such as __format__. Detach through the trusted base str method
-        # before any formatting/concatenation touches the rendered detail.
-        detail = str.__str__(str(exc))
-    except BaseException:
-        return exception_type + ": exception details unavailable"
-    return exception_type + ": " + detail
+    return safe_exception_text(exc)
 
 
 class OneShotReplayWorker:

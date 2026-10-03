@@ -1640,6 +1640,65 @@ class PersistentLiveDecisionLoop:
                 )
         return produced
 
+    def _require_no_future_local_market_evidence(
+        self,
+        input_ids: tuple[str, ...],
+        as_of: datetime,
+        *,
+        incremental: bool,
+    ) -> None:
+        """Keep future local receipts pending until their causal cutoff arrives."""
+
+        boundary = as_of.astimezone(timezone.utc)
+
+        def require_available(event: MarketEvent) -> None:
+            observed = MarketMirror._utc_timestamp(event.observed_ts)
+            ingested = MarketMirror._utc_timestamp(event.ingest_ts)
+            if (
+                observed is None
+                or ingested is None
+                or observed > boundary
+                or ingested > boundary
+            ):
+                raise _ConcurrentDecisionSnapshot(
+                    "decision snapshot contains market evidence not causally "
+                    "available at the decision cutoff"
+                )
+
+        if incremental:
+            seen: set[tuple[str, str]] = set()
+            for input_id in input_ids:
+                for key in self.dependencies.matching_keys(input_id):
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    event = self.mirror_updates.mirror.event_for_quote_key(*key)
+                    if event is not None:
+                        require_available(event)
+            return
+
+        # Provider-gap / full-cut recovery may have an unrouted dirty update, so
+        # matching_keys is not yet complete. One raw mirror snapshot is acceptable
+        # on this already-full path and preserves the prior BACKPRESSURE semantics.
+        raw = self.mirror_updates.mirror.view()
+        for event in raw.events:
+            for input_id in input_ids:
+                spec = self._input_specs.get(input_id)
+                if spec is None:
+                    continue
+                if (
+                    (spec.source_ids is None or event.source_id in spec.source_ids)
+                    and (spec.sports is None or event.sport in spec.sports)
+                    and (spec.event_ids is None or event.event_id in spec.event_ids)
+                    and (spec.market_ids is None or event.market_id in spec.market_ids)
+                    and (
+                        spec.selection_ids is None
+                        or event.selection_id in spec.selection_ids
+                    )
+                ):
+                    require_available(event)
+                    break
+
     def _capture_input_views(
         self,
         input_ids: tuple[str, ...],
@@ -1701,24 +1760,15 @@ class PersistentLiveDecisionLoop:
                     "retrying before economic action"
                 )
 
-        # Local observation/ingestion clocks are causal availability boundaries.
-        # A provider source timestamp can be old while the product receives the
-        # packet later; such a future constituent cannot enter this decision cut.
-        boundary = as_of.astimezone(timezone.utc)
-        for snapshot in snapshots.values():
-            for event in snapshot.events:
-                observed = MarketMirror._utc_timestamp(event.observed_ts)
-                ingested = MarketMirror._utc_timestamp(event.ingest_ts)
-                if (
-                    observed is None
-                    or ingested is None
-                    or observed > boundary
-                    or ingested > boundary
-                ):
-                    raise _ConcurrentDecisionSnapshot(
-                        "decision snapshot contains market evidence not causally "
-                        "available at the decision cutoff"
-                    )
+        # Active mirror views exclude locally future evidence by construction.
+        # Preserve the live-loop liveness fence as well: a future local receipt must
+        # remain pending/BACKPRESSURE until its timestamp becomes causally available,
+        # rather than disappearing when the dirty key is consumed.
+        self._require_no_future_local_market_evidence(
+            input_ids,
+            as_of,
+            incremental=incremental,
+        )
 
         if self.dependencies.routing_revision != captured_routing_revision:
             raise _ConcurrentDecisionSnapshot(

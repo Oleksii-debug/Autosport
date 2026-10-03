@@ -14,6 +14,7 @@ from .monotonic_workspace_authority import (
     MonotonicWorkspaceAuthority,
 )
 from .paper import PaperBook
+from . import _paperbook_preload_authority_guard as _paperbook_authority
 from .recovery import transaction_history_requires_recovery
 from .risk import (
     PaperRiskPolicy,
@@ -2211,6 +2212,25 @@ def admit_paper_ticket(
             )
         _require_paperbook_admission_authority()
         _PAPERBOOK_SAVE_FUNCTION(mutation_book, book_path)
+
+        # Durable publication is the commit point. If the caller supplied the exact
+        # current generation-bound view, preserve the long-standing in-place success
+        # contract only *after* that commit by promoting the committed semantic state
+        # and advancing the existing binding through the canonical persistence
+        # authority. Before this point caller state has remained untouched.
+        if working_book is book:
+            book.initial_bankroll = mutation_book.initial_bankroll
+            book.balance = mutation_book.balance
+            book.tickets = dict(mutation_book.tickets)
+            book._lifecycle = list(mutation_book._lifecycle)
+            book._settlement_times = dict(mutation_book._settlement_times)
+            book._product_day_admissions = dict(
+                mutation_book._product_day_admissions
+            )
+            _paperbook_authority._INSTALL_OPENING(book)
+            _paperbook_authority._INSTALL_CAUSAL(book)
+            _paperbook_authority._advance_book_binding(book, book_path)
+
         _require_paperbook_admission_authority()
         persisted = _PAPERBOOK_LOAD_FUNCTION(PaperBook, book_path)
         persisted_ticket = persisted.tickets.get(opened.ticket_id)
@@ -2222,10 +2242,15 @@ def admit_paper_ticket(
             raise RuntimeError(
                 "persisted PaperBook state does not match the admitted mutation"
             )
+        result_book = book if working_book is book else persisted
+        if not _same_semantic_book_state(mutation_book, result_book):
+            raise RuntimeError(
+                "current PaperBook view does not match the admitted durable mutation"
+            )
         return PaperAdmissionResult(
             risk=decision,
-            ticket=persisted.tickets[persisted_ticket.ticket_id],
-            book=persisted,
+            ticket=result_book.tickets[persisted_ticket.ticket_id],
+            book=result_book,
         )
 
 

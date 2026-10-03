@@ -9,6 +9,7 @@ from types import FunctionType
 from .domain import PaperTicket, TicketLeg
 from .economic_goal_provenance import provenance_for
 from .economic_goal_store import EconomicGoalStore
+from .monotonic_workspace_authority import MonotonicWorkspaceAuthority
 from .paper import PaperBook
 from .recovery import transaction_history_requires_recovery
 from .risk import PaperRiskPolicy, ProposedTicketRiskContext, RiskDecision
@@ -251,6 +252,118 @@ def _require_sealed_wrapper_authority(
                 raise RuntimeError(error)
 
 
+def _class_descriptor_function(descriptor: object) -> FunctionType | None:
+    if type(descriptor) is FunctionType:
+        return descriptor
+    if type(descriptor) in {classmethod, staticmethod}:
+        function = descriptor.__func__
+        return function if type(function) is FunctionType else None
+    return None
+
+
+def _capture_class_transition_graph(
+    owner: type,
+    roots: tuple[str, ...],
+) -> tuple[
+    tuple[tuple[str, object, FunctionType, object], ...],
+    tuple[tuple[str, dict[str, object], object, object | None], ...],
+]:
+    """Snapshot transitive class dispatch plus same-module Python dependencies."""
+
+    methods: dict[str, tuple[object, FunctionType, object]] = {}
+    pending = list(roots)
+    while pending:
+        name = pending.pop()
+        if name in methods:
+            continue
+        descriptor = owner.__dict__.get(name)
+        function = _class_descriptor_function(descriptor)
+        if function is None:
+            raise RuntimeError("monotonic transition helper graph is incomplete")
+        methods[name] = (descriptor, function, function.__code__)
+        for candidate in function.__code__.co_names:
+            candidate_descriptor = owner.__dict__.get(candidate)
+            if _class_descriptor_function(candidate_descriptor) is not None:
+                pending.append(candidate)
+
+    globals_witness: dict[
+        tuple[int, str], tuple[str, dict[str, object], object, object | None]
+    ] = {}
+    function_pending = [item[1] for item in methods.values()]
+    visited: set[int] = set()
+    while function_pending:
+        current = function_pending.pop()
+        marker = id(current)
+        if marker in visited:
+            continue
+        visited.add(marker)
+        namespace = current.__globals__
+        for name in current.__code__.co_names:
+            if name not in namespace:
+                continue
+            value = namespace[name]
+            if type(value) is not FunctionType or value.__globals__ is not namespace:
+                continue
+            key = (id(namespace), name)
+            if key not in globals_witness:
+                globals_witness[key] = (
+                    name,
+                    namespace,
+                    value,
+                    value.__code__,
+                )
+            function_pending.append(value)
+
+    method_witness = tuple(
+        (name, methods[name][0], methods[name][1], methods[name][2])
+        for name in sorted(methods)
+    )
+    global_witness = tuple(
+        globals_witness[key] for key in sorted(globals_witness)
+    )
+    return method_witness, global_witness
+
+
+def _require_class_transition_graph(
+    owner: type,
+    *,
+    methods: tuple[tuple[str, object, FunctionType, object], ...],
+    globals_witness: tuple[
+        tuple[str, dict[str, object], object, object | None], ...
+    ],
+    error: str,
+) -> None:
+    for name, expected_descriptor, expected_function, expected_code in methods:
+        current_descriptor = owner.__dict__.get(name)
+        current_function = _class_descriptor_function(current_descriptor)
+        if (
+            current_descriptor is not expected_descriptor
+            or current_function is not expected_function
+            or current_function is None
+            or current_function.__code__ is not expected_code
+        ):
+            raise RuntimeError(error)
+    for name, namespace, expected_value, expected_code in globals_witness:
+        if namespace.get(name) is not expected_value:
+            raise RuntimeError(error)
+        if (
+            expected_code is not None
+            and (
+                type(expected_value) is not FunctionType
+                or expected_value.__code__ is not expected_code
+            )
+        ):
+            raise RuntimeError(error)
+
+
+_MONOTONIC_TRANSITION_METHOD_WITNESS, _MONOTONIC_TRANSITION_GLOBAL_WITNESS = (
+    _capture_class_transition_graph(
+        MonotonicWorkspaceAuthority,
+        ("recover", "prepare", "commit"),
+    )
+)
+
+
 _TURNOVER_RESOLVE_DESCRIPTOR = PaperDayTurnoverResolver.__dict__["resolve"]
 if type(_TURNOVER_RESOLVE_DESCRIPTOR) is not classmethod:
     raise RuntimeError("canonical turnover resolver descriptor is unavailable")
@@ -287,6 +400,13 @@ _RISK_DAY_STORE_WITNESSES = tuple(
 
 def _require_product_day_turnover_dispatch() -> None:
     """Fail closed if positive day/turnover executable authority drifts."""
+
+    _require_class_transition_graph(
+        MonotonicWorkspaceAuthority,
+        methods=_MONOTONIC_TRANSITION_METHOD_WITNESS,
+        globals_witness=_MONOTONIC_TRANSITION_GLOBAL_WITNESS,
+        error="monotonic day authority transition graph changed",
+    )
 
     current_resolve_descriptor = PaperDayTurnoverResolver.__dict__.get("resolve")
     if (

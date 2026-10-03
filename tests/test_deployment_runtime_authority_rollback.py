@@ -4197,3 +4197,82 @@ def test_runtime_authority_append_rejects_episode_subclass_before_mutation(
         )
 
     assert store.records() == ()
+
+
+@pytest.mark.parametrize(
+    "constant_name",
+    (
+        "_CANONICAL_PATH_EXPANDUSER",
+        "_CANONICAL_PATH_RESOLVE",
+        "_CANONICAL_PATH_READ_TEXT",
+    ),
+)
+def test_runtime_authority_reopen_rejects_canonical_path_root_rebinding(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    constant_name: str,
+) -> None:
+    path = tmp_path / "deployment-runtime-authority.json"
+    authority_root = _authority_root(tmp_path)
+    DeploymentRuntimeAuthorityStore.initialize_pristine(
+        path,
+        authority_root=authority_root,
+    )
+    hostile_calls: list[object] = []
+
+    def hostile(*args: object, **kwargs: object) -> object:
+        hostile_calls.append((args, kwargs))
+        raise AssertionError("hostile canonical path primitive executed")
+
+    monkeypatch.setattr(
+        deployment_runtime_authority,
+        constant_name,
+        hostile,
+    )
+
+    with pytest.raises(
+        DeploymentRuntimeAuthorityError,
+        match="construction helper dispatch was replaced",
+    ):
+        DeploymentRuntimeAuthorityStore(
+            path,
+            authority_root=authority_root,
+        )
+
+    assert hostile_calls == []
+
+
+@pytest.mark.parametrize(
+    "constant_name",
+    (
+        "_CANONICAL_PATH_EXPANDUSER_CODE",
+        "_CANONICAL_PATH_RESOLVE_CODE",
+        "_CANONICAL_PATH_READ_TEXT_CODE",
+    ),
+)
+def test_runtime_authority_reopen_rejects_canonical_path_code_root_rebinding(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    constant_name: str,
+) -> None:
+    path = tmp_path / "deployment-runtime-authority.json"
+    authority_root = _authority_root(tmp_path)
+    DeploymentRuntimeAuthorityStore.initialize_pristine(
+        path,
+        authority_root=authority_root,
+    )
+
+    monkeypatch.setattr(
+        deployment_runtime_authority,
+        constant_name,
+        object(),
+    )
+
+    with pytest.raises(
+        DeploymentRuntimeAuthorityError,
+        match="construction helper dispatch was replaced",
+    ):
+        DeploymentRuntimeAuthorityStore(
+            path,
+            authority_root=authority_root,
+        )

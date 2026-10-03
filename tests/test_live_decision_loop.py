@@ -48,7 +48,7 @@ from autosport.portfolio_plan import (
     PortfolioDependencyGraph,
     PortfolioPlan,
 )
-from autosport.providers import ProviderUnavailableError
+from autosport.providers import InMemoryProvider, ProviderQuote, ProviderUnavailableError
 from autosport.scientific_registry import ScientificRegistry, StrategyVersion
 from autosport.risk import PaperRiskPolicy, ProposedTicketRiskContext
 from autosport.storage import SQLiteMarketStore
@@ -1393,6 +1393,77 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
                 ),
                 1,
             )
+
+    def test_default_provider_degraded_quality_blocks_economic_cut(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            registry = self._scientific_registry(
+                workspace,
+                self._strategy_version(),
+            )
+            receive_time = self.START + timedelta(seconds=1)
+            provider = InMemoryProvider(
+                "provider-a",
+                [
+                    ProviderQuote(
+                        provider_event_id="event-1",
+                        provider_market_id="winner",
+                        provider_selection_id="selection-a",
+                        decimal_odds=Decimal("2.00"),
+                        observed_ts=self.START.isoformat(),
+                        sequence=1,
+                        source_ts=self.START.isoformat(),
+                    )
+                ],
+                quality_flags=("PROVIDER_SEQUENCE_GAP",),
+            )
+            factory = _EmptyIntentFactory()
+            loop = PersistentLiveDecisionLoop(
+                workspace,
+                loop_id="live-test-loop",
+                mode=LiveDecisionMode.PAPER,
+                book=PaperBook("1000"),
+                authority=self._authority(),
+                intent_factory=factory,
+                scientific_registry=registry,
+                provider=provider,
+                ingestion_policy=IngestionPolicy(
+                    max_batch_size=100,
+                    stale_after_seconds=60,
+                    max_future_skew_seconds=5,
+                ),
+                max_quote_age=timedelta(seconds=5),
+                clock=_ManualClock(receive_time + timedelta(seconds=1)),
+            )
+            loop.register_input("input-a", source_ids="provider-a")
+
+            with patch(
+                "autosport.ingestion._utc_now_iso",
+                return_value=receive_time.isoformat(),
+            ):
+                result = loop.run_cycle()
+
+            self.assertEqual(result.status, LiveCycleStatus.BACKPRESSURE)
+            self.assertIn("quality is degraded", result.detail)
+            self.assertEqual(factory.calls, [])
+            self.assertFalse((workspace / "decisions.jsonl").exists())
+            self.assertEqual(loop.mirror_updates.pending_count, 1)
+            health = SourceHealthStore(
+                workspace / "source_health.json"
+            ).get("provider-a")
+            self.assertEqual(health.status, "degraded")
+            self.assertEqual(
+                health.quality_flags,
+                ("PROVIDER_SEQUENCE_GAP",),
+            )
+            persisted = SQLiteMarketStore(workspace / "market.db")
+            try:
+                events = persisted.events()
+            finally:
+                persisted.close()
+            self.assertEqual(len(events), 1)
+            self.assertEqual(events[0].ingest_ts, receive_time.isoformat())
+            loop.close()
 
     def test_market_update_after_coherent_capture_cannot_publish_stale_pending(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

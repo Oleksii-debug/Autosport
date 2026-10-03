@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from autosport.gui import AutosportApp
+from autosport.localization import text
 from autosport.replay_worker import ReplayWorkerMessage
 
 
@@ -116,6 +117,105 @@ def test_replay_primary_error_survives_raising_session_teardown() -> None:
         "Автоспорт",
         "Помилка паперового повтору: RuntimeError: replay failed",
     )
+
+
+def _configure_close_app(app: AutosportApp) -> tuple[list[str], list[str]]:
+    app.replay_worker = SimpleNamespace(busy=False)
+    app.live_worker = SimpleNamespace(busy=False)
+    app.evidence_export_worker = SimpleNamespace(busy=False)
+    app.live_status = _Value()
+    destroy_calls: list[str] = []
+    bell_calls: list[str] = []
+    app.destroy = lambda: destroy_calls.append("destroy")
+    app.bell = lambda: bell_calls.append("bell")
+    return destroy_calls, bell_calls
+
+
+def test_close_teardown_failure_keeps_window_open_and_quarantines_workspace() -> None:
+    app = _base_partial_app()
+    stale = app.session
+    destroy_calls, bell_calls = _configure_close_app(app)
+
+    with patch("autosport.gui.messagebox.showerror") as showerror:
+        AutosportApp.close_app(app)
+
+    assert stale is not None
+    assert stale.closed
+    assert app.session is None
+    assert app._closing is False
+    assert destroy_calls == []
+    assert bell_calls == ["bell"]
+    assert Path("economic-workspace") in app._recovery_required_workspaces
+    assert "9999" not in app.bank.value
+    assert app.tickets.lines == [text("ui.status.close.teardown_ticket")]
+    assert app.status.value == text("ui.status.close.teardown_blocked")
+    assert app._logs[-1] == text("ui.status.close.teardown_blocked")
+    assert any(
+        "вторинна_помилка=OSError: simulated session close failure" in line
+        for line in app._logs
+    )
+    showerror.assert_called_once_with(
+        text("ui.dialog.title"),
+        text("ui.error.close.teardown"),
+    )
+
+
+def test_close_process_control_failure_never_destroys_window() -> None:
+    app = _base_partial_app()
+    exact_workspace = Path("interrupt-workspace")
+
+    class _InterruptedSession:
+        def __init__(self) -> None:
+            self.workspace = exact_workspace
+
+        def close(self) -> None:
+            raise KeyboardInterrupt("close interrupted")
+
+    app.session = _InterruptedSession()
+    destroy_calls, bell_calls = _configure_close_app(app)
+
+    try:
+        AutosportApp.close_app(app)
+    except KeyboardInterrupt as exc:
+        assert str(exc) == "close interrupted"
+    else:
+        raise AssertionError("KeyboardInterrupt must propagate after fail-closed quarantine")
+
+    assert app.session is None
+    assert app._closing is False
+    assert destroy_calls == []
+    assert bell_calls == []
+    assert exact_workspace in app._recovery_required_workspaces
+    assert "9999" not in app.bank.value
+    assert app.tickets.lines == [text("ui.status.close.teardown_ticket")]
+
+
+def test_close_success_destroys_only_after_session_teardown() -> None:
+    app = _base_partial_app()
+    close_order: list[str] = []
+
+    class _SuccessfulSession:
+        workspace = Path("economic-workspace")
+
+        def close(self) -> None:
+            close_order.append("session.close")
+
+    app.session = _SuccessfulSession()
+    app.replay_worker = SimpleNamespace(busy=False)
+    app.live_worker = SimpleNamespace(busy=False)
+    app.evidence_export_worker = SimpleNamespace(busy=False)
+    app.live_status = _Value()
+    app.bell = lambda: (_ for _ in ()).throw(
+        AssertionError("successful close must not bell")
+    )
+    app.destroy = lambda: close_order.append("destroy")
+
+    AutosportApp.close_app(app)
+
+    assert close_order == ["session.close", "destroy"]
+    assert app.session is None
+    assert app._closing is True
+    assert app._recovery_required_workspaces == set()
 
 
 def test_recovery_stops_before_reconcile_after_pre_reconcile_teardown_failure() -> None:

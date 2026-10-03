@@ -311,6 +311,92 @@ def test_scoped_production_api_rejects_in_place_base_cancel_code_rebind() -> Non
         GitHubApi.cancel.__code__ = original_code
 
 
+def test_scoped_cancel_rechecks_branch_helper_after_zero_association_roundtrip(
+    monkeypatch,
+) -> None:
+    api = WorkflowScopedGitHubApi(
+        repository="owner/repo",
+        token="token",
+        workflow_id=1,
+        workflow_name="CI",
+    )
+    candidate_head = "a" * 40
+    api._zero_association_recovered_runs[123] = (candidate_head, "stale-branch")
+    helper = WorkflowScopedGitHubApi._canonical_branch_head
+    original_code = helper.__code__
+
+    def forged_branch(self, branch):
+        del self, branch
+        return "b" * 40
+
+    forged_code = forged_branch.__code__
+    assert len(forged_code.co_freevars) == len(original_code.co_freevars)
+
+    def fake_urlopen(request, *, timeout: int):
+        del timeout
+        url = request.full_url
+        if "/commits/" in url and "/pulls?" in url:
+            helper.__code__ = forged_code
+            return _FakeSuccessResponse(200, b"[]")
+        raise AssertionError("mutated branch revalidation helper must not execute")
+
+    monkeypatch.setattr(controller_module, "urlopen", fake_urlopen)
+    try:
+        with pytest.raises(
+            CancellationError,
+            match="scoped cancellation revalidation dispatch changed",
+        ):
+            api.cancel(123)
+    finally:
+        helper.__code__ = original_code
+
+
+def test_scoped_cancel_rechecks_live_qualification_after_association_roundtrip(
+    monkeypatch,
+) -> None:
+    api = WorkflowScopedGitHubApi(
+        repository="owner/repo",
+        token="token",
+        workflow_id=1,
+        workflow_name="CI",
+    )
+    candidate_head = "a" * 40
+    api._recovered_runs[123] = (7, candidate_head)
+    helper = GitHubApi.live_pr_qualification
+    original_code = helper.__code__
+
+    def forged_live_qualification(self, pr_number):
+        del self, pr_number
+        return globals()["PullRequestQualification"](
+            head_sha="b" * 40,
+            integration_capable=True,
+        )
+
+    forged_code = forged_live_qualification.__code__
+    assert len(forged_code.co_freevars) == len(original_code.co_freevars)
+
+    def fake_urlopen(request, *, timeout: int):
+        del timeout
+        url = request.full_url
+        if "/commits/" in url and "/pulls?" in url:
+            helper.__code__ = forged_code
+            body = (
+                '[{"number":7,"head":{"sha":"' + candidate_head + '"}}]'
+            ).encode()
+            return _FakeSuccessResponse(200, body)
+        raise AssertionError("mutated live qualification helper must not execute")
+
+    monkeypatch.setattr(controller_module, "urlopen", fake_urlopen)
+    try:
+        with pytest.raises(
+            CancellationError,
+            match="scoped cancellation revalidation dispatch changed",
+        ):
+            api.cancel(123)
+    finally:
+        helper.__code__ = original_code
+
+
 def test_scoped_cancel_rechecks_base_cancel_code_after_external_revalidation(
     monkeypatch,
 ) -> None:

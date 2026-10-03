@@ -23,6 +23,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from threading import RLock
+from types import MappingProxyType
 from typing import Any, Final, Mapping
 
 from . import learning_environment as _learning_environment
@@ -1096,38 +1097,89 @@ _CANONICAL_RECORD_CODEC_DESCRIPTORS: Final = tuple(
 )
 
 
-def _assert_canonical_record_codec() -> None:
-    if DeploymentRuntimeAuthorityRecord is not _CANONICAL_RECORD_TYPE:
+def _assert_canonical_record_codec(
+    _record_type: type = DeploymentRuntimeAuthorityRecord,
+    _environment_type: type = EnvironmentIdentity,
+    _episode_type: type = Episode,
+    _datetime_type: type = datetime,
+    _timezone_module: object = timezone,
+    _learning_environment_module: object = _learning_environment,
+    _learning_environment_schema: str = _learning_environment.ENVIRONMENT_SCHEMA,
+    _learning_environment_schema_version: int = (
+        _learning_environment.ENVIRONMENT_SCHEMA_VERSION
+    ),
+    _learning_environment_hashlib: object = _learning_environment.hashlib,
+    _learning_environment_json: object = _learning_environment.json,
+    _learning_environment_datetime: object = _learning_environment.datetime,
+    _learning_environment_timezone: object = _learning_environment.timezone,
+    _learning_environment_helpers: tuple[tuple[str, object, object], ...] = (
+        _CANONICAL_LEARNING_ENVIRONMENT_HELPERS
+    ),
+    _environment_surface: tuple[tuple[str, object, object], ...] = (
+        _CANONICAL_ENVIRONMENT_IDENTITY_SURFACE
+    ),
+    _episode_surface: tuple[tuple[str, object, object], ...] = (
+        _CANONICAL_EPISODE_SURFACE
+    ),
+    _record_helpers: tuple[tuple[str, object, object], ...] = (
+        _CANONICAL_RECORD_HELPERS
+    ),
+    _record_codec_descriptors: tuple[tuple[str, object, object], ...] = (
+        _CANONICAL_RECORD_CODEC_DESCRIPTORS
+    ),
+) -> None:
+    if (
+        DeploymentRuntimeAuthorityRecord is not _record_type
+        or _CANONICAL_RECORD_TYPE is not _record_type
+    ):
         raise DeploymentRuntimeAuthorityError(
             "runtime authority record type dispatch was replaced"
         )
     if (
-        EnvironmentIdentity is not _CANONICAL_ENVIRONMENT_IDENTITY_TYPE
-        or Episode is not _CANONICAL_EPISODE_TYPE
-        or datetime is not _CANONICAL_DATETIME_TYPE
-        or timezone is not _CANONICAL_TIMEZONE_MODULE
+        EnvironmentIdentity is not _environment_type
+        or _CANONICAL_ENVIRONMENT_IDENTITY_TYPE is not _environment_type
+        or Episode is not _episode_type
+        or _CANONICAL_EPISODE_TYPE is not _episode_type
+        or datetime is not _datetime_type
+        or _CANONICAL_DATETIME_TYPE is not _datetime_type
+        or timezone is not _timezone_module
+        or _CANONICAL_TIMEZONE_MODULE is not _timezone_module
     ):
         raise DeploymentRuntimeAuthorityError(
             "runtime authority semantic type dispatch was replaced"
         )
     if (
-        _learning_environment is not _CANONICAL_LEARNING_ENVIRONMENT_MODULE
-        or _learning_environment.ENVIRONMENT_SCHEMA
-        != _CANONICAL_LEARNING_ENVIRONMENT_SCHEMA
+        _learning_environment is not _learning_environment_module
+        or _CANONICAL_LEARNING_ENVIRONMENT_MODULE is not _learning_environment_module
+        or _learning_environment.ENVIRONMENT_SCHEMA != _learning_environment_schema
+        or _CANONICAL_LEARNING_ENVIRONMENT_SCHEMA != _learning_environment_schema
         or _learning_environment.ENVIRONMENT_SCHEMA_VERSION
-        != _CANONICAL_LEARNING_ENVIRONMENT_SCHEMA_VERSION
-        or _learning_environment.hashlib is not _CANONICAL_LEARNING_ENVIRONMENT_HASHLIB
-        or _learning_environment.json is not _CANONICAL_LEARNING_ENVIRONMENT_JSON
-        or _learning_environment.datetime
-        is not _CANONICAL_LEARNING_ENVIRONMENT_DATETIME
-        or _learning_environment.timezone
-        is not _CANONICAL_LEARNING_ENVIRONMENT_TIMEZONE
+        != _learning_environment_schema_version
+        or _CANONICAL_LEARNING_ENVIRONMENT_SCHEMA_VERSION
+        != _learning_environment_schema_version
+        or _learning_environment.hashlib is not _learning_environment_hashlib
+        or _CANONICAL_LEARNING_ENVIRONMENT_HASHLIB
+        is not _learning_environment_hashlib
+        or _learning_environment.json is not _learning_environment_json
+        or _CANONICAL_LEARNING_ENVIRONMENT_JSON is not _learning_environment_json
+        or _learning_environment.datetime is not _learning_environment_datetime
+        or _CANONICAL_LEARNING_ENVIRONMENT_DATETIME
+        is not _learning_environment_datetime
+        or _learning_environment.timezone is not _learning_environment_timezone
+        or _CANONICAL_LEARNING_ENVIRONMENT_TIMEZONE
+        is not _learning_environment_timezone
+        or _CANONICAL_LEARNING_ENVIRONMENT_HELPERS
+        is not _learning_environment_helpers
+        or _CANONICAL_ENVIRONMENT_IDENTITY_SURFACE is not _environment_surface
+        or _CANONICAL_EPISODE_SURFACE is not _episode_surface
+        or _CANONICAL_RECORD_HELPERS is not _record_helpers
+        or _CANONICAL_RECORD_CODEC_DESCRIPTORS is not _record_codec_descriptors
     ):
         raise DeploymentRuntimeAuthorityError(
             "runtime authority learning-environment dependency was replaced"
         )
-    for name, expected_helper, expected_code in _CANONICAL_LEARNING_ENVIRONMENT_HELPERS:
-        current_helper = getattr(_CANONICAL_LEARNING_ENVIRONMENT_MODULE, name, None)
+    for name, expected_helper, expected_code in _learning_environment_helpers:
+        current_helper = getattr(_learning_environment_module, name, None)
         if (
             current_helper is not expected_helper
             or getattr(current_helper, "__code__", None) is not expected_code
@@ -1136,14 +1188,8 @@ def _assert_canonical_record_codec() -> None:
                 "runtime authority learning-environment helper was replaced"
             )
     for semantic_type, surface in (
-        (
-            _CANONICAL_ENVIRONMENT_IDENTITY_TYPE,
-            _CANONICAL_ENVIRONMENT_IDENTITY_SURFACE,
-        ),
-        (
-            _CANONICAL_EPISODE_TYPE,
-            _CANONICAL_EPISODE_SURFACE,
-        ),
+        (_environment_type, _environment_surface),
+        (_episode_type, _episode_surface),
     ):
         class_dict = vars(semantic_type)
         for name, expected_descriptor, expected_code in surface:
@@ -1161,7 +1207,7 @@ def _assert_canonical_record_codec() -> None:
                     "runtime authority semantic type surface was replaced"
                 )
     namespace = globals()
-    for name, expected_helper, expected_code in _CANONICAL_RECORD_HELPERS:
+    for name, expected_helper, expected_code in _record_helpers:
         current_helper = namespace.get(name)
         if (
             current_helper is not expected_helper
@@ -1170,8 +1216,8 @@ def _assert_canonical_record_codec() -> None:
             raise DeploymentRuntimeAuthorityError(
                 "runtime authority record helper dispatch was replaced"
             )
-    class_dict = vars(_CANONICAL_RECORD_TYPE)
-    for name, expected_descriptor, expected_code in _CANONICAL_RECORD_CODEC_DESCRIPTORS:
+    class_dict = vars(_record_type)
+    for name, expected_descriptor, expected_code in _record_codec_descriptors:
         current = class_dict.get(name)
         current_callable = getattr(
             getattr(current, "__func__", current),
@@ -1194,16 +1240,20 @@ _CANONICAL_RECORD_CODEC_GUARD: Final = _assert_canonical_record_codec
 _CANONICAL_RECORD_CODEC_GUARD_CODE: Final = _assert_canonical_record_codec.__code__
 
 
-def _require_canonical_record_codec() -> None:
+def _require_canonical_record_codec(
+    _guard: object = _assert_canonical_record_codec,
+    _guard_code: object = _assert_canonical_record_codec.__code__,
+) -> None:
     if (
-        _assert_canonical_record_codec is not _CANONICAL_RECORD_CODEC_GUARD
-        or _CANONICAL_RECORD_CODEC_GUARD.__code__
-        is not _CANONICAL_RECORD_CODEC_GUARD_CODE
+        _assert_canonical_record_codec is not _guard
+        or _CANONICAL_RECORD_CODEC_GUARD is not _guard
+        or getattr(_guard, "__code__", None) is not _guard_code
+        or _CANONICAL_RECORD_CODEC_GUARD_CODE is not _guard_code
     ):
         raise DeploymentRuntimeAuthorityError(
             "runtime authority record codec guard dispatch was replaced"
         )
-    _CANONICAL_RECORD_CODEC_GUARD()
+    _guard()
 
 
 _CANONICAL_RECORD_CODEC_REQUIREMENT: Final = _require_canonical_record_codec
@@ -1235,6 +1285,7 @@ _IMMUTABLE_STORE_ROOT_SURFACE: Final = frozenset(
         "_binding_root_selection_store_root",
         "_WRITE_ONCE_AUTHORITY_BINDINGS",
         "_WRITE_ONCE_AUTHORITY_STORAGE_BINDINGS",
+        "_CANONICAL_DISPATCH_EXPECTATIONS",
     }
 )
 
@@ -1319,7 +1370,14 @@ class DeploymentRuntimeAuthorityStore(metaclass=_DeploymentRuntimeAuthorityStore
                 raise TypeError(
                     "runtime authority store must be exact DeploymentRuntimeAuthorityStore"
                 )
-            expected = _CANONICAL_STORE_METHOD_DESCRIPTORS.get(name)
+            expectation_root = vars(DeploymentRuntimeAuthorityStore).get(
+                "_CANONICAL_DISPATCH_EXPECTATIONS"
+            )
+            if not isinstance(expectation_root, Mapping):
+                raise DeploymentRuntimeAuthorityError(
+                    "runtime authority store expectation root was replaced"
+                )
+            expected = expectation_root.get(name)
             current = vars(DeploymentRuntimeAuthorityStore).get(name)
             if expected is None:
                 raise DeploymentRuntimeAuthorityError(
@@ -1440,23 +1498,52 @@ class DeploymentRuntimeAuthorityStore(metaclass=_DeploymentRuntimeAuthorityStore
         object.__delattr__(self, name)
 
     @staticmethod
-    def _assert_static_authority_contract() -> None:
+    def _assert_static_authority_contract(
+        _store_schema: str = STORE_SCHEMA,
+        _store_schema_version: int = STORE_SCHEMA_VERSION,
+        _record_schema: str = RECORD_SCHEMA,
+        _record_schema_version: int = RECORD_SCHEMA_VERSION,
+        _empty_chain_sha256: str = _EMPTY_CHAIN_SHA256,
+        _hex: frozenset[str] = _HEX,
+        _authority_domain: str = _AUTHORITY_DOMAIN,
+        _authority_binding_schema: str = _AUTHORITY_BINDING_SCHEMA,
+        _authority_binding_schema_version: int = _AUTHORITY_BINDING_SCHEMA_VERSION,
+        _monotonic_authority_id: str = MONOTONIC_AUTHORITY_ID,
+        _authority_phase_type: type = AuthorityPhase,
+        _recovery_disposition_type: type = RecoveryDisposition,
+        _path_type: type = Path,
+    ) -> None:
         if (
-            STORE_SCHEMA != _CANONICAL_STORE_SCHEMA_VALUE
-            or STORE_SCHEMA_VERSION != _CANONICAL_STORE_SCHEMA_VERSION_VALUE
-            or RECORD_SCHEMA != _CANONICAL_RECORD_SCHEMA_VALUE
-            or RECORD_SCHEMA_VERSION != _CANONICAL_RECORD_SCHEMA_VERSION_VALUE
-            or _EMPTY_CHAIN_SHA256 != _CANONICAL_EMPTY_CHAIN_SHA256_VALUE
-            or _HEX != _CANONICAL_HEX_VALUE
-            or _AUTHORITY_DOMAIN != _CANONICAL_AUTHORITY_DOMAIN_VALUE
-            or _AUTHORITY_BINDING_SCHEMA
-            != _CANONICAL_AUTHORITY_BINDING_SCHEMA_VALUE
+            STORE_SCHEMA != _store_schema
+            or _CANONICAL_STORE_SCHEMA_VALUE != _store_schema
+            or STORE_SCHEMA_VERSION != _store_schema_version
+            or _CANONICAL_STORE_SCHEMA_VERSION_VALUE != _store_schema_version
+            or RECORD_SCHEMA != _record_schema
+            or _CANONICAL_RECORD_SCHEMA_VALUE != _record_schema
+            or RECORD_SCHEMA_VERSION != _record_schema_version
+            or _CANONICAL_RECORD_SCHEMA_VERSION_VALUE != _record_schema_version
+            or _EMPTY_CHAIN_SHA256 != _empty_chain_sha256
+            or _CANONICAL_EMPTY_CHAIN_SHA256_VALUE != _empty_chain_sha256
+            or _HEX != _hex
+            or _CANONICAL_HEX_VALUE != _hex
+            or _AUTHORITY_DOMAIN != _authority_domain
+            or _CANONICAL_AUTHORITY_DOMAIN_VALUE != _authority_domain
+            or _AUTHORITY_BINDING_SCHEMA != _authority_binding_schema
+            or _CANONICAL_AUTHORITY_BINDING_SCHEMA_VALUE
+            != _authority_binding_schema
             or _AUTHORITY_BINDING_SCHEMA_VERSION
-            != _CANONICAL_AUTHORITY_BINDING_SCHEMA_VERSION_VALUE
-            or MONOTONIC_AUTHORITY_ID != _CANONICAL_MONOTONIC_AUTHORITY_ID
-            or AuthorityPhase is not _CANONICAL_AUTHORITY_PHASE_TYPE
-            or RecoveryDisposition is not _CANONICAL_RECOVERY_DISPOSITION_TYPE
-            or Path is not _CANONICAL_PATH_TYPE
+            != _authority_binding_schema_version
+            or _CANONICAL_AUTHORITY_BINDING_SCHEMA_VERSION_VALUE
+            != _authority_binding_schema_version
+            or MONOTONIC_AUTHORITY_ID != _monotonic_authority_id
+            or _CANONICAL_MONOTONIC_AUTHORITY_ID != _monotonic_authority_id
+            or AuthorityPhase is not _authority_phase_type
+            or _CANONICAL_AUTHORITY_PHASE_TYPE is not _authority_phase_type
+            or RecoveryDisposition is not _recovery_disposition_type
+            or _CANONICAL_RECOVERY_DISPOSITION_TYPE
+            is not _recovery_disposition_type
+            or Path is not _path_type
+            or _CANONICAL_PATH_TYPE is not _path_type
         ):
             raise DeploymentRuntimeAuthorityError(
                 "runtime authority static contract was replaced"
@@ -1885,32 +1972,51 @@ class DeploymentRuntimeAuthorityStore(metaclass=_DeploymentRuntimeAuthorityStore
             previous_available_at = current_available_at
         return tuple(records)
 
-    def _assert_binding_integrity(self) -> None:
+    def _assert_binding_integrity(
+        self,
+        _monotonic_read_guard: object = _assert_monotonic_read_helpers,
+        _monotonic_read_guard_code: object = _assert_monotonic_read_helpers.__code__,
+        _record_codec_requirement: object = _require_canonical_record_codec,
+        _record_codec_requirement_code: object = _require_canonical_record_codec.__code__,
+        _sha_validator: object = _sha,
+        _sha_validator_code: object = _sha.__code__,
+        _digest_helper: object = _digest,
+        _digest_helper_code: object = _digest.__code__,
+    ) -> None:
         self._assert_static_authority_contract()
         if (
-            _assert_monotonic_read_helpers
-            is not _CANONICAL_MONOTONIC_READ_HELPER_ASSERT
-            or _CANONICAL_MONOTONIC_READ_HELPER_ASSERT.__code__
-            is not _CANONICAL_MONOTONIC_READ_HELPER_ASSERT_CODE
+            _assert_monotonic_read_helpers is not _monotonic_read_guard
+            or _CANONICAL_MONOTONIC_READ_HELPER_ASSERT is not _monotonic_read_guard
+            or getattr(_monotonic_read_guard, "__code__", None)
+            is not _monotonic_read_guard_code
+            or _CANONICAL_MONOTONIC_READ_HELPER_ASSERT_CODE
+            is not _monotonic_read_guard_code
         ):
             raise DeploymentRuntimeAuthorityError(
                 "runtime authority monotonic read helper guard was replaced"
             )
-        _CANONICAL_MONOTONIC_READ_HELPER_ASSERT()
+        _monotonic_read_guard()
         if (
-            _require_canonical_record_codec is not _CANONICAL_RECORD_CODEC_REQUIREMENT
-            or _CANONICAL_RECORD_CODEC_REQUIREMENT.__code__
-            is not _CANONICAL_RECORD_CODEC_REQUIREMENT_CODE
+            _require_canonical_record_codec is not _record_codec_requirement
+            or _CANONICAL_RECORD_CODEC_REQUIREMENT is not _record_codec_requirement
+            or getattr(_record_codec_requirement, "__code__", None)
+            is not _record_codec_requirement_code
+            or _CANONICAL_RECORD_CODEC_REQUIREMENT_CODE
+            is not _record_codec_requirement_code
         ):
             raise DeploymentRuntimeAuthorityError(
                 "runtime authority record codec requirement dispatch was replaced"
             )
-        _CANONICAL_RECORD_CODEC_REQUIREMENT()
+        _record_codec_requirement()
         if (
-            _sha is not _CANONICAL_SHA_VALIDATOR
-            or _CANONICAL_SHA_VALIDATOR.__code__ is not _CANONICAL_SHA_VALIDATOR_CODE
-            or _digest is not _CANONICAL_DIGEST
-            or _CANONICAL_DIGEST.__code__ is not _CANONICAL_DIGEST_CODE
+            _sha is not _sha_validator
+            or _CANONICAL_SHA_VALIDATOR is not _sha_validator
+            or getattr(_sha_validator, "__code__", None) is not _sha_validator_code
+            or _CANONICAL_SHA_VALIDATOR_CODE is not _sha_validator_code
+            or _digest is not _digest_helper
+            or _CANONICAL_DIGEST is not _digest_helper
+            or getattr(_digest_helper, "__code__", None) is not _digest_helper_code
+            or _CANONICAL_DIGEST_CODE is not _digest_helper_code
         ):
             raise DeploymentRuntimeAuthorityError(
                 "runtime authority binding validator dispatch was replaced"
@@ -2107,7 +2213,7 @@ class DeploymentRuntimeAuthorityStore(metaclass=_DeploymentRuntimeAuthorityStore
             raise DeploymentRuntimeAuthorityError(
                 "runtime authority binding integrity mismatch"
             )
-        expected_semantic_binding_sha256 = _CANONICAL_DIGEST(
+        expected_semantic_binding_sha256 = _digest_helper(
             {
                 "schema": _AUTHORITY_BINDING_SCHEMA,
                 "schema_version": _AUTHORITY_BINDING_SCHEMA_VERSION,
@@ -2118,7 +2224,7 @@ class DeploymentRuntimeAuthorityStore(metaclass=_DeploymentRuntimeAuthorityStore
             }
         )
         if (
-            _CANONICAL_SHA_VALIDATOR(
+            _sha_validator(
                 semantic_binding_sha256,
                 "runtime authority semantic binding",
             )
@@ -2323,20 +2429,27 @@ class DeploymentRuntimeAuthorityStore(metaclass=_DeploymentRuntimeAuthorityStore
         with self._lock, _workspace_economic_lock(self.workspace):
             return self._read_validated_records_locked()
 
-
-# Capture the exact canonical descriptor objects after class construction. Instance
-# __dict__ entries cannot outrank this map, and later class-level replacement is
-# detected before the hostile descriptor can be invoked.
-_CANONICAL_STORE_METHOD_DESCRIPTORS: Final = {
-    name: (
-        descriptor,
-        getattr(
-            getattr(descriptor, "__func__", descriptor),
-            "__code__",
-            None,
-        ),
+    # Build the expected dispatch root inside the class namespace itself. The
+    # metaclass makes this attribute non-replaceable after class construction and
+    # MappingProxyType makes its contents immutable, so coordinated replacement of
+    # a live method plus the module-level expectation map cannot self-confirm.
+    _dispatch_expectations: dict[str, tuple[object, object]] = {}
+    for _dispatch_name in _SEALED_STORE_DISPATCH_NAMES:
+        _dispatch_descriptor = locals()[_dispatch_name]
+        _dispatch_callable = getattr(
+            _dispatch_descriptor,
+            "__func__",
+            _dispatch_descriptor,
+        )
+        _dispatch_expectations[_dispatch_name] = (
+            _dispatch_descriptor,
+            getattr(_dispatch_callable, "__code__", None),
+        )
+    _CANONICAL_DISPATCH_EXPECTATIONS: Final = MappingProxyType(
+        _dispatch_expectations
     )
-    for name in _SEALED_STORE_DISPATCH_NAMES
-    for descriptor in (vars(DeploymentRuntimeAuthorityStore)[name],)
-}
+    del _dispatch_expectations
+    del _dispatch_name
+    del _dispatch_descriptor
+    del _dispatch_callable
 

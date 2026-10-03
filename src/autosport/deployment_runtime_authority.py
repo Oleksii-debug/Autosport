@@ -26,6 +26,7 @@ from typing import Any, Final, Mapping
 
 from . import learning_environment as _learning_environment
 from .learning_environment import EnvironmentIdentity, Episode
+from . import monotonic_workspace_authority as _monotonic_workspace_authority
 from .monotonic_authority_root_binding import AuthorityRootSelectionBinding
 from .monotonic_workspace_authority import (
     AUTHORITY_ID as MONOTONIC_AUTHORITY_ID,
@@ -57,6 +58,62 @@ _CANONICAL_AUTHORITY_BINDING_SCHEMA_VALUE: Final = _AUTHORITY_BINDING_SCHEMA
 _CANONICAL_AUTHORITY_BINDING_SCHEMA_VERSION_VALUE: Final = _AUTHORITY_BINDING_SCHEMA_VERSION
 _CANONICAL_MONOTONIC_AUTHORITY_TYPE: Final = MonotonicWorkspaceAuthority
 _CANONICAL_MONOTONIC_AUTHORITY_ID: Final = MONOTONIC_AUTHORITY_ID
+_CANONICAL_MONOTONIC_MODULE: Final = _monotonic_workspace_authority
+_CANONICAL_MONOTONIC_MODULE_AUTHORITY_PHASE: Final = (
+    _monotonic_workspace_authority.AuthorityPhase
+)
+_CANONICAL_MONOTONIC_MODULE_RECOVERY_DISPOSITION: Final = (
+    _monotonic_workspace_authority.RecoveryDisposition
+)
+_CANONICAL_MONOTONIC_MODULE_AUTHORITY_RECORD: Final = (
+    _monotonic_workspace_authority.AuthorityRecord
+)
+_CANONICAL_MONOTONIC_MODULE_HISTORY_TYPE: Final = (
+    _monotonic_workspace_authority._History
+)
+_CANONICAL_MONOTONIC_MODULE_WORKSPACE_LOCK: Final = (
+    _monotonic_workspace_authority.WorkspaceEconomicLock
+)
+_CANONICAL_MONOTONIC_MODULE_STRICT_JSON_LOADS: Final = (
+    _monotonic_workspace_authority.strict_json_loads
+)
+_CANONICAL_MONOTONIC_MODULE_STAT: Final = _monotonic_workspace_authority.stat
+_CANONICAL_MONOTONIC_MODULE_RECORD_FILE_RE: Final = (
+    _monotonic_workspace_authority._RECORD_FILE_RE
+)
+_CANONICAL_MONOTONIC_MODULE_SHA256_RE: Final = (
+    _monotonic_workspace_authority._SHA256_RE
+)
+_CANONICAL_MONOTONIC_MODULE_CONSTANTS: Final = (
+    ("AUTHORITY_SCHEMA", _monotonic_workspace_authority.AUTHORITY_SCHEMA),
+    (
+        "AUTHORITY_SCHEMA_VERSION",
+        _monotonic_workspace_authority.AUTHORITY_SCHEMA_VERSION,
+    ),
+    ("AUTHORITY_ID", _monotonic_workspace_authority.AUTHORITY_ID),
+    ("_NAMESPACE_SCHEMA", _monotonic_workspace_authority._NAMESPACE_SCHEMA),
+    (
+        "_NAMESPACE_MARKER_KEYS",
+        _monotonic_workspace_authority._NAMESPACE_MARKER_KEYS,
+    ),
+    ("_RECORD_KEYS", _monotonic_workspace_authority._RECORD_KEYS),
+)
+_CANONICAL_MONOTONIC_MODULE_HELPERS: Final = tuple(
+    (
+        name,
+        helper,
+        getattr(helper, "__code__", None),
+    )
+    for name in (
+        "_text",
+        "_digest",
+        "_record_hash",
+        "_sync_directory_lineage",
+        "_durable_exclusive_json_create",
+        "strict_json_loads",
+    )
+    for helper in (getattr(_monotonic_workspace_authority, name),)
+)
 _CANONICAL_AUTHORITY_PHASE_TYPE: Final = AuthorityPhase
 _CANONICAL_RECOVERY_DISPOSITION_TYPE: Final = RecoveryDisposition
 _CANONICAL_PATH_TYPE: Final = Path
@@ -292,6 +349,50 @@ _CANONICAL_MONOTONIC_CONSTRUCTOR_HELPER_CODE: Final = _construct_monotonic_autho
 def _assert_monotonic_read_recovery_dispatch(
     authority: MonotonicWorkspaceAuthority,
 ) -> None:
+    if _monotonic_workspace_authority is not _CANONICAL_MONOTONIC_MODULE:
+        raise DeploymentRuntimeAuthorityError(
+            "runtime authority monotonic module was replaced"
+        )
+    if (
+        _CANONICAL_MONOTONIC_MODULE.AuthorityPhase
+        is not _CANONICAL_MONOTONIC_MODULE_AUTHORITY_PHASE
+        or _CANONICAL_MONOTONIC_MODULE.RecoveryDisposition
+        is not _CANONICAL_MONOTONIC_MODULE_RECOVERY_DISPOSITION
+        or _CANONICAL_MONOTONIC_MODULE.AuthorityRecord
+        is not _CANONICAL_MONOTONIC_MODULE_AUTHORITY_RECORD
+        or _CANONICAL_MONOTONIC_MODULE._History
+        is not _CANONICAL_MONOTONIC_MODULE_HISTORY_TYPE
+        or _CANONICAL_MONOTONIC_MODULE.WorkspaceEconomicLock
+        is not _CANONICAL_MONOTONIC_MODULE_WORKSPACE_LOCK
+        or _CANONICAL_MONOTONIC_MODULE.strict_json_loads
+        is not _CANONICAL_MONOTONIC_MODULE_STRICT_JSON_LOADS
+        or _CANONICAL_MONOTONIC_MODULE.stat
+        is not _CANONICAL_MONOTONIC_MODULE_STAT
+        or _CANONICAL_MONOTONIC_MODULE._RECORD_FILE_RE
+        is not _CANONICAL_MONOTONIC_MODULE_RECORD_FILE_RE
+        or _CANONICAL_MONOTONIC_MODULE._SHA256_RE
+        is not _CANONICAL_MONOTONIC_MODULE_SHA256_RE
+    ):
+        raise DeploymentRuntimeAuthorityError(
+            "runtime authority monotonic dependency was replaced"
+        )
+    for name, expected_value in _CANONICAL_MONOTONIC_MODULE_CONSTANTS:
+        if getattr(_CANONICAL_MONOTONIC_MODULE, name, None) != expected_value:
+            raise DeploymentRuntimeAuthorityError(
+                "runtime authority monotonic constant was replaced"
+            )
+    for name, expected_helper, expected_code in _CANONICAL_MONOTONIC_MODULE_HELPERS:
+        current_helper = getattr(_CANONICAL_MONOTONIC_MODULE, name, None)
+        if (
+            current_helper is not expected_helper
+            or (
+                expected_code is not None
+                and getattr(current_helper, "__code__", None) is not expected_code
+            )
+        ):
+            raise DeploymentRuntimeAuthorityError(
+                "runtime authority monotonic helper was replaced"
+            )
     if type(authority) is not _CANONICAL_MONOTONIC_AUTHORITY_TYPE:
         raise DeploymentRuntimeAuthorityError(
             "runtime authority monotonic read type was replaced"

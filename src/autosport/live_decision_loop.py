@@ -165,8 +165,8 @@ PostAppendHook = Callable[[], None]
 
 
 _PROGRESS_SCHEMA = "autosport.live_decision_progress"
-_PROGRESS_VERSION = 1
-_PROGRESS_KEYS = frozenset(
+_PROGRESS_VERSION = 2
+_PROGRESS_KEYS_V1 = frozenset(
     {
         "schema",
         "schema_version",
@@ -183,6 +183,7 @@ _PROGRESS_KEYS = frozenset(
         "gate",
     }
 )
+_PROGRESS_KEYS = _PROGRESS_KEYS_V1 | frozenset({"provider_health_boundaries"})
 _PHASE_PENDING = "pending"
 _PHASE_APPEND_PENDING = "append_pending"
 _PHASE_COMMITTED = "committed"
@@ -595,6 +596,7 @@ class _Progress:
     plan_sha256: str | None
     ledger_offset: int | None
     gate: str
+    provider_health_boundaries: tuple[ProviderHealthReplayBoundary, ...] = ()
 
     def __post_init__(self) -> None:
         _canonical_text("loop_id", self.loop_id)
@@ -609,6 +611,30 @@ class _Progress:
             raise LiveDecisionProgressError("unsupported live progress phase")
         if self.gate not in {_GATE_NORMAL, _GATE_PROVIDER_GAP}:
             raise LiveDecisionProgressError("unsupported live progress gate")
+        if type(self.provider_health_boundaries) is not tuple:
+            raise LiveDecisionProgressError(
+                "provider_health_boundaries must be a tuple"
+            )
+        for boundary in self.provider_health_boundaries:
+            if type(boundary) is not ProviderHealthReplayBoundary:
+                raise LiveDecisionProgressError(
+                    "provider_health_boundaries must contain exact replay boundaries"
+                )
+        if self.provider_health_boundaries != tuple(
+            sorted(
+                self.provider_health_boundaries,
+                key=lambda item: item.source_id,
+            )
+        ):
+            raise LiveDecisionProgressError(
+                "provider_health_boundaries must be sorted by source_id"
+            )
+        if len({item.source_id for item in self.provider_health_boundaries}) != len(
+            self.provider_health_boundaries
+        ):
+            raise LiveDecisionProgressError(
+                "provider_health_boundaries must have unique source_id values"
+            )
         if type(self.affected_input_ids) is not tuple:
             raise LiveDecisionProgressError("affected_input_ids must be a tuple")
         for input_id in self.affected_input_ids:
@@ -661,6 +687,10 @@ class _Progress:
             "decision_context_sha256": self.decision_context_sha256,
             "affected_input_ids": list(self.affected_input_ids),
             "registered_input_ids": list(self.registered_input_ids),
+            "provider_health_boundaries": [
+                boundary.to_dict()
+                for boundary in self.provider_health_boundaries
+            ],
             "decision_id": self.decision_id,
             "plan_sha256": self.plan_sha256,
             "ledger_offset": self.ledger_offset,
@@ -669,14 +699,28 @@ class _Progress:
 
     @classmethod
     def from_dict(cls, raw: object) -> "_Progress":
-        if type(raw) is not dict or set(raw) != _PROGRESS_KEYS:
+        if type(raw) is not dict:
             raise LiveDecisionProgressError(
                 "live decision progress must contain canonical fields"
             )
-        if raw["schema"] != _PROGRESS_SCHEMA or raw["schema_version"] != _PROGRESS_VERSION:
+        schema_version = raw.get("schema_version")
+        if raw.get("schema") != _PROGRESS_SCHEMA or schema_version not in {
+            1,
+            _PROGRESS_VERSION,
+        }:
             raise LiveDecisionProgressError("unsupported live decision progress schema")
+        expected_keys = (
+            _PROGRESS_KEYS_V1 if schema_version == 1 else _PROGRESS_KEYS
+        )
+        if set(raw) != expected_keys:
+            raise LiveDecisionProgressError(
+                "live decision progress must contain canonical fields"
+            )
         input_ids = raw["affected_input_ids"]
         registered_ids = raw["registered_input_ids"]
+        raw_health_boundaries = (
+            [] if schema_version == 1 else raw["provider_health_boundaries"]
+        )
         if type(input_ids) is not list or any(type(value) is not str for value in input_ids):
             raise LiveDecisionProgressError(
                 "affected_input_ids must be a JSON string array"
@@ -687,7 +731,15 @@ class _Progress:
             raise LiveDecisionProgressError(
                 "registered_input_ids must be a JSON string array"
             )
+        if type(raw_health_boundaries) is not list:
+            raise LiveDecisionProgressError(
+                "provider_health_boundaries must be a JSON array"
+            )
         try:
+            health_boundaries = tuple(
+                ProviderHealthReplayBoundary.from_dict(value)
+                for value in raw_health_boundaries
+            )
             return cls(
                 loop_id=raw["loop_id"],
                 phase=raw["phase"],
@@ -700,6 +752,7 @@ class _Progress:
                 plan_sha256=raw["plan_sha256"],
                 ledger_offset=raw["ledger_offset"],
                 gate=raw["gate"],
+                provider_health_boundaries=health_boundaries,
             )
         except (TypeError, ValueError) as exc:
             raise LiveDecisionProgressError("live decision progress is invalid") from exc

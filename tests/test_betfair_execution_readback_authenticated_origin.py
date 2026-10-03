@@ -4,6 +4,7 @@ from dataclasses import replace
 import http.client as _http_client
 import json
 import socket as _socket
+import ssl as _ssl
 from types import FunctionType
 import urllib.request as _urllib_request
 
@@ -449,6 +450,36 @@ def test_execution_origin_predicate_rejects_transitive_network_dispatch_rebind(
 
     monkeypatch.setattr(owner, name, hostile)
     assert getattr(owner, name) is not original
+    assert predicate() is False
+
+
+def test_execution_origin_predicate_rejects_default_tls_context_rebind(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    predicate = _closure_value(
+        BetfairReadOnlyClient.read_execution_readback,
+        "origin_dispatch_current",
+    )
+    assert predicate() is True
+
+    def hostile_context(*args, **kwargs):
+        del args, kwargs
+        raise AssertionError("hostile TLS context must not become provider origin")
+
+    monkeypatch.setattr(_ssl, "_create_default_https_context", hostile_context)
+    assert predicate() is False
+
+
+def test_execution_origin_predicate_rejects_http_client_ssl_module_rebind(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    predicate = _closure_value(
+        BetfairReadOnlyClient.read_execution_readback,
+        "origin_dispatch_current",
+    )
+    assert predicate() is True
+
+    monkeypatch.setattr(_http_client, "ssl", object())
     assert predicate() is False
 
 

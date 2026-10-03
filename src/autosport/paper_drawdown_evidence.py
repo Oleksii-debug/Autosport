@@ -71,6 +71,10 @@ class PaperRealizedEquityPoint:
                 )
         if self.equity < 0:
             raise PaperDrawdownEvidenceError("equity point cannot be negative")
+        if self.action in {"initial", "open"} and self.realized_delta != Decimal("0"):
+            raise PaperDrawdownEvidenceError(
+                "initial/open equity point cannot carry realized P&L"
+            )
         if self.event_time is not None and (
             type(self.event_time) is not str or not self.event_time
         ):
@@ -81,6 +85,13 @@ class PaperRealizedEquityPoint:
 
 @dataclass(frozen=True, slots=True)
 class PaperRealizedDrawdownEvidence:
+    """Product drawdown projection over one canonical realized-equity path.
+
+    The peak/trough identity fields identify the episode with maximum absolute
+    drawdown amount. historical_max_drawdown_fraction is independently the
+    worst fractional drawdown across all historical peaks.
+    """
+
     schema: str
     scope: str
     metric_class: str
@@ -162,12 +173,51 @@ class PaperRealizedDrawdownEvidence:
             raise PaperDrawdownEvidenceError(
                 "drawdown evidence initial/peak equity must be positive"
             )
+        if self.peak_equity < self.initial_equity:
+            raise PaperDrawdownEvidenceError(
+                "drawdown evidence peak cannot be below initial equity"
+            )
         if self.current_equity > self.peak_equity:
             raise PaperDrawdownEvidenceError(
                 "drawdown evidence current equity cannot exceed peak"
             )
-        if self.minimum_equity > self.current_equity and len(self.points) <= 1:
+        if (
+            self.minimum_equity > self.current_equity
+            or self.minimum_equity > self.initial_equity
+        ):
             raise PaperDrawdownEvidenceError("drawdown evidence minimum equity is invalid")
+        if self.historical_max_drawdown_fraction > Decimal("1"):
+            raise PaperDrawdownEvidenceError(
+                "drawdown evidence historical fraction cannot exceed one"
+            )
+        if self.historical_max_drawdown_amount == 0:
+            if (
+                self.historical_max_drawdown_fraction != 0
+                or self.historical_max_drawdown_peak_id is not None
+                or self.historical_max_drawdown_trough_id is not None
+            ):
+                raise PaperDrawdownEvidenceError(
+                    "zero historical drawdown cannot carry loss episode evidence"
+                )
+        elif (
+            self.historical_max_drawdown_fraction <= 0
+            or self.historical_max_drawdown_peak_id is None
+            or self.historical_max_drawdown_trough_id is None
+        ):
+            raise PaperDrawdownEvidenceError(
+                "positive historical drawdown requires fraction and episode identity"
+            )
+        if (
+            type(self.recovered_to_peak) is not bool
+            or self.recovered_to_peak != (self.current_equity == self.peak_equity)
+        ):
+            raise PaperDrawdownEvidenceError(
+                "drawdown evidence recovery flag is inconsistent"
+            )
+        if type(self.settlement_availability_complete) is not bool:
+            raise PaperDrawdownEvidenceError(
+                "drawdown evidence settlement availability flag is invalid"
+            )
         if type(self.open_position_count) is not int or self.open_position_count < 0:
             raise PaperDrawdownEvidenceError("drawdown evidence open count is invalid")
         if self.as_known_at_supported is not False:
@@ -189,6 +239,18 @@ class PaperRealizedDrawdownEvidence:
         if self.points[-1].equity != self.current_equity:
             raise PaperDrawdownEvidenceError(
                 "drawdown evidence final point does not match current equity"
+            )
+        if len({point.point_id for point in self.points}) != len(self.points):
+            raise PaperDrawdownEvidenceError(
+                "drawdown evidence point identities must be unique"
+            )
+        if min(point.equity for point in self.points) != self.minimum_equity:
+            raise PaperDrawdownEvidenceError(
+                "drawdown evidence minimum does not match the path"
+            )
+        if max(point.equity for point in self.points) != self.peak_equity:
+            raise PaperDrawdownEvidenceError(
+                "drawdown evidence peak does not match the path"
             )
 
 

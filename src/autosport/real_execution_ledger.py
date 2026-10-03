@@ -808,7 +808,7 @@ class RealExecutionLedger:
         payload: dict[str, Any],
     ) -> None:
         if not self._serialization_held:
-            return self._mutate(
+            self._mutate(
                 lambda: self._append(
                     kind,
                     plan_id,
@@ -817,6 +817,7 @@ class RealExecutionLedger:
                     payload,
                 )
             )
+            return
         event = {
             "schema_version": SCHEMA_VERSION,
             "event_id": str(uuid.uuid4()),
@@ -829,7 +830,7 @@ class RealExecutionLedger:
         }
         self._validate_event(event)
         envelope = _canonical({"sha256": _digest(event), "event": event})
-        raw_before, _events_before = self._read_verified_state()
+        raw_before, _ = self._read_verified_state()
         encoded_event = (envelope + "\n").encode("utf-8")
         intended_raw = raw_before + encoded_event
         observed_sha256 = self._monotonic_state_sha256(raw_before)

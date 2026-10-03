@@ -649,10 +649,15 @@ class _PaperDayTurnoverSnapshot:
 
 @dataclass(frozen=True, slots=True)
 class _ProductDayAdmissionAuthority:
-    """Current product-day headroom plus the product-owned action instant."""
+    """Current product-day headroom plus durable product-day admission identity."""
 
     turnover_room: Decimal
     admission_ts: str
+    day_key: str
+    window_start: str
+    window_end_exclusive: str
+    window_state_sha256: str
+    window_authority_generation: int
 
 
 _DAY_AUTHORITY_FIELD_DESCRIPTOR_WITNESSES = tuple(
@@ -1138,6 +1143,11 @@ def _revalidated_product_day_admission_authority(
         return _ProductDayAdmissionAuthority(
             turnover_room=room,
             admission_ts=admission_ts,
+            day_key=current_day_key,
+            window_start=current_window_start,
+            window_end_exclusive=current_window_end,
+            window_state_sha256=current_state_sha,
+            window_authority_generation=current_generation,
         )
     except (ArithmeticError, OSError, RuntimeError, TypeError, ValueError):
         return None
@@ -1408,6 +1418,7 @@ _PAPERBOOK_INSTANCE_STATE_CLASS_WITNESSES = tuple(
         "tickets",
         "_lifecycle",
         "_settlement_times",
+        "_product_day_admissions",
     )
 )
 
@@ -1417,16 +1428,20 @@ if type(_PAPERBOOK_LOAD_DESCRIPTOR) is not classmethod:
 _PAPERBOOK_LOAD_FUNCTION = _PAPERBOOK_LOAD_DESCRIPTOR.__func__
 _PAPERBOOK_SAVE_FUNCTION = PaperBook.__dict__["save"]
 _PAPERBOOK_OPEN_TICKET_FUNCTION = PaperBook.__dict__["open_ticket"]
+_PAPERBOOK_RECORD_PRODUCT_DAY_ADMISSION_FUNCTION = PaperBook.__dict__[
+    "_record_product_day_admission"
+]
 if (
     type(_PAPERBOOK_LOAD_FUNCTION) is not FunctionType
     or type(_PAPERBOOK_SAVE_FUNCTION) is not FunctionType
     or type(_PAPERBOOK_OPEN_TICKET_FUNCTION) is not FunctionType
+    or type(_PAPERBOOK_RECORD_PRODUCT_DAY_ADMISSION_FUNCTION) is not FunctionType
 ):
     raise RuntimeError("canonical PaperBook admission mutation authority is unavailable")
 _PAPERBOOK_GATE_METHOD_WITNESS, _PAPERBOOK_GATE_GLOBAL_WITNESS = (
     _capture_class_transition_graph(
         PaperBook,
-        ("load", "save", "open_ticket"),
+        ("load", "save", "open_ticket", "_record_product_day_admission"),
     )
 )
 
@@ -1470,6 +1485,8 @@ def _require_paperbook_admission_authority() -> None:
         or PaperBook.__dict__.get("save") is not _PAPERBOOK_SAVE_FUNCTION
         or PaperBook.__dict__.get("open_ticket")
         is not _PAPERBOOK_OPEN_TICKET_FUNCTION
+        or PaperBook.__dict__.get("_record_product_day_admission")
+        is not _PAPERBOOK_RECORD_PRODUCT_DAY_ADMISSION_FUNCTION
     ):
         raise RuntimeError("economic admission PaperBook mutation authority changed")
 
@@ -2031,6 +2048,41 @@ def admit_paper_ticket(
             bankroll_id=bankroll_id,
             currency=currency,
         )
+        if day_authority is not None:
+            _PAPERBOOK_RECORD_PRODUCT_DAY_ADMISSION_FUNCTION(
+                working_book,
+                opened.ticket_id,
+                admission_ts=_canonical_day_authority_field(
+                    day_authority,
+                    _ProductDayAdmissionAuthority,
+                    "admission_ts",
+                ),
+                day_key=_canonical_day_authority_field(
+                    day_authority,
+                    _ProductDayAdmissionAuthority,
+                    "day_key",
+                ),
+                window_start=_canonical_day_authority_field(
+                    day_authority,
+                    _ProductDayAdmissionAuthority,
+                    "window_start",
+                ),
+                window_end_exclusive=_canonical_day_authority_field(
+                    day_authority,
+                    _ProductDayAdmissionAuthority,
+                    "window_end_exclusive",
+                ),
+                window_state_sha256=_canonical_day_authority_field(
+                    day_authority,
+                    _ProductDayAdmissionAuthority,
+                    "window_state_sha256",
+                ),
+                window_authority_generation=_canonical_day_authority_field(
+                    day_authority,
+                    _ProductDayAdmissionAuthority,
+                    "window_authority_generation",
+                ),
+            )
         _require_paperbook_admission_authority()
         _PAPERBOOK_SAVE_FUNCTION(working_book, book_path)
         _require_paperbook_admission_authority()

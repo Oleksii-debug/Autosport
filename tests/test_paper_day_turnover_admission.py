@@ -89,7 +89,12 @@ def _context(leg: TicketLeg, placed_at: str) -> ProposedTicketRiskContext:
     )
 
 
-def _book_with_settled_turnover(*, placed_at: str, stake: str) -> PaperBook:
+def _book_with_settled_turnover(
+    *,
+    placed_at: str,
+    stake: str,
+    product_day_witness: bool = True,
+) -> PaperBook:
     book = PaperBook("100")
     prior = _leg("prior")
     ticket = book.open_ticket(
@@ -99,6 +104,20 @@ def _book_with_settled_turnover(*, placed_at: str, stake: str) -> PaperBook:
         bankroll_id="paper-bankroll",
         currency="USD",
     )
+    if product_day_witness:
+        admission = datetime.fromisoformat(placed_at.replace("Z", "+00:00"))
+        admission = admission.astimezone(timezone.utc)
+        start = admission.replace(hour=0, minute=0, second=0, microsecond=0)
+        end = start + timedelta(days=1)
+        book._record_product_day_admission(
+            ticket.ticket_id,
+            admission_ts=placed_at,
+            day_key=start.date().isoformat(),
+            window_start=_timestamp(start),
+            window_end_exclusive=_timestamp(end),
+            window_state_sha256="a" * 64,
+            window_authority_generation=1,
+        )
     book.settle(ticket.ticket_id, set(), {ticket.legs[0].quote_key})
     return book
 
@@ -879,6 +898,40 @@ def test_product_issued_current_utc_day_releases_old_day_turnover(tmp_path):
     assert result.risk.allowed is True
     assert result.ticket is not None
     assert result.ticket.stake == Decimal("0.01")
+
+
+def test_unproven_previous_day_timestamp_cannot_mint_turnover_headroom(tmp_path):
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    old = now - timedelta(days=2)
+    goal = _goal()
+    EconomicGoalStore(tmp_path).initialize_owner(goal)
+    book = _book_with_settled_turnover(
+        placed_at=_timestamp(old),
+        stake="50",
+        product_day_witness=False,
+    )
+
+    baseline, result = _admit(tmp_path, book, goal, _timestamp(now))
+
+    assert baseline.allowed is False
+    assert baseline.reason == "economic goal turnover limit exceeded"
+    assert result.admitted is False
+    assert result.risk.reason == "economic goal turnover limit exceeded"
+    persisted = PaperBook.load(tmp_path / "paper_book.json")
+    assert len(persisted.tickets) == 1
+    assert persisted._product_day_admissions == {}
+
+
+def test_product_day_admission_chronology_survives_restart(tmp_path):
+    old = datetime.now(timezone.utc).replace(microsecond=0) - timedelta(days=2)
+    book = _book_with_settled_turnover(placed_at=_timestamp(old), stake="5")
+    ticket_id = next(iter(book.tickets))
+    expected = book._product_day_admissions[ticket_id]
+
+    book.save(tmp_path / "paper_book.json")
+    loaded = PaperBook.load(tmp_path / "paper_book.json")
+
+    assert loaded._product_day_admissions[ticket_id] == expected
 
 
 def test_current_day_turnover_still_consumes_exact_owner_cap(tmp_path):

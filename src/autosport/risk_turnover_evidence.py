@@ -567,16 +567,20 @@ class PaperDayTurnoverResolver(metaclass=_PaperDayTurnoverResolverMeta):
                 "UTC day window must have positive duration"
             )
 
+        admissions = getattr(book, "_product_day_admissions", None)
+        if type(admissions) is not dict:
+            raise PaperDayTurnoverEvidenceIncompleteError(
+                "PaperBook lacks canonical product-day admission chronology"
+            )
+
         constituents: list[dict[str, str]] = []
         stakes: list[Decimal] = []
         for ticket in book.tickets.values():
-            # Positive bounded-day evidence cannot infer day membership from
-            # PaperTicket.placed_at alone: direct/legacy PAPER opening accepts a
-            # caller-supplied timestamp. Until durable product-issued per-ticket
-            # admission chronology exists, any ticket that cannot be proven to
-            # belong to this exact EconomicGoal/current day makes the bounded
-            # projection incomplete. Admission then falls back to the existing
-            # conservative whole-history turnover policy instead of minting room.
+            # Day membership is never inferred from caller-selectable placed_at.
+            # Every ticket participating in a positive bounded-day projection must
+            # carry durable chronology written by the canonical admission path.
+            # Legacy/direct tickets without that witness make the projection
+            # incomplete and therefore fall back to whole-history turnover.
             if ticket.bankroll_id != goal.bankroll_id:
                 raise PaperDayTurnoverEvidenceIncompleteError(
                     "PAPER ticket lacks exact EconomicGoal bankroll identity"
@@ -585,17 +589,64 @@ class PaperDayTurnoverResolver(metaclass=_PaperDayTurnoverResolverMeta):
                 raise PaperDayTurnoverEvidenceIncompleteError(
                     "PAPER ticket lacks exact EconomicGoal currency identity"
                 )
-            placed_at = _parse_timestamp(ticket.placed_at, "ticket.placed_at")
-            if not (start <= placed_at < end):
+            witness = admissions.get(ticket.ticket_id)
+            if type(witness) is not tuple or len(witness) != 6:
                 raise PaperDayTurnoverEvidenceIncompleteError(
                     "PAPER ticket lacks product-issued UTC-day admission chronology"
+                )
+            (
+                admission_ts,
+                admission_day_key,
+                admission_window_start,
+                admission_window_end,
+                admission_state_sha256,
+                admission_generation,
+            ) = witness
+            admission_time = _parse_timestamp(
+                admission_ts,
+                "ticket.product_day_admission_ts",
+            )
+            admission_start = _parse_timestamp(
+                admission_window_start,
+                "ticket.product_day_window_start",
+            )
+            admission_end = _parse_timestamp(
+                admission_window_end,
+                "ticket.product_day_window_end_exclusive",
+            )
+            if not (admission_start <= admission_time < admission_end):
+                raise PaperDayTurnoverEvidenceIncompleteError(
+                    "PAPER product-day admission chronology is internally inconsistent"
+                )
+
+            # A fully earlier canonical UTC-day witness is safely historical. Any
+            # future or overlapping-but-different window is ambiguous and cannot
+            # create positive current-day headroom.
+            if admission_end <= start:
+                continue
+            if admission_start != start or admission_end != end:
+                raise PaperDayTurnoverEvidenceIncompleteError(
+                    "PAPER product-day admission window does not match current authority"
+                )
+            if (
+                admission_day_key != current_window.day_key
+                or admission_state_sha256 != current_window.state_sha256
+                or admission_generation != current_window.authority_generation
+            ):
+                raise PaperDayTurnoverEvidenceIncompleteError(
+                    "PAPER product-day admission generation does not match current authority"
                 )
             stakes.append(ticket.stake)
             constituents.append(
                 {
                     "ticket_id": ticket.ticket_id,
                     "stake": _decimal_text(ticket.stake),
-                    "placed_at": ticket.placed_at,
+                    "admission_ts": admission_ts,
+                    "admission_day_key": admission_day_key,
+                    "admission_window_state_sha256": admission_state_sha256,
+                    "admission_window_authority_generation": str(
+                        admission_generation
+                    ),
                     "bankroll_id": goal.bankroll_id,
                     "currency": goal.currency,
                 }

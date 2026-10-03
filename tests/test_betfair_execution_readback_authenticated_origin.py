@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 import json
+from types import FunctionType
 import urllib.request as _urllib_request
 
 import pytest
@@ -215,9 +216,24 @@ def test_public_authority_slots_cannot_mint_origin_without_canonical_capture(
 
 
 def _closure_value(function, name: str):
-    closure = function.__closure__ or ()
-    mapping = dict(zip(function.__code__.co_freevars, closure, strict=True))
-    return mapping[name].cell_contents
+    pending = [function]
+    seen: set[int] = set()
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        closure = current.__closure__ or ()
+        for freevar, cell in zip(current.__code__.co_freevars, closure, strict=True):
+            try:
+                value = cell.cell_contents
+            except ValueError:
+                continue
+            if freevar == name:
+                return value
+            if type(value) is FunctionType:
+                pending.append(value)
+    raise AssertionError(f"closure value not found: {name}")
 
 
 def test_origin_proof_cannot_be_replayed_onto_equal_capture_object(

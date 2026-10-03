@@ -2233,14 +2233,20 @@ class PersistentLiveDecisionLoop:
                 gate=gate,
             )
             try:
-                with self.dependencies.hold_input_ids(
-                    expected_registered_input_ids
-                ):
-                    if expected_mirror_revision is None:
+                if expected_mirror_revision is None:
+                    with self.dependencies.hold_input_ids(
+                        expected_registered_input_ids
+                    ):
                         atomic_write_json(self.progress_path, pending.to_dict())
-                    else:
-                        with self.mirror_updates.mirror.hold_revision(
-                            expected_mirror_revision
+                else:
+                    # Canonical lock order is mirror -> focused dependency registry.
+                    # Registration uses the same order when installing its initial
+                    # matching-key snapshot, preventing publication/register deadlock.
+                    with self.mirror_updates.mirror.hold_revision(
+                        expected_mirror_revision
+                    ):
+                        with self.dependencies.hold_input_ids(
+                            expected_registered_input_ids
                         ):
                             atomic_write_json(
                                 self.progress_path,

@@ -2,9 +2,10 @@
 
 This module is deliberately authority-light. It reuses ``StrategyClass`` and
 ``OpportunityDecision`` from :mod:`autosport.opportunity`; it does not mint a
-second strategy/decision vocabulary. It answers only whether the evidence
-*classes* required by one canonical strategy class are present. It does not
-validate the evidence itself, prove economics, size stakes, mutate portfolio
+second strategy/decision vocabulary. It enumerates the proof classes required
+by one canonical strategy class and can report only whether caller-supplied
+requirement labels cover those names. Label coverage is not evidence presence
+or validity. This module does not prove economics, size stakes, mutate portfolio
 state, relax EconomicGoal/RiskPolicy authority, or authorize execution.
 """
 

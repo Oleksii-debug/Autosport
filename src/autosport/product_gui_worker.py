@@ -17,8 +17,10 @@ from .continuous_session import (
     SessionStoppedError,
 )
 from .domain import TicketStatus
+from .economic_goal_store import EconomicGoalStore
 from .paper import PaperBook
 from .portfolio import PortfolioEngine
+from .risk_reporting import build_paper_risk_report
 from .operator_source_registry import (
     list_product_source_entries,
     resolve_product_source_runtime_binding,
@@ -306,6 +308,116 @@ class ProductGuiEconomicTicket:
 
 
 @dataclass(frozen=True, slots=True)
+class ProductGuiPaperRiskSnapshot:
+    """Read-only PAPER risk report projected from canonical goal + PaperBook."""
+
+    scope: str
+    goal_id: str
+    goal_revision: int
+    goal_contract_sha256: str
+    portfolio_risk_state_sha256: str
+    bankroll_id: str
+    currency: str
+    current_equity: Decimal
+    peak_equity: Decimal
+    committed_stake: Decimal
+    realized_gross_loss: Decimal
+    turnover: Decimal
+    current_drawdown_amount: Decimal
+    historical_max_drawdown_amount: Decimal
+    historical_max_drawdown_fraction: Decimal | None
+    drawdown_loss_room: Decimal
+    max_drawdown_fraction: Decimal
+    risk_of_ruin_limit: Decimal
+    risk_of_ruin_status: str
+    includes_live_execution_exposure: bool = False
+    live_execution_headroom_authoritative: bool = False
+    risk_of_ruin_upper_bound: None = None
+
+    def __post_init__(self) -> None:
+        if self.scope != "PAPER_ONLY":
+            raise ValueError("runtime risk snapshot must be PAPER_ONLY")
+        for field_name, value in (
+            ("goal_id", self.goal_id),
+            ("bankroll_id", self.bankroll_id),
+            ("currency", self.currency),
+            ("risk_of_ruin_status", self.risk_of_ruin_status),
+        ):
+            if type(value) is not str or not value or value.strip() != value:
+                raise ValueError(
+                    f"runtime risk snapshot {field_name} must be canonical text"
+                )
+        if (
+            type(self.goal_revision) is not int
+            or isinstance(self.goal_revision, bool)
+            or self.goal_revision < 1
+        ):
+            raise ValueError("runtime risk snapshot goal revision must be positive")
+        for field_name, value in (
+            ("goal_contract_sha256", self.goal_contract_sha256),
+            ("portfolio_risk_state_sha256", self.portfolio_risk_state_sha256),
+        ):
+            if (
+                type(value) is not str
+                or len(value) != 64
+                or any(character not in "0123456789abcdef" for character in value)
+            ):
+                raise ValueError(
+                    f"runtime risk snapshot {field_name} must be lowercase SHA-256"
+                )
+        nonnegative_fields = (
+            ("current_equity", self.current_equity),
+            ("peak_equity", self.peak_equity),
+            ("committed_stake", self.committed_stake),
+            ("realized_gross_loss", self.realized_gross_loss),
+            ("turnover", self.turnover),
+            ("current_drawdown_amount", self.current_drawdown_amount),
+            ("historical_max_drawdown_amount", self.historical_max_drawdown_amount),
+        )
+        for field_name, value in nonnegative_fields:
+            if type(value) is not Decimal or not value.is_finite() or value < 0:
+                raise ValueError(
+                    f"runtime risk snapshot {field_name} must be nonnegative Decimal"
+                )
+        if self.current_equity > self.peak_equity:
+            raise ValueError("runtime risk snapshot current equity exceeds peak")
+        if type(self.drawdown_loss_room) is not Decimal or not self.drawdown_loss_room.is_finite():
+            raise ValueError("runtime risk snapshot drawdown room must be finite Decimal")
+        for field_name, value in (
+            ("max_drawdown_fraction", self.max_drawdown_fraction),
+            ("risk_of_ruin_limit", self.risk_of_ruin_limit),
+        ):
+            if (
+                type(value) is not Decimal
+                or not value.is_finite()
+                or value < 0
+                or value > 1
+            ):
+                raise ValueError(
+                    f"runtime risk snapshot {field_name} must be Decimal fraction"
+                )
+        if self.historical_max_drawdown_fraction is not None and (
+            type(self.historical_max_drawdown_fraction) is not Decimal
+            or not self.historical_max_drawdown_fraction.is_finite()
+            or self.historical_max_drawdown_fraction < 0
+            or self.historical_max_drawdown_fraction > 1
+        ):
+            raise ValueError(
+                "runtime risk snapshot historical drawdown fraction is invalid"
+            )
+        if (
+            type(self.includes_live_execution_exposure) is not bool
+            or self.includes_live_execution_exposure
+            or type(self.live_execution_headroom_authoritative) is not bool
+            or self.live_execution_headroom_authoritative
+            or self.risk_of_ruin_upper_bound is not None
+        ):
+            raise ValueError(
+                "runtime risk snapshot cannot claim live execution or ruin authority"
+            )
+
+
+@dataclass(frozen=True, slots=True)
 class ProductGuiEconomicSnapshot:
     """Read-only economic truth captured after one canonical runtime tick."""
 
@@ -323,6 +435,7 @@ class ProductGuiEconomicSnapshot:
     portfolio_worst_case: Decimal
     portfolio_best_case: Decimal
     portfolio_mean_case: Decimal
+    paper_risk: ProductGuiPaperRiskSnapshot | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.workspace, Path) or not self.workspace.is_absolute():
@@ -436,6 +549,17 @@ class ProductGuiEconomicSnapshot:
                 raise ValueError(
                     "economic snapshot empty-open portfolio must be exact zero state"
                 )
+        if self.paper_risk is not None:
+            if type(self.paper_risk) is not ProductGuiPaperRiskSnapshot:
+                raise ValueError("economic snapshot PAPER risk must be canonical")
+            if self.paper_risk.committed_stake != self.committed_stake:
+                raise ValueError(
+                    "economic snapshot PAPER risk committed stake conflicts with tickets"
+                )
+            if self.paper_risk.current_equity != self.balance + self.committed_stake:
+                raise ValueError(
+                    "economic snapshot PAPER risk equity conflicts with PaperBook"
+                )
 
 
 def _capture_runtime_economic_snapshot(
@@ -451,6 +575,9 @@ def _capture_runtime_economic_snapshot(
     _ticket_status_type: type[TicketStatus] = TicketStatus,
     _decimal_type: type[Decimal] = Decimal,
     _path_type: type[Path] = Path,
+    _goal_store_type: type[EconomicGoalStore] = EconomicGoalStore,
+    _risk_report_builder=build_paper_risk_report,
+    _risk_snapshot_type: type[ProductGuiPaperRiskSnapshot] = ProductGuiPaperRiskSnapshot,
     _sha256=sha256,
 ) -> ProductGuiEconomicSnapshot:
     """Capture economic presentation truth without reopening AutosportSession.
@@ -510,6 +637,46 @@ def _capture_runtime_economic_snapshot(
         )
         portfolio = _portfolio_engine_type().analyse(list(book.tickets.values()))
 
+        paper_risk = None
+        goal = _goal_store_type(workspace).load_optional()
+        if goal is not None:
+            report = _risk_report_builder(book, goal)
+            if (
+                report.committed_stake != committed_stake
+                or report.current_equity != book.balance + committed_stake
+                or report.scope != "PAPER_ONLY"
+                or report.includes_live_execution_exposure is not False
+                or report.live_execution_headroom_authoritative is not False
+                or report.risk_of_ruin_upper_bound is not None
+            ):
+                raise RuntimeError(
+                    "canonical PAPER risk report conflicts with economic snapshot"
+                )
+            paper_risk = _risk_snapshot_type(
+                scope=report.scope,
+                goal_id=report.goal_id,
+                goal_revision=report.goal_revision,
+                goal_contract_sha256=report.goal_contract_sha256,
+                portfolio_risk_state_sha256=report.portfolio_risk_state_sha256,
+                bankroll_id=report.bankroll_id,
+                currency=report.currency,
+                current_equity=report.current_equity,
+                peak_equity=report.peak_equity,
+                committed_stake=report.committed_stake,
+                realized_gross_loss=report.realized_gross_loss,
+                turnover=report.turnover,
+                current_drawdown_amount=report.current_drawdown_amount,
+                historical_max_drawdown_amount=report.historical_max_drawdown_amount,
+                historical_max_drawdown_fraction=report.historical_max_drawdown_fraction,
+                drawdown_loss_room=report.drawdown_loss_room,
+                max_drawdown_fraction=report.max_drawdown_fraction,
+                risk_of_ruin_limit=report.risk_of_ruin_limit,
+                risk_of_ruin_status=report.risk_of_ruin_status,
+                includes_live_execution_exposure=report.includes_live_execution_exposure,
+                live_execution_headroom_authoritative=report.live_execution_headroom_authoritative,
+                risk_of_ruin_upper_bound=report.risk_of_ruin_upper_bound,
+            )
+
     return _snapshot_type(
         workspace=workspace,
         session_id=tick.session_id,
@@ -525,6 +692,7 @@ def _capture_runtime_economic_snapshot(
         portfolio_worst_case=portfolio.worst_case,
         portfolio_best_case=portfolio.best_case,
         portfolio_mean_case=portfolio.mean_case,
+        paper_risk=paper_risk,
     )
 
 

@@ -11,10 +11,11 @@ from secrets import token_bytes, token_hex
 from typing import Callable, Protocol
 import xml.etree.ElementTree as ET
 
-from . import betdaq_account_readonly as _account_readonly
 from .betdaq_account_readonly import BetdaqCredentials, UrllibBetdaqSoapTransport
 from .betdaq_odds_ladder_wire import BetdaqOddsLadderEntry, parse_get_odds_ladder_response
+from .betdaq_readonly_live_transport import BetdaqReadOnlyLiveTransport
 from .betdaq_readonly_market_wire import EXTERNAL_API_NS, SOAP11_NS
+from .betdaq_rate_governor import BetdaqRateDeferred
 
 
 BETDAQ_ODDS_LADDER_ENDPOINT = "https://api.betdaq.com/v2.0/ReadOnlyService.asmx"
@@ -24,9 +25,7 @@ BETDAQ_ODDS_LADDER_SOAP_ACTION = (
 BETDAQ_DECIMAL_PRICE_FORMAT = 1
 _SCHEMA = "autosport.betdaq-odds-ladder-acquisition-v1"
 _ACQ_PREFIX = "betdaq-ladder-acq:"
-_CANONICAL_POST = UrllibBetdaqSoapTransport.post
-_CANONICAL_URLOPEN = _account_readonly.urlopen
-_CANONICAL_REQUEST = _account_readonly.Request
+_CANONICAL_LIVE_POST = BetdaqReadOnlyLiveTransport._post_readonly
 _CREDENTIAL_CONTEXT_HMAC_KEY = token_bytes(32)
 _ORIGIN_WITNESS = object()
 _CLOCK_WITNESS = object()
@@ -49,6 +48,22 @@ class BetdaqOddsLadderTransport(Protocol):
         body: bytes,
         timeout_seconds: float,
     ) -> bytes: ...
+
+
+@dataclass(frozen=True, slots=True)
+class _BetdaqOddsLadderWire:
+    body: bytes
+
+    @property
+    def endpoint(self) -> str:
+        return BETDAQ_ODDS_LADDER_ENDPOINT
+
+    @property
+    def headers(self) -> dict[str, str]:
+        return {
+            "Content-Type": "text/xml; charset=utf-8",
+            "SOAPAction": f'"{BETDAQ_ODDS_LADDER_SOAP_ACTION}"',
+        }
 
 
 Clock = Callable[[], str]
@@ -228,12 +243,13 @@ class BetdaqLadderUseEvidence:
 
 
 class BetdaqOddsLadderAcquirer:
-    """Read-only live GetOddsLadder acquisition. No provider write surface."""
+    """Read-only GetOddsLadder acquisition through the shared live governor."""
 
     def __init__(
         self,
         *,
         credentials: BetdaqCredentials,
+        live_transport: BetdaqReadOnlyLiveTransport | None = None,
         transport: BetdaqOddsLadderTransport | None = None,
         timeout_seconds: float = 10.0,
         clock: Clock = utc_now_iso,
@@ -241,9 +257,34 @@ class BetdaqOddsLadderAcquirer:
     ) -> None:
         if type(credentials) is not BetdaqCredentials:
             raise TypeError("credentials must be canonical BetdaqCredentials")
-        selected: object = UrllibBetdaqSoapTransport() if transport is None else transport
-        if not callable(getattr(selected, "post", None)):
-            raise TypeError("transport must expose post")
+        if (live_transport is None) == (transport is None):
+            raise TypeError(
+                "exactly one shared live transport or explicit noncanonical test transport is required"
+            )
+        if live_transport is not None:
+            if type(live_transport) is not BetdaqReadOnlyLiveTransport:
+                raise TypeError(
+                    "live_transport must be canonical BetdaqReadOnlyLiveTransport"
+                )
+            try:
+                live_credentials = object.__getattribute__(
+                    live_transport, "_credentials"
+                )
+            except AttributeError as exc:
+                raise TypeError(
+                    "live transport credential binding is unavailable"
+                ) from exc
+            if live_credentials is not credentials:
+                raise TypeError(
+                    "live transport must use the exact acquisition credentials"
+                )
+        else:
+            if type(transport) is UrllibBetdaqSoapTransport:
+                raise TypeError(
+                    "product-owned BETDAQ HTTPS transport must be rate governed"
+                )
+            if not callable(getattr(transport, "post", None)):
+                raise TypeError("transport must expose post")
         if (
             isinstance(timeout_seconds, bool)
             or type(timeout_seconds) not in {int, float}
@@ -254,7 +295,8 @@ class BetdaqOddsLadderAcquirer:
         if not callable(clock) or not callable(acquisition_id_factory):
             raise TypeError("clock and acquisition_id_factory must be callable")
         self._credentials = credentials
-        self._transport = selected
+        self._live_transport = live_transport
+        self._transport = transport
         self._timeout = float(timeout_seconds)
         self._clock = clock
         self._id_factory = acquisition_id_factory
@@ -268,15 +310,30 @@ class BetdaqOddsLadderAcquirer:
             raise TypeError("request must be BetdaqOddsLadderRequest")
         body = _soap_request(self._credentials, request)
         try:
-            payload = self._transport.post(
-                BETDAQ_ODDS_LADDER_ENDPOINT,
-                headers={
-                    "Content-Type": "text/xml; charset=utf-8",
-                    "SOAPAction": f'"{BETDAQ_ODDS_LADDER_SOAP_ACTION}"',
-                },
-                body=body,
-                timeout_seconds=self._timeout,
-            )
+            if self._live_transport is not None:
+                wire = _BetdaqOddsLadderWire(body)
+                payload = _CANONICAL_LIVE_POST(
+                    self._live_transport,
+                    wire,
+                    method="GetOddsLadder",
+                    timeout_seconds=self._timeout,
+                )
+            else:
+                assert self._transport is not None
+                payload = self._transport.post(
+                    BETDAQ_ODDS_LADDER_ENDPOINT,
+                    headers={
+                        "Content-Type": "text/xml; charset=utf-8",
+                        "SOAPAction": f'"{BETDAQ_ODDS_LADDER_SOAP_ACTION}"',
+                    },
+                    body=body,
+                    timeout_seconds=self._timeout,
+                )
+        except BetdaqRateDeferred:
+            # Preserve the shared governor's typed fail-closed denial.  In
+            # particular GetOddsLadder remains unavailable while its public
+            # provider rate axis is intentionally unmodeled.
+            raise
         except Exception:
             raise BetdaqOddsLadderAcquisitionError(
                 "BETDAQ odds-ladder transport failed"
@@ -315,11 +372,15 @@ class BetdaqOddsLadderAcquirer:
             call_id=wire.call_id,
             evidence_sha256=evidence_sha,
             _origin_witness=(
-                _ORIGIN_WITNESS if _canonical_transport(self._transport) else object()
+                _ORIGIN_WITNESS
+                if _canonical_live_transport(
+                    self._live_transport,
+                    self._credentials,
+                )
+                else object()
             ),
             _clock_witness=_CLOCK_WITNESS if self._clock_verified else object(),
         )
-
 
 def qualify_exact_price_for_local_use(
     observation: BetdaqOddsLadderObservation,
@@ -421,17 +482,20 @@ def restore_structural_odds_ladder_observation(
         ) from None
 
 
-def _canonical_transport(transport: object) -> bool:
-    if type(transport) is not UrllibBetdaqSoapTransport:
+def _canonical_live_transport(
+    transport: BetdaqReadOnlyLiveTransport | None,
+    credentials: BetdaqCredentials,
+) -> bool:
+    if type(transport) is not BetdaqReadOnlyLiveTransport:
         return False
-    post = getattr(transport, "post", None)
-    return (
-        getattr(post, "__self__", None) is transport
-        and getattr(post, "__func__", None) is _CANONICAL_POST
-        and _account_readonly.urlopen is _CANONICAL_URLOPEN
-        and _account_readonly.Request is _CANONICAL_REQUEST
-    )
-
+    try:
+        return (
+            object.__getattribute__(transport, "_credentials") is credentials
+            and object.__getattribute__(transport, "_canonical_only") is True
+            and transport.canonical_transport_selected
+        )
+    except (AttributeError, TypeError):
+        return False
 
 def _soap_request(
     credentials: BetdaqCredentials,

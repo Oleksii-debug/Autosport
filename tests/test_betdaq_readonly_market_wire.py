@@ -219,7 +219,7 @@ def test_wrong_wire_element_or_attribute_casing_is_rejected() -> None:
         parse_get_prices_response(
             _response().replace("<GetPricesResponse", "<getPricesResponse", 1)
         )
-    with pytest.raises(BetdaqSoapProtocolError, match="price/stake"):
+    with pytest.raises(BetdaqSoapProtocolError, match="unexpected attribute"):
         parse_get_prices_response(
             _response().replace('Price="2.00"', 'price="2.00"', 1)
         )
@@ -366,6 +366,27 @@ def test_dtd_and_entity_declarations_are_forbidden() -> None:
         parse_get_prices_response(payload)
 
 
+def test_utf16_entity_payload_cannot_bypass_declaration_fence() -> None:
+    payload = _response().replace(
+        '<?xml version="1.0" encoding="utf-8"?>',
+        '<?xml version="1.0" encoding="utf-16"?>\n'
+        '<!DOCTYPE x [<!ENTITY boom "Success">]>',
+        1,
+    ).replace(
+        'Description="Success"',
+        'Description="&boom;"',
+        1,
+    ).encode("utf-16")
+
+    with pytest.raises(BetdaqSoapProtocolError, match="UTF-8"):
+        parse_get_prices_response(payload)
+
+
+def test_utf8_bom_remains_supported() -> None:
+    response = parse_get_prices_response(_response().encode("utf-8-sig"))
+    assert response.markets[0].market_id == 9001
+
+
 def test_unexpected_child_cannot_leak_partial_success() -> None:
     payload = _response(
         price_nodes=(
@@ -402,3 +423,23 @@ def test_result_and_return_status_unknown_attributes_fail_closed() -> None:
     with pytest.raises(BetdaqSoapProtocolError, match="unexpected attribute"):
         parse_get_prices_response(status_extra)
 
+
+
+def test_soap_body_rejects_sibling_payload_smuggling() -> None:
+    payload = _response().replace(
+        "<soap:Body>",
+        f'<soap:Body><Unexpected xmlns="{API}" />',
+        1,
+    )
+    with pytest.raises(BetdaqSoapProtocolError, match="exactly one GetPricesResponse"):
+        parse_get_prices_response(payload)
+
+
+def test_getprices_response_rejects_sibling_result_smuggling() -> None:
+    payload = _response().replace(
+        "<GetPricesResult>",
+        '<Unexpected /><GetPricesResult>',
+        1,
+    )
+    with pytest.raises(BetdaqSoapProtocolError, match="exactly one GetPricesResult"):
+        parse_get_prices_response(payload)

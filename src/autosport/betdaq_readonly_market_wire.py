@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from typing import Final
+import re
 import xml.etree.ElementTree as ET
 
 
@@ -16,6 +17,7 @@ WSU_NS: Final = "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecur
 _MAX_XML_BYTES: Final = 4 * 1024 * 1024
 _MAX_TEXT: Final = 512
 _RC016_MARKET_NEITHER_SUSPENDED_NOR_ACTIVE: Final = 16
+_XSD_DECIMAL_RE: Final = re.compile(r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)\Z", re.ASCII)
 
 
 class BetdaqWireError(ValueError):
@@ -165,9 +167,13 @@ def _decimal(
     strictly_positive: bool = False,
     nonnegative: bool = False,
 ) -> Decimal:
+    if type(value) is not str or _XSD_DECIMAL_RE.fullmatch(value) is None:
+        raise BetdaqSoapProtocolError(
+            f"{field} must use XML Schema decimal lexical form"
+        )
     try:
         parsed = Decimal(value)
-    except (InvalidOperation, TypeError, ValueError) as exc:
+    except (InvalidOperation, ValueError) as exc:
         raise BetdaqSoapProtocolError(f"{field} must be a decimal") from exc
     if not parsed.is_finite():
         raise BetdaqSoapProtocolError(f"{field} must be finite")
@@ -498,12 +504,23 @@ def parse_get_prices_response(
         raise TypeError("xml_payload must be bytes or str")
     if not payload or len(payload) > _MAX_XML_BYTES:
         raise BetdaqSoapProtocolError("SOAP payload size is invalid")
-    upper = payload.upper()
-    if b"<!DOCTYPE" in upper or b"<!ENTITY" in upper:
+
+    # ElementTree accepts XML-declared UTF-16 bytes and expands internal entities.
+    # Scanning the raw bytes for ASCII declaration tokens is therefore insufficient:
+    # UTF-16 interleaves NUL bytes and can bypass that fence. This adapter's supported
+    # wire contract is UTF-8, so normalize that encoding boundary before declaration
+    # inspection and before handing anything to ElementTree.
+    try:
+        text = payload.decode("utf-8-sig")
+    except UnicodeDecodeError as exc:
+        raise BetdaqSoapProtocolError("SOAP XML must use UTF-8 encoding") from exc
+
+    upper = text.upper()
+    if "<!DOCTYPE" in upper or "<!ENTITY" in upper:
         raise BetdaqSoapProtocolError("DTD/entity declarations are forbidden")
 
     try:
-        root = ET.fromstring(payload)
+        root = ET.fromstring(text)
     except ET.ParseError as exc:
         raise BetdaqSoapProtocolError("malformed SOAP XML") from exc
 
@@ -518,21 +535,40 @@ def parse_get_prices_response(
         root,
         soap_ns,
     )
+    allowed_envelope_children = {
+        _tag(soap_ns, "Header"),
+        _tag(soap_ns, "Body"),
+    }
+    if any(child.tag not in allowed_envelope_children for child in list(root)):
+        raise BetdaqSoapProtocolError(
+            "SOAP Envelope contains an unexpected child element or namespace"
+        )
     body = _one_child(root, _tag(soap_ns, "Body"), "SOAP Body")
     fault = _soap_fault(body, soap_ns)
     if fault is not None:
         raise fault
-
-    response = _one_child(
-        body,
-        _tag(EXTERNAL_API_NS, "GetPricesResponse"),
-        "GetPricesResponse",
-    )
-    result = _one_child(
-        response,
-        _tag(EXTERNAL_API_NS, "GetPricesResult"),
-        "GetPricesResult",
-    )
+    body_children = list(body)
+    if (
+        len(body_children) != 1
+        or body_children[0].tag != _tag(EXTERNAL_API_NS, "GetPricesResponse")
+    ):
+        raise BetdaqSoapProtocolError(
+            "SOAP Body must contain exactly one GetPricesResponse"
+        )
+    response = body_children[0]
+    if response.attrib:
+        raise BetdaqSoapProtocolError(
+            "GetPricesResponse must not contain attributes"
+        )
+    response_children = list(response)
+    if (
+        len(response_children) != 1
+        or response_children[0].tag != _tag(EXTERNAL_API_NS, "GetPricesResult")
+    ):
+        raise BetdaqSoapProtocolError(
+            "GetPricesResponse must contain exactly one GetPricesResult"
+        )
+    result = response_children[0]
     if result.attrib:
         raise BetdaqSoapProtocolError(
             "GetPricesResult must not contain attributes"

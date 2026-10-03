@@ -1,15 +1,21 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from datetime import datetime, timezone
 from decimal import Decimal
 import json
 import xml.etree.ElementTree as ET
 
 import pytest
 
-import autosport.betdaq_account_readonly as account_readonly
 import autosport.betdaq_odds_ladder_acquisition as ladder_acq
 from autosport.betdaq_account_readonly import BetdaqCredentials
+from autosport.betdaq_readonly_live_transport import BetdaqReadOnlyLiveTransport
+from autosport.betdaq_rate_governor import (
+    BetdaqRateDeferred,
+    default_betdaq_rate_policy,
+    resolve_betdaq_rate_governor,
+)
 from autosport.betdaq_odds_ladder_acquisition import (
     BETDAQ_DECIMAL_PRICE_FORMAT,
     BETDAQ_ODDS_LADDER_ENDPOINT,
@@ -118,20 +124,16 @@ def _canonical_observation(
     *,
     payload: bytes | None = None,
 ):
+    del monkeypatch
     response = _response() if payload is None else payload
-    calls = []
-
-    def fake_urlopen(request, *, timeout):
-        calls.append((request, timeout))
-        return _HttpResponse(response)
-
-    monkeypatch.setattr(account_readonly, "urlopen", fake_urlopen)
+    transport = RecordingTransport([response])
     acquirer = BetdaqOddsLadderAcquirer(
         credentials=_credentials(),
+        transport=transport,
         acquisition_id_factory=lambda: "a" * 32,
     )
     observation = acquirer.acquire()
-    return observation, calls
+    return observation, transport.calls
 
 
 def _white_box_positive_observation(monkeypatch: pytest.MonkeyPatch):
@@ -145,7 +147,6 @@ def _white_box_positive_observation(monkeypatch: pytest.MonkeyPatch):
         ),
         calls,
     )
-
 
 def test_request_is_exact_readonly_decimal_ladder_call() -> None:
     transport = RecordingTransport([_response()])
@@ -300,34 +301,69 @@ def test_provider_message_time_is_preserved_but_never_relabelled_freshness() -> 
     assert observation.provider_freshness_proven is False
 
 
-def test_monkeypatched_request_constructor_breaks_origin_guard(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    transport = account_readonly.UrllibBetdaqSoapTransport()
-    assert ladder_acq._canonical_transport(transport) is True
-
-    monkeypatch.setattr(account_readonly, "Request", lambda *args, **kwargs: object())
-    assert ladder_acq._canonical_transport(transport) is False
+def test_implicit_ungoverned_transport_is_rejected() -> None:
+    with pytest.raises(TypeError, match="exactly one shared live transport"):
+        BetdaqOddsLadderAcquirer(credentials=_credentials())
 
 
-def test_monkeypatched_urlopen_cannot_mint_provider_origin(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    observation, calls = _canonical_observation(monkeypatch)
+def test_product_owned_https_transport_cannot_be_passed_ungoverned() -> None:
+    from autosport.betdaq_account_readonly import UrllibBetdaqSoapTransport
 
-    assert observation.provider_origin_verified is False
-    assert observation.receipt_clock_verified is True
-    assert len(calls) == 1
-    request, timeout = calls[0]
-    assert request.full_url == BETDAQ_ODDS_LADDER_ENDPOINT
-    assert timeout == 10.0
-    with pytest.raises(BetdaqOddsLadderUseError, match="provider origin"):
-        qualify_exact_price_for_local_use(
-            observation,
-            Decimal("2.00"),
-            max_age_seconds=60,
+    with pytest.raises(TypeError, match="must be rate governed"):
+        BetdaqOddsLadderAcquirer(
+            credentials=_credentials(),
+            transport=UrllibBetdaqSoapTransport(),
         )
 
+
+def test_shared_live_transport_defers_unmodeled_ladder_before_http(tmp_path) -> None:
+    credentials = _credentials()
+    rate_clock = lambda: 61.0
+    governor = resolve_betdaq_rate_governor(
+        tmp_path,
+        default_betdaq_rate_policy(),
+        clock=rate_clock,
+        wall_clock=lambda: datetime(2026, 10, 3, tzinfo=timezone.utc),
+    )
+    post = RecordingTransport([_response()])
+    live_transport = BetdaqReadOnlyLiveTransport(
+        credentials=credentials,
+        rate_governor=governor,
+        transport=post,
+    )
+    acquirer = BetdaqOddsLadderAcquirer(
+        credentials=credentials,
+        live_transport=live_transport,
+        acquisition_id_factory=lambda: "c" * 32,
+    )
+
+    with pytest.raises(BetdaqRateDeferred) as exc:
+        acquirer.acquire()
+
+    assert exc.value.method == "GetOddsLadder"
+    assert exc.value.reason == "unmodeled_provider_rate_axis"
+    assert post.calls == []
+
+
+def test_live_transport_must_share_exact_credentials(tmp_path) -> None:
+    first = _credentials(username="first")
+    second = _credentials(username="second")
+    governor = resolve_betdaq_rate_governor(
+        tmp_path,
+        default_betdaq_rate_policy(),
+        clock=lambda: 61.0,
+        wall_clock=lambda: datetime(2026, 10, 3, tzinfo=timezone.utc),
+    )
+    live_transport = BetdaqReadOnlyLiveTransport(
+        credentials=first,
+        rate_governor=governor,
+        transport=RecordingTransport([_response()]),
+    )
+    with pytest.raises(TypeError, match="exact acquisition credentials"):
+        BetdaqOddsLadderAcquirer(
+            credentials=second,
+            live_transport=live_transport,
+        )
 
 def test_narrow_use_evidence_never_claims_provider_freshness_or_write(
     monkeypatch: pytest.MonkeyPatch,

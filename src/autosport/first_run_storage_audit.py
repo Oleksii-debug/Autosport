@@ -8,6 +8,10 @@ from .paths import (
     default_workspace,
     validate_product_storage_roots,
 )
+from .storage_preflight import (
+    probe_webview_storage_writable,
+    probe_workspace_writable,
+)
 
 
 def run_first_run_storage_audit(output_path: str | Path) -> int:
@@ -26,6 +30,8 @@ def run_first_run_storage_audit(output_path: str | Path) -> int:
         if not launch_cwd.is_absolute():
             raise ValueError("launch working directory is not absolute")
         validate_product_storage_roots(workspace, webview_storage)
+        probe_workspace_writable(workspace)
+        probe_webview_storage_writable(webview_storage)
 
         payload = {
             "status": "PASS",

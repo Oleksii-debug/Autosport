@@ -112,7 +112,14 @@ def _snapshot(
         cycle_last_success_at="2026-10-03T08:00:00+00:00",
         paper_book_sha256="a" * 64,
         balance=Decimal("90"),
-        committed_stake=Decimal("10"),
+        committed_stake=sum(
+            (
+                ticket.stake
+                for ticket in tickets
+                if ticket.status == "open"
+            ),
+            Decimal("0"),
+        ),
         tickets=tickets,
         portfolio_mode="exact",
         portfolio_scenario_count=2,

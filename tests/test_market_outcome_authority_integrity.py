@@ -464,5 +464,46 @@ class MarketOutcomeAuthorityIntegrityTests(unittest.TestCase):
         self.assertEqual(hostile_calls, [])
 
 
+    def test_original_mutation_plus_integrity_method_substitution_chain_fails_closed(
+        self,
+    ) -> None:
+        authority = self._authority()
+        object.__setattr__(
+            authority,
+            "selection_ids",
+            ("away", "forged", "home"),
+        )
+        original = vars(MarketSettlementOutcomeAuthority)["assert_issued_integrity"]
+        hostile_calls: list[object] = []
+
+        def hostile(instance):
+            hostile_calls.append(instance)
+
+        type.__setattr__(
+            MarketSettlementOutcomeAuthority,
+            "assert_issued_integrity",
+            hostile,
+        )
+        try:
+            with self.assertRaisesRegex(
+                ValueError,
+                "canonical market outcome authority class dispatch was replaced",
+            ):
+                _ = authority.terminal_states
+        finally:
+            type.__setattr__(
+                MarketSettlementOutcomeAuthority,
+                "assert_issued_integrity",
+                original,
+            )
+
+        self.assertEqual(hostile_calls, [])
+        with self.assertRaisesRegex(
+            ValueError,
+            "mutated after verified issuance",
+        ):
+            authority.assert_issued_integrity()
+
+
 if __name__ == "__main__":
     unittest.main()

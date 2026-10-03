@@ -5,6 +5,7 @@ from types import FunctionType
 
 import pytest
 
+import autosport.economic_goal_store as economic_goal_store_module
 from autosport.domain import TicketLeg
 from autosport.economic_goal import EconomicGoalContract
 from autosport.economic_goal_store import EconomicGoalStore
@@ -627,6 +628,61 @@ def test_resolver_rejects_in_place_captured_helper_code_rebinding(tmp_path):
     assert evidence.source_state_sha256 != "0" * 64
     assert evidence.path_sha256 != "0" * 64
     assert evidence.evidence_sha256 != "0" * 64
+
+
+def test_resolver_rejects_paperbook_load_bytes_rebinding_before_execution(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    _initialize(tmp_path)
+    hostile_called = False
+
+    def hostile_load_bytes(cls, payload):
+        nonlocal hostile_called
+        del cls, payload
+        hostile_called = True
+        return PaperBook("1000000")
+
+    monkeypatch.setattr(
+        PaperBook,
+        "load_bytes",
+        classmethod(hostile_load_bytes),
+    )
+
+    with pytest.raises(
+        PaperDrawdownEvidenceError,
+        match="durable source resolver authority changed",
+    ):
+        resolve_paper_drawdown_evidence(tmp_path)
+
+    assert hostile_called is False
+
+
+def test_resolver_rejects_economic_goal_parser_rebinding_before_execution(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    _initialize(tmp_path)
+    hostile_called = False
+
+    def hostile_goal_parser(_text):
+        nonlocal hostile_called
+        hostile_called = True
+        return _goal()
+
+    monkeypatch.setattr(
+        economic_goal_store_module,
+        "economic_goal_from_json",
+        hostile_goal_parser,
+    )
+
+    with pytest.raises(
+        PaperDrawdownEvidenceError,
+        match="durable source resolver authority changed",
+    ):
+        resolve_paper_drawdown_evidence(tmp_path)
+
+    assert hostile_called is False
 
 
 def test_resolver_rejects_workspace_path_dispatch_rebinding(

@@ -142,7 +142,9 @@ def test_interactive_startup_cannot_use_workspace_alias_as_durable_identity(
 
     webview_shell.AutosportWebBridge = lambda controller: controller
     webview_shell.WindowsWebViewUnavailable = FakeWindowsWebViewUnavailable
-    webview_shell.launch_windows_shell = lambda _bridge: 0
+    webview_shell.launch_windows_shell = (
+        lambda _bridge, *, storage_path: 0
+    )
 
     monkeypatch.setattr(windows_entry, "_probe_workspace_writable", probe)
     monkeypatch.setitem(

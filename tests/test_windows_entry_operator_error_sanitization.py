@@ -56,7 +56,8 @@ def test_webview_launch_failure_does_not_announce_exception_detail(tmp_path: Pat
     shell_module.WindowsWebViewUnavailable = WindowsWebViewUnavailable
     shell_module.AutosportWebBridge = lambda _controller: object()
 
-    def fail_launch(_bridge: object) -> int:
+    def fail_launch(_bridge: object, *, storage_path: Path) -> int:
+        assert storage_path.is_absolute()
         raise WindowsWebViewUnavailable(secret)
 
     shell_module.launch_windows_shell = fail_launch
@@ -107,7 +108,8 @@ def test_webview_storage_failure_has_distinct_actionable_native_copy(
     shell_module.WindowsWebViewUnavailable = WindowsWebViewUnavailable
     shell_module.AutosportWebBridge = lambda _controller: object()
 
-    def fail_launch(_bridge: object) -> int:
+    def fail_launch(_bridge: object, *, storage_path: Path) -> int:
+        assert storage_path.is_absolute()
         raise WindowsWebViewUnavailable(secret, reason="storage")
 
     shell_module.launch_windows_shell = fail_launch

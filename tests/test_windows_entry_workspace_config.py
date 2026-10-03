@@ -84,7 +84,7 @@ def test_valid_workspace_configuration_delegates_to_webview_shell(tmp_path: Path
     probe_workspace.assert_called_once_with(workspace)
     build_controller.assert_called_once_with(workspace)
     build_bridge.assert_called_once_with(controller)
-    launch_shell.assert_called_once_with(bridge)
+    launch_shell.assert_called_once_with(bridge, storage_path=webview_storage)
     assert (workspace / ".interactive-run.lock").is_file()
     assert (webview_storage.parent / ".interactive-run.lock").is_file()
 

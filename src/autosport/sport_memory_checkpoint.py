@@ -858,30 +858,48 @@ def initialize_or_open_bound_sport_memory_runtime(
         )
         with durable_path_lock(first_path):
             with durable_path_lock(second_path):
-                authority, verified_opponent = _capture_checkpoint_and_opponent(
-                    identity_registry, opponent_store
-                )
-                if runtime.exists():
-                    _verify_pristine_runtime_without_checkpoint(
-                        runtime,
-                        authority,
-                        verified_opponent,
+                # Another process/thread may have completed first boot after our
+                # optimistic checkpoint existence read but before these canonical
+                # source locks were acquired. Re-read under the shared lock order
+                # so the loser opens the committed pair instead of trying to
+                # publish a second checkpoint.
+                if checkpoint.exists():
+                    authority, verified_opponent = (
+                        _load_verified_checkpoint_and_opponent(
+                            checkpoint,
+                            identity_registry,
+                            opponent_store,
+                        )
                     )
+                    if not runtime.exists():
+                        raise SportMemoryCheckpointError(
+                            "canonical authority checkpoint exists without sport-memory runtime"
+                        )
                 else:
-                    _new_bound_runtime(
-                        runtime,
+                    authority, verified_opponent = _capture_checkpoint_and_opponent(
+                        identity_registry, opponent_store
+                    )
+                    if runtime.exists():
+                        _verify_pristine_runtime_without_checkpoint(
+                            runtime,
+                            authority,
+                            verified_opponent,
+                        )
+                    else:
+                        _new_bound_runtime(
+                            runtime,
+                            checkpoint,
+                            identity_registry,
+                            opponent_store,
+                            authority,
+                            verified_opponent,
+                        )
+                    authority, verified_opponent = _persist_captured_checkpoint(
                         checkpoint,
+                        authority,
                         identity_registry,
                         opponent_store,
-                        authority,
-                        verified_opponent,
                     )
-                authority, verified_opponent = _persist_captured_checkpoint(
-                    checkpoint,
-                    authority,
-                    identity_registry,
-                    opponent_store,
-                )
 
     bound = BoundSportMemoryRuntime(
         runtime,

@@ -1154,10 +1154,21 @@ class PersistentLiveDecisionLoop:
             if isinstance(observation, IngestionStats)
             else getattr(observation, "stats", None)
         )
-        if isinstance(observation_stats, IngestionStats) and (
-            observation_stats.health_status != "healthy"
-            or bool(observation_stats.quality_flags)
-        ):
+        wrapped_health = getattr(observation, "health", None)
+        wrapped_health_status = getattr(wrapped_health, "status", None)
+        observation_quality_untrusted = (
+            isinstance(observation_stats, IngestionStats)
+            and (
+                observation_stats.health_status != "healthy"
+                or bool(observation_stats.quality_flags)
+                or (
+                    wrapped_health_status is not None
+                    and wrapped_health_status
+                    != observation_stats.health_status
+                )
+            )
+        )
+        if observation_quality_untrusted:
             # Persisted market bytes remain audit truth, but degraded acquisition
             # cannot authorize an economic cut. Do not drain invalidations here:
             # after a healthy poll they still identify every changed quote. Force

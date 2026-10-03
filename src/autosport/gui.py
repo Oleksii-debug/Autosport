@@ -1067,11 +1067,27 @@ class AutosportApp(tk.Tk):
             return
         self._closing = True
         try:
-            if self.session is not None:
-                self.session.close()
-                self.session = None
-        finally:
-            self.destroy()
+            teardown_succeeded = self._hide_uncertain_economic_state(
+                text("ui.status.close.teardown_ticket")
+            )
+        except BaseException:
+            # Process-control exceptions still leave economic truth quarantined by
+            # _hide_uncertain_economic_state. Keep the window alive if control
+            # returns to Tk/test code rather than destroying it from a finally.
+            self._closing = False
+            raise
+        if not teardown_succeeded:
+            self._closing = False
+            close_message = text("ui.status.close.teardown_blocked")
+            self.status.set(close_message)
+            self._append_log(close_message)
+            self.bell()
+            messagebox.showerror(
+                text("ui.dialog.title"),
+                text("ui.error.close.teardown"),
+            )
+            return
+        self.destroy()
 
 
 def main() -> int:

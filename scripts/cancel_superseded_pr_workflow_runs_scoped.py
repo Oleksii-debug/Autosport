@@ -533,15 +533,16 @@ def cancel_superseded_explicit_pr_runs(
         raise CancellationError("workflow name does not match exact workflow id")
 
     runs = api.active_runs()
+    explicit_singleton_runs = tuple(
+        run
+        for run in runs
+        if run.workflow_name == workflow_name and len(run.pr_numbers) == 1
+    )
     pr_numbers = sorted(
         {
             run.pr_numbers[0]
-            for run in runs
-            if (
-                run.workflow_name == workflow_name
-                and len(run.pr_numbers) == 1
-                and run.run_id != current_run_id
-            )
+            for run in explicit_singleton_runs
+            if run.run_id != current_run_id
         }
     )
 
@@ -550,7 +551,7 @@ def cancel_superseded_explicit_pr_runs(
     for pr_number in pr_numbers:
         qualification = api.live_pr_qualification(pr_number)
         selected = select_superseded_runs(
-            runs,
+            explicit_singleton_runs,
             pr_number=pr_number,
             live_head_sha=qualification.head_sha,
             workflow_name=workflow_name,

@@ -663,6 +663,35 @@ class ParlayApiProductSourceTests(unittest.TestCase):
 
             no_follow.assert_called_once_with(source.state_path)
 
+    def test_oversized_candidate_does_not_prepare_monotonic_authority(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            source = ParlayApiProductSource(
+                _Provider([]),
+                workspace=Path(directory) / "workspace",
+                authority_root=Path(directory) / "authority",
+                lawful_terms_ref="terms:parlayapi:v1",
+                retention_ref="retention:parlayapi:v1",
+            )
+            current = source._read_state()
+            candidate = dict(current)
+            candidate["event_cache"] = {"unpublishable": {"payload": "x" * 256}}
+            sealed = source._seal_state(candidate)
+
+            with (
+                patch.object(source, "_MAX_STATE_BYTES", 64),
+                patch.object(source._authority, "prepare") as prepare,
+            ):
+                with self.assertRaisesRegex(
+                    ProductSourceStateError,
+                    "exceeds bounded checkpoint capacity",
+                ):
+                    source._publish_state_locked(
+                        sealed,
+                        observed_state_sha256=str(current["state_sha256"]),
+                    )
+
+            prepare.assert_not_called()
+
     def test_two_instances_cannot_last_writer_win_pending_snapshot(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory) / "workspace"

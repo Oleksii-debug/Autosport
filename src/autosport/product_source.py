@@ -531,16 +531,10 @@ class ParlayApiProductSource:
         assert isinstance(intended, str)
         assert isinstance(tx_id, str)
         try:
-            prepared = self._authority.prepare(
-                tx_id=tx_id,
-                observed_state_sha256=observed_state_sha256,
-                intended_state_sha256=intended,
-                semantic_binding_sha256=self._authority_binding_sha256,
-            )
-            if prepared.intended_state_sha256 != intended or prepared.tx_id != tx_id:
-                raise ProductSourceStateError(
-                    "product source authority prepared a different state transition"
-                )
+            # Rendering and the product byte ceiling are pure preconditions.  Prove
+            # them before preparing the external monotonic authority so an
+            # intrinsically unpublishable candidate cannot leave a prepared
+            # transition that recovery would later have to unwind.
             try:
                 rendered = (
                     json.dumps(
@@ -559,6 +553,17 @@ class ParlayApiProductSource:
             if len(rendered) > self._MAX_STATE_BYTES:
                 raise ProductSourceStateError(
                     "product source state exceeds bounded checkpoint capacity"
+                )
+
+            prepared = self._authority.prepare(
+                tx_id=tx_id,
+                observed_state_sha256=observed_state_sha256,
+                intended_state_sha256=intended,
+                semantic_binding_sha256=self._authority_binding_sha256,
+            )
+            if prepared.intended_state_sha256 != intended or prepared.tx_id != tx_id:
+                raise ProductSourceStateError(
+                    "product source authority prepared a different state transition"
                 )
             atomic_write_json(self.state_path, sealed)
             verified = self._read_state_unlocked()

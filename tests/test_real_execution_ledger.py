@@ -2017,6 +2017,57 @@ class RealExecutionLedgerTests(unittest.TestCase):
                 )
             )
 
+
+    def test_restart_rejects_hash_valid_supervised_issuance_before_plan_reservation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "real.jsonl"
+            ledger = RealExecutionLedger(path)
+            witness = "1" * 64
+            current = plan(
+                action(),
+                plan_id=f"supervised-v2-{witness}",
+            )
+            ledger.reserve_plan(current)
+            ledger._bind_supervised_plan_issuance(
+                plan_id=current.plan_id,
+                bound_plan_witness=witness,
+                plan_fingerprint=current.fingerprint,
+            )
+
+            lines = [
+                json.loads(line)
+                for line in path.read_text(encoding="utf-8").splitlines()
+            ]
+            self.assertEqual(
+                lines[0]["event"]["event_type"],
+                EventType.PLAN_RESERVED.value,
+            )
+            self.assertEqual(
+                lines[1]["event"]["event_type"],
+                EventType.SUPERVISED_PLAN_ISSUED.value,
+            )
+            path.write_text(
+                "\n".join(
+                    json.dumps(
+                        envelope,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                    for envelope in (lines[1], lines[0])
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            restarted = RealExecutionLedger(path)
+            with self.assertRaisesRegex(
+                ExecutionLedgerIntegrityError,
+                "supervised plan issuance must follow plan reservation",
+            ):
+                restarted.verify_integrity()
+
+
     def test_restart_rejects_hash_valid_supervised_issuance_rebinding(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "real.jsonl"

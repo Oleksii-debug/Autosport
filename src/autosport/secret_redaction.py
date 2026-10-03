@@ -20,6 +20,8 @@ _OPERATOR_VALUE_MAX_NODES = 10_000
 _QUERY_KEY_MAX_DECODE_PASSES = 8
 _SECRET_VALUE_MAX_URL_ENCODING_PASSES = 8
 _SECRET_VALUE_MAX_BASE64_ENCODING_PASSES = 4
+_SECRET_VALUE_MAX_MIXED_ENCODING_TRANSITIONS = 2
+_SECRET_VALUE_MAX_MIXED_VARIANTS_PER_SECRET = 384
 
 _SENSITIVE_NORMALIZED_KEYS = frozenset(
     {
@@ -308,48 +310,78 @@ def _replace_url_encoded_secret(text: str, encoded_secret: str) -> str:
 def _mixed_reversible_secret_values(
     secrets: Iterable[str],
 ) -> tuple[tuple[str, ...], tuple[str, ...]]:
-    """Return bounded one-transition compositions of known-secret encodings.
+    """Return bounded alternating compositions of known-secret encodings.
 
     Existing URL and Base64 closures cover repeated transforms within one family.
-    Provider/logging stacks can also apply one family after the other. Derive only
-    one cross-family transition from already-bounded spellings so redaction remains
-    deterministic and cannot grow an unbounded mixed-transform closure.
+    Provider/logging stacks can alternate families, so start from those bounded
+    closures and permit only a small number of cross-family transitions. A strict
+    per-secret state budget prevents adversarial configuration from turning
+    presentation redaction into unbounded combinatorial work.
 
-    The first tuple contains exact/case-sensitive Base64 spellings of URL-family
-    values. The second contains URL spellings of Base64-family values and therefore
-    uses percent-hex case-insensitive matching at publication time.
+    The first tuple contains exact/case-sensitive Base64 spellings. The second
+    contains URL spellings and therefore uses percent-hex case-insensitive matching
+    at publication time.
     """
 
-    known = tuple(secrets)
-    base64_family = _reversible_base64_secret_values(known)
-    url_family = _reversible_url_secret_values(known)
-
     mixed_base64: set[str] = set()
-    for candidate in url_family:
-        raw = candidate.encode("utf-8")
-        standard = base64.b64encode(raw).decode("ascii")
-        urlsafe = base64.urlsafe_b64encode(raw).decode("ascii")
-        mixed_base64.update(
-            (
-                standard,
-                standard.rstrip("="),
-                urlsafe,
-                urlsafe.rstrip("="),
-            )
-        )
-
     mixed_url: set[str] = set()
-    for candidate in base64_family:
-        mixed_url.add(quote(candidate, safe=""))
-        mixed_url.add(quote_plus(candidate, safe=""))
 
-    mixed_base64.discard("")
-    mixed_url.discard("")
+    for secret in secrets:
+        base64_family = _reversible_base64_secret_values((secret,))
+        url_family = _reversible_url_secret_values((secret,))
+        frontier: list[tuple[str, str]] = [
+            *(("base64", value) for value in base64_family),
+            *(("url", value) for value in url_family),
+        ]
+        seen_states = set(frontier)
+
+        for _ in range(_SECRET_VALUE_MAX_MIXED_ENCODING_TRANSITIONS):
+            next_frontier: list[tuple[str, str]] = []
+            for family, candidate in sorted(frontier):
+                if len(seen_states) >= _SECRET_VALUE_MAX_MIXED_VARIANTS_PER_SECRET:
+                    break
+
+                if family == "base64":
+                    variants = (
+                        quote(candidate, safe=""),
+                        quote_plus(candidate, safe=""),
+                    )
+                    destination_family = "url"
+                else:
+                    raw = candidate.encode("utf-8")
+                    standard = base64.b64encode(raw).decode("ascii")
+                    urlsafe = base64.urlsafe_b64encode(raw).decode("ascii")
+                    variants = (
+                        standard,
+                        standard.rstrip("="),
+                        urlsafe,
+                        urlsafe.rstrip("="),
+                    )
+                    destination_family = "base64"
+
+                for encoded in variants:
+                    if not encoded or encoded == candidate:
+                        continue
+                    if destination_family == "base64":
+                        mixed_base64.add(encoded)
+                    else:
+                        mixed_url.add(encoded)
+                    state = (destination_family, encoded)
+                    if state in seen_states:
+                        continue
+                    if len(seen_states) >= _SECRET_VALUE_MAX_MIXED_VARIANTS_PER_SECRET:
+                        break
+                    seen_states.add(state)
+                    next_frontier.append(state)
+
+            if not next_frontier:
+                break
+            frontier = next_frontier
+
     return (
         tuple(sorted(mixed_base64, key=lambda item: (-len(item), item))),
         tuple(sorted(mixed_url, key=lambda item: (-len(item), item))),
     )
-
 
 def _decode_query_key_for_classification(value: str) -> tuple[str, bool]:
     """Return a bounded decoded query key plus unresolved-nesting truth."""

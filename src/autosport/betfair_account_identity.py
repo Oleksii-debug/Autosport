@@ -18,7 +18,6 @@ from hashlib import sha256
 import hmac
 import json
 from sys import _getframe
-import urllib.request as _urllib_request
 from secrets import token_bytes, token_hex
 from threading import RLock
 from weakref import ReferenceType, WeakKeyDictionary, ref
@@ -182,7 +181,7 @@ def _make_account_identity_authority():
     canonical_next_request_id = client_type._next_request_id
     canonical_observed_at = client_type._observed_at
     canonical_network_post = transport_type.post
-    canonical_urlopen = _urllib_request.urlopen
+    canonical_build_opener = readonly_module.build_opener
     canonical_identity_init = identity_type.__init__
     canonical_identity_post_init = identity_type.__post_init__
 
@@ -277,7 +276,7 @@ def _make_account_identity_authority():
             is canonical_next_request_id
             and client_type._observed_at is canonical_observed_at
             and transport_type.post is canonical_network_post
-            and readonly_module.urlopen is canonical_urlopen
+            and readonly_module.build_opener is canonical_build_opener
         )
 
     def client_dispatch_is_current(client: BetfairReadOnlyClient) -> bool:

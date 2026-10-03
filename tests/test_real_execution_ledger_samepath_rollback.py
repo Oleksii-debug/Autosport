@@ -2,11 +2,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import threading
 
 import pytest
 
-from autosport.monotonic_workspace_authority import MonotonicAuthorityIntegrityError
+from autosport.monotonic_workspace_authority import (
+    MonotonicAuthorityIntegrityError,
+    MonotonicWorkspaceAuthority,
+)
 from autosport.real_execution_ledger import (
     ExecutionAction,
     ExecutionLedgerBusyError,
@@ -423,3 +427,56 @@ def test_snapshot_cas_cannot_admit_valid_rolled_back_prefix(
 
     assert path.read_bytes() == bytes_s1
 
+
+
+
+def test_substituted_monotonic_authority_root_cannot_bless_rolled_back_tip(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    path = _isolated_ledger_path(tmp_path, monkeypatch)
+    ledger = RealExecutionLedger(path)
+    current_plan = _plan()
+
+    ledger.reserve_plan(current_plan)
+    snapshot_s1 = ledger.verified_snapshot()
+    bytes_s1 = path.read_bytes()
+    envelope_s1 = json.loads(bytes_s1.decode("utf-8").strip())
+    event_s1 = envelope_s1["event"]
+
+    ledger.begin_attempt(
+        plan_id=current_plan.plan_id,
+        action_id=current_plan.actions[0].action_id,
+        attempt_id="attempt-authority-substitution",
+        reserved_at=RESERVED_AT,
+    )
+    assert ledger.verified_snapshot().sha256 != snapshot_s1.sha256
+
+    decoy = MonotonicWorkspaceAuthority(
+        workspace=path.parent,
+        workspace_instance_id=ledger._monotonic_authority.workspace_instance_id,
+        domain="execution.real-ledger",
+        key=os.path.normcase(path.name),
+        authority_root=tmp_path / "decoy-machine-authority",
+    )
+    decoy.prepare(
+        tx_id=event_s1["event_id"],
+        observed_state_sha256=None,
+        intended_state_sha256=snapshot_s1.sha256,
+        semantic_binding_sha256=envelope_s1["sha256"],
+    )
+    decoy.commit(
+        tx_id=event_s1["event_id"],
+        observed_state_sha256=snapshot_s1.sha256,
+        semantic_binding_sha256=envelope_s1["sha256"],
+    )
+
+    path.write_bytes(bytes_s1)
+    reopened = RealExecutionLedger(path)
+    reopened._monotonic_authority = decoy
+
+    with pytest.raises(
+        ExecutionLedgerIntegrityError,
+        match="monotonic authority binding changed",
+    ):
+        reopened.verified_snapshot()

@@ -26,6 +26,7 @@ _T = TypeVar("_T")
 # Consume the canonical monotonic authority through function objects captured once.
 # This prevents a caller-owned instance attribute from substituting recover/prepare/
 # commit while keeping the durable transition implementation in its existing module.
+_MONOTONIC_AUTHORITY_TYPE = MonotonicWorkspaceAuthority
 _MONOTONIC_RECOVER = MonotonicWorkspaceAuthority.recover
 _MONOTONIC_PREPARE = MonotonicWorkspaceAuthority.prepare
 _MONOTONIC_COMMIT = MonotonicWorkspaceAuthority.commit
@@ -568,10 +569,13 @@ class RealExecutionLedger:
             authority_path = self.path.resolve(strict=False)
             authority_workspace = authority_path.parent
             authority_key = os.path.normcase(authority_path.name)
-            self._monotonic_authority = MonotonicWorkspaceAuthority(
+            self._monotonic_authority = _MONOTONIC_AUTHORITY_TYPE(
                 workspace=authority_workspace,
                 domain="execution.real-ledger",
                 key=authority_key,
+            )
+            self._monotonic_authority_binding = (
+                self._monotonic_authority_identity(self._monotonic_authority)
             )
         except (OSError, RuntimeError, MonotonicWorkspaceAuthorityError) as exc:
             raise ExecutionLedgerIntegrityError(
@@ -858,6 +862,43 @@ class RealExecutionLedger:
         return events
 
     @staticmethod
+    def _monotonic_authority_identity(
+        authority: MonotonicWorkspaceAuthority,
+    ) -> tuple[str, ...]:
+        if type(authority) is not _MONOTONIC_AUTHORITY_TYPE:
+            raise ExecutionLedgerIntegrityError(
+                "execution ledger monotonic authority type was substituted"
+            )
+        try:
+            return (
+                os.path.normcase(str(authority.workspace)),
+                authority.workspace_instance_id,
+                authority.domain,
+                authority.key,
+                os.path.normcase(str(authority.authority_root)),
+                authority.namespace_sha256,
+                os.path.normcase(str(authority.journal_dir)),
+                os.path.normcase(str(authority.records_dir)),
+                os.path.normcase(str(authority.namespace_marker_path)),
+                os.path.normcase(str(authority.workspace_binding_path)),
+            )
+        except (AttributeError, TypeError) as exc:
+            raise ExecutionLedgerIntegrityError(
+                "execution ledger monotonic authority identity is invalid"
+            ) from exc
+
+    def _canonical_monotonic_authority(self) -> MonotonicWorkspaceAuthority:
+        authority = self._monotonic_authority
+        if (
+            self._monotonic_authority_identity(authority)
+            != self._monotonic_authority_binding
+        ):
+            raise ExecutionLedgerIntegrityError(
+                "execution ledger monotonic authority binding changed"
+            )
+        return authority
+
+    @staticmethod
     def _monotonic_state_sha256(raw: bytes) -> str | None:
         return None if not raw else hashlib.sha256(raw).hexdigest()
 
@@ -875,7 +916,7 @@ class RealExecutionLedger:
             semantic_binding_sha256 = _digest(latest_event)
         try:
             _MONOTONIC_RECOVER(
-                self._monotonic_authority,
+                self._canonical_monotonic_authority(),
                 observed_state_sha256=observed,
                 tx_id=tx_id,
                 semantic_binding_sha256=semantic_binding_sha256,
@@ -947,7 +988,7 @@ class RealExecutionLedger:
         semantic_binding_sha256 = event_digest
         try:
             _MONOTONIC_PREPARE(
-                self._monotonic_authority,
+                self._canonical_monotonic_authority(),
                 tx_id=tx_id,
                 observed_state_sha256=observed_sha256,
                 intended_state_sha256=intended_sha256,
@@ -983,7 +1024,7 @@ class RealExecutionLedger:
         self._path_durable = True
         try:
             _MONOTONIC_COMMIT(
-                self._monotonic_authority,
+                self._canonical_monotonic_authority(),
                 tx_id=tx_id,
                 observed_state_sha256=intended_sha256,
                 semantic_binding_sha256=semantic_binding_sha256,

@@ -458,6 +458,11 @@ def test_crash_after_publish_before_commit_recovers_exact_root(
             authority_root=authority_root,
         )
 
+    # The root state was durably published before the simulated crash. A planned
+    # outcome may become product-available afterwards without converting recovery
+    # into a post-outcome root mint.
+    _accept_planned_run_outcome(workspace, run_id="run-001")
+
     monkeypatch.setattr(MonotonicWorkspaceAuthority, "commit", original_commit)
     recovered = precommit.issue_risk_randomization_precommit(
         registry,

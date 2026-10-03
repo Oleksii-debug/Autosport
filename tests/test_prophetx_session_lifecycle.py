@@ -8,6 +8,7 @@ from autosport.prophetx_session_lifecycle import (
     CONSERVATIVE_SESSION_SLOT_HOLD,
     ProphetXLoginAdmissionAction,
     ProphetXLoginFailureClass,
+    ProphetXRenewalFailureClass,
     ProphetXSessionLifecycle,
     ProphetXSessionLifecycleError,
     ProphetXSessionScope,
@@ -543,3 +544,186 @@ def test_provider_slot_wait_requires_explicit_hold_horizon(tmp_path):
         match="requires slot_hold_until",
     ):
         lifecycle.read_snapshot()
+
+
+def test_renewal_is_single_flight_and_never_authorizes_login_fallback(tmp_path):
+    lifecycle = _lifecycle(tmp_path)
+    active = _active(lifecycle)
+    due_at = active.access_expires_at - timedelta(minutes=1)
+
+    due = lifecycle.begin_login(
+        now=due_at,
+        access_token_available=True,
+    )
+    assert due.action is ProphetXLoginAdmissionAction.RENEWAL_REQUIRED
+
+    started = lifecycle.begin_renewal(now=due_at)
+    assert started.action is ProphetXLoginAdmissionAction.START_RENEWAL
+    assert started.attempt_id is not None
+    assert started.login_authorized is False
+
+    same_process = lifecycle.begin_renewal(
+        now=due_at + timedelta(seconds=1)
+    )
+    assert (
+        same_process.action
+        is ProphetXLoginAdmissionAction.WAIT_FOR_EXISTING_RENEWAL
+    )
+
+    other_process = _lifecycle(tmp_path)
+    blocked = other_process.begin_login(
+        now=due_at + timedelta(seconds=1),
+        access_token_available=False,
+    )
+    assert (
+        blocked.action
+        is ProphetXLoginAdmissionAction.WAIT_FOR_PROVIDER_SESSION_EXPIRY
+    )
+    assert blocked.login_authorized is False
+
+
+def test_successful_renewal_preserves_session_lineage_and_exact_new_expiry(tmp_path):
+    lifecycle = _lifecycle(tmp_path)
+    active = _active(lifecycle)
+    due_at = active.access_expires_at - timedelta(minutes=1)
+    lifecycle.begin_login(now=due_at, access_token_available=True)
+    started = lifecycle.begin_renewal(now=due_at)
+
+    renewed_expiry = due_at + timedelta(minutes=10)
+    renewed = lifecycle.complete_renewal_success(
+        attempt_id=started.attempt_id,
+        now=due_at + timedelta(seconds=1),
+        access_expires_at=renewed_expiry,
+    )
+
+    assert renewed.state is ProphetXSessionState.ACTIVE
+    assert renewed.session_lineage_id == active.session_lineage_id
+    assert renewed.access_expires_at == renewed_expiry
+    assert renewed.slot_hold_until == renewed_expiry
+    assert renewed.last_renewal_failure_class is None
+
+
+def test_retryable_renewal_failure_retries_refresh_not_login(tmp_path):
+    lifecycle = _lifecycle(tmp_path)
+    active = _active(lifecycle)
+    due_at = active.access_expires_at - timedelta(minutes=1)
+    lifecycle.begin_login(now=due_at, access_token_available=True)
+    started = lifecycle.begin_renewal(now=due_at)
+    failed = lifecycle.complete_renewal_failure(
+        attempt_id=started.attempt_id,
+        now=due_at + timedelta(seconds=1),
+        failure=ProphetXRenewalFailureClass.RETRYABLE,
+    )
+
+    assert failed.state is ProphetXSessionState.RENEWAL_DUE
+    assert failed.retry_not_before is not None
+
+    login_admission = lifecycle.begin_login(
+        now=due_at + timedelta(seconds=2),
+        access_token_available=True,
+    )
+    assert login_admission.action is ProphetXLoginAdmissionAction.RENEWAL_REQUIRED
+    assert login_admission.retry_at == failed.retry_not_before
+    assert login_admission.login_authorized is False
+
+    renewal_admission = lifecycle.begin_renewal(
+        now=due_at + timedelta(seconds=2)
+    )
+    assert renewal_admission.action is ProphetXLoginAdmissionAction.RETRY_LATER
+
+
+def test_ambiguous_renewal_result_blocks_replacement_login_for_conservative_hold(tmp_path):
+    lifecycle = _lifecycle(tmp_path)
+    active = _active(lifecycle)
+    due_at = active.access_expires_at - timedelta(minutes=1)
+    lifecycle.begin_login(now=due_at, access_token_available=True)
+    started = lifecycle.begin_renewal(now=due_at)
+    failed_at = due_at + timedelta(seconds=1)
+    failed = lifecycle.complete_renewal_failure(
+        attempt_id=started.attempt_id,
+        now=failed_at,
+        failure=ProphetXRenewalFailureClass.AMBIGUOUS_PROVIDER_RESULT,
+    )
+
+    assert failed.state is ProphetXSessionState.WAIT_FOR_PROVIDER_SESSION_EXPIRY
+    assert (
+        failed.slot_hold_until
+        == failed_at + CONSERVATIVE_SESSION_SLOT_HOLD
+    )
+    blocked = lifecycle.begin_login(
+        now=active.access_expires_at + timedelta(minutes=1),
+        access_token_available=False,
+    )
+    assert (
+        blocked.action
+        is ProphetXLoginAdmissionAction.WAIT_FOR_PROVIDER_SESSION_EXPIRY
+    )
+    assert blocked.login_authorized is False
+
+
+def test_crash_during_renewal_becomes_bounded_ambiguous_session_hold(tmp_path):
+    lifecycle = _lifecycle(tmp_path)
+    active = _active(lifecycle)
+    due_at = active.access_expires_at - timedelta(minutes=1)
+    lifecycle.begin_login(now=due_at, access_token_available=True)
+    lifecycle.begin_renewal(now=due_at)
+
+    restarted = _lifecycle(tmp_path)
+    blocked = restarted.begin_login(
+        now=due_at + timedelta(minutes=1),
+        access_token_available=False,
+    )
+    assert (
+        blocked.action
+        is ProphetXLoginAdmissionAction.WAIT_FOR_PROVIDER_SESSION_EXPIRY
+    )
+    assert blocked.retry_at == due_at + CONSERVATIVE_SESSION_SLOT_HOLD
+
+    recovered = restarted.begin_login(
+        now=due_at + CONSERVATIVE_SESSION_SLOT_HOLD + timedelta(seconds=1),
+        access_token_available=False,
+    )
+    assert recovered.action is ProphetXLoginAdmissionAction.CREATE_LOGIN
+
+
+def test_credential_rejected_during_renewal_stays_fail_closed(tmp_path):
+    lifecycle = _lifecycle(tmp_path)
+    active = _active(lifecycle)
+    due_at = active.access_expires_at - timedelta(minutes=1)
+    lifecycle.begin_login(now=due_at, access_token_available=True)
+    started = lifecycle.begin_renewal(now=due_at)
+    rejected = lifecycle.complete_renewal_failure(
+        attempt_id=started.attempt_id,
+        now=due_at + timedelta(seconds=1),
+        failure=ProphetXRenewalFailureClass.CREDENTIAL_REJECTED,
+    )
+
+    assert rejected.state is ProphetXSessionState.CREDENTIAL_REJECTED
+    assert rejected.slot_hold_until == active.slot_hold_until
+    assert (
+        lifecycle.begin_login(
+            now=due_at + timedelta(seconds=2),
+            access_token_available=False,
+        ).action
+        is ProphetXLoginAdmissionAction.CREDENTIAL_REJECTED
+    )
+
+
+def test_unambiguous_renewal_failure_after_original_expiry_allows_fresh_login(tmp_path):
+    lifecycle = _lifecycle(tmp_path)
+    active = _active(lifecycle)
+    due_at = active.access_expires_at - timedelta(minutes=1)
+    lifecycle.begin_login(now=due_at, access_token_available=True)
+    started = lifecycle.begin_renewal(now=due_at)
+    failed = lifecycle.complete_renewal_failure(
+        attempt_id=started.attempt_id,
+        now=active.access_expires_at + timedelta(seconds=1),
+        failure=ProphetXRenewalFailureClass.PROVIDER_UNAVAILABLE,
+    )
+
+    assert failed.state is ProphetXSessionState.EXPIRED
+    fresh = lifecycle.begin_login(
+        now=active.access_expires_at + timedelta(seconds=2),
+        access_token_available=False,
+    )
+    assert fresh.action is ProphetXLoginAdmissionAction.CREATE_LOGIN

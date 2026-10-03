@@ -1445,6 +1445,186 @@ def test_paperbook_class_shadow_cannot_forge_economic_state(
     assert set(persisted.tickets) == set(book.tickets)
 
 
+def test_authority_instance_state_class_witness_inventory_is_complete():
+    expected = {
+        economic_admission.WorkspaceEconomicLock: (
+            "workspace",
+            "path",
+            "_handle",
+        ),
+        economic_admission.ProductDayRiskWindowStore: (
+            "workspace",
+            "state_path",
+            "_clock",
+            "_authority",
+        ),
+        economic_admission.EconomicGoalStore: ("workspace", "path"),
+        economic_admission.RunRegistry: ("path",),
+        economic_admission.RunTransaction: (
+            "workspace",
+            "run_id",
+            "root",
+            "manifest_path",
+            "run_ledger_path",
+            "staged_book_path",
+            "staged_ledger_path",
+            "staged_summary_path",
+            "_identity",
+        ),
+        economic_admission.MonotonicWorkspaceAuthority: (
+            "workspace",
+            "domain",
+            "key",
+            "authority_root",
+            "workspace_binding",
+            "workspace_instance_id",
+            "authority_root_selection",
+            "authority_root_binding_path",
+            "workspace_binding_path",
+            "namespace_sha256",
+            "authority_root_activation_path",
+            "journal_dir",
+            "records_dir",
+            "namespace_marker_path",
+        ),
+    }
+    observed = {
+        economic_admission.WorkspaceEconomicLock: tuple(
+            name
+            for name, _present, _value in (
+                economic_admission._WORKSPACE_LOCK_STATE_WITNESSES
+            )
+        ),
+        economic_admission.ProductDayRiskWindowStore: tuple(
+            name
+            for name, _present, _value in (
+                economic_admission._PRODUCT_DAY_STORE_STATE_WITNESSES
+            )
+        ),
+        economic_admission.EconomicGoalStore: tuple(
+            name
+            for name, _present, _value in (
+                economic_admission._ECONOMIC_GOAL_STORE_STATE_WITNESSES
+            )
+        ),
+        economic_admission.RunRegistry: tuple(
+            name
+            for name, _present, _value in (
+                economic_admission._RUN_REGISTRY_STATE_WITNESSES
+            )
+        ),
+        economic_admission.RunTransaction: tuple(
+            name
+            for name, _present, _value in (
+                economic_admission._RUN_TRANSACTION_STATE_WITNESSES
+            )
+        ),
+        economic_admission.MonotonicWorkspaceAuthority: tuple(
+            name
+            for name, _present, _value in (
+                economic_admission._MONOTONIC_AUTHORITY_STATE_WITNESSES
+            )
+        ),
+    }
+
+    assert observed == expected
+    for witnesses in (
+        economic_admission._WORKSPACE_LOCK_STATE_WITNESSES,
+        economic_admission._PRODUCT_DAY_STORE_STATE_WITNESSES,
+        economic_admission._ECONOMIC_GOAL_STORE_STATE_WITNESSES,
+        economic_admission._RUN_REGISTRY_STATE_WITNESSES,
+        economic_admission._RUN_TRANSACTION_STATE_WITNESSES,
+        economic_admission._MONOTONIC_AUTHORITY_STATE_WITNESSES,
+    ):
+        assert all(
+            present is False and value is None
+            for _name, present, value in witnesses
+        )
+
+
+@pytest.mark.parametrize(
+    ("owner", "field_name", "error"),
+    (
+        (
+            economic_admission.WorkspaceEconomicLock,
+            "path",
+            "workspace economic lock state authority changed",
+        ),
+        (
+            economic_admission.ProductDayRiskWindowStore,
+            "_clock",
+            "product day store state authority changed",
+        ),
+        (
+            economic_admission.MonotonicWorkspaceAuthority,
+            "workspace_instance_id",
+            "monotonic day authority state changed",
+        ),
+        (
+            economic_admission.EconomicGoalStore,
+            "path",
+            "economic goal store state authority changed",
+        ),
+        (
+            economic_admission.RunRegistry,
+            "path",
+            "economic admission run registry state authority changed",
+        ),
+        (
+            economic_admission.RunTransaction,
+            "root",
+            "economic admission transaction state authority changed",
+        ),
+    ),
+)
+def test_authority_instance_state_class_shadow_fails_closed_before_read(
+    tmp_path,
+    owner,
+    field_name,
+    error,
+):
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    old = now - timedelta(days=2)
+    goal = _goal()
+    EconomicGoalStore(tmp_path).initialize_owner(goal)
+    book = _book_with_settled_turnover(placed_at=_timestamp(old), stake="50")
+    book.save(tmp_path / "paper_book.json")
+    candidate = _leg(f"authority-shadow-{field_name}")
+    context = _context(candidate, _timestamp(now))
+    policy = _policy(goal)
+    assert field_name not in owner.__dict__
+    hostile_called = False
+
+    def forged_state(_self):
+        nonlocal hostile_called
+        hostile_called = True
+        return object()
+
+    try:
+        type.__setattr__(owner, field_name, property(forged_state))
+        with pytest.raises(RuntimeError, match=error):
+            admit_paper_ticket(
+                workspace=tmp_path,
+                book=book,
+                risk_policy=policy,
+                stake=Decimal("0.01"),
+                legs=(candidate,),
+                reason="authority instance-state class shadow must fail closed",
+                placed_at=_timestamp(now),
+                context=context,
+                provider_source_ids=("provider-1",),
+                bankroll_id="paper-bankroll",
+                currency="USD",
+            )
+    finally:
+        if field_name in owner.__dict__:
+            type.__delattr__(owner, field_name)
+
+    assert hostile_called is False
+    persisted = PaperBook.load(tmp_path / "paper_book.json")
+    assert set(persisted.tickets) == set(book.tickets)
+
+
 def test_risk_policy_limit_descriptor_rebind_cannot_widen_ticket_cap(tmp_path):
     now = datetime.now(timezone.utc).replace(microsecond=0)
     old = now - timedelta(days=2)

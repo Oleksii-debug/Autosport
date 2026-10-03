@@ -1101,7 +1101,10 @@ class AutosportWebController:
         raw = payload.get("path")
         if not isinstance(raw, str) or not raw.strip():
             return self._fail(text("ui.status.evidence_export.destination_invalid"))
-        workspace = Path(self._active_workspace)
+        try:
+            workspace = self._product_runtime_target_workspace()
+        except Exception:
+            return self._fail(text("ui.status.evidence_export.destination_invalid"))
         try:
             destination = resolve_evidence_output_destination(
                 workspace,

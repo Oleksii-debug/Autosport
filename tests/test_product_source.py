@@ -742,6 +742,57 @@ class ParlayApiProductSourceTests(unittest.TestCase):
 
             self.assertIsNone(source._collector_store)
 
+    def test_failed_explicit_collector_store_binding_rolls_back_authority(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory) / "workspace"
+            source = ParlayApiProductSource(
+                _Provider([]),
+                workspace=workspace,
+                authority_root=Path(directory) / "authority",
+                lawful_terms_ref="terms:parlayapi:v1",
+                retention_ref="retention:parlayapi:v1",
+            )
+            store = CollectorDeltaStore(
+                workspace / "collector_deltas.json",
+                max_bytes=4 * 1024 * 1024,
+            )
+
+            with patch.object(
+                source,
+                "_migrate_legacy_history_to_collector_store",
+                side_effect=ProductSourceStateError("injected migration failure"),
+            ):
+                with self.assertRaisesRegex(
+                    ProductSourceStateError,
+                    "injected migration failure",
+                ):
+                    source.bind_collector_store(store)
+
+            self.assertIsNone(source._collector_store)
+
+    def test_failed_lazy_collector_store_binding_rolls_back_authority(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            source = ParlayApiProductSource(
+                _Provider([]),
+                workspace=Path(directory) / "workspace",
+                authority_root=Path(directory) / "authority",
+                lawful_terms_ref="terms:parlayapi:v1",
+                retention_ref="retention:parlayapi:v1",
+            )
+
+            with patch.object(
+                source,
+                "_migrate_legacy_history_to_collector_store",
+                side_effect=ProductSourceStateError("injected migration failure"),
+            ):
+                with self.assertRaisesRegex(
+                    ProductSourceStateError,
+                    "injected migration failure",
+                ):
+                    source._require_collector_store()
+
+            self.assertIsNone(source._collector_store)
+
     def test_collector_store_binding_is_same_object_idempotent_only(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory) / "workspace"

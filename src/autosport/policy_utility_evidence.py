@@ -130,12 +130,12 @@ class PolicyUtilityEvidence:
         _decision_type: type[DecisionKind] = DecisionKind,
         _authority_ref_type: type[AuthorityRef] = AuthorityRef,
         _finite_decimal_validator=_finite_decimal,
-        _unsupported: UtilityCompleteness = _unsupported,
-        _estimated: UtilityTruthClass = _estimated,
-        _simulated: UtilityTruthClass = _simulated,
-        _observed: UtilityTruthClass = _observed,
-        _wait_no_bet: DecisionKind = _wait_no_bet,
-        _zero_decimal: Decimal = _zero_decimal,
+        _unsupported: UtilityCompleteness = UtilityCompleteness.UNSUPPORTED,
+        _estimated: UtilityTruthClass = UtilityTruthClass.ESTIMATED,
+        _simulated: UtilityTruthClass = UtilityTruthClass.SIMULATED,
+        _observed: UtilityTruthClass = UtilityTruthClass.OBSERVED,
+        _wait_no_bet: DecisionKind = DecisionKind.WAIT_NO_BET,
+        _zero_decimal: Decimal = Decimal("0"),
         _error_type: type[PolicyUtilityError] = PolicyUtilityError,
     ) -> None:
         if type(self.completeness) is not _completeness_type:
@@ -148,9 +148,15 @@ class PolicyUtilityEvidence:
             type(item) is not _authority_ref_type for item in self.authority_refs
         ):
             raise _error_type("authority_refs must contain exact AuthorityRef values")
-        if self.denominator_ref is not None and type(self.denominator_ref) is not _authority_ref_type:
+        if (
+            self.denominator_ref is not None
+            and type(self.denominator_ref) is not _authority_ref_type
+        ):
             raise _error_type("denominator_ref must be AuthorityRef or None")
-        if self.counterfactual_ref is not None and type(self.counterfactual_ref) is not _authority_ref_type:
+        if (
+            self.counterfactual_ref is not None
+            and type(self.counterfactual_ref) is not _authority_ref_type
+        ):
             raise _error_type("counterfactual_ref must be AuthorityRef or None")
 
         for value, label in (
@@ -198,7 +204,10 @@ class PolicyUtilityEvidence:
             if type(self.support_count) is not int or self.support_count <= 0:
                 raise _error_type("support_count must be a positive integer")
         if self.effective_sample_size is not None:
-            _finite_decimal_validator(self.effective_sample_size, "effective_sample_size")
+            _finite_decimal_validator(
+                self.effective_sample_size,
+                "effective_sample_size",
+            )
             if self.effective_sample_size <= 0:
                 raise _error_type("effective_sample_size must be positive")
             if (

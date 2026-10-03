@@ -335,15 +335,17 @@ def test_coordinated_qualification_root_rebind_cannot_forge_trusted_head(
         raising=False,
     )
 
-    with pytest.raises(
-        CancellationError,
-        match="pull request qualification authority changed",
-    ):
-        admit_current_head(
-            api=api,
-            pr_number=2008,
-            event_head_sha=HEAD_A,
-        )
+    assert api.live_pr_qualification(2008) == (HEAD_B, True)
+    assert admit_current_head(
+        api=api,
+        pr_number=2008,
+        event_head_sha=HEAD_A,
+    ) == CancellationResult(current_head=False, cancelled_run_ids=())
+    assert admit_current_head(
+        api=api,
+        pr_number=2008,
+        event_head_sha=HEAD_B,
+    ) == CancellationResult(current_head=True, cancelled_run_ids=())
 
 
 def test_in_place_qualification_state_drift_revokes_cancellation() -> None:

@@ -69,6 +69,9 @@ _REQUIRED_CONTROLS = {
     "product-runtime-source-id": "input",
     "product-runtime-source-health": "input",
     "product-runtime-source-last-success": "input",
+    "product-runtime-economic-cycle": "input",
+    "product-runtime-economic-as-of": "input",
+    "product-runtime-paper-book-sha": "input",
     "emergency-stop-action": "button",
 }
 _READONLY_CONTROLS = {
@@ -84,6 +87,9 @@ _READONLY_CONTROLS = {
     "product-runtime-source-id",
     "product-runtime-source-health",
     "product-runtime-source-last-success",
+    "product-runtime-economic-cycle",
+    "product-runtime-economic-as-of",
+    "product-runtime-paper-book-sha",
 }
 _LIST_CONTROLS = {"203", "204", "304", "307"}
 _TABLE_CONTROLS = {"201"}

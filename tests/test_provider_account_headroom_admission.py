@@ -272,6 +272,34 @@ def test_submitted_liability_with_unknown_balance_coverage_forces_wait(
     assert second.decision is HeadroomDecision.WAIT_COVERAGE
 
 
+def test_live_snapshot_object_mutation_revokes_headroom_authority(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    acquired, _ = _acquire_balance(monkeypatch, tmp_path, "5")
+    assert acquired.snapshot.balance is not None
+    forged_balance = replace(
+        acquired.snapshot.balance,
+        available_balance=Decimal("1000000"),
+    )
+    forged_snapshot = replace(acquired.snapshot, balance=forged_balance)
+    object.__setattr__(acquired, "snapshot", forged_snapshot)
+
+    action = _action("a1", "10")
+    ledger = _ledger_with_plans(tmp_path, _plan("p1", action))
+
+    with pytest.raises(
+        ProviderAccountHeadroomError,
+        match="lacks live canonical provider-origin authority",
+    ):
+        assess_provider_account_headroom(
+            ledger,
+            acquired,
+            plan_id="p1",
+            action_id="a1",
+        )
+
+
 def test_account_authority_alias_rebinding_cannot_forge_available_balance(
     monkeypatch,
     tmp_path,

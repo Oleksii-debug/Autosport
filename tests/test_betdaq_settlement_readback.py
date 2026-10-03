@@ -13,6 +13,7 @@ from autosport.betdaq_account_readonly import (
 from autosport.betdaq_settlement_readback import (
     BetdaqEconomicReadbackClient,
     BetdaqEconomicReadbackError,
+    coalesce_posting_replays,
 )
 
 
@@ -126,22 +127,22 @@ def posting(
     )
 
 
-def postings_window(*rows, complete="true"):
+def postings_window(*rows, complete="true", currency="EUR"):
     return soap(
         "ListAccountPostings",
         (
-            'Currency="EUR" AvailableFunds="100.00" Balance="120.00" '
+            f'Currency="{currency}" AvailableFunds="100.00" Balance="120.00" '
             f'Credit="0" Exposure="-20.00" HaveAllPostingsBeenReturned="{complete}"'
         ),
         f"<Orders>{''.join(rows)}</Orders>",
     )
 
 
-def postings_by_id(*rows):
+def postings_by_id(*rows, currency="EUR"):
     return soap(
         "ListAccountPostingsById",
         (
-            'Currency="EUR" AvailableFunds="100.00" Balance="120.00" '
+            f'Currency="{currency}" AvailableFunds="100.00" Balance="120.00" '
             'Credit="0" Exposure="-20.00"'
         ),
         f"<Orders>{''.join(rows)}</Orders>",
@@ -612,3 +613,130 @@ def test_repr_never_exposes_credentials(monkeypatch):
     assert "alice" not in value
     assert "secret-pass" not in value
     assert "secret-app" not in value
+
+def test_posting_identity_survives_window_to_by_id_reresolution(monkeypatch):
+    row = posting(9001)
+    client, _ = economic_client(
+        monkeypatch,
+        postings_window(row, complete="false"),
+        postings_by_id(row),
+    )
+    start = datetime(2026, 9, 22, tzinfo=timezone.utc)
+    end = datetime(2026, 9, 23, tzinfo=timezone.utc)
+
+    window = client.read_account_postings(start, end)
+    by_id = client.read_account_postings_by_id(9000)
+    first = window.postings[0]
+    repeated = by_id.postings[0]
+
+    assert first.currency == "EUR"
+    assert repeated.currency == "EUR"
+    assert first.evidence.evidence_id != repeated.evidence.evidence_id
+    assert first.canonical_dict() != repeated.canonical_dict()
+    assert first.provider_content_dict() == repeated.provider_content_dict()
+    assert first.transaction_identity == repeated.transaction_identity
+    assert first.observation_id == repeated.observation_id
+    assert coalesce_posting_replays(window, by_id) == (first,)
+
+
+def test_posting_identity_ignores_unrelated_sibling_rows_in_response(monkeypatch):
+    row = posting(9001)
+    client, _ = economic_client(
+        monkeypatch,
+        postings_window(row, complete="false"),
+        postings_window(row, posting(9002), complete="false"),
+    )
+    start = datetime(2026, 9, 22, tzinfo=timezone.utc)
+    end = datetime(2026, 9, 23, tzinfo=timezone.utc)
+
+    first = client.read_account_postings(start, end)
+    second = client.read_account_postings(start, end)
+
+    assert first.evidence.evidence_id != second.evidence.evidence_id
+    assert first.postings[0].provider_content_dict() == second.postings[0].provider_content_dict()
+    assert first.postings[0].observation_id == second.postings[0].observation_id
+    assert [item.transaction_id for item in coalesce_posting_replays(first, second)] == [
+        "9001",
+        "9002",
+    ]
+
+
+def test_cross_response_same_transaction_conflict_fails_closed(monkeypatch):
+    client, _ = economic_client(
+        monkeypatch,
+        postings_window(posting(9001), complete="false"),
+        postings_by_id(posting(9001, amount="9.99")),
+    )
+    start = datetime(2026, 9, 22, tzinfo=timezone.utc)
+    end = datetime(2026, 9, 23, tzinfo=timezone.utc)
+
+    first = client.read_account_postings(start, end)
+    conflicting = client.read_account_postings_by_id(9000)
+
+    assert first.postings[0].transaction_identity == conflicting.postings[0].transaction_identity
+    assert first.postings[0].observation_id != conflicting.postings[0].observation_id
+    with pytest.raises(
+        BetdaqEconomicReadbackError,
+        match="transaction id has conflicting economic content",
+    ):
+        coalesce_posting_replays(first, conflicting)
+
+
+def test_cross_response_currency_drift_is_economic_conflict(monkeypatch):
+    row = posting(9001)
+    client, _ = economic_client(
+        monkeypatch,
+        postings_window(row, complete="false", currency="EUR"),
+        postings_by_id(row, currency="USD"),
+    )
+    start = datetime(2026, 9, 22, tzinfo=timezone.utc)
+    end = datetime(2026, 9, 23, tzinfo=timezone.utc)
+
+    euro = client.read_account_postings(start, end)
+    usd = client.read_account_postings_by_id(9000)
+
+    assert euro.postings[0].transaction_identity == usd.postings[0].transaction_identity
+    assert euro.postings[0].currency == "EUR"
+    assert usd.postings[0].currency == "USD"
+    assert euro.postings[0].observation_id != usd.postings[0].observation_id
+    with pytest.raises(
+        BetdaqEconomicReadbackError,
+        match="transaction id has conflicting economic content",
+    ):
+        coalesce_posting_replays(euro, usd)
+
+
+def test_posting_replay_coalescence_rejects_account_context_mixing(monkeypatch):
+    payload = postings_by_id(posting(9001))
+    first_client, _ = economic_client(
+        monkeypatch,
+        payload,
+        credentials=BetdaqCredentials("alice-a", "secret-a", "app-a"),
+    )
+    first = first_client.read_account_postings_by_id(9000)
+
+    second_client, _ = economic_client(
+        monkeypatch,
+        payload,
+        credentials=BetdaqCredentials("alice-b", "secret-b", "app-b"),
+    )
+    second = second_client.read_account_postings_by_id(9000)
+
+    with pytest.raises(
+        BetdaqEconomicReadbackError,
+        match="different authenticated account contexts",
+    ):
+        coalesce_posting_replays(first, second)
+
+
+def test_readback_rejects_posting_currency_mutation(monkeypatch):
+    client, _ = economic_client(monkeypatch, postings_by_id(posting(9001)))
+    readback = client.read_account_postings_by_id(9000)
+    forged = replace(readback.postings[0], currency="USD")
+
+    with pytest.raises(
+        BetdaqEconomicReadbackError,
+        match="posting currency does not match readback currency",
+    ):
+        replace(readback, postings=(forged,))
+

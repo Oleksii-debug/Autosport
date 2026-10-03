@@ -473,6 +473,46 @@ def test_evidence_shape_rejects_lifecycle_and_path_claim_drift(tmp_path):
         )
 
 
+def test_evidence_shape_rejects_equity_transition_drift(tmp_path):
+    book = _initialize(tmp_path)
+    opened = _open(book, "transition-open", "10", "2026-09-20T10:00:00+00:00")
+    book.save(tmp_path / "paper_book.json")
+    open_evidence = resolve_paper_drawdown_evidence(tmp_path)
+
+    forged_open = replace(
+        open_evidence.points[-1],
+        equity=open_evidence.points[-1].equity - Decimal("1"),
+    )
+    with pytest.raises(
+        PaperDrawdownEvidenceError,
+        match="equity transition does not match realized delta",
+    ):
+        replace(
+            open_evidence,
+            points=open_evidence.points[:-1] + (forged_open,),
+        )
+
+    book.settle(
+        opened.ticket_id,
+        set(),
+        settled_at="2026-09-20T11:00:00+00:00",
+    )
+    book.save(tmp_path / "paper_book.json")
+    loss_evidence = resolve_paper_drawdown_evidence(tmp_path)
+    forged_settle = replace(
+        loss_evidence.points[-1],
+        realized_delta=loss_evidence.points[-1].realized_delta + Decimal("1"),
+    )
+    with pytest.raises(
+        PaperDrawdownEvidenceError,
+        match="equity transition does not match realized delta",
+    ):
+        replace(
+            loss_evidence,
+            points=loss_evidence.points[:-1] + (forged_settle,),
+        )
+
+
 def test_evidence_shape_rejects_noncanonical_equity_point_objects(tmp_path):
     _initialize(tmp_path)
     evidence = resolve_paper_drawdown_evidence(tmp_path)

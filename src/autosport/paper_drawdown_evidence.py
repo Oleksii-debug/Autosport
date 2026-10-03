@@ -234,6 +234,13 @@ class PaperRealizedDrawdownEvidence:
             raise PaperDrawdownEvidenceError(
                 "drawdown evidence points must use contiguous canonical sequence"
             )
+        previous_point = self.points[0]
+        for point in self.points[1:]:
+            if point.equity != previous_point.equity + point.realized_delta:
+                raise PaperDrawdownEvidenceError(
+                    "drawdown evidence equity transition does not match realized delta"
+                )
+            previous_point = point
         if self.points[0].action != "initial":
             raise PaperDrawdownEvidenceError("drawdown evidence path must begin at initial equity")
         if self.points[0].equity != self.initial_equity:

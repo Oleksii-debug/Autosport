@@ -70,6 +70,42 @@ def test_durable_cycle_chronology_rejects_legacy_cross_slot_observation(
         )
 
 
+def test_durable_cycle_chronology_uses_canonical_next_due_rounding(
+    tmp_path,
+) -> None:
+    spec = CampaignInceptionSourceSpec(
+        expected_store_path=tmp_path / "collector.db",
+        source_id="parlayapi:table_tennis",
+        run_id="run-rounding",
+        stream_epoch="epoch-rounding",
+        anchor_at="2100-01-01T06:00:00+00:00",
+        interval_seconds=0.3333333,
+        max_items=250,
+        evaluation_start_slot_ordinal=0,
+        evaluation_end_slot_ordinal=2,
+    )
+    campaign = SimpleNamespace(
+        observation_not_before="2100-01-01T06:00:00+00:00",
+        observation_not_after="2100-01-01T06:00:02+00:00",
+    )
+    snapshot = SimpleNamespace(
+        captured_at="2100-01-01T06:00:00.666666+00:00",
+    )
+    collector_evidence = {
+        "attempted_at": "2100-01-01T06:00:00.333333+00:00",
+        "completed_at": "2100-01-01T06:00:00.666666+00:00",
+        "slot_ordinal": 1,
+        "due_at": "2100-01-01T06:00:00.333333+00:00",
+    }
+
+    binding._require_cycle_observation_chronology(
+        campaign=campaign,
+        source_spec=spec,
+        snapshot=snapshot,
+        collector_evidence=collector_evidence,
+    )
+
+
 def test_authority_preserves_distinct_plan_and_realized_universe_identity() -> None:
     identity = ForwardUniverseAuthorityIdentity(
         precommit_authority_sha256="a" * 64,
@@ -1030,15 +1066,19 @@ def test_saved_authorizer_rejects_provider_witness_map_in_place_mutation() -> No
         binding._PROVIDER_UNIVERSE_VALUES.update(original)
 
 
-def test_saved_resolver_rejects_timedelta_primitive_rebind_before_resolution(
+def test_saved_resolver_rejects_schedule_deadline_dispatch_rebind_before_resolution(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     resolver = binding.resolve_campaign_forward_universe_cycle_authority
-    monkeypatch.setattr(binding, "timedelta", object())
+    monkeypatch.setattr(
+        binding,
+        "_SCHEDULE_DUE_AT",
+        lambda **_kwargs: "2100-01-08T06:00:00+00:00",
+    )
 
     with pytest.raises(
         binding.CampaignForwardUniverseCycleBindingError,
-        match="chronology/digest primitives changed",
+        match="dispatch authority is rebound: _SCHEDULE_DUE_AT",
     ):
         resolver(
             precommit_locator=None,

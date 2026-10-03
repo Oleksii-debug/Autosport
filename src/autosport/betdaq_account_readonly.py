@@ -20,7 +20,7 @@ from secrets import token_bytes, token_hex
 from threading import Lock, RLock
 from typing import Callable, Protocol, runtime_checkable
 from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from urllib.request import Request, build_opener
 import json
 import re
 import xml.etree.ElementTree as ET
@@ -56,6 +56,9 @@ _STATUS_NAMES = {
 }
 _POLARITY_NAMES = {1: "BACK", 2: "LAY"}
 _TERMINAL_STATUS_CODES = frozenset({4, 5})
+_CANONICAL_REQUEST_TYPE = Request
+_CANONICAL_BUILD_OPENER = build_opener
+_CANONICAL_BUILD_OPENER_CODE = getattr(_CANONICAL_BUILD_OPENER, "__code__", None)
 _INTEGER_RE = re.compile(r"-?[0-9]+\Z")
 _ACCOUNT_CONTEXT_PREFIX = "betdaq-auth-context:"
 _ACCOUNT_CONTEXT_SCOPE = "AUTHENTICATED_CREDENTIAL_APPLICATION_CONTEXT"
@@ -203,9 +206,34 @@ class UrllibBetdaqSoapTransport:
         body: bytes,
         timeout_seconds: float,
     ) -> bytes:
-        request = Request(url, data=body, headers=headers, method="POST")
+        live_request_type = globals().get("Request")
+        live_build_opener = globals().get("build_opener")
+        canonical_request_type = globals().get("_CANONICAL_REQUEST_TYPE")
+        canonical_build_opener = globals().get("_CANONICAL_BUILD_OPENER")
+        if (
+            live_request_type is not canonical_request_type
+            or canonical_request_type is not _CANONICAL_REQUEST_TYPE
+            or live_build_opener is not canonical_build_opener
+            or canonical_build_opener is not _CANONICAL_BUILD_OPENER
+            or getattr(canonical_build_opener, "__code__", None)
+            is not _CANONICAL_BUILD_OPENER_CODE
+        ):
+            raise BetdaqAccountReadOnlyError(
+                "canonical BETDAQ HTTPS request/opener authority was replaced"
+            )
+        request = canonical_request_type(
+            url,
+            data=body,
+            headers=headers,
+            method="POST",
+        )
         try:
-            with urlopen(request, timeout=timeout_seconds) as response:
+            # Build an isolated opener for every credential-bearing provider request.
+            # urllib.request.urlopen() dereferences mutable process-global _opener;
+            # a fresh opener prevents caller-installed global opener state from
+            # servicing canonical authenticated BETDAQ acquisition.
+            opener = canonical_build_opener()
+            with opener.open(request, timeout=timeout_seconds) as response:
                 payload = response.read()
         except (HTTPError, URLError, OSError, TimeoutError) as exc:
             raise BetdaqAccountReadOnlyError("BETDAQ secure read transport failed") from None

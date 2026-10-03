@@ -1131,8 +1131,11 @@ class CompleteGameBoardEvidenceStore:
 
 
 def _seal_provider_evidence_store_dispatch() -> None:
+    """Seal the durable provider-evidence persistence graph against runtime retargeting."""
+
     module_globals = globals()
     store_type = CompleteGameBoardEvidenceStore
+    expected_getattr_static = inspect.getattr_static
     expected_save = store_type.save
     expected_save_code = expected_save.__code__
     expected_load = store_type.load
@@ -1142,9 +1145,109 @@ def _seal_provider_evidence_store_dispatch() -> None:
     expected_remember = _CANONICAL_REMEMBER
     expected_remember_code = _CANONICAL_REMEMBER_CODE
 
+    def _surface_witness(owner, name):
+        surface = expected_getattr_static(owner, name)
+        function = getattr(surface, "__func__", surface)
+        return name, surface, function, getattr(function, "__code__", None)
+
+    expected_store_internal = tuple(
+        _surface_witness(store_type, name)
+        for name in (
+            "_path",
+            "_authority",
+            "_workspace_sha256",
+            "_receipt_root",
+            "_receipt_path",
+            "_key_path",
+            "_read_receipt_key",
+            "_state_sha256",
+            "_semantic_binding_sha256",
+            "_read_path",
+            "_unsigned_receipt",
+            "_receipt_hmac",
+            "_write_receipt",
+            "_verify_receipt",
+            "_recover_provenance",
+            "_next_tx_id",
+        )
+    )
+    expected_authority_methods = tuple(
+        _surface_witness(MonotonicWorkspaceAuthority, name)
+        for name in ("prepare", "commit", "recover", "read_history")
+    )
+    expected_lock_methods = tuple(
+        _surface_witness(WorkspaceEconomicLock, name)
+        for name in ("__init__", "__enter__", "__exit__")
+    )
+    expected_snapshot_methods = tuple(
+        _surface_witness(CompleteGameBoardSnapshot, name)
+        for name in ("to_payload", "from_payload")
+    )
+    expected_path_type = type(Path("."))
+    expected_path_methods = tuple(
+        _surface_witness(expected_path_type, name)
+        for name in ("__truediv__", "__str__", "exists", "read_text", "mkdir", "parent")
+    )
+
+    expected_runtime_globals = {
+        "Path": Path,
+        "MonotonicWorkspaceAuthority": MonotonicWorkspaceAuthority,
+        "MonotonicWorkspaceAuthorityError": MonotonicWorkspaceAuthorityError,
+        "resolve_monotonic_authority_root": resolve_monotonic_authority_root,
+        "WorkspaceEconomicLock": WorkspaceEconomicLock,
+        "strict_json_loads": strict_json_loads,
+        "atomic_write_json": atomic_write_json,
+        "AuthorityPhase": AuthorityPhase,
+        "CompleteGameBoardSnapshot": CompleteGameBoardSnapshot,
+        "hashlib": hashlib,
+        "hmac": hmac,
+        "os": os,
+        "secrets": secrets,
+        "_canonical_json": _canonical_json,
+        "_digest": _digest,
+        "_sha": _sha,
+    }
+    expected_runtime_global_items = tuple(expected_runtime_globals.items())
+    expected_runtime_callables = tuple(
+        (
+            name,
+            target,
+            getattr(getattr(target, "__func__", target), "__code__", None),
+        )
+        for name, target in (
+            ("resolve_monotonic_authority_root", resolve_monotonic_authority_root),
+            ("strict_json_loads", strict_json_loads),
+            ("atomic_write_json", atomic_write_json),
+            ("_canonical_json", _canonical_json),
+            ("_digest", _digest),
+            ("_sha", _sha),
+        )
+    )
+    expected_hashlib_sha256 = hashlib.sha256
+    expected_hmac_new = hmac.new
+    expected_hmac_compare_digest = hmac.compare_digest
+    expected_secrets_token_bytes = secrets.token_bytes
+    expected_os_open = os.open
+    expected_os_fdopen = os.fdopen
+    expected_os_fsync = os.fsync
+
+    def _require_surface_witnesses(owner, witnesses) -> bool:
+        for name, surface, function, code in witnesses:
+            current = expected_getattr_static(owner, name)
+            if current is not surface:
+                return False
+            current_function = getattr(current, "__func__", current)
+            if current_function is not function:
+                return False
+            if getattr(current_function, "__code__", None) is not code:
+                return False
+        return True
+
     def require_store_authority() -> None:
         if (
-            module_globals.get("_CANONICAL_ASSERT_COMPLETE_GAME_BOARD_AUTHORITATIVE")
+            module_globals.get("inspect") is not inspect
+            or inspect.getattr_static is not expected_getattr_static
+            or module_globals.get("_CANONICAL_ASSERT_COMPLETE_GAME_BOARD_AUTHORITATIVE")
             is not expected_assert
             or module_globals.get(
                 "_CANONICAL_ASSERT_COMPLETE_GAME_BOARD_AUTHORITATIVE_CODE"
@@ -1157,9 +1260,62 @@ def _seal_provider_evidence_store_dispatch() -> None:
             or expected_remember.__code__ is not expected_remember_code
             or expected_save.__code__ is not expected_save_code
             or expected_load.__code__ is not expected_load_code
+            or any(
+                module_globals.get(name) is not expected
+                for name, expected in expected_runtime_global_items
+            )
+            or expected_hashlib.sha256 is not expected_hashlib_sha256
+            or expected_hmac.new is not expected_hmac_new
+            or expected_hmac.compare_digest is not expected_hmac_compare_digest
+            or expected_secrets.token_bytes is not expected_secrets_token_bytes
+            or expected_os.open is not expected_os_open
+            or expected_os.fdopen is not expected_os_fdopen
+            or expected_os.fsync is not expected_os_fsync
         ):
             raise ProviderObservationIntegrityError(
                 "provider evidence store authority witness changed"
+            )
+        for name, target, code in expected_runtime_callables:
+            if module_globals.get(name) is not target:
+                raise ProviderObservationIntegrityError(
+                    "provider evidence store authority witness changed"
+                )
+            function = getattr(target, "__func__", target)
+            if getattr(function, "__code__", None) is not code:
+                raise ProviderObservationIntegrityError(
+                    "provider evidence store authority witness changed"
+                )
+        if not _require_surface_witnesses(store_type, expected_store_internal):
+            raise ProviderObservationIntegrityError(
+                "provider evidence store internal dispatch changed"
+            )
+        if not _require_surface_witnesses(
+            MonotonicWorkspaceAuthority,
+            expected_authority_methods,
+        ):
+            raise ProviderObservationIntegrityError(
+                "provider evidence monotonic authority dispatch changed"
+            )
+        if not _require_surface_witnesses(
+            WorkspaceEconomicLock,
+            expected_lock_methods,
+        ):
+            raise ProviderObservationIntegrityError(
+                "provider evidence workspace lock dispatch changed"
+            )
+        if not _require_surface_witnesses(
+            CompleteGameBoardSnapshot,
+            expected_snapshot_methods,
+        ):
+            raise ProviderObservationIntegrityError(
+                "provider evidence snapshot dispatch changed"
+            )
+        if type(Path(".")) is not expected_path_type or not _require_surface_witnesses(
+            expected_path_type,
+            expected_path_methods,
+        ):
+            raise ProviderObservationIntegrityError(
+                "provider evidence filesystem path dispatch changed"
             )
 
     @wraps(expected_save)

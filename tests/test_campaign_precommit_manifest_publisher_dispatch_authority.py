@@ -117,6 +117,7 @@ def test_installed_publisher_fails_closed_before_rebound_monotonic_commit(
     assert not target.exists()
     assert original_commit is not hostile_commit
 
+
 def test_installed_publisher_fails_closed_before_nested_monotonic_append_dispatch(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

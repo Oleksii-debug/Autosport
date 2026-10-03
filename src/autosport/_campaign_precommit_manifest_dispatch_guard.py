@@ -270,6 +270,7 @@ def _require_class_method_graph(
             raise RuntimeError(f"{label} method dispatch authority changed: {name}")
         _require_function_graph(function_graph, f"{label}.{name}")
 
+
 def _install() -> None:
     original = _precommit.publish_campaign_precommit_manifest
     graph = _capture_function_graph(original, "campaign precommit publisher")

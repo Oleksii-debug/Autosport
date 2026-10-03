@@ -873,10 +873,6 @@ def test_module_stable_reader_rebind_cannot_forge_empty_history(
     assert path.exists()
 
 
-@pytest.mark.parametrize(
-    "binding_name",
-    ("_decode_snapshot", "snapshot_fingerprint", "strict_json_loads"),
-)
 def test_dto_constructor_rebind_fails_before_durable_decode_callback(
     monkeypatch,
     tmp_path,
@@ -947,6 +943,10 @@ def test_incoming_dto_field_descriptor_rebind_fails_before_callback(
     assert not path.exists()
 
 
+@pytest.mark.parametrize(
+    "binding_name",
+    ("_decode_snapshot", "snapshot_fingerprint", "strict_json_loads"),
+)
 def test_transitive_module_dispatch_rebind_fails_before_forged_read(
     monkeypatch,
     tmp_path,

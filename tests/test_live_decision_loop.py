@@ -724,7 +724,7 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             self.assertTrue(state["injected"])
             self.assertTrue(state["routed"])
             self.assertEqual(first.status, LiveCycleStatus.BACKPRESSURE)
-            self.assertIn("dependency routing changed", first.detail)
+            self.assertIn("dependency registry/routing changed", first.detail)
             self.assertEqual(factory.calls, [])
             self.assertFalse((workspace / "decisions.jsonl").exists())
             self.assertFalse(loop.progress_path.exists())

@@ -350,7 +350,7 @@ def test_by_id_read_never_inherits_window_completeness(monkeypatch):
     assert len(result.postings) == 1
     body = opener.calls[0][0].data
     assert b"listAccountPostingsByIdRequest" in body
-    assert b'TransactionId="9001"' in body
+    assert b'TransactionId="9000"' in body
 
 
 def test_duplicate_transaction_id_is_idempotent_only_for_identical_content(
@@ -533,6 +533,55 @@ def test_xsd_decimal_exponent_is_rejected(monkeypatch):
         match="canonical provider xsd:decimal",
     ):
         client.read_account_postings_by_id(9000)
+
+
+@pytest.mark.parametrize("currency", ("eur", "EURO", "E1R", " EUR"))
+def test_postings_reject_noncanonical_provider_currency(monkeypatch, currency):
+    client, _ = economic_client(
+        monkeypatch,
+        postings_by_id(posting(9001), currency=currency),
+    )
+
+    with pytest.raises(
+        BetdaqEconomicReadbackError,
+        match="canonical 3-letter uppercase provider currency",
+    ):
+        client.read_account_postings_by_id(9000)
+
+
+@pytest.mark.parametrize(
+    "transaction_id",
+    (
+        9_223_372_036_854_775_808,
+        "9223372036854775808",
+    ),
+)
+def test_by_id_request_rejects_value_above_provider_xsd_long_before_transport(
+    monkeypatch,
+    transaction_id,
+):
+    client, opener = economic_client(monkeypatch)
+
+    with pytest.raises(
+        BetdaqEconomicReadbackError,
+        match="must fit non-negative provider xsd:long",
+    ):
+        client.read_account_postings_by_id(transaction_id)
+
+    assert opener.calls == []
+
+
+def test_posting_response_rejects_transaction_id_above_provider_xsd_long(monkeypatch):
+    client, _ = economic_client(
+        monkeypatch,
+        postings_by_id(posting("9223372036854775808")),
+    )
+
+    with pytest.raises(
+        BetdaqEconomicReadbackError,
+        match="must fit non-negative provider xsd:long",
+    ):
+        client.read_account_postings_by_id(0)
 
 
 def test_unsigned_byte_fields_reject_out_of_contract_values(monkeypatch):

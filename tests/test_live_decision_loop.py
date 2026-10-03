@@ -1029,6 +1029,69 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
                 1,
             )
 
+    def test_market_update_after_coherent_capture_cannot_publish_stale_pending(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            clock = _ManualClock(self.START + timedelta(seconds=1))
+            first_event = self._event(selection="selection-a", sequence=1)
+            concurrent = self._event(
+                selection="selection-a",
+                sequence=2,
+                odds="2.20",
+                observed=self.START + timedelta(milliseconds=1500),
+            )
+            factory = _EmptyIntentFactory()
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(workspace, [(first_event,), ()]),
+                factory=factory,
+                clock=clock,
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+
+            real_write_pending = loop._write_pending
+            injected = {"done": False}
+
+            def advance_after_capture(*args, **kwargs):
+                if not injected["done"]:
+                    injected["done"] = True
+                    store = SQLiteMarketStore(workspace / "market.db")
+                    try:
+                        store.append(concurrent)
+                    finally:
+                        store.close()
+                    loop.mirror_updates.accept_persisted(concurrent)
+                return real_write_pending(*args, **kwargs)
+
+            with patch.object(
+                loop,
+                "_write_pending",
+                side_effect=advance_after_capture,
+            ):
+                first = loop.run_cycle()
+
+            self.assertTrue(injected["done"])
+            self.assertEqual(first.status, LiveCycleStatus.BACKPRESSURE)
+            self.assertIn(
+                "market revision advanced after decision snapshot capture",
+                first.detail,
+            )
+            self.assertFalse((workspace / "decisions.jsonl").exists())
+            self.assertIsNone(loop._load_progress())
+
+            clock.value = self.START + timedelta(seconds=2)
+            second = loop.run_cycle()
+
+            self.assertEqual(second.status, LiveCycleStatus.DECIDED)
+            self.assertEqual(
+                len(
+                    JsonlDecisionLedger(
+                        workspace / "decisions.jsonl"
+                    ).verified_records()
+                ),
+                1,
+            )
+
     def test_provider_gap_full_cut_rejects_concurrent_update_before_zero(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

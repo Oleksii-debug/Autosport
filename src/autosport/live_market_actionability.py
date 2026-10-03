@@ -92,6 +92,18 @@ def _canonical_input_id(value: object) -> str:
     return value
 
 
+def _selector_evidence(value: object, *, label: str) -> tuple[str, ...] | None:
+    if value is None:
+        return None
+    if type(value) is not frozenset or any(
+        type(item) is not str or not item for item in value
+    ):
+        raise LiveMarketActionabilityError(
+            f"registered dependency {label} selector is not canonical"
+        )
+    return tuple(sorted(value))
+
+
 def _canonical_as_of(value: object) -> datetime:
     # This is an authority boundary: datetime subclasses can override timezone
     # conversion/offset dispatch. Accept the exact stdlib scalar only.
@@ -247,15 +259,28 @@ def evaluate_registered_input_current_view(
         raise LiveMarketActionabilityError(
             "registered live input dependency is not canonical"
         )
+    if dependency.input_id != normalized_input_id:
+        raise LiveMarketActionabilityError(
+            "registered live input dependency identity is inconsistent"
+        )
 
-    selectors = dependencies._selectors(dependency)
     dependency_evidence = LiveInputDependencyEvidence(
-        source_ids=None if dependency.source_ids is None else tuple(sorted(dependency.source_ids)),
-        sports=None if dependency.sports is None else tuple(sorted(dependency.sports)),
-        event_ids=None if dependency.event_ids is None else tuple(sorted(dependency.event_ids)),
-        market_ids=None if dependency.market_ids is None else tuple(sorted(dependency.market_ids)),
-        selection_ids=None if dependency.selection_ids is None else tuple(sorted(dependency.selection_ids)),
+        source_ids=_selector_evidence(dependency.source_ids, label="source_ids"),
+        sports=_selector_evidence(dependency.sports, label="sports"),
+        event_ids=_selector_evidence(dependency.event_ids, label="event_ids"),
+        market_ids=_selector_evidence(dependency.market_ids, label="market_ids"),
+        selection_ids=_selector_evidence(
+            dependency.selection_ids,
+            label="selection_ids",
+        ),
     )
+    selectors = {
+        "source_ids": dependency_evidence.source_ids,
+        "sports": dependency_evidence.sports,
+        "event_ids": dependency_evidence.event_ids,
+        "market_ids": dependency_evidence.market_ids,
+        "selection_ids": dependency_evidence.selection_ids,
+    }
     raw_snapshot = updates.mirror.view(**selectors)
 
     component_evidence: list[LiveMarketComponentEvidence] = []

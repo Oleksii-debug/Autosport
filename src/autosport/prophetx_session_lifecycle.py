@@ -265,9 +265,23 @@ class ProphetXSessionSnapshot:
         if self.state in {
             ProphetXSessionState.AUTH_RETRYABLE_FAILURE,
             ProphetXSessionState.PROVIDER_UNAVAILABLE,
-        } and self.retry_not_before is None:
+        }:
+            if self.retry_not_before is None:
+                raise ProphetXSessionLifecycleError(
+                    "retryable state requires retry_not_before"
+                )
+            if self.retry_not_before <= self.last_transition_at:
+                raise ProphetXSessionLifecycleError(
+                    "retryable state requires a future retry horizon"
+                )
+
+        if (
+            self.state is ProphetXSessionState.RENEWAL_DUE
+            and self.retry_not_before is not None
+            and self.retry_not_before <= self.last_transition_at
+        ):
             raise ProphetXSessionLifecycleError(
-                "retryable state requires retry_not_before"
+                "renewal retry horizon must follow the latest transition"
             )
 
         if self.state is ProphetXSessionState.LOGIN_IN_FLIGHT:
@@ -321,6 +335,10 @@ class ProphetXSessionSnapshot:
             if self.slot_hold_until is None:
                 raise ProphetXSessionLifecycleError(
                     "provider-slot wait state requires slot_hold_until"
+                )
+            if self.slot_hold_until <= self.last_transition_at:
+                raise ProphetXSessionLifecycleError(
+                    "provider-slot wait state requires a future hold horizon"
                 )
             if (
                 self.session_lineage_id is not None

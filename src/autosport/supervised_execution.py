@@ -1317,6 +1317,7 @@ def reserve_supervised_plan(
         approval_id=approval.ledger_identity,
         approval_fingerprint=approval.fingerprint,
         approved_at=approval.approved_at,
+        expires_at=approval.expires_at,
         evidence_sha256=approval.evidence_sha256,
     )
     _require_durable_approval(ledger, bound, approval)

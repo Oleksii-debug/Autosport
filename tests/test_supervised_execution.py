@@ -402,11 +402,9 @@ def test_reservation_rejects_structurally_valid_but_unissued_bound_plan(tmp_path
         ledger.saga(reconstructed.execution_plan.plan_id)
 
 
-def test_registry_alias_rebinding_cannot_issue_caller_plan(
+def test_issuer_alias_rebinding_cannot_mint_product_authority(
     monkeypatch,
 ) -> None:
-    bound, _, _, _ = _bound()
-    reconstructed = replace(bound)
     hostile_calls: list[object] = []
 
     def hostile_issue(value):
@@ -421,11 +419,40 @@ def test_registry_alias_rebinding_cannot_issue_caller_plan(
 
     with pytest.raises(
         SupervisedExecutionError,
-        match="not current canonical product issuance",
+        match="canonical bound supervised execution plan authority changed",
     ):
-        assert_bound_supervised_execution_plan_authoritative(reconstructed)
+        _bound()
 
     assert hostile_calls == []
+
+
+def test_assertion_alias_rebinding_cannot_admit_unissued_plan(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    bound, approval, _, _ = _bound()
+    reconstructed = replace(bound)
+    hostile_calls: list[object] = []
+
+    def hostile_assert(value):
+        hostile_calls.append(value)
+
+    monkeypatch.setattr(
+        supervised_execution,
+        "assert_bound_supervised_execution_plan_authoritative",
+        hostile_assert,
+    )
+    ledger = RealExecutionLedger(tmp_path / "assert-rebound-ledger.jsonl")
+
+    with pytest.raises(
+        SupervisedExecutionError,
+        match="canonical bound supervised execution plan authority changed",
+    ):
+        reserve_supervised_plan(ledger, reconstructed, approval)
+
+    assert hostile_calls == []
+    with pytest.raises(KeyError):
+        ledger.saga(reconstructed.execution_plan.plan_id)
 
 
 def test_approval_binds_exact_route_and_slippage_terms() -> None:

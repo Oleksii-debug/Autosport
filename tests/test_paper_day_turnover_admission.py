@@ -1205,6 +1205,9 @@ def test_proposal_market_descriptor_witness_inventory_is_complete():
         risk_module.ProposedTicketRiskContext: tuple(
             risk_module.ProposedTicketRiskContext.__dataclass_fields__
         ),
+        risk_module.RiskOfRuinEvidence: tuple(
+            risk_module.RiskOfRuinEvidence.__dataclass_fields__
+        ),
         economic_admission.TicketLeg: tuple(
             economic_admission.TicketLeg.__dataclass_fields__
         ),
@@ -1217,6 +1220,12 @@ def test_proposal_market_descriptor_witness_inventory_is_complete():
             name
             for name, _descriptor in (
                 economic_admission._PROPOSED_CONTEXT_FIELD_DESCRIPTOR_WITNESSES
+            )
+        ),
+        risk_module.RiskOfRuinEvidence: tuple(
+            name
+            for name, _descriptor in (
+                economic_admission._RISK_OF_RUIN_EVIDENCE_FIELD_DESCRIPTOR_WITNESSES
             )
         ),
         economic_admission.TicketLeg: tuple(
@@ -1241,6 +1250,22 @@ def test_proposal_market_descriptor_witness_inventory_is_complete():
     (
         (risk_module.ProposedTicketRiskContext, "proposal_ts", "2099-01-01T00:00:00Z"),
         (risk_module.ProposedTicketRiskContext, "provider_accounts", ()),
+        (risk_module.RiskOfRuinEvidence, "upper_bound", Decimal("0")),
+        (
+            risk_module.RiskOfRuinEvidence,
+            "base_portfolio_sha256",
+            "0" * 64,
+        ),
+        (
+            risk_module.RiskOfRuinEvidence,
+            "candidate_sha256",
+            "0" * 64,
+        ),
+        (
+            risk_module.RiskOfRuinEvidence,
+            "evaluated_stake",
+            Decimal("0.01"),
+        ),
         (economic_admission.TicketLeg, "locked_odds", Decimal("999")),
         (economic_admission.MarketEvent, "source_id", "trusted-forged-provider"),
         (economic_admission.MarketEvent, "decimal_odds", Decimal("999")),

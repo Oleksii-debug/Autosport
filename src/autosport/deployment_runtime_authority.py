@@ -111,6 +111,12 @@ _CANONICAL_RLOCK_FACTORY: Final = RLock
 _CANONICAL_RLOCK_TYPE: Final = type(RLock())
 _CANONICAL_WORKSPACE_ECONOMIC_LOCK_TYPE: Final = WorkspaceEconomicLock
 _CANONICAL_MONOTONIC_AUTHORITY_INIT: Final = MonotonicWorkspaceAuthority.__init__
+_CANONICAL_MONOTONIC_RECOVER: Final = MonotonicWorkspaceAuthority.recover
+_CANONICAL_MONOTONIC_RECOVER_CODE: Final = MonotonicWorkspaceAuthority.recover.__code__
+_CANONICAL_MONOTONIC_READ_HISTORY: Final = MonotonicWorkspaceAuthority.read_history
+_CANONICAL_MONOTONIC_READ_HISTORY_CODE: Final = (
+    MonotonicWorkspaceAuthority.read_history.__code__
+)
 _CANONICAL_OBJECT_NEW: Final = object.__new__
 _CANONICAL_HASHLIB_MODULE: Final = hashlib
 _CANONICAL_HASHLIB_SHA256: Final = hashlib.sha256
@@ -252,6 +258,99 @@ _CANONICAL_WORKSPACE_LOCK_HELPER: Final = _workspace_economic_lock
 _CANONICAL_WORKSPACE_LOCK_HELPER_CODE: Final = _workspace_economic_lock.__code__
 _CANONICAL_MONOTONIC_CONSTRUCTOR_HELPER: Final = _construct_monotonic_authority
 _CANONICAL_MONOTONIC_CONSTRUCTOR_HELPER_CODE: Final = _construct_monotonic_authority.__code__
+
+
+def _assert_monotonic_read_recovery_dispatch(
+    authority: MonotonicWorkspaceAuthority,
+) -> None:
+    if type(authority) is not _CANONICAL_MONOTONIC_AUTHORITY_TYPE:
+        raise DeploymentRuntimeAuthorityError(
+            "runtime authority monotonic read type was replaced"
+        )
+    class_dict = vars(_CANONICAL_MONOTONIC_AUTHORITY_TYPE)
+    for name, expected, expected_code in (
+        (
+            "recover",
+            _CANONICAL_MONOTONIC_RECOVER,
+            _CANONICAL_MONOTONIC_RECOVER_CODE,
+        ),
+        (
+            "read_history",
+            _CANONICAL_MONOTONIC_READ_HISTORY,
+            _CANONICAL_MONOTONIC_READ_HISTORY_CODE,
+        ),
+    ):
+        current = class_dict.get(name)
+        if (
+            current is not expected
+            or getattr(current, "__code__", None) is not expected_code
+        ):
+            raise DeploymentRuntimeAuthorityError(
+                "runtime authority monotonic read dispatch was replaced"
+            )
+    instance_dict = object.__getattribute__(authority, "__dict__")
+    if "recover" in instance_dict or "read_history" in instance_dict:
+        raise DeploymentRuntimeAuthorityError(
+            "runtime authority monotonic read instance dispatch was replaced"
+        )
+
+
+def _monotonic_recover(
+    authority: MonotonicWorkspaceAuthority,
+    *,
+    observed_state_sha256: str | None,
+    tx_id: str | None = None,
+    semantic_binding_sha256: str | None = None,
+) -> object:
+    _assert_monotonic_read_recovery_dispatch(authority)
+    return _CANONICAL_MONOTONIC_RECOVER(
+        authority,
+        observed_state_sha256=observed_state_sha256,
+        tx_id=tx_id,
+        semantic_binding_sha256=semantic_binding_sha256,
+    )
+
+
+def _monotonic_read_history(
+    authority: MonotonicWorkspaceAuthority,
+) -> tuple[object, ...]:
+    _assert_monotonic_read_recovery_dispatch(authority)
+    return _CANONICAL_MONOTONIC_READ_HISTORY(authority)
+
+
+_CANONICAL_MONOTONIC_READ_DISPATCH_GUARD: Final = _assert_monotonic_read_recovery_dispatch
+_CANONICAL_MONOTONIC_READ_DISPATCH_GUARD_CODE: Final = (
+    _assert_monotonic_read_recovery_dispatch.__code__
+)
+_CANONICAL_MONOTONIC_RECOVER_HELPER: Final = _monotonic_recover
+_CANONICAL_MONOTONIC_RECOVER_HELPER_CODE: Final = _monotonic_recover.__code__
+_CANONICAL_MONOTONIC_READ_HISTORY_HELPER: Final = _monotonic_read_history
+_CANONICAL_MONOTONIC_READ_HISTORY_HELPER_CODE: Final = _monotonic_read_history.__code__
+
+
+def _assert_monotonic_read_helpers() -> None:
+    if (
+        _assert_monotonic_read_recovery_dispatch
+        is not _CANONICAL_MONOTONIC_READ_DISPATCH_GUARD
+        or _CANONICAL_MONOTONIC_READ_DISPATCH_GUARD.__code__
+        is not _CANONICAL_MONOTONIC_READ_DISPATCH_GUARD_CODE
+        or _monotonic_recover is not _CANONICAL_MONOTONIC_RECOVER_HELPER
+        or _CANONICAL_MONOTONIC_RECOVER_HELPER.__code__
+        is not _CANONICAL_MONOTONIC_RECOVER_HELPER_CODE
+        or _monotonic_read_history
+        is not _CANONICAL_MONOTONIC_READ_HISTORY_HELPER
+        or _CANONICAL_MONOTONIC_READ_HISTORY_HELPER.__code__
+        is not _CANONICAL_MONOTONIC_READ_HISTORY_HELPER_CODE
+    ):
+        raise DeploymentRuntimeAuthorityError(
+            "runtime authority monotonic read helper dispatch was replaced"
+        )
+
+
+_CANONICAL_MONOTONIC_READ_HELPER_ASSERT: Final = _assert_monotonic_read_helpers
+_CANONICAL_MONOTONIC_READ_HELPER_ASSERT_CODE: Final = (
+    _assert_monotonic_read_helpers.__code__
+)
 
 
 def _text(value: object, name: str) -> str:
@@ -1210,7 +1309,11 @@ class DeploymentRuntimeAuthorityStore:
             store = _CANONICAL_OBJECT_NEW(cls)
             store._configure(destination, authority_root=authority_root)
             store._assert_binding_integrity()
-            recovery = store._authority.recover(observed_state_sha256=None)
+            _CANONICAL_MONOTONIC_READ_HELPER_ASSERT()
+            recovery = _CANONICAL_MONOTONIC_RECOVER_HELPER(
+                store._authority,
+                observed_state_sha256=None,
+            )
             if recovery.committed_state_sha256 is not None:
                 raise DeploymentRuntimeAuthorityError(
                     "runtime authority workspace is not pristine"
@@ -1321,7 +1424,11 @@ class DeploymentRuntimeAuthorityStore:
         try:
             raw = _CANONICAL_PATH_READ_TEXT(self.path, encoding="utf-8")
         except FileNotFoundError as exc:
-            self._authority.recover(observed_state_sha256=None)
+            _CANONICAL_MONOTONIC_READ_HELPER_ASSERT()
+            _CANONICAL_MONOTONIC_RECOVER_HELPER(
+                self._authority,
+                observed_state_sha256=None,
+            )
             raise DeploymentRuntimeAuthorityError(
                 "cannot read runtime authority store"
             ) from exc
@@ -1661,7 +1768,8 @@ class DeploymentRuntimeAuthorityStore:
     ) -> None:
         self._assert_binding_integrity()
         state_sha256 = self._state_sha256(payload)
-        history = self._authority.read_history()
+        _CANONICAL_MONOTONIC_READ_HELPER_ASSERT()
+        history = _CANONICAL_MONOTONIC_READ_HISTORY_HELPER(self._authority)
         if any(
             record.semantic_binding_sha256 != self._semantic_binding_sha256
             for record in history
@@ -1677,7 +1785,8 @@ class DeploymentRuntimeAuthorityStore:
             and latest.intended_state_sha256 == state_sha256
             else None
         )
-        recovery = self._authority.recover(
+        recovery = _CANONICAL_MONOTONIC_RECOVER_HELPER(
+            self._authority,
             observed_state_sha256=state_sha256,
             tx_id=pending_tx_id,
             semantic_binding_sha256=(

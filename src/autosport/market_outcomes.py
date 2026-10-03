@@ -252,6 +252,13 @@ class MarketSettlementOutcomeAuthority:
     verification_protocol_sha256: str
     _verification_token: object = field(repr=False, compare=False)
 
+    def __getattribute__(self, name: str) -> object:
+        # Authority-bearing instance dispatch must remain on the exact class surface
+        # captured after class construction. This closes class-method/property
+        # rebinding that could otherwise bypass assert_issued_integrity().
+        _assert_canonical_market_outcome_authority_dispatch()
+        return object.__getattribute__(self, name)
+
     def __post_init__(self) -> None:
         if (
             self._verification_token is not _VERIFIED_AUTHORITY_TOKEN
@@ -598,6 +605,89 @@ class MarketSettlementOutcomeAuthority:
                 "verified source evidence"
             )
         return verified_authority
+
+
+_MISSING_AUTHORITY_CLASS_SLOT = object()
+_CANONICAL_MARKET_OUTCOME_AUTHORITY_TYPE = MarketSettlementOutcomeAuthority
+
+
+def _authority_descriptor_code_identity(member: object) -> tuple[object, ...]:
+    """Capture executable descriptor code without invoking mutable descriptors."""
+
+    if isinstance(member, property):
+        return tuple(
+            None if accessor is None else getattr(accessor, "__code__", None)
+            for accessor in (member.fget, member.fset, member.fdel)
+        )
+    if isinstance(member, (classmethod, staticmethod)):
+        function = member.__func__
+        return (getattr(function, "__code__", None),)
+    return (getattr(member, "__code__", None),)
+
+
+_CANONICAL_MARKET_OUTCOME_AUTHORITY_CLASS_SURFACE = tuple(
+    (
+        name,
+        member,
+        _authority_descriptor_code_identity(member),
+    )
+    for name in (
+        "identity",
+        "selection_ids",
+        "roster_basis",
+        "settlement_semantics",
+        "source_revision",
+        "causal_cutoff",
+        "observed_at",
+        "roster_provenance_sha256",
+        "settlement_rules_sha256",
+        "verification_protocol_sha256",
+        "_verification_token",
+        "__post_init__",
+        "__getattribute__",
+        "__setattr__",
+        "__delattr__",
+        "_calculated_authority_sha256",
+        "_register_issued_integrity",
+        "assert_issued_integrity",
+        "quote_keys",
+        "_terminal_state_count_unchecked",
+        "_terminal_space_exact_unchecked",
+        "terminal_state_count",
+        "terminal_space_exact",
+        "terminal_states",
+        "assert_available_as_of",
+        "_state_is_derived",
+        "settlement_by_quote",
+        "_identity_payload",
+        "authority_sha256",
+        "to_dict",
+        "from_dict",
+    )
+    for member in (
+        vars(MarketSettlementOutcomeAuthority).get(
+            name,
+            _MISSING_AUTHORITY_CLASS_SLOT,
+        ),
+    )
+)
+
+
+def _assert_canonical_market_outcome_authority_dispatch() -> None:
+    """Fail closed if authority-bearing class dispatch changed after import."""
+
+    class_dict = vars(_CANONICAL_MARKET_OUTCOME_AUTHORITY_TYPE)
+    for name, expected, expected_code in (
+        _CANONICAL_MARKET_OUTCOME_AUTHORITY_CLASS_SURFACE
+    ):
+        current = class_dict.get(name, _MISSING_AUTHORITY_CLASS_SLOT)
+        if (
+            current is not expected
+            or _authority_descriptor_code_identity(current) != expected_code
+        ):
+            raise ValueError(
+                "canonical market outcome authority class dispatch was replaced"
+            )
 
 
 @dataclass(frozen=True, slots=True)

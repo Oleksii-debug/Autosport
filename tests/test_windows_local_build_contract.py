@@ -279,3 +279,20 @@ def test_local_windows_build_known_folder_first_run_scrubs_all_storage_overrides
     assert restore_workspace_index < known_folder_claim_index
     assert script.count(remove_workspace) >= 2
 
+
+def test_local_windows_build_requires_clean_webview_environment_storage_witness() -> None:
+    script = _build_script_text()
+
+    witness = (
+        "$freshFirstRunEvidenceA.webview_environment_overrides_clear -ne $true "
+        "-or $freshFirstRunEvidenceB.webview_environment_overrides_clear -ne $true"
+    )
+    failure = (
+        "Fresh-extracted first-run storage audit did not prove a clean "
+        "WebView2 release environment"
+    )
+    truth_gate = "$freshFirstRunEvidenceA.real_money_execution -ne $false"
+
+    assert witness in script
+    assert failure in script
+    assert script.index(witness) < script.index(truth_gate)

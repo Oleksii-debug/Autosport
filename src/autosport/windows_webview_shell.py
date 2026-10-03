@@ -32,7 +32,11 @@ from .owner_economic_authority import (
 )
 from .parlayapi_provider import ParlayApiTableTennisProvider
 from .paths import default_webview_storage_path, default_workspace
-from .product_gui_worker import ProductGuiMessage, ProductGuiWorker
+from .product_gui_worker import (
+    ProductGuiEconomicSnapshot,
+    ProductGuiMessage,
+    ProductGuiWorker,
+)
 from .recovery_worker import OneShotRecoveryWorker, recover_workspace_once
 from .replay_worker import OneShotReplayWorker, run_workspace_dataset_once, workspace_for_strategy
 from .research_strategy import RESEARCH_STRATEGY_ID, ResearchStrategyPlan
@@ -364,6 +368,7 @@ class AutosportWebController:
         self._product_runtime_source_provider_unavailable: bool | None = None
         self._product_runtime_source_attention_required: bool | None = None
         self._product_runtime_source_last_success_at: str | None = None
+        self._product_runtime_economic_snapshot: ProductGuiEconomicSnapshot | None = None
         # Request identity/replay bookkeeping is intentionally separate from the
         # ordinary controller lock. Reservations are brief; handlers never run
         # while this lock is held, so the emergency lane can preserve one global
@@ -572,6 +577,13 @@ class AutosportWebController:
     def _quarantine_product_runtime_truth(self, workspace: Path) -> None:
         resolved_workspace = Path(workspace)
         self._recovery_required_workspaces.add(resolved_workspace)
+        self._product_runtime_economic_snapshot = None
+        self.bank = text("ui.status.bank.quarantined", workspace=resolved_workspace)
+        self.tickets = [text("ui.status.tickets.startup_failure")]
+        self.evaluation = [
+            "Економічна проєкція тривалої симуляції недоступна; "
+            "потрібне канонічне відновлення робочої області."
+        ]
         self.product_runtime_status = text(
             "ui.windows.product_runtime.error.recovery_required"
         )
@@ -781,6 +793,124 @@ class AutosportWebController:
             ),
             last_success_at=last_success_at,
         )
+
+    def _product_runtime_economic_projection(self) -> dict[str, object]:
+        snapshot = getattr(self, "_product_runtime_economic_snapshot", None)
+        if snapshot is None:
+            return {
+                "available": False,
+                "cycle_index": None,
+                "as_of": None,
+                "paper_book_sha256": None,
+                "balance": None,
+                "committed_stake": None,
+                "ticket_count": None,
+                "open_ticket_count": None,
+                "portfolio_mode": None,
+                "portfolio_scenario_count": None,
+                "portfolio_worst_case": None,
+                "portfolio_best_case": None,
+                "portfolio_mean_case": None,
+            }
+        return {
+            "available": True,
+            "cycle_index": snapshot.cycle_index,
+            "as_of": snapshot.as_of,
+            "paper_book_sha256": snapshot.paper_book_sha256,
+            "balance": str(snapshot.balance),
+            "committed_stake": str(snapshot.committed_stake),
+            "ticket_count": len(snapshot.tickets),
+            "open_ticket_count": sum(
+                1 for ticket in snapshot.tickets if ticket.status == "open"
+            ),
+            "portfolio_mode": snapshot.portfolio_mode,
+            "portfolio_scenario_count": snapshot.portfolio_scenario_count,
+            "portfolio_worst_case": str(snapshot.portfolio_worst_case),
+            "portfolio_best_case": str(snapshot.portfolio_best_case),
+            "portfolio_mean_case": str(snapshot.portfolio_mean_case),
+        }
+
+    def _apply_product_runtime_economic_snapshot(
+        self,
+        snapshot: object,
+        *,
+        cycle_index: object,
+        session_id: object,
+        source_id: object,
+    ) -> bool:
+        workspace = Path(self._active_workspace)
+        identity = getattr(self, "_product_runtime_identity", None)
+        if (
+            type(snapshot) is not ProductGuiEconomicSnapshot
+            or type(cycle_index) is not int
+            or isinstance(cycle_index, bool)
+            or cycle_index < 0
+            or type(session_id) is not str
+            or type(source_id) is not str
+            or identity is None
+            or identity != (workspace, session_id, source_id)
+            or snapshot.workspace != workspace
+            or snapshot.session_id != session_id
+            or snapshot.source_id != source_id
+            or snapshot.cycle_index != cycle_index
+        ):
+            self._quarantine_product_runtime_truth(workspace)
+            return False
+
+        previous = getattr(self, "_product_runtime_economic_snapshot", None)
+        if (
+            previous is not None
+            and previous.workspace == snapshot.workspace
+            and previous.session_id == snapshot.session_id
+            and snapshot.cycle_index <= previous.cycle_index
+        ):
+            self._quarantine_product_runtime_truth(workspace)
+            return False
+
+        self._product_runtime_economic_snapshot = snapshot
+        self.bank = text(
+            "ui.status.bank.current",
+            balance=snapshot.balance,
+            committed_stake=snapshot.committed_stake,
+            strategy_id=self.strategy_id,
+            workspace=snapshot.workspace,
+        )
+        self.tickets = [
+            text(
+                "ui.ticket.row",
+                status=ticket.status.upper(),
+                stake=ticket.stake,
+                odds=ticket.combined_odds,
+                payout=ticket.payout,
+                legs=", ".join(ticket.legs),
+            )
+            for ticket in snapshot.tickets
+        ] or [text("ui.ticket.empty")]
+
+        as_of = snapshot.as_of or "не підтверджено успішним циклом"
+        book_identity = snapshot.paper_book_sha256 or "відсутній durable PaperBook"
+        self.evaluation = [
+            (
+                "Економічний знімок тривалої симуляції: "
+                f"цикл {snapshot.cycle_index}; стан на {as_of}; "
+                f"PaperBook {book_identity}."
+            ),
+            (
+                "Поточний PAPER-портфель: "
+                f"режим {snapshot.portfolio_mode}; "
+                f"сценаріїв {snapshot.portfolio_scenario_count}; "
+                f"найгірший P&L {snapshot.portfolio_worst_case}; "
+                f"найкращий {snapshot.portfolio_best_case}; "
+                f"середній {snapshot.portfolio_mean_case}."
+            ),
+            (
+                "Відкрите PAPER-зобов'язання: "
+                f"{snapshot.committed_stake}. "
+                "Цей знімок не створює нового висновку політики ризику "
+                "і не надає реального грошового дозволу."
+            ),
+        ]
+        return True
 
     def _refresh_economic_projection(self) -> None:
         strategy_id = self.strategy_id
@@ -1000,6 +1130,13 @@ class AutosportWebController:
                     continue
                 if not self._project_product_runtime_source_tick(product_message.tick):
                     continue
+                if not self._apply_product_runtime_economic_snapshot(
+                    product_message.economic,
+                    cycle_index=product_message.tick.cycle_index,
+                    session_id=product_message.tick.session_id,
+                    source_id=product_message.tick.source_id,
+                ):
+                    continue
                 self.product_runtime_status = (
                     "Тривалий імітаційний режим: завершено цикл "
                     f"{product_message.tick.cycle_index}; "
@@ -1070,6 +1207,7 @@ class AutosportWebController:
             )
             runtime_identity = self._product_runtime_identity_projection()
             runtime_source = self._product_runtime_source_projection()
+            runtime_economic = self._product_runtime_economic_projection()
             runtime_stop_requested = self._product_runtime_stop_requested()
             return {
                 "status": self.status,
@@ -1142,6 +1280,7 @@ class AutosportWebController:
                         "attention_required"
                     ],
                     "source_last_success_at": runtime_source["last_success_at"],
+                    "economic_snapshot": runtime_economic,
                 },
                 "surface_key": self.surface_key,
                 "surfaces": surfaces,
@@ -1498,6 +1637,7 @@ class AutosportWebController:
         existing_identity = getattr(self, "_product_runtime_identity", None)
         if existing_identity is not None and existing_identity[0] != Path(workspace):
             self._product_runtime_identity = None
+        self._product_runtime_economic_snapshot = None
         self._active_workspace = workspace
         self.product_runtime_status = "Запускається канонічний тривалий імітаційний режим…"
         return self._ok(self.product_runtime_status, focus_id="product-runtime-status")

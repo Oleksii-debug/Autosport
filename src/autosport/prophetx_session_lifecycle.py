@@ -34,7 +34,7 @@ from .workspace_lock import (
 
 PROVIDER_ID = "prophetx"
 STATE_SCHEMA_VERSION = 1
-ACCESS_TOKEN_LIFETIME = timedelta(minutes=20)
+CONSERVATIVE_SESSION_SLOT_HOLD = timedelta(minutes=20)
 RENEWAL_LEAD_TIME = timedelta(minutes=2)
 _BASE_RETRY_SECONDS = 5
 _MAX_RETRY_SECONDS = 300
@@ -63,7 +63,7 @@ class ProphetXLoginAdmissionAction(str, Enum):
     WAIT_FOR_EXISTING_LOGIN = "wait_for_existing_login"
     WAIT_FOR_PROVIDER_SESSION_EXPIRY = "wait_for_provider_session_expiry"
     RETRY_LATER = "retry_later"
-    RENEWAL_CONTRACT_UNQUALIFIED = "renewal_contract_unqualified"
+    RENEWAL_REQUIRED = "renewal_required"
     CREDENTIAL_REJECTED = "credential_rejected"
     SHARED_ACCESS_KEY_CONFLICT = "shared_access_key_conflict"
 
@@ -353,9 +353,17 @@ class ProphetXSessionLifecycle:
         *,
         attempt_id: str,
         now: datetime,
+        access_expires_at: datetime,
     ) -> ProphetXSessionSnapshot:
+        """Record provider-issued expiry; never infer token lifetime locally."""
+
         attempt = _sha256_hex(attempt_id, "attempt_id")
         timestamp = _aware_utc(now, "now")
+        expires = _aware_utc(access_expires_at, "access_expires_at")
+        if expires <= timestamp:
+            raise ProphetXSessionLifecycleError(
+                "provider access_expires_at must be later than login completion"
+            )
         with self._thread_lock:
             if attempt not in self._owned_attempts:
                 raise ProphetXSessionLifecycleError(
@@ -364,7 +372,6 @@ class ProphetXSessionLifecycle:
             try:
                 with WorkspaceEconomicLock(self._scope_dir):
                     current = self._require_owned_inflight(attempt)
-                    expiry = timestamp + ACCESS_TOKEN_LIFETIME
                     updated = ProphetXSessionSnapshot(
                         state=ProphetXSessionState.ACTIVE,
                         generation=current.generation + 1,
@@ -372,8 +379,8 @@ class ProphetXSessionLifecycle:
                         integration_role=self.scope.integration_role,
                         last_transition_at=timestamp,
                         session_lineage_id=attempt,
-                        access_expires_at=expiry,
-                        slot_hold_until=expiry,
+                        access_expires_at=expires,
+                        slot_hold_until=expires,
                     )
                     self._write_state(updated)
             except WorkspaceEconomicLockError as exc:
@@ -410,7 +417,7 @@ class ProphetXSessionLifecycle:
 
                     if failure is ProphetXLoginFailureClass.SESSION_POOL_EXHAUSTED:
                         state = ProphetXSessionState.SESSION_POOL_EXHAUSTED
-                        slot_hold_until = timestamp + ACCESS_TOKEN_LIFETIME
+                        slot_hold_until = timestamp + CONSERVATIVE_SESSION_SLOT_HOLD
                     elif failure is ProphetXLoginFailureClass.CREDENTIAL_REJECTED:
                         state = ProphetXSessionState.CREDENTIAL_REJECTED
                         failures = current.transient_failures
@@ -422,7 +429,7 @@ class ProphetXSessionLifecycle:
                         retry_not_before = timestamp + self._retry_delay(failures)
                     else:
                         state = ProphetXSessionState.WAIT_FOR_PROVIDER_SESSION_EXPIRY
-                        slot_hold_until = timestamp + ACCESS_TOKEN_LIFETIME
+                        slot_hold_until = timestamp + CONSERVATIVE_SESSION_SLOT_HOLD
 
                     updated = ProphetXSessionSnapshot(
                         state=state,
@@ -581,7 +588,7 @@ class ProphetXSessionLifecycle:
                     )
                     self._write_state(current)
                 return ProphetXLoginAdmission(
-                    action=ProphetXLoginAdmissionAction.RENEWAL_CONTRACT_UNQUALIFIED,
+                    action=ProphetXLoginAdmissionAction.RENEWAL_REQUIRED,
                     snapshot=current,
                     retry_at=current.access_expires_at,
                 )
@@ -646,7 +653,7 @@ class ProphetXSessionLifecycle:
         transient_failures: int,
     ) -> ProphetXLoginAdmission:
         attempt = token_hex(32)
-        hold = now + ACCESS_TOKEN_LIFETIME
+        hold = now + CONSERVATIVE_SESSION_SLOT_HOLD
         updated = ProphetXSessionSnapshot(
             state=ProphetXSessionState.LOGIN_IN_FLIGHT,
             generation=generation,

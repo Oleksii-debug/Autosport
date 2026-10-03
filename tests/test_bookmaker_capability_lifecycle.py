@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+import json
 
 import pytest
 
@@ -838,6 +839,67 @@ def test_restart_roundtrip_preserves_age_and_identity():
     )
     assert decision.evidence_id == evidence.evidence_id
     assert decision.lifecycle is CapabilityLifecycleState.REVALIDATION_REQUIRED
+
+
+def test_journal_json_rejects_boolean_schema_version_and_unknown_top_level_field():
+    _, _, journal = _journal()
+
+    boolean_version = json.loads(journal.to_json())
+    boolean_version["schema_version"] = True
+    with pytest.raises(CapabilityEvidenceError, match="unsupported journal schema"):
+        CapabilityEvidenceJournal.from_json(json.dumps(boolean_version))
+
+    widened = json.loads(journal.to_json())
+    widened["future_authority"] = "caller-controlled"
+    with pytest.raises(
+        CapabilityEvidenceError,
+        match="journal contains unexpected or missing fields",
+    ):
+        CapabilityEvidenceJournal.from_json(json.dumps(widened))
+
+
+def test_journal_json_rejects_unknown_nested_authority_fields():
+    _, _, journal = _journal()
+
+    evidence_widened = json.loads(journal.to_json())
+    evidence_widened["evidence"][0]["future_authority"] = True
+    with pytest.raises(
+        CapabilityEvidenceError,
+        match="evidence contains unexpected or missing fields",
+    ):
+        CapabilityEvidenceJournal.from_json(json.dumps(evidence_widened))
+
+    scope_widened = json.loads(journal.to_json())
+    scope_widened["evidence"][0]["scope"]["future_scope"] = "widened"
+    with pytest.raises(
+        CapabilityEvidenceError,
+        match="scope contains unexpected or missing fields",
+    ):
+        CapabilityEvidenceJournal.from_json(json.dumps(scope_widened))
+
+    availability_widened = json.loads(journal.to_json())
+    availability_widened["availability"][0]["future_health_authority"] = True
+    with pytest.raises(
+        CapabilityEvidenceError,
+        match="availability contains unexpected or missing fields",
+    ):
+        CapabilityEvidenceJournal.from_json(json.dumps(availability_widened))
+
+
+def test_journal_json_rejects_duplicate_evidence_and_availability_entries():
+    _, _, journal = _journal()
+
+    duplicate_evidence = json.loads(journal.to_json())
+    duplicate_evidence["evidence"].append(dict(duplicate_evidence["evidence"][0]))
+    with pytest.raises(CapabilityEvidenceError, match="duplicate evidence entries"):
+        CapabilityEvidenceJournal.from_json(json.dumps(duplicate_evidence))
+
+    duplicate_availability = json.loads(journal.to_json())
+    duplicate_availability["availability"].append(
+        dict(duplicate_availability["availability"][0])
+    )
+    with pytest.raises(CapabilityEvidenceError, match="duplicate availability entries"):
+        CapabilityEvidenceJournal.from_json(json.dumps(duplicate_availability))
 
 
 def test_missing_profile_after_restart_fails_closed():

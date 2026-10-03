@@ -497,7 +497,7 @@ def _require_class_transition_graph(
 _MONOTONIC_TRANSITION_METHOD_WITNESS, _MONOTONIC_TRANSITION_GLOBAL_WITNESS = (
     _capture_class_transition_graph(
         MonotonicWorkspaceAuthority,
-        ("__init__", "recover", "prepare", "commit"),
+        ("__init__", "recover", "prepare", "commit", "read_history"),
     )
 )
 
@@ -519,6 +519,7 @@ _RISK_DAY_STORE_METHOD_NAMES = (
     "current",
     "require_current",
     "require_current_under_lock",
+    "require_committed_window",
     "_current_under_lock",
     "_publish_day",
     "_evidence",

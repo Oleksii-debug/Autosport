@@ -244,6 +244,60 @@ def test_betdaq_issuer_rejects_noncanonical_venue_before_provider_io(monkeypatch
     assert calls == []
 
 
+@pytest.mark.parametrize(
+    "method_name",
+    [
+        "read_account_balance",
+        "read_complete_current_orders",
+        "read_bootstrap_page",
+        "read_orders_changed_since",
+        "_call",
+        "_request_xml",
+        "_observed_at",
+    ],
+)
+def test_betdaq_issuer_rejects_instance_shadowed_client_dispatch_before_io(
+    monkeypatch, method_name
+):
+    client, calls = _canonical_betdaq_balance_client(monkeypatch)
+    monkeypatch.setattr(client, method_name, lambda *args, **kwargs: None)
+
+    with pytest.raises(
+        CapabilityEvidenceError,
+        match="client dispatch was replaced or shadowed",
+    ):
+        issue_betdaq_authenticated_capability_evidence(
+            client,
+            BookmakerCapability.BALANCE_READ,
+            committed_at="2026-09-21T10:01:00+00:00",
+            review_due_at="2026-09-21T11:01:00+00:00",
+        )
+
+    assert calls == []
+
+
+def test_betdaq_issuer_rejects_class_dispatch_mutation_before_io(monkeypatch):
+    client, calls = _canonical_betdaq_balance_client(monkeypatch)
+    monkeypatch.setattr(
+        BetdaqAccountReadOnlyClient,
+        "read_account_balance",
+        lambda self: None,
+    )
+
+    with pytest.raises(
+        CapabilityEvidenceError,
+        match="issuance surface changed",
+    ):
+        issue_betdaq_authenticated_capability_evidence(
+            client,
+            BookmakerCapability.BALANCE_READ,
+            committed_at="2026-09-21T10:01:00+00:00",
+            review_due_at="2026-09-21T11:01:00+00:00",
+        )
+
+    assert calls == []
+
+
 def test_betdaq_issuer_rejects_mutated_canonical_transport_root_before_io(monkeypatch):
     client, calls = _canonical_betdaq_balance_client(monkeypatch)
     monkeypatch.setattr(

@@ -338,7 +338,15 @@ class GitHubApi:
 
     def cancel(self, run_id: int) -> None:
         run_id = _require_positive_int(run_id, field="run id")
-        payload = self._request(
+        bound_request = getattr(self, "_request", None)
+        if (
+            getattr(bound_request, "__self__", None) is not self
+            or getattr(bound_request, "__func__", None) is not _CANONICAL_REQUEST
+        ):
+            raise CancellationError(
+                "workflow run cancellation request dispatch changed"
+            )
+        payload = bound_request(
             f"/actions/runs/{run_id}/cancel",
             method="POST",
             allowed_http_errors=frozenset({409}),
@@ -355,6 +363,9 @@ class GitHubApi:
             raise CancellationError(
                 "workflow run cancellation missing HTTP 202 acceptance authority"
             )
+
+
+_CANONICAL_REQUEST = GitHubApi._request
 
 
 def _qualification_snapshot(

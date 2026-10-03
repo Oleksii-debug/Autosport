@@ -1557,7 +1557,11 @@ def _seal_provider_evidence_store_dispatch() -> None:
             current = expected_getattr_static(owner, name)
             if current is not surface:
                 return False
-            current_function = expected_getattr(current, "__func__", current)
+            current_function = expected_getattr(
+                current,
+                "__func__",
+                expected_getattr(current, "fget", current),
+            )
             if current_function is not function:
                 return False
             if expected_getattr(current_function, "__code__", None) is not code:

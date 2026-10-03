@@ -1811,6 +1811,31 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
                 raise ValueError(
                     "collector cycle observation artifact is not SUCCESS-terminal evidence"
                 )
+            start_run_id = _text(row["run_id"], "run_id")
+            start_stream_epoch = _text(row["stream_epoch"], "stream_epoch")
+            start_attempted_at = _instant(
+                row["attempted_at"],
+                "attempted_at",
+            )
+            terminal_attempted_at = _instant(
+                terminal.get("attempted_at"),
+                "terminal attempted_at",
+            )
+            terminal_completed_at = _instant(
+                terminal.get("completed_at"),
+                "terminal completed_at",
+            )
+            if (
+                terminal.get("source_id") != source_id
+                or terminal.get("cycle_seq") != cycle_seq
+                or terminal.get("run_id") != start_run_id
+                or terminal.get("stream_epoch") != start_stream_epoch
+                or terminal_attempted_at != start_attempted_at
+                or terminal_completed_at < terminal_attempted_at
+            ):
+                raise ValueError(
+                    "collector cycle terminal chronology/identity conflicts with START"
+                )
             artifact_id = self._schedule_authority_sha256(
                 row["artifact_id"],
                 "artifact_id",
@@ -1874,9 +1899,10 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
                 "schema_version": 1,
                 "source_id": source_id,
                 "cycle_seq": cycle_seq,
-                "run_id": _text(row["run_id"], "run_id"),
-                "stream_epoch": _text(row["stream_epoch"], "stream_epoch"),
-                "attempted_at": _instant(row["attempted_at"], "attempted_at").isoformat(),
+                "run_id": start_run_id,
+                "stream_epoch": start_stream_epoch,
+                "attempted_at": start_attempted_at.isoformat(),
+                "completed_at": terminal_completed_at.isoformat(),
                 "schedule_id": schedule_id,
                 "gate_binding_sha256": gate_binding_sha256,
                 "slot_ordinal": int(row["slot_ordinal"]),

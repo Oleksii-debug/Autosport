@@ -649,6 +649,65 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
                 1,
             )
 
+    def test_provider_gap_does_not_publish_zero_from_future_local_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            clock = _ManualClock(self.START + timedelta(seconds=1))
+            late = self._event(
+                selection="selection-a",
+                sequence=1,
+                observed=self.START + timedelta(seconds=2),
+            )
+            late = MarketEvent.from_dict(
+                {
+                    **late.to_dict(),
+                    "source_ts": self.START.isoformat(),
+                }
+            )
+            published = {"done": False}
+
+            def failing_observer(updates):
+                if not published["done"]:
+                    published["done"] = True
+                    store = SQLiteMarketStore(workspace / "market.db")
+                    try:
+                        store.append(late)
+                    finally:
+                        store.close()
+                    updates.accept_persisted(late)
+                raise ProviderUnavailableError("simulated provider gap")
+
+            factory = _EmptyIntentFactory()
+            loop = self._loop(
+                workspace,
+                observer=failing_observer,
+                factory=factory,
+                clock=clock,
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+
+            first = loop.run_cycle()
+
+            self.assertEqual(first.status, LiveCycleStatus.BACKPRESSURE)
+            self.assertIn("provider gap snapshot was not causally coherent", first.detail)
+            self.assertEqual(factory.calls, [])
+            self.assertFalse((workspace / "decisions.jsonl").exists())
+
+            clock.value = self.START + timedelta(seconds=3)
+            second = loop.run_cycle()
+
+            self.assertEqual(second.status, LiveCycleStatus.PROVIDER_GAP)
+            self.assertIsNotNone(second.plan)
+            self.assertEqual(second.plan.action, PortfolioAction.ZERO)
+            self.assertEqual(
+                len(
+                    JsonlDecisionLedger(
+                        workspace / "decisions.jsonl"
+                    ).verified_records()
+                ),
+                1,
+            )
+
     def test_single_dirty_and_no_change_cycles_avoid_unrelated_mirror_scans(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

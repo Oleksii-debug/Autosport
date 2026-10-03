@@ -118,7 +118,7 @@ class FakeApi:
 
 
 def test_read_only_admission_distinguishes_current_and_stale_heads() -> None:
-    current_api = FakeApi([HEAD_B], ())
+    current_api = FakeApi([HEAD_B, HEAD_B], ())
     assert admit_current_head(
         api=current_api,
         pr_number=2008,

@@ -591,6 +591,50 @@ def test_execution_origin_predicate_rejects_http_client_ssl_module_rebind(
         "_parse_cleared_order",
     ),
 )
+def test_execution_readback_rejects_cleared_history_default_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = build_betfair_authenticated_client(
+        BetfairSessionCredentials("app-key", "session-token"),
+        account_label="acct-1",
+    )
+    kwdefaults = BetfairReadOnlyClient.read_cleared_orders_page.__kwdefaults__
+    assert isinstance(kwdefaults, dict)
+    monkeypatch.setitem(
+        kwdefaults,
+        "settled_from",
+        "2099-01-01T00:00:00+00:00",
+    )
+
+    with pytest.raises(
+        BetfairReadOnlyError,
+        match="origin authority implementation changed",
+    ):
+        _read(client)
+
+
+def test_execution_readback_rejects_equal_kwdefaults_replacement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = build_betfair_authenticated_client(
+        BetfairSessionCredentials("app-key", "session-token"),
+        account_label="acct-1",
+    )
+    target = BetfairReadOnlyClient.read_cleared_orders_page
+    kwdefaults = target.__kwdefaults__
+    assert isinstance(kwdefaults, dict)
+    replacement = dict(kwdefaults)
+    assert replacement == kwdefaults
+    assert replacement is not kwdefaults
+    monkeypatch.setattr(target, "__kwdefaults__", replacement)
+
+    with pytest.raises(
+        BetfairReadOnlyError,
+        match="origin authority implementation changed",
+    ):
+        _read(client)
+
+
 def test_execution_readback_rejects_module_helper_rebind(
     monkeypatch: pytest.MonkeyPatch,
     name: str,

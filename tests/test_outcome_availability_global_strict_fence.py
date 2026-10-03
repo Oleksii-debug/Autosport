@@ -143,11 +143,7 @@ class OutcomeAvailabilityGlobalStrictFenceTests(unittest.TestCase):
             )
             target = RunRegistry._read
             original_code = target.__code__
-            hostile_calls = 0
-
             def hostile_read(_registry):
-                nonlocal hostile_calls
-                hostile_calls += 1
                 raise AssertionError("mutated RunRegistry._read must not execute")
 
             self.assertEqual(original_code.co_freevars, hostile_read.__code__.co_freevars)
@@ -161,8 +157,6 @@ class OutcomeAvailabilityGlobalStrictFenceTests(unittest.TestCase):
             finally:
                 target.__code__ = original_code
 
-            self.assertEqual(hostile_calls, 0)
-
     def test_in_place_strict_fence_code_mutation_fails_before_attacker_dispatch(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             registry = self._new_registry(tmp)
@@ -173,12 +167,8 @@ class OutcomeAvailabilityGlobalStrictFenceTests(unittest.TestCase):
             )
             target = availability_guard._strictly_after_registry_fence
             original_code = target.__code__
-            hostile_calls = 0
-
             def hostile_strict(candidate, fence, *, canonical_timestamp, parse_timestamp, error_type):
-                nonlocal hostile_calls
-                hostile_calls += 1
-                return candidate
+                raise AssertionError("mutated strict fence must not execute")
 
             self.assertEqual(original_code.co_freevars, hostile_strict.__code__.co_freevars)
             try:
@@ -191,8 +181,6 @@ class OutcomeAvailabilityGlobalStrictFenceTests(unittest.TestCase):
             finally:
                 target.__code__ = original_code
 
-            self.assertEqual(hostile_calls, 0)
-
     def test_in_place_fence_reader_code_mutation_fails_before_attacker_dispatch(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             registry = self._new_registry(tmp)
@@ -203,12 +191,8 @@ class OutcomeAvailabilityGlobalStrictFenceTests(unittest.TestCase):
             )
             target = availability_guard._registry_availability_fence
             original_code = target.__code__
-            hostile_calls = 0
-
             def hostile_fence_reader(registry, *, read_state, trust_bindings, canonical_timestamp, parse_timestamp):
-                nonlocal hostile_calls
-                hostile_calls += 1
-                return None
+                raise AssertionError("mutated fence reader must not execute")
 
             self.assertEqual(original_code.co_freevars, hostile_fence_reader.__code__.co_freevars)
             try:
@@ -220,8 +204,6 @@ class OutcomeAvailabilityGlobalStrictFenceTests(unittest.TestCase):
                     self._begin(registry, binding, "run-fence-reader-code")
             finally:
                 target.__code__ = original_code
-
-            self.assertEqual(hostile_calls, 0)
 
     def test_rebound_registry_read_fails_before_attacker_dispatch(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

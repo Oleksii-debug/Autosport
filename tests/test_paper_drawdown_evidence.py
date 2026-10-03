@@ -17,6 +17,7 @@ from autosport.paper import PaperBook
 from autosport.paper_drawdown_evidence import (
     DRAW_DOWN_ECONOMIC_BASIS,
     DRAW_DOWN_HISTORY_MODE,
+    DRAW_DOWN_INITIAL_EQUITY_POINT_ID,
     DRAW_DOWN_METRIC_CLASS,
     DRAW_DOWN_SCOPE,
     PaperDrawdownEvidenceError,
@@ -121,6 +122,7 @@ def test_loss_creates_realized_drawdown_only_at_settlement(tmp_path):
     book.save(tmp_path / "paper_book.json")
 
     evidence = resolve_paper_drawdown_evidence(tmp_path)
+    report = build_paper_risk_report(book, _goal())
 
     assert evidence.current_equity == Decimal("20")
     assert evidence.minimum_equity == Decimal("20")
@@ -128,10 +130,12 @@ def test_loss_creates_realized_drawdown_only_at_settlement(tmp_path):
     assert evidence.historical_max_drawdown_amount == Decimal("80")
     assert evidence.historical_max_drawdown_fraction == Decimal("0.8")
     assert evidence.current_drawdown_amount == Decimal("80")
-    assert evidence.historical_max_drawdown_peak_id == "paper-initial-equity"
+    assert evidence.historical_max_drawdown_peak_id == DRAW_DOWN_INITIAL_EQUITY_POINT_ID
     assert evidence.historical_max_drawdown_trough_id == (
         f"paper-lifecycle:1:settle:{ticket.ticket_id}"
     )
+    assert evidence.historical_max_drawdown_peak_id == report.historical_max_drawdown_peak_id
+    assert evidence.historical_max_drawdown_trough_id == report.historical_max_drawdown_trough_id
     assert evidence.points[1].action == "open"
     assert evidence.points[1].equity == Decimal("100")
     assert evidence.points[2].action == "settle"

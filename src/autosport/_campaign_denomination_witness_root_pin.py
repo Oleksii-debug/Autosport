@@ -111,7 +111,9 @@ def _install_registry_extension_detector() -> None:
     _integrity._campaign_denomination_registry_extensions_installed = True
 
 
-def _validated_root(value: object, *, registry_path: Path) -> Path:
+def _validated_root_path(value: object, *, registry_path: Path) -> Path:
+    """Validate root identity and boundary without touching the filesystem."""
+
     if type(value) is not str or not value or value != value.strip():
         raise _impl.CampaignEconomicAuthorityError(
             "campaign denomination witness root is invalid"
@@ -133,6 +135,11 @@ def _validated_root(value: object, *, registry_path: Path) -> Path:
         raise _impl.CampaignEconomicAuthorityError(
             "campaign denomination witness root must remain outside registry workspace"
         )
+    return root
+
+
+def _validated_root(value: object, *, registry_path: Path) -> Path:
+    root = _validated_root_path(value, registry_path=registry_path)
     try:
         root.mkdir(parents=True, exist_ok=True, mode=0o700)
     except OSError as exc:
@@ -158,7 +165,10 @@ def _validated_root_record(raw: object, *, registry_path: Path) -> Mapping[str, 
         raise _impl.CampaignEconomicAuthorityError(
             "campaign denomination witness root belongs to another registry"
         )
-    root = _validated_root(raw["root"], registry_path=registry_path)
+    # Validate every record field, including the root digest, before any
+    # directory creation. A malformed durable record must never be able to turn
+    # an attacker-selected path into a filesystem side effect.
+    root = _validated_root_path(raw["root"], registry_path=registry_path)
     if raw["root_sha256"] != _root_sha256(str(root)):
         raise _impl.CampaignEconomicAuthorityError(
             "campaign denomination witness root digest mismatch"

@@ -616,6 +616,66 @@ class PaperExposureScopeProvenanceGuardTests(unittest.TestCase):
             self.assertEqual(forged_calls, [])
             self.assertEqual(runtime.ledger.events(), ())
 
+    def test_publisher_ledger_method_witnesses_are_immutable(self) -> None:
+        publisher = PaperExecutionAdoptionRuntime._publish_exposure_scope
+        cells = dict(
+            zip(
+                publisher.__code__.co_freevars,
+                publisher.__closure__ or (),
+                strict=True,
+            )
+        )
+        witnesses = cells["ledger_methods"].cell_contents
+        self.assertIs(type(witnesses), tuple)
+        self.assertEqual(
+            tuple(entry[0] for entry in witnesses),
+            (
+                "_ensure_existing_path_durable",
+                "_load_unlocked",
+                "_write_anchor_unlocked",
+                "_sync_parent_directory",
+                "_with_writer_lock",
+            ),
+        )
+        self.assertTrue(
+            all(type(entry) is tuple and len(entry) == 4 for entry in witnesses)
+        )
+        self.assertFalse(
+            any(type(entry) in {dict, list, set} for entry in witnesses)
+        )
+
+    def test_lower_ledger_method_code_mutation_fails_before_publication(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger, runtime = self._runtime(Path(tmp))
+            prepared = _caller_prepared(runtime)
+            runtime._mint_prepared(prepared)
+            _seed_scope_authority_for_lower_layer(runtime, prepared)
+            run_id = runtime.expected_run_id(
+                prepared,
+                prepared.execution_plan.decision_id,
+            )
+            guarded = PaperExecutionLedger._sync_parent_directory
+            original_code = guarded.__code__
+            forged_calls: list[str] = []
+
+            def forged_sync_parent(_self) -> None:
+                forged_calls.append("sync")
+
+            guarded.__code__ = forged_sync_parent.__code__
+            try:
+                with self.assertRaisesRegex(
+                    PaperExecutionIntegrityError,
+                    "ledger _sync_parent_directory metadata was rebound",
+                ):
+                    runtime._publish_exposure_scope(
+                        prepared=prepared,
+                        run_id=run_id,
+                    )
+            finally:
+                guarded.__code__ = original_code
+            self.assertEqual(forged_calls, [])
+            self.assertEqual(ledger.events(), ())
+
     def test_hidden_require_minted_code_rebinding_fails_before_publication(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             event, agent, context, runtime, _decision_ledger = _fixture(Path(tmp))

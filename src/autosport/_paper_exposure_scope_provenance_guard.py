@@ -325,8 +325,13 @@ def bind_canonical_execute(execute_function):
     ledger_path_open_globals = _snapshot_function_globals(ledger_path_open)
     ledger_path_open_metadata = _snapshot_function_metadata(ledger_path_open)
 
-    ledger_methods = {
-        name: getattr(ledger_type, name)
+    ledger_methods = tuple(
+        (
+            name,
+            method,
+            _snapshot_function_globals(method),
+            _snapshot_function_metadata(method),
+        )
         for name in (
             "_ensure_existing_path_durable",
             "_load_unlocked",
@@ -334,7 +339,8 @@ def bind_canonical_execute(execute_function):
             "_sync_parent_directory",
             "_with_writer_lock",
         )
-    }
+        for method in (getattr(ledger_type, name),)
+    )
 
     def checked_canonical_json(value: object) -> str:
         if _ledger_impl._canonical is not canonical_json:
@@ -541,13 +547,25 @@ def bind_canonical_execute(execute_function):
             raise PaperExecutionIntegrityError(
                 "canonical PAPER ledger path dispatch was rebound"
             )
-        for name, expected_method in ledger_methods.items():
+        for (
+            name,
+            expected_method,
+            expected_globals,
+            expected_metadata,
+        ) in ledger_methods:
             if (
                 getattr(ledger_type, name) is not expected_method
                 or name in getattr(self.ledger, "__dict__", {})
             ):
                 raise PaperExecutionIntegrityError(
                     f"canonical PAPER ledger {name} dispatch was rebound"
+                )
+            if (
+                not _function_globals_match(expected_method, expected_globals)
+                or not _function_metadata_match(expected_method, expected_metadata)
+            ):
+                raise PaperExecutionIntegrityError(
+                    f"canonical PAPER ledger {name} metadata was rebound"
                 )
 
         if runtime_type.expected_run_id is not expected_run_id:
@@ -614,11 +632,11 @@ def bind_canonical_execute(execute_function):
         )
         event_key = f"{run_id}:exposure-scope"
 
-        ensure_existing = ledger_methods["_ensure_existing_path_durable"]
-        load_unlocked = ledger_methods["_load_unlocked"]
-        write_anchor = ledger_methods["_write_anchor_unlocked"]
-        sync_parent = ledger_methods["_sync_parent_directory"]
-        with_writer_lock = ledger_methods["_with_writer_lock"]
+        ensure_existing = ledger_methods[0][1]
+        load_unlocked = ledger_methods[1][1]
+        write_anchor = ledger_methods[2][1]
+        sync_parent = ledger_methods[3][1]
+        with_writer_lock = ledger_methods[4][1]
 
         def mutate_reserved_scope() -> None:
             ensure_existing(self.ledger)

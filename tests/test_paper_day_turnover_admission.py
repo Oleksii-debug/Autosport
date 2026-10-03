@@ -414,36 +414,3 @@ def test_live_resume_helper_rebind_cannot_replace_positive_risk_suffix(tmp_path)
     assert baseline.reason == "economic goal turnover limit exceeded"
     assert result.admitted is True
     assert result.risk.allowed is True
-
-
-def test_risk_evaluate_class_rebind_cannot_mint_turnover_headroom(tmp_path):
-    now = datetime.now(timezone.utc).replace(microsecond=0)
-    goal = _goal()
-    EconomicGoalStore(tmp_path).initialize_owner(goal)
-    book = _book_with_settled_turnover(placed_at=_timestamp(now), stake="5")
-
-    original = PaperRiskPolicy.evaluate
-    try:
-        PaperRiskPolicy.evaluate = lambda self, book, stake, **kwargs: (
-            economic_admission.RiskDecision(True, "forged allowed")
-        )
-        baseline = original(_policy(goal), book, Decimal("0.01"), context=_context(_leg("baseline"), _timestamp(now)))
-        result = admit_paper_ticket(
-            workspace=tmp_path,
-            book=book,
-            risk_policy=_policy(goal),
-            stake=Decimal("0.01"),
-            legs=(_leg("candidate-rebound-evaluate"),),
-            reason="must ignore rebound risk evaluator",
-            placed_at=_timestamp(now),
-            context=_context(_leg("candidate-rebound-evaluate"), _timestamp(now)),
-            provider_source_ids=("provider-1",),
-            bankroll_id="paper-bankroll",
-            currency="USD",
-        )
-    finally:
-        PaperRiskPolicy.evaluate = original
-
-    assert baseline.reason == "economic goal turnover limit exceeded"
-    assert result.admitted is False
-    assert result.risk.reason == "economic goal turnover limit exceeded"

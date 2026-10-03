@@ -1791,3 +1791,111 @@ def test_runtime_authority_rejects_record_classmethod_code_replacement(
             store.records()
     finally:
         target.__code__ = original_code
+
+
+def test_runtime_authority_rejects_record_codec_guard_alias_rebinding(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "deployment-runtime-authority.json"
+    store = DeploymentRuntimeAuthorityStore.initialize_pristine(
+        path,
+        authority_root=_authority_root(tmp_path),
+    )
+    hostile_calls: list[None] = []
+
+    def hostile_guard() -> None:
+        hostile_calls.append(None)
+
+    monkeypatch.setattr(
+        deployment_runtime_authority,
+        "_assert_canonical_record_codec",
+        hostile_guard,
+    )
+    with pytest.raises(
+        DeploymentRuntimeAuthorityError,
+        match="record codec guard dispatch was replaced",
+    ):
+        store.records()
+
+    assert hostile_calls == []
+
+
+def test_runtime_authority_rejects_record_codec_guard_code_replacement(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "deployment-runtime-authority.json"
+    store = DeploymentRuntimeAuthorityStore.initialize_pristine(
+        path,
+        authority_root=_authority_root(tmp_path),
+    )
+    target = deployment_runtime_authority._assert_canonical_record_codec
+    original_code = target.__code__
+
+    def hostile_guard() -> None:
+        raise AssertionError("hostile record codec guard executed")
+
+    assert hostile_guard.__code__.co_freevars == original_code.co_freevars
+    target.__code__ = hostile_guard.__code__
+    try:
+        with pytest.raises(
+            DeploymentRuntimeAuthorityError,
+            match="record codec guard dispatch was replaced",
+        ):
+            store.records()
+    finally:
+        target.__code__ = original_code
+
+
+def test_runtime_authority_rejects_record_codec_requirement_alias_rebinding(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "deployment-runtime-authority.json"
+    store = DeploymentRuntimeAuthorityStore.initialize_pristine(
+        path,
+        authority_root=_authority_root(tmp_path),
+    )
+    hostile_calls: list[None] = []
+
+    def hostile_requirement() -> None:
+        hostile_calls.append(None)
+
+    monkeypatch.setattr(
+        deployment_runtime_authority,
+        "_require_canonical_record_codec",
+        hostile_requirement,
+    )
+    with pytest.raises(
+        DeploymentRuntimeAuthorityError,
+        match="record codec requirement dispatch was replaced",
+    ):
+        store.records()
+
+    assert hostile_calls == []
+
+
+def test_runtime_authority_rejects_record_codec_requirement_code_replacement(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "deployment-runtime-authority.json"
+    store = DeploymentRuntimeAuthorityStore.initialize_pristine(
+        path,
+        authority_root=_authority_root(tmp_path),
+    )
+    target = deployment_runtime_authority._require_canonical_record_codec
+    original_code = target.__code__
+
+    def hostile_requirement() -> None:
+        raise AssertionError("hostile record codec requirement executed")
+
+    assert hostile_requirement.__code__.co_freevars == original_code.co_freevars
+    target.__code__ = hostile_requirement.__code__
+    try:
+        with pytest.raises(
+            DeploymentRuntimeAuthorityError,
+            match="record codec requirement dispatch was replaced",
+        ):
+            store.records()
+    finally:
+        target.__code__ = original_code

@@ -518,16 +518,28 @@ class ProductDayRiskWindowStore(metaclass=_ProductDayRiskWindowStoreMeta):
             raise RiskDayWindowIntegrityError(
                 "risk day store must be the canonical exact store type"
             )
-        with WorkspaceEconomicLock(self.workspace):
-            return type(self)._current_under_lock(self)
+        _require_workspace_lock_dispatch()
+        with WorkspaceEconomicLock(self.workspace) as workspace_lock:
+            return type(self)._current_under_lock(
+                self,
+                workspace_lock=workspace_lock,
+            )
 
-    def _current_under_lock(self) -> ProductDayRiskWindow:
-        """Resolve/advance the current day while the canonical workspace lock is held."""
+    def _current_under_lock(
+        self,
+        *,
+        workspace_lock: WorkspaceEconomicLock,
+    ) -> ProductDayRiskWindow:
+        """Resolve/advance the current day only with a validated held workspace lock."""
 
         if type(self) is not ProductDayRiskWindowStore:
             raise RiskDayWindowIntegrityError(
                 "risk day store must be the canonical exact store type"
             )
+        _require_held_workspace_lock(
+            workspace=self.workspace,
+            workspace_lock=workspace_lock,
+        )
         target_day = _clock_utc_instant(self._clock).date()
         if os.path.lexists(self.state_path):
             state_bytes = _read_regular_bytes(self.state_path)
@@ -664,34 +676,10 @@ class ProductDayRiskWindowStore(metaclass=_ProductDayRiskWindowStoreMeta):
             raise RiskDayWindowMismatchError(
                 "candidate must be ProductDayRiskWindow evidence"
             )
-        if type(workspace_lock) is not WorkspaceEconomicLock:
-            raise RiskDayWindowIntegrityError(
-                "current-day revalidation requires the canonical held workspace economic lock"
-            )
-        lock_workspace = workspace_lock.workspace.expanduser().resolve(strict=False)
-        if (
-            lock_workspace != self.workspace
-            or workspace_lock.path != self.workspace / WorkspaceEconomicLock.FILE_NAME
-            or workspace_lock._handle is None
-            or workspace_lock._handle.closed
-        ):
-            raise RiskDayWindowIntegrityError(
-                "current-day revalidation requires the canonical held workspace economic lock"
-            )
-        try:
-            # Bind the caller-owned lock handle back to the canonical lock pathname.
-            # Admission constructs this exact lock internally; no caller-supplied
-            # positive day evidence can substitute for the monotonic state resolved below.
-            WorkspaceEconomicLock._validate_open_handle_identity(
-                workspace_lock,
-                workspace_lock._handle,
-            )
-        except (OSError, RuntimeError, ValueError) as exc:
-            raise RiskDayWindowIntegrityError(
-                "current-day revalidation requires the canonical held workspace economic lock"
-            ) from exc
-
-        current = type(self)._current_under_lock(self)
+        current = type(self)._current_under_lock(
+            self,
+            workspace_lock=workspace_lock,
+        )
         if not current.product_clock_authoritative:
             raise RiskDayWindowIntegrityError(
                 "test/synthetic clock cannot mint product day authority"
@@ -767,6 +755,95 @@ class ProductDayRiskWindowStore(metaclass=_ProductDayRiskWindowStoreMeta):
 _MONOTONIC_RECOVER = MonotonicWorkspaceAuthority.recover
 _MONOTONIC_PREPARE = MonotonicWorkspaceAuthority.prepare
 _MONOTONIC_COMMIT = MonotonicWorkspaceAuthority.commit
+
+_WORKSPACE_LOCK_FILE_NAME = WorkspaceEconomicLock.FILE_NAME
+_WORKSPACE_LOCK_METHOD_NAMES = (
+    "__init__",
+    "acquire",
+    "release",
+    "__enter__",
+    "__exit__",
+    "_open_lock_handle",
+    "_open_new_lock_handle",
+    "_validate_existing_lock_path",
+    "_validate_open_handle_identity",
+    "_require_regular_file",
+    "_require_single_link",
+    "_lock_handle",
+    "_unlock_handle",
+)
+_WORKSPACE_LOCK_DISPATCH_WITNESSES = tuple(
+    (
+        name,
+        WorkspaceEconomicLock.__dict__[name],
+        (
+            WorkspaceEconomicLock.__dict__[name].__func__.__code__
+            if type(WorkspaceEconomicLock.__dict__[name]) is staticmethod
+            else WorkspaceEconomicLock.__dict__[name].__code__
+        ),
+    )
+    for name in _WORKSPACE_LOCK_METHOD_NAMES
+)
+
+
+def _require_workspace_lock_dispatch() -> None:
+    if (
+        WorkspaceEconomicLock.__dict__.get("FILE_NAME") != _WORKSPACE_LOCK_FILE_NAME
+        or WorkspaceEconomicLock.FILE_NAME != _WORKSPACE_LOCK_FILE_NAME
+    ):
+        raise RiskDayWindowIntegrityError("workspace economic lock authority changed")
+    for name, expected_descriptor, expected_code in _WORKSPACE_LOCK_DISPATCH_WITNESSES:
+        current_descriptor = WorkspaceEconomicLock.__dict__.get(name)
+        if current_descriptor is not expected_descriptor:
+            raise RiskDayWindowIntegrityError(
+                "workspace economic lock executable authority changed"
+            )
+        current_function = (
+            current_descriptor.__func__
+            if type(current_descriptor) is staticmethod
+            else current_descriptor
+        )
+        if (
+            type(current_function) is not FunctionType
+            or current_function.__code__ is not expected_code
+        ):
+            raise RiskDayWindowIntegrityError(
+                "workspace economic lock executable authority changed"
+            )
+
+
+def _require_held_workspace_lock(
+    *,
+    workspace: Path,
+    workspace_lock: WorkspaceEconomicLock,
+) -> None:
+    _require_workspace_lock_dispatch()
+    if type(workspace_lock) is not WorkspaceEconomicLock:
+        raise RiskDayWindowIntegrityError(
+            "current-day revalidation requires the canonical held workspace economic lock"
+        )
+    lock_workspace = workspace_lock.workspace.expanduser().resolve(strict=False)
+    if (
+        lock_workspace != workspace
+        or workspace_lock.path != workspace / _WORKSPACE_LOCK_FILE_NAME
+        or workspace_lock._handle is None
+        or workspace_lock._handle.closed
+    ):
+        raise RiskDayWindowIntegrityError(
+            "current-day revalidation requires the canonical held workspace economic lock"
+        )
+    try:
+        expected_descriptor = dict(_WORKSPACE_LOCK_DISPATCH_WITNESSES)[
+            "_validate_open_handle_identity"
+        ]
+        expected_validator = expected_descriptor
+        if type(expected_descriptor) is staticmethod:
+            expected_validator = expected_descriptor.__func__
+        expected_validator(workspace_lock, workspace_lock._handle)
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise RiskDayWindowIntegrityError(
+            "current-day revalidation requires the canonical held workspace economic lock"
+        ) from exc
 
 
 def _freeze_risk_day_module_globals() -> dict[str, object]:

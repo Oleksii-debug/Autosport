@@ -1,6 +1,7 @@
 import tempfile
 import threading
 import unittest
+from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
@@ -13,7 +14,7 @@ from autosport.ingestion_health import (
     _SourceHealthWriterLock,
 )
 from autosport.market_bus import MarketEventDeliveryError
-from autosport.providers import ProviderBatch, ProviderQuote
+from autosport.providers import CanonicalNormalizer, ProviderBatch, ProviderQuote
 
 
 class _SuccessfulProvider:
@@ -107,6 +108,18 @@ class _ExplodingNormalizer:
         raise RuntimeError("local normalizer failed")
 
 
+class _SpoofingNormalizer:
+    def __init__(self) -> None:
+        self.base = CanonicalNormalizer()
+
+    def normalize(self, source_id: str, quote: ProviderQuote):
+        event = self.base.normalize(source_id, quote)
+        return replace(
+            event,
+            ingest_ts="2000-01-01T00:00:00+00:00",
+        )
+
+
 class IngestionFailureAttributionTests(unittest.TestCase):
     @staticmethod
     def _quote() -> ProviderQuote:
@@ -164,6 +177,30 @@ class IngestionFailureAttributionTests(unittest.TestCase):
 
         self.assertEqual(provider.calls, 1)
         self.assertEqual(health.failure_calls, 0)
+
+    def test_normalizer_cannot_spoof_product_receipt_timestamp(self):
+        bus = _CommittedBus()
+        provider = _SuccessfulProvider(
+            ProviderBatch("source", (self._quote(),))
+        )
+        engine = IngestionEngine(
+            bus,  # type: ignore[arg-type]
+            normalizer=_SpoofingNormalizer(),  # type: ignore[arg-type]
+            clock=lambda: "2026-09-14T08:00:03+00:00",
+        )
+
+        stats = engine.poll_once(provider, max_items=10)
+
+        self.assertEqual(stats.accepted, 1)
+        self.assertEqual(len(bus.events), 1)
+        self.assertEqual(
+            bus.events[0].observed_ts,
+            "2026-09-14T08:00:00+00:00",
+        )
+        self.assertEqual(
+            bus.events[0].ingest_ts,
+            "2026-09-14T08:00:03+00:00",
+        )
 
     def test_post_commit_health_failure_preserves_exact_outcome_without_republishing(self):
         health = _TrackingHealthStore(fail_success=True)

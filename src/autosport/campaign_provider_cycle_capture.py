@@ -1308,8 +1308,14 @@ def capture_campaign_complete_game_board(
                         None,
                     )
                     is not expected_failure_terminal_seams_code
+                    or module_globals.get("CampaignProviderCycleCaptureIntegrityError")
+                    is not expected_integrity_error
                     or module_globals.get("CollectorDeltaStore")
                     is not expected_collector_store_type
+                    or module_globals.get("_CANONICAL_TYPE") is not expected_type
+                    or module_globals.get("_CANONICAL_GETATTR") is not expected_getattr
+                    or module_globals.get("_CANONICAL_GETATTR_STATIC")
+                    is not expected_getattr_static
                     or module_globals.get("_STORE_SEAMS") is not expected_store_seams
                     or module_globals.get("_STORE_CLASS_SEAM_WITNESSES")
                     is not expected_store_class_seam_witnesses

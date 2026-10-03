@@ -54,6 +54,52 @@ class ProductSourcePayloadError(ProductSourceError):
 
 Clock = Callable[[], str]
 
+_CANONICAL_COLLECTOR_STORE_TYPE = CollectorDeltaStore
+_CANONICAL_STORE_MIGRATE_LEGACY = CollectorDeltaStore.migrate_legacy_event_payloads
+_CANONICAL_STORE_EVENT_DIGEST_MAPS = CollectorDeltaStore.event_digest_maps
+_CANONICAL_STORE_RESOLVE_EVENT = CollectorDeltaStore.resolve_event
+_CANONICAL_STORE_SURFACE = tuple(
+    (
+        name,
+        member,
+        getattr(member, "__code__", None),
+    )
+    for name, member in (
+        ("migrate_legacy_event_payloads", _CANONICAL_STORE_MIGRATE_LEGACY),
+        ("event_digest_maps", _CANONICAL_STORE_EVENT_DIGEST_MAPS),
+        ("resolve_event", _CANONICAL_STORE_RESOLVE_EVENT),
+    )
+)
+
+
+def _canonical_collector_store_dispatch(
+    store: CollectorDeltaStore,
+):
+    """Return exact durable-history callables without instance late dispatch."""
+
+    if type(store) is not _CANONICAL_COLLECTOR_STORE_TYPE:
+        raise ProductSourceStateError(
+            "collector store is not the exact canonical durable-history authority"
+        )
+    class_dict = vars(_CANONICAL_COLLECTOR_STORE_TYPE)
+    for name, expected, expected_code in _CANONICAL_STORE_SURFACE:
+        current = class_dict.get(name)
+        if (
+            current is not expected
+            or (
+                expected_code is not None
+                and getattr(current, "__code__", None) is not expected_code
+            )
+        ):
+            raise ProductSourceStateError(
+                "canonical collector-store durable-history dispatch was replaced"
+            )
+    return (
+        _CANONICAL_STORE_MIGRATE_LEGACY,
+        _CANONICAL_STORE_EVENT_DIGEST_MAPS,
+        _CANONICAL_STORE_RESOLVE_EVENT,
+    )
+
 
 class ParlayApiProductSource:
     """Restart-safe, read-only ProductCollectorSource over the Parlay API adapter.
@@ -781,7 +827,9 @@ class ParlayApiProductSource:
                         "legacy historical event cache is invalid"
                     ) from exc
             try:
-                _, retired_delta_ids = store.migrate_legacy_event_payloads(
+                migrate_legacy, _, _ = _canonical_collector_store_dispatch(store)
+                _, retired_delta_ids = migrate_legacy(
+                    store,
                     migrate,
                     source_id=self.source_id,
                     stream_epoch=self.stream_epoch,
@@ -828,7 +876,9 @@ class ParlayApiProductSource:
                     break
                 keys = tuple(str(key) for key, _ in chunk)
                 try:
-                    quote_map, dedupe_map = store.event_digest_maps(
+                    _, event_digest_maps, _ = _canonical_collector_store_dispatch(store)
+                    quote_map, dedupe_map = event_digest_maps(
+                        store,
                         source_id=self.source_id,
                         stream_epoch=self.stream_epoch,
                         quote_keys=keys if quote else (),
@@ -1165,7 +1215,9 @@ class ParlayApiProductSource:
 
         store = self._require_collector_store()
         try:
-            committed_quotes, committed_dedupes = store.event_digest_maps(
+            _, event_digest_maps, _ = _canonical_collector_store_dispatch(store)
+            committed_quotes, committed_dedupes = event_digest_maps(
+                store,
                 source_id=self.source_id,
                 stream_epoch=self.stream_epoch,
                 quote_keys=tuple(seen_quotes),
@@ -1453,7 +1505,9 @@ class ParlayApiProductSource:
                 return event
 
         try:
-            return self._require_collector_store().resolve_event(delta)
+            store = self._require_collector_store()
+            _, _, resolve_event = _canonical_collector_store_dispatch(store)
+            return resolve_event(store, delta)
         except (TypeError, ValueError) as exc:
             raise ProductSourceStateError(
                 "canonical event payload is absent or invalid in collector retention"

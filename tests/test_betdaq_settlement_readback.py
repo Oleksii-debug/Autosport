@@ -1216,7 +1216,7 @@ def test_order_settlement_rejects_unknown_provider_attribute(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    ("payload", "method_name", "read"),
+    ("payload", "read"),
     (
         (
             postings_window(posting(9001)).replace(
@@ -1224,7 +1224,6 @@ def test_order_settlement_rejects_unknown_provider_attribute(monkeypatch):
                 b'<ListAccountPostingsResult FutureWindowField="unexpected" ',
                 1,
             ),
-            "ListAccountPostingsResult",
             "window",
         ),
         (
@@ -1233,7 +1232,6 @@ def test_order_settlement_rejects_unknown_provider_attribute(monkeypatch):
                 b'<ListAccountPostingsByIdResult FutureCursorField="unexpected" ',
                 1,
             ),
-            "ListAccountPostingsByIdResult",
             "by_id",
         ),
     ),
@@ -1241,7 +1239,6 @@ def test_order_settlement_rejects_unknown_provider_attribute(monkeypatch):
 def test_postings_result_rejects_unknown_provider_attribute(
     monkeypatch,
     payload,
-    method_name,
     read,
 ):
     client, _ = economic_client(monkeypatch, payload)

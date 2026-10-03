@@ -1022,6 +1022,96 @@ def _risk_decision_descriptor_case(tmp_path, *, goal):
     return now, book, candidate, context, _policy(goal)
 
 
+def test_day_authority_descriptor_witness_inventory_is_complete():
+    expected = {
+        economic_admission._PaperDayTurnoverSnapshot: tuple(
+            economic_admission._PaperDayTurnoverSnapshot.__dataclass_fields__
+        ),
+        economic_admission._ProductDayAdmissionAuthority: tuple(
+            economic_admission._ProductDayAdmissionAuthority.__dataclass_fields__
+        ),
+        economic_admission.PaperDayTurnoverEvidence: tuple(
+            economic_admission.PaperDayTurnoverEvidence.__dataclass_fields__
+        ),
+        economic_admission.ProductDayRiskWindow: tuple(
+            economic_admission.ProductDayRiskWindow.__dataclass_fields__
+        ),
+    }
+    observed = {
+        owner: tuple(name for name, _descriptor in witnesses)
+        for owner, witnesses in (
+            economic_admission._DAY_AUTHORITY_FIELD_DESCRIPTOR_WITNESSES
+        )
+    }
+
+    assert observed == expected
+
+
+@pytest.mark.parametrize(
+    ("owner_name", "field_name"),
+    (
+        ("_PaperDayTurnoverSnapshot", "evidence"),
+        ("_ProductDayAdmissionAuthority", "turnover_room"),
+        ("PaperDayTurnoverEvidence", "residual_headroom"),
+        ("PaperDayTurnoverEvidence", "breached"),
+        ("ProductDayRiskWindow", "state_sha256"),
+        ("ProductDayRiskWindow", "product_clock_authoritative"),
+    ),
+)
+def test_day_authority_descriptor_rebind_cannot_mint_headroom(
+    tmp_path,
+    owner_name,
+    field_name,
+):
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    old = now - timedelta(days=2)
+    goal = _goal()
+    EconomicGoalStore(tmp_path).initialize_owner(goal)
+    book = _book_with_settled_turnover(placed_at=_timestamp(old), stake="50")
+    book.save(tmp_path / "paper_book.json")
+    candidate = _leg(f"day-descriptor-{owner_name}-{field_name}")
+    context = _context(candidate, _timestamp(now))
+    policy = _policy(goal)
+    owner = getattr(economic_admission, owner_name)
+    original = owner.__dict__[field_name]
+    hostile_called = False
+
+    def forged_field(_self):
+        nonlocal hostile_called
+        hostile_called = True
+        if field_name in {"turnover_room", "residual_headroom"}:
+            return Decimal("999999")
+        if field_name in {"breached", "product_clock_authoritative"}:
+            return False if field_name == "breached" else True
+        return "0" * 64
+
+    try:
+        setattr(owner, field_name, property(forged_field))
+        with pytest.raises(
+            RuntimeError,
+            match="economic admission day authority data descriptor changed",
+        ):
+            admit_paper_ticket(
+                workspace=tmp_path,
+                book=book,
+                risk_policy=policy,
+                stake=Decimal("0.01"),
+                legs=(candidate,),
+                reason="day authority descriptor mutation must fail closed",
+                placed_at=_timestamp(now),
+                context=context,
+                provider_source_ids=("provider-1",),
+                bankroll_id="paper-bankroll",
+                currency="USD",
+            )
+    finally:
+        setattr(owner, field_name, original)
+
+    assert hostile_called is False
+    persisted = PaperBook.load(tmp_path / "paper_book.json")
+    assert set(persisted.tickets) == set(book.tickets)
+
+
 def test_risk_decision_allowed_descriptor_rebind_cannot_promote_rejection(tmp_path):
     goal = replace(
         _goal(),

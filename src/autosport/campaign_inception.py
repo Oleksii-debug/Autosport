@@ -1437,6 +1437,17 @@ def _seal_campaign_inception_dispatch() -> None:
                 ("__new__", "__eq__", "__fspath__"),
             ),
             (
+                expected_concrete_path_type,
+                (
+                    "__str__",
+                    "__truediv__",
+                    "parent",
+                    "name",
+                    "mkdir",
+                    "unlink",
+                ),
+            ),
+            (
                 expected_authority_type,
                 ("__init__", "prepare", "commit", "recover", "read_history"),
             ),

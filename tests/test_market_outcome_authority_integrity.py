@@ -454,7 +454,7 @@ class MarketOutcomeAuthorityIntegrityTests(unittest.TestCase):
         forged = object.__new__(HostileAuthority)
         with self.assertRaisesRegex(
             ValueError,
-            "exact canonical source authority",
+            "exact canonical type",
         ):
             MarketSettlementOutcomeAuthority.from_dict(
                 raw,

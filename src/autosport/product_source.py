@@ -157,9 +157,6 @@ class ParlayApiProductSource:
         self._collector_store: CollectorDeltaStore | None = None
         self._initialize_state()
         self._read_state()
-        self.bind_collector_store(
-            CollectorDeltaStore(self.workspace / "collector_deltas.json")
-        )
 
     @staticmethod
     def _text(value: object, field: str) -> str:
@@ -630,9 +627,13 @@ class ParlayApiProductSource:
     def _require_collector_store(self) -> CollectorDeltaStore:
         store = self._collector_store
         if store is None:
-            raise ProductSourceStateError(
-                "canonical collector store is not bound to product source"
-            )
+            # Canonical production composition binds a budgeted store through
+            # HeadlessCollectorService before any source I/O.  Keep direct/unit
+            # source use available without mutating collector storage merely by
+            # constructing the source.
+            store = CollectorDeltaStore(self.workspace / "collector_deltas.json")
+            self._collector_store = store
+            self._migrate_legacy_history_to_collector_store()
         if store.path.resolve(strict=False) != (
             self.workspace / "collector_deltas.json"
         ).resolve(strict=False):

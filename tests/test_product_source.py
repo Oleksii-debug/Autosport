@@ -521,6 +521,27 @@ class ParlayApiProductSourceTests(unittest.TestCase):
             with self.assertRaises(ProductSourceStateError):
                 source.resolve_event(delta)
 
+    def test_construction_defers_collector_store_until_canonical_binding(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory) / "workspace"
+            source = ParlayApiProductSource(
+                _Provider([]),
+                workspace=workspace,
+                authority_root=Path(directory) / "authority",
+                lawful_terms_ref="terms:parlayapi:v1",
+                retention_ref="retention:parlayapi:v1",
+            )
+            store_path = workspace / "collector_deltas.json"
+
+            self.assertIsNone(source._collector_store)
+            self.assertFalse(store_path.exists())
+
+            store = CollectorDeltaStore(store_path, max_bytes=4 * 1024 * 1024)
+            source.bind_collector_store(store)
+
+            self.assertIs(source._require_collector_store(), store)
+            self.assertEqual(store.configured_max_bytes, 4 * 1024 * 1024)
+
     def test_state_reader_rejects_symlink_and_byte_bound_before_parse(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory) / "workspace"

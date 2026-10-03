@@ -32,6 +32,7 @@ DRAW_DOWN_ECONOMIC_BASIS = (
     "PAPER_SETTLED_STAKE_PAYOUT_GROSS_OF_UNALLOCATED_EXTERNAL_COSTS"
 )
 DRAW_DOWN_HISTORY_MODE = "RESTATED_CURRENT_HISTORY_ONLY"
+DRAW_DOWN_INITIAL_EQUITY_POINT_ID = "paper-initial-bankroll"
 
 
 class PaperDrawdownEvidenceError(ValueError):
@@ -1154,7 +1155,7 @@ def _make_resolver() -> FunctionType:
         points: list[PaperRealizedEquityPoint] = [
             exact_point_type(
                 sequence=0,
-                point_id="paper-initial-equity",
+                point_id=DRAW_DOWN_INITIAL_EQUITY_POINT_ID,
                 action="initial",
                 ticket_id=None,
                 equity=book.initial_bankroll,
@@ -1164,7 +1165,7 @@ def _make_resolver() -> FunctionType:
         ]
         equity = book.initial_bankroll
         running_peak = equity
-        running_peak_id = "paper-initial-equity"
+        running_peak_id = DRAW_DOWN_INITIAL_EQUITY_POINT_ID
         minimum_equity = equity
         maximum_drawdown = decimal_type("0")
         maximum_fraction = decimal_type("0")

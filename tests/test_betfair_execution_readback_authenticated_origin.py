@@ -7,7 +7,12 @@ import urllib.request as _urllib_request
 
 import pytest
 
-from autosport.betfair_account_identity import (\n    build_betfair_authenticated_client,\n    resolve_betfair_authenticated_account_identity,\n)
+from autosport import betfair_account_identity as account_identity_module
+from autosport.betfair_account_identity import (
+    BetfairAccountIdentityError,
+    build_betfair_authenticated_client,
+    resolve_betfair_authenticated_account_identity,
+)
 from autosport.betfair_account_readonly import (
     ACCOUNT_JSON_RPC_ENDPOINT,
     BETTING_JSON_RPC_ENDPOINT,
@@ -78,6 +83,25 @@ class _Opener:
         return _Response(_response_bytes(request.data))
 
 
+def _install_https_test_dispatch(monkeypatch: pytest.MonkeyPatch) -> None:
+    opener = _Opener()
+
+    def fake_do_open(_self, _http_class, request, **_kwargs):
+        response = opener.open(
+            request,
+            timeout=getattr(request, "timeout", 0),
+        )
+        response.code = 200
+        response.msg = "OK"
+        return response
+
+    monkeypatch.setattr(
+        _urllib_request.AbstractHTTPHandler,
+        "do_open",
+        fake_do_open,
+    )
+
+
 class _CustomTransport:
     def post(self, url: str, *, headers, body: bytes, timeout_seconds: float) -> bytes:
         del headers
@@ -99,7 +123,7 @@ def test_k07_product_client_issues_authoritative_execution_readback(
 ) -> None:
     # Keep the canonical Autosport urlopen function/transport intact. Replace only
     # stdlib's process opener below that frozen boundary, matching existing K07 tests.
-    monkeypatch.setattr(_urllib_request, "_opener", _Opener())
+    _install_https_test_dispatch(monkeypatch)
     client = build_betfair_authenticated_client(
         BetfairSessionCredentials("app-key", "session-token"),
         account_label="acct-1",
@@ -113,7 +137,7 @@ def test_k07_product_client_issues_authoritative_execution_readback(
 def test_equal_dataclass_copy_loses_readback_origin_authority(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(_urllib_request, "_opener", _Opener())
+    _install_https_test_dispatch(monkeypatch)
     client = build_betfair_authenticated_client(
         BetfairSessionCredentials("app-key", "session-token"),
         account_label="acct-1",
@@ -145,7 +169,7 @@ def test_direct_custom_transport_capture_cannot_mint_provider_origin() -> None:
 def test_k07_client_transport_rotation_revokes_existing_readback_authority(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(_urllib_request, "_opener", _Opener())
+    _install_https_test_dispatch(monkeypatch)
     client = build_betfair_authenticated_client(
         BetfairSessionCredentials("app-key", "session-token"),
         account_label="acct-1",
@@ -188,7 +212,7 @@ def test_public_authority_slots_cannot_mint_origin_without_canonical_capture(
 ) -> None:
     """A structural capture cannot become authoritative by filling public dataclass slots."""
 
-    monkeypatch.setattr(_urllib_request, "_opener", _Opener())
+    _install_https_test_dispatch(monkeypatch)
     canonical_client = build_betfair_authenticated_client(
         BetfairSessionCredentials("app-key", "session-token"),
         account_label="acct-1",
@@ -267,7 +291,7 @@ def _cell(value):
 def test_origin_proof_cannot_be_replayed_onto_equal_capture_object(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(_urllib_request, "_opener", _Opener())
+    _install_https_test_dispatch(monkeypatch)
     client = build_betfair_authenticated_client(
         BetfairSessionCredentials("app-key", "session-token"),
         account_label="acct-1",
@@ -300,7 +324,7 @@ def test_origin_proof_cannot_be_replayed_onto_equal_capture_object(
 def test_closure_recovered_origin_issuer_rejects_external_call(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(_urllib_request, "_opener", _Opener())
+    _install_https_test_dispatch(monkeypatch)
     client = build_betfair_authenticated_client(
         BetfairSessionCredentials("app-key", "session-token"),
         account_label="acct-1",
@@ -337,7 +361,7 @@ def test_readback_origin_binder_is_consumed_and_not_publicly_reusable() -> None:
 def test_same_code_reconstruction_with_foreign_raw_read_cannot_mint_origin(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(_urllib_request, "_opener", _Opener())
+    _install_https_test_dispatch(monkeypatch)
     client = build_betfair_authenticated_client(
         BetfairSessionCredentials("app-key", "session-token"),
         account_label="acct-1",
@@ -390,3 +414,31 @@ def test_same_code_reconstruction_with_foreign_raw_read_cannot_mint_origin(
             market_id=MARKET_ID,
             provider_order_ref=PROVIDER_REF,
         )
+
+
+def test_process_global_urllib_opener_cannot_mint_readback_origin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_https_test_dispatch(monkeypatch)
+
+    class HostileGlobalOpener:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def open(self, *args, **kwargs):
+            self.calls += 1
+            raise AssertionError(
+                "process-global urllib opener must not serve authenticated readback I/O"
+            )
+
+    hostile = HostileGlobalOpener()
+    monkeypatch.setattr(_urllib_request, "_opener", hostile)
+    client = build_betfair_authenticated_client(
+        BetfairSessionCredentials("app-key", "session-token"),
+        account_label="acct-1",
+    )
+
+    capture = _read(client)
+
+    assert hostile.calls == 0
+    capture.assert_authoritative()

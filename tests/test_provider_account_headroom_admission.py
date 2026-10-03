@@ -2791,3 +2791,37 @@ def test_workspace_lock_verification_descriptor_rebinding_cannot_bypass_fence(
 
     assert hostile_calls == []
 
+def test_public_reserve_rejects_caller_supplied_issuance_assertion(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    acquired, _ = _acquire_balance(monkeypatch, tmp_path, "100")
+    target = _plan("target", _action("target-action", "10"))
+    ledger = _ledger_with_plans(tmp_path, target)
+    issued = _assess(
+        ledger,
+        acquired,
+        plan_id="target",
+        action_id="target-action",
+    )
+    reconstructed = replace(issued)
+    hostile_calls: list[object] = []
+
+    def hostile_assert(value):
+        hostile_calls.append(value)
+
+    with pytest.raises(TypeError, match="_issued_assertion"):
+        reserve_observed_provider_headroom(
+            ledger,
+            acquired,
+            reconstructed,
+            attempt_id="caller-assertion-bypass",
+            bound_plans=ledger._test_bound_plans,
+            intents=ledger._test_intents,
+            _issued_assertion=hostile_assert,
+        )
+
+    assert hostile_calls == []
+    with pytest.raises(KeyError):
+        ledger.attempt_state("caller-assertion-bypass")
+

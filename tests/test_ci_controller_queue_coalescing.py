@@ -973,10 +973,7 @@ def test_live_pr_boundary_bypasses_transient_nested_request_shadow(
         canonical_urlopen,
     )
 
-    assert _trusted_live_pr_qualification(api, 303) == PullRequestQualification(
-        head_sha=HEAD,
-        integration_capable=True,
-    )
+    assert _trusted_live_pr_qualification(api, 303) == (HEAD, True)
     assert not forged_invoked["value"]
 
 
@@ -1003,6 +1000,7 @@ def test_live_pr_boundary_coordinated_class_rebind_cannot_forge_head(
         scoped_controller,
         "PullRequestQualification",
         ForgedQualification,
+        raising=False,
     )
     monkeypatch.setitem(
         authority_globals,
@@ -1072,14 +1070,12 @@ def test_live_pr_boundary_coordinated_class_rebind_cannot_forge_head(
         canonical_urlopen,
     )
 
-    forged = _trusted_live_pr_qualification(api, 303)
-    assert type(forged) is ForgedQualification
-    assert forged.head_sha == STALE_HEAD
-    with pytest.raises(
-        CancellationError,
-        match="pull request qualification authority changed",
-    ):
-        scoped_controller._pull_request_qualification_state(forged)
+    trusted = _trusted_live_pr_qualification(api, 303)
+    assert trusted == (HEAD, True)
+    assert scoped_controller._pull_request_qualification_state(trusted) == (
+        HEAD,
+        True,
+    )
 
 
 def test_controller_scheduler_coalesces_all_prs_per_source_workflow() -> None:

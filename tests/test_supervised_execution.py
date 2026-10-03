@@ -828,6 +828,9 @@ def test_class_rebound_ledger_method_fails_before_hostile_dispatch(
         "_canonical_bound_plan_authority_dispatch",
         "_canonical_supervised_ledger_dispatch",
         "_canonical_bound_plan_witness",
+        "_digest",
+        "_time",
+        "_sha",
         "_require_bound_plan_structure",
         "_require_approval",
         "_require_durable_approval",
@@ -917,6 +920,131 @@ def test_supervised_entrypoint_raw_code_replacement_fails_before_mutation(
     ):
         reserve_supervised_plan(ledger, bound, approval)
 
+    with pytest.raises(KeyError):
+        ledger.saga(bound.execution_plan.plan_id)
+
+
+@pytest.mark.parametrize(
+    ("owner_name", "attribute_name"),
+    (
+        ("execution_plan", "to_dict"),
+        ("execution_action", "to_dict"),
+        ("constraint", "to_dict"),
+        ("bound_plan", "verify_binding"),
+    ),
+)
+def test_bound_plan_transitive_method_rebinding_fails_before_mutation(
+    monkeypatch,
+    tmp_path,
+    owner_name,
+    attribute_name,
+) -> None:
+    bound, approval, _, _ = _bound()
+    owners = {
+        "execution_plan": type(bound.execution_plan),
+        "execution_action": type(bound.execution_plan.actions[0]),
+        "constraint": type(bound.constraints[0]),
+        "bound_plan": type(bound),
+    }
+    hostile_calls: list[object] = []
+
+    def hostile(*args, **kwargs):
+        hostile_calls.append((args, kwargs))
+        raise AssertionError("hostile binding method executed")
+
+    monkeypatch.setattr(owners[owner_name], attribute_name, hostile)
+    ledger = RealExecutionLedger(
+        tmp_path / f"binding-method-{owner_name}-{attribute_name}.jsonl"
+    )
+
+    with pytest.raises(
+        SupervisedExecutionError,
+        match="canonical .*binding.* changed",
+    ):
+        reserve_supervised_plan(ledger, bound, approval)
+
+    assert hostile_calls == []
+    with pytest.raises(KeyError):
+        ledger.saga(bound.execution_plan.plan_id)
+
+
+def test_bound_binding_alias_rebinding_fails_before_hostile_dispatch(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    bound, approval, _, _ = _bound()
+    hostile_calls: list[object] = []
+
+    def hostile(*args, **kwargs):
+        hostile_calls.append((args, kwargs))
+        return "0" * 64
+
+    monkeypatch.setattr(
+        supervised_execution,
+        "_bound_binding_sha256",
+        hostile,
+    )
+    ledger = RealExecutionLedger(tmp_path / "binding-alias-rebound.jsonl")
+
+    with pytest.raises(
+        SupervisedExecutionError,
+        match="canonical bound supervised execution plan binding changed",
+    ):
+        reserve_supervised_plan(ledger, bound, approval)
+
+    assert hostile_calls == []
+    with pytest.raises(KeyError):
+        ledger.saga(bound.execution_plan.plan_id)
+
+
+@pytest.mark.parametrize("member_name", ("dumps",))
+def test_digest_json_dispatch_rebinding_fails_before_hostile_dispatch(
+    monkeypatch,
+    tmp_path,
+    member_name,
+) -> None:
+    bound, approval, _, _ = _bound()
+    hostile_calls: list[object] = []
+
+    def hostile(*args, **kwargs):
+        hostile_calls.append((args, kwargs))
+        return "{}"
+
+    monkeypatch.setattr(supervised_execution.json, member_name, hostile)
+    ledger = RealExecutionLedger(tmp_path / "digest-json-rebound.jsonl")
+
+    with pytest.raises(
+        SupervisedExecutionError,
+        match="canonical supervised execution digest authority changed",
+    ):
+        reserve_supervised_plan(ledger, bound, approval)
+
+    assert hostile_calls == []
+    with pytest.raises(KeyError):
+        ledger.saga(bound.execution_plan.plan_id)
+
+
+def test_digest_hash_dispatch_rebinding_fails_before_hostile_dispatch(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    bound, approval, _, _ = _bound()
+    hostile_calls: list[object] = []
+
+    def hostile(*args, **kwargs):
+        hostile_calls.append((args, kwargs))
+        raise AssertionError("hostile digest executed")
+
+    monkeypatch.setattr(supervised_execution.hashlib, "sha256", hostile)
+    ledger = RealExecutionLedger(tmp_path / "digest-hash-rebound.jsonl")
+
+    with pytest.raises(
+        SupervisedExecutionError,
+        match="canonical supervised execution digest authority changed",
+    ):
+        reserve_supervised_plan(ledger, bound, approval)
+
+    assert hostile_calls == []
     with pytest.raises(KeyError):
         ledger.saga(bound.execution_plan.plan_id)
 

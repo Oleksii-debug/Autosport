@@ -410,6 +410,71 @@ def test_within_day_backdating_cannot_refresh_stale_quote(tmp_path):
     assert PaperBook.load(tmp_path / "paper_book.json").tickets == {}
 
 
+def _assert_risk_helper_mutation_rejected(tmp_path) -> None:
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    goal = replace(
+        _goal(),
+        max_turnover_fraction=Decimal("1"),
+        max_quote_age_seconds=Decimal("30"),
+    )
+    EconomicGoalStore(tmp_path).initialize_owner(goal)
+    book = PaperBook("100")
+    book.save(tmp_path / "paper_book.json")
+    candidate = _leg("risk-helper-authority")
+    context = _context(candidate, _timestamp(now))
+
+    result = admit_paper_ticket(
+        workspace=tmp_path,
+        book=book,
+        risk_policy=_policy(goal),
+        stake=Decimal("0.01"),
+        legs=(candidate,),
+        reason="mutated detached risk helper must fail closed",
+        placed_at=_timestamp(now),
+        context=context,
+        provider_source_ids=("provider-1",),
+        bankroll_id="paper-bankroll",
+        currency="USD",
+    )
+
+    assert result.admitted is False
+    assert result.risk.reason == "virtual bankroll risk helper authority is invalid"
+    assert PaperBook.load(tmp_path / "paper_book.json").tickets == {}
+
+
+def test_detached_quote_helper_code_mutation_cannot_mint_admission(tmp_path):
+    target = economic_admission._RISK_QUOTE_FROZEN
+    original_code = target.__code__
+    try:
+        target.__code__ = _replacement_code_preserving_freevars(target)
+        _assert_risk_helper_mutation_rejected(tmp_path)
+    finally:
+        target.__code__ = original_code
+
+
+def test_detached_quote_helper_frozen_global_rebind_cannot_mint_admission(tmp_path):
+    target = economic_admission._RISK_QUOTE_FROZEN
+    namespace = target.__globals__
+    original = namespace["_canonical_context_timestamp"]
+    try:
+        namespace["_canonical_context_timestamp"] = lambda _name, value: (value, value)
+        _assert_risk_helper_mutation_rejected(tmp_path)
+    finally:
+        namespace["_canonical_context_timestamp"] = original
+
+
+def test_transitive_decimal_context_code_mutation_cannot_mint_admission(tmp_path):
+    descriptor = PaperRiskPolicy.__dict__["_decimal_context"]
+    assert type(descriptor) is staticmethod
+    target = descriptor.__func__
+    original_code = target.__code__
+    try:
+        target.__code__ = _replacement_code_preserving_freevars(target)
+        _assert_risk_helper_mutation_rejected(tmp_path)
+    finally:
+        target.__code__ = original_code
+
+
 def test_turnover_override_cannot_use_caller_time_to_refresh_stale_quote(tmp_path):
     now = datetime.now(timezone.utc).replace(microsecond=0)
     requested = _same_day_offset(now, -60)

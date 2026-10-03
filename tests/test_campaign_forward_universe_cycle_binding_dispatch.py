@@ -299,3 +299,71 @@ def test_saved_authorizer_rejects_provider_witness_map_in_place_mutation() -> No
             )
     finally:
         binding._PROVIDER_UNIVERSE_VALUES.update(original)
+
+
+def test_saved_resolver_rejects_datetime_primitive_rebind_before_resolution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    resolver = binding.resolve_campaign_forward_universe_cycle_authority
+    monkeypatch.setattr(binding, "datetime", object())
+
+    with pytest.raises(
+        binding.CampaignForwardUniverseCycleBindingError,
+        match="chronology/digest primitives changed",
+    ):
+        resolver(
+            precommit_locator=None,
+            collector_store=None,
+            source_spec=None,
+            cycle_receipt=None,
+            provider_evidence_store=None,
+            universe_store=None,
+            protocol=None,
+            event_lifecycle=None,
+        )
+
+
+def test_saved_authorizer_rejects_sha256_primitive_mutation_before_execution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authorizer = binding.authorize_campaign_forward_source_receipts
+    original_sha256 = binding.hashlib.sha256
+    hostile_calls: list[str] = []
+
+    def hostile_sha256(*_args, **_kwargs):
+        hostile_calls.append("sha256")
+        raise AssertionError("hostile sha256 executed")
+
+    monkeypatch.setattr(binding.hashlib, "sha256", hostile_sha256)
+    try:
+        with pytest.raises(
+            binding.CampaignForwardUniverseCycleBindingError,
+            match="chronology/digest primitives changed",
+        ):
+            authorizer(
+                precommit_locator=None,
+                collector_store=None,
+                source_spec=None,
+                cycle_receipt=None,
+                provider_evidence_store=None,
+                universe_store=None,
+                protocol=None,
+                event_lifecycle=None,
+                opportunities=(),
+            )
+    finally:
+        monkeypatch.setattr(binding.hashlib, "sha256", original_sha256)
+
+    assert hostile_calls == []
+
+
+def test_private_integrity_guard_rejects_json_module_rebind(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(binding, "json", object())
+
+    with pytest.raises(
+        binding.CampaignForwardUniverseCycleBindingError,
+        match="chronology/digest primitives changed",
+    ):
+        binding._require_dispatch_integrity()

@@ -13,6 +13,7 @@ import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, DecimalException, Inexact, InvalidOperation, localcontext
+from types import FunctionType
 from typing import Final
 
 from .economic_goal_provenance import provenance_for
@@ -377,7 +378,21 @@ class PaperDayTurnoverEvidence:
         return False
 
 
-class PaperDayTurnoverResolver:
+class _PaperDayTurnoverResolverMeta(type):
+    """Seal positive evidence resolver entrypoint descriptors."""
+
+    def __setattr__(cls, name: str, value: object) -> None:
+        if name in {"resolve", "require_current"} and name in cls.__dict__:
+            raise TypeError("canonical PaperDayTurnoverResolver authority method is sealed")
+        super().__setattr__(name, value)
+
+    def __delattr__(cls, name: str) -> None:
+        if name in {"resolve", "require_current"} and name in cls.__dict__:
+            raise TypeError("canonical PaperDayTurnoverResolver authority method is sealed")
+        super().__delattr__(name)
+
+
+class PaperDayTurnoverResolver(metaclass=_PaperDayTurnoverResolverMeta):
     """Derive and re-resolve read-only PAPER UTC-day turnover evidence."""
 
     @classmethod
@@ -430,7 +445,7 @@ class PaperDayTurnoverResolver:
             # Exact-type checks above make direct class dispatch authoritative here.
             # Do not let a mutable exact store instance shadow load and mint a
             # different goal contract for turnover evidence.
-            goal = EconomicGoalStore.load(goal_store)
+            goal = _ECONOMIC_GOAL_LOAD(goal_store)
             goal_provenance = provenance_for(goal)
         except (OSError, TypeError, ValueError) as exc:
             raise PaperDayTurnoverEvidenceIncompleteError(
@@ -438,7 +453,7 @@ class PaperDayTurnoverResolver:
             ) from exc
 
         try:
-            PaperBook._validate_loaded_state(book)
+            _PAPERBOOK_VALIDATE_LOADED_STATE(book)
         except (ArithmeticError, AttributeError, TypeError, ValueError) as exc:
             raise PaperDayTurnoverEvidenceIncompleteError(
                 "PaperBook lifecycle is not canonical"
@@ -448,7 +463,7 @@ class PaperDayTurnoverResolver:
             # Bypass mutable instance dispatch for the same reason as EconomicGoalStore
             # above. A caller-owned require_current attribute is not product day
             # authority even when the container itself has the exact store type.
-            current_window = ProductDayRiskWindowStore.require_current(
+            current_window = _RISK_DAY_REQUIRE_CURRENT(
                 window_store,
                 window_evidence,
             )
@@ -575,7 +590,7 @@ class PaperDayTurnoverResolver:
             raise PaperDayTurnoverEvidenceMismatchError(
                 "candidate must be canonical PaperDayTurnoverEvidence"
             )
-        current = PaperDayTurnoverResolver.resolve(
+        current = _RISK_TURNOVER_RESOLVE_BOUND(
             book=book,
             goal_store=goal_store,
             window_store=window_store,
@@ -586,3 +601,118 @@ class PaperDayTurnoverResolver:
                 "turnover evidence does not match current canonical PAPER state"
             )
         return current
+
+
+# Positive evidence resolution consumes existing canonical authorities through exact
+# captured callables. Their implementations remain owned by their source modules.
+_ECONOMIC_GOAL_LOAD = EconomicGoalStore.load
+_PAPERBOOK_VALIDATE_LOADED_STATE = PaperBook._validate_loaded_state
+_RISK_DAY_REQUIRE_CURRENT = ProductDayRiskWindowStore.require_current
+
+
+def _freeze_turnover_module_globals() -> dict[str, object]:
+    source = globals()
+    frozen: dict[str, object] = dict(source)
+    function_type = FunctionType
+    for name, value in tuple(source.items()):
+        if type(value) is not function_type or value.__globals__ is not source:
+            continue
+        clone = function_type(
+            value.__code__,
+            frozen,
+            name=value.__name__,
+            argdefs=value.__defaults__,
+            closure=value.__closure__,
+        )
+        if value.__kwdefaults__ is not None:
+            clone.__kwdefaults__ = dict(value.__kwdefaults__)
+        clone.__qualname__ = value.__qualname__
+        clone.__doc__ = value.__doc__
+        clone.__annotations__ = dict(value.__annotations__)
+        frozen[name] = clone
+    frozen["_ECONOMIC_GOAL_LOAD"] = _ECONOMIC_GOAL_LOAD
+    frozen["_PAPERBOOK_VALIDATE_LOADED_STATE"] = _PAPERBOOK_VALIDATE_LOADED_STATE
+    frozen["_RISK_DAY_REQUIRE_CURRENT"] = _RISK_DAY_REQUIRE_CURRENT
+    if "_RISK_TURNOVER_RESOLVE_BOUND" in source:
+        frozen["_RISK_TURNOVER_RESOLVE_BOUND"] = source[
+            "_RISK_TURNOVER_RESOLVE_BOUND"
+        ]
+    return frozen
+
+
+def _seal_turnover_resolver_method(
+    function: FunctionType,
+    frozen_globals: dict[str, object],
+) -> FunctionType:
+    if type(function) is not FunctionType:
+        raise TypeError("turnover resolver authority method must be a Python function")
+    function_type = FunctionType
+    code = function.__code__
+    defaults = function.__defaults__
+    kwdefaults = (
+        None if function.__kwdefaults__ is None else dict(function.__kwdefaults__)
+    )
+    closure = function.__closure__
+    name = function.__name__
+    qualname = function.__qualname__
+    doc = function.__doc__
+    annotations = dict(function.__annotations__)
+
+    def sealed(*args, **kwargs):
+        if type(function) is not function_type or function.__code__ is not code:
+            raise PaperDayTurnoverEvidenceIncompleteError(
+                "canonical turnover resolver executable authority changed"
+            )
+        delegate = function_type(
+            code,
+            frozen_globals,
+            name=name,
+            argdefs=defaults,
+            closure=closure,
+        )
+        if kwdefaults is not None:
+            delegate.__kwdefaults__ = dict(kwdefaults)
+        return delegate(*args, **kwargs)
+
+    sealed.__name__ = name
+    sealed.__qualname__ = qualname
+    sealed.__doc__ = doc
+    sealed.__annotations__ = annotations
+    return sealed
+
+
+_raw_resolve_descriptor = PaperDayTurnoverResolver.__dict__["resolve"]
+if type(_raw_resolve_descriptor) is not classmethod:
+    raise RuntimeError("canonical turnover resolve classmethod is unavailable")
+_resolve_globals = _freeze_turnover_module_globals()
+type.__setattr__(
+    PaperDayTurnoverResolver,
+    "resolve",
+    classmethod(
+        _seal_turnover_resolver_method(
+            _raw_resolve_descriptor.__func__,
+            _resolve_globals,
+        )
+    ),
+)
+_RISK_TURNOVER_RESOLVE_BOUND = PaperDayTurnoverResolver.resolve
+
+_raw_require_descriptor = PaperDayTurnoverResolver.__dict__["require_current"]
+if type(_raw_require_descriptor) is not classmethod:
+    raise RuntimeError("canonical turnover require_current classmethod is unavailable")
+_require_globals = _freeze_turnover_module_globals()
+type.__setattr__(
+    PaperDayTurnoverResolver,
+    "require_current",
+    classmethod(
+        _seal_turnover_resolver_method(
+            _raw_require_descriptor.__func__,
+            _require_globals,
+        )
+    ),
+)
+
+del _raw_resolve_descriptor
+del _resolve_globals
+del _raw_require_descriptor
+del _require_globals

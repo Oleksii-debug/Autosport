@@ -300,15 +300,6 @@ def _append_issuance_witness(
             "campaign denomination issuance witness available_at must be timezone-aware"
         )
     available_at = available_at.astimezone(timezone.utc)
-    if records:
-        previous_available_at = _utc_datetime(
-            records[-1]["available_at"],
-            "previous issuance witness available_at",
-        )
-        if available_at < previous_available_at:
-            raise CampaignEconomicAuthorityError(
-                "campaign denomination issuance witness availability timestamp regressed"
-            )
     available_text = available_at.isoformat().replace("+00:00", "Z")
     if matches:
         record = matches[0]
@@ -320,6 +311,15 @@ def _append_issuance_witness(
                 "campaign denomination issuance witness conflicts with candidate binding"
             )
         return record
+    if records:
+        previous_available_at = _utc_datetime(
+            records[-1]["available_at"],
+            "previous issuance witness available_at",
+        )
+        if available_at < previous_available_at:
+            raise CampaignEconomicAuthorityError(
+                "campaign denomination issuance witness availability timestamp regressed"
+            )
     body: dict[str, object] = {
         "witness_schema_version": _ISSUANCE_WITNESS_SCHEMA_VERSION,
         "sequence": len(records) + 1,

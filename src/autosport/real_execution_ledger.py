@@ -1639,7 +1639,7 @@ class RealExecutionLedger:
                 )
         cls._receipt_owners(events)
 
-    def bind_supervised_plan_issuance(
+    def _bind_supervised_plan_issuance(
         self,
         *,
         plan_id: str,

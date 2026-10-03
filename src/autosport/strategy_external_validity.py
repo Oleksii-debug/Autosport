@@ -65,8 +65,19 @@ _PAPER_OUTCOME_STAGES = {
 # rows or launder ATTEMPTED/UNKNOWN into a stronger stage while preserving exact
 # object identity.  The evaluator therefore fails closed if that canonical surface
 # changes after this module is imported, and invokes only the captured functions.
+_CANONICAL_LEDGER_TYPE = EvaluationUniverseLedger
+_CANONICAL_UNIVERSE_TYPE = EvaluationUniverse
+_CANONICAL_ROW_TYPE = EvaluationRow
+_CANONICAL_EVENT_TYPE = FunnelEvent
+_CANONICAL_PROTOCOL_TYPE = FrozenBaselineProtocol
+_CANONICAL_POLICY_EVALUATION_TYPE = PolicyEvaluation
+_CANONICAL_BASELINE_REPORT_BUILDER = build_external_validity_report
 _CANONICAL_LEDGER_COHORT = EvaluationUniverseLedger.cohort
 _CANONICAL_LEDGER_CURRENT_STAGE = EvaluationUniverseLedger.current_stage
+_CANDIDATE_SLOT = SlotState.CANDIDATE
+_ARBITRAGE_STRATEGY = StrategyClass.ARBITRAGE
+_DUTCHING_STRATEGY = StrategyClass.DUTCHING
+_LIVE_STRATEGY = StrategyClass.LIVE_PRICE_MOVEMENT
 
 
 def _digest(value: object) -> str:
@@ -80,21 +91,33 @@ def _require_denominator_dispatch_authority(
 ) -> None:
     """Reject mutable/subclass denominator surfaces before deriving evidence."""
 
-    if type(ledger.universe) is not EvaluationUniverse:
+    if (
+        EvaluationUniverseLedger is not _CANONICAL_LEDGER_TYPE
+        or EvaluationUniverse is not _CANONICAL_UNIVERSE_TYPE
+        or EvaluationRow is not _CANONICAL_ROW_TYPE
+        or FunnelEvent is not _CANONICAL_EVENT_TYPE
+        or FrozenBaselineProtocol is not _CANONICAL_PROTOCOL_TYPE
+        or PolicyEvaluation is not _CANONICAL_POLICY_EVALUATION_TYPE
+        or build_external_validity_report is not _CANONICAL_BASELINE_REPORT_BUILDER
+    ):
+        raise StrategyExternalValidityError(
+            "strategy external-validity dependency dispatch changed"
+        )
+    if type(ledger.universe) is not _CANONICAL_UNIVERSE_TYPE:
         raise StrategyExternalValidityError(
             "ledger universe must be exact canonical EvaluationUniverse"
         )
-    if any(type(row) is not EvaluationRow for row in ledger.universe.rows):
+    if any(type(row) is not _CANONICAL_ROW_TYPE for row in ledger.universe.rows):
         raise StrategyExternalValidityError(
             "ledger rows must be exact canonical EvaluationRow values"
         )
-    if any(type(event) is not FunnelEvent for event in ledger.events):
+    if any(type(event) is not _CANONICAL_EVENT_TYPE for event in ledger.events):
         raise StrategyExternalValidityError(
             "ledger events must be exact canonical FunnelEvent values"
         )
     if (
-        EvaluationUniverseLedger.cohort is not _CANONICAL_LEDGER_COHORT
-        or EvaluationUniverseLedger.current_stage is not _CANONICAL_LEDGER_CURRENT_STAGE
+        _CANONICAL_LEDGER_TYPE.cohort is not _CANONICAL_LEDGER_COHORT
+        or _CANONICAL_LEDGER_TYPE.current_stage is not _CANONICAL_LEDGER_CURRENT_STAGE
     ):
         raise StrategyExternalValidityError(
             "EvaluationUniverseLedger denominator dispatch changed"
@@ -183,11 +206,11 @@ def evaluate_strategy_external_validity(
     baseline_results: Sequence[PolicyEvaluation],
 ) -> StrategyExternalValidityReport:
     """Derive a fail-closed descriptive view from canonical existing authorities."""
-    if type(ledger) is not EvaluationUniverseLedger:
+    if type(ledger) is not _CANONICAL_LEDGER_TYPE:
         raise StrategyExternalValidityError("ledger must be exact EvaluationUniverseLedger")
-    if type(protocol) is not FrozenBaselineProtocol:
+    if type(protocol) is not _CANONICAL_PROTOCOL_TYPE:
         raise StrategyExternalValidityError("protocol must be exact FrozenBaselineProtocol")
-    if type(candidate) is not PolicyEvaluation:
+    if type(candidate) is not _CANONICAL_POLICY_EVALUATION_TYPE:
         raise StrategyExternalValidityError("candidate must be exact PolicyEvaluation")
 
     _require_denominator_dispatch_authority(ledger)
@@ -205,7 +228,7 @@ def evaluate_strategy_external_validity(
         raise StrategyExternalValidityError(
             "baseline cohort must equal exact frozen EvaluationUniverse row_ids"
         )
-    baseline_report = build_external_validity_report(protocol, candidate, baseline_results)
+    baseline_report = _CANONICAL_BASELINE_REPORT_BUILDER(protocol, candidate, baseline_results)
 
     rows = ledger.universe.rows
     strategy_ids = tuple(sorted({row.strategy_version_id for row in rows}))
@@ -219,7 +242,7 @@ def evaluate_strategy_external_validity(
     if len(config_ids) != 1:
         raise StrategyExternalValidityError("frozen denominator mixes config_sha256 values")
 
-    candidate_rows = tuple(row for row in rows if row.slot_state is SlotState.CANDIDATE)
+    candidate_rows = tuple(row for row in rows if row.slot_state is _CANDIDATE_SLOT)
     stages = tuple(
         _CANONICAL_LEDGER_CURRENT_STAGE(ledger, row.row_id)
         for row in candidate_rows
@@ -231,7 +254,7 @@ def evaluate_strategy_external_validity(
     grade = StrategyEvidenceGrade.INSUFFICIENT
     if candidate_rows:
         grade = StrategyEvidenceGrade.THEORETICAL
-        if protocol.strategy_class in {StrategyClass.ARBITRAGE, StrategyClass.DUTCHING} and any(
+        if protocol.strategy_class in {_ARBITRAGE_STRATEGY, _DUTCHING_STRATEGY} and any(
             row.terminal_space_proof_id is None for row in candidate_rows
         ):
             gaps.add("terminal_space_authority_incomplete")
@@ -251,9 +274,9 @@ def evaluate_strategy_external_validity(
             # explicitly composed and re-resolved here.
             gaps.add("strategy_specific_paper_proof_not_verified")
 
-    if protocol.strategy_class is StrategyClass.LIVE_PRICE_MOVEMENT:
+    if protocol.strategy_class is _LIVE_STRATEGY:
         gaps.add("external_later_quote_execution_evidence_not_verified")
-    elif protocol.strategy_class in {StrategyClass.ARBITRAGE, StrategyClass.DUTCHING}:
+    elif protocol.strategy_class in {_ARBITRAGE_STRATEGY, _DUTCHING_STRATEGY}:
         gaps.add("external_multi_leg_acceptance_and_settlement_not_verified")
     else:
         gaps.add("external_same_trajectory_counterfactual_execution_not_verified")

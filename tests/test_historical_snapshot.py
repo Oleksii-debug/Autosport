@@ -23,6 +23,7 @@ from autosport.historical_snapshot import (
     capture_historical_snapshot,
     capture_product_owned_historical_snapshot,
 )
+from autosport.parlay_sport_provider import ParlayApiSportProvider
 from autosport.parlayapi_provider import (
     HttpJsonResponse,
     ParlayApiTableTennisProvider,
@@ -68,6 +69,7 @@ def _payload(
     timestamp: str = "2026-09-12T10:00:00Z",
     last_update: str | None = None,
     event_id: str = "tt-1",
+    sport_key: str = "table_tennis",
 ) -> dict[str, object]:
     market: dict[str, object] = {
         "key": "h2h",
@@ -85,7 +87,7 @@ def _payload(
         "data": [
             {
                 "id": event_id,
-                "sport_key": "table_tennis",
+                "sport_key": sport_key,
                 "commence_time": "2026-09-12T11:00:00Z",
                 "home_team": "Player A",
                 "away_team": "Player B",
@@ -126,6 +128,93 @@ class HistoricalSnapshotTests(unittest.TestCase):
             "not issued by canonical product-owned Parlay acquisition",
         ):
             assert_historical_snapshot_provider_origin(report)
+
+    def test_injected_generic_sport_capture_cannot_issue_provider_origin_authority(
+        self,
+    ) -> None:
+        transport = _Transport(
+            _payload(
+                event_id="basketball-1",
+                sport_key="basketball",
+            )
+        )
+        provider = ParlayApiSportProvider(
+            "basketball",
+            "secret-key-must-not-leak",
+            transport=transport,
+            clock=lambda: "2026-09-13T02:00:00+00:00",
+            sleeper=lambda _: None,
+        )
+        with tempfile.TemporaryDirectory() as temp:
+            report = capture_historical_snapshot(
+                provider,
+                requested_at="2026-09-12T10:03:00Z",
+                output_path=Path(temp) / "market.jsonl",
+                evidence_path=Path(temp) / "evidence.json",
+            )
+
+        with self.assertRaisesRegex(
+            ProviderPayloadError,
+            "not issued by canonical product-owned Parlay acquisition",
+        ):
+            assert_historical_snapshot_provider_origin(report)
+
+    def test_product_owned_capture_rejects_reserved_multisport_scope_before_io(
+        self,
+    ) -> None:
+        forged_calls: list[str] = []
+
+        def forged_open(opener, request, timeout=None):
+            del opener, request, timeout
+            forged_calls.append("open")
+            raise AssertionError("network dispatch must not run")
+
+        with tempfile.TemporaryDirectory() as temp, mock.patch.object(
+            OpenerDirector,
+            "open",
+            forged_open,
+        ):
+            with self.assertRaisesRegex(
+                ValueError,
+                "reserved dataset scope",
+            ):
+                capture_product_owned_historical_snapshot(
+                    api_key="secret-key-must-not-leak",
+                    sport_key="mixed",
+                    requested_at="2026-09-12T10:03:00Z",
+                    output_path=Path(temp) / "market.jsonl",
+                    evidence_path=Path(temp) / "evidence.json",
+                )
+
+        self.assertEqual(forged_calls, [])
+
+    def test_product_owned_capture_rejects_generic_sport_constructor_rebind_before_io(
+        self,
+    ) -> None:
+        calls: list[str] = []
+
+        def forged_init(provider, *args, **kwargs):
+            del provider, args, kwargs
+            calls.append("forged-init")
+
+        with tempfile.TemporaryDirectory() as temp, mock.patch.object(
+            ParlayApiSportProvider,
+            "__init__",
+            forged_init,
+        ):
+            with self.assertRaisesRegex(
+                ProviderPayloadError,
+                "authority changed before acquisition",
+            ):
+                capture_product_owned_historical_snapshot(
+                    api_key="secret-key-must-not-leak",
+                    sport_key="basketball",
+                    requested_at="2026-09-12T10:03:00Z",
+                    output_path=Path(temp) / "market.jsonl",
+                    evidence_path=Path(temp) / "evidence.json",
+                )
+
+        self.assertEqual(calls, [])
 
 
     def test_product_owned_capture_rejects_precall_opener_open_rebind(self) -> None:

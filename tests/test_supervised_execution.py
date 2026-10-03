@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from betfair_execution_readback_test_support import authoritative_execution_readback
+from betfair_execution_readback_test_support import semantic_execution_readback
 
 import autosport.supervised_execution as supervised_execution_module
 import autosport.supervised_provider_evidence as provider_evidence
@@ -514,7 +514,7 @@ def _provider_capture(
             )
             request_id += 1
 
-    capture = authoritative_execution_readback(
+    capture = semantic_execution_readback(
         responses,
         action_id=action.action_id,
         market_id=action.market_id,

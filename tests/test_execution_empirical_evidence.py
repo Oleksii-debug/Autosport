@@ -515,6 +515,19 @@ def test_terminal_ack_projects_exact_positive_reconciliation_lineage(tmp_path):
     )
     assert evidence.slippage_status == SLIPPAGE_STATUS_UNKNOWN
 
+    population = build_empirical_execution_population_evidence(
+        ledger,
+        evaluation_protocol_sha256="7" * 64,
+    )
+    population_payload = population.to_dict()
+    assert population.reconciliation_evidence_count == 1
+    assert population.positive_reconciliation_count == 1
+    assert population.negative_reconciliation_count == 0
+    assert population_payload["positive_reconciliation_rate"] == {
+        "numerator": 1,
+        "denominator": 1,
+    }
+
 
 def test_receiptless_rejected_attempt_projects_canonical_terminal_evidence(tmp_path):
     ledger = _ledger(tmp_path)
@@ -972,6 +985,9 @@ def test_population_aggregate_keeps_complete_funnel_denominator(tmp_path):
     assert aggregate.provider_acknowledgement_binding_count == 3
     assert aggregate.durable_acknowledgement_identity_count == 3
     assert aggregate.provider_bound_durable_ack_count == 3
+    assert aggregate.reconciliation_evidence_count == 1
+    assert aggregate.positive_reconciliation_count == 0
+    assert aggregate.negative_reconciliation_count == 1
     assert aggregate.provider_outcome_unverified_ack_count == 3
     assert aggregate.provider_outcome_unverified_absence_count == 1
     assert aggregate.provider_outcome_not_applicable_count == 3
@@ -1039,6 +1055,18 @@ def test_population_aggregate_keeps_complete_funnel_denominator(tmp_path):
     }
     assert payload["provider_bound_durable_ack_rate"] == {
         "numerator": 3,
+        "denominator": 7,
+    }
+    assert payload["reconciliation_evidence_rate"] == {
+        "numerator": 1,
+        "denominator": 7,
+    }
+    assert payload["positive_reconciliation_rate"] == {
+        "numerator": 0,
+        "denominator": 7,
+    }
+    assert payload["negative_reconciliation_rate"] == {
+        "numerator": 1,
         "denominator": 7,
     }
 

@@ -293,7 +293,7 @@ def test_population_evidence_retains_provider_provenance_in_sample_hashes(tmp_pa
     )
     payload = population.to_dict()
 
-    assert payload["schema_version"] == 5
+    assert payload["schema_version"] == 6
     assert len(population.samples) == 1
     sample = population.samples[0]
     assert sample.submitted_request_sha256 == REQUEST_SHA256

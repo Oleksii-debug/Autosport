@@ -1108,7 +1108,7 @@ def build_empirical_execution_evidence(
     return evidence
 
 
-POPULATION_SCHEMA_VERSION = 5
+POPULATION_SCHEMA_VERSION = 6
 
 
 @dataclass(frozen=True, slots=True, weakref_slot=True, init=False)
@@ -1146,6 +1146,9 @@ class EmpiricalExecutionPopulationEvidence:
     provider_acknowledgement_binding_count: int = field(init=False)
     durable_acknowledgement_identity_count: int = field(init=False)
     provider_bound_durable_ack_count: int = field(init=False)
+    reconciliation_evidence_count: int = field(init=False)
+    positive_reconciliation_count: int = field(init=False)
+    negative_reconciliation_count: int = field(init=False)
     provider_outcome_unverified_ack_count: int = field(init=False)
     provider_outcome_unverified_absence_count: int = field(init=False)
     provider_outcome_not_applicable_count: int = field(init=False)
@@ -1316,6 +1319,22 @@ class EmpiricalExecutionPopulationEvidence:
                 "population exact provider/durable ACK overlap is inconsistent"
             )
 
+        positive_reconciliation_count = sum(
+            sample.reconciliation_external_effect_found is True
+            for sample in self.samples
+        )
+        negative_reconciliation_count = sum(
+            sample.reconciliation_external_effect_found is False
+            for sample in self.samples
+        )
+        reconciliation_evidence_count = (
+            positive_reconciliation_count + negative_reconciliation_count
+        )
+        if reconciliation_evidence_count > total:
+            raise EmpiricalExecutionEvidenceError(
+                "population reconciliation evidence exceeds denominator"
+            )
+
         provider_outcome_unverified_ack_count = sum(
             sample.provider_outcome_verification_reason
             == PROVIDER_OUTCOME_UNVERIFIED_ACK
@@ -1416,6 +1435,21 @@ class EmpiricalExecutionPopulationEvidence:
             self,
             "provider_bound_durable_ack_count",
             provider_bound_durable_ack_count,
+        )
+        object.__setattr__(
+            self,
+            "reconciliation_evidence_count",
+            reconciliation_evidence_count,
+        )
+        object.__setattr__(
+            self,
+            "positive_reconciliation_count",
+            positive_reconciliation_count,
+        )
+        object.__setattr__(
+            self,
+            "negative_reconciliation_count",
+            negative_reconciliation_count,
         )
         object.__setattr__(
             self,
@@ -1585,6 +1619,21 @@ class EmpiricalExecutionPopulationEvidence:
             ),
             "provider_bound_durable_ack_rate": self._rate(
                 self.provider_bound_durable_ack_count,
+                self.total_attempts,
+            ),
+            "reconciliation_evidence_count": self.reconciliation_evidence_count,
+            "reconciliation_evidence_rate": self._rate(
+                self.reconciliation_evidence_count,
+                self.total_attempts,
+            ),
+            "positive_reconciliation_count": self.positive_reconciliation_count,
+            "positive_reconciliation_rate": self._rate(
+                self.positive_reconciliation_count,
+                self.total_attempts,
+            ),
+            "negative_reconciliation_count": self.negative_reconciliation_count,
+            "negative_reconciliation_rate": self._rate(
+                self.negative_reconciliation_count,
                 self.total_attempts,
             ),
             "provider_outcome_verification_counts": {

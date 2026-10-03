@@ -346,6 +346,9 @@ def _make_resolver() -> FunctionType:
     path_truediv = Path.__truediv__
     canonical_path_type = type(Path())
     goal_store_type = EconomicGoalStore
+    goal_store_new = EconomicGoalStore.__new__
+    goal_store_init = EconomicGoalStore.__init__
+    goal_store_file_name = EconomicGoalStore.FILE_NAME
     goal_load = EconomicGoalStore.load
     goal_load_code = goal_load.__code__
     goal_provenance = provenance_for
@@ -470,7 +473,19 @@ def _make_resolver() -> FunctionType:
             raise error_type(
                 "drawdown book path type is not canonical"
             )
+        if (
+            goal_store_type.__new__ is not goal_store_new
+            or goal_store_type.__init__ is not goal_store_init
+            or goal_store_type.FILE_NAME != goal_store_file_name
+        ):
+            raise error_type(
+                "drawdown economic-goal store authority changed"
+            )
         goal_store = goal_store_type(root)
+        if type(goal_store) is not goal_store_type:
+            raise error_type(
+                "drawdown economic-goal store type is not canonical"
+            )
         try:
             goal = goal_load(goal_store)
             book = book_load(book_path)

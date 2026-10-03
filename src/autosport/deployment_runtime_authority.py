@@ -17,6 +17,7 @@ import hashlib
 import json
 import os
 import tempfile
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -25,6 +26,7 @@ from typing import Final, Mapping
 
 from .learning_environment import EnvironmentIdentity, Episode
 from .monotonic_workspace_authority import (
+    AuthorityPhase,
     MonotonicWorkspaceAuthority,
     RecoveryDisposition,
 )
@@ -490,8 +492,8 @@ class DeploymentRuntimeAuthorityStore:
         ).hexdigest()
 
     @staticmethod
-    def _transaction_id(state_sha256: str) -> str:
-        return f"deployment-runtime-{_sha(state_sha256, 'state_sha256')}"
+    def _new_transaction_id() -> str:
+        return f"deployment-runtime-{uuid.uuid4().hex}"
 
     def _read_payload(self) -> dict[str, object]:
         try:
@@ -580,9 +582,9 @@ class DeploymentRuntimeAuthorityStore:
         payload: Mapping[str, object],
     ) -> None:
         state_sha256 = self._state_sha256(payload)
-        tx_id = self._transaction_id(state_sha256)
         history = self._authority.read_history()
         if not history:
+            tx_id = self._new_transaction_id()
             self._authority.prepare(
                 tx_id=tx_id,
                 observed_state_sha256=None,
@@ -596,10 +598,21 @@ class DeploymentRuntimeAuthorityStore:
             )
             return
 
+        latest = history[-1]
+        pending_tx_id = (
+            latest.tx_id
+            if latest.phase is AuthorityPhase.PREPARE
+            and latest.intended_state_sha256 == state_sha256
+            else None
+        )
         recovery = self._authority.recover(
             observed_state_sha256=state_sha256,
-            tx_id=tx_id,
-            semantic_binding_sha256=self._semantic_binding_sha256,
+            tx_id=pending_tx_id,
+            semantic_binding_sha256=(
+                self._semantic_binding_sha256
+                if pending_tx_id is not None
+                else None
+            ),
         )
         if recovery.disposition not in {
             RecoveryDisposition.CURRENT,
@@ -687,7 +700,7 @@ class DeploymentRuntimeAuthorityStore:
                 "records": [record.to_dict() for record in (*records, candidate)],
             }
             intended_sha256 = self._state_sha256(payload)
-            tx_id = self._transaction_id(intended_sha256)
+            tx_id = self._new_transaction_id()
             self._authority.prepare(
                 tx_id=tx_id,
                 observed_state_sha256=observed_sha256,

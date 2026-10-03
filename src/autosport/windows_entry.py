@@ -109,42 +109,42 @@ def _show_startup_error(message: str) -> None:
 def _run_owned_interactive_gui(workspace: Path) -> int:
     """Run the interactive WebView stack while caller holds workspace ownership."""
 
-from autosport.webview2_release_environment import (
-    active_webview2_environment_overrides,
-)
+    from autosport.webview2_release_environment import (
+        active_webview2_environment_overrides,
+    )
 
-if active_webview2_environment_overrides():
-    _show_startup_error(_WEBVIEW2_STARTUP_ERROR)
-    return 3
+    if active_webview2_environment_overrides():
+        _show_startup_error(_WEBVIEW2_STARTUP_ERROR)
+        return 3
 
-try:
-    from autosport.webview2_runtime_deployment import ensure_webview2_runtime
+    try:
+        from autosport.webview2_runtime_deployment import ensure_webview2_runtime
 
-    runtime_preflight = ensure_webview2_runtime()
-except Exception:
-    _show_startup_error(_WEBVIEW2_STARTUP_ERROR)
-    return 3
+        runtime_preflight = ensure_webview2_runtime()
+    except Exception:
+        _show_startup_error(_WEBVIEW2_STARTUP_ERROR)
+        return 3
 
-if runtime_preflight.available is not True:
-    _show_startup_error(_WEBVIEW2_STARTUP_ERROR)
-    return 3
+    if runtime_preflight.available is not True:
+        _show_startup_error(_WEBVIEW2_STARTUP_ERROR)
+        return 3
 
-from autosport.windows_webview_emergency_stop import EmergencyStopWebController
-from autosport.windows_webview_shell import (
-    AutosportWebBridge,
-    WindowsWebViewUnavailable,
-    launch_windows_shell,
-)
+    from autosport.windows_webview_emergency_stop import EmergencyStopWebController
+    from autosport.windows_webview_shell import (
+        AutosportWebBridge,
+        WindowsWebViewUnavailable,
+        launch_windows_shell,
+    )
 
-try:
-    controller = EmergencyStopWebController(workspace)
-    return launch_windows_shell(AutosportWebBridge(controller))
-except WindowsWebViewUnavailable as exc:
-    if getattr(exc, "reason", None) == "storage":
-        _show_startup_error(_WEBVIEW2_STORAGE_ERROR)
-        return 2
-    _show_startup_error(_WEBVIEW2_STARTUP_ERROR)
-    return 3
+    try:
+        controller = EmergencyStopWebController(workspace)
+        return launch_windows_shell(AutosportWebBridge(controller))
+    except WindowsWebViewUnavailable as exc:
+        if getattr(exc, "reason", None) == "storage":
+            _show_startup_error(_WEBVIEW2_STORAGE_ERROR)
+            return 2
+        _show_startup_error(_WEBVIEW2_STARTUP_ERROR)
+        return 3
 
 
 def _run_interactive_gui() -> int:

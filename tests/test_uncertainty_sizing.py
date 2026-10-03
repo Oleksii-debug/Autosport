@@ -4,6 +4,7 @@ import copy
 import unittest
 from decimal import Decimal, ROUND_UP, localcontext
 
+import autosport.uncertainty_sizing as uncertainty_sizing_module
 from autosport.uncertainty_sizing import (
     SizingAction,
     UncertaintySizingError,
@@ -590,6 +591,58 @@ class UncertaintySizingTests(unittest.TestCase):
             hostile.decision_fingerprint_sha256,
             reference.decision_fingerprint_sha256,
         )
+
+    def test_producer_authority_rejects_public_evaluator_rebind_before_dispatch(
+        self,
+    ) -> None:
+        original = uncertainty_sizing_module.evaluate_uncertainty_sizing
+        hostile_called = False
+
+        def hostile(evidence, request, policy):
+            nonlocal hostile_called
+            hostile_called = True
+            return original(evidence, request, policy)
+
+        uncertainty_sizing_module.evaluate_uncertainty_sizing = hostile
+        try:
+            with self.assertRaisesRegex(
+                UncertaintySizingError,
+                "producer authority changed",
+            ):
+                uncertainty_sizing_module.evaluate_authoritative_uncertainty_sizing(
+                    self._evidence(),
+                    self._request(),
+                    self._policy(),
+                )
+        finally:
+            uncertainty_sizing_module.evaluate_uncertainty_sizing = original
+
+        self.assertFalse(hostile_called)
+
+    def test_producer_authority_rejects_canonical_evaluator_code_mutation(
+        self,
+    ) -> None:
+        evaluator = uncertainty_sizing_module.evaluate_uncertainty_sizing
+        original_code = evaluator.__code__
+
+        def hostile_no_closure(evidence, request, policy):
+            raise AssertionError("hostile evaluator code executed")
+
+        self.assertEqual(evaluator.__code__.co_freevars, ())
+        self.assertEqual(hostile_no_closure.__code__.co_freevars, ())
+        try:
+            evaluator.__code__ = hostile_no_closure.__code__
+            with self.assertRaisesRegex(
+                UncertaintySizingError,
+                "producer authority changed",
+            ):
+                uncertainty_sizing_module.evaluate_authoritative_uncertainty_sizing(
+                    self._evidence(),
+                    self._request(),
+                    self._policy(),
+                )
+        finally:
+            evaluator.__code__ = original_code
 
 
 if __name__ == "__main__":

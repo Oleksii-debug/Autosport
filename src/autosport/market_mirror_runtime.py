@@ -7,7 +7,13 @@ from datetime import datetime, timedelta
 from threading import RLock
 
 from .domain import MarketEvent
-from .market_mirror import MarketMirror, MirrorApplyResult, MirrorSnapshot, MirrorUpdate
+from .market_mirror import (
+    MarketMirror,
+    MarketMirrorRevisionChanged,
+    MirrorApplyResult,
+    MirrorSnapshot,
+    MirrorUpdate,
+)
 from .storage import SQLiteMarketStore
 
 
@@ -116,21 +122,39 @@ class FocusedMirrorDependencyIndex:
             market_ids=self._selector(market_ids, name="market_ids"),
             selection_ids=self._selector(selection_ids, name="selection_ids"),
         )
-        initial_keys = {
-            (event.source_id, event.quote_key)
-            for event in self._mirror.snapshot()
-            if dependency.matches(event)
-        }
-        with self._lock:
-            if self._publication_input_guard is not None:
-                raise FocusedMirrorRegistryChanged(
-                    "focused mirror dependency mutation is blocked during decision publication"
-                )
-            if normalized_id in self._dependencies:
-                raise ValueError(f"input_id {normalized_id!r} is already registered")
-            self._dependencies[normalized_id] = dependency
-            self._matched_keys[normalized_id] = initial_keys
-        return dependency
+        # Registration must bind its initial matching-key set to one exact mirror
+        # revision. Otherwise an update can land after snapshot capture, be drained
+        # before this dependency exists, and leave the new input permanently missing
+        # a current matching quote until some unrelated later invalidation.
+        for _attempt in range(8):
+            captured = self._mirror.view()
+            initial_keys = {
+                (event.source_id, event.quote_key)
+                for event in captured.events
+                if dependency.matches(event)
+            }
+            try:
+                # Canonical lock order is mirror -> dependency registry, matching the
+                # live decision publication boundary.
+                with self._mirror.hold_revision(captured.revision):
+                    with self._lock:
+                        if self._publication_input_guard is not None:
+                            raise FocusedMirrorRegistryChanged(
+                                "focused mirror dependency mutation is blocked "
+                                "during decision publication"
+                            )
+                        if normalized_id in self._dependencies:
+                            raise ValueError(
+                                f"input_id {normalized_id!r} is already registered"
+                            )
+                        self._dependencies[normalized_id] = dependency
+                        self._matched_keys[normalized_id] = initial_keys
+                    return dependency
+            except MarketMirrorRevisionChanged:
+                continue
+        raise FocusedMirrorRegistryChanged(
+            "market mirror did not stabilize during focused dependency registration"
+        )
 
     def unregister(self, input_id: str) -> bool:
         normalized_id = self._input_id(input_id)

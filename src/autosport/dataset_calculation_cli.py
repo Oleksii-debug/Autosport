@@ -24,21 +24,89 @@ SUPPORTED_OPERATIONS = (
 def add_parser(subparsers: argparse._SubParsersAction) -> None:
     parser = subparsers.add_parser(
         "calculate-dataset-quote",
-        help="calculate one exact selected quote from a verified sealed dataset",
+        help="обчислити один точно вибраний коефіцієнт із перевіреного запечатаного набору даних",
     )
-    parser.add_argument("path", type=Path)
-    parser.add_argument("--event-id", required=True)
-    parser.add_argument("--market-id", required=True)
-    parser.add_argument("--selection-id", required=True)
-    parser.add_argument("--source-id", required=True)
-    parser.add_argument("--sequence", type=int, required=True)
-    parser.add_argument("--cutoff", required=True)
-    parser.add_argument("--operation", choices=SUPPORTED_OPERATIONS, required=True)
-    parser.add_argument("--probability")
-    parser.add_argument("--stake", default="1")
-    parser.add_argument("--fraction", default="1")
-    parser.add_argument("--cap", default="1")
-    parser.add_argument("--format", choices=("text", "json"), default="text")
+    parser.add_argument(
+        "path",
+        type=Path,
+        metavar="ШЛЯХ",
+        help="шлях до перевіреного запечатаного набору даних",
+    )
+    parser.add_argument(
+        "--event-id",
+        required=True,
+        metavar="ID_ПОДІЇ",
+        help="точний ідентифікатор події",
+    )
+    parser.add_argument(
+        "--market-id",
+        required=True,
+        metavar="ID_РИНКУ",
+        help="точний ідентифікатор ринку",
+    )
+    parser.add_argument(
+        "--selection-id",
+        required=True,
+        metavar="ID_ВИБОРУ",
+        help="точний ідентифікатор вибору",
+    )
+    parser.add_argument(
+        "--source-id",
+        required=True,
+        metavar="ID_ДЖЕРЕЛА",
+        help="точний ідентифікатор джерела котирування",
+    )
+    parser.add_argument(
+        "--sequence",
+        type=int,
+        required=True,
+        metavar="ПОСЛІДОВНІСТЬ",
+        help="точний номер послідовності котирування",
+    )
+    parser.add_argument(
+        "--cutoff",
+        required=True,
+        metavar="ЧАС_ВІДСІЧЕННЯ",
+        help="каузальний час відсічення у форматі ISO-8601 з часовим поясом",
+    )
+    parser.add_argument(
+        "--operation",
+        choices=SUPPORTED_OPERATIONS,
+        required=True,
+        metavar="ОПЕРАЦІЯ",
+        help=("операція обчислення: odds-conversion, implied-probability, "
+            "expected-return, paper-payout або fractional-kelly"),
+    )
+    parser.add_argument(
+        "--probability",
+        metavar="ЙМОВІРНІСТЬ",
+        help="десяткове значення ймовірності для операцій, яким воно потрібне",
+    )
+    parser.add_argument(
+        "--stake",
+        default="1",
+        metavar="СТАВКА",
+        help="десяткове значення ставки; типово: 1",
+    )
+    parser.add_argument(
+        "--fraction",
+        default="1",
+        metavar="ЧАСТКА",
+        help="десяткова частка Келлі; типово: 1",
+    )
+    parser.add_argument(
+        "--cap",
+        default="1",
+        metavar="ЛІМІТ",
+        help="десятковий верхній ліміт частки; типово: 1",
+    )
+    parser.add_argument(
+        "--format",
+        choices=("text", "json"),
+        default="text",
+        metavar="ФОРМАТ",
+        help="формат виводу: text або json; типово: text",
+    )
 
 
 def _timestamp(value: str, field: str) -> datetime:

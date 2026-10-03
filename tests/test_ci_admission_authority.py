@@ -130,3 +130,86 @@ def test_admission_rejects_preentry_snapshot_helper_rebind(monkeypatch) -> None:
         )
 
     assert forged_calls == []
+
+
+def test_main_admission_does_not_trust_rebound_positive_int_helper(
+    monkeypatch,
+) -> None:
+    requested: list[int] = []
+
+    def live_pr_qualification(self, pr_number: int) -> tuple[str, bool]:
+        del self
+        requested.append(pr_number)
+        return HEAD_B, True
+
+    monkeypatch.setattr(
+        controller_module.GitHubApi,
+        "live_pr_qualification",
+        live_pr_qualification,
+    )
+    monkeypatch.setattr(
+        controller_module,
+        "_require_positive_int",
+        lambda _value, *, field: 999,
+    )
+    monkeypatch.setenv("GITHUB_REPOSITORY", "owner/repo")
+    monkeypatch.setenv("GITHUB_TOKEN", "token")
+
+    assert controller_module.main(
+        [
+            "--pr-number",
+            "2008",
+            "--event-head-sha",
+            HEAD_B,
+            "--workflow-name",
+            "CI",
+            "--current-run-id",
+            "123",
+            "--admission-only",
+        ]
+    ) == 0
+
+    assert requested == [2008]
+
+
+def test_main_rejects_output_writer_rebind_from_live_qualification(
+    monkeypatch,
+) -> None:
+    forged_calls: list[object] = []
+
+    def forged_output_writer(result: object) -> None:
+        forged_calls.append(result)
+
+    def live_pr_qualification(self, pr_number: int) -> tuple[str, bool]:
+        del self
+        assert pr_number == 2008
+        monkeypatch.setattr(
+            controller_module,
+            "_write_github_output",
+            forged_output_writer,
+        )
+        return HEAD_B, True
+
+    monkeypatch.setattr(
+        controller_module.GitHubApi,
+        "live_pr_qualification",
+        live_pr_qualification,
+    )
+    monkeypatch.setenv("GITHUB_REPOSITORY", "owner/repo")
+    monkeypatch.setenv("GITHUB_TOKEN", "token")
+
+    assert controller_module.main(
+        [
+            "--pr-number",
+            "2008",
+            "--event-head-sha",
+            HEAD_B,
+            "--workflow-name",
+            "CI",
+            "--current-run-id",
+            "123",
+            "--admission-only",
+        ]
+    ) == 2
+
+    assert forged_calls == []

@@ -824,6 +824,102 @@ def test_checkpoint_publication_failure_leaves_recoverable_pristine_runtime_pref
     assert recovered.authority_generation_sha256 == checkpoint.generation_sha256
 
 
+def test_pristine_runtime_disappearing_during_recovery_does_not_commit_checkpoint(
+    tmp_path,
+):
+    identity, opponent = _canonical_stores(tmp_path)
+    checkpoint_path, runtime_path = _paths(tmp_path)
+
+    with patch(
+        "autosport.sport_memory_checkpoint.atomic_write_json",
+        side_effect=OSError("checkpoint publication failed"),
+    ):
+        with pytest.raises(
+            SportMemoryCheckpointError,
+            match="cannot persist sport-memory authority checkpoint",
+        ):
+            initialize_or_open_bound_sport_memory_runtime(
+                runtime_path,
+                checkpoint_path,
+                identity,
+                opponent,
+            )
+
+    assert runtime_path.is_file()
+    assert not checkpoint_path.exists()
+    original_runtime = checkpoint_module.SportMemoryRuntime
+
+    def delete_then_construct(*args, **kwargs):
+        runtime_path.unlink()
+        return original_runtime(*args, **kwargs)
+
+    with patch(
+        "autosport.sport_memory_checkpoint.SportMemoryRuntime",
+        side_effect=delete_then_construct,
+    ):
+        with pytest.raises(
+            SportMemoryCheckpointError,
+            match="runtime disappeared during checkpoint recovery",
+        ):
+            initialize_or_open_bound_sport_memory_runtime(
+                runtime_path,
+                checkpoint_path,
+                identity,
+                opponent,
+            )
+
+    assert not runtime_path.exists()
+    assert not checkpoint_path.exists()
+
+
+def test_verified_pristine_runtime_cannot_disappear_before_checkpoint_publication(
+    tmp_path,
+):
+    identity, opponent = _canonical_stores(tmp_path)
+    checkpoint_path, runtime_path = _paths(tmp_path)
+
+    with patch(
+        "autosport.sport_memory_checkpoint.atomic_write_json",
+        side_effect=OSError("checkpoint publication failed"),
+    ):
+        with pytest.raises(
+            SportMemoryCheckpointError,
+            match="cannot persist sport-memory authority checkpoint",
+        ):
+            initialize_or_open_bound_sport_memory_runtime(
+                runtime_path,
+                checkpoint_path,
+                identity,
+                opponent,
+            )
+
+    assert runtime_path.is_file()
+    assert not checkpoint_path.exists()
+    original_verify = checkpoint_module._verify_pristine_runtime_without_checkpoint
+
+    def verify_then_delete(*args, **kwargs):
+        original_verify(*args, **kwargs)
+        runtime_path.unlink()
+
+    with patch(
+        "autosport.sport_memory_checkpoint._verify_pristine_runtime_without_checkpoint",
+        side_effect=verify_then_delete,
+    ):
+        with pytest.raises(
+            SportMemoryCheckpointError,
+            match="runtime disappeared before authority checkpoint publication",
+        ):
+            initialize_or_open_bound_sport_memory_runtime(
+                runtime_path,
+                checkpoint_path,
+                identity,
+                opponent,
+            )
+
+    assert not runtime_path.exists()
+    assert not checkpoint_path.exists()
+
+
 def test_non_pristine_runtime_without_checkpoint_cannot_reissue_authority(tmp_path):
     identity, opponent = _canonical_stores(tmp_path, populated=True)
     checkpoint_path, runtime_path = _paths(tmp_path)

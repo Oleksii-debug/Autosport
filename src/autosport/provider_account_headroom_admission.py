@@ -444,7 +444,7 @@ class ProviderAccountHeadroomAssessment:
             )
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, weakref_slot=True)
 class ProductInternalHeadroomReservation:
     assessment_sha256: str
     attempt_id: str
@@ -452,7 +452,6 @@ class ProductInternalHeadroomReservation:
     reserved_at: str
     post_reservation_ledger_sha256: str
     post_reservation_event_count: int
-    product_internal_reservation_proven: bool = True
     provider_atomicity_proven: bool = False
     execution_authority: bool = False
     real_money_readiness: bool = False
@@ -473,10 +472,6 @@ class ProductInternalHeadroomReservation:
             raise ProviderAccountHeadroomError(
                 "post_reservation_event_count must be non-negative exact int"
             )
-        if self.product_internal_reservation_proven is not True:
-            raise ProviderAccountHeadroomError(
-                "product_internal_reservation_proven must be exactly true"
-            )
         if (
             self.provider_atomicity_proven is not False
             or self.execution_authority is not False
@@ -487,12 +482,71 @@ class ProductInternalHeadroomReservation:
                 "or real-money readiness"
             )
 
+    @property
+    def product_internal_reservation_proven(self) -> bool:
+        return _reservation_is_issued(self)
+
 
 _ISSUED_LOCK = threading.RLock()
 _ISSUED: dict[
     int,
     tuple[weakref.ReferenceType[ProviderAccountHeadroomAssessment], str],
 ] = {}
+_RESERVATION_ISSUED_LOCK = threading.RLock()
+_RESERVATION_ISSUED: dict[
+    int,
+    tuple[weakref.ReferenceType[ProductInternalHeadroomReservation], str],
+] = {}
+
+
+def _reservation_digest(value: ProductInternalHeadroomReservation) -> str:
+    return _canonical_digest(
+        {
+            "schema": "autosport.product_internal_headroom_reservation",
+            "assessment_sha256": value.assessment_sha256,
+            "attempt_id": value.attempt_id,
+            "attempt_fingerprint": value.attempt_fingerprint,
+            "reserved_at": value.reserved_at,
+            "post_reservation_ledger_sha256": value.post_reservation_ledger_sha256,
+            "post_reservation_event_count": value.post_reservation_event_count,
+            "provider_atomicity_proven": value.provider_atomicity_proven,
+            "execution_authority": value.execution_authority,
+            "real_money_readiness": value.real_money_readiness,
+        }
+    )
+
+
+def _issue_reservation(value: ProductInternalHeadroomReservation) -> None:
+    key = id(value)
+    digest = _reservation_digest(value)
+
+    def cleanup(
+        reference: weakref.ReferenceType[ProductInternalHeadroomReservation],
+    ) -> None:
+        with _RESERVATION_ISSUED_LOCK:
+            current = _RESERVATION_ISSUED.get(key)
+            if current is not None and current[0] is reference:
+                _RESERVATION_ISSUED.pop(key, None)
+
+    reference = weakref.ref(value, cleanup)
+    with _RESERVATION_ISSUED_LOCK:
+        _RESERVATION_ISSUED[key] = (reference, digest)
+
+
+def _reservation_is_issued(value: ProductInternalHeadroomReservation) -> bool:
+    if type(value) is not ProductInternalHeadroomReservation:
+        return False
+    try:
+        digest = _reservation_digest(value)
+    except (ProviderAccountHeadroomError, TypeError, ValueError):
+        return False
+    with _RESERVATION_ISSUED_LOCK:
+        current = _RESERVATION_ISSUED.get(id(value))
+        return (
+            current is not None
+            and current[0]() is value
+            and current[1] == digest
+        )
 
 
 def _assessment_payload(value: ProviderAccountHeadroomAssessment) -> dict[str, object]:
@@ -911,7 +965,7 @@ def reserve_observed_provider_headroom(
         ) from exc
 
     post = verified_snapshot(ledger)
-    return ProductInternalHeadroomReservation(
+    reservation = ProductInternalHeadroomReservation(
         assessment_sha256=assessment.evidence_sha256,
         attempt_id=attempt.attempt_id,
         attempt_fingerprint=attempt.effect_fingerprint,
@@ -919,3 +973,5 @@ def reserve_observed_provider_headroom(
         post_reservation_ledger_sha256=post.sha256,
         post_reservation_event_count=post.event_count,
     )
+    _issue_reservation(reservation)
+    return reservation

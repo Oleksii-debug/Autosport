@@ -1005,17 +1005,14 @@ def test_worse_than_requested_standard_back_limit_is_unknown_contradiction() -> 
         )
 
 
-def test_processed_with_errors_single_success_maps_partial_exactly() -> None:
+def test_processed_with_errors_single_success_is_unknown() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
         transport = _Transport(
             lambda request: _response(
                 request,
                 execution_status="PROCESSED_WITH_ERRORS",
-                matched=(
-                    action.requested_stake
-                    / Decimal("2")
-                ),
+                matched=action.requested_stake / Decimal("2"),
                 average=action.requested_odds,
                 order_status="EXECUTION_COMPLETE",
             )
@@ -1027,18 +1024,56 @@ def test_processed_with_errors_single_success_maps_partial_exactly() -> None:
             bound,
             approval,
             action_id=action.action_id,
-            attempt_id="attempt-partial",
+            attempt_id="attempt-processed-with-errors-success",
             profile=profile,
             client=client,
             clock=lambda: SUBMITTED_AT,
         )
 
-        assert result.outcome is PlaceOrdersOutcome.PARTIAL
-        assert result.attempt_state is AttemptState.PARTIAL
+        assert result.outcome is PlaceOrdersOutcome.UNKNOWN
+        assert result.attempt_state is AttemptState.UNKNOWN
+        assert result.evidence_id is None
+        assert result.external_receipt_id is None
         assert not ledger.can_retry_action(
             plan_id=bound.execution_plan.plan_id,
             action_id=action.action_id,
         )
+
+
+def test_success_report_with_root_error_code_is_unknown() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
+
+        def contradictory_success_response(request: dict[str, object]) -> bytes:
+            payload = json.loads(
+                _response(
+                    request,
+                    matched=action.requested_stake,
+                    average=action.requested_odds,
+                    order_status="EXECUTION_COMPLETE",
+                ).decode("utf-8")
+            )
+            payload["result"]["errorCode"] = "BET_ACTION_ERROR"
+            return json.dumps(payload).encode("utf-8")
+
+        transport = _Transport(contradictory_success_response)
+        client = _enabled_client(profile, transport, store=goal_store)
+
+        result = execute_betfair_supervised_action(
+            ledger,
+            bound,
+            approval,
+            action_id=action.action_id,
+            attempt_id="attempt-success-root-error",
+            profile=profile,
+            client=client,
+            clock=lambda: SUBMITTED_AT,
+        )
+
+        assert result.outcome is PlaceOrdersOutcome.UNKNOWN
+        assert result.attempt_state is AttemptState.UNKNOWN
+        assert result.evidence_id is None
+        assert result.external_receipt_id is None
 
 
 @pytest.mark.parametrize(

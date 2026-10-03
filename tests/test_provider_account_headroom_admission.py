@@ -2533,3 +2533,35 @@ def test_issued_assessment_exact_state_cannot_be_hidden_by_digest_rebinding(
             attempt_id="mutated-issued-assessment",
         )
 
+def test_economic_goal_path_read_rebinding_cannot_supply_forged_goal(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    acquired, _ = _acquire_balance(monkeypatch, tmp_path, "100")
+    target = _plan("target", _action("target-action", "10"))
+    ledger = _ledger_with_plans(tmp_path, target)
+    hostile_calls: list[object] = []
+
+    def hostile_read_text(self, *args, **kwargs):
+        hostile_calls.append((self, args, kwargs))
+        raise AssertionError("hostile economic-goal file read executed")
+
+    monkeypatch.setattr(
+        headroom_module._economic_goal_store.Path,
+        "read_text",
+        hostile_read_text,
+    )
+
+    with pytest.raises(
+        ProviderAccountHeadroomError,
+        match="canonical monetary denomination authority changed",
+    ):
+        _assess(
+            ledger,
+            acquired,
+            plan_id="target",
+            action_id="target-action",
+        )
+
+    assert hostile_calls == []
+

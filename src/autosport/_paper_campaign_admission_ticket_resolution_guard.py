@@ -36,7 +36,7 @@ def _sealed_tuple_from_callable(candidate: object):
             value = cell.cell_contents
         except ValueError:
             continue
-        if type(value) is tuple and len(value) == 15 and value[0] == _SEAL_MARKER:
+        if type(value) is tuple and len(value) == 16 and value[0] == _SEAL_MARKER:
             return value
     return None
 
@@ -65,6 +65,13 @@ def _initial_seal():
         ),
         WeakKeyDictionary(),
         RLock(),
+        (
+            _admission_module.json,
+            _admission_module.json.dumps,
+            _admission_module.json.loads,
+            _admission_module.hashlib,
+            _admission_module.hashlib.sha256,
+        ),
     )
 
 
@@ -86,6 +93,26 @@ def _build_guard(seal):
     forward_context_code = forward_context_reader[1]
     path_bindings = seal[13]
     path_bindings_lock = seal[14]
+    admission_dispatch = seal[15]
+    canonical_json = admission_dispatch[0]
+    canonical_json_dumps = admission_dispatch[1]
+    canonical_json_loads = admission_dispatch[2]
+    canonical_hashlib = admission_dispatch[3]
+    canonical_sha256 = admission_dispatch[4]
+    admission_globals = _admission_module.__dict__
+    protected_builtin_names = frozenset(
+        {
+            "any",
+            "bool",
+            "dict",
+            "isinstance",
+            "len",
+            "set",
+            "str",
+            "tuple",
+            "type",
+        }
+    )
     path_cls = Path
 
     def reject_instance_shadow(value: object, method_name: str) -> None:
@@ -134,6 +161,20 @@ def _build_guard(seal):
     def assert_entry_points(self: PaperCampaignAdmissionCoordinator) -> None:
         if seal[0] != seal_marker:
             raise RuntimeError("PAPER admission ticket-resolution seal changed")
+        if any(name in admission_globals for name in protected_builtin_names):
+            raise PaperCampaignAdmissionError(
+                "PAPER admission builtin dispatch changed after guard installation"
+            )
+        if (
+            _admission_module.json is not canonical_json
+            or canonical_json.dumps is not canonical_json_dumps
+            or canonical_json.loads is not canonical_json_loads
+            or _admission_module.hashlib is not canonical_hashlib
+            or canonical_hashlib.sha256 is not canonical_sha256
+        ):
+            raise PaperCampaignAdmissionError(
+                "PAPER admission digest/JSON authority changed after guard installation"
+            )
         if coordinator_cls.__init__ is not guarded_init:
             raise PaperCampaignAdmissionError(
                 "PAPER admission construction authority changed after guard installation"

@@ -381,6 +381,7 @@ class PaperCampaignAdmissionCoordinator(_base.PaperCampaignAdmissionCoordinator)
         adoption = record_payload.get("paper_execution")
         if not isinstance(adoption, Mapping):
             return False
+        intent_evidence_json = adoption.get("intent_evidence_json")
         return (
             adoption.get("schema") == _EXECUTION_ADOPTION_SCHEMA
             and adoption.get("schema_version") == _EXECUTION_ADOPTION_SCHEMA_VERSION
@@ -388,8 +389,8 @@ class PaperCampaignAdmissionCoordinator(_base.PaperCampaignAdmissionCoordinator)
             and adoption.get("plan_fingerprint") == reservation["plan_fingerprint"]
             and adoption.get("model_fingerprint") == reservation["model_fingerprint"]
             and adoption.get("run_id") == run_id
-            and type(adoption.get("intent_evidence_json")) is str
-            and bool(str(adoption.get("intent_evidence_json")).strip())
+            and type(intent_evidence_json) is str
+            and intent_evidence_json.strip() != ""
         )
 
     @staticmethod
@@ -747,7 +748,7 @@ class PaperCampaignAdmissionCoordinator(_base.PaperCampaignAdmissionCoordinator)
             else (
                 (
                     _FORWARD_VERIFICATION_ACTION_PARAMETER,
-                    str(forward_verification["receipt_sha256"]),
+                    forward_verification["receipt_sha256"],
                 ),
             )
         )

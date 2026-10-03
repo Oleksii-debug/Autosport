@@ -440,3 +440,58 @@ def test_forward_authority_revalidates_before_journal_mutation(tmp_path):
 
     assert state_path.read_bytes() == before
     assert _admissions(fixture) == {}
+
+
+@pytest.mark.parametrize("name", ["str", "bool", "type", "len", "dict", "tuple"])
+def test_legacy_admit_rejects_admission_builtin_shadow_before_authority_dispatch(
+    tmp_path,
+    monkeypatch,
+    name,
+):
+    fixture = AdmissionFixture(tmp_path)
+    coordinator = fixture.coordinator()
+    hostile_calls: list[str] = []
+
+    def hostile(*_args, **_kwargs):
+        hostile_calls.append(name)
+        raise AssertionError(f"hostile {name} executed")
+
+    monkeypatch.setattr(admission_module, name, hostile, raising=False)
+    with pytest.raises(
+        PaperCampaignAdmissionError,
+        match="builtin dispatch changed",
+    ):
+        fixture.admit(coordinator)
+
+    assert hostile_calls == []
+    assert _admissions(fixture) == {}
+
+
+@pytest.mark.parametrize(
+    ("surface", "attribute"),
+    [("json", "dumps"), ("json", "loads"), ("hashlib", "sha256")],
+)
+def test_legacy_admit_rejects_digest_json_surface_rebind_before_authority_dispatch(
+    tmp_path,
+    monkeypatch,
+    surface,
+    attribute,
+):
+    fixture = AdmissionFixture(tmp_path)
+    coordinator = fixture.coordinator()
+    hostile_calls: list[str] = []
+
+    def hostile(*_args, **_kwargs):
+        hostile_calls.append(attribute)
+        raise AssertionError(f"hostile {surface}.{attribute} executed")
+
+    owner = getattr(admission_module, surface)
+    monkeypatch.setattr(owner, attribute, hostile)
+    with pytest.raises(
+        PaperCampaignAdmissionError,
+        match="digest/JSON authority changed",
+    ):
+        fixture.admit(coordinator)
+
+    assert hostile_calls == []
+    assert _admissions(fixture) == {}

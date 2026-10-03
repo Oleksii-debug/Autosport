@@ -12,9 +12,11 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, localcontext
 from enum import Enum
+from functools import lru_cache
 import hashlib
 import json
 import os
+import sys
 import threading
 import weakref
 
@@ -2285,26 +2287,59 @@ def reserve_observed_provider_headroom(
     return reservation
 
 def _install_headroom_issuance_authority() -> None:
-    assessment_lock = threading.RLock()
     assessment_fields = tuple(ProviderAccountHeadroomAssessment.__dataclass_fields__)
     reservation_fields = tuple(ProductInternalHeadroomReservation.__dataclass_fields__)
-    assessment_issued: dict[
-        int,
-        tuple[weakref.ReferenceType[ProviderAccountHeadroomAssessment], tuple[object, ...]],
-    ] = {}
-    reservation_lock = threading.RLock()
-    reservation_issued: dict[
-        int,
-        tuple[
-            weakref.ReferenceType[ProductInternalHeadroomReservation],
-            tuple[object, ...],
-        ],
-    ] = {}
-
     raw_assess = assess_provider_account_headroom
     raw_reserve = reserve_observed_provider_headroom
     digest_authority = _assert_headroom_digest_authority
     digest_authority_code = getattr(digest_authority, "__code__", None)
+    getframe = sys._getframe
+
+    class _IdentityWeakRef:
+        """Hashable weak identity key that never equates distinct equal dataclasses."""
+
+        __slots__ = ("_identity", "_reference")
+
+        def __init__(self, value: object) -> None:
+            self._identity = id(value)
+            self._reference = weakref.ref(value)
+
+        def __hash__(self) -> int:
+            return self._identity
+
+        def __eq__(self, other: object) -> bool:
+            if type(other) is not _IdentityWeakRef:
+                return False
+            return self._reference() is other._reference()
+
+        def resolve(self) -> object | None:
+            return self._reference()
+
+    assessment_issuer_code = None
+    reservation_issuer_code = None
+
+    @lru_cache(maxsize=4096)
+    def assessment_issuance(
+        reference: _IdentityWeakRef,
+        state: tuple[object, ...],
+    ) -> bool:
+        # The bounded C-backed cache is intentionally the only retained issuance
+        # memory.  There is no Python dict/list/set registry for closure traversal to
+        # mutate.  Cache misses can become positive only when reached directly from
+        # the canonical assessment wrapper; reserve/assertion paths can only consume a
+        # prior positive entry for the exact live object identity + exact state.
+        if reference.resolve() is None:
+            return False
+        return getframe(1).f_code is assessment_issuer_code
+
+    @lru_cache(maxsize=4096)
+    def reservation_issuance(
+        reference: _IdentityWeakRef,
+        state: tuple[object, ...],
+    ) -> bool:
+        if reference.resolve() is None:
+            return False
+        return getframe(1).f_code is reservation_issuer_code
 
     def require_digest_authority() -> None:
         if getattr(digest_authority, "__code__", None) is not digest_authority_code:
@@ -2323,29 +2358,6 @@ def _install_headroom_issuance_authority() -> None:
     ) -> tuple[object, ...]:
         return tuple(getattr(value, field) for field in reservation_fields)
 
-    def issue_assessment(value: ProviderAccountHeadroomAssessment) -> None:
-        require_digest_authority()
-        digest = _assessment_digest(value)
-        if digest != value.evidence_sha256:
-            raise ProviderAccountHeadroomError(
-                "headroom assessment identity changed before canonical issuance"
-            )
-        identity = id(value)
-
-        def clear(
-            reference: weakref.ReferenceType[ProviderAccountHeadroomAssessment],
-            *,
-            _identity: int = identity,
-        ) -> None:
-            with assessment_lock:
-                current = assessment_issued.get(_identity)
-                if current is not None and current[0] is reference:
-                    assessment_issued.pop(_identity, None)
-
-        reference = weakref.ref(value, clear)
-        with assessment_lock:
-            assessment_issued[identity] = (reference, assessment_state(value))
-
     def assert_issued(value: ProviderAccountHeadroomAssessment) -> None:
         if type(value) is not ProviderAccountHeadroomAssessment:
             raise ProviderAccountHeadroomError(
@@ -2358,36 +2370,17 @@ def _install_headroom_issuance_authority() -> None:
             raise ProviderAccountHeadroomError(
                 "headroom assessment identity is invalid"
             ) from exc
-        with assessment_lock:
-            current = assessment_issued.get(id(value))
         if (
-            current is None
-            or current[0]() is not value
-            or current[1] != assessment_state(value)
-            or value.evidence_sha256 != digest
+            value.evidence_sha256 != digest
+            or assessment_issuance(
+                _IdentityWeakRef(value),
+                assessment_state(value),
+            )
+            is not True
         ):
             raise ProviderAccountHeadroomError(
                 "headroom assessment was not canonically issued"
             )
-
-    def issue_reservation(value: ProductInternalHeadroomReservation) -> None:
-        require_digest_authority()
-        _reservation_digest(value)
-        identity = id(value)
-
-        def clear(
-            reference: weakref.ReferenceType[ProductInternalHeadroomReservation],
-            *,
-            _identity: int = identity,
-        ) -> None:
-            with reservation_lock:
-                current = reservation_issued.get(_identity)
-                if current is not None and current[0] is reference:
-                    reservation_issued.pop(_identity, None)
-
-        reference = weakref.ref(value, clear)
-        with reservation_lock:
-            reservation_issued[identity] = (reference, reservation_state(value))
 
     def reservation_is_issued(value: ProductInternalHeadroomReservation) -> bool:
         if type(value) is not ProductInternalHeadroomReservation:
@@ -2397,12 +2390,12 @@ def _install_headroom_issuance_authority() -> None:
             _reservation_digest(value)
         except (ProviderAccountHeadroomError, TypeError, ValueError):
             return False
-        with reservation_lock:
-            current = reservation_issued.get(id(value))
         return (
-            current is not None
-            and current[0]() is value
-            and current[1] == reservation_state(value)
+            reservation_issuance(
+                _IdentityWeakRef(value),
+                reservation_state(value),
+            )
+            is True
         )
 
     def authoritative_assess(
@@ -2422,7 +2415,22 @@ def _install_headroom_issuance_authority() -> None:
             bound_plans=bound_plans,
             intents=intents,
         )
-        issue_assessment(value)
+        require_digest_authority()
+        digest = _assessment_digest(value)
+        if digest != value.evidence_sha256:
+            raise ProviderAccountHeadroomError(
+                "headroom assessment identity changed before canonical issuance"
+            )
+        if (
+            assessment_issuance(
+                _IdentityWeakRef(value),
+                assessment_state(value),
+            )
+            is not True
+        ):
+            raise ProviderAccountHeadroomError(
+                "canonical headroom assessment issuance authority changed"
+            )
         return value
 
     def authoritative_reserve(
@@ -2443,8 +2451,22 @@ def _install_headroom_issuance_authority() -> None:
             bound_plans=bound_plans,
             intents=intents,
         )
-        issue_reservation(value)
+        require_digest_authority()
+        _reservation_digest(value)
+        if (
+            reservation_issuance(
+                _IdentityWeakRef(value),
+                reservation_state(value),
+            )
+            is not True
+        ):
+            raise ProviderAccountHeadroomError(
+                "canonical headroom reservation issuance authority changed"
+            )
         return value
+
+    assessment_issuer_code = authoritative_assess.__code__
+    reservation_issuer_code = authoritative_reserve.__code__
 
     setattr(
         ProductInternalHeadroomReservation,

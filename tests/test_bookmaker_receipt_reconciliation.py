@@ -13,9 +13,17 @@ from autosport.bookmaker_routing import (
 from autosport.bookmaker_receipt_reconciliation import (
     bind_leg_receipt,
     reconcile_equal_split_residual,
+    reconcile_equal_split_residual_against_ledger,
 )
 from autosport.bookmaker_routing_plan import plan_equal_split_residual
 from autosport.opportunity import QuoteRef
+from autosport.real_execution_ledger import (
+    AcknowledgementStatus,
+    ExecutionAction,
+    ExecutionPlan,
+    ExternalAcknowledgement,
+    RealExecutionLedger,
+)
 
 
 _REQUEST_ID = "route-request-receipts-1"
@@ -62,6 +70,94 @@ def _reconcile(
         routing_request_id=_REQUEST_ID,
         parent_plan_id=_PLAN_ID,
         stake_quantum=Decimal("0.01"),
+    )
+
+
+def _execution_plan(initial) -> ExecutionPlan:
+    actions = tuple(
+        ExecutionAction(
+            action_id=leg.leg_id,
+            bookmaker_id=leg.venue.venue_id,
+            account_id=leg.venue.account_id,
+            event_id=leg.venue.quote.event_id,
+            market_id=leg.venue.quote.market_id,
+            selection_id=leg.venue.quote.selection_id,
+            side="BACK",
+            requested_odds=leg.venue.quote.decimal_odds,
+            requested_stake=leg.proposed_stake,
+            quote_id=leg.venue.quote.market_event_hash,
+            quote_observed_at=leg.venue.quote.observed_ts,
+            expires_at="2026-09-17T01:50:00+00:00",
+        )
+        for leg in initial.legs
+    )
+    return ExecutionPlan(
+        plan_id=_PLAN_ID,
+        bookmaker_profile_version="receipt-crosscheck-v1",
+        decision_id="routing-decision-1",
+        approval_id="routing-approval-1",
+        created_at="2026-09-17T01:41:00+00:00",
+        actions=actions,
+    )
+
+
+def _ledger_for_initial(tmp_path, initial) -> RealExecutionLedger:
+    ledger = RealExecutionLedger(tmp_path / "real-execution.jsonl")
+    ledger.reserve_plan(_execution_plan(initial))
+    return ledger
+
+
+def _acknowledge_leg(
+    ledger: RealExecutionLedger,
+    leg,
+    *,
+    attempt_id: str,
+    receipt_id: str,
+    status: AcknowledgementStatus,
+    accepted_stake: Decimal | None = None,
+) -> None:
+    ledger.begin_attempt(
+        plan_id=_PLAN_ID,
+        action_id=leg.leg_id,
+        attempt_id=attempt_id,
+        reserved_at="2026-09-17T01:42:00+00:00",
+    )
+    ledger.mark_submitted(
+        attempt_id,
+        submitted_at="2026-09-17T01:43:00+00:00",
+    )
+    ledger.acknowledge(
+        ExternalAcknowledgement(
+            attempt_id=attempt_id,
+            external_receipt_id=receipt_id,
+            status=status,
+            acknowledged_at="2026-09-17T01:44:00+00:00",
+            accepted_odds=(
+                leg.venue.quote.decimal_odds
+                if status in {
+                    AcknowledgementStatus.ACCEPTED,
+                    AcknowledgementStatus.PARTIAL,
+                }
+                else None
+            ),
+            accepted_stake=accepted_stake,
+        )
+    )
+
+
+def _reconcile_against_ledger(
+    venues: tuple[VenueQuote, ...],
+    receipts,
+    ledger: RealExecutionLedger,
+):
+    return reconcile_equal_split_residual_against_ledger(
+        Decimal("100.00"),
+        venues,
+        receipts,
+        routing_request_id=_REQUEST_ID,
+        parent_plan_id=_PLAN_ID,
+        stake_quantum=Decimal("0.01"),
+        ledger=ledger,
     )
 
 
@@ -266,3 +362,261 @@ def test_receipt_bound_partial_refusal_then_residual_acceptance_completes_parent
     assert final.residual_before == Decimal("0")
     assert final.proposed_total == Decimal("0")
     assert final.legs == ()
+
+
+def test_ledger_backed_partial_acceptance_requires_owned_receipt(tmp_path) -> None:
+    a, b = _venue("book-a", "acct-a"), _venue("book-b", "acct-b")
+    initial = _initial((a, b))
+    receipt = bind_leg_receipt(
+        initial.legs[0],
+        effect=ExternalEffect.ACCEPTED,
+        external_receipt_id="external-a-partial",
+        confirmed_accepted=Decimal("40.00"),
+    )
+    ledger = _ledger_for_initial(tmp_path, initial)
+    _acknowledge_leg(
+        ledger,
+        initial.legs[0],
+        attempt_id="attempt-a-1",
+        receipt_id="external-a-partial",
+        status=AcknowledgementStatus.PARTIAL,
+        accepted_stake=Decimal("40.00"),
+    )
+
+    reconciled = _reconcile_against_ledger((a, b), (receipt,), ledger)
+    assert reconciled.confirmed_total == Decimal("40.00")
+    assert reconciled.residual_before == Decimal("60.00")
+    assert reconciled.state is RoutingState.BLOCKED_UNKNOWN
+    assert reconciled.proposed_total == Decimal("0")
+    assert reconciled.legs == ()
+
+
+def test_ledger_backed_reconciliation_rejects_forged_receipt(tmp_path) -> None:
+    a, b = _venue("book-a", "acct-a"), _venue("book-b", "acct-b")
+    initial = _initial((a, b))
+    ledger = _ledger_for_initial(tmp_path, initial)
+    _acknowledge_leg(
+        ledger,
+        initial.legs[0],
+        attempt_id="attempt-a-1",
+        receipt_id="external-a-real",
+        status=AcknowledgementStatus.ACCEPTED,
+        accepted_stake=Decimal("50.00"),
+    )
+    forged = bind_leg_receipt(
+        initial.legs[0],
+        effect=ExternalEffect.ACCEPTED,
+        external_receipt_id="external-a-forged",
+        confirmed_accepted=Decimal("50.00"),
+    )
+
+    with pytest.raises(RoutingContractError, match="absent from durable"):
+        _reconcile_against_ledger((a, b), (forged,), ledger)
+
+
+def test_ledger_backed_reconciliation_rejects_receipt_from_wrong_child(
+    tmp_path,
+) -> None:
+    a, b = _venue("book-a", "acct-a"), _venue("book-b", "acct-b")
+    initial = _initial((a, b))
+    wrong_action = ExecutionAction(
+        action_id="wrong-child-action",
+        bookmaker_id=a.venue_id,
+        account_id=a.account_id,
+        event_id=a.quote.event_id,
+        market_id=a.quote.market_id,
+        selection_id=a.quote.selection_id,
+        side="BACK",
+        requested_odds=a.quote.decimal_odds,
+        requested_stake=initial.legs[0].proposed_stake,
+        quote_id=a.quote.market_event_hash,
+        quote_observed_at=a.quote.observed_ts,
+        expires_at="2026-09-17T01:50:00+00:00",
+    )
+    ledger = RealExecutionLedger(tmp_path / "wrong-child.jsonl")
+    ledger.reserve_plan(
+        ExecutionPlan(
+            plan_id=_PLAN_ID,
+            bookmaker_profile_version="receipt-crosscheck-v1",
+            decision_id="routing-decision-1",
+            approval_id="routing-approval-1",
+            created_at="2026-09-17T01:41:00+00:00",
+            actions=(wrong_action,),
+        )
+    )
+    ledger.begin_attempt(
+        plan_id=_PLAN_ID,
+        action_id=wrong_action.action_id,
+        attempt_id="wrong-child-attempt",
+        reserved_at="2026-09-17T01:42:00+00:00",
+    )
+    ledger.mark_submitted(
+        "wrong-child-attempt",
+        submitted_at="2026-09-17T01:43:00+00:00",
+    )
+    ledger.acknowledge(
+        ExternalAcknowledgement(
+            attempt_id="wrong-child-attempt",
+            external_receipt_id="external-a-1",
+            status=AcknowledgementStatus.ACCEPTED,
+            acknowledged_at="2026-09-17T01:44:00+00:00",
+            accepted_odds=a.quote.decimal_odds,
+            accepted_stake=Decimal("50.00"),
+        )
+    )
+    receipt = bind_leg_receipt(
+        initial.legs[0],
+        effect=ExternalEffect.ACCEPTED,
+        external_receipt_id="external-a-1",
+        confirmed_accepted=Decimal("50.00"),
+    )
+
+    with pytest.raises(RoutingContractError, match="canonical proposal child"):
+        _reconcile_against_ledger((a, b), (receipt,), ledger)
+
+
+def test_ledger_backed_reconciliation_rejects_durable_state_mismatch(
+    tmp_path,
+) -> None:
+    a, b = _venue("book-a", "acct-a"), _venue("book-b", "acct-b")
+    initial = _initial((a, b))
+    ledger = _ledger_for_initial(tmp_path, initial)
+    _acknowledge_leg(
+        ledger,
+        initial.legs[0],
+        attempt_id="attempt-a-rejected",
+        receipt_id="external-a-1",
+        status=AcknowledgementStatus.REJECTED,
+    )
+    receipt = bind_leg_receipt(
+        initial.legs[0],
+        effect=ExternalEffect.ACCEPTED,
+        external_receipt_id="external-a-1",
+        confirmed_accepted=Decimal("50.00"),
+    )
+
+    with pytest.raises(RoutingContractError, match="disagrees with durable"):
+        _reconcile_against_ledger((a, b), (receipt,), ledger)
+
+
+def test_ledger_backed_terminal_refusal_requires_durable_receipt(tmp_path) -> None:
+    a, b = _venue("book-a", "acct-a"), _venue("book-b", "acct-b")
+    initial = _initial((a, b))
+    ledger = _ledger_for_initial(tmp_path, initial)
+    refused = bind_leg_receipt(
+        initial.legs[0],
+        effect=ExternalEffect.MARKET_REFUSED,
+        observation_id="refusal-without-receipt",
+    )
+
+    with pytest.raises(RoutingContractError, match="requires external_receipt_id"):
+        _reconcile_against_ledger((a, b), (refused,), ledger)
+
+
+def test_ledger_backed_unknown_without_receipt_remains_fail_closed(tmp_path) -> None:
+    a, b = _venue("book-a", "acct-a"), _venue("book-b", "acct-b")
+    initial = _initial((a, b))
+    ledger = _ledger_for_initial(tmp_path, initial)
+    unknown = bind_leg_receipt(
+        initial.legs[0],
+        effect=ExternalEffect.UNKNOWN,
+    )
+
+    reconciled = _reconcile_against_ledger((a, b), (unknown,), ledger)
+    assert reconciled.state is RoutingState.BLOCKED_UNKNOWN
+    assert reconciled.proposed_total == Decimal("0")
+    assert reconciled.legs == ()
+
+
+
+def test_partial_acceptance_without_child_closure_blocks_generic_reroute() -> None:
+    a, b = _venue("book-a", "acct-a"), _venue("book-b", "acct-b")
+    initial = _initial((a, b))
+    accepted = bind_leg_receipt(
+        initial.legs[0],
+        effect=ExternalEffect.ACCEPTED,
+        external_receipt_id="external-a-partial-open",
+        confirmed_accepted=Decimal("20.00"),
+    )
+
+    reconciled = _reconcile((a, b), (accepted,))
+
+    assert reconciled.state is RoutingState.BLOCKED_UNKNOWN
+    assert reconciled.confirmed_total == Decimal("20.00")
+    assert reconciled.residual_before == Decimal("80.00")
+    assert reconciled.proposed_total == Decimal("0")
+    assert reconciled.legs == ()
+
+
+def test_refusal_on_different_child_does_not_close_partial_remainder() -> None:
+    a, b = _venue("book-a", "acct-a"), _venue("book-b", "acct-b")
+    initial = _initial((a, b))
+    accepted_a = bind_leg_receipt(
+        initial.legs[0],
+        effect=ExternalEffect.ACCEPTED,
+        external_receipt_id="external-a-partial-open",
+        confirmed_accepted=Decimal("20.00"),
+    )
+    refused_b = bind_leg_receipt(
+        initial.legs[1],
+        effect=ExternalEffect.MARKET_REFUSED,
+        observation_id="refusal-b-only",
+    )
+
+    reconciled = _reconcile((a, b), (accepted_a, refused_b))
+
+    assert reconciled.state is RoutingState.BLOCKED_UNKNOWN
+    assert reconciled.confirmed_total == Decimal("20.00")
+    assert reconciled.residual_before == Decimal("80.00")
+    assert reconciled.proposed_total == Decimal("0")
+    assert reconciled.legs == ()
+
+
+
+def test_ledger_backed_reconciliation_rejects_omitted_durable_acceptance(
+    tmp_path,
+) -> None:
+    a, b = _venue("book-a", "acct-a"), _venue("book-b", "acct-b")
+    initial = _initial((a, b))
+    ledger = _ledger_for_initial(tmp_path, initial)
+
+    _acknowledge_leg(
+        ledger,
+        initial.legs[0],
+        attempt_id="attempt-a-omitted",
+        receipt_id="external-a-omitted",
+        status=AcknowledgementStatus.ACCEPTED,
+        accepted_stake=Decimal("50.00"),
+    )
+
+    with pytest.raises(
+        RoutingContractError,
+        match="omit durable terminal receipt",
+    ):
+        _reconcile_against_ledger((a, b), (), ledger)
+
+
+def test_ledger_backed_unobserved_submitted_attempt_blocks_positive_reroute(
+    tmp_path,
+) -> None:
+    a, b = _venue("book-a", "acct-a"), _venue("book-b", "acct-b")
+    initial = _initial((a, b))
+    ledger = _ledger_for_initial(tmp_path, initial)
+    ledger.begin_attempt(
+        plan_id=_PLAN_ID,
+        action_id=initial.legs[0].leg_id,
+        attempt_id="attempt-a-submitted-unobserved",
+        reserved_at="2026-09-17T01:42:00+00:00",
+    )
+    ledger.mark_submitted(
+        "attempt-a-submitted-unobserved",
+        submitted_at="2026-09-17T01:43:00+00:00",
+    )
+
+    reconciled = _reconcile_against_ledger((a, b), (), ledger)
+
+    assert reconciled.state is RoutingState.BLOCKED_UNKNOWN
+    assert reconciled.confirmed_total == Decimal("0")
+    assert reconciled.residual_before == Decimal("100.00")
+    assert reconciled.proposed_total == Decimal("0")
+    assert reconciled.legs == ()

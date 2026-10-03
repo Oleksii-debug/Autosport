@@ -1,4 +1,4 @@
-from decimal import Decimal
+from decimal import Decimal, localcontext
 
 import pytest
 
@@ -280,3 +280,60 @@ def test_direct_proposal_construction_rejects_contradictory_state_authority(
             stake_quantum=Decimal("0.01"),
             legs=legs,
         )
+
+
+def test_parallel_plan_quantum_math_ignores_ambient_decimal_precision() -> None:
+    a = _venue("book-a", "acct-a")
+    b = _venue("book-b", "acct-b")
+    requested = "0.20000000000000000000000000002"
+    quantum = "0.10000000000000000000000000001"
+
+    with localcontext() as context:
+        context.prec = 28
+        proposal = _plan(
+            requested,
+            (a, b),
+            quantum=quantum,
+        )
+
+    assert proposal.state is RoutingState.ROUTE
+    assert proposal.residual_before == Decimal(requested)
+    assert proposal.proposed_total == Decimal(requested)
+    assert [leg.proposed_stake for leg in proposal.legs] == [
+        Decimal(quantum),
+        Decimal(quantum),
+    ]
+
+
+def test_parallel_plan_preserves_exact_sub_context_remaining_capacity() -> None:
+    a = _venue(
+        "book-a",
+        "acct-a",
+        "1.00000000000000000000000000012",
+    )
+    accepted = "0.50000000000000000000000000005"
+    quantum = "0.00000000000000000000000000001"
+
+    with localcontext() as context:
+        context.prec = 28
+        proposal = _plan(
+            "2.00000000000000000000000000010",
+            (a,),
+            (
+                _observation(a, ExternalEffect.ACCEPTED, accepted, "capacity-1"),
+                _observation(a, ExternalEffect.ACCEPTED, accepted, "capacity-2"),
+            ),
+            quantum=quantum,
+        )
+
+    assert proposal.state is RoutingState.PARTIAL
+    assert proposal.confirmed_total == Decimal(
+        "1.00000000000000000000000000010"
+    )
+    assert proposal.proposed_total == Decimal(
+        "0.00000000000000000000000000002"
+    )
+    assert len(proposal.legs) == 1
+    assert proposal.legs[0].proposed_stake == Decimal(
+        "0.00000000000000000000000000002"
+    )

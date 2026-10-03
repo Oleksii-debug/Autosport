@@ -1163,9 +1163,12 @@ def _install_provider_not_found_reconciliation_authority() -> None:
             return getattr(value.fget, "__code__", None)
         return None
 
-    def seal_function_graph(root: object) -> dict[str, tuple[object, object | None]]:
+    def seal_function_graph(
+        root: object,
+    ) -> tuple[tuple[str, object, object | None], ...]:
         module_globals = globals()
-        sealed: dict[str, tuple[object, object | None]] = {}
+        sealed: list[tuple[str, object, object | None]] = []
+        sealed_names: set[str] = set()
         pending = [root]
         visited: set[int] = set()
         while pending:
@@ -1177,17 +1180,18 @@ def _install_provider_not_found_reconciliation_authority() -> None:
             if code is None or getattr(function, "__globals__", None) is not module_globals:
                 continue
             for name in code.co_names:
-                if name not in module_globals or name in sealed:
+                if name not in module_globals or name in sealed_names:
                     continue
                 value = module_globals[name]
                 value_code = function_code(value)
-                sealed[name] = (value, value_code)
+                sealed.append((name, value, value_code))
+                sealed_names.add(name)
                 if (
                     value_code is not None
                     and getattr(value, "__globals__", None) is module_globals
                 ):
                     pending.append(value)
-        return sealed
+        return tuple(sealed)
 
     sealed_function_graph = seal_function_graph(raw_reconcile)
     sealed_descriptors: tuple[
@@ -1263,7 +1267,7 @@ def _install_provider_not_found_reconciliation_authority() -> None:
         module_globals = globals()
         if raw_reconcile.__code__ is not raw_reconcile_code:
             raise sealed_error("provider not-found reconciler executable code changed")
-        for name, (expected, expected_code) in sealed_function_graph.items():
+        for name, expected, expected_code in sealed_function_graph:
             current = module_globals.get(name, missing)
             if current is not expected:
                 raise sealed_error(

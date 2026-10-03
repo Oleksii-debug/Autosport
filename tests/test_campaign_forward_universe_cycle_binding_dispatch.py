@@ -938,6 +938,124 @@ def test_authorize_rejects_rebound_reflection_module_before_execution(
         )
 
 
+def test_authorize_rejects_reflection_helper_rebind_before_execution() -> None:
+    authorizer = binding.authorize_campaign_forward_source_receipts
+    helper_globals = binding._CANONICAL_GETATTR_STATIC_GLOBALS
+    name, original, _code = next(
+        item
+        for item in binding._CANONICAL_GETATTR_STATIC_GLOBAL_ITEMS
+        if item[2] is not None
+    )
+    hostile_calls: list[str] = []
+
+    def hostile(*_args, **_kwargs):
+        hostile_calls.append(name)
+        raise AssertionError("hostile inspect helper executed")
+
+    helper_globals[name] = hostile
+    try:
+        with pytest.raises(
+            binding.CampaignForwardUniverseCycleBindingError,
+            match="campaign forward-cycle reflection dispatch changed",
+        ):
+            authorizer(
+                precommit_locator=None,
+                collector_store=None,
+                source_spec=None,
+                cycle_receipt=None,
+                provider_evidence_store=None,
+                universe_store=None,
+                protocol=None,
+                event_lifecycle=None,
+                opportunities=(),
+            )
+    finally:
+        helper_globals[name] = original
+
+    assert hostile_calls == []
+
+
+def test_authorize_rejects_reflection_helper_code_mutation_before_execution() -> None:
+    authorizer = binding.authorize_campaign_forward_source_receipts
+    _name, helper, original_code = next(
+        item
+        for item in binding._CANONICAL_GETATTR_STATIC_GLOBAL_ITEMS
+        if item[2] is not None and not item[2].co_freevars
+    )
+
+    def hostile(*_args, **_kwargs):
+        raise AssertionError("hostile inspect helper executed")
+
+    assert not hostile.__code__.co_freevars
+    helper.__code__ = hostile.__code__
+    try:
+        with pytest.raises(
+            binding.CampaignForwardUniverseCycleBindingError,
+            match="campaign forward-cycle reflection dispatch changed",
+        ):
+            authorizer(
+                precommit_locator=None,
+                collector_store=None,
+                source_spec=None,
+                cycle_receipt=None,
+                provider_evidence_store=None,
+                universe_store=None,
+                protocol=None,
+                event_lifecycle=None,
+                opportunities=(),
+            )
+    finally:
+        helper.__code__ = original_code
+
+
+def test_resolver_rejects_reflection_dependency_witness_rebind_before_execution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    resolver = binding.resolve_campaign_forward_universe_cycle_authority
+    monkeypatch.setattr(
+        binding,
+        "_CANONICAL_GETATTR_STATIC_GLOBAL_ITEMS",
+        (),
+    )
+
+    with pytest.raises(
+        binding.CampaignForwardUniverseCycleBindingError,
+        match="campaign forward-cycle reflection dispatch changed",
+    ):
+        resolver(
+            precommit_locator=None,
+            collector_store=None,
+            source_spec=None,
+            cycle_receipt=None,
+            provider_evidence_store=None,
+            universe_store=None,
+            protocol=None,
+            event_lifecycle=None,
+        )
+
+
+def test_private_integrity_guard_rejects_reflection_helper_rebind() -> None:
+    helper_globals = binding._CANONICAL_GETATTR_STATIC_GLOBALS
+    name, original, _code = next(
+        item
+        for item in binding._CANONICAL_GETATTR_STATIC_GLOBAL_ITEMS
+        if item[2] is not None
+    )
+
+    def hostile(*_args, **_kwargs):
+        raise AssertionError("hostile inspect helper executed")
+
+    helper_globals[name] = hostile
+    try:
+        with pytest.raises(
+            binding.CampaignForwardUniverseCycleBindingError,
+            match="campaign forward-cycle reflection dispatch changed",
+        ):
+            binding._require_dispatch_integrity()
+    finally:
+        helper_globals[name] = original
+
+
 def test_saved_resolver_rejects_public_surface_rebind_before_hostile_execution(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

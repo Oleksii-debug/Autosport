@@ -666,11 +666,21 @@ def _validate_state(
         raise CampaignInceptionIntegrityError(
             "campaign inception state schema is noncanonical"
         )
-    if payload.get("precommit") != dict(precommit):
+    stored_precommit = payload.get("precommit")
+    expected_precommit = dict(precommit)
+    if (
+        type(stored_precommit) is not dict
+        or _canonical_bytes(stored_precommit) != _canonical_bytes(expected_precommit)
+    ):
         raise CampaignInceptionConflictError(
             "campaign identity is already bound to different precommit authority"
         )
-    if payload.get("source_spec") != spec.payload():
+    stored_source_spec = payload.get("source_spec")
+    expected_source_spec = spec.payload()
+    if (
+        type(stored_source_spec) is not dict
+        or _canonical_bytes(stored_source_spec) != _canonical_bytes(expected_source_spec)
+    ):
         raise CampaignInceptionConflictError(
             "campaign identity is already bound to a different collector source/run"
         )

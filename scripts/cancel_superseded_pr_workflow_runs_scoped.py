@@ -96,6 +96,8 @@ class WorkflowScopedGitHubApi(GitHubApi):
         self._historical_recovery_current_run_id: int | None = None
         self._recovered_runs: dict[int, tuple[int, str]] = {}
         self._unbound_active_runs: dict[int, tuple[str, str | None]] = {}
+        self._explicit_active_run_ids: set[int] = set()
+        self._conflicted_unbound_run_ids: set[int] = set()
         self._zero_association_recovered_runs: dict[int, tuple[str, str]] = {}
 
     def configure_same_head_candidate_recovery(
@@ -469,15 +471,32 @@ class WorkflowScopedGitHubApi(GitHubApi):
                             and head_repository.get("full_name") == self._repository
                         ):
                             head_branch = raw_branch
-                    self._unbound_active_runs[run.run_id] = (
-                        run.head_sha,
-                        head_branch,
-                    )
+                    candidate = (run.head_sha, head_branch)
+                    previous = self._unbound_active_runs.get(run.run_id)
+                    if (
+                        run.run_id in self._explicit_active_run_ids
+                        or run.run_id in self._conflicted_unbound_run_ids
+                    ):
+                        # Once this scan has observed any explicit PR metadata for the
+                        # run, a later weaker unbound view cannot reopen orphan authority.
+                        # Likewise, conflicting unbound observations remain deferred.
+                        self._unbound_active_runs.pop(run.run_id, None)
+                    elif previous is not None and previous != candidate:
+                        # A run id is supposed to have immutable source identity. If a
+                        # moving scan reports conflicting head/branch evidence while it
+                        # is unbound, preserve neither observation as cancellation
+                        # authority; a later stable controller sweep can reconsider it.
+                        self._unbound_active_runs.pop(run.run_id, None)
+                        self._conflicted_unbound_run_ids.add(run.run_id)
+                    else:
+                        self._unbound_active_runs[run.run_id] = candidate
                 else:
                     # active_runs() queries statuses sequentially, so the same run can
-                    # transition between requests. A later explicit PR observation is
-                    # stronger than an earlier unbound observation for that exact run id
-                    # and must revoke the stale orphan candidate before cleanup.
+                    # transition between requests. Any explicit PR observation is
+                    # stronger than an unbound observation for that exact run id,
+                    # regardless of observation order, and permanently revokes orphan
+                    # cleanup for the remainder of this exact-workflow snapshot.
+                    self._explicit_active_run_ids.add(run.run_id)
                     self._unbound_active_runs.pop(run.run_id, None)
                 runs.append(self._recover_candidate_run_reference(run))
             total_count = payload["total_count"]
@@ -496,6 +515,12 @@ class WorkflowScopedGitHubApi(GitHubApi):
         return tuple(runs)
 
     def active_runs(self) -> tuple[WorkflowRun, ...]:
+        # Snapshot-local identity state must never leak across repeated scans on one API
+        # object. A later invocation may observe a different stable queue and must derive
+        # orphan authority only from that invocation's complete observation set.
+        self._unbound_active_runs.clear()
+        self._explicit_active_run_ids.clear()
+        self._conflicted_unbound_run_ids.clear()
         runs: list[WorkflowRun] = []
         for status in _ACTIVE_STATUSES:
             runs.extend(self._active_runs_for_status(status))

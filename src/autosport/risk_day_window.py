@@ -466,7 +466,7 @@ class _ProductDayRiskWindowStoreMeta(type):
 
     def __setattr__(cls, name: str, value: object) -> None:
         if (
-            name in {"__init__", "current", "require_current", "_publish_day", "_evidence"}
+            name in {"__init__", "current", "product_clock_day_key", "state_snapshot_sha256", "require_current", "_publish_day", "_evidence"}
             and name in cls.__dict__
         ):
             raise TypeError(
@@ -476,7 +476,7 @@ class _ProductDayRiskWindowStoreMeta(type):
 
     def __delattr__(cls, name: str) -> None:
         if (
-            name in {"__init__", "current", "require_current", "_publish_day", "_evidence"}
+            name in {"__init__", "current", "product_clock_day_key", "state_snapshot_sha256", "require_current", "_publish_day", "_evidence"}
             and name in cls.__dict__
         ):
             raise TypeError(
@@ -578,6 +578,33 @@ class ProductDayRiskWindowStore(metaclass=_ProductDayRiskWindowStoreMeta):
                 target_day,
                 observed_sha256=observed_sha256,
             )
+
+    def product_clock_day_key(self) -> str:
+        """Return the exact product-clock UTC day without touching durable state."""
+
+        if type(self) is not ProductDayRiskWindowStore:
+            raise RiskDayWindowIntegrityError(
+                "risk day store must be the canonical exact store type"
+            )
+        if not _is_product_clock(self._clock):
+            raise RiskDayWindowIntegrityError(
+                "test/synthetic clock cannot identify product day authority"
+            )
+        return _clock_utc_instant(self._clock).date().isoformat()
+
+    def state_snapshot_sha256(self) -> str:
+        """Safely hash the canonical persisted day state without acquiring its lock."""
+
+        if type(self) is not ProductDayRiskWindowStore:
+            raise RiskDayWindowIntegrityError(
+                "risk day store must be the canonical exact store type"
+            )
+        expected_path = self.workspace / ".autosport" / _STATE_FILE_NAME
+        if self.state_path != expected_path:
+            raise RiskDayWindowIntegrityError(
+                "risk day store path is not canonical for its workspace"
+            )
+        return hashlib.sha256(_read_regular_bytes(self.state_path)).hexdigest()
 
     def require_current(
         self,
@@ -750,6 +777,8 @@ _RISK_DAY_FROZEN_GLOBALS = _freeze_risk_day_module_globals()
 for _method_name in (
     "__init__",
     "current",
+    "product_clock_day_key",
+    "state_snapshot_sha256",
     "require_current",
     "_publish_day",
     "_evidence",

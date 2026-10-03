@@ -776,6 +776,82 @@ def test_store_save_rejects_hmac_dispatch_rebind_before_dispatch(
     assert hostile_calls == []
 
 
+@pytest.mark.parametrize(
+    ("module_name", "attribute_name"),
+    [
+        ("json", "dumps"),
+        ("hashlib", "sha256"),
+    ],
+)
+def test_store_save_rejects_nested_helper_module_dispatch_rebind(
+    tmp_path,
+    monkeypatch,
+    module_name: str,
+    attribute_name: str,
+):
+    snapshot = _capture(monkeypatch)
+    store = _store(tmp_path)
+    hostile_calls: list[str] = []
+    module = getattr(authority_module, module_name)
+
+    def hostile(*_args, **_kwargs):
+        hostile_calls.append(f"{module_name}.{attribute_name}")
+        raise AssertionError("hostile nested provider-store module dispatch executed")
+
+    monkeypatch.setattr(module, attribute_name, hostile)
+
+    with pytest.raises(
+        ProviderObservationIntegrityError,
+        match="provider evidence store dependency module dispatch changed",
+    ):
+        store.save(snapshot)
+
+    assert hostile_calls == []
+
+
+def test_store_save_rejects_nested_helper_global_rebind(
+    tmp_path,
+    monkeypatch,
+):
+    snapshot = _capture(monkeypatch)
+    store = _store(tmp_path)
+    monkeypatch.setattr(authority_module, "_HEX", frozenset())
+
+    with pytest.raises(
+        ProviderObservationIntegrityError,
+        match="provider evidence store dependency globals changed",
+    ):
+        store.save(snapshot)
+
+
+def test_store_save_rejects_nested_helper_builtin_shadow(
+    tmp_path,
+    monkeypatch,
+):
+    snapshot = _capture(monkeypatch)
+    store = _store(tmp_path)
+    hostile_calls: list[str] = []
+
+    def hostile_type_error(*_args, **_kwargs):
+        hostile_calls.append("TypeError")
+        raise AssertionError("hostile nested TypeError executed")
+
+    monkeypatch.setattr(
+        authority_module,
+        "TypeError",
+        hostile_type_error,
+        raising=False,
+    )
+
+    with pytest.raises(
+        ProviderObservationIntegrityError,
+        match="provider evidence store dependency builtin dispatch changed",
+    ):
+        store.save(snapshot)
+
+    assert hostile_calls == []
+
+
 def test_store_save_rejects_internal_receipt_writer_rebind_before_dispatch(
     tmp_path,
     monkeypatch,

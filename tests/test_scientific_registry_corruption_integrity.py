@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import subprocess
+import sys
 
 import pytest
 
@@ -516,29 +518,51 @@ def test_transplant_rejects_scientific_authority_helper_rebinding(
     assert hostile_calls == []
 
 
-def test_transplant_rejects_monotonic_new_insertion(
-    tmp_path,
-    monkeypatch: pytest.MonkeyPatch,
-):
+def test_transplant_rejects_monotonic_new_insertion(tmp_path):
     target_path = _transplanted_registry_path(tmp_path)
-    hostile_calls: list[object] = []
 
-    def hostile_new(cls: object, *args: object, **kwargs: object) -> object:
-        hostile_calls.append((cls, args, kwargs))
-        raise AssertionError("hostile monotonic __new__ executed")
+    # Assigning then deleting an inherited __new__ mutates CPython's tp_new slot:
+    # after teardown the visible attribute can be object.__new__ while ordinary
+    # construction still raises object.__new__(...) argument errors. Exercise this
+    # adversarial class-surface mutation in a child interpreter so the falsifier
+    # cannot corrupt constructor semantics for unrelated tests in this worker.
+    script = f"""
+from pathlib import Path
 
-    monkeypatch.setattr(
-        MonotonicWorkspaceAuthority,
-        "__new__",
-        staticmethod(hostile_new),
+import autosport.integrity as integrity
+from autosport.monotonic_workspace_authority import MonotonicWorkspaceAuthority
+from autosport.scientific_registry import ScientificRegistry
+
+target_path = Path({str(target_path)!r})
+hostile_calls = []
+
+def hostile_new(cls, *args, **kwargs):
+    hostile_calls.append((cls, args, kwargs))
+    raise AssertionError("hostile monotonic __new__ executed")
+
+type.__setattr__(
+    MonotonicWorkspaceAuthority,
+    "__new__",
+    staticmethod(hostile_new),
+)
+try:
+    ScientificRegistry(target_path)
+except RuntimeError as exc:
+    if "ScientificRegistry monotonic authority constructor changed" not in str(exc):
+        raise
+else:
+    raise AssertionError("constructor mutation was not rejected")
+
+if hostile_calls:
+    raise AssertionError("hostile monotonic __new__ executed")
+"""
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        check=False,
+        capture_output=True,
+        text=True,
     )
-    with pytest.raises(
-        RuntimeError,
-        match="ScientificRegistry monotonic authority constructor changed",
-    ):
-        ScientificRegistry(target_path)
-
-    assert hostile_calls == []
+    assert completed.returncode == 0, completed.stdout + completed.stderr
 
 
 def test_transplant_rejects_authority_helper_guard_rebinding(

@@ -1331,6 +1331,101 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
                 1,
             )
 
+    def test_future_source_time_waits_until_causal_without_new_update(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            clock = _ManualClock(self.START + timedelta(seconds=1))
+            future_source = self._event(
+                selection="selection-a",
+                sequence=1,
+                observed=self.START,
+            )
+            future_source = MarketEvent.from_dict(
+                {
+                    **future_source.to_dict(),
+                    "source_ts": (
+                        self.START + timedelta(seconds=2)
+                    ).isoformat(),
+                    "ingest_ts": (
+                        self.START + timedelta(seconds=1)
+                    ).isoformat(),
+                }
+            )
+            factory = _EmptyIntentFactory()
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(workspace, [(future_source,), ()]),
+                factory=factory,
+                clock=clock,
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+
+            first = loop.run_cycle()
+
+            self.assertEqual(first.status, LiveCycleStatus.BACKPRESSURE)
+            self.assertIn("source evidence from the future", first.detail)
+            self.assertEqual(factory.calls, [])
+            self.assertFalse((workspace / "decisions.jsonl").exists())
+
+            clock.value = self.START + timedelta(seconds=3)
+            second = loop.run_cycle()
+
+            self.assertEqual(second.status, LiveCycleStatus.DECIDED)
+            self.assertEqual(
+                factory.calls,
+                [("input-a", (("selection-a", 1, "open"),))],
+            )
+            self.assertEqual(
+                len(
+                    JsonlDecisionLedger(
+                        workspace / "decisions.jsonl"
+                    ).verified_records()
+                ),
+                1,
+            )
+
+    def test_future_observation_fallback_waits_without_new_update(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            clock = _ManualClock(self.START + timedelta(seconds=1))
+            future_observed = self._event(
+                selection="selection-a",
+                sequence=1,
+                observed=self.START + timedelta(seconds=2),
+            )
+            future_observed = MarketEvent.from_dict(
+                {
+                    **future_observed.to_dict(),
+                    "source_ts": None,
+                    "ingest_ts": (
+                        self.START + timedelta(seconds=1)
+                    ).isoformat(),
+                }
+            )
+            factory = _EmptyIntentFactory()
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(workspace, [(future_observed,), ()]),
+                factory=factory,
+                clock=clock,
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+
+            first = loop.run_cycle()
+
+            self.assertEqual(first.status, LiveCycleStatus.BACKPRESSURE)
+            self.assertIn("source evidence from the future", first.detail)
+            self.assertEqual(factory.calls, [])
+
+            clock.value = self.START + timedelta(seconds=3)
+            second = loop.run_cycle()
+
+            self.assertEqual(second.status, LiveCycleStatus.DECIDED)
+            self.assertEqual(
+                factory.calls,
+                [("input-a", (("selection-a", 1, "open"),))],
+            )
+
     def test_future_local_stale_provider_evidence_does_not_backpressure(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

@@ -115,6 +115,7 @@ def posting(
     order_id="123",
     market_id="200",
     posted_at="2026-09-22T23:59:00Z",
+    description="fixture",
 ):
     optional = ""
     if order_id is not None:
@@ -122,7 +123,7 @@ def posting(
     if market_id is not None:
         optional += f' MarketId="{market_id}"'
     return (
-        f'<Order PostedAt="{posted_at}" Description="fixture" '
+        f'<Order PostedAt="{posted_at}" Description="{description}" '
         f'Amount="{amount}" ResultingBalance="{balance}" '
         f'PostingCategory="{category}"{optional} TransactionId="{transaction_id}" />'
     )
@@ -903,4 +904,24 @@ def test_multiple_settlement_and_commission_postings_are_not_collapsed(monkeypat
         "COMMISSION",
         "COMMISSION",
     ]
+
+def test_description_keywords_cannot_mint_finer_economic_category(monkeypatch):
+    client, _ = economic_client(
+        monkeypatch,
+        postings_by_id(
+            posting(
+                9001,
+                category=3,
+                order_id=None,
+                market_id=None,
+                description="commission win deposit settlement",
+            )
+        ),
+    )
+    result = client.read_account_postings_by_id(9000)
+
+    row = result.postings[0]
+    assert row.posting_category == 3
+    assert row.posting_category_name == "OTHER"
+    assert row.description == "commission win deposit settlement"
 

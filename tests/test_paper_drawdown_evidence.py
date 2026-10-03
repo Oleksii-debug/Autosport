@@ -1,5 +1,6 @@
 from dataclasses import replace
 from decimal import Context, Decimal, localcontext
+from functools import partial
 from pathlib import Path
 from types import FunctionType
 
@@ -717,16 +718,53 @@ def test_evidence_shape_rejects_noncanonical_equity_point_objects(tmp_path):
         replace(evidence, points=(_PointProxy(),))
 
 
+def test_outer_resolver_authority_and_witness_bundle_cannot_be_coherently_rewritten(
+    tmp_path,
+):
+    _initialize(tmp_path)
+
+    frozen = resolve_paper_drawdown_evidence
+    assert type(frozen) is partial
+    assert not hasattr(frozen, "__closure__")
+    original_args = frozen.args
+    canonical_resolver = original_args[0]
+    assert type(canonical_resolver) is FunctionType
+
+    def forged_resolver(_workspace):
+        raise AssertionError("forged drawdown resolver executed")
+
+    forged_args = (
+        forged_resolver,
+        forged_resolver.__code__,
+        forged_resolver.__closure__,
+        None,
+        None,
+        FunctionType,
+        type,
+        PaperDrawdownEvidenceError,
+    )
+    assert len(forged_args) == len(original_args)
+
+    with pytest.raises(AttributeError, match="readonly attribute"):
+        frozen.args = forged_args
+    with pytest.raises(AttributeError, match="readonly attribute"):
+        object.__setattr__(frozen, "args", forged_args)
+
+    assert frozen.args is original_args
+    assert frozen.args[0] is canonical_resolver
+    evidence = frozen(tmp_path)
+    assert evidence.scope == DRAW_DOWN_SCOPE
+    assert require_current_paper_drawdown_evidence(tmp_path, evidence) == evidence
+
+
 def test_resolver_rejects_in_place_captured_helper_code_rebinding(tmp_path):
     _initialize(tmp_path)
 
     frozen = resolve_paper_drawdown_evidence
-    resolver = next(
-        cell.cell_contents
-        for cell in frozen.__closure__ or ()
-        if type(cell.cell_contents) is FunctionType
-        and cell.cell_contents.__name__ == "resolver"
-    )
+    assert type(frozen) is partial
+    resolver = frozen.args[0]
+    assert type(resolver) is FunctionType
+    assert resolver.__name__ == "resolver"
     canonical_sha256 = next(
         cell.cell_contents
         for cell in resolver.__closure__ or ()

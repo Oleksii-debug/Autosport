@@ -266,3 +266,36 @@ def test_captured_public_resolver_fails_closed_after_module_rebinding(
             experiment_id=issued.experiment_id,
             authority_root=authority_root,
         )
+
+def test_run_registry_read_rebinding_fails_before_randomization_publication(
+    tmp_path, monkeypatch
+) -> None:
+    workspace, registry, authority_root = _paths(tmp_path)
+    membership = _install_membership(
+        monkeypatch, workspace, registry, authority_root
+    )
+    attacker_called = False
+
+    def forged_read(_registry):
+        nonlocal attacker_called
+        attacker_called = True
+        return {"schema_version": 1, "runs": {}}
+
+    monkeypatch.setattr(precommit._run_registry.RunRegistry, "_read", forged_read)
+
+    with pytest.raises(
+        precommit.RiskRandomizationPrecommitError,
+        match="product outcome availability authority dispatch changed",
+    ):
+        precommit.issue_risk_randomization_precommit(
+            registry,
+            workspace=workspace,
+            research_protocol_id=membership.research_protocol_id,
+            dataset_snapshot_id=membership.dataset_snapshot_id,
+            experiment_id="experiment-run-registry-rebind",
+            authority_root=authority_root,
+        )
+
+    assert attacker_called is False
+    assert not list(workspace.glob(".risk-randomization-precommit-*.json"))
+

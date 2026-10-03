@@ -92,6 +92,36 @@ def test_uncertain_state_is_hidden_before_raising_session_teardown() -> None:
     )
 
 
+def test_teardown_failure_does_not_trust_hostile_session_workspace_metadata() -> None:
+    app = _base_partial_app()
+    fallback_workspace = Path("fallback-economic-workspace")
+    app._active_workspace = fallback_workspace
+
+    class _HostileWorkspaceSession:
+        @property
+        def workspace(self):
+            raise AssertionError("session workspace property must not run after teardown failure")
+
+        def close(self) -> None:
+            raise OSError("primary close failure")
+
+    app.session = _HostileWorkspaceSession()
+
+    teardown_succeeded = AutosportApp._hide_uncertain_economic_state(
+        app,
+        "ECONOMIC STATE QUARANTINED",
+    )
+
+    assert teardown_succeeded is False
+    assert app.session is None
+    assert fallback_workspace in app._recovery_required_workspaces
+    assert app.tickets.lines == ["ECONOMIC STATE QUARANTINED"]
+    assert any(
+        "вторинна_помилка=OSError: primary close failure" in line
+        for line in app._logs
+    )
+
+
 def test_replay_primary_error_survives_raising_session_teardown() -> None:
     app = _base_partial_app()
     app.replay_worker = _TerminalWorker(

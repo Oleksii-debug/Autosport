@@ -1885,6 +1885,25 @@ def test_new_durable_attribution_requires_explicit_evidence_grade(tmp_path):
 
     from dataclasses import replace
 
+    changed_grade = replace(
+        graded,
+        findings=(
+            replace(
+                graded.findings[0],
+                evidence_grade=AttributionEvidenceGrade.DESCRIPTIVE_ASSOCIATION,
+            ),
+            graded.findings[1],
+        ),
+    )
+    with pytest.raises(
+        ConflictingAgentLoopEvidenceError,
+        match="different immutable content",
+    ):
+        runtime.record_attribution(
+            changed_grade,
+            at="2026-09-19T13:05:05Z",
+        )
+
     legacy_state = json_load(runtime.path)
     for finding in legacy_state["attributions"][0]["findings"]:
         finding.pop("evidence_grade")

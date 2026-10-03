@@ -207,3 +207,31 @@ def default_webview_storage_path() -> Path:
             "does not depend on the process working directory"
         )
     return home / ".autosport" / "webview2"
+
+def validate_product_storage_roots(
+    workspace: str | Path,
+    webview_storage: str | Path,
+) -> None:
+    """Require durable economic state and browser-profile state to be disjoint trees."""
+
+    workspace_path = Path(workspace)
+    webview_path = Path(webview_storage)
+    if not workspace_path.is_absolute():
+        raise ValueError("workspace storage root must be absolute")
+    if not webview_path.is_absolute():
+        raise ValueError("WebView storage root must be absolute")
+    try:
+        resolved_workspace = workspace_path.resolve(strict=False)
+        resolved_webview = webview_path.resolve(strict=False)
+    except (OSError, RuntimeError) as exc:
+        raise ValueError("product storage roots could not be resolved safely") from exc
+
+    if (
+        resolved_workspace == resolved_webview
+        or resolved_workspace.is_relative_to(resolved_webview)
+        or resolved_webview.is_relative_to(resolved_workspace)
+    ):
+        raise ValueError(
+            "workspace and WebView storage roots must be disjoint trees"
+        )
+

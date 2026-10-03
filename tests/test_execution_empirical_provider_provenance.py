@@ -302,6 +302,15 @@ def test_population_evidence_retains_provider_provenance_in_sample_hashes(tmp_pa
         == acknowledgement_sha256
     )
     assert sample.provider_outcome_verified is False
+    assert population.submitted_request_identity_count == 1
+    assert population.provider_request_binding_count == 1
+    assert population.provider_acknowledgement_binding_count == 1
+    assert population.durable_acknowledgement_identity_count == 1
+    assert population.provider_bound_durable_ack_count == 1
+    assert payload["provider_bound_durable_ack_rate"] == {
+        "numerator": 1,
+        "denominator": 1,
+    }
 
 
 def test_new_provenance_fields_participate_in_projection_issuance_digest(tmp_path):

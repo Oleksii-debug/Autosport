@@ -101,7 +101,7 @@ class RunTransactionDecisionBindingTests(unittest.TestCase):
 
             with self.assertRaisesRegex(
                 RunTransactionError,
-                "staged PaperBook semantic validation failed",
+                "retained terminal PaperBook semantic validation failed",
             ):
                 tx.stage_outputs(book, ledger_path)
 
@@ -357,6 +357,9 @@ class RunTransactionDecisionBindingTests(unittest.TestCase):
             tx.staged_book_path.write_text(
                 json.dumps(tampered_book, ensure_ascii=False, indent=2) + "\n",
                 encoding="utf-8",
+            )
+            tx.terminal_book_snapshot_path.write_bytes(
+                tx.staged_book_path.read_bytes()
             )
             tampered_book_hash = sha256_file(tx.staged_book_path)
 

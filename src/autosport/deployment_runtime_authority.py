@@ -1565,23 +1565,58 @@ class DeploymentRuntimeAuthorityStore(metaclass=_DeploymentRuntimeAuthorityStore
         path: str | Path,
         *,
         authority_root: str | Path | None,
+        _digest_helper: object = _digest,
+        _digest_helper_code: object = _digest.__code__,
+        _sha_validator: object = _sha,
+        _sha_validator_code: object = _sha.__code__,
+        _new_local_lock_helper: object = _new_local_lock,
+        _new_local_lock_helper_code: object = _new_local_lock.__code__,
+        _workspace_lock_helper: object = _workspace_economic_lock,
+        _workspace_lock_helper_code: object = _workspace_economic_lock.__code__,
+        _monotonic_constructor_helper: object = _construct_monotonic_authority,
+        _monotonic_constructor_helper_code: object = _construct_monotonic_authority.__code__,
+        _path_expanduser: object = _CANONICAL_PATH_EXPANDUSER,
+        _path_expanduser_code: object = _path_expanduser_CODE,
+        _path_resolve: object = _CANONICAL_PATH_RESOLVE,
+        _path_resolve_code: object = _path_resolve_CODE,
+        _path_read_text: object = _CANONICAL_PATH_READ_TEXT,
+        _path_read_text_code: object = _path_read_text_CODE,
     ) -> None:
         self._assert_static_authority_contract()
         if (
-            _digest is not _CANONICAL_DIGEST
-            or _CANONICAL_DIGEST.__code__ is not _CANONICAL_DIGEST_CODE
-            or _sha is not _CANONICAL_SHA_VALIDATOR
-            or _CANONICAL_SHA_VALIDATOR.__code__ is not _CANONICAL_SHA_VALIDATOR_CODE
-            or _new_local_lock is not _CANONICAL_NEW_LOCAL_LOCK_HELPER
-            or _CANONICAL_NEW_LOCAL_LOCK_HELPER.__code__
-            is not _CANONICAL_NEW_LOCAL_LOCK_HELPER_CODE
-            or _workspace_economic_lock is not _CANONICAL_WORKSPACE_LOCK_HELPER
-            or _CANONICAL_WORKSPACE_LOCK_HELPER.__code__
-            is not _CANONICAL_WORKSPACE_LOCK_HELPER_CODE
-            or _construct_monotonic_authority
-            is not _CANONICAL_MONOTONIC_CONSTRUCTOR_HELPER
-            or _CANONICAL_MONOTONIC_CONSTRUCTOR_HELPER.__code__
-            is not _CANONICAL_MONOTONIC_CONSTRUCTOR_HELPER_CODE
+            _digest is not _digest_helper
+            or _CANONICAL_DIGEST is not _digest_helper
+            or getattr(_digest_helper, "__code__", None) is not _digest_helper_code
+            or _CANONICAL_DIGEST_CODE is not _digest_helper_code
+            or _sha is not _sha_validator
+            or _CANONICAL_SHA_VALIDATOR is not _sha_validator
+            or getattr(_sha_validator, "__code__", None) is not _sha_validator_code
+            or _CANONICAL_SHA_VALIDATOR_CODE is not _sha_validator_code
+            or _new_local_lock is not _new_local_lock_helper
+            or _CANONICAL_NEW_LOCAL_LOCK_HELPER is not _new_local_lock_helper
+            or getattr(_new_local_lock_helper, "__code__", None)
+            is not _new_local_lock_helper_code
+            or _CANONICAL_NEW_LOCAL_LOCK_HELPER_CODE
+            is not _new_local_lock_helper_code
+            or _workspace_economic_lock is not _workspace_lock_helper
+            or _CANONICAL_WORKSPACE_LOCK_HELPER is not _workspace_lock_helper
+            or getattr(_workspace_lock_helper, "__code__", None)
+            is not _workspace_lock_helper_code
+            or _CANONICAL_WORKSPACE_LOCK_HELPER_CODE
+            is not _workspace_lock_helper_code
+            or _construct_monotonic_authority is not _monotonic_constructor_helper
+            or _CANONICAL_MONOTONIC_CONSTRUCTOR_HELPER
+            is not _monotonic_constructor_helper
+            or getattr(_monotonic_constructor_helper, "__code__", None)
+            is not _monotonic_constructor_helper_code
+            or _CANONICAL_MONOTONIC_CONSTRUCTOR_HELPER_CODE
+            is not _monotonic_constructor_helper_code
+            or _path_expanduser is not _path_expanduser
+            or _path_expanduser_CODE is not _path_expanduser_code
+            or _path_resolve is not _path_resolve
+            or _path_resolve_CODE is not _path_resolve_code
+            or _path_read_text is not _path_read_text
+            or _path_read_text_CODE is not _path_read_text_code
         ):
             raise DeploymentRuntimeAuthorityError(
                 "runtime authority construction helper dispatch was replaced"
@@ -1595,18 +1630,18 @@ class DeploymentRuntimeAuthorityStore(metaclass=_DeploymentRuntimeAuthorityStore
         for current, expected, expected_code in (
             (
                 current_path_type.expanduser,
-                _CANONICAL_PATH_EXPANDUSER,
-                _CANONICAL_PATH_EXPANDUSER_CODE,
+                _path_expanduser,
+                _path_expanduser_CODE,
             ),
             (
                 current_path_type.resolve,
-                _CANONICAL_PATH_RESOLVE,
-                _CANONICAL_PATH_RESOLVE_CODE,
+                _path_resolve,
+                _path_resolve_CODE,
             ),
             (
                 current_path_type.read_text,
-                _CANONICAL_PATH_READ_TEXT,
-                _CANONICAL_PATH_READ_TEXT_CODE,
+                _path_read_text,
+                _path_read_text_CODE,
             ),
         ):
             if (
@@ -1619,13 +1654,13 @@ class DeploymentRuntimeAuthorityStore(metaclass=_DeploymentRuntimeAuthorityStore
                 raise DeploymentRuntimeAuthorityError(
                     "runtime authority path dispatch was replaced"
                 )
-        self.path = _CANONICAL_PATH_RESOLVE(
-            _CANONICAL_PATH_EXPANDUSER(candidate_path),
+        self.path = _path_resolve(
+            _path_expanduser(candidate_path),
             strict=False,
         )
         self.workspace = self.path.parent
-        self._lock = _CANONICAL_NEW_LOCAL_LOCK_HELPER()
-        self._authority = _CANONICAL_MONOTONIC_CONSTRUCTOR_HELPER(
+        self._lock = _new_local_lock_helper()
+        self._authority = _monotonic_constructor_helper(
             workspace=self.workspace,
             domain=_AUTHORITY_DOMAIN,
             key=self.path.name,
@@ -1651,7 +1686,7 @@ class DeploymentRuntimeAuthorityStore(metaclass=_DeploymentRuntimeAuthorityStore
             "_binding_root_selection_store_root",
             self._authority.authority_root_selection.context.store_root,
         )
-        self._semantic_binding_sha256 = _CANONICAL_DIGEST(
+        self._semantic_binding_sha256 = _digest_helper(
             {
                 "schema": _AUTHORITY_BINDING_SCHEMA,
                 "schema_version": _AUTHORITY_BINDING_SCHEMA_VERSION,
@@ -1813,53 +1848,75 @@ class DeploymentRuntimeAuthorityStore(metaclass=_DeploymentRuntimeAuthorityStore
                     pass
 
     @staticmethod
-    def _finalize_published_path(path: Path) -> None:
+    def _finalize_published_path(
+        path: Path,
+        _finalizer: object = _durably_finalize_published_path,
+        _finalizer_code: object = _durably_finalize_published_path.__code__,
+    ) -> None:
         if (
-            _durably_finalize_published_path
-            is not _CANONICAL_DURABLE_PUBLICATION_FINALIZER
-            or _CANONICAL_DURABLE_PUBLICATION_FINALIZER.__code__
-            is not _CANONICAL_DURABLE_PUBLICATION_FINALIZER_CODE
+            _durably_finalize_published_path is not _finalizer
+            or _CANONICAL_DURABLE_PUBLICATION_FINALIZER is not _finalizer
+            or getattr(_finalizer, "__code__", None) is not _finalizer_code
+            or _CANONICAL_DURABLE_PUBLICATION_FINALIZER_CODE
+            is not _finalizer_code
         ):
             raise DeploymentRuntimeAuthorityError(
                 "runtime authority publication finalizer dispatch was replaced"
             )
-        _CANONICAL_DURABLE_PUBLICATION_FINALIZER(path)
+        _finalizer(path)
 
     @staticmethod
-    def _state_sha256(payload: Mapping[str, object]) -> str:
+    def _state_sha256(
+        payload: Mapping[str, object],
+        _hashlib_module: object = hashlib,
+        _sha256: object = hashlib.sha256,
+        _sha256_code: object = getattr(hashlib.sha256, "__code__", None),
+        _json_encoder: object = _canonical_json,
+        _json_encoder_code: object = _canonical_json.__code__,
+    ) -> str:
         if (
-            hashlib is not _CANONICAL_HASHLIB_MODULE
-            or _CANONICAL_HASHLIB_MODULE.sha256 is not _CANONICAL_HASHLIB_SHA256
+            hashlib is not _hashlib_module
+            or _CANONICAL_HASHLIB_MODULE is not _hashlib_module
+            or getattr(_hashlib_module, "sha256", None) is not _sha256
+            or _CANONICAL_HASHLIB_SHA256 is not _sha256
             or (
-                _CANONICAL_HASHLIB_SHA256_CODE is not None
-                and getattr(_CANONICAL_HASHLIB_SHA256, "__code__", None)
-                is not _CANONICAL_HASHLIB_SHA256_CODE
+                _sha256_code is not None
+                and getattr(_sha256, "__code__", None) is not _sha256_code
             )
-            or _canonical_json is not _CANONICAL_JSON_ENCODER
-            or _CANONICAL_JSON_ENCODER.__code__ is not _CANONICAL_JSON_ENCODER_CODE
+            or _CANONICAL_HASHLIB_SHA256_CODE is not _sha256_code
+            or _canonical_json is not _json_encoder
+            or _CANONICAL_JSON_ENCODER is not _json_encoder
+            or getattr(_json_encoder, "__code__", None) is not _json_encoder_code
+            or _CANONICAL_JSON_ENCODER_CODE is not _json_encoder_code
         ):
             raise DeploymentRuntimeAuthorityError(
                 "runtime authority state-digest dispatch was replaced"
             )
-        return _CANONICAL_HASHLIB_SHA256(
-            (_CANONICAL_JSON_ENCODER(payload) + "\n").encode("utf-8")
+        return _sha256(
+            (_json_encoder(payload) + "\n").encode("utf-8")
         ).hexdigest()
 
     @staticmethod
-    def _new_transaction_id() -> str:
+    def _new_transaction_id(
+        _uuid_module: object = uuid,
+        _uuid4: object = uuid.uuid4,
+        _uuid4_code: object = getattr(uuid.uuid4, "__code__", None),
+    ) -> str:
         if (
-            uuid is not _CANONICAL_UUID_MODULE
-            or _CANONICAL_UUID_MODULE.uuid4 is not _CANONICAL_UUID4
+            uuid is not _uuid_module
+            or _CANONICAL_UUID_MODULE is not _uuid_module
+            or getattr(_uuid_module, "uuid4", None) is not _uuid4
+            or _CANONICAL_UUID4 is not _uuid4
             or (
-                _CANONICAL_UUID4_CODE is not None
-                and getattr(_CANONICAL_UUID4, "__code__", None)
-                is not _CANONICAL_UUID4_CODE
+                _uuid4_code is not None
+                and getattr(_uuid4, "__code__", None) is not _uuid4_code
             )
+            or _CANONICAL_UUID4_CODE is not _uuid4_code
         ):
             raise DeploymentRuntimeAuthorityError(
                 "runtime authority transaction-id dispatch was replaced"
             )
-        return f"deployment-runtime-{_CANONICAL_UUID4().hex}"
+        return f"deployment-runtime-{_uuid4().hex}"
 
     def _read_payload(self) -> dict[str, object]:
         current_read_text = getattr(type(self.path), "read_text", None)

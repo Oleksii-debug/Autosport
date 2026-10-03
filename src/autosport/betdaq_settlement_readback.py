@@ -363,6 +363,23 @@ class BetdaqPostingObservation:
             _provider_id(self.order_id, "order_id")
         if self.market_id is not None:
             _provider_id(self.market_id, "market_id")
+        if self.posting_category == 1:
+            if self.order_id is None or self.market_id is not None:
+                raise BetdaqEconomicReadbackError(
+                    "Settlement posting requires exact OrderId and no MarketId"
+                )
+        elif self.posting_category == 2:
+            if self.market_id is None or self.order_id is not None:
+                raise BetdaqEconomicReadbackError(
+                    "Commission posting requires exact MarketId and no OrderId"
+                )
+        elif self.posting_category == 3:
+            if self.order_id is not None or self.market_id is not None:
+                raise BetdaqEconomicReadbackError(
+                    "Other posting cannot claim Settlement/Commission handles"
+                )
+        # Future provider enum values remain raw evidence per BETDAQ's schema-
+        # evolution contract; they do not inherit known category semantics.
         _provider_id(self.transaction_id, "transaction_id")
         if (
             type(self.currency) is not str

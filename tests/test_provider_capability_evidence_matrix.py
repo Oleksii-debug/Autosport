@@ -757,6 +757,54 @@ def test_matrix_journal_linearizes_successors_and_rejects_sibling_fork():
         journal.publish(sibling)
 
 
+def test_matrix_journal_historical_lookup_walks_multiple_successors():
+    journal = ProviderCapabilityEvidenceMatrixJournal()
+    first = matrix(as_of=T2)
+    second = matrix(
+        version=2,
+        predecessor=first.matrix_id,
+        as_of=T3,
+    )
+    third = matrix(
+        version=3,
+        predecessor=second.matrix_id,
+        as_of=T4,
+    )
+    journal.publish(first)
+    journal.publish(second)
+    journal.publish(third)
+
+    assert journal.latest_for(first, as_of=T1) is None
+    assert journal.latest_for(first, as_of=T2) is first
+    assert journal.latest_for(first, as_of=T3) is second
+    assert journal.latest_for(first, as_of=T4) is third
+
+
+def test_matrix_journal_historical_lookup_rejects_mutated_intermediate():
+    journal = ProviderCapabilityEvidenceMatrixJournal()
+    first = matrix(as_of=T2)
+    second = matrix(
+        version=2,
+        predecessor=first.matrix_id,
+        as_of=T3,
+    )
+    third = matrix(
+        version=3,
+        predecessor=second.matrix_id,
+        as_of=T4,
+    )
+    journal.publish(first)
+    journal.publish(second)
+    journal.publish(third)
+    object.__setattr__(second, "matrix_ref", "mutated-intermediate")
+
+    with pytest.raises(
+        ProviderCapabilityEvidenceMatrixError,
+        match="mutated after publication",
+    ):
+        journal.latest_for(first, as_of=T3)
+
+
 def test_matrix_journal_rejects_second_root_for_same_authority_scope():
     journal = ProviderCapabilityEvidenceMatrixJournal()
     first = matrix(as_of=T3)

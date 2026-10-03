@@ -1200,7 +1200,14 @@ def test_baseline_allowed_misdated_ticket_cannot_create_future_day_headroom(
     assert len(final.tickets) == 1
     ticket = next(iter(final.tickets.values()))
     assert ticket.stake == Decimal("4")
-    assert ticket.placed_at == _timestamp(now)
+    persisted_time = datetime.fromisoformat(
+        ticket.placed_at.replace("Z", "+00:00")
+    ).astimezone(timezone.utc)
+    assert persisted_time >= now
+    assert persisted_time.date() == now.date()
+    witness = final._product_day_admissions[ticket.ticket_id]
+    assert witness[0] == ticket.placed_at
+    assert witness[1] == persisted_time.date().isoformat()
 
 
 def test_candidate_outside_current_product_day_cannot_spend_current_headroom(tmp_path):

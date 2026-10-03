@@ -15,8 +15,16 @@ class ProposedTicketRiskContextTests(unittest.TestCase):
         event_id: str = "event-1",
         market_id: str = "market-1",
         selection_id: str = "selection-1",
+        *,
+        sport: str | None = None,
     ) -> TicketLeg:
-        return TicketLeg(event_id, market_id, selection_id, Decimal("2"))
+        return TicketLeg(
+            event_id,
+            market_id,
+            selection_id,
+            Decimal("2"),
+            sport=sport,
+        )
 
     @staticmethod
     def _quote(
@@ -37,6 +45,7 @@ class ProposedTicketRiskContextTests(unittest.TestCase):
             sequence=sequence,
             source_ts=source_ts,
             ingest_ts="2026-09-16T15:00:01+00:00",
+            sport=leg.sport,
         )
 
     @staticmethod
@@ -543,15 +552,231 @@ class ProposedTicketRiskContextTests(unittest.TestCase):
                 proposal_ts="2026-09-16T15:00:02+00:00",
             )
 
-    def test_sport_concentration_remains_fail_closed_without_canonical_identity(self) -> None:
-        sport = self._permissive_policy(
+    def test_sport_limits_fail_closed_when_proposal_lacks_canonical_identity(self) -> None:
+        concentration = self._permissive_policy(
             self._goal(max_sport_concentration_fraction=Decimal("0.99"))
         ).evaluate(PaperBook("100"), Decimal("1"), context=self._context())
-        self.assertFalse(sport.allowed)
+        self.assertFalse(concentration.allowed)
         self.assertEqual(
-            sport.reason,
+            concentration.reason,
             "owner sport concentration limit cannot be proven without "
             "canonical whole-portfolio exposure evidence",
+        )
+
+        deny_list = self._permissive_policy(
+            self._goal(blocked_sports=frozenset({"football"}))
+        ).evaluate(PaperBook("100"), Decimal("1"), context=self._context())
+        self.assertFalse(deny_list.allowed)
+        self.assertEqual(
+            deny_list.reason,
+            "owner sport deny-list cannot be proven without canonical sport identity",
+        )
+
+    def test_owner_blocked_sport_uses_canonical_ticket_leg_identity(self) -> None:
+        football_leg = self._leg(sport="football")
+        context = ProposedTicketRiskContext(
+            legs=(football_leg,),
+            quotes=(self._quote(football_leg),),
+            bankroll_id="paper-bankroll",
+            currency="USD",
+            proposal_ts="2026-09-16T15:00:02+00:00",
+        )
+
+        blocked = self._permissive_policy(
+            self._goal(blocked_sports=frozenset({"football"}))
+        ).evaluate(PaperBook("100"), Decimal("1"), context=context)
+        self.assertFalse(blocked.allowed)
+        self.assertEqual(
+            blocked.reason,
+            "proposed ticket contains an owner-blocked sport",
+        )
+
+        allowed = self._permissive_policy(
+            self._goal(blocked_sports=frozenset({"tennis"}))
+        ).evaluate(PaperBook("100"), Decimal("1"), context=context)
+        self.assertTrue(allowed.allowed)
+
+    def test_sport_concentration_uses_exact_whole_open_portfolio_boundary(self) -> None:
+        goal = self._goal(
+            max_session_loss_fraction=Decimal("1"),
+            max_day_loss_fraction=Decimal("1"),
+            max_drawdown_fraction=Decimal("1"),
+            max_turnover_fraction=Decimal("1000"),
+            max_sport_concentration_fraction=Decimal("0.20"),
+        )
+        policy = self._permissive_policy(goal)
+        football_leg = self._leg(sport="football")
+        football_context = ProposedTicketRiskContext(
+            legs=(football_leg,),
+            quotes=(self._quote(football_leg),),
+            bankroll_id=goal.bankroll_id,
+            currency=goal.currency,
+            proposal_ts="2026-09-16T15:00:02+00:00",
+        )
+
+        at_boundary = PaperBook("100")
+        at_boundary.open_ticket(
+            (
+                self._leg(
+                    "event-tennis",
+                    "market-tennis",
+                    "selection-tennis",
+                    sport="tennis",
+                ),
+            ),
+            Decimal("80"),
+        )
+        allowed = policy.evaluate(
+            at_boundary,
+            Decimal("20"),
+            context=football_context,
+        )
+        self.assertTrue(allowed.allowed)
+
+        over_limit = PaperBook("100")
+        over_limit.open_ticket(
+            (
+                self._leg(
+                    "event-tennis",
+                    "market-tennis",
+                    "selection-tennis",
+                    sport="tennis",
+                ),
+            ),
+            Decimal("79"),
+        )
+        over_limit.open_ticket(
+            (
+                self._leg(
+                    "event-football-existing",
+                    "market-football-existing",
+                    "selection-football-existing",
+                    sport="football",
+                ),
+            ),
+            Decimal("1"),
+        )
+        blocked = policy.evaluate(
+            over_limit,
+            Decimal("20"),
+            context=football_context,
+        )
+        self.assertFalse(blocked.allowed)
+        self.assertEqual(
+            blocked.reason,
+            "owner sport concentration limit exceeded",
+        )
+
+    def test_sport_concentration_survives_paperbook_restart(self) -> None:
+        goal = self._goal(
+            max_session_loss_fraction=Decimal("1"),
+            max_day_loss_fraction=Decimal("1"),
+            max_drawdown_fraction=Decimal("1"),
+            max_turnover_fraction=Decimal("1000"),
+            max_sport_concentration_fraction=Decimal("0.50"),
+        )
+        policy = self._permissive_policy(goal)
+        book = PaperBook("100")
+        book.open_ticket(
+            (self._leg("event-1", "market-1", "selection-1", sport="football"),),
+            Decimal("50"),
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "paper.json"
+            book.save(path)
+            restarted = PaperBook.load(path)
+
+            football = self._leg(
+                "event-2",
+                "market-2",
+                "selection-2",
+                sport="football",
+            )
+            context = ProposedTicketRiskContext(
+                legs=(football,),
+                quotes=(self._quote(football),),
+                bankroll_id=goal.bankroll_id,
+                currency=goal.currency,
+                proposal_ts="2026-09-16T15:00:02+00:00",
+            )
+            decision = policy.evaluate(
+                restarted,
+                Decimal("1"),
+                context=context,
+            )
+
+        self.assertFalse(decision.allowed)
+        self.assertEqual(
+            decision.reason,
+            "owner sport concentration limit exceeded",
+        )
+
+    def test_sport_concentration_fails_closed_on_legacy_open_ticket_without_sport(self) -> None:
+        goal = self._goal(max_sport_concentration_fraction=Decimal("0.99"))
+        book = PaperBook("100")
+        book.open_ticket(
+            (self._leg("legacy-event", "legacy-market", "legacy-selection"),),
+            Decimal("1"),
+        )
+        football = self._leg(
+            "event-football",
+            "market-football",
+            "selection-football",
+            sport="football",
+        )
+        context = ProposedTicketRiskContext(
+            legs=(football,),
+            quotes=(self._quote(football),),
+            bankroll_id=goal.bankroll_id,
+            currency=goal.currency,
+            proposal_ts="2026-09-16T15:00:02+00:00",
+        )
+
+        decision = self._permissive_policy(goal).evaluate(
+            book,
+            Decimal("1"),
+            context=context,
+        )
+
+        self.assertFalse(decision.allowed)
+        self.assertEqual(
+            decision.reason,
+            "owner sport concentration limit cannot be proven without "
+            "canonical whole-portfolio exposure evidence",
+        )
+
+    def test_risk_evidence_hashes_bind_sport_identity(self) -> None:
+        policy = self._permissive_policy(self._goal())
+
+        football_leg = self._leg(sport="football")
+        tennis_leg = self._leg(sport="tennis")
+        football_context = ProposedTicketRiskContext(
+            legs=(football_leg,),
+            quotes=(self._quote(football_leg),),
+            bankroll_id="paper-bankroll",
+            currency="USD",
+            proposal_ts="2026-09-16T15:00:02+00:00",
+        )
+        tennis_context = ProposedTicketRiskContext(
+            legs=(tennis_leg,),
+            quotes=(self._quote(tennis_leg),),
+            bankroll_id="paper-bankroll",
+            currency="USD",
+            proposal_ts="2026-09-16T15:00:02+00:00",
+        )
+        self.assertNotEqual(
+            policy.risk_of_ruin_candidate_sha256(football_context),
+            policy.risk_of_ruin_candidate_sha256(tennis_context),
+        )
+
+        football_book = PaperBook("100")
+        football_book.open_ticket((football_leg,), Decimal("1"))
+        tennis_book = PaperBook("100")
+        tennis_book.open_ticket((tennis_leg,), Decimal("1"))
+        self.assertNotEqual(
+            policy.risk_of_ruin_portfolio_sha256(football_book),
+            policy.risk_of_ruin_portfolio_sha256(tennis_book),
         )
 
 

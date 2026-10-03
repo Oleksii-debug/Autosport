@@ -328,9 +328,23 @@ class GitHubApi:
         request_type = Request
         urlopen_impl = urlopen
 
+        def repository_binding_current() -> bool:
+            return (
+                object.__getattribute__(self, "_GitHubApi__repository")
+                == repository
+            )
+
         def transport_authority_current() -> bool:
             return Request is request_type and urlopen is urlopen_impl
 
+        def assert_response_authority_current() -> None:
+            if not repository_binding_current():
+                raise CancellationError("GitHub API repository binding changed")
+            if not transport_authority_current():
+                raise CancellationError("GitHub API transport authority changed")
+
+        if not repository_binding_current():
+            raise CancellationError("GitHub API repository binding changed")
         if not transport_authority_current():
             raise CancellationError("GitHub API transport authority changed")
 
@@ -361,27 +375,29 @@ class GitHubApi:
                     # success authority. The response body is non-authoritative and is
                     # deliberately neither read nor parsed. The closure-built cancel()
                     # additionally seals this exact request implementation by identity.
-                    if not transport_authority_current():
-                        raise CancellationError("GitHub API transport authority changed")
+                    assert_response_authority_current()
                     return _CANCELLATION_ACCEPTED
                 if type(status_code) is not int or status_code != 200:
                     raise CancellationError(
                         "GitHub API GET returned unexpected HTTP status"
                     )
                 body = response.read()
-                if not transport_authority_current():
-                    raise CancellationError("GitHub API transport authority changed")
+                assert_response_authority_current()
         except HTTPError as exc:
-            if not transport_authority_current():
-                raise CancellationError("GitHub API transport authority changed") from exc
+            try:
+                assert_response_authority_current()
+            except CancellationError as authority_exc:
+                raise authority_exc from exc
             if exc.code in allowed_http_errors:
                 return _AllowedHttpError(exc.code)
             raise CancellationError(
                 f"GitHub API request failed: {type(exc).__name__}"
             ) from exc
         except (URLError, TimeoutError) as exc:
-            if not transport_authority_current():
-                raise CancellationError("GitHub API transport authority changed") from exc
+            try:
+                assert_response_authority_current()
+            except CancellationError as authority_exc:
+                raise authority_exc from exc
             raise CancellationError(
                 f"GitHub API request failed: {type(exc).__name__}"
             ) from exc

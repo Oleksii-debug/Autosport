@@ -236,6 +236,34 @@ def _closure_value(function, name: str):
     raise AssertionError(f"closure value not found: {name}")
 
 
+def _function_with_freevar(function, name: str):
+    pending = [function]
+    seen: set[int] = set()
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        if name in current.__code__.co_freevars:
+            return current
+        for cell in current.__closure__ or ():
+            try:
+                value = cell.cell_contents
+            except ValueError:
+                continue
+            if type(value) is FunctionType:
+                pending.append(value)
+    raise AssertionError(f"function with freevar not found: {name}")
+
+
+def _cell(value):
+    def capture():
+        return value
+
+    assert capture.__closure__ is not None
+    return capture.__closure__[0]
+
+
 def test_origin_proof_cannot_be_replayed_onto_equal_capture_object(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -304,3 +332,61 @@ def test_readback_origin_binder_is_consumed_and_not_publicly_reusable() -> None:
         account_identity_module,
         "_bind_betfair_execution_readback_origin_authority",
     )
+
+
+def test_same_code_reconstruction_with_foreign_raw_read_cannot_mint_origin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(_urllib_request, "_opener", _Opener())
+    client = build_betfair_authenticated_client(
+        BetfairSessionCredentials("app-key", "session-token"),
+        account_label="acct-1",
+    )
+
+    structural_client = BetfairReadOnlyClient(
+        BetfairSessionCredentials("app-key", "session-token"),
+        transport=_CustomTransport(),
+        venue_id="betfair",
+        account_id="acct-1",
+    )
+    structural = _read(structural_client)
+
+    lower = _function_with_freevar(
+        BetfairReadOnlyClient.read_execution_readback,
+        "issue_origin",
+    )
+
+    def foreign_raw_read(
+        self,
+        *,
+        action_id: str,
+        market_id: str,
+        provider_order_ref: str | None = None,
+        page_size: int = 1000,
+        max_pages: int = 100,
+    ):
+        del self, action_id, market_id, provider_order_ref, page_size, max_pages
+        return structural
+
+    closure = list(lower.__closure__ or ())
+    freevars = lower.__code__.co_freevars
+    closure[freevars.index("raw_read")] = _cell(foreign_raw_read)
+    reconstructed = FunctionType(
+        lower.__code__,
+        lower.__globals__,
+        lower.__name__,
+        lower.__defaults__,
+        tuple(closure),
+    )
+    reconstructed.__kwdefaults__ = lower.__kwdefaults__
+
+    with pytest.raises(
+        BetfairReadOnlyError,
+        match="origin proof could not be issued",
+    ):
+        reconstructed(
+            client,
+            action_id=ACTION_ID,
+            market_id=MARKET_ID,
+            provider_order_ref=PROVIDER_REF,
+        )

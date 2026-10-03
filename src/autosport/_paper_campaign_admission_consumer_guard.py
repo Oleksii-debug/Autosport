@@ -12,6 +12,7 @@ read to authorize admission.
 from __future__ import annotations
 
 from collections.abc import Mapping
+from datetime import datetime
 from pathlib import Path
 from threading import RLock
 from weakref import WeakKeyDictionary
@@ -106,6 +107,9 @@ def _build_guard(seal):
     exact_tuple = tuple
     exact_len = len
     isinstance_fn = isinstance
+    datetime_cls = datetime
+    exact_str = str
+    parse_errors = (TypeError, ValueError)
     object_getattribute = object.__getattribute__
     forward_payload_key = "campaign_forward_verification"
     forward_parameter_key = "campaign_forward_verification_sha256"
@@ -575,6 +579,42 @@ def _build_guard(seal):
         ):
             raise PaperCampaignAdmissionError(
                 "campaign forward verification is not exact structural PASS/non-promotion truth"
+            )
+
+        def parse_instant(value: object, label: str):
+            if exact_type(value) is not exact_str:
+                raise PaperCampaignAdmissionError(f"{label} must be canonical ISO text")
+            try:
+                parsed = datetime_cls.fromisoformat(value.replace("Z", "+00:00"))
+            except parse_errors as exc:
+                raise PaperCampaignAdmissionError(f"{label} is not valid ISO time") from exc
+            if parsed.tzinfo is None:
+                raise PaperCampaignAdmissionError(f"{label} must be timezone-aware")
+            return parsed
+
+        decision_instant = parse_instant(kwargs.get("decision_at"), "decision_at")
+        latest_evidence_instant = parse_instant(
+            object_getattribute(campaign_forward_cycle_receipt, "completed_at"),
+            "campaign forward cycle completed_at",
+        )
+        for collection_name, instant_name in (
+            ("opportunities", "observed_upper"),
+            ("cohort_roots", "anchor_upper"),
+            ("closes", "anchor_upper"),
+            ("reveal_boundaries", "boundary_upper"),
+        ):
+            collection = object_getattribute(campaign_forward_evidence, collection_name)
+            for item in collection:
+                instant = object_getattribute(item, instant_name)
+                if exact_type(instant) is not datetime_cls or instant.tzinfo is None:
+                    raise PaperCampaignAdmissionError(
+                        "campaign forward evidence availability instant is noncanonical"
+                    )
+                if instant > latest_evidence_instant:
+                    latest_evidence_instant = instant
+        if decision_instant < latest_evidence_instant:
+            raise PaperCampaignAdmissionError(
+                "PAPER admission decision predates campaign forward evidence availability"
             )
 
         decision_payload = kwargs.get("decision_payload")

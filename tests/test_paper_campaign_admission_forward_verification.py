@@ -72,6 +72,22 @@ def test_forward_verification_identity_is_bound_to_decision_and_action(tmp_path)
     )
 
 
+def test_admission_decision_cannot_predate_forward_evidence(tmp_path) -> None:
+    fixture = AdmissionFixture(tmp_path)
+
+    with pytest.raises(
+        PaperCampaignAdmissionError,
+        match="decision predates campaign forward evidence availability",
+    ):
+        fixture.admit(
+            fixture.coordinator(),
+            decision_at="2100-01-01T06:00:05+00:00",
+            at="2100-01-01T06:00:05+00:00",
+        )
+
+    assert not _admission_state_path(fixture).exists()
+
+
 def test_changed_structural_evidence_is_rejected_before_prepared(tmp_path) -> None:
     fixture = AdmissionFixture(tmp_path)
     forward = fixture.forward_verification_kwargs()

@@ -340,3 +340,43 @@ def test_source_reference_text_is_bounded() -> None:
 def test_source_revision_text_is_bounded() -> None:
     with pytest.raises(BetfairProviderConstraintError, match="bounded canonical"):
         observation(source_revision="r" * 4097)
+
+
+
+def test_hard_false_authority_surfaces_are_non_python_and_sealed() -> None:
+    item = observation()
+    result = resolve(item)
+
+    for cls, instance, names in (
+        (
+            BetfairProviderConstraintObservation,
+            item,
+            (
+                "provider_origin_proven",
+                "current_constraint_authority",
+                "execution_authorized",
+            ),
+        ),
+        (
+            type(result),
+            result,
+            (
+                "provider_origin_proven",
+                "current_constraint_authority",
+                "execution_authorized",
+                "real_money_execution",
+            ),
+        ),
+    ):
+        for name in names:
+            descriptor = cls.__dict__[name]
+            assert isinstance(descriptor, property)
+            assert descriptor.fget is not None
+            assert not hasattr(descriptor.fget, "__code__")
+            assert getattr(instance, name) is False
+
+        with pytest.raises(TypeError, match="authority surface is sealed"):
+            cls.current_constraint_authority = property(lambda _self: True)
+
+        with pytest.raises(TypeError, match="authority surface is sealed"):
+            cls._current_constraint_authority_constant = True

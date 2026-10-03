@@ -20,6 +20,7 @@ from decimal import Decimal
 from enum import Enum
 import hashlib
 import json
+from operator import attrgetter
 from typing import Iterable
 
 PROVIDER_ID = "betfair"
@@ -136,8 +137,51 @@ def _canonical_sha256(payload: object) -> str:
     return hashlib.sha256(raw).hexdigest()
 
 
+def _build_constraint_evidence_meta():
+    """Seal hard-false authority claims away from mutable Python getters."""
+
+    sealed_classes: set[type] = set()
+    protected_names = frozenset(
+        {
+            "provider_origin_proven",
+            "current_constraint_authority",
+            "execution_authorized",
+            "real_money_execution",
+            "_provider_origin_proven_constant",
+            "_current_constraint_authority_constant",
+            "_execution_authorized_constant",
+            "_real_money_execution_constant",
+        }
+    )
+
+    class _BetfairConstraintEvidenceMeta(type):
+        def __setattr__(cls, name: str, value: object) -> None:
+            if cls in sealed_classes and name in protected_names:
+                raise TypeError(
+                    "provider-constraint authority surface is sealed: " + name
+                )
+            super().__setattr__(name, value)
+
+        def __delattr__(cls, name: str) -> None:
+            if cls in sealed_classes and name in protected_names:
+                raise TypeError(
+                    "provider-constraint authority surface is sealed: " + name
+                )
+            super().__delattr__(name)
+
+        @classmethod
+        def seal(mcls, cls: type) -> None:
+            sealed_classes.add(cls)
+
+    return _BetfairConstraintEvidenceMeta
+
+
+_BetfairConstraintEvidenceMeta = _build_constraint_evidence_meta()
+del _build_constraint_evidence_meta
+
+
 @dataclass(frozen=True, slots=True)
-class BetfairProviderConstraintObservation:
+class BetfairProviderConstraintObservation(metaclass=_BetfairConstraintEvidenceMeta):
     """One immutable provider-rule observation.
 
     Construction is public and therefore never proves provider origin. The
@@ -278,21 +322,22 @@ class BetfairProviderConstraintObservation:
             }
         )
 
-    @property
-    def provider_origin_proven(self) -> bool:
-        return False
+    _provider_origin_proven_constant = False
+    _current_constraint_authority_constant = False
+    _execution_authorized_constant = False
 
-    @property
-    def current_constraint_authority(self) -> bool:
-        return False
+    provider_origin_proven = property(attrgetter("_provider_origin_proven_constant"))
+    current_constraint_authority = property(
+        attrgetter("_current_constraint_authority_constant")
+    )
+    execution_authorized = property(attrgetter("_execution_authorized_constant"))
 
-    @property
-    def execution_authorized(self) -> bool:
-        return False
+
+_BetfairConstraintEvidenceMeta.seal(BetfairProviderConstraintObservation)
 
 
 @dataclass(frozen=True, slots=True)
-class BetfairProviderConstraintResolution:
+class BetfairProviderConstraintResolution(metaclass=_BetfairConstraintEvidenceMeta):
     state: BetfairConstraintResolutionState
     provider_id: str
     jurisdiction_scope: str
@@ -374,21 +419,20 @@ class BetfairProviderConstraintResolution:
                 "non-consistent result cannot expose provider thresholds"
             )
 
-    @property
-    def provider_origin_proven(self) -> bool:
-        return False
+    _provider_origin_proven_constant = False
+    _current_constraint_authority_constant = False
+    _execution_authorized_constant = False
+    _real_money_execution_constant = False
 
-    @property
-    def current_constraint_authority(self) -> bool:
-        return False
+    provider_origin_proven = property(attrgetter("_provider_origin_proven_constant"))
+    current_constraint_authority = property(
+        attrgetter("_current_constraint_authority_constant")
+    )
+    execution_authorized = property(attrgetter("_execution_authorized_constant"))
+    real_money_execution = property(attrgetter("_real_money_execution_constant"))
 
-    @property
-    def execution_authorized(self) -> bool:
-        return False
 
-    @property
-    def real_money_execution(self) -> bool:
-        return False
+_BetfairConstraintEvidenceMeta.seal(BetfairProviderConstraintResolution)
 
 
 def _result(

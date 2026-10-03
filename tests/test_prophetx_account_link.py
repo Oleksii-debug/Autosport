@@ -8,6 +8,7 @@ from autosport.prophetx_account_link import (
     AccountLinkBlocked,
     AccountLinkInputError,
     AccountLinkState,
+    AccountLinkStateError,
     DiagnosticCode,
     LoginDisposition,
     LoginOutcome,

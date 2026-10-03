@@ -1162,6 +1162,21 @@ _RISK_POLICY_TRANSITION_METHOD_WITNESS, _RISK_POLICY_TRANSITION_GLOBAL_WITNESS =
 )
 
 
+_PAPERBOOK_INSTANCE_STATE_CLASS_WITNESSES = tuple(
+    (
+        name,
+        name in PaperBook.__dict__,
+        PaperBook.__dict__.get(name),
+    )
+    for name in (
+        "initial_bankroll",
+        "balance",
+        "tickets",
+        "_lifecycle",
+        "_settlement_times",
+    )
+)
+
 _PAPERBOOK_LOAD_DESCRIPTOR = PaperBook.__dict__["load"]
 if type(_PAPERBOOK_LOAD_DESCRIPTOR) is not classmethod:
     raise RuntimeError("canonical PaperBook load authority is unavailable")
@@ -1184,6 +1199,17 @@ _PAPERBOOK_GATE_METHOD_WITNESS, _PAPERBOOK_GATE_GLOBAL_WITNESS = (
 
 def _require_paperbook_admission_authority() -> None:
     """Bind approved PAPER economics to the exact durable mutation graph."""
+
+    for name, expected_present, expected_value in (
+        _PAPERBOOK_INSTANCE_STATE_CLASS_WITNESSES
+    ):
+        if (
+            (name in PaperBook.__dict__) is not expected_present
+            or PaperBook.__dict__.get(name) is not expected_value
+        ):
+            raise RuntimeError(
+                "economic admission PaperBook state descriptor authority changed"
+            )
 
     for name, expected_descriptor in _PAPER_TICKET_FIELD_DESCRIPTOR_WITNESSES:
         if PaperTicket.__dict__.get(name) is not expected_descriptor:
@@ -1565,6 +1591,7 @@ def admit_paper_ticket(
                 )
             working_book = book
 
+        _require_paperbook_admission_authority()
         pre_evaluation_state = _RISK_BOOK_STATE(PaperRiskPolicy, working_book)
         goal = risk_policy.economic_goal
         day_authority: _ProductDayAdmissionAuthority | None = None
@@ -1585,6 +1612,7 @@ def admit_paper_ticket(
                     "admission_ts",
                 )
 
+        _require_paperbook_admission_authority()
         if not _admission_risk_helper_authority_valid():
             decision = RiskDecision(
                 False,

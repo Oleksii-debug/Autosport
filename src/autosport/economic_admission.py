@@ -145,6 +145,112 @@ def _require_workspace_lock_dispatch() -> None:
                 raise RuntimeError("workspace economic lock dependency authority changed")
 
 
+def _capture_sealed_wrapper_authority(
+    function: FunctionType,
+) -> tuple[
+    tuple[tuple[str, object, object], ...],
+    tuple[tuple[str, object, object | None], ...],
+]:
+    """Snapshot one installed sealed wrapper's closure-owned dependency graph."""
+
+    if type(function) is not FunctionType:
+        raise RuntimeError("sealed authority wrapper must be a Python function")
+    closure = function.__closure__
+    freevars = function.__code__.co_freevars
+    if closure is None or len(closure) != len(freevars):
+        raise RuntimeError("sealed authority wrapper closure is unavailable")
+
+    closure_witness: list[tuple[str, object, object]] = []
+    closure_values: dict[str, object] = {}
+    for name, cell in zip(freevars, closure, strict=True):
+        try:
+            value = cell.cell_contents
+        except ValueError as exc:
+            raise RuntimeError("sealed authority wrapper closure is incomplete") from exc
+        closure_witness.append((name, cell, value))
+        closure_values[name] = value
+
+    source_function = closure_values.get("function")
+    frozen_globals = closure_values.get("frozen_globals")
+    if type(source_function) is not FunctionType or type(frozen_globals) is not dict:
+        raise RuntimeError("sealed authority wrapper dependency graph is unavailable")
+
+    bindings: dict[str, tuple[object, object | None]] = {}
+    pending = [source_function]
+    visited: set[int] = set()
+    while pending:
+        current = pending.pop()
+        marker = id(current)
+        if marker in visited:
+            continue
+        visited.add(marker)
+        for global_name in current.__code__.co_names:
+            if global_name not in frozen_globals:
+                continue
+            value = frozen_globals[global_name]
+            if global_name not in bindings:
+                bindings[global_name] = (
+                    value,
+                    value.__code__ if type(value) is FunctionType else None,
+                )
+            if (
+                type(value) is FunctionType
+                and value.__globals__ is frozen_globals
+            ):
+                pending.append(value)
+
+    binding_witness = tuple(
+        (name, bindings[name][0], bindings[name][1])
+        for name in sorted(bindings)
+    )
+    return tuple(closure_witness), binding_witness
+
+
+def _require_sealed_wrapper_authority(
+    function: FunctionType,
+    *,
+    expected_closure: tuple[tuple[str, object, object], ...],
+    expected_bindings: tuple[tuple[str, object, object | None], ...],
+    error: str,
+) -> None:
+    """Reject closure-cell, frozen-global and helper-code mutation."""
+
+    closure = function.__closure__
+    if closure is None or len(closure) != len(expected_closure):
+        raise RuntimeError(error)
+
+    frozen_globals: dict[str, object] | None = None
+    for index, (name, expected_cell, expected_value) in enumerate(expected_closure):
+        current_cell = closure[index]
+        if current_cell is not expected_cell:
+            raise RuntimeError(error)
+        try:
+            current_value = current_cell.cell_contents
+        except ValueError as exc:
+            raise RuntimeError(error) from exc
+        if current_value is not expected_value:
+            raise RuntimeError(error)
+        if name == "frozen_globals":
+            if type(current_value) is not dict:
+                raise RuntimeError(error)
+            frozen_globals = current_value
+
+    if frozen_globals is None:
+        raise RuntimeError(error)
+    for name, expected_value, expected_code in expected_bindings:
+        if name not in frozen_globals:
+            raise RuntimeError(error)
+        current_value = frozen_globals[name]
+        if current_value is not expected_value:
+            raise RuntimeError(error)
+        if expected_code is not None:
+            if (
+                type(current_value) is not FunctionType
+                or current_value.__code__ is not expected_code
+            ):
+                raise RuntimeError(error)
+
+
 _TURNOVER_RESOLVE_DESCRIPTOR = PaperDayTurnoverResolver.__dict__["resolve"]
 if type(_TURNOVER_RESOLVE_DESCRIPTOR) is not classmethod:
     raise RuntimeError("canonical turnover resolver descriptor is unavailable")
@@ -152,6 +258,10 @@ _TURNOVER_RESOLVE_FUNCTION = _TURNOVER_RESOLVE_DESCRIPTOR.__func__
 _TURNOVER_RESOLVE_CODE = getattr(_TURNOVER_RESOLVE_FUNCTION, "__code__", None)
 if type(_TURNOVER_RESOLVE_FUNCTION) is not FunctionType or _TURNOVER_RESOLVE_CODE is None:
     raise RuntimeError("canonical turnover resolver executable is unavailable")
+(
+    _TURNOVER_RESOLVE_CLOSURE_WITNESS,
+    _TURNOVER_RESOLVE_BINDING_WITNESS,
+) = _capture_sealed_wrapper_authority(_TURNOVER_RESOLVE_FUNCTION)
 
 _RISK_DAY_STORE_METHOD_NAMES = (
     "__init__",
@@ -166,14 +276,17 @@ _RISK_DAY_STORE_WITNESSES = tuple(
     (
         name,
         ProductDayRiskWindowStore.__dict__[name],
-        getattr(ProductDayRiskWindowStore.__dict__[name], "__code__", None),
+        ProductDayRiskWindowStore.__dict__[name].__code__,
+        *_capture_sealed_wrapper_authority(
+            ProductDayRiskWindowStore.__dict__[name]
+        ),
     )
     for name in _RISK_DAY_STORE_METHOD_NAMES
 )
 
 
 def _require_product_day_turnover_dispatch() -> None:
-    """Fail closed if positive day/turnover wrapper executables drift in place."""
+    """Fail closed if positive day/turnover executable authority drifts."""
 
     current_resolve_descriptor = PaperDayTurnoverResolver.__dict__.get("resolve")
     if (
@@ -184,8 +297,20 @@ def _require_product_day_turnover_dispatch() -> None:
         is not _TURNOVER_RESOLVE_CODE
     ):
         raise RuntimeError("product day turnover resolver executable authority changed")
+    _require_sealed_wrapper_authority(
+        _TURNOVER_RESOLVE_FUNCTION,
+        expected_closure=_TURNOVER_RESOLVE_CLOSURE_WITNESS,
+        expected_bindings=_TURNOVER_RESOLVE_BINDING_WITNESS,
+        error="product day turnover resolver dependency authority changed",
+    )
 
-    for name, expected_function, expected_code in _RISK_DAY_STORE_WITNESSES:
+    for (
+        name,
+        expected_function,
+        expected_code,
+        expected_closure,
+        expected_bindings,
+    ) in _RISK_DAY_STORE_WITNESSES:
         current_function = ProductDayRiskWindowStore.__dict__.get(name)
         if (
             current_function is not expected_function
@@ -193,6 +318,12 @@ def _require_product_day_turnover_dispatch() -> None:
             or getattr(current_function, "__code__", None) is not expected_code
         ):
             raise RuntimeError("product day window executable authority changed")
+        _require_sealed_wrapper_authority(
+            current_function,
+            expected_closure=expected_closure,
+            expected_bindings=expected_bindings,
+            error="product day window dependency authority changed",
+        )
 
 
 def _canonical_workspace_root(workspace: str | Path) -> Path:

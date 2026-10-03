@@ -841,8 +841,14 @@ class ProphetXSessionLifecycle:
                         lineage = None
                         expiry = None
                     elif timestamp >= current.access_expires_at:
-                        state = ProphetXSessionState.EXPIRED
-                        hold = None
+                        if timestamp < current.slot_hold_until:
+                            state = (
+                                ProphetXSessionState.WAIT_FOR_PROVIDER_SESSION_EXPIRY
+                            )
+                            hold = current.slot_hold_until
+                        else:
+                            state = ProphetXSessionState.EXPIRED
+                            hold = None
                         retry = None
                         lineage = None
                         expiry = None
@@ -908,7 +914,10 @@ class ProphetXSessionLifecycle:
                         last_transition_at=timestamp,
                         session_lineage_id=attempt,
                         access_expires_at=expires,
-                        slot_hold_until=expires,
+                        slot_hold_until=max(
+                            expires,
+                            timestamp + CONSERVATIVE_SESSION_SLOT_HOLD,
+                        ),
                     )
                     self._write_state(updated)
             except WorkspaceEconomicLockError as exc:
@@ -1139,6 +1148,28 @@ class ProphetXSessionLifecycle:
                     "active session state is missing expiry evidence"
                 )
             if now >= current.access_expires_at:
+                if now < current.slot_hold_until:
+                    waiting = ProphetXSessionSnapshot(
+                        state=(
+                            ProphetXSessionState.WAIT_FOR_PROVIDER_SESSION_EXPIRY
+                        ),
+                        generation=current.generation + 1,
+                        credential_revision=current.credential_revision,
+                        integration_role=current.integration_role,
+                        last_transition_at=now,
+                        slot_hold_until=current.slot_hold_until,
+                        transient_failures=current.transient_failures,
+                        last_failure_class=current.last_failure_class,
+                        last_renewal_failure_class=current.last_renewal_failure_class,
+                    )
+                    self._write_state(waiting)
+                    return ProphetXLoginAdmission(
+                        action=(
+                            ProphetXLoginAdmissionAction.WAIT_FOR_PROVIDER_SESSION_EXPIRY
+                        ),
+                        snapshot=waiting,
+                        retry_at=waiting.slot_hold_until,
+                    )
                 return self._grant_login(
                     now,
                     generation=current.generation + 1,

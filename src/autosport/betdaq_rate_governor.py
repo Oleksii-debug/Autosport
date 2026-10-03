@@ -544,6 +544,7 @@ class _RuntimeState:
     policy_fingerprint: str
     clock: Clock
     wall_clock: WallClock
+    blacklist_store: _BlacklistStore
     methods: dict[str, _Window]
     combined: _Window
     blacklist_blocked_until: dict[str, float]
@@ -845,6 +846,32 @@ class _BlacklistStore:
 class BetdaqRateGovernor:
     """Shared process-local request budget plus durable blacklist fence."""
 
+    # The governor is an authority-bearing resolved object.  Keep method dispatch on
+    # the canonical class surface: a normal instance __dict__ would let a caller
+    # shadow admit() or one of its transitive helpers after exact-type resolution,
+    # bypassing the shared request budget while retaining the same object identity.
+    __slots__ = (
+        "workspace",
+        "policy",
+        "policy_fingerprint",
+        "_method_policies",
+        "governor_id",
+    )
+
+    def __setattr__(self, name: str, value: object) -> None:
+        """Bind canonical governor state exactly once during construction."""
+
+        try:
+            object.__getattribute__(self, name)
+        except AttributeError:
+            object.__setattr__(self, name, value)
+            return
+        raise AttributeError("BetdaqRateGovernor authority bindings are write-once")
+
+    def __delattr__(self, name: str) -> None:
+        del name
+        raise AttributeError("BetdaqRateGovernor authority bindings are write-once")
+
     def __init__(
         self,
         workspace: Path,
@@ -861,8 +888,10 @@ class BetdaqRateGovernor:
             )
         self.workspace = workspace
         self.policy = policy
-        self._runtime = runtime
-        self._blacklist_store = blacklist_store
+        if runtime.blacklist_store is not blacklist_store:
+            raise BetdaqRateGovernorError(
+                "BETDAQ governor registry is internally inconsistent"
+            )
         self.policy_fingerprint = policy.fingerprint()
         if self.policy_fingerprint != runtime.policy_fingerprint:
             raise BetdaqRateGovernorError(
@@ -877,19 +906,7 @@ class BetdaqRateGovernor:
         )
 
     def _assert_policy_integrity(self) -> None:
-        try:
-            current_fingerprint = self.policy.fingerprint()
-        except Exception as exc:
-            raise BetdaqRateGovernorError(
-                "BETDAQ rate policy changed after governor resolution"
-            ) from exc
-        if (
-            current_fingerprint != self.policy_fingerprint
-            or self.policy_fingerprint != self._runtime.policy_fingerprint
-        ):
-            raise BetdaqRateGovernorError(
-                "BETDAQ rate policy changed after governor resolution"
-            )
+        _canonical_governor_binding(self)
 
     @property
     def multi_process_safe(self) -> bool:
@@ -909,10 +926,11 @@ class BetdaqRateGovernor:
         *,
         now_monotonic: float,
     ) -> tuple[BetdaqBlacklistStatus, float]:
-        observation = self._blacklist_store.observations().get(operation_id)
+        _, runtime, blacklist_store = _canonical_governor_binding(self)
+        observation = blacklist_store.observations().get(operation_id)
         if observation is None:
             return BetdaqBlacklistStatus.UNKNOWN, 0.0
-        wall_now = _utc(self._runtime.wall_clock(), "wall_clock")
+        wall_now = _utc(runtime.wall_clock(), "wall_clock")
         wall_remaining = max(
             0.0,
             (
@@ -922,7 +940,7 @@ class BetdaqRateGovernor:
         )
         monotonic_remaining = max(
             0.0,
-            self._runtime.blacklist_blocked_until.get(
+            runtime.blacklist_blocked_until.get(
                 operation_id, now_monotonic
             )
             - now_monotonic,
@@ -933,6 +951,7 @@ class BetdaqRateGovernor:
         return BetdaqBlacklistStatus.EXPIRED_OBSERVATION, 0.0
 
     def blacklist_status(self, api_name: str) -> BetdaqBlacklistStatus:
+        _canonical_governor_binding(self)
         raw_name = _canonical_text(api_name, "api_name")
         operation_id = _provider_operation_id(raw_name)
         if operation_id is None:
@@ -952,6 +971,7 @@ class BetdaqRateGovernor:
         remaining_ms: int,
         provider_observation_sha256: str,
     ) -> BetdaqBlacklistObservation:
+        _, runtime, blacklist_store = _canonical_governor_binding(self)
         name = _canonical_text(api_name, "api_name")
         operation_id = _provider_operation_id(name)
         if (
@@ -968,7 +988,7 @@ class BetdaqRateGovernor:
             provider_observation_sha256,
             "provider_observation_sha256",
         )
-        observed = _utc(self._runtime.wall_clock(), "wall_clock")
+        observed = _utc(runtime.wall_clock(), "wall_clock")
         blocked = observed + timedelta(milliseconds=remaining_ms)
         observation = BetdaqBlacklistObservation(
             api_name=name,
@@ -978,11 +998,11 @@ class BetdaqRateGovernor:
             provider_observation_sha256=digest,
         )
         if operation_id is None:
-            return self._blacklist_store.extend(observation)
+            return blacklist_store.extend(observation)
 
         with _REGISTRY_LOCK:
             now = self._now(operation_id)
-            persisted = self._blacklist_store.extend(observation)
+            persisted = blacklist_store.extend(observation)
             persisted_remaining = max(
                 0.0,
                 (
@@ -996,8 +1016,8 @@ class BetdaqRateGovernor:
                 remaining_ms / 1000.0,
                 persisted_remaining,
             )
-            self._runtime.blacklist_blocked_until[operation_id] = max(
-                self._runtime.blacklist_blocked_until.get(
+            runtime.blacklist_blocked_until[operation_id] = max(
+                runtime.blacklist_blocked_until.get(
                     operation_id, relative_until
                 ),
                 relative_until,
@@ -1010,7 +1030,8 @@ class BetdaqRateGovernor:
         *,
         priority: BetdaqRatePriority = BetdaqRatePriority.BACKGROUND_READ,
     ) -> BetdaqRateAdmission:
-        self._assert_policy_integrity()
+        _CANONICAL_ASSERT_POLICY_INTEGRITY(self)
+        _, runtime, _ = _canonical_governor_binding(self)
         name = _canonical_text(method, "method")
         if type(priority) is not BetdaqRatePriority:
             raise BetdaqRateGovernorError(
@@ -1025,13 +1046,13 @@ class BetdaqRateGovernor:
             )
 
         with _REGISTRY_LOCK:
-            now = self._now(name)
-            window = self._runtime.methods[name]
-            self._prune(window.admitted_at, now)
-            self._prune(self._runtime.combined.admitted_at, now)
+            now = _CANONICAL_NOW(self, name)
+            window = runtime.methods[name]
+            _CANONICAL_PRUNE(self, window.admitted_at, now)
+            _CANONICAL_PRUNE(self, runtime.combined.admitted_at, now)
             cold_blocked_until = max(
                 window.blocked_until,
-                self._runtime.combined.blocked_until,
+                runtime.combined.blocked_until,
             )
             if cold_blocked_until > now:
                 raise BetdaqRateDeferred(
@@ -1040,7 +1061,8 @@ class BetdaqRateGovernor:
                     retry_after_seconds=cold_blocked_until - now,
                 )
 
-            status, blacklist_retry = self._blacklist_state(
+            status, blacklist_retry = _CANONICAL_BLACKLIST_STATE(
+                self,
                 name,
                 now_monotonic=now,
             )
@@ -1058,7 +1080,7 @@ class BetdaqRateGovernor:
                 combined_limit -= self.policy.combined_safety_reserve
 
             method_active = len(window.admitted_at)
-            combined_active = len(self._runtime.combined.admitted_at)
+            combined_active = len(runtime.combined.admitted_at)
             retry_candidates: list[float] = []
             if method_active >= method_limit:
                 retry_candidates.append(
@@ -1067,7 +1089,7 @@ class BetdaqRateGovernor:
                 )
             if combined_active >= combined_limit:
                 retry_candidates.append(
-                    self._runtime.combined.admitted_at[
+                    runtime.combined.admitted_at[
                         combined_active - combined_limit
                     ]
                     + self.policy.window_seconds
@@ -1090,10 +1112,10 @@ class BetdaqRateGovernor:
                 )
 
             window.admitted_at.append(now)
-            self._runtime.combined.admitted_at.append(now)
-            self._runtime.sequence += 1
+            runtime.combined.admitted_at.append(now)
+            runtime.sequence += 1
             method_after = len(window.admitted_at)
-            combined_after = len(self._runtime.combined.admitted_at)
+            combined_after = len(runtime.combined.admitted_at)
             method_background = (
                 method_policy.capacity - method_policy.safety_reserve
             )
@@ -1110,10 +1132,10 @@ class BetdaqRateGovernor:
                 method=name,
                 rate_policy_key=method_policy.rate_policy_key,
                 priority=priority,
-                sequence=self._runtime.sequence,
+                sequence=runtime.sequence,
                 admitted_monotonic=now,
                 admitted_at=_utc_text(
-                    _utc(self._runtime.wall_clock(), "wall_clock")
+                    _utc(runtime.wall_clock(), "wall_clock")
                 ),
                 method_active=method_after,
                 combined_active=combined_after,
@@ -1133,36 +1155,192 @@ class BetdaqRateGovernor:
             )
 
     def _now(self, method: str) -> float:
-        if self._runtime.clock_failed_closed:
+        _, runtime, _ = _canonical_governor_binding(self)
+        if runtime.clock_failed_closed:
             raise BetdaqRateDeferred(
                 method=method,
                 reason="monotonic_clock_failed_closed",
                 retry_after_seconds=None,
             )
         try:
-            value = self._runtime.clock()
+            value = runtime.clock()
         except Exception as exc:
-            self._runtime.clock_failed_closed = True
+            runtime.clock_failed_closed = True
             raise BetdaqRateDeferred(
                 method=method,
                 reason="monotonic_clock_failed_closed",
                 retry_after_seconds=None,
             ) from exc
         now = _nonnegative_finite(value, "monotonic clock")
-        if now < self._runtime.last_monotonic:
-            self._runtime.clock_failed_closed = True
+        if now < runtime.last_monotonic:
+            runtime.clock_failed_closed = True
             raise BetdaqRateDeferred(
                 method=method,
                 reason="monotonic_clock_rollback",
                 retry_after_seconds=None,
             )
-        self._runtime.last_monotonic = now
+        runtime.last_monotonic = now
         return now
 
     def _prune(self, values: deque[float], now: float) -> None:
-        cutoff = now - self.policy.window_seconds
+        policy, _, _ = _canonical_governor_binding(self)
+        cutoff = now - policy.window_seconds
         while values and values[0] <= cutoff:
             values.popleft()
+
+
+_CANONICAL_GOVERNOR_TYPE: Final = BetdaqRateGovernor
+_CANONICAL_ASSERT_POLICY_INTEGRITY: Final = (
+    BetdaqRateGovernor._assert_policy_integrity
+)
+_CANONICAL_BLACKLIST_STATE: Final = BetdaqRateGovernor._blacklist_state
+_CANONICAL_NOW: Final = BetdaqRateGovernor._now
+_CANONICAL_PRUNE: Final = BetdaqRateGovernor._prune
+_CANONICAL_ADMIT: Final = BetdaqRateGovernor.admit
+_CANONICAL_GOVERNOR_INIT: Final = BetdaqRateGovernor.__init__
+_CANONICAL_OBJECT_NEW: Final = object.__new__
+_MISSING_CLASS_SLOT: Final = object()
+_CANONICAL_GOVERNOR_CLASS_SURFACE: Final = tuple(
+    (
+        name,
+        member,
+        getattr(member, "__code__", None),
+    )
+    for name in (
+        "workspace",
+        "policy",
+        "_runtime",
+        "_blacklist_store",
+        "policy_fingerprint",
+        "_method_policies",
+        "governor_id",
+        "__new__",
+        "__init__",
+        "__setattr__",
+        "__delattr__",
+        "__getattribute__",
+        "_assert_policy_integrity",
+        "_blacklist_state",
+        "_now",
+        "_prune",
+        "admit",
+    )
+    for member in (vars(BetdaqRateGovernor).get(name, _MISSING_CLASS_SLOT),)
+)
+
+
+def _assert_canonical_governor_dispatch() -> None:
+    class_dict = vars(_CANONICAL_GOVERNOR_TYPE)
+    for name, expected, expected_code in _CANONICAL_GOVERNOR_CLASS_SURFACE:
+        current = class_dict.get(name, _MISSING_CLASS_SLOT)
+        if (
+            current is not expected
+            or (
+                expected_code is not None
+                and getattr(current, "__code__", None) is not expected_code
+            )
+        ):
+            raise BetdaqRateGovernorError(
+                "BETDAQ canonical rate governor class dispatch was replaced"
+            )
+
+
+def _canonical_governor_binding(
+    governor: BetdaqRateGovernor,
+) -> tuple[BetdaqRatePolicy, _RuntimeState, _BlacklistStore]:
+    """Resolve and validate one governor against registry-owned authority state."""
+
+    if type(governor) is not _CANONICAL_GOVERNOR_TYPE:
+        raise TypeError("governor must be canonical BetdaqRateGovernor")
+
+    matches = [
+        workspace_key
+        for workspace_key, candidate in _GOVERNORS.items()
+        if candidate is governor
+    ]
+    if len(matches) != 1:
+        raise BetdaqRateGovernorError(
+            "BETDAQ governor is not uniquely bound to the canonical registry"
+        )
+    workspace_key = matches[0]
+    runtime = _RUNTIME.get(workspace_key)
+    if type(runtime) is not _RuntimeState:
+        raise BetdaqRateGovernorError(
+            "BETDAQ governor registry is internally inconsistent"
+        )
+
+    try:
+        workspace = object.__getattribute__(governor, "workspace")
+        policy = object.__getattribute__(governor, "policy")
+        policy_fingerprint = object.__getattribute__(
+            governor, "policy_fingerprint"
+        )
+        method_policies = object.__getattribute__(
+            governor, "_method_policies"
+        )
+        governor_id = object.__getattribute__(governor, "governor_id")
+    except AttributeError as exc:
+        raise BetdaqRateGovernorError(
+            "BETDAQ governor canonical instance binding is incomplete"
+        ) from exc
+
+    blacklist_store = runtime.blacklist_store
+    if (
+        not isinstance(workspace, Path)
+        or _workspace_registry_key(workspace) != workspace_key
+        or type(blacklist_store) is not _BlacklistStore
+        or blacklist_store.workspace != workspace
+        or blacklist_store.path != workspace / _BLACKLIST_FILE
+        or type(policy) is not BetdaqRatePolicy
+    ):
+        raise BetdaqRateGovernorError(
+            "BETDAQ governor canonical instance binding was replaced"
+        )
+
+    try:
+        current_fingerprint = policy.fingerprint()
+        expected_methods = policy.by_method()
+    except Exception as exc:
+        raise BetdaqRateGovernorError(
+            "BETDAQ rate policy changed after governor resolution"
+        ) from exc
+    if current_fingerprint != runtime.policy_fingerprint:
+        raise BetdaqRateGovernorError(
+            "BETDAQ rate policy changed after governor resolution"
+        )
+    if (
+        policy_fingerprint != runtime.policy_fingerprint
+        or type(method_policies) is not MappingProxyType
+        or dict(method_policies) != expected_methods
+    ):
+        raise BetdaqRateGovernorError(
+            "BETDAQ governor canonical instance binding was replaced"
+        )
+    expected_governor_id = "betdaq-rate:" + _digest(
+        {
+            "workspace_key": runtime.workspace_key,
+            "policy_fingerprint": runtime.policy_fingerprint,
+        }
+    )
+    if governor_id != expected_governor_id:
+        raise BetdaqRateGovernorError(
+            "BETDAQ governor canonical instance binding was replaced"
+        )
+    return policy, runtime, blacklist_store
+
+
+def admit_betdaq_rate_request(
+    governor: BetdaqRateGovernor,
+    method: str,
+    *,
+    priority: BetdaqRatePriority = BetdaqRatePriority.BACKGROUND_READ,
+) -> BetdaqRateAdmission:
+    """Use the witnessed product-owned rate-admission dispatch boundary."""
+
+    if type(governor) is not _CANONICAL_GOVERNOR_TYPE:
+        raise TypeError("governor must be canonical BetdaqRateGovernor")
+    _assert_canonical_governor_dispatch()
+    return _CANONICAL_ADMIT(governor, method, priority=priority)
 
 
 def _workspace(path: str | Path) -> Path:
@@ -1226,6 +1404,7 @@ def resolve_betdaq_rate_governor(
     fingerprint = policy.fingerprint()
 
     with _REGISTRY_LOCK:
+        _assert_canonical_governor_dispatch()
         existing = _GOVERNORS.get(workspace_key)
         runtime = _RUNTIME.get(workspace_key)
         if existing is not None or runtime is not None:
@@ -1233,7 +1412,7 @@ def resolve_betdaq_rate_governor(
                 raise BetdaqRateGovernorError(
                     "BETDAQ governor registry is internally inconsistent"
                 )
-            existing._assert_policy_integrity()
+            _CANONICAL_ASSERT_POLICY_INTEGRITY(existing)
             if runtime.policy_fingerprint != fingerprint:
                 raise BetdaqRateGovernorError(
                     "same BETDAQ workspace cannot be rebound to a different rate policy"
@@ -1251,12 +1430,17 @@ def resolve_betdaq_rate_governor(
         now_value = clock()
         now = _nonnegative_finite(now_value, "monotonic clock")
         cold_until = now + float(policy.cold_start_seconds)
+        blacklist_store = _BlacklistStore(
+            root,
+            authority_root=resolved_authority,
+        )
         runtime = _RuntimeState(
             workspace_key=workspace_key,
             authority_root_key=authority_root_key,
             policy_fingerprint=fingerprint,
             clock=clock,
             wall_clock=wall_clock,
+            blacklist_store=blacklist_store,
             methods={
                 method.method: _Window(
                     admitted_at=deque(),
@@ -1271,10 +1455,6 @@ def resolve_betdaq_rate_governor(
             blacklist_blocked_until={},
             last_monotonic=now,
             clock_failed_closed=False,
-        )
-        blacklist_store = _BlacklistStore(
-            root,
-            authority_root=resolved_authority,
         )
         wall_now = _utc(wall_clock(), "wall_clock")
         for observation in blacklist_store.observations().values():
@@ -1307,7 +1487,14 @@ def resolve_betdaq_rate_governor(
                 runtime.blacklist_blocked_until[
                     observation.operation_id
                 ] = now + restart_remaining
-        governor = BetdaqRateGovernor(
+        # Do not re-enter the mutable class __new__ dispatch slot here.  A
+        # hostile __new__ injection is rejected by the class-surface witness above,
+        # and even a later removal can leave CPython's cached tp_new slot altered for
+        # the lifetime of this type.  Allocate through the captured canonical
+        # object.__new__ primitive, then invoke the exact witnessed initializer.
+        governor = _CANONICAL_OBJECT_NEW(_CANONICAL_GOVERNOR_TYPE)
+        _CANONICAL_GOVERNOR_INIT(
+            governor,
             root,
             policy,
             runtime=runtime,

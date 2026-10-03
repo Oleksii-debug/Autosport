@@ -1005,6 +1005,7 @@ class BetdaqAccountReadOnlyClient:
         request_fields: dict[str, str],
         *,
         _protocol_authority=_canonical_betdaq_protocol_authority,
+        _require_transport=_require_canonical_account_transport,
         _expected_transport: UrllibBetdaqSoapTransport | None = None,
         _expected_https_post=None,
         _expected_https_post_code=None,
@@ -1024,9 +1025,15 @@ class BetdaqAccountReadOnlyClient:
             transport = self._transport
             canonical_dispatch = _expected_transport is not None
             if canonical_dispatch:
+                _require_transport(_expected_transport)
+                expected_bound_post = getattr(_expected_transport, "post", None)
                 if (
                     transport is not _expected_transport
                     or _expected_https_post is None
+                    or getattr(expected_bound_post, "__self__", None)
+                    is not _expected_transport
+                    or getattr(expected_bound_post, "__func__", None)
+                    is not _expected_https_post
                     or getattr(_expected_https_post, "__code__", None)
                     is not _expected_https_post_code
                 ):

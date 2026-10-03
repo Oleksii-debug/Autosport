@@ -202,6 +202,8 @@ class DatasetFidelityEvidence:
             raise TypeError("native_fidelity must be HistoricalDataFidelity")
         if type(self.analysis_fidelity) is not HistoricalDataFidelity:
             raise TypeError("analysis_fidelity must be HistoricalDataFidelity")
+        if self.transform is not None and type(self.transform) is not FidelityTransform:
+            raise TypeError("transform must be FidelityTransform or None")
         if not isinstance(self.execution_capabilities, frozenset):
             raise TypeError("execution_capabilities must be frozenset")
         if any(type(item) is not ExecutionEvidenceCapability for item in self.execution_capabilities):
@@ -258,8 +260,8 @@ def qualify_use_case(
     evidence: DatasetFidelityEvidence,
     use_case: FidelityUseCase,
 ) -> FidelityQualification:
-    if not isinstance(evidence, DatasetFidelityEvidence):
-        raise TypeError("evidence must be DatasetFidelityEvidence")
+    if type(evidence) is not DatasetFidelityEvidence:
+        raise TypeError("evidence must be exact DatasetFidelityEvidence")
     if type(use_case) is not FidelityUseCase:
         raise TypeError("use_case must be FidelityUseCase")
 
@@ -339,8 +341,8 @@ def qualify_comparison(
     *,
     projection: CommonInformationProjection | None = None,
 ) -> FidelityComparisonQualification:
-    if not isinstance(left, DatasetFidelityEvidence) or not isinstance(right, DatasetFidelityEvidence):
-        raise TypeError("left and right must be DatasetFidelityEvidence")
+    if type(left) is not DatasetFidelityEvidence or type(right) is not DatasetFidelityEvidence:
+        raise TypeError("left and right must be exact DatasetFidelityEvidence")
 
     if left.truth_fidelity is right.truth_fidelity:
         if projection is not None:
@@ -396,8 +398,8 @@ def _validate_projection(
     right: DatasetFidelityEvidence,
     projection: CommonInformationProjection,
 ) -> None:
-    if not isinstance(projection, CommonInformationProjection):
-        raise TypeError("projection must be CommonInformationProjection")
+    if type(projection) is not CommonInformationProjection:
+        raise TypeError("projection must be exact CommonInformationProjection")
     expected = tuple(sorted((left.dataset_id, right.dataset_id)))
     if projection.source_dataset_ids != expected:
         raise ValueError("projection source_dataset_ids must bind the exact compared datasets")

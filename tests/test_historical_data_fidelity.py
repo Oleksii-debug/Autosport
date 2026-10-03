@@ -35,6 +35,17 @@ def evidence(
     )
 
 
+class _SpoofTransform:
+    source_fidelity = BASIC
+    output_fidelity = ADVANCED
+
+
+class _ForgedEvidence(DatasetFidelityEvidence):
+    @property
+    def truth_fidelity(self) -> HistoricalDataFidelity:
+        return PRO
+
+
 class HistoricalDataFidelityTests(unittest.TestCase):
     def test_basic_rejects_sub_minute_strategy(self) -> None:
         result = qualify_use_case(evidence("basic", BASIC), FidelityUseCase.SUB_MINUTE_MOVEMENT)
@@ -80,6 +91,29 @@ class HistoricalDataFidelityTests(unittest.TestCase):
         )
         self.assertTrue(qualify_use_case(current, FidelityUseCase.EXECUTION_FILL_QUALITY).qualified)
         self.assertFalse(qualify_use_case(current, FidelityUseCase.SUB_SECOND_ORDERING).qualified)
+
+    def test_changed_fidelity_rejects_caller_minted_transform_lookalike(self) -> None:
+        with self.assertRaisesRegex(TypeError, "transform must be FidelityTransform"):
+            DatasetFidelityEvidence(
+                provider="betfair",
+                dataset_id="spoof-transform",
+                native_fidelity=BASIC,
+                analysis_fidelity=ADVANCED,
+                transform=_SpoofTransform(),
+            )
+
+    def test_qualification_rejects_evidence_subclass_capability_override(self) -> None:
+        forged = _ForgedEvidence(
+            provider="betfair",
+            dataset_id="forged-basic",
+            native_fidelity=BASIC,
+            analysis_fidelity=BASIC,
+        )
+        self.assertEqual(forged.truth_fidelity, PRO)
+        with self.assertRaisesRegex(TypeError, "exact DatasetFidelityEvidence"):
+            qualify_use_case(forged, FidelityUseCase.SUB_SECOND_ORDERING)
+        with self.assertRaisesRegex(TypeError, "exact DatasetFidelityEvidence"):
+            qualify_comparison(forged, evidence("basic", BASIC))
 
     def test_basic_interpolation_to_one_second_does_not_upgrade_truth(self) -> None:
         transform = FidelityTransform(

@@ -540,7 +540,31 @@ class GitHubApi:
 
     def live_pr_qualification(self, pr_number: int) -> tuple[str, bool]:
         repository = object.__getattribute__(self, "_GitHubApi__repository")
-        payload = self._pull_request(pr_number)
+        pull_request_impl = self._pull_request
+        pull_request_func = getattr(
+            pull_request_impl,
+            "__func__",
+            pull_request_impl,
+        )
+        pull_request_self = getattr(pull_request_impl, "__self__", None)
+        pull_request_code = getattr(pull_request_func, "__code__", None)
+        if pull_request_code is None:
+            raise CancellationError("pull request reader authority is unavailable")
+
+        payload = pull_request_impl(pr_number)
+
+        rebound_pull_request = self._pull_request
+        rebound_pull_request_func = getattr(
+            rebound_pull_request,
+            "__func__",
+            rebound_pull_request,
+        )
+        if (
+            getattr(rebound_pull_request, "__self__", None) is not pull_request_self
+            or rebound_pull_request_func is not pull_request_func
+            or getattr(pull_request_func, "__code__", None) is not pull_request_code
+        ):
+            raise CancellationError("pull request reader authority changed")
         if (
             object.__getattribute__(self, "_GitHubApi__repository")
             != repository
@@ -578,7 +602,31 @@ class GitHubApi:
         )
 
     def live_pr_head(self, pr_number: int) -> str:
-        payload = self._pull_request(pr_number)
+        pull_request_impl = self._pull_request
+        pull_request_func = getattr(
+            pull_request_impl,
+            "__func__",
+            pull_request_impl,
+        )
+        pull_request_self = getattr(pull_request_impl, "__self__", None)
+        pull_request_code = getattr(pull_request_func, "__code__", None)
+        if pull_request_code is None:
+            raise CancellationError("pull request reader authority is unavailable")
+
+        payload = pull_request_impl(pr_number)
+
+        rebound_pull_request = self._pull_request
+        rebound_pull_request_func = getattr(
+            rebound_pull_request,
+            "__func__",
+            rebound_pull_request,
+        )
+        if (
+            getattr(rebound_pull_request, "__self__", None) is not pull_request_self
+            or rebound_pull_request_func is not pull_request_func
+            or getattr(pull_request_func, "__code__", None) is not pull_request_code
+        ):
+            raise CancellationError("pull request reader authority changed")
         head = payload.get("head")
         if not isinstance(head, dict):
             raise CancellationError("invalid pull request head")

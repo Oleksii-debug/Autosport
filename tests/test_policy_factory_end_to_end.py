@@ -1439,10 +1439,32 @@ def test_product_issued_no_action_baseline_cannot_receive_hindsight_wait_utility
     assert Decimal(issued.uncertainty_high) == Decimal("0")
 
     # A frozen slot labelled NO_BET_WAIT must also prove behavioral abstention.
-    # Binding the label to an otherwise valid product-issued policy that acts must
-    # fail closed instead of silently applying the zero-utility projection.
+    # Use a separate product workspace so the first successful factory candidate's
+    # durable champion transition cannot mask the intended semantic guard.
+    acting_workspace = (tmp_path / "product-workspace-mislabelled-no-action").resolve()
+    acting_binding = WorkspaceIdentityBinding.resolve(
+        workspace=acting_workspace,
+        authority_root=authority_root,
+        requested_workspace_instance_id=None,
+    )
+    acting_binding.ensure_bound()
+    (
+        acting_registry,
+        _acting_registry_path,
+        _acting_artifact_root,
+        acting_store,
+        acting_predecessor,
+        acting_predecessor_model_id,
+        acting_cases,
+        acting_rule,
+    ) = _foundation(
+        acting_workspace,
+        artifact_directory="factory-artifacts",
+        wait_cost="0.25",
+    )
+
     mislabelled_policy, mislabelled_update = _policy_successor(
-        predecessor,
+        acting_predecessor,
         observation_id="3" * 64,
         outcome_id="4" * 64,
         episode_id="5" * 64,
@@ -1456,26 +1478,29 @@ def test_product_issued_no_action_baseline_cannot_receive_hindsight_wait_utility
         model_id="model-policy-issued-mislabelled-no-action",
         evaluation_id="evaluation-policy-issued-mislabelled-no-action",
         promotion_id="promotion-policy-issued-mislabelled-no-action",
-        predecessor_policy_id=predecessor.policy_id,
-        predecessor_model_id=predecessor_model_id,
+        predecessor_policy_id=acting_predecessor.policy_id,
+        predecessor_model_id=acting_predecessor_model_id,
         created_at=CHALLENGER_CREATED,
         completed_at=CHALLENGER_COMPLETED,
         decided_at=CHALLENGER_DECIDED,
     )
     mislabelled_result = _run_nongoverned_factory_retest(
-        ExperimentRunner(registry, store),
-        predecessor_policy=predecessor,
+        ExperimentRunner(acting_registry, acting_store),
+        predecessor_policy=acting_predecessor,
         challenger_policy=mislabelled_policy,
         update_evidence=mislabelled_update,
         spec=mislabelled_spec,
-        evaluation_cases=cases,
-        rule=rule,
+        evaluation_cases=acting_cases,
+        rule=acting_rule,
     )
     assert mislabelled_result.strategy_version_id == mislabelled_policy.policy_id
 
-    mislabelled_model = store.read("model", mislabelled_spec.model_version_id)
+    mislabelled_model = acting_store.read(
+        "model",
+        mislabelled_spec.model_version_id,
+    )
     mislabelled_artifact_sha256 = mislabelled_model["policy_artifact_sha256"]
-    mislabelled_evaluation = store.read(
+    mislabelled_evaluation = acting_store.read(
         "evaluation",
         mislabelled_spec.evaluation_bundle_id,
     )
@@ -1483,9 +1508,22 @@ def test_product_issued_no_action_baseline_cannot_receive_hindsight_wait_utility
         sample["challenger_action"] != "WAIT"
         for sample in mislabelled_evaluation["policy_evaluation"]["samples"]
     )
-
+    acting_candidate_model = acting_store.read(
+        "model",
+        acting_predecessor_model_id,
+    )
+    acting_dataset_manifest_sha256 = acting_registry.get(
+        "DatasetSnapshot",
+        DATASET_ID,
+    ).payload["manifest_sha256"]
+    mislabelled_protocol = _external_validity_protocol_for_policy_factory(
+        candidate_id=acting_predecessor.policy_id,
+        candidate_artifact_sha256=acting_candidate_model["policy_artifact_sha256"],
+        dataset_manifest_sha256=acting_dataset_manifest_sha256,
+        cases=acting_cases,
+    )
     mislabelled_protocol = replace(
-        protocol,
+        mislabelled_protocol,
         baselines=tuple(
             replace(
                 baseline,
@@ -1496,15 +1534,19 @@ def test_product_issued_no_action_baseline_cannot_receive_hindsight_wait_utility
             )
             if baseline.kind is BaselineKind.NO_BET_WAIT
             else baseline
-            for baseline in protocol.baselines
+            for baseline in mislabelled_protocol.baselines
         ),
+    )
+    acting_authority = ProductPolicyEvaluationWorkspace.open(
+        acting_workspace,
+        expected_workspace_instance_id=acting_binding.workspace_instance_id,
     )
     with pytest.raises(
         ProductPolicyEvaluationIssuanceError,
         match="NO_BET_WAIT source policy must abstain on every frozen sample",
     ):
         issue_product_policy_evaluation(
-            authority,
+            acting_authority,
             mislabelled_protocol,
             source_evaluation_bundle_id=mislabelled_spec.evaluation_bundle_id,
             baseline_kind=BaselineKind.NO_BET_WAIT,

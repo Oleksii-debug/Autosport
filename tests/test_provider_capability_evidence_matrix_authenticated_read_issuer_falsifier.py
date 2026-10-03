@@ -166,7 +166,7 @@ def test_product_issued_betdaq_lifecycle_can_mint_bounded_authenticated_matrix_f
         environment="production",
         application_mode="betdaq-authenticated-readonly",
         matrix_version=1,
-        as_of="2026-09-21T11:00:00+00:00",
+        as_of="2026-09-21T10:59:59+00:00",
         matrix_ref="betdaq-authenticated-lifecycle-composition",
         evidence=(fact,),
     )
@@ -178,11 +178,20 @@ def test_product_issued_betdaq_lifecycle_can_mint_bounded_authenticated_matrix_f
         accepted_grades=accepted,
         at_time="2026-09-21T10:59:59+00:00",
     )
-    assert not matrix.qualifies(
-        BookmakerCapability.BALANCE_READ,
-        accepted_grades=accepted,
-        at_time="2026-09-21T11:00:00+00:00",
-    )
+    with pytest.raises(
+        ProviderCapabilityEvidenceMatrixError,
+        match="not current at matrix as_of",
+    ):
+        build_provider_capability_evidence_matrix(
+            issuance.profile,
+            integration,
+            environment="production",
+            application_mode="betdaq-authenticated-readonly",
+            matrix_version=1,
+            as_of="2026-09-21T11:00:00+00:00",
+            matrix_ref="betdaq-expired-lifecycle-composition",
+            evidence=(fact,),
+        )
 
 
 def test_copied_lifecycle_payload_cannot_mint_authenticated_matrix_fact(
@@ -275,7 +284,7 @@ def test_matrix_fact_expiry_never_outlives_lifecycle_review_boundary(
         environment="production",
         application_mode="betdaq-authenticated-readonly",
         matrix_version=1,
-        as_of="2026-09-21T10:30:00+00:00",
+        as_of="2026-09-21T10:29:59+00:00",
         matrix_ref="betdaq-review-boundary",
         evidence=(fact,),
     )
@@ -285,11 +294,20 @@ def test_matrix_fact_expiry_never_outlives_lifecycle_review_boundary(
         accepted_grades=accepted,
         at_time="2026-09-21T10:29:59+00:00",
     )
-    assert not matrix.qualifies(
-        BookmakerCapability.BALANCE_READ,
-        accepted_grades=accepted,
-        at_time="2026-09-21T10:30:00+00:00",
-    )
+    with pytest.raises(
+        ProviderCapabilityEvidenceMatrixError,
+        match="not current at matrix as_of",
+    ):
+        build_provider_capability_evidence_matrix(
+            issuance.profile,
+            integration,
+            environment="production",
+            application_mode="betdaq-authenticated-readonly",
+            matrix_version=1,
+            as_of="2026-09-21T10:30:00+00:00",
+            matrix_ref="betdaq-review-due-boundary",
+            evidence=(fact,),
+        )
 
 
 def test_betdaq_matrix_authority_cannot_predate_lifecycle_commit(
@@ -814,3 +832,108 @@ def test_fresh_successor_can_recover_matrix_authority_after_old_evidence_outage(
     assert fact.grade is ProviderCapabilityTruthGrade.AUTHENTICATED_READ_PROVEN
     assert fact.evidence_sha256 == successor.evidence.evidence_id
     assert journal.latest_evidence_id_for(successor.evidence) == successor.evidence.evidence_id
+
+
+def test_later_outage_invalidates_reuse_of_existing_authenticated_fact(
+    monkeypatch,
+) -> None:
+    issuance = _product_issued_betdaq_balance(monkeypatch)
+    journal = CapabilityEvidenceJournal()
+    journal.publish(issuance.evidence)
+    integration = bind_bookmaker_integration(
+        issuance.profile,
+        integration_kind=BookmakerIntegrationKind.OFFICIAL_API,
+        observed_at="2026-09-21T10:01:30+00:00",
+        source_ref="betdaq-secure-api-issued-before-outage",
+        source_payload_sha256="3" * 64,
+    )
+    fact = issue_betdaq_authenticated_read_evidence(
+        issuance,
+        integration,
+        journal=journal,
+    )
+    journal.publish_availability(
+        CapabilityAvailability(
+            evidence_id=issuance.evidence.evidence_id,
+            state=CapabilityAvailabilityState.TEMPORARILY_UNAVAILABLE,
+            observed_at="2026-09-21T10:02:00+00:00",
+            source_ref="provider-outage-after-fact",
+            source_payload_sha256="4" * 64,
+        )
+    )
+
+    historical = build_provider_capability_evidence_matrix(
+        issuance.profile,
+        integration,
+        environment="production",
+        application_mode="betdaq-authenticated-readonly",
+        matrix_version=1,
+        as_of="2026-09-21T10:01:59+00:00",
+        matrix_ref="pre-outage-history",
+        evidence=(fact,),
+    )
+    assert historical.qualifies(
+        BookmakerCapability.BALANCE_READ,
+        accepted_grades=frozenset(
+            {ProviderCapabilityTruthGrade.AUTHENTICATED_READ_PROVEN}
+        ),
+        at_time="2026-09-21T10:01:59+00:00",
+    )
+
+    with pytest.raises(
+        ProviderCapabilityEvidenceMatrixError,
+        match="negative runtime availability",
+    ):
+        build_provider_capability_evidence_matrix(
+            issuance.profile,
+            integration,
+            environment="production",
+            application_mode="betdaq-authenticated-readonly",
+            matrix_version=1,
+            as_of="2026-09-21T10:02:00+00:00",
+            matrix_ref="post-outage-reuse-must-fail",
+            evidence=(fact,),
+        )
+
+
+def test_newer_lifecycle_successor_invalidates_reuse_of_old_authenticated_fact(
+    monkeypatch,
+) -> None:
+    first = _product_issued_betdaq_balance(monkeypatch)
+    journal = CapabilityEvidenceJournal()
+    journal.publish(first.evidence)
+    integration = bind_bookmaker_integration(
+        first.profile,
+        integration_kind=BookmakerIntegrationKind.OFFICIAL_API,
+        observed_at="2026-09-21T10:01:30+00:00",
+        source_ref="betdaq-secure-api-first-fact",
+        source_payload_sha256="5" * 64,
+    )
+    old_fact = issue_betdaq_authenticated_read_evidence(
+        first,
+        integration,
+        journal=journal,
+    )
+    successor = _product_issued_betdaq_balance(
+        monkeypatch,
+        observed_minute=5,
+        committed_at="2026-09-21T10:06:00+00:00",
+        review_due_at="2026-09-21T11:06:00+00:00",
+        predecessor_id=first.evidence.evidence_id,
+    )
+    journal.publish(successor.evidence)
+
+    with pytest.raises(
+        ProviderCapabilityEvidenceMatrixError,
+        match="lifecycle evidence is superseded",
+    ):
+        build_provider_capability_evidence_matrix(
+            first.profile,
+            integration,
+            environment="production",
+            application_mode="betdaq-authenticated-readonly",
+            matrix_version=1,
+            as_of="2026-09-21T10:07:00+00:00",
+            matrix_ref="superseded-old-fact",
+            evidence=(old_fact,),
+        )

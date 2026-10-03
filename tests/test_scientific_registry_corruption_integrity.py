@@ -69,12 +69,20 @@ def test_reordering_individually_valid_records_is_rejected_by_monotonic_authorit
     assert sorted(item["record_sha256"] for item in tampered["records"]) == sorted(
         original_digests
     )
+    corrupted = path.read_bytes()
 
     with pytest.raises(
         MonotonicAuthorityRollbackError,
         match="rolled back|unproven|authority",
     ):
         ScientificRegistry(path)
+    with pytest.raises(
+        MonotonicAuthorityRollbackError,
+        match="rolled back|unproven|authority",
+    ):
+        ScientificRegistry.initialize_pristine(path)
+
+    assert path.read_bytes() == corrupted
 
 
 def test_deleting_committed_predecessor_is_rejected_by_monotonic_authority(tmp_path):
@@ -95,12 +103,20 @@ def test_deleting_committed_predecessor_is_rejected_by_monotonic_authority(tmp_p
         )
     ]
     _rewrite_state(path, state)
+    corrupted = path.read_bytes()
 
     with pytest.raises(
         MonotonicAuthorityRollbackError,
         match="rolled back|unproven|authority",
     ):
         ScientificRegistry(path)
+    with pytest.raises(
+        MonotonicAuthorityRollbackError,
+        match="rolled back|unproven|authority",
+    ):
+        ScientificRegistry.initialize_pristine(path)
+
+    assert path.read_bytes() == corrupted
 
 
 def test_truncated_registry_cannot_be_pristine_reinitialized_over_history(tmp_path):

@@ -2387,3 +2387,64 @@ def test_canonical_branch_head_ignores_rebound_sha_and_quote_helpers(
         "https://api.github.com/repos/owner/repo/git/ref/heads/feature%2Foriginal"
     ]
 
+def test_active_run_pagination_bound_cannot_be_rebound_to_hide_second_page(
+    monkeypatch,
+) -> None:
+    api = WorkflowScopedGitHubApi(
+        repository="owner/repo",
+        token="token",
+        workflow_id=356678400,
+        workflow_name="CI",
+    )
+    requested: list[str] = []
+
+    def run_payload(run_id: int) -> dict[str, object]:
+        return {
+            "id": run_id,
+            "head_sha": HEAD,
+            "name": "CI",
+            "status": "queued",
+            "pull_requests": [{"number": 303}],
+            "head_branch": "feature/head",
+            "head_repository": {"full_name": "owner/repo"},
+        }
+
+    def fake_request(
+        path: str,
+        *,
+        method: str = "GET",
+        allowed_http_errors: frozenset[int] = frozenset(),
+    ) -> object:
+        assert method == "GET"
+        assert not allowed_http_errors
+        requested.append(path)
+        if "page=1" in path:
+            return {
+                "total_count": 101,
+                "workflow_runs": [run_payload(run_id) for run_id in range(1, 101)],
+            }
+        if "page=2" in path:
+            return {
+                "total_count": 101,
+                "workflow_runs": [run_payload(101)],
+            }
+        raise AssertionError(path)
+
+    monkeypatch.setattr(api, "_request", fake_request)
+    monkeypatch.setattr(scoped_controller, "_RUNS_PER_PAGE", 101)
+    monkeypatch.setattr(
+        scoped_controller,
+        "urlencode",
+        lambda _params: "event=attacker&per_page=999&page=1",
+    )
+
+    runs = api._active_runs_for_status("queued")
+
+    assert tuple(run.run_id for run in runs) == tuple(range(1, 102))
+    assert requested == [
+        "/actions/workflows/356678400/runs?"
+        "event=pull_request&status=queued&per_page=100&page=1",
+        "/actions/workflows/356678400/runs?"
+        "event=pull_request&status=queued&per_page=100&page=2",
+    ]
+

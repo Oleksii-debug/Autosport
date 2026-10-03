@@ -232,7 +232,7 @@ class ReleasePackageInputSymlinkFenceTests(unittest.TestCase):
                     self._build(paths)
 
             self.assertTrue(swapped)
-            self.assertEqual(original.read_bytes(), b"exe")
+            self.assertEqual(original.read_bytes(), b"autosport-executable")
             self.assertEqual(executable.read_bytes(), b"outside-substitute")
             self.assertFalse((root / "Autosport-V1" / "Autosport.exe").exists())
             self.assertFalse(paths["package"].exists())

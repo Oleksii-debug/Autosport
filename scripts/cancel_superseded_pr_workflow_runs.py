@@ -28,6 +28,14 @@ class _AllowedHttpError:
 
 
 @dataclass(frozen=True)
+class _CancellationAccepted:
+    pass
+
+
+_CANCELLATION_ACCEPTED = _CancellationAccepted()
+
+
+@dataclass(frozen=True)
 class WorkflowRun:
     run_id: int
     head_sha: str
@@ -61,6 +69,21 @@ def _require_positive_int(value: object, *, field: str) -> int:
     if type(value) is not int or value <= 0:
         raise CancellationError(f"invalid {field}")
     return value
+
+
+def _strict_json_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    value: dict[str, object] = {}
+    for key, item in pairs:
+        if key in value:
+            raise CancellationError("GitHub API JSON contains duplicate object key")
+        value[key] = item
+    return value
+
+
+def _reject_nonstandard_json_constant(value: str) -> object:
+    raise CancellationError(
+        f"GitHub API JSON contains non-standard constant: {value}"
+    )
 
 
 def parse_run(payload: object) -> WorkflowRun:
@@ -114,7 +137,7 @@ def select_superseded_runs(
         for run in runs
         if run.run_id != current_run_id
         and run.workflow_name == workflow_name
-        and pr_number in run.pr_numbers
+        and run.pr_numbers == (pr_number,)
         and (cancel_same_head or run.head_sha != live_head_sha)
     }
     return tuple(sorted(selected))
@@ -137,6 +160,11 @@ class GitHubApi:
         method: str = "GET",
         allowed_http_errors: frozenset[int] = frozenset(),
     ) -> object:
+        is_cancel_request = (
+            method == "POST"
+            and path.startswith("/actions/runs/")
+            and path.endswith("/cancel")
+        )
         request = Request(
             f"https://api.github.com/repos/{self._repository}{path}",
             method=method,
@@ -149,6 +177,21 @@ class GitHubApi:
         )
         try:
             with urlopen(request, timeout=20) as response:
+                status_code = response.status
+                if is_cancel_request:
+                    if type(status_code) is not int or status_code != 202:
+                        raise CancellationError(
+                            "workflow run cancellation returned unexpected HTTP status"
+                        )
+                    # For this endpoint the documented HTTP 202 Accepted status is the
+                    # success authority. The response body is non-authoritative and is
+                    # deliberately neither read nor parsed. The closure-built cancel()
+                    # additionally seals this exact request implementation by identity.
+                    return _CANCELLATION_ACCEPTED
+                if type(status_code) is not int or status_code != 200:
+                    raise CancellationError(
+                        "GitHub API GET returned unexpected HTTP status"
+                    )
                 body = response.read()
         except HTTPError as exc:
             if exc.code in allowed_http_errors:
@@ -163,7 +206,11 @@ class GitHubApi:
         if not body:
             return None
         try:
-            return json.loads(body)
+            return json.loads(
+                body,
+                object_pairs_hook=_strict_json_object,
+                parse_constant=_reject_nonstandard_json_constant,
+            )
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise CancellationError("GitHub API returned invalid JSON") from exc
 
@@ -311,23 +358,69 @@ class GitHubApi:
             raise CancellationError("invalid workflow-run status")
         return status
 
-    def cancel(self, run_id: int) -> None:
-        run_id = _require_positive_int(run_id, field="run id")
-        payload = self._request(
-            f"/actions/runs/{run_id}/cancel",
-            method="POST",
-            allowed_http_errors=frozenset({409}),
-        )
-        if isinstance(payload, _AllowedHttpError):
-            if payload.status_code != 409:
-                raise CancellationError("unexpected allowed cancellation HTTP status")
-            if self.workflow_run_status(run_id) == "completed":
-                return
-            raise CancellationError(
-                "workflow run cancellation conflicted while run remains active"
+    def _build_cancel(
+        request_impl,
+        allowed_http_error_type,
+        cancellation_accepted,
+    ):
+        request_impl_code = getattr(request_impl, "__code__", None)
+        if request_impl_code is None:
+            raise RuntimeError("canonical cancellation request executable is unavailable")
+
+        def cancel(self, run_id: int) -> None:
+            run_id = _require_positive_int(run_id, field="run id")
+            bound_request = getattr(self, "_request", None)
+            if (
+                getattr(request_impl, "__code__", None) is not request_impl_code
+                or getattr(bound_request, "__self__", None) is not self
+                or getattr(bound_request, "__func__", None) is not request_impl
+            ):
+                raise CancellationError(
+                    "workflow run cancellation request dispatch changed"
+                )
+            payload = request_impl(
+                self,
+                f"/actions/runs/{run_id}/cancel",
+                method="POST",
+                allowed_http_errors=frozenset({409}),
             )
-        if payload is not None:
-            raise CancellationError("unexpected cancel response body")
+            if isinstance(payload, allowed_http_error_type):
+                if payload.status_code != 409:
+                    raise CancellationError(
+                        "unexpected allowed cancellation HTTP status"
+                    )
+                rebound_request = getattr(self, "_request", None)
+                if (
+                    getattr(request_impl, "__code__", None) is not request_impl_code
+                    or getattr(rebound_request, "__self__", None) is not self
+                    or getattr(rebound_request, "__func__", None) is not request_impl
+                ):
+                    raise CancellationError(
+                        "workflow run cancellation request dispatch changed"
+                    )
+                status_payload = request_impl(
+                    self,
+                    f"/actions/runs/{run_id}",
+                )
+                if not isinstance(status_payload, dict):
+                    raise CancellationError("invalid workflow-run response")
+                status = status_payload.get("status")
+                if status == "completed":
+                    return
+                if status not in _ACTIVE_STATUSES:
+                    raise CancellationError("invalid workflow-run status")
+                raise CancellationError(
+                    "workflow run cancellation conflicted while run remains active"
+                )
+            if payload is not cancellation_accepted:
+                raise CancellationError(
+                    "workflow run cancellation missing HTTP 202 acceptance authority"
+                )
+
+        return cancel
+
+    cancel = _build_cancel(_request, _AllowedHttpError, _CANCELLATION_ACCEPTED)
+    del _build_cancel
 
 
 def _qualification_snapshot(

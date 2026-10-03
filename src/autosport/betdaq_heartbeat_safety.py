@@ -34,13 +34,19 @@ from .betdaq_account_readonly import (
 from .execution_stop_authority import (
     ExecutionAuthorityMode,
     ExecutionStopAuthority,
-    _exclusive_file_lock,
+    ExecutionStopAuthorityError,
 )
 
 
 _CANONICAL_EXECUTION_STOP_AUTHORITY = ExecutionStopAuthority
 _CANONICAL_PRODUCT_STOP_AUTHORITY_ROOT = (
     ExecutionStopAuthority._product_monotonic_authority_root
+)
+_CANONICAL_STOP_ADMISSION_LEASE = ExecutionStopAuthority.admission_lease
+_CANONICAL_STOP_ADMISSION_LEASE_CODE = getattr(
+    _CANONICAL_STOP_ADMISSION_LEASE,
+    "__code__",
+    None,
 )
 
 
@@ -1264,24 +1270,9 @@ class BetdaqHeartbeatSafetyController:
         action: HeartbeatAction | None,
         evidence: HeartbeatProviderEvidence,
     ) -> Iterator[HeartbeatEvent | None]:
-        """Serialize final STOP reread with heartbeat publication after provider I/O."""
+        """Bind positive publication to the canonical current STOP admission lease."""
 
-        with self._stop._thread_lock, _exclusive_file_lock(self._stop._lock_path):
-            records = self._stop._read_journal_unlocked()
-            current = (
-                None
-                if not records
-                else self._stop._state_from_record(records[-1])
-            )
-            same_armed_revision = bool(
-                current is not None
-                and current.mode is ExecutionAuthorityMode.ARMED
-                and current.revision == expected_stop_revision
-            )
-            if same_armed_revision:
-                yield None
-                return
-
+        def revoked_event() -> HeartbeatEvent:
             context_id = (
                 self._context_id()
                 if latest is None
@@ -1301,7 +1292,7 @@ class BetdaqHeartbeatSafetyController:
                     }
                 )
             )
-            revoked = self._store.append(
+            return self._store.append(
                 generation_id=generation_id,
                 predecessor_generation_id=(
                     None
@@ -1320,7 +1311,56 @@ class BetdaqHeartbeatSafetyController:
                 response_sha256=evidence.response_sha256,
                 reconciliation_required=True,
             )
-            yield revoked
+
+        if (
+            ExecutionStopAuthority is not _CANONICAL_EXECUTION_STOP_AUTHORITY
+            or getattr(
+                _CANONICAL_EXECUTION_STOP_AUTHORITY,
+                "admission_lease",
+                None,
+            )
+            is not _CANONICAL_STOP_ADMISSION_LEASE
+            or getattr(_CANONICAL_STOP_ADMISSION_LEASE, "__code__", None)
+            is not _CANONICAL_STOP_ADMISSION_LEASE_CODE
+        ):
+            yield revoked_event()
+            return
+
+        lease = _CANONICAL_STOP_ADMISSION_LEASE(self._stop)
+        try:
+            current = lease.__enter__()
+        except ExecutionStopAuthorityError:
+            yield revoked_event()
+            return
+
+        active_exception: BaseException | None = None
+        try:
+            same_armed_revision = bool(
+                current.mode is ExecutionAuthorityMode.ARMED
+                and type(current.revision) is int
+                and current.revision == expected_stop_revision
+            )
+            if same_armed_revision:
+                yield None
+            else:
+                yield revoked_event()
+        except BaseException as exc:
+            active_exception = exc
+            raise
+        finally:
+            try:
+                lease.__exit__(
+                    None if active_exception is None else type(active_exception),
+                    active_exception,
+                    None
+                    if active_exception is None
+                    else active_exception.__traceback__,
+                )
+            except ExecutionStopAuthorityError as exc:
+                revoked_event()
+                raise BetdaqHeartbeatSafetyError(
+                    "STOP authority changed during heartbeat publication"
+                ) from exc
 
     def _require_remote_active(self) -> HeartbeatEvent:
         latest = self._latest()

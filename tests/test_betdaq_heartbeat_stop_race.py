@@ -279,3 +279,32 @@ def test_stop_then_rearm_during_pulse_cannot_restore_positive_publication(
     finally:
         controller.close()
 
+def test_post_call_guard_ignores_instance_shadowed_legacy_unlocked_reader(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Current STOP admission must not regress to instance-private journal dispatch."""
+    stop = _armed_stop(tmp_path / "stop.jsonl")
+    provider = _StopDuringProviderCall(
+        [_soap("RegisterHeartbeat")],
+        stop=stop,
+        stop_on_call=99,
+    )
+    controller = _controller(tmp_path, monkeypatch, provider, stop)
+    hostile_calls = []
+
+    def hostile_reader():
+        hostile_calls.append(True)
+        raise AssertionError("legacy instance journal reader executed")
+
+    stop._read_journal_unlocked = hostile_reader
+    try:
+        event = controller.register(
+            threshold_ms=6000,
+            action=HeartbeatAction.CANCEL_ORDERS,
+        )
+        assert event.state is HeartbeatState.ACTIVE
+        assert hostile_calls == []
+    finally:
+        controller.close()
+

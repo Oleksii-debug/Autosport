@@ -253,7 +253,16 @@ class BetdaqSoapTransport(Protocol):
 
 
 class UrllibBetdaqSoapTransport:
-    """Small HTTPS transport. Provider/network diagnostics intentionally omit secrets."""
+    """Small bounded HTTPS transport for authenticated BETDAQ reads."""
+
+    def __init__(self, *, max_response_bytes: int = 8 * 1024 * 1024) -> None:
+        if (
+            not isinstance(max_response_bytes, int)
+            or isinstance(max_response_bytes, bool)
+            or max_response_bytes <= 0
+        ):
+            raise ValueError("max_response_bytes must be a positive integer")
+        self._max_response_bytes = max_response_bytes
 
     def post(
         self,
@@ -291,11 +300,13 @@ class UrllibBetdaqSoapTransport:
             # servicing canonical authenticated BETDAQ acquisition.
             opener = canonical_build_opener()
             with opener.open(request, timeout=timeout_seconds) as response:
-                payload = response.read()
+                payload = response.read(self._max_response_bytes + 1)
         except (HTTPError, URLError, OSError, TimeoutError) as exc:
             raise BetdaqAccountReadOnlyError("BETDAQ secure read transport failed") from None
         if type(payload) is not bytes:
             raise BetdaqAccountReadOnlyError("BETDAQ transport returned non-bytes payload")
+        if len(payload) > self._max_response_bytes:
+            raise BetdaqAccountReadOnlyError("BETDAQ response exceeded the size limit")
         return payload
 
 

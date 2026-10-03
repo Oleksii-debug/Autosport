@@ -82,7 +82,13 @@ def _profile() -> BookmakerCapabilityProfile:
     )
 
 
-def _capture(action: ExecutionAction, *, status: str):
+def _capture(
+    action: ExecutionAction,
+    *,
+    status: str,
+    matched_size: float = 1.0,
+    remaining_size: float = 9.0,
+):
     current_order = {
         "betId": "bet-current-status-enum",
         "marketId": action.market_id,
@@ -95,8 +101,8 @@ def _capture(action: ExecutionAction, *, status: str):
             "size": 10.0,
         },
         "averagePriceMatched": 2.0,
-        "sizeMatched": 1.0,
-        "sizeRemaining": 9.0,
+        "sizeMatched": matched_size,
+        "sizeRemaining": remaining_size,
         "customerOrderRef": PROVIDER_REF,
     }
     responses = [
@@ -131,9 +137,20 @@ def _capture(action: ExecutionAction, *, status: str):
     )
 
 
-def _verify(action: ExecutionAction, *, status: str):
+def _verify(
+    action: ExecutionAction,
+    *,
+    status: str,
+    matched_size: float = 1.0,
+    remaining_size: float = 9.0,
+):
     profile = _profile()
-    capture = _capture(action, status=status)
+    capture = _capture(
+        action,
+        status=status,
+        matched_size=matched_size,
+        remaining_size=remaining_size,
+    )
     return verify_betfair_provider_state(
         action,
         profile,
@@ -150,6 +167,44 @@ def test_recognized_executable_current_status_can_still_mint_effect_evidence() -
 
     assert isinstance(evidence, VerifiedProviderEffectEvidence)
     assert evidence.accepted_stake == Decimal("1.0")
+
+
+def test_recognized_execution_complete_status_with_zero_remaining_is_valid() -> None:
+    action = _action()
+
+    evidence = _verify(
+        action,
+        status="EXECUTION_COMPLETE",
+        matched_size=10.0,
+        remaining_size=0.0,
+    )
+
+    assert isinstance(evidence, VerifiedProviderEffectEvidence)
+    assert evidence.accepted_stake == Decimal("10.0")
+
+
+def test_executable_status_requires_positive_remaining_size() -> None:
+    action = _action()
+
+    with pytest.raises(ProviderEvidenceError):
+        _verify(
+            action,
+            status="EXECUTABLE",
+            matched_size=10.0,
+            remaining_size=0.0,
+        )
+
+
+def test_execution_complete_status_rejects_unmatched_remaining_size() -> None:
+    action = _action()
+
+    with pytest.raises(ProviderEvidenceError):
+        _verify(
+            action,
+            status="EXECUTION_COMPLETE",
+            matched_size=1.0,
+            remaining_size=9.0,
+        )
 
 
 def test_unknown_current_status_cannot_mint_effect_evidence() -> None:

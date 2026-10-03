@@ -35,18 +35,21 @@ class _QueuedProductWorker:
 class _FakeProductWorker:
     def __init__(self) -> None:
         self.busy = False
+        self.stop_requested = False
         self.start_calls: list[dict[str, object]] = []
         self.stop_reasons: list[str] = []
 
     def start(self, **kwargs: object) -> bool:
         self.start_calls.append(dict(kwargs))
         self.busy = True
+        self.stop_requested = False
         return True
 
     def request_stop(self, reason: str = "operator_stop") -> bool:
         if not self.busy:
             return False
         self.stop_reasons.append(reason)
+        self.stop_requested = True
         return True
 
 
@@ -151,6 +154,12 @@ def test_webview_runtime_start_stop_delegates_to_canonical_worker(
     stopped = controller._action_product_runtime_stop({})
     assert stopped["status"] == "completed"
     assert worker.stop_reasons == ["operator_stop"]
+    assert worker.stop_requested is True
+
+    repeated = controller._action_product_runtime_stop({})
+    assert repeated["status"] == "rejected"
+    assert "вже прийнято" in repeated["message"]
+    assert worker.stop_reasons == ["operator_stop"]
 
 
 def test_bridge_duplicate_request_id_replays_result_without_second_mutation(
@@ -193,7 +202,9 @@ def test_worker_stop_interrupts_active_runtime_tick_and_emits_stopped(
         poll_seconds=60,
     )
     assert runtime.tick_entered.wait(2.0)
+    assert worker.stop_requested is False
     assert worker.request_stop("operator_stop")
+    assert worker.stop_requested is True
     assert worker.join(2.0)
 
     messages = []
@@ -208,6 +219,7 @@ def test_worker_stop_interrupts_active_runtime_tick_and_emits_stopped(
     assert runtime.closed is True
     assert [message.kind for message in messages] == ["STARTED", "STOPPED"]
     assert messages[-1].stop_reason == "operator_stop"
+    assert worker.stop_requested is False
 
 
 def test_partial_runtime_start_is_compensated_and_error_detail_is_not_projected(

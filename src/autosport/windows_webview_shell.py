@@ -547,6 +547,17 @@ class AutosportWebController:
             return False
         return workspace not in self._recovery_required_workspaces
 
+    def _product_runtime_stop_requested(self) -> bool:
+        try:
+            value = self.product_worker.stop_requested
+        except AttributeError:
+            # Compatibility for bounded test/presentation doubles only. The
+            # canonical ProductGuiWorker always exposes stop_requested.
+            return False
+        if type(value) is not bool:
+            return True
+        return value
+
     def _product_runtime_identity_projection(self) -> dict[str, str]:
         identity = getattr(self, "_product_runtime_identity", None)
         if identity is None:
@@ -1059,6 +1070,7 @@ class AutosportWebController:
             )
             runtime_identity = self._product_runtime_identity_projection()
             runtime_source = self._product_runtime_source_projection()
+            runtime_stop_requested = self._product_runtime_stop_requested()
             return {
                 "status": self.status,
                 "last_error": self._bridge_validation_error or self.last_error,
@@ -1115,7 +1127,10 @@ class AutosportWebController:
                     "can_start": self._product_runtime_can_start(
                         source_ready=source_entry is not None
                     ),
-                    "can_stop": self.product_worker.busy,
+                    "can_stop": bool(
+                        self.product_worker.busy and not runtime_stop_requested
+                    ),
+                    "stop_requested": runtime_stop_requested,
                     "workspace": runtime_identity["workspace"],
                     "session_id": runtime_identity["session_id"],
                     "source_id": runtime_identity["source_id"],
@@ -1490,6 +1505,10 @@ class AutosportWebController:
     def _action_product_runtime_stop(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         if not self.product_worker.busy:
             return self._fail("Тривалий імітаційний режим зараз не виконується.")
+        if self._product_runtime_stop_requested():
+            return self._fail(
+                "Команду STOP уже прийнято; очікується безпечне завершення."
+            )
         if not self.product_worker.request_stop("operator_stop"):
             return self._fail("Не вдалося передати команду STOP.")
         self.product_runtime_status = (

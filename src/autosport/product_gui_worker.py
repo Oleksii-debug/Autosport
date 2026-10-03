@@ -314,6 +314,13 @@ class ProductGuiWorker:
             return self._busy
 
     @property
+    def stop_requested(self) -> bool:
+        """Expose only canonical in-process STOP acceptance for presentation."""
+
+        with self._lock:
+            return bool(self._busy and self._stop_event.is_set())
+
+    @property
     def trusted_runtime_profile(self) -> TrustedRuntimeCodeProfile | None:
         """Return the current process-issued profile, never a persisted authority."""
 

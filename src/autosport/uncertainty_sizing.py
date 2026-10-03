@@ -289,20 +289,6 @@ class UncertaintySizingEvidence:
         ).encode("utf-8")
         return hashlib.sha256(payload).hexdigest()
 
-    def evaluate_canonical(
-        self,
-        request: "UncertaintySizingRequest",
-        policy: "UncertaintySizingPolicy",
-    ) -> "UncertaintySizingDecision":
-        """Evaluate through the producer module, not a consumer-owned function alias."""
-
-        decision = evaluate_uncertainty_sizing(self, request, policy)
-        if type(decision) is not UncertaintySizingDecision:
-            raise UncertaintySizingError(
-                "canonical uncertainty sizing evaluator returned a non-canonical decision"
-            )
-        return decision
-
 
 @dataclass(frozen=True, slots=True)
 class UncertaintySizingPolicy:

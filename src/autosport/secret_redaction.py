@@ -19,6 +19,7 @@ _OPERATOR_VALUE_MAX_DEPTH = 64
 _OPERATOR_VALUE_MAX_NODES = 10_000
 _QUERY_KEY_MAX_DECODE_PASSES = 8
 _SECRET_VALUE_MAX_URL_ENCODING_PASSES = 8
+_SECRET_VALUE_MAX_BASE64_ENCODING_PASSES = 4
 
 _SENSITIVE_NORMALIZED_KEYS = frozenset(
     {
@@ -221,22 +222,29 @@ def _secret_values(extra_secret_values: Iterable[str]) -> tuple[str, ...]:
 
 
 def _reversible_base64_secret_values(secrets: Iterable[str]) -> tuple[str, ...]:
-    """Return reversible Base64 spellings only for already-known secret values."""
+    """Return bounded nested Base64 spellings of already-known secret values."""
 
     values: set[str] = set()
     for secret in secrets:
-        raw = secret.encode("utf-8")
-        standard = base64.b64encode(raw).decode("ascii")
-        urlsafe = base64.urlsafe_b64encode(raw).decode("ascii")
-        values.update(
-            {
-                standard,
-                standard.rstrip("="),
-                urlsafe,
-                urlsafe.rstrip("="),
-            }
-        )
-    values.discard("")
+        frontier = {secret}
+        for _ in range(_SECRET_VALUE_MAX_BASE64_ENCODING_PASSES):
+            next_frontier: set[str] = set()
+            for candidate in frontier:
+                raw = candidate.encode("utf-8")
+                standard = base64.b64encode(raw).decode("ascii")
+                urlsafe = base64.urlsafe_b64encode(raw).decode("ascii")
+                for encoded in (
+                    standard,
+                    standard.rstrip("="),
+                    urlsafe,
+                    urlsafe.rstrip("="),
+                ):
+                    if encoded and encoded != secret and encoded not in values:
+                        values.add(encoded)
+                        next_frontier.add(encoded)
+            if not next_frontier:
+                break
+            frontier = next_frontier
     return tuple(sorted(values, key=lambda item: (-len(item), item)))
 
 

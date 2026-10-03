@@ -811,6 +811,8 @@ class AutosportWebController:
                 "portfolio_worst_case": None,
                 "portfolio_best_case": None,
                 "portfolio_mean_case": None,
+                "risk_policy_evaluated": False,
+                "real_money_authorized": False,
             }
         return {
             "available": True,
@@ -828,6 +830,8 @@ class AutosportWebController:
             "portfolio_worst_case": str(snapshot.portfolio_worst_case),
             "portfolio_best_case": str(snapshot.portfolio_best_case),
             "portfolio_mean_case": str(snapshot.portfolio_mean_case),
+            "risk_policy_evaluated": False,
+            "real_money_authorized": False,
         }
 
     def _apply_product_runtime_economic_snapshot(
@@ -916,6 +920,10 @@ class AutosportWebController:
         return True
 
     def _refresh_economic_projection(self) -> None:
+        # This path reopens durable state only when no live product-runtime message
+        # owns presentation freshness (startup/replay/recovery/terminal STOP). Any
+        # prior runtime snapshot is therefore retired before the durable reopen.
+        self._product_runtime_economic_snapshot = None
         strategy_id = self.strategy_id
         plan = self.research_plan
         try:
@@ -1170,11 +1178,9 @@ class AutosportWebController:
                 self._ok(self.product_runtime_status)
                 self._refresh_economic_projection()
             elif product_message.kind == "ERROR":
-                self._recovery_required_workspaces.add(Path(self._active_workspace))
-                self.product_runtime_status = text(
-                    "ui.windows.product_runtime.error.recovery_required"
+                self._quarantine_product_runtime_truth(
+                    Path(self._active_workspace)
                 )
-                self._fail(self.product_runtime_status)
 
         self._refresh_owner_projection()
 

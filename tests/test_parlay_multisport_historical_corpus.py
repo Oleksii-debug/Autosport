@@ -964,7 +964,7 @@ def test_generic_provider_capture_flows_into_governed_second_sport_corpus(tmp_pa
         suffix="provider-basketball",
     )
 
-    assemble_historical_corpus(
+    build = assemble_historical_corpus(
         [(market, evidence)],
         results_path=_write_results(
             tmp_path,
@@ -978,13 +978,22 @@ def test_generic_provider_capture_flows_into_governed_second_sport_corpus(tmp_pa
         imported_at=IMPORTED_AT,
     )
     dataset = load_dataset(tmp_path / "provider-basketball-corpus")
-    manifest_text = (tmp_path / "provider-basketball-corpus" / "manifest.json").read_text(
-        encoding="utf-8"
-    )
+    manifest_path = tmp_path / "provider-basketball-corpus" / "manifest.json"
+    manifest_text = manifest_path.read_text(encoding="utf-8")
+    manifest = json.loads(manifest_text)
+    provenance = manifest["governance"]["acquisition_evidence"]["provenance"]
     evidence_text = evidence.read_text(encoding="utf-8")
     market_text = market.read_text(encoding="utf-8")
 
     assert capture.quote_count == 2
+    assert build.provider_origin_verified is False
+    assert build.provider_origin_authority_persisted is False
+    assert build.scientific_qualification == "PROVIDER_ORIGIN_UNVERIFIED"
+    assert build.structural_corpus_identity == provenance["structural_corpus_identity"]
+    assert provenance["provider_origin_verified"] is False
+    assert provenance["provider_origin_authority_persisted"] is False
+    assert provenance["provider_origin_requires_live_product_capture"] is True
+    assert provenance["scientific_qualification"] == "PROVIDER_ORIGIN_UNVERIFIED"
     assert dataset.schema_version == 3
     assert dataset.sport == "basketball"
     assert {event.sport for event in dataset.load_market_events()} == {"basketball"}

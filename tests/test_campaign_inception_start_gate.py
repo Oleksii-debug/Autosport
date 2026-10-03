@@ -394,6 +394,7 @@ def _pristine_inception_state_payload(
 @pytest.mark.parametrize(
     ("field_name", "replacement"),
     (
+        ("schedule_id", "9" * 64),
         ("anchor_at", "2100-01-01T06:00:01+00:00"),
         ("interval_seconds", "11.0"),
         ("max_items", 251),

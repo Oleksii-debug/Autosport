@@ -227,6 +227,54 @@ def test_betdaq_positive_provenance_is_not_restored_from_serialized_journal(
     assert "product-owned upstream authority" in decision.reason
 
 
+def test_durable_journal_can_stage_exact_product_issued_evidence_without_mutation(
+    monkeypatch,
+):
+    issuance, _ = _betdaq_authenticated_issuance(monkeypatch)
+    durable = CapabilityEvidenceJournal()
+    durable.publish(issuance.evidence)
+    restored = CapabilityEvidenceJournal.from_json(durable.to_json())
+    before = restored.to_json()
+
+    staged = restored.staged_with_exact_evidence(issuance.evidence)
+    decision = staged.resolve(
+        _betdaq_authenticated_requirement(issuance),
+        {issuance.profile.profile_id: issuance.profile},
+        as_of="2026-09-21T10:02:00+00:00",
+    )
+
+    assert decision.allowed
+    assert decision.evidence_id == issuance.evidence.evidence_id
+    assert restored.to_json() == before
+
+
+def test_staging_copied_payload_does_not_restore_product_provenance(monkeypatch):
+    issuance, _ = _betdaq_authenticated_issuance(monkeypatch)
+    durable = CapabilityEvidenceJournal()
+    durable.publish(issuance.evidence)
+    restored = CapabilityEvidenceJournal.from_json(durable.to_json())
+    before = restored.to_json()
+    copied = CapabilityEvidence(
+        **{
+            field: getattr(issuance.evidence, field)
+            for field in issuance.evidence.__dataclass_fields__
+            if field != "__weakref__"
+        }
+    )
+
+    staged = restored.staged_with_exact_evidence(copied)
+    decision = staged.resolve(
+        _betdaq_authenticated_requirement(issuance),
+        {issuance.profile.profile_id: issuance.profile},
+        as_of="2026-09-21T10:02:00+00:00",
+    )
+
+    assert not decision.allowed
+    assert decision.lifecycle is CapabilityLifecycleState.REVALIDATION_REQUIRED
+    assert "product-owned upstream authority" in decision.reason
+    assert restored.to_json() == before
+
+
 def test_betdaq_issuer_rejects_noncanonical_client_before_provider_io(monkeypatch):
     canonical, calls = _canonical_betdaq_balance_client(monkeypatch)
 

@@ -305,6 +305,52 @@ def _replace_url_encoded_secret(text: str, encoded_secret: str) -> str:
         search_from = index + len(REDACTED)
 
 
+def _mixed_reversible_secret_values(
+    secrets: Iterable[str],
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Return bounded one-transition compositions of known-secret encodings.
+
+    Existing URL and Base64 closures cover repeated transforms within one family.
+    Provider/logging stacks can also apply one family after the other. Derive only
+    one cross-family transition from already-bounded spellings so redaction remains
+    deterministic and cannot grow an unbounded mixed-transform closure.
+
+    The first tuple contains exact/case-sensitive Base64 spellings of URL-family
+    values. The second contains URL spellings of Base64-family values and therefore
+    uses percent-hex case-insensitive matching at publication time.
+    """
+
+    known = tuple(secrets)
+    base64_family = _reversible_base64_secret_values(known)
+    url_family = _reversible_url_secret_values(known)
+
+    mixed_base64: set[str] = set()
+    for candidate in url_family:
+        raw = candidate.encode("utf-8")
+        standard = base64.b64encode(raw).decode("ascii")
+        urlsafe = base64.urlsafe_b64encode(raw).decode("ascii")
+        mixed_base64.update(
+            (
+                standard,
+                standard.rstrip("="),
+                urlsafe,
+                urlsafe.rstrip("="),
+            )
+        )
+
+    mixed_url: set[str] = set()
+    for candidate in base64_family:
+        mixed_url.add(quote(candidate, safe=""))
+        mixed_url.add(quote_plus(candidate, safe=""))
+
+    mixed_base64.discard("")
+    mixed_url.discard("")
+    return (
+        tuple(sorted(mixed_base64, key=lambda item: (-len(item), item))),
+        tuple(sorted(mixed_url, key=lambda item: (-len(item), item))),
+    )
+
+
 def _decode_query_key_for_classification(value: str) -> tuple[str, bool]:
     """Return a bounded decoded query key plus unresolved-nesting truth."""
 
@@ -394,12 +440,27 @@ def redact_operator_text(
         # for this call; never decode/classify arbitrary opaque values.
         reversible_base64_secrets = _reversible_base64_secret_values(secrets)
         reversible_url_secrets = _reversible_url_secret_values(secrets)
-        if reversible_base64_secrets or reversible_url_secrets:
+        (
+            mixed_base64_secrets,
+            mixed_url_secrets,
+        ) = _mixed_reversible_secret_values(secrets)
+        if (
+            reversible_base64_secrets
+            or reversible_url_secrets
+            or mixed_base64_secrets
+            or mixed_url_secrets
+        ):
             parts = rendered.split(REDACTED)
             for index, part in enumerate(parts):
-                for encoded_secret in reversible_base64_secrets:
+                for encoded_secret in (
+                    *reversible_base64_secrets,
+                    *mixed_base64_secrets,
+                ):
                     part = part.replace(encoded_secret, REDACTED)
-                for encoded_secret in reversible_url_secrets:
+                for encoded_secret in (
+                    *reversible_url_secrets,
+                    *mixed_url_secrets,
+                ):
                     part = _replace_url_encoded_secret(part, encoded_secret)
                 parts[index] = part
             rendered = REDACTED.join(parts)

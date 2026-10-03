@@ -172,9 +172,47 @@ class _IssuedResolutionWitness:
     events_reader_code: object
 
 
-_ISSUED_RESOLUTIONS: OrderedDict[
-    int, _IssuedResolutionWitness
-] = OrderedDict()
+def _make_resolution_witness_registry():
+    issued = OrderedDict()
+    maximum_live = _MAX_LIVE_RESOLUTIONS
+    witness_type = _IssuedResolutionWitness
+
+    def register(
+        *,
+        resolution: ManualNvdaAcceptanceResolution,
+        fingerprint: str,
+        ledger: object,
+        path: object,
+        anchor_path: object,
+        pending_path: object,
+        lock_path: object,
+        events_reader: object,
+        events_reader_code: object,
+    ) -> None:
+        while len(issued) >= maximum_live:
+            issued.popitem(last=False)
+        issued[id(resolution)] = witness_type(
+            resolution=resolution,
+            fingerprint=fingerprint,
+            ledger=ledger,
+            path=path,
+            anchor_path=anchor_path,
+            pending_path=pending_path,
+            lock_path=lock_path,
+            events_reader=events_reader,
+            events_reader_code=events_reader_code,
+        )
+
+    def lookup(resolution: object) -> _IssuedResolutionWitness | None:
+        return issued.get(id(resolution))
+
+    return register, lookup
+
+
+_REGISTER_RESOLUTION_WITNESS, _LOOKUP_RESOLUTION_WITNESS = (
+    _make_resolution_witness_registry()
+)
+del _make_resolution_witness_registry
 
 
 def _canonical(value: object) -> str:
@@ -531,84 +569,94 @@ def _resolution_fingerprint(resolution: ManualNvdaAcceptanceResolution) -> str:
     )
 
 
-def verify_manual_nvda_acceptance_resolution(
-    resolution: object,
-    *,
-    expected_artifact_sha256: str,
-    expected_source_sha: str,
-    expected_transcript_sha256: str,
-) -> ManualNvdaAcceptanceResolution:
-    """Verify one live resolver-issued projection for an exact candidate."""
+def _make_resolution_verifier(lookup_witness):
+    def verify_manual_nvda_acceptance_resolution(
+        resolution: object,
+        *,
+        expected_artifact_sha256: str,
+        expected_source_sha: str,
+        expected_transcript_sha256: str,
+    ) -> ManualNvdaAcceptanceResolution:
+        """Verify one live resolver-issued projection for an exact candidate."""
 
-    artifact = _require_sha256(
-        "expected_artifact_sha256", expected_artifact_sha256
-    )
-    source_sha = _require_git_commit_sha(
-        "expected_source_sha", expected_source_sha
-    )
-    transcript_sha = _require_sha256(
-        "expected_transcript_sha256", expected_transcript_sha256
-    )
-    if type(resolution) is not ManualNvdaAcceptanceResolution:
-        raise NvdaManualAcceptanceStateError(
-            "manual NVDA resolution must be the exact canonical type"
+        artifact = _require_sha256(
+            "expected_artifact_sha256", expected_artifact_sha256
         )
-    issued = _ISSUED_RESOLUTIONS.get(id(resolution))
-    if issued is None or issued.resolution is not resolution:
-        raise NvdaManualAcceptanceStateError(
-            "manual NVDA resolution is not a live resolver-issued authority"
+        source_sha = _require_git_commit_sha(
+            "expected_source_sha", expected_source_sha
         )
-    fingerprint = _resolution_fingerprint(resolution)
-    if fingerprint != issued.fingerprint:
-        raise NvdaManualAcceptanceStateError(
-            "manual NVDA resolution changed after issuance"
+        transcript_sha = _require_sha256(
+            "expected_transcript_sha256", expected_transcript_sha256
         )
-    record = resolution.record
-    if (
-        record.artifact_sha256 != artifact
-        or record.source_sha != source_sha
-        or record.transcript_sha256 != transcript_sha
-    ):
-        raise NvdaManualAcceptanceStateError(
-            "manual NVDA resolution does not match the expected candidate"
-        )
-
-    issued_ledger = issued.ledger
-    if (
-        type(issued_ledger) is not ManualNvdaAcceptanceLedger
-        or issued_ledger.path is not issued.path
-        or issued_ledger._anchor_path is not issued.anchor_path
-        or issued_ledger._pending_path is not issued.pending_path
-        or issued_ledger._lock_path is not issued.lock_path
-        or "events" in vars(issued_ledger)
-        or ManualNvdaAcceptanceLedger.events is not issued.events_reader
-        or getattr(issued.events_reader, "__code__", None)
-        is not issued.events_reader_code
-    ):
-        raise NvdaManualAcceptanceStateError(
-            "manual NVDA resolution ledger authority changed after issuance"
-        )
-    current_records = issued.events_reader(issued_ledger)
-    current_matching = [
-        current
-        for current in current_records
+        if type(resolution) is not ManualNvdaAcceptanceResolution:
+            raise NvdaManualAcceptanceStateError(
+                "manual NVDA resolution must be the exact canonical type"
+            )
+        issued = lookup_witness(resolution)
+        if issued is None or issued.resolution is not resolution:
+            raise NvdaManualAcceptanceStateError(
+                "manual NVDA resolution is not a live resolver-issued authority"
+            )
+        fingerprint = _resolution_fingerprint(resolution)
+        if fingerprint != issued.fingerprint:
+            raise NvdaManualAcceptanceStateError(
+                "manual NVDA resolution changed after issuance"
+            )
+        record = resolution.record
         if (
-            current.protocol_version == record.protocol_version
-            and current.transcript_sha256 == record.transcript_sha256
-            and current.artifact_sha256 == record.artifact_sha256
-            and current.source_sha == record.source_sha
-            and current.structural_status == record.structural_status
-            and current.structural_human_tester_attestation_sha256
-            == record.structural_human_tester_attestation_sha256
-            and current.windows_version == record.windows_version
-            and current.nvda_version == record.nvda_version
-        )
-    ]
-    if not current_matching or current_matching[-1] != record:
-        raise NvdaManualAcceptanceStateError(
-            "manual NVDA resolution is no longer the current durable decision"
-        )
-    return resolution
+            record.artifact_sha256 != artifact
+            or record.source_sha != source_sha
+            or record.transcript_sha256 != transcript_sha
+        ):
+            raise NvdaManualAcceptanceStateError(
+                "manual NVDA resolution does not match the expected candidate"
+            )
+
+        issued_ledger = issued.ledger
+        if (
+            type(issued_ledger) is not ManualNvdaAcceptanceLedger
+            or issued_ledger.path is not issued.path
+            or issued_ledger._anchor_path is not issued.anchor_path
+            or issued_ledger._pending_path is not issued.pending_path
+            or issued_ledger._lock_path is not issued.lock_path
+            or "events" in vars(issued_ledger)
+            or ManualNvdaAcceptanceLedger.events is not issued.events_reader
+            or getattr(issued.events_reader, "__code__", None)
+            is not issued.events_reader_code
+        ):
+            raise NvdaManualAcceptanceStateError(
+                "manual NVDA resolution ledger authority changed after issuance"
+            )
+        current_records = issued.events_reader(issued_ledger)
+        current_matching = [
+            current
+            for current in current_records
+            if (
+                current.protocol_version == record.protocol_version
+                and current.transcript_sha256 == record.transcript_sha256
+                and current.artifact_sha256 == record.artifact_sha256
+                and current.source_sha == record.source_sha
+                and current.structural_status == record.structural_status
+                and current.structural_human_tester_attestation_sha256
+                == record.structural_human_tester_attestation_sha256
+                and current.windows_version == record.windows_version
+                and current.nvda_version == record.nvda_version
+            )
+        ]
+        if not current_matching or current_matching[-1] != record:
+            raise NvdaManualAcceptanceStateError(
+                "manual NVDA resolution is no longer the current durable decision"
+            )
+        return resolution
+
+    return verify_manual_nvda_acceptance_resolution
+
+
+verify_manual_nvda_acceptance_resolution = _make_resolution_verifier(
+    _LOOKUP_RESOLUTION_WITNESS
+)
+del _make_resolution_verifier
+del _LOOKUP_RESOLUTION_WITNESS
 
 
 class _ManualNvdaWriterLock(WorkspaceEconomicLock):
@@ -1091,11 +1139,47 @@ class ManualNvdaAcceptanceLedger:
         object.__setattr__(resolution, "manual_truth_promotion_required", True)
         object.__setattr__(resolution, "real_money_execution", False)
         object.__setattr__(resolution, "whole_product_complete", False)
+        return resolution
+
+
+def _seal_resolution_issuance(register_witness) -> None:
+    ledger_type = ManualNvdaAcceptanceLedger
+    implementation = ledger_type.resolve_current
+    implementation_code = implementation.__code__
+    events_reader = ledger_type.events
+    events_reader_code = events_reader.__code__
+
+    def resolve_current(
+        self,
+        *,
+        transcript: object,
+        expected_artifact_sha256: str,
+        expected_source_sha: str,
+        protocol_version: str = PROTOCOL_VERSION,
+    ) -> ManualNvdaAcceptanceResolution | None:
+        if (
+            type(self) is not ledger_type
+            or ledger_type.resolve_current is not resolve_current
+            or implementation.__code__ is not implementation_code
+            or ledger_type.events is not events_reader
+            or events_reader.__code__ is not events_reader_code
+            or "resolve_current" in vars(self)
+            or "events" in vars(self)
+        ):
+            raise NvdaManualAcceptanceStateError(
+                "manual NVDA resolution issuance authority changed"
+            )
+        resolution = implementation(
+            self,
+            transcript=transcript,
+            expected_artifact_sha256=expected_artifact_sha256,
+            expected_source_sha=expected_source_sha,
+            protocol_version=protocol_version,
+        )
+        if resolution is None:
+            return None
         fingerprint = _resolution_fingerprint(resolution)
-        while len(_ISSUED_RESOLUTIONS) >= _MAX_LIVE_RESOLUTIONS:
-            _ISSUED_RESOLUTIONS.popitem(last=False)
-        events_reader = ManualNvdaAcceptanceLedger.events
-        _ISSUED_RESOLUTIONS[id(resolution)] = _IssuedResolutionWitness(
+        register_witness(
             resolution=resolution,
             fingerprint=fingerprint,
             ledger=self,
@@ -1104,9 +1188,16 @@ class ManualNvdaAcceptanceLedger:
             pending_path=self._pending_path,
             lock_path=self._lock_path,
             events_reader=events_reader,
-            events_reader_code=events_reader.__code__,
+            events_reader_code=events_reader_code,
         )
         return resolution
+
+    ledger_type.resolve_current = resolve_current
+
+
+_seal_resolution_issuance(_REGISTER_RESOLUTION_WITNESS)
+del _seal_resolution_issuance
+del _REGISTER_RESOLUTION_WITNESS
 
 
 __all__ = [

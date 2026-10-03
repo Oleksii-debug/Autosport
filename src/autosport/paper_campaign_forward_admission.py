@@ -37,9 +37,9 @@ def _build_sealed_forward_admission():
         None,
     )
     installer = admission_module._install_forward_verification_runner
-    run_with_forward = installer()
-    run_with_forward_code = getattr(run_with_forward, "__code__", None)
-    delattr(admission_module, "_install_forward_verification_runner")
+    installer_code = getattr(installer, "__code__", None)
+    run_with_forward = None
+    run_with_forward_code = None
     decision_field = admission_module._FORWARD_VERIFICATION_DECISION_FIELD
     action_parameter = admission_module._FORWARD_VERIFICATION_ACTION_PARAMETER
 
@@ -90,6 +90,10 @@ def _build_sealed_forward_admission():
             is not forward_context_reader
             or exact_getattr(forward_context_reader, "__code__", None)
             is not forward_context_reader_code
+            or exact_getattr(installer, "__code__", None)
+            is not installer_code
+            or exact_getattr(resolve_request, "__code__", None)
+            is not resolve_request_code
             or exact_getattr(run_with_forward, "__code__", None)
             is not run_with_forward_code
             or exact_getattr(
@@ -216,6 +220,29 @@ def _build_sealed_forward_admission():
         require_surfaces()
         return receipt_payload(receipt, cycle_receipt=cycle_receipt)
 
+    exact_tuple = tuple
+
+    def resolve_request(request: object) -> dict[str, object]:
+        if exact_type(request) is not exact_tuple or exact_len(request) != 8:
+            raise expected_error(
+                "campaign forward admission request must be exact authority tuple"
+            )
+        return resolve_payload(
+            precommit_locator=request[0],
+            collector_store=request[1],
+            source_spec=request[2],
+            cycle_receipt=request[3],
+            provider_evidence_store=request[4],
+            universe_store=request[5],
+            event_lifecycle=request[6],
+            evidence=request[7],
+        )
+
+    resolve_request_code = exact_getattr(resolve_request, "__code__", None)
+    run_with_forward = installer(resolve_request)
+    run_with_forward_code = exact_getattr(run_with_forward, "__code__", None)
+    delattr(admission_module, "_install_forward_verification_runner")
+
     def raw_admit_forward_verified(
         coordinator: object,
         *,
@@ -249,31 +276,16 @@ def _build_sealed_forward_admission():
                 "coordinator must be exact PaperCampaignAdmissionCoordinator"
             )
 
-        before = resolve_payload(
-            precommit_locator=precommit_locator,
-            collector_store=collector_store,
-            source_spec=source_spec,
-            cycle_receipt=cycle_receipt,
-            provider_evidence_store=provider_evidence_store,
-            universe_store=universe_store,
-            event_lifecycle=event_lifecycle,
-            evidence=evidence,
+        request = (
+            precommit_locator,
+            collector_store,
+            source_spec,
+            cycle_receipt,
+            provider_evidence_store,
+            universe_store,
+            event_lifecycle,
+            evidence,
         )
-        # Reject unstable authority before any #708 journal/economic side effect.
-        stable = resolve_payload(
-            precommit_locator=precommit_locator,
-            collector_store=collector_store,
-            source_spec=source_spec,
-            cycle_receipt=cycle_receipt,
-            provider_evidence_store=provider_evidence_store,
-            universe_store=universe_store,
-            event_lifecycle=event_lifecycle,
-            evidence=evidence,
-        )
-        if stable != before:
-            raise expected_error(
-                "campaign forward verification changed before admission"
-            )
 
         def invoke_admission():
             return legacy_admit(
@@ -295,23 +307,7 @@ def _build_sealed_forward_admission():
                 action_parameters=action_parameters,
             )
 
-        result = run_with_forward(exact_dict(before), invoke_admission)
-
-        after = resolve_payload(
-            precommit_locator=precommit_locator,
-            collector_store=collector_store,
-            source_spec=source_spec,
-            cycle_receipt=cycle_receipt,
-            provider_evidence_store=provider_evidence_store,
-            universe_store=universe_store,
-            event_lifecycle=event_lifecycle,
-            evidence=evidence,
-        )
-        if after != before:
-            raise expected_error(
-                "campaign forward verification changed during admission"
-            )
-        return result
+        return run_with_forward(request, invoke_admission)
 
     def sealed_admit_forward_verified(*args, **kwargs):
         sealed = holder["sealed"]

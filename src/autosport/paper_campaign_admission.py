@@ -97,6 +97,8 @@ def _build_forward_verification_context():
     claimed = False
     exact_type = type
     exact_dict = dict
+    exact_callable = callable
+    exact_getattr = getattr
 
     def current() -> dict[str, object] | None:
         value = context.get()
@@ -108,28 +110,53 @@ def _build_forward_verification_context():
             )
         return exact_dict(value)
 
-    def claim_runner():
+    def claim_runner(resolver):
         nonlocal claimed
         if claimed:
             raise RuntimeError(
                 "campaign forward verification context runner is already claimed"
             )
+        if not exact_callable(resolver):
+            raise TypeError(
+                "campaign forward verification resolver must be callable"
+            )
         claimed = True
+        resolver_code = exact_getattr(resolver, "__code__", None)
 
-        def run(payload: dict[str, object], invoke):
-            if exact_type(payload) is not exact_dict:
+        def run(request, invoke):
+            if not exact_callable(invoke):
                 raise TypeError(
-                    "campaign forward verification payload must be exact dict"
+                    "campaign forward verification admission callback must be callable"
+                )
+            if exact_getattr(resolver, "__code__", None) is not resolver_code:
+                raise PaperCampaignAdmissionError(
+                    "campaign forward verification resolver implementation changed"
                 )
             if context.get() is not None:
                 raise PaperCampaignAdmissionError(
                     "campaign forward verification context is already active"
                 )
-            token = context.set(exact_dict(payload))
+            before = resolver(request)
+            if exact_type(before) is not exact_dict:
+                raise PaperCampaignAdmissionError(
+                    "campaign forward verification resolver returned noncanonical payload"
+                )
+            stable = resolver(request)
+            if exact_type(stable) is not exact_dict or stable != before:
+                raise PaperCampaignAdmissionError(
+                    "campaign forward verification changed before admission"
+                )
+            token = context.set(exact_dict(before))
             try:
-                return invoke()
+                result = invoke()
             finally:
                 context.reset(token)
+            after = resolver(request)
+            if exact_type(after) is not exact_dict or after != before:
+                raise PaperCampaignAdmissionError(
+                    "campaign forward verification changed during admission"
+                )
+            return result
 
         return run
 

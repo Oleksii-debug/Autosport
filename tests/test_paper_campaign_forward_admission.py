@@ -27,6 +27,32 @@ def _admissions(fixture: AdmissionFixture) -> dict[str, object]:
     return raw["admissions"]
 
 
+def _closure_function(root, *, module_name: str, function_name: str):
+    seen: set[int] = set()
+    pending = [root]
+    while pending:
+        candidate = pending.pop()
+        identity = id(candidate)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        if (
+            getattr(candidate, "__module__", None) == module_name
+            and getattr(candidate, "__name__", None) == function_name
+        ):
+            return candidate
+        for cell in getattr(candidate, "__closure__", ()) or ():
+            try:
+                value = cell.cell_contents
+            except ValueError:
+                continue
+            if callable(value):
+                pending.append(value)
+    raise AssertionError(
+        f"closure function {module_name}.{function_name} was not reachable"
+    )
+
+
 def test_legacy_admit_cannot_claim_forward_verification(tmp_path):
     fixture = AdmissionFixture(tmp_path)
     coordinator = fixture.coordinator()
@@ -342,3 +368,24 @@ def test_forward_context_has_no_public_setter():
         admission_module,
         "_install_forward_verification_runner",
     )
+
+
+def test_extracted_forward_context_runner_cannot_bypass_canonical_verifier(tmp_path):
+    fixture = AdmissionFixture(tmp_path)
+    coordinator = fixture.coordinator()
+    invoked: list[str] = []
+    runner = _closure_function(
+        admit_forward_verified,
+        module_name=admission_module.__name__,
+        function_name="run",
+    )
+
+    def hostile_invoke():
+        invoked.append("admit")
+        return fixture.admit(coordinator)
+
+    with pytest.raises((TypeError, RuntimeError)):
+        runner((None,) * 8, hostile_invoke)
+
+    assert invoked == []
+    assert _admissions(fixture) == {}

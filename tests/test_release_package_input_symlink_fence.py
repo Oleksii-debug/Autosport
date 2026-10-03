@@ -277,10 +277,17 @@ class ReleasePackageInputSymlinkFenceTests(unittest.TestCase):
                     expected_snapshot=expected_snapshot,
                 )
 
-            with patch.object(
-                release_package,
-                "_read_regular_source_bytes",
-                side_effect=inject_then_read,
+            with (
+                patch.object(
+                    release_package,
+                    "_read_regular_source_bytes",
+                    side_effect=inject_then_read,
+                ),
+                patch.object(
+                    release_package,
+                    "_same_source_tree_directory_snapshot",
+                    return_value=True,
+                ),
             ):
                 with self.assertRaisesRegex(
                     ValueError,

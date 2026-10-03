@@ -1034,6 +1034,71 @@ def test_resolver_rejects_reflection_dependency_witness_rebind_before_execution(
         )
 
 
+def test_private_integrity_guard_does_not_dispatch_through_shadowed_globals(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hostile_calls: list[str] = []
+
+    def hostile_globals():
+        hostile_calls.append("globals")
+        raise AssertionError("hostile globals executed")
+
+    monkeypatch.setattr(binding, "globals", hostile_globals, raising=False)
+
+    binding._require_dispatch_integrity()
+
+    assert hostile_calls == []
+
+
+def test_saved_resolver_does_not_dispatch_through_shadowed_globals(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    resolver = binding.resolve_campaign_forward_universe_cycle_authority
+    hostile_calls: list[str] = []
+
+    def hostile_globals():
+        hostile_calls.append("globals")
+        raise AssertionError("hostile globals executed")
+
+    monkeypatch.setattr(binding, "globals", hostile_globals, raising=False)
+
+    with pytest.raises(TypeError, match="precommit_locator must be exact"):
+        resolver(
+            precommit_locator=None,
+            collector_store=None,
+            source_spec=None,
+            cycle_receipt=None,
+            provider_evidence_store=None,
+            universe_store=None,
+            protocol=None,
+            event_lifecycle=None,
+        )
+
+    assert hostile_calls == []
+
+
+def test_saved_resolver_rejects_canonical_module_mapping_rebind(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    resolver = binding.resolve_campaign_forward_universe_cycle_authority
+    monkeypatch.setattr(binding, "_CANONICAL_MODULE_GLOBALS", {})
+
+    with pytest.raises(
+        binding.CampaignForwardUniverseCycleBindingError,
+        match="campaign forward-cycle reflection dispatch changed",
+    ):
+        resolver(
+            precommit_locator=None,
+            collector_store=None,
+            source_spec=None,
+            cycle_receipt=None,
+            provider_evidence_store=None,
+            universe_store=None,
+            protocol=None,
+            event_lifecycle=None,
+        )
+
+
 def test_private_integrity_guard_rejects_reflection_helper_rebind() -> None:
     helper_globals = binding._CANONICAL_GETATTR_STATIC_GLOBALS
     name, original, _code = next(

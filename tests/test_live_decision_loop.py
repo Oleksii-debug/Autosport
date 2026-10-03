@@ -601,6 +601,79 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             ).verified_records()
             self.assertEqual(len(records), 1)
 
+    def test_portfolio_change_during_market_cut_retries_before_decision(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            clock = _ManualClock(self.START + timedelta(seconds=1))
+            book = PaperBook("1000")
+            factory = _EmptyIntentFactory()
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(
+                    workspace,
+                    [(self._event(selection="selection-a", sequence=1),), ()],
+                ),
+                factory=factory,
+                clock=clock,
+                book=book,
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+
+            real_capture = loop.dependencies.coherent_decision_views
+            injected = {"done": False}
+
+            def capture_then_change_portfolio(*args, **kwargs):
+                snapshots = real_capture(*args, **kwargs)
+                if not injected["done"]:
+                    injected["done"] = True
+                    book.open_ticket(
+                        [
+                            TicketLeg(
+                                event_id="existing-event",
+                                market_id="existing-market",
+                                selection_id="existing-selection",
+                                locked_odds=Decimal("2"),
+                                sport="table_tennis",
+                                exchange_side="back",
+                            )
+                        ],
+                        Decimal("10"),
+                        placed_at=(
+                            clock.value + timedelta(microseconds=1)
+                        ).isoformat(),
+                    )
+                return snapshots
+
+            with patch.object(
+                loop.dependencies,
+                "coherent_decision_views",
+                side_effect=capture_then_change_portfolio,
+            ):
+                first = loop.run_cycle()
+
+            self.assertEqual(first.status, LiveCycleStatus.BACKPRESSURE)
+            self.assertIn("PaperBook/risk context advanced", first.detail)
+            self.assertEqual(factory.calls, [])
+            self.assertFalse((workspace / "decisions.jsonl").exists())
+            self.assertFalse(loop.progress_path.exists())
+
+            clock.value = self.START + timedelta(seconds=2)
+            second = loop.run_cycle()
+
+            self.assertEqual(second.status, LiveCycleStatus.DECIDED)
+            self.assertEqual(
+                len(
+                    JsonlDecisionLedger(
+                        workspace / "decisions.jsonl"
+                    ).verified_records()
+                ),
+                1,
+            )
+            self.assertEqual(
+                second.plan.portfolio_sha256,
+                loop.authority.risk_policy.risk_of_ruin_portfolio_sha256(book),
+            )
+
     def test_update_during_final_coherence_getter_retries_before_decision(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)
@@ -816,6 +889,76 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
                 2,
             )
 
+    def test_provider_gap_rejects_portfolio_change_during_full_cut(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            clock = _ManualClock(self.START + timedelta(seconds=1))
+            book = PaperBook("1000")
+            factory = _EmptyIntentFactory()
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(
+                    workspace,
+                    [
+                        ProviderUnavailableError("simulated provider gap"),
+                        ProviderUnavailableError("simulated provider gap"),
+                    ],
+                ),
+                factory=factory,
+                clock=clock,
+                book=book,
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+
+            real_capture = loop.dependencies.coherent_decision_views
+            injected = {"done": False}
+
+            def full_capture_then_change_portfolio(*args, **kwargs):
+                snapshots = real_capture(*args, **kwargs)
+                if kwargs.get("incremental") is False and not injected["done"]:
+                    injected["done"] = True
+                    book.open_ticket(
+                        [
+                            TicketLeg(
+                                event_id="existing-event",
+                                market_id="existing-market",
+                                selection_id="existing-selection",
+                                locked_odds=Decimal("2"),
+                                sport="table_tennis",
+                                exchange_side="back",
+                            )
+                        ],
+                        Decimal("10"),
+                        placed_at=(
+                            clock.value + timedelta(microseconds=1)
+                        ).isoformat(),
+                    )
+                return snapshots
+
+            with patch.object(
+                loop.dependencies,
+                "coherent_decision_views",
+                side_effect=full_capture_then_change_portfolio,
+            ):
+                first = loop.run_cycle()
+
+            self.assertEqual(first.status, LiveCycleStatus.BACKPRESSURE)
+            self.assertIsNone(first.plan)
+            self.assertIn("PaperBook/risk context advanced", first.detail)
+            self.assertFalse((workspace / "decisions.jsonl").exists())
+            self.assertFalse(loop.progress_path.exists())
+
+            clock.value = self.START + timedelta(seconds=2)
+            second = loop.run_cycle()
+
+            self.assertEqual(second.status, LiveCycleStatus.PROVIDER_GAP)
+            self.assertIsNotNone(second.plan)
+            self.assertEqual(second.plan.action, PortfolioAction.ZERO)
+            self.assertEqual(
+                second.plan.portfolio_sha256,
+                loop.authority.risk_policy.risk_of_ruin_portfolio_sha256(book),
+            )
+
     def test_provider_gap_does_not_publish_zero_from_future_local_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)
@@ -856,7 +999,7 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             first = loop.run_cycle()
 
             self.assertEqual(first.status, LiveCycleStatus.BACKPRESSURE)
-            self.assertIn("provider gap snapshot was not causally coherent", first.detail)
+            self.assertIn("provider gap decision cut was not causally coherent", first.detail)
             self.assertEqual(factory.calls, [])
             self.assertFalse((workspace / "decisions.jsonl").exists())
 

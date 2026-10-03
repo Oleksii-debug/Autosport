@@ -1133,6 +1133,7 @@ class PersistentLiveDecisionLoop:
             )
 
         decision_time = now
+        decision_context_sha256 = self._decision_context_sha256()
         try:
             snapshots = self._capture_input_views(
                 refresh_input_ids,
@@ -1170,22 +1171,30 @@ class PersistentLiveDecisionLoop:
             )
 
         decision_ts = now.isoformat()
-        self._write_pending(
-            decision_ts=decision_ts,
-            market_state_sha256=current_market_sha,
-            affected_input_ids=affected,
-            gate=_GATE_NORMAL,
-        )
+        try:
+            decision_book = self._write_pending(
+                decision_ts=decision_ts,
+                market_state_sha256=current_market_sha,
+                affected_input_ids=affected,
+                gate=_GATE_NORMAL,
+                expected_decision_context_sha256=decision_context_sha256,
+            )
+        except _ConcurrentDecisionSnapshot as exc:
+            return LiveCycleResult(
+                LiveCycleStatus.BACKPRESSURE,
+                affected_input_ids=refresh_input_ids,
+                detail=str(exc),
+            )
         self._refresh_intents_from_snapshots(snapshots)
 
         intents = self._all_cached_intents()
         graph = (
             None
             if not intents
-            else PortfolioDependencyGraph.for_inputs(self.book, intents)
+            else PortfolioDependencyGraph.for_inputs(decision_book, intents)
         )
         plan = build_portfolio_plan(
-            self.book,
+            decision_book,
             intents,
             self.authority.risk_policy,
             decision_ts,
@@ -1683,27 +1692,29 @@ class PersistentLiveDecisionLoop:
     ) -> LiveCycleResult:
         decision_ts = now.isoformat()
         affected = self.dependencies.input_ids
+        decision_context_sha256 = self._decision_context_sha256()
         try:
             self._capture_input_views(affected, now, incremental=False)
+            market_sha = self._market_state_sha256()
+            decision_book = self._write_pending(
+                decision_ts=decision_ts,
+                market_state_sha256=market_sha,
+                affected_input_ids=affected,
+                gate=_GATE_PROVIDER_GAP,
+                expected_decision_context_sha256=decision_context_sha256,
+            )
         except _ConcurrentDecisionSnapshot as exc:
             self._needs_cache_rebuild = True
             return LiveCycleResult(
                 LiveCycleStatus.BACKPRESSURE,
                 affected_input_ids=affected,
                 detail=(
-                    "provider gap snapshot was not causally coherent; "
+                    "provider gap decision cut was not causally coherent; "
                     f"retrying before ZERO decision: {exc}"
                 ),
             )
-        market_sha = self._market_state_sha256()
-        self._write_pending(
-            decision_ts=decision_ts,
-            market_state_sha256=market_sha,
-            affected_input_ids=affected,
-            gate=_GATE_PROVIDER_GAP,
-        )
         plan = build_portfolio_plan(
-            self.book,
+            decision_book,
             (),
             self.authority.risk_policy,
             decision_ts,
@@ -1993,9 +2004,14 @@ class PersistentLiveDecisionLoop:
         market_state_sha256: str,
         affected_input_ids: tuple[str, ...],
         gate: str,
-    ) -> None:
+        expected_decision_context_sha256: str,
+    ) -> PaperBook:
         _, decision_time = _canonical_timestamp("decision_ts", decision_ts)
         self.intent_provenance.assert_available_at(decision_time)
+        expected_context_sha256 = _canonical_sha256(
+            "expected decision_context_sha256",
+            expected_decision_context_sha256,
+        )
         with WorkspaceEconomicLock(self.workspace):
             # The snapshot is written before the cursor: a crash before cursor
             # publication leaves only ignorable stale snapshot bytes, while every
@@ -2010,6 +2026,11 @@ class PersistentLiveDecisionLoop:
             # authority but no live generation/path binding.  Its first save
             # therefore establishes only the dedicated recovery-snapshot lineage.
             live_context_sha256 = self._decision_context_sha256()
+            if live_context_sha256 != expected_context_sha256:
+                raise _ConcurrentDecisionSnapshot(
+                    "PaperBook/risk context advanced during decision snapshot capture; "
+                    "retrying before economic action"
+                )
             snapshot = self.authority.risk_policy._shadow_book_for_allocation(
                 self.book
             )
@@ -2047,6 +2068,7 @@ class PersistentLiveDecisionLoop:
                 not self._same_book_state(durable_pre_action, self.book)
                 or durable_context_sha256 != live_context_sha256
                 or current_context_sha256 != live_context_sha256
+                or live_context_sha256 != expected_context_sha256
             ):
                 raise LiveDecisionProgressError(
                     "pre-action PaperBook durability verification failed"
@@ -2066,6 +2088,7 @@ class PersistentLiveDecisionLoop:
             )
             atomic_write_json(self.progress_path, pending.to_dict())
         self._progress = pending
+        return durable_pre_action
 
     def _load_input_registry(self) -> tuple[_InputSpec, ...] | None:
         if not self.inputs_path.exists():

@@ -336,6 +336,64 @@ def test_orphan_cleanup_excludes_current_and_already_swept_runs(
     assert events == ["api", "sweep", "orphan"]
 
 
+def test_explicit_stale_trigger_is_cancelled_once_after_orphan_exclusion(
+    monkeypatch,
+) -> None:
+    qualification = PullRequestQualification(
+        head_sha="b" * 40,
+        integration_capable=True,
+    )
+    instances = []
+
+    class FakeScopedApi:
+        def __init__(self, **kwargs) -> None:
+            self.cancelled: list[int] = []
+            instances.append(self)
+
+        def live_pr_qualification(self, pr_number: int) -> PullRequestQualification:
+            assert pr_number == 2022
+            return qualification
+
+        def cancel_historical_unbound_runs(self, **kwargs) -> tuple[int, ...]:
+            excluded = set(kwargs["exclude_run_ids"])
+            assert excluded == {7005}
+            # Reproduce the metadata race: the current source run appears orphaned
+            # in the Actions snapshot. It must not be consumed by this phase.
+            if 7005 not in excluded:
+                self.cancel(7005)
+                return (7005,)
+            return ()
+
+        def cancel(self, run_id: int) -> None:
+            self.cancelled.append(run_id)
+
+    monkeypatch.setattr(scoped_controller, "WorkflowScopedGitHubApi", FakeScopedApi)
+    monkeypatch.setattr(
+        scoped_controller,
+        "cancel_superseded_explicit_pr_runs",
+        lambda *args, **kwargs: (),
+    )
+    monkeypatch.setenv("GITHUB_REPOSITORY", "Oleksii-debug/Autosport")
+    monkeypatch.setenv("GITHUB_TOKEN", "test-token")
+
+    assert scoped_controller.main(
+        [
+            "--pr-number",
+            "2022",
+            "--event-head-sha",
+            "a" * 40,
+            "--workflow-name",
+            "CI",
+            "--workflow-id",
+            "356678400",
+            "--current-run-id",
+            "7005",
+        ]
+    ) == 0
+    assert len(instances) == 1
+    assert instances[0].cancelled == [7005]
+
+
 def test_main_reaches_triggering_run_check_after_orphan_authority_race_skip(
     monkeypatch,
 ) -> None:

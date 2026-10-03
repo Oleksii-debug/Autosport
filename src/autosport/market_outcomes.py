@@ -18,6 +18,8 @@ _VERIFIED_AUTHORITY_ISSUANCE = contextvars.ContextVar(
     "autosport_market_outcome_authority_issuance",
     default=False,
 )
+
+
 def _build_issued_authority_registry():
     """Hide positive authority issuance membership from module-global mutation."""
 

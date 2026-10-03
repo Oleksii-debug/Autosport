@@ -127,8 +127,9 @@ def _strategy_class(
     *,
     _strategy_type: type[StrategyClass] = StrategyClass,
     _error_type: type[StrategyProofContractError] = StrategyProofContractError,
+    _type=type,
 ) -> StrategyClass:
-    if type(value) is not _strategy_type:
+    if _type(value) is not _strategy_type:
         raise _error_type("strategy_class must be a StrategyClass")
     return value
 
@@ -137,8 +138,9 @@ def _probability_claim(
     value: object,
     *,
     _error_type: type[StrategyProofContractError] = StrategyProofContractError,
+    _type=type,
 ) -> bool:
-    if type(value) is not bool:
+    if _type(value) is not bool:
         raise _error_type("claims_probability_edge must be a bool")
     return value
 
@@ -164,19 +166,26 @@ def _proofs(
     *,
     _proof_type: type[ProofRequirement] = ProofRequirement,
     _error_type: type[StrategyProofContractError] = StrategyProofContractError,
+    _type=type,
+    _frozenset_type=frozenset,
 ) -> frozenset[ProofRequirement]:
-    if type(value) is not frozenset:
+    if _type(value) is not _frozenset_type:
         raise _error_type("present_proofs must be a frozenset")
     for proof in value:
-        if type(proof) is not _proof_type:
+        if _type(proof) is not _proof_type:
             raise _error_type(
                 "present_proofs must contain only ProofRequirement values"
             )
     return value
 
 
-def _ordered(proofs: frozenset[ProofRequirement]) -> tuple[ProofRequirement, ...]:
-    return tuple(sorted(proofs, key=lambda proof: proof.value))
+def _ordered(
+    proofs: frozenset[ProofRequirement],
+    *,
+    _tuple_type=tuple,
+    _sorted=sorted,
+) -> tuple[ProofRequirement, ...]:
+    return _tuple_type(_sorted(proofs, key=lambda proof: proof.value))
 
 
 def _required_for(
@@ -215,6 +224,10 @@ class StrategyProofContract:
         _ordered_impl=_ordered,
         _proof_type: type[ProofRequirement] = ProofRequirement,
         _error_type: type[StrategyProofContractError] = StrategyProofContractError,
+        _type=type,
+        _tuple_type=tuple,
+        _frozenset_type=frozenset,
+        _any=any,
     ) -> None:
         canonical_class = _strategy_validator(self.strategy_class)
         canonical_claim = _claim_validator(self.claims_probability_edge)
@@ -222,13 +235,15 @@ class StrategyProofContract:
             _required_for_impl(canonical_class, canonical_claim)
         )
 
-        if type(self.required_proofs) is not tuple:
+        if _type(self.required_proofs) is not _tuple_type:
             raise _error_type("required_proofs must be a tuple")
-        if any(type(item) is not _proof_type for item in self.required_proofs):
+        if _any(_type(item) is not _proof_type for item in self.required_proofs):
             raise _error_type(
                 "required_proofs must contain only ProofRequirement values"
             )
-        if self.required_proofs != _ordered_impl(frozenset(self.required_proofs)):
+        if self.required_proofs != _ordered_impl(
+            _frozenset_type(self.required_proofs)
+        ):
             raise _error_type(
                 "required_proofs must be unique and use canonical lexical order"
             )
@@ -274,6 +289,10 @@ class StrategyProofEvaluation:
         _ordered_impl=_ordered,
         _proof_type: type[ProofRequirement] = ProofRequirement,
         _error_type: type[StrategyProofContractError] = StrategyProofContractError,
+        _type=type,
+        _tuple_type=tuple,
+        _frozenset_type=frozenset,
+        _any=any,
     ) -> None:
         canonical_class = _strategy_validator(self.strategy_class)
         canonical_claim = _claim_validator(self.claims_probability_edge)
@@ -286,13 +305,13 @@ class StrategyProofEvaluation:
             ("present_proofs", self.present_proofs),
             ("missing_proofs", self.missing_proofs),
         ):
-            if type(value) is not tuple:
+            if _type(value) is not _tuple_type:
                 raise _error_type(f"{name} must be a tuple")
-            if any(type(item) is not _proof_type for item in value):
+            if _any(_type(item) is not _proof_type for item in value):
                 raise _error_type(
                     f"{name} must contain only ProofRequirement values"
                 )
-            if value != _ordered_impl(frozenset(value)):
+            if value != _ordered_impl(_frozenset_type(value)):
                 raise _error_type(
                     f"{name} must be unique and use canonical lexical order"
                 )
@@ -302,8 +321,8 @@ class StrategyProofEvaluation:
                 "required_proofs do not match the canonical strategy-class contract"
             )
 
-        required_set = frozenset(self.required_proofs)
-        present_set = frozenset(self.present_proofs)
+        required_set = _frozenset_type(self.required_proofs)
+        present_set = _frozenset_type(self.present_proofs)
         expected_missing = required_set - present_set
         if self.missing_proofs != _ordered_impl(expected_missing):
             raise _error_type(
@@ -316,7 +335,7 @@ class StrategyProofEvaluation:
                 "required_labels_present does not match missing_proofs"
             )
 
-        if type(self.execution_authorized) is not bool:
+        if _type(self.execution_authorized) is not bool:
             raise _error_type("execution_authorized must be a bool")
         if self.execution_authorized:
             raise _error_type(
@@ -333,6 +352,7 @@ def _build_public_strategy_proof_api(
     _proofs_impl=_proofs,
     _contract_type: type[StrategyProofContract] = StrategyProofContract,
     _evaluation_type: type[StrategyProofEvaluation] = StrategyProofEvaluation,
+    _frozenset_type=frozenset,
 ):
     """Compose public taxonomy functions from canonical immutable roots."""
 
@@ -361,7 +381,7 @@ def _build_public_strategy_proof_api(
             claims_probability_edge=claims_probability_edge,
         )
         canonical_present = _proofs_impl(present_proofs)
-        required_set = frozenset(contract.required_proofs)
+        required_set = _frozenset_type(contract.required_proofs)
         missing = required_set - canonical_present
         satisfied = not missing
 

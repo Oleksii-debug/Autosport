@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 
-from .agent_loop import AgentLoopRuntime
+from .agent_loop import AgentLoopError, AgentLoopRuntime
 from .decision_ledger import (
     ECONOMIC_DECISION_KIND,
     DecisionLedgerIntegrityError,
@@ -392,7 +392,12 @@ def _require_agent_loop_resolution(
         raise ProductRunCapitalPathError(
             "settlement witness AgentLoop is not canonical"
         )
-    state = _LOOP_READ(loop)
+    try:
+        state = _LOOP_READ(loop)
+    except (AgentLoopError, OSError, ValueError) as exc:
+        raise ProductRunCapitalPathError(
+            "settlement witness AgentLoop resolution cannot be re-resolved"
+        ) from exc
     resolutions = state.get("resolutions") if type(state) is dict else None
     if type(resolutions) is not list:
         raise ProductRunCapitalPathError(
@@ -463,7 +468,12 @@ def _witness_effect(
             witness.action,
             witness.observation,
         )
-    except (DecisionLedgerIntegrityError, TypeError, ValueError) as exc:
+    except (
+        DecisionLedgerIntegrityError,
+        PaperSettlementLearningBridgeError,
+        TypeError,
+        ValueError,
+    ) as exc:
         raise ProductRunCapitalPathError(
             "settlement witness differs from committed economic decision"
         ) from exc

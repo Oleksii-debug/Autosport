@@ -157,6 +157,41 @@ class WindowsRecoveryTeardownFailureTests(unittest.TestCase):
             self.assertEqual(app._ticket_sessions, [None])
             error.assert_not_called()
 
+    def test_window_close_is_blocked_while_recovery_worker_owns_workspace(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            active_workspace = root / "active-workspace"
+            app = self._app(root, active_workspace)
+            session_close_calls: list[str] = []
+            destroy_calls: list[str] = []
+            bell_calls: list[str] = []
+
+            class _Session:
+                workspace = active_workspace
+
+                def close(self) -> None:
+                    session_close_calls.append("close")
+
+            app.session = _Session()
+            app.recovery_worker.busy = True
+            app.evidence_export_worker = SimpleNamespace(busy=False)
+            app.live_status = _Value()
+            app.destroy = lambda: destroy_calls.append("destroy")
+            app.bell = lambda: bell_calls.append("bell")
+
+            WindowsAutosportApp.close_app(app)
+
+            self.assertFalse(app._closing)
+            self.assertIsNotNone(app.session)
+            self.assertEqual(session_close_calls, [])
+            self.assertEqual(destroy_calls, [])
+            self.assertEqual(bell_calls, ["bell"])
+            self.assertIn("Відновлення робочої області ще виконується", app.status.value)
+            self.assertTrue(
+                any("Відновлення робочої області ще виконується" in line for line in app._logs),
+                app._logs,
+            )
+
     def test_window_close_failure_routes_to_windows_recovery_quarantine(self) -> None:
         with TemporaryDirectory() as temporary:
             root = Path(temporary)

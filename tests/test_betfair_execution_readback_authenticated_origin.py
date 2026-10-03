@@ -582,15 +582,6 @@ def test_execution_origin_predicate_rejects_http_client_ssl_module_rebind(
 
 
 @pytest.mark.parametrize(
-    ("name", "replacement"),
-    (
-        ("Request", object),
-        ("_READ_METHOD_ENDPOINT", {}),
-        ("BETTING_JSON_RPC_ENDPOINT", "https://example.invalid/json-rpc"),
-        ("_LIST_CURRENT_ORDERS", "SportsAPING/v1.0/listClearedOrders"),
-    ),
-)
-@pytest.mark.parametrize(
     "name",
     (
         "_execution_request_scope",
@@ -617,6 +608,15 @@ def test_execution_readback_rejects_module_helper_rebind(
         _read(client)
 
 
+@pytest.mark.parametrize(
+    ("name", "replacement"),
+    (
+        ("Request", object),
+        ("_READ_METHOD_ENDPOINT", {}),
+        ("BETTING_JSON_RPC_ENDPOINT", "https://example.invalid/json-rpc"),
+        ("_LIST_CURRENT_ORDERS", "SportsAPING/v1.0/listClearedOrders"),
+    ),
+)
 def test_execution_origin_predicate_rejects_request_or_endpoint_rebind(
     monkeypatch: pytest.MonkeyPatch,
     name: str,

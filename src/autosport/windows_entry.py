@@ -163,6 +163,14 @@ def _run_interactive_gui() -> int:
         _show_workspace_access_error(workspace, exc)
         return 2
 
+    from autosport.webview2_release_environment import (
+        active_webview2_environment_overrides,
+    )
+
+    if active_webview2_environment_overrides():
+        _show_startup_error(_WEBVIEW2_STARTUP_ERROR)
+        return 3
+
     try:
         from autosport.webview2_runtime_deployment import ensure_webview2_runtime
 

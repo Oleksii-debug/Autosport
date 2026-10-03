@@ -88,6 +88,9 @@ _CANONICAL_MONOTONIC_AUTHORITY_INIT: Final = MonotonicWorkspaceAuthority.__init_
 _CANONICAL_OBJECT_NEW: Final = object.__new__
 _CANONICAL_HASHLIB_MODULE: Final = hashlib
 _CANONICAL_HASHLIB_SHA256: Final = hashlib.sha256
+_CANONICAL_OS_MODULE: Final = os
+_CANONICAL_OS_PATH_NORMCASE: Final = os.path.normcase
+_CANONICAL_OS_PATH_NORMPATH: Final = os.path.normpath
 _CANONICAL_HASHLIB_SHA256_CODE: Final = getattr(hashlib.sha256, "__code__", None)
 _CANONICAL_JSON_MODULE: Final = json
 _CANONICAL_JSON_DUMPS: Final = json.dumps
@@ -729,6 +732,10 @@ class DeploymentRuntimeAuthorityStore:
         "_binding_lock",
         "_binding_authority",
         "_binding_semantic_binding_sha256",
+        "_binding_workspace_identity_binding",
+        "_binding_authority_root_selection_binding",
+        "_binding_authority_root_selection_context",
+        "_binding_root_selection_store_root",
     )
 
     _WRITE_ONCE_AUTHORITY_BINDINGS: Final = frozenset(
@@ -747,6 +754,10 @@ class DeploymentRuntimeAuthorityStore:
             "_binding_lock",
             "_binding_authority",
             "_binding_semantic_binding_sha256",
+            "_binding_workspace_identity_binding",
+            "_binding_authority_root_selection_binding",
+            "_binding_authority_root_selection_context",
+            "_binding_root_selection_store_root",
         }
     )
 
@@ -910,6 +921,26 @@ class DeploymentRuntimeAuthorityStore:
             domain=_AUTHORITY_DOMAIN,
             key=self.path.name,
             authority_root=authority_root,
+        )
+        object.__setattr__(
+            self,
+            "_binding_workspace_identity_binding",
+            self._authority.workspace_binding,
+        )
+        object.__setattr__(
+            self,
+            "_binding_authority_root_selection_binding",
+            self._authority.authority_root_selection,
+        )
+        object.__setattr__(
+            self,
+            "_binding_authority_root_selection_context",
+            self._authority.authority_root_selection.context,
+        )
+        object.__setattr__(
+            self,
+            "_binding_root_selection_store_root",
+            self._authority.authority_root_selection.context.store_root,
         )
         self._semantic_binding_sha256 = _digest(
             {
@@ -1190,6 +1221,22 @@ class DeploymentRuntimeAuthorityStore:
             self,
             "_binding_semantic_binding_sha256",
         )
+        captured_workspace_binding = object.__getattribute__(
+            self,
+            "_binding_workspace_identity_binding",
+        )
+        captured_root_selection = object.__getattribute__(
+            self,
+            "_binding_authority_root_selection_binding",
+        )
+        captured_root_context = object.__getattribute__(
+            self,
+            "_binding_authority_root_selection_context",
+        )
+        captured_root_store = object.__getattribute__(
+            self,
+            "_binding_root_selection_store_root",
+        )
         if not isinstance(path, Path) or not isinstance(workspace, Path):
             raise DeploymentRuntimeAuthorityError(
                 "runtime authority binding integrity mismatch"
@@ -1201,7 +1248,11 @@ class DeploymentRuntimeAuthorityStore:
         workspace_binding = authority.workspace_binding
         root_selection = authority.authority_root_selection
         if (
-            type(workspace_binding) is not _CANONICAL_WORKSPACE_IDENTITY_BINDING_TYPE
+            workspace_binding is not captured_workspace_binding
+            or root_selection is not captured_root_selection
+            or root_selection.context is not captured_root_context
+            or root_selection.context.store_root != captured_root_store
+            or type(workspace_binding) is not _CANONICAL_WORKSPACE_IDENTITY_BINDING_TYPE
             or type(root_selection)
             is not _CANONICAL_AUTHORITY_ROOT_SELECTION_BINDING_TYPE
         ):
@@ -1231,6 +1282,41 @@ class DeploymentRuntimeAuthorityStore:
                     raise DeploymentRuntimeAuthorityError(
                         "runtime authority nested binding dispatch was replaced"
                     )
+
+        if (
+            os is not _CANONICAL_OS_MODULE
+            or os.path.normcase is not _CANONICAL_OS_PATH_NORMCASE
+            or os.path.normpath is not _CANONICAL_OS_PATH_NORMPATH
+        ):
+            raise DeploymentRuntimeAuthorityError(
+                "runtime authority path-normalization dispatch was replaced"
+            )
+        expected_workspace_locator = _CANONICAL_OS_PATH_NORMCASE(
+            _CANONICAL_OS_PATH_NORMPATH(str(workspace))
+        )
+        expected_workspace_locator_sha256 = _CANONICAL_HASHLIB_SHA256(
+            expected_workspace_locator.encode("utf-8")
+        ).hexdigest()
+        expected_workspace_path_binding = (
+            authority.authority_root
+            / "workspace-bindings"
+            / expected_workspace_locator_sha256[:2]
+            / f"{expected_workspace_locator_sha256}.json"
+        )
+        expected_root_locator = _CANONICAL_OS_PATH_NORMCASE(
+            _CANONICAL_OS_PATH_NORMPATH(str(authority.authority_root))
+        )
+        expected_root_resolved = _CANONICAL_OS_PATH_NORMCASE(
+            _CANONICAL_OS_PATH_NORMPATH(
+                str(authority.authority_root.resolve(strict=False))
+            )
+        )
+        expected_root_locator_sha256 = _CANONICAL_HASHLIB_SHA256(
+            expected_root_locator.encode("utf-8")
+        ).hexdigest()
+        expected_root_resolved_sha256 = _CANONICAL_HASHLIB_SHA256(
+            expected_root_resolved.encode("utf-8")
+        ).hexdigest()
 
         namespace_material = "\0".join(
             (
@@ -1272,12 +1358,36 @@ class DeploymentRuntimeAuthorityStore:
             or workspace_binding.workspace_instance_id
             != authority.workspace_instance_id
             or workspace_binding.authority_root != authority.authority_root
+            or workspace_binding.workspace_locator != expected_workspace_locator
+            or workspace_binding.workspace_locator_sha256
+            != expected_workspace_locator_sha256
+            or workspace_binding.path_binding_path
+            != expected_workspace_path_binding
             or authority.workspace_binding_path
             != workspace_binding.workspace_marker_path
             or root_selection.workspace != workspace
             or root_selection.workspace_instance_id
             != authority.workspace_instance_id
             or root_selection.authority_root != authority.authority_root
+            or root_selection.context.workspace_locator
+            != expected_workspace_locator
+            or root_selection.context.workspace_locator_sha256
+            != expected_workspace_locator_sha256
+            or root_selection.context.authority_root_locator
+            != expected_root_locator
+            or root_selection.context.authority_root_locator_sha256
+            != expected_root_locator_sha256
+            or root_selection.context.authority_root_resolved
+            != expected_root_resolved
+            or root_selection.context.authority_root_resolved_sha256
+            != expected_root_resolved_sha256
+            or root_selection.context.binding_path
+            != (
+                root_selection.context.store_root
+                / "workspace-path-bindings"
+                / expected_workspace_locator_sha256[:2]
+                / f"{expected_workspace_locator_sha256}.json"
+            )
             or authority.authority_root_binding_path
             != root_selection.context.binding_path
             or authority.namespace_sha256 != expected_namespace_sha256

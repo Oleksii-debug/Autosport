@@ -300,6 +300,31 @@ class PaperExposureScopeProvenanceGuardTests(unittest.TestCase):
             self.assertEqual(origin_ledger.events(), ())
             self.assertEqual(replacement.events(), ())
 
+    def test_issued_scope_capability_cannot_be_retargeted_to_new_exact_ledger(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            origin_ledger, runtime = self._runtime(root)
+            prepared = _caller_prepared(runtime)
+            runtime._mint_prepared(prepared)
+            _seed_scope_authority_for_lower_layer(runtime, prepared)
+
+            replacement = PaperExecutionLedger(root / "post-issuance-swap.jsonl")
+            runtime.ledger = replacement
+            with self.assertRaisesRegex(
+                PaperExecutionIntegrityError,
+                "ledger origin changed",
+            ):
+                runtime._publish_exposure_scope(
+                    prepared=prepared,
+                    run_id=runtime.expected_run_id(
+                        prepared,
+                        prepared.execution_plan.decision_id,
+                    ),
+                )
+
+            self.assertEqual(origin_ledger.events(), ())
+            self.assertEqual(replacement.events(), ())
+
     def test_generic_append_cannot_mint_reserved_exposure_scope(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             ledger = PaperExecutionLedger(Path(tmp) / "paper-execution.jsonl")

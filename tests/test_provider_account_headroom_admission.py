@@ -243,6 +243,61 @@ def test_same_snapshot_two_writer_race_only_one_reserves(monkeypatch, tmp_path) 
     assert recomputed.decision is HeadroomDecision.INSUFFICIENT_UPPER_BOUND
 
 
+@pytest.mark.parametrize(
+    "surface",
+    ("resolver", "issued_current"),
+)
+def test_capital_risk_authority_rebinding_cannot_erase_existing_liability(
+    monkeypatch,
+    tmp_path,
+    surface,
+) -> None:
+    acquired, _ = _acquire_balance(monkeypatch, tmp_path, "100")
+    first_action = _action("a1", "80")
+    second_action = _action("a2", "30")
+    ledger = _ledger_with_plans(
+        tmp_path,
+        _plan("p1", first_action),
+        _plan("p2", second_action),
+    )
+    first = assess_provider_account_headroom(
+        ledger, acquired, plan_id="p1", action_id="a1"
+    )
+    reserve_observed_provider_headroom(
+        ledger, acquired, first, attempt_id="attempt-1"
+    )
+    hostile_calls = []
+
+    if surface == "resolver":
+        def hostile_resolver(*args, **kwargs):
+            hostile_calls.append((args, kwargs))
+            raise AssertionError("hostile capital resolver executed")
+        monkeypatch.setattr(
+            headroom_module,
+            "resolve_execution_capital_at_risk",
+            hostile_resolver,
+        )
+    else:
+        def hostile_assert(*args, **kwargs):
+            hostile_calls.append((args, kwargs))
+            raise AssertionError("hostile capital currentness check executed")
+        monkeypatch.setattr(
+            headroom_module.ExecutionCapitalAtRiskEvidence,
+            "assert_issued_current",
+            hostile_assert,
+        )
+
+    with pytest.raises(
+        ProviderAccountHeadroomError,
+        match="capital-at-risk headroom authority changed",
+    ):
+        assess_provider_account_headroom(
+            ledger, acquired, plan_id="p2", action_id="a2"
+        )
+
+    assert hostile_calls == []
+
+
 def test_submitted_liability_with_unknown_balance_coverage_forces_wait(
     monkeypatch,
     tmp_path,

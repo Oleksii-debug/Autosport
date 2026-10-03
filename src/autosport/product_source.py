@@ -673,8 +673,11 @@ class ParlayApiProductSource:
             ) from exc
 
     def bind_collector_store(self, store: CollectorDeltaStore) -> None:
-        if not isinstance(store, CollectorDeltaStore):
-            raise TypeError("store must be CollectorDeltaStore")
+        # Historical-event migration/lookup is durable evidence authority.  A subclass
+        # could override migration or digest-resolution methods while still passing an
+        # isinstance check, so canonical product composition requires the exact store.
+        if type(store) is not CollectorDeltaStore:
+            raise TypeError("store must be exact canonical CollectorDeltaStore")
         expected = (self.workspace / "collector_deltas.json").resolve(strict=False)
         observed = store.path.resolve(strict=False)
         if observed != expected:
@@ -682,7 +685,7 @@ class ParlayApiProductSource:
                 "product source collector store must be the canonical workspace store"
             )
         current = self._collector_store
-        if current is not None and current.path.resolve(strict=False) != observed:
+        if current is not None and current is not store:
             raise ProductSourceStateError(
                 "product source collector store authority cannot be replaced"
             )

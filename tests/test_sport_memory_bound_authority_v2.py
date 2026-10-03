@@ -140,14 +140,19 @@ def _materialize(runtime: BoundSportMemoryRuntime):
     )
 
 
-def test_bound_materialization_refreshes_concrete_canonical_authority(tmp_path):
+def test_bound_materialization_rejects_opponent_authority_rebinding(tmp_path):
     _, opponent, _, _, runtime = _bound_runtime(tmp_path)
     artifact = _materialize(runtime)
 
-    # A caller may mutate the public low-level attribute, but the product-owned
-    # bound runtime must replace it with a freshly verified concrete store before
-    # any positive materialization can run.
-    runtime.opponent_authority = object()
+    # The bound runtime now seals authority-bearing bindings after construction.
+    # A caller cannot retarget the canonical opponent authority; the legitimate
+    # product refresh path remains internal and subsequent materialization works.
+    with pytest.raises(
+        SportMemoryCheckpointError,
+        match="binding is immutable: opponent_authority",
+    ):
+        runtime.opponent_authority = object()
+
     duplicate = _materialize(runtime)
 
     assert duplicate == artifact

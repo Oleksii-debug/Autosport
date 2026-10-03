@@ -1351,6 +1351,13 @@ def _seal_campaign_forward_universe_cycle_dispatch() -> None:
     expected_authority_issuer = _CANONICAL_AUTHORITY_ISSUER
     expected_authority_issuer_function = _CANONICAL_AUTHORITY_ISSUER_FUNCTION
     expected_authority_issuer_code = _CANONICAL_AUTHORITY_ISSUER_CODE
+    expected_verification_class = _CANONICAL_VERIFICATION_CLASS
+    expected_verification_field_descriptors = _CANONICAL_VERIFICATION_FIELD_DESCRIPTORS
+    expected_verification_issuer = _CANONICAL_VERIFICATION_ISSUER
+    expected_verification_issuer_function = _CANONICAL_VERIFICATION_ISSUER_FUNCTION
+    expected_verification_issuer_code = _CANONICAL_VERIFICATION_ISSUER_CODE
+    expected_verification_domain = _COMPOSED_VERIFICATION_DOMAIN
+    expected_verification_scope = _COMPOSED_VERIFICATION_SCOPE
     expected_cycle_receipt_field_descriptors = _CANONICAL_CYCLE_RECEIPT_FIELD_DESCRIPTORS
     expected_inception_receipt_field_descriptors = (
         _CANONICAL_INCEPTION_RECEIPT_FIELD_DESCRIPTORS
@@ -1380,6 +1387,20 @@ def _seal_campaign_forward_universe_cycle_dispatch() -> None:
             or module_globals.get("_CANONICAL_AUTHORITY_ISSUER") is not expected_authority_issuer
             or module_globals.get("_CANONICAL_AUTHORITY_ISSUER_FUNCTION") is not expected_authority_issuer_function
             or module_globals.get("_CANONICAL_AUTHORITY_ISSUER_CODE") is not expected_authority_issuer_code
+            or module_globals.get("_CANONICAL_VERIFICATION_CLASS")
+            is not expected_verification_class
+            or module_globals.get("_CANONICAL_VERIFICATION_FIELD_DESCRIPTORS")
+            is not expected_verification_field_descriptors
+            or module_globals.get("_CANONICAL_VERIFICATION_ISSUER")
+            is not expected_verification_issuer
+            or module_globals.get("_CANONICAL_VERIFICATION_ISSUER_FUNCTION")
+            is not expected_verification_issuer_function
+            or module_globals.get("_CANONICAL_VERIFICATION_ISSUER_CODE")
+            is not expected_verification_issuer_code
+            or module_globals.get("_COMPOSED_VERIFICATION_DOMAIN")
+            != expected_verification_domain
+            or module_globals.get("_COMPOSED_VERIFICATION_SCOPE")
+            != expected_verification_scope
             or module_globals.get("_CANONICAL_CYCLE_RECEIPT_FIELD_DESCRIPTORS") is not expected_cycle_receipt_field_descriptors
             or module_globals.get("_CANONICAL_INCEPTION_RECEIPT_FIELD_DESCRIPTORS")
             is not expected_inception_receipt_field_descriptors

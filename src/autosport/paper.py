@@ -22,8 +22,6 @@ from weakref import WeakKeyDictionary
 
 from .domain import PaperTicket, TicketLeg, TicketStatus, utc_now_iso
 from .forecasting import parse_iso_timestamp
-from .risk_day_window import ProductDayRiskWindow, ProductDayRiskWindowStore
-from .workspace_lock import WorkspaceEconomicLock
 
 
 _PAPER_DECIMAL_PRECISION = 28
@@ -35,15 +33,6 @@ _SCHEMA_MISSING = object()
 
 _LifecycleEntry = tuple[str, str, tuple[str, ...], tuple[str, ...]]
 _ProductDayAdmissionWitness = tuple[str, str, str, str, str, int]
-
-_PRODUCT_DAY_REQUIRE_CURRENT_UNDER_LOCK = (
-    ProductDayRiskWindowStore.__dict__["require_current_under_lock"]
-)
-_PRODUCT_DAY_REQUIRE_CURRENT_UNDER_LOCK_CODE = getattr(
-    _PRODUCT_DAY_REQUIRE_CURRENT_UNDER_LOCK,
-    "__code__",
-    None,
-)
 
 
 def _ticket_opening_commitment(ticket: PaperTicket) -> tuple[object, ...]:
@@ -476,6 +465,13 @@ class PaperBook:
         scalar fields therefore cannot manufacture future turnover headroom.
         """
 
+        # PaperBook is imported during the package's early persistence-preload phase,
+        # before monotonic/day authority guards finish composing. Resolve these
+        # finalized product authorities only when this internal transition actually
+        # executes; a module-level import here would freeze the pre-finalization graph.
+        from .risk_day_window import ProductDayRiskWindow, ProductDayRiskWindowStore
+        from .workspace_lock import WorkspaceEconomicLock
+
         _require_ticket_opening_authority(self)
         _require_paperbook_causal_history_authority(self)
         self._validate_loaded_state(self)
@@ -490,15 +486,13 @@ class PaperBook:
             raise ValueError("PaperBook product-day window evidence is not canonical")
         if type(workspace_lock) is not WorkspaceEconomicLock:
             raise ValueError("PaperBook product-day workspace lock is not canonical")
-        if (
-            ProductDayRiskWindowStore.__dict__.get("require_current_under_lock")
-            is not _PRODUCT_DAY_REQUIRE_CURRENT_UNDER_LOCK
-            or getattr(_PRODUCT_DAY_REQUIRE_CURRENT_UNDER_LOCK, "__code__", None)
-            is not _PRODUCT_DAY_REQUIRE_CURRENT_UNDER_LOCK_CODE
-        ):
-            raise ValueError("PaperBook product-day authority executable changed")
 
-        current_window = _PRODUCT_DAY_REQUIRE_CURRENT_UNDER_LOCK(
+        require_current_under_lock = ProductDayRiskWindowStore.__dict__.get(
+            "require_current_under_lock"
+        )
+        if not callable(require_current_under_lock):
+            raise ValueError("PaperBook product-day authority executable changed")
+        current_window = require_current_under_lock(
             window_store,
             window_evidence,
             workspace_lock=workspace_lock,

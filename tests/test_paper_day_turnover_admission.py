@@ -895,6 +895,15 @@ def test_goal_store_constructor_rebinding_cannot_mint_day_headroom(tmp_path):
     assert persisted.tickets.keys() == book.tickets.keys()
 
 
+def test_paperbook_preload_does_not_bind_product_day_authority():
+    # PaperBook participates in the package's early persistence preload. Product-day
+    # authority remains a runtime dependency so its monotonic/day graph is consumed
+    # only after package authority composition has completed.
+    assert "ProductDayRiskWindowStore" not in vars(paper_module)
+    assert "ProductDayRiskWindow" not in vars(paper_module)
+    assert "WorkspaceEconomicLock" not in vars(paper_module)
+
+
 def test_direct_chronology_writer_cannot_forge_previous_product_day(tmp_path):
     now = datetime.now(timezone.utc).replace(microsecond=0)
     old = now - timedelta(days=2)

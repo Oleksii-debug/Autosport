@@ -379,6 +379,68 @@ def test_missing_durable_goal_never_mints_day_turnover_headroom(tmp_path):
     assert len(result.book.tickets) == 1
 
 
+def test_baseline_allowed_misdated_ticket_cannot_create_future_day_headroom(
+    tmp_path,
+):
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    old = now - timedelta(days=2)
+    goal = _goal()
+    EconomicGoalStore(tmp_path).initialize_owner(goal)
+    book = PaperBook("100")
+    book.save(tmp_path / "paper_book.json")
+    policy = _policy(goal)
+
+    first_leg = _leg("misdated-first")
+    first_context = _context(first_leg, _timestamp(old))
+    baseline = policy.evaluate(book, Decimal("4"), context=first_context)
+    assert baseline.allowed is True
+
+    first = admit_paper_ticket(
+        workspace=tmp_path,
+        book=book,
+        risk_policy=policy,
+        stake=Decimal("4"),
+        legs=(first_leg,),
+        reason="misdated ticket must not create future daily headroom",
+        placed_at=_timestamp(old),
+        context=first_context,
+        provider_source_ids=("provider-1",),
+        bankroll_id="paper-bankroll",
+        currency="USD",
+    )
+
+    assert first.admitted is False
+    assert (
+        first.risk.reason
+        == "economic goal current product day membership unavailable"
+    )
+    persisted = PaperBook.load(tmp_path / "paper_book.json")
+    assert persisted.tickets == {}
+
+    second_leg = _leg("current-second")
+    second_context = _context(second_leg, _timestamp(now))
+    second = admit_paper_ticket(
+        workspace=tmp_path,
+        book=persisted,
+        risk_policy=policy,
+        stake=Decimal("4"),
+        legs=(second_leg,),
+        reason="current-day ticket consumes canonical daily headroom",
+        placed_at=_timestamp(now),
+        context=second_context,
+        provider_source_ids=("provider-1",),
+        bankroll_id="paper-bankroll",
+        currency="USD",
+    )
+
+    assert second.admitted is True
+    final = PaperBook.load(tmp_path / "paper_book.json")
+    assert len(final.tickets) == 1
+    ticket = next(iter(final.tickets.values()))
+    assert ticket.stake == Decimal("4")
+    assert ticket.placed_at == _timestamp(now)
+
+
 def test_candidate_outside_current_product_day_cannot_spend_current_headroom(tmp_path):
     now = datetime.now(timezone.utc).replace(microsecond=0)
     old = now - timedelta(days=2)

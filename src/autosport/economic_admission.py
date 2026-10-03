@@ -721,11 +721,21 @@ def admit_paper_ticket(
 
         pre_evaluation_state = risk_policy._book_state(working_book)
         decision = risk_policy.evaluate(working_book, amount, context=context)
-        if (
+
+        # Every positive economic-goal admission must bind the ticket timestamp to
+        # the exact current product-issued UTC-day authority.  Limiting this check
+        # to the whole-history turnover rejection path lets a caller persist an
+        # otherwise-allowed ticket under a stale day and manufacture future daily
+        # headroom.  Reuse the same under-lock turnover/window authority for both
+        # baseline-positive admission and the bounded-day turnover continuation.
+        goal = risk_policy.economic_goal
+        turnover_override_candidate = (
             not decision.allowed
             and decision.reason == "economic goal turnover limit exceeded"
             and context is not None
-        ):
+        )
+        turnover_room: Decimal | None = None
+        if goal is not None and (decision.allowed or turnover_override_candidate):
             turnover_room = _revalidated_product_day_turnover_room(
                 snapshot=day_turnover_snapshot,
                 root=root,
@@ -734,6 +744,19 @@ def admit_paper_ticket(
                 placed_at=placed_at,
                 workspace_lock=workspace_lock,
             )
+
+        if decision.allowed and goal is not None:
+            if turnover_room is None:
+                decision = RiskDecision(
+                    False,
+                    "economic goal current product day membership unavailable",
+                )
+            elif amount > turnover_room:
+                decision = RiskDecision(
+                    False,
+                    "economic goal turnover limit exceeded",
+                )
+        elif turnover_override_candidate:
             if turnover_room is not None and amount <= turnover_room:
                 decision = _resume_after_product_day_turnover(
                     risk_policy=risk_policy,

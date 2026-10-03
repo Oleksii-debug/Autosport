@@ -445,7 +445,7 @@ def test_durable_resolver_rejects_cross_workspace_provider_evidence_store(
     monkeypatch.setattr(
         provider_module,
         "urlopen",
-        lambda _request, _timeout: _FakeSseResponse(_empty_frame()),
+        lambda _request, timeout: _FakeSseResponse(_empty_frame()),
     )
     monkeypatch.setattr(provider_module, "_default_clock", lambda: CAPTURED_AT)
     _snapshot, cycle_receipt = capture_campaign_complete_game_board(
@@ -496,6 +496,144 @@ def test_durable_resolver_rejects_cross_workspace_provider_evidence_store(
             protocol=protocol,
             event_lifecycle=None,
         )
+
+
+def test_first_clock_cannot_redirect_provider_evidence_authority_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    locator, store, spec, provider_store = _setup(tmp_path)
+    provider_calls: list[str] = []
+    first = True
+
+    def hostile_clock():
+        nonlocal first
+        if first:
+            first = False
+            provider_store.authority_root = tmp_path / "redirected-machine-authority"
+        return "2100-01-01T06:00:00+00:00"
+
+    def hostile_urlopen(*_args, **_kwargs):
+        provider_calls.append("provider")
+        raise AssertionError("provider I/O executed after trust-root redirect")
+
+    monkeypatch.setattr(provider_module, "urlopen", hostile_urlopen)
+    with pytest.raises(
+        CampaignProviderCycleCaptureIntegrityError,
+        match="authority root does not match campaign precommit authority",
+    ):
+        capture_campaign_complete_game_board(
+            precommit_locator=locator,
+            store=store,
+            source_spec=spec,
+            evidence_store=provider_store,
+            request=_request(),
+            api_key="secret-value",
+            timeout_seconds=3.0,
+            clock=hostile_clock,
+        )
+    assert provider_calls == []
+
+
+def test_provider_callback_cannot_redirect_evidence_root_before_save(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    locator, store, spec, provider_store = _setup(tmp_path)
+    original_root = provider_store.root
+
+    def fake_urlopen(request, timeout):
+        del request, timeout
+        provider_store.root = tmp_path / "redirected-after-provider-io"
+        return _FakeSseResponse(_frame())
+
+    monkeypatch.setattr(provider_module, "urlopen", fake_urlopen)
+    monkeypatch.setattr(provider_module, "_default_clock", lambda: CAPTURED_AT)
+    with pytest.raises(
+        CampaignProviderCycleCaptureIntegrityError,
+        match="root does not match canonical campaign workspace",
+    ):
+        capture_campaign_complete_game_board(
+            precommit_locator=locator,
+            store=store,
+            source_spec=spec,
+            evidence_store=provider_store,
+            request=_request(),
+            api_key="secret-value",
+            timeout_seconds=3.0,
+            clock=_clock(),
+        )
+    assert not original_root.exists()
+
+
+def test_campaign_capture_rejects_in_place_precommit_routing_witness_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    locator, store, spec, provider_store = _setup(tmp_path)
+    provider_calls: list[str] = []
+
+    def hostile_urlopen(*_args, **_kwargs):
+        provider_calls.append("provider")
+        raise AssertionError("provider I/O executed with mutated routing witnesses")
+
+    monkeypatch.setattr(provider_module, "urlopen", hostile_urlopen)
+    original_workspace = capture_module._PRECOMMIT_ROUTING_SEAMS["workspace"]
+    capture_module._PRECOMMIT_ROUTING_SEAMS["workspace"] = (
+        capture_module._PRECOMMIT_ROUTING_SEAMS["authority_root"]
+    )
+    try:
+        with pytest.raises(
+            CampaignProviderCycleCaptureIntegrityError,
+            match="campaign provider evidence routing authority changed",
+        ):
+            capture_campaign_complete_game_board(
+                precommit_locator=locator,
+                store=store,
+                source_spec=spec,
+                evidence_store=provider_store,
+                request=_request(),
+                api_key="secret-value",
+                timeout_seconds=3.0,
+                clock=_clock(),
+            )
+    finally:
+        capture_module._PRECOMMIT_ROUTING_SEAMS["workspace"] = original_workspace
+    assert provider_calls == []
+
+
+def test_campaign_capture_rejects_evidence_directory_rebind_before_provider_io(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    locator, store, spec, provider_store = _setup(tmp_path)
+    provider_calls: list[str] = []
+
+    def hostile_urlopen(*_args, **_kwargs):
+        provider_calls.append("provider")
+        raise AssertionError("provider I/O executed with rebound evidence directory")
+
+    monkeypatch.setattr(provider_module, "urlopen", hostile_urlopen)
+    monkeypatch.setattr(
+        CompleteGameBoardEvidenceStore,
+        "DIRECTORY",
+        "".join(("provider-", "complete-game-board")),
+    )
+    with pytest.raises(
+        CampaignProviderCycleCaptureIntegrityError,
+        match="campaign provider evidence routing authority changed",
+    ):
+        capture_campaign_complete_game_board(
+            precommit_locator=locator,
+            store=store,
+            source_spec=spec,
+            evidence_store=provider_store,
+            request=_request(),
+            api_key="secret-value",
+            timeout_seconds=3.0,
+            clock=_clock(),
+        )
+    assert provider_calls == []
 
 def test_campaign_capture_uses_captured_path_equality_after_runtime_rebind(
     tmp_path: Path,

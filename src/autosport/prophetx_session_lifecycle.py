@@ -1,0 +1,886 @@
+"""Restart-safe, secret-free ProphetX Trading API session-pool admission.
+
+This module owns only product-side admission and durable non-secret evidence for
+creating a ProphetX market-maker Trading API session. It does not implement HTTP
+login, token storage, participant Direct-Link authentication, refresh transport,
+order execution, or real-money authorization.
+
+The provider contract behind this boundary is conservative: a login can allocate
+an additional per-access-key session slot, so restart/crash ambiguity must never
+be treated as proof that a slot is free. Until the exact market-maker refresh
+contract is qualified, near-expiry sessions fail closed rather than using another
+login or the participant extend-session flow as a renewal substitute.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from enum import Enum
+from hashlib import sha256
+import json
+import os
+from pathlib import Path
+from secrets import token_hex
+import stat
+from threading import RLock
+
+from .workspace_lock import (
+    WorkspaceEconomicLock,
+    WorkspaceEconomicLockBusyError,
+    WorkspaceEconomicLockError,
+)
+
+
+PROVIDER_ID = "prophetx"
+STATE_SCHEMA_VERSION = 1
+ACCESS_TOKEN_LIFETIME = timedelta(minutes=20)
+RENEWAL_LEAD_TIME = timedelta(minutes=2)
+_BASE_RETRY_SECONDS = 5
+_MAX_RETRY_SECONDS = 300
+
+
+class ProphetXSessionLifecycleError(RuntimeError):
+    """Malformed scope/state or unsafe session-lifecycle transition."""
+
+
+class ProphetXSessionState(str, Enum):
+    NO_SESSION = "no_session"
+    LOGIN_IN_FLIGHT = "login_in_flight"
+    ACTIVE = "active"
+    RENEWAL_DUE = "renewal_due"
+    EXPIRED = "expired"
+    AUTH_RETRYABLE_FAILURE = "auth_retryable_failure"
+    PROVIDER_UNAVAILABLE = "provider_unavailable"
+    SESSION_POOL_EXHAUSTED = "session_pool_exhausted"
+    CREDENTIAL_REJECTED = "credential_rejected"
+    WAIT_FOR_PROVIDER_SESSION_EXPIRY = "wait_for_provider_session_expiry"
+
+
+class ProphetXLoginAdmissionAction(str, Enum):
+    CREATE_LOGIN = "create_login"
+    REUSE_ACTIVE = "reuse_active"
+    WAIT_FOR_EXISTING_LOGIN = "wait_for_existing_login"
+    WAIT_FOR_PROVIDER_SESSION_EXPIRY = "wait_for_provider_session_expiry"
+    RETRY_LATER = "retry_later"
+    RENEWAL_CONTRACT_UNQUALIFIED = "renewal_contract_unqualified"
+    CREDENTIAL_REJECTED = "credential_rejected"
+    SHARED_ACCESS_KEY_CONFLICT = "shared_access_key_conflict"
+
+
+class ProphetXLoginFailureClass(str, Enum):
+    SESSION_POOL_EXHAUSTED = "session_pool_exhausted"
+    CREDENTIAL_REJECTED = "credential_rejected"
+    RETRYABLE_PRE_SESSION_FAILURE = "retryable_pre_session_failure"
+    PROVIDER_UNAVAILABLE_PRE_SESSION = "provider_unavailable_pre_session"
+    AMBIGUOUS_PROVIDER_RESULT = "ambiguous_provider_result"
+
+
+def _required_text(value: object, field: str) -> str:
+    if type(value) is not str or not value or value != value.strip():
+        raise ProphetXSessionLifecycleError(
+            f"{field} must be a non-empty trimmed string"
+        )
+    return value
+
+
+def _sha256_hex(value: object, field: str) -> str:
+    text = _required_text(value, field)
+    if len(text) != 64 or any(c not in "0123456789abcdef" for c in text):
+        raise ProphetXSessionLifecycleError(
+            f"{field} must be a lowercase 64-character SHA-256 digest"
+        )
+    return text
+
+
+def _aware_utc(value: object, field: str) -> datetime:
+    if type(value) is not datetime:
+        raise ProphetXSessionLifecycleError(f"{field} must be an exact datetime")
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise ProphetXSessionLifecycleError(f"{field} must be timezone-aware")
+    return value.astimezone(timezone.utc)
+
+
+def _iso(value: datetime | None) -> str | None:
+    if value is None:
+        return None
+    return _aware_utc(value, "timestamp").isoformat().replace("+00:00", "Z")
+
+
+def _parse_iso(value: object, field: str, *, optional: bool = False) -> datetime | None:
+    if value is None and optional:
+        return None
+    text = _required_text(value, field)
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ProphetXSessionLifecycleError(f"{field} must be ISO-8601") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ProphetXSessionLifecycleError(f"{field} must be timezone-aware")
+    return parsed.astimezone(timezone.utc)
+
+
+def _nonnegative_int(value: object, field: str) -> int:
+    if type(value) is not int or value < 0:
+        raise ProphetXSessionLifecycleError(
+            f"{field} must be a non-negative exact int"
+        )
+    return value
+
+
+@dataclass(frozen=True, slots=True)
+class ProphetXSessionScope:
+    """Secret-free identity for one provider access-key session pool."""
+
+    environment: str
+    access_key_identity_sha256: str
+    credential_revision: str
+    integration_role: str
+
+    def __post_init__(self) -> None:
+        _required_text(self.environment, "environment")
+        _sha256_hex(
+            self.access_key_identity_sha256,
+            "access_key_identity_sha256",
+        )
+        _required_text(self.credential_revision, "credential_revision")
+        _required_text(self.integration_role, "integration_role")
+
+    @property
+    def pool_id(self) -> str:
+        # Credential rotation and integration-role changes deliberately do not
+        # change the pool identity: old sessions on the same provider access key
+        # may still consume provider capacity.
+        payload = json.dumps(
+            {
+                "provider": PROVIDER_ID,
+                "environment": self.environment,
+                "access_key_identity_sha256": self.access_key_identity_sha256,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("ascii")
+        return sha256(payload).hexdigest()
+
+
+@dataclass(frozen=True, slots=True)
+class ProphetXSessionSnapshot:
+    state: ProphetXSessionState
+    generation: int
+    credential_revision: str
+    integration_role: str
+    last_transition_at: datetime
+    attempt_id: str | None = None
+    attempt_started_at: datetime | None = None
+    session_lineage_id: str | None = None
+    access_expires_at: datetime | None = None
+    slot_hold_until: datetime | None = None
+    retry_not_before: datetime | None = None
+    transient_failures: int = 0
+    last_failure_class: ProphetXLoginFailureClass | None = None
+
+    def __post_init__(self) -> None:
+        if type(self.state) is not ProphetXSessionState:
+            raise ProphetXSessionLifecycleError(
+                "state must be an exact ProphetXSessionState"
+            )
+        _nonnegative_int(self.generation, "generation")
+        _required_text(self.credential_revision, "credential_revision")
+        _required_text(self.integration_role, "integration_role")
+        _aware_utc(self.last_transition_at, "last_transition_at")
+        _nonnegative_int(self.transient_failures, "transient_failures")
+        for name in (
+            "attempt_started_at",
+            "access_expires_at",
+            "slot_hold_until",
+            "retry_not_before",
+        ):
+            value = getattr(self, name)
+            if value is not None:
+                _aware_utc(value, name)
+        for name in ("attempt_id", "session_lineage_id"):
+            value = getattr(self, name)
+            if value is not None:
+                _sha256_hex(value, name)
+        if self.last_failure_class is not None and type(
+            self.last_failure_class
+        ) is not ProphetXLoginFailureClass:
+            raise ProphetXSessionLifecycleError(
+                "last_failure_class must be an exact ProphetXLoginFailureClass"
+            )
+
+        if self.state is ProphetXSessionState.LOGIN_IN_FLIGHT:
+            if (
+                self.attempt_id is None
+                or self.attempt_started_at is None
+                or self.slot_hold_until is None
+            ):
+                raise ProphetXSessionLifecycleError(
+                    "login_in_flight requires attempt and slot-hold evidence"
+                )
+        if self.state in {
+            ProphetXSessionState.ACTIVE,
+            ProphetXSessionState.RENEWAL_DUE,
+        }:
+            if (
+                self.session_lineage_id is None
+                or self.access_expires_at is None
+                or self.slot_hold_until is None
+            ):
+                raise ProphetXSessionLifecycleError(
+                    "active session state requires lineage and expiry evidence"
+                )
+        if self.state in {
+            ProphetXSessionState.AUTH_RETRYABLE_FAILURE,
+            ProphetXSessionState.PROVIDER_UNAVAILABLE,
+        } and self.retry_not_before is None:
+            raise ProphetXSessionLifecycleError(
+                "retryable state requires retry_not_before"
+            )
+
+    def to_json_dict(
+        self,
+        *,
+        environment: str,
+        access_key_identity_sha256: str,
+    ) -> dict[str, object]:
+        return {
+            "schema_version": STATE_SCHEMA_VERSION,
+            "provider": PROVIDER_ID,
+            "environment": environment,
+            "access_key_identity_sha256": access_key_identity_sha256,
+            "state": self.state.value,
+            "generation": self.generation,
+            "credential_revision": self.credential_revision,
+            "integration_role": self.integration_role,
+            "last_transition_at": _iso(self.last_transition_at),
+            "attempt_id": self.attempt_id,
+            "attempt_started_at": _iso(self.attempt_started_at),
+            "session_lineage_id": self.session_lineage_id,
+            "access_expires_at": _iso(self.access_expires_at),
+            "slot_hold_until": _iso(self.slot_hold_until),
+            "retry_not_before": _iso(self.retry_not_before),
+            "transient_failures": self.transient_failures,
+            "last_failure_class": (
+                None
+                if self.last_failure_class is None
+                else self.last_failure_class.value
+            ),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class ProphetXLoginAdmission:
+    action: ProphetXLoginAdmissionAction
+    snapshot: ProphetXSessionSnapshot | None
+    attempt_id: str | None = None
+    retry_at: datetime | None = None
+
+    @property
+    def login_authorized(self) -> bool:
+        return self.action is ProphetXLoginAdmissionAction.CREATE_LOGIN
+
+    @property
+    def real_money_execution(self) -> bool:
+        return False
+
+
+class ProphetXSessionLifecycle:
+    """Durable per-access-key login admission coordinator."""
+
+    _STATE_NAME = "prophetx-session-state.json"
+
+    def __init__(
+        self,
+        workspace: str | Path,
+        *,
+        scope: ProphetXSessionScope,
+    ) -> None:
+        if type(scope) is not ProphetXSessionScope:
+            raise ProphetXSessionLifecycleError(
+                "scope must be an exact ProphetXSessionScope"
+            )
+        self.workspace = Path(workspace)
+        self.scope = scope
+        self._scope_dir = (
+            self.workspace
+            / ".provider-session-lifecycle"
+            / self.scope.pool_id
+        )
+        self._state_path = self._scope_dir / self._STATE_NAME
+        self._thread_lock = RLock()
+        self._owned_attempts: set[str] = set()
+
+    @property
+    def state_path(self) -> Path:
+        return self._state_path
+
+    def begin_login(
+        self,
+        *,
+        now: datetime,
+        access_token_available: bool,
+    ) -> ProphetXLoginAdmission:
+        timestamp = _aware_utc(now, "now")
+        if type(access_token_available) is not bool:
+            raise ProphetXSessionLifecycleError(
+                "access_token_available must be an exact bool"
+            )
+
+        with self._thread_lock:
+            try:
+                with WorkspaceEconomicLock(self._scope_dir):
+                    current = self._load_state()
+                    return self._begin_login_locked(
+                        current,
+                        timestamp,
+                        access_token_available=access_token_available,
+                    )
+            except WorkspaceEconomicLockBusyError:
+                # Another process is changing this exact provider pool. Waiting is
+                # safer than allocating another provider session.
+                return ProphetXLoginAdmission(
+                    action=ProphetXLoginAdmissionAction.WAIT_FOR_EXISTING_LOGIN,
+                    snapshot=None,
+                )
+            except WorkspaceEconomicLockError as exc:
+                raise ProphetXSessionLifecycleError(
+                    "cannot acquire ProphetX session-pool coordination lock"
+                ) from exc
+
+    def complete_login_success(
+        self,
+        *,
+        attempt_id: str,
+        now: datetime,
+    ) -> ProphetXSessionSnapshot:
+        attempt = _sha256_hex(attempt_id, "attempt_id")
+        timestamp = _aware_utc(now, "now")
+        with self._thread_lock:
+            if attempt not in self._owned_attempts:
+                raise ProphetXSessionLifecycleError(
+                    "login attempt was not issued by this coordinator"
+                )
+            try:
+                with WorkspaceEconomicLock(self._scope_dir):
+                    current = self._require_owned_inflight(attempt)
+                    expiry = timestamp + ACCESS_TOKEN_LIFETIME
+                    updated = ProphetXSessionSnapshot(
+                        state=ProphetXSessionState.ACTIVE,
+                        generation=current.generation + 1,
+                        credential_revision=self.scope.credential_revision,
+                        integration_role=self.scope.integration_role,
+                        last_transition_at=timestamp,
+                        session_lineage_id=attempt,
+                        access_expires_at=expiry,
+                        slot_hold_until=expiry,
+                    )
+                    self._write_state(updated)
+            except WorkspaceEconomicLockError as exc:
+                raise ProphetXSessionLifecycleError(
+                    "cannot acquire ProphetX session-pool coordination lock"
+                ) from exc
+            self._owned_attempts.discard(attempt)
+            return updated
+
+    def complete_login_failure(
+        self,
+        *,
+        attempt_id: str,
+        now: datetime,
+        failure: ProphetXLoginFailureClass,
+    ) -> ProphetXSessionSnapshot:
+        attempt = _sha256_hex(attempt_id, "attempt_id")
+        timestamp = _aware_utc(now, "now")
+        if type(failure) is not ProphetXLoginFailureClass:
+            raise ProphetXSessionLifecycleError(
+                "failure must be an exact ProphetXLoginFailureClass"
+            )
+        with self._thread_lock:
+            if attempt not in self._owned_attempts:
+                raise ProphetXSessionLifecycleError(
+                    "login attempt was not issued by this coordinator"
+                )
+            try:
+                with WorkspaceEconomicLock(self._scope_dir):
+                    current = self._require_owned_inflight(attempt)
+                    failures = current.transient_failures + 1
+                    retry_not_before: datetime | None = None
+                    slot_hold_until: datetime | None = None
+
+                    if failure is ProphetXLoginFailureClass.SESSION_POOL_EXHAUSTED:
+                        state = ProphetXSessionState.SESSION_POOL_EXHAUSTED
+                        slot_hold_until = timestamp + ACCESS_TOKEN_LIFETIME
+                    elif failure is ProphetXLoginFailureClass.CREDENTIAL_REJECTED:
+                        state = ProphetXSessionState.CREDENTIAL_REJECTED
+                        failures = current.transient_failures
+                    elif failure is ProphetXLoginFailureClass.RETRYABLE_PRE_SESSION_FAILURE:
+                        state = ProphetXSessionState.AUTH_RETRYABLE_FAILURE
+                        retry_not_before = timestamp + self._retry_delay(failures)
+                    elif failure is ProphetXLoginFailureClass.PROVIDER_UNAVAILABLE_PRE_SESSION:
+                        state = ProphetXSessionState.PROVIDER_UNAVAILABLE
+                        retry_not_before = timestamp + self._retry_delay(failures)
+                    else:
+                        state = ProphetXSessionState.WAIT_FOR_PROVIDER_SESSION_EXPIRY
+                        slot_hold_until = timestamp + ACCESS_TOKEN_LIFETIME
+
+                    updated = ProphetXSessionSnapshot(
+                        state=state,
+                        generation=current.generation + 1,
+                        credential_revision=self.scope.credential_revision,
+                        integration_role=self.scope.integration_role,
+                        last_transition_at=timestamp,
+                        slot_hold_until=slot_hold_until,
+                        retry_not_before=retry_not_before,
+                        transient_failures=failures,
+                        last_failure_class=failure,
+                    )
+                    self._write_state(updated)
+            except WorkspaceEconomicLockError as exc:
+                raise ProphetXSessionLifecycleError(
+                    "cannot acquire ProphetX session-pool coordination lock"
+                ) from exc
+            self._owned_attempts.discard(attempt)
+            return updated
+
+    def record_credential_revoked(
+        self,
+        *,
+        now: datetime,
+    ) -> ProphetXSessionSnapshot:
+        """Invalidate capability without pretending revocation frees a provider slot."""
+
+        timestamp = _aware_utc(now, "now")
+        with self._thread_lock:
+            try:
+                with WorkspaceEconomicLock(self._scope_dir):
+                    current = self._load_state()
+                    if current is None:
+                        generation = 0
+                        hold = None
+                        failures = 0
+                    else:
+                        self._require_role_compatible(current)
+                        generation = current.generation + 1
+                        hold = current.slot_hold_until
+                        if hold is not None and hold <= timestamp:
+                            hold = None
+                        failures = current.transient_failures
+                    updated = ProphetXSessionSnapshot(
+                        state=ProphetXSessionState.CREDENTIAL_REJECTED,
+                        generation=generation,
+                        credential_revision=self.scope.credential_revision,
+                        integration_role=self.scope.integration_role,
+                        last_transition_at=timestamp,
+                        slot_hold_until=hold,
+                        transient_failures=failures,
+                        last_failure_class=ProphetXLoginFailureClass.CREDENTIAL_REJECTED,
+                    )
+                    self._write_state(updated)
+                    return updated
+            except WorkspaceEconomicLockError as exc:
+                raise ProphetXSessionLifecycleError(
+                    "cannot acquire ProphetX session-pool coordination lock"
+                ) from exc
+
+    def read_snapshot(self) -> ProphetXSessionSnapshot | None:
+        with self._thread_lock:
+            try:
+                with WorkspaceEconomicLock(self._scope_dir):
+                    return self._load_state()
+            except WorkspaceEconomicLockBusyError:
+                raise ProphetXSessionLifecycleError(
+                    "ProphetX session-pool state is currently being updated"
+                ) from None
+            except WorkspaceEconomicLockError as exc:
+                raise ProphetXSessionLifecycleError(
+                    "cannot acquire ProphetX session-pool coordination lock"
+                ) from exc
+
+    def _begin_login_locked(
+        self,
+        current: ProphetXSessionSnapshot | None,
+        now: datetime,
+        *,
+        access_token_available: bool,
+    ) -> ProphetXLoginAdmission:
+        if current is None:
+            return self._grant_login(now, generation=0, transient_failures=0)
+
+        if current.integration_role != self.scope.integration_role:
+            return ProphetXLoginAdmission(
+                action=ProphetXLoginAdmissionAction.SHARED_ACCESS_KEY_CONFLICT,
+                snapshot=current,
+                retry_at=current.slot_hold_until,
+            )
+
+        if current.credential_revision != self.scope.credential_revision:
+            if current.slot_hold_until is not None and now < current.slot_hold_until:
+                return ProphetXLoginAdmission(
+                    action=ProphetXLoginAdmissionAction.WAIT_FOR_PROVIDER_SESSION_EXPIRY,
+                    snapshot=current,
+                    retry_at=current.slot_hold_until,
+                )
+            return self._grant_login(
+                now,
+                generation=current.generation + 1,
+                transient_failures=0,
+            )
+
+        if current.state is ProphetXSessionState.LOGIN_IN_FLIGHT:
+            if current.slot_hold_until is not None and now < current.slot_hold_until:
+                action = (
+                    ProphetXLoginAdmissionAction.WAIT_FOR_EXISTING_LOGIN
+                    if current.attempt_id in self._owned_attempts
+                    else ProphetXLoginAdmissionAction.WAIT_FOR_PROVIDER_SESSION_EXPIRY
+                )
+                return ProphetXLoginAdmission(
+                    action=action,
+                    snapshot=current,
+                    retry_at=current.slot_hold_until,
+                )
+            return self._grant_login(
+                now,
+                generation=current.generation + 1,
+                transient_failures=current.transient_failures,
+            )
+
+        if current.state in {
+            ProphetXSessionState.ACTIVE,
+            ProphetXSessionState.RENEWAL_DUE,
+        }:
+            if current.access_expires_at is None or current.slot_hold_until is None:
+                raise ProphetXSessionLifecycleError(
+                    "active session state is missing expiry evidence"
+                )
+            if now >= current.access_expires_at:
+                return self._grant_login(
+                    now,
+                    generation=current.generation + 1,
+                    transient_failures=0,
+                )
+            if not access_token_available:
+                return ProphetXLoginAdmission(
+                    action=ProphetXLoginAdmissionAction.WAIT_FOR_PROVIDER_SESSION_EXPIRY,
+                    snapshot=current,
+                    retry_at=current.slot_hold_until,
+                )
+            if now >= current.access_expires_at - RENEWAL_LEAD_TIME:
+                if current.state is not ProphetXSessionState.RENEWAL_DUE:
+                    current = ProphetXSessionSnapshot(
+                        state=ProphetXSessionState.RENEWAL_DUE,
+                        generation=current.generation + 1,
+                        credential_revision=current.credential_revision,
+                        integration_role=current.integration_role,
+                        last_transition_at=now,
+                        session_lineage_id=current.session_lineage_id,
+                        access_expires_at=current.access_expires_at,
+                        slot_hold_until=current.slot_hold_until,
+                        transient_failures=current.transient_failures,
+                        last_failure_class=current.last_failure_class,
+                    )
+                    self._write_state(current)
+                return ProphetXLoginAdmission(
+                    action=ProphetXLoginAdmissionAction.RENEWAL_CONTRACT_UNQUALIFIED,
+                    snapshot=current,
+                    retry_at=current.access_expires_at,
+                )
+            return ProphetXLoginAdmission(
+                action=ProphetXLoginAdmissionAction.REUSE_ACTIVE,
+                snapshot=current,
+            )
+
+        if current.state in {
+            ProphetXSessionState.SESSION_POOL_EXHAUSTED,
+            ProphetXSessionState.WAIT_FOR_PROVIDER_SESSION_EXPIRY,
+        }:
+            if current.slot_hold_until is not None and now < current.slot_hold_until:
+                return ProphetXLoginAdmission(
+                    action=ProphetXLoginAdmissionAction.WAIT_FOR_PROVIDER_SESSION_EXPIRY,
+                    snapshot=current,
+                    retry_at=current.slot_hold_until,
+                )
+            return self._grant_login(
+                now,
+                generation=current.generation + 1,
+                transient_failures=current.transient_failures,
+            )
+
+        if current.state in {
+            ProphetXSessionState.AUTH_RETRYABLE_FAILURE,
+            ProphetXSessionState.PROVIDER_UNAVAILABLE,
+        }:
+            if current.retry_not_before is None:
+                raise ProphetXSessionLifecycleError(
+                    "retryable failure is missing retry_not_before"
+                )
+            if now < current.retry_not_before:
+                return ProphetXLoginAdmission(
+                    action=ProphetXLoginAdmissionAction.RETRY_LATER,
+                    snapshot=current,
+                    retry_at=current.retry_not_before,
+                )
+            return self._grant_login(
+                now,
+                generation=current.generation + 1,
+                transient_failures=current.transient_failures,
+            )
+
+        if current.state is ProphetXSessionState.CREDENTIAL_REJECTED:
+            return ProphetXLoginAdmission(
+                action=ProphetXLoginAdmissionAction.CREDENTIAL_REJECTED,
+                snapshot=current,
+            )
+
+        return self._grant_login(
+            now,
+            generation=current.generation + 1,
+            transient_failures=current.transient_failures,
+        )
+
+    def _grant_login(
+        self,
+        now: datetime,
+        *,
+        generation: int,
+        transient_failures: int,
+    ) -> ProphetXLoginAdmission:
+        attempt = token_hex(32)
+        hold = now + ACCESS_TOKEN_LIFETIME
+        updated = ProphetXSessionSnapshot(
+            state=ProphetXSessionState.LOGIN_IN_FLIGHT,
+            generation=generation,
+            credential_revision=self.scope.credential_revision,
+            integration_role=self.scope.integration_role,
+            last_transition_at=now,
+            attempt_id=attempt,
+            attempt_started_at=now,
+            slot_hold_until=hold,
+            transient_failures=transient_failures,
+        )
+        self._write_state(updated)
+        self._owned_attempts.add(attempt)
+        return ProphetXLoginAdmission(
+            action=ProphetXLoginAdmissionAction.CREATE_LOGIN,
+            snapshot=updated,
+            attempt_id=attempt,
+            retry_at=hold,
+        )
+
+    def _require_owned_inflight(
+        self,
+        attempt_id: str,
+    ) -> ProphetXSessionSnapshot:
+        current = self._load_state()
+        if (
+            current is None
+            or current.state is not ProphetXSessionState.LOGIN_IN_FLIGHT
+            or current.attempt_id != attempt_id
+            or current.credential_revision != self.scope.credential_revision
+            or current.integration_role != self.scope.integration_role
+        ):
+            raise ProphetXSessionLifecycleError(
+                "login attempt no longer owns current session-pool admission"
+            )
+        return current
+
+    def _require_role_compatible(
+        self,
+        current: ProphetXSessionSnapshot,
+    ) -> None:
+        if current.integration_role != self.scope.integration_role:
+            raise ProphetXSessionLifecycleError(
+                "access key is already bound to a different integration role"
+            )
+
+    def _retry_delay(self, failures: int) -> timedelta:
+        count = max(1, min(failures, 32))
+        base = min(_BASE_RETRY_SECONDS * (2 ** (count - 1)), 240)
+        material = f"{self.scope.pool_id}:{count}".encode("ascii")
+        jitter_window = max(1, base // 4)
+        jitter = int.from_bytes(sha256(material).digest()[:4], "big") % (
+            jitter_window + 1
+        )
+        return timedelta(
+            seconds=min(base + jitter, _MAX_RETRY_SECONDS)
+        )
+
+    def _load_state(self) -> ProphetXSessionSnapshot | None:
+        try:
+            path_stat = os.stat(self._state_path, follow_symlinks=False)
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            raise ProphetXSessionLifecycleError(
+                "cannot inspect ProphetX session state"
+            ) from exc
+        if not stat.S_ISREG(path_stat.st_mode) or path_stat.st_nlink != 1:
+            raise ProphetXSessionLifecycleError(
+                "ProphetX session state must be a single-link regular file"
+            )
+        try:
+            payload = json.loads(self._state_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise ProphetXSessionLifecycleError(
+                "ProphetX session state is unreadable or corrupt"
+            ) from exc
+        if type(payload) is not dict:
+            raise ProphetXSessionLifecycleError(
+                "ProphetX session state root must be an object"
+            )
+        expected_fields = {
+            "schema_version",
+            "provider",
+            "environment",
+            "access_key_identity_sha256",
+            "state",
+            "generation",
+            "credential_revision",
+            "integration_role",
+            "last_transition_at",
+            "attempt_id",
+            "attempt_started_at",
+            "session_lineage_id",
+            "access_expires_at",
+            "slot_hold_until",
+            "retry_not_before",
+            "transient_failures",
+            "last_failure_class",
+        }
+        if set(payload) != expected_fields:
+            raise ProphetXSessionLifecycleError(
+                "ProphetX session state has an unexpected schema"
+            )
+        if payload["schema_version"] != STATE_SCHEMA_VERSION:
+            raise ProphetXSessionLifecycleError(
+                "unsupported ProphetX session state schema"
+            )
+        if payload["provider"] != PROVIDER_ID:
+            raise ProphetXSessionLifecycleError(
+                "ProphetX session state provider mismatch"
+            )
+        if payload["environment"] != self.scope.environment:
+            raise ProphetXSessionLifecycleError(
+                "ProphetX session state environment mismatch"
+            )
+        if (
+            payload["access_key_identity_sha256"]
+            != self.scope.access_key_identity_sha256
+        ):
+            raise ProphetXSessionLifecycleError(
+                "ProphetX access-key identity mismatch"
+            )
+        try:
+            state = ProphetXSessionState(payload["state"])
+        except (TypeError, ValueError) as exc:
+            raise ProphetXSessionLifecycleError(
+                "unknown ProphetX session state"
+            ) from exc
+        raw_failure = payload["last_failure_class"]
+        try:
+            failure = (
+                None
+                if raw_failure is None
+                else ProphetXLoginFailureClass(raw_failure)
+            )
+        except (TypeError, ValueError) as exc:
+            raise ProphetXSessionLifecycleError(
+                "unknown ProphetX login failure class"
+            ) from exc
+        return ProphetXSessionSnapshot(
+            state=state,
+            generation=_nonnegative_int(payload["generation"], "generation"),
+            credential_revision=_required_text(
+                payload["credential_revision"],
+                "credential_revision",
+            ),
+            integration_role=_required_text(
+                payload["integration_role"],
+                "integration_role",
+            ),
+            last_transition_at=_parse_iso(
+                payload["last_transition_at"],
+                "last_transition_at",
+            ),
+            attempt_id=(
+                None
+                if payload["attempt_id"] is None
+                else _sha256_hex(payload["attempt_id"], "attempt_id")
+            ),
+            attempt_started_at=_parse_iso(
+                payload["attempt_started_at"],
+                "attempt_started_at",
+                optional=True,
+            ),
+            session_lineage_id=(
+                None
+                if payload["session_lineage_id"] is None
+                else _sha256_hex(
+                    payload["session_lineage_id"],
+                    "session_lineage_id",
+                )
+            ),
+            access_expires_at=_parse_iso(
+                payload["access_expires_at"],
+                "access_expires_at",
+                optional=True,
+            ),
+            slot_hold_until=_parse_iso(
+                payload["slot_hold_until"],
+                "slot_hold_until",
+                optional=True,
+            ),
+            retry_not_before=_parse_iso(
+                payload["retry_not_before"],
+                "retry_not_before",
+                optional=True,
+            ),
+            transient_failures=_nonnegative_int(
+                payload["transient_failures"],
+                "transient_failures",
+            ),
+            last_failure_class=failure,
+        )
+
+    def _write_state(self, snapshot: ProphetXSessionSnapshot) -> None:
+        if type(snapshot) is not ProphetXSessionSnapshot:
+            raise ProphetXSessionLifecycleError(
+                "snapshot must be an exact ProphetXSessionSnapshot"
+            )
+        self._scope_dir.mkdir(parents=True, exist_ok=True)
+        payload = snapshot.to_json_dict(
+            environment=self.scope.environment,
+            access_key_identity_sha256=self.scope.access_key_identity_sha256,
+        )
+        encoded = (
+            json.dumps(
+                payload,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+            )
+            + chr(10)
+        )
+        temporary = self._scope_dir / (
+            f".{self._STATE_NAME}.{os.getpid()}.{token_hex(8)}.tmp"
+        )
+        try:
+            with temporary.open("x", encoding="utf-8") as handle:
+                handle.write(encoded)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, self._state_path)
+            if os.name != "nt":
+                directory_fd = os.open(self._scope_dir, os.O_RDONLY)
+                try:
+                    os.fsync(directory_fd)
+                finally:
+                    os.close(directory_fd)
+        except OSError as exc:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise ProphetXSessionLifecycleError(
+                "cannot durably write ProphetX session state"
+            ) from exc

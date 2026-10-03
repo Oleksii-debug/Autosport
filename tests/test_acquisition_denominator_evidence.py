@@ -27,6 +27,7 @@ from autosport.evaluation_universe import (
     SlotState,
     build_frozen_universe,
 )
+from autosport.scheduled_source_universe import ScheduledSourceUniverseError
 from autosport.source_universe_commitment import build_source_universe_commitment
 
 
@@ -416,6 +417,76 @@ def test_evidence_digest_is_deterministic_but_positive_authority_is_not_copyable
         ):
             require_complete_acquisition_coverage(copied)
 
+
+
+
+def test_favorable_short_window_cannot_launder_missing_frozen_schedule_tail() -> None:
+    with TemporaryDirectory() as tmp:
+        path = Path(tmp) / "collector.db"
+        store = CollectorDeltaStore(path)
+        _ensure_schedule(store, end_slot=1)
+
+        cycle = _start_slot(store, 0)
+        _finish(
+            store,
+            cycle,
+            completed_at="2026-09-22T00:00:05+00:00",
+        )
+        source = build_source_universe_commitment(
+            store,
+            expected_store_path=path,
+            source_id=SOURCE_ID,
+            start_cycle_seq=cycle,
+            end_cycle_seq=cycle,
+        )
+
+        with pytest.raises(
+            ScheduledSourceUniverseError,
+            match="prospectively frozen evaluation window",
+        ):
+            build_acquisition_denominator_evidence(
+                store,
+                source,
+                _universe(),
+                expected_store_path=path,
+                expected_source_id=SOURCE_ID,
+                expected_run_id=RUN_ID,
+                expected_start_slot_ordinal=0,
+                expected_end_slot_ordinal=0,
+            )
+
+
+def test_missing_due_slot_cannot_disappear_from_acquisition_denominator() -> None:
+    with TemporaryDirectory() as tmp:
+        path = Path(tmp) / "collector.db"
+        store = CollectorDeltaStore(path)
+        _ensure_schedule(store, end_slot=1)
+
+        cycle = _start_slot(store, 0)
+        _finish(
+            store,
+            cycle,
+            completed_at="2026-09-22T00:00:05+00:00",
+        )
+        source = build_source_universe_commitment(
+            store,
+            expected_store_path=path,
+            source_id=SOURCE_ID,
+            start_cycle_seq=cycle,
+            end_cycle_seq=cycle,
+        )
+
+        with pytest.raises(ScheduledSourceUniverseError):
+            build_acquisition_denominator_evidence(
+                store,
+                source,
+                _universe(),
+                expected_store_path=path,
+                expected_source_id=SOURCE_ID,
+                expected_run_id=RUN_ID,
+                expected_start_slot_ordinal=0,
+                expected_end_slot_ordinal=1,
+            )
 
 def test_direct_construction_cannot_mint_positive_coverage() -> None:
     with pytest.raises(TypeError, match="product-issued"):

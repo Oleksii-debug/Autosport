@@ -264,6 +264,57 @@ def test_untyped_hostile_transport_failure_is_bounded():
     assert ctl.public_snapshot().diagnostic_code == "PROVIDER_UNAVAILABLE"
 
 
+def test_transport_rebinding_cannot_redirect_existing_2fa_challenge():
+    first = FakeTransport()
+    hostile = FakeTransport()
+    hostile.send_calls = []
+    ctl, _, _, _ = controller(transport=first)
+    make_2fa(ctl, first)
+
+    ctl._transport = hostile
+    ctl.send_verification_code()
+
+    assert first.send_calls == ["challenge-ref-1"]
+    assert hostile.send_calls == []
+
+
+def test_credential_sink_rebinding_cannot_redirect_secret_storage():
+    first = FakeSink()
+    hostile = FakeSink()
+    ctl, _, _, _ = controller(sink=first)
+    ctl._credential_sink = hostile
+
+    ctl.import_approved_api_token(
+        access_key="ACCESS_SECRET",
+        secret_key="SUPER_SECRET",
+        environment="sandbox",
+    )
+
+    assert first.calls == [("ACCESS_SECRET", "SUPER_SECRET", "sandbox")]
+    assert hostile.calls == []
+
+
+def test_clock_rebinding_cannot_bypass_existing_resend_throttle():
+    clock = FakeClock()
+    ctl, transport, _, _ = controller(clock=clock)
+    make_2fa(ctl, transport)
+    ctl.send_verification_code()
+
+    hostile_calls = []
+
+    def hostile_clock():
+        hostile_calls.append(True)
+        return clock.value + 10**15
+
+    ctl._clock_ns = hostile_clock
+    snap = ctl.public_snapshot()
+    ctl.send_verification_code()
+
+    assert hostile_calls == []
+    assert snap.resend_after_ms == 30_000
+    assert transport.send_calls == ["challenge-ref-1"]
+
+
 def test_direct_key_generation_is_fail_closed_without_any_transport_call():
     ctl, transport, _, _ = controller()
     ctl.submit_login(email="operator@example.test", password="PASSWORD_SECRET")

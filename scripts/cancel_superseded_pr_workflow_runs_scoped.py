@@ -625,13 +625,13 @@ def main(argv: list[str] | None = None) -> int:
         if args.pr_number < 0:
             raise CancellationError("pull request number cannot be negative")
 
-        # The triggering event's explicit singleton PR remains useful for same-head
-        # missing-reference recovery and for separately cancelling the triggering
-        # source run after the workflow-wide sweep. A zero value means the event did
-        # not carry one unambiguous PR identity; that must not block cleanup for every
-        # other explicit PR in the exact source workflow. Missing-reference source runs
-        # are handled uniformly by the existing workflow-wide orphan resolver after the
-        # shared active-run scan, so trigger-specific pre-recovery is unnecessary.
+        # The triggering event's explicit singleton PR is retained only for the
+        # separately boundary-revalidated triggering-source-run decision after the
+        # workflow-wide sweep. A zero value means the event did not carry one
+        # unambiguous PR identity; that must not block cleanup for every other explicit
+        # PR in the exact source workflow. Missing-reference source runs are handled
+        # uniformly by the existing workflow-wide orphan resolver after the shared
+        # active-run scan, so trigger-specific pre-recovery is unnecessary.
         trigger_pr_number: int | None = None
         if args.pr_number > 0:
             trigger_pr_number = _require_positive_int(

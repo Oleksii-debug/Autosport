@@ -286,13 +286,15 @@ class ProphetXAccountLinkController:
         return self._state
 
     def open_login(self) -> None:
-        if self._state is AccountLinkState.LINKED_CREDENTIAL_STORED:
+        if self._credential_ref is not None:
             raise AccountLinkStateError("linked credential must be explicitly unlinked first")
         self._clear_auth_context(cancel_challenge=True)
         self._state = AccountLinkState.LOGIN_FORM
         self._diagnostic = DiagnosticCode.NONE
 
     def submit_login(self, *, email: str, password: str) -> None:
+        if self._credential_ref is not None:
+            raise AccountLinkStateError("linked credential must be explicitly unlinked first")
         if self._state not in {
             AccountLinkState.LOGIN_FORM,
             AccountLinkState.AUTH_ERROR,
@@ -410,6 +412,11 @@ class ProphetXAccountLinkController:
         prove production entitlement, and cannot enable execution.
         """
 
+        if self._credential_ref is not None:
+            raise AccountLinkStateError(
+                "linked credential must be explicitly unlinked first"
+            )
+
         access_value = _secret_text(access_key, "access key")
         secret_value = _secret_text(secret_key, "secret key")
         env_value = _environment(environment)
@@ -446,7 +453,10 @@ class ProphetXAccountLinkController:
 
     def cancel(self) -> None:
         self._clear_auth_context(cancel_challenge=True)
-        self._state = AccountLinkState.NOT_LINKED
+        if self._credential_ref is not None:
+            self._state = AccountLinkState.LINKED_CREDENTIAL_STORED
+        else:
+            self._state = AccountLinkState.NOT_LINKED
         self._diagnostic = DiagnosticCode.NONE
 
     def unlink(self, *, remover: Callable[[str], None]) -> None:
@@ -470,7 +480,10 @@ class ProphetXAccountLinkController:
 
         state = self._state
         challenge_available = _opaque_ref(self._challenge_ref)
-        if state is AccountLinkState.TWO_FACTOR_REQUIRED:
+        if self._credential_ref is not None:
+            focus_target = "linked_status"
+            primary_action = None
+        elif state is AccountLinkState.TWO_FACTOR_REQUIRED:
             focus_target = "send_verification_code"
             primary_action = "send_verification_code"
         elif state is AccountLinkState.TWO_FACTOR_CODE_ENTRY or (
@@ -517,13 +530,16 @@ class ProphetXAccountLinkController:
         return AccountLinkPublicSnapshot(
             state=state.value,
             diagnostic_code=self._diagnostic.value,
-            can_submit_login=state
-            in {
-                AccountLinkState.LOGIN_FORM,
-                AccountLinkState.AUTH_ERROR,
-                AccountLinkState.PROVIDER_UNAVAILABLE,
-                AccountLinkState.SESSION_EXPIRED,
-            },
+            can_submit_login=bool(
+                self._credential_ref is None
+                and state
+                in {
+                    AccountLinkState.LOGIN_FORM,
+                    AccountLinkState.AUTH_ERROR,
+                    AccountLinkState.PROVIDER_UNAVAILABLE,
+                    AccountLinkState.SESSION_EXPIRED,
+                }
+            ),
             can_send_verification_code=bool(
                 challenge_available
                 and state
@@ -544,7 +560,7 @@ class ProphetXAccountLinkController:
                     AccountLinkState.PROVIDER_UNAVAILABLE,
                 }
             ),
-            can_import_approved_api_token=True,
+            can_import_approved_api_token=self._credential_ref is None,
             credential_present=self._credential_ref is not None,
             resend_after_ms=int(resend_after_ms),
             direct_key_generation_available=False,

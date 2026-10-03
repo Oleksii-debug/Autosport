@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from decimal import Decimal
@@ -334,7 +335,7 @@ class ParlayApiProductSourceTests(unittest.TestCase):
             self.assertEqual(migrated["last_committed_dedupe_digests"], {})
             self.assertEqual(store.resolve_event(delta), event)
 
-    def test_legacy_migration_accepts_canonical_retention_tombstone_without_resurrection(
+    def test_legacy_migration_accepts_multi_price_canonical_retirement_without_resurrection(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -345,12 +346,20 @@ class ParlayApiProductSourceTests(unittest.TestCase):
                     [
                         _batch(
                             cursor="snapshot-1",
+                            odds="1.80",
                             sequence=1,
                             provider_event_id="event-1",
                         ),
                         _batch(
                             cursor="snapshot-2",
+                            odds="1.90",
                             sequence=2,
+                            provider_event_id="event-1",
+                        ),
+                        _batch(
+                            cursor="snapshot-3",
+                            odds="2.00",
+                            sequence=3,
                             provider_event_id="event-2",
                         ),
                     ]
@@ -368,20 +377,36 @@ class ParlayApiProductSourceTests(unittest.TestCase):
             _archive_pending_delta(source, first)
             source.fetch_deltas(_stream_checkpoint(first), (), 1)
 
-            source.fetch_catalog_page(_catalog_checkpoint(first_page))
+            second_page = source.fetch_catalog_page(_catalog_checkpoint(first_page))
             second = source.fetch_deltas(_stream_checkpoint(first), (), 1)[0]
             second_event = source.resolve_event(second)
             _archive_pending_delta(source, second)
+            source.fetch_deltas(_stream_checkpoint(second), (), 1)
+
+            source.fetch_catalog_page(_catalog_checkpoint(second_page))
+            third = source.fetch_deltas(_stream_checkpoint(second), (), 1)[0]
+            third_event = source.resolve_event(third)
+            _archive_pending_delta(source, third)
             store = source._require_collector_store()
+
+            self.assertEqual(first_event.quote_key, second_event.quote_key)
+            self.assertNotEqual(
+                first.canonical_event_digest,
+                second.canonical_event_digest,
+            )
 
             legacy = source._read_state()
             legacy["pending"] = None
-            legacy["event_cache"] = {first.delta_id: first_event.to_dict()}
+            legacy["event_cache"] = {
+                first.delta_id: first_event.to_dict(),
+                second.delta_id: second_event.to_dict(),
+            }
             legacy["last_committed_quote_digests"] = {
-                first_event.quote_key: first.canonical_event_digest
+                second_event.quote_key: second.canonical_event_digest
             }
             legacy["last_committed_dedupe_digests"] = {
-                first_event.dedupe_key: first.canonical_event_digest
+                first_event.dedupe_key: first.canonical_event_digest,
+                second_event.dedupe_key: second.canonical_event_digest,
             }
             source._write_state(legacy)
 
@@ -390,6 +415,7 @@ class ParlayApiProductSourceTests(unittest.TestCase):
             )
             _ack_retention_delta(desktop, first, ordinal=1)
             _ack_retention_delta(desktop, second, ordinal=2)
+            _ack_retention_delta(desktop, third, ordinal=3)
 
             connection = store._connect()
             try:
@@ -423,18 +449,25 @@ class ParlayApiProductSourceTests(unittest.TestCase):
                 stream_epoch=source.stream_epoch,
                 desktop_checkpoint=desktop,
             )
-            self.assertEqual(plan.delete_delta_ids, (first.delta_id,))
-            self.assertIn(second.delta_id, plan.retained_delta_ids)
+            self.assertEqual(
+                plan.delete_delta_ids,
+                (first.delta_id, second.delta_id),
+            )
+            self.assertIn(third.delta_id, plan.retained_delta_ids)
             result = manager.compact(
                 plan,
                 desktop_checkpoint=desktop,
                 compacted_at="2026-09-20T17:43:00+00:00",
             )
-            self.assertEqual(result.deleted_delta_ids, (first.delta_id,))
-            self.assertIsNone(store.get(first.delta_id))
-            with self.assertRaisesRegex(ValueError, "not retained exactly"):
-                store.resolve_event(first)
-            self.assertEqual(store.resolve_event(second), second_event)
+            self.assertEqual(
+                result.deleted_delta_ids,
+                (first.delta_id, second.delta_id),
+            )
+            for retired in (first, second):
+                self.assertIsNone(store.get(retired.delta_id))
+                with self.assertRaisesRegex(ValueError, "not retained exactly"):
+                    store.resolve_event(retired)
+            self.assertEqual(store.resolve_event(third), third_event)
 
             restored = ParlayApiProductSource(
                 _Provider([]),
@@ -449,10 +482,11 @@ class ParlayApiProductSourceTests(unittest.TestCase):
             self.assertEqual(migrated["event_cache"], {})
             self.assertEqual(migrated["last_committed_quote_digests"], {})
             self.assertEqual(migrated["last_committed_dedupe_digests"], {})
-            self.assertIsNone(store.get(first.delta_id))
-            with self.assertRaisesRegex(ValueError, "not retained exactly"):
-                store.resolve_event(first)
-            self.assertEqual(store.resolve_event(second), second_event)
+            for retired in (first, second):
+                self.assertIsNone(store.get(retired.delta_id))
+                with self.assertRaisesRegex(ValueError, "not retained exactly"):
+                    store.resolve_event(retired)
+            self.assertEqual(store.resolve_event(third), third_event)
 
     def test_legacy_digest_migration_verifies_in_bounded_chunks(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -16,6 +16,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import stat
 import tempfile
 import uuid
 from dataclasses import dataclass
@@ -209,6 +210,14 @@ _CANONICAL_HASHLIB_SHA256: Final = hashlib.sha256
 _CANONICAL_OS_MODULE: Final = os
 _CANONICAL_OS_PATH_NORMCASE: Final = os.path.normcase
 _CANONICAL_OS_PATH_NORMPATH: Final = os.path.normpath
+_CANONICAL_OS_OPEN: Final = os.open
+_CANONICAL_OS_FSTAT: Final = os.fstat
+_CANONICAL_OS_LSTAT: Final = os.lstat
+_CANONICAL_OS_FSYNC: Final = os.fsync
+_CANONICAL_OS_CLOSE: Final = os.close
+_CANONICAL_OS_REPLACE: Final = os.replace
+_CANONICAL_STAT_MODULE: Final = stat
+_CANONICAL_STAT_ISREG: Final = stat.S_ISREG
 _CANONICAL_HASHLIB_SHA256_CODE: Final = getattr(hashlib.sha256, "__code__", None)
 _CANONICAL_JSON_MODULE: Final = json
 _CANONICAL_JSON_DUMPS: Final = json.dumps
@@ -248,6 +257,7 @@ _SEALED_STORE_DISPATCH_NAMES: Final = frozenset(
         "_assert_static_authority_contract",
         "_read_payload",
         "_records_from_payload",
+        "_finalize_published_path",
         "_state_sha256",
         "_recover_state",
         "_read_validated_records_locked",
@@ -606,14 +616,92 @@ _CANONICAL_DIGEST_CODE: Final = _digest.__code__
 
 
 def _fsync_directory(path: Path) -> None:
+    if (
+        os is not _CANONICAL_OS_MODULE
+        or os.open is not _CANONICAL_OS_OPEN
+        or os.fsync is not _CANONICAL_OS_FSYNC
+        or os.close is not _CANONICAL_OS_CLOSE
+    ):
+        raise DeploymentRuntimeAuthorityError(
+            "runtime authority durability dispatch was replaced"
+        )
     if os.name == "nt":
         return
     flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
-    descriptor = os.open(path, flags)
+    descriptor = _CANONICAL_OS_OPEN(path, flags)
     try:
-        os.fsync(descriptor)
+        _CANONICAL_OS_FSYNC(descriptor)
     finally:
-        os.close(descriptor)
+        _CANONICAL_OS_CLOSE(descriptor)
+
+
+_CANONICAL_FSYNC_DIRECTORY: Final = _fsync_directory
+_CANONICAL_FSYNC_DIRECTORY_CODE: Final = _fsync_directory.__code__
+
+
+def _durably_finalize_published_path(path: Path) -> None:
+    if (
+        os is not _CANONICAL_OS_MODULE
+        or stat is not _CANONICAL_STAT_MODULE
+        or os.open is not _CANONICAL_OS_OPEN
+        or os.fstat is not _CANONICAL_OS_FSTAT
+        or os.lstat is not _CANONICAL_OS_LSTAT
+        or os.fsync is not _CANONICAL_OS_FSYNC
+        or os.close is not _CANONICAL_OS_CLOSE
+        or stat.S_ISREG is not _CANONICAL_STAT_ISREG
+        or _fsync_directory is not _CANONICAL_FSYNC_DIRECTORY
+        or _CANONICAL_FSYNC_DIRECTORY.__code__
+        is not _CANONICAL_FSYNC_DIRECTORY_CODE
+    ):
+        raise DeploymentRuntimeAuthorityError(
+            "runtime authority publication durability dispatch was replaced"
+        )
+    try:
+        before = _CANONICAL_OS_LSTAT(path)
+    except OSError as exc:
+        raise DeploymentRuntimeAuthorityError(
+            "cannot inspect published runtime authority path"
+        ) from exc
+    if not _CANONICAL_STAT_ISREG(before.st_mode) or before.st_nlink != 1:
+        raise DeploymentRuntimeAuthorityError(
+            "published runtime authority must be a single-link regular file"
+        )
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = _CANONICAL_OS_OPEN(path, flags)
+    except OSError as exc:
+        raise DeploymentRuntimeAuthorityError(
+            "cannot open published runtime authority for durability"
+        ) from exc
+    try:
+        opened = _CANONICAL_OS_FSTAT(descriptor)
+        if (
+            not _CANONICAL_STAT_ISREG(opened.st_mode)
+            or opened.st_nlink != 1
+            or (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)
+        ):
+            raise DeploymentRuntimeAuthorityError(
+                "published runtime authority path changed before durability sync"
+            )
+        _CANONICAL_OS_FSYNC(descriptor)
+        after = _CANONICAL_OS_LSTAT(path)
+        if (
+            not _CANONICAL_STAT_ISREG(after.st_mode)
+            or after.st_nlink != 1
+            or (after.st_dev, after.st_ino) != (opened.st_dev, opened.st_ino)
+        ):
+            raise DeploymentRuntimeAuthorityError(
+                "published runtime authority path changed during durability sync"
+            )
+    finally:
+        _CANONICAL_OS_CLOSE(descriptor)
+    _CANONICAL_FSYNC_DIRECTORY(path.parent)
+
+
+_CANONICAL_DURABLE_PUBLICATION_FINALIZER: Final = _durably_finalize_published_path
+_CANONICAL_DURABLE_PUBLICATION_FINALIZER_CODE: Final = (
+    _durably_finalize_published_path.__code__
+)
 
 
 def _environment_payload(environment: EnvironmentIdentity) -> dict[str, object]:
@@ -1577,6 +1665,7 @@ class DeploymentRuntimeAuthorityStore(metaclass=_DeploymentRuntimeAuthorityStore
                 semantic_binding_sha256=store._semantic_binding_sha256,
             )
             store._write_atomic_path(destination, payload)
+            store._finalize_published_path(destination)
 
             published = store._read_payload()
             store._records_from_payload(published)
@@ -1624,6 +1713,19 @@ class DeploymentRuntimeAuthorityStore(metaclass=_DeploymentRuntimeAuthorityStore
                     Path(temporary_name).unlink(missing_ok=True)
                 except OSError:
                     pass
+
+    @staticmethod
+    def _finalize_published_path(path: Path) -> None:
+        if (
+            _durably_finalize_published_path
+            is not _CANONICAL_DURABLE_PUBLICATION_FINALIZER
+            or _CANONICAL_DURABLE_PUBLICATION_FINALIZER.__code__
+            is not _CANONICAL_DURABLE_PUBLICATION_FINALIZER_CODE
+        ):
+            raise DeploymentRuntimeAuthorityError(
+                "runtime authority publication finalizer dispatch was replaced"
+            )
+        _CANONICAL_DURABLE_PUBLICATION_FINALIZER(path)
 
     @staticmethod
     def _state_sha256(payload: Mapping[str, object]) -> str:
@@ -2171,6 +2273,7 @@ class DeploymentRuntimeAuthorityStore(metaclass=_DeploymentRuntimeAuthorityStore
                 semantic_binding_sha256=self._semantic_binding_sha256,
             )
             self._write_atomic_path(self.path, payload)
+            self._finalize_published_path(self.path)
 
             published = self._read_payload()
             self._records_from_payload(published)

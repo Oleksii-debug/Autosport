@@ -71,6 +71,9 @@ from autosport.provider_observation_authority import (
     CompleteGameBoardRequest,
     ProviderObservationUnsupportedError,
 )
+from autosport.decision_ledger import JsonlDecisionLedger
+from autosport.paper_campaign_forward_admission import admit_forward_verified
+from paper_campaign_admission_test_support import AdmissionFixture
 
 
 A = "a" * 64
@@ -1085,10 +1088,10 @@ def test_later_successful_capture_cannot_define_forward_universe(
         )
 
 
-def test_cycle_bound_structural_verifier_replaces_caller_receipts_and_fixes_scope(
+def _forward_verification_case(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-) -> None:
+):
     locator, store, spec, provider_store = _setup(tmp_path)
     monkeypatch.setattr(
         provider_module,
@@ -1254,6 +1257,33 @@ def test_cycle_bound_structural_verifier_replaces_caller_receipts_and_fixes_scop
         cost_evidence=(CostEvidence(1, True),),
     )
 
+    return (
+        locator,
+        store,
+        spec,
+        provider_store,
+        cycle_receipt,
+        universe_store,
+        evidence,
+        universe,
+    )
+
+
+def test_cycle_bound_structural_verifier_replaces_caller_receipts_and_fixes_scope(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (
+        locator,
+        store,
+        spec,
+        provider_store,
+        cycle_receipt,
+        universe_store,
+        evidence,
+        universe,
+    ) = _forward_verification_case(tmp_path, monkeypatch)
+
     raw = verify_campaign(evidence)
     assert raw.ok is False
     assert VerificationCode.COHORT_OMISSION_DETECTED in raw.codes
@@ -1283,6 +1313,88 @@ def test_cycle_bound_structural_verifier_replaces_caller_receipts_and_fixes_scop
     assert len(result.campaign_cycle_authority_sha256) == 64
     assert len(result.receipt_sha256) == 64
 
+
+
+def test_cycle_bound_forward_verification_drives_durable_paper_admission(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    forward_root = tmp_path / "forward"
+    forward_root.mkdir()
+    (
+        locator,
+        store,
+        spec,
+        provider_store,
+        cycle_receipt,
+        universe_store,
+        evidence,
+        _universe,
+    ) = _forward_verification_case(forward_root, monkeypatch)
+    expected = verify_campaign_forward_evidence(
+        precommit_locator=locator,
+        collector_store=store,
+        source_spec=spec,
+        cycle_receipt=cycle_receipt,
+        provider_evidence_store=provider_store,
+        universe_store=universe_store,
+        event_lifecycle=None,
+        evidence=evidence,
+    )
+    assert expected.structural_ok is True
+    assert expected.structural_codes == ("PASS",)
+
+    admission_root = tmp_path / "admission"
+    admission_root.mkdir()
+    fixture = AdmissionFixture(admission_root)
+    coordinator = fixture.coordinator()
+
+    receipt = admit_forward_verified(
+        coordinator,
+        precommit_locator=locator,
+        collector_store=store,
+        source_spec=spec,
+        cycle_receipt=cycle_receipt,
+        provider_evidence_store=provider_store,
+        universe_store=universe_store,
+        event_lifecycle=None,
+        evidence=evidence,
+        admission_id="admission-1",
+        observation=fixture.observation,
+        action_type="PAPER_PROPOSAL",
+        decision_action="OPEN_PAPER_TICKET",
+        decision_at="2026-09-20T05:00:05+00:00",
+        at="2026-09-20T05:00:05+00:00",
+        replay_run_id="admission-run",
+        agent="admission-test",
+        execution_decision_id=fixture.execution_decision_id,
+        execution_run_id=fixture.execution_run_id,
+        execution_attempt_id=fixture.execution_attempt_id,
+        execution_ticket_id=fixture.execution_ticket_id,
+    )
+
+    assert receipt.admission_id == "admission-1"
+    state = json.loads(
+        (fixture.workspace / "paper-campaign-admission.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert state["admissions"]["admission-1"]["phase"] == "COMMITTED"
+
+    records = JsonlDecisionLedger(
+        fixture.workspace / "decisions.jsonl"
+    ).verified_records()
+    durable = [record for record in records if record.decision_id == receipt.decision_id]
+    assert len(durable) == 1
+    forward_payload = durable[0].payload["campaign_forward_verification"]
+    assert forward_payload["receipt_sha256"] == expected.receipt_sha256
+    assert forward_payload["campaign_id"] == expected.campaign_id
+    assert forward_payload["verification_scope"] == expected.verification_scope
+    assert forward_payload["provider_universe_authority_resolved"] is True
+    assert forward_payload["structural_ok"] is True
+    assert forward_payload["structural_codes"] == ["PASS"]
+    assert forward_payload["promotion_ready"] is False
+    assert forward_payload["real_money_ready"] is False
 
 def test_delayed_collector_start_after_precommit_window_blocks_before_provider_io(
     tmp_path: Path,

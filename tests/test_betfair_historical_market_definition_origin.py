@@ -5,6 +5,7 @@ import copy
 import hashlib
 import json
 import unittest
+from contextlib import contextmanager
 from dataclasses import replace
 from unittest.mock import patch
 
@@ -44,6 +45,25 @@ def _raw(*records: dict[str, object]) -> bytes:
         for record in records
     ).encode("utf-8")
     return bz2.compress(payload + b"\n")
+
+
+@contextmanager
+def _upstream_authority_stub():
+    """Test only: replace the child-captured verifier, not parent class dispatch."""
+
+    def authoritative(witness):
+        del witness
+
+    with patch.object(
+        origin_module,
+        "_CANONICAL_UPSTREAM_WITNESS_ASSERT",
+        new=authoritative,
+    ), patch.object(
+        origin_module,
+        "_CANONICAL_UPSTREAM_WITNESS_ASSERT_CODE",
+        new=authoritative.__code__,
+    ):
+        yield
 
 
 class BetfairHistoricalMarketDefinitionOriginTests(unittest.TestCase):
@@ -89,12 +109,7 @@ class BetfairHistoricalMarketDefinitionOriginTests(unittest.TestCase):
         # #1345 separately tests issuance of the process-local capability. These
         # composition tests stub only that upstream authority call; raw-file replay,
         # source identity and revision selection remain real #1340 code paths.
-        with patch.object(
-            HistoricalProviderOriginWitness,
-            "assert_authoritative",
-            autospec=True,
-            return_value=None,
-        ):
+        with _upstream_authority_stub():
             return bind_betfair_historical_market_definition_origin(
                 witness=witness,
                 raw_bytes=raw,
@@ -123,12 +138,7 @@ class BetfairHistoricalMarketDefinitionOriginTests(unittest.TestCase):
         self.assertEqual(bound.provider_path, witness.provider_path)
         self.assertEqual(bound.download_retrieved_at, witness.retrieved_at)
         self.assertEqual(bound.provider_origin_witness_sha256, witness.witness_sha256)
-        with patch.object(
-            HistoricalProviderOriginWitness,
-            "assert_authoritative",
-            autospec=True,
-            return_value=None,
-        ):
+        with _upstream_authority_stub():
             truth = bound.to_dict()["truth"]
             self.assertTrue(truth["provider_origin_verified"])
             bound.assert_provider_origin()
@@ -165,12 +175,7 @@ class BetfairHistoricalMarketDefinitionOriginTests(unittest.TestCase):
     def test_authoritative_witness_cannot_be_reused_for_mutated_bytes(self) -> None:
         raw = _raw(_line(1000, self.MARKET_ID, self.definition(status="OPEN", version=1)))
         witness = self.witness(raw)
-        with patch.object(
-            HistoricalProviderOriginWitness,
-            "assert_authoritative",
-            autospec=True,
-            return_value=None,
-        ):
+        with _upstream_authority_stub():
             with self.assertRaisesRegex(
                 BetfairHistoricalMarketDefinitionOriginError,
                 "raw bytes do not match",
@@ -343,12 +348,7 @@ class BetfairHistoricalMarketDefinitionOriginTests(unittest.TestCase):
             _token=origin_module._TOKEN,
         )
 
-        with patch.object(
-            HistoricalProviderOriginWitness,
-            "assert_authoritative",
-            autospec=True,
-            return_value=None,
-        ):
+        with _upstream_authority_stub():
             self.assertTrue(bound.provider_origin_verified)
             self.assertFalse(forged.provider_origin_verified)
         with self.assertRaisesRegex(
@@ -380,12 +380,7 @@ class BetfairHistoricalMarketDefinitionOriginTests(unittest.TestCase):
                     "not issued by the canonical binder",
                 ):
                     candidate.assert_issued_integrity()
-                with patch.object(
-                    HistoricalProviderOriginWitness,
-                    "assert_authoritative",
-                    autospec=True,
-                    return_value=None,
-                ):
+                with _upstream_authority_stub():
                     self.assertFalse(candidate.provider_origin_verified)
 
     def test_self_consistent_semantic_mutation_revokes_origin_issuance(self) -> None:
@@ -414,12 +409,7 @@ class BetfairHistoricalMarketDefinitionOriginTests(unittest.TestCase):
             "mutated after canonical issuance",
         ):
             bound.assert_issued_integrity()
-        with patch.object(
-            HistoricalProviderOriginWitness,
-            "assert_authoritative",
-            autospec=True,
-            return_value=None,
-        ):
+        with _upstream_authority_stub():
             self.assertFalse(bound.provider_origin_verified)
         with self.assertRaisesRegex(
             BetfairHistoricalMarketDefinitionOriginError,
@@ -447,12 +437,7 @@ class BetfairHistoricalMarketDefinitionOriginTests(unittest.TestCase):
             hostile,
         )
         try:
-            with patch.object(
-                HistoricalProviderOriginWitness,
-                "assert_authoritative",
-                autospec=True,
-                return_value=None,
-            ):
+            with _upstream_authority_stub():
                 with self.assertRaisesRegex(
                     BetfairHistoricalMarketDefinitionOriginError,
                     "class dispatch was replaced",
@@ -512,12 +497,7 @@ class BetfairHistoricalMarketDefinitionOriginTests(unittest.TestCase):
             origin_module,
             "_definition_in_record",
             new=hostile,
-        ), patch.object(
-            HistoricalProviderOriginWitness,
-            "assert_authoritative",
-            autospec=True,
-            return_value=None,
-        ):
+        ), _upstream_authority_stub():
             with self.assertRaisesRegex(
                 BetfairHistoricalMarketDefinitionOriginError,
                 "derivation dispatch was replaced",
@@ -548,12 +528,7 @@ class BetfairHistoricalMarketDefinitionOriginTests(unittest.TestCase):
         self.assertEqual(hostile.__code__.co_freevars, ())
         target.__code__ = hostile.__code__
         try:
-            with patch.object(
-                HistoricalProviderOriginWitness,
-                "assert_authoritative",
-                autospec=True,
-                return_value=None,
-            ):
+            with _upstream_authority_stub():
                 with self.assertRaisesRegex(
                     BetfairHistoricalMarketDefinitionOriginError,
                     "derivation dispatch was replaced",
@@ -569,6 +544,29 @@ class BetfairHistoricalMarketDefinitionOriginTests(unittest.TestCase):
             target.__code__ = original_code
 
         self.assertEqual(hostile_calls, [])
+
+
+    def test_parent_witness_method_rebinding_cannot_bless_child_origin(self) -> None:
+        raw = _raw(_line(1000, self.MARKET_ID, self.definition(status="OPEN", version=1)))
+        witness = self.witness(raw)
+
+        with patch.object(
+            HistoricalProviderOriginWitness,
+            "assert_authoritative",
+            autospec=True,
+            return_value=None,
+        ):
+            with self.assertRaisesRegex(
+                BetfairHistoricalMarketDefinitionOriginError,
+                "lacks live canonical provider-origin authority",
+            ):
+                bind_betfair_historical_market_definition_origin(
+                    witness=witness,
+                    raw_bytes=raw,
+                    market_id=self.MARKET_ID,
+                    cutoff_pt_ms=1000,
+                    package_tier=HistoricalPackageTier.PRO,
+                )
 
 
 if __name__ == "__main__":

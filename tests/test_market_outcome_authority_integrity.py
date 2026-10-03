@@ -533,5 +533,43 @@ class MarketOutcomeAuthorityIntegrityTests(unittest.TestCase):
         self.assertEqual(len(authority.terminal_states), 9)
 
 
+    def test_issuance_registry_containers_are_not_module_mutation_surfaces(self) -> None:
+        self.assertFalse(hasattr(market_outcomes_module, "_ISSUED_AUTHORITY_OBJECTS"))
+        self.assertFalse(hasattr(market_outcomes_module, "_ISSUED_AUTHORITY_DIGESTS"))
+
+    def test_issuance_registry_verifier_rebinding_fails_closed(self) -> None:
+        authority = self._authority()
+        original = market_outcomes_module._issued_authority_digest
+        market_outcomes_module._issued_authority_digest = lambda _authority: "0" * 64
+        try:
+            with self.assertRaisesRegex(
+                ValueError,
+                "issuance registry dispatch was replaced",
+            ):
+                authority.assert_issued_integrity()
+        finally:
+            market_outcomes_module._issued_authority_digest = original
+
+        authority.assert_issued_integrity()
+
+    def test_issuance_registry_canonical_alias_rebinding_fails_closed(self) -> None:
+        authority = self._authority()
+        original = market_outcomes_module._CANONICAL_ISSUED_AUTHORITY_DIGEST
+        market_outcomes_module._CANONICAL_ISSUED_AUTHORITY_DIGEST = (
+            lambda _authority: "0" * 64
+        )
+        try:
+            with self.assertRaisesRegex(
+                ValueError,
+                "issuance registry dispatch was replaced",
+            ):
+                authority.assert_issued_integrity()
+        finally:
+            market_outcomes_module._CANONICAL_ISSUED_AUTHORITY_DIGEST = original
+
+        authority.assert_issued_integrity()
+
+
+
 if __name__ == "__main__":
     unittest.main()

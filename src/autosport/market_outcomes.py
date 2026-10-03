@@ -18,10 +18,79 @@ _VERIFIED_AUTHORITY_ISSUANCE = contextvars.ContextVar(
     "autosport_market_outcome_authority_issuance",
     default=False,
 )
-_ISSUED_AUTHORITY_OBJECTS: weakref.WeakValueDictionary[int, object] = (
-    weakref.WeakValueDictionary()
+def _build_issued_authority_registry():
+    """Hide positive authority issuance membership from module-global mutation."""
+
+    issued_objects: weakref.WeakValueDictionary[int, object] = (
+        weakref.WeakValueDictionary()
+    )
+    issued_digests: dict[int, str] = {}
+
+    def register(authority: object, digest: str) -> None:
+        identity = id(authority)
+        issued_objects[identity] = authority
+        issued_digests[identity] = digest
+        weakref.finalize(authority, issued_digests.pop, identity, None)
+
+    def issued_digest(authority: object) -> str | None:
+        identity = id(authority)
+        if issued_objects.get(identity) is not authority:
+            return None
+        return issued_digests.get(identity)
+
+    return register, issued_digest
+
+
+_register_issued_authority, _issued_authority_digest = (
+    _build_issued_authority_registry()
 )
-_ISSUED_AUTHORITY_DIGESTS: dict[int, str] = {}
+del _build_issued_authority_registry
+
+_CANONICAL_REGISTER_ISSUED_AUTHORITY = _register_issued_authority
+_CANONICAL_REGISTER_ISSUED_AUTHORITY_CODE = getattr(
+    _CANONICAL_REGISTER_ISSUED_AUTHORITY,
+    "__code__",
+    None,
+)
+_CANONICAL_ISSUED_AUTHORITY_DIGEST = _issued_authority_digest
+_CANONICAL_ISSUED_AUTHORITY_DIGEST_CODE = getattr(
+    _CANONICAL_ISSUED_AUTHORITY_DIGEST,
+    "__code__",
+    None,
+)
+
+
+def _assert_canonical_issued_authority_registry_dispatch() -> None:
+    checks = (
+        (
+            _register_issued_authority,
+            _CANONICAL_REGISTER_ISSUED_AUTHORITY,
+            _CANONICAL_REGISTER_ISSUED_AUTHORITY_CODE,
+        ),
+        (
+            _issued_authority_digest,
+            _CANONICAL_ISSUED_AUTHORITY_DIGEST,
+            _CANONICAL_ISSUED_AUTHORITY_DIGEST_CODE,
+        ),
+    )
+    for current, expected, expected_code in checks:
+        if (
+            current is not expected
+            or getattr(expected, "__code__", None) is not expected_code
+        ):
+            raise ValueError(
+                "market outcome authority issuance registry dispatch was replaced"
+            )
+
+
+_CANONICAL_ISSUED_AUTHORITY_REGISTRY_GUARD = (
+    _assert_canonical_issued_authority_registry_dispatch
+)
+_CANONICAL_ISSUED_AUTHORITY_REGISTRY_GUARD_CODE = getattr(
+    _CANONICAL_ISSUED_AUTHORITY_REGISTRY_GUARD,
+    "__code__",
+    None,
+)
 _BETFAIR_SOURCE_ID = "betfair_exchange_historical"
 _BETFAIR_TABLE_TENNIS_EVENT_TYPE_ID = "2593174"
 _BETFAIR_MATCH_ODDS_TYPE = "MATCH_ODDS"
@@ -313,36 +382,58 @@ class MarketSettlementOutcomeAuthority:
         return _sha256_payload(self._identity_payload())
 
     def _register_issued_integrity(self) -> None:
-        identity = id(self)
-        digest = self._calculated_authority_sha256()
-        _ISSUED_AUTHORITY_OBJECTS[identity] = self
-        _ISSUED_AUTHORITY_DIGESTS[identity] = digest
-        weakref.finalize(
+        if (
+            _assert_canonical_issued_authority_registry_dispatch
+            is not _CANONICAL_ISSUED_AUTHORITY_REGISTRY_GUARD
+            or getattr(
+                _CANONICAL_ISSUED_AUTHORITY_REGISTRY_GUARD,
+                "__code__",
+                None,
+            )
+            is not _CANONICAL_ISSUED_AUTHORITY_REGISTRY_GUARD_CODE
+        ):
+            raise ValueError(
+                "market outcome authority issuance registry guard was replaced"
+            )
+        _CANONICAL_ISSUED_AUTHORITY_REGISTRY_GUARD()
+        _CANONICAL_REGISTER_ISSUED_AUTHORITY(
             self,
-            _ISSUED_AUTHORITY_DIGESTS.pop,
-            identity,
-            None,
+            self._calculated_authority_sha256(),
         )
 
     def assert_issued_integrity(self) -> None:
         """Require the exact still-unchanged authority issued by a verified adapter."""
 
-        identity = id(self)
-        if (
-            type(self) is not MarketSettlementOutcomeAuthority
-            or _ISSUED_AUTHORITY_OBJECTS.get(identity) is not self
-        ):
+        if type(self) is not MarketSettlementOutcomeAuthority:
             raise ValueError(
                 "market outcome authority is not the exact product-issued instance"
             )
-        issued_digest = _ISSUED_AUTHORITY_DIGESTS.get(identity)
+        if (
+            _assert_canonical_issued_authority_registry_dispatch
+            is not _CANONICAL_ISSUED_AUTHORITY_REGISTRY_GUARD
+            or getattr(
+                _CANONICAL_ISSUED_AUTHORITY_REGISTRY_GUARD,
+                "__code__",
+                None,
+            )
+            is not _CANONICAL_ISSUED_AUTHORITY_REGISTRY_GUARD_CODE
+        ):
+            raise ValueError(
+                "market outcome authority issuance registry guard was replaced"
+            )
+        _CANONICAL_ISSUED_AUTHORITY_REGISTRY_GUARD()
         try:
             current_digest = self._calculated_authority_sha256()
         except (AttributeError, TypeError, ValueError) as exc:
             raise ValueError(
                 "market outcome authority mutated after verified issuance"
             ) from exc
-        if issued_digest is None or current_digest != issued_digest:
+        issued_digest = _CANONICAL_ISSUED_AUTHORITY_DIGEST(self)
+        if issued_digest is None:
+            raise ValueError(
+                "market outcome authority is not the exact product-issued instance"
+            )
+        if current_digest != issued_digest:
             raise ValueError(
                 "market outcome authority mutated after verified issuance"
             )

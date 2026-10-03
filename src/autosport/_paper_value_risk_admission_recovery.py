@@ -15,6 +15,7 @@ from .json_integrity import strict_json_loads
 from .paper import PaperBook
 from .paper_execution_adoption import PaperExecutionAdoptionError, PaperExecutionAdoptionRuntime
 from .paper_strategy import PaperValueAgent
+from .risk import ProposedTicketRiskContext
 
 
 _PREPARE_SCHEMA = "autosport.paper_value.general_risk_admission.prepare"

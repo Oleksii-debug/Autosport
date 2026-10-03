@@ -746,10 +746,47 @@ class SQLiteMarketStore:
         ).fetchone()
         previous_event = _event_from_current_row(previous) if previous is not None else None
         if previous_event is not None:
+            # current_quotes is a derived acceleration structure, never semantic
+            # authority by itself. Prove its exact source payload still exists in
+            # authoritative history before using it as the stream witness.
+            history_witness = self.connection.execute(
+                f"SELECT {_HISTORY_COLUMNS_SQL} FROM market_events WHERE dedupe_key=?",
+                (previous_event.dedupe_key,),
+            ).fetchone()
+            if history_witness is None:
+                raise ValueError(
+                    "current market quote projection is not backed by authoritative history"
+                )
+            history_event = _event_from_history_row(history_witness)
+            if _source_payload(history_event) != _source_payload(previous_event):
+                raise ValueError(
+                    "current market quote projection conflicts with authoritative history"
+                )
             _assert_stream_semantic_identity(
-                _stream_semantic_identity(previous_event),
+                _stream_semantic_identity(history_event),
                 event,
             )
+        else:
+            # A missing/corrupt projection row must not erase immutable stream
+            # semantics. The incoming history row was inserted above, so exclude it
+            # and reconstruct the semantic witness from all prior authoritative rows.
+            prior_rows = self.connection.execute(
+                f"""SELECT {_HISTORY_COLUMNS_SQL} FROM market_events
+                    WHERE source_id=? AND quote_key=? AND dedupe_key<>?""",
+                (event.source_id, event.quote_key, event.dedupe_key),
+            ).fetchall()
+            expected_semantics: tuple[str, str | None] | None = None
+            for prior_row in prior_rows:
+                prior_event = _event_from_history_row(prior_row)
+                if expected_semantics is None:
+                    expected_semantics = _stream_semantic_identity(prior_event)
+                else:
+                    _assert_stream_semantic_identity(
+                        expected_semantics,
+                        prior_event,
+                    )
+            if expected_semantics is not None:
+                _assert_stream_semantic_identity(expected_semantics, event)
         if previous_event is None or incoming_key > _projection_order_key(previous_event):
             self.connection.execute(
                 """INSERT INTO current_quotes

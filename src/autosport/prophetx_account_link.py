@@ -160,7 +160,22 @@ def _canonical_text(value: object, name: str, *, max_length: int = 4096) -> str:
 
 
 def _secret_text(value: object, name: str) -> str:
-    return _canonical_text(value, name, max_length=16384)
+    """Validate an opaque secret without normalizing its provider-significant text."""
+
+    if type(value) is not str:
+        raise AccountLinkInputError(f"{name} must be text")
+    if (
+        not value
+        or not value.strip()
+        or "\x00" in value
+        or len(value) > 16384
+    ):
+        raise AccountLinkInputError(f"{name} is invalid")
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise AccountLinkInputError(f"{name} is invalid") from exc
+    return value
 
 
 def _opaque_ref(value: object) -> bool:

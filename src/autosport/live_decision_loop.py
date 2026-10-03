@@ -971,6 +971,7 @@ class PersistentLiveDecisionLoop:
                     mirror_updates=updates,
                     max_items=self.bounds.observation_max_items,
                     policy=self.ingestion_policy,
+                    clock=self.clock,
                 )
 
             self._observe = _default_observer

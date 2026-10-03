@@ -295,3 +295,19 @@ def test_price_only_request_never_needs_completion() -> None:
     assert value.snapshot().active == ()
     with pytest.raises(ValueError, match="not an active"):
         value.complete("price", observed_at=T0)
+
+
+def test_local_gate_never_claims_complete_provider_limit_or_dispatch_authority() -> None:
+    value = gate()
+
+    projected = begin_projected(value, "projected")
+    price_only = value.begin(
+        "price-only",
+        observed_at=T0,
+        has_order_projection=False,
+        has_match_projection=False,
+    )
+
+    for decision in (projected, price_only):
+        assert decision.provider_limit_coverage_complete is False
+        assert decision.provider_dispatch_authorized is False

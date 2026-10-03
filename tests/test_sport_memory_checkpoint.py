@@ -280,6 +280,104 @@ def test_runtime_publish_recovers_commit_after_local_bytes_were_published(
     assert history[0].participant_entity_id == "p-alex"
 
 
+def test_missing_activated_runtime_history_cannot_be_rebaselined(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    authority_root = tmp_path.parent / f".{tmp_path.name}-sport-memory-authority"
+    monkeypatch.setenv("AUTOSPORT_MONOTONIC_AUTHORITY_ROOT", str(authority_root))
+    identity, opponent = _canonical_stores(tmp_path)
+    checkpoint_path, runtime_path = _paths(tmp_path)
+    initialize_or_open_bound_sport_memory_runtime(
+        runtime_path,
+        checkpoint_path,
+        identity,
+        opponent,
+    )
+
+    authority = checkpoint_module._runtime_monotonic_authority(runtime_path)
+    records = tuple(authority.records_dir.glob("*.json"))
+    assert records
+    for record in records:
+        record.unlink()
+
+    reopened_identity = ParticipantIdentityRegistry(identity.path)
+    reopened_opponent = OpponentIntelligenceStore(
+        opponent.path,
+        reopened_identity,
+    )
+    with pytest.raises(
+        SportMemoryCheckpointError,
+        match="monotonic authority history is invalid",
+    ):
+        open_bound_sport_memory_runtime(
+            runtime_path,
+            checkpoint_path,
+            reopened_identity,
+            reopened_opponent,
+        )
+
+
+def test_runtime_publish_retries_with_new_generation_after_prepare_only_crash(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    authority_root = tmp_path.parent / f".{tmp_path.name}-sport-memory-authority"
+    monkeypatch.setenv("AUTOSPORT_MONOTONIC_AUTHORITY_ROOT", str(authority_root))
+    identity, opponent = _canonical_stores(tmp_path, populated=True)
+    checkpoint_path, runtime_path = _paths(tmp_path)
+    runtime = initialize_or_open_bound_sport_memory_runtime(
+        runtime_path,
+        checkpoint_path,
+        identity,
+        opponent,
+    )
+
+    original_persist = SportMemoryRuntime._persist
+    failed = False
+
+    def fail_once_before_local_publish(self):
+        nonlocal failed
+        if not failed:
+            failed = True
+            raise RuntimeError("injected pre-publication failure")
+        return original_persist(self)
+
+    monkeypatch.setattr(
+        SportMemoryRuntime,
+        "_persist",
+        fail_once_before_local_publish,
+    )
+    with pytest.raises(RuntimeError, match="injected pre-publication failure"):
+        runtime.materialize(
+            participant_entity_id="p-alex",
+            scope=_scope(),
+            causal_cutoff=T2,
+            published_at=T3,
+            code_sha256=SHA_A,
+            dependency_sha256=SHA_B,
+            min_support=1,
+        )
+
+    monkeypatch.setattr(SportMemoryRuntime, "_persist", original_persist)
+    artifact = runtime.materialize(
+        participant_entity_id="p-alex",
+        scope=_scope(),
+        causal_cutoff=T2,
+        published_at=T3,
+        code_sha256=SHA_A,
+        dependency_sha256=SHA_B,
+        min_support=1,
+    )
+    assert runtime.get(artifact.memory_id) == artifact
+
+    authority = checkpoint_module._runtime_monotonic_authority(runtime_path)
+    history = authority.read_history()
+    generations = [record.generation for record in history]
+    assert generations == sorted(generations)
+    assert max(generations) >= 3
+
+
 def test_bound_runtime_consumes_fresh_authority_after_canonical_files_change(tmp_path):
     identity, opponent = _canonical_stores(tmp_path)
 

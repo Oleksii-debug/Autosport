@@ -61,6 +61,50 @@ class ExecutionQuoteChainUnavailable(ExecutionQuoteChainError):
     """Requested plan/attempt cannot be projected from canonical durable facts."""
 
 
+class _ExecutionQuoteChainEvidenceMeta(type):
+    """Prevent ordinary runtime replacement of public authority-bearing surfaces."""
+
+    _sealed_classes: set[type] = set()
+    _protected_names = frozenset(
+        {
+            "assert_projection_issued",
+            "submit_instruction_identity_bound",
+            "provider_request_correlation_bound",
+            "actual_submitted_instruction_bound",
+            "accepted_price_verified",
+            "chain_complete",
+            "evidence_sha256",
+            "to_dict",
+        }
+    )
+
+    def __setattr__(cls, name: str, value: object) -> None:
+        if cls in self_meta_sealed(cls) and name in self_meta_protected(cls):
+            raise TypeError(
+                "quote-chain evidence authority surface is sealed: " + name
+            )
+        super().__setattr__(name, value)
+
+    def __delattr__(cls, name: str) -> None:
+        if cls in self_meta_sealed(cls) and name in self_meta_protected(cls):
+            raise TypeError(
+                "quote-chain evidence authority surface is sealed: " + name
+            )
+        super().__delattr__(name)
+
+    @classmethod
+    def seal(mcls, cls: type) -> None:
+        mcls._sealed_classes.add(cls)
+
+
+def self_meta_sealed(cls: type) -> set[type]:
+    return type(cls)._sealed_classes
+
+
+def self_meta_protected(cls: type) -> frozenset[str]:
+    return type(cls)._protected_names
+
+
 def _require_canonical_verified_execution_view_dispatch(
     ledger: RealExecutionLedger,
 ) -> None:
@@ -101,7 +145,7 @@ def _read_canonical_verified_execution_view(
 
 
 @dataclass(frozen=True, slots=True, weakref_slot=True)
-class ExecutionQuoteChainEvidence:
+class ExecutionQuoteChainEvidence(metaclass=_ExecutionQuoteChainEvidenceMeta):
     """One immutable, snapshot-bound quote-chain diagnostic.
 
     The class intentionally exposes no caller-settable `chain_complete` or
@@ -537,6 +581,7 @@ def build_execution_quote_chain_evidence(
 def _install_quote_chain_evidence_authority() -> None:
     """Keep the only issuance registry and mint path outside module globals."""
 
+    canonical_evidence_type = ExecutionQuoteChainEvidence
     raw_builder = build_execution_quote_chain_evidence
     raw_to_dict = ExecutionQuoteChainEvidence.to_dict
     digest = _digest
@@ -627,11 +672,22 @@ def _install_quote_chain_evidence_authority() -> None:
         attempt_id: str,
     ) -> ExecutionQuoteChainEvidence:
         nonlocal issued_snapshot
+        if globals().get("ExecutionQuoteChainEvidence") is not canonical_evidence_type:
+            raise ExecutionQuoteChainError(
+                "quote-chain evidence class authority is unavailable"
+            )
         evidence = raw_builder(
             ledger,
             plan_id=plan_id,
             attempt_id=attempt_id,
         )
+        if (
+            globals().get("ExecutionQuoteChainEvidence") is not canonical_evidence_type
+            or type(evidence) is not canonical_evidence_type
+        ):
+            raise ExecutionQuoteChainError(
+                "quote-chain evidence class authority is unavailable"
+            )
         identity = id(evidence)
 
         def discard(reference: ReferenceType[ExecutionQuoteChainEvidence]) -> None:
@@ -687,6 +743,7 @@ def _install_quote_chain_evidence_authority() -> None:
     ExecutionQuoteChainEvidence.evidence_sha256 = property(evidence_sha256)
     ExecutionQuoteChainEvidence.to_dict = to_dict
     globals()["build_execution_quote_chain_evidence"] = issue
+    _ExecutionQuoteChainEvidenceMeta.seal(ExecutionQuoteChainEvidence)
 
 
 _install_quote_chain_evidence_authority()

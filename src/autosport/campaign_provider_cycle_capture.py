@@ -1184,11 +1184,6 @@ def capture_campaign_complete_game_board(
     except base_exception as exc:
         if not terminal_written:
             try:
-                try:
-                    raw_failure_completed_at = effective_clock()
-                except base_exception:
-                    raw_failure_completed_at = attempted_at
-                instant_function = _CANONICAL_GETATTR(instant, "__func__", instant)
                 finish_function = _CANONICAL_GETATTR(finish_cycle, "__func__", finish_cycle)
                 require_seams_function = _CANONICAL_GETATTR(
                     require_seams,
@@ -1211,9 +1206,6 @@ def capture_campaign_complete_game_board(
                     or module_globals.get("_CANONICAL_SORTED") is not expected_sorted
                     or module_globals.get("_CANONICAL_TYPE_ERROR")
                     is not expected_type_error_alias
-                    or module_globals.get("_instant") is not instant
-                    or _CANONICAL_GETATTR(instant_function, "__code__", None)
-                    is not expected_instant_code
                     or module_globals.get("_FINISH_CYCLE") is not finish_cycle
                     or _CANONICAL_GETATTR(finish_function, "__code__", None)
                     is not expected_finish_code
@@ -1222,21 +1214,12 @@ def capture_campaign_complete_game_board(
                         "campaign provider-cycle failure terminal dispatch changed"
                     )
                 require_seams(store, evidence_store)
-                try:
-                    failure_completed_at = instant(
-                        raw_failure_completed_at,
-                        "collector failure completed_at",
-                    )
-                except (type_error, value_error):
-                    failure_completed_at = attempted_at
-                if failure_completed_at < attempted_at:
-                    failure_completed_at = attempted_at
                 finish_cycle(
                     store,
                     source_id=source_spec.source_id,
                     cycle_seq=cycle_seq,
                     status="LOCAL_FAILURE",
-                    completed_at=failure_completed_at,
+                    completed_at=attempted_at,
                     catalog_changes=(),
                     observed_delta_ids=(),
                     committed_delta_ids=(),

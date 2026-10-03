@@ -9,6 +9,7 @@ non-expanding successor of the already persisted owner contract.
 from __future__ import annotations
 
 from decimal import Decimal, InvalidOperation
+import json
 import os
 from pathlib import Path
 import stat
@@ -83,6 +84,107 @@ _RESTRICTION_FIELDS: Final = (
     "blocked_providers",
     "blocked_markets",
 )
+
+
+def _open_exclusive_write_descriptor(path: Path) -> int:
+    """Create the final owner-authority pathname without following aliases."""
+
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
+    if os.name != "nt":
+        no_follow = getattr(os, "O_NOFOLLOW", 0)
+        if not no_follow:
+            raise OSError("platform lacks no-follow economic-goal creation support")
+        return os.open(path, flags | no_follow, 0o600)
+
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    create_file = ctypes.WinDLL("kernel32", use_last_error=True).CreateFileW
+    create_file.argtypes = (
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    )
+    create_file.restype = wintypes.HANDLE
+
+    generic_write = 0x40000000
+    file_share_read = 0x00000001
+    create_new = 1
+    file_attribute_normal = 0x00000080
+    file_flag_open_reparse_point = 0x00200000
+    invalid_handle_value = ctypes.c_void_p(-1).value
+
+    kernel_handle = create_file(
+        str(path),
+        generic_write,
+        file_share_read,
+        None,
+        create_new,
+        file_attribute_normal | file_flag_open_reparse_point,
+        None,
+    )
+    if kernel_handle == invalid_handle_value:
+        error_code = ctypes.get_last_error()
+        if error_code in (80, 183):  # ERROR_FILE_EXISTS / ERROR_ALREADY_EXISTS
+            raise FileExistsError(
+                error_code,
+                "economic goal authority path already exists",
+                str(path),
+            )
+        raise ctypes.WinError(error_code)
+
+    close_handle = ctypes.WinDLL("kernel32", use_last_error=True).CloseHandle
+    close_handle.argtypes = (wintypes.HANDLE,)
+    close_handle.restype = wintypes.BOOL
+    try:
+        return msvcrt.open_osfhandle(kernel_handle, flags)
+    except BaseException:
+        close_handle(kernel_handle)
+        raise
+
+
+def _exclusive_create_owner_contract(path: Path, payload: dict[str, object]) -> None:
+    """Publish the initial owner authority once, never by pathname replacement."""
+
+    try:
+        encoded = (
+            json.dumps(
+                payload,
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+                allow_nan=False,
+            )
+            + "\n"
+        ).encode("utf-8")
+    except (TypeError, ValueError, UnicodeError) as exc:
+        raise EconomicGoalContractError(
+            "owner economic goal is not canonical JSON"
+        ) from exc
+    if len(encoded) > _MAX_ECONOMIC_GOAL_BYTES:
+        raise EconomicGoalContractError(
+            "owner economic goal exceeds the bounded authority size"
+        )
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor: int | None = None
+    try:
+        descriptor = _open_exclusive_write_descriptor(path)
+        written = 0
+        while written < len(encoded):
+            count = os.write(descriptor, encoded[written:])
+            if count <= 0:
+                raise OSError("economic goal authority write made no progress")
+            written += count
+        os.fsync(descriptor)
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
 
 
 def _open_read_only_descriptor(path: Path) -> int:
@@ -444,23 +546,27 @@ class EconomicGoalStore:
         return self.load()
 
     def initialize_owner(self, contract: EconomicGoalContract) -> None:
-        """Create the first owner contract while holding the economic writer lock."""
+        """Create the first owner contract without any final-path replacement."""
 
+        if not isinstance(contract, EconomicGoalContract):
+            raise TypeError("owner contract must be an EconomicGoalContract")
         with WorkspaceEconomicLock(self.workspace):
             try:
-                self.path.lstat()
-            except FileNotFoundError:
-                pass
-            except OSError as exc:
-                raise EconomicGoalContractError(
-                    "cannot inspect persisted economic goal path"
-                ) from exc
-            else:
+                _exclusive_create_owner_contract(
+                    self.path,
+                    economic_goal_to_payload(contract),
+                )
+            except FileExistsError as exc:
                 raise EconomicGoalContractError(
                     "persisted economic goal already exists; owner replacement requires "
                     "a separate authority boundary"
-                )
-            atomic_write_json(self.path, economic_goal_to_payload(contract))
+                ) from exc
+            except EconomicGoalContractError:
+                raise
+            except OSError as exc:
+                raise EconomicGoalContractError(
+                    "cannot create persisted economic goal authority"
+                ) from exc
 
     def persist_automatic_successor(self, candidate: EconomicGoalContract) -> None:
         """Publish one machine revision only when durable authority cannot expand."""

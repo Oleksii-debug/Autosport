@@ -311,20 +311,16 @@ class DurableRealizedExposureScopeTests(unittest.TestCase):
 
             ticket_id = result.ticket_ids[0]
             ticket = book.tickets[ticket_id]
+            durable_before = book_path.read_bytes()
             book.tickets[ticket_id] = replace(ticket, currency="GBP")
-            book.save(book_path)
 
             with self.assertRaisesRegex(
-                MultiLegExposureProjectionError,
-                "economic scope",
+                ValueError,
+                "opening economic identity changed after admission",
             ):
-                project_multileg_realized_exposure(
-                    ledger=ledger,
-                    plan=plan,
-                    config=config,
-                    run_id=result.run.run_id,
-                    paper_book_path=book_path,
-                )
+                book.save(book_path)
+
+            self.assertEqual(book_path.read_bytes(), durable_before)
 
     def test_direct_623_run_remains_explicitly_unscoped(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

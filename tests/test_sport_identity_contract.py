@@ -279,8 +279,8 @@ class SportIdentityContractTests(unittest.TestCase):
                 for item_leg in item["legs"]:
                     item_leg.pop("sport", None)
                     item_leg.pop("exchange_side", None)
-            path.write_text(json.dumps(raw), encoding="utf-8")
-            legacy = PaperBook.load(path)
+            legacy_payload = json.dumps(raw).encode("utf-8")
+            legacy = PaperBook.load_bytes(legacy_payload)
             self.assertIsNone(legacy.tickets[ticket.ticket_id].legs[0].sport)
 
     def test_encoded_sport_identity_cannot_alias_legacy_pipe_identity(self) -> None:

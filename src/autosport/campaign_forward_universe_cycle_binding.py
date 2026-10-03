@@ -474,6 +474,11 @@ class CampaignForwardEvidenceVerification:
             raise CampaignForwardUniverseCycleBindingError(
                 "structural result codes must be canonical VerificationCode values"
             )
+        structural_pass = structural_result.codes == (VerificationCode.PASS,)
+        if structural_result.ok is not structural_pass:
+            raise CampaignForwardUniverseCycleBindingError(
+                "structural result ok flag conflicts with canonical verification codes"
+            )
         if (
             type(structural_result.candidate_count) is not int
             or structural_result.candidate_count < 0

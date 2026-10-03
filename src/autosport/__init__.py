@@ -160,6 +160,16 @@ from . import _trial_family_cross_ledger_witness as _trial_family_cross_ledger_w
 # authority through the legacy generic trial-event append seam.
 from . import _trial_family_witness_mint_guard as _trial_family_witness_mint_guard  # noqa: F401,E402
 
+# #708 consumes the already-durable #727 RUN_RESERVED decision origin. Reconcile
+# the provisional admission facade first, derive one explicit versioned decision-time
+# learning Observation contract, then closure-seal every authority-bearing read.
+from . import _paper_campaign_admission_origin_convergence as _paper_campaign_admission_origin_convergence  # noqa: F401,E402
+from . import _paper_campaign_admission_preexecution_observation as _paper_campaign_admission_preexecution_observation  # noqa: F401,E402
+from . import _paper_campaign_admission_consumer_guard as _paper_campaign_admission_consumer_guard  # noqa: F401,E402
+# Extend that same executable seal through canonical PaperBook ticket resolution;
+# no new ticket/source authority is introduced here.
+from . import _paper_campaign_admission_ticket_resolution_guard as _paper_campaign_admission_ticket_resolution_guard  # noqa: F401,E402
+
 # Product PolicyEvaluation issuance already exact-fences the FactoryArtifactStore
 # surface. Seal the lower canonical file reader that _stable_snapshot dispatches to
 # so a class/module rebind cannot inject forged bytes beneath that trusted surface.

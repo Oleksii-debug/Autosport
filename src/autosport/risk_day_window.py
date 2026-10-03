@@ -833,9 +833,11 @@ def _require_held_workspace_lock(
             "current-day revalidation requires the canonical held workspace economic lock"
         )
     try:
-        expected_descriptor = dict(_WORKSPACE_LOCK_DISPATCH_WITNESSES)[
-            "_validate_open_handle_identity"
-        ]
+        expected_descriptor = next(
+            descriptor
+            for name, descriptor, _code in _WORKSPACE_LOCK_DISPATCH_WITNESSES
+            if name == "_validate_open_handle_identity"
+        )
         expected_validator = expected_descriptor
         if type(expected_descriptor) is staticmethod:
             expected_validator = expected_descriptor.__func__

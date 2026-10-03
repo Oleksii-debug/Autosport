@@ -428,9 +428,10 @@ class DeploymentRuntimeAuthorityStore:
     )
 
     def __setattr__(self, name: str, value: object) -> None:
+        write_once = DeploymentRuntimeAuthorityStore._WRITE_ONCE_AUTHORITY_BINDINGS
         if (
-            name in self._WRITE_ONCE_AUTHORITY_BINDINGS
-            and name in vars(self)
+            name == "_WRITE_ONCE_AUTHORITY_BINDINGS"
+            or (name in write_once and name in vars(self))
         ):
             raise AttributeError(
                 "deployment runtime authority bindings are write-once"
@@ -438,7 +439,11 @@ class DeploymentRuntimeAuthorityStore:
         object.__setattr__(self, name, value)
 
     def __delattr__(self, name: str) -> None:
-        if name in self._WRITE_ONCE_AUTHORITY_BINDINGS and name in vars(self):
+        write_once = DeploymentRuntimeAuthorityStore._WRITE_ONCE_AUTHORITY_BINDINGS
+        if (
+            name == "_WRITE_ONCE_AUTHORITY_BINDINGS"
+            or (name in write_once and name in vars(self))
+        ):
             raise AttributeError(
                 "deployment runtime authority bindings are write-once"
             )

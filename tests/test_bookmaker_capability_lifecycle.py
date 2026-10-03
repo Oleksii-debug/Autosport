@@ -4,6 +4,7 @@ import json
 import pytest
 
 import autosport.betdaq_account_readonly as betdaq_account_module
+import autosport.bookmaker_capability_lifecycle as lifecycle_module
 from autosport.betdaq_account_readonly import (
     BetdaqAccountReadOnlyClient,
     BetdaqCredentials,
@@ -301,6 +302,42 @@ def test_copied_betdaq_issuance_payload_cannot_reuse_process_local_provenance(
     journal = CapabilityEvidenceJournal()
     journal.publish(copied)
 
+    decision = journal.resolve(
+        _betdaq_authenticated_requirement(issuance),
+        {issuance.profile.profile_id: issuance.profile},
+        as_of="2026-09-21T10:02:00+00:00",
+    )
+
+    assert not decision.allowed
+    assert decision.lifecycle is CapabilityLifecycleState.REVALIDATION_REQUIRED
+    assert "product-owned upstream authority" in decision.reason
+
+
+def test_caller_cannot_self_register_authenticated_positive_provenance(
+    monkeypatch,
+):
+    issuance, _ = _betdaq_authenticated_issuance(monkeypatch)
+    copied = CapabilityEvidence(
+        **{
+            field: getattr(issuance.evidence, field)
+            for field in issuance.evidence.__dataclass_fields__
+            if field != "__weakref__"
+        }
+    )
+    assert copied.evidence_id == issuance.evidence.evidence_id
+
+    # Product-positive authority must have no caller-addressable registry or mark
+    # operation. The only supported way to obtain the process-local mark is the
+    # canonical issuer, which performs the BETDAQ acquisition before marking.
+    assert not hasattr(lifecycle_module, "_PRODUCT_ISSUED_POSITIVE")
+    assert not hasattr(lifecycle_module, "_remember_product_issued")
+    assert not hasattr(
+        lifecycle_module,
+        "_issue_betdaq_authenticated_capability_evidence_unsealed",
+    )
+
+    journal = CapabilityEvidenceJournal()
+    journal.publish(copied)
     decision = journal.resolve(
         _betdaq_authenticated_requirement(issuance),
         {issuance.profile.profile_id: issuance.profile},

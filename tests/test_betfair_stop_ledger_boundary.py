@@ -53,3 +53,15 @@ def test_stop_denial_never_crosses_submitted_uncertainty_boundary(monkeypatch) -
 
         assert transport.calls == []
         assert ledger.attempt_state(attempt_id) is AttemptState.RESERVED
+        execution_view = ledger.verified_execution_view(
+            bound.execution_plan.plan_id
+        )
+        reserved_attempt = next(
+            attempt
+            for attempt in execution_view.attempts
+            if attempt.attempt_id == attempt_id
+        )
+        assert reserved_attempt.submitted_at is None
+        assert reserved_attempt.submitted_request_sha256 is None
+        assert reserved_attempt.provider_evidence is None
+        assert reserved_attempt.acknowledgement is None

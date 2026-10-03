@@ -2725,3 +2725,82 @@ def test_runtime_authority_pristine_bypasses_replaced_store_new(
 
     assert hostile_calls == []
     assert store.records() == ()
+
+
+def test_runtime_authority_rejects_path_read_descriptor_replacement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "deployment-runtime-authority.json"
+    store = DeploymentRuntimeAuthorityStore.initialize_pristine(
+        path,
+        authority_root=_authority_root(tmp_path),
+    )
+    path_type = type(store.path)
+    hostile_calls: list[object] = []
+
+    def hostile_read_text(self: object, *args: object, **kwargs: object) -> str:
+        hostile_calls.append((self, args, kwargs))
+        raise AssertionError("hostile path reader executed")
+
+    monkeypatch.setattr(path_type, "read_text", hostile_read_text)
+    with pytest.raises(
+        DeploymentRuntimeAuthorityError,
+        match="path read dispatch was replaced|binding integrity mismatch",
+    ):
+        store.records()
+
+    assert hostile_calls == []
+
+
+def test_runtime_authority_rejects_path_read_code_replacement(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "deployment-runtime-authority.json"
+    store = DeploymentRuntimeAuthorityStore.initialize_pristine(
+        path,
+        authority_root=_authority_root(tmp_path),
+    )
+    target = type(store.path).read_text
+    original_code = target.__code__
+
+    def hostile_read_text(self: object, *args: object, **kwargs: object) -> str:
+        del self, args, kwargs
+        raise AssertionError("hostile path reader code executed")
+
+    assert hostile_read_text.__code__.co_freevars == original_code.co_freevars
+    target.__code__ = hostile_read_text.__code__
+    try:
+        with pytest.raises(
+            DeploymentRuntimeAuthorityError,
+            match="path read dispatch was replaced|binding integrity mismatch",
+        ):
+            store.records()
+    finally:
+        target.__code__ = original_code
+
+
+@pytest.mark.parametrize("method_name", ("expanduser", "resolve"))
+def test_runtime_authority_rejects_path_construction_dispatch_replacement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    method_name: str,
+) -> None:
+    concrete = type(Path("."))
+    hostile_calls: list[object] = []
+
+    def hostile(self: object, *args: object, **kwargs: object) -> object:
+        hostile_calls.append((self, args, kwargs))
+        raise AssertionError("hostile path construction dispatch executed")
+
+    monkeypatch.setattr(concrete, method_name, hostile)
+    with pytest.raises(
+        DeploymentRuntimeAuthorityError,
+        match="path dispatch was replaced",
+    ):
+        DeploymentRuntimeAuthorityStore.initialize_pristine(
+            tmp_path / "deployment-runtime-authority.json",
+            authority_root=_authority_root(tmp_path),
+        )
+
+    assert hostile_calls == []

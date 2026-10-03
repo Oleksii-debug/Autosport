@@ -17,7 +17,7 @@ from .real_execution_ledger import (
     VerifiedExecutionLedgerSnapshot,
 )
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 SOURCE_ROOT_AUTHORITY_UNQUALIFIED = "UNQUALIFIED_CALLER_SELECTED_LEDGER"
 EVALUATION_PROTOCOL_AUTHORITY_UNQUALIFIED = "UNQUALIFIED_CALLER_PROTOCOL_DIGEST"
@@ -50,6 +50,7 @@ _CENSOR_REASON_BY_STATE = {
     AttemptState.UNKNOWN: "UNKNOWN_EXTERNAL_EFFECT",
     AttemptState.RECONCILED_NOT_FOUND: "RECONCILED_NOT_FOUND_UNVERIFIED_ABSENCE_AUTHORITY",
 }
+_UNKNOWN_RECONCILED_FOUND_CENSOR_REASON = "UNKNOWN_RECONCILED_FOUND_AWAITING_ACK"
 
 
 class EmpiricalExecutionEvidenceError(RuntimeError):
@@ -262,6 +263,7 @@ class EmpiricalExecutionEvidence:
     reconciliation_evidence_source: str | None
     reconciliation_evidence_observed_at: str | None
     reconciliation_external_effect_found: bool | None
+    reconciliation_external_receipt_id: str | None
 
     requested_odds: Decimal
     requested_stake: Decimal
@@ -352,6 +354,10 @@ class EmpiricalExecutionEvidence:
         )
         _optional_text(self.reconciliation_evidence_id, "reconciliation_evidence_id")
         _optional_text(self.reconciliation_evidence_source, "reconciliation_evidence_source")
+        _optional_text(
+            self.reconciliation_external_receipt_id,
+            "reconciliation_external_receipt_id",
+        )
 
         if type(self.source_event_count) is not int or self.source_event_count < 1:
             raise EmpiricalExecutionEvidenceError("source_event_count must be positive int")
@@ -460,8 +466,23 @@ class EmpiricalExecutionEvidence:
                         raise EmpiricalExecutionEvidenceError(
                             "positive reconciliation requires external receipt identity"
                         )
+                    if (
+                        self.reconciliation_external_receipt_id
+                        != self.external_receipt_id
+                    ):
+                        raise EmpiricalExecutionEvidenceError(
+                            "positive reconciliation receipt must match acknowledgement"
+                        )
         else:
-            expected_reason = _CENSOR_REASON_BY_STATE.get(state)
+            expected_reason = (
+                _UNKNOWN_RECONCILED_FOUND_CENSOR_REASON
+                if (
+                    state is AttemptState.UNKNOWN
+                    and reconciliation_present
+                    and self.reconciliation_external_effect_found is True
+                )
+                else _CENSOR_REASON_BY_STATE.get(state)
+            )
             if expected_reason is None:
                 raise EmpiricalExecutionEvidenceError(
                     "unsupported nonterminal attempt state"
@@ -502,6 +523,19 @@ class EmpiricalExecutionEvidence:
                 if self.reconciliation_external_effect_found is not False:
                     raise EmpiricalExecutionEvidenceError(
                         "unverified RECONCILED_NOT_FOUND requires external_effect_found=false"
+                    )
+                if self.reconciliation_external_receipt_id is not None:
+                    raise EmpiricalExecutionEvidenceError(
+                        "not-found reconciliation cannot claim receipt identity"
+                    )
+            elif state is AttemptState.UNKNOWN and reconciliation_present:
+                if self.reconciliation_external_effect_found is not True:
+                    raise EmpiricalExecutionEvidenceError(
+                        "UNKNOWN reconciliation evidence must prove external effect found"
+                    )
+                if self.reconciliation_external_receipt_id is None:
+                    raise EmpiricalExecutionEvidenceError(
+                        "positive UNKNOWN reconciliation requires receipt identity"
                     )
             elif reconciliation_present:
                 raise EmpiricalExecutionEvidenceError(
@@ -718,6 +752,7 @@ class EmpiricalExecutionEvidence:
             "reconciliation_evidence_source": self.reconciliation_evidence_source,
             "reconciliation_evidence_observed_at": self.reconciliation_evidence_observed_at,
             "reconciliation_external_effect_found": self.reconciliation_external_effect_found,
+            "reconciliation_external_receipt_id": self.reconciliation_external_receipt_id,
             "requested_odds": _decimal_text(self.requested_odds),
             "requested_stake": _decimal_text(self.requested_stake),
             "slippage_status": self.slippage_status,
@@ -946,6 +981,7 @@ def build_empirical_execution_evidence(
         else None
     )
     reconciliation_external_effect_found: bool | None = None
+    reconciliation_external_receipt_id: str | None = None
     if reconciliation is not None:
         if reconciliation.attempt_id != attempt:
             raise EmpiricalExecutionEvidenceUnavailable(
@@ -986,6 +1022,26 @@ def build_empirical_execution_evidence(
             )
         reconciliation = positive_reconciliation
         reconciliation_external_effect_found = True
+        reconciliation_external_receipt_id = (
+            positive_reconciliation.external_receipt_id
+        )
+    elif state is AttemptState.UNKNOWN and positive_reconciliation_events:
+        if len(positive_reconciliation_events) != 1:
+            raise EmpiricalExecutionEvidenceUnavailable(
+                "UNKNOWN attempt has ambiguous positive reconciliation lineage"
+            )
+        positive_reconciliation = RealExecutionLedger._found_reconciliation_from_dict(
+            positive_reconciliation_events[0]["payload"]
+        )
+        if positive_reconciliation.attempt_id != attempt:
+            raise EmpiricalExecutionEvidenceUnavailable(
+                "positive reconciliation attempt identity mismatch"
+            )
+        reconciliation = positive_reconciliation
+        reconciliation_external_effect_found = True
+        reconciliation_external_receipt_id = (
+            positive_reconciliation.external_receipt_id
+        )
 
     requested_odds = _decimal(action.get("requested_odds"), "requested_odds")
     requested_stake = _decimal(action.get("requested_stake"), "requested_stake")
@@ -1024,7 +1080,14 @@ def build_empirical_execution_evidence(
         )
 
     right_censored = state in _CENSOR_REASON_BY_STATE
-    censor_reason = _CENSOR_REASON_BY_STATE.get(state) if right_censored else None
+    censor_reason = (
+        _UNKNOWN_RECONCILED_FOUND_CENSOR_REASON
+        if (
+            state is AttemptState.UNKNOWN
+            and reconciliation_external_effect_found is True
+        )
+        else (_CENSOR_REASON_BY_STATE.get(state) if right_censored else None)
+    )
     censor_cutoff_recorded_at = (
         _text(events[-1].get("recorded_at"), "censor_cutoff_recorded_at")
         if right_censored
@@ -1093,6 +1156,9 @@ def build_empirical_execution_evidence(
         reconciliation_external_effect_found=(
             reconciliation_external_effect_found
         ),
+        reconciliation_external_receipt_id=(
+            reconciliation_external_receipt_id
+        ),
         requested_odds=requested_odds,
         requested_stake=requested_stake,
         slippage_status=slippage_status,
@@ -1119,7 +1185,7 @@ def build_empirical_execution_evidence(
     return evidence
 
 
-POPULATION_SCHEMA_VERSION = 7
+POPULATION_SCHEMA_VERSION = 8
 
 
 @dataclass(frozen=True, slots=True, weakref_slot=True, init=False)

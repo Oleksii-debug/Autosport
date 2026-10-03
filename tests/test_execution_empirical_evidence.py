@@ -286,6 +286,42 @@ def test_unknown_attempt_is_retained_with_explicit_censor_reason(tmp_path):
     assert evidence.acknowledged_at is None
 
 
+def test_unknown_positive_reconciliation_is_retained_pending_terminal_ack(tmp_path):
+    ledger = _ledger(tmp_path)
+    ledger.mark_unknown(
+        "attempt-1",
+        reason="provider timeout after submission",
+        observed_at="2026-09-21T10:00:02+00:00",
+    )
+    ledger.reconcile_found(
+        ExternalEffectReconciliation(
+            attempt_id="attempt-1",
+            evidence_id=RECONCILIATION_ID,
+            external_receipt_id="receipt-pending-1",
+            observed_at=RECONCILIATION_AT,
+            source=RECONCILIATION_SOURCE,
+        )
+    )
+
+    evidence = build_empirical_execution_evidence(
+        ledger,
+        attempt_id="attempt-1",
+    )
+
+    assert evidence.attempt_state == "UNKNOWN"
+    assert evidence.right_censored is True
+    assert evidence.censor_reason == "UNKNOWN_RECONCILED_FOUND_AWAITING_ACK"
+    assert evidence.reconciliation_evidence_id == RECONCILIATION_ID
+    assert evidence.reconciliation_evidence_source == RECONCILIATION_SOURCE
+    assert evidence.reconciliation_evidence_observed_at == RECONCILIATION_AT
+    assert evidence.reconciliation_external_effect_found is True
+    assert evidence.reconciliation_external_receipt_id == "receipt-pending-1"
+    assert evidence.external_receipt_id is None
+    assert evidence.acknowledgement_status is None
+    assert evidence.provider_outcome_verified is False
+    assert evidence.slippage_status == SLIPPAGE_STATUS_UNKNOWN
+
+
 def test_provider_evidence_does_not_turn_nonterminal_attempt_into_slippage_sample(
     tmp_path,
 ):
@@ -362,6 +398,7 @@ def test_reconciled_not_found_is_unverified_right_censored_evidence(tmp_path):
     assert evidence.reconciliation_evidence_source == RECONCILIATION_SOURCE
     assert evidence.reconciliation_evidence_observed_at == RECONCILIATION_AT
     assert evidence.reconciliation_external_effect_found is False
+    assert evidence.reconciliation_external_receipt_id is None
     assert evidence.slippage_status == SLIPPAGE_STATUS_UNKNOWN
     assert evidence.accepted_odds is None
 
@@ -508,6 +545,7 @@ def test_terminal_ack_projects_exact_positive_reconciliation_lineage(tmp_path):
     assert evidence.reconciliation_evidence_source == RECONCILIATION_SOURCE
     assert evidence.reconciliation_evidence_observed_at == RECONCILIATION_AT
     assert evidence.reconciliation_external_effect_found is True
+    assert evidence.reconciliation_external_receipt_id == "receipt-1"
     assert evidence.external_receipt_id == "receipt-1"
     assert evidence.provider_outcome_verified is False
     assert (

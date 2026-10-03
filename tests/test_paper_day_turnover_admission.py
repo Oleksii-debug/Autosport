@@ -934,6 +934,27 @@ def test_product_day_admission_chronology_survives_restart(tmp_path):
     assert loaded._product_day_admissions[ticket_id] == expected
 
 
+def test_product_day_admission_chronology_mutation_cannot_be_saved(tmp_path):
+    old = datetime.now(timezone.utc).replace(microsecond=0) - timedelta(days=2)
+    book = _book_with_settled_turnover(placed_at=_timestamp(old), stake="5")
+    ticket_id = next(iter(book.tickets))
+    witness = book._product_day_admissions[ticket_id]
+    book._product_day_admissions[ticket_id] = (
+        witness[0],
+        witness[1],
+        witness[2],
+        witness[3],
+        "b" * 64,
+        witness[5],
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="PaperBook causal history changed outside product-issued transitions",
+    ):
+        book.save(tmp_path / "paper_book.json")
+
+
 def test_current_day_turnover_still_consumes_exact_owner_cap(tmp_path):
     now = datetime.now(timezone.utc).replace(microsecond=0)
     goal = _goal()

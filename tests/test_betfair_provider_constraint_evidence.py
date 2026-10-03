@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal
+from decimal import Decimal, localcontext
 
 import pytest
 
@@ -302,3 +302,25 @@ def test_observation_batch_is_bounded() -> None:
             jurisdiction_scope="UK_INTERNATIONAL",
             currency_code="GBP",
         )
+
+
+
+def test_semantic_decimal_identity_ignores_ambient_context_rounding() -> None:
+    first = observation(
+        min_size=Decimal("1.2345671"),
+        min_payout=Decimal("10"),
+        source_revision="first-high-precision",
+    )
+    second = observation(
+        min_size=Decimal("1.2345672"),
+        min_payout=Decimal("10"),
+        source_revision="second-high-precision",
+        source_sha256=HASH_B,
+    )
+
+    with localcontext() as context:
+        context.prec = 6
+        assert first.semantic_sha256 != second.semantic_sha256
+
+    result = resolve(first, second)
+    assert result.state is BetfairConstraintResolutionState.CONFLICTING_UNVERIFIED

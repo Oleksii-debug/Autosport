@@ -1650,3 +1650,143 @@ def test_runtime_authority_revalidates_static_contract_before_existing_read(
         store.records()
 
     assert path.read_bytes() == pristine_bytes
+
+
+def test_runtime_authority_rejects_record_type_alias_rebinding(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "deployment-runtime-authority.json"
+    store = DeploymentRuntimeAuthorityStore.initialize_pristine(
+        path,
+        authority_root=_authority_root(tmp_path),
+    )
+
+    class HostileRecord:
+        pass
+
+    monkeypatch.setattr(
+        deployment_runtime_authority,
+        "DeploymentRuntimeAuthorityRecord",
+        HostileRecord,
+    )
+    with pytest.raises(
+        DeploymentRuntimeAuthorityError,
+        match="record type dispatch was replaced",
+    ):
+        store.records()
+
+
+@pytest.mark.parametrize("name", ("create", "from_dict"))
+def test_runtime_authority_rejects_record_classmethod_replacement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+) -> None:
+    path = tmp_path / "deployment-runtime-authority.json"
+    store = DeploymentRuntimeAuthorityStore.initialize_pristine(
+        path,
+        authority_root=_authority_root(tmp_path),
+    )
+    hostile_calls: list[object] = []
+
+    def hostile(cls: object, *args: object, **kwargs: object) -> object:
+        hostile_calls.append((cls, args, kwargs))
+        raise AssertionError("hostile runtime record codec executed")
+
+    monkeypatch.setattr(
+        DeploymentRuntimeAuthorityRecord,
+        name,
+        classmethod(hostile),
+    )
+    with pytest.raises(
+        DeploymentRuntimeAuthorityError,
+        match="record codec dispatch was replaced",
+    ):
+        store.records()
+
+    assert hostile_calls == []
+
+
+def test_runtime_authority_rejects_record_method_code_replacement(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "deployment-runtime-authority.json"
+    store = DeploymentRuntimeAuthorityStore.initialize_pristine(
+        path,
+        authority_root=_authority_root(tmp_path),
+    )
+    target = vars(DeploymentRuntimeAuthorityRecord)["to_dict"]
+    original_code = target.__code__
+
+    def hostile(self: object) -> dict[str, object]:
+        del self
+        raise AssertionError("hostile runtime record encoder code executed")
+
+    assert hostile.__code__.co_freevars == original_code.co_freevars
+    target.__code__ = hostile.__code__
+    try:
+        with pytest.raises(
+            DeploymentRuntimeAuthorityError,
+            match="record codec dispatch was replaced",
+        ):
+            store.records()
+    finally:
+        target.__code__ = original_code
+
+
+def test_runtime_authority_rejects_record_property_code_replacement(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "deployment-runtime-authority.json"
+    store = DeploymentRuntimeAuthorityStore.initialize_pristine(
+        path,
+        authority_root=_authority_root(tmp_path),
+    )
+    descriptor = vars(DeploymentRuntimeAuthorityRecord)["identity_payload"]
+    target = descriptor.fget
+    assert target is not None
+    original_code = target.__code__
+
+    def hostile(self: object) -> dict[str, object]:
+        del self
+        raise AssertionError("hostile runtime record identity code executed")
+
+    assert hostile.__code__.co_freevars == original_code.co_freevars
+    target.__code__ = hostile.__code__
+    try:
+        with pytest.raises(
+            DeploymentRuntimeAuthorityError,
+            match="record codec dispatch was replaced",
+        ):
+            store.records()
+    finally:
+        target.__code__ = original_code
+
+
+def test_runtime_authority_rejects_record_classmethod_code_replacement(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "deployment-runtime-authority.json"
+    store = DeploymentRuntimeAuthorityStore.initialize_pristine(
+        path,
+        authority_root=_authority_root(tmp_path),
+    )
+    descriptor = vars(DeploymentRuntimeAuthorityRecord)["from_dict"]
+    target = descriptor.__func__
+    original_code = target.__code__
+
+    def hostile(cls: object, raw: object) -> object:
+        del cls, raw
+        raise AssertionError("hostile runtime record parser code executed")
+
+    assert hostile.__code__.co_freevars == original_code.co_freevars
+    target.__code__ = hostile.__code__
+    try:
+        with pytest.raises(
+            DeploymentRuntimeAuthorityError,
+            match="record codec dispatch was replaced",
+        ):
+            store.records()
+    finally:
+        target.__code__ = original_code

@@ -1165,7 +1165,7 @@ def execute_betfair_supervised_action(
                 evidence_id=evidence_id,
                 observed_at=report.observed_at,
                 source=evidence_source,
-            request_sha256=report.request_sha256,
+                request_sha256=report.request_sha256,
             )
             ledger.mark_unknown(
                 attempt_id,
@@ -1199,7 +1199,7 @@ def execute_betfair_supervised_action(
         evidence_id=evidence_id,
         observed_at=report.observed_at,
         source=evidence_source,
-            request_sha256=report.request_sha256,
+        request_sha256=report.request_sha256,
         acknowledgement=acknowledgement,
     )
     ledger.acknowledge(acknowledgement)

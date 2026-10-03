@@ -365,3 +365,48 @@ def test_poll_join_interruption_preserves_terminal_message_and_busy_ownership() 
     assert message.error is None
     assert worker.busy is False
     assert worker._thread is None
+
+def test_ambiguous_start_reap_interruption_preserves_setup_disposition() -> None:
+    worker = OneShotObservationWorker()
+
+    class _StartThenInterruptibleReapThread:
+        ident = 2056
+
+        def __init__(self) -> None:
+            self.join_calls = 0
+
+        def start(self) -> None:
+            raise RuntimeError("ambiguous start failed")
+
+        def join(self) -> None:
+            self.join_calls += 1
+            if self.join_calls == 1:
+                raise KeyboardInterrupt("ambiguous-start reap interrupted")
+
+    helper = _StartThenInterruptibleReapThread()
+    with mock.patch(
+        "autosport.live_observation.threading.Thread",
+        return_value=helper,
+    ):
+        try:
+            worker.start(lambda: object())
+        except KeyboardInterrupt as exc:
+            assert str(exc) == "ambiguous-start reap interrupted"
+        else:
+            raise AssertionError("ambiguous-start reap interruption must propagate")
+
+    # Cancellation already happened, but ownership cannot be released until the
+    # maybe-started helper is reaped. The original setup disposition must remain
+    # pollable so the slot can recover deterministically.
+    assert worker.busy is True
+    assert worker._thread is helper
+    assert worker.start(lambda: object()) is False
+
+    message = worker.poll()
+    assert message is not None
+    assert message.result is None
+    assert message.error == "RuntimeError: ambiguous start failed"
+    assert helper.join_calls == 2
+    assert worker.busy is False
+    assert worker._thread is None
+

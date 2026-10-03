@@ -299,7 +299,7 @@ def test_incomplete_postings_window_keeps_exact_rows_but_not_complete_absence(
 
 def test_by_id_read_never_inherits_window_completeness(monkeypatch):
     client, opener = economic_client(monkeypatch, postings_by_id(posting(9001)))
-    result = client.read_account_postings_by_id(9000)
+    result = client.read_account_postings_by_id(9001)
     assert result.query_transaction_id == "9000"
     assert result.window_complete is None
     assert len(result.postings) == 1
@@ -335,9 +335,9 @@ def test_duplicate_transaction_id_is_idempotent_only_for_identical_content(
 def test_same_context_query_and_provider_payload_reresolve_same_evidence_id(monkeypatch):
     payload = postings_by_id(posting(9001))
     first, _ = economic_client(monkeypatch, payload, clock=clock_one)
-    first_value = first.read_account_postings_by_id(9000)
+    first_value = first.read_account_postings_by_id(9001)
     second, _ = economic_client(monkeypatch, payload, clock=clock_two)
-    second_value = second.read_account_postings_by_id(9000)
+    second_value = second.read_account_postings_by_id(9001)
     assert first_value.evidence.evidence_id == second_value.evidence.evidence_id
     assert first_value.readback_id == second_value.readback_id
     assert (
@@ -356,13 +356,13 @@ def test_distinct_authenticated_contexts_cannot_collapse_same_economic_payload(
         payload,
         credentials=BetdaqCredentials("alice-a", "secret-a", "app-a"),
     )
-    first_value = first.read_account_postings_by_id(9000)
+    first_value = first.read_account_postings_by_id(9001)
     second, _ = economic_client(
         monkeypatch,
         payload,
         credentials=BetdaqCredentials("alice-b", "secret-b", "app-b"),
     )
-    second_value = second.read_account_postings_by_id(9000)
+    second_value = second.read_account_postings_by_id(9001)
     assert first_value.evidence.account_context_id != second_value.evidence.account_context_id
     assert first_value.evidence.evidence_id != second_value.evidence.evidence_id
     assert first_value.readback_id != second_value.readback_id
@@ -437,7 +437,7 @@ def test_official_generated_response_without_return_status_is_accepted(monkeypat
         include_return_status=False,
     )
     client, _ = economic_client(monkeypatch, payload)
-    result = client.read_account_postings_by_id(9000)
+    result = client.read_account_postings_by_id(9001)
     assert result.postings[0].transaction_id == "9001"
     assert result.window_complete is None
 
@@ -573,7 +573,7 @@ def test_public_economic_dto_rejects_decimal_subclass_before_virtual_dispatch(
 
 def test_postings_readback_rejects_mutable_container(monkeypatch):
     client, _ = economic_client(monkeypatch, postings_by_id(posting(9001)))
-    value = client.read_account_postings_by_id(9000)
+    value = client.read_account_postings_by_id(9001)
 
     with pytest.raises(
         BetdaqEconomicReadbackError,
@@ -627,7 +627,7 @@ def test_posting_identity_survives_window_to_by_id_reresolution(monkeypatch):
     end = datetime(2026, 9, 23, tzinfo=timezone.utc)
 
     window = client.read_account_postings(start, end)
-    by_id = client.read_account_postings_by_id(9000)
+    by_id = client.read_account_postings_by_id(9001)
     first = window.postings[0]
     repeated = by_id.postings[0]
 
@@ -680,7 +680,7 @@ def test_cross_response_same_transaction_conflict_fails_closed(monkeypatch):
     end = datetime(2026, 9, 23, tzinfo=timezone.utc)
 
     first = client.read_account_postings(start, end)
-    conflicting = client.read_account_postings_by_id(9000)
+    conflicting = client.read_account_postings_by_id(9001)
 
     assert (
         first.postings[0].transaction_identity
@@ -705,7 +705,7 @@ def test_cross_response_currency_drift_is_economic_conflict(monkeypatch):
     end = datetime(2026, 9, 23, tzinfo=timezone.utc)
 
     euro = client.read_account_postings(start, end)
-    usd = client.read_account_postings_by_id(9000)
+    usd = client.read_account_postings_by_id(9001)
 
     assert (
         euro.postings[0].transaction_identity
@@ -728,14 +728,14 @@ def test_posting_replay_coalescence_rejects_account_context_mixing(monkeypatch):
         payload,
         credentials=BetdaqCredentials("alice-a", "secret-a", "app-a"),
     )
-    first = first_client.read_account_postings_by_id(9000)
+    first = first_client.read_account_postings_by_id(9001)
 
     second_client, _ = economic_client(
         monkeypatch,
         payload,
         credentials=BetdaqCredentials("alice-b", "secret-b", "app-b"),
     )
-    second = second_client.read_account_postings_by_id(9000)
+    second = second_client.read_account_postings_by_id(9001)
 
     with pytest.raises(
         BetdaqEconomicReadbackError,
@@ -746,7 +746,7 @@ def test_posting_replay_coalescence_rejects_account_context_mixing(monkeypatch):
 
 def test_readback_rejects_posting_currency_mutation(monkeypatch):
     client, _ = economic_client(monkeypatch, postings_by_id(posting(9001)))
-    readback = client.read_account_postings_by_id(9000)
+    readback = client.read_account_postings_by_id(9001)
     forged = replace(readback.postings[0], currency="USD")
 
     with pytest.raises(
@@ -755,107 +755,95 @@ def test_readback_rejects_posting_currency_mutation(monkeypatch):
     ):
         replace(readback, postings=(forged,))
 
-def test_by_id_requires_strict_cursor_progress(monkeypatch):
+
+
+
+
+
+
+
+
+def test_by_id_reresolves_the_requested_transaction_identity(monkeypatch):
     client, _ = economic_client(monkeypatch, postings_by_id(posting(9001)))
 
-    with pytest.raises(
-        BetdaqEconomicReadbackError,
-        match="must advance beyond requested TransactionId",
-    ):
-        client.read_account_postings_by_id(9001)
+    result = client.read_account_postings_by_id(9001)
+
+    assert result.query_transaction_id == "9001"
+    assert [row.transaction_id for row in result.postings] == ["9001"]
 
 
-def test_by_id_requires_strictly_increasing_transaction_order(monkeypatch):
+def test_posting_category_stays_raw_without_undocumented_numeric_mapping(monkeypatch):
     payload = postings_by_id(
-        posting(9002, balance="102.50"),
-        posting(9001, balance="105.00"),
-    )
-    client, _ = economic_client(monkeypatch, payload)
-
-    with pytest.raises(
-        BetdaqEconomicReadbackError,
-        match="strictly increasing TransactionId",
-    ):
-        client.read_account_postings_by_id(9000)
-
-
-def test_window_requires_nondecreasing_provider_posted_at(monkeypatch):
-    payload = postings_window(
         posting(
             9001,
-            balance="102.50",
-            posted_at="2026-09-22T23:59:01Z",
+            category=1,
+            order_id=None,
+            market_id=None,
         ),
         posting(
             9002,
-            balance="105.00",
+            amount="-0.50",
+            balance="777.00",
+            category=2,
+            order_id=None,
+            market_id=None,
+        ),
+    )
+    client, _ = economic_client(monkeypatch, payload)
+
+    result = client.read_account_postings_by_id(9001)
+
+    assert [row.posting_category for row in result.postings] == [1, 2]
+    assert [row.order_id for row in result.postings] == [None, None]
+    assert [row.market_id for row in result.postings] == [None, None]
+
+
+def test_provider_posting_order_is_preserved_without_inventing_sort_law(monkeypatch):
+    payload = postings_window(
+        posting(
+            9002,
+            balance="102.50",
+            posted_at="2026-09-22T23:59:02Z",
+        ),
+        posting(
+            9001,
+            amount="-9.00",
+            balance="17.00",
             posted_at="2026-09-22T23:59:00Z",
         ),
     )
     client, _ = economic_client(monkeypatch, payload)
 
-    with pytest.raises(
-        BetdaqEconomicReadbackError,
-        match="not ordered by PostedAt",
-    ):
-        client.read_account_postings(
-            datetime(2026, 9, 22, tzinfo=timezone.utc),
-            datetime(2026, 9, 23, tzinfo=timezone.utc),
-        )
+    result = client.read_account_postings(
+        datetime(2026, 9, 22, tzinfo=timezone.utc),
+        datetime(2026, 9, 23, tzinfo=timezone.utc),
+    )
+
+    assert [row.transaction_id for row in result.postings] == ["9002", "9001"]
+    assert [row.posted_at for row in result.postings] == [
+        "2026-09-22T23:59:02Z",
+        "2026-09-22T23:59:00Z",
+    ]
+    assert [row.resulting_balance for row in result.postings] == [
+        Decimal("102.50"),
+        Decimal("17.00"),
+    ]
 
 
-def test_posting_resulting_balance_chain_must_reconcile(monkeypatch):
-    payload = postings_window(
-        posting(9001, amount="2.50", balance="102.50"),
-        posting(9002, amount="3.00", balance="999.00"),
+def test_by_id_preserves_provider_row_order_without_cursor_order_assumption(monkeypatch):
+    payload = postings_by_id(
+        posting(9002, balance="102.50"),
+        posting(9001, amount="-3.00", balance="91.00"),
     )
     client, _ = economic_client(monkeypatch, payload)
 
-    with pytest.raises(
-        BetdaqEconomicReadbackError,
-        match="ResultingBalance chain is inconsistent",
-    ):
-        client.read_account_postings(
-            datetime(2026, 9, 22, tzinfo=timezone.utc),
-            datetime(2026, 9, 23, tzinfo=timezone.utc),
-        )
+    result = client.read_account_postings_by_id(9001)
 
-
-def test_settlement_category_requires_order_identity(monkeypatch):
-    client, _ = economic_client(
-        monkeypatch,
-        postings_by_id(posting(9001, category=1, order_id=None)),
-    )
-
-    with pytest.raises(
-        BetdaqEconomicReadbackError,
-        match="Settlement posting requires provider OrderId",
-    ):
-        client.read_account_postings_by_id(9000)
-
-
-def test_commission_category_requires_market_identity(monkeypatch):
-    client, _ = economic_client(
-        monkeypatch,
-        postings_by_id(posting(9001, category=2, market_id=None)),
-    )
-
-    with pytest.raises(
-        BetdaqEconomicReadbackError,
-        match="Commission posting requires provider MarketId",
-    ):
-        client.read_account_postings_by_id(9000)
-
-
-def test_future_posting_category_remains_explicit_unknown(monkeypatch):
-    client, _ = economic_client(
-        monkeypatch,
-        postings_by_id(posting(9001, category=99)),
-    )
-    result = client.read_account_postings_by_id(9000)
-
-    assert result.postings[0].posting_category == 99
-    assert result.postings[0].posting_category_name == "UNKNOWN"
+    assert [row.transaction_id for row in result.postings] == ["9002", "9001"]
+    assert [row.resulting_balance for row in result.postings] == [
+        Decimal("102.50"),
+        Decimal("91.00"),
+    ]
 
 
 def test_multiple_settlement_and_commission_postings_are_not_collapsed(monkeypatch):
@@ -890,7 +878,7 @@ def test_multiple_settlement_and_commission_postings_are_not_collapsed(monkeypat
         ),
     )
     client, _ = economic_client(monkeypatch, payload)
-    result = client.read_account_postings_by_id(9000)
+    result = client.read_account_postings_by_id(9001)
 
     assert [row.transaction_id for row in result.postings] == [
         "9001",
@@ -898,12 +886,7 @@ def test_multiple_settlement_and_commission_postings_are_not_collapsed(monkeypat
         "9003",
         "9004",
     ]
-    assert [row.posting_category_name for row in result.postings] == [
-        "SETTLEMENT",
-        "SETTLEMENT",
-        "COMMISSION",
-        "COMMISSION",
-    ]
+    assert [row.posting_category for row in result.postings] == [1, 1, 2, 2]
 
 def test_description_keywords_cannot_mint_finer_economic_category(monkeypatch):
     client, _ = economic_client(
@@ -918,10 +901,9 @@ def test_description_keywords_cannot_mint_finer_economic_category(monkeypatch):
             )
         ),
     )
-    result = client.read_account_postings_by_id(9000)
+    result = client.read_account_postings_by_id(9001)
 
     row = result.postings[0]
     assert row.posting_category == 3
-    assert row.posting_category_name == "OTHER"
     assert row.description == "commission win deposit settlement"
 

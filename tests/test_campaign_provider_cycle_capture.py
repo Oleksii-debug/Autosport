@@ -498,6 +498,103 @@ def test_durable_resolver_rejects_cross_workspace_provider_evidence_store(
         )
 
 
+def test_durable_imported_provider_scope_guard_rejects_coordinated_source_rebind(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    locator, _store, _spec, provider_store = _setup(tmp_path)
+    alternate = CompleteGameBoardEvidenceStore(
+        tmp_path / "coordinated-foreign-provider-workspace",
+        authority_root=provider_store.authority_root,
+    )
+    hostile_calls: list[str] = []
+
+    def forged_path_equality(_left, _right):
+        hostile_calls.append("path-equality")
+        return True
+
+    def forged_path_join(_left, _right):
+        hostile_calls.append("path-join")
+        return alternate.root
+
+    def forged_state_reader(_instance, _name):
+        hostile_calls.append("state-reader")
+        return alternate.__dict__
+
+    class ForgedLocator:
+        pass
+
+    class ForgedEvidenceStore:
+        DIRECTORY = CompleteGameBoardEvidenceStore.DIRECTORY
+
+    monkeypatch.setattr(
+        capture_module,
+        "_CANONICAL_PATH_EQUALITY",
+        forged_path_equality,
+    )
+    monkeypatch.setattr(
+        capture_module,
+        "_CANONICAL_PATH_EQUALITY_CODE",
+        forged_path_equality.__code__,
+    )
+    monkeypatch.setattr(
+        capture_module,
+        "_CANONICAL_PATH_JOIN",
+        forged_path_join,
+    )
+    monkeypatch.setattr(
+        capture_module,
+        "_CANONICAL_PATH_JOIN_CODE",
+        forged_path_join.__code__,
+    )
+    monkeypatch.setattr(
+        capture_module,
+        "_CANONICAL_OBJECT_GETATTRIBUTE",
+        forged_state_reader,
+    )
+    monkeypatch.setattr(
+        capture_module,
+        "ForwardUniversePrecommitLocator",
+        ForgedLocator,
+    )
+    monkeypatch.setattr(
+        capture_module,
+        "CompleteGameBoardEvidenceStore",
+        ForgedEvidenceStore,
+    )
+    monkeypatch.setattr(
+        capture_module,
+        "_PRECOMMIT_ROUTING_SEAMS",
+        {},
+    )
+    monkeypatch.setattr(
+        capture_module,
+        "_PRECOMMIT_ROUTING_SEAM_ITEMS",
+        (),
+    )
+    monkeypatch.setattr(
+        capture_module,
+        "_EVIDENCE_DIRECTORY_SURFACE",
+        "redirected-provider-directory",
+    )
+    monkeypatch.setattr(
+        capture_module,
+        "_EVIDENCE_DIRECTORY",
+        "redirected-provider-directory",
+    )
+
+    with pytest.raises(
+        CampaignProviderCycleCaptureIntegrityError,
+        match="workspace does not match campaign precommit workspace",
+    ):
+        binding_module._PROVIDER_EVIDENCE_SCOPE(
+            locator,
+            alternate,
+        )
+
+    assert hostile_calls == []
+
+
 def test_first_clock_cannot_redirect_provider_evidence_authority_root(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

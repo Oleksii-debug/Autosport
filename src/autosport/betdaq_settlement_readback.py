@@ -65,8 +65,50 @@ _CANONICAL_REQUIRE_ACCOUNT_TRANSPORT_CODE = getattr(
 _TERMINAL_ORDER_STATUS_CODES = _account._TERMINAL_STATUS_CODES
 
 
+def _product_receive_time(
+    _datetime=datetime,
+    _utc=timezone.utc,
+) -> datetime:
+    """Return the product-owned wall-clock instant for one provider acquisition."""
+
+    return _datetime.now(_utc)
+
+
+_PRODUCT_RECEIVE_TIME = _product_receive_time
+_PRODUCT_RECEIVE_TIME_CODE = getattr(_PRODUCT_RECEIVE_TIME, "__code__", None)
+_PRODUCT_RECEIVE_TIME_DEFAULTS = _PRODUCT_RECEIVE_TIME.__defaults__
+
+
 class BetdaqEconomicReadbackError(RuntimeError):
     """BETDAQ settlement/posting readback contract or evidence error."""
+
+
+def _canonical_product_receive_clock(
+    *,
+    _clock=_PRODUCT_RECEIVE_TIME,
+    _clock_code=_PRODUCT_RECEIVE_TIME_CODE,
+    _clock_defaults=_PRODUCT_RECEIVE_TIME_DEFAULTS,
+):
+    """Resolve the exact product-owned receive clock without caller clock trust."""
+
+    live_clock = globals().get("_product_receive_time")
+    aliases = (
+        globals().get("_PRODUCT_RECEIVE_TIME"),
+        globals().get("_PRODUCT_RECEIVE_TIME_CODE"),
+        globals().get("_PRODUCT_RECEIVE_TIME_DEFAULTS"),
+    )
+    expected_aliases = (_clock, _clock_code, _clock_defaults)
+    if (
+        live_clock is not _clock
+        or getattr(live_clock, "__code__", None) is not _clock_code
+        or getattr(_clock, "__code__", None) is not _clock_code
+        or _clock.__defaults__ is not _clock_defaults
+        or aliases != expected_aliases
+    ):
+        raise BetdaqEconomicReadbackError(
+            "canonical BETDAQ economic product clock authority was replaced"
+        )
+    return _clock
 
 
 def _canonical_economic_protocol_authority(
@@ -960,7 +1002,12 @@ class BetdaqEconomicReadbackClient:
         )
 
     def _call(
-        self, method: str, request_attributes: dict[str, str]
+        self,
+        method: str,
+        request_attributes: dict[str, str],
+        *,
+        _product_clock_dispatch=_canonical_product_receive_clock,
+        _product_clock_dispatch_code=_canonical_product_receive_clock.__code__,
     ) -> tuple[ET.Element, BetdaqEconomicEvidence]:
         if method not in ("GetOrderDetails", "ListAccountPostings", "ListAccountPostingsById"):
             raise BetdaqEconomicReadbackError("method is outside economic READ allowlist")
@@ -978,8 +1025,18 @@ class BetdaqEconomicReadbackClient:
             # rotates/rebinds the mutable account client while network I/O is in flight.
             credentials = client._credentials
             venue_id = client._venue_id
-            clock = client._clock
-            clock_code = getattr(clock, "__code__", None)
+            live_clock_dispatch = globals().get("_canonical_product_receive_clock")
+            if (
+                live_clock_dispatch is not _product_clock_dispatch
+                or getattr(live_clock_dispatch, "__code__", None)
+                is not _product_clock_dispatch_code
+                or getattr(_product_clock_dispatch, "__code__", None)
+                is not _product_clock_dispatch_code
+            ):
+                raise BetdaqEconomicReadbackError(
+                    "canonical BETDAQ economic product clock authority was replaced"
+                )
+            clock = _product_clock_dispatch()
             if type(credentials) is not _account.BetdaqCredentials:
                 raise BetdaqEconomicReadbackError(
                     "BETDAQ economic read requires canonical credentials"
@@ -1051,36 +1108,44 @@ class BetdaqEconomicReadbackClient:
                 raise BetdaqEconomicReadbackError(
                     "BETDAQ authenticated account context changed during economic acquisition"
                 )
+            live_clock_dispatch = globals().get("_canonical_product_receive_clock")
             if (
-                client._clock is not clock
-                or getattr(clock, "__code__", None) is not clock_code
+                live_clock_dispatch is not _product_clock_dispatch
+                or getattr(live_clock_dispatch, "__code__", None)
+                is not _product_clock_dispatch_code
+                or _product_clock_dispatch() is not clock
             ):
                 raise BetdaqEconomicReadbackError(
-                    "BETDAQ economic evidence clock changed during acquisition"
+                    "canonical BETDAQ economic product clock authority was replaced"
                 )
             try:
                 observed_value = clock()
                 if (
-                    not isinstance(observed_value, datetime)
+                    type(observed_value) is not datetime
                     or observed_value.tzinfo is None
                     or observed_value.utcoffset() is None
                 ):
-                    raise ValueError("clock must return timezone-aware datetime")
+                    raise ValueError("product clock must return exact timezone-aware datetime")
                 observed_at = (
                     observed_value.astimezone(timezone.utc)
                     .isoformat()
                     .replace("+00:00", "Z")
                 )
+            except BetdaqEconomicReadbackError:
+                raise
             except Exception:
                 raise BetdaqEconomicReadbackError(
                     "BETDAQ economic response failed canonical validation"
                 ) from None
+            live_clock_dispatch = globals().get("_canonical_product_receive_clock")
             if (
-                client._clock is not clock
-                or getattr(clock, "__code__", None) is not clock_code
+                live_clock_dispatch is not _product_clock_dispatch
+                or getattr(live_clock_dispatch, "__code__", None)
+                is not _product_clock_dispatch_code
+                or _product_clock_dispatch() is not clock
             ):
                 raise BetdaqEconomicReadbackError(
-                    "BETDAQ economic evidence clock changed during acquisition"
+                    "canonical BETDAQ economic product clock authority was replaced"
                 )
         if type(payload) is not bytes:
             raise BetdaqEconomicReadbackError(

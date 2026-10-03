@@ -1296,6 +1296,8 @@ def _install_execution_readback_authority() -> None:
             or issue_origin.__code__ is not issue_origin_code
             or verify_origin.__code__ is not verify_origin_code
             or origin_dispatch_current.__code__ is not origin_dispatch_current_code
+            or origin_dispatch_current.__closure__ is not None
+            or origin_dispatch_current.__defaults__ is not origin_dispatch_current_defaults
             or hasattr(account_identity, binder_name)
         ):
             raise BetfairReadOnlyError(
@@ -1466,6 +1468,14 @@ def _install_execution_readback_authority() -> None:
     issue_origin_code = issue_origin.__code__
     verify_origin_code = verify_origin.__code__
     origin_dispatch_current_code = origin_dispatch_current.__code__
+    origin_dispatch_current_defaults = origin_dispatch_current.__defaults__
+    if (
+        origin_dispatch_current.__closure__ is not None
+        or type(origin_dispatch_current_defaults) is not tuple
+    ):
+        raise BetfairReadOnlyError(
+            "execution readback network predicate is not immutable"
+        )
     delattr(account_identity, binder_name)
 
     BetfairReadOnlyClient.read_execution_readback = authoritative_read

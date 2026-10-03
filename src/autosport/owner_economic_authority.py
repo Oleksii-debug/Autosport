@@ -302,24 +302,7 @@ class OwnerEconomicAuthorityService:
 
     def read_view(self) -> OwnerEconomicAuthorityView:
         try:
-            self.store.path.lstat()
-        except FileNotFoundError:
-            exists = False
-        except OSError:
-            exists = True
-        else:
-            exists = True
-        if not exists:
-            return OwnerEconomicAuthorityView(
-                state="absent",
-                summary_uk=text("ui.windows.owner_authority.state.absent"),
-                lines_uk=(
-                    text("ui.windows.owner_authority.state.absent"),
-                    text("ui.windows.owner_authority.boundary.initial_only"),
-                ),
-            )
-        try:
-            contract = self.store.load()
+            contract = self.store.load_optional()
         except (EconomicGoalContractError, OSError, UnicodeError, ValueError):
             return OwnerEconomicAuthorityView(
                 state="corrupt",
@@ -327,6 +310,15 @@ class OwnerEconomicAuthorityService:
                 lines_uk=(
                     text("ui.windows.owner_authority.state.corrupt"),
                     text("ui.windows.owner_authority.boundary.corrupt"),
+                ),
+            )
+        if contract is None:
+            return OwnerEconomicAuthorityView(
+                state="absent",
+                summary_uk=text("ui.windows.owner_authority.state.absent"),
+                lines_uk=(
+                    text("ui.windows.owner_authority.state.absent"),
+                    text("ui.windows.owner_authority.boundary.initial_only"),
                 ),
             )
         return OwnerEconomicAuthorityView(

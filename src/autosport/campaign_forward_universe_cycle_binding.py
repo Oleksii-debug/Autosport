@@ -1060,6 +1060,14 @@ def resolve_campaign_forward_universe_cycle_authority(
             "collector artifact resolver returned noncanonical evidence"
         )
     require_stable_integrity()
+    universe_slot_ordinal = collector_evidence.get("slot_ordinal")
+    if (
+        type(universe_slot_ordinal) is not int
+        or universe_slot_ordinal != source_spec.evaluation_start_slot_ordinal
+    ):
+        raise CampaignForwardUniverseCycleBindingError(
+            "forward universe must derive from the first precommitted evaluation slot"
+        )
 
     snapshot = _LOAD_PROVIDER_EVIDENCE(
         provider_evidence_store,

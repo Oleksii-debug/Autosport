@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import tempfile
 from dataclasses import replace
@@ -265,6 +266,7 @@ class _Transport:
             {
                 "url": url,
                 "headers": dict(headers),
+                "body": body,
                 "request": request,
                 "timeout_seconds": timeout_seconds,
             }
@@ -289,6 +291,7 @@ class _TimeoutTransport(_Transport):
             {
                 "url": url,
                 "headers": dict(headers),
+                "body": body,
                 "request": request,
                 "timeout_seconds": timeout_seconds,
             }
@@ -867,6 +870,18 @@ def test_full_match_persists_provider_report_and_canonical_ack() -> None:
         assert binding["evidence_id"] == result.evidence_id
         assert len(binding["acknowledgement_sha256"]) == 64
         request = transport.calls[0]["request"]
+        request_body = transport.calls[0]["body"]
+        assert isinstance(request_body, bytes)
+        request_sha256 = hashlib.sha256(request_body).hexdigest()
+        execution_view = RealExecutionLedger(
+            Path(tmp) / "real.jsonl"
+        ).verified_execution_view(bound.execution_plan.plan_id)
+        submitted = next(
+            item
+            for item in execution_view.attempts
+            if item.attempt.attempt_id == "attempt-accepted"
+        )
+        assert submitted.submitted_request_sha256 == request_sha256
         assert request["method"] == "SportsAPING/v1.0/placeOrders"
         assert request["params"]["async"] is False
         assert len(request["params"]["customerRef"]) == 32
@@ -979,7 +994,23 @@ def test_transport_timeout_readback_stays_non_authoritative_for_retry(
 
         assert result.outcome is PlaceOrdersOutcome.UNKNOWN
         assert result.attempt_state is AttemptState.UNKNOWN
+        assert len(transport.calls) == 1
+        timeout_body = transport.calls[0]["body"]
+        assert isinstance(timeout_body, bytes)
+        timeout_request_sha256 = hashlib.sha256(timeout_body).hexdigest()
         restarted = RealExecutionLedger(Path(tmp) / "real.jsonl")
+        timeout_view = restarted.verified_execution_view(
+            bound.execution_plan.plan_id
+        )
+        timeout_attempt = next(
+            item
+            for item in timeout_view.attempts
+            if item.attempt.attempt_id == "attempt-timeout"
+        )
+        assert (
+            timeout_attempt.submitted_request_sha256
+            == timeout_request_sha256
+        )
         assert (
             restarted.attempt_state("attempt-timeout")
             is AttemptState.UNKNOWN

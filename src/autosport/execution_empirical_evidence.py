@@ -17,7 +17,7 @@ from .real_execution_ledger import (
     VerifiedExecutionLedgerSnapshot,
 )
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 SOURCE_ROOT_AUTHORITY_UNQUALIFIED = "UNQUALIFIED_CALLER_SELECTED_LEDGER"
 EVALUATION_PROTOCOL_AUTHORITY_UNQUALIFIED = "UNQUALIFIED_CALLER_PROTOCOL_DIGEST"
@@ -235,13 +235,17 @@ class EmpiricalExecutionEvidence:
     quote_observed_at: str
     reserved_at: str
     submitted_at: str | None
+    submitted_request_sha256: str | None
     provider_evidence_observed_at: str | None
     acknowledged_at: str | None
 
     external_receipt_id: str | None
     provider_evidence_id: str | None
     provider_evidence_source: str | None
+    provider_evidence_request_sha256: str | None
+    provider_evidence_acknowledgement_sha256: str | None
     acknowledgement_status: str | None
+    acknowledgement_payload_sha256: str | None
 
     reconciliation_evidence_id: str | None
     reconciliation_evidence_source: str | None
@@ -320,8 +324,21 @@ class EmpiricalExecutionEvidence:
         _sha256(self.plan_fingerprint, "plan_fingerprint")
         _optional_sha256(self.provider_evidence_id, "provider_evidence_id")
         _optional_text(self.provider_evidence_source, "provider_evidence_source")
+        _optional_sha256(self.submitted_request_sha256, "submitted_request_sha256")
+        _optional_sha256(
+            self.provider_evidence_request_sha256,
+            "provider_evidence_request_sha256",
+        )
+        _optional_sha256(
+            self.provider_evidence_acknowledgement_sha256,
+            "provider_evidence_acknowledgement_sha256",
+        )
         _optional_text(self.external_receipt_id, "external_receipt_id")
         _optional_text(self.acknowledgement_status, "acknowledgement_status")
+        _optional_sha256(
+            self.acknowledgement_payload_sha256,
+            "acknowledgement_payload_sha256",
+        )
         _optional_text(self.reconciliation_evidence_id, "reconciliation_evidence_id")
         _optional_text(self.reconciliation_evidence_source, "reconciliation_evidence_source")
 
@@ -486,6 +503,48 @@ class EmpiricalExecutionEvidence:
                 "provider evidence identity/source/time must be all present or all absent"
             )
 
+        if self.submitted_request_sha256 is not None and self.submitted_at is None:
+            raise EmpiricalExecutionEvidenceError(
+                "submitted request identity requires durable submission"
+            )
+        if (
+            self.provider_evidence_request_sha256 is not None
+            or self.provider_evidence_acknowledgement_sha256 is not None
+        ) and self.provider_evidence_id is None:
+            raise EmpiricalExecutionEvidenceError(
+                "provider provenance digests require durable provider evidence"
+            )
+        if self.provider_evidence_request_sha256 is not None:
+            if self.submitted_request_sha256 is None:
+                raise EmpiricalExecutionEvidenceError(
+                    "provider request provenance requires submitted request identity"
+                )
+            if (
+                self.provider_evidence_request_sha256
+                != self.submitted_request_sha256
+            ):
+                raise EmpiricalExecutionEvidenceError(
+                    "provider request provenance mismatches durable submission"
+                )
+        if self.acknowledgement_status is None:
+            if self.acknowledgement_payload_sha256 is not None:
+                raise EmpiricalExecutionEvidenceError(
+                    "acknowledgement payload identity requires durable acknowledgement"
+                )
+        elif self.acknowledgement_payload_sha256 is None:
+            raise EmpiricalExecutionEvidenceError(
+                "durable acknowledgement requires canonical payload identity"
+            )
+        if (
+            self.provider_evidence_acknowledgement_sha256 is not None
+            and self.acknowledgement_payload_sha256 is not None
+            and self.provider_evidence_acknowledgement_sha256
+            != self.acknowledgement_payload_sha256
+        ):
+            raise EmpiricalExecutionEvidenceError(
+                "provider acknowledgement provenance mismatches durable acknowledgement"
+            )
+
         requested_odds = _decimal(self.requested_odds, "requested_odds")
         requested_stake = _decimal(self.requested_stake, "requested_stake")
         if requested_odds <= 0 or requested_stake <= 0:
@@ -618,12 +677,20 @@ class EmpiricalExecutionEvidence:
             "quote_observed_at": self.quote_observed_at,
             "reserved_at": self.reserved_at,
             "submitted_at": self.submitted_at,
+            "submitted_request_sha256": self.submitted_request_sha256,
             "provider_evidence_observed_at": self.provider_evidence_observed_at,
             "acknowledged_at": self.acknowledged_at,
             "external_receipt_id": self.external_receipt_id,
             "provider_evidence_id": self.provider_evidence_id,
             "provider_evidence_source": self.provider_evidence_source,
+            "provider_evidence_request_sha256": (
+                self.provider_evidence_request_sha256
+            ),
+            "provider_evidence_acknowledgement_sha256": (
+                self.provider_evidence_acknowledgement_sha256
+            ),
             "acknowledgement_status": self.acknowledgement_status,
+            "acknowledgement_payload_sha256": self.acknowledgement_payload_sha256,
             "reconciliation_evidence_id": self.reconciliation_evidence_id,
             "reconciliation_evidence_source": self.reconciliation_evidence_source,
             "reconciliation_evidence_observed_at": self.reconciliation_evidence_observed_at,
@@ -795,10 +862,20 @@ def build_empirical_execution_evidence(
         if submission is not None
         else None
     )
+    submitted_request_sha256 = (
+        _optional_sha256(
+            submission["payload"].get("request_sha256"),
+            "submitted_request_sha256",
+        )
+        if submission is not None
+        else None
+    )
 
     provider_evidence_id: str | None = None
     provider_evidence_source: str | None = None
     provider_evidence_observed_at: str | None = None
+    provider_evidence_request_sha256: str | None = None
+    provider_evidence_acknowledgement_sha256: str | None = None
     if provider_event is not None:
         provider_payload = provider_event["payload"]
         provider_evidence_id = _sha256(
@@ -811,12 +888,26 @@ def build_empirical_execution_evidence(
             provider_payload.get("observed_at"),
             "provider_evidence_observed_at",
         )
+        provider_evidence_request_sha256 = _optional_sha256(
+            provider_payload.get("request_sha256"),
+            "provider_evidence_request_sha256",
+        )
+        provider_evidence_acknowledgement_sha256 = _optional_sha256(
+            provider_payload.get("acknowledgement_sha256"),
+            "provider_evidence_acknowledgement_sha256",
+        )
 
     acknowledgement = (
         RealExecutionLedger._acknowledgement_from_dict(
             acknowledgement_event["payload"]
         )
         if acknowledgement_event is not None
+        else None
+    )
+
+    acknowledgement_payload_sha256 = (
+        _digest(acknowledgement.to_dict())
+        if acknowledgement is not None
         else None
     )
 
@@ -911,6 +1002,7 @@ def build_empirical_execution_evidence(
         quote_observed_at=quote_observed_at,
         reserved_at=reserved_at,
         submitted_at=submitted_at,
+        submitted_request_sha256=submitted_request_sha256,
         provider_evidence_observed_at=provider_evidence_observed_at,
         acknowledged_at=(
             acknowledgement.acknowledged_at if acknowledgement is not None else None
@@ -920,9 +1012,14 @@ def build_empirical_execution_evidence(
         ),
         provider_evidence_id=provider_evidence_id,
         provider_evidence_source=provider_evidence_source,
+        provider_evidence_request_sha256=provider_evidence_request_sha256,
+        provider_evidence_acknowledgement_sha256=(
+            provider_evidence_acknowledgement_sha256
+        ),
         acknowledgement_status=(
             acknowledgement.status.value if acknowledgement is not None else None
         ),
+        acknowledgement_payload_sha256=acknowledgement_payload_sha256,
         reconciliation_evidence_id=(
             reconciliation.evidence_id if reconciliation is not None else None
         ),
@@ -961,7 +1058,7 @@ def build_empirical_execution_evidence(
     return evidence
 
 
-POPULATION_SCHEMA_VERSION = 4
+POPULATION_SCHEMA_VERSION = 5
 
 
 @dataclass(frozen=True, slots=True, weakref_slot=True, init=False)

@@ -50,6 +50,26 @@ def test_selects_only_superseded_runs_for_same_pr_and_workflow() -> None:
     ) == (10,)
 
 
+@pytest.mark.parametrize(
+    "pr_numbers",
+    [
+        (2008, 999),
+        (999, 2008),
+        (2008, 2008),
+    ],
+)
+def test_multi_reference_run_never_grants_single_pr_cancellation_authority(
+    pr_numbers: tuple[int, ...],
+) -> None:
+    assert select_superseded_runs(
+        (_run(14, HEAD_A, pr_numbers=pr_numbers),),
+        pr_number=2008,
+        live_head_sha=HEAD_B,
+        workflow_name="CI",
+        current_run_id=11,
+    ) == ()
+
+
 def test_current_run_is_never_selected_even_if_payload_is_inconsistent() -> None:
     assert select_superseded_runs(
         (_run(21, HEAD_A),),

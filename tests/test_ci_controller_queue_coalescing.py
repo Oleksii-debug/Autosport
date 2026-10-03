@@ -9,10 +9,12 @@ from scripts.cancel_superseded_pr_workflow_runs import (
     PullRequestQualification,
     WorkflowRun,
 )
+import scripts.cancel_superseded_pr_workflow_runs_scoped as scoped_controller
 from scripts.cancel_superseded_pr_workflow_runs_scoped import (
     WorkflowScopedGitHubApi,
     _cancel_triggering_run_if_stale_or_nonqualifying,
     _explicit_singleton_pr_for_current_run,
+    _validated_event_pr_identity,
     cancel_superseded_explicit_pr_runs,
 )
 
@@ -222,6 +224,96 @@ def test_current_run_snapshot_identity_requires_one_consistent_singleton() -> No
         current_run_id=91,
         event_head_sha=HEAD,
     ) is None
+
+
+def test_event_pr_reference_mode_preserves_multi_reference_ambiguity() -> None:
+    assert _validated_event_pr_identity(
+        2039,
+        reference_mode="singleton",
+    ) == (2039, False)
+    assert _validated_event_pr_identity(
+        0,
+        reference_mode="empty",
+    ) == (None, False)
+    assert _validated_event_pr_identity(
+        0,
+        reference_mode="ambiguous",
+    ) == (None, True)
+
+    for pr_number, mode in (
+        (0, "singleton"),
+        (2039, "empty"),
+        (2039, "ambiguous"),
+    ):
+        with pytest.raises(CancellationError):
+            _validated_event_pr_identity(
+                pr_number,
+                reference_mode=mode,
+            )
+
+
+def test_ambiguous_event_never_recovers_current_run_singleton_snapshot(
+    monkeypatch,
+) -> None:
+    instances = []
+
+    class FakeScopedApi:
+        def __init__(self, **kwargs) -> None:
+            self.kwargs = kwargs
+            instances.append(self)
+
+        def cancel_historical_unbound_runs(
+            self,
+            *,
+            exclude_run_ids: tuple[int, ...],
+        ) -> tuple[int, ...]:
+            assert 91 in exclude_run_ids
+            return ()
+
+        def live_pr_qualification(self, pr_number: int):
+            raise AssertionError(
+                f"ambiguous event must not resolve trigger PR authority: {pr_number}"
+            )
+
+    monkeypatch.setattr(
+        scoped_controller,
+        "WorkflowScopedGitHubApi",
+        FakeScopedApi,
+    )
+    monkeypatch.setattr(
+        scoped_controller,
+        "cancel_superseded_explicit_pr_runs",
+        lambda *args, **kwargs: (),
+    )
+    monkeypatch.setattr(
+        scoped_controller,
+        "_explicit_singleton_pr_for_current_run",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError(
+                "multi-reference event must not collapse to later singleton snapshot"
+            )
+        ),
+    )
+    monkeypatch.setenv("GITHUB_REPOSITORY", "Oleksii-debug/Autosport")
+    monkeypatch.setenv("GITHUB_TOKEN", "test-token")
+
+    assert scoped_controller.main(
+        [
+            "--pr-number",
+            "0",
+            "--event-pr-reference-mode",
+            "ambiguous",
+            "--event-head-sha",
+            HEAD,
+            "--workflow-name",
+            "CI",
+            "--workflow-id",
+            "356678400",
+            "--current-run-id",
+            "91",
+        ]
+    ) == 0
+    assert len(instances) == 1
 
 
 def test_later_explicit_observation_revokes_stale_unbound_candidate(monkeypatch) -> None:
@@ -501,6 +593,8 @@ def test_controller_scheduler_coalesces_all_prs_per_source_workflow() -> None:
     assert "github.event.workflow_run.event == 'pull_request'" in concurrency
     assert "format('non-pr-{0}', github.event.workflow_run.id)" in concurrency
     assert "cancel-in-progress: false" in concurrency
+    assert "--event-pr-reference-mode" in text
+    assert "&& 'ambiguous' || 'singleton'" in text
 
 
 class SweepApi:

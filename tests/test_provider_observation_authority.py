@@ -906,6 +906,67 @@ def test_store_save_rejects_monotonic_commit_rebind_before_dispatch(
     assert hostile_calls == []
 
 
+@pytest.mark.parametrize("method_name", ["acquire", "release"])
+def test_store_save_rejects_workspace_lock_virtual_dispatch_rebind(
+    tmp_path,
+    monkeypatch,
+    method_name: str,
+):
+    snapshot = _capture(monkeypatch)
+    store = _store(tmp_path)
+    hostile_calls: list[str] = []
+
+    def hostile(*_args, **_kwargs):
+        hostile_calls.append(method_name)
+        raise AssertionError(f"hostile workspace lock {method_name} executed")
+
+    monkeypatch.setattr(
+        authority_module.WorkspaceEconomicLock,
+        method_name,
+        hostile,
+    )
+
+    with pytest.raises(
+        ProviderObservationIntegrityError,
+        match="provider evidence workspace lock dispatch changed",
+    ):
+        store.save(snapshot)
+
+    assert hostile_calls == []
+
+
+@pytest.mark.parametrize(
+    "method_name",
+    ["_load_bound_history", "_append_record", "_new_record"],
+)
+def test_store_save_rejects_monotonic_internal_virtual_dispatch_rebind(
+    tmp_path,
+    monkeypatch,
+    method_name: str,
+):
+    snapshot = _capture(monkeypatch)
+    store = _store(tmp_path)
+    hostile_calls: list[str] = []
+
+    def hostile(*_args, **_kwargs):
+        hostile_calls.append(method_name)
+        raise AssertionError(f"hostile monotonic {method_name} executed")
+
+    monkeypatch.setattr(
+        authority_module.MonotonicWorkspaceAuthority,
+        method_name,
+        hostile,
+    )
+
+    with pytest.raises(
+        ProviderObservationIntegrityError,
+        match="provider evidence monotonic authority dispatch changed",
+    ):
+        store.save(snapshot)
+
+    assert hostile_calls == []
+
+
 def test_store_save_rejects_workspace_lock_enter_rebind_before_dispatch(
     tmp_path,
     monkeypatch,

@@ -979,6 +979,7 @@ class BetdaqEconomicReadbackClient:
             credentials = client._credentials
             venue_id = client._venue_id
             clock = client._clock
+            clock_code = getattr(clock, "__code__", None)
             if type(credentials) is not _account.BetdaqCredentials:
                 raise BetdaqEconomicReadbackError(
                     "BETDAQ economic read requires canonical credentials"
@@ -1050,7 +1051,10 @@ class BetdaqEconomicReadbackClient:
                 raise BetdaqEconomicReadbackError(
                     "BETDAQ authenticated account context changed during economic acquisition"
                 )
-            if client._clock is not clock:
+            if (
+                client._clock is not clock
+                or getattr(clock, "__code__", None) is not clock_code
+            ):
                 raise BetdaqEconomicReadbackError(
                     "BETDAQ economic evidence clock changed during acquisition"
                 )
@@ -1071,7 +1075,10 @@ class BetdaqEconomicReadbackClient:
                 raise BetdaqEconomicReadbackError(
                     "BETDAQ economic response failed canonical validation"
                 ) from None
-            if client._clock is not clock:
+            if (
+                client._clock is not clock
+                or getattr(clock, "__code__", None) is not clock_code
+            ):
                 raise BetdaqEconomicReadbackError(
                     "BETDAQ economic evidence clock changed during acquisition"
                 )

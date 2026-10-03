@@ -562,6 +562,52 @@ def test_economic_read_rejects_clock_rotation_during_dispatch(monkeypatch):
     assert hostile_calls == []
 
 
+def test_economic_read_rejects_in_place_clock_code_mutation_during_dispatch(
+    monkeypatch,
+):
+    payload = postings_by_id(posting(9001))
+    hostile_calls = []
+
+    def mutable_clock():
+        return datetime(2026, 10, 3, 10, 0, tzinfo=timezone.utc)
+
+    original_code = mutable_clock.__code__
+
+    def hostile_clock():
+        hostile_calls.append(True)
+        return datetime(2000, 1, 1, tzinfo=timezone.utc)
+
+    account = BetdaqAccountReadOnlyClient(
+        BetdaqCredentials("alice", "secret-pass", "secret-app"),
+        clock=mutable_clock,
+    )
+
+    class MutatingClockUrlopen:
+        def __init__(self):
+            self.calls = []
+
+        def __call__(self, request, *, timeout):
+            self.calls.append((request, timeout))
+            mutable_clock.__code__ = hostile_clock.__code__
+            return _FakeHttpResponse(payload)
+
+    opener = MutatingClockUrlopen()
+    _install_https_test_dispatch(monkeypatch, opener)
+    client = BetdaqEconomicReadbackClient(account)
+
+    try:
+        with pytest.raises(
+            BetdaqEconomicReadbackError,
+            match="economic evidence clock changed during acquisition",
+        ):
+            client.read_account_postings_by_id(9000)
+    finally:
+        mutable_clock.__code__ = original_code
+
+    assert len(opener.calls) == 1
+    assert hostile_calls == []
+
+
 def test_economic_private_call_cannot_be_widened_to_provider_write_by_globals(
     monkeypatch,
 ):

@@ -882,12 +882,15 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
 
                 def fail_after_sqlite_commit(authority, **kwargs):
                     nonlocal calls
-                    calls += 1
-                    # First recover: outer preflight. Second: under SQLite BEGIN
-                    # IMMEDIATE before PREPARE. Third: SQLite row is committed and
-                    # the machine authority still has the live PREPARE.
-                    if calls == 3:
-                        raise RuntimeError("simulated post-SQLite authority commit crash")
+                    if authority.domain == storage_module._REPLAY_CUTOFF_MACHINE_DOMAIN:
+                        calls += 1
+                        # First cutoff recover: outer preflight. Second: under
+                        # SQLite BEGIN IMMEDIATE before PREPARE. Third: the cutoff
+                        # row is committed while machine authority is still PREPARE.
+                        if calls == 3:
+                            raise RuntimeError(
+                                "simulated post-SQLite authority commit crash"
+                            )
                     return original_recover(authority, **kwargs)
 
                 with patch.object(
@@ -1026,11 +1029,12 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
 
                 def fail_after_sqlite_commit(authority, **kwargs):
                     nonlocal calls
-                    calls += 1
-                    if calls == 3:
-                        raise RuntimeError(
-                            "simulated post-SQLite append-authority crash"
-                        )
+                    if authority.domain == storage_module._REPLAY_APPEND_MACHINE_DOMAIN:
+                        calls += 1
+                        if calls == 3:
+                            raise RuntimeError(
+                                "simulated post-SQLite append-authority crash"
+                            )
                     return original_recover(authority, **kwargs)
 
                 with patch.object(

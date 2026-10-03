@@ -504,6 +504,89 @@ class PaperRealizedDrawdownEvidence:
                 "drawdown evidence peak does not match the path"
             )
 
+        path_payload = {
+            "schema": DRAW_DOWN_PATH_SCHEMA,
+            "bankroll_id": self.bankroll_id,
+            "currency": self.currency,
+            "goal_contract_sha256": self.goal_contract_sha256,
+            "points": [
+                {
+                    "sequence": point.sequence,
+                    "point_id": point.point_id,
+                    "action": point.action,
+                    "ticket_id": point.ticket_id,
+                    "equity": str(point.equity),
+                    "realized_delta": str(point.realized_delta),
+                    "event_time": point.event_time,
+                }
+                for point in self.points
+            ],
+        }
+        expected_path_sha256 = hashlib.sha256(
+            json.dumps(
+                path_payload,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            ).encode("utf-8")
+        ).hexdigest()
+        if self.path_sha256 != expected_path_sha256:
+            raise PaperDrawdownEvidenceError(
+                "drawdown evidence path digest does not match canonical path"
+            )
+
+        evidence_payload = {
+            "schema": self.schema,
+            "scope": self.scope,
+            "metric_class": self.metric_class,
+            "economic_basis": self.economic_basis,
+            "history_mode": self.history_mode,
+            "path_point_count": self.path_point_count,
+            "net_cost_evidence_complete": self.net_cost_evidence_complete,
+            "marked_equity_supported": self.marked_equity_supported,
+            "capital_at_risk_included": self.capital_at_risk_included,
+            "risk_of_ruin_included": self.risk_of_ruin_included,
+            "stress_drawdown_included": self.stress_drawdown_included,
+            "goal_id": self.goal_id,
+            "goal_revision": self.goal_revision,
+            "goal_contract_sha256": self.goal_contract_sha256,
+            "bankroll_id": self.bankroll_id,
+            "currency": self.currency,
+            "source_state_sha256": self.source_state_sha256,
+            "path_sha256": self.path_sha256,
+            "initial_equity": str(self.initial_equity),
+            "current_equity": str(self.current_equity),
+            "peak_equity": str(self.peak_equity),
+            "minimum_equity": str(self.minimum_equity),
+            "historical_max_drawdown_amount": str(
+                self.historical_max_drawdown_amount
+            ),
+            "historical_max_drawdown_fraction": str(
+                self.historical_max_drawdown_fraction
+            ),
+            "historical_max_drawdown_peak_id": self.historical_max_drawdown_peak_id,
+            "historical_max_drawdown_trough_id": self.historical_max_drawdown_trough_id,
+            "current_drawdown_amount": str(self.current_drawdown_amount),
+            "recovered_to_peak": self.recovered_to_peak,
+            "open_position_count": self.open_position_count,
+            "settlement_availability_complete": self.settlement_availability_complete,
+            "as_known_at_supported": self.as_known_at_supported,
+        }
+        expected_evidence_sha256 = hashlib.sha256(
+            json.dumps(
+                evidence_payload,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            ).encode("utf-8")
+        ).hexdigest()
+        if self.evidence_sha256 != expected_evidence_sha256:
+            raise PaperDrawdownEvidenceError(
+                "drawdown evidence result digest does not match canonical evidence"
+            )
+
 
 def _make_resolver() -> FunctionType:
     error_type = PaperDrawdownEvidenceError

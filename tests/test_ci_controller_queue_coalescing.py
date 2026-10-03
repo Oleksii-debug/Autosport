@@ -1078,6 +1078,53 @@ def test_live_pr_boundary_coordinated_class_rebind_cannot_forge_head(
     )
 
 
+def test_live_pr_boundary_does_not_trust_rebound_sha_helper(
+    monkeypatch,
+) -> None:
+    api = WorkflowScopedGitHubApi(
+        repository="owner/repo",
+        token="token",
+        workflow_id=356678400,
+        workflow_name="CI",
+    )
+    canonical_request = scoped_controller.GitHubApi._request
+
+    class FakeResponse:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, _exc_type, _exc, _tb):
+            return False
+
+        def read(self) -> bytes:
+            return (
+                b'{"state":"open","draft":false,'
+                b'"head":{"sha":"'
+                + HEAD.encode("ascii")
+                + b'","repo":{"full_name":"owner/repo"}},'
+                b'"base":{"repo":{"full_name":"owner/repo"}}}'
+            )
+
+    def forged_sha(_value, *, field: str) -> str:
+        del field
+        return STALE_HEAD
+
+    def canonical_urlopen(_request, *, timeout: int):
+        assert timeout == 20
+        monkeypatch.setattr(scoped_controller, "_require_sha", forged_sha)
+        return FakeResponse()
+
+    monkeypatch.setitem(
+        canonical_request.__globals__,
+        "urlopen",
+        canonical_urlopen,
+    )
+
+    assert _trusted_live_pr_qualification(api, 303) == (HEAD, True)
+
+
 def test_controller_scheduler_coalesces_all_prs_per_source_workflow() -> None:
     text = Path(".github/workflows/pr-qualification-supersession.yml").read_text(
         encoding="utf-8"

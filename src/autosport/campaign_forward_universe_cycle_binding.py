@@ -62,6 +62,8 @@ _SCHEMA_VERSION = 1
 _DOMAIN = "autosport.campaign-forward-universe-cycle-authority.v1"
 _COMPOSED_VERIFICATION_DOMAIN = "autosport.campaign-forward-evidence-verification.v1"
 _COMPOSED_VERIFICATION_SCOPE = "CYCLE_BOUND_PROVIDER_UNIVERSE_STRUCTURAL_ONLY"
+_AUTHORITY_ISSUANCE_CAPABILITY = object()
+_VERIFICATION_ISSUANCE_CAPABILITY = object()
 _HEX = frozenset("0123456789abcdef")
 
 _ESTABLISH_CAMPAIGN = establish_campaign_inception
@@ -328,6 +330,7 @@ class CampaignForwardUniverseCycleAuthority:
     def _issue(
         cls,
         *,
+        _issuance_capability: object,
         campaign_id: str,
         source_id: str,
         cycle_receipt_sha256: str,
@@ -337,6 +340,14 @@ class CampaignForwardUniverseCycleAuthority:
         collector_artifact_evidence_sha256: str,
         forward_identity: ForwardUniverseAuthorityIdentity,
     ) -> "CampaignForwardUniverseCycleAuthority":
+        if cls is not CampaignForwardUniverseCycleAuthority:
+            raise TypeError(
+                "campaign forward-cycle authority issuer requires exact canonical class"
+            )
+        if _issuance_capability is not _AUTHORITY_ISSUANCE_CAPABILITY:
+            raise TypeError(
+                "campaign forward-cycle authority issuance is resolver-private"
+            )
         payload = {
             "schema_version": _SCHEMA_VERSION,
             "campaign_id": _text(campaign_id, "campaign_id"),
@@ -433,9 +444,18 @@ class CampaignForwardEvidenceVerification:
     def _issue(
         cls,
         *,
+        _issuance_capability: object,
         authority: CampaignForwardUniverseCycleAuthority,
         structural_result: VerificationResult,
     ) -> "CampaignForwardEvidenceVerification":
+        if cls is not CampaignForwardEvidenceVerification:
+            raise TypeError(
+                "campaign forward verification issuer requires exact canonical class"
+            )
+        if _issuance_capability is not _VERIFICATION_ISSUANCE_CAPABILITY:
+            raise TypeError(
+                "campaign forward verification issuance is resolver-private"
+            )
         if type(authority) is not CampaignForwardUniverseCycleAuthority:
             raise TypeError(
                 "authority must be exact CampaignForwardUniverseCycleAuthority"
@@ -532,6 +552,8 @@ class CampaignForwardEvidenceVerification:
 
 
 _CANONICAL_AUTHORITY_CLASS = CampaignForwardUniverseCycleAuthority
+_CANONICAL_AUTHORITY_ISSUANCE_CAPABILITY = _AUTHORITY_ISSUANCE_CAPABILITY
+_CANONICAL_VERIFICATION_ISSUANCE_CAPABILITY = _VERIFICATION_ISSUANCE_CAPABILITY
 _AUTHORITY_FIELD_NAMES = tuple(
     CampaignForwardUniverseCycleAuthority.__dataclass_fields__
 )
@@ -605,6 +627,10 @@ def _require_dispatch_integrity() -> None:
         != _COMPOSED_VERIFICATION_DOMAIN
         or module_globals.get("_COMPOSED_VERIFICATION_SCOPE")
         != _COMPOSED_VERIFICATION_SCOPE
+        or module_globals.get("_AUTHORITY_ISSUANCE_CAPABILITY")
+        is not _CANONICAL_AUTHORITY_ISSUANCE_CAPABILITY
+        or module_globals.get("_VERIFICATION_ISSUANCE_CAPABILITY")
+        is not _CANONICAL_VERIFICATION_ISSUANCE_CAPABILITY
         or module_globals.get("ARTIFACT_KIND") != _CANONICAL_ARTIFACT_KIND
     ):
         raise CampaignForwardUniverseCycleBindingError(
@@ -878,6 +904,10 @@ def resolve_campaign_forward_universe_cycle_authority(
     expected_provider_values = _PROVIDER_UNIVERSE_VALUES
     expected_provider_value_items = tuple(expected_provider_values.items())
     expected_authority_class = _CANONICAL_AUTHORITY_CLASS
+    expected_authority_issuance_capability = _CANONICAL_AUTHORITY_ISSUANCE_CAPABILITY
+    expected_verification_issuance_capability = (
+        _CANONICAL_VERIFICATION_ISSUANCE_CAPABILITY
+    )
     expected_authority_field_descriptors = _CANONICAL_AUTHORITY_FIELD_DESCRIPTORS
     expected_authority_issuer = _CANONICAL_AUTHORITY_ISSUER
     expected_authority_issuer_function = _CANONICAL_AUTHORITY_ISSUER_FUNCTION
@@ -909,6 +939,14 @@ def resolve_campaign_forward_universe_cycle_authority(
             or module_globals.get("_PROVIDER_UNIVERSE_VALUES") is not expected_provider_values
             or tuple(expected_provider_values.items()) != expected_provider_value_items
             or module_globals.get("_CANONICAL_AUTHORITY_CLASS") is not expected_authority_class
+            or module_globals.get("_AUTHORITY_ISSUANCE_CAPABILITY")
+            is not expected_authority_issuance_capability
+            or module_globals.get("_VERIFICATION_ISSUANCE_CAPABILITY")
+            is not expected_verification_issuance_capability
+            or module_globals.get("_CANONICAL_AUTHORITY_ISSUANCE_CAPABILITY")
+            is not expected_authority_issuance_capability
+            or module_globals.get("_CANONICAL_VERIFICATION_ISSUANCE_CAPABILITY")
+            is not expected_verification_issuance_capability
             or module_globals.get("_CANONICAL_AUTHORITY_FIELD_DESCRIPTORS") is not expected_authority_field_descriptors
             or module_globals.get("_CANONICAL_AUTHORITY_ISSUER") is not expected_authority_issuer
             or module_globals.get("_CANONICAL_AUTHORITY_ISSUER_FUNCTION") is not expected_authority_issuer_function
@@ -1075,6 +1113,7 @@ def resolve_campaign_forward_universe_cycle_authority(
 
     require_stable_integrity()
     return CampaignForwardUniverseCycleAuthority._issue(
+        _issuance_capability=_AUTHORITY_ISSUANCE_CAPABILITY,
         campaign_id=campaign.campaign_id,
         source_id=cycle_receipt.source_id,
         cycle_receipt_sha256=cycle_receipt.receipt_sha256,
@@ -1119,6 +1158,10 @@ def authorize_campaign_forward_source_receipts(
     expected_provider_values = _PROVIDER_UNIVERSE_VALUES
     expected_provider_value_items = tuple(expected_provider_values.items())
     expected_authority_class = _CANONICAL_AUTHORITY_CLASS
+    expected_authority_issuance_capability = _CANONICAL_AUTHORITY_ISSUANCE_CAPABILITY
+    expected_verification_issuance_capability = (
+        _CANONICAL_VERIFICATION_ISSUANCE_CAPABILITY
+    )
     expected_authority_field_descriptors = _CANONICAL_AUTHORITY_FIELD_DESCRIPTORS
     expected_authority_issuer = _CANONICAL_AUTHORITY_ISSUER
     expected_authority_issuer_function = _CANONICAL_AUTHORITY_ISSUER_FUNCTION
@@ -1158,6 +1201,14 @@ def authorize_campaign_forward_source_receipts(
             or module_globals.get("_PROVIDER_UNIVERSE_VALUES") is not expected_provider_values
             or tuple(expected_provider_values.items()) != expected_provider_value_items
             or module_globals.get("_CANONICAL_AUTHORITY_CLASS") is not expected_authority_class
+            or module_globals.get("_AUTHORITY_ISSUANCE_CAPABILITY")
+            is not expected_authority_issuance_capability
+            or module_globals.get("_VERIFICATION_ISSUANCE_CAPABILITY")
+            is not expected_verification_issuance_capability
+            or module_globals.get("_CANONICAL_AUTHORITY_ISSUANCE_CAPABILITY")
+            is not expected_authority_issuance_capability
+            or module_globals.get("_CANONICAL_VERIFICATION_ISSUANCE_CAPABILITY")
+            is not expected_verification_issuance_capability
             or module_globals.get("_CANONICAL_AUTHORITY_FIELD_DESCRIPTORS") is not expected_authority_field_descriptors
             or module_globals.get("_CANONICAL_AUTHORITY_ISSUER") is not expected_authority_issuer
             or module_globals.get("_CANONICAL_AUTHORITY_ISSUER_FUNCTION") is not expected_authority_issuer_function
@@ -1314,6 +1365,7 @@ def verify_campaign_forward_evidence(
     _require_dispatch_integrity()
     receipt = _CANONICAL_VERIFICATION_ISSUER_FUNCTION(
         _CANONICAL_VERIFICATION_CLASS,
+        _issuance_capability=_VERIFICATION_ISSUANCE_CAPABILITY,
         authority=after,
         structural_result=result,
     )
@@ -1384,6 +1436,10 @@ def _seal_campaign_forward_universe_cycle_dispatch() -> None:
     expected_datetime = datetime
     expected_timezone = timezone
     expected_authority_class = _CANONICAL_AUTHORITY_CLASS
+    expected_authority_issuance_capability = _CANONICAL_AUTHORITY_ISSUANCE_CAPABILITY
+    expected_verification_issuance_capability = (
+        _CANONICAL_VERIFICATION_ISSUANCE_CAPABILITY
+    )
     expected_authority_field_descriptors = _CANONICAL_AUTHORITY_FIELD_DESCRIPTORS
     expected_authority_issuer = _CANONICAL_AUTHORITY_ISSUER
     expected_authority_issuer_function = _CANONICAL_AUTHORITY_ISSUER_FUNCTION
@@ -1420,6 +1476,14 @@ def _seal_campaign_forward_universe_cycle_dispatch() -> None:
             )
         if (
             module_globals.get("_CANONICAL_AUTHORITY_CLASS") is not expected_authority_class
+            or module_globals.get("_AUTHORITY_ISSUANCE_CAPABILITY")
+            is not expected_authority_issuance_capability
+            or module_globals.get("_VERIFICATION_ISSUANCE_CAPABILITY")
+            is not expected_verification_issuance_capability
+            or module_globals.get("_CANONICAL_AUTHORITY_ISSUANCE_CAPABILITY")
+            is not expected_authority_issuance_capability
+            or module_globals.get("_CANONICAL_VERIFICATION_ISSUANCE_CAPABILITY")
+            is not expected_verification_issuance_capability
             or module_globals.get("_CANONICAL_AUTHORITY_FIELD_DESCRIPTORS") is not expected_authority_field_descriptors
             or module_globals.get("_CANONICAL_AUTHORITY_ISSUER") is not expected_authority_issuer
             or module_globals.get("_CANONICAL_AUTHORITY_ISSUER_FUNCTION") is not expected_authority_issuer_function

@@ -1474,7 +1474,7 @@ def test_recovery_helper_code_replacement_cannot_hide_transaction_history(tmp_pa
         target.__code__ = original_code
 
 
-def _assert_paperbook_mutation_gate_tamper_rejected(tmp_path, match):
+def _paperbook_mutation_gate_case(tmp_path):
     now = datetime.now(timezone.utc).replace(microsecond=0)
     old = now - timedelta(days=2)
     goal = _goal()
@@ -1484,7 +1484,19 @@ def _assert_paperbook_mutation_gate_tamper_rejected(tmp_path, match):
     candidate = _leg("paperbook-mutation-gate")
     context = _context(candidate, _timestamp(now))
     policy = _policy(goal)
+    return now, book, candidate, context, policy
 
+
+def _assert_paperbook_mutation_gate_tamper_rejected(
+    tmp_path,
+    *,
+    now,
+    book,
+    candidate,
+    context,
+    policy,
+    match,
+):
     with pytest.raises(RuntimeError, match=match):
         admit_paper_ticket(
             workspace=tmp_path,
@@ -1502,6 +1514,7 @@ def _assert_paperbook_mutation_gate_tamper_rejected(tmp_path, match):
 
 
 def test_paperbook_open_ticket_rebind_cannot_inflate_approved_stake(tmp_path):
+    now, book, candidate, context, policy = _paperbook_mutation_gate_case(tmp_path)
     original = PaperBook.__dict__["open_ticket"]
     hostile_called = False
 
@@ -1521,7 +1534,12 @@ def test_paperbook_open_ticket_rebind_cannot_inflate_approved_stake(tmp_path):
         PaperBook.open_ticket = hostile_open
         _assert_paperbook_mutation_gate_tamper_rejected(
             tmp_path,
-            "economic admission PaperBook mutation authority changed",
+            now=now,
+            book=book,
+            candidate=candidate,
+            context=context,
+            policy=policy,
+            match="economic admission PaperBook mutation authority changed",
         )
     finally:
         PaperBook.open_ticket = original
@@ -1532,6 +1550,7 @@ def test_paperbook_open_ticket_rebind_cannot_inflate_approved_stake(tmp_path):
 
 
 def test_paperbook_save_rebind_cannot_redirect_approved_mutation(tmp_path):
+    now, book, candidate, context, policy = _paperbook_mutation_gate_case(tmp_path)
     original = PaperBook.__dict__["save"]
     hostile_called = False
 
@@ -1545,7 +1564,12 @@ def test_paperbook_save_rebind_cannot_redirect_approved_mutation(tmp_path):
         PaperBook.save = hostile_save
         _assert_paperbook_mutation_gate_tamper_rejected(
             tmp_path,
-            "economic admission PaperBook mutation authority changed",
+            now=now,
+            book=book,
+            candidate=candidate,
+            context=context,
+            policy=policy,
+            match="economic admission PaperBook mutation authority changed",
         )
     finally:
         PaperBook.save = original
@@ -1556,6 +1580,7 @@ def test_paperbook_save_rebind_cannot_redirect_approved_mutation(tmp_path):
 
 
 def test_paperbook_load_rebind_cannot_substitute_economic_state(tmp_path):
+    now, book, candidate, context, policy = _paperbook_mutation_gate_case(tmp_path)
     original = PaperBook.__dict__["load"]
     hostile_called = False
 
@@ -1569,7 +1594,12 @@ def test_paperbook_load_rebind_cannot_substitute_economic_state(tmp_path):
         PaperBook.load = classmethod(hostile_load)
         _assert_paperbook_mutation_gate_tamper_rejected(
             tmp_path,
-            "economic admission PaperBook mutation authority changed",
+            now=now,
+            book=book,
+            candidate=candidate,
+            context=context,
+            policy=policy,
+            match="economic admission PaperBook mutation authority changed",
         )
     finally:
         PaperBook.load = original

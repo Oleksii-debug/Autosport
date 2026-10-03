@@ -1119,6 +1119,14 @@ class Opportunity:
         return result
 
 
+def _opportunity_from_dict(
+    raw: object,
+    *,
+    _opportunity_type: type[Opportunity] = Opportunity,
+) -> Opportunity:
+    return _opportunity_type.from_dict(raw)
+
+
 @dataclass(frozen=True, slots=True)
 class OpportunitySet:
     opportunities: tuple[Opportunity, ...]
@@ -1186,7 +1194,7 @@ class OpportunitySet:
             )
         result = cls(
             opportunities=tuple(
-                Opportunity.from_dict(item)
+                _opportunity_from_dict(item)
                 for item in raw["opportunities"]
             )
         )
@@ -1198,6 +1206,14 @@ class OpportunitySet:
                 "opportunity_set_id does not match canonical members"
             )
         return result
+
+
+def _opportunity_set_from_dict(
+    raw: object,
+    *,
+    _opportunity_set_type: type[OpportunitySet] = OpportunitySet,
+) -> OpportunitySet:
+    return _opportunity_set_type.from_dict(raw)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1241,6 +1257,14 @@ class PlanAllocation:
                 "allocation stake",
             ),
         )
+
+
+def _plan_allocation_from_dict(
+    raw: object,
+    *,
+    _allocation_type: type[PlanAllocation] = PlanAllocation,
+) -> PlanAllocation:
+    return _allocation_type.from_dict(raw)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1382,7 +1406,7 @@ class PortfolioPlan:
                 raise OpportunityContractError(
                     f"{name} must be a JSON array"
                 )
-        opportunity_set = OpportunitySet.from_dict(
+        opportunity_set = _opportunity_set_from_dict(
             raw["opportunity_set"]
         )
         serialized_set_id = _canonical_hash(
@@ -1396,19 +1420,19 @@ class PortfolioPlan:
         result = cls(
             opportunity_set=opportunity_set,
             allocations=tuple(
-                PlanAllocation.from_dict(item)
+                _plan_allocation_from_dict(item)
                 for item in raw["allocations"]
             ),
             portfolio_evidence_refs=tuple(
-                EvidenceRef.from_dict(item)
+                _evidence_ref_from_dict(item)
                 for item in raw["portfolio_evidence_refs"]
             ),
             risk_evidence_refs=tuple(
-                EvidenceRef.from_dict(item)
+                _evidence_ref_from_dict(item)
                 for item in raw["risk_evidence_refs"]
             ),
             ledger_state_refs=tuple(
-                EvidenceRef.from_dict(item)
+                _evidence_ref_from_dict(item)
                 for item in raw["ledger_state_refs"]
             ),
         )

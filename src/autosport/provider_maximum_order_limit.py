@@ -19,6 +19,7 @@ from decimal import Decimal
 from enum import Enum
 from hashlib import sha256
 import json
+from weakref import ref
 
 
 class ProviderMaximumOrderLimitError(ValueError):
@@ -47,7 +48,7 @@ class ProviderMaximumOrderLimitComparison(str, Enum):
     ABOVE_UNPROVEN_MAXIMUM = "ABOVE_UNPROVEN_MAXIMUM"
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, weakref_slot=True)
 class ProviderMaximumOrderLimitEvidence:
     provider_id: str
     account_id: str
@@ -186,7 +187,7 @@ class ProviderMaximumOrderLimitAssessment:
 
 
 def _install_structural_authority() -> None:
-    sealed: dict[int, tuple[ProviderMaximumOrderLimitEvidence, str]] = {}
+    sealed: dict[int, tuple[ref[ProviderMaximumOrderLimitEvidence], str]] = {}
 
     def _validate_scope_and_time(
         evidence: ProviderMaximumOrderLimitEvidence,
@@ -277,7 +278,18 @@ def _install_structural_authority() -> None:
             limit_kind=limit_kind,
             action_binding_sha256=action_binding_sha256,
         )
-        sealed[id(evidence)] = (evidence, fingerprint)
+        identity = id(evidence)
+
+        def _drop_seal(
+            dead_ref: ref[ProviderMaximumOrderLimitEvidence],
+            *,
+            identity: int = identity,
+        ) -> None:
+            current = sealed.get(identity)
+            if current is not None and current[0] is dead_ref:
+                sealed.pop(identity, None)
+
+        sealed[identity] = (ref(evidence, _drop_seal), fingerprint)
         return evidence
 
     def assert_provider_maximum_order_limit_structure_sealed(
@@ -288,7 +300,7 @@ def _install_structural_authority() -> None:
                 "evidence must be exact ProviderMaximumOrderLimitEvidence"
             )
         record = sealed.get(id(evidence))
-        if record is None or record[0] is not evidence:
+        if record is None or record[0]() is not evidence:
             raise ProviderMaximumOrderLimitError(
                 "provider maximum-order evidence lacks structural seal"
             )

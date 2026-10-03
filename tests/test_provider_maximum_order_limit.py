@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import gc
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from weakref import ref
 
 import pytest
 
@@ -304,3 +306,13 @@ def test_fabricated_maximum_can_be_structurally_compared_but_never_supports_requ
         match="origin authority is not proven",
     ):
         assert_provider_maximum_order_limit_evidence_authoritative(item)
+
+
+def test_structural_seal_registry_does_not_retain_evidence_forever():
+    item = seal(evidence())
+    weak = ref(item)
+
+    del item
+    gc.collect()
+
+    assert weak() is None

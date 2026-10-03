@@ -220,7 +220,6 @@ class EconomicGoalEndogenousStakeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             ledger_path = root / "decisions.jsonl"
-            book_path = root / "paper.json"
             ledger = JsonlDecisionLedger(ledger_path)
             context = AgentContext(
                 book,
@@ -240,8 +239,8 @@ class EconomicGoalEndogenousStakeTests(unittest.TestCase):
             )
             self.assertEqual(new_ticket.stake, Decimal("5.00"))
             self.assertEqual(book.committed_stake, Decimal("25.00"))
-            book.save(book_path)
-
+            self.assertIsNotNone(context.paper_execution)
+            book_path = context.paper_execution.paper_book_path
             restarted_book = PaperBook.load(book_path)
             restarted_context = AgentContext(
                 restarted_book,

@@ -572,6 +572,61 @@ class DeploymentRuntimeAuthorityRecord:
         )
 
 
+_CANONICAL_RECORD_TYPE: Final = DeploymentRuntimeAuthorityRecord
+_RECORD_CODEC_NAMES: Final = (
+    "__post_init__",
+    "identity_payload",
+    "computed_runtime_authority_id",
+    "record_payload",
+    "computed_record_sha256",
+    "to_dict",
+    "create",
+    "from_dict",
+)
+_CANONICAL_RECORD_CODEC_DESCRIPTORS: Final = tuple(
+    (
+        name,
+        descriptor,
+        getattr(
+            getattr(
+                getattr(descriptor, "__func__", descriptor),
+                "fget",
+                getattr(descriptor, "__func__", descriptor),
+            ),
+            "__code__",
+            None,
+        ),
+    )
+    for name in _RECORD_CODEC_NAMES
+    for descriptor in (vars(DeploymentRuntimeAuthorityRecord)[name],)
+)
+
+
+def _assert_canonical_record_codec() -> None:
+    if DeploymentRuntimeAuthorityRecord is not _CANONICAL_RECORD_TYPE:
+        raise DeploymentRuntimeAuthorityError(
+            "runtime authority record type dispatch was replaced"
+        )
+    class_dict = vars(_CANONICAL_RECORD_TYPE)
+    for name, expected_descriptor, expected_code in _CANONICAL_RECORD_CODEC_DESCRIPTORS:
+        current = class_dict.get(name)
+        current_callable = getattr(
+            getattr(current, "__func__", current),
+            "fget",
+            getattr(current, "__func__", current),
+        )
+        if (
+            current is not expected_descriptor
+            or (
+                expected_code is not None
+                and getattr(current_callable, "__code__", None) is not expected_code
+            )
+        ):
+            raise DeploymentRuntimeAuthorityError(
+                "runtime authority record codec dispatch was replaced"
+            )
+
+
 class DeploymentRuntimeAuthorityStore:
     """Rollback-resistant append-only runtime authority file.
 
@@ -987,6 +1042,7 @@ class DeploymentRuntimeAuthorityStore:
     def _records_from_payload(
         payload: Mapping[str, object],
     ) -> tuple[DeploymentRuntimeAuthorityRecord, ...]:
+        _assert_canonical_record_codec()
         records_raw = payload["records"]
         assert isinstance(records_raw, list)
         previous = _EMPTY_CHAIN_SHA256
@@ -1019,6 +1075,7 @@ class DeploymentRuntimeAuthorityStore:
 
     def _assert_binding_integrity(self) -> None:
         self._assert_static_authority_contract()
+        _assert_canonical_record_codec()
         if (
             _sha is not _CANONICAL_SHA_VALIDATOR
             or _CANONICAL_SHA_VALIDATOR.__code__ is not _CANONICAL_SHA_VALIDATOR_CODE

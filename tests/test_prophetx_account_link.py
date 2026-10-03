@@ -68,12 +68,19 @@ class FakeSink:
         self.calls = []
         self.failure = None
         self.result = "credential-ref-1"
+        self.remove_calls = []
+        self.remove_failure = None
 
     def store_prophetx_credentials(self, *, access_key, secret_key, environment):
         self.calls.append((access_key, secret_key, environment))
         if self.failure is not None:
             raise self.failure
         return self.result
+
+    def remove_prophetx_credentials(self, *, credential_ref):
+        self.remove_calls.append(credential_ref)
+        if self.remove_failure is not None:
+            raise self.remove_failure
 
 
 def controller(*, transport=None, sink=None, clock=None):
@@ -407,9 +414,8 @@ def test_second_manual_token_import_cannot_orphan_first_credential_reference():
     assert len(sink.calls) == 1
     assert ctl.public_snapshot().credential_present is True
     assert ctl.public_snapshot().can_import_approved_api_token is False
-    removed = []
-    ctl.unlink(remover=removed.append)
-    assert removed == [first_ref]
+    ctl.unlink()
+    assert sink.remove_calls == [first_ref]
 
 
 def test_failed_unlink_keeps_existing_credential_authoritative_and_blocks_relink():
@@ -419,16 +425,12 @@ def test_failed_unlink_keeps_existing_credential_authoritative_and_blocks_relink
         secret_key="SUPER_SECRET",
         environment="sandbox",
     )
-    calls = []
+    sink.remove_failure = RuntimeError("secret backend unavailable")
 
-    def failing_remover(reference):
-        calls.append(reference)
-        raise RuntimeError("secret backend unavailable")
-
-    ctl.unlink(remover=failing_remover)
+    ctl.unlink()
 
     snap = ctl.public_snapshot()
-    assert calls == ["credential-ref-1"]
+    assert sink.remove_calls == ["credential-ref-1"]
     assert snap.credential_present is True
     assert snap.can_submit_login is False
     assert snap.can_import_approved_api_token is False
@@ -555,17 +557,16 @@ def test_session_expiry_clears_session_and_requires_safe_reauthentication():
 
 
 def test_unlink_removes_only_exact_opaque_credential_reference():
-    ctl, _, _, _ = controller()
+    ctl, _, sink, _ = controller()
     ctl.import_approved_api_token(
         access_key="ACCESS_SECRET",
         secret_key="SUPER_SECRET",
         environment="sandbox",
     )
-    removed = []
 
-    ctl.unlink(remover=removed.append)
+    ctl.unlink()
 
-    assert removed == ["credential-ref-1"]
+    assert sink.remove_calls == ["credential-ref-1"]
     assert ctl.state is AccountLinkState.NOT_LINKED
     assert ctl.public_snapshot().credential_present is False
 

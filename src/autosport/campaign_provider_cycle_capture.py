@@ -341,19 +341,23 @@ def _build_provider_evidence_campaign_scope_guard(
     getattr_static,
     type_fn,
     getattr_fn,
+    any_fn,
+    set_fn,
+    dict_type,
+    type_error,
     error_type,
 ):
     """Capture positive provider-routing authority outside mutable module globals."""
 
     routing_items = tuple(routing_items)
-    routing_descriptors = dict(routing_items)
+    routing_descriptors = dict_type(routing_items)
     workspace_descriptor = routing_descriptors["workspace"]
     authority_root_descriptor = routing_descriptors["authority_root"]
     path_equal_code = getattr_fn(path_equal, "__code__", None)
     path_join_code = getattr_fn(path_join, "__code__", None)
     getattr_static_code = getattr_fn(getattr_static, "__code__", None)
     getattr_static_globals = getattr_fn(getattr_static, "__globals__", None)
-    if type_fn(getattr_static_globals) is not dict:
+    if type_fn(getattr_static_globals) is not dict_type:
         raise error_type("provider evidence scope reflection globals unavailable")
     getattr_static_global_items = tuple(
         (
@@ -372,11 +376,11 @@ def _build_provider_evidence_campaign_scope_guard(
         """Bind provider evidence routing to the exact prospective campaign trust root."""
 
         if type_fn(precommit_locator) is not locator_type:
-            raise TypeError(
+            raise type_error(
                 "precommit_locator must be exact ForwardUniversePrecommitLocator"
             )
         if type_fn(evidence_store) is not evidence_store_type:
-            raise TypeError(
+            raise type_error(
                 "evidence_store must be the exact CompleteGameBoardEvidenceStore"
             )
         if (
@@ -384,7 +388,7 @@ def _build_provider_evidence_campaign_scope_guard(
             or getattr_fn(path_join, "__code__", None) is not path_join_code
             or getattr_fn(getattr_static, "__code__", None) is not getattr_static_code
             or getattr_fn(getattr_static, "__globals__", None) is not getattr_static_globals
-            or any(
+            or any_fn(
                 getattr_static_globals.get(name) is not target
                 or getattr_fn(target, "__code__", None) is not code
                 for name, target, code in getattr_static_global_items
@@ -415,9 +419,9 @@ def _build_provider_evidence_campaign_scope_guard(
             locator_type,
         )
         state = object_getattribute(evidence_store, "__dict__")
-        if type_fn(state) is not dict:
+        if type_fn(state) is not dict_type:
             raise error_type("provider evidence store routing state is unavailable")
-        if set(("workspace", "root", "authority_root")) - set(state):
+        if set_fn(("workspace", "root", "authority_root")) - set_fn(state):
             raise error_type("provider evidence store routing state is incomplete")
         workspace = state["workspace"]
         root = state["root"]
@@ -466,6 +470,10 @@ _require_provider_evidence_campaign_scope = (
         getattr_static=_CANONICAL_GETATTR_STATIC,
         type_fn=_CANONICAL_TYPE,
         getattr_fn=_CANONICAL_GETATTR,
+        any_fn=any,
+        set_fn=set,
+        dict_type=dict,
+        type_error=TypeError,
         error_type=CampaignProviderCycleCaptureIntegrityError,
     )
 )
@@ -710,8 +718,15 @@ def capture_campaign_complete_game_board(
     expected_type = _CANONICAL_TYPE
     expected_callable = _CANONICAL_CALLABLE
     expected_getattr = _CANONICAL_GETATTR
+    expected_unshadowed_builtins = ("any", "len", "set", "sorted", "tuple")
 
     def require_stable_dispatch() -> None:
+        for builtin_name in expected_unshadowed_builtins:
+            if builtin_name in module_globals:
+                raise CampaignProviderCycleCaptureIntegrityError(
+                    "campaign provider-cycle builtin dispatch shadowed: "
+                    + builtin_name
+                )
         if (
             module_globals.get("_CANONICAL_TYPE") is not expected_type
             or module_globals.get("_CANONICAL_CALLABLE") is not expected_callable
@@ -1286,6 +1301,16 @@ def _seal_campaign_provider_cycle_capture_dispatch() -> None:
     expected_issue_code = _CANONICAL_GETATTR(expected_issue_function, "__code__", None)
 
     def require_dispatch_integrity() -> None:
+        if (
+            "any" in module_globals
+            or "len" in module_globals
+            or "set" in module_globals
+            or "sorted" in module_globals
+            or "tuple" in module_globals
+        ):
+            raise expected_error(
+                "campaign provider-cycle builtin dispatch shadowed"
+            )
         for name, expected in expected_values.items():
             if module_globals.get(name) is not expected:
                 raise expected_error(

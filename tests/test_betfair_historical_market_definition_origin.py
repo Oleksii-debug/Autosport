@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import bz2
+import copy
 import hashlib
 import json
 import unittest
+from dataclasses import replace
 from unittest.mock import patch
 
 from autosport.betfair_historical_causal_replay import (
@@ -11,7 +13,9 @@ from autosport.betfair_historical_causal_replay import (
     HistoricalRepresentation,
 )
 from autosport.betfair_historical_entitlement import HistoricalProviderOriginWitness
+import autosport.betfair_historical_market_definition_origin as origin_module
 from autosport.betfair_historical_market_definition_origin import (
+    BetfairHistoricalMarketDefinitionOrigin,
     BetfairHistoricalMarketDefinitionOriginError,
     bind_betfair_historical_market_definition_origin,
 )
@@ -301,6 +305,127 @@ class BetfairHistoricalMarketDefinitionOriginTests(unittest.TestCase):
             "no longer authoritative",
         ):
             bound.assert_provider_origin()
+
+
+    def test_private_token_direct_constructor_cannot_mint_positive_origin(self) -> None:
+        raw = _raw(_line(1000, self.MARKET_ID, self.definition(status="OPEN", version=1)))
+        witness = self.witness(raw)
+        bound = self.bind_with_upstream_authority_stub(witness, raw, cutoff=1000)
+        fabricated = self.definition(status="CLOSED", version=999)
+        canonical = json.dumps(
+            fabricated,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+        forged = BetfairHistoricalMarketDefinitionOrigin(
+            provider_origin_witness_sha256=bound.provider_origin_witness_sha256,
+            transport_contract_sha256=bound.transport_contract_sha256,
+            download_file_identity_sha256=bound.download_file_identity_sha256,
+            provider_path=bound.provider_path,
+            raw_file_sha256=bound.raw_file_sha256,
+            entitlement_snapshot_sha256=bound.entitlement_snapshot_sha256,
+            download_retrieved_at=bound.download_retrieved_at,
+            replay_source_identity=bound.replay_source_identity,
+            source_ordinal=bound.source_ordinal,
+            provider_pt_ms=bound.provider_pt_ms,
+            line_sha256=_sha("caller-forged-line"),
+            record_payload_sha256=_sha("caller-forged-record"),
+            market_id=bound.market_id,
+            market_definition_sha256=hashlib.sha256(
+                canonical.encode("utf-8")
+            ).hexdigest(),
+            market_definition_json=canonical,
+            package_tier=bound.package_tier,
+            representation=bound.representation,
+            _witness=witness,
+            _token=origin_module._TOKEN,
+        )
+
+        with patch.object(
+            HistoricalProviderOriginWitness,
+            "assert_authoritative",
+            autospec=True,
+            return_value=None,
+        ):
+            self.assertTrue(bound.provider_origin_verified)
+            self.assertFalse(forged.provider_origin_verified)
+        with self.assertRaisesRegex(
+            BetfairHistoricalMarketDefinitionOriginError,
+            "not issued by the canonical binder",
+        ):
+            forged.assert_issued_integrity()
+        with self.assertRaisesRegex(
+            BetfairHistoricalMarketDefinitionOriginError,
+            "not issued by the canonical binder",
+        ):
+            _ = forged.evidence_sha256
+
+    def test_copy_and_replace_do_not_inherit_origin_issuance(self) -> None:
+        raw = _raw(_line(1000, self.MARKET_ID, self.definition(status="OPEN", version=1)))
+        witness = self.witness(raw)
+        bound = self.bind_with_upstream_authority_stub(witness, raw, cutoff=1000)
+        copied = copy.copy(bound)
+        replaced = replace(
+            bound,
+            record_payload_sha256=_sha("replacement-record"),
+        )
+
+        bound.assert_issued_integrity()
+        for candidate in (copied, replaced):
+            with self.subTest(candidate=type(candidate).__name__):
+                with self.assertRaisesRegex(
+                    BetfairHistoricalMarketDefinitionOriginError,
+                    "not issued by the canonical binder",
+                ):
+                    candidate.assert_issued_integrity()
+                with patch.object(
+                    HistoricalProviderOriginWitness,
+                    "assert_authoritative",
+                    autospec=True,
+                    return_value=None,
+                ):
+                    self.assertFalse(candidate.provider_origin_verified)
+
+    def test_self_consistent_semantic_mutation_revokes_origin_issuance(self) -> None:
+        raw = _raw(_line(1000, self.MARKET_ID, self.definition(status="OPEN", version=1)))
+        witness = self.witness(raw)
+        bound = self.bind_with_upstream_authority_stub(witness, raw, cutoff=1000)
+        original_evidence_sha = bound.evidence_sha256
+        fabricated = self.definition(status="CLOSED", version=999)
+        canonical = json.dumps(
+            fabricated,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+        object.__setattr__(bound, "market_definition_json", canonical)
+        object.__setattr__(
+            bound,
+            "market_definition_sha256",
+            hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
+        )
+
+        self.assertEqual(len(original_evidence_sha), 64)
+        with self.assertRaisesRegex(
+            BetfairHistoricalMarketDefinitionOriginError,
+            "mutated after canonical issuance",
+        ):
+            bound.assert_issued_integrity()
+        with patch.object(
+            HistoricalProviderOriginWitness,
+            "assert_authoritative",
+            autospec=True,
+            return_value=None,
+        ):
+            self.assertFalse(bound.provider_origin_verified)
+        with self.assertRaisesRegex(
+            BetfairHistoricalMarketDefinitionOriginError,
+            "mutated after canonical issuance",
+        ):
+            bound.market_definition()
 
 
 if __name__ == "__main__":

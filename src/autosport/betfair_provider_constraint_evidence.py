@@ -27,6 +27,7 @@ ORDER_FAMILY = "LIMIT_STANDARD_SIZE"
 SCHEMA_VERSION = 1
 _MAX_DECIMAL_DIGITS = 64
 _MAX_ABS_EXPONENT = 18
+_MAX_OBSERVATIONS = 256
 
 
 class BetfairProviderConstraintError(ValueError):
@@ -113,6 +114,12 @@ def _positive_decimal(value: object, field: str) -> Decimal:
             f"{field} exceeds bounded Decimal shape"
         )
     return value
+
+
+def _decimal_text(value: Decimal) -> str:
+    """Canonicalize numerically equivalent exact Decimal encodings."""
+    normalized = value.normalize()
+    return format(normalized, "f")
 
 
 def _canonical_sha256(payload: object) -> str:
@@ -223,9 +230,11 @@ class BetfairProviderConstraintObservation:
                 "jurisdiction_scope": self.jurisdiction_scope,
                 "currency_code": self.currency_code,
                 "order_family": self.order_family,
-                "min_standard_size": str(self.min_standard_size),
+                "min_standard_size": _decimal_text(self.min_standard_size),
                 "min_payout": (
-                    None if self.min_payout is None else str(self.min_payout)
+                    None
+                    if self.min_payout is None
+                    else _decimal_text(self.min_payout)
                 ),
                 "lower_minimum_payout_enabled": self.lower_minimum_payout_enabled,
             }
@@ -392,7 +401,7 @@ def _result(
     lower_minimum_payout_enabled: bool | None = None,
 ) -> BetfairProviderConstraintResolution:
     generations = tuple(
-        sorted(observation.generation_sha256 for observation in candidates)
+        sorted({observation.generation_sha256 for observation in candidates})
     )
     payload = {
         "schema": "autosport.betfair_standard_limit_constraint_resolution",
@@ -405,9 +414,13 @@ def _result(
         "candidate_generation_sha256s": generations,
         "semantic_sha256": semantic_sha256,
         "min_standard_size": (
-            None if min_standard_size is None else str(min_standard_size)
+            None
+            if min_standard_size is None
+            else _decimal_text(min_standard_size)
         ),
-        "min_payout": None if min_payout is None else str(min_payout),
+        "min_payout": (
+            None if min_payout is None else _decimal_text(min_payout)
+        ),
         "lower_minimum_payout_enabled": lower_minimum_payout_enabled,
     }
     return BetfairProviderConstraintResolution(
@@ -441,6 +454,10 @@ def resolve_betfair_standard_limit_constraint_evidence(
 
     if type(observations) is not tuple:
         raise BetfairProviderConstraintError("observations must be tuple")
+    if len(observations) > _MAX_OBSERVATIONS:
+        raise BetfairProviderConstraintError(
+            f"observations exceeds bounded limit {_MAX_OBSERVATIONS}"
+        )
     if any(
         type(item) is not BetfairProviderConstraintObservation
         for item in observations
@@ -448,13 +465,20 @@ def resolve_betfair_standard_limit_constraint_evidence(
         raise BetfairProviderConstraintError(
             "observations must contain exact BetfairProviderConstraintObservation"
         )
+    unique_by_generation = {
+        item.generation_sha256: item for item in observations
+    }
+    normalized_observations = tuple(
+        unique_by_generation[generation]
+        for generation in sorted(unique_by_generation)
+    )
     current = _utc(as_of, "as_of")
     scope = _scope(jurisdiction_scope)
     currency = _currency(currency_code)
 
     matching = tuple(
         item
-        for item in observations
+        for item in normalized_observations
         if item.provider_id == PROVIDER_ID
         and item.jurisdiction_scope == scope
         and item.currency_code == currency

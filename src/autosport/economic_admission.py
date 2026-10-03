@@ -1841,8 +1841,29 @@ def admit_paper_ticket(
                 book=working_book,
             )
 
-        # Positive mutation may only occur while the crash/recovery blockers still
-        # resolve through the exact graph inspected at the beginning of this lock.
+        # Positive mutation may only occur while the exact risk/proposal graph,
+        # virtual-bankroll state and crash/recovery blockers still match the authority
+        # that produced the approval. No approved decision can outlive a drift in any
+        # of those inputs before the irreversible ticket mutation.
+        _require_risk_decision_authority()
+        if not _admission_risk_helper_authority_valid():
+            return PaperAdmissionResult(
+                risk=RiskDecision(
+                    False,
+                    "virtual bankroll risk helper authority is invalid",
+                ),
+                ticket=None,
+                book=working_book,
+            )
+        if _RISK_BOOK_STATE(PaperRiskPolicy, working_book) != pre_evaluation_state:
+            return PaperAdmissionResult(
+                risk=RiskDecision(
+                    False,
+                    "virtual bankroll changed before PAPER admission mutation",
+                ),
+                ticket=None,
+                book=working_book,
+            )
         _require_admission_recovery_gate_authority()
         _require_paperbook_admission_authority()
         opened = _PAPERBOOK_OPEN_TICKET_FUNCTION(

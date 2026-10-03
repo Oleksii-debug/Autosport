@@ -117,9 +117,11 @@ def _positive_decimal(value: object, field: str) -> Decimal:
 
 
 def _decimal_text(value: Decimal) -> str:
-    """Canonicalize numerically equivalent exact Decimal encodings."""
-    normalized = value.normalize()
-    return format(normalized, "f")
+    """Canonicalize Decimal text without consulting ambient decimal context."""
+    raw = format(value, "f")
+    if "." in raw:
+        raw = raw.rstrip("0").rstrip(".")
+    return raw
 
 
 def _canonical_sha256(payload: object) -> str:

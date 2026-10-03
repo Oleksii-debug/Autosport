@@ -904,35 +904,65 @@ def test_paperbook_preload_does_not_bind_product_day_authority():
     assert "WorkspaceEconomicLock" not in vars(paper_module)
 
 
-def test_direct_chronology_writer_cannot_forge_previous_product_day(tmp_path):
+def test_direct_chronology_prepare_cannot_forge_previous_product_day(tmp_path):
     now = datetime.now(timezone.utc).replace(microsecond=0)
     old = now - timedelta(days=2)
     store = ProductDayRiskWindowStore(tmp_path)
     current = store.current()
     book = PaperBook("100")
-    leg = _leg("forged-history")
-    ticket = book.open_ticket(
-        [leg],
-        Decimal("4"),
-        placed_at=_timestamp(old),
-        bankroll_id="paper-bankroll",
-        currency="USD",
-    )
 
     with WorkspaceEconomicLock(tmp_path) as workspace_lock:
         with pytest.raises(
             ValueError,
             match="product-day admission witness is not one canonical UTC day",
         ):
-            book._record_product_day_admission(
-                ticket.ticket_id,
+            book._prepare_product_day_admission(
                 admission_ts=_timestamp(old),
                 window_store=store,
                 window_evidence=current,
                 workspace_lock=workspace_lock,
             )
 
+    assert book.tickets == {}
     assert book._product_day_admissions == {}
+
+
+def test_product_day_admission_permit_is_one_shot(tmp_path):
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    store = ProductDayRiskWindowStore(tmp_path)
+    current = store.current()
+    book = PaperBook("100")
+
+    with WorkspaceEconomicLock(tmp_path) as workspace_lock:
+        permit = book._prepare_product_day_admission(
+            admission_ts=_timestamp(now),
+            window_store=store,
+            window_evidence=current,
+            workspace_lock=workspace_lock,
+        )
+        first = book.open_ticket(
+            [_leg("permit-first")],
+            Decimal("1"),
+            placed_at=_timestamp(now),
+            bankroll_id="paper-bankroll",
+            currency="USD",
+        )
+        book._record_product_day_admission(first.ticket_id, permit=permit)
+        second = book.open_ticket(
+            [_leg("permit-second")],
+            Decimal("1"),
+            placed_at=_timestamp(now),
+            bankroll_id="paper-bankroll",
+            currency="USD",
+        )
+        with pytest.raises(
+            ValueError,
+            match="product-day admission permit is invalid or consumed",
+        ):
+            book._record_product_day_admission(second.ticket_id, permit=permit)
+
+    assert first.ticket_id in book._product_day_admissions
+    assert second.ticket_id not in book._product_day_admissions
 
 
 def test_product_issued_current_utc_day_releases_old_day_turnover(tmp_path):

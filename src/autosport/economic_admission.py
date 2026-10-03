@@ -21,7 +21,11 @@ from .risk import (
     RiskDecision,
     RiskOfRuinEvidence,
 )
-from .risk_day_window import ProductDayRiskWindow, ProductDayRiskWindowStore
+from .risk_day_window import (
+    ProductDayRiskWindow,
+    ProductDayRiskWindowStore,
+    RiskDayWindowMismatchError,
+)
 from .risk_turnover_evidence import PaperDayTurnoverEvidence, PaperDayTurnoverResolver
 from .run_registry import RunRegistry, UnresolvedExperimentError
 from .run_transaction import RunTransaction
@@ -1433,6 +1437,9 @@ if type(_PAPERBOOK_LOAD_DESCRIPTOR) is not classmethod:
 _PAPERBOOK_LOAD_FUNCTION = _PAPERBOOK_LOAD_DESCRIPTOR.__func__
 _PAPERBOOK_SAVE_FUNCTION = PaperBook.__dict__["save"]
 _PAPERBOOK_OPEN_TICKET_FUNCTION = PaperBook.__dict__["open_ticket"]
+_PAPERBOOK_PREPARE_PRODUCT_DAY_ADMISSION_FUNCTION = PaperBook.__dict__[
+    "_prepare_product_day_admission"
+]
 _PAPERBOOK_RECORD_PRODUCT_DAY_ADMISSION_FUNCTION = PaperBook.__dict__[
     "_record_product_day_admission"
 ]
@@ -1440,13 +1447,20 @@ if (
     type(_PAPERBOOK_LOAD_FUNCTION) is not FunctionType
     or type(_PAPERBOOK_SAVE_FUNCTION) is not FunctionType
     or type(_PAPERBOOK_OPEN_TICKET_FUNCTION) is not FunctionType
+    or type(_PAPERBOOK_PREPARE_PRODUCT_DAY_ADMISSION_FUNCTION) is not FunctionType
     or type(_PAPERBOOK_RECORD_PRODUCT_DAY_ADMISSION_FUNCTION) is not FunctionType
 ):
     raise RuntimeError("canonical PaperBook admission mutation authority is unavailable")
 _PAPERBOOK_GATE_METHOD_WITNESS, _PAPERBOOK_GATE_GLOBAL_WITNESS = (
     _capture_class_transition_graph(
         PaperBook,
-        ("load", "save", "open_ticket", "_record_product_day_admission"),
+        (
+            "load",
+            "save",
+            "open_ticket",
+            "_prepare_product_day_admission",
+            "_record_product_day_admission",
+        ),
     )
 )
 
@@ -1490,6 +1504,8 @@ def _require_paperbook_admission_authority() -> None:
         or PaperBook.__dict__.get("save") is not _PAPERBOOK_SAVE_FUNCTION
         or PaperBook.__dict__.get("open_ticket")
         is not _PAPERBOOK_OPEN_TICKET_FUNCTION
+        or PaperBook.__dict__.get("_prepare_product_day_admission")
+        is not _PAPERBOOK_PREPARE_PRODUCT_DAY_ADMISSION_FUNCTION
         or PaperBook.__dict__.get("_record_product_day_admission")
         is not _PAPERBOOK_RECORD_PRODUCT_DAY_ADMISSION_FUNCTION
     ):
@@ -2042,6 +2058,48 @@ def admit_paper_ticket(
                 ticket=None,
                 book=working_book,
             )
+        day_admission_permit: object | None = None
+        if day_authority is not None:
+            # Refresh the positive product-day authority at the last reversible point.
+            # If UTC day authority advanced since evaluation, deny before PaperBook
+            # balance/ticket mutation instead of leaving a partially-opened caller view.
+            _require_product_day_turnover_dispatch()
+            _require_day_authority_data_descriptors()
+            try:
+                day_admission_permit = (
+                    _PAPERBOOK_PREPARE_PRODUCT_DAY_ADMISSION_FUNCTION(
+                        working_book,
+                        admission_ts=_canonical_day_authority_field(
+                            day_authority,
+                            _ProductDayAdmissionAuthority,
+                            "admission_ts",
+                        ),
+                        window_store=_canonical_day_authority_field(
+                            day_authority,
+                            _ProductDayAdmissionAuthority,
+                            "window_store",
+                        ),
+                        window_evidence=_canonical_day_authority_field(
+                            day_authority,
+                            _ProductDayAdmissionAuthority,
+                            "window_evidence",
+                        ),
+                        workspace_lock=workspace_lock,
+                    )
+                )
+            except RiskDayWindowMismatchError:
+                return PaperAdmissionResult(
+                    risk=RiskDecision(
+                        False,
+                        "economic goal product-day authority changed before PAPER mutation",
+                    ),
+                    ticket=None,
+                    book=working_book,
+                )
+            _require_product_day_turnover_dispatch()
+            _require_day_authority_data_descriptors()
+            _require_paperbook_admission_authority()
+
         opened = _PAPERBOOK_OPEN_TICKET_FUNCTION(
             working_book,
             legs,
@@ -2053,26 +2111,11 @@ def admit_paper_ticket(
             bankroll_id=bankroll_id,
             currency=currency,
         )
-        if day_authority is not None:
+        if day_admission_permit is not None:
             _PAPERBOOK_RECORD_PRODUCT_DAY_ADMISSION_FUNCTION(
                 working_book,
                 opened.ticket_id,
-                admission_ts=_canonical_day_authority_field(
-                    day_authority,
-                    _ProductDayAdmissionAuthority,
-                    "admission_ts",
-                ),
-                window_store=_canonical_day_authority_field(
-                    day_authority,
-                    _ProductDayAdmissionAuthority,
-                    "window_store",
-                ),
-                window_evidence=_canonical_day_authority_field(
-                    day_authority,
-                    _ProductDayAdmissionAuthority,
-                    "window_evidence",
-                ),
-                workspace_lock=workspace_lock,
+                permit=day_admission_permit,
             )
         _require_paperbook_admission_authority()
         _PAPERBOOK_SAVE_FUNCTION(working_book, book_path)

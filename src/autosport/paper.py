@@ -309,6 +309,62 @@ def _make_paperbook_causal_history_authority_registry():
 ) = _make_paperbook_causal_history_authority_registry()
 
 
+def _make_product_day_admission_permit_registry():
+    """Create one-shot pre-mutation permits for product-day chronology writes."""
+
+    permits = WeakKeyDictionary()
+    guard = threading.RLock()
+
+    def register_book(book: object) -> None:
+        with guard:
+            permits[book] = {}
+
+    def issue(
+        book: object,
+        witness: _ProductDayAdmissionWitness,
+    ) -> object:
+        if type(witness) is not tuple or len(witness) != 6:
+            raise ValueError("PaperBook product-day permit witness is not canonical")
+        token = object()
+        with guard:
+            current = permits.get(book)
+            if current is None:
+                raise RuntimeError("PaperBook product-day permit registry is unavailable")
+            current[token] = witness
+        return token
+
+    def consume(
+        book: object,
+        token: object,
+        *,
+        placed_at: str,
+    ) -> _ProductDayAdmissionWitness:
+        if type(token) is not object:
+            raise ValueError("PaperBook product-day admission permit is not canonical")
+        with guard:
+            current = permits.get(book)
+            if current is None:
+                raise RuntimeError("PaperBook product-day permit registry is unavailable")
+            if token not in current:
+                raise ValueError("PaperBook product-day admission permit is invalid or consumed")
+            witness = current[token]
+            if witness[0] != placed_at:
+                raise ValueError(
+                    "PaperBook product-day admission permit does not match ticket placed_at"
+                )
+            del current[token]
+        return witness
+
+    return register_book, issue, consume
+
+
+(
+    _register_product_day_admission_permit_book,
+    _issue_product_day_admission_permit,
+    _consume_product_day_admission_permit,
+) = _make_product_day_admission_permit_registry()
+
+
 def _paper_decimal_context() -> Context:
     context = Context(
         prec=_PAPER_DECIMAL_PRECISION,
@@ -342,6 +398,7 @@ class PaperBook:
     def __init__(self, initial_bankroll: Decimal | str = Decimal("10000")) -> None:
         _register_ticket_opening_authority_book(self)
         _register_paperbook_causal_history_authority_book(self)
+        _register_product_day_admission_permit_book(self)
         initial = Decimal(str(initial_bankroll))
         self._require_finite(initial, "initial_bankroll")
         if initial <= 0:
@@ -448,38 +505,24 @@ class PaperBook:
         _advance_paperbook_causal_history_open(self, ticket.ticket_id)
         return ticket
 
-    def _record_product_day_admission(
+    def _prepare_product_day_admission(
         self,
-        ticket_id: str,
         *,
         admission_ts: str,
-        window_store: ProductDayRiskWindowStore,
-        window_evidence: ProductDayRiskWindow,
-        workspace_lock: WorkspaceEconomicLock,
-    ) -> None:
-        """Bind one opened ticket to re-resolved current product-day chronology.
+        window_store: object,
+        window_evidence: object,
+        workspace_lock: object,
+    ) -> object:
+        """Issue one opaque current-day chronology permit before ticket mutation."""
 
-        The caller-facing placed_at value is not day authority. A positive chronology
-        witness can be written only from the canonical product clock/day state
-        re-resolved while the exact workspace economic writer lock is held. Historical
-        scalar fields therefore cannot manufacture future turnover headroom.
-        """
-
-        # PaperBook is imported during the package's early persistence-preload phase,
-        # before monotonic/day authority guards finish composing. Resolve these
-        # finalized product authorities only when this internal transition actually
-        # executes; a module-level import here would freeze the pre-finalization graph.
+        # PaperBook loads during the early persistence-preload phase. Resolve the
+        # finalized day/lock authorities only when this transition executes.
         from .risk_day_window import ProductDayRiskWindow, ProductDayRiskWindowStore
         from .workspace_lock import WorkspaceEconomicLock
 
         _require_ticket_opening_authority(self)
         _require_paperbook_causal_history_authority(self)
         self._validate_loaded_state(self)
-        ticket = self.tickets.get(ticket_id)
-        if ticket is None:
-            raise ValueError("PaperBook product-day admission references unknown ticket")
-        if ticket_id in self._product_day_admissions:
-            raise ValueError("PaperBook product-day admission authority cannot be rebound")
         if type(window_store) is not ProductDayRiskWindowStore:
             raise ValueError("PaperBook product-day window store is not canonical")
         if type(window_evidence) is not ProductDayRiskWindow:
@@ -512,12 +555,35 @@ class PaperBook:
                 current_window.state_sha256,
                 current_window.authority_generation,
             ),
+            ticket_id="pending-product-day-admission",
+        )
+        return _issue_product_day_admission_permit(self, witness)
+
+    def _record_product_day_admission(
+        self,
+        ticket_id: str,
+        *,
+        permit: object,
+    ) -> None:
+        """Consume one pre-mutation permit and bind ticket chronology exactly once."""
+
+        _require_ticket_opening_authority(self)
+        _require_paperbook_causal_history_authority(self)
+        self._validate_loaded_state(self)
+        ticket = self.tickets.get(ticket_id)
+        if ticket is None:
+            raise ValueError("PaperBook product-day admission references unknown ticket")
+        if ticket_id in self._product_day_admissions:
+            raise ValueError("PaperBook product-day admission authority cannot be rebound")
+        witness = _consume_product_day_admission_permit(
+            self,
+            permit,
+            placed_at=ticket.placed_at,
+        )
+        witness = self._validate_product_day_admission_witness(
+            witness,
             ticket_id=ticket_id,
         )
-        if ticket.placed_at != admission_ts:
-            raise ValueError(
-                "PaperBook product-day admission time must equal product-owned ticket placed_at"
-            )
         self._product_day_admissions[ticket_id] = witness
         try:
             _advance_paperbook_product_day_admission(

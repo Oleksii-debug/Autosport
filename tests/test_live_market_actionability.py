@@ -235,6 +235,69 @@ def test_weakest_component_blocks_multi_component_registered_input() -> None:
     assert sum(not item.wait_reasons for item in result.components) == 1
 
 
+def test_dependency_selectors_are_bound_into_evidence_identity() -> None:
+    first_mirror = MarketMirror()
+    first_updates = BoundedMirrorInvalidationBuffer(first_mirror)
+    first_dependencies = FocusedMirrorDependencyIndex(first_mirror)
+    first_dependencies.register(
+        "input-1",
+        source_ids=("provider-a", "provider-b"),
+        sports="soccer",
+        event_ids="event-1",
+        market_ids="market-1",
+        selection_ids=("selection-b", "selection-a"),
+    )
+    first = _evaluate(first_updates, first_dependencies)
+
+    second_mirror = MarketMirror()
+    second_updates = BoundedMirrorInvalidationBuffer(second_mirror)
+    second_dependencies = FocusedMirrorDependencyIndex(second_mirror)
+    second_dependencies.register(
+        "input-1",
+        source_ids="provider-a",
+        sports="soccer",
+        event_ids="event-1",
+        market_ids="market-1",
+        selection_ids=("selection-a", "selection-b"),
+    )
+    second = _evaluate(second_updates, second_dependencies)
+
+    assert first.components == second.components == ()
+    assert first.wait_reasons == second.wait_reasons == (
+        LiveInputWaitReason.NO_COMPONENTS,
+    )
+    assert first.dependency.source_ids == ("provider-a", "provider-b")
+    assert first.dependency.selection_ids == ("selection-a", "selection-b")
+    assert second.dependency.source_ids == ("provider-a",)
+    assert first.dependency != second.dependency
+    assert first.evidence_sha256 != second.evidence_sha256
+
+
+def test_dependency_selector_order_does_not_change_evidence_identity() -> None:
+    first_mirror = MarketMirror()
+    first_updates = BoundedMirrorInvalidationBuffer(first_mirror)
+    first_dependencies = FocusedMirrorDependencyIndex(first_mirror)
+    first_dependencies.register(
+        "input-1",
+        source_ids=("provider-b", "provider-a"),
+        selection_ids=("selection-b", "selection-a"),
+    )
+    first = _evaluate(first_updates, first_dependencies)
+
+    second_mirror = MarketMirror()
+    second_updates = BoundedMirrorInvalidationBuffer(second_mirror)
+    second_dependencies = FocusedMirrorDependencyIndex(second_mirror)
+    second_dependencies.register(
+        "input-1",
+        source_ids=("provider-a", "provider-b"),
+        selection_ids=("selection-a", "selection-b"),
+    )
+    second = _evaluate(second_updates, second_dependencies)
+
+    assert first.dependency == second.dependency
+    assert first.evidence_sha256 == second.evidence_sha256
+
+
 def test_wait_recheck_triggers_are_evidence_driven_not_timer_driven() -> None:
     suspended_updates, suspended_dependencies = _runtime(_event(status="suspended"))
     suspended = _evaluate(suspended_updates, suspended_dependencies)
@@ -329,6 +392,7 @@ def test_caller_constructed_result_cannot_mint_positive_authority() -> None:
         outcome=LiveInputCurrentViewOutcome.CURRENT_VIEW_ELIGIBLE,
         wait_reasons=(),
         recheck_triggers=(),
+        dependency=result.dependency,
         components=result.components,
         evidence_sha256=result.evidence_sha256,
     )

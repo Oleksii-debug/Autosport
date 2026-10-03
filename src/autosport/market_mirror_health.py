@@ -160,6 +160,60 @@ class HealthGatedMirrorDecisionIndex:
             raise ValueError("health replay transition_order must be a non-negative integer")
         return value
 
+    def _latest_durable_boundary(
+        self,
+        source_id: str,
+    ) -> ProviderHealthReplayBoundary:
+        """Return the latest physically durable source-health horizon.
+
+        This deliberately does not apply an ``as_of`` cutoff. Economic publication
+        uses it under the source-health writer lock to prove that no transition landed
+        after the earlier causal capture, including a newly known transition whose
+        evidence timestamp is later than that earlier decision cutoff.
+        """
+        normalized_source = self._source_id(source_id)
+        raw = self._health_store._read()
+        schema_version = raw["schema_version"]
+        if schema_version == 1:
+            payload = raw["sources"].get(normalized_source)
+            if payload is None:
+                return ProviderHealthReplayBoundary(
+                    source_id=normalized_source,
+                    recorded_at=None,
+                    transition_order=0,
+                )
+            state = self._health_store._state_from_payload(payload)
+            recorded_at = self._health_store._transition_at(state)
+            if recorded_at is None:
+                return ProviderHealthReplayBoundary(
+                    source_id=normalized_source,
+                    recorded_at=None,
+                    transition_order=0,
+                )
+            return ProviderHealthReplayBoundary(
+                source_id=normalized_source,
+                recorded_at=recorded_at,
+                transition_order=1,
+            )
+
+        entries = raw.get("history", {}).get(normalized_source, ())
+        if not entries:
+            return ProviderHealthReplayBoundary(
+                source_id=normalized_source,
+                recorded_at=None,
+                transition_order=0,
+            )
+        latest = entries[-1]
+        return ProviderHealthReplayBoundary(
+            source_id=normalized_source,
+            recorded_at=latest["recorded_at"],
+            transition_order=(
+                latest["transition_order"]
+                if schema_version == 3
+                else len(entries)
+            ),
+        )
+
     def _health_at_boundary(
         self,
         source_id: str,
@@ -397,8 +451,8 @@ class HealthGatedMirrorDecisionIndex:
 
         with self._health_store._writer_guard():
             for expected in boundaries:
-                latest = self.provider_health(expected.source_id, as_of=boundary)
-                if latest.replay_boundary != expected:
+                latest_boundary = self._latest_durable_boundary(expected.source_id)
+                if latest_boundary != expected:
                     raise ValueError(
                         "provider health replay boundary advanced before decision publication"
                     )

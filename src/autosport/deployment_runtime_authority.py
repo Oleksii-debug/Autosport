@@ -1290,8 +1290,8 @@ class DeploymentRuntimeAuthorityStore:
         )
         lock = object.__getattribute__(self, "_binding_lock")
         if (
-            type(path) is not _CANONICAL_PATH_TYPE
-            or type(workspace) is not _CANONICAL_PATH_TYPE
+            not isinstance(path, _CANONICAL_PATH_TYPE)
+            or not isinstance(workspace, _CANONICAL_PATH_TYPE)
             or type(lock) is not _CANONICAL_RLOCK_TYPE
         ):
             raise DeploymentRuntimeAuthorityError(

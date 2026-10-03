@@ -612,7 +612,10 @@ class _Progress:
             raise LiveDecisionProgressError("unsupported live progress phase")
         if self.gate not in {_GATE_NORMAL, _GATE_PROVIDER_GAP}:
             raise LiveDecisionProgressError("unsupported live progress gate")
-        if self.progress_schema_version not in {1, _PROGRESS_VERSION}:
+        if (
+            type(self.progress_schema_version) is not int
+            or self.progress_schema_version not in {1, _PROGRESS_VERSION}
+        ):
             raise LiveDecisionProgressError(
                 "unsupported live progress schema version"
             )

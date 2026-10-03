@@ -380,6 +380,7 @@ class BetfairInstructionReport:
     placed_date: str | None
     average_price_matched: Decimal
     size_matched: Decimal
+    order_status: str | None = None
 
     def __post_init__(self) -> None:
         if self.status not in {"SUCCESS", "FAILURE"}:
@@ -414,9 +415,25 @@ class BetfairInstructionReport:
                 raise BetfairSupervisedExecutionError(
                     "failed instruction cannot claim a matched stake"
                 )
+            if (
+                self.bet_id is not None
+                or self.placed_date is not None
+                or self.average_price_matched != 0
+                or self.order_status is not None
+            ):
+                raise BetfairSupervisedExecutionError(
+                    "failed instruction cannot claim provider placement evidence"
+                )
         elif self.error_code is not None:
             raise BetfairSupervisedExecutionError(
                 "successful instruction cannot claim provider error_code"
+            )
+        if self.order_status is not None and self.order_status not in {
+            "EXECUTABLE",
+            "EXECUTION_COMPLETE",
+        }:
+            raise BetfairSupervisedExecutionError(
+                "unsupported Betfair order status"
             )
 
 
@@ -501,6 +518,7 @@ class BetfairPlaceExecutionReport:
                     "size_matched": str(
                         self.instruction.size_matched
                     ),
+                    "order_status": self.instruction.order_status,
                 },
             }
         )
@@ -513,6 +531,32 @@ class BetfairSupervisedExecutionResult:
     attempt_state: AttemptState
     evidence_id: str | None
     external_receipt_id: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class _PreparedBetfairPlaceRequest:
+    action_sha256: str
+    provider_order_ref: str
+    request_id: int
+    body: bytes
+    request_sha256: str
+
+    def __post_init__(self) -> None:
+        _sha(self.action_sha256, "action_sha256")
+        _text(self.provider_order_ref, "provider_order_ref")
+        if type(self.request_id) is not int or self.request_id < 1:
+            raise BetfairSupervisedExecutionError(
+                "prepared request_id must be positive int"
+            )
+        if type(self.body) is not bytes or not self.body:
+            raise BetfairSupervisedExecutionError(
+                "prepared request body must be non-empty bytes"
+            )
+        _sha(self.request_sha256, "request_sha256")
+        if sha256(self.body).hexdigest() != self.request_sha256:
+            raise BetfairSupervisedExecutionError(
+                "prepared request digest does not match exact body"
+            )
 
 
 def _validate_betfair_place_action(action: ExecutionAction) -> int:
@@ -580,22 +624,13 @@ class BetfairSupervisedPlaceOrdersClient:
         self._request_id += 1
         return self._request_id
 
-    def place_action(
+    def _prepare_place_action_request(
         self,
         action: ExecutionAction,
         *,
-        profile: BookmakerCapabilityProfile,
-        bound: BoundSupervisedExecutionPlan,
         provider_order_ref: str,
-        execution_workspace: Path,
-    ) -> BetfairPlaceExecutionReport:
+    ) -> _PreparedBetfairPlaceRequest:
         selection_id = _validate_betfair_place_action(action)
-        self._gate.require(
-            action=action,
-            profile=profile,
-            bound=bound,
-            execution_workspace=execution_workspace,
-        )
         provider_ref = _text(provider_order_ref, "provider_order_ref")
         if len(provider_ref) > 32 or any(
             character not in "0123456789abcdef"
@@ -634,7 +669,38 @@ class BetfairSupervisedPlaceOrdersClient:
             "id": request_id,
         }
         body = _canonical_bytes(envelope)
-        request_sha256 = sha256(body).hexdigest()
+        return _PreparedBetfairPlaceRequest(
+            action_sha256=_digest(action.to_dict()),
+            provider_order_ref=provider_ref,
+            request_id=request_id,
+            body=body,
+            request_sha256=sha256(body).hexdigest(),
+        )
+
+    def _place_prepared_action(
+        self,
+        action: ExecutionAction,
+        *,
+        profile: BookmakerCapabilityProfile,
+        bound: BoundSupervisedExecutionPlan,
+        prepared: _PreparedBetfairPlaceRequest,
+        execution_workspace: Path,
+    ) -> BetfairPlaceExecutionReport:
+        if type(prepared) is not _PreparedBetfairPlaceRequest:
+            raise BetfairSupervisedExecutionError(
+                "prepared request must be canonical Betfair request"
+            )
+        _validate_betfair_place_action(action)
+        if prepared.action_sha256 != _digest(action.to_dict()):
+            raise BetfairSupervisedExecutionError(
+                "prepared request action identity mismatch"
+            )
+        self._gate.require(
+            action=action,
+            profile=profile,
+            bound=bound,
+            execution_workspace=execution_workspace,
+        )
         headers = {
             "Accept": "application/json",
             "Content-Type": "application/json",
@@ -645,7 +711,7 @@ class BetfairSupervisedPlaceOrdersClient:
             payload = self._transport.post(
                 BETTING_JSON_RPC_ENDPOINT,
                 headers=headers,
-                body=body,
+                body=prepared.body,
                 timeout_seconds=self._timeout_seconds,
             )
         except (BetfairReadOnlyError, TimeoutError, OSError) as exc:
@@ -659,11 +725,39 @@ class BetfairSupervisedPlaceOrdersClient:
             )
         return _parse_place_orders_response(
             payload,
-            request_id=request_id,
-            request_sha256=request_sha256,
+            request_id=prepared.request_id,
+            request_sha256=prepared.request_sha256,
             action=action,
-            provider_order_ref=provider_ref,
+            provider_order_ref=prepared.provider_order_ref,
             observed_at=self._clock(),
+        )
+
+    def place_action(
+        self,
+        action: ExecutionAction,
+        *,
+        profile: BookmakerCapabilityProfile,
+        bound: BoundSupervisedExecutionPlan,
+        provider_order_ref: str,
+        execution_workspace: Path,
+    ) -> BetfairPlaceExecutionReport:
+        _validate_betfair_place_action(action)
+        self._gate.require(
+            action=action,
+            profile=profile,
+            bound=bound,
+            execution_workspace=execution_workspace,
+        )
+        prepared = self._prepare_place_action_request(
+            action,
+            provider_order_ref=provider_order_ref,
+        )
+        return self._place_prepared_action(
+            action,
+            profile=profile,
+            bound=bound,
+            prepared=prepared,
+            execution_workspace=execution_workspace,
         )
 
 
@@ -781,6 +875,11 @@ def _parse_place_orders_response(
     try:
         exact_echo = (
             str(echoed_selection) == action.selection_id
+            and _nonnegative_decimal(
+                echoed.get("handicap"),
+                "echoed handicap",
+            )
+            == Decimal("0")
             and echoed.get("side") == action.side
             and echoed.get("orderType") == "LIMIT"
             and _positive_decimal(
@@ -793,6 +892,7 @@ def _parse_place_orders_response(
                 "echoed size",
             )
             == action.requested_stake
+            and limit.get("persistenceType") == "LAPSE"
         )
     except BetfairSupervisedExecutionError as exc:
         raise BetfairPlaceOrdersAmbiguous(
@@ -830,6 +930,10 @@ def _parse_place_orders_response(
                 item.get("sizeMatched", 0),
                 "sizeMatched",
             ),
+            order_status=_optional_provider_text(
+                item.get("orderStatus"),
+                "orderStatus",
+            ),
         )
     except BetfairSupervisedExecutionError as exc:
         raise BetfairPlaceOrdersAmbiguous(
@@ -841,9 +945,17 @@ def _parse_place_orders_response(
             status == "FAILURE"
             and instruction.status != "FAILURE"
         )
+        or (
+            status == "PROCESSED_WITH_ERRORS"
+            and instruction.status != "FAILURE"
+        )
     ):
         raise BetfairPlaceOrdersAmbiguous(
             "placeOrders execution/instruction statuses conflict"
+        )
+    if status == "SUCCESS" and result.get("errorCode") is not None:
+        raise BetfairPlaceOrdersAmbiguous(
+            "successful placeOrders execution cannot carry provider errorCode"
         )
     if status == "FAILURE" and result.get("errorCode") is None:
         raise BetfairPlaceOrdersAmbiguous(
@@ -887,9 +999,13 @@ def _report_outcome(
     if instruction.status == "FAILURE":
         return PlaceOrdersOutcome.REJECTED
     if instruction.size_matched == action.requested_stake:
+        if instruction.order_status == "EXECUTABLE":
+            return PlaceOrdersOutcome.UNKNOWN
         return PlaceOrdersOutcome.ACCEPTED
     if instruction.size_matched > 0:
-        return PlaceOrdersOutcome.PARTIAL
+        if instruction.order_status == "EXECUTION_COMPLETE":
+            return PlaceOrdersOutcome.PARTIAL
+        return PlaceOrdersOutcome.UNKNOWN
     return PlaceOrdersOutcome.UNKNOWN
 
 
@@ -984,16 +1100,21 @@ def execute_betfair_supervised_action(
             attempt_id=attempt_id,
             provider_id=action.bookmaker_id,
         )
+        prepared_request = client._prepare_place_action_request(
+            action,
+            provider_order_ref=provider_order_ref,
+        )
         ledger.mark_submitted(
             attempt_id,
             submitted_at=now(),
+            request_sha256=prepared_request.request_sha256,
         )
         try:
-            report = client.place_action(
+            report = client._place_prepared_action(
                 action,
                 profile=profile,
                 bound=bound,
-                provider_order_ref=provider_order_ref,
+                prepared=prepared_request,
                 execution_workspace=execution_workspace,
             )
         except (
@@ -1017,16 +1138,45 @@ def execute_betfair_supervised_action(
             )
 
     evidence_id = report.evidence_id
-    ledger.bind_provider_evidence(
-        attempt_id=attempt_id,
-        evidence_id=evidence_id,
-        observed_at=report.observed_at,
-        source=f"betfair:placeOrders:{report.response_sha256}",
-    )
+    evidence_source = f"betfair:placeOrders:{report.response_sha256}"
     outcome = _report_outcome(report, action)
     receipt = report.instruction.bet_id
 
+    if (
+        report.instruction.size_matched > 0
+        and report.instruction.average_price_matched < action.requested_odds
+    ):
+        ledger.bind_provider_evidence(
+            attempt_id=attempt_id,
+            evidence_id=evidence_id,
+            observed_at=report.observed_at,
+            source=evidence_source,
+            request_sha256=report.request_sha256,
+        )
+        ledger.mark_unknown(
+            attempt_id,
+            reason=(
+                "betfair_standard_back_limit_price_contradiction_"
+                "requires_readback"
+            ),
+            observed_at=report.observed_at,
+        )
+        return BetfairSupervisedExecutionResult(
+            PlaceOrdersOutcome.UNKNOWN,
+            attempt_id,
+            ledger.attempt_state(attempt_id),
+            evidence_id,
+            receipt,
+        )
+
     if outcome is PlaceOrdersOutcome.UNKNOWN:
+        ledger.bind_provider_evidence(
+            attempt_id=attempt_id,
+            evidence_id=evidence_id,
+            observed_at=report.observed_at,
+            source=evidence_source,
+            request_sha256=report.request_sha256,
+        )
         ledger.mark_unknown(
             attempt_id,
             reason="betfair_placeOrders_report_requires_readback",
@@ -1050,6 +1200,13 @@ def execute_betfair_supervised_action(
         )
     else:
         if receipt is None:
+            ledger.bind_provider_evidence(
+                attempt_id=attempt_id,
+                evidence_id=evidence_id,
+                observed_at=report.observed_at,
+                source=evidence_source,
+                request_sha256=report.request_sha256,
+            )
             ledger.mark_unknown(
                 attempt_id,
                 reason=(
@@ -1077,6 +1234,14 @@ def execute_betfair_supervised_action(
             accepted_odds=report.instruction.average_price_matched,
             accepted_stake=report.instruction.size_matched,
         )
+    ledger._bind_provider_acknowledgement_evidence(
+        attempt_id=attempt_id,
+        evidence_id=evidence_id,
+        observed_at=report.observed_at,
+        source=evidence_source,
+        request_sha256=report.request_sha256,
+        acknowledgement=acknowledgement,
+    )
     ledger.acknowledge(acknowledgement)
     return BetfairSupervisedExecutionResult(
         outcome,

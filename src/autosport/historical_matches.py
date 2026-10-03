@@ -117,6 +117,10 @@ def capture_historical_matches(
     evidence = Path(evidence_path) if evidence_path is not None else output.with_suffix(output.suffix + ".evidence.json")
     if _paths_alias(output, evidence):
         raise ValueError("output_path and evidence_path must refer to different files")
+    if _capture_destinations_exist(output, evidence):
+        raise ProviderPayloadError(
+            "historical match capture destinations already exist"
+        )
 
     requested_sport_key = provider.sport_key
     if requested_sport_key != "table_tennis":
@@ -219,6 +223,13 @@ def capture_historical_matches(
     )
     with durable_path_lock(lock_paths[0]):
         with durable_path_lock(lock_paths[1]):
+            # Re-check after provider I/O while both canonical path locks are held.
+            # A destination that appeared during acquisition is foreign state; it
+            # must never be replaced by this generation.
+            if _capture_destinations_exist(output, evidence):
+                raise ProviderPayloadError(
+                    "historical match capture destinations already exist"
+                )
             capture_sha256 = _atomic_write_capture_json(output, capture_payload)
 
             evidence_payload = {
@@ -390,6 +401,15 @@ def _atomic_write_capture_json(path: str | Path, payload: dict[str, Any]) -> str
                 temporary.unlink()
             except FileNotFoundError:
                 pass
+
+
+def _capture_destinations_exist(output: Path, evidence: Path) -> bool:
+    return (
+        output.exists()
+        or output.is_symlink()
+        or evidence.exists()
+        or evidence.is_symlink()
+    )
 
 
 def _paths_alias(first: Path, second: Path) -> bool:

@@ -503,6 +503,44 @@ class HistoricalMatchCaptureTests(unittest.TestCase):
                     self.assertFalse(absent_path.exists())
                 self.assertEqual(transport.urls, [])
 
+    def test_destination_appearing_during_network_is_not_clobbered(self) -> None:
+        payload = [{"provider_defined_id": "must-not-replace-foreign"}]
+        raw_transport = _Transport(payload)
+        sentinel = b"foreign-generation"
+        with tempfile.TemporaryDirectory() as temp:
+            output = Path(temp) / "matches.json"
+            evidence = Path(temp) / "matches.evidence.json"
+
+            def transport_with_race(
+                url: str,
+                headers: dict[str, str],
+                timeout: float,
+            ) -> HttpJsonResponse:
+                response = raw_transport(url, headers, timeout)
+                output.write_bytes(sentinel)
+                return response
+
+            provider = ParlayApiTableTennisProvider(
+                "unit-test-key",
+                transport=transport_with_race,
+                clock=lambda: "2026-09-13T03:00:00+00:00",
+                sleeper=lambda _: None,
+            )
+            with self.assertRaisesRegex(
+                ProviderPayloadError,
+                "historical match capture destinations already exist",
+            ):
+                capture_historical_matches(
+                    provider,
+                    requested_date="2026-09-10",
+                    output_path=output,
+                    evidence_path=evidence,
+                )
+
+            self.assertEqual(output.read_bytes(), sentinel)
+            self.assertFalse(evidence.exists())
+        self.assertEqual(len(raw_transport.urls), 1)
+
     def test_priced_only_maps_to_documented_boolean_parameter(self) -> None:
         transport = _Transport([])
         with tempfile.TemporaryDirectory() as temp:

@@ -488,10 +488,19 @@ def _make_resolver() -> FunctionType:
     goal_load_code = goal_load.__code__
     goal_provenance = provenance_for
     goal_provenance_code = goal_provenance.__code__
-    book_load = PaperBook.load
+    book_type = PaperBook
+    book_load = book_type.load
     book_load_function = book_load.__func__
     book_load_code = book_load_function.__code__
     book_load_owner = book_load.__self__
+    book_load_bytes = book_type.load_bytes
+    book_load_bytes_function = book_load_bytes.__func__
+    book_load_bytes_code = book_load_bytes_function.__code__
+    book_load_bytes_owner = book_load_bytes.__self__
+    goal_parser = goal_load.__globals__.get("economic_goal_from_json")
+    if type(goal_parser) is not FunctionType:
+        raise RuntimeError("economic-goal parser authority is unavailable")
+    goal_parser_code = goal_parser.__code__
     exact_ticket_status = TicketStatus
     exact_point_type = PaperRealizedEquityPoint
     exact_evidence_type = PaperRealizedDrawdownEvidence
@@ -570,10 +579,15 @@ def _make_resolver() -> FunctionType:
     def resolver(workspace: str | Path) -> PaperRealizedDrawdownEvidence:
         if (
             goal_load.__code__ is not goal_load_code
+            or goal_load.__globals__.get("economic_goal_from_json") is not goal_parser
+            or goal_parser.__code__ is not goal_parser_code
             or goal_provenance.__code__ is not goal_provenance_code
             or book_load.__func__ is not book_load_function
             or book_load_function.__code__ is not book_load_code
             or book_load.__self__ is not book_load_owner
+            or book_type.load_bytes.__func__ is not book_load_bytes_function
+            or book_load_bytes_function.__code__ is not book_load_bytes_code
+            or book_type.load_bytes.__self__ is not book_load_bytes_owner
         ):
             raise error_type(
                 "drawdown durable source resolver authority changed"
@@ -629,6 +643,16 @@ def _make_resolver() -> FunctionType:
             raise error_type(
                 "canonical PAPER drawdown source cannot be resolved"
             ) from exc
+        if (
+            goal_load.__globals__.get("economic_goal_from_json") is not goal_parser
+            or goal_parser.__code__ is not goal_parser_code
+            or book_type.load_bytes.__func__ is not book_load_bytes_function
+            or book_load_bytes_function.__code__ is not book_load_bytes_code
+            or book_type.load_bytes.__self__ is not book_load_bytes_owner
+        ):
+            raise error_type(
+                "drawdown durable source resolver authority changed during load"
+            )
 
         for ticket in book.tickets.values():
             if (

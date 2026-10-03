@@ -323,6 +323,97 @@ class ReleasePackageInputSymlinkFenceTests(unittest.TestCase):
             self.assertFalse(staged_secret.exists())
             self.assertFalse(paths["package"].exists())
 
+    def test_example_child_directory_replacement_before_recursion_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paths = self._make_inputs(root)
+            child = paths["example"] / "nested"
+            child.mkdir()
+            (child / "inside.json").write_text(
+                '{"inside":true}\\n',
+                encoding="utf-8",
+            )
+            replacement = root / "replacement-nested"
+            replacement.mkdir()
+            outside_name = "outside-secret.json"
+            (replacement / outside_name).write_text(
+                '{"secret":true}\\n',
+                encoding="utf-8",
+            )
+            archived = root / "original-nested"
+            staging = root / "Autosport-V1"
+            real_require = release_package._require_source_tree_directory
+            real_read = release_package._read_regular_source_bytes
+            swapped = False
+            outside_read = False
+
+            def validate_then_swap(
+                path: Path,
+                *,
+                label: str,
+                relative: str | None,
+            ) -> os.stat_result:
+                nonlocal swapped
+                snapshot = real_require(
+                    path,
+                    label=label,
+                    relative=relative,
+                )
+                if path == child and staging.exists() and not swapped:
+                    swapped = True
+                    child.replace(archived)
+                    replacement.replace(child)
+                return snapshot
+
+            def read_without_outside(
+                path: Path,
+                *,
+                label: str,
+                expected_snapshot: os.stat_result | None = None,
+            ) -> bytes:
+                nonlocal outside_read
+                if path == child / outside_name:
+                    outside_read = True
+                    raise AssertionError(
+                        "replacement directory bytes must never be read"
+                    )
+                return real_read(
+                    path,
+                    label=label,
+                    expected_snapshot=expected_snapshot,
+                )
+
+            with (
+                patch.object(
+                    release_package,
+                    "_require_source_tree_directory",
+                    side_effect=validate_then_swap,
+                ),
+                patch.object(
+                    release_package,
+                    "_read_regular_source_bytes",
+                    side_effect=read_without_outside,
+                ),
+            ):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "release example tree directory changed during traversal: nested",
+                ):
+                    self._build(paths)
+
+            self.assertTrue(swapped)
+            self.assertFalse(outside_read)
+            staged_secret = (
+                staging
+                / "examples"
+                / paths["example"].name
+                / "nested"
+                / outside_name
+            )
+            self.assertFalse(staged_secret.exists())
+            self.assertFalse(paths["package"].exists())
+
+
     def test_top_level_windows_reparse_file_fails_before_existing_staging_is_deleted(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

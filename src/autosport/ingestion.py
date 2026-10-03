@@ -287,11 +287,6 @@ class IngestionEngine:
                     flags.add("INVALID_SOURCE_TIMESTAMP")
                     rejected += 1
                     continue
-                age_seconds = (now_point - source_point).total_seconds()
-                if age_seconds > self.policy.stale_after_seconds:
-                    flags.add("STALE_SOURCE")
-                if age_seconds < -self.policy.max_future_skew_seconds:
-                    flags.add("FUTURE_CLOCK_SKEW")
             try:
                 event = self.normalizer.normalize(batch.source_id, quote)
                 # Provider/adaptor observation clocks remain evidence fields.
@@ -302,6 +297,21 @@ class IngestionEngine:
                 flags.add("INVALID_QUOTE")
                 rejected += 1
                 continue
+
+            # Decision freshness uses provider source time when available and the
+            # canonical observation time otherwise. Health must classify the same
+            # temporal truth that MarketMirror.active_view will later enforce.
+            freshness_point = (
+                source_point
+                if source_point is not None
+                else parse_source_timestamp(event.observed_ts)
+            )
+            age_seconds = (now_point - freshness_point).total_seconds()
+            if age_seconds > self.policy.stale_after_seconds:
+                flags.add("STALE_SOURCE")
+            if age_seconds < -self.policy.max_future_skew_seconds:
+                flags.add("FUTURE_CLOCK_SKEW")
+
             normalized.append(event)
             if source_point is not None and (
                 latest_source is None or source_point > latest_source

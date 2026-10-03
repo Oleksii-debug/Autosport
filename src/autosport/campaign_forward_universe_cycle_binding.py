@@ -641,6 +641,21 @@ _CANONICAL_VERIFICATION_ISSUER = inspect.getattr_static(
 )
 _CANONICAL_VERIFICATION_ISSUER_FUNCTION = _CANONICAL_VERIFICATION_ISSUER.__func__
 _CANONICAL_VERIFICATION_ISSUER_CODE = _CANONICAL_VERIFICATION_ISSUER_FUNCTION.__code__
+_CANONICAL_FORWARD_PROTOCOL_CLASS = ForwardEvidenceProtocolEnvelope
+_FORWARD_PROTOCOL_FIELD_NAMES = tuple(ForwardEvidenceProtocolEnvelope.__dataclass_fields__)
+_CANONICAL_FORWARD_PROTOCOL_FIELD_DESCRIPTORS = tuple(
+    (name, inspect.getattr_static(ForwardEvidenceProtocolEnvelope, name))
+    for name in _FORWARD_PROTOCOL_FIELD_NAMES
+)
+_CANONICAL_FORWARD_PROTOCOL_PAYLOAD = inspect.getattr_static(
+    ForwardEvidenceProtocolEnvelope, "canonical_payload"
+)
+_CANONICAL_FORWARD_PROTOCOL_PAYLOAD_CODE = _CANONICAL_FORWARD_PROTOCOL_PAYLOAD.__code__
+_CANONICAL_FORWARD_PROTOCOL_SHA_DESCRIPTOR = inspect.getattr_static(
+    ForwardEvidenceProtocolEnvelope, "protocol_sha256"
+)
+_CANONICAL_FORWARD_PROTOCOL_SHA_GETTER = _CANONICAL_FORWARD_PROTOCOL_SHA_DESCRIPTOR.fget
+_CANONICAL_FORWARD_PROTOCOL_SHA_GETTER_CODE = _CANONICAL_FORWARD_PROTOCOL_SHA_GETTER.__code__
 _CYCLE_RECEIPT_FIELD_NAMES = tuple(
     CampaignCompleteBoardCycleReceipt.__dataclass_fields__
 )
@@ -723,6 +738,8 @@ def _require_dispatch_integrity() -> None:
         is not _CANONICAL_AUTHORITY_CLASS
         or module_globals.get("CampaignForwardEvidenceVerification")
         is not _CANONICAL_VERIFICATION_CLASS
+        or module_globals.get("ForwardEvidenceProtocolEnvelope")
+        is not _CANONICAL_FORWARD_PROTOCOL_CLASS
         or module_globals.get("_COMPOSED_VERIFICATION_DOMAIN")
         != _COMPOSED_VERIFICATION_DOMAIN
         or module_globals.get("_COMPOSED_VERIFICATION_SCOPE")
@@ -792,6 +809,27 @@ def _require_dispatch_integrity() -> None:
             raise CampaignForwardUniverseCycleBindingError(
                 "campaign forward verification field descriptor changed: " + name
             )
+    for name, descriptor in _CANONICAL_FORWARD_PROTOCOL_FIELD_DESCRIPTORS:
+        if inspect.getattr_static(_CANONICAL_FORWARD_PROTOCOL_CLASS, name) is not descriptor:
+            raise CampaignForwardUniverseCycleBindingError(
+                "campaign forward protocol field descriptor changed: " + name
+            )
+    current_protocol_payload = inspect.getattr_static(
+        _CANONICAL_FORWARD_PROTOCOL_CLASS, "canonical_payload"
+    )
+    current_protocol_sha = inspect.getattr_static(
+        _CANONICAL_FORWARD_PROTOCOL_CLASS, "protocol_sha256"
+    )
+    if (
+        current_protocol_payload is not _CANONICAL_FORWARD_PROTOCOL_PAYLOAD
+        or current_protocol_payload.__code__ is not _CANONICAL_FORWARD_PROTOCOL_PAYLOAD_CODE
+        or current_protocol_sha is not _CANONICAL_FORWARD_PROTOCOL_SHA_DESCRIPTOR
+        or current_protocol_sha.fget is not _CANONICAL_FORWARD_PROTOCOL_SHA_GETTER
+        or current_protocol_sha.fget.__code__ is not _CANONICAL_FORWARD_PROTOCOL_SHA_GETTER_CODE
+    ):
+        raise CampaignForwardUniverseCycleBindingError(
+            "campaign forward protocol executable surface changed"
+        )
     for name, descriptor in _CANONICAL_CYCLE_RECEIPT_FIELD_DESCRIPTORS:
         if inspect.getattr_static(CampaignCompleteBoardCycleReceipt, name) is not descriptor:
             raise CampaignForwardUniverseCycleBindingError(

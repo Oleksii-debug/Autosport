@@ -496,7 +496,12 @@ class ProphetXAccountLinkController:
                 environment=env_value,
             )
         except Exception:
+            # A store exception is not proof that no durable write occurred. The
+            # secret backend may have committed before acknowledgement failed, so
+            # reuse the same reconciliation quarantine as an invalid receipt.
+            self._clear_auth_context(cancel_challenge=True)
             self._credential_ref = None
+            self._credential_lifecycle_uncertain = True
             self._state = AccountLinkState.AUTH_ERROR
             self._diagnostic = DiagnosticCode.CREDENTIAL_STORAGE_FAILED
             return

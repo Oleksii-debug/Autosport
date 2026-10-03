@@ -1530,7 +1530,17 @@ class PersistentLiveDecisionLoop:
     ) -> tuple[ProviderHealthReplayBoundary, ...]:
         store = self._default_health_store
         if store is None:
-            return ()
+            health_path = self.workspace / "source_health.json"
+            if health_path.exists():
+                try:
+                    store = SourceHealthStore(health_path)
+                except (OSError, TypeError, ValueError) as exc:
+                    raise _ConcurrentDecisionSnapshot(
+                        "canonical provider health authority is unreadable"
+                    ) from exc
+                self._default_health_store = store
+            else:
+                return ()
         if type(input_ids) is not tuple or any(
             type(input_id) is not str for input_id in input_ids
         ):

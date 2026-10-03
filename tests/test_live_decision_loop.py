@@ -780,6 +780,106 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
                 [expected_boundary],
             )
 
+    def test_custom_observer_adopts_existing_canonical_health_authority(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            decision_time = self.START + timedelta(seconds=1)
+            health_time = self.START + timedelta(milliseconds=500)
+            health_store = SourceHealthStore(workspace / "source_health.json")
+            health_store.record_success(
+                "provider-a",
+                now=health_time.isoformat(),
+                received=1,
+                accepted=1,
+                rejected=0,
+                cursor="1",
+                latest_source_ts=self.START.isoformat(),
+                quality_flags=(),
+            )
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(
+                    workspace,
+                    [(self._event(selection="selection-a", sequence=1),)],
+                ),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(decision_time),
+            )
+            loop.register_input(
+                "input-a",
+                source_ids="provider-a",
+                selection_ids="selection-a",
+            )
+
+            result = loop.run_cycle()
+
+            self.assertEqual(result.status, LiveCycleStatus.DECIDED)
+            progress = loop._load_progress()
+            self.assertIsNotNone(progress)
+            self.assertEqual(
+                progress.provider_health_boundaries,
+                (
+                    ProviderHealthReplayBoundary(
+                        source_id="provider-a",
+                        recorded_at=health_time.isoformat(),
+                        transition_order=1,
+                    ),
+                ),
+            )
+            self.assertIsNotNone(loop._default_health_store)
+            record = JsonlDecisionLedger(
+                workspace / "decisions.jsonl"
+            ).verified_records()[0]
+            self.assertEqual(
+                record.to_dict()["payload"]["provider_health_boundaries"],
+                [
+                    {
+                        "source_id": "provider-a",
+                        "recorded_at": health_time.isoformat(),
+                        "transition_order": 1,
+                    }
+                ],
+            )
+
+    def test_custom_observer_cannot_bypass_failed_canonical_health_authority(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            decision_time = self.START + timedelta(seconds=1)
+            health_store = SourceHealthStore(workspace / "source_health.json")
+            health_store.record_failure(
+                "provider-a",
+                now=(self.START + timedelta(milliseconds=500)).isoformat(),
+                error=TimeoutError("durable provider failure"),
+            )
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(
+                    workspace,
+                    [(self._event(selection="selection-a", sequence=1),)],
+                ),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(decision_time),
+            )
+            loop.register_input(
+                "input-a",
+                source_ids="provider-a",
+                selection_ids="selection-a",
+            )
+
+            result = loop.run_cycle()
+
+            self.assertEqual(result.status, LiveCycleStatus.BACKPRESSURE)
+            self.assertIn("provider health", result.detail)
+            self.assertFalse((workspace / "decisions.jsonl").exists())
+            self.assertFalse(
+                (workspace / PersistentLiveDecisionLoop.PROGRESS_FILE_NAME).exists()
+            )
+            self.assertIsNotNone(loop._default_health_store)
+            self.assertEqual(
+                loop._default_health_store.get("provider-a").status,
+                "failed",
+            )
+
     def test_health_advance_after_capture_backpressures_before_pending_publication(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

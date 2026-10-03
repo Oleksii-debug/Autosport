@@ -2,6 +2,7 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from decimal import Decimal
 from urllib.error import URLError
+import urllib.request as _urllib_request
 
 import pytest
 
@@ -44,11 +45,30 @@ class QueueUrlopen:
     def __call__(self, request, *, timeout):
         self.calls.append((request, timeout))
         if not self.results:
-            raise AssertionError("unexpected urlopen call")
+            raise AssertionError("unexpected HTTPS test dispatch")
         result = self.results.pop(0)
         if isinstance(result, BaseException):
             raise result
         return _FakeHttpResponse(result)
+
+
+def _install_https_test_dispatch(monkeypatch, opener):
+    """Intercept below a freshly-built urllib opener without global _opener."""
+
+    def fake_do_open(_self, _http_class, request, **_kwargs):
+        response = opener(
+            request,
+            timeout=getattr(request, "timeout", 0),
+        )
+        response.code = 200
+        response.msg = "OK"
+        return response
+
+    monkeypatch.setattr(
+        _urllib_request.AbstractHTTPHandler,
+        "do_open",
+        fake_do_open,
+    )
 
 
 def clock_one():
@@ -161,7 +181,7 @@ def postings_by_id(*rows, currency="EUR", include_return_status=True):
 
 def economic_client(monkeypatch, *responses, clock=clock_one, credentials=None):
     opener = QueueUrlopen(*responses)
-    monkeypatch.setattr(account_module, "urlopen", opener)
+    _install_https_test_dispatch(monkeypatch, opener)
     account = BetdaqAccountReadOnlyClient(
         credentials or BetdaqCredentials("alice", "secret-pass", "secret-app"),
         clock=clock,
@@ -477,7 +497,7 @@ def test_economic_read_rejects_authenticated_context_rotation_during_dispatch(
             return _FakeHttpResponse(payload)
 
     opener = RotatingUrlopen()
-    monkeypatch.setattr(account_module, "urlopen", opener)
+    _install_https_test_dispatch(monkeypatch, opener)
     client = BetdaqEconomicReadbackClient(account)
 
     with pytest.raises(
@@ -572,7 +592,7 @@ def test_economic_read_rejects_protocol_authority_replacement_during_dispatch(
             return _FakeHttpResponse(payload)
 
     opener = RotatingProtocolUrlopen()
-    monkeypatch.setattr(account_module, "urlopen", opener)
+    _install_https_test_dispatch(monkeypatch, opener)
     client = BetdaqEconomicReadbackClient(account)
 
     with pytest.raises(
@@ -655,7 +675,7 @@ def test_economic_read_rejects_account_context_resolver_replacement_during_dispa
             return _FakeHttpResponse(payload)
 
     opener = RotatingUrlopen()
-    monkeypatch.setattr(account_module, "urlopen", opener)
+    _install_https_test_dispatch(monkeypatch, opener)
     client = BetdaqEconomicReadbackClient(account)
 
     with pytest.raises(
@@ -687,7 +707,7 @@ def test_economic_read_rejects_account_context_cache_replacement_during_dispatch
             return _FakeHttpResponse(payload)
 
     opener = ResettingUrlopen()
-    monkeypatch.setattr(account_module, "urlopen", opener)
+    _install_https_test_dispatch(monkeypatch, opener)
     client = BetdaqEconomicReadbackClient(account)
 
     with pytest.raises(

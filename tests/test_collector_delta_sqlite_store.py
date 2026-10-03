@@ -1,5 +1,6 @@
 import json
 import multiprocessing
+import os
 import sqlite3
 import tempfile
 import threading
@@ -101,6 +102,55 @@ class CollectorSQLiteStoreTests(unittest.TestCase):
             self.assertEqual(reopened.get(delta.delta_id), delta)
             checkpoint = reopened.stream_checkpoint("source-x", "epoch-1")
             self.assertEqual(checkpoint.last_delta_id, delta.delta_id)
+
+    def test_existing_store_symlink_alias_is_rejected_before_first_open(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "collector-target.json"
+            CollectorDeltaStore(target)
+            before = target.read_bytes()
+            alias = root / "collector-alias.json"
+            try:
+                alias.symlink_to(target)
+            except (OSError, NotImplementedError) as exc:
+                self.skipTest(f"symlink creation is unavailable: {exc}")
+
+            with self.assertRaisesRegex(ValueError, "invalid causal collector store"):
+                CollectorDeltaStore(alias)
+
+            self.assertEqual(target.read_bytes(), before)
+
+    def test_dangling_store_symlink_is_rejected_without_creating_target(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "outside-target.json"
+            alias = root / "collector-alias.json"
+            try:
+                alias.symlink_to(target)
+            except (OSError, NotImplementedError) as exc:
+                self.skipTest(f"symlink creation is unavailable: {exc}")
+
+            with self.assertRaisesRegex(ValueError, "invalid causal collector store"):
+                CollectorDeltaStore(alias)
+
+            self.assertFalse(target.exists())
+
+    def test_existing_store_hardlink_alias_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "collector-target.json"
+            CollectorDeltaStore(target)
+            alias = root / "collector-hardlink.json"
+            try:
+                os.link(target, alias)
+            except OSError as exc:
+                self.skipTest(f"hardlink creation is unavailable: {exc}")
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "canonical collector store file identity is unavailable",
+            ):
+                CollectorDeltaStore(alias)
 
     def test_event_payload_schema_marker_prevents_silent_recreation_after_loss(self):
         with tempfile.TemporaryDirectory() as tmp:

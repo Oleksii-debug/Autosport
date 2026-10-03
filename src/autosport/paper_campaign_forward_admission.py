@@ -14,6 +14,7 @@ from typing import Mapping
 from . import campaign_forward_universe_cycle_binding as _forward
 from . import paper_campaign_admission as _admission
 
+_GETATTR_STATIC = inspect.getattr_static
 _EXPECTED_COORDINATOR = _admission.PaperCampaignAdmissionCoordinator
 _EXPECTED_LEGACY_ADMIT = inspect.getattr_static(_EXPECTED_COORDINATOR, "admit")
 _EXPECTED_LEGACY_ADMIT_CODE = getattr(_EXPECTED_LEGACY_ADMIT, "__code__", None)
@@ -33,8 +34,9 @@ class PaperCampaignForwardAdmissionError(RuntimeError):
 
 def _require_surfaces() -> None:
     if (
-        _admission.PaperCampaignAdmissionCoordinator is not _EXPECTED_COORDINATOR
-        or inspect.getattr_static(_EXPECTED_COORDINATOR, "admit")
+        inspect.getattr_static is not _GETATTR_STATIC
+        or _admission.PaperCampaignAdmissionCoordinator is not _EXPECTED_COORDINATOR
+        or _GETATTR_STATIC(_EXPECTED_COORDINATOR, "admit")
         is not _EXPECTED_LEGACY_ADMIT
         or getattr(_EXPECTED_LEGACY_ADMIT, "__code__", None)
         is not _EXPECTED_LEGACY_ADMIT_CODE
@@ -218,9 +220,11 @@ def admit_forward_verified(
             "campaign forward verification changed before admission"
         )
 
-    token = _EXPECTED_CONTEXT.set(dict(before))
+    context = _EXPECTED_CONTEXT
+    legacy_admit = _EXPECTED_LEGACY_ADMIT
+    token = context.set(dict(before))
     try:
-        result = _EXPECTED_LEGACY_ADMIT(
+        result = legacy_admit(
             coordinator,
             admission_id=admission_id,
             observation=observation,
@@ -239,7 +243,7 @@ def admit_forward_verified(
             action_parameters=action_parameters,
         )
     finally:
-        _EXPECTED_CONTEXT.reset(token)
+        context.reset(token)
 
     after = _resolve_payload(
         precommit_locator=precommit_locator,
@@ -256,6 +260,76 @@ def admit_forward_verified(
             "campaign forward verification changed during admission"
         )
     return result
+
+
+def _seal_public_forward_admission():
+    module_globals = globals()
+    raw_admit = admit_forward_verified
+    expected_error = PaperCampaignForwardAdmissionError
+    expected_globals = (
+        ("inspect", inspect),
+        ("_GETATTR_STATIC", _GETATTR_STATIC),
+        ("_EXPECTED_COORDINATOR", _EXPECTED_COORDINATOR),
+        ("_EXPECTED_LEGACY_ADMIT", _EXPECTED_LEGACY_ADMIT),
+        ("_EXPECTED_LEGACY_ADMIT_CODE", _EXPECTED_LEGACY_ADMIT_CODE),
+        ("_EXPECTED_CONTEXT", _EXPECTED_CONTEXT),
+        ("_EXPECTED_DECISION_FIELD", _EXPECTED_DECISION_FIELD),
+        ("_EXPECTED_ACTION_PARAMETER", _EXPECTED_ACTION_PARAMETER),
+        ("_EXPECTED_VERIFY", _EXPECTED_VERIFY),
+        ("_EXPECTED_VERIFY_CODE", _EXPECTED_VERIFY_CODE),
+        ("_EXPECTED_RECEIPT_TYPE", _EXPECTED_RECEIPT_TYPE),
+        ("_EXPECTED_SCOPE", _EXPECTED_SCOPE),
+        ("_HEX", _HEX),
+        ("_require_surfaces", _require_surfaces),
+        ("_sha", _sha),
+        ("_receipt_payload", _receipt_payload),
+        ("_resolve_payload", _resolve_payload),
+    )
+    expected_codes = tuple(
+        (
+            name,
+            target,
+            getattr(target, "__code__", None),
+        )
+        for name, target in (
+            ("raw_admit", raw_admit),
+            ("_require_surfaces", _require_surfaces),
+            ("_sha", _sha),
+            ("_receipt_payload", _receipt_payload),
+            ("_resolve_payload", _resolve_payload),
+        )
+    )
+    holder: dict[str, object] = {}
+
+    def require_guard_integrity() -> None:
+        sealed = holder["sealed"]
+        if module_globals.get("admit_forward_verified") is not sealed:
+            raise expected_error(
+                "campaign forward admission public surface changed"
+            )
+        for name, expected in expected_globals:
+            if module_globals.get(name) is not expected:
+                raise expected_error(
+                    "campaign forward admission guard internals changed"
+                )
+        for _name, target, code in expected_codes:
+            if getattr(target, "__code__", None) is not code:
+                raise expected_error(
+                    "campaign forward admission guard code changed"
+                )
+
+    def sealed(*args, **kwargs):
+        require_guard_integrity()
+        result = raw_admit(*args, **kwargs)
+        require_guard_integrity()
+        return result
+
+    holder["sealed"] = sealed
+    return sealed
+
+
+admit_forward_verified = _seal_public_forward_admission()
+del _seal_public_forward_admission
 
 
 __all__ = [

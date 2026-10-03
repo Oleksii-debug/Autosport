@@ -309,59 +309,65 @@ class WorkflowScopedGitHubApi(GitHubApi):
             raise CancellationError("invalid canonical branch target")
         return _require_sha(target.get("sha"), field="canonical branch head")
 
-    def cancel(self, run_id: int) -> None:
-        """Revalidate synthetic candidate identity at the irreversible boundary."""
+    def _build_cancel(base_cancel):
+        def cancel(self, run_id: int) -> None:
+            """Revalidate synthetic candidate identity at the irreversible boundary."""
+    
+            run_id = _require_positive_int(run_id, field="run id")
+            zero_association = self._zero_association_recovered_runs.get(run_id)
+            if zero_association is not None:
+                candidate_head_sha, head_branch = zero_association
+                try:
+                    no_association = self._historical_head_has_no_associated_prs(
+                        candidate_head_sha
+                    )
+                    branch_head_sha = self._canonical_branch_head(head_branch)
+                except CancellationError as exc:
+                    raise CancellationError(
+                        "unbound workflow run branch authority could not be revalidated"
+                    ) from exc
+                if not no_association or branch_head_sha == candidate_head_sha:
+                    raise _CancellationAuthorityChanged(
+                        "unbound workflow run branch authority changed"
+                    )
+    
+            recovered = self._recovered_runs.get(run_id)
+            if recovered is not None:
+                pr_number, candidate_head_sha = recovered
+                try:
+                    associated_pr_number = self._historical_associated_pr_number(
+                        candidate_head_sha
+                    )
+                except (
+                    _HistoricalAssociationAbsent,
+                    _HistoricalAssociationAmbiguous,
+                ) as exc:
+                    raise _CancellationAuthorityChanged(
+                        "recovered workflow run pull request association is no longer unique"
+                    ) from exc
+                if associated_pr_number != pr_number:
+                    raise _CancellationAuthorityChanged(
+                        "recovered workflow run pull request association changed"
+                    )
+    
+                # Association validation is an external round trip. Re-resolve current PR
+                # truth immediately afterward.  A historical candidate may be cancelled
+                # while the PR has advanced, but if the PR rolls back to that exact head,
+                # same-head cancellation again requires a non-integration-capable lifecycle.
+                qualification = self.live_pr_qualification(pr_number)
+                if (
+                    qualification.head_sha == candidate_head_sha
+                    and qualification.integration_capable
+                ):
+                    raise _CancellationAuthorityChanged(
+                        "recovered workflow run live qualification changed"
+                    )
+            base_cancel(self, run_id)
+    
+        return cancel
 
-        run_id = _require_positive_int(run_id, field="run id")
-        zero_association = self._zero_association_recovered_runs.get(run_id)
-        if zero_association is not None:
-            candidate_head_sha, head_branch = zero_association
-            try:
-                no_association = self._historical_head_has_no_associated_prs(
-                    candidate_head_sha
-                )
-                branch_head_sha = self._canonical_branch_head(head_branch)
-            except CancellationError as exc:
-                raise CancellationError(
-                    "unbound workflow run branch authority could not be revalidated"
-                ) from exc
-            if not no_association or branch_head_sha == candidate_head_sha:
-                raise _CancellationAuthorityChanged(
-                    "unbound workflow run branch authority changed"
-                )
-
-        recovered = self._recovered_runs.get(run_id)
-        if recovered is not None:
-            pr_number, candidate_head_sha = recovered
-            try:
-                associated_pr_number = self._historical_associated_pr_number(
-                    candidate_head_sha
-                )
-            except (
-                _HistoricalAssociationAbsent,
-                _HistoricalAssociationAmbiguous,
-            ) as exc:
-                raise _CancellationAuthorityChanged(
-                    "recovered workflow run pull request association is no longer unique"
-                ) from exc
-            if associated_pr_number != pr_number:
-                raise _CancellationAuthorityChanged(
-                    "recovered workflow run pull request association changed"
-                )
-
-            # Association validation is an external round trip. Re-resolve current PR
-            # truth immediately afterward.  A historical candidate may be cancelled
-            # while the PR has advanced, but if the PR rolls back to that exact head,
-            # same-head cancellation again requires a non-integration-capable lifecycle.
-            qualification = self.live_pr_qualification(pr_number)
-            if (
-                qualification.head_sha == candidate_head_sha
-                and qualification.integration_capable
-            ):
-                raise _CancellationAuthorityChanged(
-                    "recovered workflow run live qualification changed"
-                )
-        super().cancel(run_id)
+    cancel = _build_cancel(GitHubApi.cancel)
+    del _build_cancel
 
     def _active_runs_for_status(self, status: str) -> tuple[WorkflowRun, ...]:
         if status not in _ACTIVE_STATUSES:

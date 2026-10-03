@@ -173,6 +173,33 @@ def test_scoped_production_api_inherits_canonical_cancel_transport_dispatch(
     api.cancel(123)
 
 
+def test_scoped_production_api_uses_captured_base_cancel_after_class_mutation(
+    monkeypatch,
+) -> None:
+    api = WorkflowScopedGitHubApi(
+        repository="owner/repo",
+        token="token",
+        workflow_id=1,
+        workflow_name="CI",
+    )
+    calls: list[tuple[str, str]] = []
+
+    monkeypatch.setattr(GitHubApi, "cancel", lambda *_args, **_kwargs: None)
+
+    def fake_urlopen(request, *, timeout: int):
+        del timeout
+        calls.append((request.full_url, request.get_method()))
+        return _FakeSuccessResponse(202, b"accepted")
+
+    monkeypatch.setattr(controller_module, "urlopen", fake_urlopen)
+
+    api.cancel(123)
+
+    assert calls == [
+        ("https://api.github.com/repos/owner/repo/actions/runs/123/cancel", "POST"),
+    ]
+
+
 @pytest.mark.parametrize(
     ("status", "body"),
     [

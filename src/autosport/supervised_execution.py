@@ -379,6 +379,25 @@ def _bound_plan_witness(value: BoundSupervisedExecutionPlan) -> str:
     )
 
 
+_BOUND_PLAN_WITNESS = _bound_plan_witness
+_BOUND_PLAN_WITNESS_CODE = getattr(_BOUND_PLAN_WITNESS, "__code__", None)
+
+
+def _canonical_bound_plan_witness(
+    value: BoundSupervisedExecutionPlan,
+    _witness=_BOUND_PLAN_WITNESS,
+    _witness_code=_BOUND_PLAN_WITNESS_CODE,
+) -> str:
+    if (
+        globals().get("_bound_plan_witness") is not _witness
+        or getattr(_witness, "__code__", None) is not _witness_code
+    ):
+        raise SupervisedExecutionError(
+            "canonical bound supervised execution plan witness changed"
+        )
+    return _witness(value)
+
+
 @dataclass(frozen=True, slots=True)
 class ProviderReadback:
     bookmaker_id: str
@@ -835,13 +854,72 @@ def _canonical_bound_plan_authority_dispatch(
     return _build, _assert
 
 
+def _canonical_supervised_issuance_ledger_dispatch(
+    ledger: RealExecutionLedger,
+    *,
+    _ledger_type=RealExecutionLedger,
+    _surface=(
+        ("reserve_plan", RealExecutionLedger.reserve_plan),
+        ("saga", RealExecutionLedger.saga),
+        (
+            "_bind_supervised_plan_issuance",
+            RealExecutionLedger._bind_supervised_plan_issuance,
+        ),
+        (
+            "supervised_plan_issuance_is_current",
+            RealExecutionLedger.supervised_plan_issuance_is_current,
+        ),
+        ("bind_supervised_approval", RealExecutionLedger.bind_supervised_approval),
+        (
+            "supervised_approval_is_active",
+            RealExecutionLedger.supervised_approval_is_active,
+        ),
+        ("begin_attempt", RealExecutionLedger.begin_attempt),
+    ),
+):
+    if RealExecutionLedger is not _ledger_type or type(ledger) is not _ledger_type:
+        raise SupervisedExecutionError("canonical real execution ledger authority changed")
+    bound = {}
+    for name, expected in _surface:
+        current = vars(_ledger_type).get(name)
+        if (
+            current is not expected
+            or getattr(current, "__code__", None)
+            is not getattr(expected, "__code__", None)
+        ):
+            raise SupervisedExecutionError(
+                "canonical real execution ledger authority changed"
+            )
+        bound[name] = expected.__get__(ledger, _ledger_type)
+    return bound
+
+
+def _require_bound_plan_structure(
+    bound: BoundSupervisedExecutionPlan,
+    _witness=_canonical_bound_plan_witness,
+    _witness_code=getattr(_canonical_bound_plan_witness, "__code__", None),
+) -> None:
+    if (
+        globals().get("_canonical_bound_plan_witness") is not _witness
+        or getattr(_witness, "__code__", None) is not _witness_code
+    ):
+        raise SupervisedExecutionError(
+            "canonical bound supervised execution plan witness changed"
+        )
+    try:
+        _witness(bound)
+    except (SupervisedExecutionError, AttributeError, TypeError, ValueError) as exc:
+        raise SupervisedExecutionError(
+            "bound supervised execution plan is not a canonical structural binding"
+        ) from exc
+
+
 def _require_approval(
     bound: BoundSupervisedExecutionPlan,
     approval: SupervisedApproval,
     at: str,
 ) -> None:
-    _, assert_bound = _canonical_bound_plan_authority_dispatch()
-    assert_bound(bound)
+    _require_bound_plan_structure(bound)
     approval.require_active(at)
     if (
         approval.portfolio_plan_sha256 != bound.portfolio_plan_sha256
@@ -857,7 +935,10 @@ def _require_durable_approval(
     bound: BoundSupervisedExecutionPlan,
     approval: SupervisedApproval,
 ) -> None:
-    if not ledger.supervised_approval_is_active(
+    approval_is_active = _canonical_supervised_issuance_ledger_dispatch(ledger)[
+        "supervised_approval_is_active"
+    ]
+    if not approval_is_active(
         plan_id=bound.execution_plan.plan_id,
         approval_id=approval.ledger_identity,
         approval_fingerprint=approval.fingerprint,
@@ -867,15 +948,34 @@ def _require_durable_approval(
         )
 
 
-def _require_reserved(ledger: RealExecutionLedger, bound: BoundSupervisedExecutionPlan) -> None:
-    _, assert_bound = _canonical_bound_plan_authority_dispatch()
-    assert_bound(bound)
+def _durable_reserved_plan_fingerprint(
+    ledger: RealExecutionLedger,
+    bound: BoundSupervisedExecutionPlan,
+) -> str | None:
+    _require_bound_plan_structure(bound)
+    _canonical_bound_plan_authority_dispatch()
+    methods = _canonical_supervised_issuance_ledger_dispatch(ledger)
     try:
-        saga = ledger.saga(bound.execution_plan.plan_id)
-    except KeyError as exc:
-        raise SupervisedExecutionError("execution plan is not reserved") from exc
+        saga = methods["saga"](bound.execution_plan.plan_id)
+    except KeyError:
+        return None
     if saga.plan_fingerprint != bound.execution_plan.fingerprint:
         raise SupervisedExecutionError("durable execution-plan fingerprint mismatch")
+    witness = _canonical_bound_plan_witness(bound)
+    if not methods["supervised_plan_issuance_is_current"](
+        plan_id=bound.execution_plan.plan_id,
+        bound_plan_witness=witness,
+        plan_fingerprint=saga.plan_fingerprint,
+    ):
+        return None
+    return saga.plan_fingerprint
+
+
+def _require_reserved(ledger: RealExecutionLedger, bound: BoundSupervisedExecutionPlan) -> None:
+    if _durable_reserved_plan_fingerprint(ledger, bound) is None:
+        raise SupervisedExecutionError(
+            "execution plan is not durably product-issued and reserved"
+        )
 
 
 def reserve_supervised_plan(
@@ -885,8 +985,27 @@ def reserve_supervised_plan(
 ) -> str:
     now = _trusted_now()
     _require_approval(bound, approval, now)
-    fingerprint = ledger.reserve_plan(bound.execution_plan)
-    ledger.bind_supervised_approval(
+    _, assert_bound = _canonical_bound_plan_authority_dispatch()
+    methods = _canonical_supervised_issuance_ledger_dispatch(ledger)
+    fingerprint = _durable_reserved_plan_fingerprint(ledger, bound)
+    if fingerprint is None:
+        assert_bound(bound)
+        fingerprint = methods["reserve_plan"](bound.execution_plan)
+        witness = _canonical_bound_plan_witness(bound)
+        methods["_bind_supervised_plan_issuance"](
+            plan_id=bound.execution_plan.plan_id,
+            bound_plan_witness=witness,
+            plan_fingerprint=fingerprint,
+        )
+        if not methods["supervised_plan_issuance_is_current"](
+            plan_id=bound.execution_plan.plan_id,
+            bound_plan_witness=witness,
+            plan_fingerprint=fingerprint,
+        ):
+            raise SupervisedExecutionError(
+                "supervised plan issuance was not durably recorded"
+            )
+    methods["bind_supervised_approval"](
         plan_id=bound.execution_plan.plan_id,
         approval_id=approval.ledger_identity,
         approval_fingerprint=approval.fingerprint,
@@ -936,7 +1055,10 @@ def begin_supervised_attempt(
     action = bound.action_for(action_id)
     if _time(now, "trusted current time") >= _time(action.expires_at, "expires_at"):
         raise SupervisedExecutionError("attempt is at/after quote expiry")
-    return ledger.begin_attempt(
+    begin_attempt = _canonical_supervised_issuance_ledger_dispatch(ledger)[
+        "begin_attempt"
+    ]
+    return begin_attempt(
         plan_id=bound.execution_plan.plan_id,
         action_id=action_id,
         attempt_id=attempt_id,

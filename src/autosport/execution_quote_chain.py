@@ -45,6 +45,12 @@ ACCEPTED_PRICE_UNKNOWN = "UNKNOWN"
 
 _QUOTE_CHAIN_EVIDENCE_ISSUANCE_TOKEN = object()
 
+_CANONICAL_REAL_EXECUTION_LEDGER = RealExecutionLedger
+_CANONICAL_VERIFIED_EXECUTION_VIEW = RealExecutionLedger.verified_execution_view
+_CANONICAL_VERIFIED_EXECUTION_VIEW_CODE = (
+    RealExecutionLedger.verified_execution_view.__code__
+)
+
 
 class ExecutionQuoteChainError(RuntimeError):
     """Base error for quote-chain projection failures."""
@@ -52,6 +58,45 @@ class ExecutionQuoteChainError(RuntimeError):
 
 class ExecutionQuoteChainUnavailable(ExecutionQuoteChainError):
     """Requested plan/attempt cannot be projected from canonical durable facts."""
+
+
+def _require_canonical_verified_execution_view_dispatch(
+    ledger: RealExecutionLedger,
+) -> None:
+    """Require the exact canonical ledger read authority used by this projection."""
+
+    if RealExecutionLedger is not _CANONICAL_REAL_EXECUTION_LEDGER:
+        raise ExecutionQuoteChainUnavailable(
+            "canonical verified execution view authority is unavailable"
+        )
+    if type(ledger) is not _CANONICAL_REAL_EXECUTION_LEDGER:
+        raise TypeError("ledger must be canonical RealExecutionLedger")
+    if "verified_execution_view" in getattr(ledger, "__dict__", {}):
+        raise ExecutionQuoteChainUnavailable(
+            "canonical verified execution view authority is unavailable"
+        )
+    current = _CANONICAL_REAL_EXECUTION_LEDGER.__dict__.get(
+        "verified_execution_view"
+    )
+    if (
+        current is not _CANONICAL_VERIFIED_EXECUTION_VIEW
+        or getattr(current, "__code__", None)
+        is not _CANONICAL_VERIFIED_EXECUTION_VIEW_CODE
+    ):
+        raise ExecutionQuoteChainUnavailable(
+            "canonical verified execution view authority is unavailable"
+        )
+
+
+def _read_canonical_verified_execution_view(
+    ledger: RealExecutionLedger,
+    plan_id: str,
+):
+    _require_canonical_verified_execution_view_dispatch(ledger)
+    try:
+        return _CANONICAL_VERIFIED_EXECUTION_VIEW(ledger, plan_id)
+    finally:
+        _require_canonical_verified_execution_view_dispatch(ledger)
 
 
 @dataclass(frozen=True, slots=True, weakref_slot=True)
@@ -401,7 +446,7 @@ def build_execution_quote_chain_evidence(
     `request_sha256` fields without owning or duplicating that writer seam.
     """
 
-    if type(ledger) is not RealExecutionLedger:
+    if type(ledger) is not _CANONICAL_REAL_EXECUTION_LEDGER:
         raise TypeError("ledger must be canonical RealExecutionLedger")
     if type(plan_id) is not str or not plan_id.strip():
         raise ValueError("plan_id must be non-empty text")
@@ -409,7 +454,7 @@ def build_execution_quote_chain_evidence(
         raise ValueError("attempt_id must be non-empty text")
 
     try:
-        view = ledger.verified_execution_view(plan_id)
+        view = _read_canonical_verified_execution_view(ledger, plan_id)
     except KeyError as exc:
         raise ExecutionQuoteChainUnavailable("plan is not present in ledger") from exc
 

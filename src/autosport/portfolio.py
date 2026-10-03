@@ -68,6 +68,32 @@ def _analysis_ticket_fingerprint(
     )
 
 
+def _validate_open_ticket_economics_for_analysis(
+    ticket_id: object,
+    stake: object,
+    legs: object,
+) -> None:
+    if type(ticket_id) is not str or not ticket_id or ticket_id != ticket_id.strip():
+        raise ValueError("portfolio ticket_id must be canonical non-empty text")
+    amount = _require_finite_decimal(
+        stake,
+        f"portfolio ticket {ticket_id} stake",
+    )
+    if amount <= 0:
+        raise ValueError(f"portfolio ticket {ticket_id} stake must be positive")
+    if type(legs) is not tuple or not legs:
+        raise ValueError(
+            f"portfolio ticket {ticket_id} requires at least one canonical leg"
+        )
+    for leg in legs:
+        PaperBook._validate_ticket_leg(leg, ticket_id=ticket_id)
+    quote_keys = tuple(leg.quote_key for leg in legs)
+    if len(quote_keys) != len(set(quote_keys)):
+        raise ValueError(
+            f"portfolio ticket {ticket_id} contains duplicate quote_key leg"
+        )
+
+
 def _snapshot_open_tickets_for_analysis(
     tickets: list[PaperTicket],
 ) -> list[PaperTicket]:
@@ -97,6 +123,11 @@ def _snapshot_open_tickets_for_analysis(
         ) = fingerprint
         if status is not TicketStatus.OPEN:
             continue
+        _validate_open_ticket_economics_for_analysis(
+            ticket_id,
+            stake,
+            legs,
+        )
         snapshots.append(
             PaperTicket(
                 ticket_id=ticket_id,

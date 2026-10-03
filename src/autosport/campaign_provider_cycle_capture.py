@@ -763,6 +763,15 @@ def capture_campaign_complete_game_board(
         "__code__",
         None,
     )
+    expected_failure_terminal_seams_code = _CANONICAL_GETATTR(
+        _CANONICAL_GETATTR(
+            require_failure_terminal_seams,
+            "__func__",
+            require_failure_terminal_seams,
+        ),
+        "__code__",
+        None,
+    )
     expected_inspect = inspect
     expected_getattr_static = _CANONICAL_GETATTR_STATIC
     expected_getattr_static_code = _CANONICAL_GETATTR_STATIC_CODE
@@ -1230,14 +1239,6 @@ def capture_campaign_complete_game_board(
                     require_failure_terminal_seams,
                     "__func__",
                     require_failure_terminal_seams,
-                )
-                expected_failure_terminal_seams_code = next(
-                    code
-                    for name, target, code in expected_codes
-                    if (
-                        name == "_require_failure_terminal_seams"
-                        and target is require_failure_terminal_seams
-                    )
                 )
                 if (
                     module_globals.get("inspect") is not expected_inspect

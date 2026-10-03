@@ -1111,10 +1111,10 @@ class PersistentLiveDecisionLoop:
             )
 
         now = _require_utc_clock(self.clock)
-        batch = self.mirror_updates.drain(
-            max_items=self.bounds.max_dirty_per_cycle
+        batch, batch_affected = self.mirror_updates.drain_and_route(
+            self.dependencies,
+            max_items=self.bounds.max_dirty_per_cycle,
         )
-        batch_affected = self.dependencies.affected_inputs(batch)
         for input_id in batch_affected:
             self._pending_affected[input_id] = None
         if batch.full_refresh_required:
@@ -1695,6 +1695,12 @@ class PersistentLiveDecisionLoop:
                         "decision snapshot contains market evidence not causally "
                         "available at the decision cutoff"
                     )
+
+        if self.dependencies.routing_revision != captured_routing_revision:
+            raise _ConcurrentDecisionSnapshot(
+                "focused dependency routing changed after decision snapshot capture; "
+                "retrying before economic action"
+            )
 
         # Publish the cache only after the complete cut passes all coherence checks.
         # A rejected/torn attempt therefore cannot leave half-refreshed intent inputs.
@@ -2279,7 +2285,7 @@ class PersistentLiveDecisionLoop:
                             )
             except FocusedMirrorRegistryChanged as exc:
                 raise _ConcurrentDecisionSnapshot(
-                    "dependency registry advanced after decision snapshot capture; "
+                    "dependency registry/routing changed after decision snapshot capture; "
                     "retrying before economic action"
                 ) from exc
             except MarketMirrorRevisionChanged as exc:

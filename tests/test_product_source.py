@@ -716,6 +716,61 @@ class ParlayApiProductSourceTests(unittest.TestCase):
             with self.assertRaises(ProductSourceStateError):
                 source.resolve_event(delta)
 
+    def test_collector_store_binding_rejects_subclass_authority(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory) / "workspace"
+            source = ParlayApiProductSource(
+                _Provider([]),
+                workspace=workspace,
+                authority_root=Path(directory) / "authority",
+                lawful_terms_ref="terms:parlayapi:v1",
+                retention_ref="retention:parlayapi:v1",
+            )
+
+            class ForgedCollectorDeltaStore(CollectorDeltaStore):
+                pass
+
+            forged = ForgedCollectorDeltaStore(
+                workspace / "collector_deltas.json",
+                max_bytes=4 * 1024 * 1024,
+            )
+            with self.assertRaisesRegex(
+                TypeError,
+                "exact canonical CollectorDeltaStore",
+            ):
+                source.bind_collector_store(forged)
+
+            self.assertIsNone(source._collector_store)
+
+    def test_collector_store_binding_is_same_object_idempotent_only(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory) / "workspace"
+            source = ParlayApiProductSource(
+                _Provider([]),
+                workspace=workspace,
+                authority_root=Path(directory) / "authority",
+                lawful_terms_ref="terms:parlayapi:v1",
+                retention_ref="retention:parlayapi:v1",
+            )
+            first = CollectorDeltaStore(
+                workspace / "collector_deltas.json",
+                max_bytes=4 * 1024 * 1024,
+            )
+            source.bind_collector_store(first)
+            source.bind_collector_store(first)
+
+            replacement = CollectorDeltaStore(
+                workspace / "collector_deltas.json",
+                max_bytes=4 * 1024 * 1024,
+            )
+            with self.assertRaisesRegex(
+                ProductSourceStateError,
+                "authority cannot be replaced",
+            ):
+                source.bind_collector_store(replacement)
+
+            self.assertIs(source._require_collector_store(), first)
+
     def test_construction_defers_collector_store_until_canonical_binding(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory) / "workspace"

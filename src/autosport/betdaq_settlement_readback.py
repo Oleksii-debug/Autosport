@@ -40,6 +40,13 @@ _CANONICAL_ACCOUNT_HTTPS_POST = _account._CANONICAL_HTTPS_POST
 _REQUIRE_CANONICAL_ACCOUNT_TRANSPORT = _account._require_canonical_account_transport
 _CANONICAL_ACCOUNT_CURRENCY = _account._currency
 _CANONICAL_ACCOUNT_CURRENCY_CODE = getattr(_CANONICAL_ACCOUNT_CURRENCY, "__code__", None)
+_CANONICAL_AUTHENTICATED_ACCOUNT_CONTEXT = _account._authenticated_account_context
+_CANONICAL_AUTHENTICATED_ACCOUNT_CONTEXT_CODE = getattr(
+    _CANONICAL_AUTHENTICATED_ACCOUNT_CONTEXT,
+    "__code__",
+    None,
+)
+_CANONICAL_AUTHENTICATED_ACCOUNT_CONTEXT_TYPE = _account.BetdaqAuthenticatedAccountContext
 _MAX_XSD_LONG = 9_223_372_036_854_775_807
 _CANONICAL_ACCOUNT_HTTPS_POST_CODE = getattr(_CANONICAL_ACCOUNT_HTTPS_POST, "__code__", None)
 _CANONICAL_REQUIRE_ACCOUNT_TRANSPORT_CODE = getattr(
@@ -76,6 +83,23 @@ def _canonical_economic_transport_dispatch():
     # Return exact local references so a module-global rebind after this witness
     # cannot redirect this individual acquisition between check and dispatch.
     return live_require, live_post
+
+
+def _canonical_authenticated_account_context_dispatch():
+    """Return the exact existing account-context resolver and type authority."""
+
+    live_resolver = getattr(_account, "_authenticated_account_context", None)
+    live_type = getattr(_account, "BetdaqAuthenticatedAccountContext", None)
+    if (
+        live_resolver is not _CANONICAL_AUTHENTICATED_ACCOUNT_CONTEXT
+        or getattr(live_resolver, "__code__", None)
+        is not _CANONICAL_AUTHENTICATED_ACCOUNT_CONTEXT_CODE
+        or live_type is not _CANONICAL_AUTHENTICATED_ACCOUNT_CONTEXT_TYPE
+    ):
+        raise BetdaqEconomicReadbackError(
+            "canonical BETDAQ authenticated account context authority was replaced"
+        )
+    return live_resolver
 
 
 def _canonical_terminal_order_status_codes() -> frozenset[int]:
@@ -832,6 +856,19 @@ class BetdaqEconomicReadbackClient:
                 raise BetdaqEconomicReadbackError(
                     "BETDAQ economic read requires canonical credentials"
                 )
+            try:
+                context_resolver = _canonical_authenticated_account_context_dispatch()
+                context_before = context_resolver(credentials, venue_id)
+            except BetdaqEconomicReadbackError:
+                raise
+            except Exception:
+                raise BetdaqEconomicReadbackError(
+                    "BETDAQ authenticated account context failed canonical validation"
+                ) from None
+            if type(context_before) is not _CANONICAL_AUTHENTICATED_ACCOUNT_CONTEXT_TYPE:
+                raise BetdaqEconomicReadbackError(
+                    "BETDAQ authenticated account context is not canonical"
+                )
             body = _request_xml(credentials, method, request_attributes)
             transport = client._transport
             try:
@@ -860,15 +897,34 @@ class BetdaqEconomicReadbackClient:
                 raise BetdaqEconomicReadbackError(
                     "BETDAQ authenticated account context changed during economic acquisition"
                 )
+            try:
+                if (
+                    _canonical_authenticated_account_context_dispatch()
+                    is not context_resolver
+                ):
+                    raise BetdaqEconomicReadbackError(
+                        "canonical BETDAQ authenticated account context authority was replaced"
+                    )
+                context_after = context_resolver(credentials, venue_id)
+            except BetdaqEconomicReadbackError:
+                raise
+            except Exception:
+                raise BetdaqEconomicReadbackError(
+                    "BETDAQ authenticated account context failed canonical validation"
+                ) from None
+            if (
+                type(context_after) is not _CANONICAL_AUTHENTICATED_ACCOUNT_CONTEXT_TYPE
+                or context_after is not context_before
+            ):
+                raise BetdaqEconomicReadbackError(
+                    "BETDAQ authenticated account context changed during economic acquisition"
+                )
         if type(payload) is not bytes:
             raise BetdaqEconomicReadbackError(
                 "BETDAQ economic read transport must return bytes"
             )
         try:
             result = _parse_economic_soap_result(payload, method)
-            context = _account._authenticated_account_context(
-                credentials, venue_id
-            )
             observed_at = client._observed_at()
         except Exception:
             raise BetdaqEconomicReadbackError(
@@ -879,7 +935,7 @@ class BetdaqEconomicReadbackClient:
             request_identity_sha256=request_identity,
             source_payload_sha256=sha256(payload).hexdigest(),
             observed_at=observed_at,
-            account_context_id=context.session_context_id,
+            account_context_id=context_before.session_context_id,
         )
         return result, evidence
 

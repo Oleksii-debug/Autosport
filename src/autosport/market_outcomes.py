@@ -704,10 +704,12 @@ class MarketOutcomeAuthorityAssessment:
             raise ValueError("assessment status must be OutcomeAuthorityStatus")
         if self.status is OutcomeAuthorityStatus.PROVEN_EXHAUSTIVE:
             if (
-                not isinstance(self.authority, MarketSettlementOutcomeAuthority)
+                type(self.authority) is not _CANONICAL_MARKET_OUTCOME_AUTHORITY_TYPE
                 or self.refusal_reason is not None
             ):
-                raise ValueError("proven assessment requires authority and no refusal")
+                raise ValueError(
+                    "proven assessment requires exact canonical authority and no refusal"
+                )
             self.authority.assert_issued_integrity()
             if self.authority.identity != self.identity:
                 raise ValueError("assessment authority identity mismatch")

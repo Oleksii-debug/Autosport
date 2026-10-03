@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
+from types import MappingProxyType
 from typing import Final
 
 from .opportunity import StrategyClass
@@ -110,7 +111,7 @@ _HEDGE: Final[frozenset[ProofRequirement]] = frozenset(
     }
 )
 
-_CLASS_REQUIREMENTS: Final[dict[StrategyClass, frozenset[ProofRequirement]]] = {
+_CLASS_REQUIREMENTS: Final = MappingProxyType({
     StrategyClass.PREDICTIVE_EDGE: _SHARED,
     StrategyClass.LIVE_PRICE_MOVEMENT: _SHARED | _LIVE,
     StrategyClass.ARBITRAGE: _SHARED | _OUTCOME_STRUCTURE,
@@ -118,44 +119,57 @@ _CLASS_REQUIREMENTS: Final[dict[StrategyClass, frozenset[ProofRequirement]]] = {
     StrategyClass.HEDGE_REBALANCE: _SHARED | _HEDGE,
     StrategyClass.HYBRID: _SHARED
     | frozenset({ProofRequirement.HYBRID_COMPONENT_EVIDENCE}),
-}
+})
 
 
-def _strategy_class(value: object) -> StrategyClass:
-    if not isinstance(value, StrategyClass):
-        raise StrategyProofContractError("strategy_class must be a StrategyClass")
+def _strategy_class(
+    value: object,
+    *,
+    _strategy_type: type[StrategyClass] = StrategyClass,
+    _error_type: type[StrategyProofContractError] = StrategyProofContractError,
+) -> StrategyClass:
+    if type(value) is not _strategy_type:
+        raise _error_type("strategy_class must be a StrategyClass")
     return value
 
 
-def _probability_claim(value: object) -> bool:
+def _probability_claim(
+    value: object,
+    *,
+    _error_type: type[StrategyProofContractError] = StrategyProofContractError,
+) -> bool:
     if type(value) is not bool:
-        raise StrategyProofContractError("claims_probability_edge must be a bool")
+        raise _error_type("claims_probability_edge must be a bool")
     return value
 
 
 def _validate_probability_claim(
     strategy_class: StrategyClass,
     claims_probability_edge: bool,
+    *,
+    _predictive: StrategyClass = StrategyClass.PREDICTIVE_EDGE,
+    _hybrid: StrategyClass = StrategyClass.HYBRID,
+    _error_type: type[StrategyProofContractError] = StrategyProofContractError,
 ) -> None:
-    if strategy_class is StrategyClass.PREDICTIVE_EDGE and not claims_probability_edge:
-        raise StrategyProofContractError(
-            "PREDICTIVE_EDGE must claim probability edge"
-        )
-    if (
-        strategy_class not in {StrategyClass.PREDICTIVE_EDGE, StrategyClass.HYBRID}
-        and claims_probability_edge
-    ):
-        raise StrategyProofContractError(
+    if strategy_class is _predictive and not claims_probability_edge:
+        raise _error_type("PREDICTIVE_EDGE must claim probability edge")
+    if strategy_class not in {_predictive, _hybrid} and claims_probability_edge:
+        raise _error_type(
             "only PREDICTIVE_EDGE or HYBRID may claim probability edge"
         )
 
 
-def _proofs(value: object) -> frozenset[ProofRequirement]:
+def _proofs(
+    value: object,
+    *,
+    _proof_type: type[ProofRequirement] = ProofRequirement,
+    _error_type: type[StrategyProofContractError] = StrategyProofContractError,
+) -> frozenset[ProofRequirement]:
     if type(value) is not frozenset:
-        raise StrategyProofContractError("present_proofs must be a frozenset")
+        raise _error_type("present_proofs must be a frozenset")
     for proof in value:
-        if not isinstance(proof, ProofRequirement):
-            raise StrategyProofContractError(
+        if type(proof) is not _proof_type:
+            raise _error_type(
                 "present_proofs must contain only ProofRequirement values"
             )
     return value
@@ -168,14 +182,20 @@ def _ordered(proofs: frozenset[ProofRequirement]) -> tuple[ProofRequirement, ...
 def _required_for(
     strategy_class: StrategyClass,
     claims_probability_edge: bool,
+    *,
+    _strategy_validator=_strategy_class,
+    _claim_validator=_probability_claim,
+    _claim_rule=_validate_probability_claim,
+    _class_requirements=_CLASS_REQUIREMENTS,
+    _predictive_requirements: frozenset[ProofRequirement] = _PREDICTIVE,
 ) -> frozenset[ProofRequirement]:
-    canonical_class = _strategy_class(strategy_class)
-    canonical_claim = _probability_claim(claims_probability_edge)
-    _validate_probability_claim(canonical_class, canonical_claim)
+    canonical_class = _strategy_validator(strategy_class)
+    canonical_claim = _claim_validator(claims_probability_edge)
+    _claim_rule(canonical_class, canonical_claim)
 
-    required = _CLASS_REQUIREMENTS[canonical_class]
+    required = _class_requirements[canonical_class]
     if canonical_claim:
-        required = required | _PREDICTIVE
+        required = required | _predictive_requirements
     return required
 
 
@@ -187,36 +207,51 @@ class StrategyProofContract:
     claims_probability_edge: bool
     required_proofs: tuple[ProofRequirement, ...]
 
-    def __post_init__(self) -> None:
-        canonical_class = _strategy_class(self.strategy_class)
-        canonical_claim = _probability_claim(self.claims_probability_edge)
-        expected = _ordered(_required_for(canonical_class, canonical_claim))
+    def __post_init__(
+        self,
+        _strategy_validator=_strategy_class,
+        _claim_validator=_probability_claim,
+        _required_for_impl=_required_for,
+        _ordered_impl=_ordered,
+        _proof_type: type[ProofRequirement] = ProofRequirement,
+        _error_type: type[StrategyProofContractError] = StrategyProofContractError,
+    ) -> None:
+        canonical_class = _strategy_validator(self.strategy_class)
+        canonical_claim = _claim_validator(self.claims_probability_edge)
+        expected = _ordered_impl(
+            _required_for_impl(canonical_class, canonical_claim)
+        )
 
         if type(self.required_proofs) is not tuple:
-            raise StrategyProofContractError("required_proofs must be a tuple")
-        if any(not isinstance(item, ProofRequirement) for item in self.required_proofs):
-            raise StrategyProofContractError(
+            raise _error_type("required_proofs must be a tuple")
+        if any(type(item) is not _proof_type for item in self.required_proofs):
+            raise _error_type(
                 "required_proofs must contain only ProofRequirement values"
             )
-        if self.required_proofs != _ordered(frozenset(self.required_proofs)):
-            raise StrategyProofContractError(
+        if self.required_proofs != _ordered_impl(frozenset(self.required_proofs)):
+            raise _error_type(
                 "required_proofs must be unique and use canonical lexical order"
             )
         if self.required_proofs != expected:
-            raise StrategyProofContractError(
+            raise _error_type(
                 "required_proofs do not match the canonical strategy-class contract"
             )
 
     @property
-    def forecast_required(self) -> bool:
-        return ProofRequirement.FORECAST_PROBABILITY in self.required_proofs
+    def forecast_required(
+        self,
+        _forecast_requirement: ProofRequirement = ProofRequirement.FORECAST_PROBABILITY,
+    ) -> bool:
+        return _forecast_requirement in self.required_proofs
 
     @property
-    def complete_terminal_state_required(self) -> bool:
-        return (
+    def complete_terminal_state_required(
+        self,
+        _terminal_requirement: ProofRequirement = (
             ProofRequirement.COMPLETE_TERMINAL_OUTCOME_SPACE
-            in self.required_proofs
-        )
+        ),
+    ) -> bool:
+        return _terminal_requirement in self.required_proofs
 
 
 @dataclass(frozen=True, slots=True)
@@ -231,10 +266,20 @@ class StrategyProofEvaluation:
     required_labels_present: bool
     execution_authorized: bool = False
 
-    def __post_init__(self) -> None:
-        canonical_class = _strategy_class(self.strategy_class)
-        canonical_claim = _probability_claim(self.claims_probability_edge)
-        expected_required = _ordered(_required_for(canonical_class, canonical_claim))
+    def __post_init__(
+        self,
+        _strategy_validator=_strategy_class,
+        _claim_validator=_probability_claim,
+        _required_for_impl=_required_for,
+        _ordered_impl=_ordered,
+        _proof_type: type[ProofRequirement] = ProofRequirement,
+        _error_type: type[StrategyProofContractError] = StrategyProofContractError,
+    ) -> None:
+        canonical_class = _strategy_validator(self.strategy_class)
+        canonical_claim = _claim_validator(self.claims_probability_edge)
+        expected_required = _ordered_impl(
+            _required_for_impl(canonical_class, canonical_claim)
+        )
 
         for name, value in (
             ("required_proofs", self.required_proofs),
@@ -242,83 +287,95 @@ class StrategyProofEvaluation:
             ("missing_proofs", self.missing_proofs),
         ):
             if type(value) is not tuple:
-                raise StrategyProofContractError(f"{name} must be a tuple")
-            if any(not isinstance(item, ProofRequirement) for item in value):
-                raise StrategyProofContractError(
+                raise _error_type(f"{name} must be a tuple")
+            if any(type(item) is not _proof_type for item in value):
+                raise _error_type(
                     f"{name} must contain only ProofRequirement values"
                 )
-            if value != _ordered(frozenset(value)):
-                raise StrategyProofContractError(
+            if value != _ordered_impl(frozenset(value)):
+                raise _error_type(
                     f"{name} must be unique and use canonical lexical order"
                 )
 
         if self.required_proofs != expected_required:
-            raise StrategyProofContractError(
+            raise _error_type(
                 "required_proofs do not match the canonical strategy-class contract"
             )
 
         required_set = frozenset(self.required_proofs)
         present_set = frozenset(self.present_proofs)
         expected_missing = required_set - present_set
-        if self.missing_proofs != _ordered(expected_missing):
-            raise StrategyProofContractError(
+        if self.missing_proofs != _ordered_impl(expected_missing):
+            raise _error_type(
                 "missing_proofs must equal canonical required-minus-present"
             )
 
         expected_satisfied = not expected_missing
         if self.required_labels_present is not expected_satisfied:
-            raise StrategyProofContractError(
+            raise _error_type(
                 "required_labels_present does not match missing_proofs"
             )
 
         if type(self.execution_authorized) is not bool:
-            raise StrategyProofContractError("execution_authorized must be a bool")
+            raise _error_type("execution_authorized must be a bool")
         if self.execution_authorized:
-            raise StrategyProofContractError(
+            raise _error_type(
                 "strategy proof evaluation cannot authorize execution"
             )
 
 
-def proof_contract_for(
-    strategy_class: StrategyClass,
+def _build_public_strategy_proof_api(
     *,
-    claims_probability_edge: bool,
-) -> StrategyProofContract:
-    """Return canonical proof obligations for one Opportunity strategy identity."""
+    _strategy_validator=_strategy_class,
+    _claim_validator=_probability_claim,
+    _required_for_impl=_required_for,
+    _ordered_impl=_ordered,
+    _proofs_impl=_proofs,
+    _contract_type: type[StrategyProofContract] = StrategyProofContract,
+    _evaluation_type: type[StrategyProofEvaluation] = StrategyProofEvaluation,
+):
+    """Compose public taxonomy functions from canonical immutable roots."""
 
-    canonical_class = _strategy_class(strategy_class)
-    canonical_claim = _probability_claim(claims_probability_edge)
-    required = _required_for(canonical_class, canonical_claim)
-    return StrategyProofContract(
-        strategy_class=canonical_class,
-        claims_probability_edge=canonical_claim,
-        required_proofs=_ordered(required),
-    )
+    def proof_contract_for(
+        strategy_class: StrategyClass,
+        *,
+        claims_probability_edge: bool,
+    ) -> StrategyProofContract:
+        canonical_class = _strategy_validator(strategy_class)
+        canonical_claim = _claim_validator(claims_probability_edge)
+        required = _required_for_impl(canonical_class, canonical_claim)
+        return _contract_type(
+            strategy_class=canonical_class,
+            claims_probability_edge=canonical_claim,
+            required_proofs=_ordered_impl(required),
+        )
+
+    def evaluate_strategy_proofs(
+        strategy_class: StrategyClass,
+        present_proofs: frozenset[ProofRequirement],
+        *,
+        claims_probability_edge: bool,
+    ) -> StrategyProofEvaluation:
+        contract = proof_contract_for(
+            strategy_class,
+            claims_probability_edge=claims_probability_edge,
+        )
+        canonical_present = _proofs_impl(present_proofs)
+        required_set = frozenset(contract.required_proofs)
+        missing = required_set - canonical_present
+        satisfied = not missing
+
+        return _evaluation_type(
+            strategy_class=contract.strategy_class,
+            claims_probability_edge=contract.claims_probability_edge,
+            required_proofs=contract.required_proofs,
+            present_proofs=_ordered_impl(canonical_present),
+            missing_proofs=_ordered_impl(missing),
+            required_labels_present=satisfied,
+            execution_authorized=False,
+        )
+
+    return proof_contract_for, evaluate_strategy_proofs
 
 
-def evaluate_strategy_proofs(
-    strategy_class: StrategyClass,
-    present_proofs: frozenset[ProofRequirement],
-    *,
-    claims_probability_edge: bool,
-) -> StrategyProofEvaluation:
-    """Evaluate required-label coverage without treating labels as proof evidence."""
-
-    contract = proof_contract_for(
-        strategy_class,
-        claims_probability_edge=claims_probability_edge,
-    )
-    canonical_present = _proofs(present_proofs)
-    required_set = frozenset(contract.required_proofs)
-    missing = required_set - canonical_present
-    satisfied = not missing
-
-    return StrategyProofEvaluation(
-        strategy_class=contract.strategy_class,
-        claims_probability_edge=contract.claims_probability_edge,
-        required_proofs=contract.required_proofs,
-        present_proofs=_ordered(canonical_present),
-        missing_proofs=_ordered(missing),
-        required_labels_present=satisfied,
-        execution_authorized=False,
-    )
+proof_contract_for, evaluate_strategy_proofs = _build_public_strategy_proof_api()

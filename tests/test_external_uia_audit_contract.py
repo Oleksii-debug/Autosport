@@ -195,3 +195,38 @@ def test_windows_candidate_external_uia_fences_package_root_against_writes() -> 
     assert "extracted_external_uia_read_only_package_status" in step
     assert "-Exe (Join-Path $packageRoot 'Autosport.exe')" in step
     assert "-WorkingDirectory $hostileCwd" in step
+
+def test_external_uia_audit_rejects_second_real_packaged_launch() -> None:
+    audit = _audit()
+
+    first_launch = (
+        "$process = Start-Process -FilePath $exePath "
+        "-WorkingDirectory $launchWorkingDirectory -PassThru"
+    )
+    second_launch = (
+        "$duplicateProcess = Start-Process -FilePath $exePath "
+        "-WorkingDirectory $launchWorkingDirectory -PassThru"
+    )
+    assert first_launch in audit
+    assert second_launch in audit
+    assert audit.index(first_launch) < audit.index(second_launch)
+    assert "duplicate_launch_status = 'NOT_RUN'" in audit
+    assert "$report.duplicate_launch_status = 'PASS'" in audit
+    assert "$report.duplicate_launch_exit_code = [int]$duplicateProcess.ExitCode" in audit
+    assert "$duplicateProcess.ExitCode -ne 2" in audit
+    assert "Second packaged launch exposed a second semantic WebView operator surface" in audit
+    assert "уже відкритий" in audit
+    assert "Economic і live state не змінено" in audit
+
+
+def test_windows_candidate_requires_duplicate_launch_evidence() -> None:
+    workflow = _windows_workflow()
+    step_start = workflow.index("- name: External UIA fresh-extraction gate")
+    step_end = workflow.index("- name: Upload external UIA failure evidence", step_start)
+    step = workflow[step_start:step_end]
+
+    assert "$external.duplicate_launch_status -ne 'PASS'" in step
+    assert "[int]$external.duplicate_launch_exit_code -ne 2" in step
+    assert "External UIA duplicate-launch dialog title mismatch" in step
+    assert "extracted_external_uia_duplicate_launch_status" in step
+

@@ -1295,6 +1295,75 @@ def test_proposal_market_descriptor_rebind_fails_closed(
     assert set(persisted.tickets) == set(book.tickets)
 
 
+def test_paper_ticket_descriptor_witness_inventory_is_complete():
+    observed = tuple(
+        name
+        for name, _descriptor in (
+            economic_admission._PAPER_TICKET_FIELD_DESCRIPTOR_WITNESSES
+        )
+    )
+    assert observed == tuple(economic_admission.PaperTicket.__dataclass_fields__)
+
+
+@pytest.mark.parametrize(
+    ("field_name", "forged_value"),
+    (
+        ("stake", Decimal("0")),
+        ("status", "forged-open"),
+        ("provider_source_ids", ()),
+        ("provider_accounts", ()),
+        ("bankroll_id", "forged-bankroll"),
+        ("currency", "EUR"),
+    ),
+)
+def test_paper_ticket_descriptor_rebind_cannot_understate_economic_history(
+    tmp_path,
+    field_name,
+    forged_value,
+):
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    old = now - timedelta(days=2)
+    goal = _goal()
+    EconomicGoalStore(tmp_path).initialize_owner(goal)
+    book = _book_with_settled_turnover(placed_at=_timestamp(old), stake="50")
+    book.save(tmp_path / "paper_book.json")
+    candidate = _leg(f"paper-ticket-descriptor-{field_name}")
+    context = _context(candidate, _timestamp(now))
+    policy = _policy(goal)
+    owner = economic_admission.PaperTicket
+    original = owner.__dict__[field_name]
+    hostile_called = False
+
+    def forged_field(_self):
+        nonlocal hostile_called
+        hostile_called = True
+        return forged_value
+
+    try:
+        setattr(owner, field_name, property(forged_field))
+        result = admit_paper_ticket(
+            workspace=tmp_path,
+            book=book,
+            risk_policy=policy,
+            stake=Decimal("0.01"),
+            legs=(candidate,),
+            reason="PaperTicket descriptor mutation must fail closed",
+            placed_at=_timestamp(now),
+            context=context,
+            provider_source_ids=("provider-1",),
+            bankroll_id="paper-bankroll",
+            currency="USD",
+        )
+    finally:
+        setattr(owner, field_name, original)
+
+    assert hostile_called is False
+    assert result.admitted is False
+    assert result.risk.reason == "virtual bankroll risk helper authority is invalid"
+    persisted = PaperBook.load(tmp_path / "paper_book.json")
+    assert set(persisted.tickets) == set(book.tickets)
+
+
 def test_risk_policy_limit_descriptor_rebind_cannot_widen_ticket_cap(tmp_path):
     now = datetime.now(timezone.utc).replace(microsecond=0)
     old = now - timedelta(days=2)

@@ -183,7 +183,13 @@ def _run_interactive_gui() -> int:
     )
 
     try:
-        with WorkspaceInteractiveLock(workspace):
+        # The economic workspace and the WebView2 profile are independent mutable
+        # authorities. Lock both for the full operator lifetime so either shared
+        # root has deterministic single-owner behavior across processes.
+        with (
+            WorkspaceInteractiveLock(workspace),
+            WorkspaceInteractiveLock(webview_storage.parent),
+        ):
             return _run_owned_interactive_gui(workspace)
     except WorkspaceEconomicLockBusyError:
         _show_startup_error(_WORKSPACE_INSTANCE_BUSY_ERROR)

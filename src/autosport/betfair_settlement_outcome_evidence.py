@@ -226,6 +226,10 @@ def _build_dispatch_guard():
     module_globals = globals()
     builtin_vars = vars
     builtin_getattr = getattr
+    builtin_type = type
+    builtin_bool = bool
+    builtin_int = int
+    builtin_dict = dict
 
     if digest_code is None or canonical_code is None:
         raise RuntimeError("Betfair settlement outcome digest authority is unavailable")
@@ -265,6 +269,11 @@ def _build_dispatch_guard():
             or module_globals.get("json") is not json_module
             or builtin_getattr(json_module, "dumps", None) is not json_dumps
             or module_globals.get("BetfairOutcomeEvidenceError") is not error_type
+            or module_globals.get("type", builtin_type) is not builtin_type
+            or module_globals.get("bool", builtin_bool) is not builtin_bool
+            or module_globals.get("int", builtin_int) is not builtin_int
+            or module_globals.get("getattr", builtin_getattr) is not builtin_getattr
+            or module_globals.get("dict", builtin_dict) is not builtin_dict
         ):
             raise error_type(
                 "Betfair settlement outcome authority dispatch changed"
@@ -291,6 +300,7 @@ def _build_public_resolvers():
     module_globals = globals()
     builtin_type = type
     builtin_getattr = getattr
+    builtin_dict = dict
 
     def require_public_dispatch(resolve, require) -> None:
         installed_guard = module_globals.get("_require_dispatch")
@@ -317,7 +327,7 @@ def _build_public_resolvers():
                 "outcome evidence requires exact canonical settlement store"
             )
         namespace = builtin_getattr(store, "__dict__", None)
-        if builtin_type(namespace) is dict and "current" in namespace:
+        if builtin_type(namespace) is builtin_dict and "current" in namespace:
             raise error_type("settlement current dispatch is instance-shadowed")
 
         revision = current(

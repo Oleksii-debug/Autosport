@@ -775,7 +775,12 @@ def _make_resolver() -> FunctionType:
         )
     book_helper_witnesses = tuple(book_helper_witnesses)
 
-    paper_globals = book_load_function.__globals__
+    # The public positive path load is a composed closure-backed wrapper whose
+    # private globals intentionally do not expose the structural parser module.
+    # Witness parser/value dependencies from canonical load_bytes instead; the
+    # composed load wrapper itself is independently pinned by exact method/function
+    # identity and code above and rechecked on every resolution.
+    paper_globals = book_load_bytes_function.__globals__
     paper_global_names = (
         "Path",
         "PaperTicket",

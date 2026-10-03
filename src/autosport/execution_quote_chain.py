@@ -711,7 +711,12 @@ def _install_quote_chain_evidence_authority() -> None:
         if not require_fingerprint:
             return record
         fingerprint = record[1]
-        if type(fingerprint) is not str or not fingerprint:
+        issued_payload = record[2]
+        if (
+            type(fingerprint) is not str
+            or not fingerprint
+            or issued_payload is None
+        ):
             raise ExecutionQuoteChainError(
                 "quote-chain evidence issuance is incomplete"
             )
@@ -738,49 +743,66 @@ def _install_quote_chain_evidence_authority() -> None:
     def assert_projection_issued(self: ExecutionQuoteChainEvidence) -> None:
         _lookup(self, require_fingerprint=True)
 
+    def _issued_payload(
+        self: ExecutionQuoteChainEvidence,
+    ) -> tuple[dict[str, object], str]:
+        record = _lookup(self, require_fingerprint=True)
+        fingerprint = record[1]
+        issued_payload = record[2]
+        if type(fingerprint) is not str or issued_payload is None:
+            raise ExecutionQuoteChainError(
+                "quote-chain evidence issuance is incomplete"
+            )
+        return dict(issued_payload), fingerprint
+
     def submit_instruction_identity_bound(
         self: ExecutionQuoteChainEvidence,
     ) -> bool:
-        _lookup(self, require_fingerprint=True)
-        return self.submission_instruction_sha256 is not None
+        payload, _fingerprint = _issued_payload(self)
+        return bool(payload["submit_instruction_identity_bound"])
 
     def provider_request_correlation_bound(
         self: ExecutionQuoteChainEvidence,
     ) -> bool:
-        _lookup(self, require_fingerprint=True)
-        return (
-            self.submission_instruction_sha256 is not None
-            and self.provider_request_sha256 == self.submission_instruction_sha256
-        )
+        payload, _fingerprint = _issued_payload(self)
+        return bool(payload["provider_request_correlation_bound"])
 
     def actual_submitted_instruction_bound(
         self: ExecutionQuoteChainEvidence,
     ) -> bool:
-        _lookup(self, require_fingerprint=True)
-        return (
-            self.submission_instruction_sha256 is not None
-            and self.provider_request_sha256 == self.submission_instruction_sha256
-        )
+        payload, _fingerprint = _issued_payload(self)
+        return bool(payload["actual_submitted_instruction_bound"])
 
     def acknowledgement_binding_matches(
         self: ExecutionQuoteChainEvidence,
     ) -> bool:
-        _lookup(self, require_fingerprint=True)
-        return self._acknowledgement_binding_matches
+        payload, _fingerprint = _issued_payload(self)
+        return bool(payload["acknowledgement_binding_matches"])
+
+    def accepted_price_verified(
+        self: ExecutionQuoteChainEvidence,
+    ) -> bool:
+        payload, _fingerprint = _issued_payload(self)
+        return bool(payload["accepted_price_verified"])
+
+    def chain_complete(
+        self: ExecutionQuoteChainEvidence,
+    ) -> bool:
+        payload, _fingerprint = _issued_payload(self)
+        return bool(payload["chain_complete"])
 
     def evidence_sha256(self: ExecutionQuoteChainEvidence) -> str:
-        assert_projection_issued(self)
-        return self._evidence_sha256
+        _payload, fingerprint = _issued_payload(self)
+        return fingerprint
 
     def to_dict(
         self: ExecutionQuoteChainEvidence,
         *,
         include_evidence_sha256: bool = True,
     ) -> dict[str, object]:
-        assert_projection_issued(self)
-        payload = raw_to_dict(self, include_evidence_sha256=False)
+        payload, fingerprint = _issued_payload(self)
         if include_evidence_sha256:
-            payload["evidence_sha256"] = self._evidence_sha256
+            payload["evidence_sha256"] = fingerprint
         return payload
 
     def issue(
@@ -825,14 +847,17 @@ def _install_quote_chain_evidence_authority() -> None:
         reference = ref(evidence, discard)
         with issued_lock:
             updated = dict(issued_snapshot)
-            updated[identity] = (reference, None)
+            updated[identity] = (reference, None, None)
             issued_snapshot = MappingProxyType(updated)
         try:
             _require_projection_dependency_authority()
             try:
-                fingerprint = digest(
-                    raw_to_dict(evidence, include_evidence_sha256=False)
+                canonical_payload = raw_to_dict(
+                    evidence,
+                    include_evidence_sha256=False,
                 )
+                fingerprint = digest(canonical_payload)
+                issued_payload = MappingProxyType(dict(canonical_payload))
             finally:
                 _require_projection_dependency_authority()
             object.__setattr__(evidence, "_evidence_sha256", fingerprint)
@@ -843,7 +868,7 @@ def _install_quote_chain_evidence_authority() -> None:
                         "quote-chain evidence issuance disappeared"
                     )
                 updated = dict(issued_snapshot)
-                updated[identity] = (reference, fingerprint)
+                updated[identity] = (reference, fingerprint, issued_payload)
                 issued_snapshot = MappingProxyType(updated)
             assert_projection_issued(evidence)
             return evidence
@@ -869,6 +894,10 @@ def _install_quote_chain_evidence_authority() -> None:
     ExecutionQuoteChainEvidence.acknowledgement_binding_matches = property(
         acknowledgement_binding_matches
     )
+    ExecutionQuoteChainEvidence.accepted_price_verified = property(
+        accepted_price_verified
+    )
+    ExecutionQuoteChainEvidence.chain_complete = property(chain_complete)
     ExecutionQuoteChainEvidence.evidence_sha256 = property(evidence_sha256)
     ExecutionQuoteChainEvidence.to_dict = to_dict
     globals()["build_execution_quote_chain_evidence"] = issue

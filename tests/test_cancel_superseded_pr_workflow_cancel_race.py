@@ -118,6 +118,74 @@ def test_cancel_wrapper_run_id_cannot_be_redirected_by_validator_rebind(
     assert cancelled == [123]
 
 
+def test_cancel_wrapper_rejects_production_instance_shadowed_cancel_dispatch(
+    monkeypatch,
+) -> None:
+    api = WorkflowScopedGitHubApi(
+        repository="owner/repo",
+        token="token",
+        workflow_id=1,
+        workflow_name="CI",
+    )
+    redirected: list[int] = []
+    monkeypatch.setattr(api, "cancel", lambda run_id: redirected.append(run_id))
+
+    with pytest.raises(
+        CancellationError,
+        match="workflow run cancellation dispatch changed",
+    ):
+        scoped_controller._cancel_run_or_defer_active_conflict(api, 123)
+
+    assert redirected == []
+
+
+def test_cancel_wrapper_rejects_production_class_rebound_cancel_dispatch(
+    monkeypatch,
+) -> None:
+    api = WorkflowScopedGitHubApi(
+        repository="owner/repo",
+        token="token",
+        workflow_id=1,
+        workflow_name="CI",
+    )
+    redirected: list[int] = []
+    monkeypatch.setattr(
+        WorkflowScopedGitHubApi,
+        "cancel",
+        lambda _self, run_id: redirected.append(run_id),
+    )
+
+    with pytest.raises(
+        CancellationError,
+        match="workflow run cancellation dispatch changed",
+    ):
+        scoped_controller._cancel_run_or_defer_active_conflict(api, 123)
+
+    assert redirected == []
+
+
+def test_cancel_wrapper_calls_captured_production_cancel_directly(monkeypatch) -> None:
+    api = WorkflowScopedGitHubApi(
+        repository="owner/repo",
+        token="token",
+        workflow_id=1,
+        workflow_name="CI",
+    )
+    calls: list[tuple[str, str]] = []
+
+    def fake_urlopen(request, *, timeout: int):
+        assert timeout == 20
+        calls.append((request.full_url, request.get_method()))
+        return _FakeSuccessResponse(202, b"accepted")
+
+    monkeypatch.setattr(controller_module, "urlopen", fake_urlopen)
+
+    assert scoped_controller._cancel_run_or_defer_active_conflict(api, 123)
+    assert calls == [
+        ("https://api.github.com/repos/owner/repo/actions/runs/123/cancel", "POST"),
+    ]
+
+
 def test_scoped_cancel_run_id_cannot_be_redirected_by_validator_rebind(
     monkeypatch,
 ) -> None:

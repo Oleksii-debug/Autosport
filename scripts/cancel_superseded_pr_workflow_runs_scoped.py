@@ -925,6 +925,74 @@ class WorkflowScopedGitHubApi(GitHubApi):
         return tuple(cancelled)
 
 
+def _build_production_cancel_effect_boundary(
+    fallback,
+    production_api_type,
+    production_cancel,
+    error_type,
+    active_conflict_message: str,
+):
+    """Seal production cancellation dispatch at the final irreversible boundary.
+
+    Identity and live-qualification checks above prove an exact run coordinate. Do not
+    hand that coordinate back to mutable instance/class cancel dispatch after those
+    proofs. Production calls use the captured canonical scoped cancel executable;
+    compatibility fakes keep the pre-existing fallback behavior.
+    """
+
+    production_cancel_code = getattr(production_cancel, "__code__", None)
+    fallback_code = getattr(fallback, "__code__", None)
+    if (
+        production_cancel_code is None
+        or fallback_code is None
+        or type(active_conflict_message) is not str
+        or not active_conflict_message
+    ):
+        raise RuntimeError("canonical cancellation effect boundary is unavailable")
+
+    def cancel_or_defer(api: GitHubApi, run_id: int) -> bool:
+        if not isinstance(api, production_api_type):
+            if getattr(fallback, "__code__", None) is not fallback_code:
+                raise error_type("workflow run cancellation wrapper changed")
+            return fallback(api, run_id)
+
+        if type(run_id) is not int or run_id <= 0:
+            raise error_type("invalid run id")
+        bound_cancel = getattr(api, "cancel", None)
+        if (
+            getattr(production_cancel, "__code__", None)
+            is not production_cancel_code
+            or getattr(bound_cancel, "__self__", None) is not api
+            or getattr(bound_cancel, "__func__", None) is not production_cancel
+        ):
+            raise error_type("workflow run cancellation dispatch changed")
+
+        try:
+            # Invoke the captured executable directly. A class or instance shadow can
+            # no longer redirect the proven run id to another effect implementation.
+            production_cancel(api, run_id)
+        except error_type as exc:
+            if (
+                exc.__class__ is error_type
+                and exc.args == (active_conflict_message,)
+            ):
+                return False
+            raise
+        return True
+
+    return cancel_or_defer
+
+
+_cancel_run_or_defer_active_conflict = _build_production_cancel_effect_boundary(
+    _cancel_run_or_defer_active_conflict,
+    WorkflowScopedGitHubApi,
+    WorkflowScopedGitHubApi.cancel,
+    CancellationError,
+    "workflow run cancellation conflicted while run remains active",
+)
+del _build_production_cancel_effect_boundary
+
+
 def _build_explicit_run_identity_checker(
     workflow_scoped_api_type,
     resolver,

@@ -1276,6 +1276,7 @@ def _install_execution_readback_authority() -> None:
 
     issue_origin = None
     verify_origin = None
+    origin_dispatch_current = None
 
     def require_executable_authority() -> None:
         # read_execution_readback is intentionally composed by the timeout
@@ -1291,8 +1292,10 @@ def _install_execution_readback_authority() -> None:
             or fingerprint_method.__code__ is not fingerprint_method_code
             or issue_origin is None
             or verify_origin is None
+            or origin_dispatch_current is None
             or issue_origin.__code__ is not issue_origin_code
             or verify_origin.__code__ is not verify_origin_code
+            or origin_dispatch_current.__code__ is not origin_dispatch_current_code
             or hasattr(account_identity, binder_name)
         ):
             raise BetfairReadOnlyError(
@@ -1343,6 +1346,13 @@ def _install_execution_readback_authority() -> None:
             raise BetfairReadOnlyError(
                 "authenticated Betfair client/session changed during execution readback"
             ) from exc
+
+        # A structurally valid capture is still useful for deterministic semantic
+        # tests and diagnostics when Python-visible HTTPS/TLS dispatch was replaced.
+        # Such a path is not live provider-origin authority, so do not mint or attach
+        # any origin capability to the capture.
+        if not origin_dispatch_current():
+            return capture
 
         fingerprint = capture._authority_fingerprint()
         try:
@@ -1437,7 +1447,7 @@ def _install_execution_readback_authority() -> None:
 
     authoritative_read_code = authoritative_read.__code__
     assert_authoritative_code = assert_authoritative.__code__
-    issue_origin, verify_origin = bind_origin(
+    issue_origin, verify_origin, origin_dispatch_current = bind_origin(
         authoritative_read_code,
         (
             ("raw_read", raw_read),
@@ -1449,6 +1459,7 @@ def _install_execution_readback_authority() -> None:
     )
     issue_origin_code = issue_origin.__code__
     verify_origin_code = verify_origin.__code__
+    origin_dispatch_current_code = origin_dispatch_current.__code__
     delattr(account_identity, binder_name)
 
     BetfairReadOnlyClient.read_execution_readback = authoritative_read

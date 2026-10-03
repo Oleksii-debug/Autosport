@@ -1883,6 +1883,25 @@ def test_new_durable_attribution_requires_explicit_evidence_grade(tmp_path):
     reopened = AgentLoopRuntime(runtime.path).snapshot()
     assert reopened.attribution_id == graded.attribution_id
 
+    from dataclasses import replace
+
+    legacy_state = json_load(runtime.path)
+    for finding in legacy_state["attributions"][0]["findings"]:
+        finding.pop("evidence_grade")
+    rewrite_with_valid_state_digest(runtime.path, legacy_state)
+
+    legacy_findings = tuple(
+        replace(finding, evidence_grade=None) for finding in graded.findings
+    )
+    legacy = replace(graded, findings=legacy_findings)
+    legacy_runtime = AgentLoopRuntime(runtime.path)
+    assert legacy_runtime.snapshot().attribution_id == graded.attribution_id
+    retry = legacy_runtime.record_attribution(
+        legacy,
+        at="2026-09-19T13:05:05Z",
+    )
+    assert retry.attribution_id == graded.attribution_id
+
 
 def test_attribution_evidence_grade_fails_closed_on_identifiability_contradictions():
     with pytest.raises(

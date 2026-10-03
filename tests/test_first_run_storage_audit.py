@@ -11,6 +11,13 @@ import pytest
 
 from autosport import windows_entry
 from autosport.first_run_storage_audit import run_first_run_storage_audit
+from autosport.webview2_release_environment import WEBVIEW2_ENVIRONMENT_OVERRIDES
+
+
+@pytest.fixture(autouse=True)
+def _clear_webview2_release_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in WEBVIEW2_ENVIRONMENT_OVERRIDES:
+        monkeypatch.delenv(name, raising=False)
 
 
 def _read(path: Path) -> dict[str, object]:
@@ -49,6 +56,8 @@ def test_audit_projects_cwd_independent_unicode_storage_identity(
     )
     assert first["launch_cwd"] == str(cwd_a)
     assert second["launch_cwd"] == str(cwd_b)
+    assert first["webview_environment_overrides_clear"] is True
+    assert second["webview_environment_overrides_clear"] is True
     assert first["real_money_execution"] is False
     assert first["human_tested"] is False
     assert first["nvda_verified"] is False
@@ -217,3 +226,32 @@ def test_audit_fails_closed_when_webview_storage_is_unwritable(
     assert evidence["status"] == "FAIL"
     assert evidence["error_type"] == "PermissionError"
     assert "secret WebView detail" not in output.read_text(encoding="utf-8")
+
+
+def test_audit_rejects_release_sensitive_webview_override_before_writability_probes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    local_app_data = tmp_path / "Local"
+    output = tmp_path / "audit.json"
+    secretish_override = str(tmp_path / "secretish-retargeted-webview")
+    calls: list[str] = []
+    monkeypatch.setenv("LOCALAPPDATA", str(local_app_data))
+    monkeypatch.delenv("AUTOSPORT_WORKSPACE", raising=False)
+    monkeypatch.setenv("WEBVIEW2_USER_DATA_FOLDER", secretish_override)
+
+    monkeypatch.setattr(
+        "autosport.first_run_storage_audit.probe_workspace_writable",
+        lambda _path: calls.append("workspace"),
+    )
+    monkeypatch.setattr(
+        "autosport.first_run_storage_audit.probe_webview_storage_writable",
+        lambda _path: calls.append("webview"),
+    )
+
+    assert run_first_run_storage_audit(output) == 1
+    evidence = _read(output)
+    assert calls == []
+    assert evidence["status"] == "FAIL"
+    assert evidence["error_type"] == "ValueError"
+    assert secretish_override not in output.read_text(encoding="utf-8")

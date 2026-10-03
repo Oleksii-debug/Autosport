@@ -8,7 +8,7 @@ import json
 
 import pytest
 
-from betfair_execution_readback_test_support import authoritative_execution_readback
+from betfair_execution_readback_test_support import semantic_execution_readback
 
 import autosport.betfair_account_readonly as betfair_readonly
 from autosport.betfair_account_readonly import (
@@ -400,7 +400,7 @@ def test_execution_readback_binds_action_market_account_and_all_cleared_statuses
 
 
 def test_execution_readback_authority_cannot_be_imported_or_forged():
-    capture = authoritative_execution_readback(
+    capture = semantic_execution_readback(
         [
         response(
             [{"marketId": "1.234", "event": {"id": "event-1"}}],
@@ -447,7 +447,7 @@ def test_execution_readback_authority_cannot_be_imported_or_forged():
 
 
 def test_execution_readback_detects_post_capture_origin_tampering():
-    capture = authoritative_execution_readback(
+    capture = semantic_execution_readback(
         [
         response(
             [{"marketId": "1.234", "event": {"id": "event-1"}}],
@@ -471,7 +471,7 @@ def test_execution_readback_detects_post_capture_origin_tampering():
 
 
 def test_execution_readback_detects_post_capture_scope_tampering():
-    capture = authoritative_execution_readback(
+    capture = semantic_execution_readback(
         [
         response(
             [{"marketId": "1.234", "event": {"id": "event-1"}}],

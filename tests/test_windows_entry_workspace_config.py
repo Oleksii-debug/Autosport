@@ -88,6 +88,15 @@ def test_valid_workspace_configuration_delegates_to_webview_shell(tmp_path: Path
     assert (workspace / ".interactive-run.lock").is_file()
     assert (webview_storage.parent / ".interactive-run.lock").is_file()
 
+    from autosport.workspace_lock import WorkspaceInteractiveLock
+
+    # Shell exit must release both OS ownership records while leaving the hardened
+    # persistent sidecars intact for the next launch.
+    with WorkspaceInteractiveLock(workspace):
+        pass
+    with WorkspaceInteractiveLock(webview_storage.parent):
+        pass
+
 
 def test_overlapping_workspace_and_webview_roots_fail_before_writability_or_runtime(
     tmp_path: Path,

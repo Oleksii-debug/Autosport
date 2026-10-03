@@ -635,6 +635,58 @@ def test_resolution_verifier_rejects_writer_lock_dispatch_rebinding(
     assert hostile_called is False
 
 
+def test_resolution_verifier_rechecks_reader_graph_after_inflight_mutation(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    transcript = _transcript()
+    ledger = _ledger(tmp_path)
+    _record(ledger, transcript, reviewed_at=T0)
+    resolution = _resolve(ledger, transcript)
+    assert resolution is not None
+
+    original_parse = nvda_manual_module._parse_json_object
+    original_read_anchor = ManualNvdaAcceptanceLedger._read_anchor
+    mutated = False
+    hostile_anchor_called = False
+
+    def hostile_read_anchor(self):
+        nonlocal hostile_anchor_called
+        hostile_anchor_called = True
+        return original_read_anchor(self)
+
+    def mutating_parse(raw, *, what):
+        nonlocal mutated
+        if not mutated:
+            mutated = True
+            monkeypatch.setattr(
+                ManualNvdaAcceptanceLedger,
+                "_read_anchor",
+                hostile_read_anchor,
+            )
+        return original_parse(raw, what=what)
+
+    monkeypatch.setattr(
+        nvda_manual_module,
+        "_parse_json_object",
+        mutating_parse,
+    )
+
+    with pytest.raises(
+        NvdaManualAcceptanceStateError,
+        match="ledger reader changed after issuance: _read_anchor",
+    ):
+        verify_manual_nvda_acceptance_resolution(
+            resolution,
+            expected_artifact_sha256=ARTIFACT_SHA,
+            expected_source_sha=SOURCE_SHA,
+            expected_transcript_sha256=resolution.record.transcript_sha256,
+        )
+
+    assert mutated is True
+    assert hostile_anchor_called is True
+
+
 def test_new_decision_must_not_backdate_or_reuse_timestamp(tmp_path):
     transcript = _transcript()
     ledger = _ledger(tmp_path)

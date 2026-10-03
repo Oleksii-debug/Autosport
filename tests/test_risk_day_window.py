@@ -471,13 +471,58 @@ class ProductClockBoundaryTests(unittest.TestCase):
                 evidence = store.current()
 
                 self.assertNotEqual(evidence.day_key, forged_day)
+                self.assertNotEqual(store.product_clock_day_key(), forged_day)
                 self.assertTrue(evidence.product_clock_authoritative)
                 self.assertEqual(store.require_current(evidence), evidence)
         finally:
             day_window._clock_utc_instant = original
 
+    def test_product_clock_day_key_rejects_injected_clock(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            store = ProductDayRiskWindowStore(
+                root / "workspace",
+                authority_root=root / "machine-authority",
+                _test_clock=lambda: _epoch_ns("2026-09-23T12:00:00Z"),
+            )
+
+            with self.assertRaisesRegex(
+                RiskDayWindowIntegrityError,
+                "test/synthetic clock",
+            ):
+                store.product_clock_day_key()
+
+    def test_state_snapshot_digest_rejects_noncanonical_path(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            store = ProductDayRiskWindowStore(
+                root / "workspace",
+                authority_root=root / "machine-authority",
+            )
+            store.current()
+            store.state_path = store.state_path.with_name("alternate-day.json")
+
+            with self.assertRaisesRegex(
+                RiskDayWindowIntegrityError,
+                "path is not canonical",
+            ):
+                store.state_snapshot_sha256()
+
+    def test_state_snapshot_digest_matches_current_evidence(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            store = ProductDayRiskWindowStore(
+                root / "workspace",
+                authority_root=root / "machine-authority",
+            )
+
+            evidence = store.current()
+
+            self.assertEqual(store.product_clock_day_key(), evidence.day_key)
+            self.assertEqual(store.state_snapshot_sha256(), evidence.state_sha256)
+
     def test_class_authority_entrypoints_reject_runtime_replacement(self) -> None:
-        for name in ("current", "require_current", "_publish_day", "_evidence"):
+        for name in ("current", "product_clock_day_key", "state_snapshot_sha256", "require_current", "_publish_day", "_evidence"):
             with self.subTest(name=name):
                 original = ProductDayRiskWindowStore.__dict__[name]
                 with self.assertRaisesRegex(TypeError, "authority method is sealed"):
@@ -489,7 +534,7 @@ class ProductClockBoundaryTests(unittest.TestCase):
                 self.assertIs(ProductDayRiskWindowStore.__dict__[name], original)
 
     def test_class_authority_entrypoints_reject_runtime_deletion(self) -> None:
-        for name in ("current", "require_current", "_publish_day", "_evidence"):
+        for name in ("current", "product_clock_day_key", "state_snapshot_sha256", "require_current", "_publish_day", "_evidence"):
             with self.subTest(name=name):
                 original = ProductDayRiskWindowStore.__dict__[name]
                 with self.assertRaisesRegex(TypeError, "authority method is sealed"):

@@ -2221,6 +2221,295 @@ class RealExecutionLedgerTests(unittest.TestCase):
                 )
 
 
+
+    def test_restart_rejects_approval_binding_reordered_before_issuance(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "real.jsonl"
+            ledger = RealExecutionLedger(path)
+            witness = "0" * 64
+            approval_fingerprint = "1" * 64
+            current = plan(
+                action(),
+                plan_id=f"supervised-v2-{witness}",
+                approval_id=f"approval-1@{approval_fingerprint}",
+            )
+            ledger.reserve_plan(current)
+            ledger._bind_supervised_plan_issuance(
+                plan_id=current.plan_id,
+                bound_plan_witness=witness,
+                plan_fingerprint=current.fingerprint,
+            )
+            ledger.bind_supervised_approval(
+                plan_id=current.plan_id,
+                approval_id=current.approval_id,
+                approval_fingerprint=approval_fingerprint,
+                approved_at=TS,
+                expires_at=EXPIRES_AT,
+                evidence_sha256="2" * 64,
+            )
+
+            lines = [
+                json.loads(line)
+                for line in path.read_text(encoding="utf-8").splitlines()
+            ]
+            self.assertEqual(
+                [line["event"]["event_type"] for line in lines],
+                [
+                    EventType.PLAN_RESERVED.value,
+                    EventType.SUPERVISED_PLAN_ISSUED.value,
+                    EventType.SUPERVISED_APPROVAL_BOUND.value,
+                ],
+            )
+            path.write_text(
+                "\n".join(
+                    json.dumps(
+                        envelope,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                    for envelope in (lines[0], lines[2], lines[1])
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            restarted = RealExecutionLedger(path)
+            with self.assertRaisesRegex(
+                ExecutionLedgerIntegrityError,
+                "supervised approval binding must follow product issuance",
+            ):
+                restarted.verify_integrity()
+
+
+    def test_restart_rejects_attempt_reordered_after_revocation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "real.jsonl"
+            ledger = RealExecutionLedger(path)
+            witness = "2" * 64
+            approval_fingerprint = "3" * 64
+            current = plan(
+                action(),
+                plan_id=f"supervised-v2-{witness}",
+                approval_id=f"approval-1@{approval_fingerprint}",
+            )
+            ledger.reserve_plan(current)
+            ledger._bind_supervised_plan_issuance(
+                plan_id=current.plan_id,
+                bound_plan_witness=witness,
+                plan_fingerprint=current.fingerprint,
+            )
+            ledger.bind_supervised_approval(
+                plan_id=current.plan_id,
+                approval_id=current.approval_id,
+                approval_fingerprint=approval_fingerprint,
+                approved_at=TS,
+                expires_at=EXPIRES_AT,
+                evidence_sha256="4" * 64,
+            )
+            ledger.begin_attempt(
+                plan_id=current.plan_id,
+                action_id="a1",
+                attempt_id="pre-revocation-attempt",
+                reserved_at=RESERVED_AT,
+            )
+            ledger.revoke_supervised_approval(
+                plan_id=current.plan_id,
+                approval_id=current.approval_id,
+                approval_fingerprint=approval_fingerprint,
+                revoked_at=RECONCILED_AT,
+                revocation_evidence_sha256="5" * 64,
+            )
+
+            lines = [
+                json.loads(line)
+                for line in path.read_text(encoding="utf-8").splitlines()
+            ]
+            self.assertEqual(
+                [line["event"]["event_type"] for line in lines],
+                [
+                    EventType.PLAN_RESERVED.value,
+                    EventType.SUPERVISED_PLAN_ISSUED.value,
+                    EventType.SUPERVISED_APPROVAL_BOUND.value,
+                    EventType.ATTEMPT_RESERVED.value,
+                    EventType.SUPERVISED_APPROVAL_REVOKED.value,
+                ],
+            )
+            path.write_text(
+                "\n".join(
+                    json.dumps(
+                        envelope,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                    for envelope in (
+                        lines[0],
+                        lines[1],
+                        lines[2],
+                        lines[4],
+                        lines[3],
+                    )
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            restarted = RealExecutionLedger(path)
+            with self.assertRaisesRegex(
+                ExecutionLedgerIntegrityError,
+                "supervised attempt reservation requires prior active approval",
+            ):
+                restarted.verify_integrity()
+
+
+    def test_restart_rejects_rehashed_attempt_at_approval_expiry(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "real.jsonl"
+            ledger = RealExecutionLedger(path)
+            witness = "6" * 64
+            approval_fingerprint = "7" * 64
+            current = plan(
+                action(),
+                plan_id=f"supervised-v2-{witness}",
+                approval_id=f"approval-1@{approval_fingerprint}",
+            )
+            ledger.reserve_plan(current)
+            ledger._bind_supervised_plan_issuance(
+                plan_id=current.plan_id,
+                bound_plan_witness=witness,
+                plan_fingerprint=current.fingerprint,
+            )
+            ledger.bind_supervised_approval(
+                plan_id=current.plan_id,
+                approval_id=current.approval_id,
+                approval_fingerprint=approval_fingerprint,
+                approved_at=TS,
+                expires_at=EXPIRES_AT,
+                evidence_sha256="8" * 64,
+            )
+            ledger.begin_attempt(
+                plan_id=current.plan_id,
+                action_id="a1",
+                attempt_id="expiry-tamper-attempt",
+                reserved_at=RESERVED_AT,
+            )
+
+            lines = [
+                json.loads(line)
+                for line in path.read_text(encoding="utf-8").splitlines()
+            ]
+            attempt = lines[3]
+            self.assertEqual(
+                attempt["event"]["event_type"],
+                EventType.ATTEMPT_RESERVED.value,
+            )
+            attempt["event"]["payload"]["reserved_at"] = EXPIRES_AT
+            import hashlib
+
+            body = json.dumps(
+                attempt["event"],
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+            attempt["sha256"] = hashlib.sha256(body.encode("utf-8")).hexdigest()
+            path.write_text(
+                "\n".join(
+                    json.dumps(
+                        envelope,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                    for envelope in lines
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            restarted = RealExecutionLedger(path)
+            with self.assertRaisesRegex(
+                ExecutionLedgerIntegrityError,
+                "supervised attempt reservation is outside approval lifetime",
+            ):
+                restarted.verify_integrity()
+
+
+    def test_restart_rejects_second_distinct_revocation_event(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "real.jsonl"
+            ledger = RealExecutionLedger(path)
+            witness = "9" * 64
+            approval_fingerprint = "a" * 64
+            current = plan(
+                action(),
+                plan_id=f"supervised-v2-{witness}",
+                approval_id=f"approval-1@{approval_fingerprint}",
+            )
+            ledger.reserve_plan(current)
+            ledger._bind_supervised_plan_issuance(
+                plan_id=current.plan_id,
+                bound_plan_witness=witness,
+                plan_fingerprint=current.fingerprint,
+            )
+            ledger.bind_supervised_approval(
+                plan_id=current.plan_id,
+                approval_id=current.approval_id,
+                approval_fingerprint=approval_fingerprint,
+                approved_at=TS,
+                expires_at=EXPIRES_AT,
+                evidence_sha256="b" * 64,
+            )
+            ledger.revoke_supervised_approval(
+                plan_id=current.plan_id,
+                approval_id=current.approval_id,
+                approval_fingerprint=approval_fingerprint,
+                revoked_at=RESERVED_AT,
+                revocation_evidence_sha256="c" * 64,
+            )
+
+            lines = [
+                json.loads(line)
+                for line in path.read_text(encoding="utf-8").splitlines()
+            ]
+            duplicate = json.loads(json.dumps(lines[-1]))
+            duplicate["event"]["event_id"] = "distinct-second-revocation"
+            duplicate["event"]["recorded_at"] = RETRY_RESERVED_AT
+            import hashlib
+
+            body = json.dumps(
+                duplicate["event"],
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+            duplicate["sha256"] = hashlib.sha256(body.encode("utf-8")).hexdigest()
+            lines.append(duplicate)
+            path.write_text(
+                "\n".join(
+                    json.dumps(
+                        envelope,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                    for envelope in lines
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            restarted = RealExecutionLedger(path)
+            with self.assertRaisesRegex(
+                ExecutionLedgerIntegrityError,
+                "supervised approval revocation identity/chronology mismatch",
+            ):
+                restarted.verify_integrity()
+
+
     def test_restart_rejects_hash_valid_attempt_reordered_before_approval(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "real.jsonl"

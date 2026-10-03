@@ -238,42 +238,114 @@ def _make_account_identity_authority():
     # canonical urllib request traverses.  Deterministic tests may still replace
     # these surfaces to exercise parsing, but such captures cannot mint live
     # provider-origin proof.
-    network_dispatch_surfaces = (
-        (_urllib_request.OpenerDirector, "open", _urllib_request.OpenerDirector.open),
-        (_urllib_request.HTTPSHandler, "__init__", _urllib_request.HTTPSHandler.__init__),
-        (_urllib_request.HTTPSHandler, "https_open", _urllib_request.HTTPSHandler.https_open),
+    network_dispatch_surfaces = tuple(
         (
-            _urllib_request.AbstractHTTPHandler,
-            "do_open",
-            _urllib_request.AbstractHTTPHandler.do_open,
-        ),
-        (
-            _http_client,
-            "_create_https_context",
-            getattr(_http_client, "_create_https_context", None),
-        ),
-        (_http_client.HTTPSConnection, "__init__", _http_client.HTTPSConnection.__init__),
-        (_http_client.HTTPSConnection, "connect", _http_client.HTTPSConnection.connect),
-        (_http_client.HTTPConnection, "connect", _http_client.HTTPConnection.connect),
-        (_http_client.HTTPConnection, "request", _http_client.HTTPConnection.request),
-        (
-            _http_client.HTTPConnection,
-            "_send_request",
-            getattr(_http_client.HTTPConnection, "_send_request", None),
-        ),
-        (_http_client.HTTPConnection, "send", _http_client.HTTPConnection.send),
-        (
-            _http_client.HTTPConnection,
-            "getresponse",
-            _http_client.HTTPConnection.getresponse,
-        ),
-        (_ssl.SSLContext, "wrap_socket", _ssl.SSLContext.wrap_socket),
-        (_ssl.SSLSocket, "_create", getattr(_ssl.SSLSocket, "_create", None)),
-        (_socket, "create_connection", _socket.create_connection),
-        (_socket, "getaddrinfo", _socket.getaddrinfo),
-        (_socket.socket, "connect", _socket.socket.connect),
-        (_socket.socket, "sendall", _socket.socket.sendall),
-        (_socket.socket, "makefile", _socket.socket.makefile),
+            owner,
+            name,
+            expected,
+            getattr(expected, "__code__", None),
+        )
+        for owner, name, expected in (
+            (_urllib_request.OpenerDirector, "open", _urllib_request.OpenerDirector.open),
+            (_urllib_request.OpenerDirector, "error", _urllib_request.OpenerDirector.error),
+            (
+                _urllib_request.HTTPSHandler,
+                "__init__",
+                _urllib_request.HTTPSHandler.__init__,
+            ),
+            (
+                _urllib_request.HTTPSHandler,
+                "https_open",
+                _urllib_request.HTTPSHandler.https_open,
+            ),
+            (
+                _urllib_request.AbstractHTTPHandler,
+                "do_open",
+                _urllib_request.AbstractHTTPHandler.do_open,
+            ),
+            (
+                _urllib_request.HTTPErrorProcessor,
+                "http_response",
+                _urllib_request.HTTPErrorProcessor.http_response,
+            ),
+            (
+                _urllib_request.HTTPErrorProcessor,
+                "https_response",
+                _urllib_request.HTTPErrorProcessor.https_response,
+            ),
+            (
+                _urllib_request.HTTPRedirectHandler,
+                "http_error_301",
+                _urllib_request.HTTPRedirectHandler.http_error_301,
+            ),
+            (
+                _urllib_request.HTTPRedirectHandler,
+                "http_error_302",
+                _urllib_request.HTTPRedirectHandler.http_error_302,
+            ),
+            (
+                _urllib_request.HTTPRedirectHandler,
+                "http_error_303",
+                _urllib_request.HTTPRedirectHandler.http_error_303,
+            ),
+            (
+                _urllib_request.HTTPRedirectHandler,
+                "http_error_307",
+                _urllib_request.HTTPRedirectHandler.http_error_307,
+            ),
+            (
+                _urllib_request.HTTPRedirectHandler,
+                "http_error_308",
+                _urllib_request.HTTPRedirectHandler.http_error_308,
+            ),
+            (
+                _http_client,
+                "_create_https_context",
+                getattr(_http_client, "_create_https_context", None),
+            ),
+            (
+                _http_client.HTTPSConnection,
+                "__init__",
+                _http_client.HTTPSConnection.__init__,
+            ),
+            (
+                _http_client.HTTPSConnection,
+                "connect",
+                _http_client.HTTPSConnection.connect,
+            ),
+            (
+                _http_client.HTTPConnection,
+                "connect",
+                _http_client.HTTPConnection.connect,
+            ),
+            (
+                _http_client.HTTPConnection,
+                "request",
+                _http_client.HTTPConnection.request,
+            ),
+            (
+                _http_client.HTTPConnection,
+                "_send_request",
+                getattr(_http_client.HTTPConnection, "_send_request", None),
+            ),
+            (
+                _http_client.HTTPConnection,
+                "send",
+                _http_client.HTTPConnection.send,
+            ),
+            (
+                _http_client.HTTPConnection,
+                "getresponse",
+                _http_client.HTTPConnection.getresponse,
+            ),
+            (_ssl.SSLContext, "wrap_socket", _ssl.SSLContext.wrap_socket),
+            (_ssl.SSLSocket, "_create", getattr(_ssl.SSLSocket, "_create", None)),
+            (_socket, "create_connection", _socket.create_connection),
+            (_socket, "getaddrinfo", _socket.getaddrinfo),
+            (_socket.socket, "connect", _socket.socket.connect),
+            (_socket.socket, "sendall", _socket.socket.sendall),
+            (_socket.socket, "makefile", _socket.socket.makefile),
+        )
     )
 
     def execution_readback_network_dispatch_is_current(
@@ -372,7 +444,11 @@ def _make_account_identity_authority():
                 return False
             return _all(
                 _getattr(owner, name, _missing_value) is expected
-                for owner, name, expected in _network_dispatch_surfaces
+                and (
+                    expected_code is None
+                    or _getattr(expected, "__code__", None) is expected_code
+                )
+                for owner, name, expected, expected_code in _network_dispatch_surfaces
             )
         except (AttributeError, TypeError):
             return False

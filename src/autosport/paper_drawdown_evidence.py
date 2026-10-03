@@ -615,6 +615,14 @@ def _freeze_resolver(function: FunctionType) -> FunctionType:
         if expected_closure is None
         else tuple(cell.cell_contents for cell in expected_closure)
     )
+    expected_closure_function_codes = (
+        None
+        if expected_closure_values is None
+        else tuple(
+            value.__code__ if type(value) is function_type else None
+            for value in expected_closure_values
+        )
+    )
 
     def frozen(workspace: str | Path) -> PaperRealizedDrawdownEvidence:
         if (
@@ -627,10 +635,26 @@ def _freeze_resolver(function: FunctionType) -> FunctionType:
             )
         if expected_closure is not None:
             assert expected_closure_values is not None
-            for cell, expected in zip(expected_closure, expected_closure_values):
-                if cell.cell_contents is not expected:
+            assert expected_closure_function_codes is not None
+            for cell, expected, expected_function_code in zip(
+                expected_closure,
+                expected_closure_values,
+                expected_closure_function_codes,
+            ):
+                current = cell.cell_contents
+                if current is not expected:
                     raise error_type(
                         "drawdown resolver dependency authority changed"
+                    )
+                if (
+                    expected_function_code is not None
+                    and (
+                        type(current) is not function_type
+                        or current.__code__ is not expected_function_code
+                    )
+                ):
+                    raise error_type(
+                        "drawdown resolver dependency executable authority changed"
                     )
         return function(workspace)
 

@@ -13,6 +13,7 @@ import json
 from dataclasses import dataclass
 from typing import Sequence
 
+from . import provider_evaluation_universe as _provider_universe_module
 from ._forward_universe_backing_guard import (
     ForwardUniverseBackingGuardError,
     load_guarded_provider_evaluation_universe,
@@ -101,6 +102,54 @@ _CANONICAL_PROVIDER_EVIDENCE_LOADER = inspect.getattr_static(
     "load",
 )
 _CANONICAL_ISSUED_UNIVERSES = _ISSUED_UNIVERSES
+_PROVIDER_UNIVERSE_VALUES = {
+    "_ISSUED_UNIVERSES": _provider_universe_module._ISSUED_UNIVERSES,
+    "EvaluationRow": _provider_universe_module.EvaluationRow,
+    "ObservationIntakeSnapshot": _provider_universe_module.ObservationIntakeSnapshot,
+    "EvaluationUniverse": _provider_universe_module.EvaluationUniverse,
+    "CompleteGameBoardSnapshot": _provider_universe_module.CompleteGameBoardSnapshot,
+    "ContinuousEventLifecycle": _provider_universe_module.ContinuousEventLifecycle,
+    "CompleteBoardMemberSpec": _provider_universe_module.CompleteBoardMemberSpec,
+    "SlotState": _provider_universe_module.SlotState,
+    "_CONSUMER_KIND": _provider_universe_module._CONSUMER_KIND,
+    "_PROVIDER_ID": _provider_universe_module._PROVIDER_ID,
+}
+_PROVIDER_UNIVERSE_CALLABLES = tuple(
+    (
+        name,
+        target,
+        getattr(target, "__code__", None),
+    )
+    for name, target in (
+        (
+            "assert_complete_game_board_authoritative",
+            _provider_universe_module.assert_complete_game_board_authoritative,
+        ),
+        (
+            "complete_game_board_member_specs",
+            _provider_universe_module.complete_game_board_member_specs,
+        ),
+        (
+            "_resolve_event_reveal_binding",
+            _provider_universe_module._resolve_event_reveal_binding,
+        ),
+        ("_selection_labels", _provider_universe_module._selection_labels),
+        (
+            "_validate_row_against_member",
+            _provider_universe_module._validate_row_against_member,
+        ),
+        (
+            "_row_semantic_sha256",
+            _provider_universe_module._row_semantic_sha256,
+        ),
+        ("_remember_issued", _provider_universe_module._remember_issued),
+        ("_text", _provider_universe_module._text),
+        ("_sha", _provider_universe_module._sha),
+        ("_instant", _provider_universe_module._instant),
+        ("_digest", _provider_universe_module._digest),
+    )
+)
+_INTERNAL_CALLABLES: tuple[tuple[str, object, object], ...] = ()
 
 
 class CampaignForwardUniverseCycleBindingError(RuntimeError):
@@ -241,10 +290,40 @@ class CampaignForwardUniverseCycleAuthority:
 
 def _require_dispatch_integrity() -> None:
     module_globals = globals()
-    if module_globals.get("_ISSUED_UNIVERSES") is not _CANONICAL_ISSUED_UNIVERSES:
+    if (
+        module_globals.get("_provider_universe_module")
+        is not _provider_universe_module
+        or _provider_universe_module._ISSUED_UNIVERSES
+        is not _CANONICAL_ISSUED_UNIVERSES
+        or module_globals.get("_ISSUED_UNIVERSES")
+        is not _CANONICAL_ISSUED_UNIVERSES
+    ):
         raise CampaignForwardUniverseCycleBindingError(
             "provider-universe issued-object cleanup authority changed"
         )
+    for name, expected in _PROVIDER_UNIVERSE_VALUES.items():
+        if getattr(_provider_universe_module, name, None) is not expected:
+            raise CampaignForwardUniverseCycleBindingError(
+                "provider-universe transitive authority is rebound: " + name
+            )
+    for name, expected, code in _PROVIDER_UNIVERSE_CALLABLES:
+        if getattr(_provider_universe_module, name, None) is not expected:
+            raise CampaignForwardUniverseCycleBindingError(
+                "provider-universe transitive dispatch is rebound: " + name
+            )
+        if getattr(expected, "__code__", None) is not code:
+            raise CampaignForwardUniverseCycleBindingError(
+                "provider-universe transitive dispatch code changed: " + name
+            )
+    for name, expected, code in _INTERNAL_CALLABLES:
+        if module_globals.get(name) is not expected:
+            raise CampaignForwardUniverseCycleBindingError(
+                "campaign forward-cycle internal dispatch is rebound: " + name
+            )
+        if getattr(expected, "__code__", None) is not code:
+            raise CampaignForwardUniverseCycleBindingError(
+                "campaign forward-cycle internal dispatch code changed: " + name
+            )
     if (
         inspect.getattr_static(
             CollectorDeltaStore,
@@ -565,6 +644,30 @@ def authorize_campaign_forward_source_receipts(
             "forward source authorization returned noncanonical receipts"
         )
     return receipts
+
+
+_INTERNAL_CALLABLES = tuple(
+    (name, target, getattr(target, "__code__", None))
+    for name, target in (
+        ("_text", _text),
+        ("_sha", _sha),
+        ("_digest", _digest),
+        (
+            "_expected_cycle_receipt_payload",
+            _expected_cycle_receipt_payload,
+        ),
+        ("_assert_cycle_receipt_exact", _assert_cycle_receipt_exact),
+        ("_rebuild_exact_provider_universe", _rebuild_exact_provider_universe),
+        (
+            "resolve_campaign_forward_universe_cycle_authority",
+            resolve_campaign_forward_universe_cycle_authority,
+        ),
+        (
+            "authorize_campaign_forward_source_receipts",
+            authorize_campaign_forward_source_receipts,
+        ),
+    )
+)
 
 
 __all__ = [

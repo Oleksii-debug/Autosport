@@ -571,6 +571,7 @@ def test_closure_boundary_registry_snapshots_are_read_only(
     with pytest.raises(TypeError):
         live["forged"] = object()
 
+
 def test_closure_boundary_immutable_live_snapshot_preserves_weakref_expiry(
     tmp_path,
     monkeypatch,
@@ -616,6 +617,7 @@ def test_closure_boundary_immutable_live_snapshot_preserves_weakref_expiry(
             acquisition_id="weakref-expiry",
         )
     assert retry_calls == []
+
 
 def test_closure_boundary_storage_ignores_mappingproxy_module_rebind(
     tmp_path,

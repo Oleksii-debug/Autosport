@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from enum import Enum
@@ -8,6 +9,10 @@ from threading import RLock
 
 from .domain import MarketEvent, _quote_identity
 from .storage import SQLiteMarketStore
+
+
+class MarketMirrorRevisionChanged(RuntimeError):
+    """The canonical mirror advanced past a decision's captured revision."""
 
 
 class MirrorUpdate(str, Enum):
@@ -48,6 +53,38 @@ class MarketMirror:
         self._latest: dict[tuple[str, str], MarketEvent] = {}
         self._revision = 0
         self._lock = RLock()
+        self._publication_revision_guard: int | None = None
+
+    @property
+    def revision(self) -> int:
+        """Return the exact current mirror revision without copying market state."""
+        with self._lock:
+            return self._revision
+
+    @contextmanager
+    def hold_revision(self, expected_revision: int) -> Iterator[None]:
+        """Linearize a short publication step against one captured mirror revision."""
+
+        if type(expected_revision) is not int or expected_revision < 0:
+            raise ValueError("expected_revision must be a non-negative integer")
+        with self._lock:
+            if self._publication_revision_guard is not None:
+                raise MarketMirrorRevisionChanged(
+                    "market mirror revision guard is already active"
+                )
+            if self._revision != expected_revision:
+                raise MarketMirrorRevisionChanged(
+                    "market mirror revision changed before decision publication"
+                )
+            self._publication_revision_guard = expected_revision
+            try:
+                yield
+                if self._revision != expected_revision:
+                    raise MarketMirrorRevisionChanged(
+                        "market mirror revision changed during decision publication"
+                    )
+            finally:
+                self._publication_revision_guard = None
 
     @staticmethod
     def _key(event: MarketEvent) -> tuple[str, str]:
@@ -133,6 +170,10 @@ class MarketMirror:
 
         key = self._key(event)
         with self._lock:
+            if self._publication_revision_guard is not None:
+                raise MarketMirrorRevisionChanged(
+                    "market mirror mutation is blocked during decision publication"
+                )
             previous = self._latest.get(key)
             if previous is None:
                 self._latest[key] = self._snapshot_event(event)
@@ -195,8 +236,16 @@ class MarketMirror:
         if not isinstance(event, MarketEvent):
             raise TypeError("event must be a MarketEvent")
 
-        store.append(event)
-        return self.apply(event)
+        with self._lock:
+            if self._publication_revision_guard is not None:
+                raise MarketMirrorRevisionChanged(
+                    "market mirror persistence is blocked during decision publication"
+                )
+            # Keep durable append and live revision advance in one mirror critical
+            # section. A decision publication guard can therefore linearize before
+            # the append or after the applied revision, never between them.
+            store.append(event)
+            return self.apply(event)
 
     def view(
         self,

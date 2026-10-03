@@ -1110,6 +1110,7 @@ def test_derivation_helper_inplace_code_mutation_is_rejected_before_execution(
     ):
         canonical.assert_issued_current(ledger)
 
+
 def test_upstream_verified_view_constructor_alias_substitution_is_rejected(
     tmp_path,
     monkeypatch,
@@ -1154,6 +1155,7 @@ def test_upstream_ledger_instance_method_shadow_is_rejected_before_execution(
         match="canonical execution-ledger read authority changed",
     ):
         resolve_execution_capital_at_risk(ledger, plan.plan_id)
+
 
 def test_upstream_classmethod_code_mutation_is_rejected_before_execution(
     tmp_path,

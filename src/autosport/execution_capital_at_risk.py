@@ -381,6 +381,7 @@ def _install_ledger_read_authority():
         "_stale",
         "_read_verified_state",
     )
+
     def descriptor_code(value: object) -> object | None:
         if isinstance(value, (classmethod, staticmethod)):
             value = value.__func__

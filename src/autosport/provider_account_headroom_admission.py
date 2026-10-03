@@ -1143,7 +1143,12 @@ def reserve_observed_provider_headroom(
     """
     if type(ledger) is not RealExecutionLedger:
         raise TypeError("ledger must be exact RealExecutionLedger")
-    verified_snapshot, _, begin_attempt, attempt_state = _canonical_ledger_dispatch()
+    (
+        verified_snapshot,
+        verified_execution_view,
+        begin_attempt,
+        attempt_state,
+    ) = _canonical_ledger_dispatch()
     _assert_issued(assessment)
     attempt_id = _text(attempt_id, "attempt_id")
     if type(acquired) is not AuthoritativeAccountSnapshot:
@@ -1200,7 +1205,7 @@ def reserve_observed_provider_headroom(
                     "execution ledger changed; recompute provider-account headroom"
                 )
             try:
-                target_view = ledger.verified_execution_view(assessment.plan_id)
+                target_view = verified_execution_view(ledger, assessment.plan_id)
             except KeyError as exc:
                 raise ProviderAccountHeadroomStale(
                     "target execution plan disappeared after headroom assessment"
@@ -1238,34 +1243,47 @@ def reserve_observed_provider_headroom(
                 raise ProviderAccountHeadroomStale(
                     "denomination or liability authority changed after assessment"
                 )
-
-    if not prior_exists:
-        if (
-            _current_economic_goal_denomination(
+            if (
+                _current_economic_goal_denomination(
+                    ledger,
+                    provider_currency=current_currency,
+                )
+                != current_goal_sha256
+            ):
+                raise ProviderAccountHeadroomStale(
+                    "economic-goal denomination authority changed before reservation commit"
+                )
+            try:
+                # The ledger CAS proves the exact liability snapshot is still current.
+                # WorkspaceEconomicLock keeps the durable economic-goal revision stable
+                # across the final denomination reread and internal reservation commit.
+                attempt: ExecutionAttempt = begin_attempt(
+                    ledger,
+                    plan_id=assessment.plan_id,
+                    action_id=assessment.action_id,
+                    attempt_id=attempt_id,
+                    expected_snapshot_sha256=assessment.ledger_snapshot_sha256,
+                )
+            except ExecutionStateError as exc:
+                raise ProviderAccountHeadroomStale(
+                    "execution ledger changed; recompute provider-account headroom"
+                ) from exc
+    else:
+        try:
+            # Exact replay resolves an existing attempt before the stale-snapshot fence;
+            # it consumes no new provider headroom and therefore does not require current
+            # owner-denomination authority to recreate an already-durable reservation.
+            attempt = begin_attempt(
                 ledger,
-                provider_currency=assessment.currency,
+                plan_id=assessment.plan_id,
+                action_id=assessment.action_id,
+                attempt_id=attempt_id,
+                expected_snapshot_sha256=assessment.ledger_snapshot_sha256,
             )
-            != assessment.economic_goal_contract_sha256
-        ):
+        except ExecutionStateError as exc:
             raise ProviderAccountHeadroomStale(
-                "economic-goal denomination authority changed before reservation commit"
-            )
-
-    try:
-        # Canonical begin_attempt resolves an exact existing attempt before its
-        # stale-snapshot fence. That ordering is essential for crash/restart
-        # idempotency: identity resolution consumes no new provider headroom.
-        attempt: ExecutionAttempt = begin_attempt(
-            ledger,
-            plan_id=assessment.plan_id,
-            action_id=assessment.action_id,
-            attempt_id=attempt_id,
-            expected_snapshot_sha256=assessment.ledger_snapshot_sha256,
-        )
-    except ExecutionStateError as exc:
-        raise ProviderAccountHeadroomStale(
-            "execution ledger changed; recompute provider-account headroom"
-        ) from exc
+                "execution ledger changed; recompute provider-account headroom"
+            ) from exc
 
     post = verified_snapshot(ledger)
     reservation = ProductInternalHeadroomReservation(

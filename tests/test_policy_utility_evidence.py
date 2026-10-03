@@ -404,3 +404,19 @@ def test_store_rejects_duplicate_json_authority_key_even_when_last_value_is_vali
 
     with pytest.raises(PolicyUtilityError, match="invalid policy utility store JSON"):
         PolicyUtilityStore(path)
+
+
+def test_store_rejects_missing_trailing_record_boundary_on_restart(tmp_path) -> None:
+    path = tmp_path / "utility.jsonl"
+    evidence = _evidence(currency="EUR", utility_value=Decimal("0.20"))
+    assert PolicyUtilityStore(path).append(evidence) is True
+
+    canonical = path.read_text(encoding="utf-8")
+    assert canonical.endswith("\n")
+    path.write_text(canonical[:-1], encoding="utf-8")
+
+    with pytest.raises(
+        PolicyUtilityError,
+        match="lacks canonical trailing record boundary",
+    ):
+        PolicyUtilityStore(path)

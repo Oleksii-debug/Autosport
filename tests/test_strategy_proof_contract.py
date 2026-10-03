@@ -319,6 +319,7 @@ def test_callers_cannot_mint_noncanonical_contract_or_execution_authority() -> N
             execution_authorized=True,
         )
 
+
 @pytest.mark.parametrize(
     ("strategy_class", "claims_probability_edge"),
     [

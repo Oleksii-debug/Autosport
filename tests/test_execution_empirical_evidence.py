@@ -916,6 +916,26 @@ def _population_ledger(tmp_path) -> RealExecutionLedger:
     return ledger
 
 
+def test_projection_rejects_same_path_rollback_against_parent_monotonic_authority(
+    tmp_path,
+):
+    ledger = _ledger(tmp_path)
+    prior_bytes = ledger.path.read_bytes()
+    _ack(ledger)
+    assert ledger.path.read_bytes() != prior_bytes
+
+    ledger.path.write_bytes(prior_bytes)
+
+    with pytest.raises(
+        ExecutionLedgerIntegrityError,
+        match="rollback/monotonic authority check failed",
+    ):
+        build_empirical_execution_evidence(
+            ledger,
+            attempt_id="attempt-1",
+        )
+
+
 def test_projection_fails_closed_while_canonical_writer_lock_exists(tmp_path):
     ledger = _ledger(tmp_path)
     ledger._lock_path.write_text("writer-held", encoding="utf-8")

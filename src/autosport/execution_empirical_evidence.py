@@ -165,6 +165,7 @@ def _canonical_verified_ledger_snapshot(
         # Exact class dispatch avoids caller-rebound parser seams while the parent
         # ledger owns the read/write serialization and inode fencing.
         events = RealExecutionLedger._parse(raw)
+        RealExecutionLedger._recover_monotonic_state(ledger, raw, events)
         return VerifiedExecutionLedgerSnapshot(
             payload=raw,
             sha256=hashlib.sha256(raw).hexdigest(),

@@ -594,7 +594,11 @@ def test_controller_scheduler_coalesces_all_prs_per_source_workflow() -> None:
     assert "format('non-pr-{0}', github.event.workflow_run.id)" in concurrency
     assert "cancel-in-progress: false" in concurrency
     assert "--event-pr-reference-mode" in text
-    assert "&& 'ambiguous' || 'singleton'" in text
+    assert "pull_requests[1].number && 'ambiguous'" in text
+    assert "pull_requests[0].number && 'singleton' || 'empty'" in text
+    assert text.index("pull_requests[1].number && 'ambiguous'") < text.index(
+        "pull_requests[0].number && 'singleton' || 'empty'"
+    )
 
 
 class SweepApi:

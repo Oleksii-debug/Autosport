@@ -3403,3 +3403,82 @@ def test_runtime_authority_postcommit_reread_recovers_noop_commit(
     assert records[0].runtime_authority_id == runtime_authority_id
     history = store._authority.read_history()
     assert history[-1].phase is AuthorityPhase.COMMIT
+
+
+@pytest.mark.parametrize(
+    "name",
+    (
+        "__new__",
+        "__init__",
+        "__getattribute__",
+        "__setattr__",
+        "__delattr__",
+        "__slots__",
+        "initialize_pristine",
+        "path",
+        "workspace",
+        "_lock",
+        "_authority",
+        "_semantic_binding_sha256",
+        "_binding_path",
+        "_binding_workspace",
+        "_binding_lock",
+        "_binding_authority",
+        "_binding_semantic_binding_sha256",
+        "_binding_workspace_identity_binding",
+        "_binding_authority_root_selection_binding",
+        "_binding_authority_root_selection_context",
+        "_binding_root_selection_store_root",
+        "_WRITE_ONCE_AUTHORITY_BINDINGS",
+        "_WRITE_ONCE_AUTHORITY_STORAGE_BINDINGS",
+    ),
+)
+def test_runtime_authority_store_root_surface_is_class_immutable(
+    tmp_path: Path,
+    name: str,
+) -> None:
+    path = tmp_path / "deployment-runtime-authority.json"
+    store = DeploymentRuntimeAuthorityStore.initialize_pristine(
+        path,
+        authority_root=_authority_root(tmp_path),
+    )
+
+    with pytest.raises(
+        TypeError,
+        match="root surface is immutable",
+    ):
+        setattr(DeploymentRuntimeAuthorityStore, name, object())
+
+    assert store.records() == ()
+
+
+@pytest.mark.parametrize(
+    "name",
+    (
+        "__getattribute__",
+        "__setattr__",
+        "__delattr__",
+        "initialize_pristine",
+        "path",
+        "_authority",
+        "_binding_authority",
+        "_WRITE_ONCE_AUTHORITY_BINDINGS",
+    ),
+)
+def test_runtime_authority_store_root_surface_cannot_be_deleted(
+    tmp_path: Path,
+    name: str,
+) -> None:
+    path = tmp_path / "deployment-runtime-authority.json"
+    store = DeploymentRuntimeAuthorityStore.initialize_pristine(
+        path,
+        authority_root=_authority_root(tmp_path),
+    )
+
+    with pytest.raises(
+        TypeError,
+        match="root surface is immutable",
+    ):
+        delattr(DeploymentRuntimeAuthorityStore, name)
+
+    assert store.records() == ()

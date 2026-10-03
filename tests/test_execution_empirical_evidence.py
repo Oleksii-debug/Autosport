@@ -784,37 +784,37 @@ def _population_ledger(tmp_path) -> RealExecutionLedger:
             )
             continue
 
-        ledger.bind_provider_evidence(
-            attempt_id=attempt_id,
-            evidence_id=format(index, "064x"),
-            observed_at=PROVIDER,
-            source="provider-response",
-        )
         status = {
             "ACCEPTED": AcknowledgementStatus.ACCEPTED,
             "PARTIAL": AcknowledgementStatus.PARTIAL,
             "REJECTED": AcknowledgementStatus.REJECTED,
         }[state]
-        ledger.acknowledge(
-            ExternalAcknowledgement(
-                attempt_id=attempt_id,
-                external_receipt_id=f"receipt-{suffix}",
-                status=status,
-                acknowledged_at=ACKED,
-                accepted_odds=(
-                    None if status is AcknowledgementStatus.REJECTED else Decimal("2.08")
-                ),
-                accepted_stake=(
-                    None
-                    if status is AcknowledgementStatus.REJECTED
-                    else (
-                        Decimal("2.00")
-                        if status is AcknowledgementStatus.PARTIAL
-                        else Decimal("5.00")
-                    )
-                ),
-            )
+        acknowledgement = ExternalAcknowledgement(
+            attempt_id=attempt_id,
+            external_receipt_id=f"receipt-{suffix}",
+            status=status,
+            acknowledged_at=ACKED,
+            accepted_odds=(
+                None if status is AcknowledgementStatus.REJECTED else Decimal("2.08")
+            ),
+            accepted_stake=(
+                None
+                if status is AcknowledgementStatus.REJECTED
+                else (
+                    Decimal("2.00")
+                    if status is AcknowledgementStatus.PARTIAL
+                    else Decimal("5.00")
+                )
+            ),
         )
+        ledger._bind_provider_acknowledgement_evidence(
+            attempt_id=attempt_id,
+            evidence_id=format(index, "064x"),
+            observed_at=ACKED,
+            source="provider-response",
+            acknowledgement=acknowledgement,
+        )
+        ledger.acknowledge(acknowledgement)
     return ledger
 
 

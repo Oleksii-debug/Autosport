@@ -844,35 +844,15 @@ def resolve_product_run_capital_path_evidence(
     return result
 
 
-def verify_product_run_capital_path_evidence(
-    candidate: ProductRunCapitalPathEvidence,
-    *,
-    workspace: str | Path,
-    run_id: str,
-    member_index: int,
-    membership: ResolvedFixedNRiskMembership,
-    registry_path: str | Path,
-    sampling_manifest_json: str,
-    settlement_bridge: PaperSettlementLearningBridge,
-    authority_root: str | Path | None = None,
-) -> ProductRunCapitalPathEvidence:
-    """Re-resolve a candidate; possession of an evidence object is never authority."""
+def _build_product_run_capital_path_evidence_verifier(
+    resolver,
+    evidence_type: type[ProductRunCapitalPathEvidence],
+):
+    """Freeze the only resolver/type graph a verifier may trust."""
 
-    if type(candidate) is not ProductRunCapitalPathEvidence:
-        raise TypeError(
-            "candidate must be an exact ProductRunCapitalPathEvidence"
-        )
-    canonical = resolve_product_run_capital_path_evidence(
-        workspace=workspace,
-        run_id=run_id,
-        member_index=member_index,
-        membership=membership,
-        registry_path=registry_path,
-        sampling_manifest_json=sampling_manifest_json,
-        settlement_bridge=settlement_bridge,
-        authority_root=authority_root,
-    )
-    for field_name in (
+    module_globals = globals()
+    resolver_code = getattr(resolver, "__code__", None)
+    field_names = (
         "member_id",
         "member_index",
         "expected_stream_sha256",
@@ -885,15 +865,75 @@ def verify_product_run_capital_path_evidence(
         "replay_source_evidence_sha256",
         "source_evidence_sha256",
         "complete",
-    ):
-        supplied = getattr(candidate, field_name)
-        expected = getattr(canonical, field_name)
-        if type(supplied) is not type(expected) or supplied != expected:
-            raise ProductRunCapitalPathError(
-                "run-capital evidence does not match canonical durable roots"
-            )
-    return canonical
+    )
 
+    def verifier(
+        candidate: ProductRunCapitalPathEvidence,
+        *,
+        workspace: str | Path,
+        run_id: str,
+        member_index: int,
+        membership: ResolvedFixedNRiskMembership,
+        registry_path: str | Path,
+        sampling_manifest_json: str,
+        settlement_bridge: PaperSettlementLearningBridge,
+        authority_root: str | Path | None = None,
+    ) -> ProductRunCapitalPathEvidence:
+        if (
+            module_globals.get("resolve_product_run_capital_path_evidence")
+            is not resolver
+            or getattr(resolver, "__code__", None) is not resolver_code
+            or module_globals.get("ProductRunCapitalPathEvidence")
+            is not evidence_type
+        ):
+            raise ProductRunCapitalPathError(
+                "run-capital evidence verifier authority dispatch changed"
+            )
+        if type(candidate) is not evidence_type:
+            raise TypeError(
+                "candidate must be an exact ProductRunCapitalPathEvidence"
+            )
+        canonical = resolver(
+            workspace=workspace,
+            run_id=run_id,
+            member_index=member_index,
+            membership=membership,
+            registry_path=registry_path,
+            sampling_manifest_json=sampling_manifest_json,
+            settlement_bridge=settlement_bridge,
+            authority_root=authority_root,
+        )
+        if (
+            module_globals.get("resolve_product_run_capital_path_evidence")
+            is not resolver
+            or getattr(resolver, "__code__", None) is not resolver_code
+            or module_globals.get("ProductRunCapitalPathEvidence")
+            is not evidence_type
+        ):
+            raise ProductRunCapitalPathError(
+                "run-capital evidence verifier authority dispatch changed"
+            )
+        for field_name in field_names:
+            supplied = getattr(candidate, field_name)
+            expected = getattr(canonical, field_name)
+            if type(supplied) is not type(expected) or supplied != expected:
+                raise ProductRunCapitalPathError(
+                    "run-capital evidence does not match canonical durable roots"
+                )
+        return canonical
+
+    verifier.__name__ = "verify_product_run_capital_path_evidence"
+    verifier.__qualname__ = "verify_product_run_capital_path_evidence"
+    return verifier
+
+
+verify_product_run_capital_path_evidence = (
+    _build_product_run_capital_path_evidence_verifier(
+        resolve_product_run_capital_path_evidence,
+        ProductRunCapitalPathEvidence,
+    )
+)
+del _build_product_run_capital_path_evidence_verifier
 
 __all__ = [
     "ProductRunCapitalPathEvidence",

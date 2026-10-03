@@ -1117,3 +1117,36 @@ def test_same_process_stale_login_reservation_recovers_after_hold(tmp_path):
             now=NOW + CONSERVATIVE_SESSION_SLOT_HOLD + timedelta(seconds=2),
             failure=ProphetXLoginFailureClass.AMBIGUOUS_PROVIDER_RESULT,
         )
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("environment", "e" * 4097),
+        ("revision", "r" * 4097),
+        ("role", "x" * 4097),
+    ],
+)
+def test_scope_text_is_bounded(field, value):
+    kwargs = {field: value}
+
+    with pytest.raises(
+        ProphetXSessionLifecycleError,
+        match="exceeds the bounded text contract",
+    ):
+        _scope(**kwargs)
+
+
+def test_state_file_size_is_bounded_before_json_parse(tmp_path):
+    lifecycle = _lifecycle(tmp_path)
+    lifecycle.begin_login(now=NOW, access_token_available=False)
+    lifecycle.state_path.write_text(
+        "{" + (" " * (64 * 1024)) + "}",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        ProphetXSessionLifecycleError,
+        match="exceeds the bounded file-size contract",
+    ):
+        lifecycle.read_snapshot()

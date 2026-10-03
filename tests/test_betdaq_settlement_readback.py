@@ -33,8 +33,10 @@ class _FakeHttpResponse:
     def __exit__(self, exc_type, exc, traceback):
         return False
 
-    def read(self):
-        return self.payload
+    def read(self, limit=None):
+        if limit is None:
+            return self.payload
+        return self.payload[:limit]
 
 
 class QueueUrlopen:

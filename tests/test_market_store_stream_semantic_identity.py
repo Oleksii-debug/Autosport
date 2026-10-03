@@ -172,6 +172,104 @@ class MarketStoreStreamSemanticIdentityTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_missing_current_projection_cannot_erase_history_semantics(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = SQLiteMarketStore(Path(temp_dir) / "market.db")
+            try:
+                baseline = self._event(sequence=33)
+                conflicting = self._event(
+                    sequence=34,
+                    odds="2.65",
+                    market_type=MarketType.TOTAL,
+                    market_semantics_id="total_points",
+                )
+                self.assertTrue(store.append(baseline))
+                store.connection.execute(
+                    "DELETE FROM current_quotes WHERE source_id=? AND quote_key=?",
+                    (baseline.source_id, baseline.quote_key),
+                )
+                store.connection.commit()
+                self.assertNotIn(
+                    (baseline.source_id, baseline.quote_key),
+                    store.current_by_source(),
+                )
+
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "market quote stream semantic identity changed",
+                ):
+                    store.append(conflicting)
+
+                self.assertEqual(store.events(), [baseline])
+            finally:
+                store.close()
+
+    def test_missing_current_projection_allows_same_semantic_history_continuation(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = SQLiteMarketStore(Path(temp_dir) / "market.db")
+            try:
+                baseline = self._event(sequence=35)
+                continuation = self._event(sequence=36, odds="2.55")
+                self.assertTrue(store.append(baseline))
+                store.connection.execute(
+                    "DELETE FROM current_quotes WHERE source_id=? AND quote_key=?",
+                    (baseline.source_id, baseline.quote_key),
+                )
+                store.connection.commit()
+
+                self.assertTrue(store.append(continuation))
+
+                self.assertEqual(store.events(), [baseline, continuation])
+                self.assertEqual(
+                    store.current_by_source()[
+                        (continuation.source_id, continuation.quote_key)
+                    ].dedupe_key,
+                    continuation.dedupe_key,
+                )
+            finally:
+                store.close()
+
+    def test_tampered_current_projection_cannot_redefine_history_semantics(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = SQLiteMarketStore(Path(temp_dir) / "market.db")
+            try:
+                baseline = self._event(sequence=37)
+                forged_projection = self._event(
+                    sequence=37,
+                    market_type=MarketType.TOTAL,
+                    market_semantics_id="total_points",
+                )
+                continuation = self._event(
+                    sequence=38,
+                    odds="2.70",
+                    market_type=MarketType.TOTAL,
+                    market_semantics_id="total_points",
+                )
+                self.assertTrue(store.append(baseline))
+                payload = json.dumps(
+                    forged_projection.to_dict(),
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    allow_nan=False,
+                )
+                store.connection.execute(
+                    """UPDATE current_quotes SET payload_json=?
+                       WHERE source_id=? AND quote_key=?""",
+                    (payload, baseline.source_id, baseline.quote_key),
+                )
+                store.connection.commit()
+
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "current market quote projection is not backed by authoritative history",
+                ):
+                    store.append(continuation)
+
+                self.assertEqual(store.events(), [baseline])
+            finally:
+                store.close()
+
     def test_reopen_rejects_preexisting_semantic_split_in_authoritative_history(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             db_path = Path(temp_dir) / "market.db"

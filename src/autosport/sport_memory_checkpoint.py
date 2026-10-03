@@ -19,6 +19,11 @@ from typing import Any
 
 from .integrity import atomic_write_json, durable_path_lock
 from .json_integrity import strict_json_loads
+from .monotonic_workspace_authority import (
+    AuthorityPhase,
+    MonotonicWorkspaceAuthority,
+    MonotonicWorkspaceAuthorityError,
+)
 from .opponent_intelligence import OpponentIntelligenceStore
 from .participant_identity import ParticipantIdentityRegistry
 from .sport_memory_runtime import SportMemoryRuntime
@@ -38,6 +43,9 @@ _OPPONENT_STORE_KEYS = {
     "feature_snapshots",
     "invalidations",
 }
+
+_RUNTIME_AUTHORITY_DOMAIN = "autosport.sport-memory-runtime.v1"
+_RUNTIME_AUTHORITY_VERSION = 1
 
 
 class SportMemoryCheckpointError(ValueError):
@@ -418,6 +426,162 @@ def _verify_runtime_snapshot_bindings(
     return runtime
 
 
+def _runtime_state_payload(runtime: SportMemoryRuntime) -> dict[str, object]:
+    return {
+        "schema_version": runtime.SCHEMA_VERSION,
+        "authority_generation_sha256": runtime.authority_generation_sha256,
+        "artifacts": [
+            artifact.payload()
+            for artifact in sorted(
+                runtime._artifacts.values(),
+                key=lambda artifact: artifact.memory_id,
+            )
+        ],
+        "consumptions": [
+            record.payload()
+            for record in sorted(
+                runtime._consumptions.values(),
+                key=lambda record: record.consumption_id,
+            )
+        ],
+    }
+
+
+def _runtime_state_sha256(path: Path) -> str | None:
+    runtime_path = Path(path)
+    if not runtime_path.exists():
+        return None
+    if not runtime_path.is_file():
+        raise SportMemoryCheckpointError(
+            "sport-memory runtime path is not a durable file"
+        )
+    try:
+        raw: Any = strict_json_loads(runtime_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise SportMemoryCheckpointError(
+            "cannot read sport-memory runtime for monotonic verification"
+        ) from exc
+    if type(raw) is not dict:
+        raise SportMemoryCheckpointError(
+            "sport-memory runtime is not a canonical JSON object"
+        )
+    return _canonical_digest(raw)
+
+
+def _runtime_monotonic_authority(runtime_path: Path) -> MonotonicWorkspaceAuthority:
+    resolved_runtime = _resolved(Path(runtime_path))
+    try:
+        return MonotonicWorkspaceAuthority(
+            workspace=resolved_runtime.parent,
+            domain=_RUNTIME_AUTHORITY_DOMAIN,
+            key=resolved_runtime.name,
+        )
+    except MonotonicWorkspaceAuthorityError as exc:
+        raise SportMemoryCheckpointError(
+            "cannot resolve sport-memory runtime monotonic authority"
+        ) from exc
+
+
+def _runtime_authority_binding(
+    *,
+    runtime_path: Path,
+    checkpoint_path: Path,
+    authority_generation_sha256: str,
+    observed_state_sha256: str | None,
+    intended_state_sha256: str,
+    kind: str,
+) -> str:
+    return _canonical_digest(
+        {
+            "schema": _RUNTIME_AUTHORITY_DOMAIN,
+            "version": _RUNTIME_AUTHORITY_VERSION,
+            "kind": kind,
+            "runtime_name": Path(runtime_path).name,
+            "checkpoint_name": Path(checkpoint_path).name,
+            "authority_generation_sha256": authority_generation_sha256,
+            "observed_state_sha256": observed_state_sha256,
+            "intended_state_sha256": intended_state_sha256,
+        }
+    )
+
+
+def _read_runtime_authority_history(
+    authority: MonotonicWorkspaceAuthority,
+):
+    try:
+        return authority.read_history()
+    except MonotonicWorkspaceAuthorityError as exc:
+        raise SportMemoryCheckpointError(
+            "sport-memory runtime monotonic authority history is invalid"
+        ) from exc
+
+
+def _recover_existing_runtime_authority(
+    authority: MonotonicWorkspaceAuthority,
+    observed_state_sha256: str | None,
+) -> None:
+    history = _read_runtime_authority_history(authority)
+    if not history:
+        if observed_state_sha256 is None:
+            return
+        raise SportMemoryCheckpointError(
+            "sport-memory runtime lacks independent monotonic baseline"
+        )
+    pending = history[-1] if history[-1].phase is AuthorityPhase.PREPARE else None
+    try:
+        if pending is None:
+            authority.recover(observed_state_sha256=observed_state_sha256)
+        else:
+            authority.recover(
+                observed_state_sha256=observed_state_sha256,
+                tx_id=pending.tx_id,
+                semantic_binding_sha256=pending.semantic_binding_sha256,
+            )
+    except MonotonicWorkspaceAuthorityError as exc:
+        raise SportMemoryCheckpointError(
+            "sport-memory runtime rollback/monotonic mismatch detected"
+        ) from exc
+
+
+def _bootstrap_validated_runtime_authority(
+    authority: MonotonicWorkspaceAuthority,
+    *,
+    runtime_path: Path,
+    checkpoint_path: Path,
+    authority_generation_sha256: str,
+    observed_state_sha256: str,
+) -> None:
+    history = _read_runtime_authority_history(authority)
+    if history:
+        _recover_existing_runtime_authority(authority, observed_state_sha256)
+        return
+    binding = _runtime_authority_binding(
+        runtime_path=runtime_path,
+        checkpoint_path=checkpoint_path,
+        authority_generation_sha256=authority_generation_sha256,
+        observed_state_sha256=None,
+        intended_state_sha256=observed_state_sha256,
+        kind="VALIDATED_BASELINE",
+    )
+    tx_id = f"sport-memory-baseline-{binding}"
+    try:
+        authority.prepare(
+            tx_id=tx_id,
+            observed_state_sha256=None,
+            intended_state_sha256=observed_state_sha256,
+            semantic_binding_sha256=binding,
+        )
+        authority.commit(
+            tx_id=tx_id,
+            observed_state_sha256=observed_state_sha256,
+            semantic_binding_sha256=binding,
+        )
+    except MonotonicWorkspaceAuthorityError as exc:
+        raise SportMemoryCheckpointError(
+            "cannot establish sport-memory runtime monotonic baseline"
+        ) from exc
+
+
 @dataclass(frozen=True, slots=True)
 class _BoundSportMemoryBindingSeal:
     """Immutable construction-time identity for a bound sport-memory runtime."""
@@ -590,6 +754,220 @@ class BoundSportMemoryRuntime(SportMemoryRuntime):
         self._assert_binding_seal()
         super()._require_durable_positive_authority()
 
+    def _merge_durable_runtime_state(
+        self,
+        durable: SportMemoryRuntime,
+    ) -> None:
+        for memory_id, artifact in durable._artifacts.items():
+            existing = self._artifacts.get(memory_id)
+            if existing is not None and existing != artifact:
+                raise SportMemoryCheckpointError(
+                    "sport-memory artifact identity conflicts with durable runtime"
+                )
+            self._artifacts.setdefault(memory_id, artifact)
+
+        for consumption_id, record in durable._consumptions.items():
+            existing = self._consumptions.get(consumption_id)
+            if existing is not None and existing != record:
+                raise SportMemoryCheckpointError(
+                    "sport-memory consumption identity conflicts with durable runtime"
+                )
+            self._consumptions.setdefault(consumption_id, record)
+
+        rebuilt: dict[tuple[str, str], str] = {}
+        participant_bindings: dict[
+            tuple[str, str, SportMemoryScope, object],
+            str,
+        ] = {}
+        for record in self._consumptions.values():
+            artifact = self._artifacts.get(record.memory_id)
+            if artifact is None:
+                raise SportMemoryCheckpointError(
+                    "sport-memory consumption references missing merged artifact"
+                )
+            self._validate_consumption(record, artifact)
+            key = (record.decision_id, record.memory_id)
+            existing_id = rebuilt.get(key)
+            if existing_id is not None and existing_id != record.consumption_id:
+                raise SportMemoryCheckpointError(
+                    "sport-memory durable decision/memory identity conflict"
+                )
+            rebuilt[key] = record.consumption_id
+            participant_key = (
+                record.decision_id,
+                artifact.participant_entity_id,
+                artifact.scope,
+                artifact.identity_view,
+            )
+            prior_memory = participant_bindings.get(participant_key)
+            if prior_memory is not None and prior_memory != artifact.memory_id:
+                raise SportMemoryCheckpointError(
+                    "sport-memory durable decision participant rebinding detected"
+                )
+            participant_bindings[participant_key] = artifact.memory_id
+        object.__setattr__(self, "_decision_consumptions", rebuilt)
+
+    def _synchronize_runtime_from_disk(
+        self,
+        seal: _BoundSportMemoryBindingSeal,
+        verified_opponent: OpponentIntelligenceStore,
+    ) -> None:
+        runtime_path = seal.runtime_path
+        with durable_path_lock(runtime_path):
+            if not runtime_path.is_file():
+                raise SportMemoryCheckpointError(
+                    "sport-memory runtime disappeared during monotonic refresh"
+                )
+            observed_before = _runtime_state_sha256(runtime_path)
+            assert observed_before is not None
+            monotonic = _runtime_monotonic_authority(runtime_path)
+            history = _read_runtime_authority_history(monotonic)
+            if history:
+                _recover_existing_runtime_authority(monotonic, observed_before)
+
+            try:
+                durable = SportMemoryRuntime(
+                    runtime_path,
+                    verified_opponent,
+                    authority_generation_sha256=seal.authority_generation_sha256,
+                )
+            except Exception as exc:
+                raise SportMemoryCheckpointError(
+                    "cannot load sport-memory runtime during monotonic refresh"
+                ) from exc
+            _verify_runtime_snapshot_bindings(durable, verified_opponent)
+
+            observed_after = _runtime_state_sha256(runtime_path)
+            if observed_after != observed_before:
+                raise SportMemoryCheckpointError(
+                    "sport-memory runtime changed during monotonic refresh"
+                )
+            if history:
+                _recover_existing_runtime_authority(monotonic, observed_after)
+            else:
+                _bootstrap_validated_runtime_authority(
+                    monotonic,
+                    runtime_path=runtime_path,
+                    checkpoint_path=seal.checkpoint_path,
+                    authority_generation_sha256=seal.authority_generation_sha256,
+                    observed_state_sha256=observed_after,
+                )
+            object.__setattr__(self, "_artifacts", dict(durable._artifacts))
+            object.__setattr__(
+                self,
+                "_consumptions",
+                dict(durable._consumptions),
+            )
+            object.__setattr__(
+                self,
+                "_decision_consumptions",
+                dict(durable._decision_consumptions),
+            )
+
+    def _persist(self) -> None:
+        seal = self._assert_binding_seal()
+        runtime_path = seal.runtime_path
+        with durable_path_lock(runtime_path):
+            observed = _runtime_state_sha256(runtime_path)
+            monotonic = _runtime_monotonic_authority(runtime_path)
+            history = _read_runtime_authority_history(monotonic)
+            if history:
+                _recover_existing_runtime_authority(monotonic, observed)
+
+            if seal.checkpoint_path.is_file():
+                checkpoint, verified_opponent = (
+                    _load_verified_checkpoint_and_opponent(
+                        seal.checkpoint_path,
+                        seal.identity_selector,
+                        seal.opponent_selector,
+                    )
+                )
+                if (
+                    checkpoint.generation_sha256
+                    != seal.authority_generation_sha256
+                ):
+                    raise SportMemoryCheckpointError(
+                        "bound sport-memory authority generation changed"
+                    )
+            else:
+                # The only valid checkpoint-free writer is first bootstrap before
+                # _persist_captured_checkpoint publishes the authority checkpoint.
+                verified_opponent = object.__getattribute__(
+                    self, "opponent_authority"
+                )
+                if type(verified_opponent) is not OpponentIntelligenceStore:
+                    raise SportMemoryCheckpointError(
+                        "sport-memory bootstrap lost canonical opponent authority"
+                    )
+
+            if observed is not None:
+                try:
+                    durable = SportMemoryRuntime(
+                        runtime_path,
+                        verified_opponent,
+                        authority_generation_sha256=seal.authority_generation_sha256,
+                    )
+                except Exception as exc:
+                    raise SportMemoryCheckpointError(
+                        "cannot load current sport-memory runtime before publication"
+                    ) from exc
+                _verify_runtime_snapshot_bindings(durable, verified_opponent)
+                if not history:
+                    _bootstrap_validated_runtime_authority(
+                        monotonic,
+                        runtime_path=runtime_path,
+                        checkpoint_path=seal.checkpoint_path,
+                        authority_generation_sha256=seal.authority_generation_sha256,
+                        observed_state_sha256=observed,
+                    )
+                self._merge_durable_runtime_state(durable)
+
+            _verify_runtime_snapshot_bindings(self, verified_opponent)
+            payload = _runtime_state_payload(self)
+            intended = _canonical_digest(payload)
+            if observed == intended:
+                object.__setattr__(self, "opponent_authority", verified_opponent)
+                return
+
+            binding = _runtime_authority_binding(
+                runtime_path=runtime_path,
+                checkpoint_path=seal.checkpoint_path,
+                authority_generation_sha256=seal.authority_generation_sha256,
+                observed_state_sha256=observed,
+                intended_state_sha256=intended,
+                kind="PUBLISH",
+            )
+            tx_id = f"sport-memory-publish-{binding}"
+            try:
+                monotonic.prepare(
+                    tx_id=tx_id,
+                    observed_state_sha256=observed,
+                    intended_state_sha256=intended,
+                    semantic_binding_sha256=binding,
+                )
+            except MonotonicWorkspaceAuthorityError as exc:
+                raise SportMemoryCheckpointError(
+                    "sport-memory runtime publish rejected by monotonic authority"
+                ) from exc
+
+            SportMemoryRuntime._persist(self)
+            published = _runtime_state_sha256(runtime_path)
+            if published != intended:
+                raise SportMemoryCheckpointError(
+                    "published sport-memory runtime does not match prepared state"
+                )
+            try:
+                monotonic.commit(
+                    tx_id=tx_id,
+                    observed_state_sha256=published,
+                    semantic_binding_sha256=binding,
+                )
+            except MonotonicWorkspaceAuthorityError as exc:
+                raise SportMemoryCheckpointError(
+                    "sport-memory runtime publish could not commit monotonic authority"
+                ) from exc
+            object.__setattr__(self, "opponent_authority", verified_opponent)
+
     def _refresh_bound_authority(self) -> OpponentIntelligenceStore:
         seal = self._assert_binding_seal()
         authority, verified_opponent = _load_verified_checkpoint_and_opponent(
@@ -604,6 +982,7 @@ class BoundSportMemoryRuntime(SportMemoryRuntime):
         # This is the sole mutable binding field. It is replaced only with the
         # freshly verified canonical object whose durable paths match the seal.
         object.__setattr__(self, "opponent_authority", verified_opponent)
+        self._synchronize_runtime_from_disk(seal, verified_opponent)
         self._assert_binding_seal()
         return verified_opponent
 
@@ -635,11 +1014,40 @@ class BoundSportMemoryRuntime(SportMemoryRuntime):
         )
         with durable_path_lock(first_path):
             with durable_path_lock(second_path):
-                self._refresh_bound_authority()
-                artifact = super().materialize(**kwargs)
-                verified_opponent = self._refresh_bound_authority()
-                _verify_runtime_snapshot_bindings(self, verified_opponent)
-                return artifact
+                with durable_path_lock(seal.runtime_path):
+                    self._refresh_bound_authority()
+                    artifact = super().materialize(**kwargs)
+                    verified_opponent = self._refresh_bound_authority()
+                    _verify_runtime_snapshot_bindings(self, verified_opponent)
+                    return artifact
+
+    def record_matchup_consumption(self, **kwargs):
+        seal = self._assert_binding_seal()
+        first_path, second_path = sorted(
+            (seal.identity_path, seal.opponent_path),
+            key=lambda path: str(_resolved(path)),
+        )
+        with durable_path_lock(first_path):
+            with durable_path_lock(second_path):
+                with durable_path_lock(seal.runtime_path):
+                    self._refresh_bound_authority()
+                    result = super().record_matchup_consumption(**kwargs)
+                    self._refresh_bound_authority()
+                    return result
+
+    def record_consumption(self, **kwargs):
+        seal = self._assert_binding_seal()
+        first_path, second_path = sorted(
+            (seal.identity_path, seal.opponent_path),
+            key=lambda path: str(_resolved(path)),
+        )
+        with durable_path_lock(first_path):
+            with durable_path_lock(second_path):
+                with durable_path_lock(seal.runtime_path):
+                    self._refresh_bound_authority()
+                    result = super().record_consumption(**kwargs)
+                    self._refresh_bound_authority()
+                    return result
 
 
 def _new_bound_runtime(

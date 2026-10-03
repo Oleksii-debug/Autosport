@@ -163,6 +163,123 @@ def test_bound_runtime_captures_exact_roots_and_reopens_same_generation(tmp_path
     assert reopened.authority_generation_sha256 == runtime.authority_generation_sha256
 
 
+def test_valid_old_runtime_rollback_is_rejected_by_independent_monotonic_authority(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    authority_root = tmp_path.parent / f".{tmp_path.name}-sport-memory-authority"
+    monkeypatch.setenv("AUTOSPORT_MONOTONIC_AUTHORITY_ROOT", str(authority_root))
+    identity, opponent = _canonical_stores(tmp_path, populated=True)
+    checkpoint_path, runtime_path = _paths(tmp_path)
+
+    runtime = initialize_or_open_bound_sport_memory_runtime(
+        runtime_path,
+        checkpoint_path,
+        identity,
+        opponent,
+    )
+    pristine_bytes = runtime_path.read_bytes()
+    artifact = runtime.materialize(
+        participant_entity_id="p-alex",
+        scope=_scope(),
+        causal_cutoff=T2,
+        published_at=T3,
+        code_sha256=SHA_A,
+        dependency_sha256=SHA_B,
+        min_support=1,
+    )
+    current_bytes = runtime_path.read_bytes()
+    assert current_bytes != pristine_bytes
+
+    runtime_path.write_bytes(pristine_bytes)
+    reopened_identity = ParticipantIdentityRegistry(identity.path)
+    reopened_opponent = OpponentIntelligenceStore(
+        opponent.path,
+        reopened_identity,
+    )
+    with pytest.raises(
+        SportMemoryCheckpointError,
+        match="rollback/monotonic mismatch",
+    ):
+        open_bound_sport_memory_runtime(
+            runtime_path,
+            checkpoint_path,
+            reopened_identity,
+            reopened_opponent,
+        )
+
+    runtime_path.write_bytes(current_bytes)
+    reopened = open_bound_sport_memory_runtime(
+        runtime_path,
+        checkpoint_path,
+        reopened_identity,
+        reopened_opponent,
+    )
+    assert reopened.get(artifact.memory_id) == artifact
+
+
+def test_runtime_publish_recovers_commit_after_local_bytes_were_published(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    authority_root = tmp_path.parent / f".{tmp_path.name}-sport-memory-authority"
+    monkeypatch.setenv("AUTOSPORT_MONOTONIC_AUTHORITY_ROOT", str(authority_root))
+    identity, opponent = _canonical_stores(tmp_path, populated=True)
+    checkpoint_path, runtime_path = _paths(tmp_path)
+    runtime = initialize_or_open_bound_sport_memory_runtime(
+        runtime_path,
+        checkpoint_path,
+        identity,
+        opponent,
+    )
+
+    original_commit = checkpoint_module.MonotonicWorkspaceAuthority.commit
+    failed = False
+
+    def fail_once_after_local_publish(self, **kwargs):
+        nonlocal failed
+        if not failed:
+            failed = True
+            raise RuntimeError("injected monotonic commit failure")
+        return original_commit(self, **kwargs)
+
+    monkeypatch.setattr(
+        checkpoint_module.MonotonicWorkspaceAuthority,
+        "commit",
+        fail_once_after_local_publish,
+    )
+    with pytest.raises(RuntimeError, match="injected monotonic commit failure"):
+        runtime.materialize(
+            participant_entity_id="p-alex",
+            scope=_scope(),
+            causal_cutoff=T2,
+            published_at=T3,
+            code_sha256=SHA_A,
+            dependency_sha256=SHA_B,
+            min_support=1,
+        )
+
+    monkeypatch.setattr(
+        checkpoint_module.MonotonicWorkspaceAuthority,
+        "commit",
+        original_commit,
+    )
+    reopened_identity = ParticipantIdentityRegistry(identity.path)
+    reopened_opponent = OpponentIntelligenceStore(
+        opponent.path,
+        reopened_identity,
+    )
+    reopened = open_bound_sport_memory_runtime(
+        runtime_path,
+        checkpoint_path,
+        reopened_identity,
+        reopened_opponent,
+    )
+    history = reopened.participant_history("p-alex", _scope())
+    assert len(history) == 1
+    assert history[0].participant_entity_id == "p-alex"
+
+
 def test_bound_runtime_consumes_fresh_authority_after_canonical_files_change(tmp_path):
     identity, opponent = _canonical_stores(tmp_path)
 

@@ -352,17 +352,6 @@ class _NoRedirectHandler(HTTPRedirectHandler):
         return None
 
 
-_CANONICAL_TRANSPORT_POST = UrllibBetfairCertLoginTransport.post_cert_login
-_CANONICAL_BUILD_OPENER = build_opener
-_CANONICAL_HTTPS_HANDLER = HTTPSHandler
-_CANONICAL_REDIRECT_HANDLER = HTTPRedirectHandler
-_CANONICAL_SSL_CONTEXT_FACTORY = ssl.create_default_context
-_CANONICAL_ACCOUNT_IDENTITY_REQUIRE = require_authoritative_betfair_account_identity
-_CANONICAL_CREDENTIALS_TYPE = BetfairSessionCredentials
-_CANONICAL_CLIENT_TYPE = BetfairReadOnlyClient
-_CANONICAL_IDENTITY_TYPE = BetfairAuthenticatedAccountIdentity
-
-
 def cert_login_endpoint(jurisdiction: BetfairLoginJurisdiction) -> str:
     if type(jurisdiction) is not BetfairLoginJurisdiction:
         raise BetfairSessionOriginError(
@@ -393,27 +382,6 @@ def parse_noninteractive_login_response(payload: bytes) -> BetfairNonInteractive
         response_sha256=sha256(payload).hexdigest(),
     )
 
-
-def _canonical_network_transport(transport: object) -> bool:
-    if type(transport) is not UrllibBetfairCertLoginTransport:
-        return False
-    if type(transport).post_cert_login is not _CANONICAL_TRANSPORT_POST:
-        return False
-    if build_opener is not _CANONICAL_BUILD_OPENER:
-        return False
-    if HTTPSHandler is not _CANONICAL_HTTPS_HANDLER:
-        return False
-    if HTTPRedirectHandler is not _CANONICAL_REDIRECT_HANDLER:
-        return False
-    if ssl.create_default_context is not _CANONICAL_SSL_CONTEXT_FACTORY:
-        return False
-    state = getattr(transport, "__dict__", None)
-    return (
-        type(state) is dict
-        and set(state) == {"_max_response_bytes"}
-        and type(state["_max_response_bytes"]) is int
-        and state["_max_response_bytes"] >= 1024
-    )
 
 
 def _build_origin_authority_runtime():

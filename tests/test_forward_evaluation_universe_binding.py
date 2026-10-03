@@ -408,6 +408,26 @@ def test_cycle_binding_reverifies_durable_universe_without_reissuing_semantic_au
     )
 
 
+def test_cycle_binding_rejects_different_live_provider_snapshot(
+    tmp_path,
+    monkeypatch,
+):
+    store = _stored_universe(tmp_path, monkeypatch, empty=False)
+    ledger = ProviderEvaluationUniverseStore.load(store)
+    assert ledger is not None
+
+    different_snapshot = _capture(monkeypatch, empty=True)
+    with pytest.raises(
+        cycle_binding.CampaignForwardUniverseCycleBindingError,
+        match="not derived from the exact campaign-bound provider snapshot",
+    ):
+        cycle_binding._verify_exact_provider_universe_snapshot(
+            ledger=ledger,
+            snapshot=different_snapshot,
+            event_lifecycle=None,
+        )
+
+
 def test_empty_complete_board_becomes_authoritative_excluded_receipt_after_restart(
     tmp_path, monkeypatch
 ):

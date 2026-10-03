@@ -14,12 +14,23 @@ from autosport.account_snapshot_acquisition import (
     BetfairAccountSnapshotAcquirer,
 )
 from autosport.betfair_account_readonly import BetfairSessionCredentials
-from autosport.bookmaker_capability import BookmakerCapability
+from autosport.bookmaker_capability import (
+    BookmakerCapability,
+    BookmakerCapabilityFact,
+    BookmakerCapabilityProfile,
+    BookmakerCapabilityState,
+)
+from autosport.bookmaker_routing import VenueQuote
+from autosport.bookmaker_routing_plan import plan_equal_split_residual
 from autosport.economic_goal import EconomicGoalContract
 from autosport.economic_goal_provenance import provenance_for
 from autosport.economic_goal_store import EconomicGoalStore
 from autosport.domain import MarketEvent, TicketLeg
 from autosport.portfolio_plan import (
+    EvidenceTruth,
+    PortfolioAction,
+    PortfolioDependencyGraph,
+    PortfolioPlan,
     Opportunity,
     OpportunityDecision,
     OpportunityEvidence,
@@ -27,6 +38,7 @@ from autosport.portfolio_plan import (
     QuoteRef,
     StrategyClass,
 )
+from autosport.paper import PaperBook
 from autosport.risk import ProposedTicketRiskContext
 import autosport.supervised_execution as supervised_execution
 from autosport.supervised_execution import BoundSupervisedExecutionPlan
@@ -241,17 +253,7 @@ def _plan(
     economic_goal_contract_sha256: str = _HEADROOM_GOAL_SHA256,
     intent_bankroll_id: str = _HEADROOM_GOAL.bankroll_id,
     intent_currency: str = _HEADROOM_GOAL.currency,
-    bound_intent_sha256: str | None = None,
-) -> tuple[str, BoundSupervisedExecutionPlan, OpportunityIntent]:
-    template = ExecutionPlan(
-        plan_id="pending-supervised-plan-id",
-        bookmaker_profile_version="profile-v1",
-        decision_id=f"decision-{plan_id}",
-        approval_id=f"approval-{plan_id}",
-        created_at=(datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat(),
-        actions=(action,),
-    )
-    portfolio_plan_sha256 = "1" * 64
+) -> tuple[str, BoundSupervisedExecutionPlan, OpportunityIntent, str]:
     intent_id = f"intent-{plan_id}"
     intent = _intent_for_action(
         action,
@@ -259,44 +261,85 @@ def _plan(
         bankroll_id=intent_bankroll_id,
         currency=intent_currency,
     )
-    intent_sha256 = (
-        intent.intent_sha256
-        if bound_intent_sha256 is None
-        else bound_intent_sha256
-    )
-    approval_fingerprint = "3" * 64
-    profile_bindings = ()
-    constraints = ()
-    binding_sha256 = supervised_execution._bound_binding_sha256(
-        template,
-        portfolio_plan_sha256,
-        economic_goal_contract_sha256,
-        intent_id,
-        intent_sha256,
-        approval_fingerprint,
-        profile_bindings,
-        constraints,
-    )
-    execution_plan = replace(
-        template,
-        plan_id=f"supervised-v2-{binding_sha256}",
-    )
-    bound = BoundSupervisedExecutionPlan(
-        execution_plan=execution_plan,
-        portfolio_plan_sha256=portfolio_plan_sha256,
+    book = PaperBook("1000")
+    graph = PortfolioDependencyGraph.for_inputs(book, (intent,))
+    portfolio = PortfolioPlan(
+        decision_ts=action.quote_observed_at,
+        action=PortfolioAction.STAKE_VECTOR,
+        stakes=(Decimal(str(action.requested_stake)),),
+        intent_ids=(intent.intent_id,),
+        intent_sha256s=(intent.intent_sha256,),
+        opportunity_classes=(intent.opportunity_class.value,),
+        portfolio_sha256=graph.portfolio_sha256,
+        dependency_graph=graph,
+        terminal_economics=None,
         economic_goal_contract_sha256=economic_goal_contract_sha256,
-        intent_id=intent_id,
-        intent_sha256=intent_sha256,
-        approval_fingerprint=approval_fingerprint,
-        profile_bindings=profile_bindings,
-        constraints=constraints,
+        risk_policy_sha256="2" * 64,
+        portfolio_truth=EvidenceTruth.EXACT,
+        reason=f"headroom test product plan {plan_id}",
     )
-    return plan_id, bound, intent
-
+    venue = VenueQuote(
+        action.bookmaker_id,
+        action.account_id,
+        intent.opportunity.quotes[0],
+        Decimal(str(action.requested_stake)),
+    )
+    route = plan_equal_split_residual(
+        Decimal(str(action.requested_stake)),
+        (venue,),
+        routing_request_id=f"route-{plan_id}",
+        parent_plan_id=portfolio.plan_sha256,
+        stake_quantum=Decimal("0.01"),
+    )
+    constraint = supervised_execution.ExecutionLegConstraint(
+        leg_id=route.legs[0].leg_id,
+        side=action.side,
+        quote_expires_at=action.expires_at,
+        max_slippage_fraction=Decimal("0.05"),
+    )
+    approval = supervised_execution.SupervisedApproval(
+        approval_id=f"approval-{plan_id}",
+        portfolio_plan_sha256=portfolio.plan_sha256,
+        intent_id=intent.intent_id,
+        routing_request_id=route.routing_request_id,
+        execution_terms_sha256=supervised_execution.supervised_execution_terms_sha256(
+            route,
+            (constraint,),
+        ),
+        approved_at=action.quote_observed_at,
+        expires_at=action.expires_at,
+        evidence_sha256="3" * 64,
+    )
+    profile = BookmakerCapabilityProfile(
+        venue_id=action.bookmaker_id,
+        account_id=action.account_id,
+        adapter_id="headroom-test-readback",
+        adapter_version="1",
+        profile_version=1,
+        facts=(
+            BookmakerCapabilityFact(
+                BookmakerCapability.BET_READBACK,
+                BookmakerCapabilityState.SUPPORTED,
+            ),
+        ),
+        observed_at=action.quote_observed_at,
+        source_ref="autosport://headroom-test/profile",
+        source_payload_sha256="4" * 64,
+    )
+    bound = supervised_execution.build_supervised_execution_plan(
+        portfolio,
+        (intent,),
+        route,
+        (profile,),
+        approval,
+        (constraint,),
+        created_at=datetime.now(timezone.utc).isoformat(),
+    )
+    return plan_id, bound, intent, action.action_id
 
 def _ledger_with_plans(
     tmp_path,
-    *plans: tuple[str, BoundSupervisedExecutionPlan, OpportunityIntent],
+    *plans: tuple[str, BoundSupervisedExecutionPlan, OpportunityIntent, str],
     economic_goal: EconomicGoalContract = _HEADROOM_GOAL,
 ) -> RealExecutionLedger:
     store = EconomicGoalStore(tmp_path)
@@ -304,14 +347,21 @@ def _ledger_with_plans(
         store.initialize_owner(economic_goal)
     ledger = RealExecutionLedger(tmp_path / "real-ledger.jsonl")
     logical_ids: dict[str, str] = {}
+    logical_action_ids: dict[tuple[str, str], str] = {}
     bounds: list[BoundSupervisedExecutionPlan] = []
     intents: list[OpportunityIntent] = []
-    for logical_id, bound, intent in plans:
+    for logical_id, bound, intent, logical_action_id in plans:
         logical_ids[logical_id] = bound.execution_plan.plan_id
+        if len(bound.execution_plan.actions) != 1:
+            raise AssertionError("headroom test helper expects one canonical action")
+        logical_action_ids[(logical_id, logical_action_id)] = (
+            bound.execution_plan.actions[0].action_id
+        )
         bounds.append(bound)
         intents.append(intent)
         ledger.reserve_plan(bound.execution_plan)
     ledger._test_logical_plan_ids = logical_ids
+    ledger._test_logical_action_ids = logical_action_ids
     ledger._test_bound_plans = tuple(bounds)
     ledger._test_intents = tuple(intents)
     return ledger
@@ -319,6 +369,14 @@ def _ledger_with_plans(
 
 def _actual_plan_id(ledger: RealExecutionLedger, logical_plan_id: str) -> str:
     return ledger._test_logical_plan_ids[logical_plan_id]
+
+
+def _actual_action_id(
+    ledger: RealExecutionLedger,
+    logical_plan_id: str,
+    logical_action_id: str,
+) -> str:
+    return ledger._test_logical_action_ids[(logical_plan_id, logical_action_id)]
 
 
 def _assess(
@@ -332,7 +390,7 @@ def _assess(
         ledger,
         acquired,
         plan_id=_actual_plan_id(ledger, plan_id),
-        action_id=action_id,
+        action_id=_actual_action_id(ledger, plan_id, action_id),
         bound_plans=ledger._test_bound_plans,
         intents=ledger._test_intents,
     )
@@ -914,7 +972,7 @@ def test_unrelated_provider_attempt_does_not_block_betfair_account_scope(
     )
     ledger.begin_attempt(
         plan_id=_actual_plan_id(ledger, "foreign-plan"),
-        action_id="foreign",
+        action_id=_actual_action_id(ledger, "foreign-plan", "foreign"),
         attempt_id="foreign-attempt",
     )
     ledger.mark_submitted("foreign-attempt")
@@ -983,7 +1041,7 @@ def test_headroom_rejects_missing_denomination_coverage_for_relevant_plan(
     ledger = _ledger_with_plans(tmp_path, target, liability)
     ledger.begin_attempt(
         plan_id=_actual_plan_id(ledger, "liability"),
-        action_id="liability-action",
+        action_id=_actual_action_id(ledger, "liability", "liability-action"),
         attempt_id="liability-attempt",
     )
 
@@ -1006,22 +1064,20 @@ def test_headroom_rejects_opaque_bound_intent_without_exact_intent_evidence(
     tmp_path,
 ) -> None:
     acquired, _ = _acquire_balance(monkeypatch, tmp_path, "100")
-    target = _plan(
-        "target",
-        _action("target-action", "10"),
-        bound_intent_sha256="2" * 64,
-    )
+    target = _plan("target", _action("target-action", "10"))
     ledger = _ledger_with_plans(tmp_path, target)
 
     with pytest.raises(
         ProviderAccountHeadroomUnsupported,
-        match="lacks exact OpportunityIntent denomination evidence",
+        match="exact OpportunityIntent denomination evidence is required",
     ):
-        _assess(
+        assess_provider_account_headroom(
             ledger,
             acquired,
-            plan_id="target",
-            action_id="target-action",
+            plan_id=_actual_plan_id(ledger, "target"),
+            action_id=_actual_action_id(ledger, "target", "target-action"),
+            bound_plans=ledger._test_bound_plans,
+            intents=(),
         )
 
 
@@ -1131,7 +1187,7 @@ def test_headroom_rejects_mixed_goal_liability_before_arithmetic(
     ledger = _ledger_with_plans(tmp_path, target, liability)
     ledger.begin_attempt(
         plan_id=_actual_plan_id(ledger, "liability"),
-        action_id="liability-action",
+        action_id=_actual_action_id(ledger, "liability", "liability-action"),
         attempt_id="liability-attempt",
     )
 
@@ -1160,7 +1216,7 @@ def test_unrelated_account_plan_needs_no_denomination_coverage(
     ledger = _ledger_with_plans(tmp_path, target, foreign)
     ledger.begin_attempt(
         plan_id=_actual_plan_id(ledger, "foreign"),
-        action_id="foreign-action",
+        action_id=_actual_action_id(ledger, "foreign", "foreign-action"),
         attempt_id="foreign-attempt-denomination",
     )
 
@@ -1188,7 +1244,7 @@ def test_assessment_binds_current_goal_and_exact_denomination_coverage(
     ledger = _ledger_with_plans(tmp_path, target, liability)
     ledger.begin_attempt(
         plan_id=_actual_plan_id(ledger, "liability"),
-        action_id="liability-action",
+        action_id=_actual_action_id(ledger, "liability", "liability-action"),
         attempt_id="liability-attempt",
     )
 

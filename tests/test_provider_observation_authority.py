@@ -763,3 +763,49 @@ def test_store_load_rejects_json_reader_rebind_before_dispatch(
         store.load(snapshot.evidence_sha256)
     assert hostile_calls == []
 
+def test_store_save_rejects_surface_reader_rebind_before_hostile_dispatch(
+    tmp_path,
+    monkeypatch,
+):
+    snapshot = _capture(monkeypatch)
+    store = _store(tmp_path)
+    hostile_calls: list[str] = []
+
+    def hostile_getattr_static(*_args, **_kwargs):
+        hostile_calls.append("reflect")
+        raise AssertionError("hostile reflection reader executed")
+
+    monkeypatch.setattr(
+        authority_module,
+        "_CANONICAL_GETATTR_STATIC",
+        hostile_getattr_static,
+    )
+    with pytest.raises(
+        ProviderObservationIntegrityError,
+        match="provider evidence store authority witness changed",
+    ):
+        store.save(snapshot)
+    assert hostile_calls == []
+
+
+def test_store_save_rejects_path_constructor_rebind_before_hostile_dispatch(
+    tmp_path,
+    monkeypatch,
+):
+    snapshot = _capture(monkeypatch)
+    store = _store(tmp_path)
+    hostile_calls: list[str] = []
+    original_new = authority_module.Path.__new__
+
+    def hostile_new(cls, *args, **kwargs):
+        hostile_calls.append("path-new")
+        return original_new(cls, *args, **kwargs)
+
+    monkeypatch.setattr(authority_module.Path, "__new__", hostile_new)
+    with pytest.raises(
+        ProviderObservationIntegrityError,
+        match="provider evidence filesystem path dispatch changed",
+    ):
+        store.save(snapshot)
+    assert hostile_calls == []
+

@@ -1243,12 +1243,14 @@ _CANONICAL_RECORD_CODEC_GUARD_CODE: Final = _assert_canonical_record_codec.__cod
 def _require_canonical_record_codec(
     _guard: object = _assert_canonical_record_codec,
     _guard_code: object = _assert_canonical_record_codec.__code__,
+    _guard_defaults: object = _assert_canonical_record_codec.__defaults__,
 ) -> None:
     if (
         _assert_canonical_record_codec is not _guard
         or _CANONICAL_RECORD_CODEC_GUARD is not _guard
         or getattr(_guard, "__code__", None) is not _guard_code
         or _CANONICAL_RECORD_CODEC_GUARD_CODE is not _guard_code
+        or getattr(_guard, "__defaults__", None) is not _guard_defaults
     ):
         raise DeploymentRuntimeAuthorityError(
             "runtime authority record codec guard dispatch was replaced"
@@ -1383,14 +1385,23 @@ class DeploymentRuntimeAuthorityStore(metaclass=_DeploymentRuntimeAuthorityStore
                 raise DeploymentRuntimeAuthorityError(
                     "runtime authority store method dispatch was replaced"
                 )
-            expected_descriptor, expected_code = expected
+            (
+                expected_descriptor,
+                expected_code,
+                expected_defaults,
+                expected_kwdefaults,
+            ) = expected
             current_callable = getattr(current, "__func__", current)
+            current_kwdefaults = getattr(current_callable, "__kwdefaults__", None) or {}
             if (
                 current is not expected_descriptor
                 or (
                     expected_code is not None
                     and getattr(current_callable, "__code__", None) is not expected_code
                 )
+                or getattr(current_callable, "__defaults__", None)
+                is not expected_defaults
+                or tuple(sorted(current_kwdefaults.items())) != expected_kwdefaults
             ):
                 raise DeploymentRuntimeAuthorityError(
                     "runtime authority store method dispatch was replaced"
@@ -1978,6 +1989,9 @@ class DeploymentRuntimeAuthorityStore(metaclass=_DeploymentRuntimeAuthorityStore
         _monotonic_read_guard_code: object = _assert_monotonic_read_helpers.__code__,
         _record_codec_requirement: object = _require_canonical_record_codec,
         _record_codec_requirement_code: object = _require_canonical_record_codec.__code__,
+        _record_codec_requirement_defaults: object = (
+            _require_canonical_record_codec.__defaults__
+        ),
         _sha_validator: object = _sha,
         _sha_validator_code: object = _sha.__code__,
         _digest_helper: object = _digest,
@@ -2003,6 +2017,8 @@ class DeploymentRuntimeAuthorityStore(metaclass=_DeploymentRuntimeAuthorityStore
             is not _record_codec_requirement_code
             or _CANONICAL_RECORD_CODEC_REQUIREMENT_CODE
             is not _record_codec_requirement_code
+            or getattr(_record_codec_requirement, "__defaults__", None)
+            is not _record_codec_requirement_defaults
         ):
             raise DeploymentRuntimeAuthorityError(
                 "runtime authority record codec requirement dispatch was replaced"
@@ -2433,7 +2449,10 @@ class DeploymentRuntimeAuthorityStore(metaclass=_DeploymentRuntimeAuthorityStore
     # metaclass makes this attribute non-replaceable after class construction and
     # MappingProxyType makes its contents immutable, so coordinated replacement of
     # a live method plus the module-level expectation map cannot self-confirm.
-    _dispatch_expectations: dict[str, tuple[object, object]] = {}
+    _dispatch_expectations: dict[
+        str,
+        tuple[object, object, object, tuple[tuple[str, object], ...]],
+    ] = {}
     for _dispatch_name in _SEALED_STORE_DISPATCH_NAMES:
         _dispatch_descriptor = locals()[_dispatch_name]
         _dispatch_callable = getattr(
@@ -2441,9 +2460,14 @@ class DeploymentRuntimeAuthorityStore(metaclass=_DeploymentRuntimeAuthorityStore
             "__func__",
             _dispatch_descriptor,
         )
+        _dispatch_kwdefaults = (
+            getattr(_dispatch_callable, "__kwdefaults__", None) or {}
+        )
         _dispatch_expectations[_dispatch_name] = (
             _dispatch_descriptor,
             getattr(_dispatch_callable, "__code__", None),
+            getattr(_dispatch_callable, "__defaults__", None),
+            tuple(sorted(_dispatch_kwdefaults.items())),
         )
     _CANONICAL_DISPATCH_EXPECTATIONS: Final = MappingProxyType(
         _dispatch_expectations
@@ -2452,4 +2476,5 @@ class DeploymentRuntimeAuthorityStore(metaclass=_DeploymentRuntimeAuthorityStore
     del _dispatch_name
     del _dispatch_descriptor
     del _dispatch_callable
+    del _dispatch_kwdefaults
 

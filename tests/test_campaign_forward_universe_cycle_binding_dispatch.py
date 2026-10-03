@@ -7,6 +7,7 @@ import pytest
 import autosport.campaign_forward_universe_cycle_binding as binding
 from autosport.campaign_inception import CampaignInceptionReceipt
 from autosport.forward_evaluation_universe_binding import ForwardUniverseAuthorityIdentity
+from autosport.forward_evidence_completeness import VerificationCode, VerificationResult
 
 
 def test_authority_preserves_distinct_plan_and_realized_universe_identity() -> None:
@@ -35,6 +36,128 @@ def test_authority_preserves_distinct_plan_and_realized_universe_identity() -> N
     assert authority.membership_sha256 == "e" * 64
     assert authority.prospective_evaluation_plan_sha256 != authority.universe_sha256
     assert len(authority.authority_sha256) == 64
+
+
+def test_composed_verification_receipt_fixes_nonpromotion_truth() -> None:
+    identity = ForwardUniverseAuthorityIdentity(
+        precommit_authority_sha256="a" * 64,
+        prospective_evaluation_plan_sha256="b" * 64,
+        backing_locator_sha256="c" * 64,
+        universe_sha256="d" * 64,
+        membership_sha256="e" * 64,
+        member_count=2,
+    )
+    authority = binding.CampaignForwardUniverseCycleAuthority._issue(
+        campaign_id="campaign-1",
+        source_id="parlayapi:table_tennis",
+        cycle_receipt_sha256="1" * 64,
+        campaign_receipt_sha256="2" * 64,
+        provider_evidence_sha256="3" * 64,
+        provider_frame_sha256="4" * 64,
+        collector_artifact_evidence_sha256="5" * 64,
+        forward_identity=identity,
+    )
+    structural = VerificationResult(
+        ok=True,
+        codes=(VerificationCode.PASS,),
+        protocol_sha256="6" * 64,
+        terminal_root_sha256="7" * 64,
+        candidate_count=2,
+        details=(("scope", "structural"),),
+    )
+
+    receipt = binding.CampaignForwardEvidenceVerification._issue(
+        authority=authority,
+        structural_result=structural,
+    )
+
+    assert receipt.structural_ok is True
+    assert receipt.structural_codes == ("PASS",)
+    assert receipt.campaign_cycle_authority_sha256 == authority.authority_sha256
+    assert receipt.prospective_evaluation_plan_sha256 == "b" * 64
+    assert receipt.universe_sha256 == "d" * 64
+    assert receipt.membership_sha256 == "e" * 64
+    assert receipt.verification_scope == "CYCLE_BOUND_PROVIDER_UNIVERSE_STRUCTURAL_ONLY"
+    assert receipt.provider_universe_authority_resolved is True
+    assert receipt.promotion_ready is False
+    assert receipt.real_money_ready is False
+    assert len(receipt.structural_result_sha256) == 64
+    assert len(receipt.receipt_sha256) == 64
+
+
+def test_composed_verification_receipt_is_not_caller_constructible() -> None:
+    with pytest.raises(TypeError, match="resolver-issued"):
+        binding.CampaignForwardEvidenceVerification(
+            promotion_ready=True,
+            real_money_ready=True,
+        )
+
+
+def test_composed_verification_issuer_rebind_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    called: list[str] = []
+
+    def hostile(cls, **_kwargs):
+        del cls
+        called.append("issuer")
+        raise AssertionError("hostile composed verification issuer executed")
+
+    monkeypatch.setattr(
+        binding.CampaignForwardEvidenceVerification,
+        "_issue",
+        classmethod(hostile),
+    )
+
+    with pytest.raises(
+        binding.CampaignForwardUniverseCycleBindingError,
+        match="forward verification issuer is rebound",
+    ):
+        binding._require_dispatch_integrity()
+
+    assert called == []
+
+
+def test_composed_verification_truth_field_rebind_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        binding.CampaignForwardEvidenceVerification,
+        "promotion_ready",
+        property(lambda _self: True),
+    )
+
+    with pytest.raises(
+        binding.CampaignForwardUniverseCycleBindingError,
+        match="forward verification field descriptor changed: promotion_ready",
+    ):
+        binding._require_dispatch_integrity()
+
+
+def test_public_verifier_rejects_scope_constant_rebind_before_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    verifier = binding.verify_campaign_forward_evidence
+    monkeypatch.setattr(
+        binding,
+        "_COMPOSED_VERIFICATION_SCOPE",
+        "PROMOTION_READY",
+    )
+
+    with pytest.raises(
+        binding.CampaignForwardUniverseCycleBindingError,
+        match="authority witness globals changed",
+    ):
+        verifier(
+            precommit_locator=None,
+            collector_store=None,
+            source_spec=None,
+            cycle_receipt=None,
+            provider_evidence_store=None,
+            universe_store=None,
+            event_lifecycle=None,
+            evidence=None,
+        )
 
 
 def test_authority_issuer_rebind_fails_before_hostile_execution(

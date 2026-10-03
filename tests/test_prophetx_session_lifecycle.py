@@ -1261,3 +1261,31 @@ def test_renewal_success_requires_provider_slot_preservation_proof(tmp_path):
             access_expires_at=due_at + timedelta(minutes=10),
             provider_session_slot_preservation_proven=1,
         )
+
+
+def test_admission_cannot_forge_login_authority_without_reservation():
+    with pytest.raises(
+        ProphetXSessionLifecycleError,
+        match="requires its exact durable reservation",
+    ):
+        ProphetXLoginAdmission(
+            action=ProphetXLoginAdmissionAction.CREATE_LOGIN,
+            snapshot=None,
+            attempt_id="a" * 64,
+            retry_at=NOW + CONSERVATIVE_SESSION_SLOT_HOLD,
+        )
+
+
+def test_admission_rejects_attempt_id_on_non_effect_action(tmp_path):
+    lifecycle = _lifecycle(tmp_path)
+    active = _active(lifecycle)
+
+    with pytest.raises(
+        ProphetXSessionLifecycleError,
+        match="only effect-start admissions may expose an attempt id",
+    ):
+        ProphetXLoginAdmission(
+            action=ProphetXLoginAdmissionAction.REUSE_ACTIVE,
+            snapshot=active,
+            attempt_id="a" * 64,
+        )

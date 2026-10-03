@@ -229,6 +229,7 @@ def test_delayed_live_quotes_are_not_live_operational():
         ProviderCapabilityTruthGrade.DEGRADED_OR_DELAYED,
         i=i,
         quality="provider_delay_seconds=180",
+        application_mode="delayed-key",
     )
     m = build_provider_capability_evidence_matrix(
         p, i, environment="production", application_mode="delayed-key",

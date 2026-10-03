@@ -307,6 +307,7 @@ def _response(
     matched: Decimal | str = "0",
     average: Decimal | str = "0",
     bet_id: str | None = "bet-123",
+    order_status: str | None = None,
 ) -> bytes:
     params = request["params"]
     instruction = params["instructions"][0]
@@ -324,6 +325,8 @@ def _response(
     }
     if bet_id is not None:
         report["betId"] = bet_id
+    if order_status is not None:
+        report["orderStatus"] = order_status
     if instruction_status == "FAILURE":
         report["errorCode"] = "BET_TAKEN_OR_LAPSED"
     if execution_status == "FAILURE":
@@ -1014,6 +1017,7 @@ def test_processed_with_errors_single_success_maps_partial_exactly() -> None:
                     / Decimal("2")
                 ),
                 average=action.requested_odds,
+                order_status="EXECUTION_COMPLETE",
             )
         )
         client = _enabled_client(profile, transport, store=goal_store)
@@ -1035,6 +1039,85 @@ def test_processed_with_errors_single_success_maps_partial_exactly() -> None:
             plan_id=bound.execution_plan.plan_id,
             action_id=action.action_id,
         )
+
+
+@pytest.mark.parametrize(
+    "order_status",
+    (None, "EXECUTABLE"),
+)
+def test_immediate_partial_requires_execution_complete_before_terminal_ack(
+    order_status: str | None,
+) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
+        transport = _Transport(
+            lambda request: _response(
+                request,
+                matched=action.requested_stake / Decimal("2"),
+                average=action.requested_odds,
+                order_status=order_status,
+            )
+        )
+        client = _enabled_client(profile, transport, store=goal_store)
+
+        result = execute_betfair_supervised_action(
+            ledger,
+            bound,
+            approval,
+            action_id=action.action_id,
+            attempt_id=f"attempt-live-partial-{order_status or 'missing'}",
+            profile=profile,
+            client=client,
+            clock=lambda: SUBMITTED_AT,
+        )
+
+        assert result.outcome is PlaceOrdersOutcome.UNKNOWN
+        assert result.attempt_state is AttemptState.UNKNOWN
+        assert result.evidence_id is not None
+        assert result.external_receipt_id == "bet-123"
+        view = ledger.verified_execution_view(
+            bound.execution_plan.plan_id
+        ).attempts[0]
+        assert view.acknowledgement is None
+        assert view.provider_evidence is not None
+        assert not ledger.can_retry_action(
+            plan_id=bound.execution_plan.plan_id,
+            action_id=action.action_id,
+        )
+
+
+def test_full_match_with_executable_order_status_fails_closed() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
+        transport = _Transport(
+            lambda request: _response(
+                request,
+                matched=action.requested_stake,
+                average=action.requested_odds,
+                order_status="EXECUTABLE",
+            )
+        )
+        client = _enabled_client(profile, transport, store=goal_store)
+
+        result = execute_betfair_supervised_action(
+            ledger,
+            bound,
+            approval,
+            action_id=action.action_id,
+            attempt_id="attempt-full-executable-conflict",
+            profile=profile,
+            client=client,
+            clock=lambda: SUBMITTED_AT,
+        )
+
+        assert result.outcome is PlaceOrdersOutcome.UNKNOWN
+        assert result.attempt_state is AttemptState.UNKNOWN
+        assert result.evidence_id is not None
+        view = ledger.verified_execution_view(
+            bound.execution_plan.plan_id
+        ).attempts[0]
+        assert view.acknowledgement is None
+        assert view.provider_evidence is not None
 
 
 def test_provider_failure_report_is_rejected_not_inferred_from_absence() -> None:

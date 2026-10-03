@@ -53,6 +53,10 @@ class LiveDecisionProgressError(RuntimeError):
     """Raised when persistent live-loop progress is malformed or inconsistent."""
 
 
+class _ConcurrentDecisionSnapshot(RuntimeError):
+    """Internal retry signal when market truth moves during one decision cut."""
+
+
 class LiveDecisionMode(str, Enum):
     PAPER = "paper"
     SHADOW = "shadow"
@@ -1129,7 +1133,17 @@ class PersistentLiveDecisionLoop:
             )
 
         decision_time = now
-        snapshots = self._capture_input_views(refresh_input_ids, decision_time)
+        try:
+            snapshots = self._capture_input_views(
+                refresh_input_ids,
+                decision_time,
+            )
+        except _ConcurrentDecisionSnapshot as exc:
+            return LiveCycleResult(
+                LiveCycleStatus.BACKPRESSURE,
+                affected_input_ids=refresh_input_ids,
+                detail=str(exc),
+            )
         current_market_sha = self._market_state_sha256()
 
         clean_committed_restart = (
@@ -1529,19 +1543,56 @@ class PersistentLiveDecisionLoop:
         *,
         incremental: bool = True,
     ) -> dict[str, MirrorSnapshot]:
-        snapshots: dict[str, MirrorSnapshot] = {}
-        reader = (
-            self.dependencies.incremental_decision_view
-            if incremental
-            else self.dependencies.decision_view
+        snapshots = self.dependencies.coherent_decision_views(
+            input_ids,
+            as_of=as_of,
+            max_age=self.max_quote_age,
+            incremental=incremental,
         )
-        for input_id in input_ids:
-            snapshot = reader(
-                input_id,
-                as_of=as_of,
-                max_age=self.max_quote_age,
-            )
-            snapshots[input_id] = snapshot
+
+        # A normal live cycle drains invalidations before taking this cut. If another
+        # durable update arrives while the cut is being assembled, never publish a
+        # strong decision from a state that is already known to have moved. The next
+        # cycle will route that pending invalidation and recompute from a new cut.
+        if incremental and snapshots:
+            revisions = {snapshot.revision for snapshot in snapshots.values()}
+            if len(revisions) != 1:
+                raise _ConcurrentDecisionSnapshot(
+                    "focused market inputs did not resolve to one mirror revision"
+                )
+            captured_revision = next(iter(revisions))
+            if (
+                self.mirror_updates.mirror.revision != captured_revision
+                or self.mirror_updates.pending_count
+                or self.mirror_updates.full_refresh_required
+            ):
+                raise _ConcurrentDecisionSnapshot(
+                    "market revision advanced during decision snapshot capture; "
+                    "retrying before economic action"
+                )
+
+        # Local observation/ingestion clocks are causal availability boundaries.
+        # A provider source timestamp can be old while the product receives the
+        # packet later; such a future constituent cannot enter this decision cut.
+        boundary = as_of.astimezone(timezone.utc)
+        for snapshot in snapshots.values():
+            for event in snapshot.events:
+                observed = MarketMirror._utc_timestamp(event.observed_ts)
+                ingested = MarketMirror._utc_timestamp(event.ingest_ts)
+                if (
+                    observed is None
+                    or ingested is None
+                    or observed > boundary
+                    or ingested > boundary
+                ):
+                    raise _ConcurrentDecisionSnapshot(
+                        "decision snapshot contains market evidence not causally "
+                        "available at the decision cutoff"
+                    )
+
+        # Publish the cache only after the complete cut passes all coherence checks.
+        # A rejected/torn attempt therefore cannot leave half-refreshed intent inputs.
+        for input_id, snapshot in snapshots.items():
             self._input_market_sha256[input_id] = _canonical_json_sha256(
                 [event.to_dict() for event in snapshot.events]
             )

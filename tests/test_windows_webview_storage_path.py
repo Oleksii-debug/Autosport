@@ -174,6 +174,30 @@ def test_external_webview_environment_override_fails_before_shell_creation(
     assert calls == {}
 
 
+@pytest.mark.parametrize("name", _WEBVIEW2_ENVIRONMENT_OVERRIDES)
+@pytest.mark.parametrize("value", [" ", "\t", " \t "])
+def test_whitespace_webview_environment_override_fails_before_shell_creation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    value: str,
+) -> None:
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "Local"))
+    _clear_webview2_environment_overrides(monkeypatch)
+    monkeypatch.setenv(name, value)
+
+    calls: dict[str, object] = {}
+    monkeypatch.setitem(sys.modules, "webview", _fake_webview(calls))
+
+    with pytest.raises(
+        WindowsWebViewUnavailable,
+        match="заблокував зовнішнє перевизначення WebView2",
+    ):
+        launch_windows_shell(_Bridge())
+
+    assert calls == {}
+
+
 def test_empty_webview_environment_overrides_do_not_retarget_release(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

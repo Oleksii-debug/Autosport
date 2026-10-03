@@ -109,6 +109,10 @@ _STORE_CLASS_SEAM_CODES = {
     )
     for name, target in _STORE_CLASS_SEAMS.items()
 }
+_STORE_CLASS_SEAM_WITNESSES = tuple(
+    (name, target, _STORE_CLASS_SEAM_CODES[name])
+    for name, target in _STORE_CLASS_SEAMS.items()
+)
 _EVIDENCE_CLASS_SEAMS = {
     "save": _CANONICAL_GETATTR_STATIC(CompleteGameBoardEvidenceStore, "save"),
     "_path": _CANONICAL_GETATTR_STATIC(CompleteGameBoardEvidenceStore, "_path"),
@@ -240,7 +244,7 @@ def _require_canonical_seams(
         )
     rebound = _CANONICAL_SORTED(
         name
-        for name, expected in _STORE_CLASS_SEAMS.items()
+        for name, expected, _code in _STORE_CLASS_SEAM_WITNESSES
         if _CANONICAL_GETATTR_STATIC(CollectorDeltaStore, name, None) is not expected
     )
     if rebound:
@@ -249,13 +253,13 @@ def _require_canonical_seams(
         )
     code_changed = _CANONICAL_SORTED(
         name
-        for name, expected in _STORE_CLASS_SEAMS.items()
+        for name, expected, code in _STORE_CLASS_SEAM_WITNESSES
         if _CANONICAL_GETATTR(
             _CANONICAL_GETATTR(expected, "__func__", expected),
             "__code__",
             None,
         )
-        is not _STORE_CLASS_SEAM_CODES[name]
+        is not code
     )
     if code_changed:
         raise CampaignProviderCycleCaptureIntegrityError(
@@ -349,7 +353,7 @@ def _require_failure_terminal_seams(
         )
     rebound = _CANONICAL_SORTED(
         name
-        for name, expected in _STORE_CLASS_SEAMS.items()
+        for name, expected, _code in _STORE_CLASS_SEAM_WITNESSES
         if _CANONICAL_GETATTR_STATIC(CollectorDeltaStore, name, None) is not expected
     )
     if rebound:
@@ -358,13 +362,13 @@ def _require_failure_terminal_seams(
         )
     code_changed = _CANONICAL_SORTED(
         name
-        for name, expected in _STORE_CLASS_SEAMS.items()
+        for name, expected, code in _STORE_CLASS_SEAM_WITNESSES
         if _CANONICAL_GETATTR(
             _CANONICAL_GETATTR(expected, "__func__", expected),
             "__code__",
             None,
         )
-        is not _STORE_CLASS_SEAM_CODES[name]
+        is not code
     )
     if code_changed:
         raise CampaignProviderCycleCaptureIntegrityError(

@@ -1474,6 +1474,111 @@ def test_recovery_helper_code_replacement_cannot_hide_transaction_history(tmp_pa
         target.__code__ = original_code
 
 
+def _assert_paperbook_mutation_gate_tamper_rejected(tmp_path, match):
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    old = now - timedelta(days=2)
+    goal = _goal()
+    EconomicGoalStore(tmp_path).initialize_owner(goal)
+    book = _book_with_settled_turnover(placed_at=_timestamp(old), stake="50")
+    book.save(tmp_path / "paper_book.json")
+    candidate = _leg("paperbook-mutation-gate")
+    context = _context(candidate, _timestamp(now))
+    policy = _policy(goal)
+
+    with pytest.raises(RuntimeError, match=match):
+        admit_paper_ticket(
+            workspace=tmp_path,
+            book=book,
+            risk_policy=policy,
+            stake=Decimal("0.01"),
+            legs=(candidate,),
+            reason="mutated PaperBook dispatch must fail closed",
+            placed_at=_timestamp(now),
+            context=context,
+            provider_source_ids=("provider-1",),
+            bankroll_id="paper-bankroll",
+            currency="USD",
+        )
+
+
+def test_paperbook_open_ticket_rebind_cannot_inflate_approved_stake(tmp_path):
+    original = PaperBook.__dict__["open_ticket"]
+    hostile_called = False
+
+    def hostile_open(self, legs, stake, *args, **kwargs):
+        nonlocal hostile_called
+        hostile_called = True
+        del stake
+        return original(
+            self,
+            legs,
+            Decimal("50"),
+            *args,
+            **kwargs,
+        )
+
+    try:
+        PaperBook.open_ticket = hostile_open
+        _assert_paperbook_mutation_gate_tamper_rejected(
+            tmp_path,
+            "economic admission PaperBook mutation authority changed",
+        )
+    finally:
+        PaperBook.open_ticket = original
+
+    assert hostile_called is False
+    persisted = PaperBook.load(tmp_path / "paper_book.json")
+    assert len(persisted.tickets) == 1
+
+
+def test_paperbook_save_rebind_cannot_redirect_approved_mutation(tmp_path):
+    original = PaperBook.__dict__["save"]
+    hostile_called = False
+
+    def hostile_save(self, path):
+        nonlocal hostile_called
+        hostile_called = True
+        del self, path
+        raise AssertionError("replacement save executed")
+
+    try:
+        PaperBook.save = hostile_save
+        _assert_paperbook_mutation_gate_tamper_rejected(
+            tmp_path,
+            "economic admission PaperBook mutation authority changed",
+        )
+    finally:
+        PaperBook.save = original
+
+    assert hostile_called is False
+    persisted = PaperBook.load(tmp_path / "paper_book.json")
+    assert len(persisted.tickets) == 1
+
+
+def test_paperbook_load_rebind_cannot_substitute_economic_state(tmp_path):
+    original = PaperBook.__dict__["load"]
+    hostile_called = False
+
+    def hostile_load(cls, path):
+        nonlocal hostile_called
+        hostile_called = True
+        del cls, path
+        return PaperBook("1000000")
+
+    try:
+        PaperBook.load = classmethod(hostile_load)
+        _assert_paperbook_mutation_gate_tamper_rejected(
+            tmp_path,
+            "economic admission PaperBook mutation authority changed",
+        )
+    finally:
+        PaperBook.load = original
+
+    assert hostile_called is False
+    persisted = PaperBook.load(tmp_path / "paper_book.json")
+    assert len(persisted.tickets) == 1
+
+
 def test_live_resume_helper_rebind_cannot_replace_positive_risk_suffix(tmp_path):
     now = datetime.now(timezone.utc).replace(microsecond=0)
     old = now - timedelta(days=2)

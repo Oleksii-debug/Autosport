@@ -813,6 +813,36 @@ class CapabilityEvidenceJournal:
             journal.publish_availability(item)
         return journal
 
+    def staged_with_exact_evidence(
+        self, evidence: CapabilityEvidence
+    ) -> "CapabilityEvidenceJournal":
+        """Return an isolated validation journal containing the exact candidate object.
+
+        Durable JSON intentionally strips process-local positive provenance. This helper
+        lets a fresh/product-issued in-process observation be evaluated against a durable
+        predecessor chain without mutating that chain before qualification succeeds.
+        If the same evidence id is already present, only an exactly identical payload may
+        be replaced by the supplied object; newer same-scope successors remain present
+        and continue to win normal latest-evidence resolution.
+        """
+
+        if type(evidence) is not CapabilityEvidence:
+            raise CapabilityEvidenceError(
+                "staged evidence must be exact CapabilityEvidence"
+            )
+        staged = CapabilityEvidenceJournal.from_json(self.to_json())
+        evidence_id = evidence.evidence_id
+        existing = staged._evidence.get(evidence_id)
+        if existing is not None:
+            if existing.payload() != evidence.payload():
+                raise CapabilityEvidenceError(
+                    "staged evidence id collides with different payload"
+                )
+            staged._evidence[evidence_id] = evidence
+            return staged
+        staged.publish(evidence)
+        return staged
+
 
 def _strict_json_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
     value: dict[str, object] = {}

@@ -557,11 +557,26 @@ class DeploymentRuntimeAuthorityStore:
                 )
             expected = _CANONICAL_STORE_METHOD_DESCRIPTORS.get(name)
             current = vars(DeploymentRuntimeAuthorityStore).get(name)
-            if expected is None or current is not expected:
+            if expected is None:
                 raise DeploymentRuntimeAuthorityError(
                     "runtime authority store method dispatch was replaced"
                 )
-            return expected.__get__(self, DeploymentRuntimeAuthorityStore)
+            expected_descriptor, expected_code = expected
+            current_callable = getattr(current, "__func__", current)
+            if (
+                current is not expected_descriptor
+                or (
+                    expected_code is not None
+                    and getattr(current_callable, "__code__", None) is not expected_code
+                )
+            ):
+                raise DeploymentRuntimeAuthorityError(
+                    "runtime authority store method dispatch was replaced"
+                )
+            return expected_descriptor.__get__(
+                self,
+                DeploymentRuntimeAuthorityStore,
+            )
         return object.__getattribute__(self, name)
 
     @property
@@ -1041,7 +1056,15 @@ class DeploymentRuntimeAuthorityStore:
 # __dict__ entries cannot outrank this map, and later class-level replacement is
 # detected before the hostile descriptor can be invoked.
 _CANONICAL_STORE_METHOD_DESCRIPTORS: Final = {
-    name: vars(DeploymentRuntimeAuthorityStore)[name]
+    name: (
+        descriptor,
+        getattr(
+            getattr(descriptor, "__func__", descriptor),
+            "__code__",
+            None,
+        ),
+    )
     for name in _SEALED_STORE_DISPATCH_NAMES
+    for descriptor in (vars(DeploymentRuntimeAuthorityStore)[name],)
 }
 

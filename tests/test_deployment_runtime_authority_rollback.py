@@ -203,6 +203,65 @@ def test_instance_dictionary_cannot_shadow_monotonic_verification_dispatch(
     assert hostile_calls == []
 
 
+
+def test_runtime_authority_rejects_in_place_sealed_method_code_replacement(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "deployment-runtime-authority.json"
+    store = DeploymentRuntimeAuthorityStore.initialize_pristine(
+        path,
+        authority_root=_authority_root(tmp_path),
+    )
+    _append(store, 0)
+
+    target = DeploymentRuntimeAuthorityStore._recover_state
+    original_code = target.__code__
+
+    def hostile(self, payload) -> None:
+        del self, payload
+        raise AssertionError("hostile recovery executable ran")
+
+    assert hostile.__code__.co_freevars == original_code.co_freevars
+    target.__code__ = hostile.__code__
+    try:
+        with pytest.raises(
+            DeploymentRuntimeAuthorityError,
+            match="method dispatch was replaced",
+        ):
+            store.records()
+    finally:
+        target.__code__ = original_code
+
+
+def test_runtime_authority_rejects_in_place_sealed_staticmethod_code_replacement(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "deployment-runtime-authority.json"
+    store = DeploymentRuntimeAuthorityStore.initialize_pristine(
+        path,
+        authority_root=_authority_root(tmp_path),
+    )
+
+    descriptor = vars(DeploymentRuntimeAuthorityStore)["_state_sha256"]
+    target = descriptor.__func__
+    original_code = target.__code__
+
+    def hostile(payload) -> str:
+        del payload
+        raise AssertionError("hostile state digest executable ran")
+
+    assert hostile.__code__.co_freevars == original_code.co_freevars
+    target.__code__ = hostile.__code__
+    try:
+        with pytest.raises(
+            DeploymentRuntimeAuthorityError,
+            match="method dispatch was replaced",
+        ):
+            _append(store, 0)
+    finally:
+        target.__code__ = original_code
+
+
 def test_runtime_authority_store_rejects_subclass_constructor_dispatch(
     tmp_path: Path,
 ) -> None:

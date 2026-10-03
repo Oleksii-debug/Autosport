@@ -1118,7 +1118,7 @@ class RealExecutionLedger:
             plan_ids.add(plan.plan_id)
 
         supervised_issuance: dict[str, tuple[str, str]] = {}
-        for event in events:
+        for event_index, event in enumerate(events):
             if event["event_type"] != EventType.SUPERVISED_PLAN_ISSUED.value:
                 continue
             if event["action_id"] is not None or event["attempt_id"] is not None:
@@ -1129,6 +1129,14 @@ class RealExecutionLedger:
             if plan_event is None:
                 raise ExecutionLedgerIntegrityError(
                     "supervised plan issuance references missing plan"
+                )
+            if not any(
+                prior["event_type"] == EventType.PLAN_RESERVED.value
+                and prior["plan_id"] == event["plan_id"]
+                for prior in events[:event_index]
+            ):
+                raise ExecutionLedgerIntegrityError(
+                    "supervised plan issuance must follow plan reservation"
                 )
             payload = event["payload"]
             if set(payload) != {"bound_plan_witness", "plan_fingerprint"}:

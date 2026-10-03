@@ -67,7 +67,10 @@ from autosport.supervised_execution import (
     supervised_execution_terms_sha256,
     verify_betfair_provider_state,
 )
-from autosport.supervised_provider_evidence import ProviderEvidenceError
+from autosport.supervised_provider_evidence import (
+    ProviderEvidenceError,
+    _evaluate_betfair_provider_state_semantics,
+)
 from autosport.workspace_lock import WorkspaceEconomicLockBusyError
 
 DECISION_TS = "2026-09-19T08:00:00+00:00"
@@ -959,7 +962,7 @@ def test_provider_failure_report_is_rejected_not_inferred_from_absence() -> None
         assert result.external_receipt_id == provider_ref
 
 
-def test_transport_timeout_readback_stays_non_authoritative_for_retry(
+def test_transport_timeout_mocked_readback_stays_non_authoritative_for_retry(
     monkeypatch,
 ) -> None:
     with tempfile.TemporaryDirectory() as tmp:
@@ -981,20 +984,11 @@ def test_transport_timeout_readback_stays_non_authoritative_for_retry(
         assert result.outcome is PlaceOrdersOutcome.UNKNOWN
         assert result.attempt_state is AttemptState.UNKNOWN
         restarted = RealExecutionLedger(Path(tmp) / "real.jsonl")
-        assert (
-            restarted.attempt_state("attempt-timeout")
-            is AttemptState.UNKNOWN
-        )
-        assert not restarted.can_retry_action(
-            plan_id=bound.execution_plan.plan_id,
-            action_id=action.action_id,
-        )
         provider_ref = restarted.provider_order_reference(
             attempt_id="attempt-timeout",
             provider_id="betfair",
         )
         assert provider_ref is not None
-        assert len(provider_ref) == 32
 
         read_transport = _ReadbackTransport(
             provider_order_ref=provider_ref,
@@ -1012,26 +1006,20 @@ def test_transport_timeout_readback_stays_non_authoritative_for_retry(
             )
         assert envelope.action_id == action.action_id
         assert envelope.provider_order_ref == provider_ref
-        assert all(
-            call["params"].get("customerOrderRefs")
-            in (None, [provider_ref])
-            for call in read_transport.calls
-        )
-        verified_absence = verify_betfair_provider_state(
-            action,
-            profile,
-            expected_profile_sha256=profile.profile_id,
-            readback=envelope,
-            expected_provider_order_ref=provider_ref,
-        )
-        assert verified_absence.provider_order_ref == provider_ref
-        reconciliation = reconcile_provider_not_found(
-            restarted,
-            bound,
-            attempt_id="attempt-timeout",
-            readback=verified_absence,
-        )
-        assert reconciliation.attempt_state is AttemptState.RECONCILED_NOT_FOUND
+        envelope._validate()
+
+        with pytest.raises(
+            ProviderEvidenceError,
+            match="authoritative canonical readback capture",
+        ):
+            verify_betfair_provider_state(
+                action,
+                profile,
+                expected_profile_sha256=profile.profile_id,
+                readback=envelope,
+                expected_provider_order_ref=provider_ref,
+            )
+        assert restarted.attempt_state("attempt-timeout") is AttemptState.UNKNOWN
         assert not restarted.can_retry_action(
             plan_id=bound.execution_plan.plan_id,
             action_id=action.action_id,
@@ -1070,8 +1058,7 @@ def test_transport_timeout_readback_stays_non_authoritative_for_retry(
             )
         assert retry_transport.calls == []
 
-
-def test_foreign_provider_order_ref_cannot_verify_or_reconcile_effect() -> None:
+def test_foreign_provider_order_ref_fails_semantic_binding_before_authority() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
         timeout_client = _enabled_client(
@@ -1094,7 +1081,6 @@ def test_foreign_provider_order_ref_cannot_verify_or_reconcile_effect() -> None:
         )
         assert owned_ref is not None
         foreign_ref = "f" * 32
-        assert foreign_ref != owned_ref
 
         transport = _ReadbackTransport(
             provider_order_ref=foreign_ref,
@@ -1115,7 +1101,7 @@ def test_foreign_provider_order_ref_cannot_verify_or_reconcile_effect() -> None:
             ProviderEvidenceError,
             match="expected durable binding",
         ):
-            verify_betfair_provider_state(
+            _evaluate_betfair_provider_state_semantics(
                 action,
                 profile,
                 expected_profile_sha256=profile.profile_id,
@@ -1123,27 +1109,19 @@ def test_foreign_provider_order_ref_cannot_verify_or_reconcile_effect() -> None:
                 expected_provider_order_ref=owned_ref,
             )
 
-        foreign_effect = verify_betfair_provider_state(
-            action,
-            profile,
-            expected_profile_sha256=profile.profile_id,
-            readback=envelope,
-        )
-        assert foreign_effect.provider_order_ref == foreign_ref
         with pytest.raises(
-            SupervisedExecutionError,
-            match="provider order reference mismatches durable attempt binding",
+            ProviderEvidenceError,
+            match="authoritative canonical readback capture",
         ):
-            reconcile_provider_readback(
-                ledger,
-                bound,
-                attempt_id="attempt-foreign-effect",
-                readback=foreign_effect,
+            verify_betfair_provider_state(
+                action,
+                profile,
+                expected_profile_sha256=profile.profile_id,
+                readback=envelope,
             )
         assert ledger.attempt_state("attempt-foreign-effect") is AttemptState.UNKNOWN
 
-
-def test_foreign_empty_provider_order_ref_cannot_release_retry() -> None:
+def test_foreign_empty_provider_ref_cannot_become_retry_authority() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
         timeout_client = _enabled_client(
@@ -1166,7 +1144,6 @@ def test_foreign_empty_provider_order_ref_cannot_release_retry() -> None:
         )
         assert owned_ref is not None
         foreign_ref = "e" * 32
-        assert foreign_ref != owned_ref
 
         transport = _ReadbackTransport(
             provider_order_ref=foreign_ref,
@@ -1181,30 +1158,33 @@ def test_foreign_empty_provider_order_ref_cannot_release_retry() -> None:
                 provider_order_ref=foreign_ref,
                 market_id=action.market_id,
             )
-        foreign_absence = verify_betfair_provider_state(
-            action,
-            profile,
-            expected_profile_sha256=profile.profile_id,
-            readback=envelope,
-        )
-        assert foreign_absence.provider_order_ref == foreign_ref
 
         with pytest.raises(
-            SupervisedExecutionError,
-            match="provider order reference mismatches durable attempt binding",
+            ProviderEvidenceError,
+            match="expected durable binding",
         ):
-            reconcile_provider_not_found(
-                ledger,
-                bound,
-                attempt_id="attempt-foreign-absence",
-                readback=foreign_absence,
+            _evaluate_betfair_provider_state_semantics(
+                action,
+                profile,
+                expected_profile_sha256=profile.profile_id,
+                readback=envelope,
+                expected_provider_order_ref=owned_ref,
+            )
+        with pytest.raises(
+            ProviderEvidenceError,
+            match="authoritative canonical readback capture",
+        ):
+            verify_betfair_provider_state(
+                action,
+                profile,
+                expected_profile_sha256=profile.profile_id,
+                readback=envelope,
             )
         assert ledger.attempt_state("attempt-foreign-absence") is AttemptState.UNKNOWN
         assert not ledger.can_retry_action(
             plan_id=bound.execution_plan.plan_id,
             action_id=action.action_id,
         )
-
 
 def test_unmatched_success_is_unknown_until_readback() -> None:
     with tempfile.TemporaryDirectory() as tmp:

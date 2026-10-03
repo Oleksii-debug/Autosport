@@ -723,6 +723,35 @@ def test_current_balance_generation_lock_enters_economic_lock_before_generation_
     ]
 
 
+@pytest.mark.parametrize(
+    "dependency_name",
+    ("_canonical_account_snapshot_authority", "_canonical_economic_lock"),
+)
+def test_generation_lock_rejects_transitive_dependency_rebinding(
+    monkeypatch,
+    dependency_name,
+) -> None:
+    hostile_calls = []
+
+    def hostile(*args, **kwargs):
+        hostile_calls.append((args, kwargs))
+        raise AssertionError("hostile generation dependency executed")
+
+    monkeypatch.setattr(headroom_module, dependency_name, hostile)
+
+    with pytest.raises(
+        ProviderAccountHeadroomError,
+        match="generation lock dependency authority changed",
+    ):
+        with headroom_module._current_balance_generation_lock(
+            object(),
+            object(),  # type: ignore[arg-type]
+        ):
+            raise AssertionError("generation body must not execute")
+
+    assert hostile_calls == []
+
+
 def test_current_generation_guard_alias_rebinding_cannot_admit_stale_balance(
     monkeypatch,
     tmp_path,

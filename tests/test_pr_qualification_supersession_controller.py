@@ -276,6 +276,8 @@ def test_zero_trigger_identity_leaves_current_run_eligible_for_orphan_cleanup(
         [
             "--pr-number",
             "0",
+            "--event-pr-reference-mode",
+            "empty",
             "--event-head-sha",
             "a" * 40,
             "--workflow-name",
@@ -332,6 +334,8 @@ def test_zero_trigger_orphan_cleanup_excludes_only_already_swept_runs(
         [
             "--pr-number",
             "0",
+            "--event-pr-reference-mode",
+            "empty",
             "--event-head-sha",
             "a" * 40,
             "--workflow-name",
@@ -393,6 +397,8 @@ def test_zero_trigger_recovers_consistent_snapshot_identity_for_boundary_cancel(
         [
             "--pr-number",
             "0",
+            "--event-pr-reference-mode",
+            "empty",
             "--event-head-sha",
             "a" * 40,
             "--workflow-name",
@@ -457,6 +463,8 @@ def test_explicit_stale_trigger_is_cancelled_once_after_orphan_exclusion(
         [
             "--pr-number",
             "2022",
+            "--event-pr-reference-mode",
+            "singleton",
             "--event-head-sha",
             "a" * 40,
             "--workflow-name",
@@ -515,6 +523,8 @@ def test_trigger_initial_qualification_failure_preserves_completed_cleanup(
         [
             "--pr-number",
             "2022",
+            "--event-pr-reference-mode",
+            "singleton",
             "--event-head-sha",
             "a" * 40,
             "--workflow-name",
@@ -586,6 +596,8 @@ def test_main_reaches_triggering_run_check_after_orphan_authority_race_skip(
         [
             "--pr-number",
             "2022",
+            "--event-pr-reference-mode",
+            "singleton",
             "--event-head-sha",
             "a" * 40,
             "--workflow-name",

@@ -1326,3 +1326,87 @@ def test_runtime_authority_rejects_uuid4_member_rebinding_before_prepare(
         _append(store, 0)
 
     assert hostile_calls == []
+
+
+def test_runtime_authority_rejects_json_loads_member_rebinding_before_parse(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "deployment-runtime-authority.json"
+    store = DeploymentRuntimeAuthorityStore.initialize_pristine(
+        path,
+        authority_root=_authority_root(tmp_path),
+    )
+    _append(store, 0)
+    hostile_calls: list[str] = []
+
+    def hostile_loads(value: str) -> object:
+        hostile_calls.append(value)
+        raise AssertionError("hostile JSON parsing executed")
+
+    monkeypatch.setattr(
+        deployment_runtime_authority.json,
+        "loads",
+        hostile_loads,
+    )
+    with pytest.raises(
+        DeploymentRuntimeAuthorityError,
+        match="JSON parsing dispatch was replaced",
+    ):
+        store.records()
+
+    assert hostile_calls == []
+
+
+def test_runtime_authority_rejects_json_loads_code_replacement_before_parse(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "deployment-runtime-authority.json"
+    store = DeploymentRuntimeAuthorityStore.initialize_pristine(
+        path,
+        authority_root=_authority_root(tmp_path),
+    )
+    _append(store, 0)
+    target = deployment_runtime_authority.json.loads
+    original_code = target.__code__
+
+    def hostile_loads(value: str) -> object:
+        del value
+        raise AssertionError("hostile JSON parser code executed")
+
+    assert hostile_loads.__code__.co_freevars == original_code.co_freevars
+    target.__code__ = hostile_loads.__code__
+    try:
+        with pytest.raises(
+            DeploymentRuntimeAuthorityError,
+            match="JSON parsing dispatch was replaced",
+        ):
+            store.records()
+    finally:
+        target.__code__ = original_code
+
+
+def test_runtime_authority_rejects_uuid4_code_replacement_before_prepare(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "deployment-runtime-authority.json"
+    store = DeploymentRuntimeAuthorityStore.initialize_pristine(
+        path,
+        authority_root=_authority_root(tmp_path),
+    )
+    target = deployment_runtime_authority.uuid.uuid4
+    original_code = target.__code__
+
+    def hostile_uuid4() -> object:
+        raise AssertionError("hostile uuid4 code executed")
+
+    assert hostile_uuid4.__code__.co_freevars == original_code.co_freevars
+    target.__code__ = hostile_uuid4.__code__
+    try:
+        with pytest.raises(
+            DeploymentRuntimeAuthorityError,
+            match="transaction-id dispatch was replaced",
+        ):
+            _append(store, 0)
+    finally:
+        target.__code__ = original_code

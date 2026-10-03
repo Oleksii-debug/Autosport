@@ -291,7 +291,25 @@ def _append_issuance_witness(
 ) -> dict[str, object]:
     records = _read_issuance_witnesses(registry)
     matches = [record for record in records if record["binding_key"] == binding_key]
-    available_text = available_at.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+    if (
+        type(available_at) is not datetime
+        or available_at.tzinfo is None
+        or available_at.utcoffset() is None
+    ):
+        raise CampaignEconomicAuthorityError(
+            "campaign denomination issuance witness available_at must be timezone-aware"
+        )
+    available_at = available_at.astimezone(timezone.utc)
+    if records:
+        previous_available_at = _utc_datetime(
+            records[-1]["available_at"],
+            "previous issuance witness available_at",
+        )
+        if available_at < previous_available_at:
+            raise CampaignEconomicAuthorityError(
+                "campaign denomination issuance witness availability timestamp regressed"
+            )
+    available_text = available_at.isoformat().replace("+00:00", "Z")
     if matches:
         record = matches[0]
         if (

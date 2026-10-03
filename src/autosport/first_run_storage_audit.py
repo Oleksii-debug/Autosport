@@ -19,9 +19,12 @@ def run_first_run_storage_audit(output_path: str | Path) -> int:
     """Project packaged first-run storage identity without opening runtime state."""
 
     destination = Path(output_path)
+    failure_stage = "workspace_identity"
     try:
         workspace = default_workspace()
+        failure_stage = "webview_storage_identity"
         webview_storage = default_webview_storage_path()
+        failure_stage = "launch_cwd_identity"
         launch_cwd = Path.cwd()
 
         if not workspace.is_absolute():
@@ -30,10 +33,14 @@ def run_first_run_storage_audit(output_path: str | Path) -> int:
             raise ValueError("WebView storage identity is not absolute")
         if not launch_cwd.is_absolute():
             raise ValueError("launch working directory is not absolute")
+        failure_stage = "storage_root_separation"
         validate_product_storage_roots(workspace, webview_storage)
+        failure_stage = "webview_release_environment"
         if active_webview2_environment_overrides():
             raise ValueError("release-sensitive WebView2 environment override is active")
+        failure_stage = "workspace_writability"
         probe_workspace_writable(workspace)
+        failure_stage = "webview_storage_writability"
         probe_webview_storage_writable(webview_storage)
 
         payload = {
@@ -51,7 +58,8 @@ def run_first_run_storage_audit(output_path: str | Path) -> int:
     except Exception as exc:
         payload = {
             "status": "FAIL",
-            "error": "first-run storage path resolution failed",
+            "error": "first-run storage preflight failed",
+            "failure_stage": failure_stage,
             "error_type": type(exc).__name__,
             "real_money_execution": False,
             "human_tested": False,

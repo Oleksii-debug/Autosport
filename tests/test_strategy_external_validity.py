@@ -4,6 +4,7 @@ import hashlib
 
 import pytest
 
+import autosport.strategy_external_validity as strategy_external_validity_module
 from autosport.evaluation_intake import ObservationIntakeSnapshot
 from autosport.evaluation_universe import (
     AttritionReason,
@@ -309,6 +310,48 @@ def test_cohort_dispatch_rebind_cannot_replace_frozen_denominator(monkeypatch):
     with pytest.raises(
         StrategyExternalValidityError,
         match="denominator dispatch changed",
+    ):
+        evaluate_strategy_external_validity(ledger, protocol, candidate, baselines)
+
+
+def test_evaluator_dependency_type_rebind_fails_closed(monkeypatch):
+    ledger = _ledger(_row("candidate"))
+    protocol = _protocol(ledger)
+    candidate, baselines = _results(protocol)
+
+    class ReplacementLedgerType:
+        pass
+
+    monkeypatch.setattr(
+        strategy_external_validity_module,
+        "EvaluationUniverseLedger",
+        ReplacementLedgerType,
+    )
+
+    with pytest.raises(
+        StrategyExternalValidityError,
+        match="dependency dispatch changed",
+    ):
+        evaluate_strategy_external_validity(ledger, protocol, candidate, baselines)
+
+
+def test_baseline_builder_rebind_fails_before_forged_report_is_consumed(monkeypatch):
+    ledger = _ledger(_row("candidate"))
+    protocol = _protocol(ledger)
+    candidate, baselines = _results(protocol)
+
+    def forged_builder(*args, **kwargs):
+        raise AssertionError("forged baseline builder must never execute")
+
+    monkeypatch.setattr(
+        strategy_external_validity_module,
+        "build_external_validity_report",
+        forged_builder,
+    )
+
+    with pytest.raises(
+        StrategyExternalValidityError,
+        match="dependency dispatch changed",
     ):
         evaluate_strategy_external_validity(ledger, protocol, candidate, baselines)
 

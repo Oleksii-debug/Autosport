@@ -17,7 +17,7 @@ from .real_execution_ledger import (
     VerifiedExecutionLedgerSnapshot,
 )
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 SOURCE_ROOT_AUTHORITY_UNQUALIFIED = "UNQUALIFIED_CALLER_SELECTED_LEDGER"
 EVALUATION_PROTOCOL_AUTHORITY_UNQUALIFIED = "UNQUALIFIED_CALLER_PROTOCOL_DIGEST"
@@ -247,8 +247,11 @@ class EmpiricalExecutionEvidence:
     side: str
     quote_id: str
 
-    decision_at: str
+    plan_created_at: str
+    decision_at: str | None
     quote_observed_at: str
+    quote_available_to_product_at: str | None
+    quote_expires_at: str
     reserved_at: str
     submitted_at: str | None
     submitted_request_sha256: str | None
@@ -329,8 +332,9 @@ class EmpiricalExecutionEvidence:
             "selection_id",
             "side",
             "quote_id",
-            "decision_at",
+            "plan_created_at",
             "quote_observed_at",
+            "quote_expires_at",
             "reserved_at",
             "attempt_state",
             "provider_outcome_verification_reason",
@@ -385,8 +389,17 @@ class EmpiricalExecutionEvidence:
                 "reconciliation_external_effect_found must be bool when present"
             )
 
-        _timestamp(self.decision_at, "decision_at")
+        _timestamp(self.plan_created_at, "plan_created_at")
+        if self.decision_at is not None:
+            raise EmpiricalExecutionEvidenceError(
+                "current execution ledger does not prove exact decision timestamp"
+            )
         _timestamp(self.quote_observed_at, "quote_observed_at")
+        if self.quote_available_to_product_at is not None:
+            raise EmpiricalExecutionEvidenceError(
+                "current execution ledger does not prove quote product-availability time"
+            )
+        _timestamp(self.quote_expires_at, "quote_expires_at")
         _timestamp(self.reserved_at, "reserved_at")
         _optional_timestamp(self.submitted_at, "submitted_at")
         _optional_timestamp(
@@ -756,8 +769,11 @@ class EmpiricalExecutionEvidence:
             "selection_id": self.selection_id,
             "side": self.side,
             "quote_id": self.quote_id,
+            "plan_created_at": self.plan_created_at,
             "decision_at": self.decision_at,
             "quote_observed_at": self.quote_observed_at,
+            "quote_available_to_product_at": self.quote_available_to_product_at,
+            "quote_expires_at": self.quote_expires_at,
             "reserved_at": self.reserved_at,
             "submitted_at": self.submitted_at,
             "submitted_request_sha256": self.submitted_request_sha256,
@@ -948,8 +964,9 @@ def build_empirical_execution_evidence(
     )
     decision_id = _text(plan.get("decision_id"), "decision_id")
     approval_id = _text(plan.get("approval_id"), "approval_id")
-    decision_at = _text(plan.get("created_at"), "decision_at")
+    plan_created_at = _text(plan.get("created_at"), "plan_created_at")
     quote_observed_at = _text(action.get("quote_observed_at"), "quote_observed_at")
+    quote_expires_at = _text(action.get("expires_at"), "quote_expires_at")
     reserved_at = _text(reservation["payload"].get("reserved_at"), "reserved_at")
     attempt_effect_fingerprint = _sha256(
         reservation["payload"].get("effect_fingerprint"),
@@ -1162,8 +1179,11 @@ def build_empirical_execution_evidence(
         selection_id=_text(action.get("selection_id"), "selection_id"),
         side=_text(action.get("side"), "side"),
         quote_id=_text(action.get("quote_id"), "quote_id"),
-        decision_at=decision_at,
+        plan_created_at=plan_created_at,
+        decision_at=None,
         quote_observed_at=quote_observed_at,
+        quote_available_to_product_at=None,
+        quote_expires_at=quote_expires_at,
         reserved_at=reserved_at,
         submitted_at=submitted_at,
         submitted_request_sha256=submitted_request_sha256,
@@ -1225,7 +1245,7 @@ def build_empirical_execution_evidence(
     return evidence
 
 
-POPULATION_SCHEMA_VERSION = 9
+POPULATION_SCHEMA_VERSION = 10
 
 
 @dataclass(frozen=True, slots=True, weakref_slot=True, init=False)

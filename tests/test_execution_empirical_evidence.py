@@ -276,6 +276,11 @@ def test_unknown_attempt_is_retained_with_explicit_censor_reason(tmp_path):
 
     assert evidence.bookmaker_profile_version == "profile-1"
     assert evidence.decision_id == "decision-1"
+    assert evidence.plan_created_at == DECISION
+    assert evidence.decision_at is None
+    assert evidence.quote_observed_at == QUOTE
+    assert evidence.quote_available_to_product_at is None
+    assert evidence.quote_expires_at == "2026-09-21T10:01:00+00:00"
     assert evidence.approval_id == "approval-1"
     assert len(evidence.attempt_effect_fingerprint) == 64
     assert evidence.attempt_state == "UNKNOWN"
@@ -375,6 +380,34 @@ def test_positive_reconciliation_direct_construction_requires_receipt_identity(
             evidence,
             reconciliation_external_receipt_id=None,
         )
+
+
+def test_direct_construction_cannot_launder_plan_time_into_decision_time(tmp_path):
+    evidence = build_empirical_execution_evidence(
+        _ledger(tmp_path),
+        attempt_id="attempt-1",
+    )
+
+    with pytest.raises(
+        EmpiricalExecutionEvidenceError,
+        match="does not prove exact decision timestamp",
+    ):
+        replace(evidence, decision_at=DECISION)
+
+
+def test_direct_construction_cannot_launder_quote_observation_into_availability(
+    tmp_path,
+):
+    evidence = build_empirical_execution_evidence(
+        _ledger(tmp_path),
+        attempt_id="attempt-1",
+    )
+
+    with pytest.raises(
+        EmpiricalExecutionEvidenceError,
+        match="does not prove quote product-availability time",
+    ):
+        replace(evidence, quote_available_to_product_at=QUOTE)
 
 
 def test_provider_evidence_does_not_turn_nonterminal_attempt_into_slippage_sample(

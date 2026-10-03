@@ -634,6 +634,67 @@ def test_positive_economic_admission_persists_product_action_time(tmp_path):
     assert persisted_time.date() == now.date()
 
 
+def test_product_action_time_cannot_predate_risk_reviewed_proposal(tmp_path):
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    requested = now + timedelta(minutes=5)
+    if requested.date() != now.date():
+        pytest.skip("needs five minutes remaining in the current UTC day")
+
+    goal = replace(
+        _goal(),
+        max_turnover_fraction=Decimal("1"),
+        max_quote_age_seconds=Decimal("600"),
+    )
+    EconomicGoalStore(tmp_path).initialize_owner(goal)
+    book = PaperBook("100")
+    book.save(tmp_path / "paper_book.json")
+    candidate = _leg("product-action-not-before-proposal")
+    observed = now - timedelta(seconds=5)
+    quote = MarketEvent(
+        event_id=candidate.event_id,
+        market_id=candidate.market_id,
+        selection_id=candidate.selection_id,
+        decimal_odds=candidate.locked_odds,
+        observed_ts=_timestamp(observed),
+        source_id="provider-1",
+        sequence=1,
+        source_ts=_timestamp(observed - timedelta(seconds=1)),
+        ingest_ts=_timestamp(observed + timedelta(seconds=1)),
+    )
+    context = ProposedTicketRiskContext(
+        legs=(candidate,),
+        quotes=(quote,),
+        bankroll_id="paper-bankroll",
+        currency="USD",
+        proposal_ts=_timestamp(requested),
+    )
+    policy = _policy(goal)
+
+    baseline = policy.evaluate(book, Decimal("0.01"), context=context)
+    assert baseline.allowed is True
+
+    result = admit_paper_ticket(
+        workspace=tmp_path,
+        book=book,
+        risk_policy=policy,
+        stake=Decimal("0.01"),
+        legs=(candidate,),
+        reason="product action time must not predate reviewed proposal",
+        placed_at=_timestamp(requested),
+        context=context,
+        provider_source_ids=("provider-1",),
+        bankroll_id="paper-bankroll",
+        currency="USD",
+    )
+
+    assert result.admitted is False
+    assert result.risk.reason == "economic goal current product action time unavailable"
+    persisted = PaperBook.load(tmp_path / "paper_book.json")
+    assert persisted.tickets == {}
+
+
+
+
 def test_admission_rejects_lock_validator_dependency_rebinding(tmp_path):
     book = PaperBook("100")
     book.save(tmp_path / "paper_book.json")

@@ -415,28 +415,44 @@ def test_reservation_rejects_structurally_valid_but_unissued_bound_plan(tmp_path
         ledger.saga(reconstructed.execution_plan.plan_id)
 
 
-def test_issuer_alias_rebinding_cannot_mint_product_authority(
+def test_product_issuer_is_not_importable_from_module_namespace() -> None:
+    assert not hasattr(
+        supervised_execution,
+        "_issue_bound_supervised_execution_plan",
+    )
+    assert not hasattr(
+        supervised_execution,
+        "_install_bound_supervised_execution_plan_authority",
+    )
+
+
+def test_builder_alias_rebinding_revokes_internal_plan_authority(
     monkeypatch,
+    tmp_path,
 ) -> None:
+    bound, approval, _, _ = _bound()
     hostile_calls: list[object] = []
 
-    def hostile_issue(value):
-        hostile_calls.append(value)
-        return value
+    def hostile_build(*args, **kwargs):
+        hostile_calls.append((args, kwargs))
+        return bound
 
     monkeypatch.setattr(
         supervised_execution,
-        "_issue_bound_supervised_execution_plan",
-        hostile_issue,
+        "build_supervised_execution_plan",
+        hostile_build,
     )
+    ledger = RealExecutionLedger(tmp_path / "builder-rebound-ledger.jsonl")
 
     with pytest.raises(
         SupervisedExecutionError,
         match="canonical bound supervised execution plan authority changed",
     ):
-        _bound()
+        reserve_supervised_plan(ledger, bound, approval)
 
     assert hostile_calls == []
+    with pytest.raises(KeyError):
+        ledger.saga(bound.execution_plan.plan_id)
 
 
 def test_assertion_alias_rebinding_cannot_admit_unissued_plan(

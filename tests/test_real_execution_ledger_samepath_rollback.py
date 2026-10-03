@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import threading
 
+import threading
+
 import pytest
 
 from autosport.monotonic_workspace_authority import MonotonicAuthorityIntegrityError
@@ -346,3 +348,77 @@ def test_instance_prepare_and_commit_shadows_do_not_gain_transition_authority(
 
     assert ledger.reserve_plan(current_plan) == current_plan.fingerprint
     assert ledger.verified_snapshot().event_count == 1
+
+
+
+def test_same_instance_other_thread_cannot_recover_active_prepare(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    path = _isolated_ledger_path(tmp_path, monkeypatch)
+    ledger = RealExecutionLedger(path)
+    current_plan = _plan()
+    original_append_record = ledger._monotonic_authority._append_record
+
+    prepare_durable = threading.Event()
+    release_writer = threading.Event()
+    reader_started = threading.Event()
+    reader_finished = threading.Event()
+    writer_errors: list[BaseException] = []
+    reader_errors: list[BaseException] = []
+    reader_counts: list[int] = []
+    append_calls = 0
+
+    def block_after_prepare(record, index) -> None:
+        nonlocal append_calls
+        append_calls += 1
+        original_append_record(record, index)
+        if append_calls == 1:
+            prepare_durable.set()
+            if not release_writer.wait(10):
+                raise AssertionError("timed out waiting to release writer")
+
+    monkeypatch.setattr(
+        ledger._monotonic_authority,
+        "_append_record",
+        block_after_prepare,
+    )
+
+    def run_writer() -> None:
+        try:
+            ledger.reserve_plan(current_plan)
+        except BaseException as exc:  # pragma: no cover - thread handoff
+            writer_errors.append(exc)
+
+    def run_reader() -> None:
+        reader_started.set()
+        try:
+            reader_counts.append(ledger.verified_snapshot().event_count)
+        except BaseException as exc:  # pragma: no cover - thread handoff
+            reader_errors.append(exc)
+        finally:
+            reader_finished.set()
+
+    writer = threading.Thread(target=run_writer, daemon=True)
+    writer.start()
+    assert prepare_durable.wait(10), "writer never reached durable PREPARE"
+
+    reader = threading.Thread(target=run_reader, daemon=True)
+    reader.start()
+    assert reader_started.wait(10), "reader thread never started"
+
+    # The same ledger instance owns serialization in the writer thread. The reader
+    # must remain fenced behind the instance RLock instead of treating that writer's
+    # PREPARE as its own and aborting it.
+    assert not reader_finished.wait(0.2)
+
+    release_writer.set()
+    writer.join(10)
+    reader.join(10)
+
+    assert not writer.is_alive()
+    assert not reader.is_alive()
+    assert not writer_errors
+    assert not reader_errors
+    assert reader_counts == [1]
+    assert RealExecutionLedger(path).verified_snapshot().event_count == 1

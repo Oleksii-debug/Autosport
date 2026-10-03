@@ -475,6 +475,7 @@ class ProductRunCapitalPathEvidence:
     def grants_real_money_authority(self) -> bool:
         return False
 
+
 def resolve_product_run_capital_path_evidence(
     *,
     workspace: str | Path,

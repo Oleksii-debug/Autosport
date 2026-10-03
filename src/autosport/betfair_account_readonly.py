@@ -1277,6 +1277,18 @@ def _install_execution_readback_authority() -> None:
             "read_cleared_orders_page",
         )
     )
+    readback_dispatch_defaults = tuple(
+        (
+            method.__defaults__,
+            method.__kwdefaults__,
+            (
+                None
+                if method.__kwdefaults__ is None
+                else tuple(sorted(method.__kwdefaults__.items()))
+            ),
+        )
+        for _, method, _ in readback_dispatch
+    )
     module_globals = globals()
     missing = object()
 
@@ -1354,6 +1366,24 @@ def _install_execution_readback_authority() -> None:
                 getattr(client_type, name, None) is not expected
                 or getattr(expected, "__code__", None) is not expected_code
                 for name, expected, expected_code in readback_dispatch
+            )
+            or any(
+                method.__defaults__ is not expected_defaults
+                or method.__kwdefaults__ is not expected_kwdefaults
+                or (
+                    expected_kwdefaults is not None
+                    and tuple(sorted(expected_kwdefaults.items()))
+                    != expected_kwdefaults_items
+                )
+                for (_, method, _), (
+                    expected_defaults,
+                    expected_kwdefaults,
+                    expected_kwdefaults_items,
+                ) in zip(
+                    readback_dispatch,
+                    readback_dispatch_defaults,
+                    strict=True,
+                )
             )
             or any(
                 module_globals.get(name, missing) is not expected

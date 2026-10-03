@@ -20,6 +20,7 @@ from autosport.bookmaker_integration_boundary import (
 from autosport.bookmaker_capability_lifecycle import (
     BetdaqAuthenticatedCapabilityIssuance,
     CapabilityEvidence,
+    CapabilityEvidenceJournal,
     issue_betdaq_authenticated_capability_evidence,
 )
 from autosport.provider_capability_evidence_matrix import (
@@ -52,8 +53,10 @@ class _BetdaqHttpResponse:
 def _product_issued_betdaq_balance(
     monkeypatch,
     *,
+    observed_minute: int = 0,
     committed_at: str = "2026-09-21T10:01:00+00:00",
     review_due_at: str = "2026-09-21T11:01:00+00:00",
+    predecessor_id: str | None = None,
 ) -> BetdaqAuthenticatedCapabilityIssuance:
     payload = (
         f'<?xml version="1.0" encoding="utf-8"?>'
@@ -72,13 +75,16 @@ def _product_issued_betdaq_balance(
     monkeypatch.setattr(betdaq_account_module, "urlopen", opener)
     client = BetdaqAccountReadOnlyClient(
         BetdaqCredentials("alice", "secret-pass", "app-id"),
-        clock=lambda: datetime(2026, 9, 21, 10, 0, tzinfo=timezone.utc),
+        clock=lambda: datetime(
+            2026, 9, 21, 10, observed_minute, tzinfo=timezone.utc
+        ),
     )
     return issue_betdaq_authenticated_capability_evidence(
         client,
         BookmakerCapability.BALANCE_READ,
         committed_at=committed_at,
         review_due_at=review_due_at,
+        predecessor_id=predecessor_id,
     )
 
 
@@ -338,3 +344,84 @@ def test_late_integration_cannot_resurrect_expired_betdaq_lifecycle(
         match="became available at or after its expiry",
     ):
         issue_betdaq_authenticated_read_evidence(issuance, integration)
+
+
+def test_betdaq_revalidation_requires_predecessor_journal_for_matrix_composition(
+    monkeypatch,
+) -> None:
+    first = _product_issued_betdaq_balance(monkeypatch)
+    successor = _product_issued_betdaq_balance(
+        monkeypatch,
+        observed_minute=5,
+        committed_at="2026-09-21T10:06:00+00:00",
+        review_due_at="2026-09-21T11:06:00+00:00",
+        predecessor_id=first.evidence.evidence_id,
+    )
+    integration = bind_bookmaker_integration(
+        successor.profile,
+        integration_kind=BookmakerIntegrationKind.OFFICIAL_API,
+        observed_at="2026-09-21T10:06:30+00:00",
+        source_ref="betdaq-secure-api-revalidation",
+        source_payload_sha256="1" * 64,
+    )
+
+    with pytest.raises(
+        ProviderCapabilityEvidenceMatrixError,
+        match="valid lifecycle predecessor chain",
+    ):
+        issue_betdaq_authenticated_read_evidence(successor, integration)
+
+
+def test_betdaq_revalidation_composes_after_exact_predecessor_chain_validation(
+    monkeypatch,
+) -> None:
+    first = _product_issued_betdaq_balance(monkeypatch)
+    journal = CapabilityEvidenceJournal()
+    journal.publish(first.evidence)
+    successor = _product_issued_betdaq_balance(
+        monkeypatch,
+        observed_minute=5,
+        committed_at="2026-09-21T10:06:00+00:00",
+        review_due_at="2026-09-21T11:06:00+00:00",
+        predecessor_id=first.evidence.evidence_id,
+    )
+    integration = bind_bookmaker_integration(
+        successor.profile,
+        integration_kind=BookmakerIntegrationKind.OFFICIAL_API,
+        observed_at="2026-09-21T10:06:30+00:00",
+        source_ref="betdaq-secure-api-revalidation",
+        source_payload_sha256="1" * 64,
+    )
+
+    fact = issue_betdaq_authenticated_read_evidence(
+        successor,
+        integration,
+        journal=journal,
+    )
+    assert fact.grade is ProviderCapabilityTruthGrade.AUTHENTICATED_READ_PROVEN
+    assert fact.observed_at == "2026-09-21T10:06:30+00:00"
+    assert fact.expires_at == "2026-09-21T11:05:00+00:00"
+    assert fact.evidence_sha256 == successor.evidence.evidence_id
+
+
+def test_betdaq_matrix_rejects_noncanonical_lifecycle_journal_type(
+    monkeypatch,
+) -> None:
+    issuance = _product_issued_betdaq_balance(monkeypatch)
+    integration = bind_bookmaker_integration(
+        issuance.profile,
+        integration_kind=BookmakerIntegrationKind.OFFICIAL_API,
+        observed_at="2026-09-21T10:01:30+00:00",
+        source_ref="betdaq-secure-api",
+        source_payload_sha256="d" * 64,
+    )
+
+    with pytest.raises(
+        ProviderCapabilityEvidenceMatrixError,
+        match="exact CapabilityEvidenceJournal",
+    ):
+        issue_betdaq_authenticated_read_evidence(
+            issuance,
+            integration,
+            journal=object(),
+        )

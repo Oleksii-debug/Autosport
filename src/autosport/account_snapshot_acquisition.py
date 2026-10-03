@@ -14,8 +14,9 @@ from hashlib import sha256
 import json
 from pathlib import Path
 import sqlite3
+import sys
 from threading import RLock
-from types import MappingProxyType
+from types import FunctionType, MappingProxyType
 from weakref import ref
 
 from ._campaign_provider_scope_devapp_identity import (
@@ -1396,6 +1397,7 @@ def _install_account_snapshot_acquisition_authority() -> None:
                 )
 
             from . import betfair_account_readonly as readonly_module
+            from . import resolver_semantics as _resolver_semantics
             from ._scientific_registry_read_authority import (
                 ScientificRegistryReadAuthorityError,
                 _source_owned_function,
@@ -1430,12 +1432,53 @@ def _install_account_snapshot_acquisition_authority() -> None:
                         )
                     candidate = vars(BetfairReadOnlyClient).get(method_name)
                     try:
-                        verified = _source_owned_function(
-                            candidate,
-                            module=readonly_module,
-                            qualname=f"BetfairReadOnlyClient.{method_name}",
-                        )
-                    except ScientificRegistryReadAuthorityError as exc:
+                        if (
+                            method_name == "read_account_details"
+                            and type(candidate) is FunctionType
+                            and candidate.__qualname__
+                            == "_install_guard.<locals>.guarded_read_account_details"
+                        ):
+                            guard_module_name = (
+                                "autosport._betfair_account_identity_io_snapshot_guard"
+                            )
+                            guard_module = sys.modules.get(guard_module_name)
+                            guard_namespace = getattr(guard_module, "__dict__", None)
+                            if (
+                                candidate.__module__ != guard_module_name
+                                or type(guard_namespace) is not dict
+                                or candidate.__globals__ is not guard_namespace
+                                or getattr(
+                                    candidate,
+                                    "_autosport_k07_io_snapshot_sealed",
+                                    None,
+                                )
+                                is not True
+                            ):
+                                raise ScientificRegistryReadAuthorityError(
+                                    "canonical K07 account-details read authority changed"
+                                )
+                            source = _resolver_semantics._module_source(candidate)
+                            expected_code = _resolver_semantics._compiled_resolver_code(
+                                source,
+                                ("_install_guard", "guarded_read_account_details"),
+                            )
+                            if _resolver_semantics._code_payload(
+                                candidate.__code__
+                            ) != _resolver_semantics._code_payload(expected_code):
+                                raise ScientificRegistryReadAuthorityError(
+                                    "canonical K07 account-details read semantics changed"
+                                )
+                            verified = candidate
+                        else:
+                            verified = _source_owned_function(
+                                candidate,
+                                module=readonly_module,
+                                qualname=f"BetfairReadOnlyClient.{method_name}",
+                            )
+                    except (
+                        ScientificRegistryReadAuthorityError,
+                        _resolver_semantics.ResolverSemanticIdentityError,
+                    ) as exc:
                         raise AccountSnapshotAcquisitionError(
                             "canonical Betfair account snapshot reader dispatch changed: "
                             f"{method_name}"

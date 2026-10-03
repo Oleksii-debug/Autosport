@@ -11,6 +11,7 @@ from autosport.market_mirror import MarketMirror, MirrorUpdate
 from autosport.market_mirror_runtime import (
     BoundedMirrorInvalidationBuffer,
     FocusedMirrorDependencyIndex,
+    FocusedMirrorRegistryChanged,
 )
 from autosport.storage import SQLiteMarketStore
 
@@ -290,6 +291,172 @@ class BoundedMirrorInvalidationBufferTests(unittest.TestCase):
             ("provider-a", "event-1|market-1|selection-z"),
             dependencies.all_matching_keys(),
         )
+
+    def test_dependency_registration_retries_if_mirror_advances_after_snapshot(self) -> None:
+        mirror = MarketMirror()
+        dependencies = FocusedMirrorDependencyIndex(mirror)
+        event = self.event(selection="selection-a", sequence=1, odds="2.10")
+        real_view = mirror.view
+        injected = {"done": False}
+
+        def capture_then_advance(*args, **kwargs):
+            captured = real_view(*args, **kwargs)
+            if not injected["done"]:
+                injected["done"] = True
+                mirror.apply(event)
+            return captured
+
+        with patch.object(mirror, "view", side_effect=capture_then_advance):
+            dependency = dependencies.register(
+                "decision-a",
+                selection_ids="selection-a",
+            )
+
+        self.assertTrue(injected["done"])
+        self.assertEqual(dependency.input_id, "decision-a")
+        self.assertEqual(
+            dependencies.matching_keys("decision-a"),
+            ((event.source_id, event.quote_key),),
+        )
+
+    def test_coherent_incremental_views_share_one_exact_mirror_revision(self) -> None:
+        mirror = MarketMirror()
+        runtime = BoundedMirrorInvalidationBuffer(mirror)
+        dependencies = FocusedMirrorDependencyIndex(mirror)
+        dependencies.register("decision-a", selection_ids="selection-a")
+        dependencies.register("decision-b", selection_ids="selection-b")
+
+        runtime.accept_persisted(
+            self.event(selection="selection-a", sequence=1, odds="2.00")
+        )
+        runtime.accept_persisted(
+            self.event(selection="selection-b", sequence=1, odds="3.00")
+        )
+        runtime.accept_persisted(
+            self.event(selection="unrelated", sequence=1, odds="9.00")
+        )
+        affected = dependencies.affected_inputs(runtime.drain())
+        self.assertEqual(affected, ("decision-a", "decision-b"))
+
+        with (
+            patch.object(
+                mirror,
+                "snapshot",
+                side_effect=AssertionError("whole mirror snapshot is forbidden"),
+            ),
+            patch.object(
+                mirror,
+                "view",
+                side_effect=AssertionError("whole mirror view is forbidden"),
+            ),
+        ):
+            views = dependencies.coherent_decision_views(
+                ("decision-a", "decision-b"),
+                as_of=datetime(2026, 9, 16, 19, 0, 10, tzinfo=timezone.utc),
+                max_age=timedelta(minutes=1),
+                incremental=True,
+            )
+
+        self.assertEqual(set(views), {"decision-a", "decision-b"})
+        self.assertEqual(
+            {snapshot.revision for snapshot in views.values()},
+            {mirror.revision},
+        )
+        self.assertEqual(
+            tuple(event.selection_id for event in views["decision-a"].events),
+            ("selection-a",),
+        )
+        self.assertEqual(
+            tuple(event.selection_id for event in views["decision-b"].events),
+            ("selection-b",),
+        )
+        self.assertNotIn(
+            "unrelated",
+            {
+                event.selection_id
+                for snapshot in views.values()
+                for event in snapshot.events
+            },
+        )
+
+    def test_atomic_drain_and_route_retains_dirty_state_on_routing_failure(self) -> None:
+        mirror = MarketMirror()
+        runtime = BoundedMirrorInvalidationBuffer(mirror)
+        dependencies = FocusedMirrorDependencyIndex(mirror)
+        dependencies.register("decision-all", source_ids="provider-a")
+        event = self.event(selection="selection-a", sequence=1, odds="2.00")
+        runtime.accept_persisted(event)
+
+        with patch.object(
+            dependencies,
+            "affected_inputs",
+            side_effect=RuntimeError("simulated routing failure"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "simulated routing failure"):
+                runtime.drain_and_route(dependencies)
+
+        self.assertEqual(runtime.pending_count, 1)
+        batch, affected = runtime.drain_and_route(dependencies)
+
+        self.assertEqual(
+            batch.changed_keys,
+            ((event.source_id, event.quote_key),),
+        )
+        self.assertEqual(affected, ("decision-all",))
+        self.assertEqual(runtime.pending_count, 0)
+        self.assertEqual(
+            dependencies.matching_keys("decision-all"),
+            ((event.source_id, event.quote_key),),
+        )
+
+
+    def test_drained_unrouted_key_invalidates_captured_routing_generation(self) -> None:
+        mirror = MarketMirror()
+        runtime = BoundedMirrorInvalidationBuffer(mirror)
+        dependencies = FocusedMirrorDependencyIndex(mirror)
+        dependencies.register("decision-all", source_ids="provider-a")
+
+        baseline = self.event(selection="selection-a", sequence=1, odds="2.00")
+        runtime.accept_persisted(baseline)
+        dependencies.affected_inputs(runtime.drain())
+        captured_routing_revision = dependencies.routing_revision
+
+        concurrent = self.event(selection="selection-b", sequence=2, odds="3.00")
+        runtime.accept_persisted(concurrent)
+        drained_but_unrouted = runtime.drain()
+
+        # Mirror truth already includes the new key and the invalidation buffer is
+        # empty, but incremental routing still reflects the older key set.
+        self.assertEqual(runtime.pending_count, 0)
+        self.assertEqual(dependencies.routing_revision, captured_routing_revision)
+        torn = dependencies.coherent_decision_views(
+            ("decision-all",),
+            as_of=datetime(2026, 9, 16, 19, 0, 10, tzinfo=timezone.utc),
+            max_age=timedelta(minutes=1),
+            incremental=True,
+        )
+        self.assertEqual(
+            tuple(event.selection_id for event in torn["decision-all"].events),
+            ("selection-a",),
+        )
+        self.assertEqual(torn["decision-all"].revision, mirror.revision)
+
+        affected = dependencies.affected_inputs(drained_but_unrouted)
+        self.assertEqual(affected, ("decision-all",))
+        self.assertGreater(
+            dependencies.routing_revision,
+            captured_routing_revision,
+        )
+        with self.assertRaisesRegex(
+            FocusedMirrorRegistryChanged,
+            "routing changed before decision publication",
+        ):
+            with dependencies.hold_input_ids(
+                ("decision-all",),
+                expected_routing_revision=captured_routing_revision,
+            ):
+                self.fail("stale routing generation must not reach publication")
+
 
     def test_focused_dependency_overflow_fails_safe_to_all_registered_inputs(self) -> None:
         mirror = MarketMirror()

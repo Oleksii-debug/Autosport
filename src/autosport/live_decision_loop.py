@@ -27,11 +27,12 @@ from .ingestion_health import IngestionPolicy, SourceHealthStore
 from .integrity import atomic_write_json
 from .json_integrity import strict_json_loads
 from .live_observation import poll_open_market_store_once
-from .market_mirror import MarketMirror, MirrorSnapshot
+from .market_mirror import MarketMirror, MarketMirrorRevisionChanged, MirrorSnapshot
 from .market_mirror_runtime import (
     BoundedMirrorInvalidationBuffer,
     FocusedMirrorDependency,
     FocusedMirrorDependencyIndex,
+    FocusedMirrorRegistryChanged,
 )
 from .paper import PaperBook
 from .paper_execution_adoption import (
@@ -51,6 +52,10 @@ from .workspace_lock import WorkspaceEconomicLock
 
 class LiveDecisionProgressError(RuntimeError):
     """Raised when persistent live-loop progress is malformed or inconsistent."""
+
+
+class _ConcurrentDecisionSnapshot(RuntimeError):
+    """Internal retry signal when market truth moves during one decision cut."""
 
 
 class LiveDecisionMode(str, Enum):
@@ -766,6 +771,14 @@ class PersistentLiveDecisionLoop:
                 raise ValueError(
                     "paper_execution must persist the canonical live workspace PaperBook"
                 )
+            canonical_execution_ledger_path = (
+                self.workspace / "paper-execution.jsonl"
+            )
+            if paper_execution.ledger.path != canonical_execution_ledger_path:
+                raise ValueError(
+                    "paper_execution must use the canonical live workspace PAPER "
+                    "execution ledger"
+                )
         self.paper_execution = paper_execution
         self.ingestion_policy = ingestion_policy
         self.max_quote_age = max_quote_age
@@ -966,7 +979,9 @@ class PersistentLiveDecisionLoop:
         if len(self._input_specs) >= self.bounds.max_registered_inputs:
             raise ValueError("max_registered_inputs would be exceeded")
 
-        previous_specs = tuple(self._input_specs.values())
+        previous_specs = tuple(
+            sorted(self._input_specs.values(), key=lambda spec: spec.input_id)
+        )
         dependency = self.dependencies.register(
             candidate.input_id,
             source_ids=candidate.source_ids,
@@ -979,8 +994,8 @@ class PersistentLiveDecisionLoop:
         try:
             self._persist_input_registry(expected_previous=previous_specs)
         except BaseException:
-            self._input_specs.pop(candidate.input_id, None)
             self.dependencies.unregister(candidate.input_id)
+            self._input_specs.pop(candidate.input_id, None)
             raise
         self._pending_affected[dependency.input_id] = None
         self._needs_cache_rebuild = True
@@ -990,7 +1005,9 @@ class PersistentLiveDecisionLoop:
         existing = self._input_specs.get(normalized_id)
         if existing is None:
             return False
-        previous_specs = tuple(self._input_specs.values())
+        previous_specs = tuple(
+            sorted(self._input_specs.values(), key=lambda spec: spec.input_id)
+        )
         if not self.dependencies.unregister(normalized_id):
             raise LiveDecisionProgressError(
                 "live dependency registry is inconsistent during retirement"
@@ -999,7 +1016,6 @@ class PersistentLiveDecisionLoop:
         try:
             self._persist_input_registry(expected_previous=previous_specs)
         except BaseException:
-            self._input_specs[normalized_id] = existing
             self.dependencies.register(
                 existing.input_id,
                 source_ids=existing.source_ids,
@@ -1008,6 +1024,7 @@ class PersistentLiveDecisionLoop:
                 market_ids=existing.market_ids,
                 selection_ids=existing.selection_ids,
             )
+            self._input_specs[normalized_id] = existing
             raise
         self._pending_affected.pop(normalized_id, None)
         self._intent_cache.pop(normalized_id, None)
@@ -1075,6 +1092,11 @@ class PersistentLiveDecisionLoop:
         ):
             return self._recover_unfinished_progress()
 
+        # Optimistic generation token for the durable progress cursor. Provider
+        # observation remains outside the workspace economic lock, but publication
+        # must prove that no peer evaluator advanced/replaced this generation.
+        expected_previous_progress = self._progress
+
         catalog_now = _require_utc_clock(self.clock)
         try:
             if self.catalog_lifecycle is not None:
@@ -1085,13 +1107,14 @@ class PersistentLiveDecisionLoop:
             return self._persist_provider_gap(
                 _require_utc_clock(self.clock),
                 exc,
+                expected_previous_progress=expected_previous_progress,
             )
 
         now = _require_utc_clock(self.clock)
-        batch = self.mirror_updates.drain(
-            max_items=self.bounds.max_dirty_per_cycle
+        batch, batch_affected = self.mirror_updates.drain_and_route(
+            self.dependencies,
+            max_items=self.bounds.max_dirty_per_cycle,
         )
-        batch_affected = self.dependencies.affected_inputs(batch)
         for input_id in batch_affected:
             self._pending_affected[input_id] = None
         if batch.full_refresh_required:
@@ -1120,7 +1143,7 @@ class PersistentLiveDecisionLoop:
             for input_id in registered_input_ids:
                 self._pending_affected[input_id] = None
 
-        refresh_input_ids = tuple(self._pending_affected)
+        refresh_input_ids = tuple(sorted(self._pending_affected))
         affected = refresh_input_ids
         if not affected:
             return LiveCycleResult(
@@ -1129,8 +1152,24 @@ class PersistentLiveDecisionLoop:
             )
 
         decision_time = now
-        snapshots = self._capture_input_views(refresh_input_ids, decision_time)
-        current_market_sha = self._market_state_sha256()
+        decision_context_sha256 = self._decision_context_sha256()
+        try:
+            snapshots, captured_routing_revision = self._capture_input_views(
+                refresh_input_ids,
+                decision_time,
+            )
+        except _ConcurrentDecisionSnapshot as exc:
+            return LiveCycleResult(
+                LiveCycleStatus.BACKPRESSURE,
+                affected_input_ids=refresh_input_ids,
+                detail=str(exc),
+            )
+        captured_mirror_revision = (
+            None
+            if not snapshots
+            else next(iter(snapshots.values())).revision
+        )
+        current_market_sha = self._market_state_sha256(registered_input_ids)
 
         clean_committed_restart = (
             self._needs_cache_rebuild
@@ -1139,6 +1178,8 @@ class PersistentLiveDecisionLoop:
             and self._progress.gate == _GATE_NORMAL
             and self._progress.market_state_sha256 == current_market_sha
             and self._progress.registered_input_ids == registered_input_ids
+            and self._progress.decision_context_sha256
+            == decision_context_sha256
             and not batch_affected
             and not batch.full_refresh_required
             and not freshness_expired
@@ -1156,22 +1197,34 @@ class PersistentLiveDecisionLoop:
             )
 
         decision_ts = now.isoformat()
-        self._write_pending(
-            decision_ts=decision_ts,
-            market_state_sha256=current_market_sha,
-            affected_input_ids=affected,
-            gate=_GATE_NORMAL,
-        )
+        try:
+            decision_book = self._write_pending(
+                decision_ts=decision_ts,
+                market_state_sha256=current_market_sha,
+                affected_input_ids=affected,
+                gate=_GATE_NORMAL,
+                expected_decision_context_sha256=decision_context_sha256,
+                expected_registered_input_ids=registered_input_ids,
+                expected_previous_progress=expected_previous_progress,
+                expected_mirror_revision=captured_mirror_revision,
+                expected_dependency_routing_revision=captured_routing_revision,
+            )
+        except _ConcurrentDecisionSnapshot as exc:
+            return LiveCycleResult(
+                LiveCycleStatus.BACKPRESSURE,
+                affected_input_ids=refresh_input_ids,
+                detail=str(exc),
+            )
         self._refresh_intents_from_snapshots(snapshots)
 
-        intents = self._all_cached_intents()
+        intents = self._all_cached_intents(registered_input_ids)
         graph = (
             None
             if not intents
-            else PortfolioDependencyGraph.for_inputs(self.book, intents)
+            else PortfolioDependencyGraph.for_inputs(decision_book, intents)
         )
         plan = build_portfolio_plan(
-            self.book,
+            decision_book,
             intents,
             self.authority.risk_policy,
             decision_ts,
@@ -1239,6 +1292,43 @@ class PersistentLiveDecisionLoop:
             and left._settlement_times == right._settlement_times
         )
 
+    def _paper_execution_model_fingerprint(self) -> str | None:
+        runtime = self.paper_execution
+        if runtime is None:
+            return None
+        if not isinstance(runtime, PaperExecutionAdoptionRuntime):
+            raise LiveDecisionProgressError(
+                "paper_execution runtime authority changed type"
+            )
+        if runtime.book is not self.book:
+            raise LiveDecisionProgressError(
+                "paper_execution runtime changed canonical PaperBook"
+            )
+        if runtime.paper_book_path != self.workspace / "paper_book.json":
+            raise LiveDecisionProgressError(
+                "paper_execution runtime changed canonical PaperBook path"
+            )
+        if runtime.ledger.path != self.workspace / "paper-execution.jsonl":
+            raise LiveDecisionProgressError(
+                "paper_execution runtime changed canonical execution ledger"
+            )
+        return runtime.config.fingerprint
+
+    def _input_registry_sha256(self) -> str:
+        return _canonical_json_sha256(
+            {
+                "schema": "autosport.live_dependency_registry_identity",
+                "schema_version": 1,
+                "inputs": [
+                    spec.to_dict()
+                    for spec in sorted(
+                        self._input_specs.values(),
+                        key=lambda item: item.input_id,
+                    )
+                ],
+            }
+        )
+
     def _decision_context_sha256_for_book(self, book: PaperBook) -> str:
         self._verify_intent_factory_provenance()
         if not isinstance(book, PaperBook):
@@ -1254,7 +1344,7 @@ class PersistentLiveDecisionLoop:
         return _canonical_json_sha256(
             {
                 "schema": "autosport.live_decision_runtime_context",
-                "schema_version": 2,
+                "schema_version": 4,
                 "mode": self.mode.value,
                 "intent_strategy_version_id": provenance.strategy_version_id,
                 "intent_model_version_id": provenance.model_version_id,
@@ -1264,6 +1354,10 @@ class PersistentLiveDecisionLoop:
                 ).contract_sha256,
                 "risk_policy_sha256": self.authority.risk_policy.provenance_sha256,
                 "book_state_sha256": book_state_sha256,
+                "input_registry_sha256": self._input_registry_sha256(),
+                "paper_execution_model_fingerprint": (
+                    self._paper_execution_model_fingerprint()
+                ),
                 "max_quote_age_seconds": str(
                     _timedelta_decimal_seconds(self.max_quote_age)
                 ),
@@ -1331,7 +1425,7 @@ class PersistentLiveDecisionLoop:
                 decision_time,
                 expected_market_state_sha256=progress.market_state_sha256,
             )
-            intents = self._all_cached_intents()
+            intents = self._all_cached_intents(progress.registered_input_ids)
         else:
             intents = ()
 
@@ -1528,25 +1622,94 @@ class PersistentLiveDecisionLoop:
         as_of: datetime,
         *,
         incremental: bool = True,
-    ) -> dict[str, MirrorSnapshot]:
-        snapshots: dict[str, MirrorSnapshot] = {}
-        reader = (
-            self.dependencies.incremental_decision_view
-            if incremental
-            else self.dependencies.decision_view
-        )
-        for input_id in input_ids:
-            snapshot = reader(
-                input_id,
+    ) -> tuple[dict[str, MirrorSnapshot], int]:
+        routing_revision_before = self.dependencies.routing_revision
+        try:
+            snapshots = self.dependencies.coherent_decision_views(
+                input_ids,
                 as_of=as_of,
                 max_age=self.max_quote_age,
+                incremental=incremental,
             )
-            snapshots[input_id] = snapshot
+        except FocusedMirrorRegistryChanged as exc:
+            raise _ConcurrentDecisionSnapshot(
+                "focused dependency routing changed during decision snapshot capture; "
+                "retrying before economic action"
+            ) from exc
+        captured_routing_revision = self.dependencies.routing_revision
+        if captured_routing_revision != routing_revision_before:
+            raise _ConcurrentDecisionSnapshot(
+                "focused dependency routing changed during decision snapshot capture; "
+                "retrying before economic action"
+            )
+
+        # Every economic cut, including provider-gap ZERO, must linearize against
+        # one exact mirror revision. Incremental cuts additionally require a drained
+        # invalidation buffer because their maintained key set depends on that routing.
+        # Full cuts read the whole mirror and may safely include already-pending
+        # invalidations, but an update after capture and before the trailing revision
+        # witness must still force a retry.
+        if snapshots:
+            revisions = {snapshot.revision for snapshot in snapshots.values()}
+            if len(revisions) != 1:
+                raise _ConcurrentDecisionSnapshot(
+                    "focused market inputs did not resolve to one mirror revision"
+                )
+            captured_revision = next(iter(revisions))
+            if incremental:
+                revision_before_invalidation_read = self.mirror_updates.mirror.revision
+                pending_count = self.mirror_updates.pending_count
+                full_refresh_required = self.mirror_updates.full_refresh_required
+                revision_after_invalidation_read = self.mirror_updates.mirror.revision
+                if (
+                    revision_before_invalidation_read != captured_revision
+                    or pending_count
+                    or full_refresh_required
+                    or revision_after_invalidation_read != captured_revision
+                ):
+                    raise _ConcurrentDecisionSnapshot(
+                        "market revision advanced during decision snapshot capture; "
+                        "retrying before economic action"
+                    )
+            elif self.mirror_updates.mirror.revision != captured_revision:
+                raise _ConcurrentDecisionSnapshot(
+                    "market revision advanced during full decision snapshot capture; "
+                    "retrying before economic action"
+                )
+
+        # Local observation/ingestion clocks are causal availability boundaries.
+        # A provider source timestamp can be old while the product receives the
+        # packet later; such a future constituent cannot enter this decision cut.
+        boundary = as_of.astimezone(timezone.utc)
+        for snapshot in snapshots.values():
+            for event in snapshot.events:
+                observed = MarketMirror._utc_timestamp(event.observed_ts)
+                ingested = MarketMirror._utc_timestamp(event.ingest_ts)
+                if (
+                    observed is None
+                    or ingested is None
+                    or observed > boundary
+                    or ingested > boundary
+                ):
+                    raise _ConcurrentDecisionSnapshot(
+                        "decision snapshot contains market evidence not causally "
+                        "available at the decision cutoff"
+                    )
+
+        if self.dependencies.routing_revision != captured_routing_revision:
+            raise _ConcurrentDecisionSnapshot(
+                "focused dependency routing changed after decision snapshot capture; "
+                "retrying before economic action"
+            )
+
+        # Publish the cache only after the complete cut passes all coherence checks.
+        # A rejected/torn attempt therefore cannot leave half-refreshed intent inputs.
+        for input_id, snapshot in snapshots.items():
             self._input_market_sha256[input_id] = _canonical_json_sha256(
                 [event.to_dict() for event in snapshot.events]
             )
             self._record_freshness_deadline(input_id, snapshot)
-        return snapshots
+        return snapshots, captured_routing_revision
 
     def _refresh_intents_from_snapshots(
         self,
@@ -1556,9 +1719,16 @@ class PersistentLiveDecisionLoop:
             produced = self.intent_factory(input_id, snapshot)
             self._intent_cache[input_id] = self._validated_intents(produced)
 
-    def _all_cached_intents(self) -> tuple[object, ...]:
+    def _all_cached_intents(
+        self,
+        input_ids: tuple[str, ...],
+    ) -> tuple[object, ...]:
+        if type(input_ids) is not tuple or any(
+            type(input_id) is not str for input_id in input_ids
+        ):
+            raise TypeError("input_ids must be a tuple of strings")
         flattened: list[object] = []
-        for input_id in self.dependencies.input_ids:
+        for input_id in sorted(input_ids):
             flattened.extend(self._intent_cache.get(input_id, ()))
         return tuple(flattened)
 
@@ -1616,19 +1786,47 @@ class PersistentLiveDecisionLoop:
         self,
         now: datetime,
         exc: Exception,
+        *,
+        expected_previous_progress: _Progress | None,
     ) -> LiveCycleResult:
         decision_ts = now.isoformat()
         affected = self.dependencies.input_ids
-        self._capture_input_views(affected, now, incremental=False)
-        market_sha = self._market_state_sha256()
-        self._write_pending(
-            decision_ts=decision_ts,
-            market_state_sha256=market_sha,
-            affected_input_ids=affected,
-            gate=_GATE_PROVIDER_GAP,
-        )
+        decision_context_sha256 = self._decision_context_sha256()
+        try:
+            gap_snapshots, captured_routing_revision = self._capture_input_views(
+                affected,
+                now,
+                incremental=False,
+            )
+            captured_mirror_revision = (
+                None
+                if not gap_snapshots
+                else next(iter(gap_snapshots.values())).revision
+            )
+            market_sha = self._market_state_sha256(affected)
+            decision_book = self._write_pending(
+                decision_ts=decision_ts,
+                market_state_sha256=market_sha,
+                affected_input_ids=affected,
+                gate=_GATE_PROVIDER_GAP,
+                expected_decision_context_sha256=decision_context_sha256,
+                expected_registered_input_ids=affected,
+                expected_previous_progress=expected_previous_progress,
+                expected_mirror_revision=captured_mirror_revision,
+                expected_dependency_routing_revision=captured_routing_revision,
+            )
+        except _ConcurrentDecisionSnapshot as exc:
+            self._needs_cache_rebuild = True
+            return LiveCycleResult(
+                LiveCycleStatus.BACKPRESSURE,
+                affected_input_ids=affected,
+                detail=(
+                    "provider gap decision cut was not causally coherent; "
+                    f"retrying before ZERO decision: {exc}"
+                ),
+            )
         plan = build_portfolio_plan(
-            self.book,
+            decision_book,
             (),
             self.authority.risk_policy,
             decision_ts,
@@ -1918,10 +2116,52 @@ class PersistentLiveDecisionLoop:
         market_state_sha256: str,
         affected_input_ids: tuple[str, ...],
         gate: str,
-    ) -> None:
+        expected_decision_context_sha256: str,
+        expected_registered_input_ids: tuple[str, ...],
+        expected_previous_progress: _Progress | None,
+        expected_mirror_revision: int | None,
+        expected_dependency_routing_revision: int,
+    ) -> PaperBook:
         _, decision_time = _canonical_timestamp("decision_ts", decision_ts)
         self.intent_provenance.assert_available_at(decision_time)
+        expected_context_sha256 = _canonical_sha256(
+            "expected decision_context_sha256",
+            expected_decision_context_sha256,
+        )
+        if type(expected_registered_input_ids) is not tuple or any(
+            type(input_id) is not str for input_id in expected_registered_input_ids
+        ):
+            raise TypeError("expected_registered_input_ids must be a tuple of strings")
+        if expected_mirror_revision is not None and (
+            type(expected_mirror_revision) is not int
+            or expected_mirror_revision < 0
+        ):
+            raise TypeError(
+                "expected_mirror_revision must be a non-negative integer or None"
+            )
+        if (
+            type(expected_dependency_routing_revision) is not int
+            or expected_dependency_routing_revision < 0
+        ):
+            raise TypeError(
+                "expected_dependency_routing_revision must be a non-negative integer"
+            )
         with WorkspaceEconomicLock(self.workspace):
+            durable_previous_progress = self._load_progress()
+            if durable_previous_progress != expected_previous_progress:
+                raise _ConcurrentDecisionSnapshot(
+                    "live decision progress advanced during snapshot assembly; "
+                    "retrying before economic action"
+                )
+            durable_input_specs = self._load_input_registry() or ()
+            current_input_specs = tuple(
+                sorted(self._input_specs.values(), key=lambda spec: spec.input_id)
+            )
+            if durable_input_specs != current_input_specs:
+                raise _ConcurrentDecisionSnapshot(
+                    "durable dependency registry changed during decision snapshot "
+                    "capture; retrying before economic action"
+                )
             # The snapshot is written before the cursor: a crash before cursor
             # publication leaves only ignorable stale snapshot bytes, while every
             # visible PENDING cursor has an exact pre-action portfolio witness.
@@ -1935,6 +2175,36 @@ class PersistentLiveDecisionLoop:
             # authority but no live generation/path binding.  Its first save
             # therefore establishes only the dedicated recovery-snapshot lineage.
             live_context_sha256 = self._decision_context_sha256()
+            if self.dependencies.input_ids != expected_registered_input_ids:
+                raise _ConcurrentDecisionSnapshot(
+                    "live dependency registry advanced during decision snapshot capture; "
+                    "retrying before economic action"
+                )
+            canonical_live_book_path = self.workspace / "paper_book.json"
+            if (
+                self.paper_execution is not None
+                or canonical_live_book_path.exists()
+            ):
+                if not canonical_live_book_path.exists():
+                    raise LiveDecisionProgressError(
+                        "canonical live PaperBook disappeared before decision publication"
+                    )
+                try:
+                    durable_live_book = PaperBook.load(canonical_live_book_path)
+                except (OSError, TypeError, ValueError) as exc:
+                    raise LiveDecisionProgressError(
+                        "canonical live PaperBook is unreadable before decision publication"
+                    ) from exc
+                if not self._same_book_state(durable_live_book, self.book):
+                    raise _ConcurrentDecisionSnapshot(
+                        "canonical PaperBook advanced during decision snapshot capture; "
+                        "retrying before economic action"
+                    )
+            if live_context_sha256 != expected_context_sha256:
+                raise _ConcurrentDecisionSnapshot(
+                    "portfolio/risk/dependency context advanced during decision "
+                    "snapshot capture; retrying before economic action"
+                )
             snapshot = self.authority.risk_policy._shadow_book_for_allocation(
                 self.book
             )
@@ -1972,6 +2242,8 @@ class PersistentLiveDecisionLoop:
                 not self._same_book_state(durable_pre_action, self.book)
                 or durable_context_sha256 != live_context_sha256
                 or current_context_sha256 != live_context_sha256
+                or live_context_sha256 != expected_context_sha256
+                or self.dependencies.input_ids != expected_registered_input_ids
             ):
                 raise LiveDecisionProgressError(
                     "pre-action PaperBook durability verification failed"
@@ -1989,8 +2261,40 @@ class PersistentLiveDecisionLoop:
                 ledger_offset=None,
                 gate=gate,
             )
-            atomic_write_json(self.progress_path, pending.to_dict())
+            try:
+                if expected_mirror_revision is None:
+                    with self.dependencies.hold_input_ids(
+                        expected_registered_input_ids,
+                        expected_routing_revision=expected_dependency_routing_revision,
+                    ):
+                        atomic_write_json(self.progress_path, pending.to_dict())
+                else:
+                    # Canonical lock order is mirror -> focused dependency registry.
+                    # Registration uses the same order when installing its initial
+                    # matching-key snapshot, preventing publication/register deadlock.
+                    with self.mirror_updates.mirror.hold_revision(
+                        expected_mirror_revision
+                    ):
+                        with self.dependencies.hold_input_ids(
+                            expected_registered_input_ids,
+                            expected_routing_revision=expected_dependency_routing_revision,
+                        ):
+                            atomic_write_json(
+                                self.progress_path,
+                                pending.to_dict(),
+                            )
+            except FocusedMirrorRegistryChanged as exc:
+                raise _ConcurrentDecisionSnapshot(
+                    "dependency registry/routing changed after decision snapshot capture; "
+                    "retrying before economic action"
+                ) from exc
+            except MarketMirrorRevisionChanged as exc:
+                raise _ConcurrentDecisionSnapshot(
+                    "market revision advanced after decision snapshot capture; "
+                    "retrying before economic action"
+                ) from exc
         self._progress = pending
+        return durable_pre_action
 
     def _load_input_registry(self) -> tuple[_InputSpec, ...] | None:
         if not self.inputs_path.exists():
@@ -2014,7 +2318,12 @@ class PersistentLiveDecisionLoop:
         values = raw["inputs"]
         if type(values) is not list:
             raise LiveDecisionProgressError("live dependency inputs must be a JSON array")
-        specs = tuple(_InputSpec.from_dict(value) for value in values)
+        specs = tuple(
+            sorted(
+                (_InputSpec.from_dict(value) for value in values),
+                key=lambda spec: spec.input_id,
+            )
+        )
         if len({spec.input_id for spec in specs}) != len(specs):
             raise LiveDecisionProgressError(
                 "live dependency registry contains duplicate input_id"
@@ -2026,7 +2335,9 @@ class PersistentLiveDecisionLoop:
         *,
         expected_previous: tuple[_InputSpec, ...],
     ) -> None:
-        candidate = tuple(self._input_specs.values())
+        candidate = tuple(
+            sorted(self._input_specs.values(), key=lambda spec: spec.input_id)
+        )
         payload = {
             "schema": _INPUTS_SCHEMA,
             "schema_version": _INPUTS_VERSION,
@@ -2034,6 +2345,15 @@ class PersistentLiveDecisionLoop:
             "inputs": [spec.to_dict() for spec in candidate],
         }
         with WorkspaceEconomicLock(self.workspace):
+            durable_progress = self._load_progress()
+            if (
+                durable_progress is not None
+                and durable_progress.phase in {_PHASE_PENDING, _PHASE_APPEND_PENDING}
+            ):
+                raise LiveDecisionProgressError(
+                    "cannot mutate live dependency registry while an economic "
+                    "decision is unfinished"
+                )
             durable = self._load_input_registry() or ()
             if durable != expected_previous:
                 raise LiveDecisionProgressError(
@@ -2240,9 +2560,13 @@ class PersistentLiveDecisionLoop:
                 "cannot verify persisted live decision progress"
             ) from exc
 
-    def _market_state_sha256(self) -> str:
+    def _market_state_sha256(self, input_ids: tuple[str, ...]) -> str:
+        if type(input_ids) is not tuple or any(
+            type(input_id) is not str for input_id in input_ids
+        ):
+            raise TypeError("input_ids must be a tuple of strings")
         payload: list[dict[str, str]] = []
-        for input_id in self.dependencies.input_ids:
+        for input_id in sorted(input_ids):
             try:
                 digest = self._input_market_sha256[input_id]
             except KeyError as exc:

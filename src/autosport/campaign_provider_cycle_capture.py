@@ -44,6 +44,18 @@ _EVIDENCE_SAVE = CompleteGameBoardEvidenceStore.save
 _EVIDENCE_PATH = CompleteGameBoardEvidenceStore._path
 _CANONICAL_PATH_EQUALITY = Path.__eq__
 _CANONICAL_PATH_EQUALITY_CODE = getattr(_CANONICAL_PATH_EQUALITY, "__code__", None)
+_CANONICAL_PATH_JOIN = Path.__truediv__
+_CANONICAL_PATH_JOIN_CODE = getattr(_CANONICAL_PATH_JOIN, "__code__", None)
+_CANONICAL_OBJECT_GETATTRIBUTE = object.__getattribute__
+_EVIDENCE_DIRECTORY = CompleteGameBoardEvidenceStore.DIRECTORY
+_EVIDENCE_DIRECTORY_SURFACE = inspect.getattr_static(
+    CompleteGameBoardEvidenceStore,
+    "DIRECTORY",
+)
+_PRECOMMIT_ROUTING_SEAMS = {
+    name: inspect.getattr_static(ForwardUniversePrecommitLocator, name)
+    for name in ("workspace", "authority_root")
+}
 _NEXT_SLOT = CollectorDeltaStore._next_collector_schedule_slot
 _SCHEDULE_DUE_AT = CollectorDeltaStore._collector_schedule_due_at
 _BEGIN_SCHEDULED = CollectorDeltaStore._begin_scheduled_collector_cycle
@@ -300,6 +312,95 @@ def _require_canonical_seams(
         )
 
 
+def _require_provider_evidence_campaign_scope(
+    precommit_locator: ForwardUniversePrecommitLocator,
+    evidence_store: CompleteGameBoardEvidenceStore,
+) -> None:
+    """Bind provider evidence routing to the exact prospective campaign trust root."""
+
+    if type(precommit_locator) is not ForwardUniversePrecommitLocator:
+        raise TypeError(
+            "precommit_locator must be exact ForwardUniversePrecommitLocator"
+        )
+    if type(evidence_store) is not CompleteGameBoardEvidenceStore:
+        raise TypeError(
+            "evidence_store must be the exact CompleteGameBoardEvidenceStore"
+        )
+    if (
+        inspect.getattr_static(
+            CompleteGameBoardEvidenceStore,
+            "DIRECTORY",
+            None,
+        )
+        != _EVIDENCE_DIRECTORY_SURFACE
+        or CompleteGameBoardEvidenceStore.DIRECTORY != _EVIDENCE_DIRECTORY
+    ):
+        raise CampaignProviderCycleCaptureIntegrityError(
+            "provider evidence directory authority changed"
+        )
+    for name, descriptor in _PRECOMMIT_ROUTING_SEAMS.items():
+        if (
+            inspect.getattr_static(
+                ForwardUniversePrecommitLocator,
+                name,
+                None,
+            )
+            is not descriptor
+        ):
+            raise CampaignProviderCycleCaptureIntegrityError(
+                "campaign precommit routing surface changed: " + name
+            )
+
+    locator_workspace = _PRECOMMIT_ROUTING_SEAMS["workspace"].__get__(
+        precommit_locator,
+        ForwardUniversePrecommitLocator,
+    )
+    locator_authority_root = _PRECOMMIT_ROUTING_SEAMS["authority_root"].__get__(
+        precommit_locator,
+        ForwardUniversePrecommitLocator,
+    )
+    state = _CANONICAL_OBJECT_GETATTRIBUTE(evidence_store, "__dict__")
+    if type(state) is not dict:
+        raise CampaignProviderCycleCaptureIntegrityError(
+            "provider evidence store routing state is unavailable"
+        )
+    if set(("workspace", "root", "authority_root")) - set(state):
+        raise CampaignProviderCycleCaptureIntegrityError(
+            "provider evidence store routing state is incomplete"
+        )
+    workspace = state["workspace"]
+    root = state["root"]
+    authority_root = state["authority_root"]
+
+    if (
+        type(locator_workspace) is not type(workspace)
+        or _CANONICAL_PATH_EQUALITY(workspace, locator_workspace) is not True
+    ):
+        raise CampaignProviderCycleCaptureIntegrityError(
+            "provider evidence workspace does not match campaign precommit workspace"
+        )
+    expected_root = _CANONICAL_PATH_JOIN(workspace, _EVIDENCE_DIRECTORY)
+    if (
+        type(root) is not type(expected_root)
+        or _CANONICAL_PATH_EQUALITY(root, expected_root) is not True
+    ):
+        raise CampaignProviderCycleCaptureIntegrityError(
+            "provider evidence root does not match canonical campaign workspace"
+        )
+    if locator_authority_root is None:
+        if authority_root is not None:
+            raise CampaignProviderCycleCaptureIntegrityError(
+                "provider evidence authority root does not match campaign precommit authority"
+            )
+    elif (
+        type(authority_root) is not type(locator_authority_root)
+        or _CANONICAL_PATH_EQUALITY(authority_root, locator_authority_root) is not True
+    ):
+        raise CampaignProviderCycleCaptureIntegrityError(
+            "provider evidence authority root does not match campaign precommit authority"
+        )
+
+
 _RECEIPT_ISSUANCE_CAPABILITY = object()
 
 
@@ -465,6 +566,7 @@ def capture_campaign_complete_game_board(
             "provider request source_id does not match campaign collector source"
         )
     require_seams = _require_canonical_seams
+    require_evidence_scope = _require_provider_evidence_campaign_scope
     instant = _instant
     establish_inception = establish_campaign_inception
     next_slot = _NEXT_SLOT
@@ -481,6 +583,7 @@ def capture_campaign_complete_game_board(
     module_globals = globals()
     expected_dispatch = (
         ("_require_canonical_seams", require_seams),
+        ("_require_provider_evidence_campaign_scope", require_evidence_scope),
         ("_instant", instant),
         ("establish_campaign_inception", establish_inception),
         ("_NEXT_SLOT", next_slot),
@@ -651,6 +754,7 @@ def capture_campaign_complete_game_board(
                 raise CampaignProviderCycleCaptureIntegrityError(
                     "campaign provider-cycle dispatch code changed: " + name
                 )
+        require_evidence_scope(precommit_locator, evidence_store)
 
     require_stable_dispatch()
     require_seams(store, evidence_store)
@@ -997,6 +1101,12 @@ def _seal_campaign_provider_cycle_capture_dispatch() -> None:
         "_EVIDENCE_PATH": _EVIDENCE_PATH,
         "_CANONICAL_PATH_EQUALITY": _CANONICAL_PATH_EQUALITY,
         "_CANONICAL_PATH_EQUALITY_CODE": _CANONICAL_PATH_EQUALITY_CODE,
+        "_CANONICAL_PATH_JOIN": _CANONICAL_PATH_JOIN,
+        "_CANONICAL_PATH_JOIN_CODE": _CANONICAL_PATH_JOIN_CODE,
+        "_CANONICAL_OBJECT_GETATTRIBUTE": _CANONICAL_OBJECT_GETATTRIBUTE,
+        "_EVIDENCE_DIRECTORY": _EVIDENCE_DIRECTORY,
+        "_EVIDENCE_DIRECTORY_SURFACE": _EVIDENCE_DIRECTORY_SURFACE,
+        "_PRECOMMIT_ROUTING_SEAMS": _PRECOMMIT_ROUTING_SEAMS,
     }
     expected_callables = tuple(
         (
@@ -1009,6 +1119,8 @@ def _seal_campaign_provider_cycle_capture_dispatch() -> None:
             ("_EVIDENCE_SAVE", _EVIDENCE_SAVE),
             ("_EVIDENCE_PATH", _EVIDENCE_PATH),
             ("_CANONICAL_PATH_EQUALITY", _CANONICAL_PATH_EQUALITY),
+            ("_CANONICAL_PATH_JOIN", _CANONICAL_PATH_JOIN),
+            ("_require_provider_evidence_campaign_scope", _require_provider_evidence_campaign_scope),
             ("_NEXT_SLOT", _NEXT_SLOT),
             ("_SCHEDULE_DUE_AT", _SCHEDULE_DUE_AT),
             ("_BEGIN_SCHEDULED", _BEGIN_SCHEDULED),
@@ -1073,6 +1185,19 @@ def _seal_campaign_provider_cycle_capture_dispatch() -> None:
         ):
             raise expected_error(
                 "campaign provider-cycle chronology/digest primitives changed"
+            )
+        if (
+            inspect.getattr_static(CompleteGameBoardEvidenceStore, "DIRECTORY", None)
+            != _EVIDENCE_DIRECTORY_SURFACE
+            or CompleteGameBoardEvidenceStore.DIRECTORY != _EVIDENCE_DIRECTORY
+            or any(
+                expected_getattr_static(ForwardUniversePrecommitLocator, name, None)
+                is not descriptor
+                for name, descriptor in _PRECOMMIT_ROUTING_SEAMS.items()
+            )
+        ):
+            raise expected_error(
+                "campaign provider evidence routing authority changed"
             )
         for name, expected, code in expected_callables:
             if module_globals.get(name) is not expected:

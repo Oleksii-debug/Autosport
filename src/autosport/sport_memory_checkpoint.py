@@ -26,7 +26,7 @@ from .monotonic_workspace_authority import (
 )
 from .opponent_intelligence import OpponentIntelligenceStore
 from .participant_identity import ParticipantIdentityRegistry
-from .sport_memory_runtime import SportMemoryRuntime
+from .sport_memory_runtime import SportMemoryRuntime, SportMemoryScope
 
 
 _SCHEMA = "autosport.sport_memory_authority_checkpoint"
@@ -937,7 +937,15 @@ class BoundSportMemoryRuntime(SportMemoryRuntime):
                 intended_state_sha256=intended,
                 kind="PUBLISH",
             )
-            tx_id = f"sport-memory-publish-{binding}"
+            current_history = _read_runtime_authority_history(monotonic)
+            next_generation = (
+                current_history[-1].generation + 1
+                if current_history
+                else 1
+            )
+            tx_id = (
+                f"sport-memory-publish-{next_generation}-{binding}"
+            )
             try:
                 monotonic.prepare(
                     tx_id=tx_id,
@@ -1225,6 +1233,7 @@ def _open_existing_bound_runtime(
             raise SportMemoryCheckpointError(
                 "sport-memory runtime disappeared during open"
             )
+        verified_opponent = bound._refresh_bound_authority()
         return _verify_runtime_snapshot_bindings(bound, verified_opponent)
 
 

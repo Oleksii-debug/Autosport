@@ -3605,3 +3605,298 @@ def test_runtime_authority_rejects_publication_os_dispatch_rebinding(
         _append(store, 0)
 
     assert hostile_calls == []
+
+def test_runtime_authority_store_expectation_root_rejects_mutation() -> None:
+    expectation_root = vars(DeploymentRuntimeAuthorityStore)[
+        "_CANONICAL_DISPATCH_EXPECTATIONS"
+    ]
+    original = expectation_root["_recover_state"]
+
+    with pytest.raises(TypeError):
+        expectation_root["_recover_state"] = expectation_root["records"]
+
+    assert expectation_root["_recover_state"] is original
+
+    with pytest.raises(
+        TypeError,
+        match="runtime authority store root surface is immutable",
+    ):
+        setattr(
+            DeploymentRuntimeAuthorityStore,
+            "_CANONICAL_DISPATCH_EXPECTATIONS",
+            {},
+        )
+
+
+def test_runtime_authority_rejects_coordinated_static_contract_root_rebinding(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "deployment-runtime-authority.json"
+    authority_root = _authority_root(tmp_path)
+    hostile_schema = "hostile.runtime.store"
+
+    monkeypatch.setattr(
+        deployment_runtime_authority,
+        "STORE_SCHEMA",
+        hostile_schema,
+    )
+    monkeypatch.setattr(
+        deployment_runtime_authority,
+        "_CANONICAL_STORE_SCHEMA_VALUE",
+        hostile_schema,
+    )
+
+    with pytest.raises(
+        DeploymentRuntimeAuthorityError,
+        match="static contract was replaced",
+    ):
+        DeploymentRuntimeAuthorityStore.initialize_pristine(
+            path,
+            authority_root=authority_root,
+        )
+
+    assert not path.exists()
+    assert not authority_root.exists()
+
+
+def test_runtime_authority_rejects_coordinated_record_helper_expectation_rebinding(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "deployment-runtime-authority.json"
+    store = DeploymentRuntimeAuthorityStore.initialize_pristine(
+        path,
+        authority_root=_authority_root(tmp_path),
+    )
+    hostile_calls: list[object] = []
+
+    def hostile(*args: object, **kwargs: object) -> object:
+        hostile_calls.append((args, kwargs))
+        raise AssertionError("hostile coordinated record helper executed")
+
+    forged_helpers = tuple(
+        (
+            name,
+            hostile if name == "_text" else helper,
+            hostile.__code__ if name == "_text" else code,
+        )
+        for name, helper, code in deployment_runtime_authority._CANONICAL_RECORD_HELPERS
+    )
+    monkeypatch.setattr(deployment_runtime_authority, "_text", hostile)
+    monkeypatch.setattr(
+        deployment_runtime_authority,
+        "_CANONICAL_RECORD_HELPERS",
+        forged_helpers,
+    )
+
+    with pytest.raises(DeploymentRuntimeAuthorityError, match="replaced"):
+        store.records()
+
+    assert hostile_calls == []
+
+
+def test_runtime_authority_rejects_coordinated_record_descriptor_expectation_rebinding(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "deployment-runtime-authority.json"
+    store = DeploymentRuntimeAuthorityStore.initialize_pristine(
+        path,
+        authority_root=_authority_root(tmp_path),
+    )
+    hostile_calls: list[object] = []
+
+    def hostile_to_dict(self: object) -> dict[str, object]:
+        hostile_calls.append(self)
+        raise AssertionError("hostile coordinated record encoder executed")
+
+    forged_descriptors = tuple(
+        (
+            name,
+            hostile_to_dict if name == "to_dict" else descriptor,
+            hostile_to_dict.__code__ if name == "to_dict" else code,
+        )
+        for name, descriptor, code in (
+            deployment_runtime_authority._CANONICAL_RECORD_CODEC_DESCRIPTORS
+        )
+    )
+    monkeypatch.setattr(
+        DeploymentRuntimeAuthorityRecord,
+        "to_dict",
+        hostile_to_dict,
+    )
+    monkeypatch.setattr(
+        deployment_runtime_authority,
+        "_CANONICAL_RECORD_CODEC_DESCRIPTORS",
+        forged_descriptors,
+    )
+
+    with pytest.raises(DeploymentRuntimeAuthorityError, match="replaced"):
+        store.records()
+
+    assert hostile_calls == []
+
+
+def test_runtime_authority_rejects_coordinated_record_type_expectation_rebinding(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "deployment-runtime-authority.json"
+    store = DeploymentRuntimeAuthorityStore.initialize_pristine(
+        path,
+        authority_root=_authority_root(tmp_path),
+    )
+
+    class HostileRecord:
+        pass
+
+    monkeypatch.setattr(
+        deployment_runtime_authority,
+        "DeploymentRuntimeAuthorityRecord",
+        HostileRecord,
+    )
+    monkeypatch.setattr(
+        deployment_runtime_authority,
+        "_CANONICAL_RECORD_TYPE",
+        HostileRecord,
+    )
+
+    with pytest.raises(
+        DeploymentRuntimeAuthorityError,
+        match="record type dispatch was replaced",
+    ):
+        store.records()
+
+
+def test_runtime_authority_rejects_coordinated_record_guard_root_rebinding(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "deployment-runtime-authority.json"
+    store = DeploymentRuntimeAuthorityStore.initialize_pristine(
+        path,
+        authority_root=_authority_root(tmp_path),
+    )
+    hostile_calls: list[None] = []
+
+    def hostile_guard() -> None:
+        hostile_calls.append(None)
+
+    monkeypatch.setattr(
+        deployment_runtime_authority,
+        "_assert_canonical_record_codec",
+        hostile_guard,
+    )
+    monkeypatch.setattr(
+        deployment_runtime_authority,
+        "_CANONICAL_RECORD_CODEC_GUARD",
+        hostile_guard,
+    )
+    monkeypatch.setattr(
+        deployment_runtime_authority,
+        "_CANONICAL_RECORD_CODEC_GUARD_CODE",
+        hostile_guard.__code__,
+    )
+
+    with pytest.raises(
+        DeploymentRuntimeAuthorityError,
+        match="record codec guard dispatch was replaced",
+    ):
+        store.records()
+
+    assert hostile_calls == []
+
+
+def test_runtime_authority_rejects_coordinated_record_requirement_root_rebinding(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "deployment-runtime-authority.json"
+    store = DeploymentRuntimeAuthorityStore.initialize_pristine(
+        path,
+        authority_root=_authority_root(tmp_path),
+    )
+    hostile_calls: list[None] = []
+
+    def hostile_requirement() -> None:
+        hostile_calls.append(None)
+
+    monkeypatch.setattr(
+        deployment_runtime_authority,
+        "_require_canonical_record_codec",
+        hostile_requirement,
+    )
+    monkeypatch.setattr(
+        deployment_runtime_authority,
+        "_CANONICAL_RECORD_CODEC_REQUIREMENT",
+        hostile_requirement,
+    )
+    monkeypatch.setattr(
+        deployment_runtime_authority,
+        "_CANONICAL_RECORD_CODEC_REQUIREMENT_CODE",
+        hostile_requirement.__code__,
+    )
+
+    with pytest.raises(
+        DeploymentRuntimeAuthorityError,
+        match="record codec requirement dispatch was replaced",
+    ):
+        store.records()
+
+    assert hostile_calls == []
+
+
+def test_runtime_authority_rejects_record_requirement_default_root_replacement(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "deployment-runtime-authority.json"
+    store = DeploymentRuntimeAuthorityStore.initialize_pristine(
+        path,
+        authority_root=_authority_root(tmp_path),
+    )
+    target = deployment_runtime_authority._require_canonical_record_codec
+    original_defaults = target.__defaults__
+    assert original_defaults is not None
+
+    def hostile_guard() -> None:
+        raise AssertionError("hostile default-captured record guard executed")
+
+    target.__defaults__ = (
+        hostile_guard,
+        hostile_guard.__code__,
+        hostile_guard.__defaults__,
+    )
+    try:
+        with pytest.raises(
+            DeploymentRuntimeAuthorityError,
+            match="record codec requirement dispatch was replaced",
+        ):
+            store.records()
+    finally:
+        target.__defaults__ = original_defaults
+
+
+def test_runtime_authority_store_dispatch_seal_rejects_method_default_replacement(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "deployment-runtime-authority.json"
+    store = DeploymentRuntimeAuthorityStore.initialize_pristine(
+        path,
+        authority_root=_authority_root(tmp_path),
+    )
+    target = vars(DeploymentRuntimeAuthorityStore)["_assert_binding_integrity"]
+    original_defaults = target.__defaults__
+    assert original_defaults is not None
+    replacement_defaults = (*original_defaults[:-1], object())
+
+    target.__defaults__ = replacement_defaults
+    try:
+        with pytest.raises(
+            DeploymentRuntimeAuthorityError,
+            match="method dispatch was replaced",
+        ):
+            store.records()
+    finally:
+        target.__defaults__ = original_defaults
+

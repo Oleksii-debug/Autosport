@@ -1183,6 +1183,31 @@ def test_product_policy_evaluation_issue_restart_idempotency_and_fresh_mint_reje
         protocol,
         source_evaluation_bundle_id=spec.evaluation_bundle_id,
     )
+    generic_source_sha256 = hashlib.sha256(
+        b"autosport.external-validity-policy-issuance.v1"
+    ).hexdigest()
+    expected_generic_issuance_id = _digest(
+        {
+            "schema_version": 3,
+            "kind": "autosport-external-validity-product-issuance-identity-v3",
+            "workspace_instance_id": authority.workspace_instance_id,
+            "workspace_locator_sha256": authority.workspace_locator_sha256,
+            "protocol_sha256": protocol.identity_sha256,
+            "evidence_scope_sha256": protocol.evidence_scope.identity_sha256,
+            "cohort_sha256": protocol.evidence_scope.cohort_sha256,
+            "policy_id": challenger.policy_id,
+            "policy_artifact_sha256": candidate_artifact_sha256,
+            "baseline_definition_sha256": None,
+        }
+    )
+    assert reference.issuance_id == expected_generic_issuance_id
+    generic_bundle = registry.get(
+        "EvaluationBundle",
+        reference.evaluation_bundle_id,
+    )
+    assert generic_bundle is not None
+    assert generic_bundle.payload["evaluator_source_sha256"] == generic_source_sha256
+
     issued = resolve_product_policy_evaluation(authority, protocol, reference)
     assert issued.policy_id == challenger.policy_id
     assert issued.policy_artifact_sha256 == candidate_artifact_sha256
@@ -1407,6 +1432,38 @@ def test_product_issued_no_action_baseline_cannot_receive_hindsight_wait_utility
         source_evaluation_bundle_id=spec.evaluation_bundle_id,
         baseline_kind=BaselineKind.NO_BET_WAIT,
     )
+    no_action_source_sha256 = hashlib.sha256(
+        b"autosport.external-validity-policy-issuance.no-action.v1"
+    ).hexdigest()
+    no_action_bundle = registry.get(
+        "EvaluationBundle",
+        reference.evaluation_bundle_id,
+    )
+    assert no_action_bundle is not None
+    assert (
+        no_action_bundle.payload["evaluator_source_sha256"]
+        == no_action_source_sha256
+    )
+    legacy_no_action_issuance_id = _digest(
+        {
+            "schema_version": 3,
+            "kind": "autosport-external-validity-product-issuance-identity-v3",
+            "workspace_instance_id": authority.workspace_instance_id,
+            "workspace_locator_sha256": authority.workspace_locator_sha256,
+            "protocol_sha256": protocol.identity_sha256,
+            "evidence_scope_sha256": protocol.evidence_scope.identity_sha256,
+            "cohort_sha256": protocol.evidence_scope.cohort_sha256,
+            "policy_id": no_action_policy.policy_id,
+            "policy_artifact_sha256": no_action_artifact_sha256,
+            "baseline_definition_sha256": next(
+                baseline.definition_sha256
+                for baseline in protocol.baselines
+                if baseline.kind is BaselineKind.NO_BET_WAIT
+            ),
+        }
+    )
+    assert reference.issuance_id != legacy_no_action_issuance_id
+
     issued = resolve_product_policy_evaluation(authority, protocol, reference)
 
     # Restart must preserve the same exact issued comparator before semantics are

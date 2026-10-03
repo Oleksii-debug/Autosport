@@ -13,6 +13,7 @@ import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, DecimalException, Inexact, InvalidOperation, localcontext
+from pathlib import Path
 from types import FunctionType
 from typing import Final
 
@@ -29,6 +30,33 @@ _SCHEMA: Final = "autosport.risk.paper-day-turnover-evidence"
 _SCHEMA_VERSION: Final = 1
 _METRIC_CLASS: Final = "PAPER_ACCEPTED_TURNOVER"
 _SCOPE_CLASS: Final = "UTC_DAY"
+
+_TURNOVER_PATH_EXPANDUSER = Path.expanduser
+_TURNOVER_PATH_EXPANDUSER_CODE = getattr(_TURNOVER_PATH_EXPANDUSER, "__code__", None)
+_TURNOVER_PATH_RESOLVE = Path.resolve
+_TURNOVER_PATH_RESOLVE_CODE = getattr(_TURNOVER_PATH_RESOLVE, "__code__", None)
+_TURNOVER_PATH_TRUEDIV = Path.__truediv__
+_TURNOVER_PATH_TRUEDIV_CODE = getattr(_TURNOVER_PATH_TRUEDIV, "__code__", None)
+_TURNOVER_CANONICAL_PATH_TYPE = type(Path())
+
+
+def _require_turnover_path_dispatch() -> None:
+    for current, expected, expected_code in (
+        (
+            Path.expanduser,
+            _TURNOVER_PATH_EXPANDUSER,
+            _TURNOVER_PATH_EXPANDUSER_CODE,
+        ),
+        (Path.resolve, _TURNOVER_PATH_RESOLVE, _TURNOVER_PATH_RESOLVE_CODE),
+        (Path.__truediv__, _TURNOVER_PATH_TRUEDIV, _TURNOVER_PATH_TRUEDIV_CODE),
+    ):
+        if (
+            current is not expected
+            or getattr(current, "__code__", None) is not expected_code
+        ):
+            raise PaperDayTurnoverEvidenceIncompleteError(
+                "turnover workspace path authority changed"
+            )
 
 
 def _require_current_paper_book_binding(book: PaperBook, book_path) -> None:
@@ -440,24 +468,50 @@ class PaperDayTurnoverResolver(metaclass=_PaperDayTurnoverResolverMeta):
             raise PaperDayTurnoverEvidenceIncompleteError(
                 "window_evidence must be canonical ProductDayRiskWindow"
             )
-        goal_workspace = goal_store.workspace.expanduser().resolve(strict=False)
-        if goal_workspace != window_store.workspace:
+        _require_turnover_path_dispatch()
+        if (
+            type(goal_store.workspace) is not _TURNOVER_CANONICAL_PATH_TYPE
+            or type(window_store.workspace) is not _TURNOVER_CANONICAL_PATH_TYPE
+            or type(goal_store.path) is not _TURNOVER_CANONICAL_PATH_TYPE
+            or type(window_store.state_path) is not _TURNOVER_CANONICAL_PATH_TYPE
+        ):
+            raise PaperDayTurnoverEvidenceIncompleteError(
+                "turnover workspace paths must use the canonical Path type"
+            )
+        goal_workspace = _TURNOVER_PATH_RESOLVE(
+            _TURNOVER_PATH_EXPANDUSER(goal_store.workspace),
+            strict=False,
+        )
+        window_workspace = _TURNOVER_PATH_RESOLVE(
+            _TURNOVER_PATH_EXPANDUSER(window_store.workspace),
+            strict=False,
+        )
+        if (
+            type(goal_workspace) is not _TURNOVER_CANONICAL_PATH_TYPE
+            or type(window_workspace) is not _TURNOVER_CANONICAL_PATH_TYPE
+            or goal_workspace != window_workspace
+        ):
             raise PaperDayTurnoverEvidenceIncompleteError(
                 "economic goal and risk day authority must share one canonical workspace"
             )
-        if goal_store.path != goal_store.workspace / EconomicGoalStore.FILE_NAME:
+        expected_goal_path = _TURNOVER_PATH_TRUEDIV(
+            goal_workspace,
+            EconomicGoalStore.FILE_NAME,
+        )
+        if goal_store.path != expected_goal_path:
             raise PaperDayTurnoverEvidenceIncompleteError(
                 "economic goal store path is not canonical for its workspace"
             )
-        if (
-            window_store.state_path
-            != window_store.workspace / ".autosport" / "risk_day_window.json"
-        ):
+        expected_day_path = _TURNOVER_PATH_TRUEDIV(
+            _TURNOVER_PATH_TRUEDIV(window_workspace, ".autosport"),
+            "risk_day_window.json",
+        )
+        if window_store.state_path != expected_day_path:
             raise PaperDayTurnoverEvidenceIncompleteError(
                 "risk day store path is not canonical for its workspace"
             )
 
-        book_path = goal_workspace / "paper_book.json"
+        book_path = _TURNOVER_PATH_TRUEDIV(goal_workspace, "paper_book.json")
         try:
             # Positive turnover evidence is a projection of the current durable
             # workspace PaperBook generation, never a caller-selected in-memory

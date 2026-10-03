@@ -1281,13 +1281,32 @@ class RealExecutionLedger:
                     for index, candidate in enumerate(events)
                     if candidate is first
                 )
+                prior_events = events[:first_index]
                 if not any(
                     prior["event_type"] == EventType.SUPERVISED_PLAN_ISSUED.value
                     and prior["plan_id"] == first["plan_id"]
-                    for prior in events[:first_index]
+                    for prior in prior_events
                 ):
                     raise ExecutionLedgerIntegrityError(
                         "supervised attempt reservation must follow product issuance"
+                    )
+                approval_active = False
+                for prior in prior_events:
+                    if prior["plan_id"] != first["plan_id"]:
+                        continue
+                    if (
+                        prior["event_type"]
+                        == EventType.SUPERVISED_APPROVAL_BOUND.value
+                    ):
+                        approval_active = True
+                    elif (
+                        prior["event_type"]
+                        == EventType.SUPERVISED_APPROVAL_REVOKED.value
+                    ):
+                        approval_active = False
+                if not approval_active:
+                    raise ExecutionLedgerIntegrityError(
+                        "supervised attempt reservation requires prior active approval"
                     )
             if set(first["payload"]) != {"effect_fingerprint", "reserved_at"}:
                 raise ExecutionLedgerIntegrityError(
@@ -2140,14 +2159,30 @@ class RealExecutionLedger:
             plan_event, action = self._action_payload(
                 events, plan_id, action_id
             )
-            if plan_id.startswith("supervised-v2-") and not any(
-                event["event_type"] == EventType.SUPERVISED_PLAN_ISSUED.value
-                and event["plan_id"] == plan_id
-                for event in events
-            ):
-                raise ExecutionStateError(
-                    "supervised execution attempt requires prior product issuance"
-                )
+            if plan_id.startswith("supervised-v2-"):
+                if not any(
+                    event["event_type"] == EventType.SUPERVISED_PLAN_ISSUED.value
+                    and event["plan_id"] == plan_id
+                    for event in events
+                ):
+                    raise ExecutionStateError(
+                        "supervised execution attempt requires prior product issuance"
+                    )
+                approval_active = False
+                for event in events:
+                    if event["plan_id"] != plan_id:
+                        continue
+                    if event["event_type"] == EventType.SUPERVISED_APPROVAL_BOUND.value:
+                        approval_active = True
+                    elif (
+                        event["event_type"]
+                        == EventType.SUPERVISED_APPROVAL_REVOKED.value
+                    ):
+                        approval_active = False
+                if not approval_active:
+                    raise ExecutionStateError(
+                        "supervised execution attempt requires active durable approval"
+                    )
             if self._stale(events, plan_id):
                 raise ExecutionStateError(
                     "execution plan is stale; recompute before another action"

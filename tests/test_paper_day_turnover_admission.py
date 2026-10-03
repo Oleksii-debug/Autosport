@@ -14,6 +14,8 @@ from autosport.economic_goal import EconomicGoalContract
 from autosport.economic_goal_store import EconomicGoalStore
 from autosport.paper import PaperBook
 from autosport.risk import PaperRiskPolicy, ProposedTicketRiskContext
+from autosport.risk_day_window import ProductDayRiskWindowStore
+from autosport.risk_turnover_evidence import PaperDayTurnoverResolver
 from autosport.workspace_lock import WorkspaceEconomicLock
 
 
@@ -118,6 +120,72 @@ def _admit(tmp_path, book: PaperBook, goal: EconomicGoalContract, placed_at: str
         currency="USD",
     )
     return baseline, result
+
+
+def _replacement_code_preserving_freevars(target):
+    def forged(*args, **kwargs):
+        del args, kwargs
+        return None
+
+    return forged.__code__.replace(co_freevars=target.__code__.co_freevars)
+
+
+def _assert_day_authority_code_mutation_rejected(tmp_path, target) -> None:
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    old = now - timedelta(days=2)
+    goal = _goal()
+    EconomicGoalStore(tmp_path).initialize_owner(goal)
+    book = _book_with_settled_turnover(placed_at=_timestamp(old), stake="50")
+    book.save(tmp_path / "paper_book.json")
+    candidate = _leg("day-authority-code")
+    context = _context(candidate, _timestamp(now))
+    policy = _policy(goal)
+    original_code = target.__code__
+
+    try:
+        target.__code__ = _replacement_code_preserving_freevars(target)
+        with pytest.raises(RuntimeError, match="product day .* executable authority changed"):
+            admit_paper_ticket(
+                workspace=tmp_path,
+                book=book,
+                risk_policy=policy,
+                stake=Decimal("0.01"),
+                legs=(candidate,),
+                reason="mutated product-day executable must fail closed",
+                placed_at=_timestamp(now),
+                context=context,
+                provider_source_ids=("provider-1",),
+                bankroll_id="paper-bankroll",
+                currency="USD",
+            )
+    finally:
+        target.__code__ = original_code
+
+    persisted = PaperBook.load(tmp_path / "paper_book.json")
+    assert persisted.tickets.keys() == book.tickets.keys()
+
+
+def test_turnover_resolver_wrapper_code_mutation_cannot_mint_headroom(tmp_path):
+    descriptor = PaperDayTurnoverResolver.__dict__["resolve"]
+    assert type(descriptor) is classmethod
+    _assert_day_authority_code_mutation_rejected(tmp_path, descriptor.__func__)
+
+
+@pytest.mark.parametrize(
+    "method_name",
+    (
+        "__init__",
+        "current",
+        "require_current",
+        "require_current_under_lock",
+        "_current_under_lock",
+        "_publish_day",
+        "_evidence",
+    ),
+)
+def test_risk_day_wrapper_code_mutation_cannot_mint_headroom(tmp_path, method_name):
+    target = ProductDayRiskWindowStore.__dict__[method_name]
+    _assert_day_authority_code_mutation_rejected(tmp_path, target)
 
 
 def test_admission_rejects_lock_validator_dependency_rebinding(tmp_path):

@@ -814,6 +814,55 @@ def test_credential_rotation_revalidation_can_link_predecessor_and_recover():
     assert "product-owned upstream authority" in decision.reason
     assert decision.evidence_id == fresh.evidence_id
 
+def test_successor_cannot_recover_from_observation_not_newer_than_predecessor():
+    first = _profile()
+    positive = _evidence(first)
+    journal = CapabilityEvidenceJournal()
+    journal.publish(positive)
+
+    revoked_profile = _profile(
+        state=BookmakerCapabilityState.UNSUPPORTED,
+        observed_at="2026-09-21T10:05:00+00:00",
+    )
+    revoked = _evidence(
+        revoked_profile,
+        support_state=BookmakerCapabilityState.UNSUPPORTED,
+        observed_at=revoked_profile.observed_at,
+        committed_at="2026-09-21T10:06:00+00:00",
+        review_due_at="2026-09-22T10:06:00+00:00",
+        predecessor_id=positive.evidence_id,
+    )
+    journal.publish(revoked)
+
+    stale_recovery_profile = _profile(observed_at="2026-09-21T10:04:00+00:00")
+    stale_recovery = _evidence(
+        stale_recovery_profile,
+        observed_at=stale_recovery_profile.observed_at,
+        committed_at="2026-09-21T10:07:00+00:00",
+        review_due_at="2026-09-22T10:07:00+00:00",
+        predecessor_id=revoked.evidence_id,
+    )
+    with pytest.raises(
+        CapabilityEvidenceError,
+        match="successor evidence must be observed after predecessor",
+    ):
+        journal.publish(stale_recovery)
+
+    same_time_profile = _profile(observed_at=revoked_profile.observed_at)
+    same_time_recovery = _evidence(
+        same_time_profile,
+        observed_at=same_time_profile.observed_at,
+        committed_at="2026-09-21T10:08:00+00:00",
+        review_due_at="2026-09-22T10:08:00+00:00",
+        predecessor_id=revoked.evidence_id,
+    )
+    with pytest.raises(
+        CapabilityEvidenceError,
+        match="successor evidence must be observed after predecessor",
+    ):
+        journal.publish(same_time_recovery)
+
+
 def test_successor_must_link_exact_latest_same_scope_predecessor():
     first = _profile()
     positive = _evidence(first)

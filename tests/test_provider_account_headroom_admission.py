@@ -3002,3 +3002,102 @@ def test_capital_attempt_state_rebinding_cannot_reclassify_reserved_liability(
             action_id="target-action",
         )
 
+def test_account_snapshot_boundary_assert_rebinding_cannot_forge_live_origin(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    acquired, _ = _acquire_balance(monkeypatch, tmp_path, "100")
+    target = _plan("target", _action("target-action", "10"))
+    ledger = _ledger_with_plans(tmp_path, target)
+    boundary = headroom_module._ACCOUNT_SNAPSHOT_AUTHORITY_BOUNDARY
+    hostile_calls: list[object] = []
+
+    def hostile_assert(self, value):
+        hostile_calls.append((self, value))
+
+    monkeypatch.setattr(
+        type(boundary),
+        "assert_live",
+        hostile_assert,
+    )
+
+    with pytest.raises(
+        ProviderAccountHeadroomError,
+        match="canonical account snapshot headroom authority changed",
+    ):
+        _assess(
+            ledger,
+            acquired,
+            plan_id="target",
+            action_id="target-action",
+        )
+
+    assert hostile_calls == []
+
+
+def test_account_snapshot_fingerprint_rebinding_cannot_preserve_mutated_balance(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    acquired, _ = _acquire_balance(monkeypatch, tmp_path, "100")
+    target = _plan("target", _action("target-action", "10"))
+    ledger = _ledger_with_plans(tmp_path, target)
+    boundary = headroom_module._ACCOUNT_SNAPSHOT_AUTHORITY_BOUNDARY
+    hostile_calls: list[object] = []
+
+    def hostile_fingerprint(value):
+        hostile_calls.append(value)
+        return acquired.receipt.snapshot_sha256
+
+    monkeypatch.setattr(
+        type(boundary),
+        "_fingerprint",
+        staticmethod(hostile_fingerprint),
+    )
+
+    with pytest.raises(
+        ProviderAccountHeadroomError,
+        match="canonical account snapshot headroom authority changed",
+    ):
+        _assess(
+            ledger,
+            acquired,
+            plan_id="target",
+            action_id="target-action",
+        )
+
+    assert hostile_calls == []
+
+
+def test_account_snapshot_payload_rebinding_cannot_hide_balance_mutation(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    acquired, _ = _acquire_balance(monkeypatch, tmp_path, "100")
+    target = _plan("target", _action("target-action", "10"))
+    ledger = _ledger_with_plans(tmp_path, target)
+    hostile_calls: list[object] = []
+
+    def hostile_payload(*args, **kwargs):
+        hostile_calls.append((args, kwargs))
+        return {}
+
+    monkeypatch.setattr(
+        headroom_module._account_acquisition,
+        "_snapshot_payload",
+        hostile_payload,
+    )
+
+    with pytest.raises(
+        ProviderAccountHeadroomError,
+        match="canonical account snapshot headroom authority changed",
+    ):
+        _assess(
+            ledger,
+            acquired,
+            plan_id="target",
+            action_id="target-action",
+        )
+
+    assert hostile_calls == []
+

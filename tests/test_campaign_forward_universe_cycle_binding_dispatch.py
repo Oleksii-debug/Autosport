@@ -367,3 +367,57 @@ def test_private_integrity_guard_rejects_json_module_rebind(
         match="chronology/digest primitives changed",
     ):
         binding._require_dispatch_integrity()
+
+
+def test_saved_resolver_rejects_issuer_and_witness_double_rebind(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    resolver = binding.resolve_campaign_forward_universe_cycle_authority
+    hostile_calls: list[str] = []
+
+    def hostile(cls, **_kwargs):
+        del cls
+        hostile_calls.append("issuer")
+        raise AssertionError("hostile authority issuer executed")
+
+    monkeypatch.setattr(
+        binding.CampaignForwardUniverseCycleAuthority,
+        "_issue",
+        classmethod(hostile),
+    )
+    hostile_surface = inspect.getattr_static(
+        binding.CampaignForwardUniverseCycleAuthority,
+        "_issue",
+    )
+    monkeypatch.setattr(
+        binding,
+        "_CANONICAL_AUTHORITY_ISSUER",
+        hostile_surface,
+    )
+    monkeypatch.setattr(
+        binding,
+        "_CANONICAL_AUTHORITY_ISSUER_FUNCTION",
+        hostile_surface.__func__,
+    )
+    monkeypatch.setattr(
+        binding,
+        "_CANONICAL_AUTHORITY_ISSUER_CODE",
+        hostile_surface.__func__.__code__,
+    )
+
+    with pytest.raises(
+        binding.CampaignForwardUniverseCycleBindingError,
+        match="authority witness globals changed",
+    ):
+        resolver(
+            precommit_locator=None,
+            collector_store=None,
+            source_spec=None,
+            cycle_receipt=None,
+            provider_evidence_store=None,
+            universe_store=None,
+            protocol=None,
+            event_lifecycle=None,
+        )
+
+    assert hostile_calls == []

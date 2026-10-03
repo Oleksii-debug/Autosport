@@ -304,9 +304,12 @@ class CampaignInceptionSourceSpec:
             raise CampaignInceptionIntegrityError(
                 "max_items must be a positive integer"
             )
-        if self.evaluation_start_slot_ordinal != 0:
+        if (
+            type(self.evaluation_start_slot_ordinal) is not int
+            or self.evaluation_start_slot_ordinal != 0
+        ):
             raise CampaignInceptionIntegrityError(
-                "campaign inception currently requires evaluation slot zero as first slot"
+                "campaign inception requires exact integer slot zero as first slot"
             )
         if (
             type(self.evaluation_end_slot_ordinal) is not int

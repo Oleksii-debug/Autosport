@@ -1522,3 +1522,65 @@ def test_runtime_authority_rejects_sha_validator_code_replacement_at_binding_bou
             store.records()
     finally:
         target.__code__ = original_code
+
+
+def test_runtime_authority_rejects_configure_descriptor_replacement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hostile_calls: list[object] = []
+
+    def hostile_configure(
+        self: object,
+        path: object,
+        *,
+        authority_root: object,
+    ) -> None:
+        hostile_calls.append((self, path, authority_root))
+        raise AssertionError("hostile runtime authority configure executed")
+
+    monkeypatch.setattr(
+        DeploymentRuntimeAuthorityStore,
+        "_configure",
+        hostile_configure,
+    )
+    with pytest.raises(
+        DeploymentRuntimeAuthorityError,
+        match="method dispatch was replaced",
+    ):
+        DeploymentRuntimeAuthorityStore.initialize_pristine(
+            tmp_path / "deployment-runtime-authority.json",
+            authority_root=_authority_root(tmp_path),
+        )
+
+    assert hostile_calls == []
+
+
+def test_runtime_authority_rejects_configure_code_replacement(
+    tmp_path: Path,
+) -> None:
+    target = DeploymentRuntimeAuthorityStore._configure
+    original_code = target.__code__
+
+    def hostile_configure(
+        self: object,
+        path: object,
+        *,
+        authority_root: object,
+    ) -> None:
+        del self, path, authority_root
+        raise AssertionError("hostile runtime authority configure code executed")
+
+    assert hostile_configure.__code__.co_freevars == original_code.co_freevars
+    target.__code__ = hostile_configure.__code__
+    try:
+        with pytest.raises(
+            DeploymentRuntimeAuthorityError,
+            match="method dispatch was replaced",
+        ):
+            DeploymentRuntimeAuthorityStore.initialize_pristine(
+                tmp_path / "deployment-runtime-authority.json",
+                authority_root=_authority_root(tmp_path),
+            )
+    finally:
+        target.__code__ = original_code

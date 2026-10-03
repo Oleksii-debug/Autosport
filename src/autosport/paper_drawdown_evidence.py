@@ -244,6 +244,74 @@ class PaperRealizedDrawdownEvidence:
             raise PaperDrawdownEvidenceError(
                 "drawdown evidence point identities must be unique"
             )
+
+        opened_ticket_ids: set[str] = set()
+        settled_ticket_ids: set[str] = set()
+        settlement_times_complete = True
+        for point in self.points[1:]:
+            if point.action == "initial":
+                raise PaperDrawdownEvidenceError(
+                    "drawdown evidence initial action may appear only at path origin"
+                )
+            assert point.ticket_id is not None
+            if point.action == "open":
+                if point.ticket_id in opened_ticket_ids:
+                    raise PaperDrawdownEvidenceError(
+                        "drawdown evidence ticket may open only once"
+                    )
+                opened_ticket_ids.add(point.ticket_id)
+                continue
+            if (
+                point.ticket_id not in opened_ticket_ids
+                or point.ticket_id in settled_ticket_ids
+            ):
+                raise PaperDrawdownEvidenceError(
+                    "drawdown evidence settlement must follow one canonical open"
+                )
+            settled_ticket_ids.add(point.ticket_id)
+            settlement_times_complete = (
+                settlement_times_complete and point.event_time is not None
+            )
+
+        if self.open_position_count != len(opened_ticket_ids - settled_ticket_ids):
+            raise PaperDrawdownEvidenceError(
+                "drawdown evidence open count does not match the path"
+            )
+        if self.settlement_availability_complete != settlement_times_complete:
+            raise PaperDrawdownEvidenceError(
+                "drawdown evidence settlement availability does not match the path"
+            )
+        if self.current_drawdown_amount > self.historical_max_drawdown_amount:
+            raise PaperDrawdownEvidenceError(
+                "drawdown evidence current drawdown exceeds historical maximum"
+            )
+        if (self.current_drawdown_amount == 0) != self.recovered_to_peak:
+            raise PaperDrawdownEvidenceError(
+                "drawdown evidence current drawdown is inconsistent with recovery"
+            )
+
+        point_ids = {point.point_id for point in self.points}
+        if self.historical_max_drawdown_amount > 0:
+            assert self.historical_max_drawdown_peak_id is not None
+            assert self.historical_max_drawdown_trough_id is not None
+            if (
+                self.historical_max_drawdown_peak_id not in point_ids
+                or self.historical_max_drawdown_trough_id not in point_ids
+            ):
+                raise PaperDrawdownEvidenceError(
+                    "drawdown evidence loss episode identity is not in the path"
+                )
+            point_indexes = {
+                point.point_id: index for index, point in enumerate(self.points)
+            }
+            if (
+                point_indexes[self.historical_max_drawdown_peak_id]
+                >= point_indexes[self.historical_max_drawdown_trough_id]
+            ):
+                raise PaperDrawdownEvidenceError(
+                    "drawdown evidence loss episode order is invalid"
+                )
+
         if min(point.equity for point in self.points) != self.minimum_equity:
             raise PaperDrawdownEvidenceError(
                 "drawdown evidence minimum does not match the path"

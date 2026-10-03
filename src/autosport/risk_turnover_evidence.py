@@ -570,16 +570,25 @@ class PaperDayTurnoverResolver(metaclass=_PaperDayTurnoverResolverMeta):
         constituents: list[dict[str, str]] = []
         stakes: list[Decimal] = []
         for ticket in book.tickets.values():
-            placed_at = _parse_timestamp(ticket.placed_at, "ticket.placed_at")
-            if not (start <= placed_at < end):
-                continue
+            # Positive bounded-day evidence cannot infer day membership from
+            # PaperTicket.placed_at alone: direct/legacy PAPER opening accepts a
+            # caller-supplied timestamp. Until durable product-issued per-ticket
+            # admission chronology exists, any ticket that cannot be proven to
+            # belong to this exact EconomicGoal/current day makes the bounded
+            # projection incomplete. Admission then falls back to the existing
+            # conservative whole-history turnover policy instead of minting room.
             if ticket.bankroll_id != goal.bankroll_id:
                 raise PaperDayTurnoverEvidenceIncompleteError(
-                    "current-day PAPER ticket lacks exact EconomicGoal bankroll identity"
+                    "PAPER ticket lacks exact EconomicGoal bankroll identity"
                 )
             if ticket.currency != goal.currency:
                 raise PaperDayTurnoverEvidenceIncompleteError(
-                    "current-day PAPER ticket lacks exact EconomicGoal currency identity"
+                    "PAPER ticket lacks exact EconomicGoal currency identity"
+                )
+            placed_at = _parse_timestamp(ticket.placed_at, "ticket.placed_at")
+            if not (start <= placed_at < end):
+                raise PaperDayTurnoverEvidenceIncompleteError(
+                    "PAPER ticket lacks product-issued UTC-day admission chronology"
                 )
             stakes.append(ticket.stake)
             constituents.append(

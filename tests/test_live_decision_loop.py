@@ -3114,6 +3114,42 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             self.assertEqual(final.status, LiveCycleStatus.DECIDED)
             self.assertGreater((workspace / "decisions.jsonl").stat().st_size, before_size)
 
+    def test_legacy_committed_record_cannot_authorize_current_progress(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(
+                    workspace,
+                    [(self._event(selection="selection-a", sequence=1),)],
+                ),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START + timedelta(seconds=1)),
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+            result = loop.run_cycle()
+            self.assertEqual(result.status, LiveCycleStatus.DECIDED)
+            progress = loop._progress
+            self.assertIsNotNone(progress)
+            self.assertEqual(progress.phase, "committed")
+
+            class LegacyRecord:
+                payload = {"schema_version": 1}
+
+            with patch(
+                "autosport.live_decision_loop.verify_economic_goal_binding",
+                return_value=None,
+            ), patch.object(
+                loop,
+                "_verified_ledger_record_at_offset",
+                return_value=LegacyRecord(),
+            ):
+                with self.assertRaisesRegex(
+                    DecisionLedgerIntegrityError,
+                    "lacks canonical intent provenance",
+                ):
+                    loop._verify_committed_progress_ledger_binding(progress)
+
     def test_restart_verifies_complete_historical_decision_ledger(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

@@ -5,6 +5,7 @@ from decimal import Decimal, localcontext
 
 import pytest
 
+import autosport.execution_capital_at_risk as capital_risk_module
 from autosport.execution_capital_at_risk import (
     CapitalRiskTruth,
     ExecutionCapitalAtRiskError,
@@ -599,3 +600,84 @@ def test_lay_side_fails_closed_until_canonical_order_economics_is_composed(
         match="supports Betfair BACK only",
     ):
         resolve_execution_capital_at_risk(ledger, plan.plan_id)
+
+def test_resolver_rejects_execution_view_alias_rebinding_before_dispatch(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    ledger, plan = _ledger(tmp_path, _action(stake="10"))
+    called = False
+
+    def fake_view(*_args, **_kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("substituted execution view must not run")
+
+    monkeypatch.setattr(
+        capital_risk_module,
+        "_VERIFIED_EXECUTION_VIEW",
+        fake_view,
+    )
+
+    with pytest.raises(
+        ExecutionCapitalAtRiskError,
+        match="canonical execution-ledger read authority changed",
+    ):
+        resolve_execution_capital_at_risk(ledger, plan.plan_id)
+
+    assert called is False
+
+
+def test_resolver_rejects_class_execution_view_replacement_before_dispatch(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    ledger, plan = _ledger(tmp_path, _action(stake="10"))
+    called = False
+
+    def fake_view(self, plan_id):
+        nonlocal called
+        called = True
+        raise AssertionError("replaced ledger reader must not run")
+
+    monkeypatch.setattr(
+        RealExecutionLedger,
+        "verified_execution_view",
+        fake_view,
+    )
+
+    with pytest.raises(
+        ExecutionCapitalAtRiskError,
+        match="canonical execution-ledger read authority changed",
+    ):
+        resolve_execution_capital_at_risk(ledger, plan.plan_id)
+
+    assert called is False
+
+
+def test_currentness_rejects_verified_snapshot_code_mutation_before_dispatch(
+    tmp_path,
+) -> None:
+    ledger, plan = _ledger(tmp_path, _action(stake="10"))
+    evidence = resolve_execution_capital_at_risk(ledger, plan.plan_id)
+    reader = RealExecutionLedger.verified_snapshot
+    original_code = reader.__code__
+    called = False
+
+    def fake_snapshot(self):
+        nonlocal called
+        called = True
+        raise AssertionError("mutated snapshot reader must not run")
+
+    try:
+        reader.__code__ = fake_snapshot.__code__
+        with pytest.raises(
+            ExecutionCapitalAtRiskError,
+            match="canonical execution-ledger read authority changed",
+        ):
+            evidence.assert_issued_current(ledger)
+    finally:
+        reader.__code__ = original_code
+
+    assert called is False
+

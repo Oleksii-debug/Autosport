@@ -307,12 +307,14 @@ class ExecutionCapitalAtRiskEvidence:
             raise ExecutionCapitalAtRiskStale(
                 "capital-at-risk evidence belongs to a different execution ledger source"
             )
+        _require_ledger_read_authority()
         try:
-            snapshot = _VERIFIED_SNAPSHOT(ledger)
+            snapshot = _CANONICAL_VERIFIED_SNAPSHOT(ledger)
         except ExecutionLedgerIntegrityError as exc:
             raise ExecutionCapitalAtRiskStale(
                 "execution ledger currentness failed during capital-at-risk validation"
             ) from exc
+        _require_ledger_read_authority()
         if (
             snapshot.sha256 != self.snapshot_sha256
             or snapshot.event_count != self.event_count
@@ -322,8 +324,34 @@ class ExecutionCapitalAtRiskEvidence:
             )
 
 
-_VERIFIED_EXECUTION_VIEW = RealExecutionLedger.verified_execution_view
-_VERIFIED_SNAPSHOT = RealExecutionLedger.verified_snapshot
+_CANONICAL_VERIFIED_EXECUTION_VIEW = RealExecutionLedger.verified_execution_view
+_CANONICAL_VERIFIED_SNAPSHOT = RealExecutionLedger.verified_snapshot
+_CANONICAL_VERIFIED_EXECUTION_VIEW_CODE = _CANONICAL_VERIFIED_EXECUTION_VIEW.__code__
+_CANONICAL_VERIFIED_SNAPSHOT_CODE = _CANONICAL_VERIFIED_SNAPSHOT.__code__
+
+# Compatibility aliases remain intentionally observable. They are not authority:
+# any rebinding is treated as process-integrity failure before durable truth is read.
+_VERIFIED_EXECUTION_VIEW = _CANONICAL_VERIFIED_EXECUTION_VIEW
+_VERIFIED_SNAPSHOT = _CANONICAL_VERIFIED_SNAPSHOT
+
+
+def _require_ledger_read_authority() -> None:
+    if (
+        _VERIFIED_EXECUTION_VIEW is not _CANONICAL_VERIFIED_EXECUTION_VIEW
+        or _VERIFIED_SNAPSHOT is not _CANONICAL_VERIFIED_SNAPSHOT
+        or RealExecutionLedger.verified_execution_view
+        is not _CANONICAL_VERIFIED_EXECUTION_VIEW
+        or RealExecutionLedger.verified_snapshot is not _CANONICAL_VERIFIED_SNAPSHOT
+        or _CANONICAL_VERIFIED_EXECUTION_VIEW.__code__
+        is not _CANONICAL_VERIFIED_EXECUTION_VIEW_CODE
+        or _CANONICAL_VERIFIED_SNAPSHOT.__code__
+        is not _CANONICAL_VERIFIED_SNAPSHOT_CODE
+    ):
+        raise ExecutionCapitalAtRiskError(
+            "canonical execution-ledger read authority changed"
+        )
+
+
 _ISSUED_LOCK = threading.RLock()
 _ISSUED: dict[
     int,
@@ -604,7 +632,12 @@ def resolve_execution_capital_at_risk(
         raise ValueError("plan_id must be non-empty text")
 
     ledger_source_sha256 = _ledger_source_sha256(ledger)
-    view: VerifiedExecutionPlanView = _VERIFIED_EXECUTION_VIEW(ledger, plan_id)
+    _require_ledger_read_authority()
+    view: VerifiedExecutionPlanView = _CANONICAL_VERIFIED_EXECUTION_VIEW(
+        ledger,
+        plan_id,
+    )
+    _require_ledger_read_authority()
     attempts = tuple(_attempt_risk(item) for item in view.attempts)
     account_ids = {item.account_id for item in attempts}
     if len(account_ids) > 1:
@@ -657,7 +690,9 @@ def resolve_execution_capital_at_risk(
         raise ExecutionCapitalAtRiskStale(
             "execution ledger source changed during capital-at-risk resolution"
         )
-    after = _VERIFIED_SNAPSHOT(ledger)
+    _require_ledger_read_authority()
+    after = _CANONICAL_VERIFIED_SNAPSHOT(ledger)
+    _require_ledger_read_authority()
     if (
         after.sha256 != view.snapshot_sha256
         or after.event_count != view.event_count

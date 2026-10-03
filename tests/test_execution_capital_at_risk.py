@@ -676,3 +676,79 @@ def test_currentness_rejects_verified_snapshot_code_mutation_before_dispatch(
     finally:
         reader.__code__ = original_code
 
+def test_resolver_rejects_verified_execution_view_code_mutation_before_dispatch(
+    tmp_path,
+) -> None:
+    ledger, plan = _ledger(tmp_path, _action(stake="10"))
+    reader = RealExecutionLedger.verified_execution_view
+    original_code = reader.__code__
+
+    def fake_view(self, plan_id):
+        raise AssertionError("mutated execution-view reader must not run")
+
+    try:
+        reader.__code__ = fake_view.__code__
+        with pytest.raises(
+            ExecutionCapitalAtRiskError,
+            match="canonical execution-ledger read authority changed",
+        ):
+            resolve_execution_capital_at_risk(ledger, plan.plan_id)
+    finally:
+        reader.__code__ = original_code
+
+
+def test_currentness_rejects_snapshot_alias_rebinding_before_dispatch(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    ledger, plan = _ledger(tmp_path, _action(stake="10"))
+    evidence = resolve_execution_capital_at_risk(ledger, plan.plan_id)
+    called = False
+
+    def fake_snapshot(*_args, **_kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("substituted snapshot alias must not run")
+
+    monkeypatch.setattr(
+        capital_risk_module,
+        "_VERIFIED_SNAPSHOT",
+        fake_snapshot,
+    )
+
+    with pytest.raises(
+        ExecutionCapitalAtRiskError,
+        match="canonical execution-ledger read authority changed",
+    ):
+        evidence.assert_issued_current(ledger)
+
+    assert called is False
+
+
+def test_currentness_rejects_snapshot_class_replacement_before_dispatch(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    ledger, plan = _ledger(tmp_path, _action(stake="10"))
+    evidence = resolve_execution_capital_at_risk(ledger, plan.plan_id)
+    called = False
+
+    def fake_snapshot(self):
+        nonlocal called
+        called = True
+        raise AssertionError("replaced snapshot reader must not run")
+
+    monkeypatch.setattr(
+        RealExecutionLedger,
+        "verified_snapshot",
+        fake_snapshot,
+    )
+
+    with pytest.raises(
+        ExecutionCapitalAtRiskError,
+        match="canonical execution-ledger read authority changed",
+    ):
+        evidence.assert_issued_current(ledger)
+
+    assert called is False
+

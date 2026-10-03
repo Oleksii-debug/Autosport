@@ -4743,6 +4743,153 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             self.assertEqual(health_store.get("provider-a").status, "failed")
             resumed.close()
 
+    def test_committed_provider_gap_restart_requires_bound_failed_health(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            registry = self._scientific_registry(
+                workspace,
+                self._strategy_version(),
+            )
+
+            class FailingProvider:
+                source_id = "provider-a"
+
+                def read_batch(self, max_items=1000):
+                    del max_items
+                    raise ProviderUnavailableError("provider offline")
+
+            first = PersistentLiveDecisionLoop(
+                workspace,
+                loop_id="live-test-loop",
+                mode=LiveDecisionMode.PAPER,
+                book=PaperBook("1000"),
+                authority=self._authority(),
+                intent_factory=_EmptyIntentFactory(),
+                scientific_registry=registry,
+                provider=FailingProvider(),
+                max_quote_age=timedelta(seconds=5),
+                clock=_ManualClock(self.START + timedelta(seconds=1)),
+            )
+            first.register_input(
+                "input-a",
+                source_ids="provider-a",
+                selection_ids="selection-a",
+            )
+            gap = first.run_cycle()
+            self.assertEqual(gap.status, LiveCycleStatus.PROVIDER_GAP)
+            first.close()
+
+            health_path = workspace / "source_health.json"
+            raw = json.loads(health_path.read_text(encoding="utf-8"))
+            entry = raw["history"]["provider-a"][0]
+            healthy = dict(entry["state"])
+            healthy.update(
+                {
+                    "status": "healthy",
+                    "poll_count": 1,
+                    "total_received": 0,
+                    "total_accepted": 0,
+                    "total_rejected": 0,
+                    "total_failures": 0,
+                    "consecutive_failures": 0,
+                    "last_success_at": entry["recorded_at"],
+                    "last_error_at": None,
+                    "last_error": None,
+                    "last_cursor": None,
+                    "latest_source_ts": None,
+                    "quality_flags": [],
+                }
+            )
+            entry["state"] = healthy
+            raw["sources"]["provider-a"] = healthy
+            health_path.write_text(
+                json.dumps(raw, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                LiveDecisionProgressError,
+                "bound provider health does not contain durable failed evidence",
+            ):
+                self._loop(
+                    workspace,
+                    observer=_DurableObserver(workspace, [()]),
+                    factory=_EmptyIntentFactory(),
+                    clock=_ManualClock(self.START + timedelta(seconds=2)),
+                )
+
+    def test_committed_provider_gap_restart_replays_failure_before_later_recovery(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            registry = self._scientific_registry(
+                workspace,
+                self._strategy_version(),
+            )
+            clock = _ManualClock(self.START + timedelta(seconds=1))
+
+            class FailingProvider:
+                source_id = "provider-a"
+
+                def read_batch(self, max_items=1000):
+                    del max_items
+                    raise ProviderUnavailableError("provider offline")
+
+            first = PersistentLiveDecisionLoop(
+                workspace,
+                loop_id="live-test-loop",
+                mode=LiveDecisionMode.PAPER,
+                book=PaperBook("1000"),
+                authority=self._authority(),
+                intent_factory=_EmptyIntentFactory(),
+                scientific_registry=registry,
+                provider=FailingProvider(),
+                max_quote_age=timedelta(seconds=5),
+                clock=clock,
+            )
+            first.register_input(
+                "input-a",
+                source_ids="provider-a",
+                selection_ids="selection-a",
+            )
+            gap = first.run_cycle()
+            self.assertEqual(gap.status, LiveCycleStatus.PROVIDER_GAP)
+            progress = first._load_progress()
+            self.assertIsNotNone(progress)
+            failed_boundary = progress.provider_health_boundaries[0]
+            first.close()
+
+            health_store = SourceHealthStore(workspace / "source_health.json")
+            health_store.record_success(
+                "provider-a",
+                now=(self.START + timedelta(milliseconds=1500)).isoformat(),
+                received=0,
+                accepted=0,
+                rejected=0,
+                cursor=None,
+                latest_source_ts=None,
+                quality_flags=(),
+            )
+            self.assertEqual(health_store.get("provider-a").status, "healthy")
+
+            resumed = self._loop(
+                workspace,
+                observer=_DurableObserver(workspace, [()]),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START + timedelta(seconds=2)),
+            )
+
+            resumed_progress = resumed._load_progress()
+            self.assertIsNotNone(resumed_progress)
+            self.assertEqual(
+                resumed_progress.provider_health_boundaries,
+                (failed_boundary,),
+            )
+            self.assertEqual(
+                resumed_progress.provider_health_boundaries[0].transition_order,
+                1,
+            )
+            resumed.close()
+
     def test_restart_verifies_complete_historical_decision_ledger(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

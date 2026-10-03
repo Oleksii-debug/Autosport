@@ -223,6 +223,20 @@ def _sealed_wrapper_frozen_globals(function):
     return closure[freevars.index("frozen_globals")].cell_contents
 
 
+def _closure_cell(function, name):
+    closure = function.__closure__
+    assert closure is not None
+    freevars = function.__code__.co_freevars
+    assert name in freevars
+    return closure[freevars.index(name)]
+
+
+def _admission_current_binding_consumer():
+    inner = _closure_cell(admit_paper_ticket, "expected_function").cell_contents
+    assert callable(inner)
+    return inner
+
+
 def test_turnover_resolver_closure_binding_rebind_cannot_mint_headroom(tmp_path):
     descriptor = PaperDayTurnoverResolver.__dict__["resolve"]
     target = descriptor.__func__
@@ -1215,19 +1229,108 @@ def test_live_module_rebind_cannot_mint_turnover_headroom(tmp_path):
     goal = _goal()
     EconomicGoalStore(tmp_path).initialize_owner(goal)
     book = _book_with_settled_turnover(placed_at=_timestamp(now), stake="5")
+    hostile_called = False
 
-    original = economic_admission._revalidated_product_day_turnover_room
+    original = economic_admission._revalidated_product_day_admission_authority
+
+    def hostile_authority(**kwargs):
+        nonlocal hostile_called
+        del kwargs
+        hostile_called = True
+        return economic_admission._ProductDayAdmissionAuthority(
+            turnover_room=Decimal("999999"),
+            admission_ts=_timestamp(now),
+        )
+
     try:
-        economic_admission._revalidated_product_day_turnover_room = (
-            lambda **kwargs: Decimal("999999")
+        economic_admission._revalidated_product_day_admission_authority = (
+            hostile_authority
         )
         baseline, result = _admit(tmp_path, book, goal, _timestamp(now))
     finally:
-        economic_admission._revalidated_product_day_turnover_room = original
+        economic_admission._revalidated_product_day_admission_authority = original
 
+    assert hostile_called is False
     assert baseline.reason == "economic goal turnover limit exceeded"
     assert result.admitted is False
     assert result.risk.reason == "economic goal turnover limit exceeded"
+
+
+def test_admission_closure_mapping_is_read_only(tmp_path):
+    del tmp_path
+    consumer = _admission_current_binding_consumer()
+    inner_globals = _closure_cell(consumer, "inner_globals").cell_contents
+
+    with pytest.raises(TypeError):
+        inner_globals["_revalidated_product_day_admission_authority"] = (
+            lambda **kwargs: None
+        )
+
+
+def test_admission_closure_cell_replacement_cannot_mint_turnover_headroom(tmp_path):
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    goal = _goal()
+    EconomicGoalStore(tmp_path).initialize_owner(goal)
+    book = _book_with_settled_turnover(placed_at=_timestamp(now), stake="5")
+    book.save(tmp_path / "paper_book.json")
+
+    consumer = _admission_current_binding_consumer()
+    globals_cell = _closure_cell(consumer, "inner_globals")
+    original_globals = globals_cell.cell_contents
+    hostile_globals = dict(original_globals)
+    hostile_called = False
+
+    def hostile_authority(**kwargs):
+        nonlocal hostile_called
+        del kwargs
+        hostile_called = True
+        return economic_admission._ProductDayAdmissionAuthority(
+            turnover_room=Decimal("999999"),
+            admission_ts=_timestamp(now),
+        )
+
+    hostile_globals["_revalidated_product_day_admission_authority"] = (
+        hostile_authority
+    )
+    globals_cell.cell_contents = hostile_globals
+    try:
+        with pytest.raises(
+            RuntimeError,
+            match="PAPER admission sealed consumer authority changed",
+        ):
+            _admit(tmp_path, book, goal, _timestamp(now))
+    finally:
+        globals_cell.cell_contents = original_globals
+
+    assert hostile_called is False
+    persisted = PaperBook.load(tmp_path / "paper_book.json")
+    assert set(persisted.tickets) == set(book.tickets)
+
+
+def test_admission_closure_helper_code_replacement_cannot_mint_headroom(tmp_path):
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    goal = _goal()
+    EconomicGoalStore(tmp_path).initialize_owner(goal)
+    book = _book_with_settled_turnover(placed_at=_timestamp(now), stake="5")
+    book.save(tmp_path / "paper_book.json")
+
+    consumer = _admission_current_binding_consumer()
+    inner_globals = _closure_cell(consumer, "inner_globals").cell_contents
+    target = inner_globals["_revalidated_product_day_admission_authority"]
+    original_code = target.__code__
+
+    try:
+        target.__code__ = _replacement_code_preserving_freevars(target)
+        with pytest.raises(
+            RuntimeError,
+            match="PAPER admission sealed consumer authority changed",
+        ):
+            _admit(tmp_path, book, goal, _timestamp(now))
+    finally:
+        target.__code__ = original_code
+
+    persisted = PaperBook.load(tmp_path / "paper_book.json")
+    assert set(persisted.tickets) == set(book.tickets)
 
 
 def test_live_resume_helper_rebind_cannot_replace_positive_risk_suffix(tmp_path):

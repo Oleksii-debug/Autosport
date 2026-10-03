@@ -441,9 +441,14 @@ class EmpiricalExecutionEvidence:
                         "accepted/partial acknowledgement requires external receipt identity"
                     )
                 if reconciliation_present:
-                    raise EmpiricalExecutionEvidenceError(
-                        "acknowledged terminal attempt cannot claim not-found reconciliation"
-                    )
+                    if self.reconciliation_external_effect_found is not True:
+                        raise EmpiricalExecutionEvidenceError(
+                            "terminal acknowledgement requires positive reconciliation evidence"
+                        )
+                    if self.external_receipt_id is None:
+                        raise EmpiricalExecutionEvidenceError(
+                            "positive reconciliation requires external receipt identity"
+                        )
         else:
             expected_reason = _CENSOR_REASON_BY_STATE.get(state)
             if expected_reason is None:
@@ -814,6 +819,11 @@ def build_empirical_execution_evidence(
         EventType.RECONCILED_NOT_FOUND,
         label="empirical evidence",
     )
+    positive_reconciliation_events = [
+        event
+        for event in attempt_events
+        if event["event_type"] == EventType.RECONCILED_FOUND.value
+    ]
     provider_event = _optional_single_event(
         attempt_events,
         EventType.PROVIDER_EVIDENCE_BOUND,
@@ -924,6 +934,7 @@ def build_empirical_execution_evidence(
         if reconciliation_event is not None
         else None
     )
+    reconciliation_external_effect_found: bool | None = None
     if reconciliation is not None:
         if reconciliation.attempt_id != attempt:
             raise EmpiricalExecutionEvidenceUnavailable(
@@ -933,6 +944,37 @@ def build_empirical_execution_evidence(
             raise EmpiricalExecutionEvidenceUnavailable(
                 "RECONCILED_NOT_FOUND requires external_effect_found=false"
             )
+        reconciliation_external_effect_found = False
+    elif (
+        acknowledgement is not None
+        and acknowledgement.reconciliation_evidence_id is not None
+    ):
+        matching_positive_reconciliations = [
+            event
+            for event in positive_reconciliation_events
+            if event["payload"].get("evidence_id")
+            == acknowledgement.reconciliation_evidence_id
+        ]
+        if len(matching_positive_reconciliations) != 1:
+            raise EmpiricalExecutionEvidenceUnavailable(
+                "terminal acknowledgement lacks exact positive reconciliation evidence"
+            )
+        positive_reconciliation = RealExecutionLedger._found_reconciliation_from_dict(
+            matching_positive_reconciliations[0]["payload"]
+        )
+        if positive_reconciliation.attempt_id != attempt:
+            raise EmpiricalExecutionEvidenceUnavailable(
+                "positive reconciliation attempt identity mismatch"
+            )
+        if (
+            positive_reconciliation.external_receipt_id
+            != acknowledgement.external_receipt_id
+        ):
+            raise EmpiricalExecutionEvidenceUnavailable(
+                "positive reconciliation receipt identity mismatch"
+            )
+        reconciliation = positive_reconciliation
+        reconciliation_external_effect_found = True
 
     requested_odds = _decimal(action.get("requested_odds"), "requested_odds")
     requested_stake = _decimal(action.get("requested_stake"), "requested_stake")
@@ -1038,7 +1080,7 @@ def build_empirical_execution_evidence(
             reconciliation.observed_at if reconciliation is not None else None
         ),
         reconciliation_external_effect_found=(
-            reconciliation.external_effect_found if reconciliation is not None else None
+            reconciliation_external_effect_found
         ),
         requested_odds=requested_odds,
         requested_stake=requested_stake,

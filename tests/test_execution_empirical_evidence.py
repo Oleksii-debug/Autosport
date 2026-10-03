@@ -30,6 +30,7 @@ from autosport.real_execution_ledger import (
     ExecutionPlan,
     ExecutionStateError,
     ExternalAcknowledgement,
+    ExternalEffectReconciliation,
     RealExecutionLedger,
     ReconciliationSnapshot,
 )
@@ -468,6 +469,51 @@ def test_rejected_attempt_is_not_a_fake_zero_slippage_sample(tmp_path):
     assert evidence.accepted_odds is None
     assert evidence.adverse_odds_delta is None
     assert evidence.unaccepted_stake is None
+
+
+def test_terminal_ack_projects_exact_positive_reconciliation_lineage(tmp_path):
+    ledger = _ledger(tmp_path)
+    ledger.mark_unknown(
+        "attempt-1",
+        reason="provider timeout after submission",
+        observed_at="2026-09-21T10:00:02+00:00",
+    )
+    reconciliation = ExternalEffectReconciliation(
+        attempt_id="attempt-1",
+        evidence_id=RECONCILIATION_ID,
+        external_receipt_id="receipt-1",
+        observed_at=RECONCILIATION_AT,
+        source=RECONCILIATION_SOURCE,
+    )
+    ledger.reconcile_found(reconciliation)
+    acknowledgement = ExternalAcknowledgement(
+        attempt_id="attempt-1",
+        external_receipt_id="receipt-1",
+        status=AcknowledgementStatus.ACCEPTED,
+        acknowledged_at="2026-09-21T10:00:04+00:00",
+        accepted_odds=Decimal("2.08"),
+        accepted_stake=Decimal("5.00"),
+        reconciliation_evidence_id=RECONCILIATION_ID,
+    )
+    ledger.acknowledge(acknowledgement)
+
+    evidence = build_empirical_execution_evidence(
+        ledger,
+        attempt_id="attempt-1",
+    )
+
+    assert evidence.attempt_state == "ACCEPTED"
+    assert evidence.reconciliation_evidence_id == RECONCILIATION_ID
+    assert evidence.reconciliation_evidence_source == RECONCILIATION_SOURCE
+    assert evidence.reconciliation_evidence_observed_at == RECONCILIATION_AT
+    assert evidence.reconciliation_external_effect_found is True
+    assert evidence.external_receipt_id == "receipt-1"
+    assert evidence.provider_outcome_verified is False
+    assert (
+        evidence.provider_outcome_verification_reason
+        == PROVIDER_OUTCOME_UNVERIFIED_ACK
+    )
+    assert evidence.slippage_status == SLIPPAGE_STATUS_UNKNOWN
 
 
 def test_receiptless_rejected_attempt_projects_canonical_terminal_evidence(tmp_path):

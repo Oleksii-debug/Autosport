@@ -82,6 +82,33 @@ def test_all_canonical_risk_ceilings_are_explicit_and_survive_restart(
     assert restarted.lines_uk == persisted.lines_uk
 
 
+@pytest.mark.parametrize(
+    "blocked_sports",
+    (
+        "Football",
+        "unknown",
+        "mixed",
+        "football|soccer",
+        "футбол",
+    ),
+)
+def test_owner_form_rejects_noncanonical_blocked_sport_without_writing(
+    tmp_path: Path,
+    blocked_sports: str,
+) -> None:
+    service = OwnerEconomicAuthorityService(tmp_path)
+
+    with pytest.raises(OwnerEconomicAuthorityError):
+        service.initialize_from_form(
+            _values(blocked_sports=blocked_sports),
+            emergency_stop=False,
+            confirmed=True,
+        )
+
+    assert service.read_view().state == "absent"
+    assert not (tmp_path / EconomicGoalStore.FILE_NAME).exists()
+
+
 def test_confirmation_cancel_never_creates_a_contract(tmp_path: Path) -> None:
     service = OwnerEconomicAuthorityService(tmp_path)
 

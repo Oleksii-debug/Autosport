@@ -1102,6 +1102,32 @@ def execute_betfair_supervised_action(
     outcome = _report_outcome(report, action)
     receipt = report.instruction.bet_id
 
+    if (
+        report.instruction.size_matched > 0
+        and report.instruction.average_price_matched < action.requested_odds
+    ):
+        ledger.bind_provider_evidence(
+            attempt_id=attempt_id,
+            evidence_id=evidence_id,
+            observed_at=report.observed_at,
+            source=evidence_source,
+        )
+        ledger.mark_unknown(
+            attempt_id,
+            reason=(
+                "betfair_standard_back_limit_price_contradiction_"
+                "requires_readback"
+            ),
+            observed_at=report.observed_at,
+        )
+        return BetfairSupervisedExecutionResult(
+            PlaceOrdersOutcome.UNKNOWN,
+            attempt_id,
+            ledger.attempt_state(attempt_id),
+            evidence_id,
+            receipt,
+        )
+
     if outcome is PlaceOrdersOutcome.UNKNOWN:
         ledger.bind_provider_evidence(
             attempt_id=attempt_id,

@@ -190,6 +190,72 @@ class PaperCampaignEpisodeHandoffTests(unittest.TestCase):
                 parent_snapshot.episode_id,
             )
 
+    def test_restart_after_child_write_before_handoff_commit_converges(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            environment, runtime, _finalization = self._terminal_parent(root)
+            parent_snapshot = runtime.agent_loop.snapshot()
+            parent_checkpoint = runtime.environment.checkpoint()
+            handoff = PaperCampaignEpisodeHandoff(runtime)
+            policy = self._child_policy(environment)
+            child_path = root / "child-agent-loop.json"
+
+            original_parent_witness = handoff._parent_witness
+            witness_calls = 0
+
+            def crash_after_child_write():
+                nonlocal witness_calls
+                witness_calls += 1
+                if witness_calls == 2:
+                    raise PaperCampaignEpisodeHandoffError(
+                        "injected post-child/pre-commit crash boundary"
+                    )
+                return original_parent_witness()
+
+            with (
+                patch(
+                    "autosport.champion_agent_episode.load_champion_policy",
+                    return_value=policy,
+                ),
+                patch.object(
+                    handoff,
+                    "_parent_witness",
+                    side_effect=crash_after_child_write,
+                ),
+            ):
+                with self.assertRaisesRegex(
+                    PaperCampaignEpisodeHandoffError,
+                    "post-child/pre-commit crash boundary",
+                ):
+                    self._call(handoff, root, environment, parent_snapshot)
+
+            self.assertTrue(child_path.is_file())
+            child_before_retry = child_path.read_bytes()
+            prepared = json.loads(handoff.state_path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                prepared["handoffs"][parent_checkpoint.checkpoint_id]["status"],
+                "PREPARED",
+            )
+
+            with patch(
+                "autosport.champion_agent_episode.load_champion_policy",
+                return_value=policy,
+            ):
+                recovered = self._call(handoff, root, environment, parent_snapshot)
+
+            self.assertEqual(child_path.read_bytes(), child_before_retry)
+            child_snapshot = recovered.episode.agent_loop.snapshot()
+            self.assertIs(child_snapshot.phase, AgentLoopPhase.BOOTSTRAP)
+            self.assertEqual(child_snapshot.loop_id, "campaign-loop-2")
+            committed = json.loads(handoff.state_path.read_text(encoding="utf-8"))
+            record = committed["handoffs"][parent_checkpoint.checkpoint_id]
+            self.assertEqual(record["status"], "COMMITTED")
+            self.assertEqual(record["handoff_id"], recovered.receipt.handoff_id)
+            self.assertEqual(
+                record["child_initial_checkpoint_id"],
+                recovered.receipt.child_initial_checkpoint_id,
+            )
+
     def test_unfinished_parent_and_fingerprint_drift_fail_closed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

@@ -42,10 +42,74 @@ _HEX: Final = frozenset("0123456789abcdef")
 _AUTHORITY_DOMAIN: Final = "deployment-runtime-authority"
 _AUTHORITY_BINDING_SCHEMA: Final = "autosport.deployment_runtime_authority.monotonic_binding"
 _AUTHORITY_BINDING_SCHEMA_VERSION: Final = 1
+_CANONICAL_MONOTONIC_AUTHORITY_TYPE: Final = MonotonicWorkspaceAuthority
+_CANONICAL_MONOTONIC_AUTHORITY_INIT: Final = MonotonicWorkspaceAuthority.__init__
+_CANONICAL_OBJECT_NEW: Final = object.__new__
+_MISSING_AUTHORITY_CLASS_SLOT: Final = object()
+_CANONICAL_MONOTONIC_AUTHORITY_CLASS_SURFACE: Final = tuple(
+    (
+        name,
+        member,
+        getattr(member, "__code__", None),
+    )
+    for name in ("__new__", "__init__")
+    for member in (
+        vars(MonotonicWorkspaceAuthority).get(
+            name,
+            _MISSING_AUTHORITY_CLASS_SLOT,
+        ),
+    )
+)
 
 
 class DeploymentRuntimeAuthorityError(ValueError):
     """Durable runtime authority is missing, malformed, or conflicting."""
+
+
+def _assert_canonical_monotonic_authority_constructor() -> None:
+    if MonotonicWorkspaceAuthority is not _CANONICAL_MONOTONIC_AUTHORITY_TYPE:
+        raise DeploymentRuntimeAuthorityError(
+            "monotonic workspace authority constructor dispatch was replaced"
+        )
+    class_dict = vars(_CANONICAL_MONOTONIC_AUTHORITY_TYPE)
+    for name, expected, expected_code in (
+        _CANONICAL_MONOTONIC_AUTHORITY_CLASS_SURFACE
+    ):
+        current = class_dict.get(name, _MISSING_AUTHORITY_CLASS_SLOT)
+        if (
+            current is not expected
+            or (
+                expected_code is not None
+                and getattr(current, "__code__", None) is not expected_code
+            )
+        ):
+            raise DeploymentRuntimeAuthorityError(
+                "monotonic workspace authority constructor dispatch was replaced"
+            )
+
+
+def _construct_monotonic_authority(
+    *,
+    workspace: Path,
+    domain: str,
+    key: str,
+    authority_root: str | Path | None,
+) -> MonotonicWorkspaceAuthority:
+    _assert_canonical_monotonic_authority_constructor()
+    authority = _CANONICAL_OBJECT_NEW(_CANONICAL_MONOTONIC_AUTHORITY_TYPE)
+    _CANONICAL_MONOTONIC_AUTHORITY_INIT(
+        authority,
+        workspace=workspace,
+        domain=domain,
+        key=key,
+        authority_root=authority_root,
+    )
+    _assert_canonical_monotonic_authority_constructor()
+    if type(authority) is not _CANONICAL_MONOTONIC_AUTHORITY_TYPE:
+        raise DeploymentRuntimeAuthorityError(
+            "monotonic workspace authority construction returned noncanonical type"
+        )
+    return authority
 
 
 def _text(value: object, name: str) -> str:
@@ -494,6 +558,10 @@ class DeploymentRuntimeAuthorityStore:
 
     @_authority.setter
     def _authority(self, value: MonotonicWorkspaceAuthority) -> None:
+        if type(value) is not _CANONICAL_MONOTONIC_AUTHORITY_TYPE:
+            raise DeploymentRuntimeAuthorityError(
+                "runtime authority binding must use canonical monotonic authority"
+            )
         try:
             object.__getattribute__(self, "_binding_authority")
         except AttributeError:
@@ -550,7 +618,7 @@ class DeploymentRuntimeAuthorityStore:
         self.path = Path(path).expanduser().resolve(strict=False)
         self.workspace = self.path.parent
         self._lock = RLock()
-        self._authority = MonotonicWorkspaceAuthority(
+        self._authority = _construct_monotonic_authority(
             workspace=self.workspace,
             domain=_AUTHORITY_DOMAIN,
             key=self.path.name,

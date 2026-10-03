@@ -8,6 +8,7 @@ import autosport.deployment_runtime_authority as deployment_runtime_authority
 from autosport.deployment_runtime_authority import (
     STORE_SCHEMA,
     STORE_SCHEMA_VERSION,
+    DeploymentRuntimeAuthorityError,
     DeploymentRuntimeAuthorityStore,
 )
 from autosport.learning_environment import EnvironmentIdentity, Episode
@@ -212,6 +213,90 @@ def test_runtime_authority_pristine_rejects_subclass_before_dispatch(
         )
 
     assert hostile_calls == []
+
+
+def test_runtime_authority_rejects_monotonic_authority_alias_replacement_before_dispatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hostile_calls = []
+
+    class HostileAuthority:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            hostile_calls.append((args, kwargs))
+            raise AssertionError("hostile authority constructor executed")
+
+    monkeypatch.setattr(
+        deployment_runtime_authority,
+        "MonotonicWorkspaceAuthority",
+        HostileAuthority,
+    )
+    with pytest.raises(
+        DeploymentRuntimeAuthorityError,
+        match="constructor dispatch was replaced",
+    ):
+        DeploymentRuntimeAuthorityStore.initialize_pristine(
+            tmp_path / "deployment-runtime-authority.json",
+            authority_root=_authority_root(tmp_path),
+        )
+
+    assert hostile_calls == []
+
+
+@pytest.mark.parametrize("attribute", ("__init__", "__new__"))
+def test_runtime_authority_rejects_monotonic_constructor_surface_replacement(
+    tmp_path: Path,
+    attribute: str,
+) -> None:
+    original = vars(MonotonicWorkspaceAuthority).get(attribute)
+    hostile_calls = []
+
+    def hostile(*args: object, **kwargs: object) -> None:
+        hostile_calls.append((args, kwargs))
+        raise AssertionError("hostile authority constructor surface executed")
+
+    type.__setattr__(MonotonicWorkspaceAuthority, attribute, hostile)
+    try:
+        with pytest.raises(
+            DeploymentRuntimeAuthorityError,
+            match="constructor dispatch was replaced",
+        ):
+            DeploymentRuntimeAuthorityStore.initialize_pristine(
+                tmp_path / "deployment-runtime-authority.json",
+                authority_root=_authority_root(tmp_path),
+            )
+    finally:
+        if original is None:
+            type.__delattr__(MonotonicWorkspaceAuthority, attribute)
+        else:
+            type.__setattr__(MonotonicWorkspaceAuthority, attribute, original)
+
+    assert hostile_calls == []
+
+
+def test_runtime_authority_rejects_monotonic_init_code_replacement(
+    tmp_path: Path,
+) -> None:
+    target = vars(MonotonicWorkspaceAuthority)["__init__"]
+    original_code = target.__code__
+
+    def hostile(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        raise AssertionError("hostile authority initializer code executed")
+
+    assert hostile.__code__.co_freevars == original_code.co_freevars
+    target.__code__ = hostile.__code__
+    try:
+        with pytest.raises(
+            DeploymentRuntimeAuthorityError,
+            match="constructor dispatch was replaced",
+        ):
+            DeploymentRuntimeAuthorityStore.initialize_pristine(
+                tmp_path / "deployment-runtime-authority.json",
+                authority_root=_authority_root(tmp_path),
+            )
+    finally:
+        target.__code__ = original_code
 
 
 def test_existing_valid_store_without_independent_history_fails_closed(

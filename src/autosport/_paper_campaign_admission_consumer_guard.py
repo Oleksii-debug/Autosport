@@ -104,6 +104,7 @@ def _build_guard(seal):
     mapping_cls = Mapping
     exact_type = type
     exact_dict = dict
+    exact_list = list
     exact_tuple = tuple
     exact_len = len
     isinstance_fn = isinstance
@@ -628,7 +629,11 @@ def _build_guard(seal):
             raise PaperCampaignAdmissionError(
                 "decision_payload attempts to replace campaign forward verification authority"
             )
-        payload[forward_payload_key] = exact_dict(resolved_snapshot)
+        durable_forward_payload = exact_dict(resolved_snapshot)
+        durable_forward_payload["structural_codes"] = exact_list(
+            resolved_values["structural_codes"]
+        )
+        payload[forward_payload_key] = durable_forward_payload
         kwargs["decision_payload"] = payload
 
         action_parameters = kwargs.get("action_parameters", ())

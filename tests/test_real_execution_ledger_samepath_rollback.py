@@ -5,6 +5,7 @@ import pytest
 from autosport.monotonic_workspace_authority import MonotonicAuthorityConflictError
 from autosport.real_execution_ledger import (
     ExecutionAction,
+    ExecutionLedgerBusyError,
     ExecutionLedgerIntegrityError,
     ExecutionPlan,
     RealExecutionLedger,
@@ -169,3 +170,47 @@ def test_valid_ledger_bytes_cannot_bootstrap_missing_independent_authority(
         match="rollback|monotonic|authority",
     ):
         copied.verified_snapshot()
+
+
+
+def test_pristine_authoritative_read_does_not_create_ledger_file(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    path = _isolated_ledger_path(tmp_path, monkeypatch)
+    ledger = RealExecutionLedger(path)
+
+    snapshot = ledger.verified_snapshot()
+
+    assert snapshot.payload == b""
+    assert snapshot.event_count == 0
+    assert not path.exists()
+
+
+def test_reader_cannot_abort_active_writer_prepare_window(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    path = _isolated_ledger_path(tmp_path, monkeypatch)
+    ledger = RealExecutionLedger(path)
+    current_plan = _plan()
+    original_prepare = ledger._monotonic_authority.prepare
+    competing_read_was_fenced = False
+
+    def prepare_with_competing_read(**kwargs):
+        nonlocal competing_read_was_fenced
+        competing = RealExecutionLedger(path)
+        with pytest.raises(ExecutionLedgerBusyError):
+            competing.verified_snapshot()
+        competing_read_was_fenced = True
+        return original_prepare(**kwargs)
+
+    monkeypatch.setattr(
+        ledger._monotonic_authority,
+        "prepare",
+        prepare_with_competing_read,
+    )
+
+    assert ledger.reserve_plan(current_plan) == current_plan.fingerprint
+    assert competing_read_was_fenced
+    assert RealExecutionLedger(path).verified_snapshot().event_count == 1

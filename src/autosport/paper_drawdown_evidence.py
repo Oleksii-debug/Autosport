@@ -669,7 +669,7 @@ def _make_resolver() -> FunctionType:
             or goal_from_payload.__code__ is not goal_from_payload_code
             or book_type.load_bytes.__func__ is not book_load_bytes_function
             or book_load_bytes_function.__code__ is not book_load_bytes_code
-            or book_load_bytes.__self__ is not book_load_bytes_owner
+            or book_type.load_bytes.__self__ is not book_load_bytes_owner
             or book_type._from_raw_snapshot.__func__ is not book_from_raw_function
             or book_from_raw_function.__code__ is not book_from_raw_code
             or book_type._from_raw_snapshot.__self__ is not book_from_raw_owner

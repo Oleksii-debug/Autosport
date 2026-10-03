@@ -1888,6 +1888,7 @@ class PersistentLiveDecisionLoop:
         detail: str = "",
         decision_context_sha256_override: str | None = None,
     ) -> LiveCycleResult:
+        self._verify_intent_factory_provenance()
         if decision_context_sha256_override is None:
             decision_context_sha256 = self._decision_context_sha256()
         else:
@@ -1974,6 +1975,7 @@ class PersistentLiveDecisionLoop:
         duplicate = False
         execution_result = None
         with WorkspaceEconomicLock(self.workspace):
+            self._verify_intent_factory_provenance()
             if (
                 decision_context_sha256_override is None
                 and self._decision_context_sha256() != decision_context_sha256

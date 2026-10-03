@@ -355,6 +355,48 @@ def test_workflow_run_status_requires_exact_http_200(monkeypatch) -> None:
         api.workflow_run_status(123)
 
 
+def test_workflow_run_status_rejects_duplicate_json_object_keys(
+    monkeypatch,
+) -> None:
+    api = GitHubApi(repository="owner/repo", token="token")
+    monkeypatch.setattr(
+        controller_module,
+        "urlopen",
+        lambda *_args, **_kwargs: _FakeSuccessResponse(
+            200,
+            b'{"status":"completed","status":"in_progress"}',
+        ),
+    )
+
+    with pytest.raises(
+        CancellationError,
+        match="duplicate object key",
+    ):
+        api.workflow_run_status(123)
+
+
+@pytest.mark.parametrize("constant", ["NaN", "Infinity", "-Infinity"])
+def test_workflow_run_status_rejects_nonstandard_json_constants(
+    monkeypatch,
+    constant: str,
+) -> None:
+    api = GitHubApi(repository="owner/repo", token="token")
+    monkeypatch.setattr(
+        controller_module,
+        "urlopen",
+        lambda *_args, **_kwargs: _FakeSuccessResponse(
+            200,
+            ('{"status":"completed","unexpected":' + constant + "}").encode(),
+        ),
+    )
+
+    with pytest.raises(
+        CancellationError,
+        match="non-standard constant",
+    ):
+        api.workflow_run_status(123)
+
+
 def test_workflow_run_status_rejects_unknown_state(monkeypatch) -> None:
     api = GitHubApi(repository="owner/repo", token="token")
     monkeypatch.setattr(

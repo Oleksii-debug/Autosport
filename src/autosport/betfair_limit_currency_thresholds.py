@@ -1,12 +1,13 @@
 """Truth-bounded Betfair LIMIT currency-threshold evaluation.
 
-This module owns only deterministic arithmetic over one versioned first-party
-Currency Parameters snapshot.  It deliberately does not own account/session
+This module owns only deterministic arithmetic over one historical, versioned
+first-party Currency Parameters snapshot.  It deliberately does not own account/session
 identity, jurisdiction, market permission, price-ladder validity, liquidity,
 funds, provider acceptance, or execution authority.
 
 The provider does not expose an API rule-version/effective-interval identifier
-for this static table.  Therefore this snapshot is useful for structural
+for this static table, and current first-party prose conflicts with the older
+snapshot for at least GBP Min Bet Size. Therefore this snapshot is useful for structural
 composition and regression tests, but it can never by itself authorize a
 provider write.  The below-minimum stake exception is additionally
 jurisdiction-gated by Betfair (UK & International only), so that path always
@@ -226,6 +227,10 @@ class BetfairCurrencyThresholdAssessment:
 
     @property
     def jurisdiction_bound(self) -> bool:
+        return False
+
+    @property
+    def current_provider_constraint_proven(self) -> bool:
         return False
 
     @property

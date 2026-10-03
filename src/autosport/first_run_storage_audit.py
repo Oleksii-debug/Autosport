@@ -22,15 +22,16 @@ def run_first_run_storage_audit(output_path: str | Path) -> int:
     failure_stage = "workspace_identity"
     try:
         workspace = default_workspace()
-        failure_stage = "webview_storage_identity"
-        webview_storage = default_webview_storage_path()
-        failure_stage = "launch_cwd_identity"
-        launch_cwd = Path.cwd()
-
         if not workspace.is_absolute():
             raise ValueError("workspace identity is not absolute")
+
+        failure_stage = "webview_storage_identity"
+        webview_storage = default_webview_storage_path()
         if not webview_storage.is_absolute():
             raise ValueError("WebView storage identity is not absolute")
+
+        failure_stage = "launch_cwd_identity"
+        launch_cwd = Path.cwd()
         if not launch_cwd.is_absolute():
             raise ValueError("launch working directory is not absolute")
         failure_stage = "storage_root_separation"

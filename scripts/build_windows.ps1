@@ -1128,8 +1128,8 @@ if ($freshWalkForwardEvidence.real_money_execution -ne $false) { throw 'Fresh-ex
 
 # Prove the actual fresh-extracted GUI executable resolves one per-user storage
 # identity independently of Explorer/shortcut/terminal working directory. Remove
-# LOCALAPPDATA so this exercises the Windows Known Folder fallback used on a
-# packaged first run instead of inheriting the CI runner's environment value.
+# both storage overrides so this exercises the Windows Known Folder fallback used
+# on a packaged first run instead of inheriting CI runner environment values.
 $freshFirstRunStorageA = Join-Path $PWD 'dist/fresh-extraction-first-run-storage-a.json'
 $freshFirstRunStorageB = Join-Path $PWD 'dist/fresh-extraction-first-run-storage-b.json'
 if (Test-Path $freshFirstRunStorageA) { Remove-Item -Force $freshFirstRunStorageA }
@@ -1140,8 +1140,11 @@ New-Item -ItemType Directory -Path $firstRunCwdA -Force | Out-Null
 if (-not (Test-Path $firstRunCwdB -PathType Container)) { throw 'System32 working-directory oracle is unavailable' }
 $originalLocalAppData = $env:LOCALAPPDATA
 $hadLocalAppData = Test-Path Env:LOCALAPPDATA
+$originalAutosportWorkspace = $env:AUTOSPORT_WORKSPACE
+$hadAutosportWorkspace = Test-Path Env:AUTOSPORT_WORKSPACE
 try {
   Remove-Item Env:LOCALAPPDATA -ErrorAction SilentlyContinue
+  Remove-Item Env:AUTOSPORT_WORKSPACE -ErrorAction SilentlyContinue
   $firstRunProcessA = Start-Process -FilePath $extractedExe -ArgumentList '--first-run-storage-audit-output', $freshFirstRunStorageA -WorkingDirectory $firstRunCwdA -Wait -PassThru
   if ($firstRunProcessA.ExitCode -ne 0) { throw "Fresh-extracted first-run storage audit A exited $($firstRunProcessA.ExitCode)" }
   $firstRunProcessB = Start-Process -FilePath $extractedExe -ArgumentList '--first-run-storage-audit-output', $freshFirstRunStorageB -WorkingDirectory $firstRunCwdB -Wait -PassThru
@@ -1151,6 +1154,11 @@ try {
     $env:LOCALAPPDATA = $originalLocalAppData
   } else {
     Remove-Item Env:LOCALAPPDATA -ErrorAction SilentlyContinue
+  }
+  if ($hadAutosportWorkspace) {
+    $env:AUTOSPORT_WORKSPACE = $originalAutosportWorkspace
+  } else {
+    Remove-Item Env:AUTOSPORT_WORKSPACE -ErrorAction SilentlyContinue
   }
 }
 $freshFirstRunEvidenceA = Get-Content $freshFirstRunStorageA -Raw | ConvertFrom-Json

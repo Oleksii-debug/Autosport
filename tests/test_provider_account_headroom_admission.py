@@ -1971,3 +1971,101 @@ def test_economic_goal_from_payload_rebinding_cannot_restore_stale_owner_goal(
 
     assert hostile_calls == []
 
+def test_economic_goal_contract_hash_rebinding_cannot_restore_stale_authority(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    acquired, _ = _acquire_balance(monkeypatch, tmp_path, "100")
+    target = _plan("target", _action("target-action", "10"))
+    ledger = _ledger_with_plans(tmp_path, target)
+    hostile_calls: list[object] = []
+
+    def hostile_contract_sha(goal):
+        hostile_calls.append(goal)
+        return _HEADROOM_GOAL_SHA256
+
+    monkeypatch.setattr(
+        headroom_module._economic_goal_provenance,
+        "contract_sha256",
+        hostile_contract_sha,
+    )
+
+    with pytest.raises(
+        ProviderAccountHeadroomError,
+        match="canonical monetary denomination authority changed",
+    ):
+        _assess(
+            ledger,
+            acquired,
+            plan_id="target",
+            action_id="target-action",
+        )
+
+    assert hostile_calls == []
+
+
+def test_economic_goal_canonical_json_rebinding_cannot_forge_provenance(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    acquired, _ = _acquire_balance(monkeypatch, tmp_path, "100")
+    target = _plan("target", _action("target-action", "10"))
+    ledger = _ledger_with_plans(tmp_path, target)
+    hostile_calls: list[object] = []
+
+    def hostile_json(payload):
+        hostile_calls.append(payload)
+        return b"{}"
+
+    monkeypatch.setattr(
+        headroom_module._economic_goal_provenance,
+        "_canonical_json",
+        hostile_json,
+    )
+
+    with pytest.raises(
+        ProviderAccountHeadroomError,
+        match="canonical monetary denomination authority changed",
+    ):
+        _assess(
+            ledger,
+            acquired,
+            plan_id="target",
+            action_id="target-action",
+        )
+
+    assert hostile_calls == []
+
+
+def test_economic_goal_provenance_payload_rebinding_cannot_forge_goal_hash(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    acquired, _ = _acquire_balance(monkeypatch, tmp_path, "100")
+    target = _plan("target", _action("target-action", "10"))
+    ledger = _ledger_with_plans(tmp_path, target)
+    hostile_calls: list[object] = []
+
+    def hostile_payload(goal):
+        hostile_calls.append(goal)
+        return {"schema": "hostile"}
+
+    monkeypatch.setattr(
+        headroom_module._economic_goal_provenance,
+        "economic_goal_to_payload",
+        hostile_payload,
+    )
+
+    with pytest.raises(
+        ProviderAccountHeadroomError,
+        match="canonical monetary denomination authority changed",
+    ):
+        _assess(
+            ledger,
+            acquired,
+            plan_id="target",
+            action_id="target-action",
+        )
+
+    assert hostile_calls == []
+

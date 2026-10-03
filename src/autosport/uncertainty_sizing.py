@@ -510,3 +510,43 @@ def evaluate_uncertainty_sizing(
         stake_fraction_ceiling=fraction,
         stake_ceiling=stake,
     )
+
+
+def _install_canonical_uncertainty_sizing_authority():
+    """Issue one producer-owned evaluator that cannot late-dispatch via evidence type."""
+
+    canonical_evaluator = evaluate_uncertainty_sizing
+    canonical_evaluator_code = canonical_evaluator.__code__
+    canonical_decision_type = UncertaintySizingDecision
+
+    def evaluate_authoritative_uncertainty_sizing(
+        evidence: UncertaintySizingEvidence,
+        request: UncertaintySizingRequest,
+        policy: UncertaintySizingPolicy,
+    ) -> UncertaintySizingDecision:
+        if (
+            evaluate_uncertainty_sizing is not canonical_evaluator
+            or canonical_evaluator.__code__ is not canonical_evaluator_code
+            or UncertaintySizingDecision is not canonical_decision_type
+        ):
+            raise UncertaintySizingError(
+                "canonical uncertainty sizing producer authority changed"
+            )
+        decision = canonical_evaluator(evidence, request, policy)
+        if (
+            evaluate_uncertainty_sizing is not canonical_evaluator
+            or canonical_evaluator.__code__ is not canonical_evaluator_code
+            or UncertaintySizingDecision is not canonical_decision_type
+            or type(decision) is not canonical_decision_type
+        ):
+            raise UncertaintySizingError(
+                "canonical uncertainty sizing producer authority changed"
+            )
+        return decision
+
+    return evaluate_authoritative_uncertainty_sizing
+
+
+evaluate_authoritative_uncertainty_sizing = (
+    _install_canonical_uncertainty_sizing_authority()
+)

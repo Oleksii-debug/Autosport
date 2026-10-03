@@ -3,12 +3,20 @@ from __future__ import annotations
 from pathlib import Path
 
 from . import _paper_value_execution_authority as _authority
-from .decision_ledger import GENERAL_DECISION_KIND, DecisionRecord, JsonlDecisionLedger
+from .decision_ledger import (
+    ECONOMIC_DECISION_KIND,
+    GENERAL_DECISION_KIND,
+    DecisionRecord,
+    JsonlDecisionLedger,
+)
+from .domain import MarketEvent, TicketLeg
 from .integrity import atomic_write_json
 from .json_integrity import strict_json_loads
 from .paper import PaperBook
 from .paper_execution_adoption import PaperExecutionAdoptionError, PaperExecutionAdoptionRuntime
 from .paper_strategy import PaperValueAgent
+from .price_truth import paper_quote_rejection_reason
+from .risk import ProposedTicketRiskContext
 
 
 _PREPARE_SCHEMA = "autosport.paper_value.general_risk_admission.prepare"
@@ -22,6 +30,10 @@ _PREPARE_FIELDS = frozenset(
     }
 )
 _ORIGINAL_VERIFY = _authority._verify_general_risk_admission
+_ORIGINAL_ECONOMIC_VERIFY = _authority._verify_economic_risk_admission
+
+_ECONOMIC_PREPARE_SCHEMA = "autosport.paper_value.economic_risk_admission.prepare"
+_ECONOMIC_PREPARE_SCHEMA_VERSION = 1
 
 
 def _prepare_path(witness_path: Path) -> Path:
@@ -69,6 +81,47 @@ def _load_prepare(path: Path) -> dict[str, object]:
     return raw
 
 
+def _economic_prepare_payload(witness: dict[str, object]) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "schema": _ECONOMIC_PREPARE_SCHEMA,
+        "schema_version": _ECONOMIC_PREPARE_SCHEMA_VERSION,
+        "witness": witness,
+    }
+    payload["prepare_sha256"] = _authority._canonical_payload_sha256(payload)
+    return payload
+
+
+def _load_economic_prepare(path: Path) -> dict[str, object]:
+    if path.is_symlink():
+        raise PaperExecutionAdoptionError(
+            "economic paper-value risk admission PREPARE path is not canonical"
+        )
+    try:
+        raw = strict_json_loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise PaperExecutionAdoptionError(
+            "durable ECONOMIC paper-value action lacks canonical risk admission PREPARE"
+        ) from exc
+    if type(raw) is not dict or set(raw) != _PREPARE_FIELDS:
+        raise PaperExecutionAdoptionError(
+            "economic paper-value risk admission PREPARE schema is invalid"
+        )
+    prepare_sha256 = raw.get("prepare_sha256")
+    unsigned = dict(raw)
+    unsigned.pop("prepare_sha256", None)
+    if (
+        raw.get("schema") != _ECONOMIC_PREPARE_SCHEMA
+        or raw.get("schema_version") != _ECONOMIC_PREPARE_SCHEMA_VERSION
+        or type(prepare_sha256) is not str
+        or prepare_sha256 != _authority._canonical_payload_sha256(unsigned)
+        or type(raw.get("witness")) is not dict
+    ):
+        raise PaperExecutionAdoptionError(
+            "economic paper-value risk admission PREPARE binding is invalid"
+        )
+    return raw
+
+
 def _validate_record_binding(
     *,
     agent: PaperValueAgent,
@@ -112,6 +165,62 @@ def _expected_witness(
         risk_policy=agent.risk_policy,
         execution_run_id=expected_run_id,
         pre_action_book_sha256=pre_action_sha256,
+    )
+
+
+def _validate_economic_record_binding(
+    *,
+    agent: PaperValueAgent,
+    context,
+    record: DecisionRecord,
+    descriptor: _authority.PaperValueExecutionDescriptor,
+    expected_run_id: str,
+) -> None:
+    action = (
+        descriptor.execution_plan.actions[0]
+        if len(descriptor.execution_plan.actions) == 1
+        else None
+    )
+    goal = agent.risk_policy.economic_goal
+    if (
+        action is None
+        or goal is None
+        or record.decision_kind != ECONOMIC_DECISION_KIND
+        or record.replay_run_id != context.replay_run_id
+        or record.agent != PaperValueAgent.name
+        or record.action != _authority._PAPER_VALUE_ACTION
+        or record.payload.get("material_action_id") != record.decision_id
+        or record.payload.get("requested_stake") != str(action.requested_stake)
+        or record.payload.get("execution_plan_id") != descriptor.execution_plan.plan_id
+        or record.payload.get("execution_plan_fingerprint")
+        != descriptor.execution_plan.fingerprint
+        or record.payload.get("execution_run_id") != expected_run_id
+        or record.payload.get("execution_authority_json")
+        != descriptor.intent_evidence_json
+        or not isinstance(agent.risk_policy, _authority.PaperRiskPolicy)
+    ):
+        raise PaperExecutionAdoptionError(
+            "economic paper-value risk admission decision binding is invalid"
+        )
+
+
+def _expected_economic_witness(
+    *,
+    agent: PaperValueAgent,
+    record: DecisionRecord,
+    descriptor: _authority.PaperValueExecutionDescriptor,
+    expected_run_id: str,
+    pre_action_sha256: str,
+) -> dict[str, object]:
+    return _authority._economic_risk_admission_payload(
+        record=record,
+        descriptor=descriptor,
+        risk_policy=agent.risk_policy,
+        execution_run_id=expected_run_id,
+        pre_action_book_sha256=pre_action_sha256,
+        decision_record_sha256=_authority._active_decision_origin_sha256(
+            record.decision_id
+        ),
     )
 
 
@@ -211,6 +320,62 @@ def _require_pre_action_risk_pass(
     if getattr(risk, "allowed", None) is not True:
         raise PaperExecutionAdoptionError(
             "durable GENERAL paper-value risk admission no longer passes canonical risk evaluation"
+        )
+
+
+def _require_economic_pre_action_risk_pass(
+    *,
+    agent: PaperValueAgent,
+    pre_action_book: PaperBook,
+    descriptor: _authority.PaperValueExecutionDescriptor,
+    event: MarketEvent,
+) -> None:
+    """Re-run the exact economic PaperValue risk gate on pre-action state."""
+
+    if len(descriptor.execution_plan.actions) != 1:
+        raise PaperExecutionAdoptionError(
+            "economic paper-value risk admission requires exactly one execution action"
+        )
+    goal = agent.risk_policy.economic_goal
+    action = descriptor.execution_plan.actions[0]
+    if (
+        goal is None
+        or event.exchange_side == "lay"
+        or action.bookmaker_id != event.source_id
+        or not action.account_id
+    ):
+        raise PaperExecutionAdoptionError(
+            "economic paper-value risk admission execution context is invalid"
+        )
+    if paper_quote_rejection_reason(event, action.requested_stake) is not None:
+        raise PaperExecutionAdoptionError(
+            "durable economic paper-value decision no longer proves quote execution safety"
+        )
+    leg = TicketLeg(
+        event.event_id,
+        event.market_id,
+        event.selection_id,
+        event.decimal_odds,
+        sport=event.sport,
+        exchange_side=event.exchange_side,
+    )
+    proposal_context = ProposedTicketRiskContext(
+        legs=(leg,),
+        quotes=(event,),
+        provider_accounts=((event.source_id, action.account_id),),
+        bankroll_id=goal.bankroll_id,
+        currency=goal.currency,
+        proposal_ts=event.observed_ts,
+    )
+    risk = agent.risk_policy.evaluate(
+        pre_action_book,
+        action.requested_stake,
+        context=proposal_context,
+    )
+    if getattr(risk, "allowed", None) is not True:
+        raise PaperExecutionAdoptionError(
+            "durable ECONOMIC paper-value risk admission no longer passes "
+            "canonical risk evaluation"
         )
 
 
@@ -410,11 +575,248 @@ def _verify_general_risk_admission(
     )
 
 
+def _issue_economic_risk_admission(
+    *,
+    agent: PaperValueAgent,
+    context,
+    descriptor: _authority.PaperValueExecutionDescriptor,
+    decision_id: str,
+    started_at: str,
+    event: MarketEvent,
+) -> None:
+    """Publish ECONOMIC PREPARE -> snapshot -> COMMIT on the canonical risk path."""
+
+    ledger = context.decision_ledger
+    runtime = context.paper_execution
+    goal = agent.risk_policy.economic_goal
+    if (
+        not isinstance(ledger, JsonlDecisionLedger)
+        or not isinstance(runtime, PaperExecutionAdoptionRuntime)
+        or goal is None
+    ):
+        raise PaperExecutionAdoptionError(
+            "economic paper-value risk admission requires canonical runtime authority"
+        )
+    try:
+        record = ledger.verified_economic_decision_for_material_action(
+            decision_id,
+            goal,
+            risk_policy=agent.risk_policy,
+        )
+    except Exception as exc:
+        raise PaperExecutionAdoptionError(
+            "economic paper-value risk admission lacks exact durable decision authority"
+        ) from exc
+    if record is None or record.observed_ts != started_at:
+        raise PaperExecutionAdoptionError(
+            "economic paper-value risk admission decision binding is invalid"
+        )
+    expected_run_id = runtime.expected_run_id(descriptor, decision_id)
+    _validate_economic_record_binding(
+        agent=agent,
+        context=context,
+        record=record,
+        descriptor=descriptor,
+        expected_run_id=expected_run_id,
+    )
+
+    pre_action_sha256 = agent.risk_policy.risk_of_ruin_portfolio_sha256(
+        context.paper_book
+    )
+    if pre_action_sha256 is None:
+        raise PaperExecutionAdoptionError(
+            "economic paper-value risk admission cannot validate pre-action PaperBook"
+        )
+    _require_economic_pre_action_risk_pass(
+        agent=agent,
+        pre_action_book=context.paper_book,
+        descriptor=descriptor,
+        event=event,
+    )
+    validated_sha256 = agent.risk_policy.risk_of_ruin_portfolio_sha256(
+        context.paper_book
+    )
+    if validated_sha256 != pre_action_sha256:
+        raise PaperExecutionAdoptionError(
+            "economic paper-value risk admission PaperBook changed during "
+            "canonical risk evaluation"
+        )
+    witness = _expected_economic_witness(
+        agent=agent,
+        record=record,
+        descriptor=descriptor,
+        expected_run_id=expected_run_id,
+        pre_action_sha256=pre_action_sha256,
+    )
+    witness_path, pre_action_path = _authority._economic_risk_admission_paths(
+        ledger,
+        decision_id,
+    )
+    prepare_path = _prepare_path(witness_path)
+    witness_path.parent.mkdir(parents=True, exist_ok=True)
+    if witness_path.is_symlink() or prepare_path.is_symlink():
+        raise PaperExecutionAdoptionError(
+            "economic paper-value risk admission witness path is not canonical"
+        )
+
+    expected_prepare = _economic_prepare_payload(witness)
+    if prepare_path.exists():
+        if _load_economic_prepare(prepare_path) != expected_prepare:
+            raise PaperExecutionAdoptionError(
+                "economic paper-value risk admission conflicts with existing PREPARE"
+            )
+    else:
+        atomic_write_json(prepare_path, expected_prepare)
+        if _load_economic_prepare(prepare_path) != expected_prepare:
+            raise PaperExecutionAdoptionError(
+                "economic paper-value risk admission PREPARE did not persist exactly"
+            )
+
+    _ensure_pre_action(
+        agent=agent,
+        context=context,
+        runtime=runtime,
+        pre_action_path=pre_action_path,
+        expected_sha256=pre_action_sha256,
+    )
+
+    if witness_path.exists():
+        existing, _ = _authority._load_economic_risk_admission(
+            ledger,
+            decision_id,
+        )
+        if existing != witness:
+            raise PaperExecutionAdoptionError(
+                "economic paper-value risk admission conflicts with existing witness"
+            )
+        return
+    _write_commit(witness_path, witness)
+    verified, _ = _authority._load_economic_risk_admission(
+        ledger,
+        decision_id,
+    )
+    if verified != witness:
+        raise PaperExecutionAdoptionError(
+            "economic paper-value risk admission witness did not persist exactly"
+        )
+
+
+def _verify_economic_risk_admission(
+    *,
+    agent: PaperValueAgent,
+    context,
+    record: DecisionRecord,
+    descriptor: _authority.PaperValueExecutionDescriptor,
+    expected_run_id: str,
+    event: MarketEvent,
+) -> None:
+    ledger = context.decision_ledger
+    runtime = context.paper_execution
+    if not isinstance(ledger, JsonlDecisionLedger) or not isinstance(
+        runtime, PaperExecutionAdoptionRuntime
+    ):
+        raise PaperExecutionAdoptionError(
+            "durable ECONOMIC paper-value recovery lacks canonical runtime authority"
+        )
+    _validate_economic_record_binding(
+        agent=agent,
+        context=context,
+        record=record,
+        descriptor=descriptor,
+        expected_run_id=expected_run_id,
+    )
+    witness_path, pre_action_path = _authority._economic_risk_admission_paths(
+        ledger,
+        record.decision_id,
+    )
+    prepare_path = _prepare_path(witness_path)
+
+    if not witness_path.exists() or not pre_action_path.exists():
+        if not prepare_path.exists():
+            raise PaperExecutionAdoptionError(
+                "durable ECONOMIC paper-value action lacks canonical risk admission witness"
+            )
+        prepare = _load_economic_prepare(prepare_path)
+        prepared_witness = prepare["witness"]
+        assert isinstance(prepared_witness, dict)
+        pre_action_sha256 = prepared_witness.get("pre_action_book_sha256")
+        if type(pre_action_sha256) is not str:
+            raise PaperExecutionAdoptionError(
+                "economic paper-value risk admission PREPARE lacks pre-action digest"
+            )
+        expected = _expected_economic_witness(
+            agent=agent,
+            record=record,
+            descriptor=descriptor,
+            expected_run_id=expected_run_id,
+            pre_action_sha256=pre_action_sha256,
+        )
+        if prepare != _economic_prepare_payload(expected):
+            raise PaperExecutionAdoptionError(
+                "economic paper-value risk admission PREPARE binding changed across restart"
+            )
+        if _authority._run_reserved(
+            runtime,
+            record.decision_id,
+            run_id=expected_run_id,
+        ):
+            raise PaperExecutionAdoptionError(
+                "incomplete economic paper-value risk admission cannot follow "
+                "execution reservation"
+            )
+        pre_action_book = _ensure_pre_action(
+            agent=agent,
+            context=context,
+            runtime=runtime,
+            pre_action_path=pre_action_path,
+            expected_sha256=pre_action_sha256,
+        )
+        _require_economic_pre_action_risk_pass(
+            agent=agent,
+            pre_action_book=pre_action_book,
+            descriptor=descriptor,
+            event=event,
+        )
+        if witness_path.exists():
+            existing, _ = _authority._load_economic_risk_admission(
+                ledger,
+                record.decision_id,
+            )
+            if existing != expected:
+                raise PaperExecutionAdoptionError(
+                    "economic paper-value risk admission conflicts with recovered COMMIT"
+                )
+        else:
+            _write_commit(witness_path, expected)
+    else:
+        _, pre_action_book = _authority._load_economic_risk_admission(
+            ledger,
+            record.decision_id,
+        )
+        _require_economic_pre_action_risk_pass(
+            agent=agent,
+            pre_action_book=pre_action_book,
+            descriptor=descriptor,
+            event=event,
+        )
+
+    _ORIGINAL_ECONOMIC_VERIFY(
+        agent=agent,
+        context=context,
+        record=record,
+        descriptor=descriptor,
+        expected_run_id=expected_run_id,
+        event=event,
+    )
+
+
 def _install() -> None:
     if getattr(_authority, "_autosport_risk_admission_recovery_installed", False):
         return
     _authority._issue_general_risk_admission = _issue_general_risk_admission
     _authority._verify_general_risk_admission = _verify_general_risk_admission
+    _authority._issue_economic_risk_admission = _issue_economic_risk_admission
+    _authority._verify_economic_risk_admission = _verify_economic_risk_admission
     _authority._autosport_risk_admission_recovery_installed = True
 
 

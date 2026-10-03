@@ -103,6 +103,23 @@ def _positive_int_from_form(name: str, value: object) -> int:
     return result
 
 
+def _nonnegative_int_from_form(name: str, value: object) -> int:
+    if not isinstance(value, str) or not value.strip():
+        raise OwnerEconomicAuthorityError(
+            text("ui.windows.owner_authority.error.required", field=_field_label(name))
+        )
+    candidate = value.strip()
+    if (
+        not candidate.isascii()
+        or not candidate.isdecimal()
+        or str(int(candidate)) != candidate
+    ):
+        raise OwnerEconomicAuthorityError(
+            text("ui.windows.owner_authority.error.integer", field=_field_label(name))
+        )
+    return int(candidate)
+
+
 def _canonical_text_from_form(name: str, value: object) -> str:
     if not isinstance(value, str) or not value or value != value.strip():
         raise OwnerEconomicAuthorityError(text("ui.windows.owner_authority.error.required", field=_field_label(name)))
@@ -174,7 +191,7 @@ def build_initial_owner_contract(
             max_execution_slippage_fraction=_decimal_from_form("max_execution_slippage_fraction", values["max_execution_slippage_fraction"]),  # type: ignore[arg-type]
             max_quote_age_seconds=_decimal_from_form("max_quote_age_seconds", values["max_quote_age_seconds"]),  # type: ignore[arg-type]
             minimum_data_quality=_decimal_from_form("minimum_data_quality", values["minimum_data_quality"]),  # type: ignore[arg-type]
-            max_concurrent_positions=_positive_int_from_form("max_concurrent_positions", values["max_concurrent_positions"]),
+            max_concurrent_positions=_nonnegative_int_from_form("max_concurrent_positions", values["max_concurrent_positions"]),
             max_parlay_legs=_positive_int_from_form("max_parlay_legs", values["max_parlay_legs"]),
             automation_level=automation_level,
             emergency_stop=emergency_stop,

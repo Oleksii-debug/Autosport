@@ -384,12 +384,16 @@ class ProductGuiEconomicSnapshot:
 def _capture_runtime_economic_snapshot(
     runtime: AutonomousProductRuntime,
     tick: ContinuousTickResult,
-    *,
     _runtime_type: type[AutonomousProductRuntime] = AutonomousProductRuntime,
     _tick_type: type[ContinuousTickResult] = ContinuousTickResult,
     _paper_book_type: type[PaperBook] = PaperBook,
     _portfolio_engine_type: type[PortfolioEngine] = PortfolioEngine,
     _economic_lock_type: type[WorkspaceEconomicLock] = WorkspaceEconomicLock,
+    _snapshot_type: type[ProductGuiEconomicSnapshot] = ProductGuiEconomicSnapshot,
+    _ticket_type: type[ProductGuiEconomicTicket] = ProductGuiEconomicTicket,
+    _ticket_status_type: type[TicketStatus] = TicketStatus,
+    _decimal_type: type[Decimal] = Decimal,
+    _path_type: type[Path] = Path,
     _sha256=sha256,
 ) -> ProductGuiEconomicSnapshot:
     """Capture economic presentation truth without reopening AutosportSession.
@@ -401,11 +405,11 @@ def _capture_runtime_economic_snapshot(
 
     if type(runtime) is not _runtime_type or type(tick) is not _tick_type:
         raise RuntimeError("economic snapshot requires exact canonical runtime tick")
-    workspace = Path(runtime.workspace)
+    workspace = _path_type(runtime.workspace)
     coordinator = runtime.coordinator
     if (
         not workspace.is_absolute()
-        or Path(coordinator.workspace) != workspace
+        or _path_type(coordinator.workspace) != workspace
         or tick.session_id != coordinator.session_id
         or tick.source_id != runtime.manifest.source_id
         or tick.cycle_index < 0
@@ -413,7 +417,7 @@ def _capture_runtime_economic_snapshot(
         raise RuntimeError("economic snapshot runtime identity mismatch")
 
     with _economic_lock_type(workspace):
-        book_path = Path(coordinator.paper_book_path)
+        book_path = _path_type(coordinator.paper_book_path)
         if book_path.exists():
             payload = book_path.read_bytes()
             paper_book_sha256 = _sha256(payload).hexdigest()
@@ -423,7 +427,7 @@ def _capture_runtime_economic_snapshot(
             book = _paper_book_type(runtime.manifest.initial_bankroll)
 
         tickets = tuple(
-            ProductGuiEconomicTicket(
+            _ticket_type(
                 ticket_id=ticket.ticket_id,
                 status=ticket.status.value,
                 stake=ticket.stake,
@@ -440,13 +444,13 @@ def _capture_runtime_economic_snapshot(
             (
                 ticket.stake
                 for ticket in book.tickets.values()
-                if ticket.status is TicketStatus.OPEN
+                if ticket.status is _ticket_status_type.OPEN
             ),
-            Decimal("0"),
+            _decimal_type("0"),
         )
         portfolio = _portfolio_engine_type().analyse(list(book.tickets.values()))
 
-    return ProductGuiEconomicSnapshot(
+    return _snapshot_type(
         workspace=workspace,
         session_id=tick.session_id,
         source_id=tick.source_id,
@@ -716,6 +720,9 @@ class ProductGuiWorker:
             [AutonomousProductRuntime, ContinuousTickResult],
             ProductGuiEconomicSnapshot,
         ] = _capture_runtime_economic_snapshot,
+        _economic_snapshot_builder_code=_capture_runtime_economic_snapshot.__code__,
+        _economic_snapshot_builder_defaults=_capture_runtime_economic_snapshot.__defaults__,
+        _runtime_type: type[AutonomousProductRuntime] = AutonomousProductRuntime,
     ) -> None:
         runtime: AutonomousProductRuntime | None = None
         runtime_profile: TrustedRuntimeCodeProfile | None = None
@@ -780,7 +787,17 @@ class ProductGuiWorker:
                 while not self._stop_event.is_set():
                     try:
                         economic = None
-                        if type(runtime) is AutonomousProductRuntime:
+                        if (
+                            _economic_snapshot_builder.__code__
+                            is not _economic_snapshot_builder_code
+                            or _economic_snapshot_builder.__defaults__
+                            is not _economic_snapshot_builder_defaults
+                            or _economic_snapshot_builder.__kwdefaults__ is not None
+                        ):
+                            raise RuntimeError(
+                                "runtime economic snapshot authority implementation changed"
+                            )
+                        if type(runtime) is _runtime_type:
                             # Keep one outer canonical runtime-operation fence across
                             # tick completion and economic readback. runtime.tick()
                             # re-enters the same RLock through its existing decorator.

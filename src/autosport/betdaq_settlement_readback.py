@@ -39,6 +39,7 @@ _DECIMAL_RE = re.compile(r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)\Z")
 _CANONICAL_ACCOUNT_HTTPS_POST = _account._CANONICAL_HTTPS_POST
 _REQUIRE_CANONICAL_ACCOUNT_TRANSPORT = _account._require_canonical_account_transport
 _CANONICAL_ACCOUNT_CURRENCY = _account._currency
+_CANONICAL_ACCOUNT_CURRENCY_CODE = getattr(_CANONICAL_ACCOUNT_CURRENCY, "__code__", None)
 _MAX_XSD_LONG = 9_223_372_036_854_775_807
 _CANONICAL_ACCOUNT_HTTPS_POST_CODE = getattr(_CANONICAL_ACCOUNT_HTTPS_POST, "__code__", None)
 _CANONICAL_REQUIRE_ACCOUNT_TRANSPORT_CODE = getattr(
@@ -1087,7 +1088,11 @@ def _optional_provider_attr(element: ET.Element, name: str) -> str | None:
 
 
 def _provider_currency(value: str, field: str) -> str:
-    if getattr(_account, "_currency", None) is not _CANONICAL_ACCOUNT_CURRENCY:
+    live_currency = getattr(_account, "_currency", None)
+    if (
+        live_currency is not _CANONICAL_ACCOUNT_CURRENCY
+        or getattr(live_currency, "__code__", None) is not _CANONICAL_ACCOUNT_CURRENCY_CODE
+    ):
         raise BetdaqEconomicReadbackError(
             "canonical BETDAQ currency validator was replaced"
         )

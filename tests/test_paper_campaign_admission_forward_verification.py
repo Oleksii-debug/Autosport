@@ -72,6 +72,45 @@ def test_forward_verification_identity_is_bound_to_decision_and_action(tmp_path)
     )
 
 
+def test_exact_type_forged_forward_receipt_is_rejected_before_prepared(tmp_path) -> None:
+    fixture = AdmissionFixture(tmp_path)
+    forward = fixture.forward_verification_kwargs()
+    canonical = forward["campaign_forward_verification"]
+    forged = object.__new__(type(canonical))
+    for name in (
+        "schema_version",
+        "campaign_id",
+        "protocol_sha256",
+        "structural_result_sha256",
+        "structural_ok",
+        "structural_codes",
+        "terminal_root_sha256",
+        "candidate_count",
+        "campaign_cycle_authority_sha256",
+        "prospective_evaluation_plan_sha256",
+        "universe_sha256",
+        "membership_sha256",
+        "verification_scope",
+        "provider_universe_authority_resolved",
+        "promotion_ready",
+        "real_money_ready",
+        "receipt_sha256",
+    ):
+        object.__setattr__(forged, name, getattr(canonical, name))
+    object.__setattr__(forged, "receipt_sha256", "0" * 64)
+
+    with pytest.raises(
+        PaperCampaignAdmissionError,
+        match="changed on canonical re-resolution",
+    ):
+        fixture.admit(
+            fixture.coordinator(),
+            campaign_forward_verification=forged,
+        )
+
+    assert not _admission_state_path(fixture).exists()
+
+
 def test_admission_decision_cannot_predate_forward_evidence(tmp_path) -> None:
     fixture = AdmissionFixture(tmp_path)
 

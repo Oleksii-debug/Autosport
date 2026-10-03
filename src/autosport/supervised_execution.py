@@ -1127,6 +1127,32 @@ def _canonical_supervised_ledger_dispatch(
             ),
         ),
     ),
+    _dynamic_surface=tuple(
+        (
+            name,
+            vars(RealExecutionLedger)[name],
+            getattr(
+                getattr(
+                    vars(RealExecutionLedger)[name],
+                    "__func__",
+                    vars(RealExecutionLedger)[name],
+                ),
+                "__code__",
+                None,
+            ),
+        )
+        for name in (
+            "_events",
+            "_plan_event",
+            "_append",
+            "_mutate",
+            "_ensure_existing_path_durable",
+            "_sync_parent_directory",
+            "_validate_event",
+            "_parse",
+            "_validate_semantics",
+        )
+    ),
 ) -> dict[str, Any]:
     if RealExecutionLedger is not _ledger_type or type(ledger) is not _ledger_type:
         raise SupervisedExecutionError(
@@ -1146,6 +1172,21 @@ def _canonical_supervised_ledger_dispatch(
                 "canonical real execution ledger authority changed"
             )
         bound[name] = expected.__get__(ledger, _ledger_type)
+    instance_state = vars(ledger)
+    for name, expected, expected_code in _dynamic_surface:
+        current = vars(_ledger_type).get(name)
+        current_callable = getattr(current, "__func__", current)
+        if (
+            current is not expected
+            or name in instance_state
+            or (
+                expected_code is not None
+                and getattr(current_callable, "__code__", None) is not expected_code
+            )
+        ):
+            raise SupervisedExecutionError(
+                "canonical real execution ledger internal authority changed"
+            )
     return bound
 
 

@@ -1188,8 +1188,11 @@ def _resolve_account_liability_lattice(
     expected_snapshot_sha256: str,
     expected_event_count: int,
     bound_by_plan_id: dict[str, BoundSupervisedExecutionPlan],
+    intent_denomination_by_identity: dict[tuple[str, str], tuple[str, str]],
     economic_goal_contract_sha256: str,
-) -> tuple[Decimal, Decimal, tuple[tuple[str, str], ...]]:
+    economic_goal_bankroll_id: str,
+    provider_currency: str,
+) -> tuple[Decimal, Decimal, tuple[tuple[str, str, str, str, str, str], ...]]:
     """Return (definitely-unreflected, unknown-reflection) liability.
 
     RESERVED is definitely product-side only: it has not crossed the provider
@@ -1210,7 +1213,7 @@ def _resolve_account_liability_lattice(
         )
     definitely_unreflected = _ZERO
     unknown_reflection = _ZERO
-    denomination_bindings: list[tuple[str, str]] = []
+    denomination_bindings: list[tuple[str, str, str, str, str, str]] = []
 
     for plan_id in _ledger_plan_ids(start.payload):
         try:
@@ -1227,7 +1230,10 @@ def _resolve_account_liability_lattice(
                 _require_plan_denomination(
                     view,
                     bound_by_plan_id=bound_by_plan_id,
+                    intent_denomination_by_identity=intent_denomination_by_identity,
                     economic_goal_contract_sha256=economic_goal_contract_sha256,
+                    economic_goal_bankroll_id=economic_goal_bankroll_id,
+                    provider_currency=provider_currency,
                 )
             )
             capital: ExecutionCapitalAtRiskEvidence = resolve_capital(
@@ -1293,6 +1299,7 @@ def assess_provider_account_headroom(
     plan_id: str,
     action_id: str,
     bound_plans: tuple[BoundSupervisedExecutionPlan, ...],
+    intents: tuple[OpportunityIntent, ...],
 ) -> ProviderAccountHeadroomAssessment:
     """Issue conservative capital-axis evidence from exact canonical truth."""
     if type(ledger) is not RealExecutionLedger:
@@ -1306,10 +1313,14 @@ def assess_provider_account_headroom(
         now=now,
     )
     bound_by_plan_id = _validated_bound_plan_map(bound_plans)
+    intent_denomination_by_identity = _validated_intent_denomination_map(intents)
     workspace = _canonical_ledger_workspace(ledger)
 
     with _canonical_denomination_dispatch()[-1](workspace):
-        economic_goal_contract_sha256 = _current_economic_goal_denomination(
+        (
+            economic_goal_contract_sha256,
+            economic_goal_bankroll_id,
+        ) = _current_economic_goal_denomination(
             ledger,
             provider_currency=currency,
         )
@@ -1330,7 +1341,10 @@ def assess_provider_account_headroom(
         target_denomination_binding = _require_plan_denomination(
             target_view,
             bound_by_plan_id=bound_by_plan_id,
+            intent_denomination_by_identity=intent_denomination_by_identity,
             economic_goal_contract_sha256=economic_goal_contract_sha256,
+            economic_goal_bankroll_id=economic_goal_bankroll_id,
+            provider_currency=currency,
         )
         action = _find_action(target_view, action_id)
         if action.bookmaker_id != "betfair" or action.side != "BACK":
@@ -1361,11 +1375,15 @@ def assess_provider_account_headroom(
             expected_snapshot_sha256=snapshot.sha256,
             expected_event_count=snapshot.event_count,
             bound_by_plan_id=bound_by_plan_id,
+            intent_denomination_by_identity=intent_denomination_by_identity,
             economic_goal_contract_sha256=economic_goal_contract_sha256,
+            economic_goal_bankroll_id=economic_goal_bankroll_id,
+            provider_currency=currency,
         )
         denomination_authority_sha256 = _denomination_authority_sha256(
             currency=currency,
             economic_goal_contract_sha256=economic_goal_contract_sha256,
+            economic_goal_bankroll_id=economic_goal_bankroll_id,
             plan_bindings=(
                 target_denomination_binding,
                 *liability_denomination_bindings,
@@ -1430,7 +1448,7 @@ def assess_provider_account_headroom(
                 ledger,
                 provider_currency=currency,
             )
-            != economic_goal_contract_sha256
+            != (economic_goal_contract_sha256, economic_goal_bankroll_id)
         ):
             raise ProviderAccountHeadroomStale(
                 "economic-goal denomination authority changed during assessment"
@@ -1454,6 +1472,7 @@ def reserve_observed_provider_headroom(
     *,
     attempt_id: str,
     bound_plans: tuple[BoundSupervisedExecutionPlan, ...],
+    intents: tuple[OpportunityIntent, ...] = (),
 ) -> ProductInternalHeadroomReservation:
     """Atomically consume product-internal headroom against exact ledger bytes.
 
@@ -1505,9 +1524,13 @@ def reserve_observed_provider_headroom(
                 "headroom assessment expired before reservation"
             )
         bound_by_plan_id = _validated_bound_plan_map(bound_plans)
+        intent_denomination_by_identity = _validated_intent_denomination_map(intents)
         workspace = _canonical_ledger_workspace(ledger)
         with _canonical_denomination_dispatch()[-1](workspace):
-            current_goal_sha256 = _current_economic_goal_denomination(
+            (
+                current_goal_sha256,
+                current_goal_bankroll_id,
+            ) = _current_economic_goal_denomination(
                 ledger,
                 provider_currency=current_currency,
             )
@@ -1532,7 +1555,10 @@ def reserve_observed_provider_headroom(
             target_binding = _require_plan_denomination(
                 target_view,
                 bound_by_plan_id=bound_by_plan_id,
+                intent_denomination_by_identity=intent_denomination_by_identity,
                 economic_goal_contract_sha256=current_goal_sha256,
+                economic_goal_bankroll_id=current_goal_bankroll_id,
+                provider_currency=current_currency,
             )
             (
                 definitely_unreflected,
@@ -1545,7 +1571,10 @@ def reserve_observed_provider_headroom(
                 expected_snapshot_sha256=current_snapshot.sha256,
                 expected_event_count=current_snapshot.event_count,
                 bound_by_plan_id=bound_by_plan_id,
+                intent_denomination_by_identity=intent_denomination_by_identity,
                 economic_goal_contract_sha256=current_goal_sha256,
+                economic_goal_bankroll_id=current_goal_bankroll_id,
+                provider_currency=current_currency,
             )
             if (
                 definitely_unreflected
@@ -1555,6 +1584,7 @@ def reserve_observed_provider_headroom(
                 or _denomination_authority_sha256(
                     currency=current_currency,
                     economic_goal_contract_sha256=current_goal_sha256,
+                    economic_goal_bankroll_id=current_goal_bankroll_id,
                     plan_bindings=(target_binding, *liability_bindings),
                 )
                 != assessment.denomination_authority_sha256
@@ -1567,7 +1597,7 @@ def reserve_observed_provider_headroom(
                     ledger,
                     provider_currency=current_currency,
                 )
-                != current_goal_sha256
+                != (current_goal_sha256, current_goal_bankroll_id)
             ):
                 raise ProviderAccountHeadroomStale(
                     "economic-goal denomination authority changed before reservation commit"

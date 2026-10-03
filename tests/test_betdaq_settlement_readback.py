@@ -756,6 +756,18 @@ def test_readback_rejects_posting_currency_mutation(monkeypatch):
         replace(readback, postings=(forged,))
 
 
+def test_canonical_readback_rejects_duplicate_transaction_rows(monkeypatch):
+    client, _ = economic_client(monkeypatch, postings_by_id(posting(9001)))
+    readback = client.read_account_postings_by_id(9001)
+    row = readback.postings[0]
+
+    with pytest.raises(
+        BetdaqEconomicReadbackError,
+        match="must not retain duplicate transaction ids",
+    ):
+        replace(readback, postings=(row, row))
+
+
 
 
 

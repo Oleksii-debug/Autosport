@@ -917,6 +917,10 @@ class ProphetXSessionLifecycle:
         access_token_lineage_id: str | None,
     ) -> ProphetXLoginAdmission:
         if current is None:
+            if access_token_available:
+                raise ProphetXSessionLifecycleError(
+                    "available access token cannot be reconciled without durable session state"
+                )
             return self._grant_login(now, generation=0, transient_failures=0)
 
         self._require_monotonic_transition(current, now)
@@ -953,6 +957,8 @@ class ProphetXSessionLifecycle:
                     snapshot=current,
                     retry_at=current.slot_hold_until,
                 )
+            if current.attempt_id is not None:
+                self._owned_attempts.discard(current.attempt_id)
             return self._grant_login(
                 now,
                 generation=current.generation + 1,

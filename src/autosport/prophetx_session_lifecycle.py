@@ -738,21 +738,20 @@ class ProphetXSessionLifecycle:
         attempt_id: str,
         now: datetime,
         access_expires_at: datetime,
-        provider_session_slot_preservation_proven: bool,
     ) -> ProphetXSessionSnapshot:
-        """Apply refresh only when provider-slot preservation is proven."""
+        """Record refresh success without inventing provider slot semantics.
+
+        The provider response can establish that refresh authentication succeeded and
+        can carry an exact new access-token expiry.  It does not, by itself, prove
+        whether the refresh preserved the existing per-access-key provider session slot
+        or allocated another one.  Until a separately qualified product-owned provider
+        contract can prove that semantic, do not publish ACTIVE/reusable session
+        authority.  Preserve a conservative durable slot hold instead.
+        """
 
         attempt = _sha256_hex(attempt_id, "attempt_id")
         timestamp = _aware_utc(now, "now")
         expires = _aware_utc(access_expires_at, "access_expires_at")
-        if type(provider_session_slot_preservation_proven) is not bool:
-            raise ProphetXSessionLifecycleError(
-                "provider_session_slot_preservation_proven must be an exact bool"
-            )
-        if not provider_session_slot_preservation_proven:
-            raise ProphetXSessionLifecycleError(
-                "renewal success requires proven provider-session slot preservation"
-            )
         if expires <= timestamp:
             raise ProphetXSessionLifecycleError(
                 "provider renewal access_expires_at must follow completion"
@@ -766,15 +765,17 @@ class ProphetXSessionLifecycle:
                 with WorkspaceEconomicLock(self._scope_dir):
                     current = self._require_owned_renewal(attempt)
                     self._require_monotonic_transition(current, timestamp)
+                    conservative_hold = max(
+                        expires,
+                        timestamp + CONSERVATIVE_SESSION_SLOT_HOLD,
+                    )
                     updated = ProphetXSessionSnapshot(
-                        state=ProphetXSessionState.ACTIVE,
+                        state=ProphetXSessionState.WAIT_FOR_PROVIDER_SESSION_EXPIRY,
                         generation=current.generation + 1,
                         credential_revision=current.credential_revision,
                         integration_role=current.integration_role,
                         last_transition_at=timestamp,
-                        session_lineage_id=current.session_lineage_id,
-                        access_expires_at=expires,
-                        slot_hold_until=expires,
+                        slot_hold_until=conservative_hold,
                         transient_failures=0,
                         last_failure_class=current.last_failure_class,
                     )

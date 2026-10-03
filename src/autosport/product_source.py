@@ -155,8 +155,19 @@ class ParlayApiProductSource:
             ).encode("utf-8")
         ).hexdigest()
         self._collector_store: CollectorDeltaStore | None = None
+        self._legacy_oversized_state = False
         self._initialize_state()
-        self._read_state()
+        try:
+            self._legacy_oversized_state = (
+                self.state_path.stat().st_size > self._MAX_STATE_BYTES
+            )
+        except OSError as exc:
+            raise ProductSourceStateError(
+                "cannot verify durable product source state"
+            ) from exc
+        self._read_state(
+            allow_oversized_legacy=self._legacy_oversized_state
+        )
 
     @staticmethod
     def _text(value: object, field: str) -> str:
@@ -249,7 +260,11 @@ class ParlayApiProductSource:
             and left.st_ctime_ns == right.st_ctime_ns
         )
 
-    def _read_state_text_bounded(self) -> str:
+    def _read_state_text_bounded(
+        self,
+        *,
+        allow_oversized_legacy: bool = False,
+    ) -> tuple[str, bool]:
         path = self.state_path
         try:
             path_before = os.stat(path, follow_symlinks=False)
@@ -257,15 +272,23 @@ class ParlayApiProductSource:
             raise ProductSourceStateError(
                 "cannot verify durable product source state"
             ) from exc
+        oversized = path_before.st_size > self._MAX_STATE_BYTES
         if (
             not stat.S_ISREG(path_before.st_mode)
             or path_before.st_nlink != 1
-            or path_before.st_size > self._MAX_STATE_BYTES
+            or (oversized and not allow_oversized_legacy)
         ):
             raise ProductSourceStateError(
                 "durable product source state is not a bounded canonical file"
             )
 
+        # The only exception to the current-state product cap is one upgrade read of
+        # a pre-existing structurally-unbounded legacy history.  Read exactly the
+        # stable observed extent (plus one byte to catch growth); parsed state is
+        # accepted below only if it actually contains migratable legacy history.
+        read_limit = (
+            path_before.st_size if oversized else self._MAX_STATE_BYTES
+        )
         try:
             descriptor = _open_read_only_descriptor(path)
         except OSError as exc:
@@ -302,7 +325,7 @@ class ParlayApiProductSource:
                         "durable product source state changed while validating"
                     )
 
-                payload = handle.read(self._MAX_STATE_BYTES + 1)
+                payload = handle.read(read_limit + 1)
                 opened_after = os.fstat(handle.fileno())
                 current_after = os.stat(path, follow_symlinks=False)
                 final_descriptor = _open_read_only_descriptor(path)
@@ -317,7 +340,7 @@ class ParlayApiProductSource:
                     or not stat.S_ISREG(final_stat.st_mode)
                     or opened_after.st_nlink != 1
                     or final_stat.st_nlink != 1
-                    or len(payload) > self._MAX_STATE_BYTES
+                    or len(payload) > read_limit
                     or not self._stable_state_metadata(opened_before, opened_after)
                     or not self._stable_state_metadata(path_before, current_after)
                 ):
@@ -339,15 +362,22 @@ class ParlayApiProductSource:
                             pass
 
         try:
-            return payload.decode("utf-8")
+            return payload.decode("utf-8"), oversized
         except UnicodeDecodeError as exc:
             raise ProductSourceStateError(
                 "durable product source state is not valid UTF-8"
             ) from exc
 
-    def _read_state_unlocked(self) -> dict[str, object]:
+    def _read_state_unlocked(
+        self,
+        *,
+        allow_oversized_legacy: bool = False,
+    ) -> dict[str, object]:
         try:
-            raw = strict_json_loads(self._read_state_text_bounded())
+            state_text, oversized = self._read_state_text_bounded(
+                allow_oversized_legacy=allow_oversized_legacy
+            )
+            raw = strict_json_loads(state_text)
         except (OSError, TypeError, ValueError) as exc:
             raise ProductSourceStateError("cannot verify durable product source state") from exc
         if (
@@ -436,6 +466,17 @@ class ParlayApiProductSource:
                     raise ProductSourceStateError(
                         "confirmed pending deltas conflict with durable collector acknowledgement"
                     )
+        if oversized and not any(
+            raw[name]
+            for name in (
+                "event_cache",
+                "last_committed_quote_digests",
+                "last_committed_dedupe_digests",
+            )
+        ):
+            raise ProductSourceStateError(
+                "oversized product source state has no migratable legacy history"
+            )
         return raw
 
     def _validate_checkpoint_pair(
@@ -542,7 +583,9 @@ class ParlayApiProductSource:
             self.state_dir.mkdir(parents=True, exist_ok=True)
             with WorkspaceEconomicLock(self.state_dir):
                 if self.state_path.exists():
-                    raw = self._read_state_unlocked()
+                    raw = self._read_state_unlocked(
+                        allow_oversized_legacy=True
+                    )
                     self._recover_authority_locked(raw)
                     return
                 try:
@@ -564,10 +607,18 @@ class ParlayApiProductSource:
                 "cannot initialize canonical product source journal"
             ) from exc
 
-    def _read_state(self) -> dict[str, object]:
+    def _read_state(
+        self,
+        *,
+        allow_oversized_legacy: bool = False,
+    ) -> dict[str, object]:
+        if self._legacy_oversized_state and not allow_oversized_legacy:
+            self._require_collector_store()
         try:
             with WorkspaceEconomicLock(self.state_dir):
-                raw = self._read_state_unlocked()
+                raw = self._read_state_unlocked(
+                    allow_oversized_legacy=allow_oversized_legacy
+                )
                 self._recover_authority_locked(raw)
                 return raw
         except ProductSourceStateError:
@@ -577,7 +628,12 @@ class ParlayApiProductSource:
                 "cannot acquire canonical product source journal lock"
             ) from exc
 
-    def _write_state(self, raw: dict[str, object]) -> None:
+    def _write_state(
+        self,
+        raw: dict[str, object],
+        *,
+        allow_oversized_current: bool = False,
+    ) -> None:
         expected = raw.get("state_sha256")
         if not self._is_digest(expected):
             raise ProductSourceStateError(
@@ -586,7 +642,9 @@ class ParlayApiProductSource:
         assert isinstance(expected, str)
         try:
             with WorkspaceEconomicLock(self.state_dir):
-                current = self._read_state_unlocked()
+                current = self._read_state_unlocked(
+                    allow_oversized_legacy=allow_oversized_current
+                )
                 self._recover_authority_locked(current)
                 if current["state_sha256"] != expected:
                     raise ProductSourceStateError(
@@ -600,6 +658,7 @@ class ParlayApiProductSource:
                     sealed,
                     observed_state_sha256=expected,
                 )
+                self._legacy_oversized_state = False
         except ProductSourceStateError:
             raise
         except WorkspaceEconomicLockError as exc:
@@ -644,7 +703,7 @@ class ParlayApiProductSource:
 
     def _migrate_legacy_history_to_collector_store(self) -> None:
         store = self._require_collector_store()
-        state = self._read_state()
+        state = self._read_state(allow_oversized_legacy=True)
         cache = state["event_cache"]
         quote_history = state["last_committed_quote_digests"]
         dedupe_history = state["last_committed_dedupe_digests"]
@@ -721,7 +780,10 @@ class ParlayApiProductSource:
         state["last_committed_quote_digests"] = {}
         state["last_committed_dedupe_digests"] = {}
         state["event_cache"] = {}
-        self._write_state(state)
+        self._write_state(
+            state,
+            allow_oversized_current=self._legacy_oversized_state,
+        )
 
     def _validate_pending(self, pending: object) -> None:
         base_fields = {

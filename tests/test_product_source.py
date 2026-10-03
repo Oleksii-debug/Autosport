@@ -542,6 +542,75 @@ class ParlayApiProductSourceTests(unittest.TestCase):
             self.assertIs(source._require_collector_store(), store)
             self.assertEqual(store.configured_max_bytes, 4 * 1024 * 1024)
 
+    def test_oversized_legacy_history_migrates_before_current_state_cap(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory) / "workspace"
+            authority_root = Path(directory) / "authority"
+            source = ParlayApiProductSource(
+                _Provider([_batch(cursor="snapshot-1")]),
+                workspace=workspace,
+                authority_root=authority_root,
+                lawful_terms_ref="terms:parlayapi:v1",
+                retention_ref="retention:parlayapi:v1",
+                clock=lambda: "2026-09-20T17:34:02+00:00",
+            )
+            source.fetch_catalog_page(None)
+            delta = source.fetch_deltas(None, (), 1)[0]
+            event = source.resolve_event(delta)
+            store = source._require_collector_store()
+            store._append_with_runtime_stream_epoch(
+                delta,
+                activated_at=delta.collector_committed_at,
+            )
+
+            legacy = source._read_state()
+            legacy["pending"] = None
+            legacy["event_cache"] = {delta.delta_id: event.to_dict()}
+            legacy["last_committed_quote_digests"] = {
+                event.quote_key: delta.canonical_event_digest
+            }
+            legacy["last_committed_dedupe_digests"] = {
+                event.dedupe_key: delta.canonical_event_digest
+            }
+            source._write_state(legacy)
+
+            cleared = dict(source._read_state())
+            cleared["event_cache"] = {}
+            cleared["last_committed_quote_digests"] = {}
+            cleared["last_committed_dedupe_digests"] = {}
+            cleared_rendered = (
+                json.dumps(
+                    source._seal_state(cleared),
+                    ensure_ascii=False,
+                    indent=2,
+                    sort_keys=True,
+                    allow_nan=False,
+                )
+                + "\n"
+            ).encode("utf-8")
+            legacy_size = source.state_path.stat().st_size
+            bound = len(cleared_rendered) + 64
+            self.assertLess(bound, legacy_size)
+
+            with patch.object(ParlayApiProductSource, "_MAX_STATE_BYTES", bound):
+                restored = ParlayApiProductSource(
+                    _Provider([]),
+                    workspace=workspace,
+                    authority_root=authority_root,
+                    lawful_terms_ref="terms:parlayapi:v1",
+                    retention_ref="retention:parlayapi:v1",
+                )
+                self.assertTrue(restored._legacy_oversized_state)
+                budgeted = CollectorDeltaStore(
+                    workspace / "collector_deltas.json",
+                    max_bytes=4 * 1024 * 1024,
+                )
+                restored.bind_collector_store(budgeted)
+
+                self.assertFalse(restored._legacy_oversized_state)
+                self.assertLessEqual(restored.state_path.stat().st_size, bound)
+                self.assertEqual(budgeted.resolve_event(delta), event)
+
     def test_state_reader_rejects_symlink_and_byte_bound_before_parse(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory) / "workspace"

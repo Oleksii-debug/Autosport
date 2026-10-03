@@ -489,6 +489,32 @@ def test_economic_read_rejects_authenticated_context_rotation_during_dispatch(
     assert len(opener.calls) == 1
 
 
+def test_economic_private_call_cannot_be_widened_to_provider_write_by_globals(
+    monkeypatch,
+):
+    client, opener = economic_client(monkeypatch, postings_by_id(posting(9001)))
+    monkeypatch.setattr(
+        settlement_module,
+        "_READ_METHODS",
+        frozenset({"SubmitOrders"}),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        settlement_module,
+        "_REQUEST_ELEMENT",
+        {"SubmitOrders": "submitOrdersRequest"},
+        raising=False,
+    )
+
+    with pytest.raises(
+        BetdaqEconomicReadbackError,
+        match="outside economic READ allowlist",
+    ):
+        client._call("SubmitOrders", {"MarketId": "200"})
+
+    assert opener.calls == []
+
+
 @pytest.mark.parametrize(
     ("attribute", "replacement"),
     (

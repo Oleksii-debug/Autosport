@@ -244,26 +244,25 @@ def test_runtime_authority_rejects_semantic_binding_history_drift(
     )
     _append(store, 0)
 
-    history = store._authority.read_history()
-    assert history
-    original = history[-1].semantic_binding_sha256
-    object.__setattr__(
-        store,
-        "_binding_semantic_binding_sha256",
-        original,
+    payload = store._read_payload()
+    state_sha256 = store._state_sha256(payload)
+    foreign_binding = "f" * 64
+    tx_id = "test-semantic-binding-drift"
+    store._authority.prepare(
+        tx_id=tx_id,
+        observed_state_sha256=state_sha256,
+        intended_state_sha256=state_sha256,
+        semantic_binding_sha256=foreign_binding,
     )
-    assert store.records()
+    store._authority.commit(
+        tx_id=tx_id,
+        observed_state_sha256=state_sha256,
+        semantic_binding_sha256=foreign_binding,
+    )
 
-    # A different in-memory semantic binding may not inherit CURRENT authority
-    # merely because the workspace payload digest still matches.
-    object.__setattr__(
-        store,
-        "_binding_semantic_binding_sha256",
-        "f" * 64,
-    )
     with pytest.raises(
         DeploymentRuntimeAuthorityError,
-        match="binding integrity mismatch",
+        match="semantic binding history mismatch",
     ):
         store.records()
 

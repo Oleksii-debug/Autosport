@@ -637,6 +637,34 @@ class HistoricalAcquisitionBundleTests(unittest.TestCase):
             self.assertFalse(root.exists())
             self.assertEqual(list(Path(tmp).iterdir()), [])
 
+    def test_bundle_digest_failure_occurs_before_final_publication(self) -> None:
+        transport = _Transport()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "acquisition"
+            real_sha256_file = historical_acquisition.sha256_file
+
+            def fail_bundle_digest(path):
+                candidate = Path(path)
+                if candidate.name == "bundle.json":
+                    raise OSError("injected bundle digest failure")
+                return real_sha256_file(path)
+
+            with patch.object(
+                historical_acquisition,
+                "sha256_file",
+                side_effect=fail_bundle_digest,
+            ):
+                with self.assertRaisesRegex(OSError, "injected bundle digest failure"):
+                    capture_historical_acquisition_bundle(
+                        self._provider(transport),
+                        requested_at=("2026-09-12T10:03:00Z",),
+                        results_date="2026-09-10",
+                        output_dir=root,
+                    )
+
+            self.assertFalse(root.exists())
+            self.assertEqual(list(Path(tmp).iterdir()), [])
+
     def test_output_created_during_publication_is_not_overwritten(self) -> None:
         transport = _Transport()
         with tempfile.TemporaryDirectory() as tmp:

@@ -921,18 +921,22 @@ def capture_historical_acquisition_bundle(
         }
         bundle_path = staging / "bundle.json"
         atomic_write_json(bundle_path, bundle)
+        # Resolve the generation digest while the bundle still lives in private
+        # staging.  After the directory rename succeeds there must be no fallible
+        # readback step that can report failure while leaving a committed output
+        # directory behind and making the same never-overwrite call unretryable.
+        bundle_sha256 = sha256_file(bundle_path)
         with durable_path_lock(_bundle_publication_lock_path(output)):
             if output.exists() or output.is_symlink():
                 raise ValueError(
                     "output_dir appeared during acquisition; historical acquisition bundles never overwrite"
                 )
             staging.rename(output)
-        final_bundle = output / "bundle.json"
         return HistoricalAcquisitionBundle(
             root=str(output),
             request_identity=request_identity,
             evidence_identity=evidence_identity,
-            bundle_sha256=sha256_file(final_bundle),
+            bundle_sha256=bundle_sha256,
             snapshot_count=len(snapshot_entries),
             snapshots_with_odds=snapshots_with_odds,
             result_capture_sha256=result_capture_sha256,

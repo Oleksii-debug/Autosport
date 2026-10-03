@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
 from decimal import Decimal
+import urllib.request as _urllib_request
 
 import pytest
 
@@ -58,11 +59,30 @@ class QueueUrlopen:
     def __call__(self, request, *, timeout):
         self.calls.append((request, timeout))
         if not self.results:
-            raise AssertionError("unexpected urlopen call")
+            raise AssertionError("unexpected HTTPS test dispatch")
         result = self.results.pop(0)
         if isinstance(result, BaseException):
             raise result
         return _FakeHttpResponse(result)
+
+
+def _install_https_test_dispatch(monkeypatch, opener):
+    """Intercept below a freshly-built urllib opener without global _opener."""
+
+    def fake_do_open(_self, _http_class, request, **_kwargs):
+        response = opener(
+            request,
+            timeout=getattr(request, "timeout", 0),
+        )
+        response.code = 200
+        response.msg = "OK"
+        return response
+
+    monkeypatch.setattr(
+        _urllib_request.AbstractHTTPHandler,
+        "do_open",
+        fake_do_open,
+    )
 
 
 def clock():
@@ -83,7 +103,7 @@ def client(*results, credentials=None, account_id="acct"):
 
 def canonical_client(monkeypatch, *results, credentials=None, account_id="acct"):
     opener = QueueUrlopen(*results)
-    monkeypatch.setattr(betdaq_account_module, "urlopen", opener)
+    _install_https_test_dispatch(monkeypatch, opener)
     credentials = credentials or BetdaqCredentials("alice", "p@ss", "app-id")
     value = BetdaqAccountReadOnlyClient(
         credentials,
@@ -167,6 +187,81 @@ def test_credentials_and_client_repr_do_not_expose_secure_values():
     assert "secret-app" not in value
     c = BetdaqAccountReadOnlyClient(credentials, transport=QueueTransport(), clock=clock)
     assert "secret" not in repr(c)
+
+
+def test_process_global_urllib_opener_cannot_serve_canonical_account_evidence(
+    monkeypatch,
+):
+    opener = QueueUrlopen(balance())
+    _install_https_test_dispatch(monkeypatch, opener)
+
+    class HostileGlobalOpener:
+        def __init__(self):
+            self.calls = 0
+
+        def open(self, *args, **kwargs):
+            self.calls += 1
+            raise AssertionError(
+                "process-global urllib opener must not serve BETDAQ auth I/O"
+            )
+
+    hostile = HostileGlobalOpener()
+    monkeypatch.setattr(_urllib_request, "_opener", hostile)
+    value = BetdaqAccountReadOnlyClient(
+        BetdaqCredentials("alice", "p@ss", "app-id"),
+        clock=clock,
+    )
+    evidence = value.read_account_evidence(
+        frozenset({BookmakerCapability.BALANCE_READ})
+    )
+    assert evidence.snapshot.balance.currency == "EUR"
+    assert hostile.calls == 0
+    assert len(opener.calls) == 1
+
+
+@pytest.mark.parametrize("attribute", ("Request", "build_opener"))
+def test_canonical_https_request_opener_authority_replacement_fails_before_io(
+    monkeypatch,
+    attribute,
+):
+    hostile_calls = []
+
+    def hostile(*args, **kwargs):
+        hostile_calls.append((args, kwargs))
+        raise AssertionError("hostile urllib authority executed")
+
+    monkeypatch.setattr(betdaq_account_module, attribute, hostile)
+    value = BetdaqAccountReadOnlyClient(
+        BetdaqCredentials("alice", "p@ss", "app-id"),
+        clock=clock,
+    )
+    with pytest.raises(
+        BetdaqAccountReadOnlyError,
+        match="canonical BETDAQ HTTPS request/opener authority was replaced",
+    ):
+        value.read_account_balance()
+    assert hostile_calls == []
+
+
+def test_canonical_build_opener_code_mutation_fails_before_io(monkeypatch):
+    value = BetdaqAccountReadOnlyClient(
+        BetdaqCredentials("alice", "p@ss", "app-id"),
+        clock=clock,
+    )
+
+    def hostile():
+        raise AssertionError("mutated opener factory executed")
+
+    monkeypatch.setattr(
+        betdaq_account_module.build_opener,
+        "__code__",
+        hostile.__code__,
+    )
+    with pytest.raises(
+        BetdaqAccountReadOnlyError,
+        match="canonical BETDAQ HTTPS request/opener authority was replaced",
+    ):
+        value.read_account_balance()
 
 
 def test_injected_transport_cannot_publish_canonical_account_evidence():
@@ -307,7 +402,7 @@ def test_credential_rotation_during_snapshot_fails_before_canonical_publication(
         bootstrap(0),
         changed(),
     )
-    monkeypatch.setattr(betdaq_account_module, "urlopen", opener)
+    _install_https_test_dispatch(monkeypatch, opener)
     value = BetdaqAccountReadOnlyClient(
         credentials,
         clock=clock,

@@ -739,18 +739,46 @@ def _qualification_snapshot(
     pr_number: int,
     *,
     legacy_cancel_same_head: bool | None = None,
+    _module_globals=globals(),
+    _qualification_state_reader=_pull_request_qualification_state,
+    _qualification_state_reader_code=_pull_request_qualification_state.__code__,
+    _qualification_type=PullRequestQualification,
+    _qualification_init=PullRequestQualification.__dict__["__init__"],
+    _qualification_init_code=PullRequestQualification.__dict__["__init__"].__code__,
 ) -> tuple[str, bool]:
+    """Read one qualification snapshot through definition-time authority anchors."""
+
+    def snapshot_authority_current() -> bool:
+        return (
+            _module_globals.get("_pull_request_qualification_state")
+            is _qualification_state_reader
+            and getattr(_qualification_state_reader, "__code__", None)
+            is _qualification_state_reader_code
+            and _module_globals.get("PullRequestQualification") is _qualification_type
+            and _qualification_type.__dict__.get("__init__") is _qualification_init
+            and getattr(_qualification_init, "__code__", None)
+            is _qualification_init_code
+        )
+
+    if not snapshot_authority_current():
+        raise CancellationError("pull request qualification snapshot authority changed")
+
     resolver = getattr(api, "live_pr_qualification", None)
     if callable(resolver):
         qualification = resolver(pr_number)
     else:
-        # Preserve the deliberately small fake API used by focused unit tests.
-        # Production GitHubApi always exposes the atomic head/state/draft resolver.
-        qualification = PullRequestQualification(
+        # Preserve the deliberately small fake API used by focused unit tests while
+        # keeping the DTO constructor pinned across the external live-head read.
+        qualification = _qualification_type(
             head_sha=api.live_pr_head(pr_number),
             integration_capable=not bool(legacy_cancel_same_head),
         )
-    return _pull_request_qualification_state(qualification)
+
+    # A response/read callback may execute arbitrary same-process test or transport
+    # hooks. Never resolve a rebound state reader or DTO constructor after that boundary.
+    if not snapshot_authority_current():
+        raise CancellationError("pull request qualification snapshot authority changed")
+    return _qualification_state_reader(qualification)
 
 
 def admit_current_head(
@@ -758,12 +786,45 @@ def admit_current_head(
     api: GitHubApi,
     pr_number: int,
     event_head_sha: str,
+    _module_globals=globals(),
+    _qualification_snapshot_impl=_qualification_snapshot,
+    _qualification_snapshot_code=_qualification_snapshot.__code__,
+    _result_type=CancellationResult,
+    _result_init=CancellationResult.__dict__["__init__"],
+    _result_init_code=CancellationResult.__dict__["__init__"].__code__,
 ) -> CancellationResult:
     """Admit heavy work only for a current, live integration-capable PR snapshot."""
 
-    event_head_sha = _require_sha(event_head_sha, field="event head sha")
-    live_head_sha, integration_capable = _qualification_snapshot(api, pr_number)
-    return CancellationResult(
+    if type(pr_number) is not int or pr_number <= 0:
+        raise CancellationError("invalid pull request number")
+    if type(event_head_sha) is not str or len(event_head_sha) != 40:
+        raise CancellationError("invalid event head sha")
+    event_head_sha = event_head_sha.lower()
+    if any(ch not in "0123456789abcdef" for ch in event_head_sha):
+        raise CancellationError("invalid event head sha")
+
+    def admission_authority_current() -> bool:
+        return (
+            _module_globals.get("_qualification_snapshot")
+            is _qualification_snapshot_impl
+            and getattr(_qualification_snapshot_impl, "__code__", None)
+            is _qualification_snapshot_code
+            and _module_globals.get("CancellationResult") is _result_type
+            and _result_type.__dict__.get("__init__") is _result_init
+            and getattr(_result_init, "__code__", None) is _result_init_code
+        )
+
+    if not admission_authority_current():
+        raise CancellationError("pull request admission authority changed")
+
+    live_head_sha, integration_capable = _qualification_snapshot_impl(api, pr_number)
+
+    # The live qualification resolver crosses the GitHub transport boundary. Recheck
+    # the definition-time helper/result authority before producing the workflow output.
+    if not admission_authority_current():
+        raise CancellationError("pull request admission authority changed")
+
+    return _result_type(
         current_head=(
             event_head_sha == live_head_sha
             and integration_capable

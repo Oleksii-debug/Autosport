@@ -1030,6 +1030,28 @@ def test_saved_authorizer_rejects_provider_witness_map_in_place_mutation() -> No
         binding._PROVIDER_UNIVERSE_VALUES.update(original)
 
 
+def test_saved_resolver_rejects_timedelta_primitive_rebind_before_resolution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    resolver = binding.resolve_campaign_forward_universe_cycle_authority
+    monkeypatch.setattr(binding, "timedelta", object())
+
+    with pytest.raises(
+        binding.CampaignForwardUniverseCycleBindingError,
+        match="chronology/digest primitives changed",
+    ):
+        resolver(
+            precommit_locator=None,
+            collector_store=None,
+            source_spec=None,
+            cycle_receipt=None,
+            provider_evidence_store=None,
+            universe_store=None,
+            protocol=None,
+            event_lifecycle=None,
+        )
+
+
 def test_saved_resolver_rejects_datetime_primitive_rebind_before_resolution(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

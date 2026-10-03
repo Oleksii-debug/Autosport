@@ -511,25 +511,28 @@ def test_semantic_shell_exposes_readonly_economic_freshness_controls() -> None:
     assert "runtimeEconomic.paper_book_sha256" in js
 
 
-def test_terminal_durable_refresh_retires_runtime_snapshot(
+def test_terminal_durable_refresh_retires_runtime_snapshot_before_reopen(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     controller = _controller(tmp_path)
     controller._product_runtime_economic_snapshot = _snapshot(tmp_path)
     controller.strategy_id = "baseline-v1"
 
-    # Avoid real session construction in this focused presentation test while
-    # preserving the retirement ordering at method entry.
-    original_session = worker_module
-    del original_session
-    try:
-        controller._refresh_economic_projection()
-    except Exception:
-        # An empty temporary workspace may fail deeper session startup depending on
-        # current composition requirements; snapshot retirement must already hold.
-        pass
+    class _RejectingSession:
+        def __init__(self, *_args, **_kwargs) -> None:
+            assert controller._product_runtime_economic_snapshot is None
+            raise RuntimeError("focused retirement witness")
+
+    monkeypatch.setattr(
+        "autosport.windows_webview_shell.AutosportSession",
+        _RejectingSession,
+    )
+
+    controller._refresh_economic_projection()
 
     assert controller._product_runtime_economic_snapshot is None
+    assert tmp_path in controller._recovery_required_workspaces
 
 
 def test_terminal_runtime_error_quarantines_visible_economics(

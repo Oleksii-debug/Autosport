@@ -539,6 +539,17 @@ _TEST_ACQUISITION_ORIGIN = ContextVar(
 _CANONICAL_MODULE_GLOBALS = globals()
 _CANONICAL_INSPECT = inspect
 _CANONICAL_GETATTR_STATIC = inspect.getattr_static
+_CANONICAL_GETATTR_STATIC_CODE = _CANONICAL_GETATTR_STATIC.__code__
+_CANONICAL_GETATTR_STATIC_GLOBALS = _CANONICAL_GETATTR_STATIC.__globals__
+_CANONICAL_GETATTR_STATIC_GLOBAL_ITEMS = tuple(
+    (
+        name,
+        _CANONICAL_GETATTR_STATIC_GLOBALS[name],
+        getattr(_CANONICAL_GETATTR_STATIC_GLOBALS[name], "__code__", None),
+    )
+    for name in _CANONICAL_GETATTR_STATIC_CODE.co_names
+    if name in _CANONICAL_GETATTR_STATIC_GLOBALS
+)
 _CANONICAL_MATH = math
 _CANONICAL_MATH_ISFINITE = math.isfinite
 _CANONICAL_HTTP_REQUEST = Request
@@ -650,6 +661,14 @@ def _require_production_capture_origin_integrity() -> None:
     if (
         inspect is not _CANONICAL_INSPECT
         or _CANONICAL_INSPECT.getattr_static is not _CANONICAL_GETATTR_STATIC
+        or _CANONICAL_GETATTR_STATIC.__code__ is not _CANONICAL_GETATTR_STATIC_CODE
+        or _CANONICAL_GETATTR_STATIC.__globals__
+        is not _CANONICAL_GETATTR_STATIC_GLOBALS
+        or any(
+            _CANONICAL_GETATTR_STATIC_GLOBALS.get(name) is not target
+            or getattr(target, "__code__", None) is not code
+            for name, target, code in _CANONICAL_GETATTR_STATIC_GLOBAL_ITEMS
+        )
         or module_globals.get("math") is not _CANONICAL_MATH
         or _CANONICAL_MATH.isfinite is not _CANONICAL_MATH_ISFINITE
         or Request is not _CANONICAL_HTTP_REQUEST
@@ -800,6 +819,9 @@ def _seal_provider_observation_capture_dispatch() -> None:
         "_CANONICAL_MATH": _CANONICAL_MATH,
         "_CANONICAL_MATH_ISFINITE": _CANONICAL_MATH_ISFINITE,
         "_CANONICAL_GETATTR_STATIC": _CANONICAL_GETATTR_STATIC,
+        "_CANONICAL_GETATTR_STATIC_CODE": _CANONICAL_GETATTR_STATIC_CODE,
+        "_CANONICAL_GETATTR_STATIC_GLOBALS": _CANONICAL_GETATTR_STATIC_GLOBALS,
+        "_CANONICAL_GETATTR_STATIC_GLOBAL_ITEMS": _CANONICAL_GETATTR_STATIC_GLOBAL_ITEMS,
         "_CANONICAL_HTTP_REQUEST": _CANONICAL_HTTP_REQUEST,
         "_CANONICAL_HTTP_REQUEST_INIT": _CANONICAL_HTTP_REQUEST_INIT,
         "_CANONICAL_HTTP_REQUEST_INIT_CODE": _CANONICAL_HTTP_REQUEST_INIT_CODE,

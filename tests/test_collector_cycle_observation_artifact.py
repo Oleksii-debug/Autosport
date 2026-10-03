@@ -96,6 +96,14 @@ class CollectorCycleObservationArtifactTests(unittest.TestCase):
             self.assertEqual(evidence["schedule_id"], schedule["schedule_id"])
             self.assertEqual(evidence["authorization_sha256"], AUTH)
             self.assertEqual(evidence["slot_ordinal"], 0)
+            self.assertEqual(
+                evidence["attempted_at"],
+                "2100-01-01T00:00:00+00:00",
+            )
+            self.assertEqual(
+                evidence["completed_at"],
+                "2100-01-01T00:00:01+00:00",
+            )
             self.assertEqual(len(evidence["terminal_sha256"]), 64)
             self.assertEqual(len(evidence["evidence_sha256"]), 64)
 

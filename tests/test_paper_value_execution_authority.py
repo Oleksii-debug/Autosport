@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from datetime import timedelta
 from decimal import Decimal
 
 import pytest
 
+from autosport import _paper_value_execution_authority as paper_value_authority
 from autosport.agents import AgentContext
 from autosport.decision_ledger import (
     ECONOMIC_DECISION_KIND,
@@ -411,6 +413,170 @@ def test_canonical_economic_agent_issues_origin_witness_before_execution(
     ]
     assert len(matching) == 1
     assert payload["decision_record_sha256"] == matching[0]["sha256"]
+
+
+def _crash_economic_after_origin_witness_before_reservation(
+    tmp_path,
+    monkeypatch,
+):
+    book = PaperBook("100.00")
+    runtime = _runtime(tmp_path, book)
+    event = _event()
+    ledger = JsonlDecisionLedger(tmp_path / "decisions.jsonl")
+    goal = _goal()
+    policy = PaperRiskPolicy(economic_goal=goal)
+    agent = PaperValueAgent(
+        {event.quote_key: _forecast(event)},
+        stake=Decimal("1.00"),
+        minimum_expected_profit_per_unit=Decimal("0"),
+        risk_policy=policy,
+    )
+    context = AgentContext(
+        book,
+        replay_run_id="replay-economic-crash-window",
+        decision_ledger=ledger,
+        paper_execution=runtime,
+        paper_provider_accounts=(("provider-a", "account-a"),),
+    )
+    original_execute = paper_value_authority._ORIGINAL_EXECUTE
+
+    def injected_crash(*_args, **_kwargs):
+        raise RuntimeError("injected crash before #623 reservation")
+
+    monkeypatch.setattr(
+        paper_value_authority,
+        "_ORIGINAL_EXECUTE",
+        injected_crash,
+    )
+    with pytest.raises(
+        RuntimeError,
+        match="injected crash before #623 reservation",
+    ):
+        agent.on_market_event(event, context)
+
+    # Authorization ran before the injected base-execution crash, so both the
+    # durable decision and origin witness exist, but no #623 reservation exists.
+    assert len(ledger.verified_records()) == 1
+    assert not runtime.ledger.events()
+    witness_root = tmp_path / ".paper-value-economic-risk-admissions"
+    witnesses = tuple(
+        path
+        for path in witness_root.glob("*.json")
+        if not path.name.endswith(".pre-action.json")
+    )
+    assert len(witnesses) == 1
+    monkeypatch.setattr(
+        paper_value_authority,
+        "_ORIGINAL_EXECUTE",
+        original_execute,
+    )
+    return event, ledger, goal, policy, witnesses[0]
+
+
+def test_economic_origin_witness_recovers_exact_pre_reservation_crash(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    event, ledger, goal, policy, witness = (
+        _crash_economic_after_origin_witness_before_reservation(
+            tmp_path,
+            monkeypatch,
+        )
+    )
+    witness_payload = json.loads(witness.read_text(encoding="utf-8"))
+
+    restarted_book = PaperBook("100.00")
+    restarted_runtime = _runtime(tmp_path, restarted_book)
+    restarted_context = AgentContext(
+        restarted_book,
+        replay_run_id="replay-economic-crash-window",
+        decision_ledger=ledger,
+        paper_execution=restarted_runtime,
+        paper_provider_accounts=(("provider-a", "account-a"),),
+    )
+    recovering = PaperValueAgent(
+        {},
+        stake=Decimal("99.00"),
+        minimum_expected_profit_per_unit=Decimal("999"),
+        risk_policy=policy,
+    )
+
+    # Recovery intentionally occurs before fresh forecast/edge/sizing proposal
+    # gates and must execute exactly the already-durable decision.
+    recovering.on_market_event(event, restarted_context)
+
+    assert len(restarted_book.tickets) == 1
+    ticket = next(iter(restarted_book.tickets.values()))
+    assert ticket.stake == Decimal(witness_payload["requested_stake"])
+    assert any(
+        item.get("event_type") == "RUN_RESERVED"
+        for item in restarted_runtime.ledger.events()
+    )
+    record = ledger.verified_records()[0]
+    assert (
+        witness_payload["decision_record_sha256"]
+        == paper_value_authority._verified_decision_record_sha256(
+            ledger,
+            record.decision_id,
+        )
+    )
+    assert goal == policy.economic_goal
+
+
+def test_economic_origin_witness_coherent_tamper_fails_closed_in_crash_window(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    event, ledger, _, policy, witness = (
+        _crash_economic_after_origin_witness_before_reservation(
+            tmp_path,
+            monkeypatch,
+        )
+    )
+    payload = json.loads(witness.read_text(encoding="utf-8"))
+    payload["pre_action_book_sha256"] = "0" * 64
+    unsigned = dict(payload)
+    unsigned.pop("witness_sha256")
+    canonical = json.dumps(
+        unsigned,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+    payload["witness_sha256"] = hashlib.sha256(
+        canonical.encode("utf-8")
+    ).hexdigest()
+    witness.write_text(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+    restarted_book = PaperBook("100.00")
+    restarted_runtime = _runtime(tmp_path, restarted_book)
+    restarted_context = AgentContext(
+        restarted_book,
+        replay_run_id="replay-economic-crash-window",
+        decision_ledger=ledger,
+        paper_execution=restarted_runtime,
+        paper_provider_accounts=(("provider-a", "account-a"),),
+    )
+    recovering = PaperValueAgent(
+        {},
+        stake=Decimal("99.00"),
+        minimum_expected_profit_per_unit=Decimal("999"),
+        risk_policy=policy,
+    )
+
+    with pytest.raises(
+        PaperExecutionAdoptionError,
+        match="risk admission binding changed across restart",
+    ):
+        recovering.on_market_event(event, restarted_context)
+
+    assert restarted_book.balance == Decimal("100.00")
+    assert not restarted_book.tickets
+    assert not restarted_runtime.ledger.events()
 
 
 def test_canonical_goal_less_agent_path_still_executes_after_risk_pass(tmp_path) -> None:

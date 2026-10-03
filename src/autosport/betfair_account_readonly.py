@@ -318,6 +318,9 @@ class BetfairExecutionReadbackEnvelope:
     _authority_capture_fingerprint: str | None = field(
         default=None, init=False, repr=False, compare=False
     )
+    _authority_origin_proof: str | None = field(
+        default=None, init=False, repr=False, compare=False
+    )
     _authority_capture_started_at: str | None = field(
         default=None, init=False, repr=False, compare=False
     )
@@ -1260,6 +1263,13 @@ def _install_execution_readback_authority() -> None:
     identity_error = account_identity.BetfairAccountIdentityError
     resolve_identity = account_identity.resolve_betfair_authenticated_account_identity
     require_identity = account_identity.require_authoritative_betfair_account_identity
+    binder_name = "_bind_betfair_execution_readback_origin_authority"
+    bind_origin = getattr(account_identity, binder_name)
+    object_id = id
+    string_type = str
+
+    issue_origin = None
+    verify_origin = None
 
     def require_executable_authority() -> None:
         # read_execution_readback is intentionally composed by the timeout
@@ -1271,6 +1281,11 @@ def _install_execution_readback_authority() -> None:
             or assert_authoritative.__code__ is not assert_authoritative_code
             or raw_read.__code__ is not raw_read_code
             or validate_integrity.__code__ is not validate_integrity_code
+            or issue_origin is None
+            or verify_origin is None
+            or issue_origin.__code__ is not issue_origin_code
+            or verify_origin.__code__ is not verify_origin_code
+            or hasattr(account_identity, binder_name)
         ):
             raise BetfairReadOnlyError(
                 "execution readback origin authority implementation changed"
@@ -1321,13 +1336,31 @@ def _install_execution_readback_authority() -> None:
                 "authenticated Betfair client/session changed during execution readback"
             ) from exc
 
+        fingerprint = capture._authority_fingerprint()
+        try:
+            origin_proof = issue_origin(
+                self,
+                identity,
+                capture_identity=object_id(capture),
+                capture_fingerprint=fingerprint,
+            )
+        except identity_error as exc:
+            raise BetfairReadOnlyError(
+                "authenticated Betfair readback origin proof could not be issued"
+            ) from exc
+        if type(origin_proof) is not string_type:
+            raise BetfairReadOnlyError(
+                "authenticated Betfair readback origin proof is invalid"
+            )
+
         object.__setattr__(capture, "_authority_client", self)
         object.__setattr__(capture, "_authority_account_identity", identity)
         object.__setattr__(
             capture,
             "_authority_capture_fingerprint",
-            capture._authority_fingerprint(),
+            fingerprint,
         )
+        object.__setattr__(capture, "_authority_origin_proof", origin_proof)
         require_executable_authority()
         return capture
 
@@ -1340,10 +1373,12 @@ def _install_execution_readback_authority() -> None:
             self,
             "_authority_capture_fingerprint",
         )
+        origin_proof = object.__getattribute__(self, "_authority_origin_proof")
         if (
             type(client) is not client_type
             or type(identity) is not identity_type
-            or type(fingerprint) is not str
+            or type(fingerprint) is not string_type
+            or type(origin_proof) is not string_type
         ):
             raise BetfairReadOnlyError(
                 "execution readback lacks authenticated product-origin authority"
@@ -1380,10 +1415,25 @@ def _install_execution_readback_authority() -> None:
             raise BetfairReadOnlyError(
                 "execution readback changed after authenticated provider capture"
             )
+        if not verify_origin(
+            origin_proof,
+            client,
+            identity,
+            capture_identity=object_id(self),
+            capture_fingerprint=fingerprint,
+        ):
+            raise BetfairReadOnlyError(
+                "execution readback lacks authenticated product-origin authority"
+            )
         require_executable_authority()
 
     authoritative_read_code = authoritative_read.__code__
     assert_authoritative_code = assert_authoritative.__code__
+    issue_origin, verify_origin = bind_origin(authoritative_read_code)
+    issue_origin_code = issue_origin.__code__
+    verify_origin_code = verify_origin.__code__
+    delattr(account_identity, binder_name)
+
     BetfairReadOnlyClient.read_execution_readback = authoritative_read
     BetfairExecutionReadbackEnvelope.assert_authoritative = assert_authoritative
 

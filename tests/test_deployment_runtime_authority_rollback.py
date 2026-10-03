@@ -155,6 +155,41 @@ def test_reopen_aborts_prepare_when_publish_never_happened(
     assert len(reopened.records()) == 2
 
 
+def test_byte_identical_retry_after_aborted_prepare_uses_fresh_transaction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "deployment-runtime-authority.json"
+    authority_root = _authority_root(tmp_path)
+    store = DeploymentRuntimeAuthorityStore.initialize_pristine(
+        path,
+        authority_root=authority_root,
+    )
+    _append(store, 0)
+    fixed_first_seen = "2100-01-01T00:00:00Z"
+    monkeypatch.setattr(store, "_observed_now", lambda: fixed_first_seen)
+
+    def crash_before_publish(
+        _path: Path,
+        _payload: object,
+    ) -> None:
+        raise RuntimeError("simulated crash before byte-identical publish")
+
+    monkeypatch.setattr(store, "_write_atomic_path", crash_before_publish)
+    with pytest.raises(RuntimeError, match="byte-identical"):
+        _append(store, 1)
+
+    reopened = DeploymentRuntimeAuthorityStore(
+        path,
+        authority_root=authority_root,
+    )
+    monkeypatch.setattr(reopened, "_observed_now", lambda: fixed_first_seen)
+    second_id = _append(reopened, 1)
+
+    assert len(reopened.records()) == 2
+    assert reopened.records()[-1].runtime_authority_id == second_id
+
+
 def test_reopen_commits_prepared_state_after_publish_before_commit_crash(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

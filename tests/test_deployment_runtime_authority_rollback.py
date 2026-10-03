@@ -2370,6 +2370,46 @@ def test_runtime_authority_rejects_construction_helper_code_replacement(
         target.__code__ = original_code
 
 
+def test_runtime_authority_rejects_coordinated_workspace_lock_helper_expected_root_rebinding(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "deployment-runtime-authority.json"
+    store = DeploymentRuntimeAuthorityStore.initialize_pristine(
+        path,
+        authority_root=_authority_root(tmp_path),
+    )
+    hostile_calls: list[object] = []
+
+    def hostile(*args: object, **kwargs: object) -> object:
+        hostile_calls.append((args, kwargs))
+        raise AssertionError("hostile workspace lock helper executed")
+
+    monkeypatch.setattr(
+        deployment_runtime_authority,
+        "_workspace_economic_lock",
+        hostile,
+    )
+    monkeypatch.setattr(
+        deployment_runtime_authority,
+        "_CANONICAL_WORKSPACE_LOCK_HELPER",
+        hostile,
+    )
+    monkeypatch.setattr(
+        deployment_runtime_authority,
+        "_CANONICAL_WORKSPACE_LOCK_HELPER_CODE",
+        hostile.__code__,
+    )
+
+    with pytest.raises(
+        DeploymentRuntimeAuthorityError,
+        match="workspace lock helper dispatch was replaced",
+    ):
+        store.records()
+
+    assert hostile_calls == []
+
+
 @pytest.mark.parametrize(
     ("name", "replacement"),
     (
@@ -3322,6 +3362,46 @@ def test_runtime_authority_rejects_clock_helper_code_replacement(
             _append(store, 0)
     finally:
         target.__code__ = original_code
+
+
+def test_runtime_authority_rejects_coordinated_clock_expected_root_rebinding(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "deployment-runtime-authority.json"
+    store = DeploymentRuntimeAuthorityStore.initialize_pristine(
+        path,
+        authority_root=_authority_root(tmp_path),
+    )
+    hostile_calls: list[None] = []
+
+    def hostile_clock() -> str:
+        hostile_calls.append(None)
+        return "2100-01-01T00:00:00Z"
+
+    monkeypatch.setattr(
+        deployment_runtime_authority,
+        "_utc_now_timestamp",
+        hostile_clock,
+    )
+    monkeypatch.setattr(
+        deployment_runtime_authority,
+        "_CANONICAL_UTC_NOW_TIMESTAMP",
+        hostile_clock,
+    )
+    monkeypatch.setattr(
+        deployment_runtime_authority,
+        "_CANONICAL_UTC_NOW_TIMESTAMP_CODE",
+        hostile_clock.__code__,
+    )
+
+    with pytest.raises(
+        DeploymentRuntimeAuthorityError,
+        match="clock dispatch was replaced",
+    ):
+        _append(store, 0)
+
+    assert hostile_calls == []
 
 
 def test_runtime_authority_pristine_rejects_noop_prepare_and_commit(

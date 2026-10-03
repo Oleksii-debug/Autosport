@@ -412,6 +412,20 @@ def _seal_source_universe_dispatch() -> None:
     )
     expected_cycle_evidence = _CANONICAL_COLLECTOR_CYCLE_EVIDENCE
     expected_cycle_evidence_code = getattr(expected_cycle_evidence, "__code__", None)
+    # The canonical store method is a Python function: keeping its class surface and
+    # code object unchanged is not enough if authority-bearing names in its defining
+    # module are rebound.  Freeze the narrow terminal-decoding dependency graph too.
+    expected_cycle_globals = expected_cycle_evidence.__globals__
+    expected_cycle_text = expected_cycle_globals.get("_text")
+    expected_cycle_text_code = getattr(expected_cycle_text, "__code__", None)
+    expected_cycle_statuses = expected_cycle_globals.get("_CYCLE_TERMINAL_STATUSES")
+    expected_cycle_hashlib = expected_cycle_globals.get("hashlib")
+    expected_cycle_sha256 = getattr(expected_cycle_hashlib, "sha256", None)
+    expected_cycle_json = expected_cycle_globals.get("json")
+    expected_cycle_json_loads = getattr(expected_cycle_json, "loads", None)
+    expected_cycle_json_loads_code = getattr(
+        expected_cycle_json_loads, "__code__", None
+    )
     expected_read_names = _CANONICAL_READ_SEAM_NAMES
     expected_class_seams = _CANONICAL_CLASS_READ_SEAMS
     expected_class_seam_witnesses = tuple(
@@ -520,6 +534,47 @@ def _seal_source_universe_dispatch() -> None:
         ):
             raise expected_error_type(
                 "source-universe collector-cycle evidence authority is rebound"
+            )
+        current_cycle_globals = getattr(
+            expected_cycle_evidence, "__globals__", None
+        )
+        if current_cycle_globals is not expected_cycle_globals:
+            raise expected_error_type(
+                "source-universe collector-cycle global authority drifted"
+            )
+        if (
+            current_cycle_globals.get("_text") is not expected_cycle_text
+            or getattr(expected_cycle_text, "__code__", None)
+            is not expected_cycle_text_code
+        ):
+            raise expected_error_type(
+                "source-universe collector-cycle text authority is rebound or mutated"
+            )
+        if (
+            current_cycle_globals.get("_CYCLE_TERMINAL_STATUSES")
+            is not expected_cycle_statuses
+        ):
+            raise expected_error_type(
+                "source-universe collector-cycle status authority is rebound"
+            )
+        if (
+            current_cycle_globals.get("hashlib") is not expected_cycle_hashlib
+            or getattr(expected_cycle_hashlib, "sha256", None)
+            is not expected_cycle_sha256
+        ):
+            raise expected_error_type(
+                "source-universe collector-cycle digest authority is rebound"
+            )
+        current_cycle_json = current_cycle_globals.get("json")
+        if (
+            current_cycle_json is not expected_cycle_json
+            or getattr(expected_cycle_json, "loads", None)
+            is not expected_cycle_json_loads
+            or getattr(expected_cycle_json_loads, "__code__", None)
+            is not expected_cycle_json_loads_code
+        ):
+            raise expected_error_type(
+                "source-universe collector-cycle JSON authority is rebound or mutated"
             )
         if module_globals.get("_CANONICAL_READ_SEAM_NAMES") is not expected_read_names:
             raise expected_error_type(

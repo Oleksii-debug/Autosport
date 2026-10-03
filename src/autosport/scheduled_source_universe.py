@@ -546,6 +546,31 @@ def _seal_scheduled_source_universe_dispatch() -> None:
     expected_schedule_evidence_code = getattr(
         expected_schedule_evidence, "__code__", None
     )
+    # The schedule reader and its witnessed helper methods share one defining-module
+    # globals dictionary.  Seal the authority-bearing bindings used for frozen scope,
+    # due-time classification and commitment construction so unchanged method code
+    # cannot late-dispatch through a hostile module-global replacement.
+    expected_schedule_globals = expected_schedule_evidence.__globals__
+    expected_schedule_text = expected_schedule_globals.get("_text")
+    expected_schedule_text_code = getattr(expected_schedule_text, "__code__", None)
+    expected_schedule_instant = expected_schedule_globals.get("_instant")
+    expected_schedule_instant_code = getattr(
+        expected_schedule_instant, "__code__", None
+    )
+    expected_schedule_policy = expected_schedule_globals.get("_SCHEDULE_POLICY")
+    expected_schedule_max_slots = expected_schedule_globals.get(
+        "_MAX_SCHEDULE_EVIDENCE_SLOTS"
+    )
+    expected_schedule_hashlib = expected_schedule_globals.get("hashlib")
+    expected_schedule_sha256 = getattr(expected_schedule_hashlib, "sha256", None)
+    expected_schedule_json = expected_schedule_globals.get("json")
+    expected_schedule_json_dumps = getattr(expected_schedule_json, "dumps", None)
+    expected_schedule_json_dumps_code = getattr(
+        expected_schedule_json_dumps, "__code__", None
+    )
+    expected_schedule_math = expected_schedule_globals.get("math")
+    expected_schedule_isfinite = getattr(expected_schedule_math, "isfinite", None)
+    expected_schedule_timedelta = expected_schedule_globals.get("timedelta")
     expected_schedule_read_names = _CANONICAL_SCHEDULE_READ_SEAMS
     expected_schedule_class_seams = _CANONICAL_SCHEDULE_CLASS_READ_SEAMS
     expected_schedule_class_witnesses = tuple(
@@ -680,6 +705,68 @@ def _seal_scheduled_source_universe_dispatch() -> None:
         ):
             raise expected_error_type(
                 "scheduled source-universe schedule evidence authority is rebound"
+            )
+        current_schedule_globals = getattr(
+            expected_schedule_evidence, "__globals__", None
+        )
+        if current_schedule_globals is not expected_schedule_globals:
+            raise expected_error_type(
+                "scheduled source-universe collector global authority drifted"
+            )
+        if (
+            current_schedule_globals.get("_text") is not expected_schedule_text
+            or getattr(expected_schedule_text, "__code__", None)
+            is not expected_schedule_text_code
+        ):
+            raise expected_error_type(
+                "scheduled source-universe collector text authority is rebound or mutated"
+            )
+        if (
+            current_schedule_globals.get("_instant") is not expected_schedule_instant
+            or getattr(expected_schedule_instant, "__code__", None)
+            is not expected_schedule_instant_code
+        ):
+            raise expected_error_type(
+                "scheduled source-universe collector time authority is rebound or mutated"
+            )
+        if (
+            current_schedule_globals.get("_SCHEDULE_POLICY")
+            != expected_schedule_policy
+            or current_schedule_globals.get("_MAX_SCHEDULE_EVIDENCE_SLOTS")
+            != expected_schedule_max_slots
+        ):
+            raise expected_error_type(
+                "scheduled source-universe collector schedule constants drifted"
+            )
+        if (
+            current_schedule_globals.get("hashlib") is not expected_schedule_hashlib
+            or getattr(expected_schedule_hashlib, "sha256", None)
+            is not expected_schedule_sha256
+        ):
+            raise expected_error_type(
+                "scheduled source-universe collector digest authority is rebound"
+            )
+        current_schedule_json = current_schedule_globals.get("json")
+        if (
+            current_schedule_json is not expected_schedule_json
+            or getattr(expected_schedule_json, "dumps", None)
+            is not expected_schedule_json_dumps
+            or getattr(expected_schedule_json_dumps, "__code__", None)
+            is not expected_schedule_json_dumps_code
+        ):
+            raise expected_error_type(
+                "scheduled source-universe collector JSON authority is rebound or mutated"
+            )
+        current_schedule_math = current_schedule_globals.get("math")
+        if (
+            current_schedule_math is not expected_schedule_math
+            or getattr(expected_schedule_math, "isfinite", None)
+            is not expected_schedule_isfinite
+            or current_schedule_globals.get("timedelta")
+            is not expected_schedule_timedelta
+        ):
+            raise expected_error_type(
+                "scheduled source-universe collector due-time authority is rebound"
             )
         if (
             module_globals.get("_CANONICAL_SCHEDULE_READ_SEAMS")

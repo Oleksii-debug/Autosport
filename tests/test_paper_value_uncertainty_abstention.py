@@ -555,22 +555,27 @@ class PaperValueUncertaintyAbstentionTests(unittest.TestCase):
             ).on_market_event(event, context)
             self.assertEqual(set(context.paper_book.tickets), ticket_ids)
 
-            # Policy identity is part of the durable sizing decision even when
-            # the numerical ceiling aliases exactly.
+            # Once the material decision is durable, #623 recovery owns the
+            # historical action before fresh forecast/sizing gates. A newer sizing
+            # policy must not retroactively rewrite or re-size that committed action;
+            # it only governs future material-action identities.
             changed_policy = self._sizing_policy(
                 policy_id="paper-value-canonical-sizing-v2",
             )
-            with self.assertRaisesRegex(
-                PaperDecisionReconciliationRequired,
-                "uncertainty sizing authority",
-            ):
-                self._agent(
-                    goal,
-                    forecast,
-                    predictive_ref=authorized_ref,
-                    sizing_evidence=sizing_evidence,
-                    sizing_policy=changed_policy,
-                ).on_market_event(event, context)
+            self._agent(
+                goal,
+                forecast,
+                predictive_ref=authorized_ref,
+                sizing_evidence=sizing_evidence,
+                sizing_policy=changed_policy,
+            ).on_market_event(event, context)
+            self.assertEqual(set(context.paper_book.tickets), ticket_ids)
+            recovered = context.decision_ledger.verified_records()
+            self.assertEqual(len(recovered), 1)
+            self.assertEqual(
+                recovered[0].payload["uncertainty_sizing_policy_fingerprint"],
+                sizing_policy.fingerprint_sha256,
+            )
 
     def test_resolver_minted_uncertainty_erases_positive_point_edge_before_material_action(
         self,

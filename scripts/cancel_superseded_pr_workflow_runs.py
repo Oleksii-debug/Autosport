@@ -787,17 +787,57 @@ def _qualification_snapshot(
 
     resolver = getattr(api, "live_pr_qualification", None)
     if callable(resolver):
+        resolver_func = getattr(resolver, "__func__", resolver)
+        resolver_self = getattr(resolver, "__self__", None)
+        resolver_code = getattr(resolver_func, "__code__", None)
+        if resolver_code is None:
+            raise CancellationError(
+                "pull request qualification resolver authority is unavailable"
+            )
         qualification = resolver(pr_number)
+        rebound_resolver = getattr(api, "live_pr_qualification", None)
+        rebound_func = getattr(rebound_resolver, "__func__", rebound_resolver)
+        if (
+            getattr(rebound_resolver, "__self__", None) is not resolver_self
+            or rebound_func is not resolver_func
+            or getattr(resolver_func, "__code__", None) is not resolver_code
+        ):
+            raise CancellationError(
+                "pull request qualification resolver authority changed"
+            )
     else:
         # Preserve the deliberately small fake API used by focused unit tests while
-        # keeping the DTO constructor pinned across the external live-head read.
+        # keeping the DTO constructor and live-head resolver pinned across the read.
+        head_resolver = getattr(api, "live_pr_head", None)
+        head_resolver_func = getattr(head_resolver, "__func__", head_resolver)
+        head_resolver_self = getattr(head_resolver, "__self__", None)
+        head_resolver_code = getattr(head_resolver_func, "__code__", None)
+        if not callable(head_resolver) or head_resolver_code is None:
+            raise CancellationError(
+                "pull request live-head resolver authority is unavailable"
+            )
+        head_sha = head_resolver(pr_number)
+        rebound_head_resolver = getattr(api, "live_pr_head", None)
+        rebound_head_func = getattr(
+            rebound_head_resolver,
+            "__func__",
+            rebound_head_resolver,
+        )
+        if (
+            getattr(rebound_head_resolver, "__self__", None) is not head_resolver_self
+            or rebound_head_func is not head_resolver_func
+            or getattr(head_resolver_func, "__code__", None) is not head_resolver_code
+        ):
+            raise CancellationError(
+                "pull request live-head resolver authority changed"
+            )
         qualification = _qualification_type(
-            head_sha=api.live_pr_head(pr_number),
+            head_sha=head_sha,
             integration_capable=not bool(legacy_cancel_same_head),
         )
 
     # A response/read callback may execute arbitrary same-process test or transport
-    # hooks. Never resolve a rebound state reader or DTO constructor after that boundary.
+    # hooks. Never resolve rebound state/DTO/resolver authority after that boundary.
     if not snapshot_authority_current():
         raise CancellationError("pull request qualification snapshot authority changed")
     return _qualification_state_reader(qualification)

@@ -28,6 +28,14 @@ class _AllowedHttpError:
 
 
 @dataclass(frozen=True)
+class _CancellationAccepted:
+    pass
+
+
+_CANCELLATION_ACCEPTED = _CancellationAccepted()
+
+
+@dataclass(frozen=True)
 class WorkflowRun:
     run_id: int
     head_sha: str
@@ -162,8 +170,10 @@ class GitHubApi:
                         )
                     # For this endpoint the documented HTTP 202 Accepted status is the
                     # success authority. The response body is non-authoritative and is
-                    # deliberately neither read nor parsed.
-                    return None
+                    # deliberately neither read nor parsed. Return an unforgeable-by-value
+                    # process-local witness so cancel() can fail closed if a transport
+                    # override returns an ordinary empty/JSON payload instead.
+                    return _CANCELLATION_ACCEPTED
                 body = response.read()
         except HTTPError as exc:
             if exc.code in allowed_http_errors:
@@ -341,11 +351,10 @@ class GitHubApi:
             raise CancellationError(
                 "workflow run cancellation conflicted while run remains active"
             )
-        # _request() has already required the documented HTTP 202 Accepted
-        # contract for this endpoint. Any success body is non-authoritative and may
-        # vary independently of that status, so do not turn accepted cancellation
-        # into controller failure merely because GitHub supplied JSON content.
-        del payload
+        if payload is not _CANCELLATION_ACCEPTED:
+            raise CancellationError(
+                "workflow run cancellation missing HTTP 202 acceptance authority"
+            )
 
 
 def _qualification_snapshot(

@@ -1740,6 +1740,7 @@ def reserve_observed_provider_headroom(
     attempt_id: str,
     bound_plans: tuple[BoundSupervisedExecutionPlan, ...],
     intents: tuple[OpportunityIntent, ...] = (),
+    _issued_assertion=None,
 ) -> ProductInternalHeadroomReservation:
     """Atomically consume product-internal headroom against exact ledger bytes.
 
@@ -1754,7 +1755,11 @@ def reserve_observed_provider_headroom(
         begin_attempt,
         attempt_state,
     ) = _canonical_ledger_dispatch()
-    _assert_issued(assessment)
+    if _issued_assertion is None:
+        raise ProviderAccountHeadroomError(
+            "canonical headroom assessment issuance assertion is unavailable"
+        )
+    _issued_assertion(assessment)
     attempt_id = _text(attempt_id, "attempt_id")
     if type(acquired) is not AuthoritativeAccountSnapshot:
         raise ProviderAccountHeadroomError(
@@ -2043,12 +2048,16 @@ def _install_headroom_issuance_authority() -> None:
             attempt_id=attempt_id,
             bound_plans=bound_plans,
             intents=intents,
+            _issued_assertion=assert_issued,
         )
         issue_reservation(value)
         return value
 
-    globals()["_assert_issued"] = assert_issued
-    globals()["_reservation_is_issued"] = reservation_is_issued
+    setattr(
+        ProductInternalHeadroomReservation,
+        "product_internal_reservation_proven",
+        property(reservation_is_issued),
+    )
     globals()["assess_provider_account_headroom"] = authoritative_assess
     globals()["reserve_observed_provider_headroom"] = authoritative_reserve
 

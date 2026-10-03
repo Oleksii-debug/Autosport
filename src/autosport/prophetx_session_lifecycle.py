@@ -341,6 +341,19 @@ class ProphetXSessionSnapshot:
                 "credential-rejected state cannot carry active-session or retry evidence"
             )
 
+        if self.state in {
+            ProphetXSessionState.NO_SESSION,
+            ProphetXSessionState.EXPIRED,
+        } and (
+            self.session_lineage_id is not None
+            or self.access_expires_at is not None
+            or self.slot_hold_until is not None
+            or self.retry_not_before is not None
+        ):
+            raise ProphetXSessionLifecycleError(
+                "empty or expired state cannot carry session, slot, or retry evidence"
+            )
+
     def to_json_dict(
         self,
         *,

@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from scripts.cancel_superseded_pr_workflow_runs import (
+    CancellationError,
     PullRequestQualification,
     WorkflowRun,
 )
@@ -271,6 +272,79 @@ def test_one_pr_authority_move_does_not_block_other_pr_group() -> None:
         current_run_id=99,
     ) == (60,)
     assert api.cancelled == [60]
+
+
+def test_one_pr_initial_qualification_failure_does_not_block_other_group() -> None:
+    two = PullRequestQualification(
+        head_sha="9" * 40,
+        integration_capable=True,
+    )
+
+    class InitialFailureApi(SweepApi):
+        def live_pr_qualification(self, pr_number: int) -> PullRequestQualification:
+            self.reads.append(pr_number)
+            if pr_number == 501:
+                raise CancellationError("fixture qualification unavailable")
+            return self._qualifications[pr_number][0]
+
+    api = InitialFailureApi(
+        (
+            _run(50, "a" * 40, (501,)),
+            _run(60, "b" * 40, (601,)),
+        ),
+        {601: [two]},
+    )
+
+    assert cancel_superseded_explicit_pr_runs(
+        api,  # type: ignore[arg-type]
+        workflow_name="CI",
+        current_run_id=99,
+    ) == (60,)
+    assert api.cancelled == [60]
+    assert api.reads == [501, 601, 601]
+
+
+def test_one_pr_qualification_reread_failure_does_not_block_other_group() -> None:
+    one = PullRequestQualification(
+        head_sha="7" * 40,
+        integration_capable=True,
+    )
+    two = PullRequestQualification(
+        head_sha="9" * 40,
+        integration_capable=True,
+    )
+
+    class RereadFailureApi(SweepApi):
+        def __init__(self, *args, **kwargs) -> None:
+            super().__init__(*args, **kwargs)
+            self._read_counts: dict[int, int] = {}
+
+        def live_pr_qualification(self, pr_number: int) -> PullRequestQualification:
+            self.reads.append(pr_number)
+            count = self._read_counts.get(pr_number, 0)
+            self._read_counts[pr_number] = count + 1
+            if pr_number == 501 and count == 1:
+                raise CancellationError("fixture qualification reread unavailable")
+            return self._qualifications[pr_number][0]
+
+    api = RereadFailureApi(
+        (
+            _run(50, "a" * 40, (501,)),
+            _run(60, "b" * 40, (601,)),
+        ),
+        {
+            501: [one],
+            601: [two],
+        },
+    )
+
+    assert cancel_superseded_explicit_pr_runs(
+        api,  # type: ignore[arg-type]
+        workflow_name="CI",
+        current_run_id=99,
+    ) == (60,)
+    assert api.cancelled == [60]
+    assert api.reads == [501, 501, 601, 601]
 
 
 def test_controller_main_uses_workflow_wide_sweep_and_trigger_boundary() -> None:

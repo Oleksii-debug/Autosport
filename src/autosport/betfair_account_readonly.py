@@ -15,7 +15,7 @@ from threading import Lock
 from types import MappingProxyType
 from typing import Callable, Mapping, Protocol, Sequence
 from urllib.error import HTTPError, URLError
-from urllib.request import Request, build_opener
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 ACCOUNT_JSON_RPC_ENDPOINT = "https://api.betfair.com/exchange/account/json-rpc/v1"
 BETTING_JSON_RPC_ENDPOINT = "https://api.betfair.com/exchange/betting/json-rpc/v1"
@@ -120,6 +120,16 @@ class BetfairHttpTransport(Protocol):
     def post(self, url: str, *, headers: Mapping[str, str], body: bytes, timeout_seconds: float) -> bytes: ...
 
 
+class _RejectBetfairRedirects(HTTPRedirectHandler):
+    """Refuse redirects before authenticated Betfair headers can change origin."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        del req, fp, msg, headers, newurl
+        raise BetfairReadOnlyError(
+            f"Betfair HTTP redirect refused with status {code}"
+        )
+
+
 class UrllibBetfairHttpTransport:
     def __init__(self, *, max_response_bytes: int = 8 * 1024 * 1024) -> None:
         if not isinstance(max_response_bytes, int) or isinstance(max_response_bytes, bool) or max_response_bytes <= 0:
@@ -131,10 +141,28 @@ class UrllibBetfairHttpTransport:
         try:
             # urllib.request.urlopen() dereferences process-global _opener state.
             # Build an isolated opener per authenticated provider request so caller
-            # global opener injection cannot become Betfair origin authority.
-            opener = build_opener()
+            # global opener injection cannot become Betfair origin authority. Refuse
+            # redirects before an authenticated request can change provider origin.
+            opener = build_opener(_RejectBetfairRedirects())
             with opener.open(request, timeout=timeout_seconds) as response:
+                status = getattr(response, "status", getattr(response, "code", None))
+                if status != 200:
+                    raise BetfairReadOnlyError(
+                        f"Betfair HTTP response status must be exactly 200, got {status!r}"
+                    )
+                geturl = getattr(response, "geturl", None)
+                final_url = (
+                    geturl()
+                    if callable(geturl)
+                    else getattr(response, "url", None)
+                )
+                if final_url != url:
+                    raise BetfairReadOnlyError(
+                        "Betfair HTTP response origin changed"
+                    )
                 payload = response.read(self._max_response_bytes + 1)
+        except BetfairReadOnlyError:
+            raise
         except HTTPError as exc:
             raise BetfairReadOnlyError(f"Betfair HTTP request failed with status {exc.code}") from None
         except (URLError, TimeoutError, OSError):

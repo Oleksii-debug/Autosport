@@ -239,7 +239,7 @@ class GitHubApi:
 
     @property
     def _repository(self) -> str:
-        return self.__repository
+        return object.__getattribute__(self, "_GitHubApi__repository")
 
     def _request(
         self,
@@ -248,13 +248,14 @@ class GitHubApi:
         method: str = "GET",
         allowed_http_errors: frozenset[int] = frozenset(),
     ) -> object:
+        repository = object.__getattribute__(self, "_GitHubApi__repository")
         is_cancel_request = (
             method == "POST"
             and path.startswith("/actions/runs/")
             and path.endswith("/cancel")
         )
         request = Request(
-            f"https://api.github.com/repos/{self._repository}{path}",
+            f"https://api.github.com/repos/{repository}{path}",
             method=method,
             headers={
                 "Accept": _ACCEPT,
@@ -359,9 +360,12 @@ class GitHubApi:
         return next(iter(exact_numbers))
 
     def live_pr_qualification(self, pr_number: int) -> tuple[str, bool]:
-        repository = self._repository
+        repository = object.__getattribute__(self, "_GitHubApi__repository")
         payload = self._pull_request(pr_number)
-        if self._repository != repository:
+        if (
+            object.__getattribute__(self, "_GitHubApi__repository")
+            != repository
+        ):
             raise CancellationError("GitHub API repository binding changed")
         head = payload.get("head")
         base = payload.get("base")

@@ -137,7 +137,7 @@ def select_superseded_runs(
         for run in runs
         if run.run_id != current_run_id
         and run.workflow_name == workflow_name
-        and pr_number in run.pr_numbers
+        and run.pr_numbers == (pr_number,)
         and (cancel_same_head or run.head_sha != live_head_sha)
     }
     return tuple(sorted(selected))

@@ -716,3 +716,4 @@ del _raw_resolve_descriptor
 del _resolve_globals
 del _raw_require_descriptor
 del _require_globals
+del _RISK_TURNOVER_RESOLVE_BOUND

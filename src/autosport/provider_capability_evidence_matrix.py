@@ -879,17 +879,41 @@ def validate_capability_matrix_successor(
     old_scope = (
         previous.profile.venue_id,
         previous.profile.account_id,
+        previous.profile.adapter_id,
+        previous.profile.adapter_version,
+        previous.integration.integration_kind,
         previous.environment,
         previous.application_mode,
     )
     new_scope = (
         current.profile.venue_id,
         current.profile.account_id,
+        current.profile.adapter_id,
+        current.profile.adapter_version,
+        current.integration.integration_kind,
         current.environment,
         current.application_mode,
     )
     if new_scope != old_scope:
-        raise ProviderCapabilityEvidenceMatrixError("successor scope changed")
+        raise ProviderCapabilityEvidenceMatrixError(
+            "successor authority scope or integration mechanism changed"
+        )
+    if current.profile.profile_version < previous.profile.profile_version:
+        raise ProviderCapabilityEvidenceMatrixError(
+            "successor capability profile version regressed"
+        )
+    if _time(current.profile.observed_at, "current.profile.observed_at") < _time(
+        previous.profile.observed_at, "previous.profile.observed_at"
+    ):
+        raise ProviderCapabilityEvidenceMatrixError(
+            "successor capability profile observation moved backwards"
+        )
+    if _time(current.integration.observed_at, "current.integration.observed_at") < _time(
+        previous.integration.observed_at, "previous.integration.observed_at"
+    ):
+        raise ProviderCapabilityEvidenceMatrixError(
+            "successor integration observation moved backwards"
+        )
     if _time(current.as_of, "current.as_of") < _time(previous.as_of, "previous.as_of"):
         raise ProviderCapabilityEvidenceMatrixError("successor time moved backwards")
     if not _is_product_issued_matrix(previous) or not _is_product_issued_matrix(current):

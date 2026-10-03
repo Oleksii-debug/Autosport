@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import timedelta
+from datetime import datetime, timedelta
 import hashlib
 import json
 import os
@@ -282,3 +282,50 @@ def test_root_record_digest_rejects_before_creating_selected_directory(tmp_path)
         )
 
     assert not attacker_root.exists()
+
+
+def test_issuance_witness_rejects_clock_rollback_without_appending() -> None:
+    fixture, authority = _fixture_authority_with_goal(_goal())
+    try:
+        issued = authority.denomination_binding()
+        assert issued is not None
+        registry = authority._registry()
+        before = campaign_authority_module._read_issuance_witnesses(registry)
+        assert len(before) == 1
+
+        with pytest.raises(
+            CampaignEconomicAuthorityError,
+            match="issuance witness availability timestamp regressed",
+        ):
+            campaign_authority_module._append_issuance_witness(
+                registry,
+                binding_key="clock-rollback-falsifier",
+                binding_payload_sha256="1" * 64,
+                available_at=issued.available_at - timedelta(microseconds=1),
+            )
+
+        assert campaign_authority_module._read_issuance_witnesses(registry) == before
+    finally:
+        fixture.doCleanups()
+
+
+def test_issuance_witness_rejects_naive_available_at() -> None:
+    fixture, authority = _fixture_authority_with_goal(_goal())
+    try:
+        registry = authority._registry()
+        before = campaign_authority_module._read_issuance_witnesses(registry)
+
+        with pytest.raises(
+            CampaignEconomicAuthorityError,
+            match="issuance witness available_at must be timezone-aware",
+        ):
+            campaign_authority_module._append_issuance_witness(
+                registry,
+                binding_key="naive-clock-falsifier",
+                binding_payload_sha256="2" * 64,
+                available_at=datetime(2026, 1, 1),
+            )
+
+        assert campaign_authority_module._read_issuance_witnesses(registry) == before
+    finally:
+        fixture.doCleanups()

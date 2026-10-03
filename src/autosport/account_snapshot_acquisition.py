@@ -15,6 +15,7 @@ import json
 from pathlib import Path
 import sqlite3
 from threading import RLock
+from types import MappingProxyType
 from weakref import ref
 
 from ._campaign_provider_scope_devapp_identity import (
@@ -1189,20 +1190,32 @@ def _install_account_snapshot_acquisition_authority() -> None:
 
         __slots__ = ("__issued", "__live", "__lock")
 
+        def __setattr__(
+            self,
+            name: str,
+            value: object,
+            _protected: frozenset[str] = frozenset(
+                {
+                    "_AccountSnapshotAuthorityBoundary__issued",
+                    "_AccountSnapshotAuthorityBoundary__live",
+                    "_AccountSnapshotAuthorityBoundary__lock",
+                }
+            ),
+        ) -> None:
+            if name in _protected:
+                try:
+                    object.__getattribute__(self, name)
+                except AttributeError:
+                    pass
+                else:
+                    raise AttributeError(
+                        "account snapshot authority storage is immutable"
+                    )
+            object.__setattr__(self, name, value)
+
         def __init__(self) -> None:
-            self.__issued: dict[
-                int,
-                tuple[
-                    object,
-                    _AccountSnapshotStore,
-                    BetfairReadOnlyClient,
-                    BetfairSessionCredentials,
-                ],
-            ] = {}
-            self.__live: dict[
-                str,
-                tuple[object, str, BetfairSessionCredentials],
-            ] = {}
+            self.__issued = MappingProxyType({})
+            self.__live = MappingProxyType({})
             self.__lock = RLock()
 
         @staticmethod
@@ -1277,14 +1290,28 @@ def _install_account_snapshot_acquisition_authority() -> None:
 
             def forget(_weakref: object, *, key: int = instance_id) -> None:
                 with self.__lock:
-                    self.__issued.pop(key, None)
+                    current = self.__issued.get(key)
+                    if current is not None and current[0] is _weakref:
+                        updated = dict(self.__issued)
+                        updated.pop(key, None)
+                        object.__setattr__(
+                            self,
+                            "_AccountSnapshotAuthorityBoundary__issued",
+                            MappingProxyType(updated),
+                        )
 
             with self.__lock:
-                self.__issued[instance_id] = (
+                updated = dict(self.__issued)
+                updated[instance_id] = (
                     ref(acquirer, forget),
                     store,
                     client,
                     credentials,
+                )
+                object.__setattr__(
+                    self,
+                    "_AccountSnapshotAuthorityBoundary__issued",
+                    MappingProxyType(updated),
                 )
 
         def acquire(
@@ -1370,12 +1397,24 @@ def _install_account_snapshot_acquisition_authority() -> None:
                     if current is not None:
                         value = current[0]()
                         if value is None:
-                            self.__live.pop(existing.receipt.acquisition_id, None)
+                            updated = dict(self.__live)
+                            updated.pop(existing.receipt.acquisition_id, None)
+                            object.__setattr__(
+                                self,
+                                "_AccountSnapshotAuthorityBoundary__live",
+                                MappingProxyType(updated),
+                            )
                         elif (
                             type(value) is not AuthoritativeAccountSnapshot
                             or current[1] != self._fingerprint(value)
                         ):
-                            self.__live.pop(existing.receipt.acquisition_id, None)
+                            updated = dict(self.__live)
+                            updated.pop(existing.receipt.acquisition_id, None)
+                            object.__setattr__(
+                                self,
+                                "_AccountSnapshotAuthorityBoundary__live",
+                                MappingProxyType(updated),
+                            )
                             raise AccountSnapshotAcquisitionError(
                                 "live account snapshot authority integrity changed"
                             )
@@ -1493,12 +1532,24 @@ def _install_account_snapshot_acquisition_authority() -> None:
                 if current is not None:
                     value = current[0]()
                     if value is None:
-                        self.__live.pop(live_id, None)
+                        updated = dict(self.__live)
+                        updated.pop(live_id, None)
+                        object.__setattr__(
+                            self,
+                            "_AccountSnapshotAuthorityBoundary__live",
+                            MappingProxyType(updated),
+                        )
                     elif (
                         type(value) is not AuthoritativeAccountSnapshot
                         or current[1] != self._fingerprint(value)
                     ):
-                        self.__live.pop(live_id, None)
+                        updated = dict(self.__live)
+                        updated.pop(live_id, None)
+                        object.__setattr__(
+                            self,
+                            "_AccountSnapshotAuthorityBoundary__live",
+                            MappingProxyType(updated),
+                        )
                         raise AccountSnapshotAcquisitionError(
                             "live account snapshot authority integrity changed"
                         )
@@ -1518,12 +1569,24 @@ def _install_account_snapshot_acquisition_authority() -> None:
                     with self.__lock:
                         registered = self.__live.get(expected_id)
                         if registered is not None and registered[0] is current_ref:
-                            self.__live.pop(expected_id, None)
+                            updated = dict(self.__live)
+                            updated.pop(expected_id, None)
+                            object.__setattr__(
+                                self,
+                                "_AccountSnapshotAuthorityBoundary__live",
+                                MappingProxyType(updated),
+                            )
 
-                self.__live[live_id] = (
+                updated = dict(self.__live)
+                updated[live_id] = (
                     ref(acquired, forget_live),
                     fingerprint,
                     origin_credentials,
+                )
+                object.__setattr__(
+                    self,
+                    "_AccountSnapshotAuthorityBoundary__live",
+                    MappingProxyType(updated),
                 )
                 return acquired
 

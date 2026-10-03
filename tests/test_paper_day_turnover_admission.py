@@ -6,12 +6,14 @@ from pathlib import Path
 import pytest
 
 import autosport.economic_admission as economic_admission
+import autosport.monotonic_workspace_authority as monotonic_module
 import autosport.risk as risk_module
 
 from autosport.domain import MarketEvent, TicketLeg
 from autosport.economic_admission import admit_paper_ticket
 from autosport.economic_goal import EconomicGoalContract
 from autosport.economic_goal_store import EconomicGoalStore
+from autosport.monotonic_workspace_authority import MonotonicWorkspaceAuthority
 from autosport.paper import PaperBook
 from autosport.risk import PaperRiskPolicy, ProposedTicketRiskContext
 from autosport.risk_day_window import ProductDayRiskWindowStore
@@ -279,6 +281,66 @@ def test_risk_day_frozen_helper_code_mutation_cannot_mint_headroom(tmp_path):
         with pytest.raises(
             RuntimeError,
             match="product day window dependency authority changed",
+        ):
+            _assert_day_authority_dependency_rejected(tmp_path)
+    finally:
+        helper.__code__ = original_code
+
+
+def test_monotonic_transition_helper_rebind_cannot_mint_day_headroom(tmp_path):
+    original = MonotonicWorkspaceAuthority._load_bound_history
+
+    def hostile_history(_self):
+        raise AssertionError("mutated monotonic history helper executed")
+
+    try:
+        MonotonicWorkspaceAuthority._load_bound_history = hostile_history
+        with pytest.raises(
+            RuntimeError,
+            match="monotonic day authority transition graph changed",
+        ):
+            _assert_day_authority_dependency_rejected(tmp_path)
+    finally:
+        MonotonicWorkspaceAuthority._load_bound_history = original
+
+
+def test_monotonic_transition_helper_code_mutation_cannot_mint_day_headroom(tmp_path):
+    helper = MonotonicWorkspaceAuthority._load_bound_history
+    original_code = helper.__code__
+    try:
+        helper.__code__ = _replacement_code_preserving_freevars(helper)
+        with pytest.raises(
+            RuntimeError,
+            match="monotonic day authority transition graph changed",
+        ):
+            _assert_day_authority_dependency_rejected(tmp_path)
+    finally:
+        helper.__code__ = original_code
+
+
+def test_monotonic_transition_global_helper_rebind_cannot_mint_day_headroom(tmp_path):
+    original = monotonic_module._record_hash
+    try:
+        monotonic_module._record_hash = lambda _payload: "0" * 64
+        with pytest.raises(
+            RuntimeError,
+            match="monotonic day authority transition graph changed",
+        ):
+            _assert_day_authority_dependency_rejected(tmp_path)
+    finally:
+        monotonic_module._record_hash = original
+
+
+def test_monotonic_transition_global_helper_code_mutation_cannot_mint_day_headroom(
+    tmp_path,
+):
+    helper = monotonic_module._record_hash
+    original_code = helper.__code__
+    try:
+        helper.__code__ = _replacement_code_preserving_freevars(helper)
+        with pytest.raises(
+            RuntimeError,
+            match="monotonic day authority transition graph changed",
         ):
             _assert_day_authority_dependency_rejected(tmp_path)
     finally:

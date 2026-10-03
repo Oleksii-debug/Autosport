@@ -8,6 +8,7 @@ import pytest
 import autosport.economic_goal_provenance as goal_provenance_module
 import autosport.economic_goal_store as economic_goal_store_module
 import autosport.paper as paper_module
+import autosport.paper_drawdown_evidence as drawdown_module
 from autosport.domain import TicketLeg
 from autosport.economic_goal import EconomicGoalContract
 from autosport.economic_goal_store import EconomicGoalStore
@@ -444,6 +445,57 @@ def test_evidence_shape_rejects_forged_result_digest(tmp_path):
         match="result digest does not match canonical evidence",
     ):
         replace(evidence, evidence_sha256="0" * 64)
+
+
+def test_evidence_shape_digest_rejects_live_hashlib_rebinding(
+    tmp_path,
+    monkeypatch,
+):
+    _initialize(tmp_path)
+    evidence = resolve_paper_drawdown_evidence(tmp_path)
+
+    class _ForgedHash:
+        def hexdigest(self):
+            return "0" * 64
+
+    def forged_sha256(_payload=b""):
+        return _ForgedHash()
+
+    monkeypatch.setattr(drawdown_module.hashlib, "sha256", forged_sha256)
+
+    with pytest.raises(
+        PaperDrawdownEvidenceError,
+        match="path digest does not match canonical path",
+    ):
+        replace(
+            evidence,
+            path_sha256="0" * 64,
+            evidence_sha256="0" * 64,
+        )
+
+
+def test_evidence_shape_digest_rejects_in_place_json_dumps_code_mutation(tmp_path):
+    _initialize(tmp_path)
+    evidence = resolve_paper_drawdown_evidence(tmp_path)
+    forged_digest = drawdown_module.hashlib.sha256(b"{}").hexdigest()
+
+    def forged_json_dumps(*_args, **_kwargs):
+        return "{}"
+
+    original_code = drawdown_module.json.dumps.__code__
+    drawdown_module.json.dumps.__code__ = forged_json_dumps.__code__
+    try:
+        with pytest.raises(
+            PaperDrawdownEvidenceError,
+            match="path digest does not match canonical path",
+        ):
+            replace(
+                evidence,
+                path_sha256=forged_digest,
+                evidence_sha256=forged_digest,
+            )
+    finally:
+        drawdown_module.json.dumps.__code__ = original_code
 
 
 def test_evidence_shape_rejects_structural_field_mutation_with_stale_digest(tmp_path):

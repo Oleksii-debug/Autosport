@@ -277,10 +277,14 @@ def _canonical_digest(payload: dict[str, object]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+_HEADROOM_DATETIME_NOW = datetime.now
+_HEADROOM_UTC = timezone.utc
+
+
 def _utc_now(
     *,
-    _datetime_now=datetime.now,
-    _utc=timezone.utc,
+    _datetime_now=_HEADROOM_DATETIME_NOW,
+    _utc=_HEADROOM_UTC,
 ) -> datetime:
     return _datetime_now(_utc)
 
@@ -289,11 +293,17 @@ def _read_headroom_utc_now(
     *,
     _clock=_utc_now,
     _clock_code=getattr(_utc_now, "__code__", None),
+    _datetime_now=_HEADROOM_DATETIME_NOW,
+    _utc=_HEADROOM_UTC,
 ) -> datetime:
     live = globals().get("_utc_now")
+    kwdefaults = getattr(_clock, "__kwdefaults__", None)
     if (
         live is not _clock
         or getattr(live, "__code__", None) is not _clock_code
+        or type(kwdefaults) is not dict
+        or kwdefaults.get("_datetime_now") is not _datetime_now
+        or kwdefaults.get("_utc") is not _utc
     ):
         raise ProviderAccountHeadroomError(
             "canonical provider-account headroom clock authority changed"

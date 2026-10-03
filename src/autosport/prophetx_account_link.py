@@ -279,14 +279,41 @@ class ProphetXAccountLinkController:
     ) -> None:
         if transport is None or credential_sink is None:
             raise ValueError("transport and credential_sink are required")
+        begin_login = getattr(transport, "begin_login", None)
+        send_verification_code = getattr(transport, "send_verification_code", None)
+        verify_two_factor = getattr(transport, "verify_two_factor", None)
+        cancel_challenge = getattr(transport, "cancel_challenge", None)
+        store_credentials = getattr(
+            credential_sink,
+            "store_prophetx_credentials",
+            None,
+        )
+        if not all(
+            callable(item)
+            for item in (
+                begin_login,
+                send_verification_code,
+                verify_two_factor,
+                cancel_challenge,
+            )
+        ):
+            raise TypeError("transport must provide the complete account-link auth surface")
+        if not callable(store_credentials):
+            raise TypeError("credential_sink must provide atomic ProphetX storage")
         self._transport = transport
         self._credential_sink = credential_sink
+        self._begin_login = begin_login
+        self._send_verification_code = send_verification_code
+        self._verify_two_factor = verify_two_factor
+        self._cancel_challenge = cancel_challenge
+        self._store_credentials = store_credentials
         self._device_id = _canonical_text(device_id, "device_id", max_length=512)
         if not callable(clock_ns):
             raise TypeError("clock_ns must be callable")
         if type(resend_interval_seconds) is not int or resend_interval_seconds < 1:
             raise ValueError("resend_interval_seconds must be positive int")
         self._clock_ns = clock_ns
+        self._clock_call = clock_ns
         self._resend_interval_ns = resend_interval_seconds * 1_000_000_000
 
         self._state = AccountLinkState.NOT_LINKED
@@ -325,7 +352,7 @@ class ProphetXAccountLinkController:
         self._diagnostic = DiagnosticCode.NONE
 
         try:
-            outcome = self._transport.begin_login(
+            outcome = self._begin_login(
                 email=email_value,
                 password=password_value,
                 device_id=self._device_id,
@@ -365,7 +392,7 @@ class ProphetXAccountLinkController:
         self._state = AccountLinkState.TWO_FACTOR_SENDING
         self._diagnostic = DiagnosticCode.NONE
         try:
-            self._transport.send_verification_code(challenge_ref=challenge_ref)
+            self._send_verification_code(challenge_ref=challenge_ref)
         except ProviderAuthFailure as exc:
             self._apply_provider_failure(exc, preserve_challenge=True)
             return
@@ -389,7 +416,7 @@ class ProphetXAccountLinkController:
         self._state = AccountLinkState.TWO_FACTOR_VERIFYING
         self._diagnostic = DiagnosticCode.NONE
         try:
-            outcome = self._transport.verify_two_factor(
+            outcome = self._verify_two_factor(
                 challenge_ref=challenge_ref,
                 code=code_value,
             )
@@ -437,7 +464,7 @@ class ProphetXAccountLinkController:
         env_value = _environment(environment)
 
         try:
-            credential_ref = self._credential_sink.store_prophetx_credentials(
+            credential_ref = self._store_credentials(
                 access_key=access_value,
                 secret_key=secret_value,
                 environment=env_value,
@@ -651,13 +678,13 @@ class ProphetXAccountLinkController:
         self._last_verification_send_ns = None
         if cancel_challenge and _opaque_ref(challenge_ref):
             try:
-                self._transport.cancel_challenge(challenge_ref=challenge_ref)
+                self._cancel_challenge(challenge_ref=challenge_ref)
             except Exception:
                 pass
 
     def _read_clock(self) -> int:
         try:
-            value = self._clock_ns()
+            value = self._clock_call()
         except Exception as exc:
             raise AccountLinkStateError("monotonic clock unavailable") from exc
         if type(value) is not int or value < 0:

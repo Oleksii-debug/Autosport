@@ -817,18 +817,27 @@ def admit_current_head(
     if not admission_authority_current():
         raise CancellationError("pull request admission authority changed")
 
-    live_head_sha, integration_capable = _qualification_snapshot_impl(api, pr_number)
+    qualification = _qualification_snapshot_impl(api, pr_number)
 
     # The live qualification resolver crosses the GitHub transport boundary. Recheck
     # the definition-time helper/result authority before producing the workflow output.
     if not admission_authority_current():
         raise CancellationError("pull request admission authority changed")
 
+    live_head_sha, integration_capable = qualification
+    current_head = event_head_sha == live_head_sha and integration_capable
+
+    # A positive admission unlocks expensive matrix allocation, so reread the exact
+    # head/lifecycle tuple immediately before publishing that positive decision. Any
+    # head move or ready/draft/close transition during admission revokes the output.
+    if current_head:
+        confirmation = _qualification_snapshot_impl(api, pr_number)
+        if not admission_authority_current():
+            raise CancellationError("pull request admission authority changed")
+        current_head = confirmation == qualification
+
     return _result_type(
-        current_head=(
-            event_head_sha == live_head_sha
-            and integration_capable
-        ),
+        current_head=current_head,
         cancelled_run_ids=(),
     )
 

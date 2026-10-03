@@ -58,6 +58,8 @@ class MarketBookRateWindowState:
         _validate_market_id(self.market_id)
         if type(self.accepted_at_utc_us) is not tuple:
             raise TypeError("accepted_at_utc_us must be a tuple")
+        if not self.accepted_at_utc_us:
+            raise ValueError("accepted_at_utc_us must not be empty")
         previous: int | None = None
         if len(self.accepted_at_utc_us) > _MAX_CALLS_PER_WINDOW:
             raise ValueError("rate state exceeds provider maximum calls per window")
@@ -85,16 +87,18 @@ class MarketBookRateGateState:
         if type(self.markets) is not tuple:
             raise TypeError("markets must be a tuple")
         ids: list[str] = []
+        if self.markets and self.last_scheduled_at_utc_us is None:
+            raise ValueError("market rate state requires last scheduled time")
         for market in self.markets:
             if type(market) is not MarketBookRateWindowState:
                 raise TypeError("markets must contain MarketBookRateWindowState values")
             ids.append(market.market_id)
-            if (
-                self.last_scheduled_at_utc_us is not None
-                and market.accepted_at_utc_us
-                and market.accepted_at_utc_us[-1] > self.last_scheduled_at_utc_us
-            ):
-                raise ValueError("rate state contains reservation after last scheduled time")
+            if self.last_scheduled_at_utc_us is not None:
+                if market.accepted_at_utc_us[-1] > self.last_scheduled_at_utc_us:
+                    raise ValueError("rate state contains reservation after last scheduled time")
+                cutoff = self.last_scheduled_at_utc_us - _WINDOW_MICROSECONDS
+                if market.accepted_at_utc_us[0] <= cutoff:
+                    raise ValueError("rate state contains reservation outside active window")
         if ids != sorted(ids):
             raise ValueError("market rate state must be sorted by market_id")
         if len(set(ids)) != len(ids):
@@ -110,6 +114,41 @@ class MarketBookRateDecision:
     next_eligible_at_utc_us: int | None = None
     provider_limit_coverage_complete: bool = False
     provider_dispatch_authorized: bool = False
+
+    def __post_init__(self) -> None:
+        if type(self.market_ids) is not tuple:
+            raise TypeError("market_ids must be a tuple")
+        normalized_ids = _normalize_market_ids(self.market_ids)
+        if normalized_ids != self.market_ids:
+            raise ValueError("market_ids must be canonical")
+        if type(self.scheduled_at_utc_us) is not int:
+            raise TypeError("scheduled_at_utc_us must be a non-boolean int")
+        if type(self.allowed) is not bool:
+            raise TypeError("allowed must be bool")
+        if type(self.blocked_market_ids) is not tuple:
+            raise TypeError("blocked_market_ids must be a tuple")
+        if self.blocked_market_ids:
+            normalized_blocked = _normalize_market_ids(self.blocked_market_ids)
+            if normalized_blocked != self.blocked_market_ids:
+                raise ValueError("blocked_market_ids must be canonical")
+            if any(market_id not in self.market_ids for market_id in self.blocked_market_ids):
+                raise ValueError("blocked_market_ids must be a subset of market_ids")
+        if self.next_eligible_at_utc_us is not None and type(
+            self.next_eligible_at_utc_us
+        ) is not int:
+            raise TypeError("next_eligible_at_utc_us must be a non-boolean int or None")
+        if self.allowed:
+            if self.blocked_market_ids or self.next_eligible_at_utc_us is not None:
+                raise ValueError("allowed decision cannot carry blocked/next-eligible state")
+        else:
+            if not self.blocked_market_ids or self.next_eligible_at_utc_us is None:
+                raise ValueError("denied decision requires blocked markets and next-eligible time")
+            if self.next_eligible_at_utc_us <= self.scheduled_at_utc_us:
+                raise ValueError("denied decision next-eligible time must be in the future")
+        if self.provider_limit_coverage_complete is not False:
+            raise ValueError("local rate decision cannot claim complete provider-limit coverage")
+        if self.provider_dispatch_authorized is not False:
+            raise ValueError("local rate decision cannot authorize provider dispatch")
 
     @property
     def scheduled_at(self) -> datetime:

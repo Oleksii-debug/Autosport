@@ -315,3 +315,57 @@ def test_local_rate_admission_never_claims_complete_provider_dispatch_authority(
     for decision in (allowed, denied):
         assert decision.provider_limit_coverage_complete is False
         assert decision.provider_dispatch_authorized is False
+
+
+
+def test_restart_state_rejects_noncanonical_window_shapes() -> None:
+    with pytest.raises(ValueError, match="must not be empty"):
+        MarketBookRateWindowState("1.1", ())
+
+    window = MarketBookRateWindowState("1.1", (1,))
+    with pytest.raises(ValueError, match="requires last scheduled"):
+        MarketBookRateGateState(
+            BETFAIR_MARKETBOOK_RATE_POLICY_VERSION,
+            None,
+            (window,),
+        )
+
+    with pytest.raises(ValueError, match="outside active window"):
+        MarketBookRateGateState(
+            BETFAIR_MARKETBOOK_RATE_POLICY_VERSION,
+            1_000_000,
+            (MarketBookRateWindowState("1.1", (0,)),),
+        )
+
+
+def test_rate_decision_rejects_inconsistent_or_widened_authority() -> None:
+    from autosport.betfair_marketbook_rate_gate import MarketBookRateDecision
+
+    with pytest.raises(ValueError, match="allowed decision"):
+        MarketBookRateDecision(
+            market_ids=("1.1",),
+            scheduled_at_utc_us=1,
+            allowed=True,
+            blocked_market_ids=("1.1",),
+            next_eligible_at_utc_us=2,
+        )
+    with pytest.raises(ValueError, match="denied decision requires"):
+        MarketBookRateDecision(
+            market_ids=("1.1",),
+            scheduled_at_utc_us=1,
+            allowed=False,
+        )
+    with pytest.raises(ValueError, match="complete provider-limit"):
+        MarketBookRateDecision(
+            market_ids=("1.1",),
+            scheduled_at_utc_us=1,
+            allowed=True,
+            provider_limit_coverage_complete=True,
+        )
+    with pytest.raises(ValueError, match="authorize provider dispatch"):
+        MarketBookRateDecision(
+            market_ids=("1.1",),
+            scheduled_at_utc_us=1,
+            allowed=True,
+            provider_dispatch_authorized=True,
+        )

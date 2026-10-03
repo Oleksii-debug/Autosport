@@ -304,6 +304,23 @@ class BetdaqEconomicEvidence:
             }
         )
 
+    @property
+    def acquisition_id(self) -> str:
+        """Identify one product acquisition without changing replay-stable economics.
+
+        evidence_id identifies the exact authenticated request/provider payload
+        independent of when Autosport re-read it. Causal consumers also need an
+        identity for the product receive/availability observation itself; bind that
+        separately so a later exact replay cannot masquerade as the earlier acquisition.
+        """
+        return "betdaq-economic-acquisition:" + _canonical_sha256(
+            {
+                "schema": _ECONOMIC_SCHEMA,
+                "evidence_id": self.evidence_id,
+                "observed_at": self.observed_at,
+            }
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class BetdaqOrderSettlementObservation:

@@ -1011,6 +1011,63 @@ def test_description_keywords_cannot_mint_finer_economic_category(monkeypatch):
 
 
 
+
+def test_order_settlement_rejects_request_identity_laundering(monkeypatch):
+    client, _ = economic_client(monkeypatch, order_details())
+    value = client.read_order_details(123)
+
+    with pytest.raises(
+        BetdaqEconomicReadbackError,
+        match="evidence request identity does not match order_id",
+    ):
+        replace(value, order_id="124")
+
+
+def test_window_readback_rejects_request_identity_laundering(monkeypatch):
+    client, _ = economic_client(
+        monkeypatch,
+        postings_window(posting(9001), complete="true"),
+    )
+    readback = client.read_account_postings(
+        datetime(2026, 9, 22, tzinfo=timezone.utc),
+        datetime(2026, 9, 23, tzinfo=timezone.utc),
+    )
+
+    with pytest.raises(
+        BetdaqEconomicReadbackError,
+        match="evidence request identity does not match readback query",
+    ):
+        replace(readback, query_end_at="2026-09-24T00:00:00Z")
+
+
+def test_window_readback_rejects_nonincreasing_bounds_after_construction(monkeypatch):
+    client, _ = economic_client(
+        monkeypatch,
+        postings_window(posting(9001), complete="true"),
+    )
+    readback = client.read_account_postings(
+        datetime(2026, 9, 22, tzinfo=timezone.utc),
+        datetime(2026, 9, 23, tzinfo=timezone.utc),
+    )
+
+    with pytest.raises(
+        BetdaqEconomicReadbackError,
+        match="postings window start must precede end",
+    ):
+        replace(readback, query_start_at=readback.query_end_at)
+
+
+def test_by_id_readback_rejects_request_identity_laundering(monkeypatch):
+    client, _ = economic_client(monkeypatch, postings_by_id(posting(9001)))
+    readback = client.read_account_postings_by_id(9001)
+
+    with pytest.raises(
+        BetdaqEconomicReadbackError,
+        match="evidence request identity does not match readback query",
+    ):
+        replace(readback, query_transaction_id="9002")
+
+
 def test_order_settlement_rejects_postings_method_evidence(monkeypatch):
     client, _ = economic_client(
         monkeypatch,

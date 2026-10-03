@@ -6,6 +6,7 @@ from urllib.error import URLError
 import pytest
 
 import autosport.betdaq_account_readonly as account_module
+import autosport.betdaq_settlement_readback as settlement_module
 from autosport.betdaq_account_readonly import (
     BetdaqAccountReadOnlyClient,
     BetdaqCredentials,
@@ -1060,3 +1061,52 @@ def test_postings_readback_rejects_cross_method_evidence_laundering(monkeypatch)
         match="postings evidence method does not match readback method",
     ):
         replace(by_id, evidence=window.evidence, postings=(forged_row,))
+
+
+@pytest.mark.parametrize(
+    "attribute",
+    ("_CANONICAL_ACCOUNT_HTTPS_POST", "_REQUIRE_CANONICAL_ACCOUNT_TRANSPORT"),
+)
+def test_economic_read_rejects_local_transport_alias_replacement_before_execution(
+    monkeypatch,
+    attribute,
+):
+    client, opener = economic_client(monkeypatch, postings_by_id(posting(9001)))
+    hostile_calls = []
+
+    def hostile(*args, **kwargs):
+        hostile_calls.append((args, kwargs))
+        raise AssertionError("hostile economic transport alias executed")
+
+    monkeypatch.setattr(settlement_module, attribute, hostile)
+
+    with pytest.raises(
+        BetdaqEconomicReadbackError,
+        match="canonical BETDAQ economic evidence requires product-owned HTTPS transport",
+    ):
+        client.read_account_postings_by_id(9001)
+
+    assert hostile_calls == []
+    assert opener.requests == []
+
+
+def test_economic_read_rejects_account_transport_class_replacement_before_execution(
+    monkeypatch,
+):
+    client, opener = economic_client(monkeypatch, postings_by_id(posting(9001)))
+    hostile_calls = []
+
+    def hostile(*args, **kwargs):
+        hostile_calls.append((args, kwargs))
+        raise AssertionError("hostile account transport class dispatch executed")
+
+    monkeypatch.setattr(account_module.UrllibBetdaqSoapTransport, "post", hostile)
+
+    with pytest.raises(
+        BetdaqEconomicReadbackError,
+        match="canonical BETDAQ economic evidence requires product-owned HTTPS transport",
+    ):
+        client.read_account_postings_by_id(9001)
+
+    assert hostile_calls == []
+    assert opener.requests == []

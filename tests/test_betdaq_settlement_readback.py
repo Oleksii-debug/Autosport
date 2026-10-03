@@ -605,8 +605,13 @@ def test_economic_read_rejects_protocol_authority_replacement_during_dispatch(
     assert opener.calls[0][0].full_url == canonical_endpoint
 
 
-def test_economic_read_rejects_account_context_resolver_replacement_before_dispatch(
+@pytest.mark.parametrize(
+    "attribute",
+    ("_credential_context_binding", "_authenticated_account_context"),
+)
+def test_economic_read_rejects_account_context_authority_replacement_before_dispatch(
     monkeypatch,
+    attribute,
 ):
     client, opener = economic_client(monkeypatch, postings_by_id(posting(9001)))
     hostile_calls = []
@@ -615,7 +620,7 @@ def test_economic_read_rejects_account_context_resolver_replacement_before_dispa
         hostile_calls.append((credentials, venue_id))
         raise AssertionError("hostile account-context resolver executed")
 
-    monkeypatch.setattr(account_module, "_authenticated_account_context", hostile)
+    monkeypatch.setattr(account_module, attribute, hostile)
 
     with pytest.raises(
         BetdaqEconomicReadbackError,

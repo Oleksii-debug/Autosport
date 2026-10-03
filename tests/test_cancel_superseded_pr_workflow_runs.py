@@ -348,6 +348,42 @@ def test_coordinated_qualification_root_rebind_cannot_forge_trusted_head(
     ) == CancellationResult(current_head=True, cancelled_run_ids=())
 
 
+def test_pull_request_target_does_not_trust_rebound_positive_int_helper(
+    monkeypatch,
+) -> None:
+    api = controller_module.GitHubApi(
+        repository="owner/repo",
+        token="token",
+    )
+    requested: list[str] = []
+
+    def fake_request(path: str, **_kwargs):
+        requested.append(path)
+        return {
+            "state": "open",
+            "draft": False,
+            "head": {
+                "sha": HEAD_B,
+                "repo": {"full_name": "owner/repo"},
+            },
+            "base": {"repo": {"full_name": "owner/repo"}},
+        }
+
+    def forged_positive_int(_value, *, field: str) -> int:
+        del field
+        return 999
+
+    monkeypatch.setattr(api, "_request", fake_request)
+    monkeypatch.setattr(
+        controller_module,
+        "_require_positive_int",
+        forged_positive_int,
+    )
+
+    assert api.live_pr_qualification(2008) == (HEAD_B, True)
+    assert requested == ["/pulls/2008"]
+
+
 def test_live_pr_qualification_does_not_trust_rebound_sha_helper(
     monkeypatch,
 ) -> None:

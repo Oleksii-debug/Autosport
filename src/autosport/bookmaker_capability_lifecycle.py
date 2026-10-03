@@ -850,7 +850,7 @@ def _evaluate(
     if evidence.strength is CapabilityEvidenceStrength.OBSERVED_ACCOUNT_SCOPED:
         return deny(
             CapabilityLifecycleState.REVALIDATION_REQUIRED,
-            "account-scoped observation requires stable product-owned account authority",
+            "authenticated/account observation requires product-owned upstream authority; stable account-scoped authority is not proven",
         )
     if evidence.strength is CapabilityEvidenceStrength.OBSERVED_AUTHENTICATED:
         if not _is_product_issued(evidence, evidence_id):

@@ -25,7 +25,11 @@ from autosport.sport_memory_checkpoint import (
     load_verified_sport_memory_authority_checkpoint,
     open_bound_sport_memory_runtime,
 )
-from autosport.sport_memory_runtime import SportMemoryRuntime, SportMemoryScope
+from autosport.sport_memory_runtime import (
+    SportMemoryError,
+    SportMemoryRuntime,
+    SportMemoryScope,
+)
 
 
 SHA_A = "a" * 64
@@ -639,6 +643,84 @@ def test_bound_runtime_detects_direct_dict_and_selector_path_drift(tmp_path):
     refreshed = runtime._refresh_bound_authority()
     assert refreshed.path == opponent.path
     assert refreshed.identity_registry.path == identity.path
+
+
+def test_runtime_rejects_duplicate_top_level_keys_without_rewriting_corruption(
+    tmp_path,
+):
+    identity, opponent = _canonical_stores(tmp_path)
+    checkpoint_path, runtime_path = _paths(tmp_path)
+    initialize_or_open_bound_sport_memory_runtime(
+        runtime_path,
+        checkpoint_path,
+        identity,
+        opponent,
+    )
+    raw = runtime_path.read_text(encoding="utf-8")
+    assert raw.count('"artifacts"') == 1
+    runtime_path.write_text(
+        raw.replace(
+            '"artifacts": [',
+            '"artifacts": [],\n  "artifacts": [',
+            1,
+        ),
+        encoding="utf-8",
+    )
+    corrupted = runtime_path.read_bytes()
+
+    for _attempt in range(2):
+        with pytest.raises(
+            SportMemoryError,
+            match="invalid sport memory checkpoint",
+        ):
+            open_bound_sport_memory_runtime(
+                runtime_path,
+                checkpoint_path,
+                identity,
+                opponent,
+            )
+        assert runtime_path.read_bytes() == corrupted
+
+
+def test_runtime_rejects_duplicate_nested_artifact_key(tmp_path):
+    identity, opponent = _canonical_stores(tmp_path, populated=True)
+    checkpoint_path, runtime_path = _paths(tmp_path)
+    runtime = initialize_or_open_bound_sport_memory_runtime(
+        runtime_path,
+        checkpoint_path,
+        identity,
+        opponent,
+    )
+    runtime.materialize(
+        participant_entity_id="p-alex",
+        scope=_scope(),
+        causal_cutoff=T2,
+        published_at=T3,
+        code_sha256=SHA_A,
+        dependency_sha256=SHA_B,
+        min_support=1,
+    )
+    raw = runtime_path.read_text(encoding="utf-8")
+    assert raw.count('"memory_id"') == 1
+    runtime_path.write_text(
+        raw.replace(
+            '"memory_id": "',
+            f'"memory_id": "{SHA_A}",\n      "memory_id": "',
+            1,
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        SportMemoryError,
+        match="invalid sport memory checkpoint",
+    ):
+        open_bound_sport_memory_runtime(
+            runtime_path,
+            checkpoint_path,
+            identity,
+            opponent,
+        )
 
 
 def test_runtime_deleted_during_open_cannot_become_empty_in_memory_authority(

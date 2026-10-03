@@ -12,6 +12,7 @@ from autosport.execution_quote_chain import (
     CHAIN_NOT_SUBMITTED,
     CHAIN_SUBMISSION_UNKNOWN,
     CHAIN_SUBMIT_INSTRUCTION_UNBOUND,
+    CHAIN_SUBMIT_INSTRUCTION_BOUND,
     ExecutionQuoteChainError,
     ExecutionQuoteChainUnavailable,
     build_execution_quote_chain_evidence,
@@ -143,6 +144,8 @@ def test_submitted_attempt_does_not_launder_requested_action_into_submit_truth(
     assert evidence.submitted_at == SUBMITTED
     assert evidence.submission_instruction_sha256 is None
     assert evidence.chain_status == CHAIN_SUBMIT_INSTRUCTION_UNBOUND
+    assert evidence.submit_instruction_identity_bound is False
+    assert evidence.provider_request_correlation_bound is False
     assert evidence.actual_submitted_instruction_bound is False
     assert evidence.chain_complete is False
 
@@ -450,3 +453,70 @@ def test_evidence_digest_covers_negative_authority_state(tmp_path) -> None:
     assert payload["actual_submitted_instruction_bound"] is False
     assert payload["accepted_price_verified"] is False
     assert payload["chain_complete"] is False
+
+def test_successor_request_binding_advances_request_truth_without_promoting_price(
+    tmp_path,
+) -> None:
+    ledger = _submitted(tmp_path)
+    _bind_provider(ledger)
+    evidence = _project(ledger)
+    request_sha256 = "a" * 64
+
+    successor_shape = replace(
+        evidence,
+        submission_instruction_sha256=request_sha256,
+        provider_request_sha256=request_sha256,
+        chain_status=CHAIN_SUBMIT_INSTRUCTION_BOUND,
+    )
+
+    assert successor_shape.submit_instruction_identity_bound is True
+    assert successor_shape.provider_request_correlation_bound is True
+    assert successor_shape.actual_submitted_instruction_bound is True
+    assert successor_shape.accepted_price_status == ACCEPTED_PRICE_UNKNOWN
+    assert successor_shape.accepted_price_verified is False
+    assert successor_shape.chain_complete is False
+    payload = successor_shape.to_dict()
+    assert payload["submission_instruction_sha256"] == request_sha256
+    assert payload["provider_request_sha256"] == request_sha256
+
+
+def test_provider_request_digest_cannot_conflict_with_durable_submission(
+    tmp_path,
+) -> None:
+    ledger = _submitted(tmp_path)
+    _bind_provider(ledger)
+    evidence = _project(ledger)
+
+    with pytest.raises(
+        ExecutionQuoteChainError,
+        match="provider request digest conflicts with durable submission",
+    ):
+        replace(
+            evidence,
+            submission_instruction_sha256="a" * 64,
+            provider_request_sha256="b" * 64,
+            chain_status=CHAIN_SUBMIT_INSTRUCTION_BOUND,
+        )
+
+
+def test_future_canonical_rejected_ack_may_omit_external_receipt(
+    tmp_path,
+) -> None:
+    ledger = _submitted(tmp_path)
+    _bind_provider(ledger)
+    _ack(
+        ledger,
+        status=AcknowledgementStatus.REJECTED,
+        odds=None,
+        stake=None,
+    )
+    evidence = _project(ledger)
+
+    successor_shape = replace(evidence, external_receipt_id=None)
+
+    assert successor_shape.acknowledgement_status == "REJECTED"
+    assert successor_shape.external_receipt_id is None
+    assert successor_shape.accepted_price_status == ACCEPTED_PRICE_NOT_APPLICABLE
+    assert successor_shape.accepted_price_verified is False
+    assert successor_shape.chain_complete is False
+

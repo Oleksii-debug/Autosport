@@ -274,6 +274,10 @@ def test_unknown_attempt_is_retained_with_explicit_censor_reason(tmp_path):
         attempt_id="attempt-1",
     )
 
+    assert evidence.bookmaker_profile_version == "profile-1"
+    assert evidence.decision_id == "decision-1"
+    assert evidence.approval_id == "approval-1"
+    assert len(evidence.attempt_effect_fingerprint) == 64
     assert evidence.attempt_state == "UNKNOWN"
     assert evidence.provider_outcome_verified is False
     assert (

@@ -17,7 +17,7 @@ from .real_execution_ledger import (
     VerifiedExecutionLedgerSnapshot,
 )
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 SOURCE_ROOT_AUTHORITY_UNQUALIFIED = "UNQUALIFIED_CALLER_SELECTED_LEDGER"
 EVALUATION_PROTOCOL_AUTHORITY_UNQUALIFIED = "UNQUALIFIED_CALLER_PROTOCOL_DIGEST"
@@ -228,8 +228,12 @@ class EmpiricalExecutionEvidence:
 
     plan_id: str
     plan_fingerprint: str
+    bookmaker_profile_version: str
+    decision_id: str
+    approval_id: str
     action_id: str
     attempt_id: str
+    attempt_effect_fingerprint: str
     attempt_state: str
     ledger_terminal: bool
     provider_outcome_verified: bool
@@ -313,6 +317,9 @@ class EmpiricalExecutionEvidence:
 
         for name in (
             "plan_id",
+            "bookmaker_profile_version",
+            "decision_id",
+            "approval_id",
             "action_id",
             "attempt_id",
             "bookmaker_id",
@@ -335,6 +342,7 @@ class EmpiricalExecutionEvidence:
 
         _sha256(self.source_ledger_sha256, "source_ledger_sha256")
         _sha256(self.plan_fingerprint, "plan_fingerprint")
+        _sha256(self.attempt_effect_fingerprint, "attempt_effect_fingerprint")
         _optional_sha256(self.provider_evidence_id, "provider_evidence_id")
         _optional_text(self.provider_evidence_source, "provider_evidence_source")
         _optional_sha256(self.submitted_request_sha256, "submitted_request_sha256")
@@ -729,8 +737,12 @@ class EmpiricalExecutionEvidence:
             "source_root_authority_status": self.source_root_authority_status,
             "plan_id": self.plan_id,
             "plan_fingerprint": self.plan_fingerprint,
+            "bookmaker_profile_version": self.bookmaker_profile_version,
+            "decision_id": self.decision_id,
+            "approval_id": self.approval_id,
             "action_id": self.action_id,
             "attempt_id": self.attempt_id,
+            "attempt_effect_fingerprint": self.attempt_effect_fingerprint,
             "attempt_state": self.attempt_state,
             "ledger_terminal": self.ledger_terminal,
             "provider_outcome_verified": self.provider_outcome_verified,
@@ -930,9 +942,19 @@ def build_empirical_execution_evidence(
     if type(plan) is not dict:
         raise EmpiricalExecutionEvidenceUnavailable("stored plan payload is invalid")
 
+    bookmaker_profile_version = _text(
+        plan.get("bookmaker_profile_version"),
+        "bookmaker_profile_version",
+    )
+    decision_id = _text(plan.get("decision_id"), "decision_id")
+    approval_id = _text(plan.get("approval_id"), "approval_id")
     decision_at = _text(plan.get("created_at"), "decision_at")
     quote_observed_at = _text(action.get("quote_observed_at"), "quote_observed_at")
     reserved_at = _text(reservation["payload"].get("reserved_at"), "reserved_at")
+    attempt_effect_fingerprint = _sha256(
+        reservation["payload"].get("effect_fingerprint"),
+        "attempt_effect_fingerprint",
+    )
     submitted_at = (
         _text(submission["payload"].get("submitted_at"), "submitted_at")
         if submission is not None
@@ -1123,8 +1145,12 @@ def build_empirical_execution_evidence(
         source_root_authority_status=SOURCE_ROOT_AUTHORITY_UNQUALIFIED,
         plan_id=plan_id,
         plan_fingerprint=plan_fingerprint,
+        bookmaker_profile_version=bookmaker_profile_version,
+        decision_id=decision_id,
+        approval_id=approval_id,
         action_id=action_id,
         attempt_id=attempt,
+        attempt_effect_fingerprint=attempt_effect_fingerprint,
         attempt_state=state.value,
         ledger_terminal=ledger_terminal,
         provider_outcome_verified=False,
@@ -1199,7 +1225,7 @@ def build_empirical_execution_evidence(
     return evidence
 
 
-POPULATION_SCHEMA_VERSION = 8
+POPULATION_SCHEMA_VERSION = 9
 
 
 @dataclass(frozen=True, slots=True, weakref_slot=True, init=False)

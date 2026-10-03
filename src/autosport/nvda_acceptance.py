@@ -470,21 +470,50 @@ def _add_trust_anchor_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--expected-source-sha",
         required=True,
-        help="canonical 40-hex Git source SHA expected for this release; obtain independently of the release ZIP",
+        metavar="GIT_SHA",
+        help=(
+            "канонічний 40-символьний Git SHA вихідного коду для цього релізу; "
+            "отримайте його незалежно від ZIP-файлу релізу"
+        ),
     )
     parser.add_argument(
         "--expected-package-sha256",
         required=True,
-        help="64-hex release ZIP SHA-256 expected for this release; obtain independently of the release ZIP",
+        metavar="SHA256_ZIP",
+        help=(
+            "64-символьний SHA-256 ZIP-файлу релізу; отримайте його незалежно "
+            "від самого ZIP-файлу релізу"
+        ),
     )
 
 
-def template_main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Create exact-candidate physical NVDA acceptance evidence template.")
-    parser.add_argument("--release-zip", type=Path, required=True)
-    parser.add_argument("--output", type=Path, required=True)
+def _template_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Створює шаблон доказу фізичного тестування NVDA, прив'язаний "
+            "до точного кандидата релізу Autosport."
+        ),
+    )
+    parser.add_argument(
+        "--release-zip",
+        type=Path,
+        required=True,
+        metavar="ZIP_РЕЛІЗУ",
+        help="ZIP-файл точного кандидата релізу Autosport",
+    )
+    parser.add_argument(
+        "--output",
+        type=Path,
+        required=True,
+        metavar="JSON_ШАБЛОН",
+        help="новий JSON-файл шаблону фізичного тестування NVDA",
+    )
     _add_trust_anchor_arguments(parser)
-    args = parser.parse_args(argv)
+    return parser
+
+
+def template_main(argv: list[str] | None = None) -> int:
+    args = _template_parser().parse_args(argv)
     try:
         payload = write_template(
             args.release_zip,
@@ -505,13 +534,39 @@ def template_main(argv: list[str] | None = None) -> int:
     return 0
 
 
-def verify_main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Validate human NVDA evidence against one exact Autosport release ZIP.")
-    parser.add_argument("--release-zip", type=Path, required=True)
-    parser.add_argument("--evidence", type=Path, required=True)
-    parser.add_argument("--output", type=Path)
+def _verify_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Перевіряє заповнений людиною доказ NVDA щодо одного точного "
+            "ZIP-релізу Autosport."
+        ),
+    )
+    parser.add_argument(
+        "--release-zip",
+        type=Path,
+        required=True,
+        metavar="ZIP_РЕЛІЗУ",
+        help="ZIP-файл точного кандидата релізу Autosport",
+    )
+    parser.add_argument(
+        "--evidence",
+        type=Path,
+        required=True,
+        metavar="JSON_ДОКАЗ",
+        help="JSON-файл доказу фізичного тестування NVDA, заповнений людиною",
+    )
+    parser.add_argument(
+        "--output",
+        type=Path,
+        metavar="JSON_ЗВІТ",
+        help="необов'язковий JSON-файл машинного звіту перевірки",
+    )
     _add_trust_anchor_arguments(parser)
-    args = parser.parse_args(argv)
+    return parser
+
+
+def verify_main(argv: list[str] | None = None) -> int:
+    args = _verify_parser().parse_args(argv)
     try:
         result = validate_evidence(
             args.release_zip,

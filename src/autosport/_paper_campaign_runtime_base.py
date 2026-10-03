@@ -581,6 +581,12 @@ class PaperCampaignRuntime:
             raise TypeError("observation must be Observation")
         if type(parameters) is not tuple:
             raise TypeError("parameters must be a canonical tuple")
+        try:
+            effective_parameters = self.agent_loop.bind_action_parameters(parameters)
+        except AgentLoopError as exc:
+            raise PaperCampaignRuntimeError(
+                "PAPER action parameters conflict with deployment identity"
+            ) from exc
         if baseline_checkpoint is not None and not isinstance(
             baseline_checkpoint, EnvironmentCheckpoint
         ):
@@ -641,7 +647,7 @@ class PaperCampaignRuntime:
             observation,
             action_type=action_type,
             decision_at=decision_at,
-            parameters=parameters,
+            parameters=effective_parameters,
         )
         try:
             receipt = self.agent_loop.commit_action(

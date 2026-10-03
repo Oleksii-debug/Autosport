@@ -534,6 +534,107 @@ def test_fake_registry_global_cannot_mint_a_copied_resolution(
         )
 
 
+def test_resolution_verifier_rejects_instance_events_locked_override(
+    tmp_path,
+) -> None:
+    transcript = _transcript()
+    ledger = _ledger(tmp_path)
+    _record(ledger, transcript, reviewed_at=T0)
+    resolution = _resolve(ledger, transcript)
+    assert resolution is not None
+    hostile_called = False
+
+    def hostile_events_locked():
+        nonlocal hostile_called
+        hostile_called = True
+        return (resolution.record,)
+
+    ledger._events_locked = hostile_events_locked  # type: ignore[method-assign]
+
+    with pytest.raises(
+        NvdaManualAcceptanceStateError,
+        match="ledger reader changed after issuance: _events_locked",
+    ):
+        verify_manual_nvda_acceptance_resolution(
+            resolution,
+            expected_artifact_sha256=ARTIFACT_SHA,
+            expected_source_sha=SOURCE_SHA,
+            expected_transcript_sha256=resolution.record.transcript_sha256,
+        )
+
+    assert hostile_called is False
+
+
+def test_resolution_verifier_rejects_class_read_anchor_rebinding(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    transcript = _transcript()
+    ledger = _ledger(tmp_path)
+    _record(ledger, transcript, reviewed_at=T0)
+    resolution = _resolve(ledger, transcript)
+    assert resolution is not None
+    hostile_called = False
+
+    def hostile_read_anchor(self):
+        nonlocal hostile_called
+        del self
+        hostile_called = True
+        return None
+
+    monkeypatch.setattr(
+        ManualNvdaAcceptanceLedger,
+        "_read_anchor",
+        hostile_read_anchor,
+    )
+
+    with pytest.raises(
+        NvdaManualAcceptanceStateError,
+        match="ledger reader changed after issuance: _read_anchor",
+    ):
+        verify_manual_nvda_acceptance_resolution(
+            resolution,
+            expected_artifact_sha256=ARTIFACT_SHA,
+            expected_source_sha=SOURCE_SHA,
+            expected_transcript_sha256=resolution.record.transcript_sha256,
+        )
+
+    assert hostile_called is False
+
+
+def test_resolution_verifier_rejects_writer_lock_dispatch_rebinding(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    transcript = _transcript()
+    ledger = _ledger(tmp_path)
+    _record(ledger, transcript, reviewed_at=T0)
+    resolution = _resolve(ledger, transcript)
+    assert resolution is not None
+    hostile_called = False
+
+    def hostile_acquire(self):
+        nonlocal hostile_called
+        del self
+        hostile_called = True
+        raise AssertionError("hostile writer-lock acquire executed")
+
+    monkeypatch.setattr(_ManualNvdaWriterLock, "acquire", hostile_acquire)
+
+    with pytest.raises(
+        NvdaManualAcceptanceStateError,
+        match="writer-lock dispatch changed after issuance: acquire",
+    ):
+        verify_manual_nvda_acceptance_resolution(
+            resolution,
+            expected_artifact_sha256=ARTIFACT_SHA,
+            expected_source_sha=SOURCE_SHA,
+            expected_transcript_sha256=resolution.record.transcript_sha256,
+        )
+
+    assert hostile_called is False
+
+
 def test_new_decision_must_not_backdate_or_reuse_timestamp(tmp_path):
     transcript = _transcript()
     ledger = _ledger(tmp_path)

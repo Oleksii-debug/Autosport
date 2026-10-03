@@ -554,6 +554,7 @@ class PaperExecutionAdoptionRuntime:
         self,
         *,
         prepared: PreparedPaperExecution,
+        trigger_id: str,
         run_id: str,
     ) -> None:
         """Persist the already-minted #646 scope into the canonical #623 ledger.
@@ -732,6 +733,7 @@ class PaperExecutionAdoptionRuntime:
         expected_run_id = self.expected_run_id(prepared, trigger_id)
         self._publish_exposure_scope(
             prepared=prepared,
+            trigger_id=trigger_id,
             run_id=expected_run_id,
         )
         run = execute_paper_plan(

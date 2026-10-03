@@ -431,6 +431,7 @@ def bind_canonical_execute(execute_function):
         self: PaperExecutionAdoptionRuntime,
         *,
         prepared: PreparedPaperExecution,
+        trigger_id: str,
         run_id: str,
     ) -> None:
         if type(self) is not runtime_type or type(self.ledger) is not ledger_type:
@@ -593,7 +594,6 @@ def bind_canonical_execute(execute_function):
                 "PAPER exposure-scope publication is reserved for canonical execution authority"
             )
 
-        trigger_id = prepared.execution_plan.decision_id
         if type(trigger_id) is not str or not trigger_id or trigger_id.strip() != trigger_id:
             raise PaperExecutionIntegrityError(
                 "canonical PAPER exposure-scope decision identity is invalid"

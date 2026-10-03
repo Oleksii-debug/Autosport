@@ -235,7 +235,50 @@ class PaperExposureScopeProvenanceGuardTests(unittest.TestCase):
             ):
                 runtime._publish_exposure_scope(
                     prepared=prepared,
+                    trigger_id=prepared.execution_plan.decision_id,
                     run_id="caller-selected-run",
+                )
+            self.assertEqual(ledger.events(), ())
+
+    def test_reserved_scope_binds_explicit_trigger_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger, runtime = self._runtime(Path(tmp))
+            prepared = _caller_prepared(runtime)
+            runtime._mint_prepared(prepared)
+            _seed_scope_authority_for_lower_layer(runtime, prepared)
+            trigger_id = "distinct-runtime-trigger"
+            run_id = runtime.expected_run_id(prepared, trigger_id)
+
+            runtime._publish_exposure_scope(
+                prepared=prepared,
+                trigger_id=trigger_id,
+                run_id=run_id,
+            )
+
+            events = ledger.events(run_id)
+            self.assertEqual(len(events), 1)
+            self.assertEqual(events[0]["event_type"], "PAPER_EXPOSURE_SCOPE_BOUND")
+
+    def test_reserved_scope_rejects_run_id_for_different_trigger(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger, runtime = self._runtime(Path(tmp))
+            prepared = _caller_prepared(runtime)
+            runtime._mint_prepared(prepared)
+            _seed_scope_authority_for_lower_layer(runtime, prepared)
+            trigger_id = "distinct-runtime-trigger"
+            wrong_run_id = runtime.expected_run_id(
+                prepared,
+                prepared.execution_plan.decision_id,
+            )
+
+            with self.assertRaisesRegex(
+                PaperExecutionIntegrityError,
+                "run identity changed",
+            ):
+                runtime._publish_exposure_scope(
+                    prepared=prepared,
+                    trigger_id=trigger_id,
+                    run_id=wrong_run_id,
                 )
             self.assertEqual(ledger.events(), ())
 
@@ -278,6 +321,7 @@ class PaperExposureScopeProvenanceGuardTests(unittest.TestCase):
             ):
                 runtime._publish_exposure_scope(
                     prepared=prepared,
+                    trigger_id=prepared.execution_plan.decision_id,
                     run_id=runtime.expected_run_id(
                         prepared,
                         prepared.execution_plan.decision_id,
@@ -316,6 +360,7 @@ class PaperExposureScopeProvenanceGuardTests(unittest.TestCase):
             ):
                 runtime._publish_exposure_scope(
                     prepared=prepared,
+                    trigger_id=prepared.execution_plan.decision_id,
                     run_id=runtime.expected_run_id(
                         prepared,
                         prepared.execution_plan.decision_id,
@@ -342,6 +387,7 @@ class PaperExposureScopeProvenanceGuardTests(unittest.TestCase):
             ):
                 runtime._publish_exposure_scope(
                     prepared=prepared,
+                    trigger_id=prepared.execution_plan.decision_id,
                     run_id=runtime.expected_run_id(
                         prepared,
                         prepared.execution_plan.decision_id,
@@ -511,6 +557,7 @@ class PaperExposureScopeProvenanceGuardTests(unittest.TestCase):
                 ):
                     runtime._publish_exposure_scope(
                         prepared=prepared,
+                        trigger_id=prepared.execution_plan.decision_id,
                         run_id=run_id,
                     )
             finally:
@@ -548,6 +595,7 @@ class PaperExposureScopeProvenanceGuardTests(unittest.TestCase):
                 ):
                     runtime._publish_exposure_scope(
                         prepared=prepared,
+                        trigger_id=prepared.execution_plan.decision_id,
                         run_id=run_id,
                     )
             finally:
@@ -669,6 +717,7 @@ class PaperExposureScopeProvenanceGuardTests(unittest.TestCase):
                 ):
                     runtime._publish_exposure_scope(
                         prepared=prepared,
+                        trigger_id=prepared.execution_plan.decision_id,
                         run_id=run_id,
                     )
             finally:

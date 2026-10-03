@@ -500,7 +500,11 @@ class WorkflowScopedGitHubApi(GitHubApi):
             for name, _, _ in helper_dispatch:
                 require_helper_dispatch(name)
 
-            run_id = _require_positive_int(run_id, field="run id")
+            # Keep the candidate key identical to the run selected by the controller.
+            # A mutable module-global validator must not be able to redirect the lookup
+            # away from recovered authority and then hand another run to base_cancel().
+            if type(run_id) is not int or run_id <= 0:
+                raise CancellationError("invalid run id")
             zero_association = self._zero_association_recovered_runs.get(run_id)
             recovered = self._recovered_runs.get(run_id)
 

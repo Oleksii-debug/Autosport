@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from dataclasses import replace
 from decimal import Decimal, localcontext
 
@@ -20,6 +21,7 @@ from autosport.real_execution_ledger import (
     ExecutionPlan,
     ExternalAcknowledgement,
     ExecutionLedgerIntegrityError,
+    ExecutionStateError,
     RealExecutionLedger,
     ReconciliationSnapshot,
 )
@@ -102,16 +104,28 @@ def _ack(
     accepted_stake: str | None = None,
     accepted_odds: str | None = None,
 ) -> None:
-    ledger.acknowledge(
-        ExternalAcknowledgement(
-            attempt_id=attempt_id,
-            external_receipt_id=f"receipt-{attempt_id}",
-            status=status,
-            acknowledged_at=ACKNOWLEDGED_AT,
-            accepted_stake=accepted_stake,
-            accepted_odds=accepted_odds,
-        )
+    acknowledgement = ExternalAcknowledgement(
+        attempt_id=attempt_id,
+        external_receipt_id=f"receipt-{attempt_id}",
+        status=status,
+        acknowledged_at=ACKNOWLEDGED_AT,
+        accepted_stake=accepted_stake,
+        accepted_odds=accepted_odds,
     )
+    evidence_id = hashlib.sha256(
+        (
+            f"{attempt_id}:{status.value}:"
+            f"{accepted_stake!r}:{accepted_odds!r}"
+        ).encode("utf-8")
+    ).hexdigest()
+    ledger._bind_provider_acknowledgement_evidence(
+        attempt_id=attempt_id,
+        evidence_id=evidence_id,
+        observed_at=ACKNOWLEDGED_AT,
+        source="test-provider-immediate-response",
+        acknowledgement=acknowledgement,
+    )
+    ledger.acknowledge(acknowledgement)
 
 
 def test_unknown_back_keeps_full_requested_capital_contingent(tmp_path) -> None:
@@ -159,24 +173,22 @@ def test_partial_back_splits_confirmed_and_unresolved_without_double_count(
     assert evidence.max_plausible_capital_at_risk == Decimal("10")
 
 
-def test_accepted_back_with_short_ack_does_not_free_unexplained_remainder(
+def test_accepted_back_confirms_full_requested_capital_under_current_writer_contract(
     tmp_path,
 ) -> None:
     ledger, plan = _ledger(tmp_path, _action(stake="10"))
     _attempt(ledger, plan)
-    # Current durable ledger permits this structurally. The risk resolver must
-    # therefore stay conservative rather than equating ACCEPTED with full fill.
     _ack(
         ledger,
         status=AcknowledgementStatus.ACCEPTED,
-        accepted_stake="4",
+        accepted_stake="10",
         accepted_odds="2",
     )
 
     evidence = resolve_execution_capital_at_risk(ledger, plan.plan_id)
 
-    assert evidence.confirmed_open_capital == Decimal("4")
-    assert evidence.contingent_unknown_capital == Decimal("6")
+    assert evidence.confirmed_open_capital == Decimal("10")
+    assert evidence.contingent_unknown_capital == Decimal("0")
     assert evidence.max_plausible_capital_at_risk == Decimal("10")
 
 
@@ -232,7 +244,9 @@ def test_reserved_attempt_has_no_external_effect_capital(tmp_path) -> None:
     assert evidence.max_plausible_capital_at_risk == Decimal("0")
 
 
-def test_retry_after_generic_not_found_keeps_both_possible_effects(tmp_path) -> None:
+def test_generic_not_found_keeps_full_risk_and_does_not_authorize_retry(
+    tmp_path,
+) -> None:
     ledger, plan = _ledger(tmp_path, _action(stake="10"))
     _attempt(ledger, plan, attempt_id="attempt-1")
     ledger.mark_unknown(
@@ -249,31 +263,24 @@ def test_retry_after_generic_not_found_keeps_both_possible_effects(tmp_path) -> 
             source="generic-readback",
         )
     )
-    # The canonical ledger now permits a retry. This risk layer intentionally
-    # does not equate that generic not-found fact with provider-origin capital
-    # release, so the prior physical attempt remains a possible effect here.
-    ledger.begin_attempt(
-        plan_id=plan.plan_id,
-        action_id=plan.actions[0].action_id,
-        attempt_id="attempt-2",
-        reserved_at="2026-09-22T07:00:05+00:00",
-    )
-    ledger.mark_submitted(
-        "attempt-2",
-        submitted_at="2026-09-22T07:00:06+00:00",
-    )
-    ledger.mark_unknown(
-        "attempt-2",
-        reason="transport_timeout",
-        observed_at="2026-09-22T07:00:07+00:00",
-    )
+
+    with pytest.raises(
+        ExecutionStateError,
+        match="retry requires product-issued no-effect authority",
+    ):
+        ledger.begin_attempt(
+            plan_id=plan.plan_id,
+            action_id=plan.actions[0].action_id,
+            attempt_id="attempt-2",
+            reserved_at="2026-09-22T07:00:05+00:00",
+        )
 
     evidence = resolve_execution_capital_at_risk(ledger, plan.plan_id)
 
-    assert len(evidence.attempts) == 2
+    assert len(evidence.attempts) == 1
     assert evidence.confirmed_open_capital == Decimal("0")
-    assert evidence.contingent_unknown_capital == Decimal("20")
-    assert evidence.max_plausible_capital_at_risk == Decimal("20")
+    assert evidence.contingent_unknown_capital == Decimal("10")
+    assert evidence.max_plausible_capital_at_risk == Decimal("10")
 
 
 def test_restart_reresolves_same_deterministic_evidence_identity(tmp_path) -> None:

@@ -2482,7 +2482,7 @@ class RealExecutionLedger:
         evidence_id: str,
         observed_at: str,
         source: str,
-        request_sha256: str,
+        request_sha256: str | None = None,
         acknowledgement: ExternalAcknowledgement,
     ) -> None:
         """Bind one immediate provider response to its exact ACK payload.
@@ -2492,7 +2492,8 @@ class RealExecutionLedger:
         acknowledge() may move a SUBMITTED attempt to a terminal state.
         """
 
-        _sha256_text(request_sha256, "request_sha256")
+        if request_sha256 is not None:
+            _sha256_text(request_sha256, "request_sha256")
         if type(acknowledgement) is not ExternalAcknowledgement:
             raise TypeError(
                 "acknowledgement must be exact ExternalAcknowledgement"

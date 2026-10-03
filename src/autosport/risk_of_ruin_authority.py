@@ -24,7 +24,10 @@ _AUTHORITY_KIND = "autosport.risk-of-ruin-product-authority.v2"
 _BOUND_SEMANTICS = "probability_upper_bound"
 _CONFIDENCE_SEMANTICS = "protocol_defined_upper_bound"
 _MAX_FIXED_POINT_MATERIALIZATION_LENGTH = 512
+_MAX_AUTHORITY_TEXT_LENGTH = 512
+_MAX_AUTHORITY_TIMESTAMP_LENGTH = 128
 _MAX_SUPPORTED_EVALUATED_STAKES = 10_000
+_MAX_SUPPORTED_EFFECTIVE_SAMPLE_SIZE = 10_000
 
 
 def _fixed_point_materialization_length(value: Decimal) -> int:
@@ -61,18 +64,44 @@ def _canonical_decimal(value: Decimal) -> str:
     return "0" if text in {"", "-0"} else text
 
 
+def _bounded_text(
+    value: object,
+    name: str,
+    *,
+    max_length: int = _MAX_AUTHORITY_TEXT_LENGTH,
+) -> str:
+    if (
+        type(value) is not str
+        or not value
+        or value != value.strip()
+        or len(value) > max_length
+        or "\x00" in value
+    ):
+        raise ValueError(f"{name} must be bounded canonical text")
+    try:
+        value.encode("utf-8", errors="strict")
+    except UnicodeEncodeError as exc:
+        raise ValueError(f"{name} must be valid UTF-8 text") from exc
+    return value
+
+
 def _canonical_sha256(value: object, name: str) -> str:
-    if type(value) is not str:
-        raise ValueError(f"{name} must be a SHA-256 string")
-    value = value.lower()
-    if len(value) != 64 or any(ch not in "0123456789abcdef" for ch in value):
+    value = _bounded_text(value, name, max_length=64)
+    if (
+        len(value) != 64
+        or value != value.lower()
+        or any(ch not in "0123456789abcdef" for ch in value)
+    ):
         raise ValueError(f"{name} must be a canonical SHA-256 digest")
     return value
 
 
 def _instant(value: str) -> datetime:
-    if type(value) is not str or not value:
-        raise ValueError("risk-of-ruin authority timestamp is missing")
+    value = _bounded_text(
+        value,
+        "risk-of-ruin authority timestamp",
+        max_length=_MAX_AUTHORITY_TIMESTAMP_LENGTH,
+    )
     parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     if parsed.tzinfo is None or parsed.utcoffset() is None:
         raise ValueError("risk-of-ruin authority timestamp must include timezone")
@@ -82,7 +111,9 @@ def _instant(value: str) -> datetime:
 def _payload(evidence: object, *, kind: str) -> dict[str, Any]:
     if kind == "single":
         candidate = {
-            "candidate_sha256": getattr(evidence, "candidate_sha256"),
+            "candidate_sha256": _canonical_sha256(
+                getattr(evidence, "candidate_sha256"), "candidate_sha256"
+            ),
             "evaluated_stake": _canonical_decimal(getattr(evidence, "evaluated_stake")),
         }
     elif kind == "vector":
@@ -94,24 +125,70 @@ def _payload(evidence: object, *, kind: str) -> dict[str, Any]:
                 "vector risk-of-ruin authority stake vector exceeds supported size"
             )
         candidate = {
-            "candidate_vector_sha256": getattr(evidence, "candidate_vector_sha256"),
+            "candidate_vector_sha256": _canonical_sha256(
+                getattr(evidence, "candidate_vector_sha256"),
+                "candidate_vector_sha256",
+            ),
             "evaluated_stakes": [_canonical_decimal(value) for value in stakes],
         }
     else:
         raise ValueError("unsupported risk-of-ruin authority kind")
 
+    evidence_id = _bounded_text(
+        getattr(evidence, "evidence_id"), "risk-of-ruin evidence_id"
+    )
+    producer_identity = _bounded_text(
+        getattr(evidence, "producer_identity"), "risk-of-ruin producer_identity"
+    )
+    bankroll_id = _bounded_text(
+        getattr(evidence, "bankroll_id"), "risk-of-ruin bankroll_id"
+    )
+    currency = _bounded_text(
+        getattr(evidence, "currency"), "risk-of-ruin currency", max_length=3
+    )
+    if (
+        len(currency) != 3
+        or not currency.isascii()
+        or not currency.isalpha()
+        or currency != currency.upper()
+    ):
+        raise ValueError(
+            "risk-of-ruin currency must be a three-letter uppercase ASCII code"
+        )
+    causal_cutoff = _bounded_text(
+        getattr(evidence, "causal_cutoff"),
+        "risk-of-ruin causal_cutoff",
+        max_length=_MAX_AUTHORITY_TIMESTAMP_LENGTH,
+    )
+    evaluated_at = _bounded_text(
+        getattr(evidence, "evaluated_at"),
+        "risk-of-ruin evaluated_at",
+        max_length=_MAX_AUTHORITY_TIMESTAMP_LENGTH,
+    )
+    _instant(causal_cutoff)
+    _instant(evaluated_at)
+
     return {
         "schema": _AUTHORITY_KIND,
         "kind": kind,
-        "evidence_id": getattr(evidence, "evidence_id"),
-        "research_protocol_sha256": getattr(evidence, "research_protocol_sha256"),
-        "reproducibility_bundle_sha256": getattr(evidence, "reproducibility_bundle_sha256"),
-        "producer_identity": getattr(evidence, "producer_identity"),
-        "causal_cutoff": getattr(evidence, "causal_cutoff"),
-        "evaluated_at": getattr(evidence, "evaluated_at"),
-        "bankroll_id": getattr(evidence, "bankroll_id"),
-        "currency": getattr(evidence, "currency"),
-        "base_portfolio_sha256": getattr(evidence, "base_portfolio_sha256"),
+        "evidence_id": evidence_id,
+        "research_protocol_sha256": _canonical_sha256(
+            getattr(evidence, "research_protocol_sha256"),
+            "research_protocol_sha256",
+        ),
+        "reproducibility_bundle_sha256": _canonical_sha256(
+            getattr(evidence, "reproducibility_bundle_sha256"),
+            "reproducibility_bundle_sha256",
+        ),
+        "producer_identity": producer_identity,
+        "causal_cutoff": causal_cutoff,
+        "evaluated_at": evaluated_at,
+        "bankroll_id": bankroll_id,
+        "currency": currency,
+        "base_portfolio_sha256": _canonical_sha256(
+            getattr(evidence, "base_portfolio_sha256"),
+            "base_portfolio_sha256",
+        ),
         "upper_bound": _canonical_decimal(getattr(evidence, "upper_bound")),
         "bound_semantics": _BOUND_SEMANTICS,
         "confidence_semantics": _CONFIDENCE_SEMANTICS,
@@ -131,14 +208,19 @@ def risk_of_ruin_result_sha256(
 ) -> str:
     """Digest the exact issued result plus canonical evaluation identity."""
 
-    if type(dataset_snapshot_id) is not str or not dataset_snapshot_id:
-        raise ValueError("dataset_snapshot_id must be a non-empty string")
+    dataset_snapshot_id = _bounded_text(
+        dataset_snapshot_id,
+        "dataset_snapshot_id",
+    )
     if (
-        isinstance(effective_sample_size, bool)
-        or not isinstance(effective_sample_size, int)
+        type(effective_sample_size) is not int
         or effective_sample_size <= 0
+        or effective_sample_size > _MAX_SUPPORTED_EFFECTIVE_SAMPLE_SIZE
     ):
-        raise ValueError("effective_sample_size must be a positive integer")
+        raise ValueError(
+            "effective_sample_size must be an exact integer between 1 and "
+            f"{_MAX_SUPPORTED_EFFECTIVE_SAMPLE_SIZE}"
+        )
     evaluation_available_at = _instant(evaluation_available_at).isoformat()
     payload = {
         **_payload(evidence, kind=kind),

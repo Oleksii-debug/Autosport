@@ -49,3 +49,53 @@ def test_request_rejects_inflight_json_decoder_global_rebind(monkeypatch) -> Non
         api._request("/actions/runs/123")
 
     assert forged_calls == []
+
+
+def test_request_rejects_inflight_json_decoder_init_code_mutation(monkeypatch) -> None:
+    api = GitHubApi(repository="owner/repo", token="token")
+    decoder_init = controller_module.json.JSONDecoder.__dict__["__init__"]
+
+    def forged_init(self, *args, **kwargs) -> None:
+        raise AssertionError("forged decoder constructor must not execute")
+
+    class MutatingResponse(_Response):
+        def read(self) -> bytes:
+            monkeypatch.setattr(decoder_init, "__code__", forged_init.__code__)
+            return super().read()
+
+    monkeypatch.setattr(
+        controller_module,
+        "urlopen",
+        lambda *_args, **_kwargs: MutatingResponse(),
+    )
+
+    with pytest.raises(
+        CancellationError,
+        match="GitHub API JSON parser authority changed",
+    ):
+        api._request("/actions/runs/123")
+
+
+def test_request_rejects_inflight_json_decoder_decode_code_mutation(monkeypatch) -> None:
+    api = GitHubApi(repository="owner/repo", token="token")
+    decoder_decode = controller_module.json.JSONDecoder.__dict__["decode"]
+
+    def forged_decode(self, value):
+        return {"status": "forged"}
+
+    class MutatingResponse(_Response):
+        def read(self) -> bytes:
+            monkeypatch.setattr(decoder_decode, "__code__", forged_decode.__code__)
+            return super().read()
+
+    monkeypatch.setattr(
+        controller_module,
+        "urlopen",
+        lambda *_args, **_kwargs: MutatingResponse(),
+    )
+
+    with pytest.raises(
+        CancellationError,
+        match="GitHub API JSON parser authority changed",
+    ):
+        api._request("/actions/runs/123")

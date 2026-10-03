@@ -302,6 +302,12 @@ class GitHubApi:
         _json_loads_code=json.loads.__code__,
         _json_loads_globals=json.loads.__globals__,
         _json_decoder_type=json.JSONDecoder,
+        _json_decoder_init=json.JSONDecoder.__dict__["__init__"],
+        _json_decoder_init_code=json.JSONDecoder.__dict__["__init__"].__code__,
+        _json_decoder_decode=json.JSONDecoder.__dict__["decode"],
+        _json_decoder_decode_code=json.JSONDecoder.__dict__["decode"].__code__,
+        _json_decoder_raw_decode=json.JSONDecoder.__dict__["raw_decode"],
+        _json_decoder_raw_decode_code=json.JSONDecoder.__dict__["raw_decode"].__code__,
         _json_decode_error=json.JSONDecodeError,
         _strict_object_hook=_strict_json_object,
         _strict_object_hook_code=_strict_json_object.__code__,
@@ -359,6 +365,16 @@ class GitHubApi:
             return (
                 getattr(_json_loads, "__code__", None) is _json_loads_code
                 and _json_loads_globals.get("JSONDecoder") is _json_decoder_type
+                and _json_decoder_type.__dict__.get("__init__") is _json_decoder_init
+                and getattr(_json_decoder_init, "__code__", None)
+                is _json_decoder_init_code
+                and _json_decoder_type.__dict__.get("decode") is _json_decoder_decode
+                and getattr(_json_decoder_decode, "__code__", None)
+                is _json_decoder_decode_code
+                and _json_decoder_type.__dict__.get("raw_decode")
+                is _json_decoder_raw_decode
+                and getattr(_json_decoder_raw_decode, "__code__", None)
+                is _json_decoder_raw_decode_code
                 and getattr(_strict_object_hook, "__code__", None)
                 is _strict_object_hook_code
                 and getattr(_reject_constant_hook, "__code__", None)

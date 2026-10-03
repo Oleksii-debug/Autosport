@@ -455,6 +455,7 @@ class RealExecutionLedger:
         # False until this instance has proven both the visible file contents and,
         # on POSIX, the directory entry naming the ledger durable.
         self._path_durable = False
+        self._serialization_held = False
         try:
             authority_workspace = self.path.parent.resolve(strict=False)
             self._monotonic_authority = MonotonicWorkspaceAuthority(
@@ -554,6 +555,79 @@ class RealExecutionLedger:
             )
         return data_fd
 
+    def _acquire_posix_ledger_read_lock(self) -> int | None:
+        """Fence authoritative reads against a concurrent canonical writer."""
+
+        if os.name == "nt":
+            return None
+
+        import fcntl
+
+        try:
+            data_fd = os.open(self.path, os.O_RDONLY)
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            raise ExecutionLedgerIntegrityError(
+                "execution ledger read lock could not open ledger inode"
+            ) from exc
+        try:
+            fcntl.flock(data_fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            os.close(data_fd)
+            raise ExecutionLedgerBusyError(
+                "ledger inode is already held by another writer"
+            ) from exc
+        except OSError as exc:
+            os.close(data_fd)
+            raise ExecutionLedgerIntegrityError(
+                "execution ledger read lock failed"
+            ) from exc
+
+        try:
+            descriptor_stat = os.fstat(data_fd)
+            path_stat = os.stat(self.path)
+        except OSError as exc:
+            os.close(data_fd)
+            raise ExecutionLedgerIntegrityError(
+                "execution ledger read path identity could not be verified"
+            ) from exc
+        if (descriptor_stat.st_dev, descriptor_stat.st_ino) != (
+            path_stat.st_dev,
+            path_stat.st_ino,
+        ):
+            os.close(data_fd)
+            raise ExecutionLedgerIntegrityError(
+                "execution ledger path changed while acquiring read lock"
+            )
+        return data_fd
+
+    def _read_serialized(self, operation: Callable[[], _T]) -> _T:
+        with self._thread_lock:
+            try:
+                fd = os.open(
+                    self._lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600
+                )
+            except FileExistsError as exc:
+                raise ExecutionLedgerBusyError(
+                    "writer lock exists; fail closed while authoritative read is serialized"
+                ) from exc
+
+            data_fd: int | None = None
+            try:
+                data_fd = self._acquire_posix_ledger_read_lock()
+                self._serialization_held = True
+                return operation()
+            finally:
+                self._serialization_held = False
+                if data_fd is not None:
+                    os.close(data_fd)
+                os.close(fd)
+                try:
+                    self._lock_path.unlink()
+                except FileNotFoundError:
+                    pass
+
     def _mutate(self, operation: Callable[[], _T]) -> _T:
         with self._thread_lock:
             try:
@@ -568,8 +642,10 @@ class RealExecutionLedger:
             data_fd: int | None = None
             try:
                 data_fd = self._acquire_posix_ledger_lock()
+                self._serialization_held = True
                 return operation()
             finally:
+                self._serialization_held = False
                 if data_fd is not None:
                     os.close(data_fd)
                 os.close(fd)
@@ -703,6 +779,8 @@ class RealExecutionLedger:
             ) from exc
 
     def _read_verified_state(self) -> tuple[bytes, list[dict[str, Any]]]:
+        if not self._serialization_held:
+            return self._read_serialized(self._read_verified_state)
         if not self.path.exists():
             raw = b""
         else:
@@ -729,6 +807,16 @@ class RealExecutionLedger:
         attempt_id: str | None,
         payload: dict[str, Any],
     ) -> None:
+        if not self._serialization_held:
+            return self._mutate(
+                lambda: self._append(
+                    kind,
+                    plan_id,
+                    action_id,
+                    attempt_id,
+                    payload,
+                )
+            )
         event = {
             "schema_version": SCHEMA_VERSION,
             "event_id": str(uuid.uuid4()),

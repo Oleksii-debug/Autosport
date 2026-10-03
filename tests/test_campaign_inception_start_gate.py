@@ -105,6 +105,47 @@ def _setup(
     return selected, locator, store, spec, authority_root
 
 
+@pytest.mark.parametrize("kind", ("float", "int"))
+def test_source_spec_rejects_virtual_interval_before_numeric_dispatch(
+    tmp_path: Path,
+    kind: str,
+) -> None:
+    calls: list[str] = []
+
+    if kind == "float":
+        class HostileInterval(float):
+            def __float__(self) -> float:
+                calls.append("float")
+                return 10.0
+
+        interval_seconds: object = HostileInterval(10.0)
+    else:
+        class HostileInterval(int):
+            def __float__(self) -> float:
+                calls.append("int")
+                return 10.0
+
+        interval_seconds = HostileInterval(10)
+
+    with pytest.raises(
+        CampaignInceptionIntegrityError,
+        match="exact built-in int or float",
+    ):
+        CampaignInceptionSourceSpec(
+            expected_store_path=tmp_path / "collector.db",
+            source_id="betfair:exchange",
+            run_id="run-1",
+            stream_epoch="epoch-1",
+            anchor_at="2100-01-01T06:00:00+00:00",
+            interval_seconds=interval_seconds,  # type: ignore[arg-type]
+            max_items=250,
+            evaluation_start_slot_ordinal=0,
+            evaluation_end_slot_ordinal=1,
+        )
+
+    assert calls == []
+
+
 def _inception_authority(
     *,
     locator: ForwardUniversePrecommitLocator,

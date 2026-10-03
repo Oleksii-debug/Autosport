@@ -618,8 +618,8 @@ class SupportedProductEntrypointTests(unittest.TestCase):
         self.assertEqual(
             restorations,
             [
-                (stop_signals[0], previous_handlers[stop_signals[0]]),
                 (stop_signals[1], previous_handlers[stop_signals[1]]),
+                (stop_signals[0], previous_handlers[stop_signals[0]]),
             ],
         )
 

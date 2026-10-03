@@ -4,6 +4,7 @@ import pytest
 
 from autosport.betfair_italy_order_admission import (
     ItalianLimitAdmissionState,
+    ItalianLimitBatchAdmission,
     ItalianLimitInstruction,
     ItalianOrderAdmissionError,
     evaluate_italian_limit_batch,
@@ -20,13 +21,26 @@ def I(side="BACK", size="2.00", price="2.00", target=None, selection_id=1):
     )
 
 
-def test_back_minimum_and_increment_are_admissible():
+def assert_unbound_match(result):
+    assert (
+        result.state
+        is ItalianLimitAdmissionState.RULESET_SATISFIED_UNBOUND
+    )
+    assert result.ruleset_satisfied_unbound is True
+    assert result.admissible is False
+    assert result.jurisdiction_bound is False
+    assert result.account_currency_bound is False
+    assert result.current_provider_rules_proven is False
+    assert result.execution_authorized is False
+    assert result.real_money_execution is False
+
+
+def test_back_minimum_and_increment_match_only_unbound_ruleset():
     result = evaluate_italian_limit_batch(
         (I(size="2.00"), I(size="2.50", selection_id=2))
     )
-    assert result.state is ItalianLimitAdmissionState.ADMISSIBLE
+    assert_unbound_match(result)
     assert result.reason_codes == ()
-    assert result.execution_authorized is False
 
 
 def test_back_below_two_euros_is_rejected():
@@ -39,15 +53,20 @@ def test_back_non_half_euro_increment_is_rejected():
     assert "I0:BACK_STAKE_NOT_EUR_0_50_INCREMENT" in result.reason_codes
 
 
-def test_lay_corresponding_backer_stake_minimum_is_half_euro():
-    assert evaluate_italian_limit_batch((I(side="LAY", size="0.50"),)).admissible
-    rejected = evaluate_italian_limit_batch((I(side="LAY", size="0.49"),))
+def test_lay_corresponding_backer_stake_minimum_matches_unbound_ruleset():
+    accepted = evaluate_italian_limit_batch(
+        (I(side="LAY", size="0.50"),)
+    )
+    assert_unbound_match(accepted)
+    rejected = evaluate_italian_limit_batch(
+        (I(side="LAY", size="0.49"),)
+    )
     assert "I0:LAY_BACKER_STAKE_BELOW_EUR_0_50" in rejected.reason_codes
 
 
-def test_fifty_instructions_are_allowed():
+def test_fifty_instructions_match_only_unbound_ruleset():
     batch = tuple(I(selection_id=i + 1) for i in range(50))
-    assert evaluate_italian_limit_batch(batch).admissible
+    assert_unbound_match(evaluate_italian_limit_batch(batch))
 
 
 def test_fifty_one_instructions_are_rejected():
@@ -72,22 +91,26 @@ def test_target_sizing_is_unavailable_in_italy(target):
     assert result.preselected_returns_eur == ()
 
 
-def test_back_preselected_return_equal_to_10000_is_allowed():
-    result = evaluate_italian_limit_batch((I(size="10.00", price="1000"),))
-    assert result.admissible
+def test_back_preselected_return_equal_to_10000_matches_unbound_ruleset():
+    result = evaluate_italian_limit_batch(
+        (I(size="10.00", price="1000"),)
+    )
+    assert_unbound_match(result)
     assert result.preselected_returns_eur == (Decimal("10000.00"),)
 
 
 def test_back_preselected_return_above_10000_is_rejected():
-    result = evaluate_italian_limit_batch((I(size="10.50", price="1000"),))
+    result = evaluate_italian_limit_batch(
+        (I(size="10.50", price="1000"),)
+    )
     assert "I0:PRESELECTED_RETURN_EXCEEDS_EUR_10000" in result.reason_codes
 
 
-def test_lay_preselected_return_equal_to_10000_is_allowed():
+def test_lay_preselected_return_equal_to_10000_matches_unbound_ruleset():
     result = evaluate_italian_limit_batch(
         (I(side="LAY", size="10.00", price="1000"),)
     )
-    assert result.admissible
+    assert_unbound_match(result)
 
 
 def test_lay_preselected_return_above_10000_is_rejected():
@@ -104,15 +127,37 @@ def test_empty_batch_is_rejected_without_fabricating_returns():
     assert result.preselected_returns_eur == ()
 
 
-def test_instruction_collection_must_be_immutable_tuple():
-    with pytest.raises(ItalianOrderAdmissionError, match="immutable tuple"):
+def test_instruction_collection_must_be_exact_immutable_tuple():
+    with pytest.raises(ItalianOrderAdmissionError, match="exact tuple"):
         evaluate_italian_limit_batch([I()])  # type: ignore[arg-type]
 
 
-@pytest.mark.parametrize("side", ["back", "LAY ", "", "BUY"])
+def test_instruction_subclass_cannot_enter_exact_projection_contract():
+    class DerivedInstruction(ItalianLimitInstruction):
+        pass
+
+    value = DerivedInstruction(
+        selection_id=1,
+        side="BACK",
+        size=Decimal("2"),
+        price=Decimal("2"),
+    )
+    with pytest.raises(
+        ItalianOrderAdmissionError,
+        match="exact ItalianLimitInstruction",
+    ):
+        evaluate_italian_limit_batch((value,))
+
+
+@pytest.mark.parametrize("side", ["back", "LAY ", "", "BUY", 1])
 def test_side_is_exact_and_fail_closed(side):
     with pytest.raises(ItalianOrderAdmissionError, match="exactly BACK or LAY"):
-        I(side=side)
+        ItalianLimitInstruction(
+            1,
+            side,  # type: ignore[arg-type]
+            Decimal("2"),
+            Decimal("2"),
+        )
 
 
 @pytest.mark.parametrize(
@@ -144,8 +189,30 @@ def test_invalid_price_rejected(bad):
 
 
 def test_binary_float_is_not_accepted_as_money():
-    with pytest.raises(ItalianOrderAdmissionError, match="positive finite Decimal"):
-        ItalianLimitInstruction(1, "BACK", 2.0, Decimal("2"))  # type: ignore[arg-type]
+    with pytest.raises(ItalianOrderAdmissionError, match="exact positive finite Decimal"):
+        ItalianLimitInstruction(
+            1, "BACK", 2.0, Decimal("2")  # type: ignore[arg-type]
+        )
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        Decimal("1e19"),
+        Decimal("1e-19"),
+        Decimal("9" * 65),
+    ],
+)
+def test_decimal_shape_is_bounded_before_fraction_or_arithmetic(bad):
+    with pytest.raises(ItalianOrderAdmissionError, match="bounded Decimal shape"):
+        ItalianLimitInstruction(1, "BACK", bad, Decimal("2"))
+
+
+def test_price_shape_is_bounded_before_multiplication():
+    with pytest.raises(ItalianOrderAdmissionError, match="bounded Decimal shape"):
+        ItalianLimitInstruction(
+            1, "BACK", Decimal("2"), Decimal("1e19")
+        )
 
 
 def test_unknown_target_mode_is_malformed_not_silently_accepted():
@@ -153,7 +220,7 @@ def test_unknown_target_mode_is_malformed_not_silently_accepted():
         I(target="SOMETHING_ELSE")
 
 
-def test_selection_id_must_be_positive_integer_not_bool():
+def test_selection_id_must_be_positive_exact_integer_not_bool():
     with pytest.raises(ItalianOrderAdmissionError, match="selection_id"):
         I(selection_id=True)
     with pytest.raises(ItalianOrderAdmissionError, match="selection_id"):
@@ -165,7 +232,7 @@ def test_preselected_return_is_independent_of_ambient_decimal_precision():
     with localcontext() as ctx:
         ctx.prec = 3
         result = evaluate_italian_limit_batch((instruction,))
-    assert result.admissible
+    assert_unbound_match(result)
     assert result.preselected_returns_eur == (Decimal("9999.4500"),)
 
 
@@ -183,3 +250,19 @@ def test_all_reasons_are_preserved_deterministically():
         "I1:PRESELECTED_RETURN_EXCEEDS_EUR_10000",
     )
     assert result.preselected_returns_eur == (Decimal("14700.00"),)
+
+
+def test_no_positive_provider_admission_state_exists():
+    assert {item.value for item in ItalianLimitAdmissionState} == {
+        "RULESET_SATISFIED_UNBOUND",
+        "REJECTED",
+    }
+
+
+def test_caller_cannot_relabel_unbound_ruleset_result_as_admissible():
+    with pytest.raises(ItalianOrderAdmissionError, match="cannot carry"):
+        ItalianLimitBatchAdmission(
+            state=ItalianLimitAdmissionState.RULESET_SATISFIED_UNBOUND,
+            reason_codes=("forged_reason",),
+            preselected_returns_eur=(Decimal("4"),),
+        )

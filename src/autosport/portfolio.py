@@ -73,8 +73,6 @@ def _validate_open_ticket_economics_for_analysis(
     stake: object,
     legs: object,
 ) -> None:
-    if type(ticket_id) is not str or not ticket_id or ticket_id != ticket_id.strip():
-        raise ValueError("portfolio ticket_id must be canonical non-empty text")
     amount = _require_finite_decimal(
         stake,
         f"portfolio ticket {ticket_id} stake",
@@ -109,6 +107,7 @@ def _snapshot_open_tickets_for_analysis(
     source_tickets = tuple(tickets)
     captured: list[tuple[object, ...]] = []
     snapshots: list[PaperTicket] = []
+    seen_ticket_ids: set[str] = set()
 
     for ticket in source_tickets:
         fingerprint = _analysis_ticket_fingerprint(ticket)
@@ -121,6 +120,13 @@ def _snapshot_open_tickets_for_analysis(
             status,
             provider_source_ids,
         ) = fingerprint
+        if type(ticket_id) is not str or not ticket_id or ticket_id != ticket_id.strip():
+            raise ValueError("portfolio ticket_id must be canonical non-empty text")
+        if ticket_id in seen_ticket_ids:
+            raise ValueError("portfolio ticket_id values must be unique")
+        seen_ticket_ids.add(ticket_id)
+        if type(status) is not TicketStatus:
+            raise ValueError("portfolio ticket status must be exact TicketStatus")
         if status is not TicketStatus.OPEN:
             continue
         _validate_open_ticket_economics_for_analysis(

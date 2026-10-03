@@ -581,6 +581,51 @@ def test_plan_reservation_epoch_ignores_in_place_now_code_mutation() -> None:
         ledger_module._now.__code__ = original_code
 
 
+def test_plan_reservation_event_id_ignores_uuid4_rebinding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    def hostile_uuid4() -> str:
+        calls.append("hostile")
+        return "attacker-selected-event-id"
+
+    monkeypatch.setattr(ledger_module.uuid, "uuid4", hostile_uuid4)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        ledger = RealExecutionLedger(Path(tmp) / "real-execution.jsonl")
+        action = ExecutionAction(
+            action_id="action-event-id",
+            bookmaker_id="betfair",
+            account_id="acct-1",
+            event_id="event-event-id",
+            market_id="1.event-id",
+            selection_id="101",
+            side="BACK",
+            requested_odds="2.20",
+            requested_stake="10",
+            quote_id="quote-event-id",
+            quote_observed_at="2001-01-01T00:00:00+00:00",
+            expires_at="2099-01-01T00:00:00+00:00",
+        )
+        plan = ExecutionPlan(
+            plan_id="plan-event-id",
+            bookmaker_profile_version="betfair-profile-v1",
+            decision_id="decision-event-id",
+            approval_id="approval-event-id",
+            created_at="2001-01-01T00:00:01+00:00",
+            actions=(action,),
+        )
+
+        ledger.reserve_plan(plan)
+        view = ledger.verified_execution_view(plan.plan_id)
+
+        assert calls == []
+        assert view.plan_reserved_event_id != "attacker-selected-event-id"
+        parsed = ledger_module.uuid.UUID(view.plan_reserved_event_id)
+        assert parsed.version == 4
+
+
 def test_exact_plan_redelivery_preserves_original_reservation_epoch() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / "real-execution.jsonl"

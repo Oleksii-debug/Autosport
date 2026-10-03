@@ -433,6 +433,21 @@
       byId("product-runtime-source-last-success"),
       productRuntime.source_last_success_at || "—",
     );
+    const runtimeEconomic = productRuntime.economic_snapshot || {};
+    setValueIfChanged(
+      byId("product-runtime-economic-cycle"),
+      runtimeEconomic.available === true && runtimeEconomic.cycle_index !== null
+        ? String(runtimeEconomic.cycle_index)
+        : "—",
+    );
+    setValueIfChanged(
+      byId("product-runtime-economic-as-of"),
+      runtimeEconomic.as_of || "—",
+    );
+    setValueIfChanged(
+      byId("product-runtime-paper-book-sha"),
+      runtimeEconomic.paper_book_sha256 || "—",
+    );
     syncRuntimeActionAvailability(
       byId("product-runtime-start"),
       byId("product-runtime-stop"),

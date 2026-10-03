@@ -5,6 +5,7 @@ from types import FunctionType
 
 import pytest
 
+import autosport.economic_goal_provenance as goal_provenance_module
 import autosport.economic_goal_store as economic_goal_store_module
 import autosport.paper as paper_module
 from autosport.domain import TicketLeg
@@ -733,6 +734,38 @@ def test_resolver_rejects_goal_parser_dependency_rebinding_before_execution(
 
     monkeypatch.setattr(
         economic_goal_store_module,
+        dependency_name,
+        hostile,
+    )
+
+    with pytest.raises(
+        PaperDrawdownEvidenceError,
+        match="durable source resolver authority changed",
+    ):
+        resolve_paper_drawdown_evidence(tmp_path)
+
+    assert hostile_called is False
+
+
+@pytest.mark.parametrize(
+    "dependency_name",
+    ("contract_sha256", "_canonical_json", "economic_goal_to_payload"),
+)
+def test_resolver_rejects_goal_provenance_dependency_rebinding_before_execution(
+    tmp_path,
+    monkeypatch,
+    dependency_name,
+) -> None:
+    _initialize(tmp_path)
+    hostile_called = False
+
+    def hostile(*_args, **_kwargs):
+        nonlocal hostile_called
+        hostile_called = True
+        raise AssertionError("hostile goal provenance dependency executed")
+
+    monkeypatch.setattr(
+        goal_provenance_module,
         dependency_name,
         hostile,
     )

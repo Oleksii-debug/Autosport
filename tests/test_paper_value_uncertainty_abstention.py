@@ -299,10 +299,10 @@ class PaperValueUncertaintyAbstentionTests(unittest.TestCase):
         caller_ref = self._self_attested_ref(event, forecast)
         refs = {event.quote_key: caller_ref}
 
-        agent = self._agent(
-            self._goal(),
-            forecast,
-            predictive_ref=caller_ref,
+        agent = PaperValueAgent(
+            {event.quote_key: forecast},
+            risk_policy=PaperRiskPolicy(economic_goal=self._goal()),
+            predictive_forecast_refs=refs,
         )
         refs.clear()
         self.assertIs(

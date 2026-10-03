@@ -549,7 +549,13 @@ def cancel_superseded_explicit_pr_runs(
     cancelled: list[int] = []
     cancelled_ids: set[int] = set()
     for pr_number in pr_numbers:
-        qualification = api.live_pr_qualification(pr_number)
+        try:
+            qualification = api.live_pr_qualification(pr_number)
+        except CancellationError:
+            # Qualification authority is scoped to one PR group. Failure to resolve
+            # one group must fail that group closed without starving independent PRs
+            # whose own live authority can still be proven.
+            continue
         selected = select_superseded_runs(
             explicit_singleton_runs,
             pr_number=pr_number,
@@ -561,9 +567,13 @@ def cancel_superseded_explicit_pr_runs(
         for run_id in selected:
             if run_id in cancelled_ids:
                 continue
-            # A head/state/draft move revokes authority only for this PR group.
-            # Other independently resolved PR groups can still make progress.
-            if api.live_pr_qualification(pr_number) != qualification:
+            # A head/state/draft move or reread failure revokes authority only for
+            # this PR group. Other independently resolved groups can still progress.
+            try:
+                current_qualification = api.live_pr_qualification(pr_number)
+            except CancellationError:
+                break
+            if current_qualification != qualification:
                 break
             api.cancel(run_id)
             cancelled.append(run_id)

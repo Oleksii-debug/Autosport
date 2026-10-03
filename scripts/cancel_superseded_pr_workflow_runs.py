@@ -227,13 +227,19 @@ def select_superseded_runs(
 
 class GitHubApi:
     def __init__(self, *, repository: str, token: str) -> None:
+        if type(repository) is not str:
+            raise CancellationError("GITHUB_REPOSITORY must be owner/repo")
         parts = repository.split("/")
         if len(parts) != 2 or not all(parts):
             raise CancellationError("GITHUB_REPOSITORY must be owner/repo")
         if not token:
             raise CancellationError("GITHUB_TOKEN is required")
-        self._repository = repository
+        self.__repository = repository
         self._token = token
+
+    @property
+    def _repository(self) -> str:
+        return self.__repository
 
     def _request(
         self,
@@ -353,7 +359,10 @@ class GitHubApi:
         return next(iter(exact_numbers))
 
     def live_pr_qualification(self, pr_number: int) -> tuple[str, bool]:
+        repository = self._repository
         payload = self._pull_request(pr_number)
+        if self._repository != repository:
+            raise CancellationError("GitHub API repository binding changed")
         head = payload.get("head")
         base = payload.get("base")
         state = payload.get("state")
@@ -364,13 +373,13 @@ class GitHubApi:
             raise CancellationError("invalid pull request qualification state")
 
         base_repo = base.get("repo")
-        if not isinstance(base_repo, dict) or base_repo.get("full_name") != self._repository:
+        if not isinstance(base_repo, dict) or base_repo.get("full_name") != repository:
             raise CancellationError("pull request base repository is not canonical")
 
         head_repo = head.get("repo")
         same_repository_head = (
             isinstance(head_repo, dict)
-            and head_repo.get("full_name") == self._repository
+            and head_repo.get("full_name") == repository
         )
         head_sha = head.get("sha")
         if type(head_sha) is not str or len(head_sha) != 40:

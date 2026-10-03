@@ -70,6 +70,11 @@ from . import _provider_transport_origin as _provider_transport_origin  # noqa: 
 # fields before normalization or monotonic integrity validation.
 from . import _provider_observation_payload_strictness as _provider_observation_payload_strictness  # noqa: F401,E402
 
+# Historical snapshot children build their logical request/canonicalization scope
+# from mutable provider fields. Freeze each child scope so one transport callback
+# cannot make a multi-snapshot bundle silently cross regions/markets/origin/source.
+from . import _historical_snapshot_scope_guard as _historical_snapshot_scope_guard  # noqa: F401,E402
+
 # Install the fail-closed predictive runtime authority bridge before callers import
 # decision modules.  The import is intentionally private; public APIs remain in the
 # owning opportunity/predictive modules.

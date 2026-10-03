@@ -1797,6 +1797,27 @@ class DeploymentRuntimeAuthorityStore(metaclass=_DeploymentRuntimeAuthorityStore
             raise DeploymentRuntimeAuthorityError(
                 "runtime authority static contract was replaced"
             )
+        if (
+            os is not _CANONICAL_OS_MODULE
+            or stat is not _CANONICAL_STAT_MODULE
+            or os.open is not _CANONICAL_OS_OPEN
+            or os.fstat is not _CANONICAL_OS_FSTAT
+            or os.lstat is not _CANONICAL_OS_LSTAT
+            or os.fsync is not _CANONICAL_OS_FSYNC
+            or os.close is not _CANONICAL_OS_CLOSE
+            or os.replace is not _CANONICAL_OS_REPLACE
+            or stat.S_ISREG is not _CANONICAL_STAT_ISREG
+            or _fsync_directory is not _CANONICAL_FSYNC_DIRECTORY
+            or getattr(_CANONICAL_FSYNC_DIRECTORY, "__code__", None)
+            is not _CANONICAL_FSYNC_DIRECTORY_CODE
+            or _durably_finalize_published_path
+            is not _CANONICAL_DURABLE_PUBLICATION_FINALIZER
+            or getattr(_CANONICAL_DURABLE_PUBLICATION_FINALIZER, "__code__", None)
+            is not _CANONICAL_DURABLE_PUBLICATION_FINALIZER_CODE
+        ):
+            raise DeploymentRuntimeAuthorityError(
+                "runtime authority publication durability dispatch was replaced"
+            )
         candidate_path = _CANONICAL_PATH_TYPE(path)
         current_path_type = type(candidate_path)
         if current_path_type is not _CANONICAL_CONCRETE_PATH_TYPE:

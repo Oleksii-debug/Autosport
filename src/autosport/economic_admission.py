@@ -780,6 +780,7 @@ def _same_semantic_book_state(expected: PaperBook, observed: PaperBook) -> bool:
         and observed.tickets == expected.tickets
         and observed._lifecycle == expected._lifecycle
         and observed._settlement_times == expected._settlement_times
+        and observed._product_day_admissions == expected._product_day_admissions
     )
 
 

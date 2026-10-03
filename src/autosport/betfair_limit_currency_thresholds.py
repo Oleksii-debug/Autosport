@@ -19,6 +19,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from decimal import Decimal, localcontext
 from enum import Enum
+from operator import attrgetter
 from types import MappingProxyType
 
 RULESET_ID = "betfair-currency-parameters-page2686993-v3"
@@ -134,8 +135,62 @@ CURRENCY_PARAMETERS = MappingProxyType(
 )
 
 
+def _build_currency_threshold_assessment_meta():
+    """Seal hard-false diagnostic authority away from mutable Python getters."""
+
+    sealed_classes: set[type] = set()
+    protected_names = frozenset(
+        {
+            "__dataclass_fields__",
+            "__init__",
+            "__post_init__",
+            "ruleset_effective_interval_proven",
+            "account_currency_bound",
+            "jurisdiction_bound",
+            "current_provider_constraint_proven",
+            "market_admissibility_proven",
+            "execution_authorized",
+            "real_money_execution",
+            "_ruleset_effective_interval_proven_constant",
+            "_account_currency_bound_constant",
+            "_jurisdiction_bound_constant",
+            "_current_provider_constraint_proven_constant",
+            "_market_admissibility_proven_constant",
+            "_execution_authorized_constant",
+            "_real_money_execution_constant",
+        }
+    )
+
+    class _BetfairCurrencyThresholdAssessmentMeta(type):
+        def __setattr__(cls, name: str, value: object) -> None:
+            if cls in sealed_classes and name in protected_names:
+                raise TypeError(
+                    "currency-threshold diagnostic authority surface is sealed: " + name
+                )
+            super().__setattr__(name, value)
+
+        def __delattr__(cls, name: str) -> None:
+            if cls in sealed_classes and name in protected_names:
+                raise TypeError(
+                    "currency-threshold diagnostic authority surface is sealed: " + name
+                )
+            super().__delattr__(name)
+
+        @classmethod
+        def seal(mcls, cls: type) -> None:
+            sealed_classes.add(cls)
+
+    return _BetfairCurrencyThresholdAssessmentMeta
+
+
+_BetfairCurrencyThresholdAssessmentMeta = _build_currency_threshold_assessment_meta()
+del _build_currency_threshold_assessment_meta
+
+
 @dataclass(frozen=True, slots=True)
-class BetfairCurrencyThresholdAssessment:
+class BetfairCurrencyThresholdAssessment(
+    metaclass=_BetfairCurrencyThresholdAssessmentMeta
+):
     state: BetfairCurrencyThresholdState
     currency_code: str
     side: str
@@ -145,7 +200,6 @@ class BetfairCurrencyThresholdAssessment:
     min_bet_size: Decimal | None
     min_bet_payout: Decimal | None
     ruleset_id: str = RULESET_ID
-    ruleset_effective_interval_proven: bool = RULESET_EFFECTIVE_INTERVAL_PROVEN
 
     def __post_init__(self) -> None:
         if type(self.state) is not BetfairCurrencyThresholdState:
@@ -168,11 +222,6 @@ class BetfairCurrencyThresholdAssessment:
                 _positive_decimal(value, field)
         if type(self.ruleset_id) is not str or self.ruleset_id != RULESET_ID:
             raise BetfairCurrencyThresholdError("ruleset_id is product-owned")
-        if self.ruleset_effective_interval_proven is not False:
-            raise BetfairCurrencyThresholdError(
-                "static ruleset cannot claim a proven effective interval"
-            )
-
         unsupported = self.state is BetfairCurrencyThresholdState.UNSUPPORTED_CURRENCY
         target = self.state is BetfairCurrencyThresholdState.TARGET_SIZING_OUTSIDE_SCOPE
         if unsupported:
@@ -221,29 +270,34 @@ class BetfairCurrencyThresholdAssessment:
             is BetfairCurrencyThresholdState.SNAPSHOT_LOWER_PAYOUT_MECHANIC_MET_REQUIRES_JURISDICTION
         )
 
-    @property
-    def account_currency_bound(self) -> bool:
-        return False
+    # These claims are intentionally hard-false. Keep the getters out of
+    # mutable Python bytecode and keep the backing values off instance slots:
+    # a frozen slots dataclass alone can still be changed through
+    # object.__setattr__, while an ordinary property exposes fget.__code__.
+    _ruleset_effective_interval_proven_constant = False
+    _account_currency_bound_constant = False
+    _jurisdiction_bound_constant = False
+    _current_provider_constraint_proven_constant = False
+    _market_admissibility_proven_constant = False
+    _execution_authorized_constant = False
+    _real_money_execution_constant = False
 
-    @property
-    def jurisdiction_bound(self) -> bool:
-        return False
+    ruleset_effective_interval_proven = property(
+        attrgetter("_ruleset_effective_interval_proven_constant")
+    )
+    account_currency_bound = property(attrgetter("_account_currency_bound_constant"))
+    jurisdiction_bound = property(attrgetter("_jurisdiction_bound_constant"))
+    current_provider_constraint_proven = property(
+        attrgetter("_current_provider_constraint_proven_constant")
+    )
+    market_admissibility_proven = property(
+        attrgetter("_market_admissibility_proven_constant")
+    )
+    execution_authorized = property(attrgetter("_execution_authorized_constant"))
+    real_money_execution = property(attrgetter("_real_money_execution_constant"))
 
-    @property
-    def current_provider_constraint_proven(self) -> bool:
-        return False
 
-    @property
-    def market_admissibility_proven(self) -> bool:
-        return False
-
-    @property
-    def execution_authorized(self) -> bool:
-        return False
-
-    @property
-    def real_money_execution(self) -> bool:
-        return False
+_BetfairCurrencyThresholdAssessmentMeta.seal(BetfairCurrencyThresholdAssessment)
 
 
 def evaluate_standard_limit_currency_thresholds(

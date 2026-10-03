@@ -5,6 +5,7 @@ import pytest
 from autosport.betfair_limit_currency_thresholds import (
     CURRENCY_PARAMETERS,
     RULESET_EFFECTIVE_INTERVAL_PROVEN,
+    BetfairCurrencyThresholdAssessment,
     BetfairCurrencyThresholdError,
     BetfairCurrencyThresholdState,
     evaluate_standard_limit_currency_thresholds,
@@ -270,3 +271,37 @@ def test_snapshot_ingress_rejects_subclasses_before_virtual_dispatch():
             bet_target_type=_HostileStr("PAYOUT"),
         )
 
+
+
+def test_hard_false_authority_surface_uses_non_python_getters_and_is_sealed():
+    result = assess()
+    hard_false_names = (
+        "ruleset_effective_interval_proven",
+        "account_currency_bound",
+        "jurisdiction_bound",
+        "current_provider_constraint_proven",
+        "market_admissibility_proven",
+        "execution_authorized",
+        "real_money_execution",
+    )
+
+    for name in hard_false_names:
+        descriptor = BetfairCurrencyThresholdAssessment.__dict__[name]
+        assert isinstance(descriptor, property)
+        assert descriptor.fget is not None
+        assert not hasattr(descriptor.fget, "__code__")
+        assert getattr(result, name) is False
+
+    with pytest.raises(TypeError, match="authority surface is sealed"):
+        BetfairCurrencyThresholdAssessment._execution_authorized_constant = True
+
+    with pytest.raises(TypeError, match="authority surface is sealed"):
+        BetfairCurrencyThresholdAssessment.execution_authorized = property(
+            lambda _self: True
+        )
+
+    with pytest.raises(AttributeError):
+        object.__setattr__(result, "_execution_authorized_constant", True)
+
+    with pytest.raises(AttributeError):
+        object.__setattr__(result, "real_money_execution", True)

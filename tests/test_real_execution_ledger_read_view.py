@@ -10,6 +10,7 @@ from autosport.real_execution_ledger import (
     AcknowledgementStatus,
     AttemptState,
     ExecutionAction,
+    ExecutionIdentityConflict,
     ExecutionLedgerIntegrityError,
     ExecutionPlan,
     ExternalAcknowledgement,
@@ -74,7 +75,12 @@ def test_verified_execution_view_binds_unknown_facts_to_one_snapshot() -> None:
             attempt_id="attempt-a",
             provider_id="betfair",
         )
-        ledger.mark_submitted("attempt-a", submitted_at=SUBMITTED_AT)
+        request_sha256 = hashlib.sha256(b"exact-provider-request-a").hexdigest()
+        ledger.mark_submitted(
+            "attempt-a",
+            submitted_at=SUBMITTED_AT,
+            request_sha256=request_sha256,
+        )
         evidence_id = hashlib.sha256(b"provider-readback-a").hexdigest()
         ledger.bind_provider_evidence(
             attempt_id="attempt-a",
@@ -104,6 +110,7 @@ def test_verified_execution_view_binds_unknown_facts_to_one_snapshot() -> None:
         assert attempt.action == first
         assert attempt.state is AttemptState.UNKNOWN
         assert attempt.submitted_at == SUBMITTED_AT
+        assert attempt.submitted_request_sha256 == request_sha256
         assert attempt.unknown_reason == "provider_effect_unresolved"
         assert attempt.unknown_observed_at == UNKNOWN_AT
         assert attempt.provider_order_ref == provider_ref
@@ -117,6 +124,73 @@ def test_verified_execution_view_binds_unknown_facts_to_one_snapshot() -> None:
 
         reopened = RealExecutionLedger(path).verified_execution_view(plan.plan_id)
         assert reopened == view
+
+
+def test_submitted_request_identity_is_immutable_across_idempotent_replay() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "real-execution.jsonl"
+        ledger = RealExecutionLedger(path)
+        action = _action("action-a", "101")
+        plan = _plan(action)
+        ledger.reserve_plan(plan)
+        ledger.begin_attempt(
+            plan_id=plan.plan_id,
+            action_id=action.action_id,
+            attempt_id="attempt-a",
+            reserved_at=RESERVED_AT,
+        )
+        request_sha256 = hashlib.sha256(b"submitted-request-v1").hexdigest()
+        ledger.mark_submitted(
+            "attempt-a",
+            submitted_at=SUBMITTED_AT,
+            request_sha256=request_sha256,
+        )
+        event_count = ledger.verify_integrity()
+
+        ledger.mark_submitted(
+            "attempt-a",
+            submitted_at=ACKNOWLEDGED_AT,
+            request_sha256=request_sha256,
+        )
+        assert ledger.verify_integrity() == event_count
+
+        with pytest.raises(
+            ExecutionIdentityConflict,
+            match="different request identity",
+        ):
+            ledger.mark_submitted(
+                "attempt-a",
+                submitted_at=ACKNOWLEDGED_AT,
+                request_sha256=hashlib.sha256(b"submitted-request-v2").hexdigest(),
+            )
+
+        attempt = RealExecutionLedger(path).verified_execution_view(
+            plan.plan_id
+        ).attempts[0]
+        assert attempt.submitted_at == SUBMITTED_AT
+        assert attempt.submitted_request_sha256 == request_sha256
+
+
+def test_legacy_submission_without_request_digest_remains_readable() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "real-execution.jsonl"
+        ledger = RealExecutionLedger(path)
+        action = _action("action-a", "101")
+        plan = _plan(action)
+        ledger.reserve_plan(plan)
+        ledger.begin_attempt(
+            plan_id=plan.plan_id,
+            action_id=action.action_id,
+            attempt_id="attempt-a",
+            reserved_at=RESERVED_AT,
+        )
+        ledger.mark_submitted("attempt-a", submitted_at=SUBMITTED_AT)
+
+        attempt = RealExecutionLedger(path).verified_execution_view(
+            plan.plan_id
+        ).attempts[0]
+        assert attempt.submitted_at == SUBMITTED_AT
+        assert attempt.submitted_request_sha256 is None
 
 
 def test_view_is_immutable_point_in_time_when_ledger_advances() -> None:

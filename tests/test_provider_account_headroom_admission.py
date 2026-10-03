@@ -2327,3 +2327,65 @@ def test_denomination_authority_binds_provider_account_identity(
     assert assessment.account_id == "acct-1"
     assert len(assessment.denomination_authority_sha256) == 64
 
+def test_headroom_issuance_mutators_and_registries_are_not_module_globals() -> None:
+    assert not hasattr(headroom_module, "_issue_assessment")
+    assert not hasattr(headroom_module, "_issue_reservation")
+    assert not hasattr(headroom_module, "_ISSUED")
+    assert not hasattr(headroom_module, "_ISSUED_LOCK")
+    assert not hasattr(headroom_module, "_RESERVATION_ISSUED")
+    assert not hasattr(headroom_module, "_RESERVATION_ISSUED_LOCK")
+
+
+def test_reconstructed_assessment_cannot_self_mint_via_module_surface(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    acquired, _ = _acquire_balance(monkeypatch, tmp_path, "100")
+    target = _plan("target", _action("target-action", "10"))
+    ledger = _ledger_with_plans(tmp_path, target)
+    issued = _assess(
+        ledger,
+        acquired,
+        plan_id="target",
+        action_id="target-action",
+    )
+    reconstructed = replace(issued)
+
+    assert not hasattr(headroom_module, "_issue_assessment")
+    with pytest.raises(
+        ProviderAccountHeadroomError,
+        match="not canonically issued",
+    ):
+        _reserve(
+            ledger,
+            acquired,
+            reconstructed,
+            attempt_id="forged-assessment-attempt",
+        )
+
+
+def test_reconstructed_reservation_loses_product_internal_proof(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    acquired, _ = _acquire_balance(monkeypatch, tmp_path, "100")
+    target = _plan("target", _action("target-action", "10"))
+    ledger = _ledger_with_plans(tmp_path, target)
+    assessment = _assess(
+        ledger,
+        acquired,
+        plan_id="target",
+        action_id="target-action",
+    )
+    reservation = _reserve(
+        ledger,
+        acquired,
+        assessment,
+        attempt_id="issued-reservation-attempt",
+    )
+    reconstructed = replace(reservation)
+
+    assert reservation.product_internal_reservation_proven is True
+    assert reconstructed.product_internal_reservation_proven is False
+    assert not hasattr(headroom_module, "_issue_reservation")
+

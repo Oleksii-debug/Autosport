@@ -97,6 +97,22 @@ def _projection_order_key(event: MarketEvent) -> tuple[int, str]:
     return (event.sequence, event.dedupe_key)
 
 
+def _stream_semantic_identity(event: MarketEvent) -> tuple[str, str | None]:
+    """Stable market-rule identity for one provider/source quote stream."""
+    return (event.market_type.value, event.market_semantics_id)
+
+
+def _assert_stream_semantic_identity(
+    expected: tuple[str, str | None],
+    event: MarketEvent,
+) -> None:
+    if _stream_semantic_identity(event) != expected:
+        raise ValueError(
+            "market quote stream semantic identity changed: "
+            f"{event.source_id}|{event.quote_key}"
+        )
+
+
 def _canonical_json(raw: object) -> str:
     return json.dumps(
         raw,
@@ -626,6 +642,7 @@ class SQLiteMarketStore:
         """Repair provider-aware current projection from one write-locked history snapshot."""
         latest: dict[tuple[str, str], tuple[tuple[int, str], MarketEvent]] = {}
         history_by_dedupe: dict[str, MarketEvent] = {}
+        stream_semantics: dict[tuple[str, str], tuple[str, str | None]] = {}
         self.connection.execute("BEGIN IMMEDIATE")
         try:
             rows = self.connection.execute(
@@ -636,6 +653,11 @@ class SQLiteMarketStore:
                 history_by_dedupe[event.dedupe_key] = event
                 order_key = _projection_order_key(event)
                 projection_key = (event.source_id, event.quote_key)
+                expected_semantics = stream_semantics.get(projection_key)
+                if expected_semantics is None:
+                    stream_semantics[projection_key] = _stream_semantic_identity(event)
+                else:
+                    _assert_stream_semantic_identity(expected_semantics, event)
                 previous = latest.get(projection_key)
                 if previous is None or order_key > previous[0]:
                     latest[projection_key] = (order_key, event)
@@ -723,6 +745,11 @@ class SQLiteMarketStore:
             (event.source_id, event.quote_key),
         ).fetchone()
         previous_event = _event_from_current_row(previous) if previous is not None else None
+        if previous_event is not None:
+            _assert_stream_semantic_identity(
+                _stream_semantic_identity(previous_event),
+                event,
+            )
         if previous_event is None or incoming_key > _projection_order_key(previous_event):
             self.connection.execute(
                 """INSERT INTO current_quotes

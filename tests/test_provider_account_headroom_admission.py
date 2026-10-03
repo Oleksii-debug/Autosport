@@ -1352,3 +1352,60 @@ def test_workspace_lock_alias_rebinding_cannot_bypass_goal_revision_fence(
 
     assert hostile_calls == []
 
+
+def test_ledger_path_rebinding_cannot_redirect_economic_goal_workspace(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    acquired, _ = _acquire_balance(monkeypatch, tmp_path, "100")
+    target = _plan("target", _action("target-action", "10"))
+    ledger = _ledger_with_plans(tmp_path, target)
+    foreign = tmp_path / "foreign-workspace"
+    foreign.mkdir()
+    EconomicGoalStore(foreign).initialize_owner(_HEADROOM_GOAL)
+    ledger.path = foreign / "real-ledger.jsonl"
+
+    with pytest.raises(
+        ProviderAccountHeadroomError,
+        match="path no longer matches canonical workspace authority",
+    ):
+        _assess(
+            ledger,
+            acquired,
+            plan_id="target",
+            action_id="target-action",
+        )
+
+
+def test_ledger_workspace_authority_dispatch_rebinding_cannot_redirect_goal(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    acquired, _ = _acquire_balance(monkeypatch, tmp_path, "100")
+    target = _plan("target", _action("target-action", "10"))
+    ledger = _ledger_with_plans(tmp_path, target)
+    hostile_calls: list[object] = []
+
+    def hostile_authority(self):
+        hostile_calls.append(self)
+        raise AssertionError("hostile ledger workspace authority executed")
+
+    monkeypatch.setattr(
+        RealExecutionLedger,
+        "_canonical_monotonic_authority",
+        hostile_authority,
+    )
+
+    with pytest.raises(
+        ProviderAccountHeadroomError,
+        match="canonical execution-ledger workspace authority changed",
+    ):
+        _assess(
+            ledger,
+            acquired,
+            plan_id="target",
+            action_id="target-action",
+        )
+
+    assert hostile_calls == []
+

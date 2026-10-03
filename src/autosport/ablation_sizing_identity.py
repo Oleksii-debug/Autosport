@@ -135,7 +135,11 @@ class SizingPolicyIdentity:
 
     def __post_init__(self) -> None:
         _sha256_hex(self.implementation_sha256, "implementation_sha256")
-        _text(self.risk_authority_identity, "risk_authority_identity")
+        object.__setattr__(
+            self,
+            "risk_authority_identity",
+            _text(self.risk_authority_identity, "risk_authority_identity"),
+        )
         _sha256_hex(self.parameters_sha256, "parameters_sha256")
         _sha256_hex(self.policy_fingerprint, "policy_fingerprint")
         if type(self.canonical_parameters_json) is not str:

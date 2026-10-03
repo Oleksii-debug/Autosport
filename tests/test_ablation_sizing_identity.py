@@ -2,12 +2,18 @@ from __future__ import annotations
 
 from dataclasses import replace
 from decimal import Decimal, localcontext
+import hashlib
+import json
 
 import pytest
 
 from autosport.ablation_sizing_identity import (
+    AUTHORITY_FAMILY,
+    SCHEMA,
+    SCHEMA_VERSION,
     AblationSizingIdentityError,
     SizingAblationContext,
+    SizingPolicyIdentity,
     assess_sizing_only_ablation,
     derive_sizing_policy_identity,
 )
@@ -98,6 +104,50 @@ def test_unicode_nfc_equivalence_and_duplicate_normalized_keys():
     assert composed.policy_fingerprint == decomposed.policy_fingerprint
     with pytest.raises(AblationSizingIdentityError, match="duplicate keys"):
         identity(parameters={"é": 1, "e\u0301": 2})
+
+
+def test_direct_constructor_cannot_fork_unicode_equivalent_risk_identity():
+    canonical = derive_sizing_policy_identity(
+        implementation_sha256=IMPL,
+        risk_authority_identity="risk:café",
+        parameters={"fraction": Decimal("0.01")},
+    )
+    decomposed = "risk:cafe\u0301"
+    forged_payload = {
+        "authority_family": AUTHORITY_FAMILY,
+        "implementation_sha256": canonical.implementation_sha256,
+        "parameters_sha256": canonical.parameters_sha256,
+        "risk_authority_identity": decomposed,
+        "schema": SCHEMA,
+        "schema_version": SCHEMA_VERSION,
+    }
+    forged_fingerprint = hashlib.sha256(
+        json.dumps(
+            forged_payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()
+
+    with pytest.raises(AblationSizingIdentityError, match="policy_fingerprint"):
+        SizingPolicyIdentity(
+            implementation_sha256=canonical.implementation_sha256,
+            risk_authority_identity=decomposed,
+            canonical_parameters_json=canonical.canonical_parameters_json,
+            parameters_sha256=canonical.parameters_sha256,
+            policy_fingerprint=forged_fingerprint,
+        )
+
+    normalized = SizingPolicyIdentity(
+        implementation_sha256=canonical.implementation_sha256,
+        risk_authority_identity=decomposed,
+        canonical_parameters_json=canonical.canonical_parameters_json,
+        parameters_sha256=canonical.parameters_sha256,
+        policy_fingerprint=canonical.policy_fingerprint,
+    )
+    assert normalized == canonical
 
 
 def test_sequence_order_is_semantic():

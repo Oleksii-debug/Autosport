@@ -1150,3 +1150,71 @@ def test_state_file_size_is_bounded_before_json_parse(tmp_path):
         match="exceeds the bounded file-size contract",
     ):
         lifecycle.read_snapshot()
+
+
+@pytest.mark.parametrize(
+    "state",
+    [
+        ProphetXSessionState.SESSION_POOL_EXHAUSTED,
+        ProphetXSessionState.WAIT_FOR_PROVIDER_SESSION_EXPIRY,
+    ],
+)
+def test_provider_slot_wait_rejects_nonfuture_hold(tmp_path, state):
+    lifecycle = _lifecycle(tmp_path)
+    admission = lifecycle.begin_login(now=NOW, access_token_available=False)
+    lifecycle.complete_login_failure(
+        attempt_id=admission.attempt_id,
+        now=NOW + timedelta(seconds=1),
+        failure=ProphetXLoginFailureClass.AMBIGUOUS_PROVIDER_RESULT,
+    )
+    payload = json.loads(lifecycle.state_path.read_text(encoding="utf-8"))
+    payload["state"] = state.value
+    payload["slot_hold_until"] = payload["last_transition_at"]
+    if state is ProphetXSessionState.SESSION_POOL_EXHAUSTED:
+        payload["last_failure_class"] = (
+            ProphetXLoginFailureClass.SESSION_POOL_EXHAUSTED.value
+        )
+    lifecycle.state_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(
+        ProphetXSessionLifecycleError,
+        match="requires a future hold horizon",
+    ):
+        lifecycle.begin_login(
+            now=NOW + timedelta(minutes=1),
+            access_token_available=False,
+        )
+
+
+@pytest.mark.parametrize(
+    "state",
+    [
+        ProphetXSessionState.AUTH_RETRYABLE_FAILURE,
+        ProphetXSessionState.PROVIDER_UNAVAILABLE,
+    ],
+)
+def test_retryable_state_rejects_nonfuture_retry_horizon(tmp_path, state):
+    lifecycle = _lifecycle(tmp_path)
+    admission = lifecycle.begin_login(now=NOW, access_token_available=False)
+    failure = (
+        ProphetXLoginFailureClass.RETRYABLE_PRE_SESSION_FAILURE
+        if state is ProphetXSessionState.AUTH_RETRYABLE_FAILURE
+        else ProphetXLoginFailureClass.PROVIDER_UNAVAILABLE_PRE_SESSION
+    )
+    lifecycle.complete_login_failure(
+        attempt_id=admission.attempt_id,
+        now=NOW + timedelta(seconds=1),
+        failure=failure,
+    )
+    payload = json.loads(lifecycle.state_path.read_text(encoding="utf-8"))
+    payload["retry_not_before"] = payload["last_transition_at"]
+    lifecycle.state_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(
+        ProphetXSessionLifecycleError,
+        match="requires a future retry horizon",
+    ):
+        lifecycle.begin_login(
+            now=NOW + timedelta(minutes=1),
+            access_token_available=False,
+        )

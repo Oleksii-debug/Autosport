@@ -120,7 +120,8 @@ def test_initial_form_rejects_unexpected_keys_without_silently_discarding_them(
         ("max_turnover_fraction", "NaN"),
         ("max_execution_slippage_fraction", "1e-2"),
         ("max_quote_age_seconds", "1e2"),
-        ("max_concurrent_positions", "0"),
+        ("max_concurrent_positions", "-1"),
+        ("max_concurrent_positions", "00"),
     ),
 )
 def test_initial_form_rejects_nonfinite_or_noncanonical_values_without_writing(
@@ -133,6 +134,27 @@ def test_initial_form_rejects_nonfinite_or_noncanonical_values_without_writing(
 
     assert service.read_view().state == "absent"
     assert not (tmp_path / EconomicGoalStore.FILE_NAME).exists()
+
+
+def test_owner_can_set_zero_concurrent_positions_as_strictest_position_cap(
+    tmp_path: Path,
+) -> None:
+    values = _values(max_concurrent_positions="0")
+
+    parsed = build_initial_owner_contract(values, emergency_stop=False)
+    assert parsed.max_concurrent_positions == 0
+
+    persisted = OwnerEconomicAuthorityService(tmp_path).initialize_from_form(
+        values,
+        emergency_stop=False,
+        confirmed=True,
+    )
+    assert persisted.contract is not None
+    assert persisted.contract.max_concurrent_positions == 0
+    assert any(
+        "Максимум одночасних позицій" in line and line.endswith("0")
+        for line in persisted.lines_uk
+    )
 
 
 def test_existing_contract_is_read_only_and_duplicate_initialization_preserves_it(

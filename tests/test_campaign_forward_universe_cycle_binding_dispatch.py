@@ -114,6 +114,82 @@ def test_artifact_kind_rebind_fails_closed(
         binding._require_dispatch_integrity()
 
 
+def test_verify_rejects_rebound_authorizer_before_hostile_execution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    called: list[str] = []
+    verifier = binding.verify_campaign_forward_evidence
+
+    def hostile(**_kwargs):
+        called.append("authorizer")
+        raise AssertionError("hostile authorizer executed")
+
+    monkeypatch.setattr(
+        binding,
+        "authorize_campaign_forward_source_receipts",
+        hostile,
+    )
+
+    with pytest.raises(
+        binding.CampaignForwardUniverseCycleBindingError,
+        match="public verification surface changed",
+    ):
+        verifier(
+            precommit_locator=None,
+            collector_store=None,
+            source_spec=None,
+            cycle_receipt=None,
+            provider_evidence_store=None,
+            universe_store=None,
+            event_lifecycle=None,
+            evidence=None,
+        )
+
+    assert called == []
+
+
+def test_verify_rejects_rebound_structural_verifier_alias(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    called: list[str] = []
+
+    def hostile(_evidence):
+        called.append("verifier")
+        raise AssertionError("hostile structural verifier executed")
+
+    monkeypatch.setattr(binding, "_VERIFY_FORWARD_EVIDENCE", hostile)
+
+    with pytest.raises(
+        binding.CampaignForwardUniverseCycleBindingError,
+        match="dispatch authority is rebound: _VERIFY_FORWARD_EVIDENCE",
+    ):
+        binding._require_dispatch_integrity()
+
+    assert called == []
+
+
+def test_verify_rejects_rebound_structural_evidence_type(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    verifier = binding.verify_campaign_forward_evidence
+    monkeypatch.setattr(binding, "CampaignEvidence", object)
+
+    with pytest.raises(
+        binding.CampaignForwardUniverseCycleBindingError,
+        match="structural evidence types changed",
+    ):
+        verifier(
+            precommit_locator=None,
+            collector_store=None,
+            source_spec=None,
+            cycle_receipt=None,
+            provider_evidence_store=None,
+            universe_store=None,
+            event_lifecycle=None,
+            evidence=None,
+        )
+
+
 def test_authorize_rejects_rebound_resolver_before_hostile_execution(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

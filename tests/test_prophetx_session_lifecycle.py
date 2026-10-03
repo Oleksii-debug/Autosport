@@ -774,3 +774,43 @@ def test_renewal_before_lead_window_is_rejected(tmp_path):
         lifecycle.begin_renewal(
             now=active.access_expires_at - timedelta(minutes=3)
         )
+
+
+def test_successful_renewal_resets_transient_failure_backoff(tmp_path):
+    lifecycle = _lifecycle(tmp_path)
+    active = _active(lifecycle)
+    due_at = active.access_expires_at - timedelta(minutes=1)
+    lifecycle.begin_login(now=due_at, access_token_available=True)
+
+    first_attempt = lifecycle.begin_renewal(now=due_at)
+    first_failed_at = due_at + timedelta(seconds=1)
+    first_failure = lifecycle.complete_renewal_failure(
+        attempt_id=first_attempt.attempt_id,
+        now=first_failed_at,
+        failure=ProphetXRenewalFailureClass.RETRYABLE,
+    )
+    assert first_failure.transient_failures == 1
+    first_retry_delay = first_failure.retry_not_before - first_failed_at
+
+    retry_at = first_failure.retry_not_before
+    second_attempt = lifecycle.begin_renewal(now=retry_at)
+    renewed = lifecycle.complete_renewal_success(
+        attempt_id=second_attempt.attempt_id,
+        now=retry_at + timedelta(seconds=1),
+        access_expires_at=retry_at + timedelta(minutes=10),
+    )
+    assert renewed.transient_failures == 0
+    assert renewed.last_renewal_failure_class is None
+
+    next_due_at = renewed.access_expires_at - timedelta(minutes=1)
+    lifecycle.begin_login(now=next_due_at, access_token_available=True)
+    third_attempt = lifecycle.begin_renewal(now=next_due_at)
+    third_failed_at = next_due_at + timedelta(seconds=1)
+    third_failure = lifecycle.complete_renewal_failure(
+        attempt_id=third_attempt.attempt_id,
+        now=third_failed_at,
+        failure=ProphetXRenewalFailureClass.RETRYABLE,
+    )
+
+    assert third_failure.transient_failures == 1
+    assert third_failure.retry_not_before - third_failed_at == first_retry_delay

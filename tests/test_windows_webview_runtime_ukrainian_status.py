@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+from decimal import Decimal
 from pathlib import Path
 import inspect
 import threading
 from types import SimpleNamespace
 
 from autosport.causal_collector import GapState, SyncState
+from autosport.product_gui_worker import ProductGuiEconomicSnapshot
 from autosport.windows_webview_shell import AutosportWebController, web_shell_index_path
 
 
@@ -57,7 +59,34 @@ def _runtime_status(
     )
 
 
+def _economic_snapshot(tmp_path: Path, *, cycle_index: int = 7) -> ProductGuiEconomicSnapshot:
+    return ProductGuiEconomicSnapshot(
+        workspace=tmp_path,
+        session_id="session-1",
+        source_id="source-1",
+        cycle_index=cycle_index,
+        as_of="2026-10-03T08:00:00+00:00",
+        paper_book_sha256="a" * 64,
+        balance=Decimal("10000"),
+        committed_stake=Decimal("0"),
+        tickets=(),
+        portfolio_mode="exact",
+        portfolio_scenario_count=1,
+        portfolio_worst_case=Decimal("0"),
+        portfolio_best_case=Decimal("0"),
+        portfolio_mean_case=Decimal("0"),
+    )
+
+
 def _controller(tmp_path: Path, message: object) -> AutosportWebController:
+    if (
+        getattr(message, "kind", None) == "TICK"
+        and not hasattr(message, "economic")
+    ):
+        message.economic = _economic_snapshot(
+            tmp_path,
+            cycle_index=message.tick.cycle_index,
+        )
     controller = AutosportWebController.__new__(AutosportWebController)
     controller._lock = threading.RLock()
     controller.workspace = tmp_path
@@ -71,6 +100,11 @@ def _controller(tmp_path: Path, message: object) -> AutosportWebController:
     controller.product_worker = _QueuedProductWorker(message)
     controller.product_runtime_status = ""
     controller._product_runtime_identity = None
+    controller._product_runtime_economic_snapshot = None
+    controller.strategy_id = "baseline-v1"
+    controller.bank = ""
+    controller.tickets = []
+    controller.evaluation = []
     controller.status = ""
     controller.last_error = ""
     controller.log = []

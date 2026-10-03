@@ -45,8 +45,8 @@ from .forward_evidence_completeness import (
 from .forward_universe_precommit_authority import ForwardUniversePrecommitLocator
 from .provider_evaluation_universe import (
     ProviderEvaluationUniverseStore,
+    ProviderEvaluationUniverseError,
     _ISSUED_UNIVERSES,
-    build_frozen_universe_from_complete_game_board,
 )
 from .provider_observation_authority import (
     CompleteGameBoardEvidenceStore,
@@ -62,7 +62,6 @@ _ESTABLISH_CAMPAIGN = establish_campaign_inception
 _RESOLVE_ARTIFACT = CollectorDeltaStore.collector_cycle_observation_artifact_evidence
 _LOAD_PROVIDER_EVIDENCE = CompleteGameBoardEvidenceStore.load
 _GUARDED_UNIVERSE_LOAD = load_guarded_provider_evaluation_universe
-_REBUILD_PROVIDER_UNIVERSE = build_frozen_universe_from_complete_game_board
 _RESOLVE_FORWARD_IDENTITY = resolve_forward_universe_authority_identity
 _AUTHORIZE_FORWARD_RECEIPTS = authorize_forward_source_receipts
 
@@ -78,11 +77,6 @@ _CAPTURED_CALLABLES = (
         "_GUARDED_UNIVERSE_LOAD",
         _GUARDED_UNIVERSE_LOAD,
         _GUARDED_UNIVERSE_LOAD.__code__,
-    ),
-    (
-        "_REBUILD_PROVIDER_UNIVERSE",
-        _REBUILD_PROVIDER_UNIVERSE,
-        _REBUILD_PROVIDER_UNIVERSE.__code__,
     ),
     (
         "_RESOLVE_FORWARD_IDENTITY",
@@ -559,43 +553,75 @@ def _assert_cycle_receipt_exact(
             )
 
 
-def _rebuild_exact_provider_universe(
+def _verify_exact_provider_universe_snapshot(
     *,
     ledger: EvaluationUniverseLedger,
     snapshot: CompleteGameBoardSnapshot,
     event_lifecycle: ContinuousEventLifecycle | None,
 ):
-    universe = ledger.universe
-    rebuilt = None
-    try:
-        rebuilt = _REBUILD_PROVIDER_UNIVERSE(
-            snapshot=snapshot,
-            event_lifecycle=event_lifecycle,
-            authority_id=universe.intake_snapshot.authority_id,
-            session_id=universe.intake_snapshot.session_id,
-            universe_id=universe.universe_id,
-            campaign_id=universe.campaign_id,
-            research_protocol_id=universe.research_protocol_id,
-            protocol_sha256=universe.protocol_sha256,
-            evaluation_not_before=universe.intake_snapshot.evaluation_not_before,
-            frozen_at=universe.frozen_at,
-            rows=universe.rows,
-        )
-        if (
-            rebuilt.universe_sha256 != universe.universe_sha256
-            or rebuilt.membership_sha256 != universe.membership_sha256
-            or rebuilt.intake_snapshot.snapshot_sha256
-            != universe.intake_snapshot.snapshot_sha256
-        ):
-            raise CampaignForwardUniverseCycleBindingError(
-                "durable forward universe is not derived from the exact "
-                "campaign-bound provider snapshot"
-            )
-        return universe
-    finally:
-        if rebuilt is not None:
-            _CANONICAL_ISSUED_UNIVERSES.pop(id(rebuilt), None)
+    """Read-only proof that durable universe membership came from this snapshot.
 
+    The provider-universe constructor is an issuance boundary guarded by the
+    product-owned pre-evaluation semantic capability.  A verifier must never
+    reissue that authority merely to compare provenance.  Instead, derive the
+    canonical complete-board members from the already-authoritative snapshot and
+    require the durable rows/intake metadata to match them exactly.
+    """
+
+    universe = ledger.universe
+    try:
+        _provider_universe_module.assert_complete_game_board_authoritative(snapshot)
+        members = _provider_universe_module.complete_game_board_member_specs(
+            snapshot,
+            event_lifecycle=event_lifecycle,
+        )
+        rows = tuple(universe.rows)
+        if not rows or not all(
+            type(row) is _provider_universe_module.EvaluationRow for row in rows
+        ):
+            raise ProviderEvaluationUniverseError(
+                "durable provider universe rows are not canonical EvaluationRow values"
+            )
+        by_key = {row.row_key: row for row in rows}
+        if len(by_key) != len(rows):
+            raise ProviderEvaluationUniverseError(
+                "durable provider universe row_key values are not unique"
+            )
+        expected_keys = tuple(member.row_key for member in members)
+        if tuple(sorted(by_key)) != tuple(sorted(expected_keys)):
+            raise ProviderEvaluationUniverseError(
+                "durable provider universe membership does not equal exact provider snapshot"
+            )
+        if tuple(universe.intake_snapshot.expected_row_keys) != tuple(
+            sorted(expected_keys)
+        ):
+            raise ProviderEvaluationUniverseError(
+                "durable provider intake membership does not equal exact provider snapshot"
+            )
+        if _instant(
+            universe.intake_snapshot.committed_at,
+            "durable provider intake committed_at",
+        ) != _instant(snapshot.captured_at, "provider captured_at"):
+            raise ProviderEvaluationUniverseError(
+                "durable provider intake capture time does not equal exact provider snapshot"
+            )
+        if universe.intake_snapshot.source_id != snapshot.request.source_id:
+            raise ProviderEvaluationUniverseError(
+                "durable provider intake source does not equal exact provider snapshot"
+            )
+        for member in members:
+            _provider_universe_module._validate_row_against_member(
+                row=by_key[member.row_key],
+                member=member,
+                snapshot=snapshot,
+                evaluation_not_before=universe.intake_snapshot.evaluation_not_before,
+            )
+    except ProviderEvaluationUniverseError as exc:
+        raise CampaignForwardUniverseCycleBindingError(
+            "durable forward universe is not derived from the exact "
+            "campaign-bound provider snapshot"
+        ) from exc
+    return universe
 
 def resolve_campaign_forward_universe_cycle_authority(
     *,
@@ -782,7 +808,7 @@ def resolve_campaign_forward_universe_cycle_authority(
         )
     require_stable_integrity()
 
-    universe = _rebuild_exact_provider_universe(
+    universe = _verify_exact_provider_universe_snapshot(
         ledger=ledger,
         snapshot=snapshot,
         event_lifecycle=event_lifecycle,
@@ -998,7 +1024,7 @@ _INTERNAL_CALLABLES = tuple(
             _expected_cycle_receipt_payload,
         ),
         ("_assert_cycle_receipt_exact", _assert_cycle_receipt_exact),
-        ("_rebuild_exact_provider_universe", _rebuild_exact_provider_universe),
+        ("_verify_exact_provider_universe_snapshot", _verify_exact_provider_universe_snapshot),
     )
 )
 

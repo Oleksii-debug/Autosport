@@ -6,7 +6,10 @@ import pytest
 
 from autosport.deployment_runtime_authority import DeploymentRuntimeAuthorityStore
 from autosport.learning_environment import EnvironmentIdentity, Episode
-from autosport.monotonic_workspace_authority import MonotonicAuthorityRollbackError
+from autosport.monotonic_workspace_authority import (
+    MonotonicAuthorityRollbackError,
+    MonotonicWorkspaceAuthorityError,
+)
 
 
 _ACTION_MEANINGS = (
@@ -96,6 +99,29 @@ def test_canonical_empty_store_restore_is_rejected_after_commits(
         DeploymentRuntimeAuthorityStore(
             path,
             authority_root=authority_root,
+        )
+
+
+def test_established_store_cannot_reselect_machine_authority_root(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "deployment-runtime-authority.json"
+    first_root = (tmp_path.parent / f"{tmp_path.name}-authority-a").resolve(
+        strict=False
+    )
+    second_root = (tmp_path.parent / f"{tmp_path.name}-authority-b").resolve(
+        strict=False
+    )
+    store = DeploymentRuntimeAuthorityStore.initialize_pristine(
+        path,
+        authority_root=first_root,
+    )
+    _append(store, 0)
+
+    with pytest.raises(MonotonicWorkspaceAuthorityError):
+        DeploymentRuntimeAuthorityStore(
+            path,
+            authority_root=second_root,
         )
 
 

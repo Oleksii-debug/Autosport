@@ -170,6 +170,42 @@ class MarketImpliedBaselineTests(unittest.TestCase):
             self.evidence()
         del self.store.events
 
+    def test_in_place_store_reader_code_mutation_fails_closed(self) -> None:
+        self.persist()
+        original_code = SQLiteMarketStore.events.__code__
+
+        def forged_events(self, event_id=None):
+            return []
+
+        try:
+            SQLiteMarketStore.events.__code__ = forged_events.__code__
+            with self.assertRaisesRegex(
+                MarketImpliedBaselineError,
+                "canonical market store events executable was mutated",
+            ):
+                self.evidence()
+        finally:
+            SQLiteMarketStore.events.__code__ = original_code
+
+    def test_in_place_outcome_availability_code_mutation_fails_closed(self) -> None:
+        self.persist()
+        original_code = MarketSettlementOutcomeAuthority.assert_available_as_of.__code__
+
+        def forged_assert_available_as_of(self, decision_as_of):
+            return None
+
+        try:
+            MarketSettlementOutcomeAuthority.assert_available_as_of.__code__ = (
+                forged_assert_available_as_of.__code__
+            )
+            with self.assertRaisesRegex(
+                MarketImpliedBaselineError,
+                "market outcome availability executable was mutated",
+            ):
+                self.evidence()
+        finally:
+            MarketSettlementOutcomeAuthority.assert_available_as_of.__code__ = original_code
+
     def test_time_subclasses_cannot_execute_before_canonical_history_read(self) -> None:
         hooks = {"cutoff": 0, "max_age": 0}
 

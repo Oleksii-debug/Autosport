@@ -1008,3 +1008,55 @@ def test_description_keywords_cannot_mint_finer_economic_category(monkeypatch):
     assert row.posting_category == 3
     assert row.description == "commission win deposit settlement"
 
+
+
+def test_order_settlement_rejects_postings_method_evidence(monkeypatch):
+    client, _ = economic_client(
+        monkeypatch,
+        order_details(),
+        postings_by_id(posting(9001)),
+    )
+    order = client.read_order_details(123)
+    postings = client.read_account_postings_by_id(9001)
+
+    with pytest.raises(
+        BetdaqEconomicReadbackError,
+        match="order settlement evidence method must be GetOrderDetails",
+    ):
+        replace(order, evidence=postings.evidence)
+
+
+def test_posting_observation_rejects_order_details_evidence(monkeypatch):
+    client, _ = economic_client(
+        monkeypatch,
+        postings_by_id(posting(9001)),
+        order_details(),
+    )
+    postings = client.read_account_postings_by_id(9001)
+    order = client.read_order_details(123)
+
+    with pytest.raises(
+        BetdaqEconomicReadbackError,
+        match="posting evidence method must be a postings read method",
+    ):
+        replace(postings.postings[0], evidence=order.evidence)
+
+
+def test_postings_readback_rejects_cross_method_evidence_laundering(monkeypatch):
+    client, _ = economic_client(
+        monkeypatch,
+        postings_window(posting(9001), complete="true"),
+        postings_by_id(posting(9001)),
+    )
+    start = datetime(2026, 9, 22, tzinfo=timezone.utc)
+    end = datetime(2026, 9, 23, tzinfo=timezone.utc)
+
+    window = client.read_account_postings(start, end)
+    by_id = client.read_account_postings_by_id(9001)
+    forged_row = replace(by_id.postings[0], evidence=window.evidence)
+
+    with pytest.raises(
+        BetdaqEconomicReadbackError,
+        match="postings evidence method does not match readback method",
+    ):
+        replace(by_id, evidence=window.evidence, postings=(forged_row,))

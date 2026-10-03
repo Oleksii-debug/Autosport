@@ -1368,6 +1368,8 @@ def _seal_provider_evidence_store_dispatch() -> None:
     expected_request_methods = tuple(
         _surface_witness(CompleteGameBoardRequest, name)
         for name in (
+            "__init__",
+            "__post_init__",
             "sport_key",
             "bookmakers",
             "markets",
@@ -1382,6 +1384,9 @@ def _seal_provider_evidence_store_dispatch() -> None:
     expected_snapshot_methods = tuple(
         _surface_witness(CompleteGameBoardSnapshot, name)
         for name in (
+            "__init__",
+            "__post_init__",
+            "_validate_frame",
             "request",
             "captured_at",
             "frame_json",

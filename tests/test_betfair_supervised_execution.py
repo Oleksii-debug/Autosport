@@ -16,6 +16,8 @@ from autosport.betfair_account_readonly import (
     BetfairSessionCredentials,
 )
 from autosport.betfair_supervised_execution import (
+    BetfairInstructionReport,
+    BetfairPlaceExecutionReport,
     BetfairSupervisedExecutionError,
     BetfairSupervisedExecutionGate,
     BetfairSupervisedPlaceOrdersClient,
@@ -1487,6 +1489,39 @@ def test_client_repr_never_exposes_session_credentials() -> None:
     assert "super-secret-app" not in rendered
     assert "super-secret-session" not in rendered
     assert "enabled=False" in rendered
+
+
+def test_order_status_changes_execution_evidence_identity() -> None:
+    instruction = BetfairInstructionReport(
+        status="SUCCESS",
+        error_code=None,
+        bet_id="bet-123",
+        placed_date=READBACK_AT,
+        average_price_matched=Decimal("2.00"),
+        size_matched=Decimal("10"),
+        order_status="EXECUTION_COMPLETE",
+    )
+    report = BetfairPlaceExecutionReport(
+        bookmaker_id="betfair",
+        account_id="acct-1",
+        action_id="action-1",
+        provider_order_ref="a" * 32,
+        market_id="1.234",
+        request_id=1,
+        request_sha256="b" * 64,
+        response_sha256="c" * 64,
+        observed_at=READBACK_AT,
+        status="SUCCESS",
+        error_code=None,
+        instruction=instruction,
+    )
+    reconstructed = replace(
+        report,
+        instruction=replace(instruction, order_status="EXECUTABLE"),
+    )
+
+    assert reconstructed.response_sha256 == report.response_sha256
+    assert reconstructed.evidence_id != report.evidence_id
 
 
 def test_processed_with_errors_single_success_is_unknown() -> None:

@@ -24,6 +24,7 @@ from pathlib import Path
 from threading import RLock
 from typing import Any, Final, Mapping
 
+from . import learning_environment as _learning_environment
 from .learning_environment import EnvironmentIdentity, Episode
 from .monotonic_authority_root_binding import AuthorityRootSelectionBinding
 from .monotonic_workspace_authority import (
@@ -637,6 +638,30 @@ class DeploymentRuntimeAuthorityRecord:
 _CANONICAL_RECORD_TYPE: Final = DeploymentRuntimeAuthorityRecord
 _CANONICAL_ENVIRONMENT_IDENTITY_TYPE: Final = EnvironmentIdentity
 _CANONICAL_EPISODE_TYPE: Final = Episode
+_CANONICAL_LEARNING_ENVIRONMENT_MODULE: Final = _learning_environment
+_CANONICAL_LEARNING_ENVIRONMENT_SCHEMA: Final = _learning_environment.ENVIRONMENT_SCHEMA
+_CANONICAL_LEARNING_ENVIRONMENT_SCHEMA_VERSION: Final = (
+    _learning_environment.ENVIRONMENT_SCHEMA_VERSION
+)
+_CANONICAL_LEARNING_ENVIRONMENT_HASHLIB: Final = _learning_environment.hashlib
+_CANONICAL_LEARNING_ENVIRONMENT_JSON: Final = _learning_environment.json
+_CANONICAL_LEARNING_ENVIRONMENT_DATETIME: Final = _learning_environment.datetime
+_CANONICAL_LEARNING_ENVIRONMENT_TIMEZONE: Final = _learning_environment.timezone
+_CANONICAL_LEARNING_ENVIRONMENT_HELPERS: Final = tuple(
+    (
+        name,
+        helper,
+        helper.__code__,
+    )
+    for name in (
+        "_canonical_text",
+        "_timestamp",
+        "_timestamp_identity",
+        "_sha256_hex",
+        "_stable_hash",
+    )
+    for helper in (getattr(_learning_environment, name),)
+)
 _CANONICAL_ENVIRONMENT_IDENTITY_SURFACE: Final = tuple(
     (
         name,
@@ -720,6 +745,31 @@ def _assert_canonical_record_codec() -> None:
         raise DeploymentRuntimeAuthorityError(
             "runtime authority semantic type dispatch was replaced"
         )
+    if (
+        _learning_environment is not _CANONICAL_LEARNING_ENVIRONMENT_MODULE
+        or _learning_environment.ENVIRONMENT_SCHEMA
+        != _CANONICAL_LEARNING_ENVIRONMENT_SCHEMA
+        or _learning_environment.ENVIRONMENT_SCHEMA_VERSION
+        != _CANONICAL_LEARNING_ENVIRONMENT_SCHEMA_VERSION
+        or _learning_environment.hashlib is not _CANONICAL_LEARNING_ENVIRONMENT_HASHLIB
+        or _learning_environment.json is not _CANONICAL_LEARNING_ENVIRONMENT_JSON
+        or _learning_environment.datetime
+        is not _CANONICAL_LEARNING_ENVIRONMENT_DATETIME
+        or _learning_environment.timezone
+        is not _CANONICAL_LEARNING_ENVIRONMENT_TIMEZONE
+    ):
+        raise DeploymentRuntimeAuthorityError(
+            "runtime authority learning-environment dependency was replaced"
+        )
+    for name, expected_helper, expected_code in _CANONICAL_LEARNING_ENVIRONMENT_HELPERS:
+        current_helper = getattr(_CANONICAL_LEARNING_ENVIRONMENT_MODULE, name, None)
+        if (
+            current_helper is not expected_helper
+            or getattr(current_helper, "__code__", None) is not expected_code
+        ):
+            raise DeploymentRuntimeAuthorityError(
+                "runtime authority learning-environment helper was replaced"
+            )
     for semantic_type, surface in (
         (
             _CANONICAL_ENVIRONMENT_IDENTITY_TYPE,

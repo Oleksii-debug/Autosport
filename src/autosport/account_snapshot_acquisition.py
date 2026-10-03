@@ -7,6 +7,7 @@ or grant execution authority.  Credentials remain memory-only and are never pers
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
@@ -265,6 +266,19 @@ def assert_account_snapshot_acquisition_authoritative(
     raise AccountSnapshotAcquisitionError(
         "account snapshot lacks live canonical provider-origin authority"
     )
+
+
+@contextmanager
+def hold_current_account_snapshot_acquisition(
+    acquired: AuthoritativeAccountSnapshot,
+    required_capabilities: frozenset[BookmakerCapability],
+):
+    """Hold current provider-read generation authority across one atomic consumer step."""
+
+    raise AccountSnapshotAcquisitionError(
+        "account snapshot lacks current canonical provider acquisition authority"
+    )
+    yield acquired
 
 
 class BetfairAccountSnapshotAcquirer:
@@ -1187,7 +1201,12 @@ def _install_account_snapshot_acquisition_authority() -> None:
     class _AccountSnapshotAuthorityBoundary:
         """Own live provider-origin authority without an independently callable mint."""
 
-        __slots__ = ("__issued", "__live", "__lock")
+        __slots__ = (
+            "__issued",
+            "__live",
+            "__current_capability",
+            "__lock",
+        )
 
         def __init__(self) -> None:
             self.__issued: dict[
@@ -1202,6 +1221,10 @@ def _install_account_snapshot_acquisition_authority() -> None:
             self.__live: dict[
                 str,
                 tuple[object, str, BetfairSessionCredentials],
+            ] = {}
+            self.__current_capability: dict[
+                tuple[str, str, str, str],
+                str,
             ] = {}
             self.__lock = RLock()
 
@@ -1525,7 +1548,77 @@ def _install_account_snapshot_acquisition_authority() -> None:
                     fingerprint,
                     origin_credentials,
                 )
+                for capability in acquired.receipt.requested_capabilities:
+                    self.__current_capability[
+                        (
+                            acquired.receipt.venue_id,
+                            acquired.receipt.account_id,
+                            acquired.receipt.authenticated_account_identity_sha256,
+                            capability,
+                        )
+                    ] = live_id
                 return acquired
+
+        @contextmanager
+        def hold_current(
+            self,
+            acquired: AuthoritativeAccountSnapshot,
+            required_capabilities: frozenset[BookmakerCapability],
+        ):
+            if type(acquired) is not AuthoritativeAccountSnapshot:
+                raise AccountSnapshotAcquisitionError(
+                    "current provider-origin authority requires exact acquired snapshot evidence"
+                )
+            if type(required_capabilities) is not frozenset or not required_capabilities:
+                raise AccountSnapshotAcquisitionError(
+                    "required_capabilities must be a non-empty exact frozenset"
+                )
+            required_names: list[str] = []
+            for capability in required_capabilities:
+                if type(capability) is not BookmakerCapability:
+                    raise AccountSnapshotAcquisitionError(
+                        "required_capabilities must contain exact BookmakerCapability values"
+                    )
+                if capability not in _ALLOWED_ACCOUNT_CAPABILITIES:
+                    raise AccountSnapshotAcquisitionError(
+                        "required capability is outside account snapshot authority"
+                    )
+                required_names.append(capability.value)
+            required_names.sort()
+            receipt = acquired.receipt
+            if any(
+                capability not in receipt.requested_capabilities
+                for capability in required_names
+            ):
+                raise AccountSnapshotAcquisitionError(
+                    "account snapshot did not acquire every required capability"
+                )
+
+            with self.__lock:
+                current = self.__live.get(receipt.acquisition_id)
+                if (
+                    current is None
+                    or current[0]() is not acquired
+                    or current[1] != self._fingerprint(acquired)
+                ):
+                    raise AccountSnapshotAcquisitionError(
+                        "account snapshot was not issued by live canonical provider acquisition"
+                    )
+                for capability in required_names:
+                    current_id = self.__current_capability.get(
+                        (
+                            receipt.venue_id,
+                            receipt.account_id,
+                            receipt.authenticated_account_identity_sha256,
+                            capability,
+                        )
+                    )
+                    if current_id != receipt.acquisition_id:
+                        raise AccountSnapshotAcquisitionError(
+                            "account snapshot is not the current canonical provider acquisition "
+                            f"for required capability {capability}"
+                        )
+                yield acquired
 
         def resolve(
             self,
@@ -1597,6 +1690,14 @@ def _install_account_snapshot_acquisition_authority() -> None:
     def assert_live(acquired: AuthoritativeAccountSnapshot) -> None:
         authority.assert_live(acquired)
 
+    @contextmanager
+    def hold_current(
+        acquired: AuthoritativeAccountSnapshot,
+        required_capabilities: frozenset[BookmakerCapability],
+    ):
+        with authority.hold_current(acquired, required_capabilities):
+            yield acquired
+
     def __init__(
         self: BetfairAccountSnapshotAcquirer,
         database_path: str | Path,
@@ -1639,6 +1740,7 @@ def _install_account_snapshot_acquisition_authority() -> None:
         authority.verify(self, snapshot, receipt)
 
     globals()["assert_account_snapshot_acquisition_authoritative"] = assert_live
+    globals()["hold_current_account_snapshot_acquisition"] = hold_current
     BetfairAccountSnapshotAcquirer.__init__ = __init__
     BetfairAccountSnapshotAcquirer.acquire = acquire
     BetfairAccountSnapshotAcquirer.resolve = resolve

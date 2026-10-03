@@ -313,6 +313,89 @@ def test_verify_rejects_rebound_structural_evidence_type(
         )
 
 
+def test_public_verifier_rejects_campaign_evidence_descriptor_rebind(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    verifier = binding.verify_campaign_forward_evidence
+    monkeypatch.setattr(
+        binding.CampaignEvidence,
+        "authoritative_receipts",
+        property(lambda _self: ()),
+    )
+
+    with pytest.raises(
+        binding.CampaignForwardUniverseCycleBindingError,
+        match="structural evidence types changed",
+    ):
+        verifier(
+            precommit_locator=None,
+            collector_store=None,
+            source_spec=None,
+            cycle_receipt=None,
+            provider_evidence_store=None,
+            universe_store=None,
+            event_lifecycle=None,
+            evidence=None,
+        )
+
+
+def test_public_verifier_rejects_campaign_evidence_init_rebind_before_execution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+    verifier = binding.verify_campaign_forward_evidence
+
+    def hostile_init(self, *args, **kwargs):
+        del self, args, kwargs
+        calls.append("init")
+        raise AssertionError("hostile CampaignEvidence init executed")
+
+    monkeypatch.setattr(binding.CampaignEvidence, "__init__", hostile_init)
+
+    with pytest.raises(
+        binding.CampaignForwardUniverseCycleBindingError,
+        match="structural evidence types changed",
+    ):
+        verifier(
+            precommit_locator=None,
+            collector_store=None,
+            source_spec=None,
+            cycle_receipt=None,
+            provider_evidence_store=None,
+            universe_store=None,
+            event_lifecycle=None,
+            evidence=None,
+        )
+
+    assert calls == []
+
+
+def test_public_verifier_rejects_verification_result_descriptor_rebind(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    verifier = binding.verify_campaign_forward_evidence
+    monkeypatch.setattr(
+        binding.VerificationResult,
+        "ok",
+        property(lambda _self: True),
+    )
+
+    with pytest.raises(
+        binding.CampaignForwardUniverseCycleBindingError,
+        match="structural evidence types changed",
+    ):
+        verifier(
+            precommit_locator=None,
+            collector_store=None,
+            source_spec=None,
+            cycle_receipt=None,
+            provider_evidence_store=None,
+            universe_store=None,
+            event_lifecycle=None,
+            evidence=None,
+        )
+
+
 def test_authorize_rejects_rebound_resolver_before_hostile_execution(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -2995,7 +2995,6 @@ def test_private_surface_guard_rejection_ignores_shadowed_type_error(
 @pytest.mark.parametrize(
     ("name", "replacement", "expected"),
     [
-        ("_text", lambda *_args, **_kwargs: "2100-01-01T06:00:00+00:00", "dispatch authority is rebound: _text"),
         ("_digest", lambda *_args, **_kwargs: "0" * 64, "dispatch authority is rebound: _digest"),
         ("_SCHEMA_VERSION", 999, "schema/hash authority changed"),
         ("_HEX", frozenset(), "schema/hash authority changed"),
@@ -3040,6 +3039,50 @@ def test_provider_callback_cannot_rebind_campaign_semantic_dependencies(
     assert len(evidence) == 1
     assert evidence[0]["terminal"]["status"] == "LOCAL_FAILURE"
     assert "observed_artifacts" not in evidence[0]["terminal"]
+
+
+def test_rebound_text_helper_never_executes_or_breaks_failure_terminal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    locator, store, spec, provider_store = _setup(tmp_path)
+    hostile_calls: list[str] = []
+
+    def hostile_text(*_args, **_kwargs):
+        hostile_calls.append("_text")
+        raise AssertionError("hostile _text executed")
+
+    def mutating_provider_io(_request, _timeout):
+        monkeypatch.setattr(capture_module, "_text", hostile_text)
+        return _FakeSseResponse(_frame())
+
+    monkeypatch.setattr(provider_module, "urlopen", mutating_provider_io)
+    monkeypatch.setattr(provider_module, "_default_clock", lambda: CAPTURED_AT)
+
+    with pytest.raises(
+        CampaignProviderCycleCaptureIntegrityError,
+        match="dispatch authority is rebound: _text",
+    ):
+        capture_module.capture_campaign_complete_game_board(
+            precommit_locator=locator,
+            store=store,
+            source_spec=spec,
+            evidence_store=provider_store,
+            request=_request(),
+            api_key="secret-value",
+            timeout_seconds=3.0,
+            clock=_clock(),
+        )
+
+    evidence = store.collector_cycle_evidence(
+        source_id=spec.source_id,
+        start_cycle_seq=1,
+        end_cycle_seq=1,
+    )
+    assert len(evidence) == 1
+    assert evidence[0]["terminal"]["status"] == "LOCAL_FAILURE"
+    assert "observed_artifacts" not in evidence[0]["terminal"]
+    assert hostile_calls == []
 
 
 def test_provider_callback_cannot_rebind_campaign_artifact_kind(

@@ -564,6 +564,8 @@ def capture_campaign_complete_game_board(
                     raw_failure_completed_at,
                     "collector failure completed_at",
                 )
+                if failure_completed_at < attempted_at:
+                    failure_completed_at = attempted_at
                 finish_cycle(
                     store,
                     source_id=source_spec.source_id,

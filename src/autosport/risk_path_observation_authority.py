@@ -37,6 +37,21 @@ _SCHEMA = "AUTOSPORT_PRODUCT_RUN_CAPITAL_PATH_EVIDENCE_V1"
 _EFFECTS_SCHEMA = "AUTOSPORT_PRODUCT_RUN_SETTLEMENT_EFFECTS_V1"
 _MAX_DECIMAL_TEXT = 512
 
+_DECISION_TYPE = DecisionRecord
+_VERIFY_GOAL = verify_economic_goal_binding
+_VERIFY_GOAL_CODE = getattr(_VERIFY_GOAL, "__code__", None)
+_TICKET_TYPE = PaperTicket
+_TICKET_STATUS_TYPE = TicketStatus
+_OPEN_STATUS = TicketStatus.OPEN
+_WITNESS_TYPE = PaperSettlementLearningWitness
+_MEMBERSHIP_TYPE = ResolvedFixedNRiskMembership
+_PAPER_TYPE = PaperBook
+_PAPER_LOAD = PaperBook.load_bytes
+_PAPER_LOAD_CODE = getattr(_PAPER_LOAD.__func__, "__code__", None)
+_PAPER_DEBIT = PaperBook._debit_balance
+_PAPER_DEBIT_CODE = getattr(_PAPER_DEBIT.__func__, "__code__", None)
+_REPLAY = replay_paper_book_equity_path
+_REPLAY_CODE = getattr(_REPLAY, "__code__", None)
 _BRIDGE_TYPE = PaperSettlementLearningBridge
 _BRIDGE_WITNESS = PaperSettlementLearningBridge.resolution_witness
 _BRIDGE_WITNESS_CODE = getattr(_BRIDGE_WITNESS, "__code__", None)
@@ -55,11 +70,13 @@ _TX_TERMINAL = RunTransaction.verified_terminal_paper_book_snapshot
 _TX_COMPLETED = RunTransaction._completed_registry_item
 _TX_LEDGER = RunTransaction._verified_canonical_decision_ledger
 _TX_REQUIRE_RUN = RunTransaction._require_run_decision_identity
+_TX_DECODE = RunTransaction._decode_strict_json
 _TX_BASE_CODE = getattr(_TX_BASE, "__code__", None)
 _TX_TERMINAL_CODE = getattr(_TX_TERMINAL, "__code__", None)
 _TX_COMPLETED_CODE = getattr(_TX_COMPLETED, "__code__", None)
 _TX_LEDGER_CODE = getattr(_TX_LEDGER.__func__, "__code__", None)
 _TX_REQUIRE_RUN_CODE = getattr(_TX_REQUIRE_RUN.__func__, "__code__", None)
+_TX_DECODE_CODE = getattr(_TX_DECODE.__func__, "__code__", None)
 _PRECOMMIT = resolve_fixed_n_iid_precommit_authority
 _PRECOMMIT_CODE = getattr(_PRECOMMIT, "__code__", None)
 _STRUCTURE = inspect_fixed_n_iid_sampling_structure
@@ -184,7 +201,7 @@ def _pairs(value: object, name: str) -> dict[str, str]:
 
 
 def _opening_ticket_payload(ticket: PaperTicket) -> dict[str, object]:
-    if type(ticket) is not PaperTicket:
+    if type(ticket) is not _TICKET_TYPE:
         raise ProductRunCapitalPathError(
             "opening ticket evidence must be an exact PaperTicket"
         )
@@ -260,7 +277,7 @@ def _conservative_minimum_equity(
         if stake > balance:
             return Decimal("0")
         try:
-            balance = PaperBook._debit_balance(balance, stake)
+            balance = _PAPER_DEBIT(balance, stake)
         except ValueError as exc:
             raise ProductRunCapitalPathError(
                 "new-ticket debit is not canonical PaperBook arithmetic"
@@ -270,7 +287,22 @@ def _conservative_minimum_equity(
 
 def _require_dispatch() -> None:
     if (
-        PaperSettlementLearningBridge is not _BRIDGE_TYPE
+        DecisionRecord is not _DECISION_TYPE
+        or verify_economic_goal_binding is not _VERIFY_GOAL
+        or getattr(_VERIFY_GOAL, "__code__", None) is not _VERIFY_GOAL_CODE
+        or PaperTicket is not _TICKET_TYPE
+        or TicketStatus is not _TICKET_STATUS_TYPE
+        or _TICKET_STATUS_TYPE.OPEN is not _OPEN_STATUS
+        or PaperSettlementLearningWitness is not _WITNESS_TYPE
+        or ResolvedFixedNRiskMembership is not _MEMBERSHIP_TYPE
+        or PaperBook is not _PAPER_TYPE
+        or _PAPER_TYPE.load_bytes.__func__ is not _PAPER_LOAD.__func__
+        or getattr(_PAPER_LOAD.__func__, "__code__", None) is not _PAPER_LOAD_CODE
+        or _PAPER_TYPE._debit_balance.__func__ is not _PAPER_DEBIT.__func__
+        or getattr(_PAPER_DEBIT.__func__, "__code__", None) is not _PAPER_DEBIT_CODE
+        or replay_paper_book_equity_path is not _REPLAY
+        or getattr(_REPLAY, "__code__", None) is not _REPLAY_CODE
+        or PaperSettlementLearningBridge is not _BRIDGE_TYPE
         or _BRIDGE_TYPE.resolution_witness is not _BRIDGE_WITNESS
         or getattr(_BRIDGE_WITNESS, "__code__", None)
         is not _BRIDGE_WITNESS_CODE
@@ -288,6 +320,7 @@ def _require_dispatch() -> None:
         is not _TX_LEDGER.__func__
         or _TX_TYPE._require_run_decision_identity.__func__
         is not _TX_REQUIRE_RUN.__func__
+        or _TX_TYPE._decode_strict_json.__func__ is not _TX_DECODE.__func__
         or getattr(_TX_BASE, "__code__", None) is not _TX_BASE_CODE
         or getattr(_TX_TERMINAL, "__code__", None) is not _TX_TERMINAL_CODE
         or getattr(_TX_COMPLETED, "__code__", None) is not _TX_COMPLETED_CODE
@@ -295,6 +328,7 @@ def _require_dispatch() -> None:
         is not _TX_LEDGER_CODE
         or getattr(_TX_REQUIRE_RUN.__func__, "__code__", None)
         is not _TX_REQUIRE_RUN_CODE
+        or getattr(_TX_DECODE.__func__, "__code__", None) is not _TX_DECODE_CODE
         or resolve_fixed_n_iid_precommit_authority is not _PRECOMMIT
         or getattr(_PRECOMMIT, "__code__", None) is not _PRECOMMIT_CODE
         or inspect_fixed_n_iid_sampling_structure is not _STRUCTURE
@@ -344,7 +378,7 @@ def _committed_run_decisions(
         run.payload.decode("utf-8").splitlines(),
         start=1,
     ):
-        envelope = _TX_TYPE._decode_strict_json(
+        envelope = _TX_DECODE(
             line,
             label=f"retained run Decision Ledger line {line_number}",
         )
@@ -356,7 +390,7 @@ def _committed_run_decisions(
         if raw.get("decision_kind") != ECONOMIC_DECISION_KIND:
             continue
         try:
-            record = DecisionRecord(
+            record = _DECISION_TYPE(
                 replay_run_id=raw["replay_run_id"],
                 agent=raw["agent"],
                 observed_ts=raw["observed_ts"],
@@ -441,7 +475,7 @@ def _witness_effect(
     decisions: dict[str, DecisionRecord],
     bridge: PaperSettlementLearningBridge,
 ) -> dict[str, str]:
-    if type(witness) is not PaperSettlementLearningWitness:
+    if type(witness) is not _WITNESS_TYPE:
         raise ProductRunCapitalPathError(
             "settlement bridge returned unsupported witness type"
         )
@@ -457,7 +491,7 @@ def _witness_effect(
             "settlement witness decision is not in the committed run suffix"
         )
     try:
-        verify_economic_goal_binding(
+        _VERIFY_GOAL(
             record,
             bridge.economic_goal,
             risk_policy=bridge.risk_policy,
@@ -611,7 +645,7 @@ def resolve_product_run_capital_path_evidence(
         raise ProductRunCapitalPathError(
             "member_index must be a non-negative exact integer"
         )
-    if type(membership) is not ResolvedFixedNRiskMembership:
+    if type(membership) is not _MEMBERSHIP_TYPE:
         raise TypeError("membership must be exact ResolvedFixedNRiskMembership")
     try:
         precommit = _PRECOMMIT(
@@ -680,15 +714,15 @@ def resolve_product_run_capital_path_evidence(
         base = _TX_BASE(tx)
         final = _TX_TERMINAL(tx)
         decisions = _committed_run_decisions(tx)
-        base_book = PaperBook.load_bytes(base.payload)
-        final_book = PaperBook.load_bytes(final.payload)
+        base_book = _PAPER_LOAD(base.payload)
+        final_book = _PAPER_LOAD(final.payload)
         changed = _changed_ticket_ids(base_book, final_book)
         if any(ticket_id in base_book.tickets for ticket_id in changed):
             raise ProductRunCapitalPathError(
                 "run-capital path authority v1 supports only tickets opened "
                 "and completed inside the exact run"
             )
-        replay = replay_paper_book_equity_path(
+        replay = _REPLAY(
             base.payload,
             final.payload,
             expected_changed_ticket_ids=frozenset(changed),
@@ -706,7 +740,7 @@ def resolve_product_run_capital_path_evidence(
     effects: list[dict[str, str]] = []
     for ticket_id in changed:
         ticket = final_book.tickets[ticket_id]
-        if ticket.status is TicketStatus.OPEN:
+        if ticket.status is _OPEN_STATUS:
             raise ProductRunCapitalPathError(
                 "open run ticket has no complete settlement occurrence authority"
             )

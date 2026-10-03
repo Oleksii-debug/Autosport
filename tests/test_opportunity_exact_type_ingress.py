@@ -9,6 +9,7 @@ import autosport.opportunity as opportunity_module
 from autosport.domain import MarketEvent
 from autosport.forecasting import ForecastRecord
 from autosport.opportunity import (
+    EvidenceRef,
     ForecastRef,
     Opportunity,
     OpportunityContractError,
@@ -366,6 +367,7 @@ def test_serialized_nested_reconstruction_ignores_rebound_type_globals(
         strategy_class=StrategyClass.ARBITRAGE,
         decision=OpportunityDecision.WAIT,
         quotes=(_quote(),),
+        evidence_refs=(EvidenceRef("test-authority", "test-reference"),),
     )
     payload = original.to_dict()
 
@@ -374,8 +376,25 @@ def test_serialized_nested_reconstruction_ignores_rebound_type_globals(
         def from_dict(cls, raw: object) -> object:
             raise AssertionError("rebound QuoteRef.from_dict executed")
 
+    class _PoisonEvidenceRef:
+        @classmethod
+        def from_dict(cls, raw: object) -> object:
+            raise AssertionError("rebound EvidenceRef.from_dict executed")
+
+    def _poison_strategy(value: object) -> object:
+        raise AssertionError("rebound StrategyClass constructor executed")
+
+    def _poison_decision(value: object) -> object:
+        raise AssertionError("rebound OpportunityDecision constructor executed")
+
+    monkeypatch.setattr(opportunity_module, "StrategyClass", _poison_strategy)
+    monkeypatch.setattr(opportunity_module, "OpportunityDecision", _poison_decision)
     monkeypatch.setattr(opportunity_module, "QuoteRef", _PoisonQuoteRef)
+    monkeypatch.setattr(opportunity_module, "EvidenceRef", _PoisonEvidenceRef)
 
     restored = Opportunity.from_dict(payload)
     assert restored == original
+    assert type(restored.strategy_class) is StrategyClass
+    assert type(restored.decision) is OpportunityDecision
     assert all(type(item) is QuoteRef for item in restored.quotes)
+    assert all(type(item) is EvidenceRef for item in restored.evidence_refs)

@@ -18,6 +18,7 @@ _MAPPING_KEY_MAX_NODES = 256
 _OPERATOR_VALUE_MAX_DEPTH = 64
 _OPERATOR_VALUE_MAX_NODES = 10_000
 _QUERY_KEY_MAX_DECODE_PASSES = 8
+_SECRET_VALUE_MAX_URL_ENCODING_PASSES = 8
 
 _SENSITIVE_NORMALIZED_KEYS = frozenset(
     {
@@ -240,16 +241,29 @@ def _reversible_base64_secret_values(secrets: Iterable[str]) -> tuple[str, ...]:
 
 
 def _reversible_url_secret_values(secrets: Iterable[str]) -> tuple[str, ...]:
-    """Return canonical single-pass URL spellings of known secret values."""
+    """Return bounded nested URL spellings of already-known secret values.
+
+    Provider, proxy and logging layers can percent-encode an already encoded value.
+    Those forms remain trivially reversible credential material.  Derive them only
+    from secrets already authoritative for this call; never decode arbitrary text.
+    """
 
     values: set[str] = set()
     for secret in secrets:
-        for encoded in (
-            quote(secret, safe=""),
-            quote_plus(secret, safe=""),
-        ):
-            if encoded != secret:
-                values.add(encoded)
+        frontier = {secret}
+        for _ in range(_SECRET_VALUE_MAX_URL_ENCODING_PASSES):
+            next_frontier: set[str] = set()
+            for candidate in frontier:
+                for encoded in (
+                    quote(candidate, safe=""),
+                    quote_plus(candidate, safe=""),
+                ):
+                    if encoded != secret and encoded not in values:
+                        values.add(encoded)
+                        next_frontier.add(encoded)
+            if not next_frontier:
+                break
+            frontier = next_frontier
     values.discard("")
     return tuple(sorted(values, key=lambda item: (-len(item), item)))
 

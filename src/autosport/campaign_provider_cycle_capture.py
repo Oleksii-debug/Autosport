@@ -802,8 +802,14 @@ def capture_campaign_complete_game_board(
     expected_test_clock_origin = _CANONICAL_TEST_CAMPAIGN_CLOCK_ORIGIN
     expected_test_clock_capability = _CANONICAL_TEST_CAMPAIGN_CLOCK_CAPABILITY
     expected_provider_module = _provider_observation_module
+    expected_request_type = CompleteGameBoardRequest
+    expected_snapshot_type = CompleteGameBoardSnapshot
+    expected_evidence_store_type = CompleteGameBoardEvidenceStore
+    expected_evidence_class_seam_witnesses = _EVIDENCE_CLASS_SEAM_WITNESSES
     expected_provider_request_seams = _PROVIDER_REQUEST_SEAMS
+    expected_provider_request_seam_items = _PROVIDER_REQUEST_SEAM_ITEMS
     expected_provider_snapshot_seams = _PROVIDER_SNAPSHOT_SEAMS
+    expected_provider_snapshot_seam_items = _PROVIDER_SNAPSHOT_SEAM_ITEMS
     expected_provider_assert = _PROVIDER_CANONICAL_ASSERT
     expected_provider_assert_code = _PROVIDER_CANONICAL_ASSERT_CODE
     expected_receipt_class = _CANONICAL_CYCLE_RECEIPT_CLASS
@@ -849,6 +855,25 @@ def capture_campaign_complete_game_board(
         ):
             raise integrity_error(
                 "campaign provider-cycle collector seam authority changed"
+            )
+        if (
+            module_globals.get("CompleteGameBoardRequest") is not expected_request_type
+            or module_globals.get("CompleteGameBoardSnapshot") is not expected_snapshot_type
+            or module_globals.get("CompleteGameBoardEvidenceStore")
+            is not expected_evidence_store_type
+            or module_globals.get("_EVIDENCE_CLASS_SEAM_WITNESSES")
+            is not expected_evidence_class_seam_witnesses
+            or module_globals.get("_PROVIDER_REQUEST_SEAM_ITEMS")
+            is not expected_provider_request_seam_items
+            or module_globals.get("_PROVIDER_SNAPSHOT_SEAM_ITEMS")
+            is not expected_provider_snapshot_seam_items
+            or tuple(expected_provider_request_seams.items())
+            != expected_provider_request_seam_items
+            or tuple(expected_provider_snapshot_seams.items())
+            != expected_provider_snapshot_seam_items
+        ):
+            raise integrity_error(
+                "campaign provider-cycle provider/evidence seam authority changed"
             )
         if module_globals.get("ARTIFACT_KIND") != expected_artifact_kind:
             raise integrity_error(
@@ -1382,7 +1407,10 @@ def _seal_campaign_provider_cycle_capture_dispatch() -> None:
         "_CANONICAL_TEST_CAMPAIGN_CLOCK_CAPABILITY": _CANONICAL_TEST_CAMPAIGN_CLOCK_CAPABILITY,
         "_provider_observation_module": _provider_observation_module,
         "_PROVIDER_REQUEST_SEAMS": _PROVIDER_REQUEST_SEAMS,
+        "_PROVIDER_REQUEST_SEAM_ITEMS": _PROVIDER_REQUEST_SEAM_ITEMS,
         "_PROVIDER_SNAPSHOT_SEAMS": _PROVIDER_SNAPSHOT_SEAMS,
+        "_PROVIDER_SNAPSHOT_SEAM_ITEMS": _PROVIDER_SNAPSHOT_SEAM_ITEMS,
+        "_EVIDENCE_CLASS_SEAM_WITNESSES": _EVIDENCE_CLASS_SEAM_WITNESSES,
         "_PROVIDER_CANONICAL_ASSERT": _PROVIDER_CANONICAL_ASSERT,
         "_PROVIDER_CANONICAL_ASSERT_CODE": _PROVIDER_CANONICAL_ASSERT_CODE,
         "_EVIDENCE_PATH": _EVIDENCE_PATH,

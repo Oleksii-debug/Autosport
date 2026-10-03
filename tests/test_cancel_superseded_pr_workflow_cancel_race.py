@@ -413,7 +413,7 @@ def test_scoped_cancel_rechecks_branch_helper_after_zero_association_roundtrip(
     try:
         with pytest.raises(
             CancellationError,
-            match="scoped cancellation revalidation dispatch changed",
+            match="unbound workflow run branch authority could not be revalidated",
         ):
             api.cancel(123)
     finally:
@@ -504,7 +504,10 @@ def test_scoped_cancel_rechecks_base_cancel_code_after_external_revalidation(
         url = request.full_url
         if "/commits/" in url and "/pulls?" in url:
             GitHubApi.cancel.__code__ = forged_code
-            return _FakeSuccessResponse(200, b'[{"number":7}]')
+            body = (
+                '[{"number":7,"head":{"sha":"' + candidate_head + '"}}]'
+            ).encode()
+            return _FakeSuccessResponse(200, body)
         if url.endswith("/pulls/7"):
             body = (
                 '{"head":{"sha":"' + ("b" * 40)

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import gc
 import json
 import tempfile
+import weakref
 from dataclasses import replace
 from datetime import datetime
 from decimal import Decimal
@@ -9,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+import autosport.supervised_execution as supervised_execution
 import autosport.supervised_provider_evidence as provider_evidence
 from autosport.betfair_account_readonly import (
     BetfairReadOnlyClient,
@@ -44,12 +47,14 @@ from autosport.real_execution_ledger import (
 from autosport.risk import PaperRiskPolicy, ProposedTicketRiskContext
 from autosport.supervised_execution import (
     ApprovalState,
+    BoundSupervisedExecutionPlan,
     ExecutionLegConstraint,
     ProviderNotFoundReadback,
     ProviderReadback,
     ReadbackOutcome,
     SupervisedApproval,
     SupervisedExecutionError,
+    assert_bound_supervised_execution_plan_authoritative,
     begin_supervised_attempt,
     build_supervised_execution_plan,
     reconcile_account_snapshot,
@@ -321,6 +326,162 @@ def test_build_binds_portfolio_intent_approval_profiles_and_quote_constraints() 
     assert action.requested_stake == portfolio.stakes[0]
     assert action.expires_at == QUOTE_EXPIRES_AT
     assert len(action.quote_id) == 64
+
+
+def test_builder_issues_exact_bound_plan_product_authority() -> None:
+    bound, _, _, _ = _bound()
+
+    assert_bound_supervised_execution_plan_authoritative(bound)
+
+
+def test_product_issuance_registry_does_not_retain_dead_plans() -> None:
+    bound, _, _, _ = _bound()
+    reference = weakref.ref(bound)
+    assert reference() is bound
+
+    del bound
+    gc.collect()
+
+    assert reference() is None
+
+
+def test_reconstructed_bound_plan_cannot_mint_product_authority() -> None:
+    bound, _, _, _ = _bound()
+    reconstructed = BoundSupervisedExecutionPlan(
+        execution_plan=bound.execution_plan,
+        portfolio_plan_sha256=bound.portfolio_plan_sha256,
+        economic_goal_contract_sha256=bound.economic_goal_contract_sha256,
+        intent_id=bound.intent_id,
+        intent_sha256=bound.intent_sha256,
+        approval_fingerprint=bound.approval_fingerprint,
+        profile_bindings=bound.profile_bindings,
+        constraints=bound.constraints,
+    )
+
+    reconstructed.verify_binding()
+    with pytest.raises(
+        SupervisedExecutionError,
+        match="not current canonical product issuance",
+    ):
+        assert_bound_supervised_execution_plan_authoritative(reconstructed)
+
+
+def test_copied_bound_plan_cannot_transfer_product_authority() -> None:
+    bound, _, _, _ = _bound()
+    copied = replace(bound)
+
+    copied.verify_binding()
+    with pytest.raises(
+        SupervisedExecutionError,
+        match="not current canonical product issuance",
+    ):
+        assert_bound_supervised_execution_plan_authoritative(copied)
+
+
+def test_mutated_issued_bound_plan_revokes_product_authority() -> None:
+    bound, _, _, _ = _bound()
+    assert_bound_supervised_execution_plan_authoritative(bound)
+
+    object.__setattr__(bound, "intent_id", "mutated-intent")
+
+    with pytest.raises(
+        SupervisedExecutionError,
+        match="not current canonical product issuance",
+    ):
+        assert_bound_supervised_execution_plan_authoritative(bound)
+
+
+def test_reservation_rejects_structurally_valid_but_unissued_bound_plan(tmp_path) -> None:
+    bound, approval, _, _ = _bound()
+    reconstructed = BoundSupervisedExecutionPlan(
+        execution_plan=bound.execution_plan,
+        portfolio_plan_sha256=bound.portfolio_plan_sha256,
+        economic_goal_contract_sha256=bound.economic_goal_contract_sha256,
+        intent_id=bound.intent_id,
+        intent_sha256=bound.intent_sha256,
+        approval_fingerprint=bound.approval_fingerprint,
+        profile_bindings=bound.profile_bindings,
+        constraints=bound.constraints,
+    )
+    ledger = RealExecutionLedger(tmp_path / "unissued-bound-ledger.jsonl")
+
+    with pytest.raises(
+        SupervisedExecutionError,
+        match="not current canonical product issuance",
+    ):
+        reserve_supervised_plan(ledger, reconstructed, approval)
+
+    with pytest.raises(KeyError):
+        ledger.saga(reconstructed.execution_plan.plan_id)
+
+
+def test_product_issuer_is_not_importable_from_module_namespace() -> None:
+    assert not hasattr(
+        supervised_execution,
+        "_issue_bound_supervised_execution_plan",
+    )
+    assert not hasattr(
+        supervised_execution,
+        "_install_bound_supervised_execution_plan_authority",
+    )
+
+
+def test_builder_alias_rebinding_revokes_internal_plan_authority(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    bound, approval, _, _ = _bound()
+    hostile_calls: list[object] = []
+
+    def hostile_build(*args, **kwargs):
+        hostile_calls.append((args, kwargs))
+        return bound
+
+    monkeypatch.setattr(
+        supervised_execution,
+        "build_supervised_execution_plan",
+        hostile_build,
+    )
+    ledger = RealExecutionLedger(tmp_path / "builder-rebound-ledger.jsonl")
+
+    with pytest.raises(
+        SupervisedExecutionError,
+        match="canonical bound supervised execution plan authority changed",
+    ):
+        reserve_supervised_plan(ledger, bound, approval)
+
+    assert hostile_calls == []
+    with pytest.raises(KeyError):
+        ledger.saga(bound.execution_plan.plan_id)
+
+
+def test_assertion_alias_rebinding_cannot_admit_unissued_plan(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    bound, approval, _, _ = _bound()
+    reconstructed = replace(bound)
+    hostile_calls: list[object] = []
+
+    def hostile_assert(value):
+        hostile_calls.append(value)
+
+    monkeypatch.setattr(
+        supervised_execution,
+        "assert_bound_supervised_execution_plan_authoritative",
+        hostile_assert,
+    )
+    ledger = RealExecutionLedger(tmp_path / "assert-rebound-ledger.jsonl")
+
+    with pytest.raises(
+        SupervisedExecutionError,
+        match="canonical bound supervised execution plan authority changed",
+    ):
+        reserve_supervised_plan(ledger, reconstructed, approval)
+
+    assert hostile_calls == []
+    with pytest.raises(KeyError):
+        ledger.saga(reconstructed.execution_plan.plan_id)
 
 
 def test_approval_binds_exact_route_and_slippage_terms() -> None:

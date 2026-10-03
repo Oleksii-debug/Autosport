@@ -1862,6 +1862,26 @@ def test_carrier_executable_descriptor_rebind_fails_closed_before_dispatch(
     assert set(persisted.tickets) == set(book.tickets)
 
 
+def test_positive_mutation_rereads_all_authority_immediately_before_open():
+    text = Path("src/autosport/economic_admission.py").read_text(encoding="utf-8")
+    region = text.split(
+        "# Positive mutation may only occur while crash/recovery, PaperBook,",
+        1,
+    )[1].split("_PAPERBOOK_SAVE_FUNCTION", 1)[0]
+
+    markers = (
+        "_require_admission_recovery_gate_authority()",
+        "_require_paperbook_admission_authority()",
+        "_require_risk_decision_authority()",
+        "if not _admission_risk_helper_authority_valid():",
+        "pre_evaluation_state is None",
+        "_RISK_BOOK_STATE(PaperRiskPolicy, working_book)",
+        "opened = _PAPERBOOK_OPEN_TICKET_FUNCTION(",
+    )
+    positions = tuple(region.index(marker) for marker in markers)
+    assert positions == tuple(sorted(positions))
+
+
 def test_risk_policy_limit_descriptor_rebind_cannot_widen_ticket_cap(tmp_path):
     now = datetime.now(timezone.utc).replace(microsecond=0)
     old = now - timedelta(days=2)

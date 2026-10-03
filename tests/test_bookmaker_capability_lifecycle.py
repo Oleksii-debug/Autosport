@@ -182,6 +182,110 @@ def test_product_issued_betdaq_evidence_does_not_mint_available_health(monkeypat
     assert "not AVAILABLE" in decision.reason
 
 
+def test_available_audit_record_cannot_clear_prior_negative_runtime_state(
+    monkeypatch,
+):
+    issuance, _ = _betdaq_authenticated_issuance(monkeypatch)
+    journal = CapabilityEvidenceJournal()
+    journal.publish(issuance.evidence)
+    journal.publish_availability(
+        CapabilityAvailability(
+            evidence_id=issuance.evidence.evidence_id,
+            state=CapabilityAvailabilityState.TEMPORARILY_UNAVAILABLE,
+            observed_at="2026-09-21T10:02:00+00:00",
+            source_ref="provider-outage",
+            source_payload_sha256="1" * 64,
+        )
+    )
+    journal.publish_availability(
+        CapabilityAvailability(
+            evidence_id=issuance.evidence.evidence_id,
+            state=CapabilityAvailabilityState.AVAILABLE,
+            observed_at="2026-09-21T10:03:00+00:00",
+            source_ref="caller-claims-recovered",
+            source_payload_sha256="2" * 64,
+        )
+    )
+
+    decision = journal.resolve(
+        _betdaq_authenticated_requirement(issuance),
+        {issuance.profile.profile_id: issuance.profile},
+        as_of="2026-09-21T10:04:00+00:00",
+    )
+
+    assert decision.allowed
+    assert decision.availability is CapabilityAvailabilityState.TEMPORARILY_UNAVAILABLE
+
+
+def test_unknown_audit_record_cannot_clear_prior_degraded_runtime_state(
+    monkeypatch,
+):
+    issuance, _ = _betdaq_authenticated_issuance(monkeypatch)
+    journal = CapabilityEvidenceJournal()
+    journal.publish(issuance.evidence)
+    journal.publish_availability(
+        CapabilityAvailability(
+            evidence_id=issuance.evidence.evidence_id,
+            state=CapabilityAvailabilityState.DEGRADED,
+            observed_at="2026-09-21T10:02:00+00:00",
+            source_ref="provider-degraded",
+            source_payload_sha256="3" * 64,
+        )
+    )
+    journal.publish_availability(
+        CapabilityAvailability(
+            evidence_id=issuance.evidence.evidence_id,
+            state=CapabilityAvailabilityState.UNKNOWN,
+            observed_at="2026-09-21T10:03:00+00:00",
+            source_ref="caller-unknown",
+            source_payload_sha256="4" * 64,
+        )
+    )
+
+    decision = journal.resolve(
+        _betdaq_authenticated_requirement(issuance, require_available=True),
+        {issuance.profile.profile_id: issuance.profile},
+        as_of="2026-09-21T10:04:00+00:00",
+    )
+
+    assert not decision.allowed
+    assert decision.availability is CapabilityAvailabilityState.DEGRADED
+    assert "not AVAILABLE" in decision.reason
+
+
+def test_fresh_lifecycle_successor_does_not_inherit_old_evidence_runtime_outage(
+    monkeypatch,
+):
+    first, _ = _betdaq_authenticated_issuance(monkeypatch)
+    journal = CapabilityEvidenceJournal()
+    journal.publish(first.evidence)
+    journal.publish_availability(
+        CapabilityAvailability(
+            evidence_id=first.evidence.evidence_id,
+            state=CapabilityAvailabilityState.TEMPORARILY_UNAVAILABLE,
+            observed_at="2026-09-21T10:02:00+00:00",
+            source_ref="old-provider-outage",
+            source_payload_sha256="5" * 64,
+        )
+    )
+
+    fresh, _ = _betdaq_authenticated_issuance(
+        monkeypatch,
+        observed_minute=5,
+        predecessor_id=first.evidence.evidence_id,
+    )
+    journal.publish(fresh.evidence)
+    decision = journal.resolve(
+        _betdaq_authenticated_requirement(fresh),
+        {fresh.profile.profile_id: fresh.profile},
+        as_of="2026-09-21T10:07:00+00:00",
+    )
+
+    assert decision.allowed
+    assert decision.evidence_id == fresh.evidence.evidence_id
+    assert decision.availability is CapabilityAvailabilityState.UNKNOWN
+
+
 def test_copied_betdaq_issuance_payload_cannot_reuse_process_local_provenance(
     monkeypatch,
 ):

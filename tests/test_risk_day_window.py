@@ -422,16 +422,17 @@ class ProductClockBoundaryTests(unittest.TestCase):
                 root / "workspace",
                 authority_root=root / "machine-authority",
             )
-            canonical = ProductDayRiskWindowStore.current(store)
 
             def hostile_evidence(*args, **kwargs):
                 del args, kwargs
                 raise AssertionError("instance evidence shadow executed")
 
             store._evidence = hostile_evidence
-            observed = ProductDayRiskWindowStore.current(store)
+            first = ProductDayRiskWindowStore.current(store)
+            second = ProductDayRiskWindowStore.current(store)
 
-            self.assertEqual(observed, canonical)
+            self.assertEqual(second, first)
+            self.assertTrue(first.product_clock_authoritative)
 
     def test_runtime_product_clock_rebind_is_downgraded(self) -> None:
         original = day_window._PRODUCT_TIME_NS

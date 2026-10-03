@@ -188,6 +188,39 @@ def test_class_level_snapshot_reader_rebinding_cannot_mint_authority(
     assert acquired.source_authority_proven is True
 
 
+def test_live_snapshot_content_mutation_revokes_provider_origin_authority(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    _install_transport(monkeypatch, [_DEVELOPER_APPS, _DETAILS, _FUNDS])
+    acquired = BetfairAccountSnapshotAcquirer(
+        tmp_path / "account.sqlite3",
+        _credentials(),
+    ).acquire(
+        _balance_capabilities(),
+        acquisition_id="snapshot-content-mutation",
+    )
+    assert acquired.snapshot.balance is not None
+    assert acquired.source_authority_proven is True
+
+    forged_balance = replace(
+        acquired.snapshot.balance,
+        available_balance=Decimal("1000000"),
+    )
+    object.__setattr__(
+        acquired,
+        "snapshot",
+        replace(acquired.snapshot, balance=forged_balance),
+    )
+
+    assert acquired.source_authority_proven is False
+    with pytest.raises(
+        AccountSnapshotAcquisitionError,
+        match="not issued by live canonical provider acquisition",
+    ):
+        assert_account_snapshot_acquisition_authoritative(acquired)
+
+
 def test_product_owned_read_persists_restart_verifiable_receipt_without_secrets(
     tmp_path,
     monkeypatch,

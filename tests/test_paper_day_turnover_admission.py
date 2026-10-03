@@ -188,6 +188,103 @@ def test_risk_day_wrapper_code_mutation_cannot_mint_headroom(tmp_path, method_na
     _assert_day_authority_code_mutation_rejected(tmp_path, target)
 
 
+def _assert_day_authority_dependency_rejected(tmp_path) -> None:
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    old = now - timedelta(days=2)
+    goal = _goal()
+    EconomicGoalStore(tmp_path).initialize_owner(goal)
+    book = _book_with_settled_turnover(placed_at=_timestamp(old), stake="50")
+    book.save(tmp_path / "paper_book.json")
+    candidate = _leg("day-authority-dependency")
+    context = _context(candidate, _timestamp(now))
+    policy = _policy(goal)
+    admit_paper_ticket(
+        workspace=tmp_path,
+        book=book,
+        risk_policy=policy,
+        stake=Decimal("0.01"),
+        legs=(candidate,),
+        reason="mutated product-day dependency must fail closed",
+        placed_at=_timestamp(now),
+        context=context,
+        provider_source_ids=("provider-1",),
+        bankroll_id="paper-bankroll",
+        currency="USD",
+    )
+
+
+def _sealed_wrapper_frozen_globals(function):
+    closure = function.__closure__
+    assert closure is not None
+    freevars = function.__code__.co_freevars
+    assert "frozen_globals" in freevars
+    return closure[freevars.index("frozen_globals")].cell_contents
+
+
+def test_turnover_resolver_closure_binding_rebind_cannot_mint_headroom(tmp_path):
+    descriptor = PaperDayTurnoverResolver.__dict__["resolve"]
+    target = descriptor.__func__
+    frozen_globals = _sealed_wrapper_frozen_globals(target)
+    original = frozen_globals["_PAPERBOOK_LOAD"]
+    try:
+        frozen_globals["_PAPERBOOK_LOAD"] = lambda _path: PaperBook("1000000")
+        with pytest.raises(
+            RuntimeError,
+            match="product day turnover resolver dependency authority changed",
+        ):
+            _assert_day_authority_dependency_rejected(tmp_path)
+    finally:
+        frozen_globals["_PAPERBOOK_LOAD"] = original
+
+
+def test_turnover_resolver_frozen_helper_code_mutation_cannot_mint_headroom(tmp_path):
+    descriptor = PaperDayTurnoverResolver.__dict__["resolve"]
+    target = descriptor.__func__
+    frozen_globals = _sealed_wrapper_frozen_globals(target)
+    helper = frozen_globals["_exact_sum"]
+    original_code = helper.__code__
+    try:
+        helper.__code__ = _replacement_code_preserving_freevars(helper)
+        with pytest.raises(
+            RuntimeError,
+            match="product day turnover resolver dependency authority changed",
+        ):
+            _assert_day_authority_dependency_rejected(tmp_path)
+    finally:
+        helper.__code__ = original_code
+
+
+def test_risk_day_closure_binding_rebind_cannot_mint_headroom(tmp_path):
+    target = ProductDayRiskWindowStore.__dict__["_current_under_lock"]
+    frozen_globals = _sealed_wrapper_frozen_globals(target)
+    original = frozen_globals["_MONOTONIC_RECOVER"]
+    try:
+        frozen_globals["_MONOTONIC_RECOVER"] = lambda *args, **kwargs: None
+        with pytest.raises(
+            RuntimeError,
+            match="product day window dependency authority changed",
+        ):
+            _assert_day_authority_dependency_rejected(tmp_path)
+    finally:
+        frozen_globals["_MONOTONIC_RECOVER"] = original
+
+
+def test_risk_day_frozen_helper_code_mutation_cannot_mint_headroom(tmp_path):
+    target = ProductDayRiskWindowStore.__dict__["_current_under_lock"]
+    frozen_globals = _sealed_wrapper_frozen_globals(target)
+    helper = frozen_globals["_clock_utc_instant"]
+    original_code = helper.__code__
+    try:
+        helper.__code__ = _replacement_code_preserving_freevars(helper)
+        with pytest.raises(
+            RuntimeError,
+            match="product day window dependency authority changed",
+        ):
+            _assert_day_authority_dependency_rejected(tmp_path)
+    finally:
+        helper.__code__ = original_code
+
+
 def test_admission_rejects_lock_validator_dependency_rebinding(tmp_path):
     book = PaperBook("100")
     book.save(tmp_path / "paper_book.json")

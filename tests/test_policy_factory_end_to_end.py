@@ -1293,3 +1293,131 @@ def test_product_policy_evaluation_issue_restart_idempotency_and_fresh_mint_reje
             protocol,
             source_evaluation_bundle_id="evaluation-policy-bootstrap",
         )
+
+def test_product_issued_no_action_baseline_cannot_receive_hindsight_wait_utility(
+    tmp_path,
+    monkeypatch,
+):
+    """NO_ACTION must not turn counterfactual WAIT reward into positive utility."""
+
+    workspace = (tmp_path / "product-workspace-no-action").resolve()
+    authority_root = (tmp_path / "machine-authority-no-action").resolve()
+    monkeypatch.setenv("AUTOSPORT_MONOTONIC_AUTHORITY_ROOT", str(authority_root))
+    binding = WorkspaceIdentityBinding.resolve(
+        workspace=workspace,
+        authority_root=authority_root,
+        requested_workspace_instance_id=None,
+    )
+    binding.ensure_bound()
+
+    (
+        registry,
+        registry_path,
+        _artifact_root,
+        store,
+        predecessor,
+        predecessor_model_id,
+        cases,
+        rule,
+    ) = _foundation(workspace, artifact_directory="factory-artifacts")
+
+    no_action_policy, update = _policy_successor(
+        predecessor,
+        observation_id="8" * 64,
+        outcome_id="9" * 64,
+        episode_id="a" * 64,
+        decided_at="2026-09-19T09:33:00Z",
+        available_at="2026-09-19T09:34:00Z",
+        reward_value="2",
+        action_type="WAIT",
+    )
+    spec = _spec(
+        experiment_id="experiment-policy-issued-no-action",
+        model_id="model-policy-issued-no-action",
+        evaluation_id="evaluation-policy-issued-no-action",
+        promotion_id="promotion-policy-issued-no-action",
+        predecessor_policy_id=predecessor.policy_id,
+        predecessor_model_id=predecessor_model_id,
+        created_at=CHALLENGER_CREATED,
+        completed_at=CHALLENGER_COMPLETED,
+        decided_at=CHALLENGER_DECIDED,
+    )
+    result = _run_nongoverned_factory_retest(
+        ExperimentRunner(registry, store),
+        predecessor_policy=predecessor,
+        challenger_policy=no_action_policy,
+        update_evidence=update,
+        spec=spec,
+        evaluation_cases=cases,
+        rule=rule,
+    )
+    assert result.strategy_version_id == no_action_policy.policy_id
+
+    no_action_model = store.read("model", spec.model_version_id)
+    no_action_artifact_sha256 = no_action_model["policy_artifact_sha256"]
+    candidate_model = store.read("model", predecessor_model_id)
+    candidate_artifact_sha256 = candidate_model["policy_artifact_sha256"]
+    dataset_manifest_sha256 = registry.get(
+        "DatasetSnapshot", DATASET_ID
+    ).payload["manifest_sha256"]
+
+    protocol = _external_validity_protocol_for_policy_factory(
+        candidate_id=predecessor.policy_id,
+        candidate_artifact_sha256=candidate_artifact_sha256,
+        dataset_manifest_sha256=dataset_manifest_sha256,
+        cases=cases,
+    )
+    protocol = replace(
+        protocol,
+        baselines=tuple(
+            replace(
+                baseline,
+                baseline_id=no_action_policy.policy_id,
+                implementation_sha256=no_action_artifact_sha256,
+                supported=True,
+                unsupported_reason=None,
+            )
+            if baseline.kind is BaselineKind.NO_BET_WAIT
+            else baseline
+            for baseline in protocol.baselines
+        ),
+    )
+
+    authority = ProductPolicyEvaluationWorkspace.open(
+        workspace,
+        expected_workspace_instance_id=binding.workspace_instance_id,
+    )
+    reference = issue_product_policy_evaluation(
+        authority,
+        protocol,
+        source_evaluation_bundle_id=spec.evaluation_bundle_id,
+        baseline_kind=BaselineKind.NO_BET_WAIT,
+    )
+    issued = resolve_product_policy_evaluation(authority, protocol, reference)
+
+    # Restart must preserve the same exact issued comparator before semantics are
+    # consumed.  A fresh process may not reconstruct a different NO_ACTION result.
+    reopened_authority = ProductPolicyEvaluationWorkspace.open(
+        workspace,
+        expected_workspace_instance_id=binding.workspace_instance_id,
+    )
+    restarted = resolve_product_policy_evaluation(
+        reopened_authority,
+        protocol,
+        IssuedPolicyEvaluationRef.from_payload(reference.to_payload()),
+    )
+    assert restarted.to_payload() == issued.to_payload()
+
+    assert issued.policy_id == no_action_policy.policy_id
+    assert issued.observed_count == len(cases)
+    assert issued.scored_count == 0
+    assert issued.abstention_count == len(cases)
+
+    # The frozen cases intentionally assign WAIT a positive counterfactual reward.
+    # That value is useful for ordinary policy evaluation but is not factual profit
+    # earned by taking NO_ACTION.  Baseline issuance must not convert it into
+    # hindsight "avoided loss" utility or a non-zero action uncertainty interval.
+    assert Decimal(issued.metric_value) == Decimal("0")
+    assert Decimal(issued.uncertainty_low) == Decimal("0")
+    assert Decimal(issued.uncertainty_high) == Decimal("0")
+

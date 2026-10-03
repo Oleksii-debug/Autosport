@@ -405,16 +405,28 @@ class PaperDayTurnoverResolver:
             raise PaperDayTurnoverEvidenceIncompleteError(
                 "window_evidence must be canonical ProductDayRiskWindow"
             )
-        if (
-            goal_store.workspace.expanduser().resolve(strict=False)
-            != window_store.workspace
-        ):
+        goal_workspace = goal_store.workspace.expanduser().resolve(strict=False)
+        if goal_workspace != window_store.workspace:
             raise PaperDayTurnoverEvidenceIncompleteError(
                 "economic goal and risk day authority must share one canonical workspace"
             )
+        if goal_store.path != goal_store.workspace / EconomicGoalStore.FILE_NAME:
+            raise PaperDayTurnoverEvidenceIncompleteError(
+                "economic goal store path is not canonical for its workspace"
+            )
+        if (
+            window_store.state_path
+            != window_store.workspace / ".autosport" / "risk_day_window.json"
+        ):
+            raise PaperDayTurnoverEvidenceIncompleteError(
+                "risk day store path is not canonical for its workspace"
+            )
 
         try:
-            goal = goal_store.load()
+            # Exact-type checks above make direct class dispatch authoritative here.
+            # Do not let a mutable exact store instance shadow load and mint a
+            # different goal contract for turnover evidence.
+            goal = EconomicGoalStore.load(goal_store)
             goal_provenance = provenance_for(goal)
         except (OSError, TypeError, ValueError) as exc:
             raise PaperDayTurnoverEvidenceIncompleteError(
@@ -429,7 +441,13 @@ class PaperDayTurnoverResolver:
             ) from exc
 
         try:
-            current_window = window_store.require_current(window_evidence)
+            # Bypass mutable instance dispatch for the same reason as EconomicGoalStore
+            # above. A caller-owned require_current attribute is not product day
+            # authority even when the container itself has the exact store type.
+            current_window = ProductDayRiskWindowStore.require_current(
+                window_store,
+                window_evidence,
+            )
         except Exception as exc:
             raise PaperDayTurnoverEvidenceIncompleteError(
                 "UTC day-window evidence is not current product authority"

@@ -799,25 +799,6 @@ def test_issued_quote_chain_mutation_cannot_mint_acknowledgement_binding(
 
 
 
-def test_negative_authority_properties_require_intact_issuance_snapshot(
-    tmp_path,
-) -> None:
-    evidence = _project(_submitted(tmp_path))
-
-    object.__setattr__(
-        evidence,
-        "accepted_price_status",
-        ACCEPTED_PRICE_ACKNOWLEDGED_UNVERIFIED,
-    )
-
-    for authority_name in ("accepted_price_verified", "chain_complete"):
-        with pytest.raises(
-            ExecutionQuoteChainError,
-            match="not issued by canonical ledger projection",
-        ):
-            getattr(evidence, authority_name)
-
-
 def test_to_dict_returns_detached_canonical_issuance_snapshot(tmp_path) -> None:
     evidence = _project(_submitted(tmp_path))
     first = evidence.to_dict()

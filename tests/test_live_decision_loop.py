@@ -716,6 +716,106 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
                 1,
             )
 
+    def test_provider_gap_full_cut_rejects_concurrent_update_before_zero(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            clock = _ManualClock(self.START + timedelta(seconds=1))
+            first_event = self._event(selection="selection-a", sequence=1)
+            observer_calls = {"count": 0}
+
+            def observer(updates):
+                observer_calls["count"] += 1
+                if observer_calls["count"] == 1:
+                    store = SQLiteMarketStore(workspace / "market.db")
+                    try:
+                        store.append(first_event)
+                    finally:
+                        store.close()
+                    updates.accept_persisted(first_event)
+                    return
+                raise ProviderUnavailableError("simulated provider gap")
+
+            factory = _EmptyIntentFactory()
+            loop = self._loop(
+                workspace,
+                observer=observer,
+                factory=factory,
+                clock=clock,
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+
+            first = loop.run_cycle()
+            self.assertEqual(first.status, LiveCycleStatus.DECIDED)
+            self.assertEqual(
+                len(
+                    JsonlDecisionLedger(
+                        workspace / "decisions.jsonl"
+                    ).verified_records()
+                ),
+                1,
+            )
+
+            concurrent = self._event(
+                selection="selection-a",
+                sequence=2,
+                odds="2.20",
+                observed=self.START + timedelta(milliseconds=1500),
+            )
+            real_capture = loop.dependencies.coherent_decision_views
+            injected = {"done": False}
+
+            def full_capture_then_advance(*args, **kwargs):
+                snapshots = real_capture(*args, **kwargs)
+                if kwargs.get("incremental") is False and not injected["done"]:
+                    injected["done"] = True
+                    store = SQLiteMarketStore(workspace / "market.db")
+                    try:
+                        store.append(concurrent)
+                    finally:
+                        store.close()
+                    loop.mirror_updates.accept_persisted(concurrent)
+                return snapshots
+
+            clock.value = self.START + timedelta(seconds=2)
+            with patch.object(
+                loop.dependencies,
+                "coherent_decision_views",
+                side_effect=full_capture_then_advance,
+            ):
+                second = loop.run_cycle()
+
+            self.assertEqual(second.status, LiveCycleStatus.BACKPRESSURE)
+            self.assertIsNone(second.plan)
+            self.assertIn(
+                "market revision advanced during full decision snapshot capture",
+                second.detail,
+            )
+            self.assertEqual(
+                len(
+                    JsonlDecisionLedger(
+                        workspace / "decisions.jsonl"
+                    ).verified_records()
+                ),
+                1,
+            )
+
+            # The update is already in canonical mirror truth on the next full cut.
+            # Pending incremental invalidation must not starve provider-gap ZERO.
+            clock.value = self.START + timedelta(seconds=3)
+            third = loop.run_cycle()
+
+            self.assertEqual(third.status, LiveCycleStatus.PROVIDER_GAP)
+            self.assertIsNotNone(third.plan)
+            self.assertEqual(third.plan.action, PortfolioAction.ZERO)
+            self.assertEqual(
+                len(
+                    JsonlDecisionLedger(
+                        workspace / "decisions.jsonl"
+                    ).verified_records()
+                ),
+                2,
+            )
+
     def test_provider_gap_does_not_publish_zero_from_future_local_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

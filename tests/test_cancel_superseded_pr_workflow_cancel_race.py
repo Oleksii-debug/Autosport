@@ -1002,3 +1002,74 @@ def test_cancel_wrapper_defers_only_frozen_active_conflict_message(monkeypatch) 
             322,
         )
 
+def test_request_ignores_inflight_json_decoder_global_rebind(monkeypatch) -> None:
+    api = GitHubApi(repository="owner/repo", token="token")
+
+    class RebindingResponse(_FakeSuccessResponse):
+        def read(self) -> bytes:
+            monkeypatch.setattr(
+                controller_module.json,
+                "loads",
+                lambda *_args, **_kwargs: {"status": "forged"},
+            )
+            return b'{"status":"completed"}'
+
+    monkeypatch.setattr(
+        controller_module,
+        "urlopen",
+        lambda *_args, **_kwargs: RebindingResponse(200, b""),
+    )
+
+    assert api._request("/actions/runs/123") == {"status": "completed"}
+
+
+def test_request_ignores_inflight_json_hook_global_rebind(monkeypatch) -> None:
+    api = GitHubApi(repository="owner/repo", token="token")
+
+    class RebindingResponse(_FakeSuccessResponse):
+        def read(self) -> bytes:
+            monkeypatch.setattr(
+                controller_module,
+                "_strict_json_object",
+                lambda pairs: dict(pairs),
+            )
+            return b'{"status":"completed","status":"in_progress"}'
+
+    monkeypatch.setattr(
+        controller_module,
+        "urlopen",
+        lambda *_args, **_kwargs: RebindingResponse(200, b""),
+    )
+
+    with pytest.raises(CancellationError, match="duplicate object key"):
+        api._request("/actions/runs/123")
+
+
+def test_request_rejects_inflight_json_hook_code_mutation(monkeypatch) -> None:
+    api = GitHubApi(repository="owner/repo", token="token")
+    strict_hook = controller_module._strict_json_object
+
+    def forged_hook(pairs):
+        return dict(pairs)
+
+    forged_code = forged_hook.__code__.replace(
+        co_freevars=strict_hook.__code__.co_freevars,
+    )
+
+    class MutatingResponse(_FakeSuccessResponse):
+        def read(self) -> bytes:
+            monkeypatch.setattr(strict_hook, "__code__", forged_code)
+            return b'{"status":"completed"}'
+
+    monkeypatch.setattr(
+        controller_module,
+        "urlopen",
+        lambda *_args, **_kwargs: MutatingResponse(200, b""),
+    )
+
+    with pytest.raises(
+        CancellationError,
+        match="GitHub API JSON parser authority changed",
+    ):
+        api._request("/actions/runs/123")
+

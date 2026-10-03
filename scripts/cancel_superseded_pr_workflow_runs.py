@@ -298,6 +298,13 @@ class GitHubApi:
         *,
         method: str = "GET",
         allowed_http_errors: frozenset[int] = frozenset(),
+        _json_loads=json.loads,
+        _json_loads_code=json.loads.__code__,
+        _json_decode_error=json.JSONDecodeError,
+        _strict_object_hook=_strict_json_object,
+        _strict_object_hook_code=_strict_json_object.__code__,
+        _reject_constant_hook=_reject_nonstandard_json_constant,
+        _reject_constant_hook_code=_reject_nonstandard_json_constant.__code__,
     ) -> object:
         repository = object.__getattribute__(self, "_GitHubApi__repository")
         is_cancel_request = (
@@ -345,14 +352,33 @@ class GitHubApi:
             ) from exc
         if not body:
             return None
-        try:
-            return json.loads(
-                body,
-                object_pairs_hook=_strict_json_object,
-                parse_constant=_reject_nonstandard_json_constant,
+
+        def json_parser_authority_current() -> bool:
+            return (
+                getattr(_json_loads, "__code__", None) is _json_loads_code
+                and getattr(_strict_object_hook, "__code__", None)
+                is _strict_object_hook_code
+                and getattr(_reject_constant_hook, "__code__", None)
+                is _reject_constant_hook_code
             )
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+
+        if not json_parser_authority_current():
+            raise CancellationError("GitHub API JSON parser authority changed")
+        try:
+            payload = _json_loads(
+                body,
+                object_pairs_hook=_strict_object_hook,
+                parse_constant=_reject_constant_hook,
+            )
+        except (UnicodeDecodeError, _json_decode_error) as exc:
+            if not json_parser_authority_current():
+                raise CancellationError(
+                    "GitHub API JSON parser authority changed"
+                ) from exc
             raise CancellationError("GitHub API returned invalid JSON") from exc
+        if not json_parser_authority_current():
+            raise CancellationError("GitHub API JSON parser authority changed")
+        return payload
 
     def _pull_request(self, pr_number: int) -> dict[str, object]:
         if type(pr_number) is not int or pr_number <= 0:

@@ -350,6 +350,7 @@ def _copy_regular_source_tree(
         destination_dir: Path,
         *,
         relative: Path,
+        expected_snapshot: os.stat_result | None = None,
     ) -> None:
         relative_text = relative.as_posix() if relative.parts else None
         if len(relative.parts) > _MAX_RELEASE_SOURCE_TREE_DEPTH:
@@ -361,6 +362,14 @@ def _copy_regular_source_tree(
             label=label,
             relative=relative_text,
         )
+        if expected_snapshot is not None and not os.path.samestat(
+            expected_snapshot,
+            before,
+        ):
+            target = relative_text or "."
+            raise ValueError(
+                f"{label} directory changed during traversal: {target}"
+            )
         try:
             with os.scandir(source_dir) as iterator:
                 entries = sorted(iterator, key=lambda entry: entry.name)
@@ -416,6 +425,7 @@ def _copy_regular_source_tree(
                     source,
                     destination,
                     relative=child_relative,
+                    expected_snapshot=metadata,
                 )
             elif stat.S_ISREG(metadata.st_mode):
                 destination.write_bytes(

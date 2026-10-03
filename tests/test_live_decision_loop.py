@@ -427,6 +427,63 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
                     loop._decision_context_sha256()
                 setattr(factory, attribute, original)
 
+    def test_factory_provenance_is_checked_before_live_invocation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            factory = _EmptyIntentFactory()
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(workspace, [()]),
+                factory=factory,
+                clock=_ManualClock(self.START),
+            )
+            factory.source_sha256 = "f" * 64
+            snapshot = loop.mirror_updates.mirror.view()
+
+            with self.assertRaisesRegex(
+                LiveDecisionProgressError,
+                "factory source_sha256 provenance changed",
+            ):
+                loop._refresh_intents_from_snapshots(
+                    {"input-a": snapshot},
+                )
+
+            self.assertEqual(factory.calls, [])
+            self.assertNotIn("input-a", loop._intent_cache)
+
+    def test_factory_self_provenance_mutation_is_rejected_before_cache_publish(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            calls = []
+
+            def self_mutating_factory(input_id, snapshot):
+                calls.append(input_id)
+                self_mutating_factory.source_sha256 = "f" * 64
+                return ()
+
+            self_mutating_factory.strategy_version_id = "live-test-strategy-v1"
+            self_mutating_factory.source_sha256 = self.INTENT_SOURCE_SHA256
+            self_mutating_factory.environment_sha256 = self.INTENT_ENVIRONMENT_SHA256
+            self_mutating_factory.config_sha256 = self.INTENT_CONFIG_SHA256
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(workspace, [()]),
+                factory=self_mutating_factory,
+                clock=_ManualClock(self.START),
+            )
+            snapshot = loop.mirror_updates.mirror.view()
+
+            with self.assertRaisesRegex(
+                LiveDecisionProgressError,
+                "factory source_sha256 provenance changed",
+            ):
+                loop._refresh_intents_from_snapshots(
+                    {"input-a": snapshot},
+                )
+
+            self.assertEqual(calls, ["input-a"])
+            self.assertNotIn("input-a", loop._intent_cache)
+
     def test_emitted_intent_cannot_relabel_registered_strategy_version(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

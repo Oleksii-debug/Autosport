@@ -79,7 +79,10 @@ class _ExecutionQuoteChainEvidenceMeta(type):
     )
 
     def __setattr__(cls, name: str, value: object) -> None:
-        if cls in self_meta_sealed(cls) and name in self_meta_protected(cls):
+        if (
+            cls in __class__._sealed_classes
+            and name in __class__._protected_names
+        ):
             raise TypeError(
                 "quote-chain evidence authority surface is sealed: " + name
             )
@@ -95,15 +98,6 @@ class _ExecutionQuoteChainEvidenceMeta(type):
     @classmethod
     def seal(mcls, cls: type) -> None:
         mcls._sealed_classes.add(cls)
-
-
-def self_meta_sealed(cls: type) -> set[type]:
-    return type(cls)._sealed_classes
-
-
-def self_meta_protected(cls: type) -> frozenset[str]:
-    return type(cls)._protected_names
-
 
 def _require_canonical_verified_execution_view_dispatch(
     ledger: RealExecutionLedger,

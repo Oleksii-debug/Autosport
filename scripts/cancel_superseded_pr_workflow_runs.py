@@ -308,6 +308,16 @@ class GitHubApi:
         _json_decoder_decode_code=json.JSONDecoder.__dict__["decode"].__code__,
         _json_decoder_raw_decode=json.JSONDecoder.__dict__["raw_decode"],
         _json_decoder_raw_decode_code=json.JSONDecoder.__dict__["raw_decode"].__code__,
+        _json_decoder_globals=json.JSONDecoder.__dict__["__init__"].__globals__,
+        _json_decoder_scanner=json.JSONDecoder.__dict__["__init__"].__globals__["scanner"],
+        _json_decoder_make_scanner=json.JSONDecoder.__dict__["__init__"].__globals__["scanner"].make_scanner,
+        _json_decoder_object=json.JSONDecoder.__dict__["__init__"].__globals__["JSONObject"],
+        _json_decoder_object_code=json.JSONDecoder.__dict__["__init__"].__globals__["JSONObject"].__code__,
+        _json_decoder_array=json.JSONDecoder.__dict__["__init__"].__globals__["JSONArray"],
+        _json_decoder_array_code=json.JSONDecoder.__dict__["__init__"].__globals__["JSONArray"].__code__,
+        _json_decoder_scanstring=json.JSONDecoder.__dict__["__init__"].__globals__["scanstring"],
+        _json_parse_int=int,
+        _json_parse_float=float,
         _json_decode_error=json.JSONDecodeError,
         _strict_object_hook=_strict_json_object,
         _strict_object_hook_code=_strict_json_object.__code__,
@@ -375,6 +385,16 @@ class GitHubApi:
                 is _json_decoder_raw_decode
                 and getattr(_json_decoder_raw_decode, "__code__", None)
                 is _json_decoder_raw_decode_code
+                and _json_decoder_globals.get("scanner") is _json_decoder_scanner
+                and getattr(_json_decoder_scanner, "make_scanner", None)
+                is _json_decoder_make_scanner
+                and _json_decoder_globals.get("JSONObject") is _json_decoder_object
+                and getattr(_json_decoder_object, "__code__", None)
+                is _json_decoder_object_code
+                and _json_decoder_globals.get("JSONArray") is _json_decoder_array
+                and getattr(_json_decoder_array, "__code__", None)
+                is _json_decoder_array_code
+                and _json_decoder_globals.get("scanstring") is _json_decoder_scanstring
                 and getattr(_strict_object_hook, "__code__", None)
                 is _strict_object_hook_code
                 and getattr(_reject_constant_hook, "__code__", None)
@@ -388,6 +408,8 @@ class GitHubApi:
                 body,
                 cls=_json_decoder_type,
                 object_pairs_hook=_strict_object_hook,
+                parse_int=_json_parse_int,
+                parse_float=_json_parse_float,
                 parse_constant=_reject_constant_hook,
             )
         except (UnicodeDecodeError, _json_decode_error) as exc:

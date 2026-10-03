@@ -1138,6 +1138,12 @@ def _seal_campaign_forward_universe_cycle_dispatch() -> None:
     expected_resolve_code = expected_resolve.__code__
     expected_authorize = authorize_campaign_forward_source_receipts
     expected_authorize_code = expected_authorize.__code__
+    expected_verify = verify_campaign_forward_evidence
+    expected_verify_code = expected_verify.__code__
+    expected_campaign_evidence_type = CampaignEvidence
+    expected_verification_result_type = VerificationResult
+    expected_canonical_campaign_evidence = _CANONICAL_CAMPAIGN_EVIDENCE
+    expected_canonical_verification_result = _CANONICAL_VERIFICATION_RESULT
     expected_inspect = inspect
     expected_getattr_static = inspect.getattr_static
     expected_hashlib = hashlib
@@ -1208,6 +1214,17 @@ def _seal_campaign_forward_universe_cycle_dispatch() -> None:
                 "campaign forward-cycle witness tables changed"
             )
         if (
+            module_globals.get("CampaignEvidence") is not expected_campaign_evidence_type
+            or module_globals.get("VerificationResult") is not expected_verification_result_type
+            or module_globals.get("_CANONICAL_CAMPAIGN_EVIDENCE")
+            is not expected_canonical_campaign_evidence
+            or module_globals.get("_CANONICAL_VERIFICATION_RESULT")
+            is not expected_canonical_verification_result
+        ):
+            raise expected_error(
+                "campaign forward-cycle structural evidence types changed"
+            )
+        if (
             module_globals.get("inspect") is not expected_inspect
             or expected_inspect.getattr_static is not expected_getattr_static
         ):
@@ -1232,6 +1249,10 @@ def _seal_campaign_forward_universe_cycle_dispatch() -> None:
         if expected_authorize.__code__ is not expected_authorize_code:
             raise expected_error(
                 "campaign forward-cycle authorizer implementation changed"
+            )
+        if expected_verify.__code__ is not expected_verify_code:
+            raise expected_error(
+                "campaign forward-cycle structural verifier implementation changed"
             )
         expected_guard()
 
@@ -1267,6 +1288,25 @@ def _seal_campaign_forward_universe_cycle_dispatch() -> None:
         require_sealed_surface()
         return result
 
+    def sealed_verify_campaign_forward_evidence(*args, **kwargs):
+        if (
+            module_globals.get("verify_campaign_forward_evidence")
+            is not sealed_verify_campaign_forward_evidence
+            or module_globals.get("authorize_campaign_forward_source_receipts")
+            is not sealed_authorize_campaign_forward_source_receipts
+            or module_globals.get(
+                "resolve_campaign_forward_universe_cycle_authority"
+            )
+            is not sealed_resolve_campaign_forward_universe_cycle_authority
+        ):
+            raise expected_error(
+                "campaign forward-cycle public verification surface changed"
+            )
+        require_sealed_surface()
+        result = expected_verify(*args, **kwargs)
+        require_sealed_surface()
+        return result
+
     sealed_resolve_campaign_forward_universe_cycle_authority.__name__ = (
         expected_resolve.__name__
     )
@@ -1285,11 +1325,17 @@ def _seal_campaign_forward_universe_cycle_dispatch() -> None:
     sealed_authorize_campaign_forward_source_receipts.__doc__ = (
         expected_authorize.__doc__
     )
+    sealed_verify_campaign_forward_evidence.__name__ = expected_verify.__name__
+    sealed_verify_campaign_forward_evidence.__qualname__ = expected_verify.__qualname__
+    sealed_verify_campaign_forward_evidence.__doc__ = expected_verify.__doc__
     module_globals["resolve_campaign_forward_universe_cycle_authority"] = (
         sealed_resolve_campaign_forward_universe_cycle_authority
     )
     module_globals["authorize_campaign_forward_source_receipts"] = (
         sealed_authorize_campaign_forward_source_receipts
+    )
+    module_globals["verify_campaign_forward_evidence"] = (
+        sealed_verify_campaign_forward_evidence
     )
 
 
@@ -1301,4 +1347,5 @@ __all__ = [
     "CampaignForwardUniverseCycleBindingError",
     "authorize_campaign_forward_source_receipts",
     "resolve_campaign_forward_universe_cycle_authority",
+    "verify_campaign_forward_evidence",
 ]

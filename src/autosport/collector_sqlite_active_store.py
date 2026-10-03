@@ -679,6 +679,107 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
         finally:
             connection.close()
 
+    def migrate_legacy_event_payloads(
+        self,
+        events_by_delta_id: Mapping[str, MarketEvent],
+        *,
+        source_id: str,
+        stream_epoch: str,
+        allow_missing_delta_ids: Sequence[str] = (),
+    ) -> tuple[int, tuple[str, ...]]:
+        """Move legacy source events into retained archive or prove canonical retirement.
+
+        The retained-vs-tombstoned classification is resolved in the same SQLite
+        writer transaction as any archive inserts.  A tombstone is retirement
+        authority only for the exact source/epoch identity; unexplained missing
+        collector history remains a hard failure.  Assigned-but-not-yet-appended
+        pending deltas retain the existing narrow migration allowance.
+        """
+
+        if not isinstance(events_by_delta_id, Mapping):
+            raise TypeError("events_by_delta_id must be a mapping")
+        source_id = _text(source_id, "source_id")
+        stream_epoch = _text(stream_epoch, "stream_epoch")
+        allowed_missing = set(
+            self._bounded_identity_keys(
+                allow_missing_delta_ids,
+                "allow_missing_delta_id",
+            )
+        )
+        connection = self._connect()
+        migrated = 0
+        retired: list[str] = []
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            for raw_delta_id, event in events_by_delta_id.items():
+                delta_id = _text(raw_delta_id, "delta_id")
+                if not isinstance(event, MarketEvent):
+                    raise TypeError("legacy event payload must be MarketEvent")
+                if event.source_id != source_id:
+                    raise ValueError(
+                        "legacy event payload source conflicts with migration authority"
+                    )
+
+                delta = self._delta_by_id(connection, delta_id)
+                if delta is not None:
+                    if (
+                        delta.source_id != source_id
+                        or delta.stream_epoch != stream_epoch
+                    ):
+                        raise ValueError(
+                            "legacy event payload target conflicts with migration authority"
+                        )
+                    if self._append_event_payload_connection(
+                        connection,
+                        delta,
+                        event,
+                    ):
+                        migrated += 1
+                    continue
+
+                tombstone = connection.execute(
+                    "SELECT source_id, stream_epoch "
+                    "FROM collector_delta_tombstones_v1 WHERE delta_id=?",
+                    (delta_id,),
+                ).fetchone()
+                if tombstone is not None:
+                    if (
+                        tombstone["source_id"] != source_id
+                        or tombstone["stream_epoch"] != stream_epoch
+                    ):
+                        raise ValueError(
+                            "legacy event payload tombstone conflicts with migration authority"
+                        )
+                    # Parse/canonicalize before accepting legacy state as the retired
+                    # identity witness.  The collector tombstone proves that this
+                    # exact delta id was canonically retired; the monotonic product
+                    # source state proves the legacy MarketEvent bound to that id.
+                    self._canonical_event_payload(event)
+                    retired.append(delta_id)
+                    continue
+
+                if delta_id in allowed_missing:
+                    continue
+                raise ValueError(
+                    f"event payload migration target {delta_id} is neither retained "
+                    "nor canonically retired"
+                )
+
+            connection.commit()
+            return migrated, tuple(retired)
+        except sqlite3.DatabaseError as exc:
+            if connection.in_transaction:
+                connection.rollback()
+            raise ValueError(
+                "cannot migrate legacy collector event payload evidence"
+            ) from exc
+        except Exception:
+            if connection.in_transaction:
+                connection.rollback()
+            raise
+        finally:
+            connection.close()
+
     def resolve_event(self, delta: CollectorDelta) -> MarketEvent:
         if not isinstance(delta, CollectorDelta):
             raise TypeError("delta must be CollectorDelta")

@@ -409,6 +409,24 @@ class EconomicGoalStore:
     def load(self) -> EconomicGoalContract:
         return economic_goal_from_json(_read_canonical_contract_text(self.path))
 
+    def load_optional(self) -> EconomicGoalContract | None:
+        """Return None only for a genuinely absent pathname.
+
+        Any existing pathname object, including a broken symlink/reparse alias,
+        must cross the canonical verified reader and therefore fail closed rather
+        than being reclassified as missing authority.
+        """
+
+        try:
+            self.path.lstat()
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            raise EconomicGoalContractError(
+                "cannot inspect persisted economic goal path"
+            ) from exc
+        return self.load()
+
     def initialize_owner(self, contract: EconomicGoalContract) -> None:
         """Create the first owner contract while holding the economic writer lock."""
 

@@ -97,6 +97,49 @@ class ParlayApiSportProviderTests(unittest.TestCase):
             tennis.quotes[0].provider_market_id,
         )
 
+    def test_generic_sport_preserves_provider_and_bookmaker_freshness(self) -> None:
+        event = _event()
+        bookmaker = event["bookmakers"][0]
+        self.assertIsInstance(bookmaker, dict)
+        bookmaker["stale_seconds"] = 7.5
+        bookmaker["last_update_ms"] = 1790020799000
+        bookmaker["topped_up"] = True
+        provider_state = json.dumps(
+            {
+                "ts": 1790020800,
+                "src": {"book-a": {"age_s": 1.25, "role": "primary"}},
+            },
+            separators=(",", ":"),
+        )
+        provider = ParlayApiSportProvider(
+            "basketball_nba",
+            "secret",
+            transport=lambda *_: HttpJsonResponse(
+                [event],
+                200,
+                {"X-Provider-State": provider_state},
+            ),
+            clock=lambda: "2026-09-21T20:00:01+00:00",
+            sleeper=lambda _: None,
+        )
+
+        batch = provider.read_batch()
+
+        self.assertEqual(batch.source_id, "parlayapi:basketball_nba")
+        self.assertEqual(batch.quality_flags, ("UPSTREAM_BOOKMAKER_TOPPED_UP",))
+        self.assertEqual(len(batch.quotes), 2)
+        metadata = batch.quotes[0].metadata
+        self.assertEqual(batch.quotes[0].sport, "basketball_nba")
+        self.assertEqual(metadata["sport_key"], "basketball_nba")
+        self.assertEqual(metadata["provider_state_role"], "primary")
+        self.assertEqual(metadata["provider_state_age_seconds"], 1.25)
+        self.assertEqual(metadata["provider_state_server_timestamp"], 1790020800)
+        self.assertFalse(metadata["provider_state_truncated"])
+        self.assertEqual(metadata["provider_block_stale_seconds"], 7.5)
+        self.assertEqual(metadata["provider_block_last_update_ms"], 1790020799000)
+        self.assertTrue(metadata["provider_block_topped_up"])
+        self.assertTrue(metadata["provider_block_freshness_complete"])
+
     def test_explicit_cross_sport_payload_fails_closed(self) -> None:
         provider = ParlayApiSportProvider(
             "basketball_nba",

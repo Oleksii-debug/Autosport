@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
 
+import scripts.cancel_superseded_pr_workflow_runs as controller_module
 from scripts.cancel_superseded_pr_workflow_runs import (
     CancellationError,
     GitHubApi,
@@ -18,6 +20,67 @@ from scripts.cancel_superseded_pr_workflow_runs_scoped import WorkflowScopedGitH
 HEAD = "a" * 40
 STALE_HEAD = "b" * 40
 _SCRIPT = Path("scripts/cancel_superseded_pr_workflow_runs_scoped.py")
+
+
+
+class _FakeSuccessResponse:
+    def __init__(self, status: int, body: bytes) -> None:
+        self.status = status
+        self._body = body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, traceback):
+        del exc_type, exc, traceback
+        return False
+
+    def read(self) -> bytes:
+        return self._body
+
+
+def _sealed_api(
+    monkeypatch: pytest.MonkeyPatch,
+    workflow_id: int,
+    responses: list[object],
+    *,
+    workflow_name: str = "CI",
+) -> WorkflowScopedGitHubApi:
+    api = WorkflowScopedGitHubApi(
+        repository="Oleksii-debug/Autosport",
+        token="test-token",
+        workflow_id=workflow_id,
+        workflow_name=workflow_name,
+    )
+    queue = list(responses)
+    api.paths = []
+    api.cancelled = []
+    prefix = "https://api.github.com/repos/Oleksii-debug/Autosport"
+
+    def fake_urlopen(request, *, timeout: int):
+        del timeout
+        url = request.full_url
+        method = request.get_method()
+        assert url.startswith(prefix)
+        path = url[len(prefix) :]
+        if method == "POST":
+            parts = path.split("/")
+            assert parts[:3] == ["", "actions", "runs"]
+            assert parts[-1] == "cancel"
+            api.cancelled.append(int(parts[3]))
+            return _FakeSuccessResponse(202, b'{"message":"accepted"}')
+        assert method == "GET"
+        api.paths.append(path)
+        if not queue:
+            raise AssertionError("unexpected API request")
+        response = queue.pop(0)
+        return _FakeSuccessResponse(
+            200,
+            json.dumps(response, separators=(",", ":")).encode("utf-8"),
+        )
+
+    monkeypatch.setattr(controller_module, "urlopen", fake_urlopen)
+    return api
 
 
 class FakeScopedApi(WorkflowScopedGitHubApi):
@@ -262,8 +325,8 @@ def test_scoped_scan_applies_authorized_same_head_empty_reference_recovery() -> 
     ]
 
 
-def test_recovered_candidate_identity_is_revalidated_at_cancel_boundary() -> None:
-    api = FakeScopedApi(
+def test_recovered_candidate_identity_is_revalidated_at_cancel_boundary(monkeypatch: pytest.MonkeyPatch) -> None:
+    api = _sealed_api(monkeypatch, 
         356678400,
         [
             [_associated_pr(2022)],
@@ -291,8 +354,8 @@ def test_recovered_candidate_identity_is_revalidated_at_cancel_boundary() -> Non
     ]
 
 
-def test_recovered_candidate_rejects_historical_cross_pr_reuse_at_cancel_boundary() -> None:
-    api = FakeScopedApi(
+def test_recovered_candidate_rejects_historical_cross_pr_reuse_at_cancel_boundary(monkeypatch: pytest.MonkeyPatch) -> None:
+    api = _sealed_api(monkeypatch, 
         356678400,
         [
             [_associated_pr(2022)],
@@ -315,7 +378,7 @@ def test_recovered_candidate_rejects_historical_cross_pr_reuse_at_cancel_boundar
         api.cancel(99)
 
 
-def test_recovered_same_head_candidate_rejects_ready_transition_before_post() -> None:
+def test_recovered_same_head_candidate_rejects_ready_transition_before_post(monkeypatch: pytest.MonkeyPatch) -> None:
     live_payload = {
         "head": {
             "sha": HEAD,
@@ -325,7 +388,7 @@ def test_recovered_same_head_candidate_rejects_ready_transition_before_post() ->
         "state": "open",
         "draft": False,
     }
-    api = FakeScopedApi(
+    api = _sealed_api(monkeypatch, 
         356678400,
         [
             [_associated_pr(2022)],
@@ -486,7 +549,7 @@ def test_historical_recovery_never_overwrites_explicit_pr_metadata() -> None:
 def test_historical_stale_candidate_can_cancel_after_fresh_target_rechecks(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    api = FakeScopedApi(
+    api = _sealed_api(monkeypatch, 
         356678400,
         [
             [_associated_pr(2022, head_sha=HEAD)],
@@ -504,15 +567,9 @@ def test_historical_stale_candidate_can_cancel_after_fresh_target_rechecks(
     )
     assert recovered.pr_numbers == (2022,)
 
-    cancelled: list[int] = []
-    monkeypatch.setattr(
-        GitHubApi,
-        "cancel",
-        lambda self, run_id: cancelled.append(run_id),
-    )
     api.cancel(99)
 
-    assert cancelled == [99]
+    assert api.cancelled == [99]
     assert api.paths == [
         f"/commits/{STALE_HEAD}/pulls?per_page=100&page=1",
         f"/commits/{STALE_HEAD}/pulls?per_page=100&page=1",
@@ -523,7 +580,7 @@ def test_historical_stale_candidate_can_cancel_after_fresh_target_rechecks(
 def test_historical_stale_candidate_rollback_to_ready_head_revokes_cancel(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    api = FakeScopedApi(
+    api = _sealed_api(monkeypatch, 
         356678400,
         [
             [_associated_pr(2022, head_sha=HEAD)],
@@ -541,22 +598,16 @@ def test_historical_stale_candidate_rollback_to_ready_head_revokes_cancel(
     )
     assert recovered.pr_numbers == (2022,)
 
-    cancelled: list[int] = []
-    monkeypatch.setattr(
-        GitHubApi,
-        "cancel",
-        lambda self, run_id: cancelled.append(run_id),
-    )
     with pytest.raises(CancellationError, match="live qualification changed"):
         api.cancel(99)
 
-    assert cancelled == []
+    assert api.cancelled == []
 
 
 def test_historical_stale_candidate_ambiguity_before_post_fails_closed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    api = FakeScopedApi(
+    api = _sealed_api(monkeypatch, 
         356678400,
         [
             [_associated_pr(2022, head_sha=HEAD)],
@@ -576,16 +627,10 @@ def test_historical_stale_candidate_ambiguity_before_post_fails_closed(
     )
     assert recovered.pr_numbers == (2022,)
 
-    cancelled: list[int] = []
-    monkeypatch.setattr(
-        GitHubApi,
-        "cancel",
-        lambda self, run_id: cancelled.append(run_id),
-    )
     with pytest.raises(CancellationError, match="association is no longer unique"):
         api.cancel(99)
 
-    assert cancelled == []
+    assert api.cancelled == []
 
 
 def test_historical_recovery_requires_exact_workflow_identity() -> None:

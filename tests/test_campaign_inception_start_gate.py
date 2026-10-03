@@ -467,6 +467,31 @@ def test_validate_state_rejects_rehashed_wrong_prestart_digest(
         )
 
 
+def test_validate_state_rejects_boolean_alias_inside_source_spec(
+    tmp_path: Path,
+) -> None:
+    _manifest_value, locator, store, spec, _authority_root = _setup(tmp_path)
+    precommit, payload = _pristine_inception_state_payload(
+        locator=locator,
+        store=store,
+        spec=spec,
+    )
+    source_spec_payload = dict(payload["source_spec"])
+    assert source_spec_payload["evaluation_end_slot_ordinal"] == 1
+    source_spec_payload["evaluation_end_slot_ordinal"] = True
+    payload["source_spec"] = source_spec_payload
+
+    with pytest.raises(
+        CampaignInceptionConflictError,
+        match="different collector source/run",
+    ):
+        inception_module._validate_state(
+            payload,
+            precommit=precommit,
+            spec=spec,
+        )
+
+
 def test_validate_state_rejects_boolean_top_level_schema_version(
     tmp_path: Path,
 ) -> None:

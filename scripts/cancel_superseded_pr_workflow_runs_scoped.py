@@ -318,18 +318,21 @@ class WorkflowScopedGitHubApi(GitHubApi):
         pull_request,
     ):
         base_cancel_code = getattr(base_cancel, "__code__", None)
-        helper_dispatch = (
-            (
-                "_historical_associated_pr_number",
-                historical_associated_pr_number,
-            ),
-            (
-                "_historical_head_has_no_associated_prs",
-                historical_head_has_no_associated_prs,
-            ),
-            ("_canonical_branch_head", canonical_branch_head),
-            ("live_pr_qualification", live_pr_qualification),
-            ("_pull_request", pull_request),
+        helper_dispatch = tuple(
+            (name, implementation, getattr(implementation, "__code__", None))
+            for name, implementation in (
+                (
+                    "_historical_associated_pr_number",
+                    historical_associated_pr_number,
+                ),
+                (
+                    "_historical_head_has_no_associated_prs",
+                    historical_head_has_no_associated_prs,
+                ),
+                ("_canonical_branch_head", canonical_branch_head),
+                ("live_pr_qualification", live_pr_qualification),
+                ("_pull_request", pull_request),
+            )
         )
 
         def cancel(self, run_id: int) -> None:
@@ -339,10 +342,11 @@ class WorkflowScopedGitHubApi(GitHubApi):
                 raise CancellationError(
                     "canonical base cancellation authority changed"
                 )
-            for name, expected in helper_dispatch:
+            for name, expected, expected_code in helper_dispatch:
                 bound = getattr(self, name, None)
                 if (
-                    getattr(bound, "__self__", None) is not self
+                    getattr(expected, "__code__", None) is not expected_code
+                    or getattr(bound, "__self__", None) is not self
                     or getattr(bound, "__func__", None) is not expected
                 ):
                     raise CancellationError(

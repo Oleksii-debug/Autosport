@@ -105,18 +105,26 @@ def test_accept_enum_remains_forward_compatible_but_is_not_currently_mintable():
     )
 
 
-def test_direct_assessment_construction_cannot_mint_accept():
-    with pytest.raises(ValueError, match="canonical provider authority"):
+@pytest.mark.parametrize(
+    "action",
+    [
+        ConfidenceAction.ACCEPT,
+        ConfidenceAction.DOWNWEIGHT,
+        ConfidenceAction.ABSTAIN,
+    ],
+)
+def test_direct_assessment_construction_is_unavailable(action: ConfidenceAction):
+    with pytest.raises(TypeError, match="issued only by assess_source_quality"):
         SourceQualityAssessment(
-            action=ConfidenceAction.ACCEPT,
-            input_confidence=Decimal("1"),
-            reasons=("FORGED_ACCEPT",),
+            action=action,
+            input_confidence=Decimal("0.75"),
+            reasons=("CALLER_MINTED",),
             corroborated=False,
         )
 
 
 def test_direct_assessment_construction_cannot_mint_corroboration():
-    with pytest.raises(ValueError, match="canonical corroborator authority"):
+    with pytest.raises(TypeError, match="issued only by assess_source_quality"):
         SourceQualityAssessment(
             action=ConfidenceAction.DOWNWEIGHT,
             input_confidence=Decimal("0.75"),

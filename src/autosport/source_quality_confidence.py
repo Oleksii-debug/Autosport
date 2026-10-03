@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from enum import Enum
 import re
@@ -117,20 +117,10 @@ class SourceQualityAssessment:
     reasons: tuple[str, ...]
     corroborated: bool
 
-    def __post_init__(self) -> None:
-        if not isinstance(self.action, ConfidenceAction):
-            raise ValueError("action must be ConfidenceAction")
-        _validate_probability(self.input_confidence, "input_confidence")
-        if type(self.reasons) is not tuple:
-            raise ValueError("reasons must be an exact tuple")
-        normalized_reasons = tuple(_strict_text(reason, "reason") for reason in self.reasons)
-        object.__setattr__(self, "reasons", normalized_reasons)
-        if type(self.corroborated) is not bool:
-            raise ValueError("corroborated must be bool")
-        if self.action is ConfidenceAction.ACCEPT:
-            raise ValueError("ACCEPT requires canonical provider authority integration")
-        if self.corroborated:
-            raise ValueError("corroborated=True requires canonical corroborator authority integration")
+    def __init__(self, *_args: object, **_kwargs: object) -> None:
+        raise TypeError(
+            "SourceQualityAssessment is issued only by assess_source_quality"
+        )
 
 
 def assess_source_quality(
@@ -165,7 +155,10 @@ def assess_source_quality(
     if not observation.provenance_bound:
         reasons.append("PROVENANCE_UNBOUND")
 
-    age = now - observation.observed_at
+    age = (
+        now.astimezone(timezone.utc)
+        - observation.observed_at.astimezone(timezone.utc)
+    )
     if age < timedelta(0):
         reasons.append("FUTURE_OBSERVATION")
     elif age > policy.max_age:
@@ -177,38 +170,43 @@ def assess_source_quality(
     corroborated = False
     input_confidence = observation.base_confidence
 
-    if reasons:
-        return SourceQualityAssessment(
-            action=ConfidenceAction.ABSTAIN,
-            input_confidence=input_confidence,
-            reasons=tuple(reasons),
-            corroborated=corroborated,
+    def _result(
+        action: ConfidenceAction,
+        result_reasons: tuple[str, ...],
+    ) -> SourceQualityAssessment:
+        if action is ConfidenceAction.ACCEPT:
+            raise RuntimeError("ACCEPT is unavailable without canonical provider authority")
+        normalized_reasons = tuple(
+            _strict_text(reason, "reason") for reason in result_reasons
         )
+        assessment = object.__new__(SourceQualityAssessment)
+        object.__setattr__(assessment, "action", action)
+        object.__setattr__(assessment, "input_confidence", input_confidence)
+        object.__setattr__(assessment, "reasons", normalized_reasons)
+        object.__setattr__(assessment, "corroborated", corroborated)
+        return assessment
+
+    if reasons:
+        return _result(ConfidenceAction.ABSTAIN, tuple(reasons))
 
     # SourceClass is caller-supplied.  There is no durable product-owned issuance
     # resolver in this authority family yet, so treating OFFICIAL_API as trusted
     # here would be an authority-forgery path.
     if observation.source_class is SourceClass.OFFICIAL_API:
-        return SourceQualityAssessment(
-            action=ConfidenceAction.ABSTAIN,
-            input_confidence=input_confidence,
-            reasons=("OFFICIAL_API_AUTHORITY_UNRESOLVED",),
-            corroborated=corroborated,
+        return _result(
+            ConfidenceAction.ABSTAIN,
+            ("OFFICIAL_API_AUTHORITY_UNRESOLVED",),
         )
 
     if input_confidence < policy.downweight_confidence:
-        return SourceQualityAssessment(
-            action=ConfidenceAction.ABSTAIN,
-            input_confidence=input_confidence,
-            reasons=("CONFIDENCE_BELOW_DOWNWEIGHT_FLOOR",),
-            corroborated=corroborated,
+        return _result(
+            ConfidenceAction.ABSTAIN,
+            ("CONFIDENCE_BELOW_DOWNWEIGHT_FLOOR",),
         )
 
-    return SourceQualityAssessment(
-        action=ConfidenceAction.DOWNWEIGHT,
-        input_confidence=input_confidence,
-        reasons=(f"{observation.source_class.value}_CANNOT_MINT_ACCEPT",),
-        corroborated=corroborated,
+    return _result(
+        ConfidenceAction.DOWNWEIGHT,
+        (f"{observation.source_class.value}_CANNOT_MINT_ACCEPT",),
     )
 
 

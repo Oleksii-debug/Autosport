@@ -5,6 +5,7 @@ import hashlib
 import json
 import threading
 import weakref
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from types import MappingProxyType
 from datetime import datetime, timezone
@@ -123,8 +124,52 @@ def _digest(
     return _sha256(raw).hexdigest()
 
 
-def _trusted_now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="microseconds")
+_TEST_TRUSTED_NOW: ContextVar[str | None] = ContextVar(
+    "autosport_supervised_execution_test_trusted_now",
+    default=None,
+)
+
+
+def _trusted_now(
+    _datetime=datetime,
+    _utc=timezone.utc,
+    _test_now=_TEST_TRUSTED_NOW,
+) -> str:
+    """Return product-owned UTC wall time; deterministic override is test-internal."""
+
+    test_value = _test_now.get()
+    if test_value is not None:
+        return test_value
+    return _datetime.now(_utc).isoformat(timespec="microseconds")
+
+
+_CANONICAL_TRUSTED_NOW = _trusted_now
+_CANONICAL_TRUSTED_NOW_CODE = getattr(_CANONICAL_TRUSTED_NOW, "__code__", None)
+_CANONICAL_TRUSTED_NOW_DEFAULTS = _CANONICAL_TRUSTED_NOW.__defaults__
+_CANONICAL_TEST_TRUSTED_NOW = _TEST_TRUSTED_NOW
+
+
+def _canonical_trusted_now(
+    *,
+    _clock=_CANONICAL_TRUSTED_NOW,
+    _clock_code=_CANONICAL_TRUSTED_NOW_CODE,
+    _clock_defaults=_CANONICAL_TRUSTED_NOW_DEFAULTS,
+    _test_now=_CANONICAL_TEST_TRUSTED_NOW,
+) -> str:
+    if (
+        globals().get("_trusted_now") is not _clock
+        or globals().get("_CANONICAL_TRUSTED_NOW") is not _clock
+        or globals().get("_CANONICAL_TRUSTED_NOW_CODE") is not _clock_code
+        or globals().get("_CANONICAL_TRUSTED_NOW_DEFAULTS") is not _clock_defaults
+        or globals().get("_TEST_TRUSTED_NOW") is not _test_now
+        or globals().get("_CANONICAL_TEST_TRUSTED_NOW") is not _test_now
+        or getattr(_clock, "__code__", None) is not _clock_code
+        or _clock.__defaults__ is not _clock_defaults
+    ):
+        raise SupervisedExecutionError(
+            "canonical supervised execution trusted clock authority changed"
+        )
+    return _clock()
 
 
 def _quote_payload(quote: object) -> dict[str, object]:
@@ -1286,7 +1331,7 @@ def reserve_supervised_plan(
     bound: BoundSupervisedExecutionPlan,
     approval: SupervisedApproval,
 ) -> str:
-    now = _trusted_now()
+    now = _canonical_trusted_now()
     _require_approval(bound, approval, now)
     _, assert_bound = _canonical_bound_plan_authority_dispatch()
     methods = _canonical_supervised_ledger_dispatch(ledger)
@@ -1344,7 +1389,7 @@ def revoke_supervised_approval(
         plan_id=bound.execution_plan.plan_id,
         approval_id=approval.ledger_identity,
         approval_fingerprint=approval.fingerprint,
-        revoked_at=_trusted_now(),
+        revoked_at=_canonical_trusted_now(),
         revocation_evidence_sha256=_sha(
             revocation_evidence_sha256, "revocation_evidence_sha256"
         ),
@@ -1359,7 +1404,7 @@ def begin_supervised_attempt(
     action_id: str,
     attempt_id: str,
 ) -> ExecutionAttempt:
-    now = _trusted_now()
+    now = _canonical_trusted_now()
     _require_approval(bound, approval, now)
     _require_reserved(ledger, bound)
     _require_durable_approval(ledger, bound, approval)
@@ -1752,6 +1797,7 @@ def _install_supervised_execution_composition_guard() -> None:
     helper_names = (
         "_canonical_bound_plan_authority_dispatch",
         "_canonical_supervised_ledger_dispatch",
+        "_canonical_trusted_now",
         "_canonical_bound_plan_witness",
         "_digest",
         "_time",

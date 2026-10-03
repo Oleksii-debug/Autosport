@@ -601,6 +601,54 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             ).verified_records()
             self.assertEqual(len(records), 1)
 
+    def test_future_local_availability_cannot_enter_old_decision_cut(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            clock = _ManualClock(self.START + timedelta(seconds=1))
+            late = self._event(
+                selection="selection-a",
+                sequence=1,
+                observed=self.START + timedelta(seconds=2),
+            )
+            late = MarketEvent.from_dict(
+                {
+                    **late.to_dict(),
+                    "source_ts": self.START.isoformat(),
+                }
+            )
+            factory = _EmptyIntentFactory()
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(workspace, [(late,), ()]),
+                factory=factory,
+                clock=clock,
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+
+            first = loop.run_cycle()
+
+            self.assertEqual(first.status, LiveCycleStatus.BACKPRESSURE)
+            self.assertIn("not causally available", first.detail)
+            self.assertEqual(factory.calls, [])
+            self.assertFalse((workspace / "decisions.jsonl").exists())
+
+            clock.value = self.START + timedelta(seconds=3)
+            second = loop.run_cycle()
+
+            self.assertEqual(second.status, LiveCycleStatus.DECIDED)
+            self.assertEqual(
+                factory.calls,
+                [("input-a", (("selection-a", 1, "open"),))],
+            )
+            self.assertEqual(
+                len(
+                    JsonlDecisionLedger(
+                        workspace / "decisions.jsonl"
+                    ).verified_records()
+                ),
+                1,
+            )
+
     def test_single_dirty_and_no_change_cycles_avoid_unrelated_mirror_scans(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

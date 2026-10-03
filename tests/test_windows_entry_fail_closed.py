@@ -45,7 +45,12 @@ class WindowsEntrypointFailClosedTests(unittest.TestCase):
         module.ensure_webview2_runtime = ensure_webview2_runtime
         return module
 
-    def _interactive_patches(self, *, calls: list[str] | None = None):
+    def _interactive_patches(
+        self,
+        *,
+        calls: list[str] | None = None,
+        lock_error: BaseException | None = None,
+    ):
         workspace = Path.cwd().resolve() / ".autosport-entry-test-workspace"
         if calls is None:
             workspace_patch = patch.object(
@@ -59,9 +64,28 @@ class WindowsEntrypointFailClosedTests(unittest.TestCase):
                 "_probe_workspace_writable",
                 side_effect=lambda _workspace: calls.append("workspace"),
             )
+
+        class FakeInteractiveLock:
+            def __init__(self, actual_workspace: Path) -> None:
+                self.workspace = actual_workspace
+
+            def __enter__(self):
+                if calls is not None:
+                    calls.append("instance_lock")
+                if lock_error is not None:
+                    raise lock_error
+                return self
+
+            def __exit__(self, exc_type, exc_value, traceback) -> bool:
+                del exc_type, exc_value, traceback
+                if calls is not None:
+                    calls.append("instance_unlock")
+                return False
+
         return (
             patch("autosport.paths.default_workspace", return_value=workspace),
             workspace_patch,
+            patch("autosport.workspace_lock.WorkspaceInteractiveLock", FakeInteractiveLock),
         )
 
     def test_unknown_packaged_argument_fails_before_webview_shell(self) -> None:
@@ -111,10 +135,11 @@ class WindowsEntrypointFailClosedTests(unittest.TestCase):
         fake_shell.AutosportWebBridge = AutosportWebBridge
         fake_shell.WindowsWebViewUnavailable = WindowsWebViewUnavailable
         fake_shell.launch_windows_shell = launch_windows_shell
-        path_patch, workspace_patch = self._interactive_patches(calls=calls)
+        path_patch, workspace_patch, instance_patch = self._interactive_patches(calls=calls)
         with (
             path_patch,
             workspace_patch,
+            instance_patch,
             patch.dict(
                 sys.modules,
                 {
@@ -131,7 +156,15 @@ class WindowsEntrypointFailClosedTests(unittest.TestCase):
 
         self.assertEqual(
             calls,
-            ["workspace", "deployment", "controller", "bridge", "webview"],
+            [
+                "workspace",
+                "instance_lock",
+                "deployment",
+                "controller",
+                "bridge",
+                "webview",
+                "instance_unlock",
+            ],
         )
 
     def test_workspace_failure_precedes_runtime_dependency_check(self) -> None:
@@ -163,11 +196,12 @@ class WindowsEntrypointFailClosedTests(unittest.TestCase):
         calls: list[str] = []
         environment = {name: "" for name in WEBVIEW2_ENVIRONMENT_OVERRIDES}
         environment["WEBVIEW2_USER_DATA_FOLDER"] = " \t "
-        path_patch, workspace_patch = self._interactive_patches(calls=calls)
+        path_patch, workspace_patch, instance_patch = self._interactive_patches(calls=calls)
 
         with (
             path_patch,
             workspace_patch,
+            instance_patch,
             patch.dict("os.environ", environment, clear=False),
             patch.object(windows_entry, "_show_startup_error") as show_error,
             patch.dict(
@@ -181,8 +215,58 @@ class WindowsEntrypointFailClosedTests(unittest.TestCase):
         ):
             self.assertEqual(main([]), 3)
 
-        self.assertEqual(calls, ["workspace"])
+        self.assertEqual(calls, ["workspace", "instance_lock", "instance_unlock"])
         show_error.assert_called_once_with(windows_entry._WEBVIEW2_STARTUP_ERROR)
+
+    def test_second_interactive_instance_fails_before_runtime_or_controller(self) -> None:
+        from autosport.workspace_lock import WorkspaceEconomicLockBusyError
+
+        calls: list[str] = []
+        path_patch, workspace_patch, instance_patch = self._interactive_patches(
+            calls=calls,
+            lock_error=WorkspaceEconomicLockBusyError("secret internal busy detail"),
+        )
+        with (
+            path_patch,
+            workspace_patch,
+            instance_patch,
+            patch.object(windows_entry, "_show_startup_error") as show_error,
+            patch.dict(
+                sys.modules,
+                {
+                    "autosport.webview2_runtime_deployment": self._deployment_module(
+                        exc=AssertionError("busy lock must fail before runtime deployment"),
+                        calls=calls,
+                    ),
+                },
+            ),
+        ):
+            self.assertEqual(main([]), 2)
+
+        self.assertEqual(calls, ["workspace", "instance_lock"])
+        show_error.assert_called_once_with(windows_entry._WORKSPACE_INSTANCE_BUSY_ERROR)
+        self.assertNotIn("secret internal busy detail", show_error.call_args.args[0])
+
+    def test_interactive_lock_integrity_failure_is_bounded_and_secret_safe(self) -> None:
+        from autosport.workspace_lock import WorkspaceEconomicLockError
+
+        secret = "secret lock pathname detail"
+        calls: list[str] = []
+        path_patch, workspace_patch, instance_patch = self._interactive_patches(
+            calls=calls,
+            lock_error=WorkspaceEconomicLockError(secret),
+        )
+        with (
+            path_patch,
+            workspace_patch,
+            instance_patch,
+            patch.object(windows_entry, "_show_startup_error") as show_error,
+        ):
+            self.assertEqual(main([]), 2)
+
+        self.assertEqual(calls, ["workspace", "instance_lock"])
+        show_error.assert_called_once_with(windows_entry._WORKSPACE_INSTANCE_LOCK_ERROR)
+        self.assertNotIn(secret, show_error.call_args.args[0])
 
     def test_unavailable_runtime_fails_before_webview_shell_start(self) -> None:
         calls: list[str] = []
@@ -197,10 +281,11 @@ class WindowsEntrypointFailClosedTests(unittest.TestCase):
 
         fake_shell.WindowsWebViewUnavailable = WindowsWebViewUnavailable
         fake_shell.main = shell_main
-        path_patch, workspace_patch = self._interactive_patches()
+        path_patch, workspace_patch, instance_patch = self._interactive_patches()
         with (
             path_patch,
             workspace_patch as workspace_probe,
+            instance_patch,
             patch.object(windows_entry, "_show_startup_error") as show_error,
             patch.dict(
                 sys.modules,
@@ -219,11 +304,12 @@ class WindowsEntrypointFailClosedTests(unittest.TestCase):
         show_error.assert_called_once_with(windows_entry._WEBVIEW2_STARTUP_ERROR)
 
     def test_preflight_exception_fails_closed_without_detail_leak(self) -> None:
-        path_patch, workspace_patch = self._interactive_patches()
+        path_patch, workspace_patch, instance_patch = self._interactive_patches()
         secret = "secret-bearing-preflight-detail"
         with (
             path_patch,
             workspace_patch as workspace_probe,
+            instance_patch,
             patch.object(windows_entry, "_show_startup_error") as show_error,
             patch.dict(
                 sys.modules,

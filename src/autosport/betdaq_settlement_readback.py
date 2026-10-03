@@ -37,6 +37,7 @@ _INTEGER_RE = re.compile(r"[0-9]+\Z")
 _DECIMAL_RE = re.compile(r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)\Z")
 _CANONICAL_ACCOUNT_HTTPS_POST = _account._CANONICAL_HTTPS_POST
 _REQUIRE_CANONICAL_ACCOUNT_TRANSPORT = _account._require_canonical_account_transport
+_TERMINAL_ORDER_STATUS_CODES = _account._TERMINAL_STATUS_CODES
 
 
 class BetdaqEconomicReadbackError(RuntimeError):
@@ -196,7 +197,7 @@ class BetdaqOrderSettlementObservation:
                 "scalar economic use requires independently proven denomination"
             )
         expected_final = (
-            self.order_status_code in {4, 5}
+            self.order_status_code in _TERMINAL_ORDER_STATUS_CODES
             and self.gross_settlement_amount is not None
             and (
                 self.order_commission is not None
@@ -543,7 +544,7 @@ class BetdaqEconomicReadbackClient:
         )
         status = _unsigned_byte_attr(result, "OrderStatus")
         final = (
-            status in {4, 5}
+            status in _TERMINAL_ORDER_STATUS_CODES
             and gross is not None
             and (order_commission is not None or market_commission is not None)
             and market_settled_at is not None

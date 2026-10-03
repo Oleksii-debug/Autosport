@@ -742,6 +742,65 @@ class ParlayApiProductSourceTests(unittest.TestCase):
 
             self.assertIsNone(source._collector_store)
 
+    def test_bound_store_instance_method_shadow_cannot_redirect_history_reads(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory) / "workspace"
+            source = ParlayApiProductSource(
+                _Provider([_batch(cursor="snapshot-1")]),
+                workspace=workspace,
+                authority_root=Path(directory) / "authority",
+                lawful_terms_ref="terms:parlayapi:v1",
+                retention_ref="retention:parlayapi:v1",
+                clock=lambda: "2026-09-20T17:34:02+00:00",
+            )
+            store = CollectorDeltaStore(
+                workspace / "collector_deltas.json",
+                max_bytes=4 * 1024 * 1024,
+            )
+            source.bind_collector_store(store)
+            hostile_calls = []
+
+            def hostile(*args, **kwargs):
+                hostile_calls.append((args, kwargs))
+                raise AssertionError("hostile instance dispatch executed")
+
+            store.event_digest_maps = hostile
+            page = source.fetch_catalog_page(None)
+
+            self.assertEqual(page.cursor, "snapshot-1")
+            self.assertEqual(hostile_calls, [])
+
+    def test_bound_store_class_method_replacement_fails_before_hostile_dispatch(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory) / "workspace"
+            source = ParlayApiProductSource(
+                _Provider([_batch(cursor="snapshot-1")]),
+                workspace=workspace,
+                authority_root=Path(directory) / "authority",
+                lawful_terms_ref="terms:parlayapi:v1",
+                retention_ref="retention:parlayapi:v1",
+                clock=lambda: "2026-09-20T17:34:02+00:00",
+            )
+            store = CollectorDeltaStore(
+                workspace / "collector_deltas.json",
+                max_bytes=4 * 1024 * 1024,
+            )
+            source.bind_collector_store(store)
+            hostile_calls = []
+
+            def hostile(*args, **kwargs):
+                hostile_calls.append((args, kwargs))
+                raise AssertionError("hostile class dispatch executed")
+
+            with patch.object(CollectorDeltaStore, "event_digest_maps", hostile):
+                with self.assertRaisesRegex(
+                    ProductSourceStateError,
+                    "durable-history dispatch was replaced",
+                ):
+                    source.fetch_catalog_page(None)
+
+            self.assertEqual(hostile_calls, [])
+
     def test_failed_explicit_collector_store_binding_rolls_back_authority(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory) / "workspace"

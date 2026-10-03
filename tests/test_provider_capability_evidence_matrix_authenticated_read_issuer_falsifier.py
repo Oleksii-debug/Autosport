@@ -425,3 +425,53 @@ def test_betdaq_matrix_rejects_noncanonical_lifecycle_journal_type(
             integration,
             journal=object(),
         )
+
+
+def test_restart_journal_can_requalify_only_with_fresh_product_issued_successor(
+    monkeypatch,
+) -> None:
+    first = _product_issued_betdaq_balance(monkeypatch)
+    durable = CapabilityEvidenceJournal()
+    durable.publish(first.evidence)
+    restored = CapabilityEvidenceJournal.from_json(durable.to_json())
+
+    successor = _product_issued_betdaq_balance(
+        monkeypatch,
+        observed_minute=5,
+        committed_at="2026-09-21T10:06:00+00:00",
+        review_due_at="2026-09-21T11:06:00+00:00",
+        predecessor_id=first.evidence.evidence_id,
+    )
+    integration = bind_bookmaker_integration(
+        successor.profile,
+        integration_kind=BookmakerIntegrationKind.OFFICIAL_API,
+        observed_at="2026-09-21T10:06:30+00:00",
+        source_ref="betdaq-secure-api-restart",
+        source_payload_sha256="2" * 64,
+    )
+
+    fact = issue_betdaq_authenticated_read_evidence(
+        successor,
+        integration,
+        journal=restored,
+    )
+    assert fact.evidence_sha256 == successor.evidence.evidence_id
+    assert successor.evidence.evidence_id in restored.to_json()
+
+    matrix = build_provider_capability_evidence_matrix(
+        successor.profile,
+        integration,
+        environment="production",
+        application_mode="betdaq-authenticated-readonly",
+        matrix_version=1,
+        as_of="2026-09-21T10:07:00+00:00",
+        matrix_ref="betdaq-restart-reacquisition",
+        evidence=(fact,),
+    )
+    assert matrix.qualifies(
+        BookmakerCapability.BALANCE_READ,
+        accepted_grades=frozenset(
+            {ProviderCapabilityTruthGrade.AUTHENTICATED_READ_PROVEN}
+        ),
+        at_time="2026-09-21T10:07:00+00:00",
+    )

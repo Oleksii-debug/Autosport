@@ -416,6 +416,109 @@ def test_provider_observation_cannot_cross_next_slot_boundary(
     assert evidence[0]["terminal"]["status"] == "LOCAL_FAILURE"
 
 
+def test_later_successful_capture_cannot_define_forward_universe(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    locator, store, spec, provider_store = _setup(tmp_path)
+    establish_campaign_inception(
+        precommit_locator=locator,
+        store=store,
+        source_spec=spec,
+    )
+
+    slot_zero = store._next_collector_schedule_slot(
+        source_id=spec.source_id,
+        run_id=spec.run_id,
+    )
+    assert slot_zero["slot_ordinal"] == 0
+    first_cycle = store._begin_scheduled_collector_cycle(
+        source_id=spec.source_id,
+        run_id=spec.run_id,
+        stream_epoch=spec.stream_epoch,
+        max_items=spec.max_items,
+        slot_ordinal=slot_zero["slot_ordinal"],
+        due_at=slot_zero["due_at"],
+        attempted_at=slot_zero["due_at"],
+    )
+    store._finish_collector_cycle(
+        source_id=spec.source_id,
+        cycle_seq=first_cycle,
+        status="LOCAL_FAILURE",
+        completed_at=slot_zero["due_at"],
+        catalog_changes=(),
+        observed_delta_ids=(),
+        committed_delta_ids=(),
+        duplicate_delta_ids=(),
+        error_code="slot-zero-failure",
+    )
+
+    monkeypatch.setattr(
+        provider_module,
+        "urlopen",
+        lambda _request, _timeout: _FakeSseResponse(_empty_frame()),
+    )
+    monkeypatch.setattr(
+        provider_module,
+        "_default_clock",
+        lambda: "2100-01-01T06:00:10.500000Z",
+    )
+    clock_values = iter(
+        [
+            "2100-01-01T06:00:10+00:00",
+            "2100-01-01T06:00:11+00:00",
+        ]
+    )
+    snapshot, cycle_receipt = capture_campaign_complete_game_board(
+        precommit_locator=locator,
+        store=store,
+        source_spec=spec,
+        evidence_store=provider_store,
+        request=_request(),
+        api_key="secret-value",
+        timeout_seconds=3.0,
+        clock=lambda: next(clock_values),
+    )
+
+    assert cycle_receipt.slot_ordinal == 1
+    assert cycle_receipt.provider_evidence_sha256 == snapshot.evidence_sha256
+
+    universe_store = ProviderEvaluationUniverseStore(
+        tmp_path / "later-slot-universe",
+        authority_id="later-slot-authority",
+        source_id=spec.source_id,
+        authority_root=tmp_path / "later-slot-authority-root",
+    )
+    protocol = ForwardEvidenceProtocolEnvelope(
+        campaign_id="campaign-cycle-capture-test",
+        scientific_protocol_sha256=PROTOCOL_SHA,
+        candidate_universe_rule_id=FORWARD_UNIVERSE_RULE_ID,
+        candidate_universe_rule_sha256=FORWARD_UNIVERSE_RULE_SHA256,
+        forward_evaluation_policy_sha256="7" * 64,
+        runtime_identity_sha256="6" * 64,
+        baseline_set_sha256="5" * 64,
+        protective_metric_set_sha256="4" * 64,
+        cost_policy_sha256="3" * 64,
+        precommit_anchor_lower=datetime(2099, 12, 31, 19, 0, tzinfo=timezone.utc),
+        precommit_anchor_upper=datetime(2099, 12, 31, 19, 30, tzinfo=timezone.utc),
+    )
+
+    with pytest.raises(
+        CampaignForwardUniverseCycleBindingError,
+        match="first precommitted evaluation slot",
+    ):
+        resolve_campaign_forward_universe_cycle_authority(
+            precommit_locator=locator,
+            collector_store=store,
+            source_spec=spec,
+            cycle_receipt=cycle_receipt,
+            provider_evidence_store=provider_store,
+            universe_store=universe_store,
+            protocol=protocol,
+            event_lifecycle=None,
+        )
+
+
 def test_cycle_bound_structural_verifier_replaces_caller_receipts_and_fixes_scope(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

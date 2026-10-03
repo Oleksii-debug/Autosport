@@ -4716,6 +4716,64 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
                     clock=_ManualClock(self.START + timedelta(seconds=2)),
                 )
 
+    def test_committed_restart_does_not_regrade_history_with_new_freshness_policy(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            decision_time = self.START + timedelta(seconds=1)
+            health_store = SourceHealthStore(workspace / "source_health.json")
+            health_store.record_success(
+                "provider-a",
+                now=(self.START + timedelta(milliseconds=500)).isoformat(),
+                received=1,
+                accepted=1,
+                rejected=0,
+                cursor="1",
+                latest_source_ts=self.START.isoformat(),
+                quality_flags=(),
+            )
+            first = self._loop(
+                workspace,
+                observer=_DurableObserver(
+                    workspace,
+                    [(self._event(selection="selection-a", sequence=1),)],
+                ),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(decision_time),
+            )
+            first.register_input(
+                "input-a",
+                source_ids="provider-a",
+                selection_ids="selection-a",
+            )
+            self.assertEqual(first.run_cycle().status, LiveCycleStatus.DECIDED)
+            first.close()
+
+            registry = self._scientific_registry(
+                workspace,
+                self._strategy_version(),
+            )
+            resumed = PersistentLiveDecisionLoop(
+                workspace,
+                loop_id="live-test-loop",
+                mode=LiveDecisionMode.PAPER,
+                book=PaperBook("1000"),
+                authority=self._authority(),
+                intent_factory=_EmptyIntentFactory(),
+                scientific_registry=registry,
+                observation_runner=_DurableObserver(workspace, [()]),
+                max_quote_age=timedelta(milliseconds=100),
+                clock=_ManualClock(self.START + timedelta(seconds=2)),
+            )
+
+            progress = resumed._load_progress()
+            self.assertIsNotNone(progress)
+            self.assertEqual(progress.phase, "committed")
+            self.assertEqual(
+                progress.provider_health_boundaries[0].transition_order,
+                1,
+            )
+            resumed.close()
+
     def test_committed_restart_replays_bound_health_before_later_failure(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

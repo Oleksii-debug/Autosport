@@ -1016,7 +1016,8 @@ class PersistentLiveDecisionLoop:
                     self._verify_provider_health_boundaries(
                         self._progress.provider_health_boundaries,
                         committed_decision_time,
-                        require_eligible=(self._progress.gate == _GATE_NORMAL),
+                        require_eligible=False,
+                        require_healthy=(self._progress.gate == _GATE_NORMAL),
                         require_failed=(self._progress.gate == _GATE_PROVIDER_GAP),
                     )
         elif (
@@ -1624,13 +1625,18 @@ class PersistentLiveDecisionLoop:
         as_of: datetime,
         *,
         require_eligible: bool,
+        require_healthy: bool = False,
         require_failed: bool = False,
     ) -> None:
-        if type(require_eligible) is not bool or type(require_failed) is not bool:
-            raise TypeError("provider health eligibility requirements must be bools")
-        if require_eligible and require_failed:
+        if (
+            type(require_eligible) is not bool
+            or type(require_healthy) is not bool
+            or type(require_failed) is not bool
+        ):
+            raise TypeError("provider health replay requirements must be bools")
+        if sum((require_eligible, require_healthy, require_failed)) > 1:
             raise ValueError(
-                "provider health cannot be required eligible and failed together"
+                "provider health replay cannot require multiple semantic states"
             )
         store = self._health_store_for_boundaries(boundaries)
         if store is None:
@@ -1656,6 +1662,10 @@ class PersistentLiveDecisionLoop:
             if require_eligible and not replayed.eligible:
                 raise LiveDecisionProgressError(
                     "bound provider health was not decision-eligible"
+                )
+            if require_healthy and replayed.source_status != "healthy":
+                raise LiveDecisionProgressError(
+                    "bound provider health was not historically healthy"
                 )
         if (
             require_failed

@@ -563,6 +563,52 @@ class BoundedMirrorInvalidationBuffer:
             self._dirty[key] = None
             return result
 
+    def drain_and_route(
+        self,
+        dependencies: FocusedMirrorDependencyIndex,
+        *,
+        max_items: int = 250,
+    ) -> tuple[MirrorInvalidationBatch, tuple[str, ...]]:
+        """Atomically route one bounded dirty batch before consuming its keys.
+
+        Economic consumers must not expose a state where canonical mirror truth has
+        advanced, the dirty key has been destructively drained, but the focused
+        dependency index still reflects the older key set. Holding the invalidation
+        lock across routing also prevents a concurrent accept from landing between
+        the routed batch and its consume point. If routing raises, the dirty state is
+        retained for a later retry.
+        """
+        if not isinstance(dependencies, FocusedMirrorDependencyIndex):
+            raise TypeError("dependencies must be a FocusedMirrorDependencyIndex")
+        if dependencies._mirror is not self._mirror:
+            raise ValueError("dependencies must index this invalidation buffer mirror")
+        if isinstance(max_items, bool) or not isinstance(max_items, int) or max_items <= 0:
+            raise ValueError("max_items must be a positive non-boolean integer")
+
+        with self._lock:
+            if self._full_refresh_required:
+                batch = MirrorInvalidationBatch(
+                    changed_keys=(),
+                    full_refresh_required=True,
+                    has_more=False,
+                )
+                affected = dependencies.affected_inputs(batch)
+                self._full_refresh_required = False
+                self._dirty.clear()
+                return batch, affected
+
+            count = min(max_items, len(self._dirty))
+            keys = tuple(list(self._dirty)[:count])
+            batch = MirrorInvalidationBatch(
+                changed_keys=keys,
+                full_refresh_required=False,
+                has_more=len(self._dirty) > count,
+            )
+            affected = dependencies.affected_inputs(batch)
+            for key in keys:
+                self._dirty.pop(key, None)
+            return batch, affected
+
     def drain(self, *, max_items: int = 250) -> MirrorInvalidationBatch:
         """Return at most ``max_items`` affected keys, or one full-refresh fence."""
         if isinstance(max_items, bool) or not isinstance(max_items, int) or max_items <= 0:

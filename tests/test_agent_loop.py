@@ -168,7 +168,7 @@ def _attribution(environment, transition, outcome, reward, **overrides):
             AttributionFinding(
                 component=AttributionComponent.FORECAST,
                 status=AttributionStatus.SUPPORTED,
-                evidence_grade=AttributionEvidenceGrade.FACTUAL_MECHANICAL,
+                evidence_grade=AttributionEvidenceGrade.SCIENTIFIC_COHORT_ESTIMATE,
                 evidence_sha256=EVIDENCE_SHA,
                 evidence_available_at="2026-09-19T13:05:03Z",
                 contribution=Decimal("0.10"),
@@ -1874,7 +1874,7 @@ def test_new_durable_attribution_requires_explicit_evidence_grade(tmp_path):
     }
     assert grades == {
         AttributionComponent.FORECAST.value: (
-            AttributionEvidenceGrade.FACTUAL_MECHANICAL.value
+            AttributionEvidenceGrade.SCIENTIFIC_COHORT_ESTIMATE.value
         ),
         AttributionComponent.RANDOMNESS.value: (
             AttributionEvidenceGrade.NOT_IDENTIFIABLE.value

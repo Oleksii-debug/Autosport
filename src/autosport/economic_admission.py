@@ -1,13 +1,19 @@
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 from .domain import PaperTicket, TicketLeg
+from .economic_goal_provenance import provenance_for
+from .economic_goal_store import EconomicGoalStore
 from .paper import PaperBook
 from .recovery import transaction_history_requires_recovery
 from .risk import PaperRiskPolicy, ProposedTicketRiskContext, RiskDecision
+from .risk_day_window import ProductDayRiskWindowStore
+from .risk_turnover_evidence import PaperDayTurnoverEvidence, PaperDayTurnoverResolver
 from .run_registry import RunRegistry, UnresolvedExperimentError
 from .run_transaction import RunTransaction
 from .workspace_lock import WorkspaceEconomicLock
@@ -24,6 +30,15 @@ class PaperAdmissionResult:
     @property
     def admitted(self) -> bool:
         return self.ticket is not None
+
+
+@dataclass(frozen=True, slots=True)
+class _PaperDayTurnoverSnapshot:
+    """Read-only pre-lock evidence that must be revalidated under the writer lock."""
+
+    book: PaperBook
+    evidence: PaperDayTurnoverEvidence
+    window_state_path: Path
 
 
 def _positive_decimal(value: Decimal | str) -> Decimal:
@@ -91,6 +106,189 @@ def _validate_context_binding(
             )
 
 
+def _parse_utc_timestamp(value: str) -> datetime | None:
+    if type(value) is not str or not value or value != value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        return None
+    return parsed.astimezone(timezone.utc)
+
+
+def _prepare_paper_day_turnover_snapshot(
+    *,
+    root: Path,
+    book_path: Path,
+    risk_policy: PaperRiskPolicy,
+) -> _PaperDayTurnoverSnapshot | None:
+    """Resolve product-issued day turnover before the admission lock is acquired.
+
+    ProductDayRiskWindowStore itself owns the canonical workspace lock while it
+    resolves/advances the UTC-day authority. Admission therefore resolves a
+    read-only snapshot first and later revalidates every mutable dependency while
+    holding its own economic writer lock. Any intervening change disables the
+    bounded-day override and falls back to the conservative whole-history policy.
+    """
+
+    goal = risk_policy.economic_goal
+    if goal is None or not book_path.exists():
+        return None
+    try:
+        goal_store = EconomicGoalStore(root)
+        if goal_store.load() != goal:
+            return None
+        snapshot_book = PaperBook.load(book_path)
+        window_store = ProductDayRiskWindowStore(root)
+        window = window_store.current()
+        if not window.product_clock_authoritative:
+            return None
+        evidence = PaperDayTurnoverResolver.resolve(
+            book=snapshot_book,
+            goal_store=goal_store,
+            window_store=window_store,
+            window_evidence=window,
+        )
+    except (ArithmeticError, OSError, RuntimeError, TypeError, ValueError):
+        return None
+    return _PaperDayTurnoverSnapshot(
+        book=snapshot_book,
+        evidence=evidence,
+        window_state_path=window_store.state_path,
+    )
+
+
+def _revalidated_product_day_turnover_room(
+    *,
+    snapshot: _PaperDayTurnoverSnapshot | None,
+    root: Path,
+    book: PaperBook,
+    risk_policy: PaperRiskPolicy,
+    placed_at: str,
+) -> Decimal | None:
+    """Return bounded UTC-day room only when the pre-lock evidence is still exact."""
+
+    if snapshot is None:
+        return None
+    goal = risk_policy.economic_goal
+    if goal is None:
+        return None
+    try:
+        if not _same_semantic_book_state(snapshot.book, book):
+            return None
+        durable_goal = EconomicGoalStore(root).load()
+        if durable_goal != goal:
+            return None
+        evidence = snapshot.evidence
+        provenance = provenance_for(goal)
+        if (
+            evidence.goal_id != goal.goal_id
+            or evidence.goal_revision != goal.revision
+            or evidence.goal_contract_sha256 != provenance.contract_sha256
+            or evidence.bankroll_id != goal.bankroll_id
+            or evidence.currency != goal.currency
+            or evidence.initial_bankroll != book.initial_bankroll
+            or evidence.breached
+        ):
+            return None
+
+        state_bytes = snapshot.window_state_path.read_bytes()
+        if hashlib.sha256(state_bytes).hexdigest() != evidence.window_state_sha256:
+            return None
+        # A UTC-day rollover can occur after snapshot resolution but before this
+        # writer acquired the lock. Never spend yesterday's residual headroom.
+        if datetime.now(timezone.utc).date().isoformat() != evidence.day_key:
+            return None
+
+        candidate_time = _parse_utc_timestamp(placed_at)
+        window_start = _parse_utc_timestamp(evidence.window_start)
+        window_end = _parse_utc_timestamp(evidence.window_end_exclusive)
+        if (
+            candidate_time is None
+            or window_start is None
+            or window_end is None
+            or not (window_start <= candidate_time < window_end)
+        ):
+            return None
+        room = evidence.residual_headroom
+        if type(room) is not Decimal or not room.is_finite() or room < 0:
+            return None
+        return room
+    except (ArithmeticError, OSError, RuntimeError, TypeError, ValueError):
+        return None
+
+
+def _resume_after_product_day_turnover(
+    *,
+    risk_policy: PaperRiskPolicy,
+    book: PaperBook,
+    amount: Decimal,
+    context: ProposedTicketRiskContext,
+    pre_evaluation_state: tuple[Decimal, Decimal, Decimal, int] | None,
+) -> RiskDecision:
+    """Continue the canonical evaluator after only its turnover gate is replaced.
+
+    The ordinary evaluator must already have reached the turnover rejection, so
+    owner restrictions, absolute stake, concurrency and the first three durable
+    history rooms were checked by the canonical policy. This function rechecks
+    state/history before executing the exact canonical quote, ruin and local
+    bankroll checks that occur after turnover in PaperRiskPolicy.evaluate().
+    """
+
+    goal = risk_policy.economic_goal
+    state = risk_policy._book_state(book)
+    if goal is None or state is None or state != pre_evaluation_state:
+        return RiskDecision(False, "virtual bankroll changed during risk evaluation")
+    initial_bankroll, balance, committed_stake, _ = state
+
+    history_rooms = risk_policy._goal_history_rooms(book, goal, context=context)
+    if history_rooms is None:
+        return RiskDecision(False, "virtual bankroll risk history is invalid")
+    session_room, day_room, drawdown_room, _ = history_rooms
+    for room, reason in (
+        (session_room, "economic goal conservative session loss limit exceeded"),
+        (day_room, "economic goal conservative day loss limit exceeded"),
+        (drawdown_room, "economic goal drawdown limit exceeded"),
+    ):
+        if amount > room:
+            return RiskDecision(False, reason)
+
+    quote_decision = risk_policy._quote_risk_decision(goal, context)
+    if quote_decision is not None:
+        return quote_decision
+
+    if goal.max_risk_of_ruin < Decimal("1"):
+        ruin_decision = risk_policy._risk_of_ruin_evidence_decision(
+            book, amount, goal, context
+        )
+        if ruin_decision is not None:
+            return ruin_decision
+
+    derived = risk_policy._derived_risk_values(
+        initial_bankroll, balance, committed_stake, amount
+    )
+    if derived is None:
+        return RiskDecision(False, "virtual bankroll state is invalid")
+    (
+        ticket_limit,
+        aggregate_committed,
+        committed_limit,
+        remaining_balance,
+        reserve_limit,
+    ) = derived
+    if amount > ticket_limit:
+        return RiskDecision(False, "ticket exceeds configured bankroll fraction")
+    if aggregate_committed > committed_limit:
+        return RiskDecision(False, "aggregate committed stake limit exceeded")
+    if remaining_balance < reserve_limit:
+        return RiskDecision(False, "minimum virtual cash reserve would be violated")
+    if risk_policy._book_state(book) != state:
+        return RiskDecision(False, "virtual bankroll changed during risk evaluation")
+    return RiskDecision(True, "allowed")
+
+
 def admit_paper_ticket(
     *,
     workspace: str | Path,
@@ -109,11 +307,13 @@ def admit_paper_ticket(
     """Atomically evaluate canonical PAPER risk and open the ticket if allowed.
 
     This function does not create a second risk, turnover, reservation, or ledger
-    authority.  It only composes the existing PaperRiskPolicy + PaperBook mutation
-    inside the canonical WorkspaceEconomicLock so cooperating writers cannot both
-    consume the same stale pre-action risk/headroom snapshot.
+    authority. It composes PaperRiskPolicy + PaperBook mutation inside the canonical
+    WorkspaceEconomicLock. When a current product-issued UTC-day turnover snapshot
+    is available, only the policy's conservative whole-history turnover room may be
+    replaced; every other canonical risk gate remains authoritative. Incomplete or
+    stale day evidence always falls back to the old conservative behavior.
 
-    The lock is intentionally acquired *before* risk evaluation.  A contender that
+    The lock is intentionally acquired *before* risk evaluation. A contender that
     cannot acquire the lock fails closed through WorkspaceEconomicLock rather than
     evaluating against stale economic state.
     """
@@ -140,12 +340,13 @@ def admit_paper_ticket(
 
     root = Path(workspace).expanduser().resolve(strict=False)
     book_path = root / "paper_book.json"
+    day_turnover_snapshot = _prepare_paper_day_turnover_snapshot(
+        root=root,
+        book_path=book_path,
+        risk_policy=risk_policy,
+    )
 
     with WorkspaceEconomicLock(root):
-        # No independent PAPER writer may advance the canonical book while an older
-        # transaction is unresolved. AutosportSession applies the same two durable
-        # start gates before beginning economic work; reuse those authorities here
-        # while already holding the canonical workspace lock.
         registry_path = root / "run_registry.json"
         registry_missing = False
         try:
@@ -176,9 +377,6 @@ def admit_paper_ticket(
                     "repair it before PAPER admission."
                 )
 
-        # The lock alone is insufficient if this caller was constructed before a
-        # different process committed a newer PaperBook. Re-read the one durable
-        # workspace book only after owning the economic writer lock.
         if not book_path.exists():
             raise FileNotFoundError(
                 "canonical paper_book.json must already exist; "
@@ -186,11 +384,6 @@ def admit_paper_ticket(
             )
         canonical_book = PaperBook.load(book_path)
 
-        # A caller that still carries the exact current durable generation can remain
-        # the mutable working view. Its normal PaperBook.save() then advances the same
-        # generation binding after publication. A stale or unbound caller is never
-        # rebound by copying fields into it: use the freshly loaded canonical view and
-        # return that authority-bearing object to the caller instead.
         try:
             _REQUIRE_CURRENT_BINDING(book, book_path)
         except (TypeError, ValueError):
@@ -202,11 +395,28 @@ def admit_paper_ticket(
                 )
             working_book = book
 
-        # Owner-facing instance dispatch is sealed by the canonical risk-root
-        # composition before product admission can execute. That gate is closureless,
-        # rejects its own executable/default retargeting before mutation, and
-        # revalidates the exact evaluate root on lookup and retained invocation.
+        pre_evaluation_state = risk_policy._book_state(working_book)
         decision = risk_policy.evaluate(working_book, amount, context=context)
+        if (
+            not decision.allowed
+            and decision.reason == "economic goal turnover limit exceeded"
+            and context is not None
+        ):
+            turnover_room = _revalidated_product_day_turnover_room(
+                snapshot=day_turnover_snapshot,
+                root=root,
+                book=working_book,
+                risk_policy=risk_policy,
+                placed_at=placed_at,
+            )
+            if turnover_room is not None and amount <= turnover_room:
+                decision = _resume_after_product_day_turnover(
+                    risk_policy=risk_policy,
+                    book=working_book,
+                    amount=amount,
+                    context=context,
+                    pre_evaluation_state=pre_evaluation_state,
+                )
         if not decision.allowed:
             return PaperAdmissionResult(
                 risk=decision,
@@ -224,9 +434,6 @@ def admit_paper_ticket(
             bankroll_id=bankroll_id,
             currency=currency,
         )
-        # Publish the mutation while the same lock is still held. PaperBook.save
-        # uses atomic replacement and advances the binding of the exact working book
-        # when that caller was already current.
         working_book.save(book_path)
         persisted = PaperBook.load(book_path)
         persisted_ticket = persisted.tickets.get(opened.ticket_id)
@@ -246,8 +453,6 @@ def admit_paper_ticket(
         )
 
 
-# Resolve PaperBook generation binding from the already-sealed persistence graph on
-# every admission call. The public consumer itself carries no mutable positive verifier.
 from ._paperbook_current_binding_verifier import (
     seal_current_binding_consumer as _seal_current_binding_consumer,
 )

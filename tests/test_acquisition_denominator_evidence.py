@@ -9,6 +9,7 @@ from autosport._evaluation_universe_structural_gate import (
     _authorize_structural_intake_for_tests,
 )
 from autosport.acquisition_denominator_evidence import (
+    AcquisitionCoverageStrength,
     AcquisitionDenominatorEvidence,
     AcquisitionDenominatorEvidenceError,
     build_acquisition_denominator_evidence,
@@ -241,6 +242,11 @@ def test_complete_empty_before_freeze_is_explicit_observed_zero_coverage() -> No
         assert evidence.pending_or_late_terminal_count == 0
         assert evidence.terminal_after_freeze_count == 0
         assert evidence.acquisition_complete_by_universe_freeze is True
+        assert (
+            evidence.coverage_strength
+            is AcquisitionCoverageStrength.SCHEDULED_CYCLE_WINDOW_COMPLETE
+        )
+        assert evidence.positive_evaluation_lineage_complete is False
         assert evidence.external_provider_universe_complete is False
         assert evidence.promotion_ready is False
         assert require_complete_acquisition_coverage(evidence) is evidence
@@ -271,6 +277,11 @@ def test_provider_failure_stays_visible_and_blocks_whole_universe_qualification(
         assert evidence.provider_unavailable_count == 1
         assert evidence.pending_or_late_terminal_count == 0
         assert evidence.acquisition_complete_by_universe_freeze is False
+        assert (
+            evidence.coverage_strength
+            is AcquisitionCoverageStrength.INCOMPLETE_OR_UNKNOWN
+        )
+        assert evidence.positive_evaluation_lineage_complete is False
         with pytest.raises(
             AcquisitionDenominatorEvidenceError,
             match="failed, stopped, pending, late, or post-cutoff",
@@ -396,11 +407,8 @@ def test_evidence_digest_is_deterministic_but_positive_authority_is_not_copyable
         assert first.evidence_sha256 == second.evidence_sha256
 
         copied = object.__new__(AcquisitionDenominatorEvidence)
-        for name, value in first.to_payload(include_digest=False).items():
-            if name == "schema":
-                continue
-            object.__setattr__(copied, name, value)
-        object.__setattr__(copied, "evidence_sha256", first.evidence_sha256)
+        for name in first.__dataclass_fields__:
+            object.__setattr__(copied, name, getattr(first, name))
 
         with pytest.raises(
             AcquisitionDenominatorEvidenceError,

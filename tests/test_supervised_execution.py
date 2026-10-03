@@ -8,6 +8,7 @@ from dataclasses import replace
 from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
+from types import MappingProxyType
 
 import pytest
 
@@ -437,6 +438,42 @@ def test_product_issuer_is_not_importable_from_module_namespace() -> None:
         supervised_execution,
         "_install_bound_supervised_execution_plan_authority",
     )
+
+
+def test_product_issuance_registry_closure_is_not_caller_writable() -> None:
+    bound, _, _, _ = _bound()
+    reconstructed = replace(bound)
+    registries: list[MappingProxyType] = []
+
+    for function in (
+        supervised_execution.build_supervised_execution_plan,
+        supervised_execution.assert_bound_supervised_execution_plan_authoritative,
+    ):
+        for cell in function.__closure__ or ():
+            try:
+                value = cell.cell_contents
+            except ValueError:
+                continue
+            assert type(value) not in {dict, list, set}
+            if isinstance(value, MappingProxyType):
+                registries.append(value)
+
+    registry = next(
+        candidate
+        for candidate in registries
+        if id(bound) in candidate
+    )
+    record = registry[id(bound)]
+    assert record[0]() is bound
+
+    with pytest.raises(TypeError):
+        registry[id(reconstructed)] = record
+
+    with pytest.raises(
+        SupervisedExecutionError,
+        match="not current canonical product issuance",
+    ):
+        assert_bound_supervised_execution_plan_authoritative(reconstructed)
 
 
 def test_builder_alias_rebinding_revokes_internal_plan_authority(

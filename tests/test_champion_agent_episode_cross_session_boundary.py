@@ -7,6 +7,7 @@ from unittest.mock import patch
 import pytest
 
 import autosport.agent_loop as agent_loop_module
+import autosport.champion_agent_episode as champion_episode_module
 from autosport.agent_loop import (
     AgentLoopError,
     AgentLoopPhase,
@@ -22,6 +23,7 @@ from autosport.champion_agent_episode import (
     ChampionAgentEpisode,
     ChampionAgentEpisodeError,
 )
+from autosport.deployment_runtime_authority import DeploymentRuntimeAuthorityStore
 from autosport.learning_environment import (
     EnvironmentIdentity,
     EvidenceTruth,
@@ -31,6 +33,11 @@ from autosport.learning_environment import (
 )
 from autosport.paper_abstention_learning import PaperAbstentionLearningRuntime
 from autosport.policy_deployment import ActivationBinding, DeploymentScope
+from autosport.policy_deployment_semantic_bridge import (
+    CrossSessionSemanticInputs,
+    SemanticResolutionInput,
+)
+from autosport.storage import SQLiteMarketStore
 from autosport.transparent_bandit_policy import BanditPolicyState
 
 
@@ -896,3 +903,74 @@ def test_later_episode_and_abstention_reuse_durable_activation_generation(
     assert ("operator_note", "bounded") in action.parameters
     assert session.agent_loop.snapshot().action_id == action.action_id
 
+
+
+def test_canonical_resolver_boundary_rejects_subclass_capability_handles() -> None:
+    resolution = SemanticResolutionInput(
+        market_event_dedupe_key="canonical-event",
+        feature_set_id="canonical-feature",
+        runtime_authority_id="1" * 64,
+    )
+    inputs = CrossSessionSemanticInputs(
+        training=resolution,
+        deployment=resolution,
+    )
+    canonical_market = object.__new__(SQLiteMarketStore)
+    canonical_runtime = object.__new__(DeploymentRuntimeAuthorityStore)
+
+    class HostileInputs(CrossSessionSemanticInputs):
+        pass
+
+    class HostileResolutionInput(SemanticResolutionInput):
+        pass
+
+    class HostileMarketStore(SQLiteMarketStore):
+        def events(self):
+            raise AssertionError("hostile market-store dispatch executed")
+
+    class HostileRuntimeStore(DeploymentRuntimeAuthorityStore):
+        def get(self, _runtime_authority_id):
+            raise AssertionError("hostile runtime-store dispatch executed")
+
+    hostile_resolution = HostileResolutionInput(
+        market_event_dedupe_key="canonical-event",
+        feature_set_id="canonical-feature",
+        runtime_authority_id="1" * 64,
+    )
+    nested_hostile_inputs = CrossSessionSemanticInputs(
+        training=hostile_resolution,
+        deployment=resolution,
+    )
+
+    cases = (
+        (
+            object.__new__(HostileInputs),
+            canonical_market,
+            canonical_runtime,
+        ),
+        (
+            nested_hostile_inputs,
+            canonical_market,
+            canonical_runtime,
+        ),
+        (
+            inputs,
+            object.__new__(HostileMarketStore),
+            canonical_runtime,
+        ),
+        (
+            inputs,
+            canonical_market,
+            object.__new__(HostileRuntimeStore),
+        ),
+    )
+    for semantic_inputs, market_store, runtime_store in cases:
+        with pytest.raises(
+            ChampionAgentEpisodeError,
+            match="canonical semantic resolver inputs",
+        ):
+            champion_episode_module._require_canonical_inputs(
+                semantic_inputs=semantic_inputs,
+                market_store=market_store,
+                runtime_authority_store=runtime_store,
+            )

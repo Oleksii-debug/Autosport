@@ -30,6 +30,7 @@ from .policy_deployment import (
 from .policy_deployment_semantic_bridge import (
     CrossSessionSemanticInputs,
     PolicyDeploymentSemanticBridgeError,
+    SemanticResolutionInput,
     validate_canonical_activation_binding,
 )
 from .scientific_registry import ScientificRegistry
@@ -75,15 +76,13 @@ def _require_canonical_inputs(
     canonical re-resolution itself on every initialize/resume.
     """
 
-    if not isinstance(semantic_inputs, CrossSessionSemanticInputs):
-        raise ChampionAgentEpisodeError(
-            "cross-session activation requires canonical semantic resolver inputs"
-        )
-    if not isinstance(market_store, SQLiteMarketStore):
-        raise ChampionAgentEpisodeError(
-            "cross-session activation requires canonical semantic resolver inputs"
-        )
-    if not isinstance(runtime_authority_store, DeploymentRuntimeAuthorityStore):
+    if (
+        type(semantic_inputs) is not CrossSessionSemanticInputs
+        or type(semantic_inputs.training) is not SemanticResolutionInput
+        or type(semantic_inputs.deployment) is not SemanticResolutionInput
+        or type(market_store) is not SQLiteMarketStore
+        or type(runtime_authority_store) is not DeploymentRuntimeAuthorityStore
+    ):
         raise ChampionAgentEpisodeError(
             "cross-session activation requires canonical semantic resolver inputs"
         )

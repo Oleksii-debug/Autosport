@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from threading import RLock
-from typing import Final, Mapping
+from typing import Any, Final, Mapping
 
 from .learning_environment import EnvironmentIdentity, Episode
 from .monotonic_workspace_authority import (
@@ -417,6 +417,19 @@ class DeploymentRuntimeAuthorityStore:
     bytes while its separate machine-state root survives.
     """
 
+    # Keep an instance dictionary for deliberately injected crash/falsifier seams,
+    # but never store authority-bearing bindings in it. Data descriptors backed by
+    # slots take precedence over __dict__, so direct vars(store)/__dict__.update()
+    # cannot bypass the write-once boundary.
+    __slots__ = (
+        "__dict__",
+        "_binding_path",
+        "_binding_workspace",
+        "_binding_lock",
+        "_binding_authority",
+        "_binding_semantic_binding_sha256",
+    )
+
     _WRITE_ONCE_AUTHORITY_BINDINGS: Final = frozenset(
         {
             "path",
@@ -426,13 +439,89 @@ class DeploymentRuntimeAuthorityStore:
             "_semantic_binding_sha256",
         }
     )
+    _WRITE_ONCE_AUTHORITY_STORAGE_BINDINGS: Final = frozenset(
+        {
+            "_binding_path",
+            "_binding_workspace",
+            "_binding_lock",
+            "_binding_authority",
+            "_binding_semantic_binding_sha256",
+        }
+    )
+
+    @property
+    def path(self) -> Path:
+        return object.__getattribute__(self, "_binding_path")
+
+    @path.setter
+    def path(self, value: Path) -> None:
+        try:
+            object.__getattribute__(self, "_binding_path")
+        except AttributeError:
+            object.__setattr__(self, "_binding_path", value)
+            return
+        raise AttributeError("deployment runtime authority bindings are write-once")
+
+    @property
+    def workspace(self) -> Path:
+        return object.__getattribute__(self, "_binding_workspace")
+
+    @workspace.setter
+    def workspace(self, value: Path) -> None:
+        try:
+            object.__getattribute__(self, "_binding_workspace")
+        except AttributeError:
+            object.__setattr__(self, "_binding_workspace", value)
+            return
+        raise AttributeError("deployment runtime authority bindings are write-once")
+
+    @property
+    def _lock(self) -> Any:
+        return object.__getattribute__(self, "_binding_lock")
+
+    @_lock.setter
+    def _lock(self, value: object) -> None:
+        try:
+            object.__getattribute__(self, "_binding_lock")
+        except AttributeError:
+            object.__setattr__(self, "_binding_lock", value)
+            return
+        raise AttributeError("deployment runtime authority bindings are write-once")
+
+    @property
+    def _authority(self) -> MonotonicWorkspaceAuthority:
+        return object.__getattribute__(self, "_binding_authority")
+
+    @_authority.setter
+    def _authority(self, value: MonotonicWorkspaceAuthority) -> None:
+        try:
+            object.__getattribute__(self, "_binding_authority")
+        except AttributeError:
+            object.__setattr__(self, "_binding_authority", value)
+            return
+        raise AttributeError("deployment runtime authority bindings are write-once")
+
+    @property
+    def _semantic_binding_sha256(self) -> str:
+        return object.__getattribute__(self, "_binding_semantic_binding_sha256")
+
+    @_semantic_binding_sha256.setter
+    def _semantic_binding_sha256(self, value: str) -> None:
+        try:
+            object.__getattribute__(self, "_binding_semantic_binding_sha256")
+        except AttributeError:
+            object.__setattr__(self, "_binding_semantic_binding_sha256", value)
+            return
+        raise AttributeError("deployment runtime authority bindings are write-once")
 
     def __setattr__(self, name: str, value: object) -> None:
-        write_once = DeploymentRuntimeAuthorityStore._WRITE_ONCE_AUTHORITY_BINDINGS
-        if (
-            name == "_WRITE_ONCE_AUTHORITY_BINDINGS"
-            or (name in write_once and name in vars(self))
-        ):
+        storage = (
+            DeploymentRuntimeAuthorityStore._WRITE_ONCE_AUTHORITY_STORAGE_BINDINGS
+        )
+        if name in {
+            "_WRITE_ONCE_AUTHORITY_BINDINGS",
+            "_WRITE_ONCE_AUTHORITY_STORAGE_BINDINGS",
+        } or name in storage:
             raise AttributeError(
                 "deployment runtime authority bindings are write-once"
             )
@@ -440,10 +529,13 @@ class DeploymentRuntimeAuthorityStore:
 
     def __delattr__(self, name: str) -> None:
         write_once = DeploymentRuntimeAuthorityStore._WRITE_ONCE_AUTHORITY_BINDINGS
-        if (
-            name == "_WRITE_ONCE_AUTHORITY_BINDINGS"
-            or (name in write_once and name in vars(self))
-        ):
+        storage = (
+            DeploymentRuntimeAuthorityStore._WRITE_ONCE_AUTHORITY_STORAGE_BINDINGS
+        )
+        if name in {
+            "_WRITE_ONCE_AUTHORITY_BINDINGS",
+            "_WRITE_ONCE_AUTHORITY_STORAGE_BINDINGS",
+        } or name in write_once or name in storage:
             raise AttributeError(
                 "deployment runtime authority bindings are write-once"
             )

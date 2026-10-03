@@ -126,6 +126,50 @@ def test_runtime_authority_write_once_guard_cannot_be_shadowed(
     assert len(store.records()) == 1
 
 
+def test_runtime_authority_instance_dict_cannot_shadow_bindings(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "deployment-runtime-authority.json"
+    store = DeploymentRuntimeAuthorityStore.initialize_pristine(
+        path,
+        authority_root=_authority_root(tmp_path),
+    )
+    originals = {
+        name: getattr(store, name)
+        for name in DeploymentRuntimeAuthorityStore._WRITE_ONCE_AUTHORITY_BINDINGS
+    }
+
+    # Direct dict mutation bypasses __setattr__ on ordinary Python objects. These
+    # hostile entries must remain inert because the canonical bindings are data
+    # descriptors backed by slots outside the instance dictionary.
+    store.__dict__.update(
+        {name: object() for name in originals}
+    )
+    store.__dict__.update(
+        {
+            name: object()
+            for name in (
+                DeploymentRuntimeAuthorityStore._WRITE_ONCE_AUTHORITY_STORAGE_BINDINGS
+            )
+        }
+    )
+
+    for name, original in originals.items():
+        assert getattr(store, name) is original
+
+    for storage_name in (
+        DeploymentRuntimeAuthorityStore._WRITE_ONCE_AUTHORITY_STORAGE_BINDINGS
+    ):
+        with pytest.raises(
+            AttributeError,
+            match="authority bindings are write-once",
+        ):
+            setattr(store, storage_name, object())
+
+    _append(store, 0)
+    assert len(store.records()) == 1
+
+
 def test_runtime_authority_store_rejects_subclass_constructor_dispatch(
     tmp_path: Path,
 ) -> None:

@@ -6,7 +6,7 @@ import json
 
 import pytest
 
-from betfair_execution_readback_test_support import authoritative_execution_readback
+from betfair_execution_readback_test_support import semantic_execution_readback
 
 from autosport.betfair_account_readonly import (
     BetfairReadOnlyClient,
@@ -22,7 +22,7 @@ from autosport.real_execution_ledger import ExecutionAction
 from autosport.supervised_provider_evidence import (
     ProviderEvidenceError,
     VerifiedProviderEffectEvidence,
-    verify_betfair_provider_state,
+    _evaluate_betfair_provider_state_semantics,
 )
 
 
@@ -163,7 +163,7 @@ def _capture(
             )
         )
 
-    return authoritative_execution_readback(
+    return semantic_execution_readback(
         responses,
         action_id=action.action_id,
         market_id=action.market_id,
@@ -179,7 +179,7 @@ def _verify(action: ExecutionAction, *, surface: str, requested_price: float | N
         surface=surface,
         provider_requested_price=requested_price,
     )
-    return verify_betfair_provider_state(
+    return _evaluate_betfair_provider_state_semantics(
         action,
         profile,
         expected_profile_sha256=profile.profile_id,

@@ -196,8 +196,13 @@ def _make_resolver() -> FunctionType:
     path_type = Path
     goal_store_type = EconomicGoalStore
     goal_load = EconomicGoalStore.load
+    goal_load_code = goal_load.__code__
     goal_provenance = provenance_for
+    goal_provenance_code = goal_provenance.__code__
     book_load = PaperBook.load
+    book_load_function = book_load.__func__
+    book_load_code = book_load_function.__code__
+    book_load_owner = book_load.__self__
     exact_ticket_status = TicketStatus
     exact_point_type = PaperRealizedEquityPoint
     exact_evidence_type = PaperRealizedDrawdownEvidence
@@ -236,7 +241,54 @@ def _make_resolver() -> FunctionType:
         context.clear_flags()
         return context
 
+    def exact_sum(values: tuple[Decimal, ...]) -> Decimal:
+        if not values:
+            return decimal_type("0")
+        min_exponent: int | None = None
+        max_adjusted: int | None = None
+        nonzero_count = 0
+        for value in values:
+            if type(value) is not decimal_type or not value.is_finite():
+                raise PaperDrawdownEvidenceError(
+                    "drawdown arithmetic requires finite exact Decimals"
+                )
+            if value.is_zero():
+                continue
+            parts = value.copy_abs().as_tuple()
+            exponent = int(parts.exponent)
+            adjusted = exponent + len(parts.digits) - 1
+            min_exponent = exponent if min_exponent is None else min(min_exponent, exponent)
+            max_adjusted = adjusted if max_adjusted is None else max(max_adjusted, adjusted)
+            nonzero_count += 1
+        if nonzero_count == 0:
+            return decimal_type("0")
+        assert min_exponent is not None and max_adjusted is not None
+        precision = max_adjusted - min_exponent + 2 + len(str(nonzero_count))
+        context = decimal_context_type(
+            prec=max(1, precision),
+            rounding=round_half_even,
+            Emin=-999999,
+            Emax=999999,
+        )
+        context.traps[inexact_signal] = True
+        context.traps[invalid_signal] = True
+        context.traps[overflow_signal] = True
+        context.traps[underflow_signal] = True
+        context.clear_flags()
+        with local_context(context):
+            return sum(values, decimal_type("0"))
+
     def resolver(workspace: str | Path) -> PaperRealizedDrawdownEvidence:
+        if (
+            goal_load.__code__ is not goal_load_code
+            or goal_provenance.__code__ is not goal_provenance_code
+            or book_load.__func__ is not book_load_function
+            or book_load_function.__code__ is not book_load_code
+            or book_load.__self__ is not book_load_owner
+        ):
+            raise PaperDrawdownEvidenceError(
+                "drawdown durable source resolver authority changed"
+            )
         root = path_type(workspace).expanduser().resolve(strict=False)
         book_path = root / "paper_book.json"
         goal_store = goal_store_type(root)
@@ -346,9 +398,8 @@ def _make_resolver() -> FunctionType:
                 delta = decimal_type("0")
                 event_time = ticket.placed_at
             else:
-                with local_context(exact_context()):
-                    delta = ticket.payout - ticket.stake
-                    equity = equity + delta
+                delta = exact_sum((ticket.payout, -ticket.stake))
+                equity = exact_sum((equity, delta))
                 event_time = book._settlement_times[ticket_id]
                 settlement_availability_complete = (
                     settlement_availability_complete and event_time is not None
@@ -386,17 +437,15 @@ def _make_resolver() -> FunctionType:
             1 for ticket in book.tickets.values()
             if ticket.status is exact_ticket_status.OPEN
         )
-        with local_context(exact_context()):
-            committed = sum(
-                (
-                    ticket.stake
-                    for ticket in book.tickets.values()
-                    if ticket.status is exact_ticket_status.OPEN
-                ),
-                decimal_type("0"),
+        committed = exact_sum(
+            tuple(
+                ticket.stake
+                for ticket in book.tickets.values()
+                if ticket.status is exact_ticket_status.OPEN
             )
-            expected_current_equity = book.balance + committed
-            current_drawdown = running_peak - equity
+        )
+        expected_current_equity = exact_sum((book.balance, committed))
+        current_drawdown = exact_sum((running_peak, -equity))
         if equity != expected_current_equity:
             raise PaperDrawdownEvidenceError(
                 "realized-settled equity path is inconsistent with canonical PaperBook"

@@ -871,6 +871,97 @@ def test_module_stable_reader_rebind_cannot_forge_empty_history(
     assert path.exists()
 
 
+@pytest.mark.parametrize(
+    "binding_name",
+    ("_decode_snapshot", "snapshot_fingerprint", "strict_json_loads"),
+)
+def test_transitive_module_dispatch_rebind_fails_before_forged_read(
+    monkeypatch,
+    tmp_path,
+    binding_name: str,
+) -> None:
+    path = tmp_path / "account.json"
+    store = BookmakerAccountReconciliationStore(
+        path,
+        authority_root=_authority_root(tmp_path, "authority"),
+    )
+    expected = _snapshot(Decimal("10"))
+    assert store.append_snapshot(expected)
+
+    original = getattr(reconciliation_module, binding_name)
+    callback_reached = False
+
+    def hostile_dispatch(*args, **kwargs):
+        nonlocal callback_reached
+        callback_reached = True
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(reconciliation_module, binding_name, hostile_dispatch)
+
+    with pytest.raises(
+        AccountReconciliationIntegrityError,
+        match="transitive module dispatch graph changed",
+    ):
+        store.latest_snapshot()
+
+    assert callback_reached is False
+
+
+def test_transitive_module_dispatch_rejects_authority_method_map_mutation(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    path = tmp_path / "account.json"
+    store = BookmakerAccountReconciliationStore(
+        path,
+        authority_root=_authority_root(tmp_path, "authority"),
+    )
+    expected = _snapshot(Decimal("10"))
+    assert store.append_snapshot(expected)
+
+    callback_reached = False
+
+    def forged_read_history(*args, **kwargs):
+        nonlocal callback_reached
+        callback_reached = True
+        return ()
+
+    monkeypatch.setitem(
+        reconciliation_module._CANONICAL_AUTHORITY_METHODS,
+        "read_history",
+        forged_read_history,
+    )
+
+    with pytest.raises(
+        AccountReconciliationIntegrityError,
+        match="transitive module dispatch mapping changed",
+    ):
+        store.latest_snapshot()
+
+    assert callback_reached is False
+
+
+def test_schema_version_runtime_rebind_cannot_reinterpret_durable_bytes(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    path = tmp_path / "account.json"
+    store = BookmakerAccountReconciliationStore(
+        path,
+        authority_root=_authority_root(tmp_path, "authority"),
+    )
+    expected = _snapshot(Decimal("10"))
+    assert store.append_snapshot(expected)
+
+    monkeypatch.setattr(BookmakerAccountReconciliationStore, "SCHEMA_VERSION", 2)
+
+    with pytest.raises(
+        AccountReconciliationIntegrityError,
+        match="class contract changed",
+    ):
+        store.latest_snapshot()
+
+
 def test_stable_reader_default_rebind_cannot_forge_empty_history(
     monkeypatch,
     tmp_path,

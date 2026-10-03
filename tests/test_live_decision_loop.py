@@ -96,6 +96,15 @@ class _EmptyIntentFactory:
         strategy_version_id: str = "live-test-strategy-v1",
     ) -> None:
         self.strategy_version_id = strategy_version_id
+        self.source_sha256 = hashlib.sha256(
+            b"tests.test_live_decision_loop:_EmptyIntentFactory:v1"
+        ).hexdigest()
+        self.environment_sha256 = hashlib.sha256(
+            b"tests.test_live_decision_loop:environment:v1"
+        ).hexdigest()
+        self.config_sha256 = hashlib.sha256(
+            b"tests.test_live_decision_loop:empty-intent-config:v1"
+        ).hexdigest()
         self.calls: list[tuple[str, tuple[tuple[str, int, str], ...]]] = []
 
     def __call__(self, input_id, snapshot):
@@ -118,6 +127,12 @@ class _PositiveIntentFactory:
         strategy_version_id: str = "live-test-strategy-v1",
     ) -> None:
         self.strategy_version_id = strategy_version_id
+        self.source_sha256 = hashlib.sha256(
+            b"tests.test_live_decision_loop:_EmptyIntentFactory:v1"
+        ).hexdigest()
+        self.environment_sha256 = hashlib.sha256(
+            b"tests.test_live_decision_loop:environment:v1"
+        ).hexdigest()
         self.config_sha256 = config_sha256
         self.calls = 0
 
@@ -361,9 +376,56 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
 
             with self.assertRaisesRegex(
                 LiveDecisionProgressError,
-                "factory strategy-version provenance changed",
+                "factory strategy_version_id provenance changed",
             ):
                 loop._decision_context_sha256()
+
+    def test_factory_source_environment_and_config_must_match_registry(self) -> None:
+        for attribute in (
+            "source_sha256",
+            "environment_sha256",
+            "config_sha256",
+        ):
+            with self.subTest(attribute=attribute):
+                with tempfile.TemporaryDirectory() as directory:
+                    workspace = Path(directory)
+                    factory = _EmptyIntentFactory()
+                    setattr(factory, attribute, "f" * 64)
+                    with self.assertRaisesRegex(
+                        LiveDecisionProgressError,
+                        rf"factory {attribute} provenance changed",
+                    ):
+                        self._loop(
+                            workspace,
+                            observer=_DurableObserver(workspace, [()]),
+                            factory=factory,
+                            clock=_ManualClock(self.START),
+                        )
+
+    def test_factory_scientific_provenance_cannot_mutate_after_construction(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            factory = _EmptyIntentFactory()
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(workspace, [()]),
+                factory=factory,
+                clock=_ManualClock(self.START),
+            )
+
+            for attribute in (
+                "source_sha256",
+                "environment_sha256",
+                "config_sha256",
+            ):
+                original = getattr(factory, attribute)
+                setattr(factory, attribute, "f" * 64)
+                with self.assertRaisesRegex(
+                    LiveDecisionProgressError,
+                    rf"factory {attribute} provenance changed",
+                ):
+                    loop._decision_context_sha256()
+                setattr(factory, attribute, original)
 
     def test_emitted_intent_cannot_relabel_registered_strategy_version(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -2029,6 +2091,9 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
                 raise RuntimeError("simulated process loss after pending cursor")
 
             fail_after_pending.strategy_version_id = "live-test-strategy-v1"
+            fail_after_pending.source_sha256 = self.INTENT_SOURCE_SHA256
+            fail_after_pending.environment_sha256 = self.INTENT_ENVIRONMENT_SHA256
+            fail_after_pending.config_sha256 = self.INTENT_CONFIG_SHA256
             first = self._loop(
                 workspace,
                 observer=_DurableObserver(
@@ -2098,6 +2163,9 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
                 raise RuntimeError("simulated process loss after pending cursor")
 
             fail_after_pending.strategy_version_id = "live-test-strategy-v1"
+            fail_after_pending.source_sha256 = self.INTENT_SOURCE_SHA256
+            fail_after_pending.environment_sha256 = self.INTENT_ENVIRONMENT_SHA256
+            fail_after_pending.config_sha256 = self.INTENT_CONFIG_SHA256
 
             first = self._loop(
                 workspace,
@@ -2150,6 +2218,9 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
                 raise RuntimeError("simulated process loss after pending cursor")
 
             fail_after_pending.strategy_version_id = "live-test-strategy-v1"
+            fail_after_pending.source_sha256 = self.INTENT_SOURCE_SHA256
+            fail_after_pending.environment_sha256 = self.INTENT_ENVIRONMENT_SHA256
+            fail_after_pending.config_sha256 = self.INTENT_CONFIG_SHA256
 
             first = self._loop(
                 workspace,
@@ -2196,6 +2267,47 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             self.assertEqual(resumed_factory.calls, [])
             self.assertFalse((workspace / "decisions.jsonl").exists())
 
+    def test_pending_restart_rejects_factory_source_swap_before_poll(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+
+            def fail_after_pending(input_id, snapshot):
+                raise RuntimeError("simulated process loss after pending cursor")
+
+            fail_after_pending.strategy_version_id = "live-test-strategy-v1"
+            fail_after_pending.source_sha256 = self.INTENT_SOURCE_SHA256
+            fail_after_pending.environment_sha256 = self.INTENT_ENVIRONMENT_SHA256
+            fail_after_pending.config_sha256 = self.INTENT_CONFIG_SHA256
+
+            first = self._loop(
+                workspace,
+                observer=_DurableObserver(
+                    workspace,
+                    [(self._event(selection="selection-a", sequence=1),)],
+                ),
+                factory=fail_after_pending,
+                clock=_ManualClock(self.START + timedelta(seconds=1)),
+            )
+            first.register_input("input-a", selection_ids="selection-a")
+            with self.assertRaisesRegex(RuntimeError, "simulated process loss"):
+                first.run_cycle()
+
+            resumed_observer = _DurableObserver(workspace, [()])
+            resumed_factory = _EmptyIntentFactory()
+            resumed_factory.source_sha256 = "f" * 64
+            with self.assertRaisesRegex(
+                LiveDecisionProgressError,
+                "factory source_sha256 provenance changed",
+            ):
+                self._loop(
+                    workspace,
+                    observer=resumed_observer,
+                    factory=resumed_factory,
+                    clock=_ManualClock(self.START + timedelta(seconds=2)),
+                )
+            self.assertEqual(resumed_observer.calls, 0)
+            self.assertFalse((workspace / "decisions.jsonl").exists())
+
     def test_pending_restart_rejects_changed_intent_provenance_before_poll(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)
@@ -2204,6 +2316,9 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
                 raise RuntimeError("simulated process loss after pending cursor")
 
             fail_after_pending.strategy_version_id = "live-test-strategy-v1"
+            fail_after_pending.source_sha256 = self.INTENT_SOURCE_SHA256
+            fail_after_pending.environment_sha256 = self.INTENT_ENVIRONMENT_SHA256
+            fail_after_pending.config_sha256 = self.INTENT_CONFIG_SHA256
 
             first = self._loop(
                 workspace,
@@ -2303,6 +2418,9 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
                 raise RuntimeError("simulated process loss after pending cursor")
 
             fail_after_pending.strategy_version_id = "live-test-strategy-v1"
+            fail_after_pending.source_sha256 = self.INTENT_SOURCE_SHA256
+            fail_after_pending.environment_sha256 = self.INTENT_ENVIRONMENT_SHA256
+            fail_after_pending.config_sha256 = self.INTENT_CONFIG_SHA256
             loop = self._loop(
                 workspace,
                 observer=_DurableObserver(
@@ -2347,6 +2465,9 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
                 raise RuntimeError("simulated process loss after pending cursor")
 
             fail_after_pending.strategy_version_id = "live-test-strategy-v1"
+            fail_after_pending.source_sha256 = self.INTENT_SOURCE_SHA256
+            fail_after_pending.environment_sha256 = self.INTENT_ENVIRONMENT_SHA256
+            fail_after_pending.config_sha256 = self.INTENT_CONFIG_SHA256
 
             first = self._loop(
                 workspace,

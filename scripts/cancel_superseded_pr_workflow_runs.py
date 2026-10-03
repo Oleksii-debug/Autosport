@@ -371,8 +371,14 @@ class GitHubApi:
             isinstance(head_repo, dict)
             and head_repo.get("full_name") == self._repository
         )
+        head_sha = head.get("sha")
+        if type(head_sha) is not str or len(head_sha) != 40:
+            raise CancellationError("invalid live pull request head")
+        head_sha = head_sha.lower()
+        if any(ch not in "0123456789abcdef" for ch in head_sha):
+            raise CancellationError("invalid live pull request head")
         return (
-            _require_sha(head.get("sha"), field="live pull request head"),
+            head_sha,
             state == "open"
             and draft is False
             and same_repository_head,

@@ -683,6 +683,11 @@ def resolve_product_run_capital_path_evidence(
         base_book = PaperBook.load_bytes(base.payload)
         final_book = PaperBook.load_bytes(final.payload)
         changed = _changed_ticket_ids(base_book, final_book)
+        if any(ticket_id in base_book.tickets for ticket_id in changed):
+            raise ProductRunCapitalPathError(
+                "run-capital path authority v1 supports only tickets opened "
+                "and completed inside the exact run"
+            )
         replay = replay_paper_book_equity_path(
             base.payload,
             final.payload,

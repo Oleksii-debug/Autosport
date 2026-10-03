@@ -160,7 +160,7 @@ class ManualNvdaAcceptanceResolution:
 
 
 _ISSUED_RESOLUTIONS: OrderedDict[
-    int, tuple[ManualNvdaAcceptanceResolution, str]
+    int, tuple[ManualNvdaAcceptanceResolution, str, object, str]
 ] = OrderedDict()
 
 
@@ -558,6 +558,36 @@ def verify_manual_nvda_acceptance_resolution(
     ):
         raise NvdaManualAcceptanceStateError(
             "manual NVDA resolution does not match the expected candidate"
+        )
+
+    issued_ledger = issued[2]
+    issued_ledger_path = issued[3]
+    if (
+        type(issued_ledger) is not ManualNvdaAcceptanceLedger
+        or str(issued_ledger.path) != issued_ledger_path
+    ):
+        raise NvdaManualAcceptanceStateError(
+            "manual NVDA resolution ledger authority changed after issuance"
+        )
+    current_records = issued_ledger.events()
+    current_matching = [
+        current
+        for current in current_records
+        if (
+            current.protocol_version == record.protocol_version
+            and current.transcript_sha256 == record.transcript_sha256
+            and current.artifact_sha256 == record.artifact_sha256
+            and current.source_sha == record.source_sha
+            and current.structural_status == record.structural_status
+            and current.structural_human_tester_attestation_sha256
+            == record.structural_human_tester_attestation_sha256
+            and current.windows_version == record.windows_version
+            and current.nvda_version == record.nvda_version
+        )
+    ]
+    if not current_matching or current_matching[-1] != record:
+        raise NvdaManualAcceptanceStateError(
+            "manual NVDA resolution is no longer the current durable decision"
         )
     return resolution
 
@@ -1045,7 +1075,12 @@ class ManualNvdaAcceptanceLedger:
         fingerprint = _resolution_fingerprint(resolution)
         while len(_ISSUED_RESOLUTIONS) >= _MAX_LIVE_RESOLUTIONS:
             _ISSUED_RESOLUTIONS.popitem(last=False)
-        _ISSUED_RESOLUTIONS[id(resolution)] = (resolution, fingerprint)
+        _ISSUED_RESOLUTIONS[id(resolution)] = (
+            resolution,
+            fingerprint,
+            self,
+            str(self.path),
+        )
         return resolution
 
 

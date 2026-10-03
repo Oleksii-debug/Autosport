@@ -57,6 +57,7 @@ class AttemptState(str, Enum):
 
 class EventType(str, Enum):
     PLAN_RESERVED = "PLAN_RESERVED"
+    SUPERVISED_PLAN_ISSUED = "SUPERVISED_PLAN_ISSUED"
     SUPERVISED_APPROVAL_BOUND = "SUPERVISED_APPROVAL_BOUND"
     SUPERVISED_APPROVAL_REVOKED = "SUPERVISED_APPROVAL_REVOKED"
     ATTEMPT_RESERVED = "ATTEMPT_RESERVED"
@@ -1116,6 +1117,51 @@ class RealExecutionLedger:
                 )
             plan_ids.add(plan.plan_id)
 
+        supervised_issuance: dict[str, tuple[str, str]] = {}
+        for event in events:
+            if event["event_type"] != EventType.SUPERVISED_PLAN_ISSUED.value:
+                continue
+            if event["action_id"] is not None or event["attempt_id"] is not None:
+                raise ExecutionLedgerIntegrityError(
+                    "supervised plan issuance cannot claim action/attempt identity"
+                )
+            plan_event = cls._plan_event(events, event["plan_id"])
+            if plan_event is None:
+                raise ExecutionLedgerIntegrityError(
+                    "supervised plan issuance references missing plan"
+                )
+            payload = event["payload"]
+            if set(payload) != {"bound_plan_witness", "plan_fingerprint"}:
+                raise ExecutionLedgerIntegrityError(
+                    "supervised plan issuance schema is invalid"
+                )
+            try:
+                witness = _sha256_text(
+                    payload["bound_plan_witness"],
+                    "bound_plan_witness",
+                )
+                fingerprint = _sha256_text(
+                    payload["plan_fingerprint"],
+                    "plan_fingerprint",
+                )
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ExecutionLedgerIntegrityError(
+                    "supervised plan issuance values are invalid"
+                ) from exc
+            if event["plan_id"] != f"supervised-v2-{witness}":
+                raise ExecutionLedgerIntegrityError(
+                    "supervised plan issuance witness mismatches plan identity"
+                )
+            if plan_event["payload"]["plan_fingerprint"] != fingerprint:
+                raise ExecutionLedgerIntegrityError(
+                    "supervised plan issuance fingerprint mismatches stored plan"
+                )
+            if event["plan_id"] in supervised_issuance:
+                raise ExecutionLedgerIntegrityError(
+                    "multiple supervised plan issuance bindings"
+                )
+            supervised_issuance[event["plan_id"]] = (witness, fingerprint)
+
         approval_state: dict[str, tuple[str, str, datetime, bool]] = {}
         for event in events:
             kind = event["event_type"]
@@ -1578,6 +1624,7 @@ class RealExecutionLedger:
         for event in events:
             if event["event_type"] in {
                 EventType.PLAN_RESERVED.value,
+                EventType.SUPERVISED_PLAN_ISSUED.value,
                 EventType.SUPERVISED_APPROVAL_BOUND.value,
                 EventType.SUPERVISED_APPROVAL_REVOKED.value,
             }:
@@ -1591,6 +1638,90 @@ class RealExecutionLedger:
                     "attempt event references missing plan"
                 )
         cls._receipt_owners(events)
+
+    def bind_supervised_plan_issuance(
+        self,
+        *,
+        plan_id: str,
+        bound_plan_witness: str,
+        plan_fingerprint: str,
+    ) -> None:
+        identity = _text(plan_id, "plan_id")
+        witness = _sha256_text(bound_plan_witness, "bound_plan_witness")
+        fingerprint = _sha256_text(plan_fingerprint, "plan_fingerprint")
+        if identity != f"supervised-v2-{witness}":
+            raise ExecutionIdentityConflict(
+                "supervised plan issuance witness mismatches plan identity"
+            )
+
+        def operation() -> None:
+            events = self._events()
+            plan_event = self._plan_event(events, identity)
+            if plan_event is None:
+                raise ExecutionStateError(
+                    "supervised plan issuance requires reserved plan"
+                )
+            if plan_event["payload"]["plan_fingerprint"] != fingerprint:
+                raise ExecutionIdentityConflict(
+                    "supervised plan issuance fingerprint mismatches durable plan"
+                )
+            bindings = [
+                event
+                for event in events
+                if event["plan_id"] == identity
+                and event["event_type"] == EventType.SUPERVISED_PLAN_ISSUED.value
+            ]
+            payload = {
+                "bound_plan_witness": witness,
+                "plan_fingerprint": fingerprint,
+            }
+            if bindings:
+                if len(bindings) == 1 and bindings[0]["payload"] == payload:
+                    return
+                raise ExecutionIdentityConflict(
+                    "durable supervised plan issuance conflicts"
+                )
+            self._append(
+                EventType.SUPERVISED_PLAN_ISSUED,
+                identity,
+                None,
+                None,
+                payload,
+            )
+
+        self._mutate(operation)
+
+    def supervised_plan_issuance_is_current(
+        self,
+        *,
+        plan_id: str,
+        bound_plan_witness: str,
+        plan_fingerprint: str,
+    ) -> bool:
+        identity = _text(plan_id, "plan_id")
+        witness = _sha256_text(bound_plan_witness, "bound_plan_witness")
+        fingerprint = _sha256_text(plan_fingerprint, "plan_fingerprint")
+        if identity != f"supervised-v2-{witness}":
+            return False
+        events = self._events()
+        plan_event = self._plan_event(events, identity)
+        if (
+            plan_event is None
+            or plan_event["payload"]["plan_fingerprint"] != fingerprint
+        ):
+            return False
+        bindings = [
+            event
+            for event in events
+            if event["plan_id"] == identity
+            and event["event_type"] == EventType.SUPERVISED_PLAN_ISSUED.value
+        ]
+        if len(bindings) != 1:
+            return False
+        return bindings[0]["payload"] == {
+            "bound_plan_witness": witness,
+            "plan_fingerprint": fingerprint,
+        }
 
     def bind_supervised_approval(
         self,

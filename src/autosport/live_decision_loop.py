@@ -111,12 +111,45 @@ class LiveLoopBounds:
 
 class LiveIntentFactory(Protocol):
     strategy_version_id: str
+    source_sha256: str
+    environment_sha256: str
+    config_sha256: str
 
     def __call__(
         self,
         input_id: str,
         snapshot: MirrorSnapshot,
     ) -> tuple[object, ...]: ...
+
+
+def _require_intent_factory_provenance(
+    intent_factory: LiveIntentFactory,
+    provenance: LiveIntentProvenance,
+) -> None:
+    """Require executable factory metadata to match scientific registry truth."""
+
+    fields = (
+        ("strategy_version_id", provenance.strategy_version_id, _canonical_text),
+        ("source_sha256", provenance.source_sha256, _canonical_sha256),
+        (
+            "environment_sha256",
+            provenance.environment_sha256,
+            _canonical_sha256,
+        ),
+        ("config_sha256", provenance.config_sha256, _canonical_sha256),
+    )
+    for name, expected, validator in fields:
+        value = getattr(intent_factory, name, None)
+        try:
+            normalized = validator(f"intent_factory.{name}", value)
+        except ValueError as exc:
+            raise LiveDecisionProgressError(
+                f"live intent factory lost canonical {name} provenance"
+            ) from exc
+        if normalized != expected:
+            raise LiveDecisionProgressError(
+                f"live intent factory {name} provenance changed"
+            )
 
 
 Clock = Callable[[], datetime]
@@ -736,6 +769,10 @@ class PersistentLiveDecisionLoop:
             factory_strategy_version_id,
             as_of=provenance_as_of,
         )
+        _require_intent_factory_provenance(
+            intent_factory,
+            intent_provenance,
+        )
         goal_quote_age = authority.contract.max_quote_age_seconds
         if max_quote_age is None:
             max_quote_age = _conservative_timedelta(goal_quote_age)
@@ -1263,24 +1300,10 @@ class PersistentLiveDecisionLoop:
             store.close()
 
     def _verify_intent_factory_provenance(self) -> None:
-        factory_strategy_version_id = getattr(
+        _require_intent_factory_provenance(
             self.intent_factory,
-            "strategy_version_id",
-            None,
+            self.intent_provenance,
         )
-        try:
-            factory_strategy_version_id = _canonical_text(
-                "intent_factory.strategy_version_id",
-                factory_strategy_version_id,
-            )
-        except ValueError as exc:
-            raise LiveDecisionProgressError(
-                "live intent factory lost canonical strategy-version provenance"
-            ) from exc
-        if factory_strategy_version_id != self.intent_provenance.strategy_version_id:
-            raise LiveDecisionProgressError(
-                "live intent factory strategy-version provenance changed"
-            )
 
     @staticmethod
     def _same_book_state(left: PaperBook, right: PaperBook) -> bool:

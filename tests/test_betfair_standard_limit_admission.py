@@ -347,7 +347,7 @@ def test_arithmetic_is_exact_under_low_ambient_precision(monkeypatch, tmp_path):
     with localcontext() as context:
         context.prec = 2
         result = assess(client, identity, bound, size="0.1000000001", price="99.9999999")
-    assert result.gross_payout == Decimal("10.0000000000000000") - Decimal("0.00000000001")
+    assert result.gross_payout == Decimal("9.99999999999999999")
     assert result.state is BetfairStandardLimitAdmissionState.REJECTED_REVIEWED_CONSTRAINT
 
 
@@ -391,3 +391,25 @@ def test_naive_decision_time_is_rejected(monkeypatch, tmp_path):
             bound,
             as_of=datetime(2026, 10, 3, 21, 0),
         )
+
+
+def test_module_helper_rebind_cannot_change_captured_canonical_arithmetic(monkeypatch, tmp_path):
+    client, identity, bound = authoritative_context(monkeypatch, tmp_path)
+
+    monkeypatch.setattr(
+        subject,
+        "_exact_multiply",
+        lambda left, right: Decimal("999999"),
+    )
+    monkeypatch.setattr(
+        subject,
+        "_positive_decimal",
+        lambda value, field, **kwargs: Decimal("999999"),
+    )
+
+    result = assess(client, identity, bound, size="0.10", price="100")
+    assert result.gross_payout == Decimal("10.00")
+    assert result.reason_code == "GBP_LOWER_MINIMUM_PAYOUT_SATISFIED"
+    assert is_authoritative_betfair_standard_limit_admission(
+        result, client=client
+    )

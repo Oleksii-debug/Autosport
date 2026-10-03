@@ -231,24 +231,6 @@ def _revalidated_product_day_turnover_room(
         return None
 
 
-# Freeze the canonical evaluator itself against later risk-module/class
-# rebinding. The detached globals preserve its built-in helper witness table while
-# the evaluator still verifies every live helper descriptor before financial use.
-_RISK_EVALUATE = PaperRiskPolicy.__dict__["evaluate"]
-if type(_RISK_EVALUATE) is not FunctionType:
-    raise RuntimeError("canonical PaperRiskPolicy.evaluate executable is unavailable")
-_RISK_EVALUATE_GLOBALS = dict(_RISK_EVALUATE.__globals__)
-_RISK_EVALUATE_BOUND = FunctionType(
-    _RISK_EVALUATE.__code__,
-    _RISK_EVALUATE_GLOBALS,
-    name=_RISK_EVALUATE.__name__,
-    argdefs=_RISK_EVALUATE.__defaults__,
-    closure=_RISK_EVALUATE.__closure__,
-)
-if _RISK_EVALUATE.__kwdefaults__ is not None:
-    _RISK_EVALUATE_BOUND.__kwdefaults__ = dict(_RISK_EVALUATE.__kwdefaults__)
-
-
 # Freeze the exact canonical risk helper descriptors used by the positive
 # post-turnover continuation. This mirrors PaperRiskPolicy.evaluate's own helper
 # witnesses so a later class/descriptor mutation cannot widen admission authority.
@@ -482,12 +464,7 @@ def admit_paper_ticket(
             working_book = book
 
         pre_evaluation_state = risk_policy._book_state(working_book)
-        decision = _RISK_EVALUATE_BOUND(
-            risk_policy,
-            working_book,
-            amount,
-            context=context,
-        )
+        decision = risk_policy.evaluate(working_book, amount, context=context)
         if (
             not decision.allowed
             and decision.reason == "economic goal turnover limit exceeded"

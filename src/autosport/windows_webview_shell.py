@@ -1131,7 +1131,7 @@ class AutosportWebController:
                 if not self._project_product_runtime_source_tick(product_message.tick):
                     continue
                 if not self._apply_product_runtime_economic_snapshot(
-                    product_message.economic,
+                    getattr(product_message, "economic", None),
                     cycle_index=product_message.tick.cycle_index,
                     session_id=product_message.tick.session_id,
                     source_id=product_message.tick.source_id,

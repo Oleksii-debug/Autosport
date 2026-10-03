@@ -1000,7 +1000,29 @@ class AutosportApp(tk.Tk):
             )
 
         if not self.replay_worker.start(task):
-            self.session = self._open_session(strategy_id, research_plan)
+            try:
+                self.session = self._open_session(strategy_id, research_plan)
+            except Exception as exc:
+                self._recovery_required_workspaces.add(replay_workspace)
+                self._hide_uncertain_economic_state(
+                    text("ui.status.replay.reopen_ticket")
+                )
+                self._set_evaluation_lines(
+                    [text("ui.evaluation.reopen_failed")]
+                )
+                detail = text(
+                    "ui.error.replay.reopen",
+                    detail=_safe_exception_text(exc),
+                )
+                self.status.set(text("ui.status.replay.reopen_blocked"))
+                self._append_log(detail)
+                messagebox.showerror(text("ui.dialog.title"), detail)
+                return
+            self._active_strategy_id = strategy_id
+            self._active_research_plan = research_plan
+            self._startup_economic_error = None
+            self.bank.set(self._bank_text())
+            self._refresh_tickets()
             self.status.set(text("ui.status.replay.start_failed"))
             return
 

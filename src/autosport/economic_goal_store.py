@@ -113,7 +113,6 @@ def _open_exclusive_write_descriptor(path: Path) -> int:
     create_file.restype = wintypes.HANDLE
 
     generic_write = 0x40000000
-    file_share_read = 0x00000001
     create_new = 1
     file_attribute_normal = 0x00000080
     file_flag_open_reparse_point = 0x00200000
@@ -122,7 +121,7 @@ def _open_exclusive_write_descriptor(path: Path) -> int:
     kernel_handle = create_file(
         str(path),
         generic_write,
-        file_share_read,
+        0,
         None,
         create_new,
         file_attribute_normal | file_flag_open_reparse_point,
@@ -142,7 +141,10 @@ def _open_exclusive_write_descriptor(path: Path) -> int:
     close_handle.argtypes = (wintypes.HANDLE,)
     close_handle.restype = wintypes.BOOL
     try:
-        return msvcrt.open_osfhandle(kernel_handle, flags)
+        return msvcrt.open_osfhandle(
+            kernel_handle,
+            os.O_WRONLY | os.O_BINARY,
+        )
     except BaseException:
         close_handle(kernel_handle)
         raise

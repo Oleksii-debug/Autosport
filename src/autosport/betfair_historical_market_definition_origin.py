@@ -86,6 +86,29 @@ def _canonical_market_definition(value: object) -> tuple[str, str]:
     return encoded, hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
+_PROVIDER_PATH_PREFIX = "/data/xds/historic/"
+
+
+def _provider_path_package_tier(provider_path: object) -> HistoricalPackageTier:
+    path = _text(provider_path, "provider_path")
+    if not path.startswith(_PROVIDER_PATH_PREFIX):
+        raise BetfairHistoricalMarketDefinitionOriginError(
+            "provider_path must use the canonical /data/xds/historic/<TIER>/... namespace"
+        )
+    remainder = path[len(_PROVIDER_PATH_PREFIX) :]
+    parts = remainder.split("/")
+    if len(parts) < 2 or any(part in ("", ".", "..") for part in parts):
+        raise BetfairHistoricalMarketDefinitionOriginError(
+            "provider_path must encode a canonical historical package tier and file path"
+        )
+    try:
+        return HistoricalPackageTier(parts[0])
+    except ValueError as exc:
+        raise BetfairHistoricalMarketDefinitionOriginError(
+            "provider_path contains an unknown historical package tier"
+        ) from exc
+
+
 @dataclass(frozen=True, slots=True)
 class BetfairHistoricalMarketDefinitionOrigin:
     """One archive revision bound to an authenticated exact historical file."""
@@ -128,6 +151,14 @@ class BetfairHistoricalMarketDefinitionOrigin:
         ):
             _sha(getattr(self, name), name)
         _text(self.provider_path, "provider_path")
+        if type(self.package_tier) is not HistoricalPackageTier:
+            raise BetfairHistoricalMarketDefinitionOriginError(
+                "package_tier must be exact HistoricalPackageTier"
+            )
+        if _provider_path_package_tier(self.provider_path) is not self.package_tier:
+            raise BetfairHistoricalMarketDefinitionOriginError(
+                "package_tier does not match authoritative provider_path package tier"
+            )
         _text(self.download_retrieved_at, "download_retrieved_at")
         _text(self.market_id, "market_id")
         if type(self.source_ordinal) is not int or self.source_ordinal < 1:
@@ -308,6 +339,11 @@ def bind_betfair_historical_market_definition_origin(
         )
     if type(package_tier) is not HistoricalPackageTier:
         raise TypeError("package_tier must be exact HistoricalPackageTier")
+    provider_path_tier = _provider_path_package_tier(witness.provider_path)
+    if provider_path_tier is not package_tier:
+        raise BetfairHistoricalMarketDefinitionOriginError(
+            "package_tier does not match authoritative provider_path package tier"
+        )
     if type(representation) is not HistoricalRepresentation:
         raise TypeError("representation must be exact HistoricalRepresentation")
 

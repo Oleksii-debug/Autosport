@@ -55,13 +55,18 @@ class BetfairHistoricalMarketDefinitionOriginTests(unittest.TestCase):
             "runners": [{"id": 11}, {"id": 22}, {"id": 33}],
         }
 
-    def witness(self, raw: bytes) -> HistoricalProviderOriginWitness:
+    def witness(
+        self,
+        raw: bytes,
+        *,
+        provider_path: str = "/data/xds/historic/PRO/table_tennis/file.bz2",
+    ) -> HistoricalProviderOriginWitness:
         return HistoricalProviderOriginWitness(
             session_context_id="betfair-session-context:" + _sha("session"),
             entitlement_snapshot_sha256=_sha("entitlement"),
             listing_sha256=_sha("listing"),
             download_file_identity_sha256=_sha("download"),
-            provider_path="/data/xds/historic/table_tennis/file.bz2",
+            provider_path=provider_path,
             retrieved_at="2026-09-23T06:30:00+00:00",
             raw_sha256=hashlib.sha256(raw).hexdigest(),
             byte_length=len(raw),
@@ -75,6 +80,7 @@ class BetfairHistoricalMarketDefinitionOriginTests(unittest.TestCase):
         *,
         cutoff: int = 2500,
         market_id: str | None = None,
+        package_tier: HistoricalPackageTier = HistoricalPackageTier.PRO,
     ):
         # #1345 separately tests issuance of the process-local capability. These
         # composition tests stub only that upstream authority call; raw-file replay,
@@ -90,7 +96,7 @@ class BetfairHistoricalMarketDefinitionOriginTests(unittest.TestCase):
                 raw_bytes=raw,
                 market_id=market_id or self.MARKET_ID,
                 cutoff_pt_ms=cutoff,
-                package_tier=HistoricalPackageTier.PRO,
+                package_tier=package_tier,
                 representation=HistoricalRepresentation.MARKET,
             )
 
@@ -218,6 +224,68 @@ class BetfairHistoricalMarketDefinitionOriginTests(unittest.TestCase):
             self.bind_with_upstream_authority_stub(
                 self.witness(malformed), malformed, cutoff=1000
             )
+
+    def test_package_tier_must_match_authoritative_provider_path(self) -> None:
+        raw = _raw(_line(1000, self.MARKET_ID, self.definition(status="OPEN", version=1)))
+        witness = self.witness(raw)
+
+        with self.assertRaisesRegex(
+            BetfairHistoricalMarketDefinitionOriginError,
+            "does not match authoritative provider_path package tier",
+        ):
+            self.bind_with_upstream_authority_stub(
+                witness,
+                raw,
+                cutoff=1000,
+                package_tier=HistoricalPackageTier.BASIC,
+            )
+
+        basic_witness = self.witness(
+            raw,
+            provider_path="/data/xds/historic/BASIC/table_tennis/file.bz2",
+        )
+        bound = self.bind_with_upstream_authority_stub(
+            basic_witness,
+            raw,
+            cutoff=1000,
+            package_tier=HistoricalPackageTier.BASIC,
+        )
+        self.assertIs(bound.package_tier, HistoricalPackageTier.BASIC)
+        self.assertEqual(bound.provider_path, basic_witness.provider_path)
+
+    def test_provider_path_must_encode_known_canonical_package_tier(self) -> None:
+        raw = _raw(_line(1000, self.MARKET_ID, self.definition(status="OPEN", version=1)))
+        cases = (
+            (
+                "/data/xds/historic/UNKNOWN/table_tennis/file.bz2",
+                "unknown historical package tier",
+            ),
+            (
+                "/data/xds/historic/PRO",
+                "canonical historical package tier and file path",
+            ),
+            (
+                "/data/xds/historic//table_tennis/file.bz2",
+                "canonical historical package tier and file path",
+            ),
+            (
+                "/data/xds/other/PRO/table_tennis/file.bz2",
+                "canonical /data/xds/historic/<TIER>/... namespace",
+            ),
+        )
+        for provider_path, message in cases:
+            with self.subTest(provider_path=provider_path):
+                witness = self.witness(raw, provider_path=provider_path)
+                with self.assertRaisesRegex(
+                    BetfairHistoricalMarketDefinitionOriginError,
+                    message,
+                ):
+                    self.bind_with_upstream_authority_stub(
+                        witness,
+                        raw,
+                        cutoff=1000,
+                        package_tier=HistoricalPackageTier.PRO,
+                    )
 
     def test_dynamic_provider_origin_truth_revokes_with_upstream_capability(self) -> None:
         raw = _raw(_line(1000, self.MARKET_ID, self.definition(status="OPEN", version=1)))

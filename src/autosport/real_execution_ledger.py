@@ -494,12 +494,15 @@ class ProviderEvidenceBindingView:
     evidence_id: str
     observed_at: str
     source: str
+    request_sha256: str | None = None
     acknowledgement_sha256: str | None = None
 
     def __post_init__(self) -> None:
         _sha256_text(self.evidence_id, "evidence_id")
         _timestamp(self.observed_at, "observed_at")
         _text(self.source, "source")
+        if self.request_sha256 is not None:
+            _sha256_text(self.request_sha256, "request_sha256")
         if self.acknowledgement_sha256 is not None:
             _sha256_text(
                 self.acknowledgement_sha256,
@@ -1616,6 +1619,7 @@ class RealExecutionLedger:
                     "stored effect fingerprint mismatch"
                 )
             submitted_time: datetime | None = None
+            submitted_request_sha256: str | None = None
             unknown_time: datetime | None = None
             provider_evidence_time: datetime | None = None
             provider_order_reference_seen = False
@@ -1656,6 +1660,7 @@ class RealExecutionLedger:
                                 raise ExecutionLedgerIntegrityError(
                                     "submitted request digest is invalid"
                                 ) from exc
+                        submitted_request_sha256 = request_sha256
                         submitted_time = _timestamp(
                             submission_payload["submitted_at"],
                             "submitted_at",
@@ -1805,14 +1810,14 @@ class RealExecutionLedger:
                         == EventType.PROVIDER_EVIDENCE_BOUND.value
                     ):
                         payload_fields = set(followup["payload"])
-                        if payload_fields not in (
-                            {"evidence_id", "observed_at", "source"},
-                            {
-                                "evidence_id",
-                                "observed_at",
-                                "source",
-                                "acknowledgement_sha256",
-                            },
+                        base_fields = {"evidence_id", "observed_at", "source"}
+                        allowed_optional_fields = {
+                            "request_sha256",
+                            "acknowledgement_sha256",
+                        }
+                        if (
+                            not base_fields.issubset(payload_fields)
+                            or payload_fields - base_fields - allowed_optional_fields
                         ):
                             raise ExecutionLedgerIntegrityError(
                                 "provider evidence binding schema is invalid"
@@ -1826,6 +1831,27 @@ class RealExecutionLedger:
                             followup["payload"]["evidence_id"], "evidence_id"
                         )
                         _text(followup["payload"]["source"], "source")
+                        provider_request_sha256 = followup["payload"].get(
+                            "request_sha256"
+                        )
+                        if provider_request_sha256 is not None:
+                            try:
+                                _sha256_text(
+                                    provider_request_sha256,
+                                    "request_sha256",
+                                )
+                            except ValueError as exc:
+                                raise ExecutionLedgerIntegrityError(
+                                    "provider request digest is invalid"
+                                ) from exc
+                            if submitted_request_sha256 is None:
+                                raise ExecutionLedgerIntegrityError(
+                                    "provider request digest lacks submitted identity"
+                                )
+                            if provider_request_sha256 != submitted_request_sha256:
+                                raise ExecutionLedgerIntegrityError(
+                                    "provider request digest mismatches submission"
+                                )
                         if provider_evidence_time is not None:
                             raise ExecutionLedgerIntegrityError(
                                 "attempt has multiple provider evidence bindings"
@@ -2309,6 +2335,7 @@ class RealExecutionLedger:
         evidence_id: str,
         observed_at: str,
         source: str,
+        request_sha256: str | None,
         acknowledgement_sha256: str | None,
         require_submitted: bool,
     ) -> None:
@@ -2316,6 +2343,8 @@ class RealExecutionLedger:
         _sha256_text(evidence_id, "evidence_id")
         _timestamp(observed_at, "observed_at")
         _text(source, "source")
+        if request_sha256 is not None:
+            _sha256_text(request_sha256, "request_sha256")
         if acknowledgement_sha256 is not None:
             _sha256_text(
                 acknowledgement_sha256,
@@ -2334,6 +2363,25 @@ class RealExecutionLedger:
                 "observed_at": observed_at,
                 "source": source,
             }
+            if request_sha256 is not None:
+                submitted_events = [
+                    event
+                    for event in attempt_events
+                    if event["event_type"]
+                    == EventType.ATTEMPT_SUBMITTED.value
+                ]
+                if len(submitted_events) != 1:
+                    raise ExecutionStateError(
+                        "provider request evidence requires one durable submission"
+                    )
+                if (
+                    submitted_events[0]["payload"].get("request_sha256")
+                    != request_sha256
+                ):
+                    raise ExecutionIdentityConflict(
+                        "provider request evidence mismatches durable submission"
+                    )
+                payload["request_sha256"] = request_sha256
             if acknowledgement_sha256 is not None:
                 payload["acknowledgement_sha256"] = acknowledgement_sha256
             existing = [
@@ -2408,6 +2456,7 @@ class RealExecutionLedger:
         evidence_id: str,
         observed_at: str,
         source: str,
+        request_sha256: str | None = None,
     ) -> None:
         """Persist provider evidence without granting immediate ACK authority.
 
@@ -2421,6 +2470,7 @@ class RealExecutionLedger:
             evidence_id=evidence_id,
             observed_at=observed_at,
             source=source,
+            request_sha256=request_sha256,
             acknowledgement_sha256=None,
             require_submitted=False,
         )
@@ -2432,6 +2482,7 @@ class RealExecutionLedger:
         evidence_id: str,
         observed_at: str,
         source: str,
+        request_sha256: str,
         acknowledgement: ExternalAcknowledgement,
     ) -> None:
         """Bind one immediate provider response to its exact ACK payload.
@@ -2441,6 +2492,7 @@ class RealExecutionLedger:
         acknowledge() may move a SUBMITTED attempt to a terminal state.
         """
 
+        _sha256_text(request_sha256, "request_sha256")
         if type(acknowledgement) is not ExternalAcknowledgement:
             raise TypeError(
                 "acknowledgement must be exact ExternalAcknowledgement"
@@ -2465,6 +2517,7 @@ class RealExecutionLedger:
             evidence_id=evidence_id,
             observed_at=observed_at,
             source=source,
+            request_sha256=request_sha256,
             acknowledgement_sha256=_digest(acknowledgement.to_dict()),
             require_submitted=True,
         )
@@ -3333,6 +3386,7 @@ class RealExecutionLedger:
                     evidence_id=payload["evidence_id"],
                     observed_at=payload["observed_at"],
                     source=payload["source"],
+                    request_sha256=payload.get("request_sha256"),
                     acknowledgement_sha256=payload.get(
                         "acknowledgement_sha256"
                     ),

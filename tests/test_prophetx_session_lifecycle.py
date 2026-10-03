@@ -614,7 +614,7 @@ def test_refresh_success_without_slot_contract_enters_conservative_wait(tmp_path
 
     assert refreshed.state is ProphetXSessionState.WAIT_FOR_PROVIDER_SESSION_EXPIRY
     assert refreshed.session_lineage_id is None
-    assert refreshed.access_expires_at is None
+    assert refreshed.access_expires_at == renewed_expiry
     assert refreshed.slot_hold_until == completed_at + CONSERVATIVE_SESSION_SLOT_HOLD
     assert refreshed.transient_failures == 0
     assert refreshed.last_renewal_failure_class is None
@@ -889,6 +889,7 @@ def test_refresh_success_clears_transient_backoff_without_minting_active(tmp_pat
     )
 
     assert refreshed.state is ProphetXSessionState.WAIT_FOR_PROVIDER_SESSION_EXPIRY
+    assert refreshed.access_expires_at == completed_at + timedelta(minutes=30)
     assert refreshed.transient_failures == 0
     assert refreshed.last_renewal_failure_class is None
     assert refreshed.slot_hold_until == completed_at + timedelta(minutes=30)
@@ -1229,6 +1230,38 @@ def test_retryable_state_rejects_nonfuture_retry_horizon(tmp_path, state):
         lifecycle.begin_login(
             now=NOW + timedelta(minutes=1),
             access_token_available=False,
+        )
+
+
+def test_wait_state_rejects_access_expiry_beyond_slot_hold():
+    with pytest.raises(
+        ProphetXSessionLifecycleError,
+        match="slot hold cannot precede observed access expiry",
+    ):
+        ProphetXSessionSnapshot(
+            state=ProphetXSessionState.WAIT_FOR_PROVIDER_SESSION_EXPIRY,
+            generation=1,
+            credential_revision="cred-v1",
+            integration_role="market-maker",
+            last_transition_at=NOW,
+            access_expires_at=NOW + timedelta(minutes=30),
+            slot_hold_until=NOW + timedelta(minutes=20),
+        )
+
+
+def test_session_pool_exhaustion_cannot_claim_access_expiry():
+    with pytest.raises(
+        ProphetXSessionLifecycleError,
+        match="exhaustion cannot carry access-expiry evidence",
+    ):
+        ProphetXSessionSnapshot(
+            state=ProphetXSessionState.SESSION_POOL_EXHAUSTED,
+            generation=1,
+            credential_revision="cred-v1",
+            integration_role="market-maker",
+            last_transition_at=NOW,
+            access_expires_at=NOW + timedelta(minutes=10),
+            slot_hold_until=NOW + timedelta(minutes=20),
         )
 
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 
+from autosport.monotonic_workspace_authority import MonotonicAuthorityConflictError
 from autosport.real_execution_ledger import (
     ExecutionAction,
     ExecutionLedgerIntegrityError,
@@ -43,10 +44,22 @@ def _plan() -> ExecutionPlan:
     )
 
 
+def _isolated_ledger_path(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    authority_root = tmp_path / "machine-authority"
+    monkeypatch.setenv(
+        "AUTOSPORT_MONOTONIC_AUTHORITY_ROOT",
+        str(authority_root),
+    )
+    return workspace / "execution.jsonl"
+
+
 def test_same_path_valid_prefix_rollback_cannot_become_current_after_restart(
     tmp_path,
+    monkeypatch,
 ) -> None:
-    path = tmp_path / "execution.jsonl"
+    path = _isolated_ledger_path(tmp_path, monkeypatch)
     ledger = RealExecutionLedger(path)
     current_plan = _plan()
 
@@ -76,3 +89,83 @@ def test_same_path_valid_prefix_rollback_cannot_become_current_after_restart(
         match="rollback|monotonic|older|high-water|committed",
     ):
         reopened.verified_snapshot()
+
+
+
+def test_same_path_complete_deletion_cannot_become_pristine_after_restart(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    path = _isolated_ledger_path(tmp_path, monkeypatch)
+    ledger = RealExecutionLedger(path)
+    ledger.reserve_plan(_plan())
+    committed = ledger.verified_snapshot()
+    assert committed.event_count == 1
+
+    path.unlink()
+    reopened = RealExecutionLedger(path)
+
+    with pytest.raises(
+        ExecutionLedgerIntegrityError,
+        match="rollback|monotonic|older|high-water|committed",
+    ):
+        reopened.verified_snapshot()
+
+
+def test_durable_append_with_interrupted_authority_commit_recovers_exact_tip(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    path = _isolated_ledger_path(tmp_path, monkeypatch)
+    ledger = RealExecutionLedger(path)
+    current_plan = _plan()
+
+    def fail_commit(**_kwargs) -> None:
+        raise MonotonicAuthorityConflictError("injected commit interruption")
+
+    monkeypatch.setattr(ledger._monotonic_authority, "commit", fail_commit)
+    with pytest.raises(
+        ExecutionLedgerIntegrityError,
+        match="monotonic COMMIT failed",
+    ):
+        ledger.reserve_plan(current_plan)
+
+    durable_bytes = path.read_bytes()
+    assert durable_bytes
+
+    reopened = RealExecutionLedger(path)
+    recovered = reopened.verified_snapshot()
+
+    assert recovered.payload == durable_bytes
+    assert recovered.event_count == 1
+    assert reopened.reserve_plan(current_plan) == current_plan.fingerprint
+    assert reopened.verified_snapshot().event_count == 1
+
+
+def test_valid_ledger_bytes_cannot_bootstrap_missing_independent_authority(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    source_root = tmp_path / "source"
+    source_root.mkdir()
+    authority_root = tmp_path / "machine-authority"
+    monkeypatch.setenv(
+        "AUTOSPORT_MONOTONIC_AUTHORITY_ROOT",
+        str(authority_root),
+    )
+    source_path = source_root / "execution.jsonl"
+    source = RealExecutionLedger(source_path)
+    source.reserve_plan(_plan())
+    valid_bytes = source_path.read_bytes()
+
+    copied_root = tmp_path / "copied"
+    copied_root.mkdir()
+    copied_path = copied_root / "execution.jsonl"
+    copied_path.write_bytes(valid_bytes)
+    copied = RealExecutionLedger(copied_path)
+
+    with pytest.raises(
+        ExecutionLedgerIntegrityError,
+        match="rollback|monotonic|authority",
+    ):
+        copied.verified_snapshot()

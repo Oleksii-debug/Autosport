@@ -630,3 +630,106 @@ def test_non_pr_source_events_cannot_evict_pending_pr_cleanup_controller() -> No
     assert "format('non-pr-{0}', github.event.workflow_run.id)" in concurrency
     assert "concurrency is evaluated before the job-level pull_request guard" in workflow
     assert "source run id is scheduler isolation only" in workflow
+
+def test_main_captures_sweep_before_snapshot_callback_global_rebind(
+    monkeypatch,
+) -> None:
+    events: list[str] = []
+    forged_calls: list[str] = []
+
+    class FakeScopedApi:
+        def __init__(self, **kwargs) -> None:
+            events.append("api")
+
+        def active_runs(self) -> tuple[WorkflowRun, ...]:
+            events.append("snapshot")
+            monkeypatch.setattr(
+                scoped_controller,
+                "cancel_superseded_explicit_pr_runs",
+                lambda *_args, **_kwargs: forged_calls.append("sweep") or (),
+            )
+            return ()
+
+        def cancel_historical_unbound_runs(self, **kwargs) -> tuple[int, ...]:
+            assert kwargs["exclude_run_ids"] == ()
+            events.append("orphan")
+            return ()
+
+    def captured_sweep(*_args, **_kwargs) -> tuple[int, ...]:
+        events.append("sweep")
+        return ()
+
+    monkeypatch.setattr(scoped_controller, "WorkflowScopedGitHubApi", FakeScopedApi)
+    monkeypatch.setattr(
+        scoped_controller,
+        "cancel_superseded_explicit_pr_runs",
+        captured_sweep,
+    )
+    monkeypatch.setenv("GITHUB_REPOSITORY", "Oleksii-debug/Autosport")
+    monkeypatch.setenv("GITHUB_TOKEN", "test-token")
+
+    assert scoped_controller.main(
+        [
+            "--pr-number",
+            "0",
+            "--event-pr-reference-mode",
+            "empty",
+            "--event-head-sha",
+            "a" * 40,
+            "--workflow-name",
+            "CI",
+            "--workflow-id",
+            "356678400",
+            "--current-run-id",
+            "7000",
+        ]
+    ) == 0
+    assert events == ["api", "snapshot", "sweep", "orphan"]
+    assert forged_calls == []
+
+
+def test_main_rejects_orphan_instance_shadow_created_by_snapshot_callback(
+    monkeypatch,
+) -> None:
+    forged_calls: list[str] = []
+
+    class FakeScopedApi:
+        def __init__(self, **kwargs) -> None:
+            pass
+
+        def active_runs(self) -> tuple[WorkflowRun, ...]:
+            self.cancel_historical_unbound_runs = (
+                lambda **_kwargs: forged_calls.append("orphan") or ()
+            )
+            return ()
+
+        def cancel_historical_unbound_runs(self, **kwargs) -> tuple[int, ...]:
+            return ()
+
+    monkeypatch.setattr(scoped_controller, "WorkflowScopedGitHubApi", FakeScopedApi)
+    monkeypatch.setattr(
+        scoped_controller,
+        "cancel_superseded_explicit_pr_runs",
+        lambda *_args, **_kwargs: (),
+    )
+    monkeypatch.setenv("GITHUB_REPOSITORY", "Oleksii-debug/Autosport")
+    monkeypatch.setenv("GITHUB_TOKEN", "test-token")
+
+    assert scoped_controller.main(
+        [
+            "--pr-number",
+            "0",
+            "--event-pr-reference-mode",
+            "empty",
+            "--event-head-sha",
+            "a" * 40,
+            "--workflow-name",
+            "CI",
+            "--workflow-id",
+            "356678400",
+            "--current-run-id",
+            "7000",
+        ]
+    ) == 2
+    assert forged_calls == []
+

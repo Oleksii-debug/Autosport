@@ -159,10 +159,31 @@ class LatencySummary:
             <= self.max_ns
         ):
             raise LatencyBudgetError("latency summary ranks must be monotonic")
-        minimum_total = self.sample_count * self.min_ns
-        maximum_total = self.sample_count * self.max_ns
-        if not minimum_total <= self.total_ns <= maximum_total:
-            raise LatencyBudgetError("total_ns contradicts sample_count/min_ns/max_ns bounds")
+        if self.sample_count == 1:
+            if not (
+                self.min_ns
+                == self.p50_ns
+                == self.p95_ns
+                == self.p99_ns
+                == self.max_ns
+                == self.total_ns
+            ):
+                raise LatencyBudgetError(
+                    "single-sample summary fields must describe one exact sample"
+                )
+        else:
+            # Any realizable sample set containing both extrema must include at least
+            # one min and one max. The remaining samples can only lie between them.
+            minimum_total = (
+                self.max_ns + (self.sample_count - 1) * self.min_ns
+            )
+            maximum_total = (
+                self.min_ns + (self.sample_count - 1) * self.max_ns
+            )
+            if not minimum_total <= self.total_ns <= maximum_total:
+                raise LatencyBudgetError(
+                    "total_ns contradicts realizable sample_count/min_ns/max_ns bounds"
+                )
 
     @property
     def within_budget(self) -> bool:
@@ -250,12 +271,24 @@ def measure_call(
         raise LatencyBudgetError("clock_ns must be callable")
 
     start_ns = clock_ns()
-    if isinstance(start_ns, bool) or not isinstance(start_ns, int):
-        raise LatencyBudgetError("clock_ns must return integer nanoseconds")
+    if (
+        isinstance(start_ns, bool)
+        or not isinstance(start_ns, int)
+        or start_ns < 0
+    ):
+        raise LatencyBudgetError(
+            "clock_ns must return non-negative integer nanoseconds"
+        )
     result = call()
     end_ns = clock_ns()
-    if isinstance(end_ns, bool) or not isinstance(end_ns, int):
-        raise LatencyBudgetError("clock_ns must return integer nanoseconds")
+    if (
+        isinstance(end_ns, bool)
+        or not isinstance(end_ns, int)
+        or end_ns < 0
+    ):
+        raise LatencyBudgetError(
+            "clock_ns must return non-negative integer nanoseconds"
+        )
     if end_ns < start_ns:
         raise LatencyBudgetError("clock_ns moved backwards")
 

@@ -181,3 +181,49 @@ def test_wrapped_exception_propagates_and_truth_flags_remain_false() -> None:
     assert payload["readiness_authority"] is False
     assert payload["real_hardware_performance_evidence"] is False
     assert payload["whole_product_complete"] is False
+
+
+def test_summary_constructor_rejects_impossible_extrema_total_and_single_sample() -> None:
+    budget = LatencyBudget("forged", 1_000)
+
+    with pytest.raises(LatencyBudgetError, match="realizable"):
+        LatencySummary(
+            budget=budget,
+            sample_count=2,
+            total_ns=50,
+            min_ns=0,
+            p50_ns=0,
+            p95_ns=100,
+            p99_ns=100,
+            max_ns=100,
+            breach_count=0,
+        )
+
+    with pytest.raises(LatencyBudgetError, match="single-sample"):
+        LatencySummary(
+            budget=budget,
+            sample_count=1,
+            total_ns=3,
+            min_ns=1,
+            p50_ns=2,
+            p95_ns=2,
+            p99_ns=3,
+            max_ns=3,
+            breach_count=0,
+        )
+
+
+def test_negative_injected_clock_ticks_fail_closed() -> None:
+    budget = LatencyBudget("clock", 10)
+
+    with pytest.raises(LatencyBudgetError, match="non-negative integer nanoseconds"):
+        measure_call("op", lambda: None, budget=budget, clock_ns=lambda: -1)
+
+    ticks = iter((0, -1))
+    with pytest.raises(LatencyBudgetError, match="non-negative integer nanoseconds"):
+        measure_call(
+            "op",
+            lambda: None,
+            budget=budget,
+            clock_ns=lambda: next(ticks),
+        )

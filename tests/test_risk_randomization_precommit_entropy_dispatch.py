@@ -4,6 +4,7 @@ import pytest
 
 import autosport.risk_membership_publication as publication
 from autosport.risk_sampling_membership import ResolvedFixedNRiskMembership
+from autosport.run_registry import RunRegistry
 import autosport.risk_randomization_precommit as precommit
 
 
@@ -31,6 +32,7 @@ def test_public_entropy_dispatch_rebinding_fails_closed_before_root_publication(
     workspace.mkdir()
     registry = workspace / "scientific-registry.json"
     registry.write_text("{}\n", encoding="utf-8")
+    RunRegistry.initialize_pristine(workspace / "run_registry.json")
     authority_root = tmp_path / "machine-authority"
     membership = _membership()
     monkeypatch.setattr(

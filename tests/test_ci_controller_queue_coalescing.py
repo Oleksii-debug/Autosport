@@ -405,3 +405,16 @@ def test_controller_main_uses_workflow_wide_sweep_and_trigger_boundary() -> None
         "trigger_qualification = api.live_pr_qualification(trigger_pr_number)"
     )
     assert "_cancel_triggering_run_if_stale_or_nonqualifying(" in text
+
+def test_workflow_wide_sweep_preserves_sealed_scoped_cancel_boundary() -> None:
+    text = Path("scripts/cancel_superseded_pr_workflow_runs_scoped.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert "cancel = _build_cancel(" in text
+    assert "canonical base cancellation authority changed" in text
+    assert "scoped cancellation revalidation dispatch changed" in text
+    assert "base_cancel(self, run_id)" in text
+    assert text.index("current_qualification = api.live_pr_qualification(pr_number)") < text.index(
+        "api.cancel(run_id)"
+    )

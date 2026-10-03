@@ -344,7 +344,7 @@ def test_restart_during_2fa_drops_transient_auth_context():
     assert "challenge-ref-1" not in text
 
 
-def test_restart_preserves_only_opaque_stored_credential_reference():
+def test_restart_does_not_trust_public_snapshot_as_credential_authority():
     ctl, _, _, _ = controller()
     ctl.import_approved_api_token(
         access_key="ACCESS_SECRET",
@@ -356,8 +356,23 @@ def test_restart_preserves_only_opaque_stored_credential_reference():
         ctl.public_snapshot()
     )
 
-    assert restored_state is AccountLinkState.LINKED_CREDENTIAL_STORED
-    assert restored_credential_ref == "credential-ref-1"
+    assert restored_state is AccountLinkState.LOGIN_FORM
+    assert restored_credential_ref is None
+
+
+def test_forged_serialized_snapshot_cannot_mint_linked_credential_state():
+    forged = {
+        "state": AccountLinkState.LINKED_CREDENTIAL_STORED.value,
+        "credential_present": True,
+        "credential_ref": "attacker-selected-reference",
+    }
+
+    restored_state, restored_credential_ref = (
+        ProphetXAccountLinkController.restart_safe_state(forged)
+    )
+
+    assert restored_state is AccountLinkState.LOGIN_FORM
+    assert restored_credential_ref is None
 
 
 def test_cancel_drops_2fa_context_and_best_effort_cancels_native_challenge():

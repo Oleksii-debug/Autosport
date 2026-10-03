@@ -78,6 +78,40 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
     def semantic_events(snapshot) -> tuple[dict[str, object], ...]:
         return tuple(event.to_dict() for event in snapshot.events)
 
+    @staticmethod
+    def direct_insert_positive_append(
+        store: SQLiteMarketStore,
+        event: MarketEvent,
+        *,
+        generation: int,
+    ) -> None:
+        payload = storage_module._canonical_payload(event)
+        store.connection.execute(
+            """INSERT INTO market_events
+               (dedupe_key,quote_key,event_id,market_id,selection_id,decimal_odds,
+                observed_ts,source_id,sequence,payload_json)
+               VALUES (?,?,?,?,?,?,?,?,?,?)""",
+            (
+                event.dedupe_key,
+                event.quote_key,
+                event.event_id,
+                event.market_id,
+                event.selection_id,
+                str(event.decimal_odds),
+                event.observed_ts,
+                event.source_id,
+                event.sequence,
+                payload,
+            ),
+        )
+        store.connection.execute(
+            """INSERT INTO market_event_commit_order
+               (dedupe_key, append_generation)
+               VALUES (?, ?)""",
+            (event.dedupe_key, generation),
+        )
+        store.connection.commit()
+
     def test_late_backdated_append_cannot_rewrite_frozen_cutoff(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = SQLiteMarketStore(Path(directory) / "market.db")
@@ -909,6 +943,170 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
                     "workspace state is missing, rolled back, or unproven",
                 ):
                     self.replay(store)
+            finally:
+                store.close()
+
+
+
+    def test_preinserted_positive_append_without_independent_issuance_fails_closed(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "market.db"
+            store = SQLiteMarketStore(path)
+            try:
+                forged = self.event(
+                    sequence=1,
+                    odds="2.00",
+                    observed_ts="2026-09-16T19:00:00+00:00",
+                )
+                self.direct_insert_positive_append(
+                    store,
+                    forged,
+                    generation=1,
+                )
+
+                with self.assertRaisesRegex(
+                    MonotonicAuthorityRollbackError,
+                    "workspace has state but independent authority history is missing",
+                ):
+                    self.replay(store)
+                with self.assertRaises(MonotonicAuthorityRollbackError):
+                    store.append(forged)
+            finally:
+                store.close()
+
+            with self.assertRaises(MonotonicAuthorityRollbackError):
+                SQLiteMarketStore(path)
+
+    def test_direct_positive_append_after_authority_history_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            try:
+                first = self.event(
+                    sequence=1,
+                    odds="2.00",
+                    observed_ts="2026-09-16T19:00:00+00:00",
+                )
+                second = self.event(
+                    sequence=2,
+                    odds="2.10",
+                    observed_ts="2026-09-16T19:00:00.500000+00:00",
+                )
+                self.assertTrue(store.append(first))
+                self.direct_insert_positive_append(
+                    store,
+                    second,
+                    generation=2,
+                )
+
+                with self.assertRaisesRegex(
+                    MonotonicAuthorityRollbackError,
+                    "workspace state is missing, rolled back, or unproven",
+                ):
+                    self.replay(store)
+                with self.assertRaises(MonotonicAuthorityRollbackError):
+                    store.append(second)
+            finally:
+                store.close()
+
+    def test_append_issuance_recovers_after_sqlite_commit_before_authority_commit(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            try:
+                event = self.event(
+                    sequence=1,
+                    odds="2.00",
+                    observed_ts="2026-09-16T19:00:00+00:00",
+                )
+                original_recover = MonotonicWorkspaceAuthority.recover
+                calls = 0
+
+                def fail_after_sqlite_commit(authority, **kwargs):
+                    nonlocal calls
+                    calls += 1
+                    if calls == 3:
+                        raise RuntimeError(
+                            "simulated post-SQLite append-authority crash"
+                        )
+                    return original_recover(authority, **kwargs)
+
+                with patch.object(
+                    MonotonicWorkspaceAuthority,
+                    "recover",
+                    new=fail_after_sqlite_commit,
+                ):
+                    with self.assertRaisesRegex(
+                        RuntimeError,
+                        "simulated post-SQLite append-authority crash",
+                    ):
+                        store.append(event)
+
+                self.assertEqual(
+                    store.connection.execute(
+                        "SELECT COUNT(*) FROM market_event_commit_order "
+                        "WHERE append_generation > 0"
+                    ).fetchone(),
+                    (1,),
+                )
+                self.assertFalse(store.append(event))
+                recovered = self.replay(store)
+                self.assertEqual(len(recovered.events), 1)
+                self.assertEqual(recovered.events[0].dedupe_key, event.dedupe_key)
+            finally:
+                store.close()
+
+    def test_coherent_generation_swap_is_rejected_before_any_cutoff_issuance(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            try:
+                first = self.event(
+                    sequence=1,
+                    odds="2.00",
+                    observed_ts="2026-09-16T19:00:00+00:00",
+                )
+                second = self.event(
+                    sequence=2,
+                    odds="2.10",
+                    observed_ts="2026-09-16T19:00:00.500000+00:00",
+                )
+                self.assertTrue(store.append(first))
+                self.assertTrue(store.append(second))
+                store.connection.execute(
+                    "DROP TRIGGER market_event_commit_order_no_delete"
+                )
+                store.connection.execute(
+                    "DROP TRIGGER market_event_commit_order_no_update"
+                )
+                store.connection.execute(
+                    """UPDATE market_event_commit_order
+                       SET append_generation = CASE append_generation
+                           WHEN 1 THEN 2
+                           WHEN 2 THEN 1
+                           ELSE append_generation
+                       END"""
+                )
+                for trigger_sql in (
+                    storage_module._COMMIT_ORDER_IMMUTABILITY_TRIGGERS.values()
+                ):
+                    store.connection.execute(trigger_sql)
+                store.connection.commit()
+
+                with self.assertRaisesRegex(
+                    MonotonicAuthorityRollbackError,
+                    "workspace state is missing, rolled back, or unproven",
+                ):
+                    store.append(first)
+                self.assertEqual(
+                    store.connection.execute(
+                        "SELECT COUNT(*) FROM market_replay_cutoffs"
+                    ).fetchone(),
+                    (0,),
+                )
             finally:
                 store.close()
 

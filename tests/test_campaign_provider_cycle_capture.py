@@ -1,13 +1,18 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 
+import autosport.campaign_forward_universe_cycle_binding as binding_module
 import autosport.campaign_provider_cycle_capture as capture_module
 import autosport.provider_observation_authority as provider_module
-from autosport.campaign_inception import CampaignInceptionSourceSpec
+from autosport.campaign_inception import (
+    CampaignInceptionSourceSpec,
+    establish_campaign_inception,
+)
 from autosport.campaign_precommit_manifest import (
     CampaignPrecommitManifest,
     publish_campaign_precommit_manifest,
@@ -19,6 +24,12 @@ from autosport.campaign_provider_cycle_capture import (
     capture_campaign_complete_game_board,
 )
 from autosport.causal_collector import CollectorDeltaStore
+from autosport.campaign_forward_universe_cycle_binding import (
+    CampaignForwardUniverseCycleBindingError,
+    resolve_campaign_forward_universe_cycle_authority,
+)
+from autosport.forward_evidence_completeness import ForwardEvidenceProtocolEnvelope
+from autosport.provider_evaluation_universe import ProviderEvaluationUniverseStore
 from autosport.forward_universe_precommit_authority import (
     ForwardUniversePrecommitLocator,
 )
@@ -338,6 +349,111 @@ def test_provider_observation_cannot_postdate_cycle_completion(
     terminal = evidence[0]["terminal"]
     assert terminal["status"] == "LOCAL_FAILURE"
     assert "observed_artifacts" not in terminal
+
+
+def test_durable_resolver_rejects_legacy_success_with_post_cycle_provider_time(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    locator, store, spec, provider_store = _setup(tmp_path)
+    campaign = establish_campaign_inception(
+        precommit_locator=locator,
+        store=store,
+        source_spec=spec,
+    )
+    slot = store._next_collector_schedule_slot(
+        source_id=spec.source_id,
+        run_id=spec.run_id,
+    )
+    cycle_seq = store._begin_scheduled_collector_cycle(
+        source_id=spec.source_id,
+        run_id=spec.run_id,
+        stream_epoch=spec.stream_epoch,
+        max_items=spec.max_items,
+        slot_ordinal=slot["slot_ordinal"],
+        due_at=slot["due_at"],
+        attempted_at="2100-01-01T06:00:00+00:00",
+    )
+
+    monkeypatch.setattr(
+        provider_module,
+        "urlopen",
+        lambda _request, _timeout: _FakeSseResponse(_frame()),
+    )
+    monkeypatch.setattr(
+        provider_module,
+        "_default_clock",
+        lambda: "2100-01-01T06:00:02Z",
+    )
+    snapshot = provider_module.capture_parlay_complete_game_board(
+        api_key="secret-value",
+        request=_request(),
+        timeout_seconds=3.0,
+    )
+    provider_store.save(snapshot)
+
+    store._record_collector_cycle_observation_artifact(
+        source_id=spec.source_id,
+        cycle_seq=cycle_seq,
+        artifact_kind=ARTIFACT_KIND,
+        artifact_sha256=snapshot.evidence_sha256,
+    )
+    store._finish_collector_cycle(
+        source_id=spec.source_id,
+        cycle_seq=cycle_seq,
+        status="SUCCESS",
+        completed_at="2100-01-01T06:00:01+00:00",
+        catalog_changes=(),
+        observed_delta_ids=(),
+        committed_delta_ids=(),
+        duplicate_delta_ids=(),
+    )
+    collector_evidence = store.collector_cycle_observation_artifact_evidence(
+        source_id=spec.source_id,
+        cycle_seq=cycle_seq,
+        artifact_kind=ARTIFACT_KIND,
+        artifact_sha256=snapshot.evidence_sha256,
+    )
+    receipt = capture_module._issue_receipt(
+        campaign=campaign,
+        snapshot=snapshot,
+        collector_evidence=collector_evidence,
+    )
+
+    universe_store = ProviderEvaluationUniverseStore(
+        tmp_path / "workspace",
+        authority_id="legacy-chronology-test-authority",
+        source_id=spec.source_id,
+        authority_root=tmp_path / "machine-authority",
+    )
+    protocol = ForwardEvidenceProtocolEnvelope(
+        campaign_id=campaign.campaign_id,
+        scientific_protocol_sha256=A,
+        candidate_universe_rule_id="legacy-cycle-chronology",
+        candidate_universe_rule_sha256=B,
+        forward_evaluation_policy_sha256=C,
+        runtime_identity_sha256=D,
+        baseline_set_sha256=E,
+        protective_metric_set_sha256=F,
+        cost_policy_sha256=ZERO,
+        precommit_anchor_lower=datetime(2099, 12, 31, tzinfo=timezone.utc),
+        precommit_anchor_upper=datetime(2100, 1, 1, tzinfo=timezone.utc),
+    )
+
+    with pytest.raises(
+        CampaignForwardUniverseCycleBindingError,
+        match="outside authorized collector cycle chronology",
+    ):
+        resolve_campaign_forward_universe_cycle_authority(
+            precommit_locator=locator,
+            collector_store=store,
+            source_spec=spec,
+            cycle_receipt=receipt,
+            provider_evidence_store=provider_store,
+            universe_store=universe_store,
+            protocol=protocol,
+            event_lifecycle=None,
+        )
 
 
 def test_provider_failure_records_terminal_failure_without_artifact(

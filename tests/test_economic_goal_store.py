@@ -202,6 +202,34 @@ def test_strict_json_rejects_duplicate_schema_key() -> None:
         economic_goal_from_json(duplicate)
 
 
+def test_optional_load_returns_none_only_for_genuinely_absent_path(
+    tmp_path: Path,
+) -> None:
+    store = EconomicGoalStore(tmp_path)
+
+    assert store.load_optional() is None
+
+    store.initialize_owner(_goal())
+    assert store.load_optional() == _goal()
+
+
+def test_optional_load_rejects_broken_symlink_instead_of_treating_it_as_absent(
+    tmp_path: Path,
+) -> None:
+    store = EconomicGoalStore(tmp_path)
+    target = tmp_path / "missing-external-goal.json"
+    try:
+        store.path.symlink_to(target)
+    except OSError as exc:
+        pytest.skip(f"symlinks unavailable on this runner: {exc}")
+
+    with pytest.raises(EconomicGoalContractError):
+        store.load_optional()
+
+    assert store.path.is_symlink()
+    assert not target.exists()
+
+
 def test_store_rejects_hard_linked_owner_authority(tmp_path: Path) -> None:
     store = EconomicGoalStore(tmp_path)
     store.initialize_owner(_goal())

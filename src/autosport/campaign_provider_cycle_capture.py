@@ -628,8 +628,9 @@ def capture_campaign_complete_game_board(
 ) -> tuple[CompleteGameBoardSnapshot, CampaignCompleteBoardCycleReceipt]:
     """Capture one provider board only after the exact campaign START is authorized."""
 
+    integrity_error = CampaignProviderCycleCaptureIntegrityError
     if _public_surface_guard is None:
-        raise CampaignProviderCycleCaptureIntegrityError(
+        raise integrity_error(
             "campaign provider-cycle sealed public surface guard is required"
         )
 
@@ -655,12 +656,12 @@ def capture_campaign_complete_game_board(
         is _CANONICAL_TEST_CAMPAIGN_CLOCK_CAPABILITY
     )
     if not test_clock_origin and clock is not _CANONICAL_CAMPAIGN_CLOCK:
-        raise CampaignProviderCycleCaptureIntegrityError(
+        raise integrity_error(
             "campaign collector clock must be product-owned"
         )
     effective_clock = clock if test_clock_origin else _CANONICAL_CAMPAIGN_CLOCK
     if request.source_id != source_spec.source_id:
-        raise CampaignProviderCycleCaptureIntegrityError(
+        raise integrity_error(
             "provider request source_id does not match campaign collector source"
         )
     require_seams = _require_canonical_seams
@@ -749,6 +750,7 @@ def capture_campaign_complete_game_board(
     expected_evidence_directory_surface = _EVIDENCE_DIRECTORY_SURFACE
     expected_precommit_routing_seams = _PRECOMMIT_ROUTING_SEAMS
     expected_precommit_routing_items = _PRECOMMIT_ROUTING_SEAM_ITEMS
+    expected_integrity_error = integrity_error
     expected_type = _CANONICAL_TYPE
     expected_callable = _CANONICAL_CALLABLE
     expected_getattr = _CANONICAL_GETATTR
@@ -758,9 +760,16 @@ def capture_campaign_complete_game_board(
 
     def require_stable_dispatch() -> None:
         require_public_surface()
+        if (
+            module_globals.get("CampaignProviderCycleCaptureIntegrityError")
+            is not expected_integrity_error
+        ):
+            raise integrity_error(
+                "campaign provider-cycle integrity error authority changed"
+            )
         for builtin_name in expected_unshadowed_builtins:
             if builtin_name in module_globals:
-                raise CampaignProviderCycleCaptureIntegrityError(
+                raise integrity_error(
                     "campaign provider-cycle builtin dispatch shadowed: "
                     + builtin_name
                 )
@@ -771,7 +780,7 @@ def capture_campaign_complete_game_board(
             or module_globals.get("_CANONICAL_SORTED") is not expected_sorted
             or module_globals.get("_CANONICAL_TYPE_ERROR") is not expected_type_error_alias
         ):
-            raise CampaignProviderCycleCaptureIntegrityError(
+            raise integrity_error(
                 "campaign provider-cycle builtin dispatch changed"
             )
         if (
@@ -785,7 +794,7 @@ def capture_campaign_complete_game_board(
                 for name, target, code in expected_getattr_static_global_items
             )
         ):
-            raise CampaignProviderCycleCaptureIntegrityError(
+            raise integrity_error(
                 "campaign provider-cycle reflection dispatch changed"
             )
         if (
@@ -806,7 +815,7 @@ def capture_campaign_complete_game_board(
             or expected_getattr_static(expected_receipt_class, "_issue")
             is not expected_receipt_issuer
         ):
-            raise CampaignProviderCycleCaptureIntegrityError(
+            raise integrity_error(
                 "campaign cycle receipt issuance authority changed"
             )
         if (
@@ -847,7 +856,7 @@ def capture_campaign_complete_game_board(
                 for name, descriptor in expected_provider_snapshot_seams.items()
             )
         ):
-            raise CampaignProviderCycleCaptureIntegrityError(
+            raise integrity_error(
                 "campaign provider acquisition authority changed"
             )
         if (
@@ -864,7 +873,7 @@ def capture_campaign_complete_game_board(
                 for name, descriptor in expected_receipt_field_descriptors
             )
         ):
-            raise CampaignProviderCycleCaptureIntegrityError(
+            raise integrity_error(
                 "campaign provider-cycle receipt field authority changed"
             )
         if (
@@ -881,7 +890,7 @@ def capture_campaign_complete_game_board(
                 for name, descriptor in expected_inception_field_descriptors
             )
         ):
-            raise CampaignProviderCycleCaptureIntegrityError(
+            raise integrity_error(
                 "campaign inception receipt field authority changed"
             )
         if (
@@ -892,7 +901,7 @@ def capture_campaign_complete_game_board(
             or module_globals.get("datetime") is not expected_datetime
             or module_globals.get("UTC") is not expected_utc
         ):
-            raise CampaignProviderCycleCaptureIntegrityError(
+            raise integrity_error(
                 "campaign provider-cycle chronology/digest primitives changed"
             )
         if (
@@ -921,17 +930,17 @@ def capture_campaign_complete_game_board(
                 for name, descriptor in expected_precommit_routing_items
             )
         ):
-            raise CampaignProviderCycleCaptureIntegrityError(
+            raise integrity_error(
                 "campaign provider evidence routing witness changed mid-capture"
             )
         for name, target, code in expected_codes:
             if module_globals.get(name) is not target:
-                raise CampaignProviderCycleCaptureIntegrityError(
+                raise integrity_error(
                     "campaign provider-cycle dispatch authority is rebound: " + name
                 )
             function = _CANONICAL_GETATTR(target, "__func__", target)
             if _CANONICAL_GETATTR(function, "__code__", None) is not code:
-                raise CampaignProviderCycleCaptureIntegrityError(
+                raise integrity_error(
                     "campaign provider-cycle dispatch code changed: " + name
                 )
         require_evidence_scope(precommit_locator, evidence_store)
@@ -960,7 +969,7 @@ def capture_campaign_complete_game_board(
         or slot.get("slot_ordinal") < source_spec.evaluation_start_slot_ordinal
         or slot.get("slot_ordinal") > source_spec.evaluation_end_slot_ordinal
     ):
-        raise CampaignProviderCycleCaptureIntegrityError(
+        raise integrity_error(
             "campaign collector next slot does not match inception receipt"
         )
     raw_attempted_at = effective_clock()
@@ -982,14 +991,14 @@ def capture_campaign_complete_game_board(
             instant(slot_deadline_at, "collector next slot due_at")
         )
     except (overflow_error, type_error, value_error) as exc:
-        raise CampaignProviderCycleCaptureIntegrityError(
+        raise integrity_error(
             "collector fixed schedule slot window is not representable"
         ) from exc
     if (
         attempted_instant < slot_due_instant
         or attempted_instant >= slot_deadline_instant
     ):
-        raise CampaignProviderCycleCaptureIntegrityError(
+        raise integrity_error(
             "collector START falls outside precommitted fixed schedule slot window"
         )
     campaign_not_before = datetime.fromisoformat(
@@ -999,7 +1008,7 @@ def capture_campaign_complete_game_board(
         instant(campaign.observation_not_after, "campaign observation_not_after")
     )
     if attempted_instant < campaign_not_before or attempted_instant > campaign_not_after:
-        raise CampaignProviderCycleCaptureIntegrityError(
+        raise integrity_error(
             "collector START falls outside precommitted campaign observation window"
         )
     require_public_surface()
@@ -1015,7 +1024,7 @@ def capture_campaign_complete_game_board(
             attempted_at=attempted_at,
         )
     except (type_error, value_error) as exc:
-        raise CampaignProviderCycleCaptureIntegrityError(
+        raise integrity_error(
             "cannot reserve exact campaign collector START before provider I/O"
         ) from exc
 
@@ -1029,7 +1038,7 @@ def capture_campaign_complete_game_board(
         require_public_surface()
         require_stable_dispatch()
         if _CANONICAL_TYPE(snapshot) is not CompleteGameBoardSnapshot:
-            raise CampaignProviderCycleCaptureIntegrityError(
+            raise integrity_error(
                 "provider capture returned noncanonical snapshot type"
             )
         provider_captured_at = instant(
@@ -1038,11 +1047,11 @@ def capture_campaign_complete_game_board(
         )
         provider_captured_instant = datetime.fromisoformat(provider_captured_at)
         if provider_captured_instant < attempted_instant:
-            raise CampaignProviderCycleCaptureIntegrityError(
+            raise integrity_error(
                 "provider observation predates authorized collector START"
             )
         if provider_captured_instant >= slot_deadline_instant:
-            raise CampaignProviderCycleCaptureIntegrityError(
+            raise integrity_error(
                 "provider observation falls outside precommitted fixed schedule slot window"
             )
         raw_completed_at = effective_clock()
@@ -1052,7 +1061,7 @@ def capture_campaign_complete_game_board(
         completed_at = instant(raw_completed_at, "collector completed_at")
         completed_instant = datetime.fromisoformat(completed_at)
         if completed_instant < provider_captured_instant:
-            raise CampaignProviderCycleCaptureIntegrityError(
+            raise integrity_error(
                 "provider observation falls after collector cycle completion"
             )
         if (
@@ -1060,7 +1069,7 @@ def capture_campaign_complete_game_board(
             or provider_captured_instant > campaign_not_after
             or completed_instant > campaign_not_after
         ):
-            raise CampaignProviderCycleCaptureIntegrityError(
+            raise integrity_error(
                 "provider cycle falls outside precommitted campaign observation window"
             )
         require_public_surface()
@@ -1080,7 +1089,7 @@ def capture_campaign_complete_game_board(
             or path_equal(evidence_path, repeated_path) is not True
             or path_equal(evidence_path, expected_evidence_path) is not True
         ):
-            raise CampaignProviderCycleCaptureIntegrityError(
+            raise integrity_error(
                 "provider evidence store did not retain exact captured identity"
             )
         require_public_surface()
@@ -1097,7 +1106,7 @@ def capture_campaign_complete_game_board(
             or artifact.get("artifact_kind") != ARTIFACT_KIND
             or artifact.get("artifact_sha256") != snapshot.evidence_sha256
         ):
-            raise CampaignProviderCycleCaptureIntegrityError(
+            raise integrity_error(
                 "collector artifact append returned noncanonical identity"
             )
         require_public_surface()
@@ -1138,7 +1147,7 @@ def capture_campaign_complete_game_board(
             or collector_evidence.get("completed_at") != completed_at
             or collector_evidence.get("artifact_id") != artifact.get("artifact_id")
         ):
-            raise CampaignProviderCycleCaptureIntegrityError(
+            raise integrity_error(
                 "collector artifact evidence does not bind exact campaign authority"
             )
         require_public_surface()
@@ -1189,7 +1198,7 @@ def capture_campaign_complete_game_board(
                     or _CANONICAL_GETATTR(finish_function, "__code__", None)
                     is not expected_finish_code
                 ):
-                    raise CampaignProviderCycleCaptureIntegrityError(
+                    raise integrity_error(
                         "campaign provider-cycle failure terminal dispatch changed"
                     )
                 require_seams(store, evidence_store)

@@ -410,6 +410,23 @@ class HealthGatedMirrorDecisionIndexTests(unittest.TestCase):
                 ):
                     self.fail("advanced provider health must not enter publication")
 
+    def test_provider_gap_publication_fence_rejects_empty_failed_witness(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            _, _, _, gate = self.build_gate(directory)
+            as_of = datetime(2026, 9, 17, 12, 0, 10, tzinfo=timezone.utc)
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "lacks durable failed evidence",
+            ):
+                with gate.hold_replay_boundaries(
+                    (),
+                    as_of=as_of,
+                    require_eligible=False,
+                    require_failed=True,
+                ):
+                    self.fail("empty failed-health witness must not publish")
+
     def test_provider_gap_publication_fence_requires_durable_failed_health(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             _, _, health_store, gate = self.build_gate(directory)

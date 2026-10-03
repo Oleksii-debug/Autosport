@@ -451,6 +451,10 @@ class HealthGatedMirrorDecisionIndex:
             )
         boundary = self._as_of(as_of)
         if not boundaries:
+            if require_failed:
+                raise ValueError(
+                    "provider health publication lacks durable failed evidence"
+                )
             yield
             return
 

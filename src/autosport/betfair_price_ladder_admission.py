@@ -702,10 +702,48 @@ def _install_price_ladder_authority() -> None:
     validate_admission = BetfairPriceLadderAdmission.assert_authoritative
     require_account_origin = require_authoritative_betfair_account_identity
     account_origin_error = BetfairAccountIdentityError
+    canonical_dispatch = (
+        ("_parse_line_range", _parse_line_range),
+        ("_classic_tick", _classic_tick),
+        ("_finest_tick", _finest_tick),
+        ("_json_object", _json_object),
+        ("_provider_required_text", _provider_required_text),
+        ("_provider_number", _provider_number),
+        ("_provider_enum_text", _provider_enum_text),
+        ("_required_text", _required_text),
+        ("_positive_int", _positive_int),
+        ("_finite_decimal", _finite_decimal),
+        ("_input_decimal", _input_decimal),
+        ("_decimal_text", _decimal_text),
+        ("_iso_timestamp", _iso_timestamp),
+        ("_sha256_hex", _sha256_hex),
+        ("_canonical_sha256", _canonical_sha256),
+    )
+    canonical_json_dumps = json.dumps
+    canonical_sha256_fn = sha256
+    canonical_decimal_type = Decimal
+    canonical_fraction_type = Fraction
+
+    def require_source_dispatch() -> None:
+        for name, expected in canonical_dispatch:
+            if globals().get(name) is not expected:
+                raise BetfairPriceLadderError(
+                    f"price-ladder canonical dispatch {name} was rebound"
+                )
+        if (
+            json.dumps is not canonical_json_dumps
+            or sha256 is not canonical_sha256_fn
+            or Decimal is not canonical_decimal_type
+            or Fraction is not canonical_fraction_type
+        ):
+            raise BetfairPriceLadderError(
+                "price-ladder canonical primitive dispatch was rebound"
+            )
 
     def require_bound_origin(
         authority: BetfairPriceLadderAuthority,
     ) -> tuple[BetfairReadOnlyClient, BetfairAuthenticatedAccountIdentity]:
+        require_source_dispatch()
         with issuance_lock:
             record = origin_by_authority.get(id(authority))
         if record is None or record[0]() is not authority:
@@ -734,6 +772,7 @@ def _install_price_ladder_authority() -> None:
         client: BetfairReadOnlyClient,
         account_identity: BetfairAuthenticatedAccountIdentity,
     ) -> None:
+        require_source_dispatch()
         raw_init(self, client, account_identity)
         try:
             require_account_origin(account_identity, client=client)
@@ -796,6 +835,7 @@ def _install_price_ladder_authority() -> None:
         return observation
 
     def assert_observation(self: BetfairPriceLadderObservation) -> None:
+        require_source_dispatch()
         validate_observation(self)
         with issuance_lock:
             record = issued_observations.get(id(self))
@@ -864,6 +904,7 @@ def _install_price_ladder_authority() -> None:
         return admission
 
     def assert_admission(self: BetfairPriceLadderAdmission) -> None:
+        require_source_dispatch()
         validate_admission(self)
         with issuance_lock:
             record = issued_admissions.get(id(self))

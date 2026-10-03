@@ -410,6 +410,45 @@ def test_within_day_backdating_cannot_refresh_stale_quote(tmp_path):
     assert PaperBook.load(tmp_path / "paper_book.json").tickets == {}
 
 
+def test_turnover_override_cannot_use_caller_time_to_refresh_stale_quote(tmp_path):
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    requested = _same_day_offset(now, -60)
+    old = now - timedelta(days=2)
+    goal = replace(_goal(), max_quote_age_seconds=Decimal("5"))
+    EconomicGoalStore(tmp_path).initialize_owner(goal)
+    book = _book_with_settled_turnover(placed_at=_timestamp(old), stake="50")
+    book.save(tmp_path / "paper_book.json")
+    candidate = _leg("override-stale-quote")
+    context = _context(candidate, _timestamp(requested))
+    policy = _policy(goal)
+
+    baseline = policy.evaluate(book, Decimal("0.01"), context=context)
+    assert baseline.allowed is False
+    assert baseline.reason == "economic goal turnover limit exceeded"
+
+    result = admit_paper_ticket(
+        workspace=tmp_path,
+        book=book,
+        risk_policy=policy,
+        stake=Decimal("0.01"),
+        legs=(candidate,),
+        reason="bounded-day override must use product quote time",
+        placed_at=_timestamp(requested),
+        context=context,
+        provider_source_ids=("provider-1",),
+        bankroll_id="paper-bankroll",
+        currency="USD",
+    )
+
+    assert result.admitted is False
+    assert result.risk.reason in {
+        "quote exceeds economic goal maximum age",
+        "quote timestamp is after proposal timestamp",
+    }
+    persisted = PaperBook.load(tmp_path / "paper_book.json")
+    assert tuple(persisted.tickets) == tuple(book.tickets)
+
+
 def test_positive_economic_admission_persists_product_action_time(tmp_path):
     now = datetime.now(timezone.utc).replace(microsecond=0)
     requested = now - timedelta(seconds=1)

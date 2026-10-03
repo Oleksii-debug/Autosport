@@ -347,22 +347,40 @@ class WorkflowScopedGitHubApi(GitHubApi):
         pull_request,
     ):
         base_cancel_code = getattr(base_cancel, "__code__", None)
-        helper_dispatch = {
-            name: (implementation, getattr(implementation, "__code__", None))
-            for name, implementation in (
-                (
-                    "_historical_associated_pr_number",
-                    historical_associated_pr_number,
-                ),
-                (
-                    "_historical_head_has_no_associated_prs",
-                    historical_head_has_no_associated_prs,
-                ),
-                ("_canonical_branch_head", canonical_branch_head),
-                ("live_pr_qualification", live_pr_qualification),
-                ("_pull_request", pull_request),
+        helper_dispatch = (
+            (
+                "_historical_associated_pr_number",
+                historical_associated_pr_number,
+                getattr(historical_associated_pr_number, "__code__", None),
+            ),
+            (
+                "_historical_head_has_no_associated_prs",
+                historical_head_has_no_associated_prs,
+                getattr(historical_head_has_no_associated_prs, "__code__", None),
+            ),
+            (
+                "_canonical_branch_head",
+                canonical_branch_head,
+                getattr(canonical_branch_head, "__code__", None),
+            ),
+            (
+                "live_pr_qualification",
+                live_pr_qualification,
+                getattr(live_pr_qualification, "__code__", None),
+            ),
+            (
+                "_pull_request",
+                pull_request,
+                getattr(pull_request, "__code__", None),
+            ),
+        )
+        if any(
+            implementation_code is None
+            for _, _, implementation_code in helper_dispatch
+        ):
+            raise RuntimeError(
+                "canonical scoped cancellation executable is unavailable"
             )
-        }
 
         def cancel(self, run_id: int) -> None:
             """Revalidate synthetic candidate identity at the irreversible boundary."""
@@ -373,7 +391,20 @@ class WorkflowScopedGitHubApi(GitHubApi):
                 )
 
             def require_helper_dispatch(name: str) -> None:
-                expected, expected_code = helper_dispatch[name]
+                match = None
+                for helper_name, expected, expected_code in helper_dispatch:
+                    if helper_name != name:
+                        continue
+                    if match is not None:
+                        raise CancellationError(
+                            "scoped cancellation revalidation dispatch changed"
+                        )
+                    match = (expected, expected_code)
+                if match is None:
+                    raise CancellationError(
+                        "scoped cancellation revalidation dispatch changed"
+                    )
+                expected, expected_code = match
                 bound = getattr(self, name, None)
                 if (
                     getattr(expected, "__code__", None) is not expected_code
@@ -384,7 +415,7 @@ class WorkflowScopedGitHubApi(GitHubApi):
                         "scoped cancellation revalidation dispatch changed"
                     )
 
-            for name in helper_dispatch:
+            for name, _, _ in helper_dispatch:
                 require_helper_dispatch(name)
 
             run_id = _require_positive_int(run_id, field="run id")

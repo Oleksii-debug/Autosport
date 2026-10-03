@@ -311,6 +311,47 @@ def test_scoped_production_api_rejects_in_place_base_cancel_code_rebind() -> Non
         GitHubApi.cancel.__code__ = original_code
 
 
+@pytest.mark.parametrize(
+    "cancel_impl",
+    [GitHubApi.cancel, WorkflowScopedGitHubApi.cancel],
+)
+def test_cancellation_authority_closures_reject_writable_builtin_containers(
+    cancel_impl,
+) -> None:
+    captured = tuple(
+        cell.cell_contents for cell in (cancel_impl.__closure__ or ())
+    )
+
+    assert not any(type(value) in {dict, list, set} for value in captured)
+
+
+def test_scoped_cancel_helper_dispatch_metadata_is_immutable_and_complete() -> None:
+    closure = {
+        name: cell.cell_contents
+        for name, cell in zip(
+            WorkflowScopedGitHubApi.cancel.__code__.co_freevars,
+            WorkflowScopedGitHubApi.cancel.__closure__ or (),
+            strict=True,
+        )
+    }
+    helper_dispatch = closure["helper_dispatch"]
+
+    assert type(helper_dispatch) is tuple
+    assert tuple(name for name, _, _ in helper_dispatch) == (
+        "_historical_associated_pr_number",
+        "_historical_head_has_no_associated_prs",
+        "_canonical_branch_head",
+        "live_pr_qualification",
+        "_pull_request",
+    )
+    assert all(
+        type(entry) is tuple
+        and len(entry) == 3
+        and entry[2] is not None
+        for entry in helper_dispatch
+    )
+
+
 def test_scoped_cancel_rechecks_branch_helper_after_zero_association_roundtrip(
     monkeypatch,
 ) -> None:

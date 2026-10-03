@@ -425,7 +425,9 @@ def test_runtime_authority_rejects_in_place_sealed_method_code_replacement(
         del self, payload
         raise AssertionError("hostile recovery executable ran")
 
-    target.__code__ = hostile.__code__.replace(\n        co_freevars=original_code.co_freevars,\n    )
+    target.__code__ = hostile.__code__.replace(
+        co_freevars=original_code.co_freevars,
+    )
     try:
         with pytest.raises(
             DeploymentRuntimeAuthorityError,
@@ -453,7 +455,9 @@ def test_runtime_authority_rejects_in_place_sealed_staticmethod_code_replacement
         del payload
         raise AssertionError("hostile state digest executable ran")
 
-    target.__code__ = hostile.__code__.replace(\n        co_freevars=original_code.co_freevars,\n    )
+    target.__code__ = hostile.__code__.replace(
+        co_freevars=original_code.co_freevars,
+    )
     try:
         with pytest.raises(
             DeploymentRuntimeAuthorityError,
@@ -627,7 +631,9 @@ def test_runtime_authority_rejects_monotonic_init_code_replacement(
         del args, kwargs
         raise AssertionError("hostile authority initializer code executed")
 
-    target.__code__ = hostile.__code__.replace(\n        co_freevars=original_code.co_freevars,\n    )
+    target.__code__ = hostile.__code__.replace(
+        co_freevars=original_code.co_freevars,
+    )
     try:
         with pytest.raises(
             DeploymentRuntimeAuthorityError,
@@ -1307,7 +1313,9 @@ def test_runtime_authority_rejects_canonical_json_code_replacement_before_read(
         del value
         raise AssertionError("hostile canonical encoder code executed")
 
-    target.__code__ = hostile_encoder.__code__.replace(\n        co_freevars=original_code.co_freevars,\n    )
+    target.__code__ = hostile_encoder.__code__.replace(
+        co_freevars=original_code.co_freevars,
+    )
     try:
         with pytest.raises(
             DeploymentRuntimeAuthorityError,
@@ -1420,7 +1428,9 @@ def test_runtime_authority_rejects_json_loads_code_replacement_before_parse(
         del value
         raise AssertionError("hostile JSON parser code executed")
 
-    target.__code__ = hostile_loads.__code__.replace(\n        co_freevars=original_code.co_freevars,\n    )
+    target.__code__ = hostile_loads.__code__.replace(
+        co_freevars=original_code.co_freevars,
+    )
     try:
         with pytest.raises(
             DeploymentRuntimeAuthorityError,
@@ -1445,7 +1455,9 @@ def test_runtime_authority_rejects_uuid4_code_replacement_before_prepare(
     def hostile_uuid4() -> object:
         raise AssertionError("hostile uuid4 code executed")
 
-    target.__code__ = hostile_uuid4.__code__.replace(\n        co_freevars=original_code.co_freevars,\n    )
+    target.__code__ = hostile_uuid4.__code__.replace(
+        co_freevars=original_code.co_freevars,
+    )
     try:
         with pytest.raises(
             DeploymentRuntimeAuthorityError,
@@ -1500,7 +1512,9 @@ def test_runtime_authority_rejects_digest_code_replacement_at_binding_boundary(
         del value
         raise AssertionError("hostile digest code executed")
 
-    target.__code__ = hostile_digest.__code__.replace(\n        co_freevars=original_code.co_freevars,\n    )
+    target.__code__ = hostile_digest.__code__.replace(
+        co_freevars=original_code.co_freevars,
+    )
     try:
         with pytest.raises(
             DeploymentRuntimeAuthorityError,
@@ -1555,7 +1569,9 @@ def test_runtime_authority_rejects_sha_validator_code_replacement_at_binding_bou
         del value, name
         raise AssertionError("hostile SHA validator code executed")
 
-    target.__code__ = hostile_sha.__code__.replace(\n        co_freevars=original_code.co_freevars,\n    )
+    target.__code__ = hostile_sha.__code__.replace(
+        co_freevars=original_code.co_freevars,
+    )
     try:
         with pytest.raises(
             DeploymentRuntimeAuthorityError,
@@ -1613,7 +1629,9 @@ def test_runtime_authority_rejects_configure_code_replacement(
         del self, path, authority_root
         raise AssertionError("hostile runtime authority configure code executed")
 
-    target.__code__ = hostile_configure.__code__.replace(\n        co_freevars=original_code.co_freevars,\n    )
+    target.__code__ = hostile_configure.__code__.replace(
+        co_freevars=original_code.co_freevars,
+    )
     try:
         with pytest.raises(
             DeploymentRuntimeAuthorityError,
@@ -1764,7 +1782,9 @@ def test_runtime_authority_rejects_record_method_code_replacement(
         del self
         raise AssertionError("hostile runtime record encoder code executed")
 
-    target.__code__ = hostile.__code__.replace(\n        co_freevars=original_code.co_freevars,\n    )
+    target.__code__ = hostile.__code__.replace(
+        co_freevars=original_code.co_freevars,
+    )
     try:
         with pytest.raises(
             DeploymentRuntimeAuthorityError,
@@ -1792,7 +1812,9 @@ def test_runtime_authority_rejects_record_property_code_replacement(
         del self
         raise AssertionError("hostile runtime record identity code executed")
 
-    target.__code__ = hostile.__code__.replace(\n        co_freevars=original_code.co_freevars,\n    )
+    target.__code__ = hostile.__code__.replace(
+        co_freevars=original_code.co_freevars,
+    )
     try:
         with pytest.raises(
             DeploymentRuntimeAuthorityError,
@@ -1819,7 +1841,9 @@ def test_runtime_authority_rejects_record_classmethod_code_replacement(
         del cls, raw
         raise AssertionError("hostile runtime record parser code executed")
 
-    target.__code__ = hostile.__code__.replace(\n        co_freevars=original_code.co_freevars,\n    )
+    target.__code__ = hostile.__code__.replace(
+        co_freevars=original_code.co_freevars,
+    )
     try:
         with pytest.raises(
             DeploymentRuntimeAuthorityError,
@@ -1872,7 +1896,9 @@ def test_runtime_authority_rejects_record_codec_guard_code_replacement(
     def hostile_guard() -> None:
         raise AssertionError("hostile record codec guard executed")
 
-    target.__code__ = hostile_guard.__code__.replace(\n        co_freevars=original_code.co_freevars,\n    )
+    target.__code__ = hostile_guard.__code__.replace(
+        co_freevars=original_code.co_freevars,
+    )
     try:
         with pytest.raises(
             DeploymentRuntimeAuthorityError,
@@ -1925,7 +1951,9 @@ def test_runtime_authority_rejects_record_codec_requirement_code_replacement(
     def hostile_requirement() -> None:
         raise AssertionError("hostile record codec requirement executed")
 
-    target.__code__ = hostile_requirement.__code__.replace(\n        co_freevars=original_code.co_freevars,\n    )
+    target.__code__ = hostile_requirement.__code__.replace(
+        co_freevars=original_code.co_freevars,
+    )
     try:
         with pytest.raises(
             DeploymentRuntimeAuthorityError,
@@ -2002,7 +2030,9 @@ def test_runtime_authority_rejects_record_helper_code_replacement(
         del args, kwargs
         raise AssertionError("hostile runtime record helper code executed")
 
-    target.__code__ = hostile.__code__.replace(\n        co_freevars=original_code.co_freevars,\n    )
+    target.__code__ = hostile.__code__.replace(
+        co_freevars=original_code.co_freevars,
+    )
     try:
         with pytest.raises(
             DeploymentRuntimeAuthorityError,
@@ -2080,7 +2110,9 @@ def test_runtime_authority_rejects_instant_code_replacement(
         del value, name
         raise AssertionError("hostile instant parser code executed")
 
-    target.__code__ = hostile.__code__.replace(\n        co_freevars=original_code.co_freevars,\n    )
+    target.__code__ = hostile.__code__.replace(
+        co_freevars=original_code.co_freevars,
+    )
     try:
         with pytest.raises(
             DeploymentRuntimeAuthorityError,
@@ -2278,7 +2310,9 @@ def test_runtime_authority_rejects_nested_binding_code_replacement(
         del args, kwargs
         raise AssertionError("hostile nested binding method code executed")
 
-    target.__code__ = hostile.__code__.replace(\n        co_freevars=original_code.co_freevars,\n    )
+    target.__code__ = hostile.__code__.replace(
+        co_freevars=original_code.co_freevars,
+    )
     try:
         with pytest.raises(
             DeploymentRuntimeAuthorityError,
@@ -2363,7 +2397,9 @@ def test_runtime_authority_rejects_construction_helper_code_replacement(
         del args, kwargs
         raise AssertionError("hostile construction helper code executed")
 
-    target.__code__ = hostile.__code__.replace(\n        co_freevars=original_code.co_freevars,\n    )
+    target.__code__ = hostile.__code__.replace(
+        co_freevars=original_code.co_freevars,
+    )
     try:
         with pytest.raises(
             DeploymentRuntimeAuthorityError,
@@ -2523,7 +2559,9 @@ def test_runtime_authority_rejects_record_init_code_replacement(
         del self, args, kwargs
         raise AssertionError("hostile runtime record init code executed")
 
-    target.__code__ = hostile_init.__code__.replace(\n        co_freevars=original_code.co_freevars,\n    )
+    target.__code__ = hostile_init.__code__.replace(
+        co_freevars=original_code.co_freevars,
+    )
     try:
         with pytest.raises(
             DeploymentRuntimeAuthorityError,
@@ -2603,7 +2641,9 @@ def test_runtime_authority_rejects_semantic_surface_code_replacement(
         del args, kwargs
         raise AssertionError("hostile semantic identity code executed")
 
-    target.__code__ = hostile.__code__.replace(\n        co_freevars=original_code.co_freevars,\n    )
+    target.__code__ = hostile.__code__.replace(
+        co_freevars=original_code.co_freevars,
+    )
     try:
         with pytest.raises(
             DeploymentRuntimeAuthorityError,
@@ -2677,7 +2717,9 @@ def test_runtime_authority_rejects_learning_environment_helper_code_replacement(
         del args, kwargs
         raise AssertionError("hostile learning-environment helper code executed")
 
-    target.__code__ = hostile.__code__.replace(\n        co_freevars=original_code.co_freevars,\n    )
+    target.__code__ = hostile.__code__.replace(
+        co_freevars=original_code.co_freevars,
+    )
     try:
         with pytest.raises(
             DeploymentRuntimeAuthorityError,
@@ -2860,7 +2902,9 @@ def test_runtime_authority_rejects_path_read_code_replacement(
         del self, args, kwargs
         raise AssertionError("hostile path reader code executed")
 
-    target.__code__ = hostile_read_text.__code__.replace(\n        co_freevars=original_code.co_freevars,\n    )
+    target.__code__ = hostile_read_text.__code__.replace(
+        co_freevars=original_code.co_freevars,
+    )
     try:
         with pytest.raises(
             DeploymentRuntimeAuthorityError,
@@ -2969,7 +3013,9 @@ def test_runtime_authority_rejects_monotonic_read_code_replacement(
         del args, kwargs
         raise AssertionError("hostile monotonic read code executed")
 
-    target.__code__ = hostile.__code__.replace(\n        co_freevars=original_code.co_freevars,\n    )
+    target.__code__ = hostile.__code__.replace(
+        co_freevars=original_code.co_freevars,
+    )
     try:
         with pytest.raises(
             DeploymentRuntimeAuthorityError,
@@ -3040,7 +3086,9 @@ def test_runtime_authority_rejects_monotonic_read_helper_code_replacement(
         del args, kwargs
         raise AssertionError("hostile monotonic read helper code executed")
 
-    target.__code__ = hostile.__code__.replace(\n        co_freevars=original_code.co_freevars,\n    )
+    target.__code__ = hostile.__code__.replace(
+        co_freevars=original_code.co_freevars,
+    )
     try:
         with pytest.raises(
             DeploymentRuntimeAuthorityError,
@@ -3122,7 +3170,9 @@ def test_runtime_authority_rejects_monotonic_read_internal_code_replacement(
         del args, kwargs
         raise AssertionError("hostile monotonic internal code executed")
 
-    target.__code__ = hostile.__code__.replace(\n        co_freevars=original_code.co_freevars,\n    )
+    target.__code__ = hostile.__code__.replace(
+        co_freevars=original_code.co_freevars,
+    )
     try:
         with pytest.raises(
             DeploymentRuntimeAuthorityError,
@@ -3267,7 +3317,9 @@ def test_runtime_authority_rejects_monotonic_helper_code_replacement(
         del args, kwargs
         raise AssertionError("hostile monotonic helper code executed")
 
-    target.__code__ = hostile.__code__.replace(\n        co_freevars=original_code.co_freevars,\n    )
+    target.__code__ = hostile.__code__.replace(
+        co_freevars=original_code.co_freevars,
+    )
     try:
         with pytest.raises(
             DeploymentRuntimeAuthorityError,
@@ -3375,7 +3427,9 @@ def test_runtime_authority_rejects_clock_helper_code_replacement(
     def hostile_clock() -> str:
         raise AssertionError("hostile clock helper code executed")
 
-    target.__code__ = hostile_clock.__code__.replace(\n        co_freevars=original_code.co_freevars,\n    )
+    target.__code__ = hostile_clock.__code__.replace(
+        co_freevars=original_code.co_freevars,
+    )
     try:
         with pytest.raises(
             DeploymentRuntimeAuthorityError,

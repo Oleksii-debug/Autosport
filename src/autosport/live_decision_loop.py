@@ -1149,9 +1149,14 @@ class PersistentLiveDecisionLoop:
                 expected_previous_progress=expected_previous_progress,
             )
 
-        if isinstance(observation, IngestionStats) and (
-            observation.health_status != "healthy"
-            or bool(observation.quality_flags)
+        observation_stats = (
+            observation
+            if isinstance(observation, IngestionStats)
+            else getattr(observation, "stats", None)
+        )
+        if isinstance(observation_stats, IngestionStats) and (
+            observation_stats.health_status != "healthy"
+            or bool(observation_stats.quality_flags)
         ):
             # Persisted market bytes remain audit truth, but degraded acquisition
             # cannot authorize an economic cut. Do not drain invalidations here:

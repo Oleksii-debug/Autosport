@@ -97,6 +97,31 @@ def test_trigger_cancel_effect_failure_is_not_swallowed() -> None:
         )
 
 
+def test_trigger_active_cancel_conflict_is_deferred_without_false_success() -> None:
+    qualification = PullRequestQualification(
+        head_sha=HEAD,
+        integration_capable=False,
+    )
+
+    class ActiveConflictApi(FakeApi):
+        def cancel(self, run_id: int) -> None:
+            assert run_id == 91
+            raise CancellationError(
+                "workflow run cancellation conflicted while run remains active"
+            )
+
+    api = ActiveConflictApi(qualification)
+
+    assert not _cancel_triggering_run_if_stale_or_nonqualifying(
+        api,  # type: ignore[arg-type]
+        pr_number=2039,
+        event_head_sha=HEAD,
+        current_run_id=91,
+        qualification=qualification,
+    )
+    assert api.cancelled == []
+
+
 def test_current_ready_source_run_is_preserved() -> None:
     qualification = PullRequestQualification(
         head_sha=HEAD,
@@ -481,6 +506,40 @@ def test_workflow_wide_sweep_cancels_stale_runs_for_multiple_ready_prs() -> None
         current_run_id=11,
     ) == (10, 20)
     assert api.cancelled == [10, 20]
+
+
+def test_workflow_wide_sweep_active_cancel_conflict_does_not_starve_other_prs() -> None:
+    head_one = "1" * 40
+    head_two = "2" * 40
+    one = PullRequestQualification(head_sha=head_one, integration_capable=True)
+    two = PullRequestQualification(head_sha=head_two, integration_capable=True)
+
+    class ConflictSweepApi(SweepApi):
+        def cancel(self, run_id: int) -> None:
+            if run_id == 10:
+                raise CancellationError(
+                    "workflow run cancellation conflicted while run remains active"
+                )
+            super().cancel(run_id)
+
+    api = ConflictSweepApi(
+        (
+            _run(10, "3" * 40, (101,)),
+            _run(20, "4" * 40, (202,)),
+        ),
+        {
+            101: [one, one],
+            202: [two, two],
+        },
+    )
+
+    assert cancel_superseded_explicit_pr_runs(
+        api,  # type: ignore[arg-type]
+        workflow_name="CI",
+        current_run_id=99,
+    ) == (20,)
+    assert api.cancelled == [20]
+    assert api.reads == [101, 101, 202, 202]
 
 
 def test_current_trigger_only_group_needs_no_sweep_qualification_read() -> None:

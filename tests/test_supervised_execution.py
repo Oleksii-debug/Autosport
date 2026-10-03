@@ -599,7 +599,7 @@ def test_trusted_clock_prevents_backdating_expired_quote(monkeypatch) -> None:
             )
 
 
-def test_generic_snapshot_cannot_authorize_positive_but_verified_provider_pages_can() -> None:
+def test_generic_and_mocked_semantic_provider_reads_cannot_authorize_effect() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / "execution.jsonl"
         ledger, bound, _, action, _, _ = _ledger_with_unknown(path)
@@ -615,43 +615,27 @@ def test_generic_snapshot_cannot_authorize_positive_but_verified_provider_pages_
             external_receipt_id="bet-1",
         )
         assert generic.outcome is ReadbackOutcome.UNKNOWN
-        assert ledger.attempt_state("attempt-1") is AttemptState.UNKNOWN
 
-        verified = _semantic_state(
+        semantic = _semantic_state(
             bound,
             action,
             matched_stake=action.requested_stake / Decimal("2"),
             matched_odds=Decimal("1.99"),
         )
-        assert isinstance(verified, VerifiedProviderEffectEvidence)
-        result = reconcile_provider_readback(
-            ledger,
-            bound,
-            attempt_id="attempt-1",
-            readback=verified,
-        )
-        assert result.outcome is ReadbackOutcome.PARTIAL
-        assert result.attempt_state is AttemptState.PARTIAL
-        before = ledger.verified_snapshot().event_count
-        replay = reconcile_provider_readback(
-            ledger,
-            bound,
-            attempt_id="attempt-1",
-            readback=verified,
-        )
-        assert replay == result
-        assert ledger.verified_snapshot().event_count == before
+        assert isinstance(semantic, VerifiedProviderEffectEvidence)
+        with pytest.raises(
+            SupervisedExecutionError,
+            match="provider evidence is not authoritative",
+        ):
+            reconcile_provider_readback(
+                ledger,
+                bound,
+                attempt_id="attempt-1",
+                readback=semantic,
+            )
+        assert ledger.attempt_state("attempt-1") is AttemptState.UNKNOWN
 
-        restarted = RealExecutionLedger(path)
-        assert restarted.verify_integrity() > 0
-        assert restarted.attempt_state("attempt-1") is AttemptState.PARTIAL
-        assert restarted.can_retry_action(
-            plan_id=bound.execution_plan.plan_id,
-            action_id=action.action_id,
-        ) is False
-
-
-def test_direct_submitted_ack_persists_exact_provider_evidence_across_restart() -> None:
+def test_mocked_semantic_effect_cannot_persist_direct_provider_ack() -> None:
     bound, approval, _, _ = _bound()
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / "execution.jsonl"
@@ -666,37 +650,27 @@ def test_direct_submitted_ack_persists_exact_provider_evidence_across_restart() 
             attempt_id="attempt-direct",
         )
         ledger.mark_submitted("attempt-direct", submitted_at=SUBMITTED_AT)
-        verified = _semantic_state(
+        semantic = _semantic_state(
             bound,
             action,
             matched_stake=action.requested_stake,
         )
-        assert isinstance(verified, VerifiedProviderEffectEvidence)
-        result = reconcile_provider_readback(
-            ledger,
-            bound,
-            attempt_id="attempt-direct",
-            readback=verified,
-        )
-        assert result.outcome is ReadbackOutcome.ACCEPTED
+        assert isinstance(semantic, VerifiedProviderEffectEvidence)
+
+        with pytest.raises(
+            SupervisedExecutionError,
+            match="provider evidence is not authoritative",
+        ):
+            reconcile_provider_readback(
+                ledger,
+                bound,
+                attempt_id="attempt-direct",
+                readback=semantic,
+            )
 
         restarted = RealExecutionLedger(path)
-        binding = restarted.provider_evidence_binding("attempt-direct")
-        assert binding is not None
-        assert binding["evidence_id"] == verified.evidence_id
-        assert binding["source"] == (
-            f"betfair-readonly:{verified.source_payload_sha256}"
-        )
-        before = restarted.verified_snapshot().event_count
-        replay = reconcile_provider_readback(
-            restarted,
-            bound,
-            attempt_id="attempt-direct",
-            readback=verified,
-        )
-        assert replay == result
-        assert restarted.verified_snapshot().event_count == before
-
+        assert restarted.provider_evidence_binding("attempt-direct") is None
+        assert restarted.attempt_state("attempt-direct") is AttemptState.SUBMITTED
 
 def test_caller_constructed_positive_readback_cannot_mint_ack() -> None:
     with tempfile.TemporaryDirectory() as tmp:
@@ -733,53 +707,56 @@ def test_caller_constructed_positive_readback_cannot_mint_ack() -> None:
         assert ledger.attempt_state("attempt-1") is AttemptState.UNKNOWN
 
 
-def test_caller_cannot_clone_verified_effect_to_mint_ack() -> None:
+def test_semantic_effect_and_equal_copy_cannot_mint_ack() -> None:
     assert not hasattr(provider_evidence, "_SEAL")
     with tempfile.TemporaryDirectory() as tmp:
         ledger, bound, _, action, _, _ = _ledger_with_unknown(
             Path(tmp) / "execution.jsonl"
         )
-        genuine = _semantic_state(
+        semantic = _semantic_state(
             bound,
             action,
             matched_stake=action.requested_stake,
         )
-        assert isinstance(genuine, VerifiedProviderEffectEvidence)
-        forged = replace(genuine)
+        assert isinstance(semantic, VerifiedProviderEffectEvidence)
+        forged = replace(semantic)
 
-        with pytest.raises(
-            SupervisedExecutionError,
-            match="provider evidence is not authoritative",
-        ):
-            reconcile_provider_readback(
-                ledger,
-                bound,
-                attempt_id="attempt-1",
-                readback=forged,
-            )
+        for candidate in (semantic, forged):
+            with pytest.raises(
+                SupervisedExecutionError,
+                match="provider evidence is not authoritative",
+            ):
+                reconcile_provider_readback(
+                    ledger,
+                    bound,
+                    attempt_id="attempt-1",
+                    readback=candidate,
+                )
         assert ledger.attempt_state("attempt-1") is AttemptState.UNKNOWN
 
-
-def test_complete_provider_absence_is_diagnostic_without_retry_authority() -> None:
+def test_mocked_semantic_absence_cannot_mint_diagnostic_not_found() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         ledger, bound, _, action, _, _ = _ledger_with_unknown(
             Path(tmp) / "execution.jsonl"
         )
-        verified = _semantic_state(bound, action, matched_stake=None)
-        assert isinstance(verified, VerifiedProviderAbsenceEvidence)
-        result = reconcile_provider_not_found(
-            ledger,
-            bound,
-            attempt_id="attempt-1",
-            readback=verified,
-        )
-        assert result.outcome is ReadbackOutcome.NOT_FOUND
-        assert ledger.attempt_state("attempt-1") is AttemptState.RECONCILED_NOT_FOUND
+        semantic = _semantic_state(bound, action, matched_stake=None)
+        assert isinstance(semantic, VerifiedProviderAbsenceEvidence)
+
+        with pytest.raises(
+            SupervisedExecutionError,
+            match="provider absence evidence is not authoritative",
+        ):
+            reconcile_provider_not_found(
+                ledger,
+                bound,
+                attempt_id="attempt-1",
+                readback=semantic,
+            )
+        assert ledger.attempt_state("attempt-1") is AttemptState.UNKNOWN
         assert ledger.can_retry_action(
             plan_id=bound.execution_plan.plan_id,
             action_id=action.action_id,
         ) is False
-
 
 def test_betfair_timeout_unknown_requires_timeout_visibility_authority() -> None:
     with tempfile.TemporaryDirectory() as tmp:
@@ -803,28 +780,30 @@ def test_betfair_timeout_unknown_requires_timeout_visibility_authority() -> None
         assert ledger.attempt_state("attempt-1") is AttemptState.UNKNOWN
 
 
-def test_betfair_timeout_unknown_still_accepts_positive_provider_effect() -> None:
+def test_betfair_timeout_mocked_semantic_effect_stays_unknown() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         ledger, bound, _, action, _, _ = _ledger_with_unknown(
             Path(tmp) / "execution.jsonl",
             unknown_reason="betfair_placeOrders_ambiguous_effect_requires_readback",
         )
-        verified = _semantic_state(
+        semantic = _semantic_state(
             bound,
             action,
             matched_stake=action.requested_stake,
         )
-        assert isinstance(verified, VerifiedProviderEffectEvidence)
+        assert isinstance(semantic, VerifiedProviderEffectEvidence)
 
-        result = reconcile_provider_readback(
-            ledger,
-            bound,
-            attempt_id="attempt-1",
-            readback=verified,
-        )
-        assert result.outcome is ReadbackOutcome.ACCEPTED
-        assert ledger.attempt_state("attempt-1") is AttemptState.ACCEPTED
-
+        with pytest.raises(
+            SupervisedExecutionError,
+            match="provider evidence is not authoritative",
+        ):
+            reconcile_provider_readback(
+                ledger,
+                bound,
+                attempt_id="attempt-1",
+                readback=semantic,
+            )
+        assert ledger.attempt_state("attempt-1") is AttemptState.UNKNOWN
 
 def test_not_found_consumer_rejects_timeout_assertion_rebind(monkeypatch) -> None:
     with tempfile.TemporaryDirectory() as tmp:
@@ -1117,27 +1096,29 @@ def test_closed_market_can_bind_event_from_cleared_bet_without_releasing_retry()
         )
 
 
-def test_verified_readback_still_enforces_approved_slippage() -> None:
+def test_mocked_semantic_readback_cannot_reach_slippage_authority() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         ledger, bound, _, action, _, _ = _ledger_with_unknown(
             Path(tmp) / "execution.jsonl"
         )
-        verified = _semantic_state(
+        semantic = _semantic_state(
             bound,
             action,
             matched_stake=action.requested_stake,
             matched_odds=Decimal("1.80"),
         )
-        assert isinstance(verified, VerifiedProviderEffectEvidence)
-        with pytest.raises(SupervisedExecutionError, match="slippage"):
+        assert isinstance(semantic, VerifiedProviderEffectEvidence)
+        with pytest.raises(
+            SupervisedExecutionError,
+            match="provider evidence is not authoritative",
+        ):
             reconcile_provider_readback(
                 ledger,
                 bound,
                 attempt_id="attempt-1",
-                readback=verified,
+                readback=semantic,
             )
         assert ledger.attempt_state("attempt-1") is AttemptState.UNKNOWN
-
 
 def test_bridge_rejects_caller_asserted_terminal_settlement_exactness() -> None:
     with tempfile.TemporaryDirectory() as tmp:

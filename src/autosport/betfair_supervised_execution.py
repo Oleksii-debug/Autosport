@@ -857,6 +857,11 @@ def _parse_place_orders_response(
     try:
         exact_echo = (
             str(echoed_selection) == action.selection_id
+            and _nonnegative_decimal(
+                echoed.get("handicap"),
+                "echoed handicap",
+            )
+            == Decimal("0")
             and echoed.get("side") == action.side
             and echoed.get("orderType") == "LIMIT"
             and _positive_decimal(
@@ -869,6 +874,7 @@ def _parse_place_orders_response(
                 "echoed size",
             )
             == action.requested_stake
+            and limit.get("persistenceType") == "LAPSE"
         )
     except BetfairSupervisedExecutionError as exc:
         raise BetfairPlaceOrdersAmbiguous(

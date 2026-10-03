@@ -65,6 +65,7 @@ _CURRENT = frozenset(
         ProviderCapabilityTruthGrade.AUTHENTICATED_READ_PROVEN,
         ProviderCapabilityTruthGrade.WRITE_PERMISSION_PROVEN,
         ProviderCapabilityTruthGrade.OBSERVED_OPERATIONAL,
+        ProviderCapabilityTruthGrade.DEGRADED_OR_DELAYED,
     }
 )
 _REQUIRES_SUPPORTED = frozenset(

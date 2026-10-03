@@ -429,6 +429,95 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
                     loop._decision_context_sha256()
                 setattr(factory, attribute, original)
 
+    def test_intent_factory_cannot_observe_ephemeral_mirror_revision(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            seen_revisions = []
+
+            def revision_sensitive_factory(input_id, snapshot):
+                del input_id
+                seen_revisions.append(snapshot.revision)
+                if snapshot.revision != 0:
+                    raise AssertionError(
+                        "ephemeral mirror revision reached economic strategy input"
+                    )
+                return ()
+
+            revision_sensitive_factory.strategy_version_id = "live-test-strategy-v1"
+            revision_sensitive_factory.source_sha256 = self.INTENT_SOURCE_SHA256
+            revision_sensitive_factory.environment_sha256 = (
+                self.INTENT_ENVIRONMENT_SHA256
+            )
+            revision_sensitive_factory.config_sha256 = self.INTENT_CONFIG_SHA256
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(
+                    workspace,
+                    [(self._event(selection="selection-a", sequence=1),)],
+                ),
+                factory=revision_sensitive_factory,
+                clock=_ManualClock(self.START + timedelta(seconds=1)),
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+
+            result = loop.run_cycle()
+
+            self.assertEqual(result.status, LiveCycleStatus.DECIDED)
+            self.assertEqual(seen_revisions, [0])
+            self.assertGreater(loop.mirror_updates.mirror.revision, 0)
+
+    def test_pending_replay_hides_reconstructed_mirror_revision_from_factory(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            seen_revisions = []
+
+            def fail_after_pending(input_id, snapshot):
+                del input_id
+                seen_revisions.append(snapshot.revision)
+                raise RuntimeError("simulated process loss after pending cursor")
+
+            fail_after_pending.strategy_version_id = "live-test-strategy-v1"
+            fail_after_pending.source_sha256 = self.INTENT_SOURCE_SHA256
+            fail_after_pending.environment_sha256 = self.INTENT_ENVIRONMENT_SHA256
+            fail_after_pending.config_sha256 = self.INTENT_CONFIG_SHA256
+            first = self._loop(
+                workspace,
+                observer=_DurableObserver(
+                    workspace,
+                    [(self._event(selection="selection-a", sequence=1),)],
+                ),
+                factory=fail_after_pending,
+                clock=_ManualClock(self.START + timedelta(seconds=1)),
+            )
+            first.register_input("input-a", selection_ids="selection-a")
+
+            with self.assertRaisesRegex(RuntimeError, "simulated process loss"):
+                first.run_cycle()
+            self.assertEqual(seen_revisions, [0])
+
+            replay_revisions = []
+
+            def replay_factory(input_id, snapshot):
+                del input_id
+                replay_revisions.append(snapshot.revision)
+                return ()
+
+            replay_factory.strategy_version_id = "live-test-strategy-v1"
+            replay_factory.source_sha256 = self.INTENT_SOURCE_SHA256
+            replay_factory.environment_sha256 = self.INTENT_ENVIRONMENT_SHA256
+            replay_factory.config_sha256 = self.INTENT_CONFIG_SHA256
+            resumed = self._loop(
+                workspace,
+                observer=_DurableObserver(workspace, [()]),
+                factory=replay_factory,
+                clock=_ManualClock(self.START + timedelta(seconds=2)),
+            )
+
+            recovered = resumed.run_cycle()
+
+            self.assertEqual(recovered.status, LiveCycleStatus.DECIDED)
+            self.assertEqual(replay_revisions, [0])
+
     def test_factory_provenance_is_checked_before_live_invocation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

@@ -1585,6 +1585,14 @@ class PersistentLiveDecisionLoop:
         self._freshness_heap.clear()
         return result
 
+    @staticmethod
+    def _intent_factory_snapshot(snapshot: MirrorSnapshot) -> MirrorSnapshot:
+        """Remove ephemeral mirror generations from economic strategy input."""
+
+        if not isinstance(snapshot, MirrorSnapshot):
+            raise TypeError("intent factory snapshot must be MirrorSnapshot")
+        return MirrorSnapshot(revision=0, events=snapshot.events)
+
     def _refresh_intents_from_replay(
         self,
         input_ids: tuple[str, ...],
@@ -1637,7 +1645,10 @@ class PersistentLiveDecisionLoop:
                 ),
             )
             self._verify_intent_factory_provenance()
-            produced = self.intent_factory(input_id, focused)
+            produced = self.intent_factory(
+                input_id,
+                self._intent_factory_snapshot(focused),
+            )
             self._intent_cache[input_id] = self._validated_intents(produced)
 
     def _validated_intents(self, produced: object) -> tuple[object, ...]:
@@ -1827,7 +1838,10 @@ class PersistentLiveDecisionLoop:
     ) -> None:
         for input_id, snapshot in snapshots.items():
             self._verify_intent_factory_provenance()
-            produced = self.intent_factory(input_id, snapshot)
+            produced = self.intent_factory(
+                input_id,
+                self._intent_factory_snapshot(snapshot),
+            )
             self._intent_cache[input_id] = self._validated_intents(produced)
 
     def _all_cached_intents(

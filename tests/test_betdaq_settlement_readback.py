@@ -1195,7 +1195,7 @@ def test_order_result_rejects_unknown_provider_attribute(monkeypatch):
 
     with pytest.raises(
         BetdaqEconomicReadbackError,
-        match="GetOrderDetailsResult contains unexpected provider attribute",
+        match="failed canonical validation",
     ):
         client.read_order_details(123)
 
@@ -1210,7 +1210,7 @@ def test_order_settlement_rejects_unknown_provider_attribute(monkeypatch):
 
     with pytest.raises(
         BetdaqEconomicReadbackError,
-        match="OrderSettlementInformation contains unexpected provider attribute",
+        match="failed canonical validation",
     ):
         client.read_order_details(123)
 
@@ -1248,7 +1248,7 @@ def test_postings_result_rejects_unknown_provider_attribute(
 
     with pytest.raises(
         BetdaqEconomicReadbackError,
-        match=method_name + " contains unexpected provider attribute",
+        match="failed canonical validation",
     ):
         if read == "window":
             client.read_account_postings(
@@ -1269,7 +1269,7 @@ def test_posting_row_rejects_unknown_provider_attribute(monkeypatch):
 
     with pytest.raises(
         BetdaqEconomicReadbackError,
-        match="posting row contains unexpected provider attribute",
+        match="failed canonical validation",
     ):
         client.read_account_postings_by_id(9000)
 

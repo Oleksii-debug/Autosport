@@ -1993,6 +1993,8 @@ def assess_provider_account_headroom(
     intents: tuple[OpportunityIntent, ...],
     _digest_authority=_assert_headroom_digest_authority,
     _digest_authority_code=getattr(_assert_headroom_digest_authority, "__code__", None),
+    _generation_lock=_current_balance_generation_lock,
+    _generation_lock_code=getattr(_current_balance_generation_lock, "__code__", None),
 ) -> ProviderAccountHeadroomAssessment:
     """Issue conservative capital-axis evidence from exact canonical truth."""
     if type(ledger) is not RealExecutionLedger:
@@ -2002,6 +2004,13 @@ def assess_provider_account_headroom(
             "canonical provider-account headroom digest guard changed"
         )
     _digest_authority()
+    if (
+        globals().get("_current_balance_generation_lock") is not _generation_lock
+        or getattr(_generation_lock, "__code__", None) is not _generation_lock_code
+    ):
+        raise ProviderAccountHeadroomError(
+            "current balance generation lock authority changed"
+        )
     plan_id = _text(plan_id, "plan_id")
     action_id = _text(action_id, "action_id")
     verified_snapshot, verified_execution_view, _, _ = _canonical_ledger_dispatch()
@@ -2014,7 +2023,7 @@ def assess_provider_account_headroom(
     intent_denomination_by_identity = _validated_intent_denomination_map(intents)
     workspace = _canonical_ledger_workspace(ledger)
 
-    with _current_balance_generation_lock(workspace, acquired):
+    with _generation_lock(workspace, acquired):
         (
             economic_goal_contract_sha256,
             economic_goal_bankroll_id,
@@ -2174,6 +2183,8 @@ def reserve_observed_provider_headroom(
     intents: tuple[OpportunityIntent, ...] = (),
     _digest_authority=_assert_headroom_digest_authority,
     _digest_authority_code=getattr(_assert_headroom_digest_authority, "__code__", None),
+    _generation_lock=_current_balance_generation_lock,
+    _generation_lock_code=getattr(_current_balance_generation_lock, "__code__", None),
 ) -> ProductInternalHeadroomReservation:
     """Atomically consume product-internal headroom against exact ledger bytes.
 
@@ -2187,6 +2198,13 @@ def reserve_observed_provider_headroom(
             "canonical provider-account headroom digest guard changed"
         )
     _digest_authority()
+    if (
+        globals().get("_current_balance_generation_lock") is not _generation_lock
+        or getattr(_generation_lock, "__code__", None) is not _generation_lock_code
+    ):
+        raise ProviderAccountHeadroomError(
+            "current balance generation lock authority changed"
+        )
     (
         verified_snapshot,
         verified_execution_view,
@@ -2234,7 +2252,7 @@ def reserve_observed_provider_headroom(
         # New product-internal capital consumption must keep the exact provider
         # BALANCE_READ generation current through the ledger CAS. The helper acquires
         # the workspace economic lock first, then the provider-generation hold.
-        with _current_balance_generation_lock(workspace, acquired):
+        with _generation_lock(workspace, acquired):
             (
                 current_goal_sha256,
                 current_goal_bankroll_id,

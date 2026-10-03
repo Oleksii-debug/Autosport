@@ -61,6 +61,50 @@ def _append(store: DeploymentRuntimeAuthorityStore, index: int) -> str:
     return record.runtime_authority_id
 
 
+def test_runtime_authority_store_rejects_subclass_constructor_dispatch(
+    tmp_path: Path,
+) -> None:
+    hostile_calls = []
+
+    class AttackerStore(DeploymentRuntimeAuthorityStore):
+        def _configure(self, *args: object, **kwargs: object) -> None:
+            hostile_calls.append((args, kwargs))
+            raise AssertionError("hostile subclass configure executed")
+
+    with pytest.raises(
+        TypeError,
+        match="exact DeploymentRuntimeAuthorityStore",
+    ):
+        AttackerStore(
+            tmp_path / "deployment-runtime-authority.json",
+            authority_root=_authority_root(tmp_path),
+        )
+
+    assert hostile_calls == []
+
+
+def test_runtime_authority_pristine_rejects_subclass_before_dispatch(
+    tmp_path: Path,
+) -> None:
+    hostile_calls = []
+
+    class AttackerStore(DeploymentRuntimeAuthorityStore):
+        def _configure(self, *args: object, **kwargs: object) -> None:
+            hostile_calls.append((args, kwargs))
+            raise AssertionError("hostile subclass configure executed")
+
+    with pytest.raises(
+        TypeError,
+        match="exact DeploymentRuntimeAuthorityStore",
+    ):
+        AttackerStore.initialize_pristine(
+            tmp_path / "deployment-runtime-authority.json",
+            authority_root=_authority_root(tmp_path),
+        )
+
+    assert hostile_calls == []
+
+
 def test_existing_valid_store_without_independent_history_fails_closed(
     tmp_path: Path,
 ) -> None:

@@ -272,6 +272,7 @@ class CampaignForwardUniverseCycleAuthority:
     provider_frame_sha256: str
     collector_artifact_evidence_sha256: str
     precommit_authority_sha256: str
+    prospective_evaluation_plan_sha256: str
     backing_locator_sha256: str
     universe_sha256: str
     membership_sha256: str
@@ -324,6 +325,10 @@ class CampaignForwardUniverseCycleAuthority:
             "precommit_authority_sha256": _sha(
                 forward_identity.precommit_authority_sha256,
                 "precommit_authority_sha256",
+            ),
+            "prospective_evaluation_plan_sha256": _sha(
+                forward_identity.prospective_evaluation_plan_sha256,
+                "prospective_evaluation_plan_sha256",
             ),
             "backing_locator_sha256": _sha(
                 forward_identity.backing_locator_sha256,
@@ -818,10 +823,9 @@ def resolve_campaign_forward_universe_cycle_authority(
         universe.campaign_id != campaign.campaign_id
         or universe.campaign_id != protocol.campaign_id
         or universe.intake_snapshot.source_id != cycle_receipt.source_id
-        or campaign.evaluation_universe_sha256 != universe.universe_sha256
     ):
         raise CampaignForwardUniverseCycleBindingError(
-            "campaign precommit does not bind the exact cycle-derived provider universe"
+            "cycle-derived provider universe crosses campaign or source authority"
         )
 
     try:
@@ -839,12 +843,15 @@ def resolve_campaign_forward_universe_cycle_authority(
             "forward universe resolver returned noncanonical authority identity"
         )
     if (
-        forward_identity.universe_sha256 != universe.universe_sha256
+        forward_identity.prospective_evaluation_plan_sha256
+        != campaign.evaluation_universe_sha256
+        or forward_identity.universe_sha256 != universe.universe_sha256
         or forward_identity.membership_sha256 != universe.membership_sha256
         or forward_identity.member_count != len(universe.rows)
     ):
         raise CampaignForwardUniverseCycleBindingError(
-            "forward universe identity conflicts with cycle-derived durable universe"
+            "prospective plan or realized forward universe identity conflicts "
+            "with campaign-cycle authority"
         )
 
     require_stable_integrity()

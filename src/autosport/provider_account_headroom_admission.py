@@ -772,6 +772,30 @@ def _canonical_digest(payload: dict[str, object]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+_HEADROOM_CANONICAL_DIGEST = _canonical_digest
+_HEADROOM_CANONICAL_DIGEST_CODE = getattr(_HEADROOM_CANONICAL_DIGEST, "__code__", None)
+_HEADROOM_JSON_DUMPS = json.dumps
+_HEADROOM_HASHLIB_SHA256 = hashlib.sha256
+
+
+def _assert_headroom_digest_authority(
+    *,
+    _digest=_HEADROOM_CANONICAL_DIGEST,
+    _digest_code=_HEADROOM_CANONICAL_DIGEST_CODE,
+    _json_dumps=_HEADROOM_JSON_DUMPS,
+    _sha256=_HEADROOM_HASHLIB_SHA256,
+) -> None:
+    if (
+        globals().get("_canonical_digest") is not _digest
+        or getattr(_digest, "__code__", None) is not _digest_code
+        or getattr(json, "dumps", None) is not _json_dumps
+        or getattr(hashlib, "sha256", None) is not _sha256
+    ):
+        raise ProviderAccountHeadroomError(
+            "canonical provider-account headroom digest authority changed"
+        )
+
+
 _HEADROOM_DATETIME_NOW = datetime.now
 _HEADROOM_UTC = timezone.utc
 
@@ -1566,10 +1590,17 @@ def assess_provider_account_headroom(
     action_id: str,
     bound_plans: tuple[BoundSupervisedExecutionPlan, ...],
     intents: tuple[OpportunityIntent, ...],
+    _digest_authority=_assert_headroom_digest_authority,
+    _digest_authority_code=getattr(_assert_headroom_digest_authority, "__code__", None),
 ) -> ProviderAccountHeadroomAssessment:
     """Issue conservative capital-axis evidence from exact canonical truth."""
     if type(ledger) is not RealExecutionLedger:
         raise TypeError("ledger must be exact RealExecutionLedger")
+    if getattr(_digest_authority, "__code__", None) is not _digest_authority_code:
+        raise ProviderAccountHeadroomError(
+            "canonical provider-account headroom digest guard changed"
+        )
+    _digest_authority()
     plan_id = _text(plan_id, "plan_id")
     action_id = _text(action_id, "action_id")
     verified_snapshot, verified_execution_view, _, _ = _canonical_ledger_dispatch()
@@ -1741,6 +1772,8 @@ def reserve_observed_provider_headroom(
     bound_plans: tuple[BoundSupervisedExecutionPlan, ...],
     intents: tuple[OpportunityIntent, ...] = (),
     _issued_assertion=None,
+    _digest_authority=_assert_headroom_digest_authority,
+    _digest_authority_code=getattr(_assert_headroom_digest_authority, "__code__", None),
 ) -> ProductInternalHeadroomReservation:
     """Atomically consume product-internal headroom against exact ledger bytes.
 
@@ -1749,6 +1782,11 @@ def reserve_observed_provider_headroom(
     """
     if type(ledger) is not RealExecutionLedger:
         raise TypeError("ledger must be exact RealExecutionLedger")
+    if getattr(_digest_authority, "__code__", None) is not _digest_authority_code:
+        raise ProviderAccountHeadroomError(
+            "canonical provider-account headroom digest guard changed"
+        )
+    _digest_authority()
     (
         verified_snapshot,
         verified_execution_view,
@@ -1921,20 +1959,45 @@ def reserve_observed_provider_headroom(
 
 def _install_headroom_issuance_authority() -> None:
     assessment_lock = threading.RLock()
+    assessment_fields = tuple(ProviderAccountHeadroomAssessment.__dataclass_fields__)
+    reservation_fields = tuple(ProductInternalHeadroomReservation.__dataclass_fields__)
     assessment_issued: dict[
         int,
-        tuple[weakref.ReferenceType[ProviderAccountHeadroomAssessment], str],
+        tuple[weakref.ReferenceType[ProviderAccountHeadroomAssessment], tuple[object, ...]],
     ] = {}
     reservation_lock = threading.RLock()
     reservation_issued: dict[
         int,
-        tuple[weakref.ReferenceType[ProductInternalHeadroomReservation], str],
+        tuple[
+            weakref.ReferenceType[ProductInternalHeadroomReservation],
+            tuple[object, ...],
+        ],
     ] = {}
 
     raw_assess = assess_provider_account_headroom
     raw_reserve = reserve_observed_provider_headroom
+    digest_authority = _assert_headroom_digest_authority
+    digest_authority_code = getattr(digest_authority, "__code__", None)
+
+    def require_digest_authority() -> None:
+        if getattr(digest_authority, "__code__", None) is not digest_authority_code:
+            raise ProviderAccountHeadroomError(
+                "canonical provider-account headroom digest guard changed"
+            )
+        digest_authority()
+
+    def assessment_state(
+        value: ProviderAccountHeadroomAssessment,
+    ) -> tuple[object, ...]:
+        return tuple(getattr(value, field) for field in assessment_fields)
+
+    def reservation_state(
+        value: ProductInternalHeadroomReservation,
+    ) -> tuple[object, ...]:
+        return tuple(getattr(value, field) for field in reservation_fields)
 
     def issue_assessment(value: ProviderAccountHeadroomAssessment) -> None:
+        require_digest_authority()
         digest = _assessment_digest(value)
         if digest != value.evidence_sha256:
             raise ProviderAccountHeadroomError(
@@ -1954,13 +2017,14 @@ def _install_headroom_issuance_authority() -> None:
 
         reference = weakref.ref(value, clear)
         with assessment_lock:
-            assessment_issued[identity] = (reference, digest)
+            assessment_issued[identity] = (reference, assessment_state(value))
 
     def assert_issued(value: ProviderAccountHeadroomAssessment) -> None:
         if type(value) is not ProviderAccountHeadroomAssessment:
             raise ProviderAccountHeadroomError(
                 "assessment must be exact ProviderAccountHeadroomAssessment"
             )
+        require_digest_authority()
         try:
             digest = _assessment_digest(value)
         except (ProviderAccountHeadroomError, TypeError, ValueError) as exc:
@@ -1972,7 +2036,7 @@ def _install_headroom_issuance_authority() -> None:
         if (
             current is None
             or current[0]() is not value
-            or current[1] != digest
+            or current[1] != assessment_state(value)
             or value.evidence_sha256 != digest
         ):
             raise ProviderAccountHeadroomError(
@@ -1980,7 +2044,8 @@ def _install_headroom_issuance_authority() -> None:
             )
 
     def issue_reservation(value: ProductInternalHeadroomReservation) -> None:
-        digest = _reservation_digest(value)
+        require_digest_authority()
+        _reservation_digest(value)
         identity = id(value)
 
         def clear(
@@ -1995,13 +2060,14 @@ def _install_headroom_issuance_authority() -> None:
 
         reference = weakref.ref(value, clear)
         with reservation_lock:
-            reservation_issued[identity] = (reference, digest)
+            reservation_issued[identity] = (reference, reservation_state(value))
 
     def reservation_is_issued(value: ProductInternalHeadroomReservation) -> bool:
         if type(value) is not ProductInternalHeadroomReservation:
             return False
         try:
-            digest = _reservation_digest(value)
+            require_digest_authority()
+            _reservation_digest(value)
         except (ProviderAccountHeadroomError, TypeError, ValueError):
             return False
         with reservation_lock:
@@ -2009,7 +2075,7 @@ def _install_headroom_issuance_authority() -> None:
         return (
             current is not None
             and current[0]() is value
-            and current[1] == digest
+            and current[1] == reservation_state(value)
         )
 
     def authoritative_assess(

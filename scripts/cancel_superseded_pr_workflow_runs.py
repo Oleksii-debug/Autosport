@@ -904,6 +904,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--current-run-id", type=int, required=True)
     parser.add_argument("--admission-only", action="store_true")
     args = parser.parse_args(argv)
+
+    # Capture orchestration call targets before any GitHub transport callback can run.
+    # A response hook may mutate module globals in-process; it must not be able to swap
+    # the final workflow-output writer after admission has already consumed trusted data.
+    admit_impl = admit_current_head
+    cancel_impl = cancel_superseded
+    output_writer = _write_github_output
+    output_writer_code = getattr(output_writer, "__code__", None)
+
     try:
         api = GitHubApi(
             repository=os.environ.get("GITHUB_REPOSITORY", ""),
@@ -914,23 +923,31 @@ def main(argv: list[str] | None = None) -> int:
             if args.admission_only:
                 raise CancellationError("admission requires an explicit pull request number")
             pr_number = api.associated_pr_number(args.event_head_sha)
-        else:
-            pr_number = _require_positive_int(pr_number, field="pull request number")
+        elif type(pr_number) is not int:
+            raise CancellationError("invalid pull request number")
+
         if args.admission_only:
-            result = admit_current_head(
+            result = admit_impl(
                 api=api,
                 pr_number=pr_number,
                 event_head_sha=args.event_head_sha,
             )
         else:
-            result = cancel_superseded(
+            result = cancel_impl(
                 api=api,
                 pr_number=pr_number,
                 event_head_sha=args.event_head_sha,
                 workflow_name=args.workflow_name,
                 current_run_id=args.current_run_id,
             )
-        _write_github_output(result)
+
+        if (
+            _write_github_output is not output_writer
+            or output_writer_code is None
+            or getattr(output_writer, "__code__", None) is not output_writer_code
+        ):
+            raise CancellationError("workflow output authority changed")
+        output_writer(result)
     except CancellationError as exc:
         print(f"superseded-run cancellation failed: {exc}", file=sys.stderr)
         return 2

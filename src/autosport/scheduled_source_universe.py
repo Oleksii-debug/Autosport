@@ -1326,6 +1326,80 @@ def _seal_scheduled_source_universe_prestart_dispatch() -> None:
         )
         for name, surface in sorted(expected_prestart_class_seams.items())
     )
+    expected_prestart_globals = getattr(expected_ensure, "__globals__", None)
+    if (
+        type(expected_prestart_globals) is not dict
+        or getattr(expected_next_slot, "__globals__", None)
+        is not expected_prestart_globals
+        or getattr(expected_gate_status, "__globals__", None)
+        is not expected_prestart_globals
+    ):
+        raise RuntimeError("canonical pre-START collector globals are unavailable")
+    expected_prestart_text = expected_prestart_globals.get("_text")
+    expected_prestart_text_code = getattr(expected_prestart_text, "__code__", None)
+    expected_prestart_instant = expected_prestart_globals.get("_instant")
+    expected_prestart_instant_code = getattr(
+        expected_prestart_instant, "__code__", None
+    )
+    expected_prestart_policy = expected_prestart_globals.get("_SCHEDULE_POLICY")
+    expected_prestart_hashlib = expected_prestart_globals.get("hashlib")
+    expected_prestart_sha256 = getattr(expected_prestart_hashlib, "sha256", None)
+    expected_prestart_json = expected_prestart_globals.get("json")
+    expected_prestart_json_dumps = getattr(expected_prestart_json, "dumps", None)
+    expected_prestart_json_dumps_code = getattr(
+        expected_prestart_json_dumps, "__code__", None
+    )
+    expected_prestart_math = expected_prestart_globals.get("math")
+    expected_prestart_isfinite = getattr(expected_prestart_math, "isfinite", None)
+    expected_prestart_timedelta = expected_prestart_globals.get("timedelta")
+    expected_connect_path_surface = expected_prestart_class_seams["_connect_path"]
+    expected_connect_path_callable = getattr(
+        expected_connect_path_surface,
+        "__func__",
+        expected_connect_path_surface,
+    )
+    expected_connect_path_globals = getattr(
+        expected_connect_path_callable, "__globals__", None
+    )
+    expected_prestart_sqlite3 = (
+        expected_connect_path_globals.get("sqlite3")
+        if type(expected_connect_path_globals) is dict
+        else None
+    )
+    expected_prestart_sqlite_connect = getattr(
+        expected_prestart_sqlite3, "connect", None
+    )
+    expected_prestart_sqlite_row = getattr(expected_prestart_sqlite3, "Row", None)
+    expected_prestart_sqlite_database_error = getattr(
+        expected_prestart_sqlite3, "DatabaseError", None
+    )
+    expected_path_identity_surface = expected_prestart_class_seams[
+        "_path_file_identity"
+    ]
+    expected_path_identity_callable = getattr(
+        expected_path_identity_surface,
+        "__func__",
+        expected_path_identity_surface,
+    )
+    expected_path_identity_globals = getattr(
+        expected_path_identity_callable, "__globals__", None
+    )
+    expected_prestart_os = (
+        expected_path_identity_globals.get("os")
+        if type(expected_path_identity_globals) is dict
+        else None
+    )
+    expected_prestart_os_stat = getattr(expected_prestart_os, "stat", None)
+    if (
+        expected_prestart_text_code is None
+        or expected_prestart_instant_code is None
+        or expected_prestart_json_dumps is None
+        or expected_prestart_sqlite_connect is None
+        or expected_prestart_sqlite_row is None
+        or expected_prestart_sqlite_database_error is None
+        or expected_prestart_os_stat is None
+    ):
+        raise RuntimeError("canonical pre-START collector dependency graph is unavailable")
     expected_hex = _HEX
     expected_prepared_field_surfaces = tuple(
         (
@@ -1461,6 +1535,96 @@ def _seal_scheduled_source_universe_prestart_dispatch() -> None:
                 raise expected_error_type(
                     "scheduled pre-START canonical seam drifted: " + name
                 )
+        current_prestart_globals = getattr(expected_ensure, "__globals__", None)
+        if (
+            current_prestart_globals is not expected_prestart_globals
+            or getattr(expected_next_slot, "__globals__", None)
+            is not expected_prestart_globals
+            or getattr(expected_gate_status, "__globals__", None)
+            is not expected_prestart_globals
+        ):
+            raise expected_error_type(
+                "scheduled pre-START collector global authority drifted"
+            )
+        if (
+            current_prestart_globals.get("_text") is not expected_prestart_text
+            or getattr(expected_prestart_text, "__code__", None)
+            is not expected_prestart_text_code
+        ):
+            raise expected_error_type(
+                "scheduled pre-START collector text authority is rebound or mutated"
+            )
+        if (
+            current_prestart_globals.get("_instant") is not expected_prestart_instant
+            or getattr(expected_prestart_instant, "__code__", None)
+            is not expected_prestart_instant_code
+        ):
+            raise expected_error_type(
+                "scheduled pre-START collector time authority is rebound or mutated"
+            )
+        if (
+            current_prestart_globals.get("_SCHEDULE_POLICY")
+            is not expected_prestart_policy
+        ):
+            raise expected_error_type(
+                "scheduled pre-START collector schedule constants drifted"
+            )
+        if (
+            current_prestart_globals.get("hashlib") is not expected_prestart_hashlib
+            or getattr(expected_prestart_hashlib, "sha256", None)
+            is not expected_prestart_sha256
+        ):
+            raise expected_error_type(
+                "scheduled pre-START collector digest authority is rebound"
+            )
+        current_prestart_json = current_prestart_globals.get("json")
+        if (
+            current_prestart_json is not expected_prestart_json
+            or getattr(expected_prestart_json, "dumps", None)
+            is not expected_prestart_json_dumps
+            or getattr(expected_prestart_json_dumps, "__code__", None)
+            is not expected_prestart_json_dumps_code
+        ):
+            raise expected_error_type(
+                "scheduled pre-START collector JSON authority is rebound or mutated"
+            )
+        current_prestart_math = current_prestart_globals.get("math")
+        if (
+            current_prestart_math is not expected_prestart_math
+            or getattr(expected_prestart_math, "isfinite", None)
+            is not expected_prestart_isfinite
+            or current_prestart_globals.get("timedelta")
+            is not expected_prestart_timedelta
+        ):
+            raise expected_error_type(
+                "scheduled pre-START collector due-time authority is rebound"
+            )
+        if (
+            getattr(expected_connect_path_callable, "__globals__", None)
+            is not expected_connect_path_globals
+            or expected_connect_path_globals.get("sqlite3")
+            is not expected_prestart_sqlite3
+            or getattr(expected_prestart_sqlite3, "connect", None)
+            is not expected_prestart_sqlite_connect
+            or getattr(expected_prestart_sqlite3, "Row", None)
+            is not expected_prestart_sqlite_row
+            or getattr(expected_prestart_sqlite3, "DatabaseError", None)
+            is not expected_prestart_sqlite_database_error
+        ):
+            raise expected_error_type(
+                "scheduled pre-START collector SQLite connection authority drifted"
+            )
+        if (
+            getattr(expected_path_identity_callable, "__globals__", None)
+            is not expected_path_identity_globals
+            or expected_path_identity_globals.get("os")
+            is not expected_prestart_os
+            or getattr(expected_prestart_os, "stat", None)
+            is not expected_prestart_os_stat
+        ):
+            raise expected_error_type(
+                "scheduled pre-START collector path identity authority drifted"
+            )
         for name, expected_alias, expected_code in alias_witnesses:
             current_alias = module_globals.get(name)
             if (

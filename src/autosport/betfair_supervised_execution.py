@@ -515,6 +515,32 @@ class BetfairSupervisedExecutionResult:
     external_receipt_id: str | None
 
 
+@dataclass(frozen=True, slots=True)
+class _PreparedBetfairPlaceRequest:
+    action_sha256: str
+    provider_order_ref: str
+    request_id: int
+    body: bytes
+    request_sha256: str
+
+    def __post_init__(self) -> None:
+        _sha(self.action_sha256, "action_sha256")
+        _text(self.provider_order_ref, "provider_order_ref")
+        if type(self.request_id) is not int or self.request_id < 1:
+            raise BetfairSupervisedExecutionError(
+                "prepared request_id must be positive int"
+            )
+        if type(self.body) is not bytes or not self.body:
+            raise BetfairSupervisedExecutionError(
+                "prepared request body must be non-empty bytes"
+            )
+        _sha(self.request_sha256, "request_sha256")
+        if sha256(self.body).hexdigest() != self.request_sha256:
+            raise BetfairSupervisedExecutionError(
+                "prepared request digest does not match exact body"
+            )
+
+
 def _validate_betfair_place_action(action: ExecutionAction) -> int:
     """Validate deterministic Betfair action shape before any durable attempt."""
 
@@ -580,22 +606,13 @@ class BetfairSupervisedPlaceOrdersClient:
         self._request_id += 1
         return self._request_id
 
-    def place_action(
+    def _prepare_place_action_request(
         self,
         action: ExecutionAction,
         *,
-        profile: BookmakerCapabilityProfile,
-        bound: BoundSupervisedExecutionPlan,
         provider_order_ref: str,
-        execution_workspace: Path,
-    ) -> BetfairPlaceExecutionReport:
+    ) -> _PreparedBetfairPlaceRequest:
         selection_id = _validate_betfair_place_action(action)
-        self._gate.require(
-            action=action,
-            profile=profile,
-            bound=bound,
-            execution_workspace=execution_workspace,
-        )
         provider_ref = _text(provider_order_ref, "provider_order_ref")
         if len(provider_ref) > 32 or any(
             character not in "0123456789abcdef"
@@ -634,7 +651,38 @@ class BetfairSupervisedPlaceOrdersClient:
             "id": request_id,
         }
         body = _canonical_bytes(envelope)
-        request_sha256 = sha256(body).hexdigest()
+        return _PreparedBetfairPlaceRequest(
+            action_sha256=_digest(action.to_dict()),
+            provider_order_ref=provider_ref,
+            request_id=request_id,
+            body=body,
+            request_sha256=sha256(body).hexdigest(),
+        )
+
+    def _place_prepared_action(
+        self,
+        action: ExecutionAction,
+        *,
+        profile: BookmakerCapabilityProfile,
+        bound: BoundSupervisedExecutionPlan,
+        prepared: _PreparedBetfairPlaceRequest,
+        execution_workspace: Path,
+    ) -> BetfairPlaceExecutionReport:
+        if type(prepared) is not _PreparedBetfairPlaceRequest:
+            raise BetfairSupervisedExecutionError(
+                "prepared request must be canonical Betfair request"
+            )
+        _validate_betfair_place_action(action)
+        if prepared.action_sha256 != _digest(action.to_dict()):
+            raise BetfairSupervisedExecutionError(
+                "prepared request action identity mismatch"
+            )
+        self._gate.require(
+            action=action,
+            profile=profile,
+            bound=bound,
+            execution_workspace=execution_workspace,
+        )
         headers = {
             "Accept": "application/json",
             "Content-Type": "application/json",
@@ -645,7 +693,7 @@ class BetfairSupervisedPlaceOrdersClient:
             payload = self._transport.post(
                 BETTING_JSON_RPC_ENDPOINT,
                 headers=headers,
-                body=body,
+                body=prepared.body,
                 timeout_seconds=self._timeout_seconds,
             )
         except (BetfairReadOnlyError, TimeoutError, OSError) as exc:
@@ -659,11 +707,39 @@ class BetfairSupervisedPlaceOrdersClient:
             )
         return _parse_place_orders_response(
             payload,
-            request_id=request_id,
-            request_sha256=request_sha256,
+            request_id=prepared.request_id,
+            request_sha256=prepared.request_sha256,
             action=action,
-            provider_order_ref=provider_ref,
+            provider_order_ref=prepared.provider_order_ref,
             observed_at=self._clock(),
+        )
+
+    def place_action(
+        self,
+        action: ExecutionAction,
+        *,
+        profile: BookmakerCapabilityProfile,
+        bound: BoundSupervisedExecutionPlan,
+        provider_order_ref: str,
+        execution_workspace: Path,
+    ) -> BetfairPlaceExecutionReport:
+        _validate_betfair_place_action(action)
+        self._gate.require(
+            action=action,
+            profile=profile,
+            bound=bound,
+            execution_workspace=execution_workspace,
+        )
+        prepared = self._prepare_place_action_request(
+            action,
+            provider_order_ref=provider_order_ref,
+        )
+        return self._place_prepared_action(
+            action,
+            profile=profile,
+            bound=bound,
+            prepared=prepared,
+            execution_workspace=execution_workspace,
         )
 
 
@@ -984,16 +1060,21 @@ def execute_betfair_supervised_action(
             attempt_id=attempt_id,
             provider_id=action.bookmaker_id,
         )
+        prepared_request = client._prepare_place_action_request(
+            action,
+            provider_order_ref=provider_order_ref,
+        )
         ledger.mark_submitted(
             attempt_id,
             submitted_at=now(),
+            request_sha256=prepared_request.request_sha256,
         )
         try:
-            report = client.place_action(
+            report = client._place_prepared_action(
                 action,
                 profile=profile,
                 bound=bound,
-                provider_order_ref=provider_order_ref,
+                prepared=prepared_request,
                 execution_workspace=execution_workspace,
             )
         except (

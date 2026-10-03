@@ -739,8 +739,8 @@ def test_instance_shadowed_ledger_methods_cannot_reopen_revoked_approval(
         hostile_calls.append(kwargs)
         raise AssertionError("instance-shadowed begin_attempt executed")
 
-    ledger.supervised_approval_is_active = lambda **_kwargs: True
-    ledger.begin_attempt = hostile_begin_attempt
+    ledger.__dict__["supervised_approval_is_active"] = lambda **_kwargs: True
+    ledger.__dict__["begin_attempt"] = hostile_begin_attempt
     action = bound.execution_plan.actions[0]
 
     with pytest.raises(

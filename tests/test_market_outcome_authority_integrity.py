@@ -10,8 +10,10 @@ from decimal import Decimal
 
 from autosport.domain import MarketType, TicketLeg
 from autosport.market_outcomes import (
+    MarketOutcomeAuthorityAssessment,
     MarketOutcomeIdentity,
     MarketSettlementOutcomeAuthority,
+    OutcomeAuthorityStatus,
     OutcomeRosterBasis,
     SettlementSemantics,
 )
@@ -379,6 +381,60 @@ class MarketOutcomeAuthorityIntegrityTests(unittest.TestCase):
                 )
         finally:
             guard.__code__ = original_code
+
+        self.assertEqual(hostile_calls, [])
+
+
+    def test_authoritative_scenario_rejects_subclass_before_hostile_dispatch(
+        self,
+    ) -> None:
+        authority = self._authority()
+        book = PaperBook("100")
+        ticket = self._open_home_ticket(book)
+        hostile_calls: list[str] = []
+
+        class HostileAuthority(MarketSettlementOutcomeAuthority):
+            def __getattribute__(self, name: str):
+                hostile_calls.append(name)
+                raise AssertionError("hostile subclass dispatch executed")
+
+        forged = object.__new__(HostileAuthority)
+        with self.assertRaisesRegex(
+            ValueError,
+            "exact canonical market authorities",
+        ):
+            ScenarioSearchEngine().analyse_authoritative(
+                [ticket],
+                [forged],
+                decision_as_of=self.DECISION_AS_OF,
+            )
+
+        self.assertEqual(hostile_calls, [])
+        authority.assert_issued_integrity()
+
+    def test_proven_assessment_rejects_subclass_before_hostile_dispatch(
+        self,
+    ) -> None:
+        authority = self._authority()
+        identity = authority.identity
+        hostile_calls: list[str] = []
+
+        class HostileAuthority(MarketSettlementOutcomeAuthority):
+            def __getattribute__(self, name: str):
+                hostile_calls.append(name)
+                raise AssertionError("hostile subclass dispatch executed")
+
+        forged = object.__new__(HostileAuthority)
+        with self.assertRaisesRegex(
+            ValueError,
+            "exact canonical authority",
+        ):
+            MarketOutcomeAuthorityAssessment(
+                identity=identity,
+                status=OutcomeAuthorityStatus.PROVEN_EXHAUSTIVE,
+                authority=forged,
+                refusal_reason=None,
+            )
 
         self.assertEqual(hostile_calls, [])
 

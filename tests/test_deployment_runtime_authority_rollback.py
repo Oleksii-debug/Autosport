@@ -1977,3 +1977,82 @@ def test_runtime_authority_rejects_record_helper_code_replacement(
             store.records()
     finally:
         target.__code__ = original_code
+
+
+@pytest.mark.parametrize("type_name", ("EnvironmentIdentity", "Episode"))
+def test_runtime_authority_rejects_semantic_type_alias_rebinding(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    type_name: str,
+) -> None:
+    path = tmp_path / "deployment-runtime-authority.json"
+    store = DeploymentRuntimeAuthorityStore.initialize_pristine(
+        path,
+        authority_root=_authority_root(tmp_path),
+    )
+
+    class HostileSemanticType:
+        pass
+
+    monkeypatch.setattr(
+        deployment_runtime_authority,
+        type_name,
+        HostileSemanticType,
+    )
+    with pytest.raises(
+        DeploymentRuntimeAuthorityError,
+        match="semantic type dispatch was replaced",
+    ):
+        store.records()
+
+
+def test_runtime_authority_rejects_instant_alias_rebinding(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "deployment-runtime-authority.json"
+    store = DeploymentRuntimeAuthorityStore.initialize_pristine(
+        path,
+        authority_root=_authority_root(tmp_path),
+    )
+    hostile_calls: list[object] = []
+
+    def hostile(value: object, name: str) -> object:
+        hostile_calls.append((value, name))
+        raise AssertionError("hostile instant parser executed")
+
+    monkeypatch.setattr(deployment_runtime_authority, "_instant", hostile)
+    with pytest.raises(
+        DeploymentRuntimeAuthorityError,
+        match="record helper dispatch was replaced",
+    ):
+        store.records()
+
+    assert hostile_calls == []
+
+
+def test_runtime_authority_rejects_instant_code_replacement(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "deployment-runtime-authority.json"
+    store = DeploymentRuntimeAuthorityStore.initialize_pristine(
+        path,
+        authority_root=_authority_root(tmp_path),
+    )
+    target = deployment_runtime_authority._instant
+    original_code = target.__code__
+
+    def hostile(value: object, name: str) -> object:
+        del value, name
+        raise AssertionError("hostile instant parser code executed")
+
+    assert hostile.__code__.co_freevars == original_code.co_freevars
+    target.__code__ = hostile.__code__
+    try:
+        with pytest.raises(
+            DeploymentRuntimeAuthorityError,
+            match="record helper dispatch was replaced",
+        ):
+            store.records()
+    finally:
+        target.__code__ = original_code

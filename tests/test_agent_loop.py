@@ -1252,7 +1252,7 @@ def test_attribution_and_postmortem_identity_keys_are_causal_and_immutable():
     finding = AttributionFinding(
         component=AttributionComponent.RANDOMNESS,
         status=AttributionStatus.UNKNOWN,
-                evidence_grade=AttributionEvidenceGrade.NOT_IDENTIFIABLE,
+        evidence_grade=AttributionEvidenceGrade.NOT_IDENTIFIABLE,
         evidence_sha256=RANDOMNESS_SHA,
         evidence_available_at="2026-09-19T13:05:03Z",
         reason_code="UNRESOLVED",

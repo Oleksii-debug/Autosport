@@ -6,7 +6,7 @@ numbers remain Decimal observations and every response carries an exact SHA-256 
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal
 from hashlib import sha256
@@ -16,7 +16,6 @@ from types import MappingProxyType
 from typing import Callable, Mapping, Protocol, Sequence
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
-from weakref import ref
 
 ACCOUNT_JSON_RPC_ENDPOINT = "https://api.betfair.com/exchange/account/json-rpc/v1"
 BETTING_JSON_RPC_ENDPOINT = "https://api.betfair.com/exchange/betting/json-rpc/v1"
@@ -310,6 +309,27 @@ class BetfairExecutionReadbackEnvelope:
     request_scope_sha256: str
     evidence_sha256: str
     provider_order_ref: str | None = None
+    _authority_client: object | None = field(
+        default=None, init=False, repr=False, compare=False
+    )
+    _authority_account_identity: object | None = field(
+        default=None, init=False, repr=False, compare=False
+    )
+    _authority_capture_fingerprint: str | None = field(
+        default=None, init=False, repr=False, compare=False
+    )
+    _authority_origin_proof: str | None = field(
+        default=None, init=False, repr=False, compare=False
+    )
+    _authority_capture_started_at: str | None = field(
+        default=None, init=False, repr=False, compare=False
+    )
+    _authority_capture_started_monotonic_ns: int | None = field(
+        default=None, init=False, repr=False, compare=False
+    )
+    _authority_capture_start_fingerprint: str | None = field(
+        default=None, init=False, repr=False, compare=False
+    )
 
     def __post_init__(self) -> None:
         self._validate()
@@ -1221,14 +1241,55 @@ def _extend_unique(target: list[object], seen: set[str], orders: Sequence[object
         seen.add(bet_id)
         target.append(order)
 
-# Bind execution-readback authority to captures actually emitted by the canonical
-# adapter.  The registration closure is deliberately not exported: importing this
-# module exposes neither a seal token nor a registration function that can mint
-# authority for caller-constructed DTOs.
+# Bind positive execution-readback authority to the existing K07 authenticated
+# client/session-context authority. Direct/custom BetfairReadOnlyClient instances remain
+# useful for read-only parsing and network-free fixtures, but their captures deliberately
+# carry no provider-origin authority and therefore cannot authorize provider effects or
+# timeout absence.
+#
+# Import K07 here, after this module's read-only types and client are fully defined. This
+# avoids a second client/transport registry while letting K07 capture the exact canonical
+# read-only implementation it already owns.
 def _install_execution_readback_authority() -> None:
-    issued: dict[int, tuple[object, str]] = {}
+    from . import betfair_account_identity as account_identity
+
     raw_read = BetfairReadOnlyClient.read_execution_readback
+    raw_read_code = raw_read.__code__
     validate_integrity = BetfairExecutionReadbackEnvelope.assert_authoritative
+    validate_integrity_code = validate_integrity.__code__
+    client_type = BetfairReadOnlyClient
+    envelope_type = BetfairExecutionReadbackEnvelope
+    identity_type = account_identity.BetfairAuthenticatedAccountIdentity
+    identity_error = account_identity.BetfairAccountIdentityError
+    resolve_identity = account_identity.resolve_betfair_authenticated_account_identity
+    require_identity = account_identity.require_authoritative_betfair_account_identity
+    binder_name = "_bind_betfair_execution_readback_origin_authority"
+    bind_origin = getattr(account_identity, binder_name)
+    object_id = id
+    string_type = str
+
+    issue_origin = None
+    verify_origin = None
+
+    def require_executable_authority() -> None:
+        # read_execution_readback is intentionally composed by the timeout
+        # capture-start authority later in package import. Pin this lower callable's
+        # own code and the envelope assertion, not the mutable class dispatch slot.
+        if (
+            authoritative_read.__code__ is not authoritative_read_code
+            or envelope_type.assert_authoritative is not assert_authoritative
+            or assert_authoritative.__code__ is not assert_authoritative_code
+            or raw_read.__code__ is not raw_read_code
+            or validate_integrity.__code__ is not validate_integrity_code
+            or issue_origin is None
+            or verify_origin is None
+            or issue_origin.__code__ is not issue_origin_code
+            or verify_origin.__code__ is not verify_origin_code
+            or hasattr(account_identity, binder_name)
+        ):
+            raise BetfairReadOnlyError(
+                "execution readback origin authority implementation changed"
+            )
 
     def authoritative_read(
         self: BetfairReadOnlyClient,
@@ -1239,6 +1300,18 @@ def _install_execution_readback_authority() -> None:
         page_size: int = 1000,
         max_pages: int = 100,
     ) -> BetfairExecutionReadbackEnvelope:
+        require_executable_authority()
+
+        # K07 is the sole product-owned authenticated-client/session authority. A
+        # directly constructed or custom-transport client intentionally fails this
+        # step; it may still produce a structural read-only capture, but that capture
+        # is not provider-origin authority.
+        identity = None
+        try:
+            identity = resolve_identity(self)
+        except identity_error:
+            identity = None
+
         capture = raw_read(
             self,
             action_id=action_id,
@@ -1247,30 +1320,119 @@ def _install_execution_readback_authority() -> None:
             page_size=page_size,
             max_pages=max_pages,
         )
-        capture_id = id(capture)
+        require_executable_authority()
+        if type(capture) is not envelope_type:
+            raise BetfairReadOnlyError(
+                "execution readback returned non-canonical envelope"
+            )
 
-        def forget(_weakref: object, *, key: int = capture_id) -> None:
-            issued.pop(key, None)
+        if identity is None:
+            return capture
 
-        issued[capture_id] = (
-            ref(capture, forget),
-            capture._authority_fingerprint(),
+        try:
+            require_identity(identity, client=self)
+        except identity_error as exc:
+            raise BetfairReadOnlyError(
+                "authenticated Betfair client/session changed during execution readback"
+            ) from exc
+
+        fingerprint = capture._authority_fingerprint()
+        try:
+            origin_proof = issue_origin(
+                self,
+                identity,
+                capture_identity=object_id(capture),
+                capture_fingerprint=fingerprint,
+            )
+        except identity_error as exc:
+            raise BetfairReadOnlyError(
+                "authenticated Betfair readback origin proof could not be issued"
+            ) from exc
+        if type(origin_proof) is not string_type:
+            raise BetfairReadOnlyError(
+                "authenticated Betfair readback origin proof is invalid"
+            )
+
+        object.__setattr__(capture, "_authority_client", self)
+        object.__setattr__(capture, "_authority_account_identity", identity)
+        object.__setattr__(
+            capture,
+            "_authority_capture_fingerprint",
+            fingerprint,
         )
+        object.__setattr__(capture, "_authority_origin_proof", origin_proof)
+        require_executable_authority()
         return capture
 
     def assert_authoritative(self: BetfairExecutionReadbackEnvelope) -> None:
-        # Preserve the canonical scope/evidence checks first so any ordinary
-        # tamper is rejected for its exact invariant before origin is considered.
+        require_executable_authority()
         validate_integrity(self)
-        record = issued.get(id(self))
-        if record is None or record[0]() is not self:
+        client = object.__getattribute__(self, "_authority_client")
+        identity = object.__getattribute__(self, "_authority_account_identity")
+        fingerprint = object.__getattribute__(
+            self,
+            "_authority_capture_fingerprint",
+        )
+        origin_proof = object.__getattribute__(self, "_authority_origin_proof")
+        if (
+            type(client) is not client_type
+            or type(identity) is not identity_type
+            or type(fingerprint) is not string_type
+            or type(origin_proof) is not string_type
+        ):
             raise BetfairReadOnlyError(
-                "execution readback was not issued by canonical BetfairReadOnlyClient"
+                "execution readback lacks authenticated product-origin authority"
             )
-        if record[1] != self._authority_fingerprint():
+        try:
+            require_identity(identity, client=client)
+        except identity_error as exc:
             raise BetfairReadOnlyError(
-                "execution readback changed after canonical adapter capture"
+                "execution readback authenticated origin is no longer authoritative"
+            ) from exc
+        try:
+            client_venue = object.__getattribute__(client, "_venue_id")
+            client_account = object.__getattribute__(client, "_account_id")
+        except BaseException as exc:
+            raise BetfairReadOnlyError(
+                "execution readback authenticated client scope is unavailable"
+            ) from exc
+        if (
+            client_venue != self.venue_id
+            or client_account != self.account_id
+            or identity.venue_id != self.venue_id
+        ):
+            raise BetfairReadOnlyError(
+                "execution readback authenticated origin scope mismatch"
             )
+        if _iso_timestamp(identity.observed_at, "account_identity.observed_at") > _iso_timestamp(
+            self.observed_at,
+            "observed_at",
+        ):
+            raise BetfairReadOnlyError(
+                "execution readback predates authenticated account-context evidence"
+            )
+        if fingerprint != self._authority_fingerprint():
+            raise BetfairReadOnlyError(
+                "execution readback changed after authenticated provider capture"
+            )
+        if not verify_origin(
+            origin_proof,
+            client,
+            identity,
+            capture_identity=object_id(self),
+            capture_fingerprint=fingerprint,
+        ):
+            raise BetfairReadOnlyError(
+                "execution readback lacks authenticated product-origin authority"
+            )
+        require_executable_authority()
+
+    authoritative_read_code = authoritative_read.__code__
+    assert_authoritative_code = assert_authoritative.__code__
+    issue_origin, verify_origin = bind_origin(authoritative_read_code)
+    issue_origin_code = issue_origin.__code__
+    verify_origin_code = verify_origin.__code__
+    delattr(account_identity, binder_name)
 
     BetfairReadOnlyClient.read_execution_readback = authoritative_read
     BetfairExecutionReadbackEnvelope.assert_authoritative = assert_authoritative

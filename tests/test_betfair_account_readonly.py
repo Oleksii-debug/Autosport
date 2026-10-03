@@ -8,6 +8,8 @@ import json
 
 import pytest
 
+from betfair_execution_readback_test_support import authoritative_execution_readback
+
 import autosport.betfair_account_readonly as betfair_readonly
 from autosport.betfair_account_readonly import (
     ACCOUNT_JSON_RPC_ENDPOINT,
@@ -398,7 +400,8 @@ def test_execution_readback_binds_action_market_account_and_all_cleared_statuses
 
 
 def test_execution_readback_authority_cannot_be_imported_or_forged():
-    client, _ = client_for(
+    capture = authoritative_execution_readback(
+        [
         response(
             [{"marketId": "1.234", "event": {"id": "event-1"}}],
             1,
@@ -408,10 +411,11 @@ def test_execution_readback_authority_cannot_be_imported_or_forged():
         response({"clearedOrders": [], "moreAvailable": False}, 4),
         response({"clearedOrders": [], "moreAvailable": False}, 5),
         response({"clearedOrders": [], "moreAvailable": False}, 6),
-    )
-    capture = client.read_execution_readback(
+    ],
         action_id="action-1",
         market_id="1.234",
+        provider_order_ref=None,
+        account_id="default-account",
     )
     capture.assert_authoritative()
 
@@ -434,16 +438,17 @@ def test_execution_readback_authority_cannot_be_imported_or_forged():
         capture.request_scope_sha256,
         capture.evidence_sha256,
     )
-    with pytest.raises(BetfairReadOnlyError, match="not issued"):
+    with pytest.raises(BetfairReadOnlyError, match="product-origin authority"):
         forged.assert_authoritative()
 
     copied = replace(capture)
-    with pytest.raises(BetfairReadOnlyError, match="not issued"):
+    with pytest.raises(BetfairReadOnlyError, match="product-origin authority"):
         copied.assert_authoritative()
 
 
 def test_execution_readback_detects_post_capture_origin_tampering():
-    client, _ = client_for(
+    capture = authoritative_execution_readback(
+        [
         response(
             [{"marketId": "1.234", "event": {"id": "event-1"}}],
             1,
@@ -453,19 +458,21 @@ def test_execution_readback_detects_post_capture_origin_tampering():
         response({"clearedOrders": [], "moreAvailable": False}, 4),
         response({"clearedOrders": [], "moreAvailable": False}, 5),
         response({"clearedOrders": [], "moreAvailable": False}, 6),
-    )
-    capture = client.read_execution_readback(
+    ],
         action_id="action-1",
         market_id="1.234",
+        provider_order_ref=None,
+        account_id="default-account",
     )
 
     object.__setattr__(capture, "observed_at", "2026-09-17T17:31:00+00:00")
-    with pytest.raises(BetfairReadOnlyError, match="changed after canonical adapter capture"):
+    with pytest.raises(BetfairReadOnlyError, match="changed after authenticated provider capture"):
         capture.assert_authoritative()
 
 
 def test_execution_readback_detects_post_capture_scope_tampering():
-    client, _ = client_for(
+    capture = authoritative_execution_readback(
+        [
         response(
             [{"marketId": "1.234", "event": {"id": "event-1"}}],
             1,
@@ -475,10 +482,11 @@ def test_execution_readback_detects_post_capture_scope_tampering():
         response({"clearedOrders": [], "moreAvailable": False}, 4),
         response({"clearedOrders": [], "moreAvailable": False}, 5),
         response({"clearedOrders": [], "moreAvailable": False}, 6),
-    )
-    capture = client.read_execution_readback(
+    ],
         action_id="action-1",
         market_id="1.234",
+        provider_order_ref=None,
+        account_id="default-account",
     )
 
     object.__setattr__(capture, "account_id", "forged-account")

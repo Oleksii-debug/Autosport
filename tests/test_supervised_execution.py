@@ -9,6 +9,9 @@ from pathlib import Path
 
 import pytest
 
+from betfair_execution_readback_test_support import authoritative_execution_readback
+
+import autosport.supervised_execution as supervised_execution_module
 import autosport.supervised_provider_evidence as provider_evidence
 from autosport.betfair_account_readonly import (
     BetfairReadOnlyClient,
@@ -243,7 +246,11 @@ def _bound():
     return bound, approval, portfolio, intent
 
 
-def _ledger_with_unknown(path: Path):
+def _ledger_with_unknown(
+    path: Path,
+    *,
+    unknown_reason: str = "ambiguous_external_effect",
+):
     bound, approval, portfolio, intent = _bound()
     ledger = RealExecutionLedger(path)
     reserve_supervised_plan(ledger, bound, approval)
@@ -256,7 +263,7 @@ def _ledger_with_unknown(path: Path):
         attempt_id="attempt-1",
     )
     ledger.mark_submitted("attempt-1", submitted_at=SUBMITTED_AT)
-    ledger.mark_unknown("attempt-1", reason="ambiguous_external_effect", observed_at=UNKNOWN_AT)
+    ledger.mark_unknown("attempt-1", reason=unknown_reason, observed_at=UNKNOWN_AT)
     return ledger, bound, approval, action, portfolio, intent
 
 
@@ -507,19 +514,14 @@ def _provider_capture(
             )
             request_id += 1
 
-    transport = _ExecutionReadbackTransport(responses)
-    client = BetfairReadOnlyClient(
-        BetfairSessionCredentials("app-secret", "session-secret"),
-        transport=transport,
-        clock=lambda: datetime.fromisoformat(READBACK_AT),
-        venue_id="betfair",
-        account_id=account_id,
-    )
-    capture = client.read_execution_readback(
+    capture = authoritative_execution_readback(
+        responses,
         action_id=action.action_id,
         market_id=action.market_id,
+        provider_order_ref=None,
+        account_id=account_id,
     )
-    return capture, transport
+    return capture, None
 
 
 def _verified_state(bound, action, *, matched_stake: Decimal | None, **kwargs):
@@ -776,6 +778,106 @@ def test_complete_provider_absence_is_diagnostic_without_retry_authority() -> No
             plan_id=bound.execution_plan.plan_id,
             action_id=action.action_id,
         ) is False
+
+
+def test_betfair_timeout_unknown_requires_timeout_visibility_authority() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        ledger, bound, _, action, _, _ = _ledger_with_unknown(
+            Path(tmp) / "execution.jsonl",
+            unknown_reason="betfair_placeOrders_ambiguous_effect_requires_readback",
+        )
+        verified = _verified_state(bound, action, matched_stake=None)
+        assert isinstance(verified, VerifiedProviderAbsenceEvidence)
+
+        with pytest.raises(
+            SupervisedExecutionError,
+            match="provider absence evidence is not authoritative",
+        ):
+            reconcile_provider_not_found(
+                ledger,
+                bound,
+                attempt_id="attempt-1",
+                readback=verified,
+            )
+        assert ledger.attempt_state("attempt-1") is AttemptState.UNKNOWN
+
+
+def test_betfair_timeout_unknown_still_accepts_positive_provider_effect() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        ledger, bound, _, action, _, _ = _ledger_with_unknown(
+            Path(tmp) / "execution.jsonl",
+            unknown_reason="betfair_placeOrders_ambiguous_effect_requires_readback",
+        )
+        verified = _verified_state(
+            bound,
+            action,
+            matched_stake=action.requested_stake,
+        )
+        assert isinstance(verified, VerifiedProviderEffectEvidence)
+
+        result = reconcile_provider_readback(
+            ledger,
+            bound,
+            attempt_id="attempt-1",
+            readback=verified,
+        )
+        assert result.outcome is ReadbackOutcome.ACCEPTED
+        assert ledger.attempt_state("attempt-1") is AttemptState.ACCEPTED
+
+
+def test_not_found_consumer_rejects_timeout_assertion_rebind(monkeypatch) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        ledger, bound, _, action, _, _ = _ledger_with_unknown(
+            Path(tmp) / "execution.jsonl",
+            unknown_reason="betfair_placeOrders_ambiguous_effect_requires_readback",
+        )
+        verified = _verified_state(bound, action, matched_stake=None)
+        assert isinstance(verified, VerifiedProviderAbsenceEvidence)
+
+        monkeypatch.setattr(
+            supervised_execution_module,
+            "assert_betfair_timeout_absence_authoritative_for_attempt",
+            lambda *_args, **_kwargs: None,
+        )
+        with pytest.raises(
+            SupervisedExecutionError,
+            match="provider not-found executable authority changed",
+        ):
+            reconcile_provider_not_found(
+                ledger,
+                bound,
+                attempt_id="attempt-1",
+                readback=verified,
+            )
+        assert ledger.attempt_state("attempt-1") is AttemptState.UNKNOWN
+
+
+def test_not_found_consumer_rejects_verified_execution_view_rebind(
+    monkeypatch,
+) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        ledger, bound, _, action, _, _ = _ledger_with_unknown(
+            Path(tmp) / "execution.jsonl"
+        )
+        verified = _verified_state(bound, action, matched_stake=None)
+        assert isinstance(verified, VerifiedProviderAbsenceEvidence)
+
+        monkeypatch.setattr(
+            RealExecutionLedger,
+            "verified_execution_view",
+            lambda *_args, **_kwargs: None,
+        )
+        with pytest.raises(
+            SupervisedExecutionError,
+            match="provider not-found authority method changed",
+        ):
+            reconcile_provider_not_found(
+                ledger,
+                bound,
+                attempt_id="attempt-1",
+                readback=verified,
+            )
+        assert ledger.attempt_state("attempt-1") is AttemptState.UNKNOWN
 
 
 def test_opaque_not_found_hashes_cannot_release_retry() -> None:

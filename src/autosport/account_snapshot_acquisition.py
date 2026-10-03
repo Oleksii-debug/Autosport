@@ -7,6 +7,7 @@ or grant execution authority.  Credentials remain memory-only and are never pers
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
@@ -15,6 +16,7 @@ import json
 from pathlib import Path
 import sqlite3
 from threading import RLock
+from types import MappingProxyType
 from weakref import ref
 
 from ._campaign_provider_scope_devapp_identity import (
@@ -265,6 +267,19 @@ def assert_account_snapshot_acquisition_authoritative(
     raise AccountSnapshotAcquisitionError(
         "account snapshot lacks live canonical provider-origin authority"
     )
+
+
+@contextmanager
+def hold_current_account_snapshot_acquisition(
+    acquired: AuthoritativeAccountSnapshot,
+    required_capabilities: frozenset[BookmakerCapability],
+):
+    """Hold current provider-read generation authority across one atomic consumer step."""
+
+    raise AccountSnapshotAcquisitionError(
+        "account snapshot lacks current canonical provider acquisition authority"
+    )
+    yield acquired
 
 
 class BetfairAccountSnapshotAcquirer:
@@ -1183,27 +1198,18 @@ def _install_account_snapshot_acquisition_authority() -> None:
     raw_resolve = _AccountSnapshotStore.resolve
     raw_resolve_request = _AccountSnapshotStore.resolve_request
     canonical_snapshot_read = BetfairReadOnlyClient.read_account_snapshot
+    immutable_mapping_type = MappingProxyType
+    issued_snapshot = immutable_mapping_type({})
+    live_snapshot = immutable_mapping_type({})
+    current_capability_snapshot = immutable_mapping_type({})
+    state_lock = RLock()
 
     class _AccountSnapshotAuthorityBoundary:
         """Own live provider-origin authority without an independently callable mint."""
 
-        __slots__ = ("__issued", "__live", "__lock")
-
-        def __init__(self) -> None:
-            self.__issued: dict[
-                int,
-                tuple[
-                    object,
-                    _AccountSnapshotStore,
-                    BetfairReadOnlyClient,
-                    BetfairSessionCredentials,
-                ],
-            ] = {}
-            self.__live: dict[
-                str,
-                tuple[object, str, BetfairSessionCredentials],
-            ] = {}
-            self.__lock = RLock()
+        # The caller can recover this boundary from the public acquire closure. Keep
+        # authority-bearing state out of replaceable instance attributes entirely.
+        __slots__ = ()
 
         @staticmethod
         def _fingerprint(acquired: AuthoritativeAccountSnapshot) -> str:
@@ -1258,6 +1264,7 @@ def _install_account_snapshot_acquisition_authority() -> None:
             account_id: str = "default-account",
             timeout_seconds: float = 10.0,
         ) -> None:
+            nonlocal issued_snapshot
             raw_init(
                 acquirer,
                 database_path,
@@ -1276,16 +1283,23 @@ def _install_account_snapshot_acquisition_authority() -> None:
             instance_id = id(acquirer)
 
             def forget(_weakref: object, *, key: int = instance_id) -> None:
-                with self.__lock:
-                    self.__issued.pop(key, None)
+                nonlocal issued_snapshot
+                with state_lock:
+                    current = issued_snapshot.get(key)
+                    if current is not None and current[0] is _weakref:
+                        updated = dict(issued_snapshot)
+                        updated.pop(key, None)
+                        issued_snapshot = immutable_mapping_type(updated)
 
-            with self.__lock:
-                self.__issued[instance_id] = (
+            with state_lock:
+                updated = dict(issued_snapshot)
+                updated[instance_id] = (
                     ref(acquirer, forget),
                     store,
                     client,
                     credentials,
                 )
+                issued_snapshot = immutable_mapping_type(updated)
 
         def acquire(
             self,
@@ -1294,8 +1308,9 @@ def _install_account_snapshot_acquisition_authority() -> None:
             *,
             acquisition_id: str,
         ) -> AuthoritativeAccountSnapshot:
-            with self.__lock:
-                state = self.__issued.get(id(acquirer))
+            nonlocal live_snapshot, current_capability_snapshot
+            with state_lock:
+                state = issued_snapshot.get(id(acquirer))
                 if state is None or state[0]() is not acquirer:
                     raise AccountSnapshotAcquisitionError(
                         "account snapshot acquirer was not initialized by canonical "
@@ -1365,17 +1380,21 @@ def _install_account_snapshot_acquisition_authority() -> None:
                         "acquisition_id cannot be reused for another "
                         "provider/account/capability scope"
                     )
-                with self.__lock:
-                    current = self.__live.get(existing.receipt.acquisition_id)
+                with state_lock:
+                    current = live_snapshot.get(existing.receipt.acquisition_id)
                     if current is not None:
                         value = current[0]()
                         if value is None:
-                            self.__live.pop(existing.receipt.acquisition_id, None)
+                            updated = dict(live_snapshot)
+                            updated.pop(existing.receipt.acquisition_id, None)
+                            live_snapshot = immutable_mapping_type(updated)
                         elif (
                             type(value) is not AuthoritativeAccountSnapshot
                             or current[1] != self._fingerprint(value)
                         ):
-                            self.__live.pop(existing.receipt.acquisition_id, None)
+                            updated = dict(live_snapshot)
+                            updated.pop(existing.receipt.acquisition_id, None)
+                            live_snapshot = immutable_mapping_type(updated)
                             raise AccountSnapshotAcquisitionError(
                                 "live account snapshot authority integrity changed"
                             )
@@ -1488,17 +1507,21 @@ def _install_account_snapshot_acquisition_authority() -> None:
                 )
             live_id = acquired.receipt.acquisition_id
             fingerprint = self._fingerprint(acquired)
-            with self.__lock:
-                current = self.__live.get(live_id)
+            with state_lock:
+                current = live_snapshot.get(live_id)
                 if current is not None:
                     value = current[0]()
                     if value is None:
-                        self.__live.pop(live_id, None)
+                        updated = dict(live_snapshot)
+                        updated.pop(live_id, None)
+                        live_snapshot = immutable_mapping_type(updated)
                     elif (
                         type(value) is not AuthoritativeAccountSnapshot
                         or current[1] != self._fingerprint(value)
                     ):
-                        self.__live.pop(live_id, None)
+                        updated = dict(live_snapshot)
+                        updated.pop(live_id, None)
+                        live_snapshot = immutable_mapping_type(updated)
                         raise AccountSnapshotAcquisitionError(
                             "live account snapshot authority integrity changed"
                         )
@@ -1515,25 +1538,106 @@ def _install_account_snapshot_acquisition_authority() -> None:
                     *,
                     expected_id: str = live_id,
                 ) -> None:
-                    with self.__lock:
-                        registered = self.__live.get(expected_id)
+                    nonlocal live_snapshot
+                    with state_lock:
+                        registered = live_snapshot.get(expected_id)
                         if registered is not None and registered[0] is current_ref:
-                            self.__live.pop(expected_id, None)
+                            updated = dict(live_snapshot)
+                            updated.pop(expected_id, None)
+                            live_snapshot = immutable_mapping_type(updated)
 
-                self.__live[live_id] = (
+                updated = dict(live_snapshot)
+                updated[live_id] = (
                     ref(acquired, forget_live),
                     fingerprint,
                     origin_credentials,
                 )
+                live_snapshot = immutable_mapping_type(updated)
+
+                current_updated = dict(current_capability_snapshot)
+                for capability in acquired.receipt.requested_capabilities:
+                    current_updated[
+                        (
+                            acquired.receipt.venue_id,
+                            acquired.receipt.account_id,
+                            acquired.receipt.authenticated_account_identity_sha256,
+                            capability,
+                        )
+                    ] = live_id
+                current_capability_snapshot = immutable_mapping_type(current_updated)
                 return acquired
+
+        @contextmanager
+        def hold_current(
+            self,
+            acquired: AuthoritativeAccountSnapshot,
+            required_capabilities: frozenset[BookmakerCapability],
+        ):
+            if type(acquired) is not AuthoritativeAccountSnapshot:
+                raise AccountSnapshotAcquisitionError(
+                    "current provider-origin authority requires exact acquired snapshot evidence"
+                )
+            if type(required_capabilities) is not frozenset or not required_capabilities:
+                raise AccountSnapshotAcquisitionError(
+                    "required_capabilities must be a non-empty exact frozenset"
+                )
+            required_names: list[str] = []
+            for capability in required_capabilities:
+                if type(capability) is not BookmakerCapability:
+                    raise AccountSnapshotAcquisitionError(
+                        "required_capabilities must contain exact BookmakerCapability values"
+                    )
+                if capability not in _ALLOWED_ACCOUNT_CAPABILITIES:
+                    raise AccountSnapshotAcquisitionError(
+                        "required capability is outside account snapshot authority"
+                    )
+                required_names.append(capability.value)
+            required_names.sort()
+            receipt = acquired.receipt
+            if any(
+                capability not in receipt.requested_capabilities
+                for capability in required_names
+            ):
+                raise AccountSnapshotAcquisitionError(
+                    "account snapshot did not acquire every required capability"
+                )
+
+            with state_lock:
+                current = live_snapshot.get(receipt.acquisition_id)
+                if (
+                    current is None
+                    or current[0]() is not acquired
+                    or current[1] != self._fingerprint(acquired)
+                ):
+                    raise AccountSnapshotAcquisitionError(
+                        "account snapshot was not issued by live canonical provider acquisition"
+                    )
+                for capability in required_names:
+                    current_id = current_capability_snapshot.get(
+                        (
+                            receipt.venue_id,
+                            receipt.account_id,
+                            receipt.authenticated_account_identity_sha256,
+                            capability,
+                        )
+                    )
+                    if current_id != receipt.acquisition_id:
+                        raise AccountSnapshotAcquisitionError(
+                            "account snapshot is not the current canonical provider acquisition "
+                            f"for required capability {capability}"
+                        )
+                # Keep the authority lock held for the entire consumer critical section.
+                # A genuine newer acquisition cannot publish a replacement generation
+                # until the downstream operation exits this context.
+                yield acquired
 
         def resolve(
             self,
             acquirer: BetfairAccountSnapshotAcquirer,
             acquisition_id: str,
         ) -> AuthoritativeAccountSnapshot:
-            with self.__lock:
-                state = self.__issued.get(id(acquirer))
+            with state_lock:
+                state = issued_snapshot.get(id(acquirer))
                 if state is None or state[0]() is not acquirer:
                     raise AccountSnapshotAcquisitionError(
                         "account snapshot acquirer was not initialized by canonical "
@@ -1556,8 +1660,8 @@ def _install_account_snapshot_acquisition_authority() -> None:
                 raise AccountSnapshotAcquisitionError(
                     "receipt must be an exact AccountSnapshotAcquisitionReceipt"
                 )
-            with self.__lock:
-                state = self.__issued.get(id(acquirer))
+            with state_lock:
+                state = issued_snapshot.get(id(acquirer))
                 if state is None or state[0]() is not acquirer:
                     raise AccountSnapshotAcquisitionError(
                         "account snapshot acquirer was not initialized by canonical "
@@ -1581,8 +1685,8 @@ def _install_account_snapshot_acquisition_authority() -> None:
                 raise AccountSnapshotAcquisitionError(
                     "provider-origin authority requires exact acquired snapshot evidence"
                 )
-            with self.__lock:
-                current = self.__live.get(acquired.receipt.acquisition_id)
+            with state_lock:
+                current = live_snapshot.get(acquired.receipt.acquisition_id)
                 if (
                     current is None
                     or current[0]() is not acquired
@@ -1596,6 +1700,14 @@ def _install_account_snapshot_acquisition_authority() -> None:
 
     def assert_live(acquired: AuthoritativeAccountSnapshot) -> None:
         authority.assert_live(acquired)
+
+    @contextmanager
+    def hold_current(
+        acquired: AuthoritativeAccountSnapshot,
+        required_capabilities: frozenset[BookmakerCapability],
+    ):
+        with authority.hold_current(acquired, required_capabilities):
+            yield acquired
 
     def __init__(
         self: BetfairAccountSnapshotAcquirer,
@@ -1639,6 +1751,7 @@ def _install_account_snapshot_acquisition_authority() -> None:
         authority.verify(self, snapshot, receipt)
 
     globals()["assert_account_snapshot_acquisition_authoritative"] = assert_live
+    globals()["hold_current_account_snapshot_acquisition"] = hold_current
     BetfairAccountSnapshotAcquirer.__init__ = __init__
     BetfairAccountSnapshotAcquirer.acquire = acquire
     BetfairAccountSnapshotAcquirer.resolve = resolve

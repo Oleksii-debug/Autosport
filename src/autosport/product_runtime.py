@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import threading
 from contextlib import ExitStack
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -18,7 +19,12 @@ from .causal_collector import (
     DesktopDeltaCheckpointStore,
     DesktopDeltaConsumer,
 )
-from .collector_service import CollectorServiceSource, HeadlessCollectorService
+from .collector_service import (
+    CollectorServiceConfig,
+    CollectorServiceSource,
+    HeadlessCollectorService,
+    _SignalStopRequest,
+)
 from .continuous_session import (
     ContinuousSessionCoordinator,
     ContinuousSessionStatus,
@@ -519,6 +525,36 @@ def _settlement_authority_identity(
     return hashlib.sha256(encoded).hexdigest()
 
 
+class _ProductStopRequest(_SignalStopRequest):
+    """Product reason semantics over the canonical collector signal STOP event."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._reason_lock = threading.Lock()
+        self._product_reason = "operator_stop"
+
+    @staticmethod
+    def _validated_reason(reason: str) -> str:
+        if type(reason) is not str or not reason or reason.strip() != reason:
+            raise ValueError("stop reason must be a non-empty trimmed string")
+        return reason
+
+    def request(self, reason: str) -> None:
+        resolved = self._validated_reason(reason)
+        with self._reason_lock:
+            self._product_reason = resolved
+            self._event.set()
+
+    def clear(self) -> None:
+        with self._reason_lock:
+            self._product_reason = "operator_stop"
+            self._event.clear()
+
+    def reason(self) -> str:
+        with self._reason_lock:
+            return self._product_reason
+
+
 @dataclass(slots=True)
 class AutonomousProductRuntime:
     """One supported headless composition of the integrated PAPER product authorities."""
@@ -534,6 +570,11 @@ class AutonomousProductRuntime:
     dependencies: FocusedMirrorDependencyIndex
     _runtime_lease: _ProductRuntimeLease
     _start_transition_store: _ProductStartTransitionStore
+    _stop_controller: _ProductStopRequest = field(
+        default_factory=_ProductStopRequest,
+        repr=False,
+        compare=False,
+    )
     _closed: bool = False
     _operation_fence: RLock = field(
         default_factory=RLock,
@@ -542,11 +583,52 @@ class AutonomousProductRuntime:
         compare=False,
     )
 
+    def __setattr__(self, name: str, value: object) -> None:
+        if name == "_stop_controller":
+            try:
+                object.__getattribute__(self, "_stop_controller")
+            except AttributeError:
+                pass
+            else:
+                raise ProductCompositionError(
+                    "canonical product STOP source binding is immutable"
+                )
+        object.__setattr__(self, name, value)
+
     def _require_runtime_authority(self) -> None:
         if self._closed or not self._runtime_lease.authority_active:
             raise ProductCompositionError(
                 "product runtime is closed or no longer owns workspace authority"
             )
+
+    def _canonical_product_stop_source(self) -> _ProductStopRequest:
+        """Resolve the exact construction-time STOP event consumed by the collector."""
+
+        expected_stop_source = self._stop_controller
+        if type(expected_stop_source) is not _ProductStopRequest:
+            raise ProductCompositionError(
+                "canonical product STOP source binding changed"
+            )
+
+        collector = self.collector
+        if type(collector) is HeadlessCollectorService:
+            stop_source = collector.stop_requested
+            if stop_source is not expected_stop_source:
+                raise ProductCompositionError(
+                    "canonical product collector STOP source binding changed"
+                )
+            reason_callback = collector.stop_reason
+            if (
+                getattr(reason_callback, "__self__", None) is not stop_source
+                or getattr(reason_callback, "__func__", None)
+                is not _ProductStopRequest.reason
+            ):
+                raise ProductCompositionError(
+                    "canonical product collector STOP reason binding changed"
+                )
+            return stop_source
+
+        return expected_stop_source
 
     @staticmethod
     def _state_value(status: ContinuousSessionStatus) -> str:
@@ -576,6 +658,7 @@ class AutonomousProductRuntime:
         """Project lifecycle truth only when collector and session durable state agree."""
 
         self._require_runtime_authority()
+        self._canonical_product_stop_source()
         if not allow_pending_start:
             self._require_start_transition_resolved()
         coordinator_status = self.coordinator.status()
@@ -709,6 +792,7 @@ class AutonomousProductRuntime:
             session_pre_state=current_state,
         )
         try:
+            self._canonical_product_stop_source().clear()
             self.collector.resume()
             self.coordinator.resume()
             resolved = self._coherent_status(allow_pending_start=True)
@@ -742,58 +826,73 @@ class AutonomousProductRuntime:
     def resume(self) -> ContinuousSessionStatus:
         return self.start()
 
-    @_serialized_runtime_operation
-    def stop(self, reason: str = "operator_stop") -> ContinuousSessionStatus:
+    def request_stop(self, reason: str = "operator_stop") -> None:
+        """Signal cooperative STOP immediately without waiting for the active tick."""
+
         self._require_runtime_authority()
-        pending = self._start_transition_store.pending()
-        collector_error: BaseException | None = None
-        coordinator_error: BaseException | None = None
-        try:
-            self.collector.stop(reason)
-        except BaseException as exc:
-            collector_error = exc
-        try:
-            self.coordinator.stop(reason)
-        except BaseException as exc:
-            coordinator_error = exc
+        stop_source = self._stop_controller
+        if type(stop_source) is not _ProductStopRequest:
+            raise ProductCompositionError(
+                "canonical product STOP source binding changed"
+            )
+        stop_source.request(reason)
+        self._canonical_product_stop_source()
 
-        if collector_error is not None:
+    def stop(self, reason: str = "operator_stop") -> ContinuousSessionStatus:
+        # STOP must win the cooperative wait before waiting for the serialized lifecycle
+        # fence held by an active tick. Durable collector/session STOP remains serialized.
+        self.request_stop(reason)
+        with self._operation_fence:
+            self._require_runtime_authority()
+            pending = self._start_transition_store.pending()
+            collector_error: BaseException | None = None
+            coordinator_error: BaseException | None = None
+            try:
+                self.collector.stop(reason)
+            except BaseException as exc:
+                collector_error = exc
+            try:
+                self.coordinator.stop(reason)
+            except BaseException as exc:
+                coordinator_error = exc
+
+            if collector_error is not None:
+                if coordinator_error is not None:
+                    self._note_secondary_failure(
+                        collector_error,
+                        action="session STOP",
+                        secondary_error=coordinator_error,
+                    )
+                if pending is not None:
+                    self._mark_start_recovery_required(
+                        int(pending["generation"]),
+                        collector_error,
+                    )
+                raise collector_error
             if coordinator_error is not None:
-                self._note_secondary_failure(
-                    collector_error,
-                    action="session STOP",
-                    secondary_error=coordinator_error,
-                )
-            if pending is not None:
-                self._mark_start_recovery_required(
-                    int(pending["generation"]),
-                    collector_error,
-                )
-            raise collector_error
-        if coordinator_error is not None:
-            if pending is not None:
-                self._mark_start_recovery_required(
-                    int(pending["generation"]),
-                    coordinator_error,
-                )
-            raise coordinator_error
+                if pending is not None:
+                    self._mark_start_recovery_required(
+                        int(pending["generation"]),
+                        coordinator_error,
+                    )
+                raise coordinator_error
 
-        resolved = self._coherent_status(allow_pending_start=True)
-        if self._state_value(resolved) != SessionState.STOPPED.value:
-            error = ProductCompositionError(
-                "canonical product STOP did not reach coherent STOPPED state"
-            )
-            if pending is not None:
-                self._mark_start_recovery_required(
-                    int(pending["generation"]),
-                    error,
+            resolved = self._coherent_status(allow_pending_start=True)
+            if self._state_value(resolved) != SessionState.STOPPED.value:
+                error = ProductCompositionError(
+                    "canonical product STOP did not reach coherent STOPPED state"
                 )
-            raise error
-        if pending is not None:
-            self._start_transition_store.mark_rolled_back(
-                int(pending["generation"])
-            )
-        return resolved
+                if pending is not None:
+                    self._mark_start_recovery_required(
+                        int(pending["generation"]),
+                        error,
+                    )
+                raise error
+            if pending is not None:
+                self._start_transition_store.mark_rolled_back(
+                    int(pending["generation"])
+                )
+            return resolved
 
     @_serialized_runtime_operation
     def status(self) -> ContinuousSessionStatus:
@@ -830,6 +929,7 @@ def build_autonomous_product_runtime(
     source: ProductCollectorSource,
     clock: Callable[[], str] | None = None,
     sleep: Callable[[float], None] | None = None,
+    collector_config: CollectorServiceConfig | None = None,
     initial_bankroll: str = "10000",
     outcome_authority: SettlementOutcomeAuthority | None = None,
     settlement_learning_handoff: SettlementLearningHandoff | None = None,
@@ -849,6 +949,8 @@ def build_autonomous_product_runtime(
         raise ProductCompositionError("source.source_id must be a non-empty trimmed string")
     if not callable(getattr(source, "resolve_event", None)):
         raise ProductCompositionError("source.resolve_event must be callable")
+    if collector_config is not None and type(collector_config) is not CollectorServiceConfig:
+        raise TypeError("collector_config must be CollectorServiceConfig or None")
 
     try:
         normalized_bankroll = str(initial_bankroll)
@@ -903,6 +1005,7 @@ def build_autonomous_product_runtime(
         )
 
         dependencies = FocusedMirrorDependencyIndex(mirror)
+        stop_controller = _ProductStopRequest()
         collector_store = CollectorDeltaStore(root / "collector_deltas.json")
         collector = HeadlessCollectorService(
             delta_store=collector_store,
@@ -910,8 +1013,11 @@ def build_autonomous_product_runtime(
             source=source,
             state_path=root / "collector_state.json",
             run_id=f"product:{source_id}",
+            config=collector_config,
             clock=resolved_clock,
             sleep=sleep,
+            stop_requested=stop_controller,
+            stop_reason=stop_controller.reason,
         )
         desktop = DesktopDeltaConsumer(
             collector_store,
@@ -932,6 +1038,7 @@ def build_autonomous_product_runtime(
             settlement_learning_handoff=settlement_learning_handoff,
             clock=resolved_clock,
             initial_bankroll=manifest.initial_bankroll,
+            prospective_collection=True,
         )
         runtime = AutonomousProductRuntime(
             workspace=root,
@@ -943,6 +1050,7 @@ def build_autonomous_product_runtime(
             mirror=mirror,
             invalidations=invalidations,
             dependencies=dependencies,
+            _stop_controller=stop_controller,
             _runtime_lease=runtime_lease,
             _start_transition_store=_ProductStartTransitionStore(
                 root / "product_start_transition.json"

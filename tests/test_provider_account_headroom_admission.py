@@ -1782,3 +1782,94 @@ def test_economic_goal_store_path_factory_rebinding_cannot_redirect_denomination
             action_id="target-action",
         )
 
+def test_workspace_lock_acquire_rebinding_cannot_bypass_goal_revision_fence(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    acquired, _ = _acquire_balance(monkeypatch, tmp_path, "100")
+    target = _plan("target", _action("target-action", "10"))
+    ledger = _ledger_with_plans(tmp_path, target)
+    hostile_calls: list[object] = []
+
+    def hostile_acquire(self) -> None:
+        hostile_calls.append(self)
+
+    monkeypatch.setattr(
+        headroom_module.WorkspaceEconomicLock,
+        "acquire",
+        hostile_acquire,
+    )
+
+    with pytest.raises(
+        ProviderAccountHeadroomError,
+        match="canonical monetary denomination authority changed",
+    ):
+        _assess(
+            ledger,
+            acquired,
+            plan_id="target",
+            action_id="target-action",
+        )
+
+    assert hostile_calls == []
+
+
+def test_workspace_lock_init_rebinding_cannot_redirect_goal_fence(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    acquired, _ = _acquire_balance(monkeypatch, tmp_path, "100")
+    target = _plan("target", _action("target-action", "10"))
+    ledger = _ledger_with_plans(tmp_path, target)
+    hostile_calls: list[object] = []
+
+    def hostile_init(self, workspace) -> None:
+        hostile_calls.append(workspace)
+
+    monkeypatch.setattr(
+        headroom_module.WorkspaceEconomicLock,
+        "__init__",
+        hostile_init,
+    )
+
+    with pytest.raises(
+        ProviderAccountHeadroomError,
+        match="canonical monetary denomination authority changed",
+    ):
+        _assess(
+            ledger,
+            acquired,
+            plan_id="target",
+            action_id="target-action",
+        )
+
+    assert hostile_calls == []
+
+
+def test_workspace_lock_path_factory_rebinding_cannot_redirect_goal_fence(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    acquired, _ = _acquire_balance(monkeypatch, tmp_path, "100")
+    target = _plan("target", _action("target-action", "10"))
+    ledger = _ledger_with_plans(tmp_path, target)
+    foreign_workspace = tmp_path / "foreign-lock-workspace"
+    foreign_workspace.mkdir()
+
+    monkeypatch.setattr(
+        headroom_module._workspace_lock,
+        "Path",
+        lambda _workspace: foreign_workspace,
+    )
+
+    with pytest.raises(
+        ProviderAccountHeadroomError,
+        match="canonical monetary denomination authority changed",
+    ):
+        _assess(
+            ledger,
+            acquired,
+            plan_id="target",
+            action_id="target-action",
+        )
+

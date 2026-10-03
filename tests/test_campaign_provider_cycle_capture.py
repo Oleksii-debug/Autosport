@@ -1661,7 +1661,11 @@ def test_saved_capture_rejects_schedule_deadline_dispatch_rebind_before_executio
     locator, store, spec, provider_store = _setup(tmp_path)
     capture = capture_campaign_complete_game_board
     provider_calls: list[str] = []
-    monkeypatch.setattr(capture_module, "_SCHEDULE_DUE_AT", lambda **_kwargs: "2100-01-08T06:00:00+00:00")
+    monkeypatch.setattr(
+        capture_module,
+        "_SCHEDULE_DUE_AT",
+        lambda **_kwargs: "2100-01-08T06:00:00+00:00",
+    )
     monkeypatch.setattr(
         provider_module,
         "urlopen",

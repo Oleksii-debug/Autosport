@@ -9,7 +9,7 @@ from weakref import ref
 
 import pytest
 
-from betfair_execution_readback_test_support import authoritative_execution_readback
+from betfair_execution_readback_test_support import semantic_execution_readback
 
 import autosport.supervised_provider_evidence as provider_evidence
 
@@ -29,6 +29,7 @@ from autosport.supervised_provider_evidence import (
     VerifiedProviderEffectEvidence,
     assert_verified_provider_evidence_authoritative,
     verify_betfair_provider_state,
+    _evaluate_betfair_provider_state_semantics,
 )
 
 
@@ -129,7 +130,7 @@ def _capture_with_provider_requested_size(
             )
         )
 
-    return authoritative_execution_readback(
+    return semantic_execution_readback(
         responses,
         action_id=action.action_id,
         market_id=action.market_id,
@@ -147,7 +148,7 @@ def test_current_order_wrong_requested_size_cannot_mint_effect_evidence() -> Non
     )
 
     with pytest.raises(ProviderEvidenceError, match="requested (size|stake)"):
-        verify_betfair_provider_state(
+        _evaluate_betfair_provider_state_semantics(
             action,
             profile,
             expected_profile_sha256=profile.profile_id,
@@ -259,7 +260,7 @@ def test_equal_caller_copy_cannot_mint_provider_evidence_authority() -> None:
         action,
         requested_size=10.0,
     )
-    evidence = verify_betfair_provider_state(
+    evidence = _evaluate_betfair_provider_state_semantics(
         action,
         profile,
         expected_profile_sha256=profile.profile_id,
@@ -283,7 +284,7 @@ def test_reachable_closure_dict_injection_cannot_mint_provider_authority() -> No
         action,
         requested_size=10.0,
     )
-    evidence = verify_betfair_provider_state(
+    evidence = _evaluate_betfair_provider_state_semantics(
         action,
         profile,
         expected_profile_sha256=profile.profile_id,

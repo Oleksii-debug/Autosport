@@ -78,7 +78,6 @@ def evidence(
     if grade in {
         ProviderCapabilityTruthGrade.DECLARED_DOCUMENTED,
         ProviderCapabilityTruthGrade.CONFIGURED,
-        ProviderCapabilityTruthGrade.DEGRADED_OR_DELAYED,
         ProviderCapabilityTruthGrade.REVOKED_OR_UNAVAILABLE,
     }:
         expires = None
@@ -233,7 +232,7 @@ def test_delayed_live_quotes_are_not_live_operational():
     )
     m = build_provider_capability_evidence_matrix(
         p, i, environment="production", application_mode="delayed-key",
-        matrix_version=1, as_of=T3, matrix_ref="delayed", evidence=(f,)
+        matrix_version=1, as_of=T4, matrix_ref="delayed", evidence=(f,)
     )
     assert m.qualifies(
         BookmakerCapability.LIVE_QUOTES_READ,
@@ -245,6 +244,25 @@ def test_delayed_live_quotes_are_not_live_operational():
         accepted_grades=frozenset({ProviderCapabilityTruthGrade.OBSERVED_OPERATIONAL}),
         at_time=T3,
     )
+    assert not m.qualifies(
+        BookmakerCapability.LIVE_QUOTES_READ,
+        accepted_grades=frozenset({ProviderCapabilityTruthGrade.DEGRADED_OR_DELAYED}),
+        at_time=T4,
+    )
+
+
+def test_degraded_grade_requires_expiry():
+    p = profile()
+    i = integration(p)
+    with pytest.raises(ProviderCapabilityEvidenceMatrixError, match="requires expires_at"):
+        evidence(
+            p,
+            BookmakerCapability.LIVE_QUOTES_READ,
+            ProviderCapabilityTruthGrade.DEGRADED_OR_DELAYED,
+            i=i,
+            expires=None,
+            quality="provider_delay_seconds=180",
+        )
 
 
 def test_degraded_grade_requires_quality_constraint():

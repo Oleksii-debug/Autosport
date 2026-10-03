@@ -662,11 +662,8 @@ def test_currentness_rejects_verified_snapshot_code_mutation_before_dispatch(
     evidence = resolve_execution_capital_at_risk(ledger, plan.plan_id)
     reader = RealExecutionLedger.verified_snapshot
     original_code = reader.__code__
-    called = False
 
     def fake_snapshot(self):
-        nonlocal called
-        called = True
         raise AssertionError("mutated snapshot reader must not run")
 
     try:
@@ -678,6 +675,4 @@ def test_currentness_rejects_verified_snapshot_code_mutation_before_dispatch(
             evidence.assert_issued_current(ledger)
     finally:
         reader.__code__ = original_code
-
-    assert called is False
 

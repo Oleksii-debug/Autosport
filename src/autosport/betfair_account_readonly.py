@@ -1313,15 +1313,17 @@ def _install_execution_readback_authority() -> None:
     ) -> BetfairExecutionReadbackEnvelope:
         require_executable_authority()
 
-        # K07 is the sole product-owned authenticated-client/session authority. A
-        # directly constructed or custom-transport client intentionally fails this
-        # step; it may still produce a structural read-only capture, but that capture
-        # is not provider-origin authority.
+        # K07 is the sole product-owned authenticated-client/session authority,
+        # but even K07 identity acquisition must not run through a network graph that
+        # was already replaced before this readback started.  Noncanonical dispatch
+        # remains usable only for structural/semantic capture.
+        origin_candidate = origin_dispatch_current()
         identity = None
-        try:
-            identity = resolve_identity(self)
-        except identity_error:
-            identity = None
+        if origin_candidate:
+            try:
+                identity = resolve_identity(self)
+            except identity_error:
+                identity = None
 
         capture = raw_read(
             self,
@@ -1337,7 +1339,11 @@ def _install_execution_readback_authority() -> None:
                 "execution readback returned non-canonical envelope"
             )
 
-        if identity is None:
+        if (
+            identity is None
+            or not origin_candidate
+            or not origin_dispatch_current()
+        ):
             return capture
 
         try:

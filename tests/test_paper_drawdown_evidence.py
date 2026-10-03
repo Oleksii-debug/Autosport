@@ -1,5 +1,6 @@
 from dataclasses import replace
 from decimal import Decimal
+from pathlib import Path
 from types import FunctionType
 
 import pytest
@@ -539,6 +540,35 @@ def test_resolver_rejects_in_place_captured_helper_code_rebinding(tmp_path):
     assert evidence.source_state_sha256 != "0" * 64
     assert evidence.path_sha256 != "0" * 64
     assert evidence.evidence_sha256 != "0" * 64
+
+
+def test_resolver_rejects_workspace_path_dispatch_rebinding(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    _initialize(tmp_path)
+    hostile_called = False
+
+    def hostile_resolve(self, *args, **kwargs):
+        nonlocal hostile_called
+        del self, args, kwargs
+        hostile_called = True
+        return tmp_path
+
+    original_resolve = Path.resolve
+    monkeypatch.setattr(Path, "resolve", hostile_resolve)
+
+    with pytest.raises(
+        PaperDrawdownEvidenceError,
+        match="workspace path authority changed",
+    ):
+        resolve_paper_drawdown_evidence(tmp_path)
+
+    assert hostile_called is False
+
+    monkeypatch.setattr(Path, "resolve", original_resolve)
+    evidence = resolve_paper_drawdown_evidence(tmp_path)
+    assert evidence.scope == DRAW_DOWN_SCOPE
 
 
 def test_missing_durable_sources_fail_closed(tmp_path):

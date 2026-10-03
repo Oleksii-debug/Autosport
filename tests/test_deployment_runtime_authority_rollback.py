@@ -2056,3 +2056,223 @@ def test_runtime_authority_rejects_instant_code_replacement(
             store.records()
     finally:
         target.__code__ = original_code
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    (
+        "namespace_sha256",
+        "journal_dir",
+        "records_dir",
+        "namespace_marker_path",
+        "authority_root_activation_path",
+        "authority_root_binding_path",
+        "workspace_binding_path",
+    ),
+)
+def test_runtime_authority_rejects_derived_namespace_path_rebinding(
+    tmp_path: Path,
+    field_name: str,
+) -> None:
+    path = tmp_path / "deployment-runtime-authority.json"
+    store = DeploymentRuntimeAuthorityStore.initialize_pristine(
+        path,
+        authority_root=_authority_root(tmp_path),
+    )
+    replacement: object = (
+        "f" * 64
+        if field_name == "namespace_sha256"
+        else tmp_path / f"redirected-{field_name}.json"
+    )
+    object.__setattr__(store._authority, field_name, replacement)
+
+    with pytest.raises(
+        DeploymentRuntimeAuthorityError,
+        match="binding integrity mismatch",
+    ):
+        store.records()
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    ("workspace_locator", "workspace_locator_sha256", "path_binding_path"),
+)
+def test_runtime_authority_rejects_workspace_binding_topology_rebinding(
+    tmp_path: Path,
+    field_name: str,
+) -> None:
+    path = tmp_path / "deployment-runtime-authority.json"
+    store = DeploymentRuntimeAuthorityStore.initialize_pristine(
+        path,
+        authority_root=_authority_root(tmp_path),
+    )
+    binding = store._authority.workspace_binding
+    replacement: object = (
+        tmp_path / "redirected-workspace-binding.json"
+        if field_name == "path_binding_path"
+        else ("f" * 64 if field_name.endswith("sha256") else "hostile-workspace")
+    )
+    object.__setattr__(binding, field_name, replacement)
+
+    with pytest.raises(
+        DeploymentRuntimeAuthorityError,
+        match="binding integrity mismatch",
+    ):
+        store.records()
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    (
+        "workspace_locator",
+        "workspace_locator_sha256",
+        "authority_root_locator",
+        "authority_root_locator_sha256",
+        "authority_root_resolved",
+        "authority_root_resolved_sha256",
+        "binding_path",
+        "store_root",
+    ),
+)
+def test_runtime_authority_rejects_root_selection_context_rebinding(
+    tmp_path: Path,
+    field_name: str,
+) -> None:
+    path = tmp_path / "deployment-runtime-authority.json"
+    store = DeploymentRuntimeAuthorityStore.initialize_pristine(
+        path,
+        authority_root=_authority_root(tmp_path),
+    )
+    context = store._authority.authority_root_selection.context
+    if field_name in {"binding_path", "store_root"}:
+        replacement: object = tmp_path / f"redirected-{field_name}"
+    elif field_name.endswith("sha256"):
+        replacement = "f" * 64
+    else:
+        replacement = f"hostile-{field_name}"
+    object.__setattr__(context, field_name, replacement)
+
+    with pytest.raises(
+        DeploymentRuntimeAuthorityError,
+        match="nested binding type mismatch|binding integrity mismatch",
+    ):
+        store.records()
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    ("workspace_binding", "authority_root_selection"),
+)
+def test_runtime_authority_rejects_nested_binding_object_replacement(
+    tmp_path: Path,
+    field_name: str,
+) -> None:
+    path = tmp_path / "deployment-runtime-authority.json"
+    store = DeploymentRuntimeAuthorityStore.initialize_pristine(
+        path,
+        authority_root=_authority_root(tmp_path),
+    )
+    object.__setattr__(store._authority, field_name, object())
+
+    with pytest.raises(
+        DeploymentRuntimeAuthorityError,
+        match="nested binding type mismatch",
+    ):
+        store.records()
+
+
+@pytest.mark.parametrize(
+    ("binding_type_name", "method_name"),
+    (
+        ("WorkspaceIdentityBinding", "validate_existing"),
+        ("WorkspaceIdentityBinding", "ensure_bound"),
+        ("AuthorityRootSelectionBinding", "validate_existing"),
+        ("AuthorityRootSelectionBinding", "ensure_bound"),
+        ("AuthorityRootSelectionBinding", "validate_namespace_activation"),
+        ("AuthorityRootSelectionBinding", "ensure_namespace_activated"),
+    ),
+)
+def test_runtime_authority_rejects_nested_binding_descriptor_replacement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    binding_type_name: str,
+    method_name: str,
+) -> None:
+    path = tmp_path / "deployment-runtime-authority.json"
+    store = DeploymentRuntimeAuthorityStore.initialize_pristine(
+        path,
+        authority_root=_authority_root(tmp_path),
+    )
+    binding_type = getattr(deployment_runtime_authority, binding_type_name)
+    hostile_calls: list[object] = []
+
+    def hostile(*args: object, **kwargs: object) -> object:
+        hostile_calls.append((args, kwargs))
+        raise AssertionError("hostile nested binding method executed")
+
+    monkeypatch.setattr(binding_type, method_name, hostile)
+    with pytest.raises(
+        DeploymentRuntimeAuthorityError,
+        match="nested binding dispatch was replaced",
+    ):
+        store.records()
+
+    assert hostile_calls == []
+
+
+@pytest.mark.parametrize(
+    ("binding_type_name", "method_name"),
+    (
+        ("WorkspaceIdentityBinding", "validate_existing"),
+        ("AuthorityRootSelectionBinding", "validate_namespace_activation"),
+    ),
+)
+def test_runtime_authority_rejects_nested_binding_code_replacement(
+    tmp_path: Path,
+    binding_type_name: str,
+    method_name: str,
+) -> None:
+    path = tmp_path / "deployment-runtime-authority.json"
+    store = DeploymentRuntimeAuthorityStore.initialize_pristine(
+        path,
+        authority_root=_authority_root(tmp_path),
+    )
+    binding_type = getattr(deployment_runtime_authority, binding_type_name)
+    target = vars(binding_type)[method_name]
+    original_code = target.__code__
+
+    def hostile(*args: object, **kwargs: object) -> object:
+        del args, kwargs
+        raise AssertionError("hostile nested binding method code executed")
+
+    assert hostile.__code__.co_freevars == original_code.co_freevars
+    target.__code__ = hostile.__code__
+    try:
+        with pytest.raises(
+            DeploymentRuntimeAuthorityError,
+            match="nested binding dispatch was replaced",
+        ):
+            store.records()
+    finally:
+        target.__code__ = original_code
+
+
+def test_runtime_authority_rejects_path_normalization_module_rebinding(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "deployment-runtime-authority.json"
+    store = DeploymentRuntimeAuthorityStore.initialize_pristine(
+        path,
+        authority_root=_authority_root(tmp_path),
+    )
+
+    class HostileOs:
+        path = object()
+
+    monkeypatch.setattr(deployment_runtime_authority, "os", HostileOs)
+    with pytest.raises(
+        DeploymentRuntimeAuthorityError,
+        match="path-normalization dispatch was replaced",
+    ):
+        store.records()

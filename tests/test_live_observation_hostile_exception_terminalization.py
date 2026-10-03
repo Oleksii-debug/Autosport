@@ -194,6 +194,43 @@ def test_renderer_in_place_code_mutation_fails_closed_before_publication() -> No
     assert worker.busy is False
 
 
+def test_coordinated_renderer_and_kwdefaults_rebind_cannot_publish_secret() -> None:
+    worker = OneShotObservationWorker()
+    secret = "coordinated-renderer-secret-2056"
+    original_renderer = live_observation.safe_exception_text
+    original_kwdefaults = OneShotObservationWorker._safe_terminal_error.__kwdefaults__
+
+    def forged_renderer(exc):
+        return f"RuntimeError: Authorization: Bearer {secret}"
+
+    try:
+        live_observation.safe_exception_text = forged_renderer
+        # Reproduce the former attack even though these names are no longer
+        # parameters consumed by the terminal helper.
+        OneShotObservationWorker._safe_terminal_error.__kwdefaults__ = {
+            "_renderer": forged_renderer,
+            "_renderer_code": forged_renderer.__code__,
+        }
+
+        def task():
+            raise RuntimeError(f"Authorization: Bearer {secret}")
+
+        assert worker.start(task) is True
+        message = _wait_for_terminal(worker)
+    finally:
+        live_observation.safe_exception_text = original_renderer
+        OneShotObservationWorker._safe_terminal_error.__kwdefaults__ = (
+            original_kwdefaults
+        )
+
+    assert message.result is None
+    assert message.error == "BaseException: exception details unavailable"
+    assert secret not in message.error
+    rendered = text("ui.error.live.snapshot", detail=message.error)
+    assert secret not in rendered
+    assert worker.busy is False
+
+
 def test_terminal_bound_globals_cannot_widen_published_diagnostic() -> None:
     worker = OneShotObservationWorker()
     oversized = "bounded-" + ("z" * 10_000)
@@ -214,8 +251,7 @@ def test_terminal_bound_globals_cannot_widen_published_diagnostic() -> None:
 
     assert message.result is None
     assert message.error is not None
-    assert len(message.error) == 2048
-    assert message.error.endswith("... [truncated]")
+    assert message.error == "BaseException: exception details unavailable"
     assert "attacker-controlled-marker" not in message.error
     assert worker.busy is False
 
@@ -270,10 +306,7 @@ def test_oversized_task_error_is_redacted_then_bounded_and_releases_busy() -> No
 
     assert message.result is None
     assert message.error is not None
-    assert len(message.error) == 2048
-    assert message.error.endswith("... [truncated]")
-    assert "[REDACTED]" in message.error
-    assert "ordinary=provider-timeout" in message.error
+    assert message.error == "BaseException: exception details unavailable"
     assert secret not in message.error
     assert worker.busy is False
 
@@ -298,9 +331,7 @@ def test_oversized_thread_constructor_error_is_bounded_and_pollable() -> None:
     assert message is not None
     assert message.result is None
     assert message.error is not None
-    assert len(message.error) == 2048
-    assert message.error.startswith("RuntimeError: setup-")
-    assert message.error.endswith("... [truncated]")
+    assert message.error == "BaseException: exception details unavailable"
     assert worker.busy is False
 
 
@@ -318,8 +349,7 @@ def test_task_error_is_redacted_before_localized_live_presentation() -> None:
 
     assert message.result is None
     assert message.error is not None
-    assert "[REDACTED]" in message.error
-    assert "ordinary=provider-timeout" in message.error
+    assert message.error == "BaseException: exception details unavailable"
     assert secret not in message.error
     assert worker.busy is False
 
@@ -405,7 +435,7 @@ def test_ambiguous_start_reap_interruption_preserves_setup_disposition() -> None
     message = worker.poll()
     assert message is not None
     assert message.result is None
-    assert message.error == "RuntimeError: ambiguous start failed"
+    assert message.error == "BaseException: exception details unavailable"
     assert helper.join_calls == 2
     assert worker.busy is False
     assert worker._thread is None

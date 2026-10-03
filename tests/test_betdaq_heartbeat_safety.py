@@ -607,3 +607,59 @@ def test_same_process_account_rotation_revokes_persisted_active_generation(
     finally:
         second.close()
 
+class _OperationLockSpy:
+    def __init__(self) -> None:
+        self.depth = 0
+        self.entries = 0
+
+    def __enter__(self):
+        self.depth += 1
+        self.entries += 1
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        del exc_type, exc, tb
+        self.depth -= 1
+
+
+def test_public_heartbeat_operations_use_controller_operation_serialization(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = _ProviderQueue(
+        [
+            _soap("RegisterHeartbeat"),
+            _soap(
+                "Pulse",
+                performed_at="2026-09-23T00:00:02Z",
+                action=0,
+            ),
+            _soap("DeregisterHeartbeat"),
+        ]
+    )
+    controller, _, _ = _controller(tmp_path, monkeypatch, provider)
+    spy = _OperationLockSpy()
+    controller._operation_lock = spy
+    original_call = controller._call
+
+    def witnessed_call(method, request_attributes):
+        assert spy.depth == 1
+        return original_call(method, request_attributes)
+
+    controller._call = witnessed_call
+    try:
+        assert spy.depth == 0
+        controller.status()
+        assert spy.depth == 0
+        controller.register(
+            threshold_ms=6000,
+            action=HeartbeatAction.CANCEL_ORDERS,
+        )
+        controller.pulse()
+        controller.deregister()
+        assert spy.depth == 0
+        assert spy.entries >= 4
+    finally:
+        controller.close()
+    assert spy.depth == 0
+

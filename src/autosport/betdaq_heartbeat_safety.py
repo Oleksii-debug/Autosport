@@ -18,6 +18,7 @@ import os
 from pathlib import Path
 from secrets import token_hex
 import tempfile
+from threading import RLock
 from typing import Any, Iterator
 import xml.etree.ElementTree as ET
 
@@ -75,6 +76,19 @@ _HEX = frozenset("0123456789abcdef")
 
 class BetdaqHeartbeatSafetyError(RuntimeError):
     """Fail-closed heartbeat authority or provider-control error."""
+
+
+def _serialized_controller_operation(method):
+    """Serialize one controller's full heartbeat causal operation."""
+
+    def serialized(self, *args, **kwargs):
+        with self._operation_lock:
+            return method(self, *args, **kwargs)
+
+    serialized.__name__ = method.__name__
+    serialized.__qualname__ = method.__qualname__
+    serialized.__doc__ = method.__doc__
+    return serialized
 
 
 class HeartbeatAction(IntEnum):
@@ -807,6 +821,7 @@ class BetdaqHeartbeatSafetyController:
         _require_canonical_account_transport(account_client._transport)
         self._client = account_client
         self._stop = stop_authority
+        self._operation_lock = RLock()
         self._store = BetdaqHeartbeatSafetyStore(state_path)
         self._lease = _ProcessLease(
             _account_owner_lease_path(account_client, stop_authority)
@@ -918,6 +933,7 @@ class BetdaqHeartbeatSafetyController:
             reconciliation_required=True,
         )
 
+    @_serialized_controller_operation
     def status(self) -> HeartbeatSafetyStatus:
         self._require_open()
         self._fence_stop_if_needed()
@@ -937,6 +953,7 @@ class BetdaqHeartbeatSafetyController:
             ),
         )
 
+    @_serialized_controller_operation
     def register(
         self,
         *,
@@ -1020,6 +1037,7 @@ class BetdaqHeartbeatSafetyController:
                 reconciliation_required=carry_reconciliation,
             )
 
+    @_serialized_controller_operation
     def change_registration(
         self,
         *,
@@ -1095,6 +1113,7 @@ class BetdaqHeartbeatSafetyController:
                 reconciliation_required=latest.reconciliation_required,
             )
 
+    @_serialized_controller_operation
     def pulse(self) -> HeartbeatEvent:
         self._require_open()
         stop_revision = self._require_armed()
@@ -1213,6 +1232,7 @@ class BetdaqHeartbeatSafetyController:
                 reconciliation_required=reconciliation_required,
             )
 
+    @_serialized_controller_operation
     def deregister(self) -> HeartbeatEvent:
         self._require_open()
         self._fence_account_context_if_needed()
@@ -1259,6 +1279,7 @@ class BetdaqHeartbeatSafetyController:
             reconciliation_required=latest.reconciliation_required,
         )
 
+    @_serialized_controller_operation
     def close(self) -> None:
         if self._closed:
             return

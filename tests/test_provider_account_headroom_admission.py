@@ -3208,3 +3208,25 @@ def test_risk_candidate_hash_module_rebinding_cannot_forge_account_scope(
 
     assert hostile_calls == []
 
+def test_account_bound_headroom_assessment_uses_schema_v3(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    acquired, _ = _acquire_balance(monkeypatch, tmp_path, "100")
+    target = _plan("target", _action("target-action", "10"))
+    ledger = _ledger_with_plans(tmp_path, target)
+
+    assessment = _assess(
+        ledger,
+        acquired,
+        plan_id="target",
+        action_id="target-action",
+    )
+
+    assert assessment.schema_version == 3
+    with pytest.raises(
+        ProviderAccountHeadroomError,
+        match="unsupported headroom assessment schema",
+    ):
+        replace(assessment, schema_version=2)
+

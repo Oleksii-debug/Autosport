@@ -1257,6 +1257,8 @@ def _install_execution_readback_authority() -> None:
     raw_read_code = raw_read.__code__
     validate_integrity = BetfairExecutionReadbackEnvelope.assert_authoritative
     validate_integrity_code = validate_integrity.__code__
+    fingerprint_method = BetfairExecutionReadbackEnvelope._authority_fingerprint
+    fingerprint_method_code = fingerprint_method.__code__
     client_type = BetfairReadOnlyClient
     envelope_type = BetfairExecutionReadbackEnvelope
     identity_type = account_identity.BetfairAuthenticatedAccountIdentity
@@ -1281,6 +1283,8 @@ def _install_execution_readback_authority() -> None:
             or assert_authoritative.__code__ is not assert_authoritative_code
             or raw_read.__code__ is not raw_read_code
             or validate_integrity.__code__ is not validate_integrity_code
+            or envelope_type._authority_fingerprint is not fingerprint_method
+            or fingerprint_method.__code__ is not fingerprint_method_code
             or issue_origin is None
             or verify_origin is None
             or issue_origin.__code__ is not issue_origin_code
@@ -1429,7 +1433,16 @@ def _install_execution_readback_authority() -> None:
 
     authoritative_read_code = authoritative_read.__code__
     assert_authoritative_code = assert_authoritative.__code__
-    issue_origin, verify_origin = bind_origin(authoritative_read_code)
+    issue_origin, verify_origin = bind_origin(
+        authoritative_read_code,
+        (
+            ("raw_read", raw_read),
+            ("require_executable_authority", require_executable_authority),
+            ("resolve_identity", resolve_identity),
+            ("require_identity", require_identity),
+            ("envelope_type", envelope_type),
+        ),
+    )
     issue_origin_code = issue_origin.__code__
     verify_origin_code = verify_origin.__code__
     delattr(account_identity, binder_name)

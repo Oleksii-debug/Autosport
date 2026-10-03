@@ -333,6 +333,7 @@ def _build_provider_evidence_campaign_scope_guard(
     authority_root_descriptor = routing_descriptors["authority_root"]
     path_equal_code = getattr(path_equal, "__code__", None)
     path_join_code = getattr(path_join, "__code__", None)
+    getattr_static_code = getattr(getattr_static, "__code__", None)
 
     def require_provider_evidence_campaign_scope(
         precommit_locator: ForwardUniversePrecommitLocator,
@@ -351,8 +352,9 @@ def _build_provider_evidence_campaign_scope_guard(
         if (
             getattr(path_equal, "__code__", None) is not path_equal_code
             or getattr(path_join, "__code__", None) is not path_join_code
+            or getattr(getattr_static, "__code__", None) is not getattr_static_code
         ):
-            raise error_type("provider evidence path authority executable changed")
+            raise error_type("provider evidence scope authority executable changed")
         if (
             getattr_static(
                 evidence_store_type,

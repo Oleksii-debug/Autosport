@@ -8,6 +8,7 @@ import pytest
 import autosport._paper_value_risk_admission_recovery as recovery
 from autosport.agents import AgentContext
 from autosport.decision_ledger import DecisionRecord, JsonlDecisionLedger
+from autosport.economic_goal import EconomicGoalContract
 from autosport.domain import MarketEvent
 from autosport.paper import PaperBook
 from autosport.paper_execution_adoption import PaperExecutionAdoptionError, PaperExecutionAdoptionRuntime
@@ -78,6 +79,21 @@ def _agent(event: MarketEvent, policy: PaperRiskPolicy, *, forecasts: bool = Tru
     )
 
 
+def _economic_goal() -> EconomicGoalContract:
+    return EconomicGoalContract(
+        goal_id="risk-admission-economic-goal",
+        revision=1,
+        bankroll_id="paper-bankroll",
+        currency="USD",
+        max_stake_fraction=Decimal("0.10"),
+        max_capital_at_risk_fraction=Decimal("0.50"),
+        max_risk_of_ruin=Decimal("1"),
+        max_concurrent_positions=2,
+        max_quote_age_seconds=Decimal("5"),
+        minimum_data_quality=Decimal("0"),
+    )
+
+
 def _context(tmp_path, book: PaperBook, runtime: PaperExecutionAdoptionRuntime) -> AgentContext:
     return AgentContext(
         book,
@@ -121,6 +137,74 @@ def _inject_pre_action_commit_crash(tmp_path, monkeypatch):
     assert not book.tickets
     assert len(tuple(context.decision_ledger.verified_records())) == 1
     return event, policy, pre_actions[0]
+
+
+def test_economic_risk_admission_recovers_crash_after_pre_action_before_commit(
+    tmp_path, monkeypatch
+) -> None:
+    book = PaperBook("100.00")
+    runtime = _runtime(tmp_path, book)
+    context = _context(tmp_path, book, runtime)
+    event = _event()
+    policy = PaperRiskPolicy(economic_goal=_economic_goal())
+    agent = _agent(event, policy)
+    original_write_commit = recovery._write_commit
+
+    def crash_before_commit(path, witness):
+        raise RuntimeError("injected-economic-risk-admission-crash")
+
+    monkeypatch.setattr(recovery, "_write_commit", crash_before_commit)
+    with pytest.raises(
+        RuntimeError,
+        match="injected-economic-risk-admission-crash",
+    ):
+        agent.on_market_event(event, context)
+    monkeypatch.setattr(recovery, "_write_commit", original_write_commit)
+
+    root = tmp_path / ".paper-value-risk-admissions"
+    prepares = tuple(root.glob("*.prepare.json"))
+    pre_actions = tuple(root.glob("*.pre-action.json"))
+    commits = tuple(
+        path
+        for path in root.glob("*.json")
+        if not path.name.endswith(".prepare.json")
+        and not path.name.endswith(".pre-action.json")
+    )
+    assert len(prepares) == 1
+    assert len(pre_actions) == 1
+    assert commits == ()
+    assert not runtime.ledger.events()
+    assert not book.tickets
+    assert len(tuple(context.decision_ledger.verified_records())) == 1
+
+    prepare = recovery._load_economic_prepare(prepares[0])
+    assert (
+        prepare["schema"]
+        == "autosport.paper_value.economic_risk_admission.prepare"
+    )
+
+    restarted_book = PaperBook.load(tmp_path / "paper-book.json")
+    restarted_runtime = _runtime(tmp_path, restarted_book)
+    restarted_context = _context(tmp_path, restarted_book, restarted_runtime)
+    recovering = _agent(event, policy, forecasts=False)
+
+    recovering.on_market_event(event, restarted_context)
+
+    assert len(restarted_book.tickets) == 1
+    assert restarted_book.balance == Decimal("99.00")
+    reserved = [
+        item
+        for item in restarted_runtime.ledger.events()
+        if item.get("event_type") == "RUN_RESERVED"
+    ]
+    assert len(reserved) == 1
+    commits = tuple(
+        path
+        for path in root.glob("*.json")
+        if not path.name.endswith(".prepare.json")
+        and not path.name.endswith(".pre-action.json")
+    )
+    assert len(commits) == 1
 
 
 def test_general_risk_admission_recovers_crash_after_pre_action_before_commit(

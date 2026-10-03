@@ -107,7 +107,6 @@ _RISK_ADMISSION_FIELDS = frozenset(
 
 _ECONOMIC_RISK_ADMISSION_SCHEMA = "autosport.paper_value.economic_risk_admission"
 _ECONOMIC_RISK_ADMISSION_SCHEMA_VERSION = 1
-_ECONOMIC_RISK_ADMISSION_DIR = ".paper-value-economic-risk-admissions"
 _ECONOMIC_RISK_ADMISSION_FIELDS = frozenset(
     {
         *_RISK_ADMISSION_FIELDS,
@@ -141,9 +140,10 @@ def _economic_risk_admission_paths(
     ledger: JsonlDecisionLedger,
     decision_id: str,
 ) -> tuple[Path, Path]:
-    token = hashlib.sha256(decision_id.encode("utf-8")).hexdigest()
-    root = ledger.path.parent / _ECONOMIC_RISK_ADMISSION_DIR
-    return root / f"{token}.json", root / f"{token}.pre-action.json"
+    # GENERAL and ECONOMIC risk-admission records are mutually exclusive for one
+    # material decision id.  Reuse the canonical persistence root so the landed
+    # recovery transaction remains the single sidecar authority family.
+    return _risk_admission_paths(ledger, decision_id)
 
 
 def _active_decision_origin_sha256(decision_id: str) -> str:
@@ -471,6 +471,7 @@ def _issue_economic_risk_admission(
     descriptor: PaperValueExecutionDescriptor,
     decision_id: str,
     started_at: str,
+    event: MarketEvent,
 ) -> None:
     """Persist canonical ECONOMIC fresh-risk origin before #623 reservation."""
 
@@ -599,6 +600,7 @@ def _verify_economic_risk_admission(
     record: DecisionRecord,
     descriptor: PaperValueExecutionDescriptor,
     expected_run_id: str,
+    event: MarketEvent,
 ) -> None:
     """Verify canonical ECONOMIC fresh-risk origin and restart book topology."""
 
@@ -1000,6 +1002,7 @@ def _first_execution_risk_authority(
         record=record,
         descriptor=descriptor,
         expected_run_id=expected_run_id,
+        event=durable_event,
     )
     return "durable-risk-admission-recovery"
 
@@ -1198,6 +1201,7 @@ def _canonical_agent_call(
                 descriptor=descriptor,
                 decision_id=decision_id,
                 started_at=started_at,
+                event=event,
             )
         return (
             ledger,

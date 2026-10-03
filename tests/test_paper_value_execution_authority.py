@@ -392,11 +392,12 @@ def test_canonical_economic_agent_issues_origin_witness_before_execution(
     agent.on_market_event(event, context)
 
     assert len(book.tickets) == 1
-    witness_root = tmp_path / ".paper-value-economic-risk-admissions"
+    witness_root = tmp_path / ".paper-value-risk-admissions"
     witnesses = tuple(
         path
         for path in witness_root.glob("*.json")
-        if not path.name.endswith(".pre-action.json")
+        if not path.name.endswith(".prepare.json")
+        and not path.name.endswith(".pre-action.json")
     )
     assert len(witnesses) == 1
     payload = json.loads(witnesses[0].read_text(encoding="utf-8"))
@@ -458,11 +459,12 @@ def _crash_economic_after_origin_witness_before_reservation(
     # durable decision and origin witness exist, but no #623 reservation exists.
     assert len(ledger.verified_records()) == 1
     assert not runtime.ledger.events()
-    witness_root = tmp_path / ".paper-value-economic-risk-admissions"
+    witness_root = tmp_path / ".paper-value-risk-admissions"
     witnesses = tuple(
         path
         for path in witness_root.glob("*.json")
-        if not path.name.endswith(".pre-action.json")
+        if not path.name.endswith(".prepare.json")
+        and not path.name.endswith(".pre-action.json")
     )
     assert len(witnesses) == 1
     monkeypatch.setattr(

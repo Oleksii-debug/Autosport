@@ -56,7 +56,7 @@ def test_controller_bounds_pending_work_per_source_workflow() -> None:
     assert "github.event.workflow_run.event == 'pull_request'" in concurrency
     assert "format('non-pr-{0}', github.event.workflow_run.id)" in concurrency
     assert "O(source workflows)" in workflow
-    assert "reconciles the whole workflow" in workflow
+    assert "reconciles its source workflow" in workflow
 
 
 def test_delayed_stale_head_controller_reconciles_live_head_without_killing_running_controller() -> None:
@@ -132,7 +132,7 @@ def test_scoped_controller_reconciles_each_pr_against_fresh_live_qualification()
     )
 
     assert "cancel_superseded_explicit_pr_runs(" in source
-    assert "api.live_pr_qualification(pr_number) != qualification" in source
+    assert "current_qualification = api.live_pr_qualification(pr_number)" in source\n    assert "current_qualification != qualification" in source
 
 
 class FakeTriggeringRunApi:

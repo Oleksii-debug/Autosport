@@ -274,6 +274,27 @@ class ProductGuiEconomicTicket:
     payout: Decimal
     legs: tuple[str, ...]
 
+    def __post_init__(self) -> None:
+        if type(self.ticket_id) is not str or not self.ticket_id:
+            raise ValueError("economic ticket id must be non-empty text")
+        if self.status not in {"open", "won", "lost", "void"}:
+            raise ValueError("economic ticket status is not canonical")
+        for field_name, value in (
+            ("stake", self.stake),
+            ("combined_odds", self.combined_odds),
+            ("payout", self.payout),
+        ):
+            if type(value) is not Decimal or not value.is_finite():
+                raise ValueError(f"economic ticket {field_name} must be finite Decimal")
+        if self.stake <= 0 or self.combined_odds <= 0 or self.payout < 0:
+            raise ValueError("economic ticket monetary values are outside canonical range")
+        if (
+            type(self.legs) is not tuple
+            or not self.legs
+            or any(type(leg) is not str or not leg for leg in self.legs)
+        ):
+            raise ValueError("economic ticket legs must be non-empty canonical tuple")
+
 
 @dataclass(frozen=True, slots=True)
 class ProductGuiEconomicSnapshot:
@@ -293,6 +314,71 @@ class ProductGuiEconomicSnapshot:
     portfolio_worst_case: Decimal
     portfolio_best_case: Decimal
     portfolio_mean_case: Decimal
+
+    def __post_init__(self) -> None:
+        if type(self.workspace) is not Path or not self.workspace.is_absolute():
+            raise ValueError("economic snapshot workspace must be an absolute Path")
+        for field_name, value in (
+            ("session_id", self.session_id),
+            ("source_id", self.source_id),
+        ):
+            if type(value) is not str or not value or value.strip() != value:
+                raise ValueError(
+                    f"economic snapshot {field_name} must be non-empty trimmed text"
+                )
+        if (
+            type(self.cycle_index) is not int
+            or isinstance(self.cycle_index, bool)
+            or self.cycle_index < 0
+        ):
+            raise ValueError("economic snapshot cycle_index must be a nonnegative int")
+        if self.cycle_last_success_at is not None and (
+            type(self.cycle_last_success_at) is not str
+            or not self.cycle_last_success_at
+            or self.cycle_last_success_at.strip() != self.cycle_last_success_at
+        ):
+            raise ValueError(
+                "economic snapshot cycle_last_success_at must be canonical text or None"
+            )
+        if self.paper_book_sha256 is not None and (
+            type(self.paper_book_sha256) is not str
+            or len(self.paper_book_sha256) != 64
+            or any(
+                character not in "0123456789abcdef"
+                for character in self.paper_book_sha256
+            )
+        ):
+            raise ValueError("economic snapshot PaperBook SHA must be lowercase SHA-256")
+        for field_name, value in (
+            ("balance", self.balance),
+            ("committed_stake", self.committed_stake),
+            ("portfolio_worst_case", self.portfolio_worst_case),
+            ("portfolio_best_case", self.portfolio_best_case),
+            ("portfolio_mean_case", self.portfolio_mean_case),
+        ):
+            if type(value) is not Decimal or not value.is_finite():
+                raise ValueError(f"economic snapshot {field_name} must be finite Decimal")
+        if self.committed_stake < 0:
+            raise ValueError("economic snapshot committed_stake cannot be negative")
+        if type(self.tickets) is not tuple or any(
+            type(ticket) is not ProductGuiEconomicTicket for ticket in self.tickets
+        ):
+            raise ValueError("economic snapshot tickets must be canonical tuple")
+        if self.portfolio_mode not in {
+            "exact",
+            "approximate",
+            "conservative-enumeration",
+            "conservative-approximate",
+        }:
+            raise ValueError("economic snapshot portfolio mode is not canonical")
+        if (
+            type(self.portfolio_scenario_count) is not int
+            or isinstance(self.portfolio_scenario_count, bool)
+            or self.portfolio_scenario_count < 1
+        ):
+            raise ValueError(
+                "economic snapshot portfolio_scenario_count must be positive int"
+            )
 
 
 def _capture_runtime_economic_snapshot(

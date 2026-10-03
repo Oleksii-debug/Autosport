@@ -265,40 +265,71 @@ def _make_account_identity_authority():
         (_socket.socket, "makefile", _socket.socket.makefile),
     )
 
-    def execution_readback_network_dispatch_is_current() -> bool:
+    def execution_readback_network_dispatch_is_current(
+        _transport_type=transport_type,
+        _canonical_network_post=canonical_network_post,
+        _canonical_network_post_code=canonical_network_post_code,
+        _client_type=client_type,
+        _canonical_rpc=canonical_rpc,
+        _canonical_rpc_code=canonical_rpc_code,
+        _readonly_module=readonly_module,
+        _canonical_build_opener=canonical_build_opener,
+        _canonical_build_opener_code=canonical_build_opener_code,
+        _canonical_request_type=canonical_request_type,
+        _canonical_request_init=canonical_request_init,
+        _canonical_request_init_code=canonical_request_init_code,
+        _canonical_read_method_endpoint=canonical_read_method_endpoint,
+        _canonical_read_method_items=canonical_read_method_items,
+        _canonical_account_endpoint=canonical_account_endpoint,
+        _canonical_betting_endpoint=canonical_betting_endpoint,
+        _canonical_read_method_names=canonical_read_method_names,
+        _http_client_module=_http_client,
+        _canonical_http_client_ssl=canonical_http_client_ssl,
+        _ssl_module=_ssl,
+        _canonical_ssl_context_type=canonical_ssl_context_type,
+        _canonical_ssl_socket_type=canonical_ssl_socket_type,
+        _canonical_default_https_context=canonical_default_https_context,
+        _canonical_default_https_context_code=canonical_default_https_context_code,
+        _network_dispatch_surfaces=network_dispatch_surfaces,
+        _missing_value=missing_value,
+        _getattr=getattr,
+        _tuple=tuple,
+        _all=all,
+    ) -> bool:
         try:
             if (
-                transport_type.post is not canonical_network_post
-                or getattr(canonical_network_post, "__code__", None)
-                is not canonical_network_post_code
-                or client_type._rpc is not canonical_rpc
-                or getattr(canonical_rpc, "__code__", None) is not canonical_rpc_code
-                or readonly_module.build_opener is not canonical_build_opener
-                or getattr(canonical_build_opener, "__code__", None)
-                is not canonical_build_opener_code
-                or readonly_module.Request is not canonical_request_type
-                or getattr(canonical_request_type, "__init__", None)
-                is not canonical_request_init
-                or getattr(canonical_request_init, "__code__", None)
-                is not canonical_request_init_code
-                or readonly_module._READ_METHOD_ENDPOINT
-                is not canonical_read_method_endpoint
-                or tuple(canonical_read_method_endpoint.items())
-                != canonical_read_method_items
-                or readonly_module.ACCOUNT_JSON_RPC_ENDPOINT
-                != canonical_account_endpoint
-                or readonly_module.BETTING_JSON_RPC_ENDPOINT
-                != canonical_betting_endpoint
-                or getattr(_http_client, "ssl", None)
-                is not canonical_http_client_ssl
-                or _ssl.SSLContext is not canonical_ssl_context_type
-                or _ssl.SSLSocket is not canonical_ssl_socket_type
-                or getattr(_ssl, "_create_default_https_context", None)
-                is not canonical_default_https_context
-                or getattr(canonical_default_https_context, "__code__", None)
-                is not canonical_default_https_context_code
-                or tuple(
-                    getattr(readonly_module, name, missing_value)
+                _transport_type.post is not _canonical_network_post
+                or _getattr(_canonical_network_post, "__code__", None)
+                is not _canonical_network_post_code
+                or _client_type._rpc is not _canonical_rpc
+                or _getattr(_canonical_rpc, "__code__", None)
+                is not _canonical_rpc_code
+                or _readonly_module.build_opener is not _canonical_build_opener
+                or _getattr(_canonical_build_opener, "__code__", None)
+                is not _canonical_build_opener_code
+                or _readonly_module.Request is not _canonical_request_type
+                or _getattr(_canonical_request_type, "__init__", None)
+                is not _canonical_request_init
+                or _getattr(_canonical_request_init, "__code__", None)
+                is not _canonical_request_init_code
+                or _readonly_module._READ_METHOD_ENDPOINT
+                is not _canonical_read_method_endpoint
+                or _tuple(_canonical_read_method_endpoint.items())
+                != _canonical_read_method_items
+                or _readonly_module.ACCOUNT_JSON_RPC_ENDPOINT
+                != _canonical_account_endpoint
+                or _readonly_module.BETTING_JSON_RPC_ENDPOINT
+                != _canonical_betting_endpoint
+                or _getattr(_http_client_module, "ssl", None)
+                is not _canonical_http_client_ssl
+                or _ssl_module.SSLContext is not _canonical_ssl_context_type
+                or _ssl_module.SSLSocket is not _canonical_ssl_socket_type
+                or _getattr(_ssl_module, "_create_default_https_context", None)
+                is not _canonical_default_https_context
+                or _getattr(_canonical_default_https_context, "__code__", None)
+                is not _canonical_default_https_context_code
+                or _tuple(
+                    _getattr(_readonly_module, name, _missing_value)
                     for name in (
                         "_GET_ACCOUNT_FUNDS",
                         "_GET_ACCOUNT_DETAILS",
@@ -307,12 +338,12 @@ def _make_account_identity_authority():
                         "_LIST_MARKET_CATALOGUE",
                     )
                 )
-                != canonical_read_method_names
+                != _canonical_read_method_names
             ):
                 return False
-            return all(
-                getattr(owner, name, missing_value) is expected
-                for owner, name, expected in network_dispatch_surfaces
+            return _all(
+                _getattr(owner, name, _missing_value) is expected
+                for owner, name, expected in _network_dispatch_surfaces
             )
         except (AttributeError, TypeError):
             return False

@@ -457,11 +457,13 @@ class RealExecutionLedger:
         self._path_durable = False
         self._serialization_held = False
         try:
-            authority_workspace = self.path.parent.resolve(strict=False)
+            authority_path = self.path.resolve(strict=False)
+            authority_workspace = authority_path.parent
+            authority_key = os.path.normcase(authority_path.name)
             self._monotonic_authority = MonotonicWorkspaceAuthority(
                 workspace=authority_workspace,
                 domain="execution.real-ledger",
-                key=self.path.name,
+                key=authority_key,
             )
         except (OSError, MonotonicWorkspaceAuthorityError) as exc:
             raise ExecutionLedgerIntegrityError(
@@ -471,7 +473,7 @@ class RealExecutionLedger:
             {
                 "schema": "autosport.real_execution_ledger.monotonic-binding",
                 "schema_version": 1,
-                "ledger_name": self.path.name,
+                "ledger_key": authority_key,
             }
         )
 

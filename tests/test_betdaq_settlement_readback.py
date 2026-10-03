@@ -1367,7 +1367,7 @@ def test_economic_read_rejects_local_transport_alias_replacement_before_executio
         client.read_account_postings_by_id(9000)
 
     assert hostile_calls == []
-    assert opener.requests == []
+    assert opener.calls == []
 
 
 def test_economic_read_rejects_account_transport_class_replacement_before_execution(
@@ -1389,7 +1389,7 @@ def test_economic_read_rejects_account_transport_class_replacement_before_execut
         client.read_account_postings_by_id(9000)
 
     assert hostile_calls == []
-    assert opener.requests == []
+    assert opener.calls == []
 
 
 def test_order_settlement_rejects_local_terminal_status_authority_replacement(
@@ -1411,7 +1411,7 @@ def test_order_settlement_rejects_local_terminal_status_authority_replacement(
     ):
         client.read_order_details(123)
 
-    assert len(opener.requests) == 1
+    assert len(opener.calls) == 1
 
 
 def test_order_dto_rejects_terminal_status_authority_replacement(monkeypatch):

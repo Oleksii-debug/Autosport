@@ -1239,6 +1239,10 @@ def _seal_provider_evidence_store_dispatch() -> None:
     expected_type_error = TypeError
     expected_getattr = getattr
     expected_any = any
+    expected_dict = dict
+    expected_id = id
+    expected_object_getattribute = object.__getattribute__
+    expected_weakref_ref = weakref.ref
     expected_unshadowed_builtins = (
         "any",
         "len",
@@ -1273,10 +1277,14 @@ def _seal_provider_evidence_store_dispatch() -> None:
     )
     expected_inspect = inspect
     expected_getattr_static = inspect.getattr_static
+    expected_init = store_type.__init__
+    expected_init_code = expected_getattr(expected_init, "__code__", None)
     expected_save = store_type.save
     expected_save_code = _CANONICAL_EVIDENCE_STORE_SAVE_IMPLEMENTATION_CODE
     expected_load = store_type.load
     expected_load_code = _CANONICAL_EVIDENCE_STORE_LOAD_IMPLEMENTATION_CODE
+    expected_directory = store_type.DIRECTORY
+    expected_authority_domain = store_type.AUTHORITY_DOMAIN
     expected_assert = _CANONICAL_ASSERT_COMPLETE_GAME_BOARD_AUTHORITATIVE
     expected_assert_code = _CANONICAL_ASSERT_COMPLETE_GAME_BOARD_AUTHORITATIVE_CODE
     expected_remember = _CANONICAL_REMEMBER
@@ -1405,8 +1413,28 @@ def _seal_provider_evidence_store_dispatch() -> None:
     )
     expected_path_methods = tuple(
         _surface_witness(expected_path_type, name)
-        for name in ("__truediv__", "__str__", "exists", "read_text", "mkdir", "parent")
+        for name in (
+            "__truediv__",
+            "__str__",
+            "__eq__",
+            "exists",
+            "read_text",
+            "mkdir",
+            "parent",
+            "expanduser",
+            "resolve",
+        )
     )
+    expected_instance_shadow_names = tuple(
+        name for name, _surface, _function, _code in expected_store_internal
+    ) + (
+        "__init__",
+        "save",
+        "load",
+        "DIRECTORY",
+        "AUTHORITY_DOMAIN",
+    )
+    instance_bindings: dict[int, tuple[object, object, object, object]] = {}
 
     expected_runtime_globals = {
         "Path": Path,
@@ -1460,7 +1488,8 @@ def _seal_provider_evidence_store_dispatch() -> None:
     expected_os_fsync = os.fsync
 
     expected_dependency_functions = (
-        tuple(
+        (("store.__init__", expected_init, expected_init_code),)
+        + tuple(
             ("store." + name, function, code)
             for name, _surface, function, code in expected_store_internal
             if code is not None
@@ -1603,8 +1632,11 @@ def _seal_provider_evidence_store_dispatch() -> None:
                 or expected_getattr(target, "__code__", None) is not code
                 for name, target, code in expected_store_surface_reader_global_items
             )
+            or expected_init.__code__ is not expected_init_code
             or expected_save.__code__ is not expected_save_code
             or expected_load.__code__ is not expected_load_code
+            or store_type.DIRECTORY is not expected_directory
+            or store_type.AUTHORITY_DOMAIN is not expected_authority_domain
             or expected_any(
                 module_globals.get(name) is not expected
                 for name, expected in expected_runtime_global_items
@@ -1727,7 +1759,69 @@ def _seal_provider_evidence_store_dispatch() -> None:
                 "provider evidence filesystem path dispatch changed"
             )
 
+    def _current_store_instance_state(self):
+        state = expected_object_getattribute(self, "__dict__")
+        if expected_type(state) is not expected_dict:
+            raise expected_error(
+                "provider evidence store instance state is not canonical"
+            )
+        if expected_any(name in state for name in expected_instance_shadow_names):
+            raise expected_error(
+                "provider evidence store instance dispatch shadowed"
+            )
+        workspace = state.get("workspace")
+        root = state.get("root")
+        authority_root = state.get("authority_root")
+        if (
+            expected_type(workspace) is not expected_path_type
+            or expected_type(root) is not expected_path_type
+            or root != workspace / expected_directory
+        ):
+            raise expected_error(
+                "provider evidence store instance routing changed"
+            )
+        return workspace, root, authority_root
+
+    def _forget_store_instance(instance_id: int, reference: object) -> None:
+        current = instance_bindings.get(instance_id)
+        if current is not None and current[0] is reference:
+            instance_bindings.pop(instance_id, None)
+
+    def _register_store_instance(self) -> None:
+        workspace, root, authority_root = _current_store_instance_state(self)
+        instance_id = expected_id(self)
+
+        def forget(reference, *, _instance_id=instance_id):
+            _forget_store_instance(_instance_id, reference)
+
+        reference = expected_weakref_ref(self, forget)
+        instance_bindings[instance_id] = (
+            reference,
+            workspace,
+            root,
+            authority_root,
+        )
+
+    def require_store_instance(self):
+        workspace, root, authority_root = _current_store_instance_state(self)
+        binding = instance_bindings.get(expected_id(self))
+        if (
+            binding is None
+            or binding[0]() is not self
+            or workspace is not binding[1]
+            or root is not binding[2]
+            or authority_root is not binding[3]
+        ):
+            raise expected_error(
+                "provider evidence store construction authority changed"
+            )
+        return workspace, root, authority_root
+
     def require_store_public_surfaces() -> None:
+        if expected_store_surface_reader(store_type, "__init__") is not sealed_init:
+            raise expected_error(
+                "provider evidence store init surface changed"
+            )
         if expected_store_surface_reader(store_type, "save") is not sealed_save:
             raise expected_error(
                 "provider evidence store save surface changed"
@@ -1737,6 +1831,15 @@ def _seal_provider_evidence_store_dispatch() -> None:
                 "provider evidence store load surface changed"
             )
 
+    def sealed_init(self, *args, **kwargs):
+        if expected_type(self) is not store_type:
+            return expected_init(self, *args, **kwargs)
+        require_store_authority()
+        expected_init(self, *args, **kwargs)
+        require_store_authority()
+        _register_store_instance(self)
+        require_store_public_surfaces()
+
     def sealed_save(self, snapshot):
         if expected_type(self) is not store_type:
             raise expected_type_error(
@@ -1744,8 +1847,18 @@ def _seal_provider_evidence_store_dispatch() -> None:
             )
         require_store_public_surfaces()
         require_store_authority()
+        before_workspace, before_root, before_authority_root = require_store_instance(self)
         result = expected_save(self, snapshot)
         require_store_authority()
+        after_workspace, after_root, after_authority_root = require_store_instance(self)
+        if (
+            after_workspace is not before_workspace
+            or after_root is not before_root
+            or after_authority_root is not before_authority_root
+        ):
+            raise expected_error(
+                "provider evidence store construction authority changed during save"
+            )
         require_store_public_surfaces()
         return result
 
@@ -1756,13 +1869,28 @@ def _seal_provider_evidence_store_dispatch() -> None:
             )
         require_store_public_surfaces()
         require_store_authority()
+        before_workspace, before_root, before_authority_root = require_store_instance(self)
         result = expected_load(self, evidence_sha256)
         require_store_authority()
+        after_workspace, after_root, after_authority_root = require_store_instance(self)
+        if (
+            after_workspace is not before_workspace
+            or after_root is not before_root
+            or after_authority_root is not before_authority_root
+        ):
+            raise expected_error(
+                "provider evidence store construction authority changed during load"
+            )
         require_store_public_surfaces()
         return result
 
-    if hasattr(sealed_save, "__wrapped__") or hasattr(sealed_load, "__wrapped__"):
+    if (
+        hasattr(sealed_init, "__wrapped__")
+        or hasattr(sealed_save, "__wrapped__")
+        or hasattr(sealed_load, "__wrapped__")
+    ):
         raise RuntimeError("provider evidence store seal must not expose unsealed delegates")
+    store_type.__init__ = sealed_init
     store_type.save = sealed_save
     store_type.load = sealed_load
 

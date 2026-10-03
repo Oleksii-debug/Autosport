@@ -882,6 +882,148 @@ def test_store_save_rejects_internal_receipt_writer_rebind_before_dispatch(
     assert hostile_calls == []
 
 
+@pytest.mark.parametrize(
+    "method_name",
+    ["_path", "_authority", "_write_receipt", "_verify_receipt"],
+)
+def test_store_save_rejects_instance_internal_dispatch_shadow_before_dispatch(
+    tmp_path,
+    monkeypatch,
+    method_name: str,
+):
+    snapshot = _capture(monkeypatch)
+    store = _store(tmp_path)
+    hostile_calls: list[str] = []
+
+    def hostile(*_args, **_kwargs):
+        hostile_calls.append(method_name)
+        raise AssertionError(f"hostile instance seam executed: {method_name}")
+
+    monkeypatch.setattr(store, method_name, hostile, raising=False)
+
+    with pytest.raises(
+        ProviderObservationIntegrityError,
+        match="provider evidence store instance dispatch shadowed",
+    ):
+        store.save(snapshot)
+
+    assert hostile_calls == []
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("DIRECTORY", "hostile-provider-evidence"),
+        ("AUTHORITY_DOMAIN", "hostile-provider-authority"),
+    ],
+)
+def test_store_save_rejects_instance_routing_constant_shadow(
+    tmp_path,
+    monkeypatch,
+    name: str,
+    value: str,
+):
+    snapshot = _capture(monkeypatch)
+    store = _store(tmp_path)
+    monkeypatch.setattr(store, name, value, raising=False)
+
+    with pytest.raises(
+        ProviderObservationIntegrityError,
+        match="provider evidence store instance dispatch shadowed",
+    ):
+        store.save(snapshot)
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("DIRECTORY", "hostile-provider-evidence"),
+        ("AUTHORITY_DOMAIN", "hostile-provider-authority"),
+    ],
+)
+def test_store_save_rejects_class_routing_constant_rebind(
+    tmp_path,
+    monkeypatch,
+    name: str,
+    value: str,
+):
+    snapshot = _capture(monkeypatch)
+    store = _store(tmp_path)
+    monkeypatch.setattr(CompleteGameBoardEvidenceStore, name, value)
+
+    with pytest.raises(
+        ProviderObservationIntegrityError,
+        match="provider evidence store authority witness changed",
+    ):
+        store.save(snapshot)
+
+
+@pytest.mark.parametrize("field_name", ["workspace", "root", "authority_root"])
+def test_store_save_rejects_post_construction_routing_retarget(
+    tmp_path,
+    monkeypatch,
+    field_name: str,
+):
+    snapshot = _capture(monkeypatch)
+    store = _store(tmp_path)
+    if field_name == "workspace":
+        value = type(store.workspace)(tmp_path / "hostile-workspace")
+    elif field_name == "root":
+        value = type(store.root)(tmp_path / "hostile-root")
+    else:
+        value = tmp_path / "hostile-authority"
+
+    monkeypatch.setattr(store, field_name, value)
+
+    with pytest.raises(
+        ProviderObservationIntegrityError,
+        match=(
+            "provider evidence store instance routing changed|"
+            "provider evidence store construction authority changed"
+        ),
+    ):
+        store.save(snapshot)
+
+
+def test_store_load_rejects_post_construction_authority_root_retarget(
+    tmp_path,
+    monkeypatch,
+):
+    snapshot = _capture(monkeypatch)
+    store = _store(tmp_path)
+    store.save(snapshot)
+    monkeypatch.setattr(store, "authority_root", tmp_path / "hostile-authority")
+
+    with pytest.raises(
+        ProviderObservationIntegrityError,
+        match="provider evidence store construction authority changed",
+    ):
+        store.load(snapshot.evidence_sha256)
+
+
+def test_store_save_rejects_constructor_surface_rebind(
+    tmp_path,
+    monkeypatch,
+):
+    snapshot = _capture(monkeypatch)
+    store = _store(tmp_path)
+    hostile_calls: list[str] = []
+
+    def hostile_init(*_args, **_kwargs):
+        hostile_calls.append("init")
+        raise AssertionError("hostile evidence store constructor executed")
+
+    monkeypatch.setattr(CompleteGameBoardEvidenceStore, "__init__", hostile_init)
+
+    with pytest.raises(
+        ProviderObservationIntegrityError,
+        match="provider evidence store init surface changed",
+    ):
+        store.save(snapshot)
+
+    assert hostile_calls == []
+
+
 def test_store_save_rejects_monotonic_commit_rebind_before_dispatch(
     tmp_path,
     monkeypatch,

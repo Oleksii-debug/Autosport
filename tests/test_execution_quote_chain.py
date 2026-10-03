@@ -543,6 +543,14 @@ def test_evidence_invariant_rejects_conflicting_future_request_digests(
         )
 
 
+def test_quote_chain_class_seal_witnesses_are_not_mutable_metaclass_attributes() -> None:
+    evidence_type = execution_quote_chain.ExecutionQuoteChainEvidence
+    metaclass = type(evidence_type)
+
+    assert "_sealed_classes" not in metaclass.__dict__
+    assert "_protected_names" not in metaclass.__dict__
+
+
 def test_quote_chain_authority_surfaces_reject_runtime_class_rebinding() -> None:
     evidence_type = execution_quote_chain.ExecutionQuoteChainEvidence
 
@@ -562,6 +570,12 @@ def test_quote_chain_authority_surfaces_reject_runtime_class_rebinding() -> None
             match="quote-chain evidence authority surface is sealed",
         ):
             setattr(evidence_type, name, object())
+        assert evidence_type.__dict__[name] is original
+        with pytest.raises(
+            TypeError,
+            match="quote-chain evidence authority surface is sealed",
+        ):
+            delattr(evidence_type, name)
         assert evidence_type.__dict__[name] is original
 
 

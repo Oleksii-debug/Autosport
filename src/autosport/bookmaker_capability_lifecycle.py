@@ -399,6 +399,23 @@ def _issue_betdaq_authenticated_capability_evidence_unsealed(
         raise CapabilityEvidenceError(
             "canonical BETDAQ account capability acquisition failed"
         ) from exc
+
+    # Provider I/O is an external callback boundary. Canonical read_account_evidence
+    # performs dynamic method/global lookups after transport.post() returns (including
+    # the observation clock). Revalidate the exact authority surface after the round
+    # trip so a mutation during I/O cannot turn the returned object into product-issued
+    # positive lifecycle authority.
+    _require_current_betdaq_issuance_surface()
+    _require_exact_betdaq_client_dispatch(client)
+    if (
+        getattr(client, "_venue_id", None) != _BETDAQ_VENUE_ID
+        or getattr(client, "_credentials", None) is not credentials
+        or getattr(client, "_transport", None) is not transport
+    ):
+        raise CapabilityEvidenceError(
+            "BETDAQ capability issuance client authority changed during acquisition"
+        )
+
     if type(acquisition) is not _BETDAQ_ACCOUNT_EVIDENCE_TYPE:
         raise CapabilityEvidenceError(
             "BETDAQ account acquisition did not return canonical evidence"

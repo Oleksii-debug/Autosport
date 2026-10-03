@@ -60,24 +60,6 @@ def _digest(value: object) -> str:
     return sha256(_canonical(value).encode("utf-8")).hexdigest()
 
 
-def _require_dispatch() -> None:
-    current = vars(_STORE_TYPE).get("current")
-    project = globals().get("_project")
-    evidence_type = globals().get("BetfairBinarySelectionOutcomeEvidence")
-    if (
-        _settlement.BetfairSettlementRevisionStore is not _STORE_TYPE
-        or _settlement.BetfairSettlementRevision is not _REVISION_TYPE
-        or current is not _CURRENT
-        or getattr(current, "__code__", None) is not _CURRENT_CODE
-        or project is not _PROJECT
-        or getattr(project, "__code__", None) is not _PROJECT_CODE
-        or evidence_type is not _EVIDENCE_TYPE
-    ):
-        raise BetfairOutcomeEvidenceError(
-            "Betfair settlement outcome authority dispatch changed"
-        )
-
-
 @dataclass(frozen=True, slots=True)
 class BetfairBinarySelectionOutcomeEvidence:
     evidence_id: str
@@ -220,67 +202,140 @@ if _PROJECT_CODE is None:
     raise RuntimeError("Betfair settlement outcome projection code is unavailable")
 
 
-def resolve_current_binary_selection_outcome(
-    store: _STORE_TYPE,
-    *,
-    bookmaker_id: str,
-    account_id: str,
-    external_bet_id: str,
-) -> BetfairBinarySelectionOutcomeEvidence:
-    """Project the exact current verified settlement revision into revocable outcome evidence."""
-    _require_dispatch()
-    if type(store) is not _STORE_TYPE:
-        raise BetfairOutcomeEvidenceError(
-            "outcome evidence requires exact canonical settlement store"
+def _build_dispatch_guard():
+    store_type = _STORE_TYPE
+    revision_type = _REVISION_TYPE
+    current = _CURRENT
+    current_code = _CURRENT_CODE
+    project = _PROJECT
+    project_code = _PROJECT_CODE
+    evidence_type = _EVIDENCE_TYPE
+    settlement_module = _settlement
+    module_globals = globals()
+
+    def require_dispatch() -> None:
+        installed_current = vars(store_type).get("current")
+        installed_project = module_globals.get("_project")
+        installed_evidence_type = module_globals.get(
+            "BetfairBinarySelectionOutcomeEvidence"
         )
-    namespace = getattr(store, "__dict__", None)
-    if type(namespace) is dict and "current" in namespace:
-        raise BetfairOutcomeEvidenceError("settlement current dispatch is instance-shadowed")
+        if (
+            settlement_module.BetfairSettlementRevisionStore is not store_type
+            or settlement_module.BetfairSettlementRevision is not revision_type
+            or installed_current is not current
+            or getattr(installed_current, "__code__", None) is not current_code
+            or installed_project is not project
+            or getattr(installed_project, "__code__", None) is not project_code
+            or installed_evidence_type is not evidence_type
+        ):
+            raise BetfairOutcomeEvidenceError(
+                "Betfair settlement outcome authority dispatch changed"
+            )
 
-    revision = _CURRENT(
-        store,
-        bookmaker_id,
-        account_id,
-        external_bet_id,
-    )
-    if revision is None:
-        raise BetfairOutcomeEvidenceError("current settlement revision is absent")
-    evidence = _PROJECT(revision)
+    return require_dispatch
 
-    _require_dispatch()
-    current = _CURRENT(
-        store,
-        bookmaker_id,
-        account_id,
-        external_bet_id,
-    )
-    if current is None or current.revision_id != evidence.settlement_revision_id:
-        raise BetfairOutcomeEvidenceError(
-            "settlement revision changed during outcome evidence projection"
+
+_require_dispatch = _build_dispatch_guard()
+del _build_dispatch_guard
+
+
+def _build_public_resolvers():
+    require_dispatch = _require_dispatch
+    require_dispatch_code = getattr(require_dispatch, "__code__", None)
+    if require_dispatch_code is None:
+        raise RuntimeError("Betfair settlement outcome dispatch guard code is unavailable")
+
+    store_type = _STORE_TYPE
+    evidence_type = _EVIDENCE_TYPE
+    current = _CURRENT
+    project = _PROJECT
+    error_type = BetfairOutcomeEvidenceError
+    module_globals = globals()
+
+    def require_public_dispatch(resolve, require) -> None:
+        installed_guard = module_globals.get("_require_dispatch")
+        if (
+            installed_guard is not require_dispatch
+            or getattr(installed_guard, "__code__", None) is not require_dispatch_code
+            or module_globals.get("resolve_current_binary_selection_outcome") is not resolve
+            or module_globals.get("require_current_binary_selection_outcome") is not require
+        ):
+            raise error_type("Betfair settlement outcome public dispatch changed")
+        require_dispatch()
+
+    def resolve(
+        store: store_type,
+        *,
+        bookmaker_id: str,
+        account_id: str,
+        external_bet_id: str,
+    ) -> BetfairBinarySelectionOutcomeEvidence:
+        """Project the exact current verified settlement revision into revocable outcome evidence."""
+        require_public_dispatch(resolve, require_current)
+        if type(store) is not store_type:
+            raise error_type(
+                "outcome evidence requires exact canonical settlement store"
+            )
+        namespace = getattr(store, "__dict__", None)
+        if type(namespace) is dict and "current" in namespace:
+            raise error_type("settlement current dispatch is instance-shadowed")
+
+        revision = current(
+            store,
+            bookmaker_id,
+            account_id,
+            external_bet_id,
         )
-    _require_dispatch()
-    return evidence
+        if revision is None:
+            raise error_type("current settlement revision is absent")
+        evidence = project(revision)
 
-
-def require_current_binary_selection_outcome(
-    store: _STORE_TYPE,
-    evidence: BetfairBinarySelectionOutcomeEvidence,
-) -> BetfairBinarySelectionOutcomeEvidence:
-    """Revalidate revision-bound evidence immediately before downstream use."""
-    if type(evidence) is not _EVIDENCE_TYPE:
-        raise BetfairOutcomeEvidenceError("outcome evidence type is not canonical")
-    current = resolve_current_binary_selection_outcome(
-        store,
-        bookmaker_id=evidence.bookmaker_id,
-        account_id=evidence.account_id,
-        external_bet_id=evidence.external_bet_id,
-    )
-    if current != evidence:
-        raise BetfairOutcomeEvidenceError(
-            "outcome evidence was superseded by settlement correction"
+        require_public_dispatch(resolve, require_current)
+        current_revision = current(
+            store,
+            bookmaker_id,
+            account_id,
+            external_bet_id,
         )
-    return current
+        if (
+            current_revision is None
+            or current_revision.revision_id != evidence.settlement_revision_id
+        ):
+            raise error_type(
+                "settlement revision changed during outcome evidence projection"
+            )
+        require_public_dispatch(resolve, require_current)
+        return evidence
 
+    def require_current(
+        store: store_type,
+        evidence: BetfairBinarySelectionOutcomeEvidence,
+    ) -> BetfairBinarySelectionOutcomeEvidence:
+        """Revalidate revision-bound evidence immediately before downstream use."""
+        require_public_dispatch(resolve, require_current)
+        if type(evidence) is not evidence_type:
+            raise error_type("outcome evidence type is not canonical")
+        current_evidence = resolve(
+            store,
+            bookmaker_id=evidence.bookmaker_id,
+            account_id=evidence.account_id,
+            external_bet_id=evidence.external_bet_id,
+        )
+        if current_evidence != evidence:
+            raise error_type(
+                "outcome evidence was superseded by settlement correction"
+            )
+        require_public_dispatch(resolve, require_current)
+        return current_evidence
+
+    return resolve, require_current
+
+
+(
+    resolve_current_binary_selection_outcome,
+    require_current_binary_selection_outcome,
+) = _build_public_resolvers()
+del _build_public_resolvers
 
 __all__ = [
     "BetfairBinarySelectionOutcomeEvidence",

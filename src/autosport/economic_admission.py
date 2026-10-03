@@ -145,6 +145,56 @@ def _require_workspace_lock_dispatch() -> None:
                 raise RuntimeError("workspace economic lock dependency authority changed")
 
 
+_TURNOVER_RESOLVE_DESCRIPTOR = PaperDayTurnoverResolver.__dict__["resolve"]
+if type(_TURNOVER_RESOLVE_DESCRIPTOR) is not classmethod:
+    raise RuntimeError("canonical turnover resolver descriptor is unavailable")
+_TURNOVER_RESOLVE_FUNCTION = _TURNOVER_RESOLVE_DESCRIPTOR.__func__
+_TURNOVER_RESOLVE_CODE = getattr(_TURNOVER_RESOLVE_FUNCTION, "__code__", None)
+if type(_TURNOVER_RESOLVE_FUNCTION) is not FunctionType or _TURNOVER_RESOLVE_CODE is None:
+    raise RuntimeError("canonical turnover resolver executable is unavailable")
+
+_RISK_DAY_STORE_METHOD_NAMES = (
+    "__init__",
+    "current",
+    "require_current",
+    "require_current_under_lock",
+    "_current_under_lock",
+    "_publish_day",
+    "_evidence",
+)
+_RISK_DAY_STORE_WITNESSES = tuple(
+    (
+        name,
+        ProductDayRiskWindowStore.__dict__[name],
+        getattr(ProductDayRiskWindowStore.__dict__[name], "__code__", None),
+    )
+    for name in _RISK_DAY_STORE_METHOD_NAMES
+)
+
+
+def _require_product_day_turnover_dispatch() -> None:
+    """Fail closed if positive day/turnover wrapper executables drift in place."""
+
+    current_resolve_descriptor = PaperDayTurnoverResolver.__dict__.get("resolve")
+    if (
+        current_resolve_descriptor is not _TURNOVER_RESOLVE_DESCRIPTOR
+        or type(current_resolve_descriptor) is not classmethod
+        or current_resolve_descriptor.__func__ is not _TURNOVER_RESOLVE_FUNCTION
+        or getattr(current_resolve_descriptor.__func__, "__code__", None)
+        is not _TURNOVER_RESOLVE_CODE
+    ):
+        raise RuntimeError("product day turnover resolver executable authority changed")
+
+    for name, expected_function, expected_code in _RISK_DAY_STORE_WITNESSES:
+        current_function = ProductDayRiskWindowStore.__dict__.get(name)
+        if (
+            current_function is not expected_function
+            or type(current_function) is not FunctionType
+            or getattr(current_function, "__code__", None) is not expected_code
+        ):
+            raise RuntimeError("product day window executable authority changed")
+
+
 def _canonical_workspace_root(workspace: str | Path) -> Path:
     """Resolve the economic workspace through the frozen canonical Path surface."""
 
@@ -333,6 +383,7 @@ def _prepare_paper_day_turnover_snapshot(
     goal = risk_policy.economic_goal
     if goal is None or not _ADMISSION_PATH_EXISTS(book_path):
         return None
+    _require_product_day_turnover_dispatch()
     try:
         goal_store = _canonical_economic_goal_store(root)
         if _ECONOMIC_GOAL_LOAD_FROZEN(goal_store) != goal:
@@ -348,6 +399,7 @@ def _prepare_paper_day_turnover_snapshot(
             window_store=window_store,
             window_evidence=window,
         )
+        _require_product_day_turnover_dispatch()
     except (ArithmeticError, OSError, RuntimeError, TypeError, ValueError):
         return None
     return _PaperDayTurnoverSnapshot(
@@ -374,6 +426,7 @@ def _revalidated_product_day_turnover_room(
     if goal is None:
         return None
     try:
+        _require_product_day_turnover_dispatch()
         if not _same_semantic_book_state(snapshot.book, book):
             return None
         goal_store = _canonical_economic_goal_store(root)
@@ -390,6 +443,7 @@ def _revalidated_product_day_turnover_room(
             snapshot.window_evidence,
             workspace_lock=workspace_lock,
         )
+        _require_product_day_turnover_dispatch()
 
         evidence = snapshot.evidence
         provenance = provenance_for(goal)
@@ -424,6 +478,7 @@ def _revalidated_product_day_turnover_room(
         room = evidence.residual_headroom
         if type(room) is not Decimal or not room.is_finite() or room < 0:
             return None
+        _require_product_day_turnover_dispatch()
         return room
     except (ArithmeticError, OSError, RuntimeError, TypeError, ValueError):
         return None

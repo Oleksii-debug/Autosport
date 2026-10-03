@@ -6,6 +6,35 @@ import pytest
 
 import autosport.campaign_forward_universe_cycle_binding as binding
 from autosport.campaign_inception import CampaignInceptionReceipt
+from autosport.forward_evaluation_universe_binding import ForwardUniverseAuthorityIdentity
+
+
+def test_authority_preserves_distinct_plan_and_realized_universe_identity() -> None:
+    identity = ForwardUniverseAuthorityIdentity(
+        precommit_authority_sha256="a" * 64,
+        prospective_evaluation_plan_sha256="b" * 64,
+        backing_locator_sha256="c" * 64,
+        universe_sha256="d" * 64,
+        membership_sha256="e" * 64,
+        member_count=2,
+    )
+
+    authority = binding.CampaignForwardUniverseCycleAuthority._issue(
+        campaign_id="campaign-1",
+        source_id="parlayapi:table_tennis",
+        cycle_receipt_sha256="1" * 64,
+        campaign_receipt_sha256="2" * 64,
+        provider_evidence_sha256="3" * 64,
+        provider_frame_sha256="4" * 64,
+        collector_artifact_evidence_sha256="5" * 64,
+        forward_identity=identity,
+    )
+
+    assert authority.prospective_evaluation_plan_sha256 == "b" * 64
+    assert authority.universe_sha256 == "d" * 64
+    assert authority.membership_sha256 == "e" * 64
+    assert authority.prospective_evaluation_plan_sha256 != authority.universe_sha256
+    assert len(authority.authority_sha256) == 64
 
 
 def test_authority_issuer_rebind_fails_before_hostile_execution(

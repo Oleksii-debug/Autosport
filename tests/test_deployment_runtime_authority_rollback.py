@@ -234,6 +234,52 @@ def test_runtime_authority_direct_authority_key_rebinding_fails_closed(
         store.records()
 
 
+def test_runtime_authority_rebinding_cannot_prepare_new_generation(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "deployment-runtime-authority.json"
+    store = DeploymentRuntimeAuthorityStore.initialize_pristine(
+        path,
+        authority_root=_authority_root(tmp_path),
+    )
+    _append(store, 0)
+    history_before = store._authority.read_history()
+
+    object.__setattr__(
+        store,
+        "_binding_semantic_binding_sha256",
+        "0" * 64,
+    )
+
+    with pytest.raises(
+        DeploymentRuntimeAuthorityError,
+        match="binding integrity mismatch",
+    ):
+        _append(store, 1)
+
+    assert store._authority.read_history() == history_before
+
+
+def test_direct_validated_read_rechecks_binding_integrity(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "deployment-runtime-authority.json"
+    store = DeploymentRuntimeAuthorityStore.initialize_pristine(
+        path,
+        authority_root=_authority_root(tmp_path),
+    )
+    _append(store, 0)
+    redirected = tmp_path / "redirected-runtime-authority.json"
+    redirected.write_bytes(path.read_bytes())
+    object.__setattr__(store, "_binding_path", redirected)
+
+    with pytest.raises(
+        DeploymentRuntimeAuthorityError,
+        match="binding integrity mismatch",
+    ):
+        store._read_validated_records_locked()
+
+
 def test_runtime_authority_rejects_semantic_binding_history_drift(
     tmp_path: Path,
 ) -> None:

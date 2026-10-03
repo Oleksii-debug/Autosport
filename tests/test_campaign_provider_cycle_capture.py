@@ -2830,11 +2830,11 @@ def test_campaign_capture_rejects_attempt_clock_surface_rebind_before_start(
         )
 
     assert provider_calls == []
-    assert store.collector_cycle_evidence(
+    assert not store.collector_cycle_evidence(
         source_id=spec.source_id,
         start_cycle_seq=1,
         end_cycle_seq=1,
-    ) == []
+    )
     assert (
         store._next_collector_schedule_slot(
             source_id=spec.source_id,
@@ -2960,6 +2960,36 @@ def test_campaign_capture_rejects_caller_supplied_private_surface_guard() -> Non
             api_key="secret-value",
             _public_surface_guard=lambda: None,
         )
+
+
+def test_private_surface_guard_rejection_ignores_shadowed_type_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hostile_calls: list[str] = []
+
+    def hostile_type_error(*_args, **_kwargs):
+        hostile_calls.append("TypeError")
+        raise AssertionError("shadowed TypeError executed")
+
+    monkeypatch.setattr(
+        capture_module,
+        "TypeError",
+        hostile_type_error,
+        raising=False,
+    )
+
+    with pytest.raises(TypeError, match="private to the sealed campaign capture"):
+        capture_module.capture_campaign_complete_game_board(
+            precommit_locator=None,
+            store=None,
+            source_spec=None,
+            evidence_store=None,
+            request=None,
+            api_key="secret-value",
+            _public_surface_guard=lambda: None,
+        )
+
+    assert hostile_calls == []
 
 
 def test_campaign_clock_witness_double_rebind_fails_before_clock_execution(

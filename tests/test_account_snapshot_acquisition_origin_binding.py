@@ -420,8 +420,23 @@ def test_durable_resolve_remains_non_authoritative_without_new_provider_read(
         )
     assert durable.source_authority_proven is False
 
+def _boundary_mapping_snapshots(authority: object) -> list[MappingProxyType]:
+    snapshots: list[MappingProxyType] = []
+    seen: set[int] = set()
+    for method_name in ("initialize", "acquire", "resolve", "verify", "assert_live"):
+        method = vars(type(authority))[method_name]
+        for cell in method.__closure__ or ():
+            try:
+                value = cell.cell_contents
+            except ValueError:
+                continue
+            if type(value) is MappingProxyType and id(value) not in seen:
+                seen.add(id(value))
+                snapshots.append(value)
+    return snapshots
 
-def test_closure_boundary_live_registry_rejects_mangled_slot_mint(
+
+def test_closure_boundary_direct_object_setattr_cannot_replace_live_authority(
     tmp_path,
     monkeypatch,
 ) -> None:
@@ -436,7 +451,7 @@ def test_closure_boundary_live_registry_rejects_mangled_slot_mint(
     )
     live = acquirer.acquire(
         _balance_capabilities(),
-        acquisition_id="immutable-live-witness",
+        acquisition_id="direct-object-setattr",
     )
     assert len(calls) == 3
     durable = acquirer.resolve(live.receipt.acquisition_id)
@@ -446,63 +461,23 @@ def test_closure_boundary_live_registry_rejects_mangled_slot_mint(
     authority = _extract_inner_authority_boundary(
         _extract_outer_guard_raw_acquire()
     )
-    live_registry = getattr(
-        authority,
-        "_AccountSnapshotAuthorityBoundary__live",
+    forged = MappingProxyType(
+        {
+            durable.receipt.acquisition_id: (
+                ref(durable),
+                authority._fingerprint(durable),
+                _credentials("A"),
+            )
+        }
     )
-    assert type(live_registry) is MappingProxyType
 
-    with pytest.raises(TypeError):
-        live_registry[durable.receipt.acquisition_id] = (
-            ref(durable),
-            authority._fingerprint(durable),
-            _credentials("A"),
+    with pytest.raises(AttributeError):
+        object.__setattr__(
+            authority,
+            "_AccountSnapshotAuthorityBoundary__live",
+            forged,
         )
 
-    with pytest.raises(
-        AccountSnapshotAcquisitionError,
-        match="not issued by live canonical provider acquisition",
-    ):
-        authority.assert_live(durable)
-    authority.assert_live(live)
-    assert durable.source_authority_proven is False
-
-
-def test_closure_boundary_forged_registry_copy_cannot_mint_live_authority(
-    tmp_path,
-    monkeypatch,
-) -> None:
-    _install_transport(
-        monkeypatch,
-        [_DEVELOPER_APPS, _DETAILS, _FUNDS],
-    )
-    acquirer = BetfairAccountSnapshotAcquirer(
-        tmp_path / "account.sqlite3",
-        _credentials("A"),
-        account_id="default-account",
-    )
-    live = acquirer.acquire(
-        _balance_capabilities(),
-        acquisition_id="forged-live-copy",
-    )
-    durable = acquirer.resolve(live.receipt.acquisition_id)
-    authority = _extract_inner_authority_boundary(
-        _extract_outer_guard_raw_acquire()
-    )
-    live_registry = getattr(
-        authority,
-        "_AccountSnapshotAuthorityBoundary__live",
-    )
-    forged = dict(live_registry)
-    forged[durable.receipt.acquisition_id] = (
-        ref(durable),
-        authority._fingerprint(durable),
-        _credentials("A"),
-    )
-
-    assert forged[durable.receipt.acquisition_id] != (
-        live_registry[durable.receipt.acquisition_id]
-    )
     with pytest.raises(
         AccountSnapshotAcquisitionError,
         match="not issued by live canonical provider acquisition",
@@ -520,11 +495,11 @@ def test_closure_boundary_forged_registry_copy_cannot_mint_live_authority(
         "_AccountSnapshotAuthorityBoundary__lock",
     ),
 )
-def test_closure_boundary_authority_storage_cannot_be_reassigned(
+def test_closure_boundary_has_no_replaceable_authority_storage(
     tmp_path,
     storage_name: str,
 ) -> None:
-    acquirer = BetfairAccountSnapshotAcquirer(
+    BetfairAccountSnapshotAcquirer(
         tmp_path / "account.sqlite3",
         _credentials("A"),
         account_id="default-account",
@@ -532,44 +507,67 @@ def test_closure_boundary_authority_storage_cannot_be_reassigned(
     authority = _extract_inner_authority_boundary(
         _extract_outer_guard_raw_acquire()
     )
-    original = getattr(authority, storage_name)
+
+    assert not hasattr(authority, storage_name)
+    with pytest.raises(AttributeError):
+        setattr(authority, storage_name, object())
+    with pytest.raises(AttributeError):
+        object.__setattr__(authority, storage_name, object())
+
+
+def test_closure_boundary_authority_snapshots_are_immutable_and_copy_isolated(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    _install_transport(
+        monkeypatch,
+        [_DEVELOPER_APPS, _DETAILS, _FUNDS],
+    )
+    acquirer = BetfairAccountSnapshotAcquirer(
+        tmp_path / "account.sqlite3",
+        _credentials("A"),
+        account_id="default-account",
+    )
+    live = acquirer.acquire(
+        _balance_capabilities(),
+        acquisition_id="closure-snapshot-copy",
+    )
+    durable = acquirer.resolve(live.receipt.acquisition_id)
+    authority = _extract_inner_authority_boundary(
+        _extract_outer_guard_raw_acquire()
+    )
+
+    snapshots = _boundary_mapping_snapshots(authority)
+    assert snapshots
+    live_snapshots = [
+        snapshot
+        for snapshot in snapshots
+        if live.receipt.acquisition_id in snapshot
+    ]
+    assert live_snapshots
+    canonical_live_snapshot = live_snapshots[0]
+
+    with pytest.raises(TypeError):
+        canonical_live_snapshot[durable.receipt.acquisition_id] = (
+            ref(durable),
+            authority._fingerprint(durable),
+            _credentials("A"),
+        )
+
+    forged = dict(canonical_live_snapshot)
+    forged[durable.receipt.acquisition_id] = (
+        ref(durable),
+        authority._fingerprint(durable),
+        _credentials("A"),
+    )
+    assert forged is not canonical_live_snapshot
 
     with pytest.raises(
-        AttributeError,
-        match="account snapshot authority storage is immutable",
+        AccountSnapshotAcquisitionError,
+        match="not issued by live canonical provider acquisition",
     ):
-        setattr(authority, storage_name, original)
-
-    assert getattr(authority, storage_name) is original
-    del acquirer
-
-
-def test_closure_boundary_registry_snapshots_are_read_only(
-    tmp_path,
-) -> None:
-    acquirer = BetfairAccountSnapshotAcquirer(
-        tmp_path / "account.sqlite3",
-        _credentials("A"),
-        account_id="default-account",
-    )
-    authority = _extract_inner_authority_boundary(
-        _extract_outer_guard_raw_acquire()
-    )
-    issued = getattr(
-        authority,
-        "_AccountSnapshotAuthorityBoundary__issued",
-    )
-    live = getattr(
-        authority,
-        "_AccountSnapshotAuthorityBoundary__live",
-    )
-    assert type(issued) is MappingProxyType
-    assert type(live) is MappingProxyType
-
-    with pytest.raises(TypeError):
-        issued[id(acquirer)] = issued[id(acquirer)]
-    with pytest.raises(TypeError):
-        live["forged"] = object()
+        authority.assert_live(durable)
+    authority.assert_live(live)
 
 
 def test_closure_boundary_immutable_live_snapshot_preserves_weakref_expiry(
@@ -591,21 +589,10 @@ def test_closure_boundary_immutable_live_snapshot_preserves_weakref_expiry(
         acquisition_id="weakref-expiry",
     )
     assert len(calls) == 3
-    live_id = live.receipt.acquisition_id
     live_ref = ref(live)
     del live
     gc.collect()
     assert live_ref() is None
-
-    authority = _extract_inner_authority_boundary(
-        _extract_outer_guard_raw_acquire()
-    )
-    live_registry = getattr(
-        authority,
-        "_AccountSnapshotAuthorityBoundary__live",
-    )
-    assert type(live_registry) is MappingProxyType
-    assert live_id not in live_registry
 
     retry_calls = _install_transport(monkeypatch, [])
     with pytest.raises(
@@ -628,27 +615,34 @@ def test_closure_boundary_storage_ignores_mappingproxy_module_rebind(
         "MappingProxyType",
         lambda value: dict(value),
     )
+    calls = _install_transport(
+        monkeypatch,
+        [_DEVELOPER_APPS, _DETAILS, _FUNDS],
+    )
     acquirer = BetfairAccountSnapshotAcquirer(
         tmp_path / "account.sqlite3",
         _credentials("A"),
         account_id="default-account",
     )
+    live = acquirer.acquire(
+        _balance_capabilities(),
+        acquisition_id="mappingproxy-rebind",
+    )
+    assert len(calls) == 3
+
     authority = _extract_inner_authority_boundary(
         _extract_outer_guard_raw_acquire()
     )
-    issued = getattr(
-        authority,
-        "_AccountSnapshotAuthorityBoundary__issued",
-    )
-    live = getattr(
-        authority,
-        "_AccountSnapshotAuthorityBoundary__live",
-    )
+    snapshots = _boundary_mapping_snapshots(authority)
+    assert snapshots
+    live_snapshots = [
+        snapshot
+        for snapshot in snapshots
+        if live.receipt.acquisition_id in snapshot
+    ]
+    assert live_snapshots
+    assert all(type(snapshot) is MappingProxyType for snapshot in snapshots)
 
-    assert type(issued) is MappingProxyType
-    assert type(live) is MappingProxyType
     with pytest.raises(TypeError):
-        issued[id(acquirer)] = issued[id(acquirer)]
-    with pytest.raises(TypeError):
-        live["forged"] = object()
+        live_snapshots[0]["forged"] = object()
 

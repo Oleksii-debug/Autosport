@@ -152,6 +152,43 @@ class ReleasePackageInputSymlinkFenceTests(unittest.TestCase):
             self.assertTrue(mutated)
             self.assertEqual(source_lstat_calls, 3)
 
+    def test_different_regular_file_swap_between_lstat_and_open_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source.bin"
+            source.write_bytes(b"approved")
+            replacement = root / "replacement.bin"
+            replacement.write_bytes(b"outside-substitute")
+            original = root / "source-original.bin"
+            real_open = release_package._open_read_only_descriptor
+            swapped = False
+
+            def swap_then_open(path: Path) -> int:
+                nonlocal swapped
+                if Path(path) == source and not swapped:
+                    swapped = True
+                    source.replace(original)
+                    replacement.replace(source)
+                return real_open(path)
+
+            with patch.object(
+                release_package,
+                "_open_read_only_descriptor",
+                side_effect=swap_then_open,
+            ):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "test source changed during open",
+                ):
+                    release_package._read_regular_source_bytes(
+                        source,
+                        label="test source",
+                    )
+
+            self.assertTrue(swapped)
+            self.assertEqual(original.read_bytes(), b"approved")
+            self.assertEqual(source.read_bytes(), b"outside-substitute")
+
     def test_top_level_symlink_fails_before_existing_staging_is_deleted(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

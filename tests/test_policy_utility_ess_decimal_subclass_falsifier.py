@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import datetime, timezone
 from decimal import Decimal
 
@@ -78,3 +79,22 @@ def test_decimal_subclass_cannot_bypass_ess_raw_support_bound() -> None:
         match="effective_sample_size",
     ):
         _estimated_evidence(hostile)
+
+
+def test_decimal_subclass_cannot_enter_other_policy_utility_numeric_fields() -> None:
+    baseline = _estimated_evidence(Decimal("1"))
+
+    hostile_utility = _AdversarialEffectiveSampleSize("1")
+    with pytest.raises(PolicyUtilityError, match="utility_value"):
+        replace(
+            baseline,
+            currency="EUR",
+            utility_value=hostile_utility,
+        )
+
+    hostile_uncertainty = _AdversarialEffectiveSampleSize("0")
+    with pytest.raises(PolicyUtilityError, match="uncertainty"):
+        replace(
+            baseline,
+            uncertainty=hostile_uncertainty,
+        )

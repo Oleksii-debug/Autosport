@@ -88,3 +88,46 @@ def test_handicap_is_content_bound_into_evidence_identity() -> None:
     assert positive.observed_at == negative.observed_at
     assert positive.levels == negative.levels
     assert positive.evidence_id != negative.evidence_id
+
+def test_explicit_zero_handicap_is_required_and_canonical_for_ordinary_markets() -> None:
+    snapshot = _snapshot(
+        _market_book(_runner(0)),
+        handicap=Decimal("-0.0"),
+    )
+
+    assert snapshot.handicap == Decimal("0")
+    assert snapshot.to_dict()["handicap"] == "0"
+
+
+def test_missing_handicap_does_not_alias_explicit_zero() -> None:
+    runner = _runner(0)
+    runner.pop("handicap")
+
+    with pytest.raises(BetfairDecisionDepthError, match="handicap must be a finite number"):
+        _snapshot(
+            _market_book(runner),
+            handicap=Decimal("0"),
+        )
+
+
+@pytest.mark.parametrize("bad_handicap", [None, True, "NaN", "Infinity", "-Infinity"])
+def test_invalid_requested_handicap_fails_closed(bad_handicap: object) -> None:
+    with pytest.raises(BetfairDecisionDepthError, match="handicap must be a finite number"):
+        issue_betfair_decision_depth_snapshot(
+            _market_book(_runner(0)),
+            market_id="1.24681012",
+            selection_id=42,
+            handicap=bad_handicap,
+            side="BACK",
+            observed_at=OBSERVED_AT,
+        )
+
+
+@pytest.mark.parametrize("bad_handicap", [None, True, "NaN", "Infinity", "-Infinity"])
+def test_invalid_runner_handicap_fails_closed(bad_handicap: object) -> None:
+    with pytest.raises(BetfairDecisionDepthError, match="handicap must be a finite number"):
+        _snapshot(
+            _market_book(_runner(bad_handicap)),
+            handicap=Decimal("0"),
+        )
+

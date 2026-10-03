@@ -26,6 +26,7 @@ def _market_book() -> dict[str, object]:
         "runners": [
             {
                 "selectionId": 42,
+                "handicap": 0.0,
                 "status": "ACTIVE",
                 "ex": {
                     "availableToBack": [
@@ -57,6 +58,7 @@ def test_back_snapshot_uses_exact_decimal_threshold_and_best_to_worst_order() ->
         book,
         market_id="1.24681012",
         selection_id=42,
+        handicap=Decimal("0"),
         side="BACK",
         observed_at=OBSERVED_AT,
     )
@@ -83,6 +85,7 @@ def test_lay_snapshot_uses_lower_price_as_better() -> None:
         _market_book(),
         market_id="1.24681012",
         selection_id=42,
+        handicap=Decimal("0"),
         side=BetfairOrderSide.LAY,
         observed_at=OBSERVED_AT,
     )
@@ -103,6 +106,7 @@ def test_evidence_is_explicitly_non_authorizing_and_stable() -> None:
         _market_book(),
         market_id="1.24681012",
         selection_id=42,
+        handicap=Decimal("0"),
         side="BACK",
         observed_at=OBSERVED_AT,
     )
@@ -110,6 +114,7 @@ def test_evidence_is_explicitly_non_authorizing_and_stable() -> None:
         _market_book(),
         market_id="1.24681012",
         selection_id=42,
+        handicap=Decimal("0"),
         side="BACK",
         observed_at=OBSERVED_AT,
     )
@@ -127,6 +132,7 @@ def test_evidence_is_explicitly_non_authorizing_and_stable() -> None:
     payload = first.to_dict()
     assert payload["evidence_id"] == first.evidence_id
     assert payload["observed_at"] == "2026-09-21T13:15:00Z"
+    assert payload["handicap"] == "0"
     assert payload["levels"][0] == {"price": "2.04", "size": "3.25"}
 
 
@@ -138,6 +144,7 @@ def test_empty_present_ladder_is_valid_zero_displayed_depth() -> None:
         book,
         market_id="1.24681012",
         selection_id=42,
+        handicap=Decimal("0"),
         side="BACK",
         observed_at=OBSERVED_AT,
     )
@@ -188,6 +195,7 @@ def test_malformed_or_nontradable_market_book_fails_closed(mutate, match: str) -
             book,
             market_id="1.24681012",
             selection_id=42,
+            handicap=Decimal("0"),
             side="BACK",
             observed_at=OBSERVED_AT,
         )
@@ -200,6 +208,7 @@ def test_unsupported_side_fails_closed(side: object) -> None:
             _market_book(),
             market_id="1.24681012",
             selection_id=42,
+            handicap=Decimal("0"),
             side=side,
             observed_at=OBSERVED_AT,
         )
@@ -211,6 +220,7 @@ def test_naive_observation_time_fails_closed() -> None:
             _market_book(),
             market_id="1.24681012",
             selection_id=42,
+            handicap=Decimal("0"),
             side="BACK",
             observed_at=datetime(2026, 9, 21, 13, 15, 0),
         )
@@ -221,6 +231,7 @@ def test_positive_authority_flags_cannot_be_minted_by_constructor() -> None:
         _market_book(),
         market_id="1.24681012",
         selection_id=42,
+        handicap=Decimal("0"),
         side="BACK",
         observed_at=OBSERVED_AT,
     )
@@ -228,6 +239,7 @@ def test_positive_authority_flags_cannot_be_minted_by_constructor() -> None:
     kwargs = {
         "market_id": snapshot.market_id,
         "selection_id": snapshot.selection_id,
+        "handicap": snapshot.handicap,
         "side": snapshot.side,
         "observed_at": snapshot.observed_at,
         "market_status": snapshot.market_status,
@@ -270,6 +282,7 @@ def test_nonfinite_and_boolean_ladder_values_fail_closed(field: str, value: obje
             book,
             market_id="1.24681012",
             selection_id=42,
+            handicap=Decimal("0"),
             side="BACK",
             observed_at=OBSERVED_AT,
         )
@@ -281,6 +294,7 @@ def test_boolean_selection_id_fails_closed() -> None:
             _market_book(),
             market_id="1.24681012",
             selection_id=True,
+            handicap=Decimal("0"),
             side="BACK",
             observed_at=OBSERVED_AT,
         )
@@ -303,6 +317,7 @@ def test_market_metadata_types_fail_closed(mutate, match: str) -> None:
             book,
             market_id="1.24681012",
             selection_id=42,
+            handicap=Decimal("0"),
             side="BACK",
             observed_at=OBSERVED_AT,
         )
@@ -316,6 +331,7 @@ def test_delayed_market_data_is_preserved_not_upgraded_to_live_truth() -> None:
         book,
         market_id="1.24681012",
         selection_id=42,
+        handicap=Decimal("0"),
         side="BACK",
         observed_at=OBSERVED_AT,
     )
@@ -333,6 +349,7 @@ def test_missing_market_data_delay_marker_stays_unknown_not_false() -> None:
         book,
         market_id="1.24681012",
         selection_id=42,
+        handicap=Decimal("0"),
         side="BACK",
         observed_at=OBSERVED_AT,
     )
@@ -352,6 +369,7 @@ def test_market_data_delay_marker_must_be_boolean_when_present(value: object) ->
             book,
             market_id="1.24681012",
             selection_id=42,
+            handicap=Decimal("0"),
             side="BACK",
             observed_at=OBSERVED_AT,
         )

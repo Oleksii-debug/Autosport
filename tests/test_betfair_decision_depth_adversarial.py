@@ -24,6 +24,7 @@ def _market_book() -> dict[str, object]:
         "runners": [
             {
                 "selectionId": 42,
+                "handicap": 0.0,
                 "status": "ACTIVE",
                 "ex": {
                     "availableToBack": [{"price": "2.04", "size": "3.25"}],
@@ -55,6 +56,7 @@ def test_boolean_runner_selection_id_cannot_alias_integer_selection() -> None:
             book,
             market_id="1.24681012",
             selection_id=1,
+            handicap=Decimal("0"),
             side="BACK",
             observed_at=OBSERVED_AT,
         )

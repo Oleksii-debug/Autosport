@@ -54,19 +54,15 @@ def _selection_id(value: object, field: str = "selection_id") -> int:
     return value
 
 
-def _handicap(value: object, field: str = "handicap") -> Decimal | None:
-    if value is None:
-        return None
-    if isinstance(value, bool):
-        raise BetfairDecisionDepthError(f"{field} must be a finite number or None")
+def _handicap(value: object, field: str = "handicap") -> Decimal:
+    if isinstance(value, bool) or value is None:
+        raise BetfairDecisionDepthError(f"{field} must be a finite number")
     try:
         parsed = value if type(value) is Decimal else Decimal(str(value))
     except (InvalidOperation, TypeError, ValueError) as exc:
-        raise BetfairDecisionDepthError(
-            f"{field} must be a finite number or None"
-        ) from exc
+        raise BetfairDecisionDepthError(f"{field} must be a finite number") from exc
     if not parsed.is_finite():
-        raise BetfairDecisionDepthError(f"{field} must be a finite number or None")
+        raise BetfairDecisionDepthError(f"{field} must be a finite number")
     if parsed == 0:
         return Decimal("0")
     return parsed
@@ -145,6 +141,7 @@ class BetfairDecisionDepthSnapshot:
 
     market_id: str
     selection_id: int
+    handicap: Decimal
     side: BetfairOrderSide
     observed_at: datetime
     market_status: str
@@ -152,7 +149,6 @@ class BetfairDecisionDepthSnapshot:
     inplay: bool | None
     bet_delay_seconds: int | None
     levels: tuple[BetfairDepthLevel, ...]
-    handicap: Decimal | None = None
     market_data_delayed: bool | None = None
     status: BetfairDecisionDepthStatus = field(
         default=BetfairDecisionDepthStatus.PARSED_RETURNED_EXCHANGE_LADDER, init=False
@@ -287,9 +283,7 @@ class BetfairDecisionDepthSnapshot:
             "provider_id": self.provider_id,
             "market_id": self.market_id,
             "selection_id": self.selection_id,
-            "handicap": (
-                None if self.handicap is None else _canonical_decimal(self.handicap)
-            ),
+            "handicap": _canonical_decimal(self.handicap),
             "side": self.side.value,
             "observed_at": self.observed_at.isoformat().replace("+00:00", "Z"),
             "market_status": self.market_status,
@@ -318,9 +312,9 @@ def issue_betfair_decision_depth_snapshot(
     *,
     market_id: str,
     selection_id: int,
+    handicap: Decimal | int | str,
     side: BetfairOrderSide | str,
     observed_at: datetime,
-    handicap: Decimal | int | str | None = None,
 ) -> BetfairDecisionDepthSnapshot:
     """Parse one caller-supplied MarketBook into non-authorizing depth evidence.
 

@@ -508,6 +508,122 @@ def test_same_snapshot_two_writer_race_only_one_reserves(monkeypatch, tmp_path) 
     assert recomputed.decision is HeadroomDecision.INSUFFICIENT_UPPER_BOUND
 
 
+def test_newer_balance_generation_stales_assessment_before_new_reservation(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    acquired, _ = _acquire_balance(monkeypatch, tmp_path, "100")
+    action = _action("generation-target", "80")
+    ledger = _ledger_with_plans(tmp_path, _plan("target", action))
+    assessment = _assess(
+        ledger,
+        acquired,
+        plan_id="target",
+        action_id="generation-target",
+    )
+    assert assessment.decision is HeadroomDecision.SUFFICIENT_LOWER_BOUND
+
+    newer, _ = _acquire_balance(monkeypatch, tmp_path, "10")
+
+    with pytest.raises(
+        ProviderAccountHeadroomStale,
+        match="balance generation changed",
+    ):
+        _reserve(
+            ledger,
+            acquired,
+            assessment,
+            attempt_id="generation-stale-attempt",
+        )
+    with pytest.raises(KeyError):
+        ledger.attempt_state("generation-stale-attempt")
+
+    with pytest.raises(
+        ProviderAccountHeadroomStale,
+        match="balance generation changed",
+    ):
+        _assess(
+            ledger,
+            acquired,
+            plan_id="target",
+            action_id="generation-target",
+        )
+
+    recomputed = _assess(
+        ledger,
+        newer,
+        plan_id="target",
+        action_id="generation-target",
+    )
+    assert recomputed.provider_available_to_bet == Decimal("10")
+    assert recomputed.decision is HeadroomDecision.INSUFFICIENT_UPPER_BOUND
+
+
+def test_exact_existing_attempt_replay_does_not_require_current_balance_generation(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    acquired, _ = _acquire_balance(monkeypatch, tmp_path, "100")
+    action = _action("replay-target", "10")
+    ledger = _ledger_with_plans(tmp_path, _plan("target", action))
+    assessment = _assess(
+        ledger,
+        acquired,
+        plan_id="target",
+        action_id="replay-target",
+    )
+    first = _reserve(
+        ledger,
+        acquired,
+        assessment,
+        attempt_id="generation-replay-attempt",
+    )
+
+    _acquire_balance(monkeypatch, tmp_path, "1")
+
+    replay = _reserve(
+        ledger,
+        acquired,
+        assessment,
+        attempt_id="generation-replay-attempt",
+    )
+    assert replay == first
+    assert ledger.attempt_state("generation-replay-attempt") is AttemptState.RESERVED
+
+
+def test_current_generation_guard_alias_rebinding_cannot_admit_stale_balance(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    acquired, _ = _acquire_balance(monkeypatch, tmp_path, "100")
+    action = _action("guard-alias-target", "10")
+    ledger = _ledger_with_plans(tmp_path, _plan("target", action))
+    hostile_calls = []
+
+    def hostile_guard(*args, **kwargs):
+        hostile_calls.append((args, kwargs))
+        raise AssertionError("hostile generation guard executed")
+
+    monkeypatch.setattr(
+        headroom_module,
+        "hold_current_account_snapshot_acquisition",
+        hostile_guard,
+    )
+
+    with pytest.raises(
+        ProviderAccountHeadroomError,
+        match="account snapshot headroom authority changed",
+    ):
+        _assess(
+            ledger,
+            acquired,
+            plan_id="target",
+            action_id="guard-alias-target",
+        )
+
+    assert hostile_calls == []
+
+
 @pytest.mark.parametrize(
     "surface",
     ("resolver", "issued_current"),

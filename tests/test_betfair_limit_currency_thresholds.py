@@ -35,6 +35,7 @@ def test_ruleset_is_explicitly_not_currentness_or_execution_authority():
     assert result.snapshot_standard_minimum_met is True
     assert result.account_currency_bound is False
     assert result.jurisdiction_bound is False
+    assert result.current_provider_constraint_proven is False
     assert result.market_admissibility_proven is False
     assert result.execution_authorized is False
     assert result.real_money_execution is False

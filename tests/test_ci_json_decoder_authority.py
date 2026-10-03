@@ -255,3 +255,55 @@ def test_request_rejects_inflight_json_scanstring_rebind(monkeypatch) -> None:
     ):
         api._request("/actions/runs/123")
 
+def test_request_rejects_inflight_urlopen_transport_rebind(monkeypatch) -> None:
+    api = GitHubApi(repository="owner/repo", token="token")
+    forged_calls: list[str] = []
+
+    def forged_urlopen(*_args, **_kwargs):
+        forged_calls.append("urlopen")
+        return _Response()
+
+    class RebindingResponse(_Response):
+        def read(self) -> bytes:
+            monkeypatch.setattr(controller_module, "urlopen", forged_urlopen)
+            return super().read()
+
+    initial_urlopen = lambda *_args, **_kwargs: RebindingResponse()
+    monkeypatch.setattr(controller_module, "urlopen", initial_urlopen)
+
+    with pytest.raises(
+        CancellationError,
+        match="GitHub API transport authority changed",
+    ):
+        api._request("/actions/runs/123")
+
+    assert forged_calls == []
+
+
+def test_request_rejects_inflight_request_constructor_rebind(monkeypatch) -> None:
+    api = GitHubApi(repository="owner/repo", token="token")
+    forged_calls: list[str] = []
+
+    class ForgedRequest:
+        def __init__(self, *_args, **_kwargs) -> None:
+            forged_calls.append("request")
+
+    class RebindingResponse(_Response):
+        def read(self) -> bytes:
+            monkeypatch.setattr(controller_module, "Request", ForgedRequest)
+            return super().read()
+
+    monkeypatch.setattr(
+        controller_module,
+        "urlopen",
+        lambda *_args, **_kwargs: RebindingResponse(),
+    )
+
+    with pytest.raises(
+        CancellationError,
+        match="GitHub API transport authority changed",
+    ):
+        api._request("/actions/runs/123")
+
+    assert forged_calls == []
+

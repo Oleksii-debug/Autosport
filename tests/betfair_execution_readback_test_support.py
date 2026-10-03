@@ -100,7 +100,7 @@ def _install_https_opener_dispatch(
     )
 
 
-def authoritative_execution_readback(
+def semantic_execution_readback(
     responses: list[bytes],
     *,
     action_id: str,
@@ -110,7 +110,12 @@ def authoritative_execution_readback(
     page_size: int = 1000,
     max_pages: int = 100,
 ):
-    """Capture through the real K07 product-client origin with deterministic I/O."""
+    """Return one structural K07-shaped capture from deterministic mocked I/O.
+
+    The HTTPS dispatch is intentionally replaced for this helper, so the result
+    carries no live provider-origin authority. Use the internal semantic evaluator
+    for parser/economic falsifiers; public authority verification must reject it.
+    """
 
     opener = _QueuedOpener(responses)
     with pytest.MonkeyPatch.context() as monkeypatch:
@@ -130,7 +135,7 @@ def authoritative_execution_readback(
     return capture
 
 
-def authoritative_execution_readback_with_client(
+def semantic_execution_readback_with_client(
     responses: list[bytes],
     *,
     action_id: str,
@@ -196,8 +201,8 @@ class _DelegatingOpener:
 
 
 @contextmanager
-def canonical_authenticated_readback_client(transport, *, account_id: str):
-    """Yield a K07 client while deterministic betting I/O stays below canonical transport."""
+def semantic_authenticated_readback_client(transport, *, account_id: str):
+    """Yield a structurally canonical client with deterministic, non-authoritative I/O."""
 
     with pytest.MonkeyPatch.context() as monkeypatch:
         _install_https_opener_dispatch(

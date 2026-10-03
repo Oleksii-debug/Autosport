@@ -104,6 +104,17 @@ def _snapshot(
     cycle_index: int = 1,
     tickets: tuple[ProductGuiEconomicTicket, ...] = (),
 ) -> ProductGuiEconomicSnapshot:
+    open_tickets = tuple(ticket for ticket in tickets if ticket.status == "open")
+    if open_tickets:
+        portfolio_scenario_count = 2
+        portfolio_worst_case = Decimal("-10")
+        portfolio_best_case = Decimal("10")
+        portfolio_mean_case = Decimal("0")
+    else:
+        portfolio_scenario_count = 1
+        portfolio_worst_case = Decimal("0")
+        portfolio_best_case = Decimal("0")
+        portfolio_mean_case = Decimal("0")
     return ProductGuiEconomicSnapshot(
         workspace=tmp_path,
         session_id="session-1",
@@ -113,21 +124,16 @@ def _snapshot(
         paper_book_sha256="a" * 64,
         balance=Decimal("90"),
         committed_stake=sum(
-            (
-                ticket.stake
-                for ticket in tickets
-                if ticket.status == "open"
-            ),
+            (ticket.stake for ticket in open_tickets),
             Decimal("0"),
         ),
         tickets=tickets,
         portfolio_mode="exact",
-        portfolio_scenario_count=2,
-        portfolio_worst_case=Decimal("-10"),
-        portfolio_best_case=Decimal("10"),
-        portfolio_mean_case=Decimal("0"),
+        portfolio_scenario_count=portfolio_scenario_count,
+        portfolio_worst_case=portfolio_worst_case,
+        portfolio_best_case=portfolio_best_case,
+        portfolio_mean_case=portfolio_mean_case,
     )
-
 
 def _controller(
     tmp_path: Path,

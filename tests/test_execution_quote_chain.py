@@ -797,3 +797,40 @@ def test_issued_quote_chain_mutation_cannot_mint_acknowledgement_binding(
     ):
         _ = evidence.acknowledgement_binding_matches
 
+
+
+def test_negative_authority_properties_require_intact_issuance_snapshot(
+    tmp_path,
+) -> None:
+    evidence = _project(_submitted(tmp_path))
+
+    object.__setattr__(
+        evidence,
+        "accepted_price_status",
+        ACCEPTED_PRICE_ACKNOWLEDGED_UNVERIFIED,
+    )
+
+    for authority_name in ("accepted_price_verified", "chain_complete"):
+        with pytest.raises(
+            ExecutionQuoteChainError,
+            match="not issued by canonical ledger projection",
+        ):
+            getattr(evidence, authority_name)
+
+
+def test_to_dict_returns_detached_canonical_issuance_snapshot(tmp_path) -> None:
+    evidence = _project(_submitted(tmp_path))
+    first = evidence.to_dict()
+
+    first["actual_submitted_instruction_bound"] = True
+    first["accepted_price_verified"] = True
+    first["chain_complete"] = True
+    first["submission_instruction_sha256"] = "f" * 64
+
+    second = evidence.to_dict()
+
+    assert second["actual_submitted_instruction_bound"] is False
+    assert second["accepted_price_verified"] is False
+    assert second["chain_complete"] is False
+    assert second["submission_instruction_sha256"] is None
+    assert second["evidence_sha256"] == evidence.evidence_sha256

@@ -564,6 +564,23 @@ def test_replay_dispatch_rebinding_fails_before_attacker_executes(
     assert attacker_called is False
 
 
+def test_product_run_capital_path_evidence_cannot_be_caller_minted() -> None:
+    with pytest.raises(TypeError, match="product-issued"):
+        ProductRunCapitalPathEvidence(
+            member_id="forged-run",
+            member_index=0,
+            expected_stream_sha256="1" * 64,
+            base_snapshot_sha256="2" * 64,
+            final_snapshot_sha256="3" * 64,
+            changed_ticket_ids=("forged-ticket",),
+            minimum_equity=Decimal("100"),
+            outcome_available_at="2026-09-03T10:00:30+00:00",
+            settlement_effects_sha256="4" * 64,
+            replay_source_evidence_sha256="5" * 64,
+            source_evidence_sha256="6" * 64,
+        )
+
+
 def test_product_run_capital_path_evidence_truth_cannot_be_subclassed() -> None:
     with pytest.raises(TypeError, match="must not be subclassed"):
         class ForgedProductRunCapitalPathEvidence(ProductRunCapitalPathEvidence):

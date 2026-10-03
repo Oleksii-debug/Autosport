@@ -580,7 +580,7 @@ def _witness_effect(
     }
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, init=False)
 class ProductRunCapitalPathEvidence:
     """Product-owned completed PAPER run-capital evidence.
 
@@ -601,6 +601,16 @@ class ProductRunCapitalPathEvidence:
     replay_source_evidence_sha256: str
     source_evidence_sha256: str
     complete: bool = True
+
+    def __new__(
+        cls,
+        *args: object,
+        **kwargs: object,
+    ) -> "ProductRunCapitalPathEvidence":
+        raise TypeError(
+            "ProductRunCapitalPathEvidence is product-issued; "
+            "use resolve_product_run_capital_path_evidence"
+        )
 
     def __init_subclass__(cls, **kwargs: object) -> None:
         raise TypeError("ProductRunCapitalPathEvidence must not be subclassed")
@@ -804,22 +814,32 @@ def resolve_product_run_capital_path_evidence(
         "iid_qualified": False,
         "grants_real_money_authority": False,
     }
-    result = ProductRunCapitalPathEvidence(
-        member_id=run_id,
-        member_index=member_index,
-        expected_stream_sha256=stream,
-        base_snapshot_sha256=_sha(base.sha256, "base_snapshot_sha256"),
-        final_snapshot_sha256=_sha(final.sha256, "final_snapshot_sha256"),
-        changed_ticket_ids=changed,
-        minimum_equity=minimum,
-        outcome_available_at=latest,
-        settlement_effects_sha256=effects_sha,
-        replay_source_evidence_sha256=_sha(
-            replay.source_evidence_sha256,
+    # Do not expose a public constructor for positive run-path ancestry.  This object
+    # is a projection of the durable roots re-resolved above, not caller-mintable
+    # bearer authority.  Bypass the rejecting public __new__ only at this exact
+    # resolver issuance point.
+    result = object.__new__(ProductRunCapitalPathEvidence)
+    for field_name, value in (
+        ("member_id", run_id),
+        ("member_index", member_index),
+        ("expected_stream_sha256", stream),
+        ("base_snapshot_sha256", _sha(base.sha256, "base_snapshot_sha256")),
+        ("final_snapshot_sha256", _sha(final.sha256, "final_snapshot_sha256")),
+        ("changed_ticket_ids", changed),
+        ("minimum_equity", minimum),
+        ("outcome_available_at", latest),
+        ("settlement_effects_sha256", effects_sha),
+        (
             "replay_source_evidence_sha256",
+            _sha(
+                replay.source_evidence_sha256,
+                "replay_source_evidence_sha256",
+            ),
         ),
-        source_evidence_sha256=_digest(source_payload),
-    )
+        ("source_evidence_sha256", _digest(source_payload)),
+        ("complete", True),
+    ):
+        object.__setattr__(result, field_name, value)
     _require_dispatch()
     return result
 

@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Iterable, Sequence
-from urllib.parse import parse_qsl, urlsplit
+from urllib.parse import parse_qsl, urlencode, urlsplit
 
 from .dataset import load_dataset
 from .domain import MarketEvent
@@ -356,6 +356,11 @@ def _snapshot_acquisition_provenance(
     query_from_string = dict(query_pairs)
     if len(query_from_string) != len(query_pairs) or query_from_string != query:
         raise ValueError("snapshot acquisition request.query_string contradicts query object")
+    canonical_query_string = urlencode(
+        tuple((key, query[key]) for key in canonical_query_order)
+    )
+    if query_string != canonical_query_string:
+        raise ValueError("snapshot acquisition request.query_string is not canonical")
     canonical_request_url = f"{origin}{expected_endpoint}?{query_string}"
     if (
         hashlib.sha256(canonical_request_url.encode("utf-8")).hexdigest()

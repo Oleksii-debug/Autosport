@@ -29,6 +29,7 @@ from .workspace_lock import (
     WorkspaceEconomicLock,
     WorkspaceEconomicLockBusyError,
     WorkspaceEconomicLockError,
+    _open_read_only_descriptor,
 )
 
 
@@ -38,6 +39,8 @@ CONSERVATIVE_SESSION_SLOT_HOLD = timedelta(minutes=20)
 RENEWAL_LEAD_TIME = timedelta(minutes=2)
 _BASE_RETRY_SECONDS = 5
 _MAX_RETRY_SECONDS = 300
+_MAX_TEXT_CHARS = 4096
+_MAX_STATE_FILE_BYTES = 64 * 1024
 
 
 class ProphetXSessionLifecycleError(RuntimeError):
@@ -90,6 +93,10 @@ def _required_text(value: object, field: str) -> str:
     if type(value) is not str or not value or value != value.strip():
         raise ProphetXSessionLifecycleError(
             f"{field} must be a non-empty trimmed string"
+        )
+    if len(value) > _MAX_TEXT_CHARS:
+        raise ProphetXSessionLifecycleError(
+            f"{field} exceeds the bounded text contract"
         )
     return value
 
@@ -1198,23 +1205,44 @@ class ProphetXSessionLifecycle:
 
     def _load_state(self) -> ProphetXSessionSnapshot | None:
         try:
-            path_stat = os.stat(self._state_path, follow_symlinks=False)
+            descriptor = _open_read_only_descriptor(self._state_path)
         except FileNotFoundError:
             return None
         except OSError as exc:
             raise ProphetXSessionLifecycleError(
-                "cannot inspect ProphetX session state"
+                "cannot safely open ProphetX session state"
             ) from exc
-        if not stat.S_ISREG(path_stat.st_mode) or path_stat.st_nlink != 1:
-            raise ProphetXSessionLifecycleError(
-                "ProphetX session state must be a single-link regular file"
-            )
+
         try:
-            payload = json.loads(self._state_path.read_text(encoding="utf-8"))
+            path_stat = os.fstat(descriptor)
+            if not stat.S_ISREG(path_stat.st_mode) or path_stat.st_nlink != 1:
+                raise ProphetXSessionLifecycleError(
+                    "ProphetX session state must be a single-link regular file"
+                )
+            if path_stat.st_size > _MAX_STATE_FILE_BYTES:
+                raise ProphetXSessionLifecycleError(
+                    "ProphetX session state exceeds the bounded file-size contract"
+                )
+            with os.fdopen(descriptor, "r", encoding="utf-8", closefd=True) as handle:
+                descriptor = -1
+                raw = handle.read(_MAX_STATE_FILE_BYTES + 1)
+            if len(raw.encode("utf-8")) > _MAX_STATE_FILE_BYTES:
+                raise ProphetXSessionLifecycleError(
+                    "ProphetX session state exceeds the bounded file-size contract"
+                )
+            payload = json.loads(raw)
+        except ProphetXSessionLifecycleError:
+            raise
         except (OSError, UnicodeError, json.JSONDecodeError) as exc:
             raise ProphetXSessionLifecycleError(
                 "ProphetX session state is unreadable or corrupt"
             ) from exc
+        finally:
+            if descriptor >= 0:
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
         if type(payload) is not dict:
             raise ProphetXSessionLifecycleError(
                 "ProphetX session state root must be an object"

@@ -98,6 +98,10 @@ _REPLAY_CUTOFF_MACHINE_KEY_PREFIX: Final = "sqlite-market-store-replay-cutoff:"
 _REPLAY_CUTOFF_STATE_SCHEMA: Final = "autosport.market-replay-cutoff.machine-state.v1"
 _REPLAY_CUTOFF_CORPUS_SCHEMA: Final = "autosport.market-replay-cutoff.corpus.v1"
 _REPLAY_CUTOFF_BINDING_SCHEMA: Final = "autosport.market-replay-cutoff.issuance-binding.v1"
+_REPLAY_APPEND_MACHINE_DOMAIN: Final = "data.market-replay-append-order.v1"
+_REPLAY_APPEND_MACHINE_KEY_PREFIX: Final = "sqlite-market-store-replay-append:"
+_REPLAY_APPEND_STATE_SCHEMA: Final = "autosport.market-replay-append.machine-state.v1"
+_REPLAY_APPEND_BINDING_SCHEMA: Final = "autosport.market-replay-append.issuance-binding.v1"
 _COMMIT_ORDER_IMMUTABILITY_TRIGGERS: Final = {
     "market_event_commit_order_no_delete": """CREATE TRIGGER market_event_commit_order_no_delete
 BEFORE DELETE ON market_event_commit_order
@@ -185,6 +189,30 @@ def _replay_cutoff_binding_sha256(
             "as_of": canonical_as_of,
             "max_append_generation": max_append_generation,
             "corpus_sha256": corpus_sha256,
+        }
+    )
+
+
+def _replay_append_state_sha256(
+    rows: tuple[tuple[int, str, str], ...],
+) -> str | None:
+    if not rows:
+        return None
+    return _canonical_sha256(
+        {
+            "schema": _REPLAY_APPEND_STATE_SCHEMA,
+            "rows": [list(row) for row in rows],
+        }
+    )
+
+
+def _replay_append_binding_sha256(
+    rows: tuple[tuple[int, str, str], ...],
+) -> str:
+    return _canonical_sha256(
+        {
+            "schema": _REPLAY_APPEND_BINDING_SCHEMA,
+            "rows": [list(row) for row in rows],
         }
     )
 
@@ -810,6 +838,16 @@ class SQLiteMarketStore:
         else:
             self.connection.commit()
 
+        append_authority = self._replay_append_authority()
+        with self._replay_append_issuance_lock(append_authority):
+            with self._connection_lock:
+                self._validate_causal_replay_state()
+                append_rows = self._validated_replay_append_rows()
+                self._recover_replay_append_authority(
+                    append_authority,
+                    _replay_append_state_sha256(append_rows),
+                )
+
     def _validate_causal_replay_state(self) -> None:
         """Fail closed if durable append-generation/cutoff evidence is inconsistent."""
 
@@ -887,6 +925,77 @@ class SQLiteMarketStore:
         if row[0] >= _SQLITE_INTEGER_MAX:
             raise OverflowError("market event append generation exhausted")
         return row[0] + 1
+
+    def _replay_append_authority(self) -> MonotonicWorkspaceAuthority:
+        database_path = self.path.absolute()
+        return MonotonicWorkspaceAuthority(
+            workspace=database_path.parent,
+            domain=_REPLAY_APPEND_MACHINE_DOMAIN,
+            key=f"{_REPLAY_APPEND_MACHINE_KEY_PREFIX}{database_path.name}",
+        )
+
+    def _validated_replay_append_rows(
+        self,
+    ) -> tuple[tuple[int, str, str], ...]:
+        raw_rows = self.connection.execute(
+            """SELECT c.append_generation, m.dedupe_key, m.payload_json
+               FROM market_event_commit_order AS c
+               JOIN market_events AS m ON m.dedupe_key = c.dedupe_key
+               WHERE c.append_generation > 0
+               ORDER BY c.append_generation, m.dedupe_key"""
+        ).fetchall()
+        rows: list[tuple[int, str, str]] = []
+        for generation, dedupe_key, payload_json in raw_rows:
+            if (
+                type(generation) is not int
+                or generation <= 0
+                or type(dedupe_key) is not str
+                or not dedupe_key
+                or type(payload_json) is not str
+            ):
+                raise ValueError(
+                    "market event positive append authority is invalid"
+                )
+            event = _event_from_history_row(
+                self.connection.execute(
+                    f"""SELECT {_HISTORY_COLUMNS_SQL} FROM market_events
+                        WHERE dedupe_key=?""",
+                    (dedupe_key,),
+                ).fetchone()
+            )
+            if _canonical_payload(event) != payload_json:
+                raise ValueError(
+                    "market event positive append payload is not canonical"
+                )
+            rows.append((generation, dedupe_key, payload_json))
+        return tuple(rows)
+
+    @staticmethod
+    def _replay_append_issuance_lock(
+        authority: MonotonicWorkspaceAuthority,
+    ) -> WorkspaceEconomicLock:
+        return WorkspaceEconomicLock(
+            authority.journal_dir / "replay-append-issuance"
+        )
+
+    @staticmethod
+    def _recover_replay_append_authority(
+        authority: MonotonicWorkspaceAuthority,
+        observed_state_sha256: str | None,
+    ) -> None:
+        try:
+            authority.recover(observed_state_sha256=observed_state_sha256)
+            return
+        except MonotonicAuthorityRecoveryRequiredError:
+            history = authority.read_history()
+            if not history or history[-1].phase is not AuthorityPhase.PREPARE:
+                raise
+            pending = history[-1]
+            authority.recover(
+                observed_state_sha256=observed_state_sha256,
+                tx_id=pending.tx_id,
+                semantic_binding_sha256=pending.semantic_binding_sha256,
+            )
 
     def _replay_cutoff_authority(self) -> MonotonicWorkspaceAuthority:
         database_path = self.path.absolute()
@@ -1164,20 +1273,98 @@ class SQLiteMarketStore:
             )
         return True
 
+    def _append_product_issued(
+        self,
+        events: Iterable[MarketEvent],
+    ) -> list[MarketEvent]:
+        authority = self._replay_append_authority()
+        accepted: list[MarketEvent] = []
+        with self._replay_append_issuance_lock(authority):
+            with self._connection_lock:
+                self._validate_causal_replay_state()
+                append_rows = self._validated_replay_append_rows()
+                observed_state_sha256 = _replay_append_state_sha256(append_rows)
+                self._recover_replay_append_authority(
+                    authority,
+                    observed_state_sha256,
+                )
+
+                prepared: tuple[str, str, str | None] | None = None
+                self.connection.execute("BEGIN IMMEDIATE")
+                try:
+                    self._validate_causal_replay_state()
+                    append_rows = self._validated_replay_append_rows()
+                    observed_state_sha256 = _replay_append_state_sha256(
+                        append_rows
+                    )
+                    self._recover_replay_append_authority(
+                        authority,
+                        observed_state_sha256,
+                    )
+                    for event in events:
+                        if self._insert_one(event):
+                            accepted.append(event)
+
+                    intended_rows = self._validated_replay_append_rows()
+                    intended_state_sha256 = _replay_append_state_sha256(
+                        intended_rows
+                    )
+                    if intended_state_sha256 != observed_state_sha256:
+                        if intended_state_sha256 is None:
+                            raise RuntimeError(
+                                "positive append transition has no authority digest"
+                            )
+                        binding_sha256 = _replay_append_binding_sha256(
+                            intended_rows
+                        )
+                        tx_id = f"market-append-{uuid.uuid4().hex}"
+                        authority.prepare(
+                            tx_id=tx_id,
+                            observed_state_sha256=observed_state_sha256,
+                            intended_state_sha256=intended_state_sha256,
+                            semantic_binding_sha256=binding_sha256,
+                        )
+                        prepared = (
+                            tx_id,
+                            binding_sha256,
+                            observed_state_sha256,
+                        )
+                    self.connection.commit()
+                except Exception as exc:
+                    self.connection.rollback()
+                    if prepared is not None:
+                        tx_id, binding_sha256, previous_state_sha256 = prepared
+                        try:
+                            authority.abort(
+                                tx_id=tx_id,
+                                observed_state_sha256=previous_state_sha256,
+                                semantic_binding_sha256=binding_sha256,
+                            )
+                        except Exception as abort_error:
+                            exc.add_note(
+                                "independent append-authority PREPARE could not be "
+                                f"aborted cleanly: {type(abort_error).__name__}: "
+                                f"{abort_error}"
+                            )
+                    raise
+
+                self._validate_causal_replay_state()
+                committed_rows = self._validated_replay_append_rows()
+                committed_state_sha256 = _replay_append_state_sha256(
+                    committed_rows
+                )
+                self._recover_replay_append_authority(
+                    authority,
+                    committed_state_sha256,
+                )
+        return accepted
+
     def append(self, event: MarketEvent) -> bool:
-        with self._connection_lock:
-            with self.connection:
-                return self._insert_one(event)
+        return bool(self._append_product_issued((event,)))
 
     def append_batch_accepted(self, events: Iterable[MarketEvent]) -> list[MarketEvent]:
-        """Insert one normalized batch in one transaction and return newly accepted events."""
-        accepted: list[MarketEvent] = []
-        with self._connection_lock:
-            with self.connection:
-                for event in events:
-                    if self._insert_one(event):
-                        accepted.append(event)
-        return accepted
+        """Insert one normalized batch under independent append issuance authority."""
+        return self._append_product_issued(events)
 
     def append_many(self, events: Iterable[MarketEvent]) -> int:
         return len(self.append_batch_accepted(events))
@@ -1216,6 +1403,12 @@ class SQLiteMarketStore:
         with self._replay_cutoff_issuance_lock(authority):
             with self._connection_lock:
                 self._validate_causal_replay_state()
+                append_authority = self._replay_append_authority()
+                append_rows = self._validated_replay_append_rows()
+                self._recover_replay_append_authority(
+                    append_authority,
+                    _replay_append_state_sha256(append_rows),
+                )
                 cutoff_rows = self._validated_replay_cutoff_rows()
                 observed_state_sha256 = (
                     self._replay_cutoff_authority_state_sha256(cutoff_rows)

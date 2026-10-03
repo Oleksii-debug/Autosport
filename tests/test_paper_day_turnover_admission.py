@@ -1,6 +1,7 @@
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from pathlib import Path
 
 import pytest
 
@@ -152,6 +153,47 @@ def test_admission_rejects_lock_validator_dependency_rebinding(tmp_path):
     finally:
         validator_globals["_open_read_only_descriptor"] = original_open
 
+    persisted = PaperBook.load(tmp_path / "paper_book.json")
+    assert persisted.tickets == {}
+
+
+def test_admission_rejects_workspace_path_rebinding_before_mutation(tmp_path):
+    book = PaperBook("100")
+    book.save(tmp_path / "paper_book.json")
+    policy = PaperRiskPolicy(
+        max_ticket_fraction=Decimal("1"),
+        max_committed_fraction=Decimal("1"),
+        minimum_cash_reserve_fraction=Decimal("0"),
+    )
+    candidate = _leg("workspace-path-dispatch")
+    original_resolve = Path.resolve
+    hostile_called = False
+
+    def hostile_resolve(self, *args, **kwargs):
+        nonlocal hostile_called
+        del self, args, kwargs
+        hostile_called = True
+        return tmp_path
+
+    try:
+        Path.resolve = hostile_resolve
+        with pytest.raises(
+            RuntimeError,
+            match="economic admission workspace path authority changed",
+        ):
+            admit_paper_ticket(
+                workspace=tmp_path,
+                book=book,
+                risk_policy=policy,
+                stake=Decimal("1"),
+                legs=(candidate,),
+                reason="workspace path dispatch must remain canonical",
+                placed_at="2026-10-03T06:30:00Z",
+            )
+    finally:
+        Path.resolve = original_resolve
+
+    assert hostile_called is False
     persisted = PaperBook.load(tmp_path / "paper_book.json")
     assert persisted.tickets == {}
 

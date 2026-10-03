@@ -12,7 +12,12 @@ from .economic_goal_store import EconomicGoalStore
 from .monotonic_workspace_authority import MonotonicWorkspaceAuthority
 from .paper import PaperBook
 from .recovery import transaction_history_requires_recovery
-from .risk import PaperRiskPolicy, ProposedTicketRiskContext, RiskDecision
+from .risk import (
+    PaperRiskPolicy,
+    ProposedTicketRiskContext,
+    RiskDecision,
+    RiskOfRuinEvidence,
+)
 from .risk_day_window import ProductDayRiskWindow, ProductDayRiskWindowStore
 from .risk_turnover_evidence import PaperDayTurnoverEvidence, PaperDayTurnoverResolver
 from .run_registry import RunRegistry, UnresolvedExperimentError
@@ -1214,6 +1219,10 @@ _PROPOSED_CONTEXT_FIELD_DESCRIPTOR_WITNESSES = tuple(
     (name, ProposedTicketRiskContext.__dict__[name])
     for name in tuple(ProposedTicketRiskContext.__dataclass_fields__)
 )
+_RISK_OF_RUIN_EVIDENCE_FIELD_DESCRIPTOR_WITNESSES = tuple(
+    (name, RiskOfRuinEvidence.__dict__[name])
+    for name in tuple(RiskOfRuinEvidence.__dataclass_fields__)
+)
 _TICKET_LEG_FIELD_DESCRIPTOR_WITNESSES = tuple(
     (name, TicketLeg.__dict__[name])
     for name in tuple(TicketLeg.__dataclass_fields__)
@@ -1435,6 +1444,10 @@ def _admission_risk_helper_authority_valid() -> bool:
         (
             ProposedTicketRiskContext,
             _PROPOSED_CONTEXT_FIELD_DESCRIPTOR_WITNESSES,
+        ),
+        (
+            RiskOfRuinEvidence,
+            _RISK_OF_RUIN_EVIDENCE_FIELD_DESCRIPTOR_WITNESSES,
         ),
         (TicketLeg, _TICKET_LEG_FIELD_DESCRIPTOR_WITNESSES),
         (MarketEvent, _MARKET_EVENT_FIELD_DESCRIPTOR_WITNESSES),

@@ -1584,3 +1584,69 @@ def test_runtime_authority_rejects_configure_code_replacement(
             )
     finally:
         target.__code__ = original_code
+
+
+@pytest.mark.parametrize(
+    ("attribute", "replacement"),
+    (
+        ("STORE_SCHEMA", "hostile.runtime.store"),
+        ("STORE_SCHEMA_VERSION", 999),
+        ("RECORD_SCHEMA", "hostile.runtime.record"),
+        ("RECORD_SCHEMA_VERSION", 999),
+        ("_EMPTY_CHAIN_SHA256", "f" * 64),
+        ("_HEX", frozenset("0123456789abcdefg")),
+        ("_AUTHORITY_DOMAIN", "hostile-runtime-authority"),
+        ("_AUTHORITY_BINDING_SCHEMA", "hostile.runtime.binding"),
+        ("_AUTHORITY_BINDING_SCHEMA_VERSION", 999),
+    ),
+)
+def test_runtime_authority_rejects_static_contract_rebinding_before_authority_construction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    attribute: str,
+    replacement: object,
+) -> None:
+    path = tmp_path / "deployment-runtime-authority.json"
+    authority_root = _authority_root(tmp_path)
+    monkeypatch.setattr(
+        deployment_runtime_authority,
+        attribute,
+        replacement,
+    )
+
+    with pytest.raises(
+        DeploymentRuntimeAuthorityError,
+        match="static contract was replaced",
+    ):
+        DeploymentRuntimeAuthorityStore.initialize_pristine(
+            path,
+            authority_root=authority_root,
+        )
+
+    assert not path.exists()
+    assert not authority_root.exists()
+
+
+def test_runtime_authority_revalidates_static_contract_before_existing_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "deployment-runtime-authority.json"
+    store = DeploymentRuntimeAuthorityStore.initialize_pristine(
+        path,
+        authority_root=_authority_root(tmp_path),
+    )
+    pristine_bytes = path.read_bytes()
+
+    monkeypatch.setattr(
+        deployment_runtime_authority,
+        "_AUTHORITY_DOMAIN",
+        "hostile-runtime-authority",
+    )
+    with pytest.raises(
+        DeploymentRuntimeAuthorityError,
+        match="static contract was replaced",
+    ):
+        store.records()
+
+    assert path.read_bytes() == pristine_bytes

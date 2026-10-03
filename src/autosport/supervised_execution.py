@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import threading
 import weakref
 from dataclasses import dataclass, field
+from types import MappingProxyType
 from datetime import datetime, timezone
 from decimal import Decimal
 from enum import Enum
@@ -759,6 +761,15 @@ def _install_bound_supervised_execution_plan_authority() -> None:
     witness_code = getattr(witness_fn, "__code__", None)
     token_guard = object()
 
+    # Token construction alone is not sufficient provenance: an in-process caller can
+    # recover the nested token type and bypass __init__ with object.__new__. Keep an
+    # independent copy-on-write exact-object registry for first product issuance.
+    # The immutable mapping exposed through closure inspection cannot be mutated in place,
+    # while weak references prevent authority bookkeeping from retaining dead plans.
+    registry_lock = threading.RLock()
+    immutable_mapping_type = MappingProxyType
+    issued = immutable_mapping_type({})
+
     class IssuanceToken:
         __slots__ = ("reference", "witness")
 
@@ -809,6 +820,26 @@ def _install_bound_supervised_execution_plan_authority() -> None:
         witness = witness_fn(value)
         token = token_type(token_guard, value, witness)
         object.__setattr__(value, "_product_issuance_token", token)
+        identity = id(value)
+
+        def clear(
+            reference: weakref.ReferenceType[BoundSupervisedExecutionPlan],
+            *,
+            _identity: int = identity,
+        ) -> None:
+            nonlocal issued
+            with registry_lock:
+                record = issued.get(_identity)
+                if record is not None and record[0] is reference:
+                    updated = dict(issued)
+                    updated.pop(_identity, None)
+                    issued = immutable_mapping_type(updated)
+
+        reference = weakref.ref(value, clear)
+        with registry_lock:
+            updated = dict(issued)
+            updated[identity] = (reference, witness)
+            issued = immutable_mapping_type(updated)
         return value
 
     def assert_authoritative(value: BoundSupervisedExecutionPlan) -> None:
@@ -824,6 +855,16 @@ def _install_bound_supervised_execution_plan_authority() -> None:
             type(token) is not token_type
             or token.reference() is not value
             or token.witness != witness
+        ):
+            raise SupervisedExecutionError(
+                "bound supervised execution plan is not current canonical product issuance"
+            )
+        with registry_lock:
+            record = issued.get(id(value))
+        if (
+            record is None
+            or record[0]() is not value
+            or record[1] != witness
         ):
             raise SupervisedExecutionError(
                 "bound supervised execution plan is not current canonical product issuance"

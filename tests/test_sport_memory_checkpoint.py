@@ -2,10 +2,11 @@ from __future__ import annotations
 
 from hashlib import sha256
 import json
-
-import pytest
 from unittest.mock import patch
 
+import pytest
+
+import autosport.sport_memory_checkpoint as checkpoint_module
 from autosport.learning_environment import EvidenceTruth
 from autosport.opponent_intelligence import (
     ObservedPerformance,
@@ -638,6 +639,41 @@ def test_bound_runtime_detects_direct_dict_and_selector_path_drift(tmp_path):
     refreshed = runtime._refresh_bound_authority()
     assert refreshed.path == opponent.path
     assert refreshed.identity_registry.path == identity.path
+
+
+def test_runtime_deleted_during_open_cannot_become_empty_in_memory_authority(
+    tmp_path,
+):
+    identity, opponent = _canonical_stores(tmp_path)
+    checkpoint_path, runtime_path = _paths(tmp_path)
+    initialize_or_open_bound_sport_memory_runtime(
+        runtime_path,
+        checkpoint_path,
+        identity,
+        opponent,
+    )
+    original_bound_runtime = checkpoint_module.BoundSportMemoryRuntime
+
+    def delete_then_construct(*args, **kwargs):
+        runtime_path.unlink()
+        return original_bound_runtime(*args, **kwargs)
+
+    with patch(
+        "autosport.sport_memory_checkpoint.BoundSportMemoryRuntime",
+        side_effect=delete_then_construct,
+    ):
+        with pytest.raises(
+            SportMemoryCheckpointError,
+            match="runtime disappeared during open",
+        ):
+            open_bound_sport_memory_runtime(
+                runtime_path,
+                checkpoint_path,
+                identity,
+                opponent,
+            )
+
+    assert not runtime_path.exists()
 
 
 def test_committed_checkpoint_with_missing_runtime_fails_closed_without_reinitializing(tmp_path):

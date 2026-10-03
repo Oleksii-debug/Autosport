@@ -367,59 +367,6 @@ class WorkflowScopedGitHubApi(GitHubApi):
                     "canonical base cancellation authority changed"
                 )
 
-            # Production uses the canonical inherited GitHubApi._request. Focused
-            # deterministic fixtures subclass this API solely to provide a transport
-            # double. Permit exactly one stable direct-subclass transport override,
-            # while keeping every authority-bearing resolver canonical and rejecting
-            # instance shadows or mutations of the production request implementation.
-            canonical_request_code = None
-            for helper_name, expected, expected_code in helper_dispatch:
-                if helper_name == "_request":
-                    if canonical_request_code is not None:
-                        raise CancellationError(
-                            "scoped cancellation revalidation dispatch changed"
-                        )
-                    if expected is not request_impl:
-                        raise CancellationError(
-                            "scoped cancellation revalidation dispatch changed"
-                        )
-                    canonical_request_code = expected_code
-            if (
-                canonical_request_code is None
-                or getattr(request_impl, "__code__", None)
-                is not canonical_request_code
-            ):
-                raise CancellationError(
-                    "scoped cancellation revalidation dispatch changed"
-                )
-
-            request_bound = getattr(self, "_request", None)
-            request_func = getattr(request_bound, "__func__", None)
-            request_code = getattr(request_func, "__code__", None)
-            if (
-                getattr(request_bound, "__self__", None) is not self
-                or request_func is None
-                or request_code is None
-            ):
-                raise CancellationError(
-                    "scoped cancellation revalidation dispatch changed"
-                )
-            if request_func is not request_impl:
-                mro = type(self).__mro__
-                if len(mro) < 2:
-                    raise CancellationError(
-                        "scoped cancellation revalidation dispatch changed"
-                    )
-                direct_base = mro[1]
-                if (
-                    vars(direct_base).get("_request") is not None
-                    or getattr(direct_base, "_request", None) is not request_impl
-                    or vars(type(self)).get("_request") is not request_func
-                ):
-                    raise CancellationError(
-                        "scoped cancellation revalidation dispatch changed"
-                    )
-
             def require_helper_dispatch(name: str) -> None:
                 match = None
                 for helper_name, expected, expected_code in helper_dispatch:
@@ -435,15 +382,6 @@ class WorkflowScopedGitHubApi(GitHubApi):
                         "scoped cancellation revalidation dispatch changed"
                     )
                 expected, expected_code = match
-                if name == "_request":
-                    if (
-                        getattr(request_impl, "__code__", None)
-                        is not canonical_request_code
-                    ):
-                        raise CancellationError(
-                            "scoped cancellation revalidation dispatch changed"
-                        )
-                    expected, expected_code = request_func, request_code
                 bound = getattr(self, name, None)
                 if (
                     getattr(expected, "__code__", None) is not expected_code

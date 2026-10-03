@@ -36,7 +36,6 @@ class BetfairProviderConstraintError(ValueError):
 
 class BetfairConstraintResolutionState(str, Enum):
     NO_EVIDENCE = "NO_EVIDENCE"
-    CAUSALLY_UNAVAILABLE = "CAUSALLY_UNAVAILABLE"
     NO_APPLICABLE_RULE = "NO_APPLICABLE_RULE"
     REVIEW_EXPIRED = "REVIEW_EXPIRED"
     CONSISTENT_UNVERIFIED = "CONSISTENT_UNVERIFIED"
@@ -501,12 +500,14 @@ def resolve_betfair_standard_limit_constraint_evidence(
         if _utc(item.available_at, "available_at") <= current
     )
     if not causally_available:
+        # Future observations did not exist for this product decision cut.
+        # They must not alter historical state, candidate identity, or digest.
         return _result(
-            state=BetfairConstraintResolutionState.CAUSALLY_UNAVAILABLE,
+            state=BetfairConstraintResolutionState.NO_EVIDENCE,
             jurisdiction_scope=scope,
             currency_code=currency,
             as_of=current,
-            candidates=matching,
+            candidates=(),
         )
 
     applicable = tuple(

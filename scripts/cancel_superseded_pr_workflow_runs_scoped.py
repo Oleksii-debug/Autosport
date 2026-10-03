@@ -951,7 +951,9 @@ def _build_production_cancel_effect_boundary(
         raise RuntimeError("canonical cancellation effect boundary is unavailable")
 
     def cancel_or_defer(api: GitHubApi, run_id: int) -> bool:
-        if not isinstance(api, production_api_type):
+        if type(api) is not production_api_type:
+            if isinstance(api, production_api_type):
+                raise error_type("workflow run cancellation API type changed")
             if getattr(fallback, "__code__", None) is not fallback_code:
                 raise error_type("workflow run cancellation wrapper changed")
             return fallback(api, run_id)
@@ -1012,7 +1014,7 @@ def _build_explicit_run_identity_checker(
     ) -> bool:
         """Fail closed when explicit identity or its transport dispatch changes."""
 
-        if isinstance(api, workflow_scoped_api_type):
+        if type(api) is workflow_scoped_api_type:
             workflow_id_authority = object.__getattribute__(
                 api,
                 "_WorkflowScopedGitHubApi__workflow_id",
@@ -1081,6 +1083,8 @@ def _build_explicit_run_identity_checker(
                 and pull.get("number") == pr_number
             )
 
+        if isinstance(api, workflow_scoped_api_type):
+            return False
         candidate = getattr(api, "_explicit_run_identity_matches", None)
         if candidate is None:
             return True
@@ -1117,7 +1121,9 @@ def _build_live_pr_qualification_reader(
         api: WorkflowScopedGitHubApi,
         pr_number: int,
     ) -> tuple[str, bool] | object:
-        if not isinstance(api, workflow_scoped_api_type):
+        if type(api) is not workflow_scoped_api_type:
+            if isinstance(api, workflow_scoped_api_type):
+                raise CancellationError("live PR qualification API type changed")
             return api.live_pr_qualification(pr_number)
 
         def production_dispatch_current() -> bool:

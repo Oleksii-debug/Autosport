@@ -767,7 +767,7 @@ def _make_account_identity_authority():
             except (AttributeError, TypeError, ValueError, identity_error_type):
                 return False
 
-        return issue_origin, verify_origin
+        return issue_origin, verify_origin, execution_readback_network_dispatch_is_current
 
     return (
         build_client,

@@ -93,7 +93,7 @@ def test_active_unexpired_session_reuses_local_token(tmp_path):
     admission = lifecycle.begin_login(
         now=NOW + timedelta(minutes=1),
         access_token_available=True,
-    access_token_lineage_id=active.session_lineage_id,
+        access_token_lineage_id=active.session_lineage_id,
     )
 
     assert admission.action is ProphetXLoginAdmissionAction.REUSE_ACTIVE
@@ -209,7 +209,7 @@ def test_near_expiry_requires_renewal_without_login_fallback(tmp_path):
     admission = lifecycle.begin_login(
         now=active.access_expires_at - timedelta(minutes=1),
         access_token_available=True,
-    access_token_lineage_id=active.session_lineage_id,
+        access_token_lineage_id=active.session_lineage_id,
     )
 
     assert (
@@ -557,7 +557,7 @@ def test_renewal_is_single_flight_and_never_authorizes_login_fallback(tmp_path):
     due = lifecycle.begin_login(
         now=due_at,
         access_token_available=True,
-    access_token_lineage_id=active.session_lineage_id,
+        access_token_lineage_id=active.session_lineage_id,
     )
     assert due.action is ProphetXLoginAdmissionAction.RENEWAL_REQUIRED
 
@@ -590,7 +590,11 @@ def test_successful_renewal_preserves_session_lineage_and_exact_new_expiry(tmp_p
     lifecycle = _lifecycle(tmp_path)
     active = _active(lifecycle)
     due_at = active.access_expires_at - timedelta(minutes=1)
-    lifecycle.begin_login(now=due_at, access_token_available=True, access_token_lineage_id=active.session_lineage_id)
+    lifecycle.begin_login(
+        now=due_at,
+        access_token_available=True,
+        access_token_lineage_id=active.session_lineage_id,
+    )
     started = lifecycle.begin_renewal(now=due_at)
 
     renewed_expiry = due_at + timedelta(minutes=10)
@@ -611,7 +615,11 @@ def test_retryable_renewal_failure_retries_refresh_not_login(tmp_path):
     lifecycle = _lifecycle(tmp_path)
     active = _active(lifecycle)
     due_at = active.access_expires_at - timedelta(minutes=1)
-    lifecycle.begin_login(now=due_at, access_token_available=True, access_token_lineage_id=active.session_lineage_id)
+    lifecycle.begin_login(
+        now=due_at,
+        access_token_available=True,
+        access_token_lineage_id=active.session_lineage_id,
+    )
     started = lifecycle.begin_renewal(now=due_at)
     failed = lifecycle.complete_renewal_failure(
         attempt_id=started.attempt_id,
@@ -625,7 +633,7 @@ def test_retryable_renewal_failure_retries_refresh_not_login(tmp_path):
     login_admission = lifecycle.begin_login(
         now=due_at + timedelta(seconds=2),
         access_token_available=True,
-    access_token_lineage_id=active.session_lineage_id,
+        access_token_lineage_id=active.session_lineage_id,
     )
     assert login_admission.action is ProphetXLoginAdmissionAction.RENEWAL_REQUIRED
     assert login_admission.retry_at == failed.retry_not_before
@@ -641,7 +649,11 @@ def test_ambiguous_renewal_result_blocks_replacement_login_for_conservative_hold
     lifecycle = _lifecycle(tmp_path)
     active = _active(lifecycle)
     due_at = active.access_expires_at - timedelta(minutes=1)
-    lifecycle.begin_login(now=due_at, access_token_available=True, access_token_lineage_id=active.session_lineage_id)
+    lifecycle.begin_login(
+        now=due_at,
+        access_token_available=True,
+        access_token_lineage_id=active.session_lineage_id,
+    )
     started = lifecycle.begin_renewal(now=due_at)
     failed_at = due_at + timedelta(seconds=1)
     failed = lifecycle.complete_renewal_failure(
@@ -670,7 +682,11 @@ def test_crash_during_renewal_becomes_bounded_ambiguous_session_hold(tmp_path):
     lifecycle = _lifecycle(tmp_path)
     active = _active(lifecycle)
     due_at = active.access_expires_at - timedelta(minutes=1)
-    lifecycle.begin_login(now=due_at, access_token_available=True, access_token_lineage_id=active.session_lineage_id)
+    lifecycle.begin_login(
+        now=due_at,
+        access_token_available=True,
+        access_token_lineage_id=active.session_lineage_id,
+    )
     lifecycle.begin_renewal(now=due_at)
 
     restarted = _lifecycle(tmp_path)
@@ -695,7 +711,11 @@ def test_credential_rejected_during_renewal_stays_fail_closed(tmp_path):
     lifecycle = _lifecycle(tmp_path)
     active = _active(lifecycle)
     due_at = active.access_expires_at - timedelta(minutes=1)
-    lifecycle.begin_login(now=due_at, access_token_available=True, access_token_lineage_id=active.session_lineage_id)
+    lifecycle.begin_login(
+        now=due_at,
+        access_token_available=True,
+        access_token_lineage_id=active.session_lineage_id,
+    )
     started = lifecycle.begin_renewal(now=due_at)
     rejected = lifecycle.complete_renewal_failure(
         attempt_id=started.attempt_id,
@@ -718,7 +738,11 @@ def test_unambiguous_renewal_failure_after_original_expiry_allows_fresh_login(tm
     lifecycle = _lifecycle(tmp_path)
     active = _active(lifecycle)
     due_at = active.access_expires_at - timedelta(minutes=1)
-    lifecycle.begin_login(now=due_at, access_token_available=True, access_token_lineage_id=active.session_lineage_id)
+    lifecycle.begin_login(
+        now=due_at,
+        access_token_available=True,
+        access_token_lineage_id=active.session_lineage_id,
+    )
     started = lifecycle.begin_renewal(now=due_at)
     failed = lifecycle.complete_renewal_failure(
         attempt_id=started.attempt_id,
@@ -738,7 +762,11 @@ def test_revocation_during_renewal_preserves_ambiguous_refresh_slot_horizon(tmp_
     lifecycle = _lifecycle(tmp_path)
     active = _active(lifecycle)
     due_at = active.access_expires_at - timedelta(minutes=1)
-    lifecycle.begin_login(now=due_at, access_token_available=True, access_token_lineage_id=active.session_lineage_id)
+    lifecycle.begin_login(
+        now=due_at,
+        access_token_available=True,
+        access_token_lineage_id=active.session_lineage_id,
+    )
     lifecycle.begin_renewal(now=due_at)
 
     revoked_at = due_at + timedelta(seconds=1)
@@ -756,7 +784,11 @@ def test_renewal_persisted_state_remains_secret_free(tmp_path):
     lifecycle = _lifecycle(tmp_path)
     active = _active(lifecycle)
     due_at = active.access_expires_at - timedelta(minutes=1)
-    lifecycle.begin_login(now=due_at, access_token_available=True, access_token_lineage_id=active.session_lineage_id)
+    lifecycle.begin_login(
+        now=due_at,
+        access_token_available=True,
+        access_token_lineage_id=active.session_lineage_id,
+    )
     lifecycle.begin_renewal(now=due_at)
 
     raw = lifecycle.state_path.read_text(encoding="utf-8")
@@ -784,7 +816,11 @@ def test_successful_renewal_resets_transient_failure_backoff(tmp_path):
     lifecycle = _lifecycle(tmp_path)
     active = _active(lifecycle)
     due_at = active.access_expires_at - timedelta(minutes=1)
-    lifecycle.begin_login(now=due_at, access_token_available=True, access_token_lineage_id=active.session_lineage_id)
+    lifecycle.begin_login(
+        now=due_at,
+        access_token_available=True,
+        access_token_lineage_id=active.session_lineage_id,
+    )
 
     first_attempt = lifecycle.begin_renewal(now=due_at)
     first_failed_at = due_at + timedelta(seconds=1)
@@ -807,7 +843,11 @@ def test_successful_renewal_resets_transient_failure_backoff(tmp_path):
     assert renewed.last_renewal_failure_class is None
 
     next_due_at = renewed.access_expires_at - timedelta(minutes=1)
-    lifecycle.begin_login(now=next_due_at, access_token_available=True, access_token_lineage_id=active.session_lineage_id)
+    lifecycle.begin_login(
+        now=next_due_at,
+        access_token_available=True,
+        access_token_lineage_id=active.session_lineage_id,
+    )
     third_attempt = lifecycle.begin_renewal(now=next_due_at)
     third_failed_at = next_due_at + timedelta(seconds=1)
     third_failure = lifecycle.complete_renewal_failure(

@@ -129,7 +129,7 @@ def _reject_webview2_environment_overrides() -> None:
     active = [
         name
         for name in _WEBVIEW2_ENVIRONMENT_OVERRIDES
-        if (value := os.environ.get(name)) is not None and value.strip()
+        if (value := os.environ.get(name)) is not None and value != ""
     ]
     if active:
         raise WindowsWebViewUnavailable(

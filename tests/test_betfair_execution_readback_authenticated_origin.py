@@ -590,6 +590,33 @@ def test_execution_origin_predicate_rejects_http_client_ssl_module_rebind(
         ("_LIST_CURRENT_ORDERS", "SportsAPING/v1.0/listClearedOrders"),
     ),
 )
+@pytest.mark.parametrize(
+    "name",
+    (
+        "_execution_request_scope",
+        "_execution_evidence_payload",
+        "_canonical_sha256",
+        "_parse_current_order",
+        "_parse_cleared_order",
+    ),
+)
+def test_execution_readback_rejects_module_helper_rebind(
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+) -> None:
+    client = build_betfair_authenticated_client(
+        BetfairSessionCredentials("app-key", "session-token"),
+        account_label="acct-1",
+    )
+
+    monkeypatch.setattr(readonly_module, name, object())
+    with pytest.raises(
+        BetfairReadOnlyError,
+        match="origin authority implementation changed",
+    ):
+        _read(client)
+
+
 def test_execution_origin_predicate_rejects_request_or_endpoint_rebind(
     monkeypatch: pytest.MonkeyPatch,
     name: str,

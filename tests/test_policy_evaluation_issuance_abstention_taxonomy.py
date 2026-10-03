@@ -8,6 +8,7 @@ import pytest
 import autosport.external_validity_policy_issuance as issuance
 from autosport.external_validity_baseline import (
     BaselineDefinition,
+    BaselineKind,
     EvaluationContractFamily,
     FrozenBaselineProtocol,
     FrozenEvidenceScope,
@@ -25,7 +26,11 @@ def _sha(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def _protocol(keys: tuple[str, ...]) -> FrozenBaselineProtocol:
+def _protocol(
+    keys: tuple[str, ...],
+    *,
+    supported_baseline_kind: BaselineKind | None = None,
+) -> FrozenBaselineProtocol:
     scope = FrozenEvidenceScope(
         dataset_sha256=_sha("dataset"),
         dataset_cutoff=T0,
@@ -41,8 +46,12 @@ def _protocol(keys: tuple[str, ...]) -> FrozenBaselineProtocol:
             baseline_id=f"baseline:{kind.value}",
             implementation_sha256=_sha("impl:" + kind.value),
             config_sha256=_sha("config:" + kind.value),
-            supported=False,
-            unsupported_reason="not needed by issuance taxonomy regression",
+            supported=kind is supported_baseline_kind,
+            unsupported_reason=(
+                None
+                if kind is supported_baseline_kind
+                else "not needed by issuance taxonomy regression"
+            ),
         )
         for kind in REQUIRED_BASELINE_KINDS
     )
@@ -69,14 +78,24 @@ def _source(
     actions: tuple[tuple[str, str], ...],
     *,
     configured_abstain_action: str = "WAIT",
+    net_reward: str = "0",
+    cost: str = "0",
+    policy_loss: str | None = None,
 ) -> issuance._SourceEvaluation:
+    canonical_net_reward = str(Decimal(net_reward))
+    canonical_cost = str(Decimal(cost))
+    canonical_policy_loss = (
+        str(-Decimal(canonical_net_reward))
+        if policy_loss is None
+        else str(Decimal(policy_loss))
+    )
     samples = [
         {
             "sample_id": sample_id,
             "regime_id": "table-tennis:pre-match",
             "challenger_action": action,
-            "challenger_net_reward": "0",
-            "challenger_cost": "0",
+            "challenger_net_reward": canonical_net_reward,
+            "challenger_cost": canonical_cost,
             "case_payload": {
                 "sample_id": sample_id,
                 "source_evidence_sha256": _sha("evidence:" + sample_id),
@@ -108,7 +127,7 @@ def _source(
             "completed_at": T1,
             "samples": samples,
             "challenger_metrics": {
-                "policy_loss": "0",
+                "policy_loss": canonical_policy_loss,
                 "abstention_rate": str(abstention_rate),
                 "action_rate": str(action_rate),
             },
@@ -214,3 +233,89 @@ def test_product_issuance_matches_canonical_nonterminating_rate_precision():
     assert issued.observed_count == 3
     assert issued.abstention_count == 1
     assert issued.scored_count == 2
+
+
+
+def test_no_action_baseline_excludes_hindsight_reward_and_preserves_cost():
+    actions = (("case-a", "WAIT"), ("case-b", "NO_BET"))
+    protocol = _protocol(
+        ("case-a", "case-b"),
+        supported_baseline_kind=BaselineKind.NO_BET_WAIT,
+    )
+
+    issued, projection = issuance._derive_policy_evaluation(
+        protocol,
+        issuance._target(protocol, BaselineKind.NO_BET_WAIT),
+        _source(actions, net_reward="0.75", cost="0.25"),
+    )
+
+    assert issued.observed_count == 2
+    assert issued.scored_count == 0
+    assert issued.abstention_count == 2
+    assert Decimal(issued.metric_value) == Decimal("0")
+    assert Decimal(issued.uncertainty_low) == Decimal("0")
+    assert Decimal(issued.uncertainty_high) == Decimal("0")
+    assert Decimal(issued.total_cost) == Decimal("0.5")
+    assert projection["projection_rule"] == (
+        "no_action_action_utility=0;"
+        "counterfactual_wait_reward_excluded;"
+        "applicable_cost_preserved_separately"
+    )
+
+
+def test_no_action_baseline_rejects_material_action_even_when_source_metrics_reconcile():
+    actions = (("case-a", "WAIT"), ("case-b", "BET"))
+    protocol = _protocol(
+        ("case-a", "case-b"),
+        supported_baseline_kind=BaselineKind.NO_BET_WAIT,
+    )
+
+    with pytest.raises(
+        issuance.ProductPolicyEvaluationIssuanceError,
+        match="must abstain canonically on every frozen sample",
+    ):
+        issuance._derive_policy_evaluation(
+            protocol,
+            issuance._target(protocol, BaselineKind.NO_BET_WAIT),
+            _source(actions, net_reward="0.5"),
+        )
+
+
+def test_no_action_baseline_rejects_custom_abstention_alias():
+    actions = (("case-a", "SKIP"),)
+    protocol = _protocol(
+        ("case-a",),
+        supported_baseline_kind=BaselineKind.NO_BET_WAIT,
+    )
+
+    # SKIP remains a valid custom abstention for generic policy metrics, but the
+    # frozen NO_BET_WAIT control is narrower: only canonical WAIT/NO_BET semantics
+    # can establish that no betting action occurred.
+    with pytest.raises(
+        issuance.ProductPolicyEvaluationIssuanceError,
+        match="must abstain canonically on every frozen sample",
+    ):
+        issuance._derive_policy_evaluation(
+            protocol,
+            issuance._target(protocol, BaselineKind.NO_BET_WAIT),
+            _source(
+                actions,
+                configured_abstain_action="SKIP",
+                net_reward="1.25",
+            ),
+        )
+
+
+def test_candidate_projection_keeps_reconciled_predictive_utility_semantics():
+    actions = (("case-a", "WAIT"), ("case-b", "NO_BET"))
+    protocol = _protocol(("case-a", "case-b"))
+
+    issued, projection = issuance._derive_policy_evaluation(
+        protocol,
+        _target(),
+        _source(actions, net_reward="0.75", cost="0.25"),
+    )
+
+    assert Decimal(issued.metric_value) == Decimal("0.75")
+    assert Decimal(issued.total_cost) == Decimal("0.5")
+    assert projection["projection_rule"] == "predictive_net_utility=-policy_loss"

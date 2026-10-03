@@ -1282,6 +1282,7 @@ def _derive_policy_evaluation(
         {abstain_action}
     )
     sample_ids: list[str] = []
+    sample_actions: list[str] = []
     rows: list[tuple[str, str, Decimal]] = []
     total_cost = Decimal(0)
     abstention_count = 0
@@ -1313,6 +1314,7 @@ def _derive_policy_evaluation(
                 "source case source_evidence_sha256",
             )
             sample_ids.append(sample_id)
+            sample_actions.append(action)
             rows.append((sample_id, regime_id, net))
             total_cost += cost
             if action in abstention_actions:
@@ -1378,6 +1380,31 @@ def _derive_policy_evaluation(
             "source sample utility does not reconcile to canonical policy_loss"
         )
 
+    projection_rule = "predictive_net_utility=-policy_loss"
+    if target.baseline_kind is BaselineKind.NO_BET_WAIT:
+        if any(
+            action not in CANONICAL_PAPER_ABSTENTION_ACTIONS
+            for action in sample_actions
+        ):
+            raise ProductPolicyEvaluationIssuanceError(
+                "NO_BET_WAIT source policy must abstain canonically on every frozen sample"
+            )
+        # The paired evaluator may carry qualified counterfactual WAIT/NO_BET reward
+        # for ordinary learning/scientific use. NO_ACTION realizes none of that
+        # counterfactual value, so product issuance cannot convert hindsight
+        # avoided-loss knowledge into factual action utility. Applicable costs stay
+        # separately represented by total_cost and are deliberately preserved.
+        rows = [
+            (sample_id, regime_id, Decimal(0))
+            for sample_id, regime_id, _source_net in rows
+        ]
+        metric_value = Decimal(0)
+        projection_rule = (
+            "no_action_action_utility=0;"
+            "counterfactual_wait_reward_excluded;"
+            "applicable_cost_preserved_separately"
+        )
+
     low, high = _bootstrap_interval(protocol, rows)
     evaluated_at = _text(source.completed_at, "source completed_at")
     provisional = PolicyEvaluation(
@@ -1422,7 +1449,7 @@ def _derive_policy_evaluation(
         "source_policy_evaluation_sha256": source.policy_evaluation_sha256,
         "source_metric": "policy_loss",
         "projection_metric": protocol.primary_metric,
-        "projection_rule": "predictive_net_utility=-policy_loss",
+        "projection_rule": projection_rule,
         "uncertainty_method": protocol.uncertainty_method,
         "bootstrap_replicates": _BOOTSTRAP_REPLICATES,
         "bootstrap_schedule": "sha256-frozen-protocol-cohort-sample-blocks-v1",

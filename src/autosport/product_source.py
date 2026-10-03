@@ -32,7 +32,11 @@ from .monotonic_workspace_authority import (
 from .json_integrity import strict_json_loads
 from .parlayapi_provider import ParlayApiTableTennisProvider
 from .providers import CanonicalNormalizer, MarketProvider, ProviderBatch, ProviderQuote
-from .workspace_lock import WorkspaceEconomicLock, WorkspaceEconomicLockError
+from .workspace_lock import (
+    WorkspaceEconomicLock,
+    WorkspaceEconomicLockError,
+    _open_read_only_descriptor,
+)
 
 
 class ProductSourceError(RuntimeError):
@@ -266,47 +270,77 @@ class ParlayApiProductSource:
             )
 
         try:
-            handle = path.open("rb")
+            descriptor = _open_read_only_descriptor(path)
         except OSError as exc:
             raise ProductSourceStateError(
                 "cannot verify durable product source state"
             ) from exc
+        try:
+            handle = os.fdopen(descriptor, "rb", closefd=True)
+        except BaseException:
+            os.close(descriptor)
+            raise
+
         with handle:
+            verification_descriptor: int | None = None
+            final_descriptor: int | None = None
             try:
                 opened_before = os.fstat(handle.fileno())
                 current = os.stat(path, follow_symlinks=False)
-                with path.open("rb") as verification:
-                    same_file = os.path.sameopenfile(
-                        handle.fileno(),
-                        verification.fileno(),
-                    )
+                verification_descriptor = _open_read_only_descriptor(path)
+                verification_stat = os.fstat(verification_descriptor)
+                same_file = os.path.sameopenfile(
+                    handle.fileno(),
+                    verification_descriptor,
+                )
                 if (
                     not same_file
                     or not stat.S_ISREG(opened_before.st_mode)
+                    or not stat.S_ISREG(verification_stat.st_mode)
                     or opened_before.st_nlink != 1
-                    or not self._stable_state_metadata(path_before, opened_before)
+                    or verification_stat.st_nlink != 1
                     or not self._stable_state_metadata(path_before, current)
                 ):
                     raise ProductSourceStateError(
                         "durable product source state changed while validating"
                     )
+
                 payload = handle.read(self._MAX_STATE_BYTES + 1)
                 opened_after = os.fstat(handle.fileno())
                 current_after = os.stat(path, follow_symlinks=False)
+                final_descriptor = _open_read_only_descriptor(path)
+                final_stat = os.fstat(final_descriptor)
+                same_final_file = os.path.sameopenfile(
+                    handle.fileno(),
+                    final_descriptor,
+                )
+                if (
+                    not same_final_file
+                    or not stat.S_ISREG(opened_after.st_mode)
+                    or not stat.S_ISREG(final_stat.st_mode)
+                    or opened_after.st_nlink != 1
+                    or final_stat.st_nlink != 1
+                    or len(payload) > self._MAX_STATE_BYTES
+                    or not self._stable_state_metadata(opened_before, opened_after)
+                    or not self._stable_state_metadata(path_before, current_after)
+                ):
+                    raise ProductSourceStateError(
+                        "durable product source state changed or exceeded its byte bound"
+                    )
             except ProductSourceStateError:
                 raise
             except OSError as exc:
                 raise ProductSourceStateError(
                     "cannot verify durable product source state"
                 ) from exc
-        if (
-            len(payload) > self._MAX_STATE_BYTES
-            or not self._stable_state_metadata(opened_before, opened_after)
-            or not self._stable_state_metadata(path_before, current_after)
-        ):
-            raise ProductSourceStateError(
-                "durable product source state changed or exceeded its byte bound"
-            )
+            finally:
+                for candidate in (final_descriptor, verification_descriptor):
+                    if candidate is not None:
+                        try:
+                            os.close(candidate)
+                        except OSError:
+                            pass
+
         try:
             return payload.decode("utf-8")
         except UnicodeDecodeError as exc:

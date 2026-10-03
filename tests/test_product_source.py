@@ -550,6 +550,29 @@ class ParlayApiProductSourceTests(unittest.TestCase):
                 source.state_path = old_path
             self.assertEqual(source.state_path.read_bytes(), original)
 
+    def test_state_reader_requires_canonical_no_follow_descriptor(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            source = ParlayApiProductSource(
+                _Provider([]),
+                workspace=Path(directory) / "workspace",
+                authority_root=Path(directory) / "authority",
+                lawful_terms_ref="terms:parlayapi:v1",
+                retention_ref="retention:parlayapi:v1",
+            )
+
+            with patch.object(
+                product_source_module,
+                "_open_read_only_descriptor",
+                side_effect=OSError("injected no-follow rejection"),
+            ) as no_follow:
+                with self.assertRaisesRegex(
+                    ProductSourceStateError,
+                    "cannot verify durable product source state",
+                ):
+                    source._read_state_unlocked()
+
+            no_follow.assert_called_once_with(source.state_path)
+
     def test_two_instances_cannot_last_writer_win_pending_snapshot(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory) / "workspace"

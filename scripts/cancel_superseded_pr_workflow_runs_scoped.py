@@ -386,7 +386,6 @@ class WorkflowScopedGitHubApi(GitHubApi):
         canonical_branch_head,
         live_pr_qualification,
         pull_request,
-        explicit_run_identity_matches,
     ):
         base_cancel_code = getattr(base_cancel, "__code__", None)
         helper_dispatch = (
@@ -419,11 +418,6 @@ class WorkflowScopedGitHubApi(GitHubApi):
                 "_pull_request",
                 pull_request,
                 getattr(pull_request, "__code__", None),
-            ),
-            (
-                "_explicit_run_identity_matches",
-                explicit_run_identity_matches,
-                getattr(explicit_run_identity_matches, "__code__", None),
             ),
         )
         if any(
@@ -549,7 +543,6 @@ class WorkflowScopedGitHubApi(GitHubApi):
         _canonical_branch_head,
         GitHubApi.live_pr_qualification,
         GitHubApi._pull_request,
-        _explicit_run_identity_matches,
     )
     del _build_cancel
 
@@ -728,33 +721,59 @@ class WorkflowScopedGitHubApi(GitHubApi):
         return tuple(cancelled)
 
 
-def _explicit_run_identity_is_current(
-    api: WorkflowScopedGitHubApi,
-    *,
-    run_id: int,
-    expected_head_sha: str,
-    pr_number: int,
-) -> bool:
-    """Fail closed when an explicit run no longer matches its scanned identity."""
+def _build_explicit_run_identity_checker(resolver):
+    resolver_code = getattr(resolver, "__code__", None)
+    if resolver_code is None:
+        raise RuntimeError("explicit run identity resolver executable is unavailable")
 
-    resolver = getattr(api, "_explicit_run_identity_matches", None)
-    if resolver is None:
-        # Focused test doubles predate the production boundary resolver. Production
-        # WorkflowScopedGitHubApi always supplies it.
-        return True
-    if not callable(resolver):
-        return False
-    try:
-        return (
-            resolver(
-                run_id=run_id,
-                expected_head_sha=expected_head_sha,
-                pr_number=pr_number,
+    def check(
+        api: WorkflowScopedGitHubApi,
+        *,
+        run_id: int,
+        expected_head_sha: str,
+        pr_number: int,
+    ) -> bool:
+        """Fail closed when an explicit run no longer matches its scanned identity."""
+
+        if isinstance(api, WorkflowScopedGitHubApi):
+            bound = getattr(api, "_explicit_run_identity_matches", None)
+            if (
+                getattr(resolver, "__code__", None) is not resolver_code
+                or getattr(bound, "__self__", None) is not api
+                or getattr(bound, "__func__", None) is not resolver
+            ):
+                return False
+            candidate = resolver
+            receiver = (api,)
+        else:
+            # Keep deliberately small focused unit-test doubles usable without
+            # weakening the production dispatch check above.
+            candidate = getattr(api, "_explicit_run_identity_matches", None)
+            if candidate is None:
+                return True
+            if not callable(candidate):
+                return False
+            receiver = ()
+        try:
+            return (
+                candidate(
+                    *receiver,
+                    run_id=run_id,
+                    expected_head_sha=expected_head_sha,
+                    pr_number=pr_number,
+                )
+                is True
             )
-            is True
-        )
-    except CancellationError:
-        return False
+        except CancellationError:
+            return False
+
+    return check
+
+
+_explicit_run_identity_is_current = _build_explicit_run_identity_checker(
+    WorkflowScopedGitHubApi._explicit_run_identity_matches
+)
+del _build_explicit_run_identity_checker
 
 
 def _explicit_singleton_pr_for_current_run(

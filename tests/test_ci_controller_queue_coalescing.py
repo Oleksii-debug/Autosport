@@ -13,6 +13,7 @@ import scripts.cancel_superseded_pr_workflow_runs_scoped as scoped_controller
 from scripts.cancel_superseded_pr_workflow_runs_scoped import (
     WorkflowScopedGitHubApi,
     _cancel_triggering_run_if_stale_or_nonqualifying,
+    _explicit_run_identity_is_current,
     _explicit_singleton_pr_for_current_run,
     _validated_event_pr_identity,
     cancel_superseded_explicit_pr_runs,
@@ -662,6 +663,29 @@ def test_explicit_run_boundary_requires_exact_workflow_head_and_singleton(
     payload["head_sha"] = HEAD
     payload["workflow_id"] = 356678489
     assert not api._explicit_run_identity_matches(
+        run_id=7012,
+        expected_head_sha=HEAD,
+        pr_number=303,
+    )
+
+
+def test_explicit_run_boundary_checker_rejects_instance_dispatch_shadow(
+    monkeypatch,
+) -> None:
+    api = WorkflowScopedGitHubApi(
+        repository="owner/repo",
+        token="token",
+        workflow_id=356678400,
+        workflow_name="CI",
+    )
+    monkeypatch.setattr(
+        api,
+        "_explicit_run_identity_matches",
+        lambda **_kwargs: True,
+    )
+
+    assert not _explicit_run_identity_is_current(
+        api,
         run_id=7012,
         expected_head_sha=HEAD,
         pr_number=303,

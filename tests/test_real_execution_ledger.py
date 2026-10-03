@@ -2226,9 +2226,11 @@ class RealExecutionLedgerTests(unittest.TestCase):
             path = Path(tmp) / "real.jsonl"
             ledger = RealExecutionLedger(path)
             witness = "a" * 64
+            approval_fingerprint = "b" * 64
             current = plan(
                 action(),
                 plan_id=f"supervised-v2-{witness}",
+                approval_id=f"approval-1@{approval_fingerprint}",
             )
             ledger.reserve_plan(current)
             ledger._bind_supervised_plan_issuance(

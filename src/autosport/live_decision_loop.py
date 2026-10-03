@@ -1550,33 +1550,37 @@ class PersistentLiveDecisionLoop:
             incremental=incremental,
         )
 
-        # A normal live cycle drains invalidations before taking this cut. If another
-        # durable update arrives while the cut is being assembled, never publish a
-        # strong decision from a state that is already known to have moved. The next
-        # cycle will route that pending invalidation and recompute from a new cut.
-        if incremental and snapshots:
+        # Every economic cut, including provider-gap ZERO, must linearize against
+        # one exact mirror revision. Incremental cuts additionally require a drained
+        # invalidation buffer because their maintained key set depends on that routing.
+        # Full cuts read the whole mirror and may safely include already-pending
+        # invalidations, but an update after capture and before the trailing revision
+        # witness must still force a retry.
+        if snapshots:
             revisions = {snapshot.revision for snapshot in snapshots.values()}
             if len(revisions) != 1:
                 raise _ConcurrentDecisionSnapshot(
                     "focused market inputs did not resolve to one mirror revision"
                 )
             captured_revision = next(iter(revisions))
-            # Linearize the cut only after invalidation-state reads. A market
-            # update can land between the first revision read and the final
-            # buffer getter; the trailing revision witness makes that window
-            # fail closed instead of publishing a stale economic cut.
-            revision_before_invalidation_read = self.mirror_updates.mirror.revision
-            pending_count = self.mirror_updates.pending_count
-            full_refresh_required = self.mirror_updates.full_refresh_required
-            revision_after_invalidation_read = self.mirror_updates.mirror.revision
-            if (
-                revision_before_invalidation_read != captured_revision
-                or pending_count
-                or full_refresh_required
-                or revision_after_invalidation_read != captured_revision
-            ):
+            if incremental:
+                revision_before_invalidation_read = self.mirror_updates.mirror.revision
+                pending_count = self.mirror_updates.pending_count
+                full_refresh_required = self.mirror_updates.full_refresh_required
+                revision_after_invalidation_read = self.mirror_updates.mirror.revision
+                if (
+                    revision_before_invalidation_read != captured_revision
+                    or pending_count
+                    or full_refresh_required
+                    or revision_after_invalidation_read != captured_revision
+                ):
+                    raise _ConcurrentDecisionSnapshot(
+                        "market revision advanced during decision snapshot capture; "
+                        "retrying before economic action"
+                    )
+            elif self.mirror_updates.mirror.revision != captured_revision:
                 raise _ConcurrentDecisionSnapshot(
-                    "market revision advanced during decision snapshot capture; "
+                    "market revision advanced during full decision snapshot capture; "
                     "retrying before economic action"
                 )
 

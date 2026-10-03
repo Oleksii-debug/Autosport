@@ -1185,6 +1185,10 @@ def _seal_provider_evidence_store_dispatch() -> None:
         for name in ("to_payload", "from_payload")
     )
     expected_path_type = type(Path("."))
+    expected_path_factory_methods = tuple(
+        _surface_witness(Path, name)
+        for name in ("__new__",)
+    )
     expected_path_methods = tuple(
         _surface_witness(expected_path_type, name)
         for name in ("__truediv__", "__str__", "exists", "read_text", "mkdir", "parent")
@@ -1311,9 +1315,12 @@ def _seal_provider_evidence_store_dispatch() -> None:
             raise ProviderObservationIntegrityError(
                 "provider evidence snapshot dispatch changed"
             )
-        if type(Path(".")) is not expected_path_type or not _require_surface_witnesses(
-            expected_path_type,
-            expected_path_methods,
+        if (
+            not _require_surface_witnesses(Path, expected_path_factory_methods)
+            or not _require_surface_witnesses(
+                expected_path_type,
+                expected_path_methods,
+            )
         ):
             raise ProviderObservationIntegrityError(
                 "provider evidence filesystem path dispatch changed"

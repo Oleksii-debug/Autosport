@@ -380,6 +380,7 @@ class BetfairInstructionReport:
     placed_date: str | None
     average_price_matched: Decimal
     size_matched: Decimal
+    order_status: str | None = None
 
     def __post_init__(self) -> None:
         if self.status not in {"SUCCESS", "FAILURE"}:
@@ -417,6 +418,13 @@ class BetfairInstructionReport:
         elif self.error_code is not None:
             raise BetfairSupervisedExecutionError(
                 "successful instruction cannot claim provider error_code"
+            )
+        if self.order_status is not None and self.order_status not in {
+            "EXECUTABLE",
+            "EXECUTION_COMPLETE",
+        }:
+            raise BetfairSupervisedExecutionError(
+                "unsupported Betfair order status"
             )
 
 
@@ -857,6 +865,11 @@ def _parse_place_orders_response(
     try:
         exact_echo = (
             str(echoed_selection) == action.selection_id
+            and _nonnegative_decimal(
+                echoed.get("handicap"),
+                "echoed handicap",
+            )
+            == Decimal("0")
             and echoed.get("side") == action.side
             and echoed.get("orderType") == "LIMIT"
             and _positive_decimal(
@@ -869,6 +882,7 @@ def _parse_place_orders_response(
                 "echoed size",
             )
             == action.requested_stake
+            and limit.get("persistenceType") == "LAPSE"
         )
     except BetfairSupervisedExecutionError as exc:
         raise BetfairPlaceOrdersAmbiguous(
@@ -906,6 +920,10 @@ def _parse_place_orders_response(
                 item.get("sizeMatched", 0),
                 "sizeMatched",
             ),
+            order_status=_optional_provider_text(
+                item.get("orderStatus"),
+                "orderStatus",
+            ),
         )
     except BetfairSupervisedExecutionError as exc:
         raise BetfairPlaceOrdersAmbiguous(
@@ -917,9 +935,17 @@ def _parse_place_orders_response(
             status == "FAILURE"
             and instruction.status != "FAILURE"
         )
+        or (
+            status == "PROCESSED_WITH_ERRORS"
+            and instruction.status != "FAILURE"
+        )
     ):
         raise BetfairPlaceOrdersAmbiguous(
             "placeOrders execution/instruction statuses conflict"
+        )
+    if status == "SUCCESS" and result.get("errorCode") is not None:
+        raise BetfairPlaceOrdersAmbiguous(
+            "successful placeOrders execution cannot carry provider errorCode"
         )
     if status == "FAILURE" and result.get("errorCode") is None:
         raise BetfairPlaceOrdersAmbiguous(
@@ -963,9 +989,13 @@ def _report_outcome(
     if instruction.status == "FAILURE":
         return PlaceOrdersOutcome.REJECTED
     if instruction.size_matched == action.requested_stake:
+        if instruction.order_status == "EXECUTABLE":
+            return PlaceOrdersOutcome.UNKNOWN
         return PlaceOrdersOutcome.ACCEPTED
     if instruction.size_matched > 0:
-        return PlaceOrdersOutcome.PARTIAL
+        if instruction.order_status == "EXECUTION_COMPLETE":
+            return PlaceOrdersOutcome.PARTIAL
+        return PlaceOrdersOutcome.UNKNOWN
     return PlaceOrdersOutcome.UNKNOWN
 
 

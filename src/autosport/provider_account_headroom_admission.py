@@ -167,8 +167,37 @@ def _canonical_digest(payload: dict[str, object]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
-def _utc_now() -> datetime:
-    return datetime.now(timezone.utc)
+def _utc_now(
+    *,
+    _datetime_now=datetime.now,
+    _utc=timezone.utc,
+) -> datetime:
+    return _datetime_now(_utc)
+
+
+def _read_headroom_utc_now(
+    *,
+    _clock=_utc_now,
+    _clock_code=getattr(_utc_now, "__code__", None),
+) -> datetime:
+    live = globals().get("_utc_now")
+    if (
+        live is not _clock
+        or getattr(live, "__code__", None) is not _clock_code
+    ):
+        raise ProviderAccountHeadroomError(
+            "canonical provider-account headroom clock authority changed"
+        )
+    value = _clock()
+    if (
+        type(value) is not datetime
+        or value.tzinfo is None
+        or value.utcoffset() is None
+    ):
+        raise ProviderAccountHeadroomError(
+            "canonical provider-account headroom clock returned invalid time"
+        )
+    return value.astimezone(timezone.utc)
 
 
 def _ledger_plan_ids(snapshot_payload: bytes) -> tuple[str, ...]:
@@ -632,7 +661,7 @@ def assess_provider_account_headroom(
         raise TypeError("ledger must be exact RealExecutionLedger")
     plan_id = _text(plan_id, "plan_id")
     action_id = _text(action_id, "action_id")
-    now = _utc_now()
+    now = _read_headroom_utc_now()
     available, currency, acquired_at, balance_observed_at = _require_live_balance(
         acquired,
         now=now,
@@ -779,7 +808,7 @@ def reserve_observed_provider_headroom(
             raise ProviderAccountHeadroomUnsupported(
                 "new internal reservation requires proven sufficient lower-bound headroom"
             )
-        now = _utc_now()
+        now = _read_headroom_utc_now()
         _require_live_balance(acquired, now=now)
         if now >= _timestamp(assessment.expires_at, "assessment expires_at"):
             raise ProviderAccountHeadroomStale(

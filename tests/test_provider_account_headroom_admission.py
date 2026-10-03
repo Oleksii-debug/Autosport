@@ -318,3 +318,35 @@ def test_exact_attempt_retry_is_idempotent_after_reservation(monkeypatch, tmp_pa
     assert second.attempt_fingerprint == first.attempt_fingerprint
     assert second.reserved_at == first.reserved_at
     assert ledger.attempt_state("attempt-1") is AttemptState.RESERVED
+
+
+def test_instance_shadow_cannot_bypass_snapshot_or_reservation_cas(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    acquired, _ = _acquire_balance(monkeypatch, tmp_path, "100")
+    action = _action("a1", "10")
+    ledger = _ledger_with_plans(tmp_path, _plan("p1", action))
+    calls = {"snapshot": 0, "begin": 0}
+
+    def fake_snapshot():
+        calls["snapshot"] += 1
+        raise AssertionError("instance-shadowed verified_snapshot must not run")
+
+    def fake_begin_attempt(**kwargs):
+        calls["begin"] += 1
+        raise AssertionError("instance-shadowed begin_attempt must not run")
+
+    ledger.verified_snapshot = fake_snapshot
+    ledger.begin_attempt = fake_begin_attempt
+
+    assessment = assess_provider_account_headroom(
+        ledger, acquired, plan_id="p1", action_id="a1"
+    )
+    reserved = reserve_observed_provider_headroom(
+        ledger, acquired, assessment, attempt_id="attempt-1"
+    )
+
+    assert calls == {"snapshot": 0, "begin": 0}
+    assert reserved.product_internal_reservation_proven is True
+    assert ledger.attempt_state("attempt-1") is AttemptState.RESERVED

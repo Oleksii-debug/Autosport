@@ -991,6 +991,45 @@ def test_store_save_rejects_workspace_lock_enter_rebind_before_dispatch(
     assert hostile_calls == []
 
 
+@pytest.mark.parametrize(
+    ("owner", "name", "expected_message"),
+    [
+        (
+            CompleteGameBoardSnapshot,
+            "evidence_sha256",
+            "provider evidence snapshot dispatch changed",
+        ),
+        (
+            CompleteGameBoardRequest,
+            "source_id",
+            "provider evidence request dispatch changed",
+        ),
+    ],
+)
+def test_store_save_rejects_identity_property_code_mutation(
+    tmp_path,
+    monkeypatch,
+    owner,
+    name: str,
+    expected_message: str,
+):
+    snapshot = _capture(monkeypatch)
+    store = _store(tmp_path)
+    descriptor = getattr(owner, name)
+    original_getter = descriptor.fget
+
+    def hostile_getter(_self):
+        raise AssertionError("hostile identity property getter executed")
+
+    monkeypatch.setattr(original_getter, "__code__", hostile_getter.__code__)
+
+    with pytest.raises(
+        ProviderObservationIntegrityError,
+        match=expected_message,
+    ):
+        store.save(snapshot)
+
+
 def test_store_save_rejects_snapshot_evidence_identity_descriptor_rebind(
     tmp_path,
     monkeypatch,

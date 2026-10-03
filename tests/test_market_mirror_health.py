@@ -10,6 +10,7 @@ from autosport.market_mirror import MarketMirror
 from autosport.market_mirror_health import (
     HealthGatedMirrorDecisionIndex,
     ProviderDecisionEligibility,
+    ProviderHealthReplayBoundary,
 )
 from autosport.market_mirror_runtime import FocusedMirrorDependencyIndex
 
@@ -335,6 +336,110 @@ class HealthGatedMirrorDecisionIndexTests(unittest.TestCase):
                 ).events,
                 (),
             )
+
+
+    def test_provider_health_replay_boundary_is_canonical_and_round_trips(self) -> None:
+        boundary = ProviderHealthReplayBoundary(
+            source_id="provider-a",
+            recorded_at="2026-09-17T12:00:05+00:00",
+            transition_order=3,
+        )
+
+        self.assertEqual(
+            ProviderHealthReplayBoundary.from_dict(boundary.to_dict()),
+            boundary,
+        )
+        with self.assertRaisesRegex(ValueError, "requires recorded_at"):
+            ProviderHealthReplayBoundary(
+                source_id="provider-a",
+                recorded_at=None,
+                transition_order=1,
+            )
+        with self.assertRaisesRegex(ValueError, "cannot carry recorded_at"):
+            ProviderHealthReplayBoundary(
+                source_id="provider-a",
+                recorded_at="2026-09-17T12:00:05+00:00",
+                transition_order=0,
+            )
+        with self.assertRaisesRegex(ValueError, "non-negative integer"):
+            ProviderHealthReplayBoundary(
+                source_id="provider-a",
+                recorded_at=None,
+                transition_order=True,
+            )
+        with self.assertRaisesRegex(ValueError, "canonical fields"):
+            ProviderHealthReplayBoundary.from_dict(
+                {
+                    "source_id": "provider-a",
+                    "recorded_at": None,
+                    "transition_order": 0,
+                    "extra": "forged",
+                }
+            )
+
+    def test_publication_fence_rejects_health_horizon_that_advanced_after_capture(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            _, _, health_store, gate = self.build_gate(directory)
+            self.record_healthy(
+                health_store,
+                "provider-a",
+                now="2026-09-17T12:00:05+00:00",
+            )
+            as_of = datetime(2026, 9, 17, 12, 0, 10, tzinfo=timezone.utc)
+            boundaries = gate.bind_replay_boundaries(
+                ("provider-a",),
+                as_of=as_of,
+            )
+            self.assertEqual(boundaries[0].transition_order, 1)
+
+            health_store.record_failure(
+                "provider-a",
+                now="2026-09-17T12:00:08+00:00",
+                error=TimeoutError("late failure before publication"),
+            )
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "advanced before decision publication",
+            ):
+                with gate.hold_replay_boundaries(
+                    boundaries,
+                    as_of=as_of,
+                ):
+                    self.fail("advanced provider health must not enter publication")
+
+    def test_publication_fence_accepts_exact_unchanged_health_horizon(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            _, _, health_store, gate = self.build_gate(directory)
+            self.record_healthy(
+                health_store,
+                "provider-a",
+                now="2026-09-17T12:00:05+00:00",
+            )
+            as_of = datetime(2026, 9, 17, 12, 0, 10, tzinfo=timezone.utc)
+            boundaries = gate.bind_replay_boundaries(
+                ("provider-a",),
+                as_of=as_of,
+            )
+
+            entered = False
+            with gate.hold_replay_boundaries(
+                boundaries,
+                as_of=as_of,
+            ):
+                entered = True
+
+            self.assertTrue(entered)
+            replayed = gate.provider_health(
+                "provider-a",
+                as_of=as_of,
+                replay_boundary=boundaries[0],
+            )
+            self.assertEqual(
+                replayed.eligibility,
+                ProviderDecisionEligibility.ELIGIBLE,
+            )
+
 
 
 if __name__ == "__main__":

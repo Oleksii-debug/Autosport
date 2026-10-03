@@ -10,6 +10,7 @@ from autosport.agent_loop import (
     AgentLoopPhase,
     AgentLoopRuntime,
     AttributionComponent,
+    AttributionEvidenceGrade,
     AttributionFinding,
     AttributionStatus,
     ConflictingAgentLoopEvidenceError,
@@ -167,6 +168,7 @@ def _attribution(environment, transition, outcome, reward, **overrides):
             AttributionFinding(
                 component=AttributionComponent.FORECAST,
                 status=AttributionStatus.SUPPORTED,
+                evidence_grade=AttributionEvidenceGrade.SCIENTIFIC_COHORT_ESTIMATE,
                 evidence_sha256=EVIDENCE_SHA,
                 evidence_available_at="2026-09-19T13:05:03Z",
                 contribution=Decimal("0.10"),
@@ -175,6 +177,7 @@ def _attribution(environment, transition, outcome, reward, **overrides):
             AttributionFinding(
                 component=AttributionComponent.RANDOMNESS,
                 status=AttributionStatus.UNKNOWN,
+                evidence_grade=AttributionEvidenceGrade.NOT_IDENTIFIABLE,
                 evidence_sha256=RANDOMNESS_SHA,
                 evidence_available_at="2026-09-19T13:05:03Z",
                 reason_code="UNRESOLVED_RANDOMNESS",
@@ -1044,6 +1047,7 @@ def test_future_evidence_and_observed_simulated_relabel_fail_closed(
             AttributionFinding(
                 component=AttributionComponent.RANDOMNESS,
                 status=AttributionStatus.UNKNOWN,
+                evidence_grade=AttributionEvidenceGrade.NOT_IDENTIFIABLE,
                 evidence_sha256=RANDOMNESS_SHA,
                 evidence_available_at="2026-09-19T13:06:00Z",
                 reason_code="FUTURE_EVIDENCE",
@@ -1078,6 +1082,7 @@ def test_attribution_must_bind_exact_reward_and_unknown_cannot_invent_credit(
         AttributionFinding(
             component=AttributionComponent.RANDOMNESS,
             status=AttributionStatus.UNKNOWN,
+            evidence_grade=AttributionEvidenceGrade.NOT_IDENTIFIABLE,
             evidence_sha256=RANDOMNESS_SHA,
             evidence_available_at="2026-09-19T13:05:03Z",
             contribution=Decimal("1"),
@@ -1247,6 +1252,7 @@ def test_attribution_and_postmortem_identity_keys_are_causal_and_immutable():
     finding = AttributionFinding(
         component=AttributionComponent.RANDOMNESS,
         status=AttributionStatus.UNKNOWN,
+        evidence_grade=AttributionEvidenceGrade.NOT_IDENTIFIABLE,
         evidence_sha256=RANDOMNESS_SHA,
         evidence_available_at="2026-09-19T13:05:03Z",
         reason_code="UNRESOLVED",
@@ -1794,3 +1800,152 @@ def test_restart_rejects_self_consistent_cross_linked_agent_memory(tmp_path):
 
     rewrite_with_valid_state_digest(runtime.path, original)
     assert AgentLoopRuntime(runtime.path).snapshot().research_run_id is not None
+
+def test_new_durable_attribution_requires_explicit_evidence_grade(tmp_path):
+    environment = _environment()
+    runtime = _runtime(tmp_path, environment)
+    observation = _observation(environment)
+    runtime.begin_observation(
+        observation,
+        environment_identity=environment.identity,
+        at="2026-09-19T13:00:01Z",
+    )
+    _advance_to_action(runtime)
+    action = environment.act(
+        observation,
+        action_type="WAIT",
+        decision_at="2026-09-19T13:00:05Z",
+    )
+    runtime.commit_action(
+        action,
+        episode=environment.episode,
+        observation=observation,
+        effect_state=ExternalEffectState.NONE,
+        at="2026-09-19T13:00:05Z",
+    )
+    outcome, reward, transition = _resolve(environment, action)
+    runtime.record_resolution(
+        transition,
+        outcome=outcome,
+        reward=reward,
+        at="2026-09-19T13:05:02Z",
+    )
+    runtime.advance(
+        expected=AgentLoopPhase.EVALUATE,
+        at="2026-09-19T13:05:03Z",
+    )
+
+    ungraded = _attribution(
+        environment,
+        transition,
+        outcome,
+        reward,
+        findings=(
+            AttributionFinding(
+                component=AttributionComponent.FORECAST,
+                status=AttributionStatus.SUPPORTED,
+                evidence_sha256=EVIDENCE_SHA,
+                evidence_available_at="2026-09-19T13:05:03Z",
+                contribution=Decimal("0.10"),
+                reason_code="LEGACY_UNGRADED_INPUT",
+            ),
+        ),
+    )
+    with pytest.raises(
+        AgentLoopError,
+        match="require explicit evidence_grade",
+    ):
+        runtime.record_attribution(
+            ungraded,
+            at="2026-09-19T13:05:04Z",
+        )
+    assert runtime.snapshot().phase is AgentLoopPhase.ATTRIBUTE
+    assert runtime.snapshot().attribution_id is None
+
+    graded = _attribution(environment, transition, outcome, reward)
+    runtime.record_attribution(
+        graded,
+        at="2026-09-19T13:05:04Z",
+    )
+    durable = json_load(runtime.path)
+    grades = {
+        item["component"]: item["evidence_grade"]
+        for item in durable["attributions"][0]["findings"]
+    }
+    assert grades == {
+        AttributionComponent.FORECAST.value: (
+            AttributionEvidenceGrade.SCIENTIFIC_COHORT_ESTIMATE.value
+        ),
+        AttributionComponent.RANDOMNESS.value: (
+            AttributionEvidenceGrade.NOT_IDENTIFIABLE.value
+        ),
+    }
+    reopened = AgentLoopRuntime(runtime.path).snapshot()
+    assert reopened.attribution_id == graded.attribution_id
+
+    from dataclasses import replace
+
+    changed_grade = replace(
+        graded,
+        findings=(
+            replace(
+                graded.findings[0],
+                evidence_grade=AttributionEvidenceGrade.DESCRIPTIVE_ASSOCIATION,
+            ),
+            graded.findings[1],
+        ),
+    )
+    with pytest.raises(
+        ConflictingAgentLoopEvidenceError,
+        match="different immutable content",
+    ):
+        runtime.record_attribution(
+            changed_grade,
+            at="2026-09-19T13:05:05Z",
+        )
+
+    legacy_state = json_load(runtime.path)
+    for finding in legacy_state["attributions"][0]["findings"]:
+        finding.pop("evidence_grade")
+    rewrite_with_valid_state_digest(runtime.path, legacy_state)
+
+    legacy_findings = tuple(
+        replace(finding, evidence_grade=None) for finding in graded.findings
+    )
+    legacy = replace(graded, findings=legacy_findings)
+    legacy_runtime = AgentLoopRuntime(runtime.path)
+    assert legacy_runtime.snapshot().attribution_id == graded.attribution_id
+    retry = legacy_runtime.record_attribution(
+        legacy,
+        at="2026-09-19T13:05:05Z",
+    )
+    assert retry.attribution_id == graded.attribution_id
+
+
+def test_attribution_evidence_grade_fails_closed_on_identifiability_contradictions():
+    with pytest.raises(
+        AgentLoopError,
+        match="UNKNOWN attribution must be NOT_IDENTIFIABLE",
+    ):
+        AttributionFinding(
+            component=AttributionComponent.RANDOMNESS,
+            status=AttributionStatus.UNKNOWN,
+            evidence_grade=AttributionEvidenceGrade.FACTUAL_MECHANICAL,
+            evidence_sha256=RANDOMNESS_SHA,
+            evidence_available_at="2026-09-19T13:05:03Z",
+            reason_code="CONTRADICTORY_GRADE",
+        )
+
+    with pytest.raises(
+        AgentLoopError,
+        match="NOT_IDENTIFIABLE evidence must use UNKNOWN",
+    ):
+        AttributionFinding(
+            component=AttributionComponent.FORECAST,
+            status=AttributionStatus.SUPPORTED,
+            evidence_grade=AttributionEvidenceGrade.NOT_IDENTIFIABLE,
+            evidence_sha256=EVIDENCE_SHA,
+            evidence_available_at="2026-09-19T13:05:03Z",
+            reason_code="CONTRADICTORY_STATUS",
+        )
+

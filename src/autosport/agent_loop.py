@@ -110,6 +110,17 @@ class AttributionStatus(StrEnum):
     MIXED = "MIXED"
 
 
+class AttributionEvidenceGrade(StrEnum):
+    """Evidence-basis and identifiability category for one attribution finding."""
+
+    FACTUAL_MECHANICAL = "FACTUAL_MECHANICAL"
+    SCIENTIFIC_COHORT_ESTIMATE = "SCIENTIFIC_COHORT_ESTIMATE"
+    FROZEN_REPLAY_COUNTERFACTUAL = "FROZEN_REPLAY_COUNTERFACTUAL"
+    SIMULATED_COUNTERFACTUAL = "SIMULATED_COUNTERFACTUAL"
+    DESCRIPTIVE_ASSOCIATION = "DESCRIPTIVE_ASSOCIATION"
+    NOT_IDENTIFIABLE = "NOT_IDENTIFIABLE"
+
+
 _PRIMARY_NEXT: dict[AgentLoopPhase, AgentLoopPhase] = {
     AgentLoopPhase.OBSERVE: AgentLoopPhase.ASSESS,
     AgentLoopPhase.ASSESS: AgentLoopPhase.PLAN,
@@ -197,22 +208,41 @@ class AttributionFinding:
     evidence_available_at: str
     contribution: Decimal | None = None
     reason_code: str = "UNSPECIFIED"
+    evidence_grade: AttributionEvidenceGrade | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.component, AttributionComponent):
             raise AgentLoopError("component must be AttributionComponent")
         if not isinstance(self.status, AttributionStatus):
             raise AgentLoopError("status must be AttributionStatus")
+        if self.evidence_grade is not None and not isinstance(
+            self.evidence_grade, AttributionEvidenceGrade
+        ):
+            raise AgentLoopError(
+                "evidence_grade must be AttributionEvidenceGrade or None"
+            )
         _sha256(self.evidence_sha256, "evidence_sha256")
         _instant(self.evidence_available_at, "evidence_available_at")
         _text(self.reason_code, "reason_code")
         if self.contribution is not None:
             _decimal(self.contribution, "contribution")
-        if self.status is AttributionStatus.UNKNOWN and self.contribution is not None:
-            raise AgentLoopError("UNKNOWN attribution cannot assert a contribution")
+        if self.status is AttributionStatus.UNKNOWN:
+            if self.contribution is not None:
+                raise AgentLoopError("UNKNOWN attribution cannot assert a contribution")
+            if (
+                self.evidence_grade is not None
+                and self.evidence_grade is not AttributionEvidenceGrade.NOT_IDENTIFIABLE
+            ):
+                raise AgentLoopError(
+                    "UNKNOWN attribution must be NOT_IDENTIFIABLE when graded"
+                )
+        elif self.evidence_grade is AttributionEvidenceGrade.NOT_IDENTIFIABLE:
+            raise AgentLoopError(
+                "NOT_IDENTIFIABLE evidence must use UNKNOWN attribution status"
+            )
 
     def payload(self) -> dict[str, object]:
-        return {
+        payload: dict[str, object] = {
             "component": self.component.value,
             "status": self.status.value,
             "evidence_sha256": self.evidence_sha256,
@@ -222,6 +252,9 @@ class AttributionFinding:
             "contribution": None if self.contribution is None else str(self.contribution),
             "reason_code": self.reason_code,
         }
+        if self.evidence_grade is not None:
+            payload["evidence_grade"] = self.evidence_grade.value
+        return payload
 
 
 # Factor-level immutable causal credit assignment record. Kept as an alias to avoid
@@ -1171,22 +1204,32 @@ class AgentLoopRuntime:
             if type(findings_raw) is not list:
                 raise AgentLoopError("attribution findings must be a list")
             findings: list[AttributionFinding] = []
+            legacy_finding_fields = {
+                "component",
+                "status",
+                "evidence_sha256",
+                "evidence_available_at",
+                "contribution",
+                "reason_code",
+            }
+            graded_finding_fields = legacy_finding_fields | {"evidence_grade"}
             for raw_finding in findings_raw:
-                raw_finding = require_fields(
-                    raw_finding,
-                    expected={
-                        "component",
-                        "status",
-                        "evidence_sha256",
-                        "evidence_available_at",
-                        "contribution",
-                        "reason_code",
-                    },
-                    label="attribution finding",
+                finding_fields = (
+                    frozenset(raw_finding) if type(raw_finding) is dict else None
                 )
+                if finding_fields not in {
+                    frozenset(legacy_finding_fields),
+                    frozenset(graded_finding_fields),
+                }:
+                    raise AgentLoopError("attribution finding fields mismatch")
                 try:
                     component = AttributionComponent(raw_finding["component"])
                     status = AttributionStatus(raw_finding["status"])
+                    evidence_grade = (
+                        None
+                        if "evidence_grade" not in raw_finding
+                        else AttributionEvidenceGrade(raw_finding["evidence_grade"])
+                    )
                 except (TypeError, ValueError) as exc:
                     raise AgentLoopError("attribution finding enum is invalid") from exc
                 contribution = (
@@ -1202,6 +1245,7 @@ class AgentLoopRuntime:
                         status=status,
                         evidence_sha256=raw_finding["evidence_sha256"],
                         evidence_available_at=raw_finding["evidence_available_at"],
+                        evidence_grade=evidence_grade,
                         contribution=contribution,
                         reason_code=raw_finding["reason_code"],
                     )
@@ -2243,6 +2287,12 @@ class AgentLoopRuntime:
                     "attribution identity is bound to different immutable content"
                 )
             return self.snapshot()
+        if any(
+            finding.evidence_grade is None for finding in attribution.findings
+        ):
+            raise AgentLoopError(
+                "new durable attribution findings require explicit evidence_grade"
+            )
 
         def apply(state: dict[str, Any], now: str) -> None:
             if (

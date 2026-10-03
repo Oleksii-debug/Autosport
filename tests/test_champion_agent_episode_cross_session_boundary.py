@@ -13,6 +13,7 @@ from autosport.agent_loop import (
     AgentLoopPhase,
     AgentLoopRuntime,
     AttributionComponent,
+    AttributionEvidenceGrade,
     AttributionFinding,
     AttributionStatus,
     ConflictingAgentLoopEvidenceError,
@@ -629,6 +630,7 @@ def test_resolution_and_attribution_preserve_originating_deployment_binding(
             AttributionFinding(
                 component=AttributionComponent.IDENTITY,
                 status=AttributionStatus.SUPPORTED,
+                evidence_grade=AttributionEvidenceGrade.FACTUAL_MECHANICAL,
                 evidence_sha256=ATTRIBUTION_EVIDENCE_SHA,
                 evidence_available_at=T4,
                 contribution=Decimal("0.00"),

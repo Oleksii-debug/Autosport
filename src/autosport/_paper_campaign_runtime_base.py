@@ -24,6 +24,7 @@ from .agent_loop import (
     AgentLoopError,
     AgentLoopPhase,
     AttributionComponent,
+    AttributionEvidenceGrade,
     AttributionFinding,
     AttributionStatus,
     ExternalEffectState,
@@ -878,6 +879,7 @@ class PaperCampaignRuntime:
             AttributionFinding(
                 component=component,
                 status=AttributionStatus.UNKNOWN,
+                evidence_grade=AttributionEvidenceGrade.NOT_IDENTIFIABLE,
                 evidence_sha256=witness.settlement_bundle_sha256,
                 evidence_available_at=reflection_available_at,
                 contribution=None,

@@ -22,6 +22,7 @@ from .agent_loop import (
     AgentLoopPhase,
     AgentLoopRuntime,
     AttributionComponent,
+    AttributionEvidenceGrade,
     AttributionFinding,
     AttributionStatus,
     ExternalEffectState,
@@ -593,6 +594,7 @@ class PaperAbstentionLearningRuntime:
                 AttributionFinding(
                     component=AttributionComponent.RANDOMNESS,
                     status=AttributionStatus.UNKNOWN,
+                    evidence_grade=AttributionEvidenceGrade.NOT_IDENTIFIABLE,
                     evidence_sha256=reward.reward_id,
                     evidence_available_at=reward_at,
                     contribution=None,

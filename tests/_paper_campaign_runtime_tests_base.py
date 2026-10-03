@@ -224,6 +224,7 @@ class PaperCampaignRuntimeTests(unittest.TestCase):
             finding = raw["attributions"][0]["findings"][0]
             self.assertEqual(finding["component"], "RANDOMNESS")
             self.assertEqual(finding["status"], "UNKNOWN")
+            self.assertEqual(finding["evidence_grade"], "NOT_IDENTIFIABLE")
             self.assertIsNone(finding["contribution"])
             self.assertEqual(finding["evidence_sha256"], witness.settlement_bundle_sha256)
 

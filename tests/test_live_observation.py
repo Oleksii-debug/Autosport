@@ -169,6 +169,55 @@ class LiveObservationTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_duplicate_provider_sequence_preserves_first_receipt_time(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = SQLiteMarketStore(root / "market.db")
+            try:
+                mirror = MarketMirror.from_store(store)
+                updates = BoundedMirrorInvalidationBuffer(mirror)
+                health_store = SourceHealthStore(root / "source_health.json")
+                receive_time = {"value": _RECEIVE_TIME}
+
+                first = poll_open_market_store_once(
+                    store,
+                    health_store,
+                    self._provider(),
+                    mirror_updates=updates,
+                    max_items=10,
+                    clock=lambda: receive_time["value"],
+                )
+                self.assertEqual(first.accepted, 2)
+                first_persisted = store.events()
+                self.assertEqual(
+                    {event.ingest_ts for event in first_persisted},
+                    {_RECEIVE_TIME},
+                )
+
+                receive_time["value"] = "2026-09-12T20:00:05+00:00"
+                duplicate = poll_open_market_store_once(
+                    store,
+                    health_store,
+                    self._provider(),
+                    mirror_updates=updates,
+                    max_items=10,
+                    clock=lambda: receive_time["value"],
+                )
+
+                self.assertEqual(duplicate.accepted, 0)
+                persisted = store.events()
+                self.assertEqual(len(persisted), 2)
+                self.assertEqual(
+                    {event.ingest_ts for event in persisted},
+                    {_RECEIVE_TIME},
+                )
+                self.assertEqual(
+                    {event.ingest_ts for event in mirror.snapshot()},
+                    {_RECEIVE_TIME},
+                )
+            finally:
+                store.close()
+
     def test_worker_refuses_second_start_until_terminal_message_is_consumed(self):
         # Build the real observation result outside the worker timing window. This
         # test owns the worker single-flight/message-consumption contract; SQLite

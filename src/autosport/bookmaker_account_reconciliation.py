@@ -16,9 +16,11 @@ from enum import Enum
 from hashlib import sha256
 import json
 import os
+import stat
 from pathlib import Path
 import tempfile
 from threading import RLock
+from weakref import ReferenceType, ref
 
 from .bookmaker_capability import (
     BookmakerAccountSnapshot,
@@ -36,6 +38,7 @@ from .monotonic_workspace_authority import (
     MonotonicWorkspaceAuthority,
     MonotonicWorkspaceAuthorityError,
 )
+from .workspace_lock import _open_read_only_descriptor
 
 _RECONCILIATION_AUTHORITY_DOMAIN = "provider.account-snapshot-reconciliation-v1"
 _RECONCILIATION_TRANSITION_SCHEMA = (
@@ -43,6 +46,286 @@ _RECONCILIATION_TRANSITION_SCHEMA = (
 )
 _RECONCILIATION_LEGACY_SCHEMA_VERSION = 1
 _RECONCILIATION_SCHEMA_VERSION = 2
+
+_CANONICAL_AUTHORITY_CLASS = MonotonicWorkspaceAuthority
+_CANONICAL_AUTHORITY_METHOD_NAMES = ("read_history", "prepare", "recover")
+_CANONICAL_AUTHORITY_METHODS = {
+    name: getattr(_CANONICAL_AUTHORITY_CLASS, name)
+    for name in _CANONICAL_AUTHORITY_METHOD_NAMES
+}
+_CANONICAL_AUTHORITY_METHOD_CODES = {
+    name: getattr(method, "__code__", None)
+    for name, method in _CANONICAL_AUTHORITY_METHODS.items()
+}
+
+# The reconciliation boundary treats these DTO definitions as product authority.
+# Keep their exact identities and validation/serialization entrypoints independent
+# of the module globals that callers can rebind after import. This mirrors the
+# existing canonical MonotonicWorkspaceAuthority binding above: a forged subclass
+# must not become "canonical" merely because a live imported name was replaced.
+_CANONICAL_ACCOUNT_SNAPSHOT_CLASS = BookmakerAccountSnapshot
+_CANONICAL_CAPABILITY_PROFILE_CLASS = BookmakerCapabilityProfile
+_CANONICAL_CAPABILITY_FACT_CLASS = BookmakerCapabilityFact
+_CANONICAL_BALANCE_OBSERVATION_CLASS = BookmakerBalanceObservation
+_CANONICAL_POSITION_OBSERVATION_CLASS = BookmakerPositionObservation
+_CANONICAL_CAPABILITY_CLASS = BookmakerCapability
+
+_CANONICAL_CAPABILITY_FACT_VALIDATE = BookmakerCapabilityFact.__post_init__
+_CANONICAL_CAPABILITY_PROFILE_VALIDATE = BookmakerCapabilityProfile.__post_init__
+_CANONICAL_BALANCE_OBSERVATION_VALIDATE = BookmakerBalanceObservation.__post_init__
+_CANONICAL_POSITION_OBSERVATION_VALIDATE = BookmakerPositionObservation.__post_init__
+_CANONICAL_ACCOUNT_SNAPSHOT_VALIDATE = BookmakerAccountSnapshot.__post_init__
+_CANONICAL_CAPABILITY_PROFILE_TO_DICT = BookmakerCapabilityProfile.to_canonical_dict
+
+_MAX_CANONICAL_DECIMAL_TEXT_LENGTH = 4096
+_WINDOWS_PRODUCT_AUTHORITY_ROOT_RELATIVE = (
+    Path("Autosport") / "application-state" / "monotonic-authority-v1"
+)
+_POSIX_PRODUCT_AUTHORITY_ROOT_RELATIVE = Path("autosport") / "monotonic-authority-v1"
+
+
+
+def _read_stable_reconciliation_bytes(path: Path) -> bytes | None:
+    """Read one stable regular state-file identity without following its final alias.
+
+    Reconciliation history is structurally unbounded today, so this helper does not
+    invent a fixed retention/byte ceiling.  It does bound each individual read to
+    the size observed before opening (+1 byte to detect growth) and rejects path or
+    descriptor identity/metadata changes across the read.
+    """
+
+    try:
+        before = os.stat(path, follow_symlinks=False)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise AccountReconciliationIntegrityError(
+            "account reconciliation store cannot be inspected"
+        ) from exc
+
+    if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+        raise AccountReconciliationIntegrityError(
+            "account reconciliation store must be one regular file"
+        )
+
+    descriptor: int | None = None
+    primary_error: BaseException | None = None
+    try:
+        descriptor = _open_read_only_descriptor(path)
+        opened = os.fstat(descriptor)
+        if (
+            opened.st_dev != before.st_dev
+            or opened.st_ino != before.st_ino
+            or not stat.S_ISREG(opened.st_mode)
+            or opened.st_nlink != 1
+        ):
+            raise AccountReconciliationIntegrityError(
+                "account reconciliation store changed during open"
+            )
+
+        chunks: list[bytes] = []
+        remaining = before.st_size + 1
+        while remaining > 0:
+            chunk = os.read(descriptor, min(1024 * 1024, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        raw_bytes = b"".join(chunks)
+
+        after_open = os.fstat(descriptor)
+        after = os.stat(path, follow_symlinks=False)
+    except AccountReconciliationIntegrityError as exc:
+        primary_error = exc
+        raise
+    except OSError as exc:
+        primary_error = exc
+        raise AccountReconciliationIntegrityError(
+            "account reconciliation store is unreadable or changed"
+        ) from exc
+    finally:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError as close_error:
+                if primary_error is None:
+                    raise AccountReconciliationIntegrityError(
+                        "account reconciliation read descriptor cleanup failed"
+                    ) from close_error
+                try:
+                    primary_error.add_note(
+                        "account reconciliation read descriptor cleanup also failed"
+                    )
+                except BaseException:
+                    pass
+
+    if len(raw_bytes) > before.st_size:
+        raise AccountReconciliationIntegrityError(
+            "account reconciliation store grew during stable read"
+        )
+
+    def identity(
+        value: os.stat_result,
+    ) -> tuple[int, int, int, int, int, int, int]:
+        return (
+            value.st_dev,
+            value.st_ino,
+            value.st_mode,
+            value.st_size,
+            value.st_mtime_ns,
+            value.st_ctime_ns,
+            value.st_nlink,
+        )
+
+    if (
+        len(raw_bytes) != before.st_size
+        or identity(before) != identity(after)
+        or identity(opened) != identity(after_open)
+    ):
+        raise AccountReconciliationIntegrityError(
+            "account reconciliation store changed during stable read"
+        )
+    return raw_bytes
+
+
+def _product_account_reconciliation_authority_root() -> Path:
+    """Resolve the supported product machine-state root without env overrides.
+
+    The generic MonotonicWorkspaceAuthority deliberately supports a caller/process
+    override.  The supported account-reconciliation path must not use that override
+    as its default authority selector: otherwise a restart can point at a fresh root
+    after deleting local state and make a previously non-pristine workspace appear
+    PRISTINE.  Resolve the OS-owned user state location directly instead.
+    """
+
+    if os.name == "nt":
+        try:
+            import ctypes
+
+            buffer = ctypes.create_unicode_buffer(32768)
+            # CSIDL_LOCAL_APPDATA.  Query the shell rather than trusting the
+            # caller-editable LOCALAPPDATA environment variable.
+            result = ctypes.windll.shell32.SHGetFolderPathW(  # type: ignore[attr-defined]
+                None,
+                0x001C,
+                None,
+                0,
+                buffer,
+            )
+        except (AttributeError, OSError, ValueError) as exc:
+            raise AccountReconciliationIntegrityError(
+                "cannot resolve product-owned Windows account authority root"
+            ) from exc
+        if result != 0 or not buffer.value:
+            raise AccountReconciliationIntegrityError(
+                "cannot resolve product-owned Windows account authority root"
+            )
+        base = Path(buffer.value)
+        relative = _WINDOWS_PRODUCT_AUTHORITY_ROOT_RELATIVE
+    else:
+        try:
+            import pwd
+
+            home = pwd.getpwuid(os.getuid()).pw_dir
+        except (ImportError, KeyError, OSError) as exc:
+            raise AccountReconciliationIntegrityError(
+                "cannot resolve product-owned POSIX account authority root"
+            ) from exc
+        base = Path(home) / ".local" / "state"
+        relative = _POSIX_PRODUCT_AUTHORITY_ROOT_RELATIVE
+
+    if not base.is_absolute():
+        raise AccountReconciliationIntegrityError(
+            "product-owned account authority root must be absolute"
+        )
+    return base / relative
+
+
+def _build_authority_binding_registry():
+    """Keep constructor-issued authority trust outside caller-mutable store fields."""
+
+    records: dict[
+        int,
+        tuple[
+            ReferenceType[object],
+            MonotonicWorkspaceAuthority,
+            tuple[object, ...],
+            Path,
+            Path,
+        ],
+    ] = {}
+    lock = RLock()
+
+    def authority_binding(
+        authority: MonotonicWorkspaceAuthority,
+    ) -> tuple[object, ...]:
+        return (
+            authority.authority_root,
+            authority.workspace,
+            authority.workspace_instance_id,
+            authority.domain,
+            authority.key,
+            authority.namespace_sha256,
+            authority.journal_dir,
+            authority.namespace_marker_path,
+            authority.workspace_binding_path,
+        )
+
+    def register(
+        store: object,
+        authority: MonotonicWorkspaceAuthority,
+        *,
+        workspace: Path,
+        path: Path,
+    ) -> None:
+        key = id(store)
+
+        def release(
+            dead_ref: ReferenceType[object],
+            *,
+            issued_key: int = key,
+        ) -> None:
+            with lock:
+                record = records.get(issued_key)
+                if record is not None and record[0] is dead_ref:
+                    records.pop(issued_key, None)
+
+        store_ref = ref(store, release)
+        record = (
+            store_ref,
+            authority,
+            authority_binding(authority),
+            workspace,
+            path,
+        )
+        with lock:
+            existing = records.get(key)
+            if existing is not None and existing[0]() is store:
+                raise AccountReconciliationIntegrityError(
+                    "account reconciliation monotonic authority issuance is already registered"
+                )
+            records[key] = record
+
+    def lookup(
+        store: object,
+    ) -> tuple[
+        MonotonicWorkspaceAuthority,
+        tuple[object, ...],
+        Path,
+        Path,
+    ] | None:
+        with lock:
+            record = records.get(id(store))
+            if record is None or record[0]() is not store:
+                return None
+            return record[1], record[2], record[3], record[4]
+
+    return register, lookup
+
+
+_register_authority_binding, _lookup_authority_binding = (
+    _build_authority_binding_registry()
+)
 
 
 class AccountReconciliationError(RuntimeError):
@@ -176,6 +459,23 @@ def _decimal_text(value: Decimal) -> str:
         digits.pop()
         exponent += 1
 
+    coefficient_length = len(digits)
+    if exponent >= 0:
+        fixed_length = coefficient_length + exponent
+    else:
+        point = coefficient_length + exponent
+        fixed_length = (
+            coefficient_length + 1
+            if point > 0
+            else 2 + (-point) + coefficient_length
+        )
+    if sign:
+        fixed_length += 1
+    if fixed_length > _MAX_CANONICAL_DECIMAL_TEXT_LENGTH:
+        raise AccountReconciliationIntegrityError(
+            "money canonical Decimal text exceeds bounded length"
+        )
+
     coefficient = "".join(str(digit) for digit in digits)
     if exponent >= 0:
         text = coefficient + ("0" * exponent)
@@ -209,6 +509,8 @@ def _exact_decimal_difference(left: Decimal, right: Decimal) -> Decimal:
         coefficient = 0
         for digit in digits:
             coefficient = (coefficient * 10) + digit
+        if coefficient == 0:
+            return 0, 0
         return (-coefficient if sign else coefficient), exponent
 
     left_coefficient, left_exponent = signed_coefficient(left)
@@ -292,20 +594,92 @@ def _position_to_dict(value: BookmakerPositionObservation) -> dict[str, object]:
         "gross_return": _optional_decimal_text(value.gross_return),
         "external_receipt_id": value.external_receipt_id,
     }
-    # Preserve schema-v1 snapshot identity for legacy observations: an omitted
-    # provider-native status is not serialized as a new null-bearing field.
     if value.provider_status is not None:
         payload["provider_status"] = value.provider_status
     return payload
 
 
-def snapshot_to_canonical_dict(snapshot: BookmakerAccountSnapshot) -> dict[str, object]:
-    if not isinstance(snapshot, BookmakerAccountSnapshot):
+def _require_canonical_snapshot_graph(snapshot: object) -> BookmakerAccountSnapshot:
+    """Reject caller-defined DTO subclasses at the durable evidence boundary.
+
+    The capability DTOs are frozen+slots dataclasses, but Python still permits
+    subclassing them and overriding __post_init__ or inherited slot descriptors.
+    isinstance therefore is not an issuance/canonicality boundary. Durable
+    reconciliation accepts only the exact product DTO graph.
+    """
+
+    if type(snapshot) is not _CANONICAL_ACCOUNT_SNAPSHOT_CLASS:
         raise AccountReconciliationIntegrityError(
-            "snapshot must be a BookmakerAccountSnapshot"
+            "snapshot must be the exact canonical BookmakerAccountSnapshot"
         )
+
+    profile = snapshot.profile
+    if type(profile) is not _CANONICAL_CAPABILITY_PROFILE_CLASS:
+        raise AccountReconciliationIntegrityError(
+            "snapshot profile must be the exact canonical BookmakerCapabilityProfile"
+        )
+    if type(profile.facts) is not tuple or any(
+        type(fact) is not _CANONICAL_CAPABILITY_FACT_CLASS for fact in profile.facts
+    ):
+        raise AccountReconciliationIntegrityError(
+            "snapshot profile facts must be exact canonical BookmakerCapabilityFact values"
+        )
+
+    if type(snapshot.observed_capabilities) is not frozenset or any(
+        type(capability) is not _CANONICAL_CAPABILITY_CLASS
+        for capability in snapshot.observed_capabilities
+    ):
+        raise AccountReconciliationIntegrityError(
+            "snapshot observed_capabilities must contain exact canonical capability values"
+        )
+
+    if (
+        snapshot.balance is not None
+        and type(snapshot.balance) is not _CANONICAL_BALANCE_OBSERVATION_CLASS
+    ):
+        raise AccountReconciliationIntegrityError(
+            "snapshot balance must be the exact canonical BookmakerBalanceObservation"
+        )
+
+    for field, positions in (
+        ("open_positions", snapshot.open_positions),
+        ("settled_positions", snapshot.settled_positions),
+    ):
+        if type(positions) is not tuple or any(
+            type(position) is not _CANONICAL_POSITION_OBSERVATION_CLASS
+            for position in positions
+        ):
+            raise AccountReconciliationIntegrityError(
+                f"snapshot {field} must contain exact canonical BookmakerPositionObservation values"
+            )
+
+    # frozen dataclasses are still mutable through object.__setattr__. Re-run the
+    # canonical constructors' semantic validators over the exact graph so a DTO
+    # that was valid at issuance cannot be changed into irreloadable durable state.
+    # Invoke the import-time captured functions directly: replacing an imported
+    # class or its __post_init__ attribute after composition must not weaken this
+    # durable evidence boundary.
+    try:
+        for fact in profile.facts:
+            _CANONICAL_CAPABILITY_FACT_VALIDATE(fact)
+        _CANONICAL_CAPABILITY_PROFILE_VALIDATE(profile)
+        if snapshot.balance is not None:
+            _CANONICAL_BALANCE_OBSERVATION_VALIDATE(snapshot.balance)
+        for position in (*snapshot.open_positions, *snapshot.settled_positions):
+            _CANONICAL_POSITION_OBSERVATION_VALIDATE(position, None)
+        _CANONICAL_ACCOUNT_SNAPSHOT_VALIDATE(snapshot)
+    except (TypeError, ValueError) as exc:
+        raise AccountReconciliationIntegrityError(
+            "snapshot canonical DTO graph failed current-state revalidation"
+        ) from exc
+
+    return snapshot
+
+
+def snapshot_to_canonical_dict(snapshot: BookmakerAccountSnapshot) -> dict[str, object]:
+    snapshot = _require_canonical_snapshot_graph(snapshot)
     return {
-        "profile": snapshot.profile.to_canonical_dict(),
+        "profile": _CANONICAL_CAPABILITY_PROFILE_TO_DICT(snapshot.profile),
         "observed_capabilities": sorted(
             capability.value for capability in snapshot.observed_capabilities
         ),
@@ -482,7 +856,7 @@ def _decode_position(
     if schema_version == _RECONCILIATION_LEGACY_SCHEMA_VERSION:
         payload = _exact_keys(raw, base_keys, "position")
     elif schema_version == _RECONCILIATION_SCHEMA_VERSION:
-        if not isinstance(raw, dict):
+        if type(raw) is not dict:
             raise AccountReconciliationIntegrityError("position schema is invalid")
         keys = set(raw)
         if keys not in (base_keys, base_keys | {"provider_status"}):
@@ -492,7 +866,6 @@ def _decode_position(
         raise AccountReconciliationIntegrityError(
             "unsupported account reconciliation schema_version"
         )
-
     try:
         amount = _optional_decimal(payload["provider_amount"], "provider_amount")
         if amount is None:
@@ -587,20 +960,99 @@ class BookmakerAccountReconciliationStore:
         *,
         authority_root: str | Path | None = None,
     ) -> None:
-        self.path = Path(path)
-        self._workspace = self.path.parent.resolve(strict=False)
-        self._authority = MonotonicWorkspaceAuthority(
+        requested_path = Path(path)
+        self._workspace = requested_path.parent.resolve(strict=False)
+        self.path = self._workspace / requested_path.name
+        if MonotonicWorkspaceAuthority is not _CANONICAL_AUTHORITY_CLASS:
+            raise AccountReconciliationIntegrityError(
+                "account reconciliation monotonic authority class identity changed"
+            )
+        selected_authority_root = (
+            _product_account_reconciliation_authority_root()
+            if authority_root is None
+            else authority_root
+        )
+        authority = _CANONICAL_AUTHORITY_CLASS(
             workspace=self._workspace,
             domain=_RECONCILIATION_AUTHORITY_DOMAIN,
             key=f"account-reconciliation:{self.path.name}",
-            authority_root=authority_root,
+            authority_root=selected_authority_root,
+        )
+        self._authority = authority
+        _register_authority_binding(
+            self,
+            authority,
+            workspace=self._workspace,
+            path=self.path,
         )
 
-    def append_snapshot(self, snapshot: BookmakerAccountSnapshot) -> bool:
-        if not isinstance(snapshot, BookmakerAccountSnapshot):
+    def _require_canonical_authority(
+        self,
+        _registry_lookup=_lookup_authority_binding,
+    ) -> MonotonicWorkspaceAuthority:
+        if MonotonicWorkspaceAuthority is not _CANONICAL_AUTHORITY_CLASS:
             raise AccountReconciliationIntegrityError(
-                "snapshot must be a BookmakerAccountSnapshot"
+                "account reconciliation monotonic authority class identity changed"
             )
+        authority = self._authority
+        registered = _registry_lookup(self)
+        if registered is None:
+            raise AccountReconciliationIntegrityError(
+                "account reconciliation monotonic authority issuance is missing"
+            )
+        (
+            expected_authority,
+            expected_binding,
+            expected_workspace,
+            expected_path,
+        ) = registered
+        current_binding = (
+            getattr(authority, "authority_root", None),
+            getattr(authority, "workspace", None),
+            getattr(authority, "workspace_instance_id", None),
+            getattr(authority, "domain", None),
+            getattr(authority, "key", None),
+            getattr(authority, "namespace_sha256", None),
+            getattr(authority, "journal_dir", None),
+            getattr(authority, "namespace_marker_path", None),
+            getattr(authority, "workspace_binding_path", None),
+        )
+        if (
+            type(authority) is not _CANONICAL_AUTHORITY_CLASS
+            or authority is not expected_authority
+            or current_binding != expected_binding
+            or self._workspace != expected_workspace
+            or self.path != expected_path
+            or authority.workspace != expected_workspace
+            or authority.domain != _RECONCILIATION_AUTHORITY_DOMAIN
+            or authority.key != f"account-reconciliation:{expected_path.name}"
+        ):
+            raise AccountReconciliationIntegrityError(
+                "account reconciliation monotonic authority identity or binding changed"
+            )
+
+        for method_name in _CANONICAL_AUTHORITY_METHOD_NAMES:
+            expected_method = _CANONICAL_AUTHORITY_METHODS[method_name]
+            current_class_method = getattr(
+                _CANONICAL_AUTHORITY_CLASS,
+                method_name,
+                None,
+            )
+            bound_method = getattr(authority, method_name, None)
+            if (
+                current_class_method is not expected_method
+                or getattr(current_class_method, "__code__", None)
+                is not _CANONICAL_AUTHORITY_METHOD_CODES[method_name]
+                or getattr(bound_method, "__self__", None) is not authority
+                or getattr(bound_method, "__func__", None) is not expected_method
+            ):
+                raise AccountReconciliationIntegrityError(
+                    "account reconciliation monotonic authority dispatch changed"
+                )
+        return authority
+
+    def append_snapshot(self, snapshot: BookmakerAccountSnapshot) -> bool:
+        snapshot = _require_canonical_snapshot_graph(snapshot)
         with _write_lock(self.path):
             history = self._load_history()
             incoming_id = snapshot_fingerprint(snapshot)
@@ -655,32 +1107,6 @@ class BookmakerAccountReconciliationStore:
             )
 
     @staticmethod
-    def _require_profile_continuity(
-        previous: BookmakerCapabilityProfile,
-        current: BookmakerCapabilityProfile,
-    ) -> None:
-        """Prevent a later account checkpoint from rolling capability truth backward.
-
-        The canonical capability registry treats profile_version as the immutable
-        version key for one venue/account/adapter scope. A durable account history may
-        replay the exact same profile, or advance to a higher version, but it must not
-        regress to an older version or attach different content to an already-used
-        version.
-        """
-
-        if current.profile_version < previous.profile_version:
-            raise AccountReconciliationIntegrityError(
-                "capability profile_version cannot regress within account history"
-            )
-        if (
-            current.profile_version == previous.profile_version
-            and current.profile_id != previous.profile_id
-        ):
-            raise AccountReconciliationIntegrityError(
-                "capability profile_version was reused with conflicting content"
-            )
-
-    @staticmethod
     def _require_nested_evidence_after(
         snapshot: BookmakerAccountSnapshot,
         previous_snapshot_at: datetime,
@@ -730,7 +1156,6 @@ class BookmakerAccountReconciliationStore:
             )
         first = history[0]
         previous_at: datetime | None = None
-        previous_profile: BookmakerCapabilityProfile | None = None
         positions: dict[str, ReconciledPosition] = {}
         latest_balance: BookmakerBalanceObservation | None = None
         balance_delta: UnexplainedBalanceDelta | None = None
@@ -740,8 +1165,6 @@ class BookmakerAccountReconciliationStore:
         for snapshot in history:
             cls._require_same_account(first, snapshot)
             current_at = _time(snapshot.observed_at, "snapshot.observed_at")
-            if previous_profile is not None:
-                cls._require_profile_continuity(previous_profile, snapshot.profile)
             if previous_at is not None:
                 if current_at <= previous_at:
                     raise AccountReconciliationIntegrityError(
@@ -754,7 +1177,6 @@ class BookmakerAccountReconciliationStore:
                     position_observations=position_observations,
                 )
             previous_at = current_at
-            previous_profile = snapshot.profile
             balance_delta = None
 
             explicitly_seen: set[str] = set()
@@ -865,9 +1287,14 @@ class BookmakerAccountReconciliationStore:
         observed_state_sha256: str | None,
         *,
         history: list[BookmakerAccountSnapshot] | None = None,
+        _authority_guard=_require_canonical_authority,
     ) -> None:
+        # Capture the product-owned validator at class-definition time.  Resolving
+        # self._require_canonical_authority here would let an exact store instance
+        # shadow the guard after construction and route durability to another root.
+        authority = _authority_guard(self)
         try:
-            records = self._authority.read_history()
+            records = authority.read_history()
             pending = (
                 records[-1]
                 if records and records[-1].phase is AuthorityPhase.PREPARE
@@ -901,13 +1328,13 @@ class BookmakerAccountReconciliationStore:
                     raise AccountReconciliationIntegrityError(
                         "account reconciliation authority semantic binding mismatch"
                     )
-                self._authority.recover(
+                authority.recover(
                     observed_state_sha256=observed_state_sha256,
                     tx_id=pending.tx_id,
                     semantic_binding_sha256=expected_binding,
                 )
             else:
-                self._authority.recover(
+                authority.recover(
                     observed_state_sha256=observed_state_sha256,
                 )
         except MonotonicWorkspaceAuthorityError as exc:
@@ -915,10 +1342,16 @@ class BookmakerAccountReconciliationStore:
                 "account reconciliation failed independent monotonic authority validation"
             ) from exc
 
-    def _next_authority_tx_id(self, snapshot_id: str) -> str:
+    def _next_authority_tx_id(
+        self,
+        snapshot_id: str,
+        *,
+        _authority_guard=_require_canonical_authority,
+    ) -> str:
         prefix = _authority_tx_prefix(snapshot_id)
+        authority = _authority_guard(self)
         try:
-            records = self._authority.read_history()
+            records = authority.read_history()
         except MonotonicWorkspaceAuthorityError as exc:
             raise AccountReconciliationIntegrityError(
                 "account reconciliation monotonic authority history is unreadable"
@@ -932,15 +1365,19 @@ class BookmakerAccountReconciliationStore:
                 attempts.append(int(suffix))
         return f"{prefix}{max(attempts, default=0) + 1}"
 
-    def _load_history(self) -> list[BookmakerAccountSnapshot]:
-        if not self.path.exists():
+    def _load_history(
+        self,
+        *,
+        _stable_read=_read_stable_reconciliation_bytes,
+    ) -> list[BookmakerAccountSnapshot]:
+        raw_bytes = _stable_read(self.path)
+        if raw_bytes is None:
             self._recover_authority(None)
             return []
         try:
-            raw_bytes = self.path.read_bytes()
             raw = raw_bytes.decode("utf-8")
             document = strict_json_loads(raw)
-        except (OSError, UnicodeError, ValueError) as exc:
+        except (UnicodeError, ValueError, RecursionError) as exc:
             raise AccountReconciliationIntegrityError(
                 "account reconciliation store is unreadable or corrupt"
             ) from exc
@@ -1047,18 +1484,21 @@ class BookmakerAccountReconciliationStore:
                     pass
 
     def _write_history(
-        self, history: tuple[BookmakerAccountSnapshot, ...] | list[BookmakerAccountSnapshot]
+        self,
+        history: tuple[BookmakerAccountSnapshot, ...] | list[BookmakerAccountSnapshot],
+        *,
+        _authority_guard=_require_canonical_authority,
+        _stable_read=_read_stable_reconciliation_bytes,
     ) -> None:
+        authority = _authority_guard(self)
         encoded = self._encode_history(history)
         intended_state_sha256 = sha256(encoded).hexdigest()
-        previous_state_sha256: str | None = None
-        if self.path.exists():
-            try:
-                previous_state_sha256 = sha256(self.path.read_bytes()).hexdigest()
-            except OSError as exc:
-                raise AccountReconciliationIntegrityError(
-                    "cannot read current account reconciliation state before publication"
-                ) from exc
+        previous_bytes = _stable_read(self.path)
+        previous_state_sha256 = (
+            None
+            if previous_bytes is None
+            else sha256(previous_bytes).hexdigest()
+        )
 
         latest_snapshot_id = snapshot_fingerprint(history[-1])
         tx_id = self._next_authority_tx_id(latest_snapshot_id)
@@ -1068,7 +1508,7 @@ class BookmakerAccountReconciliationStore:
             tx_id=tx_id,
         )
         try:
-            self._authority.prepare(
+            authority.prepare(
                 tx_id=tx_id,
                 observed_state_sha256=previous_state_sha256,
                 intended_state_sha256=intended_state_sha256,
@@ -1092,3 +1532,429 @@ class BookmakerAccountReconciliationStore:
                 "account reconciliation publication did not preserve intended history"
             )
 
+
+def _install_canonical_store_dispatch_seal(
+    cls: type[BookmakerAccountReconciliationStore],
+) -> None:
+    """Freeze lower durable-store dispatch consumed by the public reconciliation API.
+
+    The store already seals its independent monotonic-authority object. The public
+    methods must also not dynamically trust caller-shadowable lower helpers such as
+    _load_history or _write_history: otherwise an exact store instance can retain
+    the canonical authority while bypassing durable publication entirely.
+
+    Keep canonical lower descriptors/functions in this closure, fail closed if
+    class bindings/code or instance resolution changes, and invoke the captured
+    functions non-virtually from closure-owned public entrypoints.
+    """
+
+    guarded_names = (
+        "_require_canonical_authority",
+        "_require_same_account",
+        "_require_nested_evidence_after",
+        "_reconcile",
+        "_recover_authority",
+        "_next_authority_tx_id",
+        "_load_history",
+        "_encode_history",
+        "_publish_history_bytes",
+        "_write_history",
+    )
+    entries: list[tuple[str, str, object, object, object, object, dict[str, object]]] = []
+    for name in guarded_names:
+        descriptor = cls.__dict__.get(name)
+        if isinstance(descriptor, staticmethod):
+            kind = "static"
+            function = descriptor.__func__
+        elif isinstance(descriptor, classmethod):
+            kind = "class"
+            function = descriptor.__func__
+        elif callable(descriptor):
+            kind = "instance"
+            function = descriptor
+        else:  # pragma: no cover - import-time product invariant
+            raise RuntimeError(f"missing canonical reconciliation helper {name!r}")
+        entries.append(
+            (
+                name,
+                kind,
+                descriptor,
+                function,
+                getattr(function, "__code__", None),
+                getattr(function, "__defaults__", None),
+                dict(getattr(function, "__kwdefaults__", None) or {}),
+            )
+        )
+    frozen_entries = tuple(entries)
+    stable_reader = _read_stable_reconciliation_bytes
+    stable_reader_code = getattr(stable_reader, "__code__", None)
+
+    write_lock = _write_lock
+    require_snapshot = _require_canonical_snapshot_graph
+    fingerprint = snapshot_fingerprint
+    parse_time = _time
+    integrity_error = AccountReconciliationIntegrityError
+    stale_error = AccountSnapshotStaleError
+    module_namespace = globals()
+    schema_version = cls.SCHEMA_VERSION
+
+    # Exact lower-method bytecode is not a complete authority boundary: those
+    # functions still resolve module globals dynamically. Freeze the transitive
+    # semantic helpers/constants that can reinterpret already-authorized durable
+    # bytes while leaving the outer store method unchanged.
+    guarded_module_names = (
+        "_RECONCILIATION_AUTHORITY_DOMAIN",
+        "_RECONCILIATION_TRANSITION_SCHEMA",
+        "_CANONICAL_AUTHORITY_CLASS",
+        "_CANONICAL_AUTHORITY_METHOD_NAMES",
+        "_CANONICAL_AUTHORITY_METHODS",
+        "_CANONICAL_AUTHORITY_METHOD_CODES",
+        "_CANONICAL_ACCOUNT_SNAPSHOT_CLASS",
+        "_CANONICAL_CAPABILITY_PROFILE_CLASS",
+        "_CANONICAL_CAPABILITY_FACT_CLASS",
+        "_CANONICAL_BALANCE_OBSERVATION_CLASS",
+        "_CANONICAL_POSITION_OBSERVATION_CLASS",
+        "_CANONICAL_CAPABILITY_CLASS",
+        "_CANONICAL_CAPABILITY_FACT_VALIDATE",
+        "_CANONICAL_CAPABILITY_PROFILE_VALIDATE",
+        "_CANONICAL_BALANCE_OBSERVATION_VALIDATE",
+        "_CANONICAL_POSITION_OBSERVATION_VALIDATE",
+        "_CANONICAL_ACCOUNT_SNAPSHOT_VALIDATE",
+        "_CANONICAL_CAPABILITY_PROFILE_TO_DICT",
+        "strict_json_loads",
+        "_exact_keys",
+        "_optional_decimal",
+        "_decode_profile",
+        "_decode_balance",
+        "_decode_position",
+        "_decode_snapshot",
+        "_require_canonical_snapshot_graph",
+        "snapshot_to_canonical_dict",
+        "snapshot_fingerprint",
+        "_balance_to_dict",
+        "_position_to_dict",
+        "_decimal_text",
+        "_optional_decimal_text",
+        "_exact_decimal_difference",
+        "_time",
+        "_authority_tx_prefix",
+        "_authority_transition_binding",
+        "sha256",
+        "json",
+        "AuthorityPhase",
+        "MonotonicWorkspaceAuthorityError",
+    )
+    frozen_module_graph = tuple(
+        (
+            name,
+            module_namespace[name],
+            getattr(module_namespace[name], "__code__", None),
+            getattr(module_namespace[name], "__defaults__", None),
+            dict(getattr(module_namespace[name], "__kwdefaults__", None) or {}),
+            (
+                tuple(module_namespace[name].items())
+                if isinstance(module_namespace[name], dict)
+                else None
+            ),
+        )
+        for name in guarded_module_names
+    )
+    missing_module_binding = object()
+
+    def _descriptor_code(descriptor: object) -> object:
+        if isinstance(descriptor, (staticmethod, classmethod)):
+            target = descriptor.__func__
+        elif isinstance(descriptor, property):
+            target = descriptor.fget
+        else:
+            target = descriptor
+        return getattr(target, "__code__", None)
+
+    class_dispatch_specs = (
+        (
+            "BookmakerCapabilityFact",
+            _CANONICAL_CAPABILITY_FACT_CLASS,
+            ("__init__", "__post_init__"),
+        ),
+        (
+            "BookmakerCapabilityProfile",
+            _CANONICAL_CAPABILITY_PROFILE_CLASS,
+            (
+                "__init__",
+                "__post_init__",
+                "profile_id",
+                "to_canonical_dict",
+                "state_of",
+                "require",
+            ),
+        ),
+        (
+            "BookmakerBalanceObservation",
+            _CANONICAL_BALANCE_OBSERVATION_CLASS,
+            ("__init__", "__post_init__"),
+        ),
+        (
+            "BookmakerPositionObservation",
+            _CANONICAL_POSITION_OBSERVATION_CLASS,
+            ("__init__", "__post_init__"),
+        ),
+        (
+            "BookmakerAccountSnapshot",
+            _CANONICAL_ACCOUNT_SNAPSHOT_CLASS,
+            (
+                "__init__",
+                "__post_init__",
+                "_validate_cross_state_position_identity",
+                "_validate_balance",
+                "_validate_positions",
+                "_validate_not_after_snapshot",
+                "_validate_identity",
+            ),
+        ),
+        ("ReconciledPosition", ReconciledPosition, ("__init__",)),
+        ("UnexplainedBalanceDelta", UnexplainedBalanceDelta, ("__init__",)),
+        (
+            "ReconciledAccountState",
+            ReconciledAccountState,
+            ("__init__", "position_state"),
+        ),
+    )
+    frozen_class_dispatch_graph = tuple(
+        (
+            class_name,
+            expected_class,
+            tuple(
+                (
+                    descriptor_name,
+                    vars(expected_class).get(descriptor_name),
+                    _descriptor_code(vars(expected_class).get(descriptor_name)),
+                )
+                for descriptor_name in descriptor_names
+            ),
+        )
+        for class_name, expected_class, descriptor_names in class_dispatch_specs
+    )
+    frozen_field_descriptor_graph = tuple(
+        (
+            class_name,
+            expected_class,
+            tuple(
+                (field_name, vars(expected_class)[field_name])
+                for field_name in getattr(expected_class, "__slots__", ())
+                if field_name != "__weakref__" and field_name in vars(expected_class)
+            ),
+        )
+        for class_name, expected_class, _descriptor_names in class_dispatch_specs
+    )
+
+    def _guard(store: BookmakerAccountReconciliationStore) -> None:
+        if type(store) is not cls:
+            raise integrity_error(
+                "account reconciliation store type changed at canonical dispatch boundary"
+            )
+        instance_dict = object.__getattribute__(store, "__dict__")
+        if cls.SCHEMA_VERSION != schema_version:
+            raise integrity_error(
+                "account reconciliation class contract changed"
+            )
+        for (
+            name,
+            expected,
+            expected_code,
+            expected_defaults,
+            expected_kwdefaults,
+            expected_mapping_items,
+        ) in frozen_module_graph:
+            live = module_namespace.get(name, missing_module_binding)
+            if live is not expected:
+                raise integrity_error(
+                    "account reconciliation transitive module dispatch graph changed"
+                )
+            if expected_code is not None and (
+                getattr(live, "__code__", None) is not expected_code
+                or getattr(live, "__defaults__", None) != expected_defaults
+                or dict(getattr(live, "__kwdefaults__", None) or {})
+                != expected_kwdefaults
+            ):
+                raise integrity_error(
+                    "account reconciliation transitive module dispatch implementation changed"
+                )
+            if expected_mapping_items is not None and (
+                type(live) is not dict
+                or len(live) != len(expected_mapping_items)
+                or any(
+                    key not in live or live[key] is not expected_value
+                    for key, expected_value in expected_mapping_items
+                )
+            ):
+                raise integrity_error(
+                    "account reconciliation transitive module dispatch mapping changed"
+                )
+        for class_name, expected_class, descriptors in frozen_class_dispatch_graph:
+            if (
+                module_namespace.get(class_name, missing_module_binding)
+                is not expected_class
+            ):
+                raise integrity_error(
+                    "account reconciliation canonical DTO class binding changed"
+                )
+            for (
+                descriptor_name,
+                expected_descriptor,
+                expected_descriptor_code,
+            ) in descriptors:
+                live_descriptor = vars(expected_class).get(descriptor_name)
+                if (
+                    live_descriptor is not expected_descriptor
+                    or _descriptor_code(live_descriptor)
+                    is not expected_descriptor_code
+                ):
+                    raise integrity_error(
+                        "account reconciliation canonical DTO class dispatch changed"
+                    )
+        for (
+            _class_name,
+            expected_class,
+            field_descriptors,
+        ) in frozen_field_descriptor_graph:
+            for field_name, expected_field_descriptor in field_descriptors:
+                if (
+                    vars(expected_class).get(field_name)
+                    is not expected_field_descriptor
+                ):
+                    raise integrity_error(
+                        "account reconciliation canonical DTO field descriptor changed"
+                    )
+        if (
+            _read_stable_reconciliation_bytes is not stable_reader
+            or getattr(_read_stable_reconciliation_bytes, "__code__", None)
+            is not stable_reader_code
+        ):
+            raise integrity_error(
+                "account reconciliation stable reader dispatch changed"
+            )
+        for (
+            name,
+            _kind,
+            descriptor,
+            function,
+            code,
+            defaults,
+            kwdefaults,
+        ) in frozen_entries:
+            live_descriptor = cls.__dict__.get(name)
+            if live_descriptor is not descriptor or name in instance_dict:
+                raise integrity_error(
+                    "account reconciliation lower dispatch graph changed"
+                )
+            if isinstance(live_descriptor, (staticmethod, classmethod)):
+                live_function = live_descriptor.__func__
+            else:
+                live_function = live_descriptor
+            if (
+                live_function is not function
+                or getattr(live_function, "__code__", None) is not code
+                or getattr(live_function, "__defaults__", None) != defaults
+                or dict(getattr(live_function, "__kwdefaults__", None) or {})
+                != kwdefaults
+            ):
+                raise integrity_error(
+                    "account reconciliation lower dispatch implementation changed"
+                )
+
+    def _invoke(
+        store: BookmakerAccountReconciliationStore,
+        name: str,
+        *args: object,
+        **kwargs: object,
+    ) -> object:
+        _guard(store)
+        for (
+            candidate,
+            kind,
+            _descriptor,
+            function,
+            _code,
+            _defaults,
+            _kwdefaults,
+        ) in frozen_entries:
+            if candidate != name:
+                continue
+            if kind == "instance":
+                return function(store, *args, **kwargs)  # type: ignore[misc]
+            if kind == "class":
+                return function(cls, *args, **kwargs)  # type: ignore[misc]
+            return function(*args, **kwargs)  # type: ignore[misc]
+        raise integrity_error(
+            "unknown canonical account reconciliation lower dispatch"
+        )
+
+    def append_snapshot(
+        self: BookmakerAccountReconciliationStore,
+        snapshot: BookmakerAccountSnapshot,
+    ) -> bool:
+        _guard(self)
+        snapshot = require_snapshot(snapshot)
+        with write_lock(self.path):
+            history = _invoke(self, "_load_history")
+            assert isinstance(history, list)
+            incoming_id = fingerprint(snapshot)
+            if any(fingerprint(existing) == incoming_id for existing in history):
+                return False
+            if history:
+                latest = history[-1]
+                _invoke(self, "_require_same_account", latest, snapshot)
+                incoming_at = parse_time(
+                    snapshot.observed_at, "snapshot.observed_at"
+                )
+                latest_at = parse_time(
+                    latest.observed_at, "checkpoint.observed_at"
+                )
+                if incoming_at < latest_at:
+                    raise stale_error(
+                        "older account snapshot cannot supersede the durable checkpoint"
+                    )
+                if incoming_at == latest_at:
+                    raise integrity_error(
+                        "conflicting account snapshot content at the same observed_at"
+                    )
+            candidate = (*history, snapshot)
+            _invoke(self, "_reconcile", candidate)
+            _invoke(self, "_write_history", candidate)
+            return True
+
+    def history(
+        self: BookmakerAccountReconciliationStore,
+    ) -> tuple[BookmakerAccountSnapshot, ...]:
+        with write_lock(self.path):
+            loaded = _invoke(self, "_load_history")
+            assert isinstance(loaded, list)
+            return tuple(loaded)
+
+    def latest_snapshot(
+        self: BookmakerAccountReconciliationStore,
+    ) -> BookmakerAccountSnapshot | None:
+        with write_lock(self.path):
+            loaded = _invoke(self, "_load_history")
+            assert isinstance(loaded, list)
+            return loaded[-1] if loaded else None
+
+    def latest_state(
+        self: BookmakerAccountReconciliationStore,
+    ) -> ReconciledAccountState | None:
+        with write_lock(self.path):
+            loaded = _invoke(self, "_load_history")
+            assert isinstance(loaded, list)
+            if not loaded:
+                return None
+            state = _invoke(self, "_reconcile", loaded)
+            assert isinstance(state, ReconciledAccountState)
+            return state
+
+    cls.append_snapshot = append_snapshot
+    cls.history = history
+    cls.latest_snapshot = latest_snapshot
+    cls.latest_state = latest_state
+
+
+_install_canonical_store_dispatch_seal(BookmakerAccountReconciliationStore)

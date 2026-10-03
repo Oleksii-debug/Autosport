@@ -458,40 +458,93 @@ def test_adapter_protocol_remains_read_only_and_structural() -> None:
     assert "cashout" not in ReadOnlyBookmakerAdapter.__dict__
 
 
+
 @pytest.mark.parametrize(
-    "provider_status",
-    ("PUSH", "PUSH_WIN", "PUSH_LOSE", "FUTURE_PROVIDER_STATUS"),
+    "capability",
+    [
+        BookmakerCapability.ACCOUNT_IDENTITY_READ,
+        BookmakerCapability.LIMITS_READ,
+        BookmakerCapability.PREMATCH_QUOTES_READ,
+        BookmakerCapability.LIVE_QUOTES_READ,
+        BookmakerCapability.BETSLIP_READ,
+        BookmakerCapability.PLACE_BET,
+        BookmakerCapability.BET_READBACK,
+        BookmakerCapability.CASHOUT,
+        BookmakerCapability.CANCEL_BET,
+    ],
 )
-def test_position_preserves_opaque_provider_status(provider_status: str) -> None:
-    position = _position(
-        BookmakerPositionState.SETTLED,
-        provider_status=provider_status,
-        gross_return=None,
-    )
-
-    assert position.provider_status == provider_status
-    assert position.state is BookmakerPositionState.SETTLED
-    assert position.gross_return is None
-
-
-@pytest.mark.parametrize("provider_status", ("", " PUSH", "PUSH ", 42))
-def test_position_rejects_malformed_provider_status(
-    provider_status: object,
-) -> None:
-    with pytest.raises(BookmakerCapabilityError, match="provider_status"):
-        _position(
-            BookmakerPositionState.SETTLED,
-            provider_status=provider_status,
+def test_snapshot_rejects_capability_without_typed_snapshot_evidence(capability):
+    profile = _profile(capability)
+    with pytest.raises(
+        BookmakerCapabilityError,
+        match="without typed account-snapshot evidence",
+    ):
+        BookmakerAccountSnapshot(
+            profile=profile,
+            observed_capabilities=frozenset({capability}),
+            observed_at=_TS,
         )
 
 
-def test_provider_status_does_not_mint_canonical_settlement_or_return() -> None:
-    position = _position(
+def test_position_provider_status_preserves_legacy_positional_constructor_order():
+    position = BookmakerPositionObservation(
+        "book-a",
+        "acct-a",
+        "adapter-a",
+        "obs-positional",
+        "external-positional",
         BookmakerPositionState.OPEN,
-        provider_status="PUSH_WIN",
-        gross_return=None,
+        "EUR",
+        _TS,
+        _HASH,
+        Decimal("10"),
+        "backer_stake",
+        "BACK",
+        Decimal("2.00"),
+        None,
+        "receipt-1",
+        None,
     )
+    assert position.provider_amount == Decimal("10")
+    assert position.external_receipt_id == "receipt-1"
+    assert position.provider_status is None
 
-    assert position.provider_status == "PUSH_WIN"
-    assert position.state is BookmakerPositionState.OPEN
-    assert position.gross_return is None
+
+def test_position_provider_status_is_optional_opaque_evidence():
+    legacy = _position(BookmakerPositionState.OPEN)
+    assert legacy.provider_status is None
+    for status in ("PUSH", "PUSH_WIN", "PUSH_LOSE", "PROVIDER_FUTURE_STATUS_V7"):
+        position = _position(
+            BookmakerPositionState.OPEN,
+            observation_id=f"status-{status}",
+            external_position_id=f"external-{status}",
+            provider_status=status,
+        )
+        assert position.provider_status == status
+        assert position.state is BookmakerPositionState.OPEN
+        assert position.gross_return is None
+
+
+@pytest.mark.parametrize("provider_status", ["", " PUSH_WIN", "PUSH_WIN ", "   "])
+def test_position_provider_status_rejects_empty_or_untrimmed_text(provider_status):
+    with pytest.raises(BookmakerCapabilityError, match="provider_status"):
+        _position(BookmakerPositionState.OPEN, provider_status=provider_status)
+
+
+@pytest.mark.parametrize("provider_status", [7, True, object()])
+def test_position_provider_status_rejects_non_string_values(provider_status):
+    with pytest.raises(BookmakerCapabilityError, match="provider_status"):
+        _position(BookmakerPositionState.OPEN, provider_status=provider_status)
+
+
+def test_position_provider_status_does_not_rewrite_explicit_canonical_state():
+    settled = _position(
+        BookmakerPositionState.SETTLED,
+        observation_id="status-settled",
+        external_position_id="external-status-settled",
+        provider_status="PUSH_LOSE",
+        gross_return=Decimal("0"),
+    )
+    assert settled.provider_status == "PUSH_LOSE"
+    assert settled.state is BookmakerPositionState.SETTLED
+    assert settled.gross_return == Decimal("0")

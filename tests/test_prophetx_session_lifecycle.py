@@ -570,7 +570,7 @@ def test_renewal_is_single_flight_and_never_authorizes_login_fallback(tmp_path):
     assert started.login_authorized is False
 
     same_process = lifecycle.begin_renewal(
-        now=due_at + timedelta(seconds=1)
+        now=due_at + timedelta(seconds=1),
         refresh_token_lineage_id=active.session_lineage_id,
     )
     assert (
@@ -651,7 +651,7 @@ def test_retryable_renewal_failure_retries_refresh_not_login(tmp_path):
     assert login_admission.login_authorized is False
 
     renewal_admission = lifecycle.begin_renewal(
-        now=due_at + timedelta(seconds=2)
+        now=due_at + timedelta(seconds=2),
         refresh_token_lineage_id=active.session_lineage_id,
     )
     assert renewal_admission.action is ProphetXLoginAdmissionAction.RETRY_LATER
@@ -838,7 +838,7 @@ def test_renewal_before_lead_window_is_rejected(tmp_path):
         match="renewal is not due yet",
     ):
         lifecycle.begin_renewal(
-            now=active.access_expires_at - timedelta(minutes=3)
+            now=active.access_expires_at - timedelta(minutes=3),
             refresh_token_lineage_id=active.session_lineage_id,
         )
 
@@ -875,7 +875,7 @@ def test_successful_renewal_resets_transient_failure_backoff(tmp_path):
         attempt_id=second_attempt.attempt_id,
         now=retry_at + timedelta(seconds=1),
         access_expires_at=retry_at + timedelta(minutes=10),
-    provider_session_slot_preservation_proven=True,
+        provider_session_slot_preservation_proven=True,
     )
     assert renewed.transient_failures == 0
     assert renewed.last_renewal_failure_class is None

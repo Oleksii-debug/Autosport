@@ -1154,7 +1154,7 @@ class PersistentLiveDecisionLoop:
         decision_time = now
         decision_context_sha256 = self._decision_context_sha256()
         try:
-            snapshots = self._capture_input_views(
+            snapshots, captured_routing_revision = self._capture_input_views(
                 refresh_input_ids,
                 decision_time,
             )
@@ -1207,6 +1207,7 @@ class PersistentLiveDecisionLoop:
                 expected_registered_input_ids=registered_input_ids,
                 expected_previous_progress=expected_previous_progress,
                 expected_mirror_revision=captured_mirror_revision,
+                expected_dependency_routing_revision=captured_routing_revision,
             )
         except _ConcurrentDecisionSnapshot as exc:
             return LiveCycleResult(
@@ -1621,13 +1622,26 @@ class PersistentLiveDecisionLoop:
         as_of: datetime,
         *,
         incremental: bool = True,
-    ) -> dict[str, MirrorSnapshot]:
-        snapshots = self.dependencies.coherent_decision_views(
-            input_ids,
-            as_of=as_of,
-            max_age=self.max_quote_age,
-            incremental=incremental,
-        )
+    ) -> tuple[dict[str, MirrorSnapshot], int]:
+        routing_revision_before = self.dependencies.routing_revision
+        try:
+            snapshots = self.dependencies.coherent_decision_views(
+                input_ids,
+                as_of=as_of,
+                max_age=self.max_quote_age,
+                incremental=incremental,
+            )
+        except FocusedMirrorRegistryChanged as exc:
+            raise _ConcurrentDecisionSnapshot(
+                "focused dependency routing changed during decision snapshot capture; "
+                "retrying before economic action"
+            ) from exc
+        captured_routing_revision = self.dependencies.routing_revision
+        if captured_routing_revision != routing_revision_before:
+            raise _ConcurrentDecisionSnapshot(
+                "focused dependency routing changed during decision snapshot capture; "
+                "retrying before economic action"
+            )
 
         # Every economic cut, including provider-gap ZERO, must linearize against
         # one exact mirror revision. Incremental cuts additionally require a drained
@@ -1689,7 +1703,7 @@ class PersistentLiveDecisionLoop:
                 [event.to_dict() for event in snapshot.events]
             )
             self._record_freshness_deadline(input_id, snapshot)
-        return snapshots
+        return snapshots, captured_routing_revision
 
     def _refresh_intents_from_snapshots(
         self,
@@ -1773,7 +1787,7 @@ class PersistentLiveDecisionLoop:
         affected = self.dependencies.input_ids
         decision_context_sha256 = self._decision_context_sha256()
         try:
-            gap_snapshots = self._capture_input_views(
+            gap_snapshots, captured_routing_revision = self._capture_input_views(
                 affected,
                 now,
                 incremental=False,
@@ -1793,6 +1807,7 @@ class PersistentLiveDecisionLoop:
                 expected_registered_input_ids=affected,
                 expected_previous_progress=expected_previous_progress,
                 expected_mirror_revision=captured_mirror_revision,
+                expected_dependency_routing_revision=captured_routing_revision,
             )
         except _ConcurrentDecisionSnapshot as exc:
             self._needs_cache_rebuild = True
@@ -2099,6 +2114,7 @@ class PersistentLiveDecisionLoop:
         expected_registered_input_ids: tuple[str, ...],
         expected_previous_progress: _Progress | None,
         expected_mirror_revision: int | None,
+        expected_dependency_routing_revision: int,
     ) -> PaperBook:
         _, decision_time = _canonical_timestamp("decision_ts", decision_ts)
         self.intent_provenance.assert_available_at(decision_time)
@@ -2116,6 +2132,13 @@ class PersistentLiveDecisionLoop:
         ):
             raise TypeError(
                 "expected_mirror_revision must be a non-negative integer or None"
+            )
+        if (
+            type(expected_dependency_routing_revision) is not int
+            or expected_dependency_routing_revision < 0
+        ):
+            raise TypeError(
+                "expected_dependency_routing_revision must be a non-negative integer"
             )
         with WorkspaceEconomicLock(self.workspace):
             durable_previous_progress = self._load_progress()
@@ -2235,7 +2258,8 @@ class PersistentLiveDecisionLoop:
             try:
                 if expected_mirror_revision is None:
                     with self.dependencies.hold_input_ids(
-                        expected_registered_input_ids
+                        expected_registered_input_ids,
+                        expected_routing_revision=expected_dependency_routing_revision,
                     ):
                         atomic_write_json(self.progress_path, pending.to_dict())
                 else:
@@ -2246,7 +2270,8 @@ class PersistentLiveDecisionLoop:
                         expected_mirror_revision
                     ):
                         with self.dependencies.hold_input_ids(
-                            expected_registered_input_ids
+                            expected_registered_input_ids,
+                            expected_routing_revision=expected_dependency_routing_revision,
                         ):
                             atomic_write_json(
                                 self.progress_path,

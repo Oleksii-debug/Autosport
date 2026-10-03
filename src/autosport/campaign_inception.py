@@ -261,8 +261,14 @@ class CampaignInceptionSourceSpec:
     evaluation_end_slot_ordinal: int
 
     def __post_init__(self) -> None:
-        if not isinstance(self.expected_store_path, Path):
-            raise TypeError("expected_store_path must be pathlib.Path")
+        # A Path subclass can override is_absolute()/__fspath__() and execute
+        # caller code while the exact collector-store authority path is still being
+        # constructed.  This DTO is authority-bearing input, so admit only the exact
+        # platform pathlib concrete type before any virtual path dispatch.
+        if type(self.expected_store_path) is not type(Path()):
+            raise TypeError(
+                "expected_store_path must be the exact platform pathlib path type"
+            )
         if not self.expected_store_path.is_absolute():
             raise CampaignInceptionIntegrityError(
                 "expected_store_path must be absolute"

@@ -11,6 +11,7 @@ from pathlib import Path
 from time import monotonic
 from typing import Callable, Protocol
 
+from . import _paperbook_preload_authority_guard as _paperbook_authority
 from .decision_ledger import (
     ECONOMIC_DECISION_KIND,
     MATERIAL_ACTION_ID_PAYLOAD_KEY,
@@ -1924,9 +1925,54 @@ class PersistentLiveDecisionLoop:
             # The snapshot is written before the cursor: a crash before cursor
             # publication leaves only ignorable stale snapshot bytes, while every
             # visible PENDING cursor has an exact pre-action portfolio witness.
-            self.book.save(self.pre_action_book_path)
+            #
+            # The pre-action artifact is recovery evidence, not an alternate
+            # persistence path for the live PaperBook.  In PAPER mode #623 owns
+            # that exact live object at workspace/paper_book.json; publishing the
+            # same object here would either rebind or cross-path-save its durable
+            # generation.  Reuse the canonical risk shadow capability to create
+            # a detached exact semantic clone with product-issued opening/causal
+            # authority but no live generation/path binding.  Its first save
+            # therefore establishes only the dedicated recovery-snapshot lineage.
+            live_context_sha256 = self._decision_context_sha256()
+            snapshot = self.authority.risk_policy._shadow_book_for_allocation(
+                self.book
+            )
+            if (
+                type(snapshot) is not PaperBook
+                or snapshot is self.book
+                or not self._same_book_state(snapshot, self.book)
+            ):
+                raise LiveDecisionProgressError(
+                    "cannot detach exact pre-action PaperBook"
+                )
+            snapshot_context_sha256 = self._decision_context_sha256_for_book(
+                snapshot
+            )
+            if snapshot_context_sha256 != live_context_sha256:
+                raise LiveDecisionProgressError(
+                    "pre-action PaperBook context changed before durability"
+                )
+
+            # A new detached shadow is created for every decision cycle so the live
+            # canonical PaperBook never acquires the recovery-artifact path authority.
+            # When a previous pre-action artifact already exists, explicitly adopt
+            # that artifact's *current* durable generation before replacement.  This
+            # is a product-owned capability resolved from the sealed persistence graph
+            # below; generic PaperBook.save() remains fail-closed for unbound/stale
+            # objects and for cross-path publication.
+            _paperbook_authority._bind_book(snapshot, self.pre_action_book_path)
+            snapshot.save(self.pre_action_book_path)
             durable_pre_action = PaperBook.load(self.pre_action_book_path)
-            if not self._same_book_state(durable_pre_action, self.book):
+            durable_context_sha256 = self._decision_context_sha256_for_book(
+                durable_pre_action
+            )
+            current_context_sha256 = self._decision_context_sha256()
+            if (
+                not self._same_book_state(durable_pre_action, self.book)
+                or durable_context_sha256 != live_context_sha256
+                or current_context_sha256 != live_context_sha256
+            ):
                 raise LiveDecisionProgressError(
                     "pre-action PaperBook durability verification failed"
                 )
@@ -1935,9 +1981,7 @@ class PersistentLiveDecisionLoop:
                 phase=_PHASE_PENDING,
                 decision_ts=decision_ts,
                 market_state_sha256=market_state_sha256,
-                decision_context_sha256=self._decision_context_sha256_for_book(
-                    durable_pre_action
-                ),
+                decision_context_sha256=durable_context_sha256,
                 affected_input_ids=affected_input_ids,
                 registered_input_ids=self.dependencies.input_ids,
                 decision_id=None,
@@ -2233,3 +2277,18 @@ class PersistentLiveDecisionLoop:
                 for input_id in self.dependencies.input_ids
             ]
         )
+
+
+# _write_pending is the only live-loop boundary allowed to adopt the existing
+# pre-action recovery snapshot generation for a freshly detached risk shadow.  Seal
+# that positive capability behind the already-frozen PaperBook persistence graph and
+# remove the mutable module alias afterwards.
+from ._paperbook_current_binding_verifier import (
+    seal_current_binding_consumer as _seal_current_binding_consumer,
+)
+
+PersistentLiveDecisionLoop._write_pending = _seal_current_binding_consumer(
+    PersistentLiveDecisionLoop._write_pending
+)
+del _seal_current_binding_consumer
+del _paperbook_authority

@@ -626,55 +626,65 @@ def _make_resolution_verifier(lookup_witness):
 
         issued_ledger = issued.ledger
         issued_ledger_type = issued.ledger_type
-        if (
-            type(issued_ledger) is not issued_ledger_type
-            or issued_ledger.path is not issued.path
-            or issued_ledger._anchor_path is not issued.anchor_path
-            or issued_ledger._pending_path is not issued.pending_path
-            or issued_ledger._lock_path is not issued.lock_path
-            or issued.events_reader.__globals__.get("_ManualNvdaWriterLock")
-            is not issued.writer_lock_type
-        ):
-            raise NvdaManualAcceptanceStateError(
-                "manual NVDA resolution ledger authority changed after issuance"
-            )
-        for (
-            name,
-            expected_descriptor,
-            expected_callable,
-            expected_code,
-        ) in issued.reader_method_witnesses:
-            current_descriptor = issued_ledger_type.__dict__.get(name)
-            current_callable = getattr(issued_ledger_type, name, None)
+
+        def require_issued_reader_graph() -> None:
             if (
-                current_descriptor is not expected_descriptor
-                or current_callable is not expected_callable
-                or getattr(current_callable, "__code__", None) is not expected_code
-                or name in vars(issued_ledger)
+                type(issued_ledger) is not issued_ledger_type
+                or issued_ledger.path is not issued.path
+                or issued_ledger._anchor_path is not issued.anchor_path
+                or issued_ledger._pending_path is not issued.pending_path
+                or issued_ledger._lock_path is not issued.lock_path
+                or issued.events_reader.__globals__.get("_ManualNvdaWriterLock")
+                is not issued.writer_lock_type
             ):
                 raise NvdaManualAcceptanceStateError(
-                    "manual NVDA resolution ledger reader changed after issuance: "
-                    + name
+                    "manual NVDA resolution ledger authority changed after issuance"
                 )
-        for name, expected_callable, expected_code in issued.writer_lock_method_witnesses:
-            current_callable = getattr(issued.writer_lock_type, name, None)
+            for (
+                name,
+                expected_descriptor,
+                expected_callable,
+                expected_code,
+            ) in issued.reader_method_witnesses:
+                current_descriptor = issued_ledger_type.__dict__.get(name)
+                current_callable = getattr(issued_ledger_type, name, None)
+                if (
+                    current_descriptor is not expected_descriptor
+                    or current_callable is not expected_callable
+                    or getattr(current_callable, "__code__", None) is not expected_code
+                    or name in vars(issued_ledger)
+                ):
+                    raise NvdaManualAcceptanceStateError(
+                        "manual NVDA resolution ledger reader changed after issuance: "
+                        + name
+                    )
+            for (
+                name,
+                expected_callable,
+                expected_code,
+            ) in issued.writer_lock_method_witnesses:
+                current_callable = getattr(issued.writer_lock_type, name, None)
+                if (
+                    current_callable is not expected_callable
+                    or getattr(current_callable, "__code__", None)
+                    is not expected_code
+                ):
+                    raise NvdaManualAcceptanceStateError(
+                        "manual NVDA resolution writer-lock dispatch changed after issuance: "
+                        + name
+                    )
             if (
-                current_callable is not expected_callable
-                or getattr(current_callable, "__code__", None) is not expected_code
+                issued_ledger_type.events is not issued.events_reader
+                or getattr(issued.events_reader, "__code__", None)
+                is not issued.events_reader_code
             ):
                 raise NvdaManualAcceptanceStateError(
-                    "manual NVDA resolution writer-lock dispatch changed after issuance: "
-                    + name
+                    "manual NVDA resolution ledger authority changed after issuance"
                 )
-        if (
-            issued_ledger_type.events is not issued.events_reader
-            or getattr(issued.events_reader, "__code__", None)
-            is not issued.events_reader_code
-        ):
-            raise NvdaManualAcceptanceStateError(
-                "manual NVDA resolution ledger authority changed after issuance"
-            )
+
+        require_issued_reader_graph()
         current_records = issued.events_reader(issued_ledger)
+        require_issued_reader_graph()
         current_matching = [
             current
             for current in current_records

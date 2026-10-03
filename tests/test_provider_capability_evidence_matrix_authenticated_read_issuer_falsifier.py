@@ -475,3 +475,82 @@ def test_restart_journal_can_requalify_only_with_fresh_product_issued_successor(
         ),
         at_time="2026-09-21T10:07:00+00:00",
     )
+
+
+def test_rejected_copied_successor_cannot_poison_caller_lifecycle_journal(
+    monkeypatch,
+) -> None:
+    first = _product_issued_betdaq_balance(monkeypatch)
+    journal = CapabilityEvidenceJournal()
+    journal.publish(first.evidence)
+    before = journal.to_json()
+
+    successor = _product_issued_betdaq_balance(
+        monkeypatch,
+        observed_minute=5,
+        committed_at="2026-09-21T10:06:00+00:00",
+        review_due_at="2026-09-21T11:06:00+00:00",
+        predecessor_id=first.evidence.evidence_id,
+    )
+    copied = CapabilityEvidence(
+        **{
+            field: getattr(successor.evidence, field)
+            for field in successor.evidence.__dataclass_fields__
+        }
+    )
+    forged = BetdaqAuthenticatedCapabilityIssuance(successor.profile, copied)
+    integration = bind_bookmaker_integration(
+        successor.profile,
+        integration_kind=BookmakerIntegrationKind.OFFICIAL_API,
+        observed_at="2026-09-21T10:06:30+00:00",
+        source_ref="betdaq-secure-api-forged-successor",
+        source_payload_sha256="3" * 64,
+    )
+
+    with pytest.raises(
+        ProviderCapabilityEvidenceMatrixError,
+        match="not current product-issued authenticated proof",
+    ):
+        issue_betdaq_authenticated_read_evidence(
+            forged,
+            integration,
+            journal=journal,
+        )
+
+    assert journal.to_json() == before
+
+
+def test_rejected_late_successor_cannot_poison_caller_lifecycle_journal(
+    monkeypatch,
+) -> None:
+    first = _product_issued_betdaq_balance(monkeypatch)
+    journal = CapabilityEvidenceJournal()
+    journal.publish(first.evidence)
+    before = journal.to_json()
+
+    successor = _product_issued_betdaq_balance(
+        monkeypatch,
+        observed_minute=5,
+        committed_at="2026-09-21T10:06:00+00:00",
+        review_due_at="2026-09-21T11:06:00+00:00",
+        predecessor_id=first.evidence.evidence_id,
+    )
+    integration = bind_bookmaker_integration(
+        successor.profile,
+        integration_kind=BookmakerIntegrationKind.OFFICIAL_API,
+        observed_at="2026-09-21T11:05:00+00:00",
+        source_ref="betdaq-secure-api-too-late-successor",
+        source_payload_sha256="4" * 64,
+    )
+
+    with pytest.raises(
+        ProviderCapabilityEvidenceMatrixError,
+        match="became available at or after its expiry",
+    ):
+        issue_betdaq_authenticated_read_evidence(
+            successor,
+            integration,
+            journal=journal,
+        )
+
+    assert journal.to_json() == before

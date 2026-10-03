@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from threading import RLock
@@ -11,6 +12,10 @@ from .storage import SQLiteMarketStore
 
 
 MirrorQuoteKey = tuple[str, str]
+
+
+class FocusedMirrorRegistryChanged(RuntimeError):
+    """The focused dependency registry moved across an economic decision cut."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -133,6 +138,32 @@ class FocusedMirrorDependencyIndex:
     def input_ids(self) -> tuple[str, ...]:
         with self._lock:
             return tuple(sorted(self._dependencies))
+
+    @contextmanager
+    def hold_input_ids(
+        self,
+        expected_input_ids: tuple[str, ...],
+    ) -> Iterator[None]:
+        """Linearize a short publication step against one exact dependency registry."""
+
+        if type(expected_input_ids) is not tuple or any(
+            type(input_id) is not str for input_id in expected_input_ids
+        ):
+            raise TypeError("expected_input_ids must be a tuple of strings")
+        expected = tuple(sorted(expected_input_ids))
+        if len(expected) != len(set(expected)):
+            raise ValueError("expected_input_ids must be unique")
+        with self._lock:
+            current = tuple(sorted(self._dependencies))
+            if current != expected:
+                raise FocusedMirrorRegistryChanged(
+                    "focused mirror dependency registry changed before decision publication"
+                )
+            yield
+            if tuple(sorted(self._dependencies)) != expected:
+                raise FocusedMirrorRegistryChanged(
+                    "focused mirror dependency registry changed during decision publication"
+                )
 
     def _dependency(self, input_id: str) -> FocusedMirrorDependency:
         normalized_id = self._input_id(input_id)

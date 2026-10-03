@@ -526,7 +526,6 @@ def test_composite_mapping_keys_share_global_value_node_budget() -> None:
     assert redact_operator_value(payload) == REDACTED
 
 
-
 def test_double_encoded_sensitive_query_key_redacts_value() -> None:
     secret = "AS-QUERY-NESTED-SECRET-4d91"
     rendered = redact_operator_text(

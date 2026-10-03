@@ -409,7 +409,7 @@ def _build_capability():
             }
         )
 
-    @dataclass(frozen=True, slots=True)
+    @dataclass(frozen=True, slots=True, weakref_slot=True)
     class ProviderBillingInputsObservation:
         entitlement: DeveloperAppEntitlementObservation
         statement: AccountStatementPageObservation

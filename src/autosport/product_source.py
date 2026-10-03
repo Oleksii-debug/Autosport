@@ -6,6 +6,7 @@ import os
 import stat
 import uuid
 from datetime import datetime, timezone
+from itertools import islice
 from pathlib import Path
 from typing import Callable
 
@@ -725,16 +726,18 @@ class ParlayApiProductSource:
                 delta = CollectorDelta.from_dict(item["delta"])
                 pending_delta_ids.add(delta.delta_id)
 
-        cache_items = list(cache.items())
-        for offset in range(
-            0,
-            len(cache_items),
-            self._LEGACY_EVENT_MIGRATION_CHUNK,
-        ):
+        cache_items = iter(cache.items())
+        while True:
+            cache_chunk = tuple(
+                islice(
+                    cache_items,
+                    self._LEGACY_EVENT_MIGRATION_CHUNK,
+                )
+            )
+            if not cache_chunk:
+                break
             migrate: dict[str, MarketEvent] = {}
-            for delta_id, event_raw in cache_items[
-                offset : offset + self._LEGACY_EVENT_MIGRATION_CHUNK
-            ]:
+            for delta_id, event_raw in cache_chunk:
                 try:
                     migrate[delta_id] = MarketEvent.from_dict(event_raw)
                 except (TypeError, ValueError) as exc:
@@ -756,9 +759,16 @@ class ParlayApiProductSource:
             *,
             quote: bool,
         ) -> None:
-            items = list(history.items())
-            for offset in range(0, len(items), self._LEGACY_HISTORY_VERIFY_CHUNK):
-                chunk = items[offset : offset + self._LEGACY_HISTORY_VERIFY_CHUNK]
+            items = iter(history.items())
+            while True:
+                chunk = tuple(
+                    islice(
+                        items,
+                        self._LEGACY_HISTORY_VERIFY_CHUNK,
+                    )
+                )
+                if not chunk:
+                    break
                 keys = tuple(str(key) for key, _ in chunk)
                 try:
                     quote_map, dedupe_map = store.event_digest_maps(

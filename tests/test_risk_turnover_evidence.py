@@ -157,6 +157,47 @@ def _resolve_current(
     )
 
 
+@pytest.mark.parametrize(
+    "method_name",
+    ["expanduser", "resolve", "__truediv__"],
+)
+def test_turnover_resolver_rejects_workspace_path_dispatch_rebinding(
+    tmp_path,
+    monkeypatch,
+    method_name,
+):
+    store = _store(tmp_path)
+    window = store.current()
+    goal_store = _goal_store(store)
+    book = _book()
+    _open(book, window, stake="10", suffix="path-dispatch")
+    book_path = store.workspace / "paper_book.json"
+    book.save(book_path)
+    canonical_book = PaperBook.load(book_path)
+    hostile_called = False
+
+    def hostile_path_method(*args, **kwargs):
+        nonlocal hostile_called
+        del args, kwargs
+        hostile_called = True
+        raise AssertionError("mutated Path method executed")
+
+    monkeypatch.setattr(turnover_evidence.Path, method_name, hostile_path_method)
+
+    with pytest.raises(
+        PaperDayTurnoverEvidenceIncompleteError,
+        match="turnover workspace path authority changed",
+    ):
+        PaperDayTurnoverResolver.resolve(
+            book=canonical_book,
+            goal_store=goal_store,
+            window_store=store,
+            window_evidence=window,
+        )
+
+    assert hostile_called is False
+
+
 def test_current_day_turnover_counts_ticket_stake_once_for_parlay(tmp_path):
     store = _store(tmp_path)
     window = store.current()

@@ -53,6 +53,7 @@ from . import supervised_execution as _supervised_execution
 from .supervised_execution import (
     BoundSupervisedExecutionPlan,
     SupervisedExecutionError,
+    assert_bound_supervised_execution_plan_authoritative,
 )
 from . import workspace_lock as _workspace_lock
 from .workspace_lock import WorkspaceEconomicLock
@@ -104,6 +105,14 @@ _BOUND_SUPERVISED_PLAN_TYPE = BoundSupervisedExecutionPlan
 _BOUND_SUPERVISED_PLAN_VERIFY = BoundSupervisedExecutionPlan.verify_binding
 _BOUND_SUPERVISED_PLAN_VERIFY_CODE = getattr(
     _BOUND_SUPERVISED_PLAN_VERIFY,
+    "__code__",
+    None,
+)
+_ASSERT_BOUND_SUPERVISED_PLAN_AUTHORITY = (
+    assert_bound_supervised_execution_plan_authoritative
+)
+_ASSERT_BOUND_SUPERVISED_PLAN_AUTHORITY_CODE = getattr(
+    _ASSERT_BOUND_SUPERVISED_PLAN_AUTHORITY,
     "__code__",
     None,
 )
@@ -262,6 +271,8 @@ def _canonical_denomination_dispatch(
     _bound_type=_BOUND_SUPERVISED_PLAN_TYPE,
     _bound_verify=_BOUND_SUPERVISED_PLAN_VERIFY,
     _bound_verify_code=_BOUND_SUPERVISED_PLAN_VERIFY_CODE,
+    _bound_assert=_ASSERT_BOUND_SUPERVISED_PLAN_AUTHORITY,
+    _bound_assert_code=_ASSERT_BOUND_SUPERVISED_PLAN_AUTHORITY_CODE,
     _lock_type=_WORKSPACE_ECONOMIC_LOCK_TYPE,
     _lock_enter=_WORKSPACE_ECONOMIC_LOCK_ENTER,
     _lock_enter_code=_WORKSPACE_ECONOMIC_LOCK_ENTER_CODE,
@@ -285,6 +296,11 @@ def _canonical_denomination_dispatch(
         if live_bound_type is _bound_type
         else None
     )
+    live_bound_assert = getattr(
+        _supervised_execution,
+        "assert_bound_supervised_execution_plan_authoritative",
+        None,
+    )
     live_lock_type = getattr(_workspace_lock, "WorkspaceEconomicLock", None)
     live_lock_enter = (
         vars(live_lock_type).get("__enter__") if live_lock_type is _lock_type else None
@@ -306,6 +322,10 @@ def _canonical_denomination_dispatch(
         or globals().get("BoundSupervisedExecutionPlan") is not _bound_type
         or live_bound_verify is not _bound_verify
         or getattr(_bound_verify, "__code__", None) is not _bound_verify_code
+        or live_bound_assert is not _bound_assert
+        or globals().get("assert_bound_supervised_execution_plan_authoritative")
+        is not _bound_assert
+        or getattr(_bound_assert, "__code__", None) is not _bound_assert_code
         or live_lock_type is not _lock_type
         or globals().get("WorkspaceEconomicLock") is not _lock_type
         or live_lock_enter is not _lock_enter
@@ -322,6 +342,7 @@ def _canonical_denomination_dispatch(
         _provenance,
         _bound_type,
         _bound_verify,
+        _bound_assert,
         _lock_type,
     )
 
@@ -1044,7 +1065,9 @@ def _require_live_balance(
 def _validated_bound_plan_map(
     bound_plans: tuple[BoundSupervisedExecutionPlan, ...],
 ) -> dict[str, BoundSupervisedExecutionPlan]:
-    _, _, _, bound_type, verify_binding, _ = _canonical_denomination_dispatch()
+    _, _, _, bound_type, verify_binding, assert_bound_authoritative, _ = (
+        _canonical_denomination_dispatch()
+    )
     if type(bound_plans) is not tuple or not bound_plans:
         raise ProviderAccountHeadroomUnsupported(
             "exact bound supervised execution plans are required for monetary denomination"
@@ -1057,9 +1080,10 @@ def _validated_bound_plan_map(
             )
         try:
             verify_binding(bound)
+            assert_bound_authoritative(bound)
         except SupervisedExecutionError as exc:
             raise ProviderAccountHeadroomUnsupported(
-                "bound supervised execution plan failed canonical binding verification"
+                "bound supervised execution plan lacks canonical product issuance authority"
             ) from exc
         plan_id = bound.execution_plan.plan_id
         if plan_id in result:
@@ -1164,16 +1188,19 @@ def _require_plan_denomination(
         raise ProviderAccountHeadroomUnsupported(
             "relevant execution plan lacks exact supervised denomination binding"
         )
-    _, _, _, bound_type, verify_binding, _ = _canonical_denomination_dispatch()
+    _, _, _, bound_type, verify_binding, assert_bound_authoritative, _ = (
+        _canonical_denomination_dispatch()
+    )
     if type(bound) is not bound_type:
         raise ProviderAccountHeadroomUnsupported(
             "relevant denomination binding is not canonical"
         )
     try:
         verify_binding(bound)
+        assert_bound_authoritative(bound)
     except SupervisedExecutionError as exc:
         raise ProviderAccountHeadroomUnsupported(
-            "relevant supervised plan binding is no longer canonical"
+            "relevant supervised plan binding lacks current product issuance authority"
         ) from exc
     if (
         bound.economic_goal_contract_sha256 != economic_goal_contract_sha256

@@ -6,7 +6,7 @@ import urllib.request as _urllib_request
 
 import pytest
 
-from autosport.betfair_account_identity import build_betfair_authenticated_client
+from autosport.betfair_account_identity import (\n    build_betfair_authenticated_client,\n    resolve_betfair_authenticated_account_identity,\n)
 from autosport.betfair_account_readonly import (
     ACCOUNT_JSON_RPC_ENDPOINT,
     BETTING_JSON_RPC_ENDPOINT,
@@ -180,3 +180,35 @@ def test_lower_readback_wrapper_has_no_direct_mutable_issuance_registry() -> Non
                 type(value) is dict
                 and any(type(key) is int for key in value)
             ), "lower readback authority still exposes mutable id-key issuance state"
+
+
+def test_public_authority_slots_cannot_mint_origin_without_canonical_capture(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A structural capture cannot become authoritative by filling public dataclass slots."""
+
+    monkeypatch.setattr(_urllib_request, "_opener", _Opener())
+    canonical_client = build_betfair_authenticated_client(
+        BetfairSessionCredentials("app-key", "session-token"),
+        account_label="acct-1",
+    )
+    identity = resolve_betfair_authenticated_account_identity(canonical_client)
+
+    structural_client = BetfairReadOnlyClient(
+        BetfairSessionCredentials("app-key", "session-token"),
+        transport=_CustomTransport(),
+        venue_id="betfair",
+        account_id="acct-1",
+    )
+    forged = _read(structural_client)
+
+    object.__setattr__(forged, "_authority_client", canonical_client)
+    object.__setattr__(forged, "_authority_account_identity", identity)
+    object.__setattr__(
+        forged,
+        "_authority_capture_fingerprint",
+        forged._authority_fingerprint(),
+    )
+
+    with pytest.raises(BetfairReadOnlyError, match="product-origin authority"):
+        forged.assert_authoritative()

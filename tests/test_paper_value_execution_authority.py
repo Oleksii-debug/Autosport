@@ -513,13 +513,17 @@ def test_economic_origin_witness_recovers_exact_pre_reservation_crash(
         for item in restarted_runtime.ledger.events()
     )
     record = ledger.verified_records()[0]
-    assert (
-        witness_payload["decision_record_sha256"]
-        == paper_value_authority._verified_decision_record_sha256(
-            ledger,
-            record.decision_id,
-        )
-    )
+    envelopes = [
+        json.loads(line)
+        for line in ledger.verified_snapshot().payload.decode("utf-8").splitlines()
+    ]
+    matching = [
+        envelope
+        for envelope in envelopes
+        if envelope["record"]["decision_id"] == record.decision_id
+    ]
+    assert len(matching) == 1
+    assert witness_payload["decision_record_sha256"] == matching[0]["sha256"]
     assert goal == policy.economic_goal
 
 

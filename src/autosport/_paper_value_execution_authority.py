@@ -146,46 +146,31 @@ def _economic_risk_admission_paths(
     return root / f"{token}.json", root / f"{token}.pre-action.json"
 
 
-def _verified_decision_record_sha256(
-    ledger: JsonlDecisionLedger,
-    decision_id: str,
-) -> str:
-    """Return the exact durable DecisionLedger envelope digest for one decision."""
+def _active_decision_origin_sha256(decision_id: str) -> str:
+    """Consume the exact origin already verified by the canonical #623 guard."""
 
-    if type(ledger) is not JsonlDecisionLedger:
-        raise PaperExecutionAdoptionError(
-            "economic paper-value decision digest requires exact DecisionLedger authority"
+    # Deliberately lazy: this module is imported before decision-origin guards are
+    # installed.  Authority-bearing calls occur only after package composition is
+    # complete, when the callsite/resume guard has populated this context with a
+    # closure-verified DecisionRecordOrigin.
+    from . import _paper_execution_decision_origin as _decision_origin
+
+    origin = _decision_origin._DECISION_ORIGIN.get()
+    if (
+        origin is None
+        or origin.decision_id != decision_id
+        or type(origin.record_sha256) is not str
+        or len(origin.record_sha256) != 64
+        or origin.record_sha256 != origin.record_sha256.lower()
+        or any(
+            character not in "0123456789abcdef"
+            for character in origin.record_sha256
         )
-    try:
-        snapshot = ledger.verified_snapshot()
-        matches: list[str] = []
-        for line in snapshot.payload.decode("utf-8").splitlines():
-            envelope = json.loads(line)
-            record = envelope.get("record")
-            if type(record) is not dict or record.get("decision_id") != decision_id:
-                continue
-            digest = envelope.get("sha256")
-            if (
-                type(digest) is not str
-                or len(digest) != 64
-                or digest != digest.lower()
-                or any(character not in "0123456789abcdef" for character in digest)
-            ):
-                raise PaperExecutionAdoptionError(
-                    "economic paper-value durable decision digest is invalid"
-                )
-            matches.append(digest)
-    except PaperExecutionAdoptionError:
-        raise
-    except (UnicodeError, ValueError) as exc:
+    ):
         raise PaperExecutionAdoptionError(
-            "economic paper-value durable decision digest cannot be resolved"
-        ) from exc
-    if len(matches) != 1:
-        raise PaperExecutionAdoptionError(
-            "economic paper-value decision digest requires one exact durable record"
+            "economic paper-value risk admission lacks exact active decision origin"
         )
-    return matches[0]
+    return origin.record_sha256
 
 
 def _risk_admission_payload(
@@ -542,10 +527,7 @@ def _issue_economic_risk_admission(
         raise PaperExecutionAdoptionError(
             "economic paper-value risk admission cannot validate pre-action PaperBook"
         )
-    decision_record_sha256 = _verified_decision_record_sha256(
-        ledger,
-        decision_id,
-    )
+    decision_record_sha256 = _active_decision_origin_sha256(decision_id)
     witness = _economic_risk_admission_payload(
         record=record,
         descriptor=descriptor,
@@ -640,10 +622,7 @@ def _verify_economic_risk_admission(
         raise PaperExecutionAdoptionError(
             "economic paper-value risk admission pre-action PaperBook is invalid"
         )
-    decision_record_sha256 = _verified_decision_record_sha256(
-        ledger,
-        record.decision_id,
-    )
+    decision_record_sha256 = _active_decision_origin_sha256(record.decision_id)
     expected = _economic_risk_admission_payload(
         record=record,
         descriptor=descriptor,

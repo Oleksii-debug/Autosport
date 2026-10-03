@@ -100,9 +100,12 @@ def _build_forward_verification_context():
     exact_type = type
     exact_dict = dict
     exact_tuple = tuple
+    exact_str = str
     exact_len = len
+    exact_any = any
     exact_callable = callable
     exact_getattr = getattr
+    hex_chars = frozenset("0123456789abcdef")
 
     def resolve_active(request) -> dict[str, object]:
         if (
@@ -118,6 +121,15 @@ def _build_forward_verification_context():
             raise PaperCampaignAdmissionError(
                 "campaign forward verification resolver returned noncanonical payload"
             )
+        receipt_sha256 = payload.get("receipt_sha256")
+        if (
+            exact_type(receipt_sha256) is not exact_str
+            or exact_len(receipt_sha256) != 64
+            or exact_any(character not in hex_chars for character in receipt_sha256)
+        ):
+            raise PaperCampaignAdmissionError(
+                "campaign forward verification receipt identity is invalid"
+            )
         return payload
 
     def current() -> dict[str, object] | None:
@@ -127,13 +139,15 @@ def _build_forward_verification_context():
         if (
             exact_type(value) is not exact_tuple
             or exact_len(value) != 2
-            or exact_type(value[1]) is not exact_dict
+            or exact_type(value[1]) is not exact_str
+            or exact_len(value[1]) != 64
+            or exact_any(character not in hex_chars for character in value[1])
         ):
             raise PaperCampaignAdmissionError(
                 "campaign forward verification context is invalid"
             )
         resolved = resolve_active(value[0])
-        if resolved != value[1]:
+        if resolved["receipt_sha256"] != value[1]:
             raise PaperCampaignAdmissionError(
                 "campaign forward verification changed inside admission"
             )
@@ -168,7 +182,7 @@ def _build_forward_verification_context():
                 raise PaperCampaignAdmissionError(
                     "campaign forward verification changed before admission"
                 )
-            token = context.set((request, exact_dict(before)))
+            token = context.set((request, before["receipt_sha256"]))
             try:
                 result = invoke()
             finally:

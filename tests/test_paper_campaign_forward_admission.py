@@ -408,10 +408,7 @@ def test_extracted_forward_context_var_cannot_forge_verification(tmp_path):
     token = context.set(
         (
             (None,) * 8,
-            {
-                "receipt_sha256": "a" * 64,
-                "campaign_id": "forged-campaign",
-            },
+            "a" * 64,
         )
     )
     try:
@@ -432,10 +429,7 @@ def test_forward_authority_revalidates_before_journal_mutation(tmp_path):
     token = context.set(
         (
             (None,) * 8,
-            {
-                "receipt_sha256": "a" * 64,
-                "campaign_id": "forged-campaign",
-            },
+            "a" * 64,
         )
     )
     try:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 
+import scripts.cancel_superseded_pr_workflow_runs as controller_module
 from scripts.cancel_superseded_pr_workflow_runs import (
     CancellationError,
     CancellationResult,
@@ -263,6 +264,86 @@ def test_qualification_constructor_code_mutation_is_rejected() -> None:
             )
     finally:
         target.__code__ = original_code
+
+
+def test_coordinated_qualification_root_rebind_cannot_forge_trusted_head(
+    monkeypatch,
+) -> None:
+    api = controller_module.GitHubApi(
+        repository="owner/repo",
+        token="token",
+    )
+    api._pull_request = lambda pr_number: {
+        "state": "open",
+        "draft": False,
+        "head": {
+            "sha": HEAD_B,
+            "repo": {"full_name": "owner/repo"},
+        },
+        "base": {"repo": {"full_name": "owner/repo"}},
+    } if pr_number == 2008 else (_ for _ in ()).throw(AssertionError(pr_number))
+
+    class ForgedQualification:
+        def __init__(self, head_sha: str, integration_capable: bool) -> None:
+            del head_sha, integration_capable
+            self.head_sha = HEAD_A
+            self.integration_capable = True
+
+    forged_init = ForgedQualification.__dict__["__init__"]
+    monkeypatch.setattr(
+        controller_module,
+        "PullRequestQualification",
+        ForgedQualification,
+    )
+    # Recreate the old coordinated witness-global attack even though these names
+    # are no longer authority-bearing. A secure reader must ignore all of them.
+    monkeypatch.setattr(
+        controller_module,
+        "_PULL_REQUEST_QUALIFICATION_TYPE",
+        ForgedQualification,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        controller_module,
+        "_PULL_REQUEST_QUALIFICATION_DICT_DESCRIPTOR",
+        ForgedQualification.__dict__["__dict__"],
+        raising=False,
+    )
+    monkeypatch.setattr(
+        controller_module,
+        "_PULL_REQUEST_QUALIFICATION_INIT",
+        forged_init,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        controller_module,
+        "_PULL_REQUEST_QUALIFICATION_INIT_CODE",
+        forged_init.__code__,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        controller_module,
+        "_PULL_REQUEST_QUALIFICATION_FIELD_CLASS_WITNESSES",
+        tuple(
+            (
+                name,
+                name in ForgedQualification.__dict__,
+                ForgedQualification.__dict__.get(name),
+            )
+            for name in ("head_sha", "integration_capable")
+        ),
+        raising=False,
+    )
+
+    with pytest.raises(
+        CancellationError,
+        match="pull request qualification authority changed",
+    ):
+        admit_current_head(
+            api=api,
+            pr_number=2008,
+            event_head_sha=HEAD_A,
+        )
 
 
 def test_in_place_qualification_state_drift_revokes_cancellation() -> None:

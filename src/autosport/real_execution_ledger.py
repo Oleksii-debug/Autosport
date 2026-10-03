@@ -515,6 +515,7 @@ class ExecutionAttemptReadView:
     action: ExecutionAction
     state: AttemptState
     submitted_at: str | None
+    submitted_request_sha256: str | None
     unknown_reason: str | None
     unknown_observed_at: str | None
     provider_order_ref: str | None
@@ -1636,8 +1637,27 @@ class RealExecutionLedger:
                         followup["event_type"]
                         == EventType.ATTEMPT_SUBMITTED.value
                     ):
+                        submission_payload = followup["payload"]
+                        if set(submission_payload) not in (
+                            {"submitted_at"},
+                            {"submitted_at", "request_sha256"},
+                        ):
+                            raise ExecutionLedgerIntegrityError(
+                                "ATTEMPT_SUBMITTED payload schema is invalid"
+                            )
+                        request_sha256 = submission_payload.get("request_sha256")
+                        if request_sha256 is not None:
+                            try:
+                                _sha256_text(
+                                    request_sha256,
+                                    "request_sha256",
+                                )
+                            except ValueError as exc:
+                                raise ExecutionLedgerIntegrityError(
+                                    "submitted request digest is invalid"
+                                ) from exc
                         submitted_time = _timestamp(
-                            followup["payload"]["submitted_at"],
+                            submission_payload["submitted_at"],
                             "submitted_at",
                         )
                         if submitted_time < reserved_time:
@@ -2609,16 +2629,40 @@ class RealExecutionLedger:
         return self._mutate(operation)
 
     def mark_submitted(
-        self, attempt_id: str, submitted_at: str | None = None
+        self,
+        attempt_id: str,
+        submitted_at: str | None = None,
+        *,
+        request_sha256: str | None = None,
     ) -> None:
         actual_submitted_at = submitted_at or _now()
         submitted_time = _timestamp(actual_submitted_at, "submitted_at")
+        if request_sha256 is not None:
+            _sha256_text(request_sha256, "request_sha256")
 
         def operation() -> None:
             events = self._events()
             attempt_events = self._attempt_events(events, attempt_id)
             state = self._state(attempt_events)
             if state == AttemptState.SUBMITTED:
+                if request_sha256 is not None:
+                    submitted_events = [
+                        event
+                        for event in attempt_events
+                        if event["event_type"]
+                        == EventType.ATTEMPT_SUBMITTED.value
+                    ]
+                    if len(submitted_events) != 1:
+                        raise ExecutionLedgerIntegrityError(
+                            "attempt has ambiguous submission history"
+                        )
+                    if (
+                        submitted_events[0]["payload"].get("request_sha256")
+                        != request_sha256
+                    ):
+                        raise ExecutionIdentityConflict(
+                            "attempt already submitted with different request identity"
+                        )
                 return
             if state != AttemptState.RESERVED:
                 raise ExecutionStateError(
@@ -2641,12 +2685,17 @@ class RealExecutionLedger:
                 raise ExecutionStateError(
                     "cannot submit attempt at or after persisted quote expiry"
                 )
+            payload: dict[str, str] = {
+                "submitted_at": actual_submitted_at,
+            }
+            if request_sha256 is not None:
+                payload["request_sha256"] = request_sha256
             self._append(
                 EventType.ATTEMPT_SUBMITTED,
                 first["plan_id"],
                 first["action_id"],
                 attempt_id,
-                {"submitted_at": actual_submitted_at},
+                payload,
             )
 
         self._mutate(operation)
@@ -3263,6 +3312,11 @@ class RealExecutionLedger:
             submitted_at = (
                 submitted[0]["payload"]["submitted_at"] if submitted else None
             )
+            submitted_request_sha256 = (
+                submitted[0]["payload"].get("request_sha256")
+                if submitted
+                else None
+            )
             unknown_reason = unknown[0]["payload"]["reason"] if unknown else None
             unknown_observed_at = (
                 unknown[0]["payload"]["observed_at"] if unknown else None
@@ -3314,6 +3368,7 @@ class RealExecutionLedger:
                     action=action,
                     state=state,
                     submitted_at=submitted_at,
+                    submitted_request_sha256=submitted_request_sha256,
                     unknown_reason=unknown_reason,
                     unknown_observed_at=unknown_observed_at,
                     provider_order_ref=provider_order_ref,

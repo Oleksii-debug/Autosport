@@ -1410,3 +1410,115 @@ def test_runtime_authority_rejects_uuid4_code_replacement_before_prepare(
             _append(store, 0)
     finally:
         target.__code__ = original_code
+
+
+def test_runtime_authority_rejects_digest_alias_rebinding_at_binding_boundary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "deployment-runtime-authority.json"
+    store = DeploymentRuntimeAuthorityStore.initialize_pristine(
+        path,
+        authority_root=_authority_root(tmp_path),
+    )
+    hostile_calls: list[object] = []
+
+    def hostile_digest(value: object) -> str:
+        hostile_calls.append(value)
+        return store._semantic_binding_sha256
+
+    monkeypatch.setattr(
+        deployment_runtime_authority,
+        "_digest",
+        hostile_digest,
+    )
+    with pytest.raises(
+        DeploymentRuntimeAuthorityError,
+        match="binding validator dispatch was replaced",
+    ):
+        store.records()
+
+    assert hostile_calls == []
+
+
+def test_runtime_authority_rejects_digest_code_replacement_at_binding_boundary(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "deployment-runtime-authority.json"
+    store = DeploymentRuntimeAuthorityStore.initialize_pristine(
+        path,
+        authority_root=_authority_root(tmp_path),
+    )
+    target = deployment_runtime_authority._digest
+    original_code = target.__code__
+
+    def hostile_digest(value: object) -> str:
+        del value
+        raise AssertionError("hostile digest code executed")
+
+    assert hostile_digest.__code__.co_freevars == original_code.co_freevars
+    target.__code__ = hostile_digest.__code__
+    try:
+        with pytest.raises(
+            DeploymentRuntimeAuthorityError,
+            match="binding validator dispatch was replaced",
+        ):
+            store.records()
+    finally:
+        target.__code__ = original_code
+
+
+def test_runtime_authority_rejects_sha_validator_alias_rebinding_at_binding_boundary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "deployment-runtime-authority.json"
+    store = DeploymentRuntimeAuthorityStore.initialize_pristine(
+        path,
+        authority_root=_authority_root(tmp_path),
+    )
+    hostile_calls: list[object] = []
+
+    def hostile_sha(value: object, name: str) -> str:
+        hostile_calls.append((value, name))
+        return store._semantic_binding_sha256
+
+    monkeypatch.setattr(
+        deployment_runtime_authority,
+        "_sha",
+        hostile_sha,
+    )
+    with pytest.raises(
+        DeploymentRuntimeAuthorityError,
+        match="binding validator dispatch was replaced",
+    ):
+        store.records()
+
+    assert hostile_calls == []
+
+
+def test_runtime_authority_rejects_sha_validator_code_replacement_at_binding_boundary(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "deployment-runtime-authority.json"
+    store = DeploymentRuntimeAuthorityStore.initialize_pristine(
+        path,
+        authority_root=_authority_root(tmp_path),
+    )
+    target = deployment_runtime_authority._sha
+    original_code = target.__code__
+
+    def hostile_sha(value: object, name: str) -> str:
+        del value, name
+        raise AssertionError("hostile SHA validator code executed")
+
+    assert hostile_sha.__code__.co_freevars == original_code.co_freevars
+    target.__code__ = hostile_sha.__code__
+    try:
+        with pytest.raises(
+            DeploymentRuntimeAuthorityError,
+            match="binding validator dispatch was replaced",
+        ):
+            store.records()
+    finally:
+        target.__code__ = original_code

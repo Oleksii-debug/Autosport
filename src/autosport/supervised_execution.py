@@ -881,9 +881,9 @@ def _canonical_supervised_ledger_dispatch(
     _reserve_plan_code=getattr(RealExecutionLedger.reserve_plan, "__code__", None),
     _saga=RealExecutionLedger.saga,
     _saga_code=getattr(RealExecutionLedger.saga, "__code__", None),
-    _bind_issuance=RealExecutionLedger.bind_supervised_plan_issuance,
+    _bind_issuance=RealExecutionLedger._bind_supervised_plan_issuance,
     _bind_issuance_code=getattr(
-        RealExecutionLedger.bind_supervised_plan_issuance,
+        RealExecutionLedger._bind_supervised_plan_issuance,
         "__code__",
         None,
     ),
@@ -901,7 +901,7 @@ def _canonical_supervised_ledger_dispatch(
     for name, expected, expected_code in (
         ("reserve_plan", _reserve_plan, _reserve_plan_code),
         ("saga", _saga, _saga_code),
-        ("bind_supervised_plan_issuance", _bind_issuance, _bind_issuance_code),
+        ("_bind_supervised_plan_issuance", _bind_issuance, _bind_issuance_code),
         (
             "supervised_plan_issuance_is_current",
             _issuance_current,

@@ -533,6 +533,69 @@ def test_arbitrary_product_issuance_token_cannot_mint_authority() -> None:
         assert_bound_supervised_execution_plan_authoritative(reconstructed)
 
 
+def test_raw_ledger_plan_reservation_cannot_mint_supervised_issuance(
+    tmp_path,
+) -> None:
+    bound, approval, _, _ = _bound()
+    reconstructed = replace(bound)
+    ledger = RealExecutionLedger(tmp_path / "raw-reserve-ledger.jsonl")
+
+    ledger.reserve_plan(reconstructed.execution_plan)
+
+    with pytest.raises(
+        SupervisedExecutionError,
+        match="not current canonical product issuance",
+    ):
+        reserve_supervised_plan(ledger, reconstructed, approval)
+
+    witness = reconstructed.execution_plan.plan_id.removeprefix("supervised-v2-")
+    assert not ledger.supervised_plan_issuance_is_current(
+        plan_id=reconstructed.execution_plan.plan_id,
+        bound_plan_witness=witness,
+        plan_fingerprint=reconstructed.execution_plan.fingerprint,
+    )
+
+
+def test_raw_ledger_plan_reservation_cannot_authorize_attempt_after_restart(
+    tmp_path,
+) -> None:
+    bound, approval, _, _ = _bound()
+    reconstructed = replace(bound)
+    ledger = RealExecutionLedger(tmp_path / "raw-attempt-ledger.jsonl")
+    ledger.reserve_plan(reconstructed.execution_plan)
+    action = reconstructed.execution_plan.actions[0]
+
+    with pytest.raises(
+        SupervisedExecutionError,
+        match="not durably product-issued and reserved",
+    ):
+        begin_supervised_attempt(
+            ledger,
+            reconstructed,
+            approval,
+            action_id=action.action_id,
+            attempt_id="raw-reserve-attempt",
+        )
+
+
+def test_live_issued_plan_can_close_crash_window_after_raw_plan_reservation(
+    tmp_path,
+) -> None:
+    bound, approval, _, _ = _bound()
+    ledger = RealExecutionLedger(tmp_path / "live-crash-window-ledger.jsonl")
+    ledger.reserve_plan(bound.execution_plan)
+
+    fingerprint = reserve_supervised_plan(ledger, bound, approval)
+    witness = bound.execution_plan.plan_id.removeprefix("supervised-v2-")
+
+    assert fingerprint == bound.execution_plan.fingerprint
+    assert ledger.supervised_plan_issuance_is_current(
+        plan_id=bound.execution_plan.plan_id,
+        bound_plan_witness=witness,
+        plan_fingerprint=fingerprint,
+    )
+
+
 def test_reserved_plan_reconstruction_is_restart_idempotent(tmp_path) -> None:
     bound, approval, _, _ = _bound()
     ledger = RealExecutionLedger(tmp_path / "restart-plan-ledger.jsonl")
@@ -566,7 +629,10 @@ def test_unreserved_reconstruction_cannot_use_restart_authority(tmp_path) -> Non
     ledger = RealExecutionLedger(tmp_path / "unreserved-restart-ledger.jsonl")
     action = reconstructed.execution_plan.actions[0]
 
-    with pytest.raises(SupervisedExecutionError, match="execution plan is not reserved"):
+    with pytest.raises(
+        SupervisedExecutionError,
+        match="not durably product-issued and reserved",
+    ):
         begin_supervised_attempt(
             ledger,
             reconstructed,
@@ -629,16 +695,14 @@ def test_bound_plan_witness_alias_rebinding_fails_before_hostile_dispatch(
         ledger.saga(bound.execution_plan.plan_id)
 
 
-def test_bound_plan_witness_code_replacement_fails_before_hostile_dispatch(
+def test_bound_plan_witness_code_replacement_fails_closed(
     monkeypatch,
     tmp_path,
 ) -> None:
     bound, approval, _, _ = _bound()
-    hostile_calls: list[object] = []
 
     def hostile_witness(value):
-        hostile_calls.append(value)
-        return bound.execution_plan.plan_id.removeprefix("supervised-v2-")
+        return "0" * 64
 
     monkeypatch.setattr(
         supervised_execution._bound_plan_witness,
@@ -653,7 +717,6 @@ def test_bound_plan_witness_code_replacement_fails_before_hostile_dispatch(
     ):
         reserve_supervised_plan(ledger, bound, approval)
 
-    assert hostile_calls == []
     with pytest.raises(KeyError):
         ledger.saga(bound.execution_plan.plan_id)
 

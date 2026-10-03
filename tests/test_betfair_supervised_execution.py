@@ -2391,3 +2391,200 @@ def test_existing_submitted_reentry_does_not_execute_caller_clock() -> None:
         assert transport.calls == []
         restarted = RealExecutionLedger(Path(tmp) / "real.jsonl")
         assert restarted.attempt_state(attempt_id) is AttemptState.UNKNOWN
+
+
+def test_submitted_reentry_survives_expired_approval(monkeypatch) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
+        attempt_id = "attempt-expired-approval-reentry"
+        begin_supervised_attempt(
+            ledger,
+            bound,
+            approval,
+            action_id=action.action_id,
+            attempt_id=attempt_id,
+        )
+        ledger.bind_provider_order_reference(
+            attempt_id=attempt_id,
+            provider_id=action.bookmaker_id,
+        )
+        ledger.mark_submitted(
+            attempt_id,
+            submitted_at=SUBMITTED_AT,
+            request_sha256="1" * 64,
+        )
+        monkeypatch.setattr(
+            "autosport.supervised_execution._trusted_now",
+            lambda: "2026-09-19T09:00:00+00:00",
+        )
+        transport = _Transport(
+            lambda _request: (_ for _ in ()).throw(
+                AssertionError("expired reentry must not transmit placeOrders")
+            )
+        )
+        client = _enabled_client(profile, transport, store=goal_store)
+
+        result = execute_betfair_supervised_action(
+            ledger,
+            bound,
+            approval,
+            action_id=action.action_id,
+            attempt_id=attempt_id,
+            profile=profile,
+            client=client,
+        )
+
+        assert result.outcome is PlaceOrdersOutcome.UNKNOWN
+        assert result.attempt_state is AttemptState.UNKNOWN
+        assert transport.calls == []
+
+
+def test_submitted_reentry_survives_new_emergency_stop() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
+        attempt_id = "attempt-stop-after-submit"
+        begin_supervised_attempt(
+            ledger,
+            bound,
+            approval,
+            action_id=action.action_id,
+            attempt_id=attempt_id,
+        )
+        ledger.bind_provider_order_reference(
+            attempt_id=attempt_id,
+            provider_id=action.bookmaker_id,
+        )
+        ledger.mark_submitted(
+            attempt_id,
+            submitted_at=SUBMITTED_AT,
+            request_sha256="2" * 64,
+        )
+        goal_store.persist_automatic_successor(
+            _goal(revision=2, emergency_stop=True)
+        )
+        transport = _Transport(
+            lambda _request: (_ for _ in ()).throw(
+                AssertionError("STOP recovery must not transmit placeOrders")
+            )
+        )
+        client = _enabled_client(profile, transport, store=goal_store)
+
+        result = execute_betfair_supervised_action(
+            ledger,
+            bound,
+            approval,
+            action_id=action.action_id,
+            attempt_id=attempt_id,
+            profile=profile,
+            client=client,
+        )
+
+        assert result.outcome is PlaceOrdersOutcome.UNKNOWN
+        assert result.attempt_state is AttemptState.UNKNOWN
+        assert transport.calls == []
+
+
+def test_existing_unknown_is_idempotent_under_stop_and_expiry(monkeypatch) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
+        attempt_id = "attempt-existing-unknown"
+        begin_supervised_attempt(
+            ledger,
+            bound,
+            approval,
+            action_id=action.action_id,
+            attempt_id=attempt_id,
+        )
+        ledger.bind_provider_order_reference(
+            attempt_id=attempt_id,
+            provider_id=action.bookmaker_id,
+        )
+        ledger.mark_submitted(
+            attempt_id,
+            submitted_at=SUBMITTED_AT,
+            request_sha256="3" * 64,
+        )
+        ledger.mark_unknown(
+            attempt_id,
+            reason="simulated provider uncertainty",
+            observed_at=READBACK_AT,
+        )
+        goal_store.persist_automatic_successor(
+            _goal(revision=2, emergency_stop=True)
+        )
+        monkeypatch.setattr(
+            "autosport.supervised_execution._trusted_now",
+            lambda: "2026-09-19T09:00:00+00:00",
+        )
+        transport = _Transport(
+            lambda _request: (_ for _ in ()).throw(
+                AssertionError("UNKNOWN redelivery must not transmit placeOrders")
+            )
+        )
+        client = _enabled_client(profile, transport, store=goal_store)
+
+        result = execute_betfair_supervised_action(
+            ledger,
+            bound,
+            approval,
+            action_id=action.action_id,
+            attempt_id=attempt_id,
+            profile=profile,
+            client=client,
+        )
+
+        assert result.outcome is PlaceOrdersOutcome.UNKNOWN
+        assert result.attempt_state is AttemptState.UNKNOWN
+        assert transport.calls == []
+
+
+def test_terminal_attempt_redelivery_is_idempotent_under_new_stop_and_expiry(
+    monkeypatch,
+) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
+        transport = _Transport(
+            lambda request: _response(
+                request,
+                matched=action.requested_stake,
+                average=action.requested_odds,
+            )
+        )
+        client = _enabled_client(profile, transport, store=goal_store)
+        attempt_id = "attempt-terminal-redelivery"
+
+        first = execute_betfair_supervised_action(
+            ledger,
+            bound,
+            approval,
+            action_id=action.action_id,
+            attempt_id=attempt_id,
+            profile=profile,
+            client=client,
+        )
+        assert first.outcome is PlaceOrdersOutcome.ACCEPTED
+        assert len(transport.calls) == 1
+
+        goal_store.persist_automatic_successor(
+            _goal(revision=2, emergency_stop=True)
+        )
+        monkeypatch.setattr(
+            "autosport.supervised_execution._trusted_now",
+            lambda: "2026-09-19T09:00:00+00:00",
+        )
+
+        second = execute_betfair_supervised_action(
+            ledger,
+            bound,
+            approval,
+            action_id=action.action_id,
+            attempt_id=attempt_id,
+            profile=profile,
+            client=client,
+        )
+
+        assert second.outcome is PlaceOrdersOutcome.ACCEPTED
+        assert second.attempt_state is AttemptState.ACCEPTED
+        assert second.evidence_id == first.evidence_id
+        assert second.external_receipt_id == first.external_receipt_id
+        assert len(transport.calls) == 1

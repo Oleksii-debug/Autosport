@@ -1560,6 +1560,7 @@ def _install_account_snapshot_acquisition_authority() -> None:
                         (
                             acquired.receipt.venue_id,
                             acquired.receipt.account_id,
+                            acquired.receipt.authenticated_account_identity_sha256,
                             capability,
                         )
                     ] = live_id
@@ -1613,7 +1614,12 @@ def _install_account_snapshot_acquisition_authority() -> None:
                     )
                 for capability in required_names:
                     current_id = current_capability_snapshot.get(
-                        (receipt.venue_id, receipt.account_id, capability)
+                        (
+                            receipt.venue_id,
+                            receipt.account_id,
+                            receipt.authenticated_account_identity_sha256,
+                            capability,
+                        )
                     )
                     if current_id != receipt.acquisition_id:
                         raise AccountSnapshotAcquisitionError(

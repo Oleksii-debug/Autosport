@@ -120,7 +120,13 @@ def _canonical_json(value: object) -> str:
 
 
 def _digest(value: object) -> str:
-    return sha256(_canonical_json(value).encode("utf-8")).hexdigest()
+    try:
+        encoded = _canonical_json(value).encode("utf-8", "strict")
+    except UnicodeEncodeError as exc:
+        raise AblationSizingIdentityError(
+            "canonical identity values must be valid UTF-8"
+        ) from exc
+    return sha256(encoded).hexdigest()
 
 
 @dataclass(frozen=True, slots=True)

@@ -172,6 +172,7 @@ def test_implementation_risk_and_parameters_each_bind_identity():
         {"x": {1: "not-a-text-key"}},
         {"x": b"bytes"},
         {"x": {"set": {1, 2}}},
+        {"x": "\ud800"},
     ],
 )
 def test_unsafe_or_ambiguous_parameter_types_fail_closed(bad):

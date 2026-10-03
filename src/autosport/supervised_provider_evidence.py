@@ -335,7 +335,7 @@ def _require_bound_profile(
 _REQUIRED_CLEARED_STATUSES = ("SETTLED", "VOIDED", "LAPSED", "CANCELLED")
 
 
-def verify_betfair_provider_state(
+def _evaluate_betfair_provider_state_semantics(
     action: ExecutionAction,
     profile: BookmakerCapabilityProfile,
     *,
@@ -343,7 +343,7 @@ def verify_betfair_provider_state(
     readback: BetfairExecutionReadbackEnvelope,
     expected_provider_order_ref: str | None = None,
 ) -> VerifiedProviderState:
-    """Derive execution truth only from a client-sealed, action-scoped Betfair capture."""
+    """Evaluate exact Betfair readback semantics without minting provider authority.\n\n    This helper is deliberately structural/semantic only. Callers may use it for\n    deterministic parser/economic falsifiers, but its returned evidence is not\n    product-issued authority until the public verifier first proves readback origin.\n    """
 
     if type(action) is not ExecutionAction:
         raise ProviderEvidenceError("action must be exact canonical ExecutionAction")
@@ -351,12 +351,6 @@ def verify_betfair_provider_state(
         raise ProviderEvidenceError(
             "provider evidence requires exact canonical action-scoped readback envelope"
         )
-    try:
-        readback.assert_authoritative()
-    except BetfairReadOnlyError as exc:
-        raise ProviderEvidenceError(
-            "provider evidence requires authoritative canonical readback capture"
-        ) from exc
     if (
         readback.venue_id != action.bookmaker_id
         or readback.account_id != action.account_id
@@ -660,6 +654,35 @@ def verify_betfair_provider_state(
         accepted_stake,
         evidence_id,
         readback.provider_order_ref,
+    )
+
+
+def verify_betfair_provider_state(
+    action: ExecutionAction,
+    profile: BookmakerCapabilityProfile,
+    *,
+    expected_profile_sha256: str,
+    readback: BetfairExecutionReadbackEnvelope,
+    expected_provider_order_ref: str | None = None,
+) -> VerifiedProviderState:
+    """Issue provider state only from an authoritative canonical Betfair readback."""
+
+    if type(readback) is not BetfairExecutionReadbackEnvelope:
+        raise ProviderEvidenceError(
+            "provider evidence requires exact canonical action-scoped readback envelope"
+        )
+    try:
+        readback.assert_authoritative()
+    except BetfairReadOnlyError as exc:
+        raise ProviderEvidenceError(
+            "provider evidence requires authoritative canonical readback capture"
+        ) from exc
+    return _evaluate_betfair_provider_state_semantics(
+        action,
+        profile,
+        expected_profile_sha256=expected_profile_sha256,
+        readback=readback,
+        expected_provider_order_ref=expected_provider_order_ref,
     )
 
 # Verified provider state is an origin-reverifiable in-process capability, not a

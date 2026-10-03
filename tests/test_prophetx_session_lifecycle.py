@@ -494,3 +494,52 @@ def test_provider_expiry_must_be_future_of_login_completion(tmp_path):
             now=NOW,
             access_expires_at=NOW,
         )
+
+
+def test_active_state_rejects_stale_login_attempt_evidence(tmp_path):
+    lifecycle = _lifecycle(tmp_path)
+    _active(lifecycle)
+    payload = json.loads(lifecycle.state_path.read_text(encoding="utf-8"))
+    payload["attempt_id"] = "a" * 64
+    payload["attempt_started_at"] = NOW.isoformat()
+    lifecycle.state_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(
+        ProphetXSessionLifecycleError,
+        match="attempt evidence is only valid",
+    ):
+        lifecycle.read_snapshot()
+
+
+def test_active_state_rejects_expiry_at_or_before_transition(tmp_path):
+    lifecycle = _lifecycle(tmp_path)
+    _active(lifecycle)
+    payload = json.loads(lifecycle.state_path.read_text(encoding="utf-8"))
+    payload["access_expires_at"] = payload["last_transition_at"]
+    payload["slot_hold_until"] = payload["last_transition_at"]
+    lifecycle.state_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(
+        ProphetXSessionLifecycleError,
+        match="access expiry must follow",
+    ):
+        lifecycle.read_snapshot()
+
+
+def test_provider_slot_wait_requires_explicit_hold_horizon(tmp_path):
+    lifecycle = _lifecycle(tmp_path)
+    admission = lifecycle.begin_login(now=NOW, access_token_available=False)
+    lifecycle.complete_login_failure(
+        attempt_id=admission.attempt_id,
+        now=NOW,
+        failure=ProphetXLoginFailureClass.SESSION_POOL_EXHAUSTED,
+    )
+    payload = json.loads(lifecycle.state_path.read_text(encoding="utf-8"))
+    payload["slot_hold_until"] = None
+    lifecycle.state_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(
+        ProphetXSessionLifecycleError,
+        match="requires slot_hold_until",
+    ):
+        lifecycle.read_snapshot()

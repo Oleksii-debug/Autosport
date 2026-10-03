@@ -44,20 +44,25 @@ always required.
 
 ## Fail-closed semantics
 
-`evaluate_strategy_proofs()` compares a `frozenset[ProofRequirement]` with the
-canonical contract for `(StrategyClass, claims_probability_edge)`.
+`evaluate_strategy_proofs()` compares a caller-supplied
+`frozenset[ProofRequirement]` with the canonical requirement taxonomy for
+`(StrategyClass, claims_probability_edge)`. These enum labels describe what
+must be proved; they are not resolved evidence from the authorities named by
+those requirements.
 
-- missing required proof -> `positive_action_candidate=False`;
-- missing proof -> `proof_gate_decision=OpportunityDecision.WAIT`;
-- complete proof classes -> proof gate may return `OpportunityDecision.ACTIONABLE`;
+- missing required label -> `proof_contract_satisfied=False`;
+- every required label present -> structural label coverage may be
+  `proof_contract_satisfied=True`;
+- label coverage never mints `positive_action_candidate=True`;
+- `proof_gate_decision` remains `OpportunityDecision.WAIT` even when every
+  label is present;
 - `execution_authorized` is always `False`.
 
-`proof_gate_decision=ACTIONABLE` is only the result of this narrow proof-class
-presence gate. It is not the final Opportunity decision and is not permission
-to place a stake. Evidence contents still have to pass their canonical
-validators, whole-portfolio economics, EconomicGoal, RiskPolicy, execution
-feasibility, provider reconciliation, settlement authority, and every other
-binding downstream gate.
+A later composition may produce positive proof-gate truth only by consuming and
+re-resolving product-issued evidence from the canonical forecast, quote,
+portfolio, risk, settlement, cost, provider-limit and execution-feasibility
+authorities. A requirement enum, copied DTO, caller digest, or boolean is not a
+substitute for that evidence.
 
 In particular, this contract cannot produce `OUTCOME_INDEPENDENT_POSITIVE` by
 itself. That economic truth still requires the complete executable-state proof
@@ -68,7 +73,8 @@ defined by #355 and the existing EconomicGoal authority.
 Contracts and evaluations are frozen dataclasses. Required/present/missing proof
 tuples use canonical lexical ordering. Callers cannot construct a shortened
 canonical class contract, inject predictive claims into a non-predictive class,
-or set `execution_authorized=True`.
+turn complete bare requirement labels into actionable truth, or set
+`execution_authorized=True`.
 
 This slice intentionally contains no adapter into `ResearchDecisionPipeline`;
 a future integration should adapt the proven predictive path into the canonical

@@ -471,3 +471,55 @@ def test_valid_old_registry_restore_is_rejected_as_monotonic_rollback(tmp_path):
     with pytest.raises(MonotonicAuthorityRollbackError):
         ScientificRegistry.initialize_pristine(path)
     assert path.read_bytes() == valid_old_bytes
+
+
+def test_transplant_rejects_monotonic_constructor_code_replacement(tmp_path):
+    target_path = _transplanted_registry_path(tmp_path)
+    target = MonotonicWorkspaceAuthority.__init__
+    original_code = target.__code__
+
+    def hostile_init(self: object, *args: object, **kwargs: object) -> None:
+        del self, args, kwargs
+        raise AssertionError("hostile monotonic constructor executed")
+
+    assert hostile_init.__code__.co_freevars == original_code.co_freevars
+    target.__code__ = hostile_init.__code__
+    try:
+        with pytest.raises(
+            RuntimeError,
+            match="ScientificRegistry monotonic read/recovery dispatch changed",
+        ):
+            ScientificRegistry(target_path)
+    finally:
+        target.__code__ = original_code
+
+
+@pytest.mark.parametrize(
+    "helper_name",
+    (
+        "_scientific_registry_authority",
+        "_authority_read_history",
+        "_authority_recover",
+        "_recover_or_bootstrap_scientific_registry_authority",
+    ),
+)
+def test_transplant_rejects_scientific_authority_helper_rebinding(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+    helper_name: str,
+):
+    target_path = _transplanted_registry_path(tmp_path)
+    hostile_calls: list[object] = []
+
+    def hostile(*args: object, **kwargs: object) -> object:
+        hostile_calls.append((args, kwargs))
+        raise AssertionError("hostile ScientificRegistry authority helper executed")
+
+    monkeypatch.setattr(integrity, helper_name, hostile)
+    with pytest.raises(
+        RuntimeError,
+        match="ScientificRegistry authority helper dispatch changed",
+    ):
+        ScientificRegistry(target_path)
+
+    assert hostile_calls == []

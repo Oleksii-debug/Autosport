@@ -343,6 +343,82 @@ class OutcomeRevisionProductAvailabilityTests(unittest.TestCase):
                 {"2026-01-01T11:00:00.000000Z"},
             )
 
+    def test_begin_rejects_outcome_lineage_subclass_before_virtual_attribute_dispatch(self) -> None:
+        class ForgedBinding(OutcomeLineageBinding):
+            attribute_reads = 0
+
+            def __getattribute__(self, name):
+                if name in {
+                    "source_identity",
+                    "record_id",
+                    "root_revision_id",
+                    "root_record_sha256",
+                    "revisions",
+                }:
+                    type(self).attribute_reads += 1
+                    raise AssertionError("virtual binding attributes must not execute")
+                return super().__getattribute__(name)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            registry = RunRegistry.initialize_pristine(Path(tmp) / "run_registry.json")
+            revision = TrustedOutcomeRevision(
+                revision=1,
+                revision_id="forged-r1",
+                record_sha256=self._sha("forged"),
+            )
+            forged = ForgedBinding(
+                source_identity=self.source_identity,
+                record_id=self.record_id,
+                root_revision_id=revision.revision_id,
+                root_record_sha256=revision.record_sha256,
+                revisions=(revision,),
+            )
+            before = registry.path.read_bytes()
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "exact OutcomeLineageBinding",
+            ):
+                registry.begin(
+                    self._sha("market-forged-binding"),
+                    self._sha("results-forged-binding"),
+                    "baseline-v1",
+                    "forged-binding",
+                    outcome_lineage=forged,
+                )
+
+            self.assertEqual(ForgedBinding.attribute_reads, 0)
+            self.assertEqual(registry.path.read_bytes(), before)
+
+    def test_malformed_exact_outcome_lineage_fails_before_unknown_publication(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            registry = RunRegistry.initialize_pristine(Path(tmp) / "run_registry.json")
+            malformed = OutcomeLineageBinding(
+                source_identity=self.source_identity,
+                record_id=self.record_id,
+                root_revision_id="malformed-r1",
+                root_record_sha256="not-a-digest",
+                revisions=(
+                    TrustedOutcomeRevision(
+                        revision=1,
+                        revision_id="malformed-r1",
+                        record_sha256="not-a-digest",
+                    ),
+                ),
+            )
+            before = registry.path.read_bytes()
+
+            with self.assertRaises(OutcomeLineageTrustError):
+                registry.begin(
+                    self._sha("market-malformed-binding"),
+                    self._sha("results-malformed-binding"),
+                    "baseline-v1",
+                    "malformed-binding",
+                    outcome_lineage=malformed,
+                )
+
+            self.assertEqual(registry.path.read_bytes(), before)
+
     def test_clock_rollback_cannot_backdate_new_correction(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             registry = RunRegistry.initialize_pristine(Path(tmp) / "run_registry.json")

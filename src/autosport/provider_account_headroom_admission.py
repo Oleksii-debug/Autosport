@@ -17,6 +17,7 @@ import json
 import threading
 import weakref
 
+from . import account_snapshot_acquisition as _account_acquisition
 from .account_snapshot_acquisition import (
     AccountSnapshotAcquisitionError,
     AuthoritativeAccountSnapshot,
@@ -46,6 +47,12 @@ _VERIFIED_SNAPSHOT_CODE = getattr(_VERIFIED_SNAPSHOT, "__code__", None)
 _VERIFIED_EXECUTION_VIEW_CODE = getattr(_VERIFIED_EXECUTION_VIEW, "__code__", None)
 _BEGIN_ATTEMPT_CODE = getattr(_BEGIN_ATTEMPT, "__code__", None)
 _ATTEMPT_STATE_CODE = getattr(_ATTEMPT_STATE, "__code__", None)
+_ASSERT_ACCOUNT_SNAPSHOT_AUTHORITY = assert_account_snapshot_acquisition_authoritative
+_ASSERT_ACCOUNT_SNAPSHOT_AUTHORITY_CODE = getattr(
+    _ASSERT_ACCOUNT_SNAPSHOT_AUTHORITY,
+    "__code__",
+    None,
+)
 
 
 class ProviderAccountHeadroomError(RuntimeError):
@@ -64,6 +71,28 @@ class HeadroomDecision(str, Enum):
     SUFFICIENT_LOWER_BOUND = "SUFFICIENT_LOWER_BOUND"
     INSUFFICIENT_UPPER_BOUND = "INSUFFICIENT_UPPER_BOUND"
     WAIT_COVERAGE = "WAIT_COVERAGE"
+
+
+def _canonical_account_snapshot_authority(
+    *,
+    _assert=_ASSERT_ACCOUNT_SNAPSHOT_AUTHORITY,
+    _assert_code=_ASSERT_ACCOUNT_SNAPSHOT_AUTHORITY_CODE,
+):
+    live_module = getattr(
+        _account_acquisition,
+        "assert_account_snapshot_acquisition_authoritative",
+        None,
+    )
+    live_alias = globals().get("assert_account_snapshot_acquisition_authoritative")
+    if (
+        live_module is not _assert
+        or live_alias is not _assert
+        or getattr(_assert, "__code__", None) is not _assert_code
+    ):
+        raise ProviderAccountHeadroomError(
+            "canonical account snapshot headroom authority changed"
+        )
+    return _assert
 
 
 def _canonical_ledger_dispatch(
@@ -552,7 +581,8 @@ def _require_live_balance(
             "account evidence must be exact AuthoritativeAccountSnapshot"
         )
     try:
-        assert_account_snapshot_acquisition_authoritative(acquired)
+        assert_live = _canonical_account_snapshot_authority()
+        assert_live(acquired)
     except AccountSnapshotAcquisitionError as exc:
         raise ProviderAccountHeadroomError(
             "account snapshot lacks live canonical provider-origin authority"

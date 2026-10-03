@@ -600,7 +600,9 @@ class ForecastRef:
 
     def __post_init__(
         self,
-        _predictive_evidence_type: type[PredictiveEligibilityEvidence] = PredictiveEligibilityEvidence,
+        _predictive_evidence_type: type[PredictiveEligibilityEvidence] = (
+            PredictiveEligibilityEvidence
+        ),
     ) -> None:
         _canonical_text(self.forecast_id, "forecast_id")
         _canonical_hash(self.forecast_hash, "forecast_hash")

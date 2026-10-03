@@ -90,6 +90,25 @@ class ProductDayRiskWindowStoreTests(unittest.TestCase):
             _test_clock=self.clock,
         )
 
+    def test_workspace_lock_file_name_equal_subclass_rebind_fails_closed(self) -> None:
+        store = self._store()
+        original_file_name = WorkspaceEconomicLock.FILE_NAME
+
+        class EqualLockName(str):
+            pass
+
+        try:
+            WorkspaceEconomicLock.FILE_NAME = EqualLockName(original_file_name)
+            with self.assertRaisesRegex(
+                RiskDayWindowIntegrityError,
+                "workspace economic lock authority changed",
+            ):
+                store.current()
+        finally:
+            WorkspaceEconomicLock.FILE_NAME = original_file_name
+
+        self.assertFalse(store.state_path.exists())
+
     def test_workspace_lock_acquire_rebind_fails_before_day_authority(self) -> None:
         store = self._store()
         original_acquire = WorkspaceEconomicLock.acquire

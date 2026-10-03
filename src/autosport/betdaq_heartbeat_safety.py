@@ -1493,6 +1493,7 @@ class BetdaqHeartbeatSafetyController:
         action: HeartbeatAction | None,
         evidence: HeartbeatProviderEvidence | None = None,
     ) -> HeartbeatEvent:
+        self._fence_account_context_if_needed()
         context_id = self._context_id()
         generation_id = (
             latest.generation_id

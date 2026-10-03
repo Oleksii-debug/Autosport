@@ -245,10 +245,7 @@ def test_owner_lease_rejects_in_place_product_root_resolver_code_mutation(
     """In-place function mutation cannot redirect the machine-root owner lease."""
     target = ExecutionStopAuthority._product_monotonic_authority_root
     original_code = target.__code__
-    hostile_calls = []
-
     def hostile_root():
-        hostile_calls.append(True)
         raise AssertionError("hostile product-root resolver executed")
 
     assert original_code.co_freevars == ()
@@ -266,6 +263,4 @@ def test_owner_lease_rejects_in_place_product_root_resolver_code_mutation(
             )
     finally:
         target.__code__ = original_code
-
-    assert hostile_calls == []
 

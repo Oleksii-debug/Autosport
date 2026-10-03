@@ -705,3 +705,43 @@ def test_live_client_credential_rotation_fences_and_requires_recreation(
     finally:
         controller.close()
 
+def test_inflight_account_rotation_durably_revokes_active_generation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Credential drift during provider I/O cannot leave durable ACTIVE truth."""
+    provider = _ProviderQueue([_soap("RegisterHeartbeat")])
+    controller, _, _ = _controller(tmp_path, monkeypatch, provider)
+    registered = controller.register(
+        threshold_ms=6000,
+        action=HeartbeatAction.CANCEL_ORDERS,
+    )
+    original_call = controller._call
+
+    def rotated_call(method, request_attributes):
+        del method, request_attributes
+        controller._client._credentials = BetdaqCredentials(
+            username="inflight-rotated-user",
+            password="inflight-rotated-password",
+            application_identifier="inflight-rotated-app",
+        )
+        raise BetdaqHeartbeatSafetyError("simulated provider-boundary context drift")
+
+    controller._call = rotated_call
+    try:
+        with pytest.raises(
+            BetdaqHeartbeatSafetyError,
+            match="account context changed; recreate controller",
+        ):
+            controller.pulse()
+        latest = controller._store.history()[-1]
+        assert latest.state is HeartbeatState.REVOKED
+        assert latest.operation == "LOCAL_ACCOUNT_CONTEXT_FENCE"
+        assert latest.generation_id == registered.generation_id
+        assert latest.account_context_id == registered.account_context_id
+        assert latest.reconciliation_required is True
+        assert len(provider.requests) == 1
+    finally:
+        controller._call = original_call
+        controller.close()
+

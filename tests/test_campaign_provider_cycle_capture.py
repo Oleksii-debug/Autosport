@@ -2992,6 +2992,48 @@ def test_private_surface_guard_rejection_ignores_shadowed_type_error(
     assert hostile_calls == []
 
 
+def test_provider_callback_cannot_rebind_campaign_artifact_kind(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    locator, store, spec, provider_store = _setup(tmp_path)
+
+    def mutating_provider_io(_request, _timeout):
+        monkeypatch.setattr(
+            capture_module,
+            "ARTIFACT_KIND",
+            "forged-provider-artifact-kind",
+        )
+        return _FakeSseResponse(_frame())
+
+    monkeypatch.setattr(provider_module, "urlopen", mutating_provider_io)
+    monkeypatch.setattr(provider_module, "_default_clock", lambda: CAPTURED_AT)
+
+    with pytest.raises(
+        CampaignProviderCycleCaptureIntegrityError,
+        match="artifact kind authority changed",
+    ):
+        capture_module.capture_campaign_complete_game_board(
+            precommit_locator=locator,
+            store=store,
+            source_spec=spec,
+            evidence_store=provider_store,
+            request=_request(),
+            api_key="secret-value",
+            timeout_seconds=3.0,
+            clock=_clock(),
+        )
+
+    evidence = store.collector_cycle_evidence(
+        source_id=spec.source_id,
+        start_cycle_seq=1,
+        end_cycle_seq=1,
+    )
+    assert len(evidence) == 1
+    assert evidence[0]["terminal"]["status"] == "LOCAL_FAILURE"
+    assert "observed_artifacts" not in evidence[0]["terminal"]
+
+
 def test_provider_callback_cannot_rebind_campaign_integrity_error_dispatch(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

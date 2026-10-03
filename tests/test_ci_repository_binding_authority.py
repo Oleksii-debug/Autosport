@@ -96,3 +96,99 @@ def test_scoped_live_qualification_rejects_repository_drift_during_read(
         match="GitHub API repository binding changed",
     ):
         _trusted_live_pr_qualification(api, 303)
+
+
+
+def test_base_live_qualification_ignores_repository_property_class_shadow(
+    monkeypatch,
+) -> None:
+    api = base_controller.GitHubApi(repository="owner/repo", token="token")
+    canonical_request = base_controller.GitHubApi._request
+    requested: list[str] = []
+
+    class FakeResponse:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, _exc_type, _exc, _tb):
+            return False
+
+        def read(self) -> bytes:
+            return (
+                b'{"state":"open","draft":false,'
+                b'"head":{"sha":"'
+                + HEAD.encode("ascii")
+                + b'","repo":{"full_name":"owner/repo"}},'
+                b'"base":{"repo":{"full_name":"owner/repo"}}}'
+            )
+
+    def canonical_urlopen(request, *, timeout: int):
+        assert timeout == 20
+        requested.append(request.full_url)
+        return FakeResponse()
+
+    monkeypatch.setattr(
+        base_controller.GitHubApi,
+        "_repository",
+        "other/repo",
+    )
+    monkeypatch.setitem(
+        canonical_request.__globals__,
+        "urlopen",
+        canonical_urlopen,
+    )
+
+    assert api.live_pr_qualification(2008) == (HEAD, True)
+    assert requested == ["https://api.github.com/repos/owner/repo/pulls/2008"]
+
+
+def test_scoped_live_qualification_ignores_repository_property_class_shadow(
+    monkeypatch,
+) -> None:
+    api = WorkflowScopedGitHubApi(
+        repository="owner/repo",
+        token="token",
+        workflow_id=356678400,
+        workflow_name="CI",
+    )
+    canonical_request = scoped_controller.GitHubApi._request
+    requested: list[str] = []
+
+    class FakeResponse:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, _exc_type, _exc, _tb):
+            return False
+
+        def read(self) -> bytes:
+            return (
+                b'{"state":"open","draft":false,'
+                b'"head":{"sha":"'
+                + HEAD.encode("ascii")
+                + b'","repo":{"full_name":"owner/repo"}},'
+                b'"base":{"repo":{"full_name":"owner/repo"}}}'
+            )
+
+    def canonical_urlopen(request, *, timeout: int):
+        assert timeout == 20
+        requested.append(request.full_url)
+        return FakeResponse()
+
+    monkeypatch.setattr(
+        base_controller.GitHubApi,
+        "_repository",
+        "other/repo",
+    )
+    monkeypatch.setitem(
+        canonical_request.__globals__,
+        "urlopen",
+        canonical_urlopen,
+    )
+
+    assert _trusted_live_pr_qualification(api, 303) == (HEAD, True)
+    assert requested == ["https://api.github.com/repos/owner/repo/pulls/303"]

@@ -118,6 +118,43 @@ def _admit(tmp_path, book: PaperBook, goal: EconomicGoalContract, placed_at: str
     return baseline, result
 
 
+def test_admission_rejects_lock_validator_dependency_rebinding(tmp_path):
+    book = PaperBook("100")
+    book.save(tmp_path / "paper_book.json")
+    policy = PaperRiskPolicy(
+        max_ticket_fraction=Decimal("1"),
+        max_committed_fraction=Decimal("1"),
+        minimum_cash_reserve_fraction=Decimal("0"),
+    )
+    candidate = _leg("lock-validator-global")
+    validator_globals = WorkspaceEconomicLock._validate_open_handle_identity.__globals__
+    original_open = validator_globals["_open_read_only_descriptor"]
+
+    def hostile_open(_path) -> int:
+        raise AssertionError("mutated lock descriptor opener executed")
+
+    try:
+        validator_globals["_open_read_only_descriptor"] = hostile_open
+        with pytest.raises(
+            RuntimeError,
+            match="workspace economic lock dependency authority changed",
+        ):
+            admit_paper_ticket(
+                workspace=tmp_path,
+                book=book,
+                risk_policy=policy,
+                stake=Decimal("1"),
+                legs=(candidate,),
+                reason="lock validator globals must remain canonical",
+                placed_at="2026-10-03T06:30:00Z",
+            )
+    finally:
+        validator_globals["_open_read_only_descriptor"] = original_open
+
+    persisted = PaperBook.load(tmp_path / "paper_book.json")
+    assert persisted.tickets == {}
+
+
 def test_admission_rejects_workspace_lock_rebinding_before_mutation(tmp_path):
     book = PaperBook("100")
     book.save(tmp_path / "paper_book.json")

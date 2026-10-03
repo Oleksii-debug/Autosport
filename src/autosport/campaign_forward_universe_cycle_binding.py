@@ -603,6 +603,24 @@ def resolve_campaign_forward_universe_cycle_authority(
     expected_json_dumps = json.dumps
     expected_datetime = datetime
     expected_timezone = timezone
+    expected_inspect = inspect
+    expected_getattr_static = inspect.getattr_static
+    expected_internal_callables = _INTERNAL_CALLABLES
+    expected_captured_callables = _CAPTURED_CALLABLES
+    expected_provider_callables = _PROVIDER_UNIVERSE_CALLABLES
+    expected_provider_values = _PROVIDER_UNIVERSE_VALUES
+    expected_provider_value_items = tuple(expected_provider_values.items())
+    expected_authority_class = _CANONICAL_AUTHORITY_CLASS
+    expected_authority_field_descriptors = _CANONICAL_AUTHORITY_FIELD_DESCRIPTORS
+    expected_authority_issuer = _CANONICAL_AUTHORITY_ISSUER
+    expected_authority_issuer_function = _CANONICAL_AUTHORITY_ISSUER_FUNCTION
+    expected_authority_issuer_code = _CANONICAL_AUTHORITY_ISSUER_CODE
+    expected_cycle_receipt_field_descriptors = _CANONICAL_CYCLE_RECEIPT_FIELD_DESCRIPTORS
+    expected_artifact_kind = _CANONICAL_ARTIFACT_KIND
+    expected_collector_artifact_resolver = _CANONICAL_COLLECTOR_ARTIFACT_RESOLVER
+    expected_provider_evidence_loader = _CANONICAL_PROVIDER_EVIDENCE_LOADER
+    expected_issued_universes = _CANONICAL_ISSUED_UNIVERSES
+    expected_provider_universe_module = _provider_universe_module
 
     def require_stable_integrity() -> None:
         if (
@@ -611,6 +629,30 @@ def resolve_campaign_forward_universe_cycle_authority(
         ):
             raise CampaignForwardUniverseCycleBindingError(
                 "campaign forward-cycle integrity guard changed mid-resolution"
+            )
+        if (
+            module_globals.get("inspect") is not expected_inspect
+            or expected_inspect.getattr_static is not expected_getattr_static
+            or module_globals.get("_INTERNAL_CALLABLES") is not expected_internal_callables
+            or module_globals.get("_CAPTURED_CALLABLES") is not expected_captured_callables
+            or module_globals.get("_PROVIDER_UNIVERSE_CALLABLES") is not expected_provider_callables
+            or module_globals.get("_PROVIDER_UNIVERSE_VALUES") is not expected_provider_values
+            or tuple(expected_provider_values.items()) != expected_provider_value_items
+            or module_globals.get("_CANONICAL_AUTHORITY_CLASS") is not expected_authority_class
+            or module_globals.get("_CANONICAL_AUTHORITY_FIELD_DESCRIPTORS") is not expected_authority_field_descriptors
+            or module_globals.get("_CANONICAL_AUTHORITY_ISSUER") is not expected_authority_issuer
+            or module_globals.get("_CANONICAL_AUTHORITY_ISSUER_FUNCTION") is not expected_authority_issuer_function
+            or module_globals.get("_CANONICAL_AUTHORITY_ISSUER_CODE") is not expected_authority_issuer_code
+            or module_globals.get("_CANONICAL_CYCLE_RECEIPT_FIELD_DESCRIPTORS") is not expected_cycle_receipt_field_descriptors
+            or module_globals.get("_CANONICAL_ARTIFACT_KIND") != expected_artifact_kind
+            or module_globals.get("_CANONICAL_COLLECTOR_ARTIFACT_RESOLVER") is not expected_collector_artifact_resolver
+            or module_globals.get("_CANONICAL_PROVIDER_EVIDENCE_LOADER") is not expected_provider_evidence_loader
+            or module_globals.get("_CANONICAL_ISSUED_UNIVERSES") is not expected_issued_universes
+            or module_globals.get("_provider_universe_module") is not expected_provider_universe_module
+            or expected_provider_universe_module._ISSUED_UNIVERSES is not expected_issued_universes
+        ):
+            raise CampaignForwardUniverseCycleBindingError(
+                "campaign forward-cycle authority witness changed mid-resolution"
             )
         if (
             module_globals.get("hashlib") is not expected_hashlib
@@ -795,6 +837,24 @@ def authorize_campaign_forward_source_receipts(
     expected_json_dumps = json.dumps
     expected_datetime = datetime
     expected_timezone = timezone
+    expected_inspect = inspect
+    expected_getattr_static = inspect.getattr_static
+    expected_internal_callables = _INTERNAL_CALLABLES
+    expected_captured_callables = _CAPTURED_CALLABLES
+    expected_provider_callables = _PROVIDER_UNIVERSE_CALLABLES
+    expected_provider_values = _PROVIDER_UNIVERSE_VALUES
+    expected_provider_value_items = tuple(expected_provider_values.items())
+    expected_authority_class = _CANONICAL_AUTHORITY_CLASS
+    expected_authority_field_descriptors = _CANONICAL_AUTHORITY_FIELD_DESCRIPTORS
+    expected_authority_issuer = _CANONICAL_AUTHORITY_ISSUER
+    expected_authority_issuer_function = _CANONICAL_AUTHORITY_ISSUER_FUNCTION
+    expected_authority_issuer_code = _CANONICAL_AUTHORITY_ISSUER_CODE
+    expected_cycle_receipt_field_descriptors = _CANONICAL_CYCLE_RECEIPT_FIELD_DESCRIPTORS
+    expected_artifact_kind = _CANONICAL_ARTIFACT_KIND
+    expected_collector_artifact_resolver = _CANONICAL_COLLECTOR_ARTIFACT_RESOLVER
+    expected_provider_evidence_loader = _CANONICAL_PROVIDER_EVIDENCE_LOADER
+    expected_issued_universes = _CANONICAL_ISSUED_UNIVERSES
+    expected_provider_universe_module = _provider_universe_module
 
     def require_stable_authorization_dispatch() -> None:
         if (
@@ -811,6 +871,30 @@ def authorize_campaign_forward_source_receipts(
         ):
             raise CampaignForwardUniverseCycleBindingError(
                 "campaign forward-cycle resolver changed during authorization"
+            )
+        if (
+            module_globals.get("inspect") is not expected_inspect
+            or expected_inspect.getattr_static is not expected_getattr_static
+            or module_globals.get("_INTERNAL_CALLABLES") is not expected_internal_callables
+            or module_globals.get("_CAPTURED_CALLABLES") is not expected_captured_callables
+            or module_globals.get("_PROVIDER_UNIVERSE_CALLABLES") is not expected_provider_callables
+            or module_globals.get("_PROVIDER_UNIVERSE_VALUES") is not expected_provider_values
+            or tuple(expected_provider_values.items()) != expected_provider_value_items
+            or module_globals.get("_CANONICAL_AUTHORITY_CLASS") is not expected_authority_class
+            or module_globals.get("_CANONICAL_AUTHORITY_FIELD_DESCRIPTORS") is not expected_authority_field_descriptors
+            or module_globals.get("_CANONICAL_AUTHORITY_ISSUER") is not expected_authority_issuer
+            or module_globals.get("_CANONICAL_AUTHORITY_ISSUER_FUNCTION") is not expected_authority_issuer_function
+            or module_globals.get("_CANONICAL_AUTHORITY_ISSUER_CODE") is not expected_authority_issuer_code
+            or module_globals.get("_CANONICAL_CYCLE_RECEIPT_FIELD_DESCRIPTORS") is not expected_cycle_receipt_field_descriptors
+            or module_globals.get("_CANONICAL_ARTIFACT_KIND") != expected_artifact_kind
+            or module_globals.get("_CANONICAL_COLLECTOR_ARTIFACT_RESOLVER") is not expected_collector_artifact_resolver
+            or module_globals.get("_CANONICAL_PROVIDER_EVIDENCE_LOADER") is not expected_provider_evidence_loader
+            or module_globals.get("_CANONICAL_ISSUED_UNIVERSES") is not expected_issued_universes
+            or module_globals.get("_provider_universe_module") is not expected_provider_universe_module
+            or expected_provider_universe_module._ISSUED_UNIVERSES is not expected_issued_universes
+        ):
+            raise CampaignForwardUniverseCycleBindingError(
+                "campaign forward-cycle authority witness changed during authorization"
             )
         if (
             module_globals.get("hashlib") is not expected_hashlib
@@ -912,6 +996,17 @@ def _seal_campaign_forward_universe_cycle_dispatch() -> None:
     expected_json_dumps = json.dumps
     expected_datetime = datetime
     expected_timezone = timezone
+    expected_authority_class = _CANONICAL_AUTHORITY_CLASS
+    expected_authority_field_descriptors = _CANONICAL_AUTHORITY_FIELD_DESCRIPTORS
+    expected_authority_issuer = _CANONICAL_AUTHORITY_ISSUER
+    expected_authority_issuer_function = _CANONICAL_AUTHORITY_ISSUER_FUNCTION
+    expected_authority_issuer_code = _CANONICAL_AUTHORITY_ISSUER_CODE
+    expected_cycle_receipt_field_descriptors = _CANONICAL_CYCLE_RECEIPT_FIELD_DESCRIPTORS
+    expected_artifact_kind = _CANONICAL_ARTIFACT_KIND
+    expected_collector_artifact_resolver = _CANONICAL_COLLECTOR_ARTIFACT_RESOLVER
+    expected_provider_evidence_loader = _CANONICAL_PROVIDER_EVIDENCE_LOADER
+    expected_issued_universes = _CANONICAL_ISSUED_UNIVERSES
+    expected_provider_universe_module = _provider_universe_module
     expected_internal_callables = _INTERNAL_CALLABLES
     expected_captured_callables = _CAPTURED_CALLABLES
     expected_provider_callables = _PROVIDER_UNIVERSE_CALLABLES
@@ -925,6 +1020,23 @@ def _seal_campaign_forward_universe_cycle_dispatch() -> None:
         ):
             raise expected_error(
                 "campaign forward-cycle integrity guard changed"
+            )
+        if (
+            module_globals.get("_CANONICAL_AUTHORITY_CLASS") is not expected_authority_class
+            or module_globals.get("_CANONICAL_AUTHORITY_FIELD_DESCRIPTORS") is not expected_authority_field_descriptors
+            or module_globals.get("_CANONICAL_AUTHORITY_ISSUER") is not expected_authority_issuer
+            or module_globals.get("_CANONICAL_AUTHORITY_ISSUER_FUNCTION") is not expected_authority_issuer_function
+            or module_globals.get("_CANONICAL_AUTHORITY_ISSUER_CODE") is not expected_authority_issuer_code
+            or module_globals.get("_CANONICAL_CYCLE_RECEIPT_FIELD_DESCRIPTORS") is not expected_cycle_receipt_field_descriptors
+            or module_globals.get("_CANONICAL_ARTIFACT_KIND") != expected_artifact_kind
+            or module_globals.get("_CANONICAL_COLLECTOR_ARTIFACT_RESOLVER") is not expected_collector_artifact_resolver
+            or module_globals.get("_CANONICAL_PROVIDER_EVIDENCE_LOADER") is not expected_provider_evidence_loader
+            or module_globals.get("_CANONICAL_ISSUED_UNIVERSES") is not expected_issued_universes
+            or module_globals.get("_provider_universe_module") is not expected_provider_universe_module
+            or expected_provider_universe_module._ISSUED_UNIVERSES is not expected_issued_universes
+        ):
+            raise expected_error(
+                "campaign forward-cycle authority witness globals changed"
             )
         if (
             module_globals.get("_INTERNAL_CALLABLES") is not expected_internal_callables

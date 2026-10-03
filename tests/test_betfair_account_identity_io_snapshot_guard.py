@@ -32,6 +32,8 @@ def _install_https_test_dispatch(
     def fake_do_open(_self, _http_class, request, **_kwargs):
         response = fake_open(request, getattr(request, "timeout", 0))
         response.code = 200
+        response.status = 200
+        response.url = request.full_url
         response.msg = "OK"
         response.info = lambda: {}
         return response

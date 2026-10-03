@@ -637,6 +637,32 @@ class DeploymentRuntimeAuthorityRecord:
 _CANONICAL_RECORD_TYPE: Final = DeploymentRuntimeAuthorityRecord
 _CANONICAL_ENVIRONMENT_IDENTITY_TYPE: Final = EnvironmentIdentity
 _CANONICAL_EPISODE_TYPE: Final = Episode
+_CANONICAL_ENVIRONMENT_IDENTITY_SURFACE: Final = tuple(
+    (
+        name,
+        descriptor,
+        getattr(
+            getattr(descriptor, "fget", descriptor),
+            "__code__",
+            None,
+        ),
+    )
+    for name in ("__init__", "__post_init__", "environment_id")
+    for descriptor in (vars(EnvironmentIdentity)[name],)
+)
+_CANONICAL_EPISODE_SURFACE: Final = tuple(
+    (
+        name,
+        descriptor,
+        getattr(
+            getattr(descriptor, "fget", descriptor),
+            "__code__",
+            None,
+        ),
+    )
+    for name in ("__init__", "__post_init__", "episode_id")
+    for descriptor in (vars(Episode)[name],)
+)
 _CANONICAL_RECORD_HELPERS: Final = (
     ("_text", _text, _text.__code__),
     ("_sha", _sha, _sha.__code__),
@@ -694,6 +720,31 @@ def _assert_canonical_record_codec() -> None:
         raise DeploymentRuntimeAuthorityError(
             "runtime authority semantic type dispatch was replaced"
         )
+    for semantic_type, surface in (
+        (
+            _CANONICAL_ENVIRONMENT_IDENTITY_TYPE,
+            _CANONICAL_ENVIRONMENT_IDENTITY_SURFACE,
+        ),
+        (
+            _CANONICAL_EPISODE_TYPE,
+            _CANONICAL_EPISODE_SURFACE,
+        ),
+    ):
+        class_dict = vars(semantic_type)
+        for name, expected_descriptor, expected_code in surface:
+            current = class_dict.get(name)
+            current_callable = getattr(current, "fget", current)
+            if (
+                current is not expected_descriptor
+                or (
+                    expected_code is not None
+                    and getattr(current_callable, "__code__", None)
+                    is not expected_code
+                )
+            ):
+                raise DeploymentRuntimeAuthorityError(
+                    "runtime authority semantic type surface was replaced"
+                )
     namespace = globals()
     for name, expected_helper, expected_code in _CANONICAL_RECORD_HELPERS:
         current_helper = namespace.get(name)

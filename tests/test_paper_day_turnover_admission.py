@@ -1200,6 +1200,101 @@ def test_risk_decision_reason_descriptor_rebind_cannot_trigger_turnover_resume(t
     assert set(persisted.tickets) == set(book.tickets)
 
 
+def test_proposal_market_descriptor_witness_inventory_is_complete():
+    expected = {
+        risk_module.ProposedTicketRiskContext: tuple(
+            risk_module.ProposedTicketRiskContext.__dataclass_fields__
+        ),
+        economic_admission.TicketLeg: tuple(
+            economic_admission.TicketLeg.__dataclass_fields__
+        ),
+        economic_admission.MarketEvent: tuple(
+            economic_admission.MarketEvent.__dataclass_fields__
+        ),
+    }
+    observed = {
+        risk_module.ProposedTicketRiskContext: tuple(
+            name
+            for name, _descriptor in (
+                economic_admission._PROPOSED_CONTEXT_FIELD_DESCRIPTOR_WITNESSES
+            )
+        ),
+        economic_admission.TicketLeg: tuple(
+            name
+            for name, _descriptor in (
+                economic_admission._TICKET_LEG_FIELD_DESCRIPTOR_WITNESSES
+            )
+        ),
+        economic_admission.MarketEvent: tuple(
+            name
+            for name, _descriptor in (
+                economic_admission._MARKET_EVENT_FIELD_DESCRIPTOR_WITNESSES
+            )
+        ),
+    }
+
+    assert observed == expected
+
+
+@pytest.mark.parametrize(
+    ("owner", "field_name", "forged_value"),
+    (
+        (risk_module.ProposedTicketRiskContext, "proposal_ts", "2099-01-01T00:00:00Z"),
+        (risk_module.ProposedTicketRiskContext, "provider_accounts", ()),
+        (economic_admission.TicketLeg, "locked_odds", Decimal("999")),
+        (economic_admission.MarketEvent, "source_id", "trusted-forged-provider"),
+        (economic_admission.MarketEvent, "decimal_odds", Decimal("999")),
+        (economic_admission.MarketEvent, "observed_ts", "2099-01-01T00:00:00Z"),
+    ),
+)
+def test_proposal_market_descriptor_rebind_fails_closed(
+    tmp_path,
+    owner,
+    field_name,
+    forged_value,
+):
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    old = now - timedelta(days=2)
+    goal = _goal()
+    EconomicGoalStore(tmp_path).initialize_owner(goal)
+    book = _book_with_settled_turnover(placed_at=_timestamp(old), stake="50")
+    book.save(tmp_path / "paper_book.json")
+    candidate = _leg(f"proposal-descriptor-{field_name}")
+    context = _context(candidate, _timestamp(now))
+    policy = _policy(goal)
+    original = owner.__dict__[field_name]
+    hostile_called = False
+
+    def forged_field(_self):
+        nonlocal hostile_called
+        hostile_called = True
+        return forged_value
+
+    try:
+        setattr(owner, field_name, property(forged_field))
+        result = admit_paper_ticket(
+            workspace=tmp_path,
+            book=book,
+            risk_policy=policy,
+            stake=Decimal("0.01"),
+            legs=(candidate,),
+            reason="proposal market descriptor mutation must fail closed",
+            placed_at=_timestamp(now),
+            context=context,
+            provider_source_ids=("provider-1",),
+            bankroll_id="paper-bankroll",
+            currency="USD",
+        )
+    finally:
+        setattr(owner, field_name, original)
+
+    assert hostile_called is False
+    assert result.admitted is False
+    assert result.risk.reason == "virtual bankroll risk helper authority is invalid"
+    persisted = PaperBook.load(tmp_path / "paper_book.json")
+    assert set(persisted.tickets) == set(book.tickets)
+
+
 def test_risk_policy_limit_descriptor_rebind_cannot_widen_ticket_cap(tmp_path):
     now = datetime.now(timezone.utc).replace(microsecond=0)
     old = now - timedelta(days=2)

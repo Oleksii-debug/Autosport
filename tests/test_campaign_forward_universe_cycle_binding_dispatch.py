@@ -259,6 +259,56 @@ def test_saved_verifier_rejects_capability_and_witness_double_rebind(
         )
 
 
+def test_saved_resolver_rejects_authority_issuance_capability_rebind(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    resolver = binding.resolve_campaign_forward_universe_cycle_authority
+    monkeypatch.setattr(binding, "_AUTHORITY_ISSUANCE_CAPABILITY", object())
+
+    with pytest.raises(
+        binding.CampaignForwardUniverseCycleBindingError,
+        match="authority witness globals changed",
+    ):
+        resolver(
+            precommit_locator=None,
+            collector_store=None,
+            source_spec=None,
+            cycle_receipt=None,
+            provider_evidence_store=None,
+            universe_store=None,
+            protocol=None,
+            event_lifecycle=None,
+        )
+
+
+def test_saved_resolver_rejects_authority_capability_and_witness_double_rebind(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    resolver = binding.resolve_campaign_forward_universe_cycle_authority
+    hostile = object()
+    monkeypatch.setattr(binding, "_AUTHORITY_ISSUANCE_CAPABILITY", hostile)
+    monkeypatch.setattr(
+        binding,
+        "_CANONICAL_AUTHORITY_ISSUANCE_CAPABILITY",
+        hostile,
+    )
+
+    with pytest.raises(
+        binding.CampaignForwardUniverseCycleBindingError,
+        match="authority witness globals changed",
+    ):
+        resolver(
+            precommit_locator=None,
+            collector_store=None,
+            source_spec=None,
+            cycle_receipt=None,
+            provider_evidence_store=None,
+            universe_store=None,
+            protocol=None,
+            event_lifecycle=None,
+        )
+
+
 def test_composed_verification_issuer_rebind_fails_closed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

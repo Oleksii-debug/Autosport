@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
 import threading
@@ -1601,3 +1602,72 @@ def reconcile_account_snapshot(
             raise SupervisedExecutionError("matched stake exceeds requested stake")
 
     return ReconciliationResult(ReadbackOutcome.UNKNOWN, AttemptState.UNKNOWN, None)
+
+
+def _install_supervised_execution_composition_guard() -> None:
+    """Seal transitive authority helpers used by state-mutating supervised APIs."""
+
+    helper_names = (
+        "_canonical_bound_plan_authority_dispatch",
+        "_canonical_supervised_ledger_dispatch",
+        "_canonical_bound_plan_witness",
+        "_require_bound_plan_structure",
+        "_require_approval",
+        "_require_durable_approval",
+        "_durable_reserved_plan_fingerprint",
+        "_require_reserved",
+        "_attempt_action",
+        "_require_attempt_provider_order_reference",
+        "_validate_slippage",
+        "_require_verified_profile",
+    )
+    helper_surface = tuple(
+        (
+            name,
+            globals()[name],
+            getattr(globals()[name], "__code__", None),
+        )
+        for name in helper_names
+    )
+
+    def require_pristine_composition() -> None:
+        for name, expected, expected_code in helper_surface:
+            current = globals().get(name)
+            if (
+                current is not expected
+                or (
+                    expected_code is not None
+                    and getattr(current, "__code__", None) is not expected_code
+                )
+            ):
+                raise SupervisedExecutionError(
+                    "canonical supervised execution composition changed"
+                )
+
+    for name in (
+        "reserve_supervised_plan",
+        "revoke_supervised_approval",
+        "begin_supervised_attempt",
+        "reconcile_provider_readback",
+        "reconcile_provider_not_found",
+    ):
+        raw = globals()[name]
+        raw_code = getattr(raw, "__code__", None)
+
+        @functools.wraps(raw)
+        def guarded(*args, __raw=raw, __raw_code=raw_code, **kwargs):
+            require_pristine_composition()
+            if (
+                __raw_code is not None
+                and getattr(__raw, "__code__", None) is not __raw_code
+            ):
+                raise SupervisedExecutionError(
+                    "canonical supervised execution entrypoint changed"
+                )
+            return __raw(*args, **kwargs)
+
+        globals()[name] = guarded
+
+
+_install_supervised_execution_composition_guard()
+del _install_supervised_execution_composition_guard

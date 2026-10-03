@@ -282,6 +282,17 @@ _RECEIPT_FIELD_DESCRIPTORS = tuple(
     for name in _RECEIPT_FIELD_NAMES
 )
 
+_INCEPTION_RECEIPT_FIELD_NAMES = tuple(
+    CampaignInceptionReceipt.__dataclass_fields__
+)
+_INCEPTION_RECEIPT_FIELD_DESCRIPTORS = tuple(
+    (
+        name,
+        inspect.getattr_static(CampaignInceptionReceipt, name),
+    )
+    for name in _INCEPTION_RECEIPT_FIELD_NAMES
+)
+
 
 def _issue_receipt(
     *,
@@ -368,6 +379,8 @@ def capture_campaign_complete_game_board(
     expected_getattr_static = inspect.getattr_static
     expected_receipt_field_names = _RECEIPT_FIELD_NAMES
     expected_receipt_field_descriptors = _RECEIPT_FIELD_DESCRIPTORS
+    expected_inception_field_names = _INCEPTION_RECEIPT_FIELD_NAMES
+    expected_inception_field_descriptors = _INCEPTION_RECEIPT_FIELD_DESCRIPTORS
     expected_hashlib = hashlib
     expected_sha256 = hashlib.sha256
     expected_json = json
@@ -399,6 +412,23 @@ def capture_campaign_complete_game_board(
         ):
             raise CampaignProviderCycleCaptureIntegrityError(
                 "campaign provider-cycle receipt field authority changed"
+            )
+        if (
+            module_globals.get("_INCEPTION_RECEIPT_FIELD_NAMES")
+            is not expected_inception_field_names
+            or module_globals.get("_INCEPTION_RECEIPT_FIELD_DESCRIPTORS")
+            is not expected_inception_field_descriptors
+            or any(
+                expected_getattr_static(
+                    CampaignInceptionReceipt,
+                    name,
+                )
+                is not descriptor
+                for name, descriptor in expected_inception_field_descriptors
+            )
+        ):
+            raise CampaignProviderCycleCaptureIntegrityError(
+                "campaign inception receipt field authority changed"
             )
         if (
             module_globals.get("hashlib") is not expected_hashlib
@@ -682,6 +712,8 @@ def _seal_campaign_provider_cycle_capture_dispatch() -> None:
     expected_getattr_static = inspect.getattr_static
     expected_receipt_field_names = _RECEIPT_FIELD_NAMES
     expected_receipt_field_descriptors = _RECEIPT_FIELD_DESCRIPTORS
+    expected_inception_field_names = _INCEPTION_RECEIPT_FIELD_NAMES
+    expected_inception_field_descriptors = _INCEPTION_RECEIPT_FIELD_DESCRIPTORS
     expected_hashlib = hashlib
     expected_sha256 = hashlib.sha256
     expected_json = json
@@ -705,6 +737,8 @@ def _seal_campaign_provider_cycle_capture_dispatch() -> None:
         "UTC": expected_utc,
         "_RECEIPT_FIELD_NAMES": expected_receipt_field_names,
         "_RECEIPT_FIELD_DESCRIPTORS": expected_receipt_field_descriptors,
+        "_INCEPTION_RECEIPT_FIELD_NAMES": expected_inception_field_names,
+        "_INCEPTION_RECEIPT_FIELD_DESCRIPTORS": expected_inception_field_descriptors,
         "ARTIFACT_KIND": ARTIFACT_KIND,
     }
     expected_callables = tuple(
@@ -761,6 +795,17 @@ def _seal_campaign_provider_cycle_capture_dispatch() -> None:
         ):
             raise expected_error(
                 "campaign provider-cycle receipt field authority changed"
+            )
+        if any(
+            expected_getattr_static(
+                CampaignInceptionReceipt,
+                name,
+            )
+            is not descriptor
+            for name, descriptor in expected_inception_field_descriptors
+        ):
+            raise expected_error(
+                "campaign inception receipt field authority changed"
             )
         if (
             expected_hashlib.sha256 is not expected_sha256

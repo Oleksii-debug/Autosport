@@ -443,7 +443,11 @@ class ProviderCapabilityEvidenceMatrix:
             return False
         if requested_at > _time(self.as_of, "as_of"):
             return False
-        if requested_at < _time(self.integration.observed_at, "integration.observed_at"):
+        authority_floor = max(
+            _time(self.profile.observed_at, "profile.observed_at"),
+            _time(self.integration.observed_at, "integration.observed_at"),
+        )
+        if requested_at < authority_floor:
             return False
         fact = self.fact_for(capability)
         # A weaker documentation/configuration fact may be retained for audit even
@@ -508,7 +512,11 @@ class ProviderCapabilityEvidenceMatrix:
             return False
         if requested_at > _time(self.as_of, "as_of"):
             return False
-        if requested_at < _time(self.integration.observed_at, "integration.observed_at"):
+        authority_floor = max(
+            _time(self.profile.observed_at, "profile.observed_at"),
+            _time(self.integration.observed_at, "integration.observed_at"),
+        )
+        if requested_at < authority_floor:
             return False
         fact = self.fact_for(capability)
         # A weaker documentation/configuration fact may be retained for audit even

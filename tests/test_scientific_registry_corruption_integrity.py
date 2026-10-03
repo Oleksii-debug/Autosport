@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 
 import pytest
@@ -43,6 +44,23 @@ def _rewrite_state(path, state: dict[str, object]) -> None:
         encoding="utf-8",
     )
 
+
+
+def _record_digest(entry: dict[str, object]) -> str:
+    envelope = {
+        "record_type": entry["record_type"],
+        "record_id": entry["record_id"],
+        "available_at": entry["available_at"],
+        "payload": entry["payload"],
+    }
+    raw = json.dumps(
+        envelope,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()
 
 def test_reordering_individually_valid_records_is_rejected_by_monotonic_authority(
     tmp_path,
@@ -137,3 +155,121 @@ def test_truncated_registry_cannot_be_pristine_reinitialized_over_history(tmp_pa
         ScientificRegistry.initialize_pristine(path)
 
     assert path.read_bytes() == corrupted
+
+
+def test_payload_byte_tamper_with_stale_record_digest_fails_locally(tmp_path):
+    path = tmp_path / "scientific_registry.json"
+    registry = ScientificRegistry.initialize_pristine(path)
+    registry.append(_question())
+
+    state = json.loads(path.read_text(encoding="utf-8"))
+    state["records"][0]["payload"]["statement"] = "Tampered question"
+    stale_digest = state["records"][0]["record_sha256"]
+    _rewrite_state(path, state)
+    corrupted = path.read_bytes()
+
+    assert _record_digest(state["records"][0]) != stale_digest
+    for _attempt in range(2):
+        with pytest.raises(
+            ValueError,
+            match="record digest mismatch",
+        ):
+            ScientificRegistry(path)
+        assert path.read_bytes() == corrupted
+
+
+def test_recomputed_record_digest_cannot_mint_tampered_scientific_authority(tmp_path):
+    path = tmp_path / "scientific_registry.json"
+    registry = ScientificRegistry.initialize_pristine(path)
+    registry.append(_question())
+
+    state = json.loads(path.read_text(encoding="utf-8"))
+    entry = state["records"][0]
+    original_digest = entry["record_sha256"]
+    entry["payload"]["statement"] = "Tampered but locally rehashed question"
+    entry["record_sha256"] = _record_digest(entry)
+    assert entry["record_sha256"] != original_digest
+    _rewrite_state(path, state)
+    corrupted = path.read_bytes()
+
+    messages: list[str] = []
+    for _attempt in range(2):
+        with pytest.raises(MonotonicAuthorityRollbackError) as caught:
+            ScientificRegistry(path)
+        messages.append(str(caught.value))
+        assert path.read_bytes() == corrupted
+
+    assert messages[0] == messages[1]
+    with pytest.raises(MonotonicAuthorityRollbackError):
+        ScientificRegistry.initialize_pristine(path)
+    assert path.read_bytes() == corrupted
+
+
+def test_exact_duplicate_durable_record_never_doubles_scientific_effect(tmp_path):
+    path = tmp_path / "scientific_registry.json"
+    registry = ScientificRegistry.initialize_pristine(path)
+    registry.append(_question())
+
+    state = json.loads(path.read_text(encoding="utf-8"))
+    state["records"].append(dict(state["records"][0]))
+    _rewrite_state(path, state)
+    corrupted = path.read_bytes()
+
+    for _attempt in range(2):
+        with pytest.raises(
+            ValueError,
+            match="duplicate record identity",
+        ):
+            ScientificRegistry(path)
+        assert path.read_bytes() == corrupted
+
+    with pytest.raises(
+        ValueError,
+        match="duplicate record identity",
+    ):
+        ScientificRegistry.initialize_pristine(path)
+    assert path.read_bytes() == corrupted
+
+
+def test_rehashed_outer_identity_relabel_cannot_mint_scientific_authority(tmp_path):
+    path = tmp_path / "scientific_registry.json"
+    registry = ScientificRegistry.initialize_pristine(path)
+    registry.append(_question())
+
+    state = json.loads(path.read_text(encoding="utf-8"))
+    entry = state["records"][0]
+    assert entry["payload"]["question_id"] == "question-1"
+    entry["record_id"] = "question-forged"
+    entry["record_sha256"] = _record_digest(entry)
+    _rewrite_state(path, state)
+    corrupted = path.read_bytes()
+
+    for _attempt in range(2):
+        with pytest.raises(MonotonicAuthorityRollbackError):
+            ScientificRegistry(path)
+        assert path.read_bytes() == corrupted
+
+    with pytest.raises(MonotonicAuthorityRollbackError):
+        ScientificRegistry.initialize_pristine(path)
+    assert path.read_bytes() == corrupted
+
+
+def test_semantically_invalid_available_at_is_rejected_before_authority_recovery(tmp_path):
+    path = tmp_path / "scientific_registry.json"
+    registry = ScientificRegistry.initialize_pristine(path)
+    registry.append(_question())
+
+    state = json.loads(path.read_text(encoding="utf-8"))
+    entry = state["records"][0]
+    entry["available_at"] = 123
+    entry["record_sha256"] = _record_digest(entry)
+    _rewrite_state(path, state)
+    corrupted = path.read_bytes()
+
+    for _attempt in range(2):
+        with pytest.raises(
+            ValueError,
+            match="available_at must be a non-empty canonical string",
+        ):
+            ScientificRegistry(path)
+        assert path.read_bytes() == corrupted

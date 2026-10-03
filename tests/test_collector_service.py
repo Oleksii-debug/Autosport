@@ -9,6 +9,7 @@ from pathlib import Path
 from autosport.causal_collector import (
     CollectorDelta,
     CollectorDeltaStore,
+    CollectorStorageBackpressureError,
     CursorRegressionError,
     GapState,
     SyncState,
@@ -217,6 +218,26 @@ class HeadlessCollectorServiceTests(unittest.TestCase):
             stop_requested=stop_requested,
             stop_reason=stop_reason,
         )
+
+    def test_source_binding_maps_storage_backpressure_to_retention_required(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            page = catalog_page(1, "event-1")
+
+            class BackpressuredBindingSource(FakeCollectorSource):
+                def bind_collector_store(self, store):
+                    raise CollectorStorageBackpressureError(
+                        "RETENTION_REQUIRED: simulated migration budget exhaustion"
+                    )
+
+            source = BackpressuredBindingSource([page], [()])
+            with self.assertRaisesRegex(
+                CollectorRetentionRequiredError,
+                "RETENTION_REQUIRED",
+            ):
+                self.make_service(tmp, source)
+
+            self.assertEqual(source.catalog_calls, 0)
+            self.assertEqual(source.delta_calls, 0)
 
     def test_runtime_epoch_activation_is_durable_and_revalidated_each_cycle(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -18,6 +18,16 @@ from autosport.bookmaker_capability import BookmakerCapability
 from autosport.economic_goal import EconomicGoalContract
 from autosport.economic_goal_provenance import provenance_for
 from autosport.economic_goal_store import EconomicGoalStore
+from autosport.domain import MarketEvent, TicketLeg
+from autosport.portfolio_plan import (
+    Opportunity,
+    OpportunityDecision,
+    OpportunityEvidence,
+    OpportunityIntent,
+    QuoteRef,
+    StrategyClass,
+)
+from autosport.risk import ProposedTicketRiskContext
 import autosport.supervised_execution as supervised_execution
 from autosport.supervised_execution import BoundSupervisedExecutionPlan
 from autosport.provider_account_headroom_admission import (
@@ -164,12 +174,75 @@ _HEADROOM_GOAL = EconomicGoalContract(
 _HEADROOM_GOAL_SHA256 = provenance_for(_HEADROOM_GOAL).contract_sha256
 
 
+def _intent_for_action(
+    action: ExecutionAction,
+    intent_id: str,
+    *,
+    bankroll_id: str = _HEADROOM_GOAL.bankroll_id,
+    currency: str = _HEADROOM_GOAL.currency,
+) -> OpportunityIntent:
+    odds = Decimal(str(action.requested_odds))
+    leg = TicketLeg(
+        event_id=action.event_id,
+        market_id=action.market_id,
+        selection_id=action.selection_id,
+        locked_odds=odds,
+    )
+    quote_event = MarketEvent(
+        event_id=action.event_id,
+        market_id=action.market_id,
+        selection_id=action.selection_id,
+        decimal_odds=odds,
+        observed_ts=action.quote_observed_at,
+        source_id=action.bookmaker_id,
+        sequence=1,
+        source_ts=action.quote_observed_at,
+        ingest_ts=action.quote_observed_at,
+    )
+    context = ProposedTicketRiskContext(
+        legs=(leg,),
+        quotes=(quote_event,),
+        provider_accounts=((action.bookmaker_id, action.account_id),),
+        bankroll_id=bankroll_id,
+        currency=currency,
+        proposal_ts=action.quote_observed_at,
+    )
+    quote = QuoteRef.from_market_event(
+        quote_event,
+        market_snapshot_hash="9" * 64,
+    )
+    opportunity = Opportunity(
+        strategy_class=StrategyClass.LIVE_PRICE_MOVEMENT,
+        decision=OpportunityDecision.ACTIONABLE,
+        quotes=(quote,),
+        claims_probability_edge=False,
+        forecasts=(),
+    )
+    return OpportunityIntent(
+        intent_id=intent_id,
+        opportunity=opportunity,
+        evidence=OpportunityEvidence(
+            evidence_id=f"headroom-evidence-{intent_id}",
+            observed_at=action.quote_observed_at,
+            causal_cutoff=action.quote_observed_at,
+            reproducibility_sha256="a" * 64,
+        ),
+        risk_context=context,
+        signal_strength=Decimal("0.05"),
+        strategy_id=f"headroom-strategy-{intent_id}",
+        config_sha256="e" * 64,
+    )
+
+
 def _plan(
     plan_id: str,
     action: ExecutionAction,
     *,
     economic_goal_contract_sha256: str = _HEADROOM_GOAL_SHA256,
-) -> tuple[str, BoundSupervisedExecutionPlan]:
+    intent_bankroll_id: str = _HEADROOM_GOAL.bankroll_id,
+    intent_currency: str = _HEADROOM_GOAL.currency,
+    bound_intent_sha256: str | None = None,
+) -> tuple[str, BoundSupervisedExecutionPlan, OpportunityIntent]:
     template = ExecutionPlan(
         plan_id="pending-supervised-plan-id",
         bookmaker_profile_version="profile-v1",
@@ -180,7 +253,17 @@ def _plan(
     )
     portfolio_plan_sha256 = "1" * 64
     intent_id = f"intent-{plan_id}"
-    intent_sha256 = "2" * 64
+    intent = _intent_for_action(
+        action,
+        intent_id,
+        bankroll_id=intent_bankroll_id,
+        currency=intent_currency,
+    )
+    intent_sha256 = (
+        intent.intent_sha256
+        if bound_intent_sha256 is None
+        else bound_intent_sha256
+    )
     approval_fingerprint = "3" * 64
     profile_bindings = ()
     constraints = ()
@@ -208,12 +291,12 @@ def _plan(
         profile_bindings=profile_bindings,
         constraints=constraints,
     )
-    return plan_id, bound
+    return plan_id, bound, intent
 
 
 def _ledger_with_plans(
     tmp_path,
-    *plans: tuple[str, BoundSupervisedExecutionPlan],
+    *plans: tuple[str, BoundSupervisedExecutionPlan, OpportunityIntent],
     economic_goal: EconomicGoalContract = _HEADROOM_GOAL,
 ) -> RealExecutionLedger:
     store = EconomicGoalStore(tmp_path)
@@ -222,12 +305,15 @@ def _ledger_with_plans(
     ledger = RealExecutionLedger(tmp_path / "real-ledger.jsonl")
     logical_ids: dict[str, str] = {}
     bounds: list[BoundSupervisedExecutionPlan] = []
-    for logical_id, bound in plans:
+    intents: list[OpportunityIntent] = []
+    for logical_id, bound, intent in plans:
         logical_ids[logical_id] = bound.execution_plan.plan_id
         bounds.append(bound)
+        intents.append(intent)
         ledger.reserve_plan(bound.execution_plan)
     ledger._test_logical_plan_ids = logical_ids
     ledger._test_bound_plans = tuple(bounds)
+    ledger._test_intents = tuple(intents)
     return ledger
 
 
@@ -248,6 +334,7 @@ def _assess(
         plan_id=_actual_plan_id(ledger, plan_id),
         action_id=action_id,
         bound_plans=ledger._test_bound_plans,
+        intents=ledger._test_intents,
     )
 
 
@@ -264,6 +351,7 @@ def _reserve(
         assessment,
         attempt_id=attempt_id,
         bound_plans=ledger._test_bound_plans,
+        intents=ledger._test_intents,
     )
 
 
@@ -909,6 +997,54 @@ def test_headroom_rejects_missing_denomination_coverage_for_relevant_plan(
             plan_id=_actual_plan_id(ledger, "target"),
             action_id="target-action",
             bound_plans=(ledger._test_bound_plans[0],),
+        )
+
+
+def test_headroom_rejects_opaque_bound_intent_without_exact_intent_evidence(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    acquired, _ = _acquire_balance(monkeypatch, tmp_path, "100")
+    target = _plan(
+        "target",
+        _action("target-action", "10"),
+        bound_intent_sha256="2" * 64,
+    )
+    ledger = _ledger_with_plans(tmp_path, target)
+
+    with pytest.raises(
+        ProviderAccountHeadroomUnsupported,
+        match="lacks exact OpportunityIntent denomination evidence",
+    ):
+        _assess(
+            ledger,
+            acquired,
+            plan_id="target",
+            action_id="target-action",
+        )
+
+
+def test_headroom_rejects_intent_currency_mismatching_current_goal(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    acquired, _ = _acquire_balance(monkeypatch, tmp_path, "100")
+    target = _plan(
+        "target",
+        _action("target-action", "10"),
+        intent_currency="USD",
+    )
+    ledger = _ledger_with_plans(tmp_path, target)
+
+    with pytest.raises(
+        ProviderAccountHeadroomUnsupported,
+        match="intent denomination does not match current durable economic goal",
+    ):
+        _assess(
+            ledger,
+            acquired,
+            plan_id="target",
+            action_id="target-action",
         )
 
 

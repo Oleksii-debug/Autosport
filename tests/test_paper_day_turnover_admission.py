@@ -1011,6 +1011,105 @@ def test_day_turnover_override_does_not_bypass_local_ticket_limit(tmp_path):
     assert result.risk.reason == "ticket exceeds configured bankroll fraction"
 
 
+def _risk_decision_descriptor_case(tmp_path, *, goal):
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    old = now - timedelta(days=2)
+    EconomicGoalStore(tmp_path).initialize_owner(goal)
+    book = _book_with_settled_turnover(placed_at=_timestamp(old), stake="50")
+    book.save(tmp_path / "paper_book.json")
+    candidate = _leg("risk-decision-descriptor")
+    context = _context(candidate, _timestamp(now))
+    return now, book, candidate, context, _policy(goal)
+
+
+def test_risk_decision_allowed_descriptor_rebind_cannot_promote_rejection(tmp_path):
+    goal = replace(
+        _goal(),
+        max_stake_amount=Decimal("0.001"),
+    )
+    now, book, candidate, context, policy = _risk_decision_descriptor_case(
+        tmp_path,
+        goal=goal,
+    )
+    original = risk_module.RiskDecision.__dict__["allowed"]
+    hostile_called = False
+
+    def forged_allowed(_self):
+        nonlocal hostile_called
+        hostile_called = True
+        return True
+
+    try:
+        risk_module.RiskDecision.allowed = property(forged_allowed)
+        with pytest.raises(
+            RuntimeError,
+            match="economic admission risk decision authority changed",
+        ):
+            admit_paper_ticket(
+                workspace=tmp_path,
+                book=book,
+                risk_policy=policy,
+                stake=Decimal("0.01"),
+                legs=(candidate,),
+                reason="risk decision allowed descriptor must not promote rejection",
+                placed_at=_timestamp(now),
+                context=context,
+                provider_source_ids=("provider-1",),
+                bankroll_id="paper-bankroll",
+                currency="USD",
+            )
+    finally:
+        risk_module.RiskDecision.allowed = original
+
+    assert hostile_called is False
+    persisted = PaperBook.load(tmp_path / "paper_book.json")
+    assert set(persisted.tickets) == set(book.tickets)
+
+
+def test_risk_decision_reason_descriptor_rebind_cannot_trigger_turnover_resume(tmp_path):
+    goal = replace(
+        _goal(),
+        blocked_providers=frozenset({"provider-1"}),
+    )
+    now, book, candidate, context, policy = _risk_decision_descriptor_case(
+        tmp_path,
+        goal=goal,
+    )
+    original = risk_module.RiskDecision.__dict__["reason"]
+    hostile_called = False
+
+    def forged_reason(_self):
+        nonlocal hostile_called
+        hostile_called = True
+        return "economic goal turnover limit exceeded"
+
+    try:
+        risk_module.RiskDecision.reason = property(forged_reason)
+        with pytest.raises(
+            RuntimeError,
+            match="economic admission risk decision authority changed",
+        ):
+            admit_paper_ticket(
+                workspace=tmp_path,
+                book=book,
+                risk_policy=policy,
+                stake=Decimal("0.01"),
+                legs=(candidate,),
+                reason="risk decision reason must not reclassify provider rejection",
+                placed_at=_timestamp(now),
+                context=context,
+                provider_source_ids=("provider-1",),
+                bankroll_id="paper-bankroll",
+                currency="USD",
+            )
+    finally:
+        risk_module.RiskDecision.reason = original
+
+    assert hostile_called is False
+    persisted = PaperBook.load(tmp_path / "paper_book.json")
+    assert set(persisted.tickets) == set(book.tickets)
+
+
 def test_risk_policy_limit_descriptor_rebind_cannot_widen_ticket_cap(tmp_path):
     now = datetime.now(timezone.utc).replace(microsecond=0)
     old = now - timedelta(days=2)

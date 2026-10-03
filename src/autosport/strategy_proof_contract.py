@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Final
 
-from .opportunity import OpportunityDecision, StrategyClass
+from .opportunity import StrategyClass
 
 
 class StrategyProofContractError(ValueError):
@@ -227,9 +227,7 @@ class StrategyProofEvaluation:
     required_proofs: tuple[ProofRequirement, ...]
     present_proofs: tuple[ProofRequirement, ...]
     missing_proofs: tuple[ProofRequirement, ...]
-    proof_contract_satisfied: bool
-    positive_action_candidate: bool
-    proof_gate_decision: OpportunityDecision
+    required_labels_present: bool
     execution_authorized: bool = False
 
     def __post_init__(self) -> None:
@@ -267,22 +265,9 @@ class StrategyProofEvaluation:
             )
 
         expected_satisfied = not expected_missing
-        if self.proof_contract_satisfied is not expected_satisfied:
+        if self.required_labels_present is not expected_satisfied:
             raise StrategyProofContractError(
-                "proof_contract_satisfied does not match missing_proofs"
-            )
-        if self.positive_action_candidate is not False:
-            raise StrategyProofContractError(
-                "requirement labels cannot mint a positive action candidate"
-            )
-
-        if not isinstance(self.proof_gate_decision, OpportunityDecision):
-            raise StrategyProofContractError(
-                "proof_gate_decision must be an OpportunityDecision"
-            )
-        if self.proof_gate_decision is not OpportunityDecision.WAIT:
-            raise StrategyProofContractError(
-                "requirement labels cannot mint an actionable decision"
+                "required_labels_present does not match missing_proofs"
             )
 
         if type(self.execution_authorized) is not bool:
@@ -333,8 +318,6 @@ def evaluate_strategy_proofs(
         required_proofs=contract.required_proofs,
         present_proofs=_ordered(canonical_present),
         missing_proofs=_ordered(missing),
-        proof_contract_satisfied=satisfied,
-        positive_action_candidate=False,
-        proof_gate_decision=OpportunityDecision.WAIT,
+        required_labels_present=satisfied,
         execution_authorized=False,
     )

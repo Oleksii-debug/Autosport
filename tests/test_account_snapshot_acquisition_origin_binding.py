@@ -300,6 +300,54 @@ def test_account_snapshot_reader_class_dispatch_rebind_fails_before_provider_io(
     assert calls == []
 
 
+def test_k07_account_details_metadata_spoof_cannot_mint_reader_authority(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    calls = _install_transport(monkeypatch, [])
+    acquirer = BetfairAccountSnapshotAcquirer(
+        tmp_path / "account.sqlite3",
+        _credentials("A"),
+        account_id="default-account",
+    )
+    attacker_calls = 0
+
+    def forged_details(self):
+        nonlocal attacker_calls
+        attacker_calls += 1
+        del self
+        raise AssertionError("forged account details reader executed")
+
+    # Spoof every cheap wrapper-identification field. The owning acquisition
+    # authority must still derive executable identity from the canonical K07
+    # source rather than trusting a marker/module/qualname tuple.
+    forged_details.__module__ = (
+        "autosport._betfair_account_identity_io_snapshot_guard"
+    )
+    forged_details.__qualname__ = (
+        "_install_guard.<locals>.guarded_read_account_details"
+    )
+    forged_details._autosport_k07_io_snapshot_sealed = True
+
+    monkeypatch.setattr(
+        betfair_readonly.BetfairReadOnlyClient,
+        "read_account_details",
+        forged_details,
+    )
+
+    with pytest.raises(
+        AccountSnapshotAcquisitionError,
+        match="account snapshot reader dispatch changed: read_account_details",
+    ):
+        acquirer.acquire(
+            _balance_capabilities(),
+            acquisition_id="k07-details-metadata-spoof",
+        )
+
+    assert attacker_calls == 0
+    assert calls == []
+
+
 def test_closure_boundary_does_not_expose_hidden_client_state(tmp_path) -> None:
     acquirer = BetfairAccountSnapshotAcquirer(
         tmp_path / "account.sqlite3",

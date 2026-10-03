@@ -1,5 +1,5 @@
 from dataclasses import replace
-from decimal import Decimal
+from decimal import Context, Decimal, localcontext
 from pathlib import Path
 from types import FunctionType
 
@@ -511,6 +511,22 @@ def test_evidence_shape_rejects_equity_transition_drift(tmp_path):
             loss_evidence,
             points=loss_evidence.points[:-1] + (forged_settle,),
         )
+
+    # Ambient precision must not turn 100 + (-9) into a rounded 90 and let a
+    # forged settlement delta explain the canonical 90 equity point.
+    rounded_forgery = replace(
+        loss_evidence.points[-1],
+        realized_delta=Decimal("-9"),
+    )
+    with localcontext(Context(prec=1)):
+        with pytest.raises(
+            PaperDrawdownEvidenceError,
+            match="equity transition does not match realized delta",
+        ):
+            replace(
+                loss_evidence,
+                points=loss_evidence.points[:-1] + (rounded_forgery,),
+            )
 
 
 def test_evidence_shape_rejects_noncanonical_equity_point_objects(tmp_path):

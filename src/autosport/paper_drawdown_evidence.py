@@ -37,6 +37,54 @@ class PaperDrawdownEvidenceMismatchError(PaperDrawdownEvidenceError):
     """Raised when supplied evidence is not the current canonical result."""
 
 
+def _exact_shape_sum(values: tuple[Decimal, ...]) -> Decimal:
+    """Add canonical evidence decimals without ambient Decimal-context rounding."""
+
+    if not values:
+        return Decimal("0")
+    min_exponent: int | None = None
+    max_adjusted: int | None = None
+    nonzero_count = 0
+    for value in values:
+        if type(value) is not Decimal or not value.is_finite():
+            raise PaperDrawdownEvidenceError(
+                "drawdown evidence transition requires finite exact Decimals"
+            )
+        if value.is_zero():
+            continue
+        parts = value.copy_abs().as_tuple()
+        exponent = int(parts.exponent)
+        adjusted = exponent + len(parts.digits) - 1
+        min_exponent = exponent if min_exponent is None else min(min_exponent, exponent)
+        max_adjusted = adjusted if max_adjusted is None else max(max_adjusted, adjusted)
+        nonzero_count += 1
+    if nonzero_count == 0:
+        return Decimal("0")
+    if min_exponent is None or max_adjusted is None:
+        raise PaperDrawdownEvidenceError(
+            "drawdown evidence transition arithmetic is invalid"
+        )
+    precision = max_adjusted - min_exponent + 2 + len(str(nonzero_count))
+    context = Context(
+        prec=max(1, precision),
+        rounding=ROUND_HALF_EVEN,
+        Emin=-999999,
+        Emax=999999,
+    )
+    context.traps[Inexact] = True
+    context.traps[InvalidOperation] = True
+    context.traps[Overflow] = True
+    context.traps[Underflow] = True
+    context.clear_flags()
+    try:
+        with localcontext(context):
+            return sum(values, Decimal("0"))
+    except ArithmeticError as exc:
+        raise PaperDrawdownEvidenceError(
+            "drawdown evidence transition arithmetic is invalid"
+        ) from exc
+
+
 @dataclass(frozen=True, slots=True)
 class PaperRealizedEquityPoint:
     sequence: int
@@ -236,7 +284,10 @@ class PaperRealizedDrawdownEvidence:
             )
         previous_point = self.points[0]
         for point in self.points[1:]:
-            if point.equity != previous_point.equity + point.realized_delta:
+            expected_equity = _exact_shape_sum(
+                (previous_point.equity, point.realized_delta)
+            )
+            if point.equity != expected_equity:
                 raise PaperDrawdownEvidenceError(
                     "drawdown evidence equity transition does not match realized delta"
                 )

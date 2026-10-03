@@ -362,8 +362,17 @@ class GitHubApi:
                     raise CancellationError(
                         "unexpected allowed cancellation HTTP status"
                     )
-                if self.workflow_run_status(run_id) == "completed":
+                status_payload = request_impl(
+                    self,
+                    f"/actions/runs/{run_id}",
+                )
+                if not isinstance(status_payload, dict):
+                    raise CancellationError("invalid workflow-run response")
+                status = status_payload.get("status")
+                if status == "completed":
                     return
+                if status not in _ACTIVE_STATUSES:
+                    raise CancellationError("invalid workflow-run status")
                 raise CancellationError(
                     "workflow run cancellation conflicted while run remains active"
                 )

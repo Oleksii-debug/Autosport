@@ -16,8 +16,8 @@ if __package__:
         WorkflowRun,
         _require_positive_int,
         _require_sha,
-        cancel_superseded,
         parse_run,
+        select_superseded_runs,
     )
 else:
     # GitHub Actions executes this file directly as
@@ -34,8 +34,8 @@ else:
         WorkflowRun,
         _require_positive_int,
         _require_sha,
-        cancel_superseded,
         parse_run,
+        select_superseded_runs,
     )
 
 
@@ -558,6 +558,82 @@ class WorkflowScopedGitHubApi(GitHubApi):
             cancelled.append(run_id)
         return tuple(cancelled)
 
+
+def cancel_superseded_explicit_pr_runs(
+    api: WorkflowScopedGitHubApi,
+    *,
+    workflow_name: str,
+    current_run_id: int,
+) -> tuple[int, ...]:
+    """Sweep superseded runs for every explicit singleton PR in one workflow snapshot.
+
+    The exact-workflow API already performs one bounded active-run enumeration. Reuse
+    that snapshot across PR groups instead of requiring one trusted controller job per
+    PR. Each group still derives same-head cancellation from one live qualification
+    snapshot and rereads that exact snapshot immediately before every irreversible POST.
+
+    Empty/multi-reference runs never gain PR identity here. Historical missing-reference
+    cleanup remains owned by cancel_historical_unbound_runs and keeps its existing
+    association/branch boundary checks.
+    """
+
+    current_run_id = _require_positive_int(current_run_id, field="current run id")
+    if (
+        type(workflow_name) is not str
+        or not workflow_name
+        or workflow_name != api._workflow_name
+    ):
+        raise CancellationError("workflow name does not match exact workflow id")
+
+    runs = api.active_runs()
+    explicit_singleton_runs = tuple(
+        run
+        for run in runs
+        if run.workflow_name == workflow_name and len(run.pr_numbers) == 1
+    )
+    pr_numbers = sorted(
+        {
+            run.pr_numbers[0]
+            for run in explicit_singleton_runs
+            if run.run_id != current_run_id
+        }
+    )
+
+    cancelled: list[int] = []
+    cancelled_ids: set[int] = set()
+    for pr_number in pr_numbers:
+        try:
+            qualification = api.live_pr_qualification(pr_number)
+        except CancellationError:
+            # Qualification authority is scoped to one PR group. Failure to resolve
+            # one group must fail that group closed without starving independent PRs
+            # whose own live authority can still be proven.
+            continue
+        selected = select_superseded_runs(
+            explicit_singleton_runs,
+            pr_number=pr_number,
+            live_head_sha=qualification.head_sha,
+            workflow_name=workflow_name,
+            current_run_id=current_run_id,
+            cancel_same_head=not qualification.integration_capable,
+        )
+        for run_id in selected:
+            if run_id in cancelled_ids:
+                continue
+            # A head/state/draft move or reread failure revokes authority only for
+            # this PR group. Other independently resolved groups can still progress.
+            try:
+                current_qualification = api.live_pr_qualification(pr_number)
+            except CancellationError:
+                break
+            if current_qualification != qualification:
+                break
+            api.cancel(run_id)
+            cancelled.append(run_id)
+            cancelled_ids.add(run_id)
+    return tuple(cancelled)
+
+
 def _cancel_triggering_run_if_stale_or_nonqualifying(
     api: WorkflowScopedGitHubApi,
     *,
@@ -584,7 +660,13 @@ def _cancel_triggering_run_if_stale_or_nonqualifying(
     )
     if not stale and not same_head_nonqualifying:
         return False
-    if api.live_pr_qualification(pr_number) != qualification:
+    try:
+        current_qualification = api.live_pr_qualification(pr_number)
+    except CancellationError:
+        # A failed authority reread grants no trigger cancellation authority, but it
+        # must not invalidate independently completed workflow-wide cleanup.
+        return False
+    if current_qualification != qualification:
         return False
     api.cancel(current_run_id)
     return True
@@ -605,60 +687,66 @@ def main(argv: list[str] | None = None) -> int:
             workflow_id=args.workflow_id,
             workflow_name=args.workflow_name,
         )
-        pr_number = args.pr_number
-        if pr_number <= 0:
-            pr_number = api.associated_pr_number(args.event_head_sha)
-        else:
-            pr_number = _require_positive_int(pr_number, field="pull request number")
-
-        # Only a live same-head lifecycle (closed or draft) may recover missing PR
-        # references on candidate source runs. If the PR becomes integration-capable
-        # before canonical cancellation selects candidates, same-head selection is
-        # disabled there; if its head changes, canonical cancellation returns stale.
-        qualification = api.live_pr_qualification(pr_number)
         event_head_sha = _require_sha(args.event_head_sha, field="event head sha")
-        api.configure_historical_candidate_recovery(
-            pr_number=pr_number,
-            workflow_name=args.workflow_name,
-            current_run_id=args.current_run_id,
+        current_run_id = _require_positive_int(
+            args.current_run_id,
+            field="current run id",
         )
-        if (
-            qualification.head_sha == event_head_sha
-            and not qualification.integration_capable
-        ):
-            api.configure_same_head_candidate_recovery(
-                pr_number=pr_number,
-                event_head_sha=event_head_sha,
-                workflow_name=args.workflow_name,
-                current_run_id=args.current_run_id,
+        if args.pr_number < 0:
+            raise CancellationError("pull request number cannot be negative")
+
+        # The triggering event's explicit singleton PR is retained only for the
+        # separately boundary-revalidated triggering-source-run decision after the
+        # workflow-wide sweep. A zero value means the event did not carry one
+        # unambiguous PR identity; that must not block cleanup for every other explicit
+        # PR in the exact source workflow. Missing-reference source runs are handled
+        # uniformly by the existing workflow-wide orphan resolver after the shared
+        # active-run scan, so trigger-specific pre-recovery is unnecessary.
+        trigger_pr_number: int | None = None
+        if args.pr_number > 0:
+            trigger_pr_number = _require_positive_int(
+                args.pr_number,
+                field="pull request number",
             )
 
-        # Reconcile against live PR truth rather than the triggering event head. This
-        # makes one surviving PR+workflow controller sufficient after scheduler-side
-        # coalescing: even a delayed stale-head workflow_run event can cancel obsolete
-        # source runs relative to the exact current live head. The canonical helper
-        # still repeats the live qualification snapshot before every irreversible POST.
-        result = cancel_superseded(
-            api=api,
-            pr_number=pr_number,
-            event_head_sha=qualification.head_sha,
-            workflow_name=args.workflow_name,
-            current_run_id=args.current_run_id,
-        )
-        orphan_cancelled = api.cancel_historical_unbound_runs(
-            exclude_run_ids=(args.current_run_id, *result.cancelled_run_ids),
-        )
-        _cancel_triggering_run_if_stale_or_nonqualifying(
+        # One exact-workflow snapshot now reconciles every explicit singleton PR group.
+        # The selector and irreversible cancel boundary retain their existing live
+        # qualification checks; no cross-PR authority is inferred from scheduler state.
+        sweep_cancelled = cancel_superseded_explicit_pr_runs(
             api,
-            pr_number=pr_number,
-            event_head_sha=event_head_sha,
-            current_run_id=args.current_run_id,
-            qualification=qualification,
+            workflow_name=args.workflow_name,
+            current_run_id=current_run_id,
         )
+        # The triggering source run has its own live-qualification boundary below.
+        # Never let orphan reconciliation consume it first: the Actions list can lose
+        # embedded PR references even when the workflow_run trigger carried explicit
+        # identity, which would otherwise allow a second cancel race on the same run.
+        orphan_cancelled = api.cancel_historical_unbound_runs(
+            exclude_run_ids=(current_run_id, *sweep_cancelled),
+        )
+
+        if trigger_pr_number is not None:
+            # Refresh after the potentially long sweep; the helper itself rereads once
+            # more immediately before cancelling this exact triggering source run.
+            try:
+                trigger_qualification = api.live_pr_qualification(trigger_pr_number)
+            except CancellationError:
+                # Trigger qualification is authority for this one source run only.
+                # Failure proves no cancellation authority and must not turn already
+                # completed workflow-wide reconciliation into a controller failure.
+                trigger_qualification = None
+            if trigger_qualification is not None:
+                _cancel_triggering_run_if_stale_or_nonqualifying(
+                    api,
+                    pr_number=trigger_pr_number,
+                    event_head_sha=event_head_sha,
+                    current_run_id=current_run_id,
+                    qualification=trigger_qualification,
+                )
     except CancellationError as exc:
         print(f"superseded-run cancellation failed: {exc}", file=sys.stderr)
         return 2
-    cancelled = ",".join(str(item) for item in result.cancelled_run_ids)
+    cancelled = ",".join(str(item) for item in sweep_cancelled)
     orphaned = ",".join(str(item) for item in orphan_cancelled)
     print("cancelled superseded workflow runs: " + cancelled)
     print("cancelled historical unbound workflow runs: " + orphaned)

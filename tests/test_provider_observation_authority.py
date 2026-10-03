@@ -637,6 +637,61 @@ def test_store_load_requires_exact_store_type(tmp_path):
         store.load("a" * 64)
 
 
+def test_store_save_rejects_rebound_load_surface_before_persistence(
+    tmp_path,
+    monkeypatch,
+):
+    snapshot = _capture(monkeypatch)
+    store = _store(tmp_path)
+    saved_save = store.save
+    hostile_calls: list[str] = []
+
+    def hostile_load(*_args, **_kwargs):
+        hostile_calls.append("load")
+        raise AssertionError("hostile load executed")
+
+    monkeypatch.setattr(
+        CompleteGameBoardEvidenceStore,
+        "load",
+        hostile_load,
+    )
+
+    with pytest.raises(
+        ProviderObservationIntegrityError,
+        match="provider evidence store load surface changed",
+    ):
+        saved_save(snapshot)
+
+    assert hostile_calls == []
+
+
+def test_store_load_rejects_rebound_save_surface_before_resolution(
+    tmp_path,
+    monkeypatch,
+):
+    store = _store(tmp_path)
+    saved_load = store.load
+    hostile_calls: list[str] = []
+
+    def hostile_save(*_args, **_kwargs):
+        hostile_calls.append("save")
+        raise AssertionError("hostile save executed")
+
+    monkeypatch.setattr(
+        CompleteGameBoardEvidenceStore,
+        "save",
+        hostile_save,
+    )
+
+    with pytest.raises(
+        ProviderObservationIntegrityError,
+        match="provider evidence store save surface changed",
+    ):
+        saved_load("a" * 64)
+
+    assert hostile_calls == []
+
+
 def test_store_load_implementation_uses_canonical_remember_without_unsealed_delegate():
     import inspect
 

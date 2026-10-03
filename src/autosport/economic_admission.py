@@ -54,10 +54,7 @@ _WORKSPACE_LOCK_DISPATCH_WITNESSES = tuple(
 
 
 def _require_workspace_lock_dispatch() -> None:
-    if (
-        WorkspaceEconomicLock.__dict__.get("FILE_NAME") != _WORKSPACE_LOCK_FILE_NAME
-        or WorkspaceEconomicLock.FILE_NAME != _WORKSPACE_LOCK_FILE_NAME
-    ):
+    if WorkspaceEconomicLock.__dict__.get("FILE_NAME") is not _WORKSPACE_LOCK_FILE_NAME:
         raise RuntimeError("workspace economic lock authority changed")
     for name, expected_descriptor, expected_code in _WORKSPACE_LOCK_DISPATCH_WITNESSES:
         current_descriptor = WorkspaceEconomicLock.__dict__.get(name)

@@ -1708,6 +1708,8 @@ def _install_supervised_execution_composition_guard() -> None:
         "_digest",
         "_time",
         "_sha",
+        "_text",
+        "assert_verified_provider_evidence_authoritative",
         "_require_bound_plan_structure",
         "_require_approval",
         "_require_durable_approval",
@@ -1726,6 +1728,65 @@ def _install_supervised_execution_composition_guard() -> None:
         )
         for name in helper_names
     )
+    object_surface = (
+        ("SupervisedApproval", SupervisedApproval),
+        ("VerifiedProviderEffectEvidence", VerifiedProviderEffectEvidence),
+        ("VerifiedProviderAbsenceEvidence", VerifiedProviderAbsenceEvidence),
+        ("ExternalAcknowledgement", ExternalAcknowledgement),
+        ("ExternalEffectReconciliation", ExternalEffectReconciliation),
+        ("ReconciliationSnapshot", ReconciliationSnapshot),
+        ("AcknowledgementStatus", AcknowledgementStatus),
+        ("AttemptState", AttemptState),
+    )
+
+    def descriptor_code(descriptor: object) -> object | None:
+        executable = descriptor.fget if isinstance(descriptor, property) else descriptor
+        return getattr(executable, "__code__", None)
+
+    descriptor_surface = (
+        (
+            BoundSupervisedExecutionPlan,
+            "action_for",
+            BoundSupervisedExecutionPlan.action_for,
+            getattr(BoundSupervisedExecutionPlan.action_for, "__code__", None),
+        ),
+        (
+            BoundSupervisedExecutionPlan,
+            "constraint_for",
+            BoundSupervisedExecutionPlan.constraint_for,
+            getattr(BoundSupervisedExecutionPlan.constraint_for, "__code__", None),
+        ),
+        (
+            BoundSupervisedExecutionPlan,
+            "profile_for",
+            BoundSupervisedExecutionPlan.profile_for,
+            getattr(BoundSupervisedExecutionPlan.profile_for, "__code__", None),
+        ),
+        (
+            SupervisedApproval,
+            "require_active",
+            SupervisedApproval.require_active,
+            getattr(SupervisedApproval.require_active, "__code__", None),
+        ),
+        (
+            SupervisedApproval,
+            "fingerprint",
+            vars(SupervisedApproval)["fingerprint"],
+            descriptor_code(vars(SupervisedApproval)["fingerprint"]),
+        ),
+        (
+            SupervisedApproval,
+            "ledger_identity",
+            vars(SupervisedApproval)["ledger_identity"],
+            descriptor_code(vars(SupervisedApproval)["ledger_identity"]),
+        ),
+        (
+            ExecutionPlan,
+            "fingerprint",
+            vars(ExecutionPlan)["fingerprint"],
+            descriptor_code(vars(ExecutionPlan)["fingerprint"]),
+        ),
+    )
 
     def require_pristine_composition() -> None:
         for name, expected, expected_code in helper_surface:
@@ -1735,6 +1796,23 @@ def _install_supervised_execution_composition_guard() -> None:
                 or (
                     expected_code is not None
                     and getattr(current, "__code__", None) is not expected_code
+                )
+            ):
+                raise SupervisedExecutionError(
+                    "canonical supervised execution composition changed"
+                )
+        for name, expected in object_surface:
+            if globals().get(name) is not expected:
+                raise SupervisedExecutionError(
+                    "canonical supervised execution composition changed"
+                )
+        for owner, name, expected, expected_code in descriptor_surface:
+            current = vars(owner).get(name)
+            if (
+                current is not expected
+                or (
+                    expected_code is not None
+                    and descriptor_code(current) is not expected_code
                 )
             ):
                 raise SupervisedExecutionError(

@@ -2789,6 +2789,54 @@ def test_post_open_authority_failure_does_not_mutate_caller_book(tmp_path):
     assert persisted._lifecycle == []
 
 
+def test_committed_clone_promotes_and_advances_current_caller_generation(tmp_path):
+    """Successful staged commits keep the existing bound-caller API reusable."""
+
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    book = PaperBook("100")
+    book_path = tmp_path / "paper_book.json"
+    book.save(book_path)
+    policy = PaperRiskPolicy(
+        max_ticket_fraction=Decimal("1"),
+        max_committed_fraction=Decimal("1"),
+        minimum_cash_reserve_fraction=Decimal("0"),
+    )
+
+    first_leg = _leg("clone-promotion-first")
+    first = admit_paper_ticket(
+        workspace=tmp_path,
+        book=book,
+        risk_policy=policy,
+        stake=Decimal("1"),
+        legs=(first_leg,),
+        reason="first committed clone promotion",
+        placed_at=_timestamp(now),
+    )
+    assert first.admitted is True
+    assert first.book is book
+    assert book.balance == Decimal("99")
+    assert len(book.tickets) == 1
+
+    second_leg = _leg("clone-promotion-second")
+    second = admit_paper_ticket(
+        workspace=tmp_path,
+        book=book,
+        risk_policy=policy,
+        stake=Decimal("1"),
+        legs=(second_leg,),
+        reason="same caller must remain generation-current",
+        placed_at=_timestamp(now),
+    )
+    assert second.admitted is True
+    assert second.book is book
+    assert book.balance == Decimal("98")
+    assert len(book.tickets) == 2
+
+    persisted = PaperBook.load(book_path)
+    assert persisted.balance == Decimal("98")
+    assert set(persisted.tickets) == set(book.tickets)
+
+
 def test_paperbook_open_ticket_rebind_cannot_inflate_approved_stake(tmp_path):
     now, book, candidate, context, policy = _paperbook_mutation_gate_case(tmp_path)
     original = PaperBook.__dict__["open_ticket"]

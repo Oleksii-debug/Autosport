@@ -15,6 +15,7 @@ _API_VERSION = "2022-11-28"
 _ACCEPT = "application/vnd.github+json"
 _ACTIVE_STATUSES = ("queued", "in_progress", "waiting", "pending", "requested")
 _RUNS_PER_PAGE = 100
+_PULLS_PER_PAGE = 100
 
 
 class CancellationError(RuntimeError):
@@ -111,7 +112,7 @@ def select_superseded_runs(
     selected = {
         run.run_id
         for run in runs
-        if run.run_id < current_run_id
+        if run.run_id != current_run_id
         and run.workflow_name == workflow_name
         and pr_number in run.pr_numbers
         and (cancel_same_head or run.head_sha != live_head_sha)
@@ -173,18 +174,81 @@ class GitHubApi:
             raise CancellationError("invalid pull request response")
         return payload
 
+    def associated_pr_number(self, head_sha: str) -> int:
+        """Resolve a missing workflow_run PR reference from its exact source head.
+
+        GitHub may omit workflow_run.pull_requests for close/merge lifecycle runs. The
+        commit association endpoint is trusted API data, but head equality alone is not
+        enough to identify the emitting PR: another PR may have used the same commit and
+        later advanced. Cancellation authority is therefore granted only when the commit
+        is associated with exactly one PR in total and that same PR still names the exact
+        event head. Historical cross-PR reuse, zero matches, and ambiguity fail closed.
+        """
+
+        head_sha = _require_sha(head_sha, field="event head sha")
+        associated_numbers: set[int] = set()
+        exact_numbers: set[int] = set()
+        page = 1
+        while True:
+            query = urlencode({"per_page": _PULLS_PER_PAGE, "page": page})
+            payload = self._request(f"/commits/{head_sha}/pulls?{query}")
+            if not isinstance(payload, list):
+                raise CancellationError("invalid commit pull-requests response")
+            for item in payload:
+                if not isinstance(item, dict):
+                    raise CancellationError("invalid associated pull request")
+                head = item.get("head")
+                if not isinstance(head, dict):
+                    raise CancellationError("invalid associated pull request head")
+                candidate_sha = _require_sha(
+                    head.get("sha"), field="associated pull request head"
+                )
+                candidate_number = _require_positive_int(
+                    item.get("number"), field="associated pull request number"
+                )
+                associated_numbers.add(candidate_number)
+                if candidate_sha == head_sha:
+                    exact_numbers.add(candidate_number)
+            if len(payload) < _PULLS_PER_PAGE:
+                break
+            page += 1
+        if (
+            len(associated_numbers) != 1
+            or len(exact_numbers) != 1
+            or associated_numbers != exact_numbers
+        ):
+            raise CancellationError(
+                "event head does not resolve to exactly one associated pull request"
+            )
+        return next(iter(exact_numbers))
+
     def live_pr_qualification(self, pr_number: int) -> PullRequestQualification:
         payload = self._pull_request(pr_number)
         head = payload.get("head")
+        base = payload.get("base")
         state = payload.get("state")
         draft = payload.get("draft")
-        if not isinstance(head, dict):
-            raise CancellationError("invalid pull request head")
+        if not isinstance(head, dict) or not isinstance(base, dict):
+            raise CancellationError("invalid pull request head/base")
         if state not in ("open", "closed") or type(draft) is not bool:
             raise CancellationError("invalid pull request qualification state")
+
+        base_repo = base.get("repo")
+        if not isinstance(base_repo, dict) or base_repo.get("full_name") != self._repository:
+            raise CancellationError("pull request base repository is not canonical")
+
+        head_repo = head.get("repo")
+        same_repository_head = (
+            isinstance(head_repo, dict)
+            and head_repo.get("full_name") == self._repository
+        )
         return PullRequestQualification(
             head_sha=_require_sha(head.get("sha"), field="live pull request head"),
-            integration_capable=state == "open" and draft is False,
+            integration_capable=(
+                state == "open"
+                and draft is False
+                and same_repository_head
+            ),
         )
 
     def live_pr_head(self, pr_number: int) -> str:
@@ -195,12 +259,7 @@ class GitHubApi:
         return _require_sha(head.get("sha"), field="live pull request head")
 
     def pr_is_integration_capable(self, pr_number: int) -> bool:
-        payload = self._pull_request(pr_number)
-        state = payload.get("state")
-        draft = payload.get("draft")
-        if state not in ("open", "closed") or type(draft) is not bool:
-            raise CancellationError("invalid pull request qualification state")
-        return state == "open" and draft is False
+        return self.live_pr_qualification(pr_number).integration_capable
 
     def _active_runs_for_status(self, status: str) -> tuple[WorkflowRun, ...]:
         if status not in _ACTIVE_STATUSES:
@@ -383,16 +442,23 @@ def main(argv: list[str] | None = None) -> int:
             repository=os.environ.get("GITHUB_REPOSITORY", ""),
             token=os.environ.get("GITHUB_TOKEN", ""),
         )
+        pr_number = args.pr_number
+        if pr_number <= 0:
+            if args.admission_only:
+                raise CancellationError("admission requires an explicit pull request number")
+            pr_number = api.associated_pr_number(args.event_head_sha)
+        else:
+            pr_number = _require_positive_int(pr_number, field="pull request number")
         if args.admission_only:
             result = admit_current_head(
                 api=api,
-                pr_number=args.pr_number,
+                pr_number=pr_number,
                 event_head_sha=args.event_head_sha,
             )
         else:
             result = cancel_superseded(
                 api=api,
-                pr_number=args.pr_number,
+                pr_number=pr_number,
                 event_head_sha=args.event_head_sha,
                 workflow_name=args.workflow_name,
                 current_run_id=args.current_run_id,

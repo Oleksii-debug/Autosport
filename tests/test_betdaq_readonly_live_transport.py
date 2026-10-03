@@ -20,6 +20,8 @@ from autosport.betdaq_readonly_live_transport import BetdaqReadOnlyLiveTransport
 from autosport.betdaq_readonly_market_wire import EXTERNAL_API_NS, SOAP11_NS
 from autosport.betdaq_rate_governor import (
     BetdaqRateDeferred,
+    BetdaqRateGovernor,
+    BetdaqRateGovernorError,
     default_betdaq_rate_policy,
     resolve_betdaq_rate_governor,
 )
@@ -438,6 +440,37 @@ def test_retry_then_success_binds_both_rate_admissions_to_request_evidence(tmp_p
     assert admission.grants_write_permission is False
     assert admission.grants_freshness is False
     assert admission.multi_process_safe is False
+
+
+def test_rate_dispatch_class_replacement_fails_before_http_dispatch(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    post = _PostTransport()
+    governor, _ = _rate_governor(tmp_path)
+    bridge = BetdaqReadOnlyLiveTransport(
+        credentials=_credentials(),
+        rate_governor=governor,
+        transport=post,
+    )
+    hostile_calls = 0
+
+    def hostile_admit(*args, **kwargs):
+        nonlocal hostile_calls
+        hostile_calls += 1
+        raise AssertionError("hostile rate dispatch must never execute")
+
+    monkeypatch.setattr(BetdaqRateGovernor, "admit", hostile_admit)
+
+    with pytest.raises(
+        BetdaqRateGovernorError,
+        match="canonical rate governor class dispatch was replaced",
+    ):
+        bridge.get_prices(_request(), timeout_seconds=1.0)
+
+    assert hostile_calls == 0
+    assert post.calls == []
+    assert bridge.last_rate_admission is None
 
 
 def test_rate_cold_start_denial_occurs_before_http_dispatch(tmp_path) -> None:

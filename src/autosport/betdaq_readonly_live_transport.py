@@ -15,7 +15,11 @@ from .betdaq_readonly_provider import (
     BetdaqTransientTransportError,
 )
 from .betdaq_readonly_request_wire import build_get_prices_soap11_request
-from .betdaq_rate_governor import BetdaqRateAdmission, BetdaqRateGovernor
+from .betdaq_rate_governor import (
+    BetdaqRateAdmission,
+    BetdaqRateGovernor,
+    admit_betdaq_rate_request,
+)
 from .providers import ProviderUnavailableError
 
 _CANONICAL_POST = UrllibBetdaqSoapTransport.post
@@ -117,7 +121,7 @@ class BetdaqReadOnlyLiveTransport:
         object.__setattr__(
             self,
             "_last_rate_admission",
-            self._rate_governor.admit(method),
+            admit_betdaq_rate_request(self._rate_governor, method),
         )
         try:
             if self._canonical_only:

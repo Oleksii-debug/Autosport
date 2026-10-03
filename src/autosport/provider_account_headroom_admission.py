@@ -1727,8 +1727,6 @@ def assess_provider_account_headroom(
             economic_goal_contract_sha256=economic_goal_contract_sha256,
             economic_goal_bankroll_id=economic_goal_bankroll_id,
             provider_currency=currency,
-            provider_id=action.bookmaker_id,
-            account_id=action.account_id,
         )
         denomination_authority_sha256 = _denomination_authority_sha256(
             currency=currency,
@@ -1883,8 +1881,6 @@ def reserve_observed_provider_headroom(
             ) = _current_economic_goal_denomination(
                 ledger,
                 provider_currency=current_currency,
-                provider_id=assessment.provider_id,
-                account_id=assessment.account_id,
             )
             if current_goal_sha256 != assessment.economic_goal_contract_sha256:
                 raise ProviderAccountHeadroomStale(
@@ -1929,8 +1925,6 @@ def reserve_observed_provider_headroom(
                 economic_goal_contract_sha256=current_goal_sha256,
                 economic_goal_bankroll_id=current_goal_bankroll_id,
                 provider_currency=current_currency,
-                provider_id=assessment.provider_id,
-                account_id=assessment.account_id,
             )
             if (
                 definitely_unreflected

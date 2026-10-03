@@ -1087,6 +1087,38 @@ def test_inception_rejects_os_fspath_rebind_before_path_canonicalization(
     )
 
 
+@pytest.mark.parametrize(
+    "method_name",
+    ("__str__", "__truediv__", "mkdir", "unlink"),
+)
+def test_inception_rejects_concrete_path_dispatch_rebind_before_execution(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    method_name: str,
+) -> None:
+    _manifest_value, locator, store, spec, _authority_root = _setup(tmp_path)
+    concrete_path_type = inception_module._CANONICAL_CONCRETE_PATH_TYPE
+    original = getattr(concrete_path_type, method_name)
+    calls: list[str] = []
+
+    def hostile(*args: object, **kwargs: object):
+        calls.append(method_name)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(concrete_path_type, method_name, hostile)
+    with pytest.raises(
+        CampaignInceptionIntegrityError,
+        match="dynamic method authority drifted",
+    ):
+        establish_campaign_inception(
+            precommit_locator=locator,
+            store=store,
+            source_spec=spec,
+        )
+
+    assert calls == []
+
+
 def test_inception_rejects_path_equality_rebind_before_prestart_dispatch(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -448,7 +448,7 @@ def test_execution_readback_authority_cannot_be_imported_or_forged():
         copied.assert_authoritative()
 
 
-def test_execution_readback_detects_post_capture_origin_tampering():
+def test_semantic_execution_readback_remains_non_authoritative_after_timestamp_tamper():
     capture = semantic_execution_readback(
         [
         response(
@@ -472,7 +472,7 @@ def test_execution_readback_detects_post_capture_origin_tampering():
         capture.assert_authoritative()
 
 
-def test_execution_readback_detects_post_capture_scope_tampering():
+def test_semantic_execution_readback_rejects_scope_digest_tampering():
     capture = semantic_execution_readback(
         [
         response(

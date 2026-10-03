@@ -1,6 +1,8 @@
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
+import autosport.economic_admission as economic_admission
+
 from autosport.domain import MarketEvent, TicketLeg
 from autosport.economic_admission import admit_paper_ticket
 from autosport.economic_goal import EconomicGoalContract
@@ -369,3 +371,46 @@ def test_restart_re_resolves_remaining_current_day_headroom(tmp_path):
     )
     assert third.admitted is False
     assert third.risk.reason == "economic goal turnover limit exceeded"
+
+
+def test_live_module_rebind_cannot_mint_turnover_headroom(tmp_path):
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    goal = _goal()
+    EconomicGoalStore(tmp_path).initialize_owner(goal)
+    book = _book_with_settled_turnover(placed_at=_timestamp(now), stake="5")
+
+    original = economic_admission._revalidated_product_day_turnover_room
+    try:
+        economic_admission._revalidated_product_day_turnover_room = (
+            lambda **kwargs: Decimal("999999")
+        )
+        baseline, result = _admit(tmp_path, book, goal, _timestamp(now))
+    finally:
+        economic_admission._revalidated_product_day_turnover_room = original
+
+    assert baseline.reason == "economic goal turnover limit exceeded"
+    assert result.admitted is False
+    assert result.risk.reason == "economic goal turnover limit exceeded"
+
+
+def test_live_resume_helper_rebind_cannot_replace_positive_risk_suffix(tmp_path):
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    old = now - timedelta(days=2)
+    goal = _goal()
+    EconomicGoalStore(tmp_path).initialize_owner(goal)
+    book = _book_with_settled_turnover(placed_at=_timestamp(old), stake="50")
+
+    original = economic_admission._resume_after_product_day_turnover
+    try:
+        def hostile_resume(**kwargs):
+            del kwargs
+            raise AssertionError("mutable admission resume helper executed")
+
+        economic_admission._resume_after_product_day_turnover = hostile_resume
+        baseline, result = _admit(tmp_path, book, goal, _timestamp(now))
+    finally:
+        economic_admission._resume_after_product_day_turnover = original
+
+    assert baseline.reason == "economic goal turnover limit exceeded"
+    assert result.admitted is True
+    assert result.risk.allowed is True

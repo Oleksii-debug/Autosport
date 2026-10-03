@@ -424,6 +424,39 @@ def test_evidence_shape_rejects_forged_path_point_count(tmp_path):
         replace(evidence, path_point_count=evidence.path_point_count + 1)
 
 
+def test_evidence_shape_rejects_forged_path_digest(tmp_path):
+    _initialize(tmp_path)
+    evidence = resolve_paper_drawdown_evidence(tmp_path)
+
+    with pytest.raises(
+        PaperDrawdownEvidenceError,
+        match="path digest does not match canonical path",
+    ):
+        replace(evidence, path_sha256="0" * 64)
+
+
+def test_evidence_shape_rejects_forged_result_digest(tmp_path):
+    _initialize(tmp_path)
+    evidence = resolve_paper_drawdown_evidence(tmp_path)
+
+    with pytest.raises(
+        PaperDrawdownEvidenceError,
+        match="result digest does not match canonical evidence",
+    ):
+        replace(evidence, evidence_sha256="0" * 64)
+
+
+def test_evidence_shape_rejects_structural_field_mutation_with_stale_digest(tmp_path):
+    _initialize(tmp_path)
+    evidence = resolve_paper_drawdown_evidence(tmp_path)
+
+    with pytest.raises(
+        PaperDrawdownEvidenceError,
+        match="result digest does not match canonical evidence",
+    ):
+        replace(evidence, goal_revision=evidence.goal_revision + 1)
+
+
 def test_evidence_shape_rejects_impossible_internal_metrics(tmp_path):
     _initialize(tmp_path)
     evidence = resolve_paper_drawdown_evidence(tmp_path)

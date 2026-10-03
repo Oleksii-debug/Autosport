@@ -67,6 +67,7 @@ _CANONICAL_GATE_STATUS = CollectorDeltaStore._collector_schedule_start_gate_stat
 _CANONICAL_GATE_AUTHORIZE = CollectorDeltaStore._authorize_collector_schedule_start_gate
 _CANONICAL_SCHEDULE_ID = CollectorDeltaStore._collector_schedule_id
 _CANONICAL_SCHEDULE_DUE_AT = CollectorDeltaStore._collector_schedule_due_at
+_CANONICAL_CONCRETE_PATH_TYPE = type(Path())
 _CANONICAL_PATH_EQUALITY = Path.__eq__
 _CANONICAL_PATH_FSPATH = Path.__fspath__
 _CANONICAL_OS_FSPATH = os.fspath
@@ -358,23 +359,24 @@ class CampaignInceptionSourceSpec:
     evaluation_end_slot_ordinal: int
 
     def __post_init__(self) -> None:
-        # A Path subclass can override is_absolute()/__fspath__() and execute
-        # caller code while the exact collector-store authority path is still being
-        # constructed.  This DTO is authority-bearing input, so admit only the exact
-        # platform pathlib concrete type before any virtual path dispatch.
-        if type(self.expected_store_path) is not type(Path()):
+        # This DTO is constructed before the sealed positive entrypoint.  Never
+        # invoke Path()/virtual path methods on caller input here: freeze the concrete
+        # platform path type at module import and admit only its canonical absolute
+        # spelling through captured non-virtual dispatch.
+        if type(self.expected_store_path) is not _CANONICAL_CONCRETE_PATH_TYPE:
             raise TypeError(
                 "expected_store_path must be the exact platform pathlib path type"
             )
-        if not self.expected_store_path.is_absolute():
+        raw_store_path = _CANONICAL_PATH_FSPATH(self.expected_store_path)
+        canonical_store_path = _CANONICAL_ABSPATH(raw_store_path)
+        if (
+            type(raw_store_path) is not str
+            or type(canonical_store_path) is not str
+            or raw_store_path != canonical_store_path
+        ):
             raise CampaignInceptionIntegrityError(
-                "expected_store_path must be absolute"
+                "expected_store_path must be a canonical absolute path"
             )
-        object.__setattr__(
-            self,
-            "expected_store_path",
-            Path(os.path.abspath(self.expected_store_path)),
-        )
         for field_name in ("source_id", "run_id", "stream_epoch"):
             object.__setattr__(
                 self,
@@ -782,9 +784,9 @@ def _expected_schedule_id(spec: CampaignInceptionSourceSpec) -> str:
 
 
 def _canonical_absolute_path_text(value: object) -> str:
-    """Resolve a Path through import-time captured path/filesystem dispatch only."""
+    """Resolve one exact concrete Path through captured filesystem dispatch only."""
 
-    if not isinstance(value, Path):
+    if type(value) is not _CANONICAL_CONCRETE_PATH_TYPE:
         raise CampaignInceptionIntegrityError(
             "campaign inception path identity is unavailable"
         )
@@ -1256,6 +1258,7 @@ def _seal_campaign_inception_dispatch() -> None:
     expected_authority_type = MonotonicWorkspaceAuthority
     expected_lock_type = WorkspaceEconomicLock
     expected_path_type = Path
+    expected_concrete_path_type = _CANONICAL_CONCRETE_PATH_TYPE
     expected_path_equality = _CANONICAL_PATH_EQUALITY
     expected_path_equality_code = getattr(expected_path_equality, "__code__", None)
     expected_path_fspath = _CANONICAL_PATH_FSPATH
@@ -1454,7 +1457,9 @@ def _seal_campaign_inception_dispatch() -> None:
             raise expected_error_type("campaign inception schema/domain authority is rebound")
 
         if (
-            module_globals.get("_CANONICAL_PATH_EQUALITY")
+            module_globals.get("_CANONICAL_CONCRETE_PATH_TYPE")
+            is not expected_concrete_path_type
+            or module_globals.get("_CANONICAL_PATH_EQUALITY")
             is not expected_path_equality
             or getattr(expected_path_equality, "__code__", None)
             is not expected_path_equality_code

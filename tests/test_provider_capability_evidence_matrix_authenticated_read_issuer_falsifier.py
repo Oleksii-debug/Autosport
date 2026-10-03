@@ -554,3 +554,64 @@ def test_rejected_late_successor_cannot_poison_caller_lifecycle_journal(
         )
 
     assert journal.to_json() == before
+
+
+def test_already_published_exact_lifecycle_evidence_can_compose_matrix_fact(
+    monkeypatch,
+) -> None:
+    issuance = _product_issued_betdaq_balance(monkeypatch)
+    journal = CapabilityEvidenceJournal()
+    journal.publish(issuance.evidence)
+    before = journal.to_json()
+    integration = bind_bookmaker_integration(
+        issuance.profile,
+        integration_kind=BookmakerIntegrationKind.OFFICIAL_API,
+        observed_at="2026-09-21T10:01:30+00:00",
+        source_ref="betdaq-secure-api-existing-journal",
+        source_payload_sha256="5" * 64,
+    )
+
+    fact = issue_betdaq_authenticated_read_evidence(
+        issuance,
+        integration,
+        journal=journal,
+    )
+
+    assert fact.evidence_sha256 == issuance.evidence.evidence_id
+    assert journal.to_json() == before
+
+
+def test_superseded_lifecycle_evidence_cannot_requalify_matrix_authority(
+    monkeypatch,
+) -> None:
+    first = _product_issued_betdaq_balance(monkeypatch)
+    journal = CapabilityEvidenceJournal()
+    journal.publish(first.evidence)
+    successor = _product_issued_betdaq_balance(
+        monkeypatch,
+        observed_minute=5,
+        committed_at="2026-09-21T10:06:00+00:00",
+        review_due_at="2026-09-21T11:06:00+00:00",
+        predecessor_id=first.evidence.evidence_id,
+    )
+    journal.publish(successor.evidence)
+    before = journal.to_json()
+    integration = bind_bookmaker_integration(
+        first.profile,
+        integration_kind=BookmakerIntegrationKind.OFFICIAL_API,
+        observed_at="2026-09-21T10:01:30+00:00",
+        source_ref="betdaq-secure-api-historical",
+        source_payload_sha256="6" * 64,
+    )
+
+    with pytest.raises(
+        ProviderCapabilityEvidenceMatrixError,
+        match="superseded by newer same-scope evidence",
+    ):
+        issue_betdaq_authenticated_read_evidence(
+            first,
+            integration,
+            journal=journal,
+        )
+
+    assert journal.to_json() == before

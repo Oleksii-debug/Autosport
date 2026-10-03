@@ -9,6 +9,7 @@ from autosport.paper_campaign_admission import (
     PaperCampaignAdmissionCoordinator,
     PaperCampaignAdmissionError,
 )
+from autosport import paper_campaign_admission as admission_module
 from autosport import paper_campaign_forward_admission as forward_admission_module
 from autosport.paper_campaign_forward_admission import (
     PaperCampaignForwardAdmissionError,
@@ -288,4 +289,48 @@ def test_forward_admission_rejects_builtin_shadow_before_dispatch(
         )
 
     assert hostile_calls == []
+    assert _admissions(fixture) == {}
+
+
+def test_legacy_admit_rejects_forward_routing_constant_rebind(
+    tmp_path,
+    monkeypatch,
+):
+    fixture = AdmissionFixture(tmp_path)
+    coordinator = fixture.coordinator()
+
+    monkeypatch.setattr(
+        admission_module,
+        "_FORWARD_VERIFICATION_DECISION_FIELD",
+        "hostile_forward_verification",
+    )
+
+    with pytest.raises(
+        PaperCampaignAdmissionError,
+        match="forward-verification routing changed",
+    ):
+        fixture.admit(coordinator)
+
+    assert _admissions(fixture) == {}
+
+
+def test_legacy_admit_rejects_forward_context_rebind(
+    tmp_path,
+    monkeypatch,
+):
+    fixture = AdmissionFixture(tmp_path)
+    coordinator = fixture.coordinator()
+
+    monkeypatch.setattr(
+        admission_module,
+        "_ACTIVE_FORWARD_VERIFICATION",
+        object(),
+    )
+
+    with pytest.raises(
+        PaperCampaignAdmissionError,
+        match="forward-verification routing changed",
+    ):
+        fixture.admit(coordinator)
+
     assert _admissions(fixture) == {}

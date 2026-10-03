@@ -42,6 +42,7 @@ def _build_sealed_forward_admission():
     exact_type = type
     exact_dict = dict
     exact_str = str
+    exact_int = int
     exact_len = len
     exact_any = any
     exact_getattr = getattr
@@ -51,6 +52,7 @@ def _build_sealed_forward_admission():
         "type",
         "dict",
         "str",
+        "int",
         "len",
         "any",
         "getattr",
@@ -127,7 +129,7 @@ def _build_sealed_forward_admission():
                 "forward structural verification did not pass"
             )
         if (
-            exact_type(receipt.candidate_count) is not int
+            exact_type(receipt.candidate_count) is not exact_int
             or receipt.candidate_count < 0
         ):
             raise expected_error(

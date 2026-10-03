@@ -699,19 +699,23 @@ class PaperExposureScopeProvenanceGuardTests(unittest.TestCase):
             prepared = _caller_prepared(runtime)
             runtime._mint_prepared(prepared)
             _seed_scope_authority_for_lower_layer(runtime, prepared)
+            original_lock = ledger._lock
             ledger._lock = object()
-            with self.assertRaisesRegex(
-                PaperExecutionIntegrityError,
-                "ledger origin changed",
-            ):
-                runtime._publish_exposure_scope(
-                    prepared=prepared,
-                    trigger_id=prepared.execution_plan.decision_id,
-                    run_id=runtime.expected_run_id(
-                        prepared,
-                        prepared.execution_plan.decision_id,
-                    ),
-                )
+            try:
+                with self.assertRaisesRegex(
+                    PaperExecutionIntegrityError,
+                    "ledger origin changed",
+                ):
+                    runtime._publish_exposure_scope(
+                        prepared=prepared,
+                        trigger_id=prepared.execution_plan.decision_id,
+                        run_id=runtime.expected_run_id(
+                            prepared,
+                            prepared.execution_plan.decision_id,
+                        ),
+                    )
+            finally:
+                ledger._lock = original_lock
             self.assertEqual(ledger.events(), ())
 
     def test_os_open_rebind_fails_before_writer_lock_dispatch(self) -> None:

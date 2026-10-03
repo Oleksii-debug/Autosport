@@ -283,13 +283,73 @@ class CampaignForwardUniverseCycleAuthority:
             {"domain": _DOMAIN, "authority": payload}
         )
         instance = object.__new__(cls)
-        for name in cls.__dataclass_fields__:
+        for name in _AUTHORITY_FIELD_NAMES:
             object.__setattr__(instance, name, payload[name])
         return instance
 
 
+_CANONICAL_AUTHORITY_CLASS = CampaignForwardUniverseCycleAuthority
+_AUTHORITY_FIELD_NAMES = tuple(
+    CampaignForwardUniverseCycleAuthority.__dataclass_fields__
+)
+_CANONICAL_AUTHORITY_FIELD_DESCRIPTORS = tuple(
+    (
+        name,
+        inspect.getattr_static(CampaignForwardUniverseCycleAuthority, name),
+    )
+    for name in _AUTHORITY_FIELD_NAMES
+)
+_CANONICAL_AUTHORITY_ISSUER = inspect.getattr_static(
+    CampaignForwardUniverseCycleAuthority,
+    "_issue",
+)
+_CANONICAL_AUTHORITY_ISSUER_FUNCTION = _CANONICAL_AUTHORITY_ISSUER.__func__
+_CANONICAL_AUTHORITY_ISSUER_CODE = _CANONICAL_AUTHORITY_ISSUER_FUNCTION.__code__
+_CYCLE_RECEIPT_FIELD_NAMES = tuple(
+    CampaignCompleteBoardCycleReceipt.__dataclass_fields__
+)
+_CANONICAL_CYCLE_RECEIPT_FIELD_DESCRIPTORS = tuple(
+    (
+        name,
+        inspect.getattr_static(CampaignCompleteBoardCycleReceipt, name),
+    )
+    for name in _CYCLE_RECEIPT_FIELD_NAMES
+)
+_CANONICAL_ARTIFACT_KIND = ARTIFACT_KIND
+
+
 def _require_dispatch_integrity() -> None:
     module_globals = globals()
+    if (
+        module_globals.get("CampaignForwardUniverseCycleAuthority")
+        is not _CANONICAL_AUTHORITY_CLASS
+        or module_globals.get("ARTIFACT_KIND") != _CANONICAL_ARTIFACT_KIND
+    ):
+        raise CampaignForwardUniverseCycleBindingError(
+            "campaign forward-cycle authority class or artifact kind changed"
+        )
+    current_issuer = inspect.getattr_static(
+        _CANONICAL_AUTHORITY_CLASS,
+        "_issue",
+    )
+    if (
+        current_issuer is not _CANONICAL_AUTHORITY_ISSUER
+        or current_issuer.__func__ is not _CANONICAL_AUTHORITY_ISSUER_FUNCTION
+        or current_issuer.__func__.__code__ is not _CANONICAL_AUTHORITY_ISSUER_CODE
+    ):
+        raise CampaignForwardUniverseCycleBindingError(
+            "campaign forward-cycle authority issuer is rebound"
+        )
+    for name, descriptor in _CANONICAL_AUTHORITY_FIELD_DESCRIPTORS:
+        if inspect.getattr_static(_CANONICAL_AUTHORITY_CLASS, name) is not descriptor:
+            raise CampaignForwardUniverseCycleBindingError(
+                "campaign forward-cycle authority field descriptor changed: " + name
+            )
+    for name, descriptor in _CANONICAL_CYCLE_RECEIPT_FIELD_DESCRIPTORS:
+        if inspect.getattr_static(CampaignCompleteBoardCycleReceipt, name) is not descriptor:
+            raise CampaignForwardUniverseCycleBindingError(
+                "campaign cycle receipt field descriptor changed: " + name
+            )
     if (
         module_globals.get("_provider_universe_module")
         is not _provider_universe_module
@@ -389,7 +449,7 @@ def _assert_cycle_receipt_exact(
         raise TypeError(
             "cycle_receipt must be exact CampaignCompleteBoardCycleReceipt"
         )
-    for name in CampaignCompleteBoardCycleReceipt.__dataclass_fields__:
+    for name in _CYCLE_RECEIPT_FIELD_NAMES:
         if getattr(receipt, name) != expected.get(name):
             raise CampaignForwardUniverseCycleBindingError(
                 "cycle receipt does not re-resolve from campaign/provider/collector "
@@ -600,6 +660,7 @@ def authorize_campaign_forward_source_receipts(
 ) -> tuple[AuthoritativeSourceReceipt, ...]:
     """Authorize #1185 receipts only while the cycle-bound provider authority is stable."""
 
+    _require_dispatch_integrity()
     before = resolve_campaign_forward_universe_cycle_authority(
         precommit_locator=precommit_locator,
         collector_store=collector_store,

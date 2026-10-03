@@ -232,6 +232,172 @@ def test_later_explicit_observation_revokes_stale_unbound_candidate(monkeypatch)
     assert api.cancel_historical_unbound_runs() == ()
 
 
+def test_later_unbound_observation_cannot_reopen_explicit_orphan_authority(monkeypatch) -> None:
+    api = WorkflowScopedGitHubApi(
+        repository="owner/repo",
+        token="token",
+        workflow_id=356678400,
+        workflow_name="CI",
+    )
+
+    def run_payload(*, status: str, pr_numbers: tuple[int, ...]) -> dict[str, object]:
+        return {
+            "id": 7008,
+            "head_sha": HEAD,
+            "name": "CI",
+            "status": status,
+            "pull_requests": [{"number": number} for number in pr_numbers],
+            "head_branch": "feature/head",
+            "head_repository": {"full_name": "owner/repo"},
+        }
+
+    def fake_request(
+        path: str,
+        *,
+        method: str = "GET",
+        allowed_http_errors: frozenset[int] = frozenset(),
+    ) -> object:
+        assert method == "GET"
+        assert not allowed_http_errors
+        if "status=queued" in path:
+            return {
+                "total_count": 1,
+                "workflow_runs": [
+                    run_payload(status="queued", pr_numbers=(2050,))
+                ],
+            }
+        if "status=in_progress" in path:
+            return {
+                "total_count": 1,
+                "workflow_runs": [run_payload(status="in_progress", pr_numbers=())],
+            }
+        return {"total_count": 0, "workflow_runs": []}
+
+    monkeypatch.setattr(api, "_request", fake_request)
+
+    runs = api.active_runs()
+
+    assert tuple(
+        run.pr_numbers for run in runs if run.run_id == 7008
+    ) == ((2050,), ())
+    assert 7008 not in api._unbound_active_runs
+
+    def stale_orphan_lookup(_head_sha: str) -> int:
+        raise AssertionError("later unbound metadata must not reopen orphan cleanup")
+
+    monkeypatch.setattr(
+        api,
+        "_historical_associated_pr_number",
+        stale_orphan_lookup,
+    )
+    assert api.cancel_historical_unbound_runs() == ()
+
+
+def test_conflicting_unbound_observations_defer_orphan_cleanup(monkeypatch) -> None:
+    api = WorkflowScopedGitHubApi(
+        repository="owner/repo",
+        token="token",
+        workflow_id=356678400,
+        workflow_name="CI",
+    )
+
+    def run_payload(*, status: str, head_sha: str) -> dict[str, object]:
+        return {
+            "id": 7009,
+            "head_sha": head_sha,
+            "name": "CI",
+            "status": status,
+            "pull_requests": [],
+            "head_branch": "feature/head",
+            "head_repository": {"full_name": "owner/repo"},
+        }
+
+    def fake_request(
+        path: str,
+        *,
+        method: str = "GET",
+        allowed_http_errors: frozenset[int] = frozenset(),
+    ) -> object:
+        assert method == "GET"
+        assert not allowed_http_errors
+        if "status=queued" in path:
+            return {
+                "total_count": 1,
+                "workflow_runs": [run_payload(status="queued", head_sha=HEAD)],
+            }
+        if "status=in_progress" in path:
+            return {
+                "total_count": 1,
+                "workflow_runs": [
+                    run_payload(status="in_progress", head_sha=STALE_HEAD)
+                ],
+            }
+        return {"total_count": 0, "workflow_runs": []}
+
+    monkeypatch.setattr(api, "_request", fake_request)
+
+    api.active_runs()
+
+    assert 7009 not in api._unbound_active_runs
+    assert 7009 in api._conflicted_unbound_run_ids
+
+    def stale_orphan_lookup(_head_sha: str) -> int:
+        raise AssertionError("conflicting unbound identity must defer orphan cleanup")
+
+    monkeypatch.setattr(
+        api,
+        "_historical_associated_pr_number",
+        stale_orphan_lookup,
+    )
+    assert api.cancel_historical_unbound_runs() == ()
+
+
+def test_repeated_active_run_scan_resets_snapshot_local_orphan_state(monkeypatch) -> None:
+    api = WorkflowScopedGitHubApi(
+        repository="owner/repo",
+        token="token",
+        workflow_id=356678400,
+        workflow_name="CI",
+    )
+    phase = {"value": 0}
+
+    def fake_request(
+        path: str,
+        *,
+        method: str = "GET",
+        allowed_http_errors: frozenset[int] = frozenset(),
+    ) -> object:
+        assert method == "GET"
+        assert not allowed_http_errors
+        if phase["value"] == 0 and "status=queued" in path:
+            return {
+                "total_count": 1,
+                "workflow_runs": [
+                    {
+                        "id": 7010,
+                        "head_sha": HEAD,
+                        "name": "CI",
+                        "status": "queued",
+                        "pull_requests": [],
+                        "head_branch": "feature/head",
+                        "head_repository": {"full_name": "owner/repo"},
+                    }
+                ],
+            }
+        return {"total_count": 0, "workflow_runs": []}
+
+    monkeypatch.setattr(api, "_request", fake_request)
+
+    api.active_runs()
+    assert 7010 in api._unbound_active_runs
+
+    phase["value"] = 1
+    assert api.active_runs() == ()
+    assert api._unbound_active_runs == {}
+    assert api._explicit_active_run_ids == set()
+    assert api._conflicted_unbound_run_ids == set()
+
+
 def test_controller_scheduler_coalesces_all_prs_per_source_workflow() -> None:
     text = Path(".github/workflows/pr-qualification-supersession.yml").read_text(
         encoding="utf-8"

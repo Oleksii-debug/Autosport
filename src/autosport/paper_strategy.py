@@ -14,6 +14,7 @@ from .decision_ledger import (
 )
 from .domain import MarketEvent, PaperTicket, TicketLeg
 from .forecasting import ForecastRecord, parse_iso_timestamp
+from .opportunity import ForecastRef, QuoteRef
 from .price_truth import paper_quote_rejection_reason
 from .probability import paper_value
 from .risk import PaperRiskPolicy, ProposedTicketRiskContext
@@ -52,8 +53,32 @@ class PaperValueAgent:
         stake: Decimal | str = "50",
         minimum_expected_profit_per_unit: Decimal | str = "0.05",
         risk_policy: PaperRiskPolicy | None = None,
+        predictive_forecast_refs: dict[str, ForecastRef] | None = None,
     ) -> None:
         self.forecasts = forecasts
+        refs = {} if predictive_forecast_refs is None else predictive_forecast_refs
+        if type(refs) is not dict:
+            raise TypeError("predictive_forecast_refs must be a canonical dict")
+        normalized_refs: dict[str, ForecastRef] = {}
+        for quote_key, reference in refs.items():
+            if (
+                type(quote_key) is not str
+                or not quote_key
+                or quote_key.strip() != quote_key
+            ):
+                raise ValueError(
+                    "predictive_forecast_refs keys must be canonical non-empty text"
+                )
+            if type(reference) is not ForecastRef:
+                raise TypeError(
+                    "predictive_forecast_refs values must be exact ForecastRef values"
+                )
+            if reference.quote_key != quote_key:
+                raise ValueError(
+                    "predictive ForecastRef key must match its bound quote_key"
+                )
+            normalized_refs[quote_key] = reference
+        self.predictive_forecast_refs = normalized_refs
         # ``stake`` remains a compatibility input for legacy/no-goal paper runs.
         # Once an EconomicGoalContract is active it has no financial authority:
         # the strategy derives a bounded proposal from edge + current PaperBook
@@ -62,6 +87,120 @@ class PaperValueAgent:
         self.minimum_edge = Decimal(str(minimum_expected_profit_per_unit))
         self.risk_policy = risk_policy or PaperRiskPolicy()
         self._acted: set[str] = set()
+
+    def _qualified_forecast_probability(
+        self,
+        forecast: ForecastLike,
+        event: MarketEvent,
+        context: AgentContext,
+    ) -> Decimal | None:
+        """Return one uncertainty-conservative probability or fail closed.
+
+        Legacy Forecast remains a compatibility-only PAPER input. Modern
+        ForecastRecord probability edge must reuse the canonical predictive
+        authority from #597/#615: an exact resolver-minted ForecastRef bound to
+        this forecast and this exact quote snapshot. Caller-authored/audit-only
+        ForecastRef values are not positive authority because the installed
+        predictive_eligibility_reason guard requires runtime resolver identity.
+
+        Once that authority is present, its declared
+        absolute_probability_radius_v1 uncertainty is applied exactly once.
+        BACK uses the lower probability endpoint; LAY uses the upper endpoint.
+        This is only an edge precondition and does not replace PaperRiskPolicy or
+        the canonical #623 PAPER execution authority.
+        """
+
+        if type(forecast) is Forecast:
+            return forecast.probability
+        if type(forecast) is not ForecastRecord:
+            context.notes.append(
+                "paper-value material action withheld: forecast type is not canonical"
+            )
+            return None
+
+        reference = self.predictive_forecast_refs.get(event.quote_key)
+        if reference is None:
+            context.notes.append(
+                "paper-value material action withheld: modern ForecastRecord lacks "
+                "canonical predictive ForecastRef authority"
+            )
+            return None
+        if forecast.market_snapshot_hash is None:
+            context.notes.append(
+                "paper-value material action withheld: modern ForecastRecord lacks "
+                "canonical market_snapshot_hash evidence"
+            )
+            return None
+
+        try:
+            rebound_quote = QuoteRef.from_market_event(
+                event,
+                market_snapshot_hash=forecast.market_snapshot_hash,
+            )
+        except Exception:
+            context.notes.append(
+                "paper-value material action withheld: current quote cannot be rebound "
+                "to canonical predictive evidence"
+            )
+            return None
+
+        if (
+            reference.forecast_id != forecast.forecast_id
+            or reference.forecast_hash != forecast.canonical_hash
+            or reference.quote_key != forecast.quote_key
+            or reference.probability != forecast.probability
+            or reference.input_cutoff_ts != forecast.input_cutoff_ts
+            or reference.market_snapshot_hash != forecast.market_snapshot_hash
+            or reference.quote_market_event_hash != rebound_quote.market_event_hash
+            or reference.model_id != forecast.model_id
+            or reference.model_version != forecast.model_version
+            or reference.strategy_version != forecast.strategy_version
+            or reference.uncertainty != forecast.uncertainty
+        ):
+            context.notes.append(
+                "paper-value material action withheld: predictive ForecastRef does "
+                "not bind the exact forecast/current quote snapshot"
+            )
+            return None
+
+        try:
+            reason = reference.predictive_eligibility_reason(
+                parse_iso_timestamp(event.observed_ts),
+                expected_model_id=forecast.model_id,
+            )
+        except Exception:
+            context.notes.append(
+                "paper-value material action withheld: predictive authority "
+                "resolution could not be verified"
+            )
+            return None
+        if reason is not None:
+            context.notes.append(
+                "paper-value material action withheld: " + reason
+            )
+            return None
+
+        witness = reference.predictive_eligibility
+        if (
+            witness is None
+            or witness.uncertainty_kind != "absolute_probability_radius_v1"
+            or reference.uncertainty is None
+        ):
+            context.notes.append(
+                "paper-value material action withheld: predictive uncertainty "
+                "semantics are not canonical"
+            )
+            return None
+
+        if event.exchange_side == "lay":
+            return min(
+                Decimal("1"),
+                reference.probability + reference.uncertainty,
+            )
+        return max(
+            Decimal("0"),
+            reference.probability - reference.uncertainty,
+        )
 
     @classmethod
     def _material_action_id(cls, context: AgentContext, event: MarketEvent) -> str:
@@ -265,7 +404,18 @@ class PaperValueAgent:
             return
         if parse_iso_timestamp(forecast.as_of_ts) > parse_iso_timestamp(event.observed_ts):
             return
-        estimate = paper_value(event.quote_key, forecast.probability, event.decimal_odds)
+        qualified_probability = self._qualified_forecast_probability(
+            forecast,
+            event,
+            context,
+        )
+        if qualified_probability is None:
+            return
+        estimate = paper_value(
+            event.quote_key,
+            qualified_probability,
+            event.decimal_odds,
+        )
         expected_profit_per_unit = estimate.expected_profit_per_unit
         if event.exchange_side == "lay":
             # paper_value is the canonical BACK value p*O - 1. For a LAY quote
@@ -340,6 +490,19 @@ class PaperValueAgent:
                 raise PaperDecisionReconciliationRequired(
                     "durable paper-value decision identity changed across restart"
                 )
+            if type(forecast) is ForecastRecord:
+                reference = self.predictive_forecast_refs.get(event.quote_key)
+                if (
+                    reference is None
+                    or payload.get("predictive_forecast_ref")
+                    != reference.to_dict()
+                    or payload.get("qualified_probability")
+                    != str(qualified_probability)
+                ):
+                    raise PaperDecisionReconciliationRequired(
+                        "durable paper-value decision does not bind current "
+                        "predictive uncertainty authority"
+                    )
             try:
                 chosen_stake = Decimal(str(payload["requested_stake"]))
             except Exception as exc:
@@ -443,6 +606,10 @@ class PaperValueAgent:
                             "input_cutoff_ts": forecast.input_cutoff_ts,
                             "generated_at": forecast.generated_at,
                             "uncertainty": str(forecast.uncertainty),
+                            "qualified_probability": str(qualified_probability),
+                            "predictive_forecast_ref": self.predictive_forecast_refs[
+                                event.quote_key
+                            ].to_dict(),
                             "evidence_hashes": list(forecast.evidence_hashes),
                             "market_snapshot_hash": forecast.market_snapshot_hash,
                         }

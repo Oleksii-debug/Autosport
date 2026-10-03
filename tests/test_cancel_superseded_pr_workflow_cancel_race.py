@@ -244,6 +244,52 @@ def test_cancel_conflict_status_reread_ignores_shadowed_helper(monkeypatch) -> N
         api.cancel(123)
 
 
+@pytest.mark.parametrize("status", [201, 202, 204])
+def test_cancel_conflict_rejects_non_200_status_reread(
+    monkeypatch,
+    status: int,
+) -> None:
+    api = GitHubApi(repository="owner/repo", token="token")
+
+    def fake_urlopen(request, *, timeout: int):
+        del timeout
+        if request.get_method() == "POST":
+            raise HTTPError(
+                request.full_url,
+                409,
+                "Conflict",
+                hdrs=None,
+                fp=None,
+            )
+        return _FakeSuccessResponse(status, b'{"status":"completed"}')
+
+    monkeypatch.setattr(controller_module, "urlopen", fake_urlopen)
+
+    with pytest.raises(
+        CancellationError,
+        match="GitHub API GET returned unexpected HTTP status",
+    ):
+        api.cancel(123)
+
+
+def test_workflow_run_status_requires_exact_http_200(monkeypatch) -> None:
+    api = GitHubApi(repository="owner/repo", token="token")
+    monkeypatch.setattr(
+        controller_module,
+        "urlopen",
+        lambda *_args, **_kwargs: _FakeSuccessResponse(
+            202,
+            b'{"status":"completed"}',
+        ),
+    )
+
+    with pytest.raises(
+        CancellationError,
+        match="GitHub API GET returned unexpected HTTP status",
+    ):
+        api.workflow_run_status(123)
+
+
 def test_workflow_run_status_rejects_unknown_state(monkeypatch) -> None:
     api = GitHubApi(repository="owner/repo", token="token")
     monkeypatch.setattr(

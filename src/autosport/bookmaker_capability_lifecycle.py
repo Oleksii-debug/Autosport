@@ -58,6 +58,7 @@ _BETDAQ_AUTHENTICATED_CONTEXT = _betdaq_account._authenticated_account_context
 _BETDAQ_AUTHENTICATED_CONTEXT_CODE = _BETDAQ_AUTHENTICATED_CONTEXT.__code__
 _BETDAQ_ADAPTER_ID = _betdaq_account.ADAPTER_ID
 _BETDAQ_ADAPTER_VERSION = _betdaq_account.ADAPTER_VERSION
+_BETDAQ_SECURE_ENDPOINT = _betdaq_account._SECURE_ENDPOINT
 _BETDAQ_VENUE_ID = "betdaq"
 
 BETDAQ_AUTHENTICATED_VALIDATION_POLICY_VERSION = "betdaq-authenticated-readonly-v1"
@@ -337,6 +338,8 @@ def _require_current_betdaq_issuance_surface() -> None:
             )
     if (
         _betdaq_account.BetdaqAccountReadOnlyClient is not _BETDAQ_CLIENT_TYPE
+        or getattr(_betdaq_account, "_SECURE_ENDPOINT", None)
+        != _BETDAQ_SECURE_ENDPOINT
         or _betdaq_account.BetdaqCredentials is not _BETDAQ_CREDENTIAL_TYPE
         or _betdaq_account.UrllibBetdaqSoapTransport is not _BETDAQ_TRANSPORT_TYPE
         or getattr(_betdaq_account, "_CANONICAL_HTTPS_POST", None)

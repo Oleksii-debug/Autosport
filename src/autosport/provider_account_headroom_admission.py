@@ -14,6 +14,7 @@ from decimal import Decimal, localcontext
 from enum import Enum
 import hashlib
 import json
+import os
 import threading
 import weakref
 
@@ -64,6 +65,12 @@ _VERIFIED_SNAPSHOT_CODE = getattr(_VERIFIED_SNAPSHOT, "__code__", None)
 _VERIFIED_EXECUTION_VIEW_CODE = getattr(_VERIFIED_EXECUTION_VIEW, "__code__", None)
 _BEGIN_ATTEMPT_CODE = getattr(_BEGIN_ATTEMPT, "__code__", None)
 _ATTEMPT_STATE_CODE = getattr(_ATTEMPT_STATE, "__code__", None)
+_LEDGER_CANONICAL_MONOTONIC_AUTHORITY = RealExecutionLedger._canonical_monotonic_authority
+_LEDGER_CANONICAL_MONOTONIC_AUTHORITY_CODE = getattr(
+    _LEDGER_CANONICAL_MONOTONIC_AUTHORITY,
+    "__code__",
+    None,
+)
 _ASSERT_ACCOUNT_SNAPSHOT_AUTHORITY = assert_account_snapshot_acquisition_authoritative
 _ASSERT_ACCOUNT_SNAPSHOT_AUTHORITY_CODE = getattr(
     _ASSERT_ACCOUNT_SNAPSHOT_AUTHORITY,
@@ -149,6 +156,40 @@ def _canonical_capital_risk_dispatch(
             "canonical capital-at-risk headroom authority changed"
         )
     return _resolve, _assert_current
+
+
+def _canonical_ledger_workspace(
+    ledger: RealExecutionLedger,
+    *,
+    _authority=_LEDGER_CANONICAL_MONOTONIC_AUTHORITY,
+    _authority_code=_LEDGER_CANONICAL_MONOTONIC_AUTHORITY_CODE,
+):
+    live = vars(RealExecutionLedger).get("_canonical_monotonic_authority")
+    if (
+        live is not _authority
+        or getattr(_authority, "__code__", None) is not _authority_code
+    ):
+        raise ProviderAccountHeadroomError(
+            "canonical execution-ledger workspace authority changed"
+        )
+    try:
+        authority = _authority(ledger)
+        path = ledger.path.resolve(strict=False)
+        authority_workspace = authority.workspace.resolve(strict=False)
+        authority_key = authority.key
+    except (AttributeError, OSError, TypeError, ExecutionLedgerIntegrityError) as exc:
+        raise ProviderAccountHeadroomError(
+            "canonical execution-ledger workspace identity is unavailable"
+        ) from exc
+    if (
+        os.path.normcase(str(path.parent))
+        != os.path.normcase(str(authority_workspace))
+        or os.path.normcase(path.name) != os.path.normcase(authority_key)
+    ):
+        raise ProviderAccountHeadroomError(
+            "execution-ledger path no longer matches canonical workspace authority"
+        )
+    return authority_workspace
 
 
 def _canonical_denomination_dispatch(
@@ -907,7 +948,7 @@ def _current_economic_goal_denomination(
     store_type, store_load, derive_provenance, _, _, _ = (
         _canonical_denomination_dispatch()
     )
-    workspace = ledger.path.resolve(strict=False).parent
+    workspace = _canonical_ledger_workspace(ledger)
     store = store_type(workspace)
     try:
         goal = store_load(store)
@@ -1109,7 +1150,7 @@ def assess_provider_account_headroom(
         now=now,
     )
     bound_by_plan_id = _validated_bound_plan_map(bound_plans)
-    workspace = ledger.path.resolve(strict=False).parent
+    workspace = _canonical_ledger_workspace(ledger)
 
     with _canonical_denomination_dispatch()[-1](workspace):
         economic_goal_contract_sha256 = _current_economic_goal_denomination(
@@ -1308,7 +1349,7 @@ def reserve_observed_provider_headroom(
                 "headroom assessment expired before reservation"
             )
         bound_by_plan_id = _validated_bound_plan_map(bound_plans)
-        workspace = ledger.path.resolve(strict=False).parent
+        workspace = _canonical_ledger_workspace(ledger)
         with _canonical_denomination_dispatch()[-1](workspace):
             current_goal_sha256 = _current_economic_goal_denomination(
                 ledger,

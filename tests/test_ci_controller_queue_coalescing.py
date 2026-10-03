@@ -1861,6 +1861,66 @@ def test_trigger_trusted_tuple_head_cannot_be_rewritten_by_sha_helper_rebind(mon
     assert cancel_calls == {"count": 0}
 
 
+def test_explicit_run_identity_ignores_mutable_coordinate_helpers(monkeypatch) -> None:
+    api = WorkflowScopedGitHubApi(
+        repository="owner/repo",
+        token="token",
+        workflow_id=356678400,
+        workflow_name="CI",
+    )
+    canonical_request = scoped_controller.GitHubApi._request
+    requested: list[str] = []
+
+    class FakeResponse:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, _exc_type, _exc, _tb):
+            return False
+
+        def read(self) -> bytes:
+            return (
+                b'{"id":7012,"workflow_id":356678400,'
+                b'"event":"pull_request","head_sha":"'
+                + HEAD.encode("ascii")
+                + b'","name":"CI","status":"queued",'
+                b'"pull_requests":[{"number":303}]}'
+            )
+
+    def canonical_urlopen(request, *, timeout: int):
+        assert timeout == 20
+        requested.append(request.full_url)
+        return FakeResponse()
+
+    monkeypatch.setattr(
+        scoped_controller,
+        "_require_positive_int",
+        lambda _value, *, field: 999999,
+    )
+    monkeypatch.setattr(
+        scoped_controller,
+        "_require_sha",
+        lambda _value, *, field: "b" * 40,
+    )
+    monkeypatch.setitem(
+        canonical_request.__globals__,
+        "urlopen",
+        canonical_urlopen,
+    )
+
+    assert _explicit_run_identity_is_current(
+        api,
+        run_id=7012,
+        expected_head_sha=HEAD,
+        pr_number=303,
+    )
+    assert requested == [
+        "https://api.github.com/repos/owner/repo/actions/runs/7012"
+    ]
+
+
 def test_explicit_run_boundary_scoped_type_rebind_cannot_reopen_dynamic_request_shadow(
     monkeypatch,
 ) -> None:

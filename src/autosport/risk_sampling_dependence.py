@@ -4,8 +4,11 @@ import hashlib
 import json
 from dataclasses import dataclass
 from itertools import islice
+from pathlib import Path
 from typing import Any, Iterable
 
+from . import risk_membership_publication as _membership_publication
+from . import risk_randomization_precommit as _randomization_precommit
 from .risk_sampling_membership import ResolvedFixedNRiskMembership
 
 
@@ -45,6 +48,17 @@ _REQUIRED_MANIFEST_FIELDS = frozenset(
         "randomization_authority",
     }
 )
+
+_MEMBERSHIP_RECEIPT_TYPE = _membership_publication.RiskMembershipPublicationReceipt
+_MEMBERSHIP_RESOLVER = _membership_publication.resolve_fixed_n_membership_publication
+_MEMBERSHIP_RESOLVER_CODE = getattr(_MEMBERSHIP_RESOLVER, "__code__", None)
+_RANDOMIZATION_RECEIPT_TYPE = (
+    _randomization_precommit.RiskRandomizationPrecommitReceipt
+)
+_RANDOMIZATION_RESOLVER = (
+    _randomization_precommit.resolve_risk_randomization_precommit
+)
+_RANDOMIZATION_RESOLVER_CODE = getattr(_RANDOMIZATION_RESOLVER, "__code__", None)
 
 
 class RiskSamplingDependenceError(RuntimeError):
@@ -227,6 +241,176 @@ class ResolvedFixedNIidOccurrenceSet:
     @property
     def grants_real_money_authority(self) -> bool:
         return False
+
+
+@dataclass(frozen=True, slots=True)
+class ResolvedFixedNIidPrecommitAuthority:
+    """Positive product authority only for pre-outcome membership/randomization.
+
+    This receipt deliberately stops before occurrence ancestry. It is not evidence
+    that caller-provided draw transcripts, run paths, minimum equity values, or IID
+    Bernoulli trials came from the committed product randomization streams.
+    """
+
+    workspace_instance_id: str
+    experiment_id: str
+    membership_sha256: str
+    membership_receipt_sha256: str
+    randomization_precommit_receipt_sha256: str
+    randomization_root_sha256: str
+    membership_design_sha256: str
+    sampling_manifest_sha256: str
+    planned_member_ids: tuple[str, ...]
+
+    def __init_subclass__(cls, **kwargs: object) -> None:
+        raise TypeError("ResolvedFixedNIidPrecommitAuthority must not be subclassed")
+
+    @property
+    def product_membership_preoutcome_chronology_proven(self) -> bool:
+        return True
+
+    @property
+    def product_randomization_root_issued(self) -> bool:
+        return True
+
+    @property
+    def occurrence_ancestry_proven(self) -> bool:
+        return False
+
+    @property
+    def iid_qualified(self) -> bool:
+        return False
+
+    @property
+    def grants_real_money_authority(self) -> bool:
+        return False
+
+
+def _require_product_precommit_dispatch() -> None:
+    if (
+        _membership_publication.RiskMembershipPublicationReceipt
+        is not _MEMBERSHIP_RECEIPT_TYPE
+        or _membership_publication.resolve_fixed_n_membership_publication
+        is not _MEMBERSHIP_RESOLVER
+        or getattr(_MEMBERSHIP_RESOLVER, "__code__", None)
+        is not _MEMBERSHIP_RESOLVER_CODE
+        or _randomization_precommit.RiskRandomizationPrecommitReceipt
+        is not _RANDOMIZATION_RECEIPT_TYPE
+        or _randomization_precommit.resolve_risk_randomization_precommit
+        is not _RANDOMIZATION_RESOLVER
+        or getattr(_RANDOMIZATION_RESOLVER, "__code__", None)
+        is not _RANDOMIZATION_RESOLVER_CODE
+    ):
+        raise RiskSamplingDependenceError(
+            "risk sampling product precommit authority dispatch changed"
+        )
+
+
+def _publication_matches_membership(
+    publication: object,
+    membership: ResolvedFixedNRiskMembership,
+) -> bool:
+    return (
+        type(publication) is _MEMBERSHIP_RECEIPT_TYPE
+        and publication.research_protocol_id == membership.research_protocol_id
+        and publication.protocol_sha256 == membership.protocol_sha256
+        and publication.protocol_record_sha256 == membership.protocol_record_sha256
+        and publication.dataset_snapshot_id == membership.dataset_snapshot_id
+        and publication.dataset_manifest_sha256 == membership.dataset_manifest_sha256
+        and publication.dataset_record_sha256 == membership.dataset_record_sha256
+        and publication.causal_cutoff == membership.causal_cutoff
+        and publication.outcome_reveal_after == membership.outcome_reveal_after
+        and publication.planned_run_ids == membership.planned_run_ids
+        and publication.sampling_frame_sha256 == membership.sampling_frame_sha256
+        and publication.design_sha256 == membership.design_sha256
+    )
+
+
+def resolve_fixed_n_iid_precommit_authority(
+    membership: ResolvedFixedNRiskMembership,
+    *,
+    registry_path: str | Path,
+    workspace: str | Path,
+    sampling_manifest_json: str,
+    authority_root: str | Path | None = None,
+) -> ResolvedFixedNIidPrecommitAuthority:
+    """Re-resolve exact product membership plus randomization chronology.
+
+    The returned receipt is intentionally narrower than IID qualification. It
+    proves that the exact frozen membership was durably published and that the
+    exact manifest randomization root was product-generated while planned-run
+    outcomes were still unavailable through canonical product chronology.
+    """
+
+    if type(membership) is not ResolvedFixedNRiskMembership:
+        raise RiskSamplingDependenceError(
+            "membership must be an exact ResolvedFixedNRiskMembership"
+        )
+    structure = inspect_fixed_n_iid_sampling_structure(
+        membership,
+        sampling_manifest_json=sampling_manifest_json,
+    )
+    _require_product_precommit_dispatch()
+    try:
+        publication = _MEMBERSHIP_RESOLVER(
+            registry_path,
+            workspace=workspace,
+            research_protocol_id=membership.research_protocol_id,
+            dataset_snapshot_id=membership.dataset_snapshot_id,
+            authority_root=authority_root,
+        )
+        randomization = _RANDOMIZATION_RESOLVER(
+            registry_path,
+            workspace=workspace,
+            research_protocol_id=membership.research_protocol_id,
+            dataset_snapshot_id=membership.dataset_snapshot_id,
+            experiment_id=structure.experiment_id,
+            authority_root=authority_root,
+        )
+    except (
+        _membership_publication.RiskMembershipPublicationError,
+        _randomization_precommit.RiskRandomizationPrecommitError,
+        OSError,
+        ValueError,
+    ) as exc:
+        raise RiskSamplingDependenceError(
+            "risk sampling product precommit authority cannot be re-resolved"
+        ) from exc
+    _require_product_precommit_dispatch()
+
+    if not _publication_matches_membership(publication, membership):
+        raise RiskSamplingDependenceError(
+            "product membership publication differs from the frozen IID membership"
+        )
+    if type(randomization) is not _RANDOMIZATION_RECEIPT_TYPE:
+        raise RiskSamplingDependenceError(
+            "product randomization resolver returned unsupported receipt type"
+        )
+    if (
+        randomization.workspace_instance_id != publication.workspace_instance_id
+        or randomization.experiment_id != structure.experiment_id
+        or randomization.membership_sha256 != publication.membership_sha256
+        or randomization.membership_receipt_sha256 != publication.receipt_sha256
+        or randomization.randomization_root_sha256
+        != structure.randomization_root_sha256
+        or randomization.product_randomization_root_issued is not True
+        or randomization.product_preoutcome_chronology_proven is not True
+    ):
+        raise RiskSamplingDependenceError(
+            "product randomization precommit does not bind the exact IID design"
+        )
+
+    return ResolvedFixedNIidPrecommitAuthority(
+        workspace_instance_id=randomization.workspace_instance_id,
+        experiment_id=structure.experiment_id,
+        membership_sha256=publication.membership_sha256,
+        membership_receipt_sha256=publication.receipt_sha256,
+        randomization_precommit_receipt_sha256=randomization.receipt_sha256,
+        randomization_root_sha256=randomization.randomization_root_sha256,
+        membership_design_sha256=membership.design_sha256,
+        sampling_manifest_sha256=structure.manifest_sha256,
+        planned_member_ids=structure.planned_member_ids,
+    )
 
 
 def inspect_fixed_n_iid_sampling_structure(
@@ -541,25 +725,42 @@ def inspect_fixed_n_iid_occurrences(
 def resolve_fixed_n_iid_sampling_authority(
     membership: ResolvedFixedNRiskMembership,
     *,
+    registry_path: str | Path,
+    workspace: str | Path,
     sampling_manifest_json: str,
     occurrences: Iterable[IidSamplingOccurrence],
+    authority_root: str | Path | None = None,
 ) -> ResolvedFixedNIidOccurrenceSet:
-    """Fail closed until causal membership and randomization precommit are product-owned.
+    """Compose product precommit truth but keep occurrence rows non-authoritative.
 
-    Local canonical JSON, deterministic hashes, unique streams and complete replay
-    transcripts are structural evidence only. They cannot prove that the experiment
-    design/randomization root existed before outcomes were knowable.
+    Positive membership/randomization chronology is re-resolved through canonical
+    product issuers. IidSamplingOccurrence remains a structural assertion type, so
+    this function still fails closed before promoting those rows into IID evidence.
     """
 
+    precommit = resolve_fixed_n_iid_precommit_authority(
+        membership,
+        registry_path=registry_path,
+        workspace=workspace,
+        sampling_manifest_json=sampling_manifest_json,
+        authority_root=authority_root,
+    )
     structure = inspect_fixed_n_iid_sampling_structure(
         membership,
         sampling_manifest_json=sampling_manifest_json,
     )
     resolved = inspect_fixed_n_iid_occurrences(structure, occurrences)
-    if not membership.causal_precommit_proven:
+    if (
+        precommit.product_membership_preoutcome_chronology_proven is not True
+        or precommit.product_randomization_root_issued is not True
+        or precommit.occurrence_ancestry_proven is not False
+        or precommit.iid_qualified is not False
+        or resolved.iid_qualified is not False
+    ):
         raise RiskSamplingDependenceError(
-            "fixed-N membership lacks non-backdateable product-owned pre-outcome precommit authority"
+            "risk sampling precommit authority truth boundary is inconsistent"
         )
     raise RiskSamplingDependenceError(
-        "IID randomization root lacks non-backdateable product-owned pre-outcome precommit authority"
+        "IID occurrence ancestry lacks product-owned run/path evidence; "
+        "caller-provided occurrence rows remain structural assertions"
     )

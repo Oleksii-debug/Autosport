@@ -1657,6 +1657,99 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             )
             loop.close()
 
+    def test_default_provider_large_future_skew_survives_degrade_then_waits(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            registry = self._scientific_registry(
+                workspace,
+                self._strategy_version(),
+            )
+            provider_time = self.START + timedelta(seconds=10)
+            provider = InMemoryProvider(
+                "provider-a",
+                [
+                    ProviderQuote(
+                        provider_event_id="event-1",
+                        provider_market_id="winner",
+                        provider_selection_id="selection-a",
+                        decimal_odds=Decimal("2.00"),
+                        observed_ts=self.START.isoformat(),
+                        sequence=1,
+                        source_ts=provider_time.isoformat(),
+                    )
+                ],
+            )
+            factory = _EmptyIntentFactory()
+            decision_clock = _ManualClock(self.START + timedelta(seconds=1))
+            loop = PersistentLiveDecisionLoop(
+                workspace,
+                loop_id="live-test-loop",
+                mode=LiveDecisionMode.PAPER,
+                book=PaperBook("1000"),
+                authority=self._authority(),
+                intent_factory=factory,
+                scientific_registry=registry,
+                provider=provider,
+                ingestion_policy=IngestionPolicy(
+                    max_batch_size=100,
+                    stale_after_seconds=60,
+                    max_future_skew_seconds=5,
+                ),
+                max_quote_age=timedelta(seconds=5),
+                clock=decision_clock,
+            )
+            loop.register_input("input-a", source_ids="provider-a")
+            receipt_clock = {
+                "value": (self.START + timedelta(seconds=1)).isoformat()
+            }
+
+            with patch(
+                "autosport.ingestion._utc_now_iso",
+                side_effect=lambda: receipt_clock["value"],
+            ):
+                degraded = loop.run_cycle()
+                self.assertEqual(degraded.status, LiveCycleStatus.BACKPRESSURE)
+                self.assertIn("quality is degraded", degraded.detail)
+                self.assertEqual(loop.mirror_updates.pending_count, 1)
+                self.assertEqual(factory.calls, [])
+
+                decision_clock.value = self.START + timedelta(seconds=6)
+                receipt_clock["value"] = (
+                    self.START + timedelta(seconds=6)
+                ).isoformat()
+                still_future = loop.run_cycle()
+                self.assertEqual(
+                    still_future.status,
+                    LiveCycleStatus.BACKPRESSURE,
+                )
+                self.assertIn(
+                    "source evidence from the future",
+                    still_future.detail,
+                )
+                self.assertEqual(loop.mirror_updates.pending_count, 0)
+                self.assertEqual(factory.calls, [])
+
+                decision_clock.value = self.START + timedelta(seconds=11)
+                receipt_clock["value"] = (
+                    self.START + timedelta(seconds=11)
+                ).isoformat()
+                recovered = loop.run_cycle()
+
+            self.assertEqual(recovered.status, LiveCycleStatus.DECIDED)
+            self.assertEqual(
+                factory.calls,
+                [("input-a", (("provider-a:selection-a", 1, "open"),))],
+            )
+            self.assertEqual(
+                len(
+                    JsonlDecisionLedger(
+                        workspace / "decisions.jsonl"
+                    ).verified_records()
+                ),
+                1,
+            )
+            loop.close()
+
     def test_default_provider_degraded_quality_blocks_economic_cut(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

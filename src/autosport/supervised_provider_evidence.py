@@ -491,6 +491,14 @@ def _evaluate_betfair_provider_state_semantics(
                 raise ProviderEvidenceError(
                     "provider current order status is not a recognized Betfair state"
                 )
+            if order.status == "EXECUTABLE" and order.size_remaining <= 0:
+                raise ProviderEvidenceError(
+                    "provider EXECUTABLE current order has no unmatched remaining size"
+                )
+            if order.status == "EXECUTION_COMPLETE" and order.size_remaining != 0:
+                raise ProviderEvidenceError(
+                    "provider EXECUTION_COMPLETE current order has unmatched remaining size"
+                )
             if order.price is None or order.price != action.requested_odds:
                 raise ProviderEvidenceError(
                     "provider current order requested price conflicts with execution action"

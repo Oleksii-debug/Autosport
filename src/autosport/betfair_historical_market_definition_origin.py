@@ -40,6 +40,24 @@ _ISSUED_ORIGIN_OBJECTS: weakref.WeakValueDictionary[int, object] = (
     weakref.WeakValueDictionary()
 )
 _ISSUED_ORIGIN_DIGESTS: dict[int, str] = {}
+_CANONICAL_UPSTREAM_WITNESS_ASSERT = (
+    HistoricalProviderOriginWitness.assert_authoritative
+)
+_CANONICAL_UPSTREAM_WITNESS_ASSERT_CODE = getattr(
+    _CANONICAL_UPSTREAM_WITNESS_ASSERT,
+    "__code__",
+    None,
+)
+
+
+def _assert_canonical_upstream_witness_authority() -> None:
+    if (
+        getattr(_CANONICAL_UPSTREAM_WITNESS_ASSERT, "__code__", None)
+        is not _CANONICAL_UPSTREAM_WITNESS_ASSERT_CODE
+    ):
+        raise BetfairHistoricalMarketDefinitionOriginError(
+            "canonical historical provider-origin witness authority was replaced"
+        )
 
 
 def _text(value: object, name: str) -> str:
@@ -231,7 +249,8 @@ class BetfairHistoricalMarketDefinitionOrigin:
     def provider_origin_verified(self) -> bool:
         try:
             self.assert_issued_integrity()
-            self._witness.assert_authoritative()
+            _assert_canonical_upstream_witness_authority()
+            _CANONICAL_UPSTREAM_WITNESS_ASSERT(self._witness)
         except Exception:
             return False
         return self._witness.witness_sha256 == self.provider_origin_witness_sha256
@@ -503,7 +522,8 @@ def bind_betfair_historical_market_definition_origin(
     if type(witness) is not HistoricalProviderOriginWitness:
         raise TypeError("witness must be exact HistoricalProviderOriginWitness")
     try:
-        witness.assert_authoritative()
+        _assert_canonical_upstream_witness_authority()
+        _CANONICAL_UPSTREAM_WITNESS_ASSERT(witness)
     except Exception as exc:
         raise BetfairHistoricalMarketDefinitionOriginError(
             "historical file lacks live canonical provider-origin authority"

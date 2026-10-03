@@ -50,70 +50,73 @@ class PullRequestQualification:
     integration_capable: bool
 
 
-_PULL_REQUEST_QUALIFICATION_TYPE = PullRequestQualification
-_PULL_REQUEST_QUALIFICATION_DICT_DESCRIPTOR = (
-    PullRequestQualification.__dict__["__dict__"]
-)
-_PULL_REQUEST_QUALIFICATION_INIT = PullRequestQualification.__dict__["__init__"]
-_PULL_REQUEST_QUALIFICATION_INIT_CODE = getattr(
-    _PULL_REQUEST_QUALIFICATION_INIT,
-    "__code__",
-    None,
-)
-_PULL_REQUEST_QUALIFICATION_FIELD_CLASS_WITNESSES = tuple(
-    (
-        name,
-        name in PullRequestQualification.__dict__,
-        PullRequestQualification.__dict__.get(name),
+def _build_pull_request_qualification_state_reader(
+    qualification_type,
+    qualification_dict_descriptor,
+    qualification_init,
+):
+    """Freeze the qualification DTO trust root at module composition time."""
+
+    qualification_init_code = getattr(qualification_init, "__code__", None)
+    if qualification_init_code is None:
+        raise RuntimeError("pull request qualification constructor is unavailable")
+    field_class_witnesses = tuple(
+        (
+            name,
+            name in qualification_type.__dict__,
+            qualification_type.__dict__.get(name),
+        )
+        for name in ("head_sha", "integration_capable")
     )
-    for name in ("head_sha", "integration_capable")
-)
 
+    def read(qualification: object) -> tuple[str, bool]:
+        """Read one qualification without mutable module-global trust roots."""
 
-def _pull_request_qualification_state(
-    qualification: object,
-) -> tuple[str, bool]:
-    """Read one qualification without mutable attribute or dataclass equality dispatch."""
-
-    if (
-        PullRequestQualification is not _PULL_REQUEST_QUALIFICATION_TYPE
-        or PullRequestQualification.__dict__.get("__dict__")
-        is not _PULL_REQUEST_QUALIFICATION_DICT_DESCRIPTOR
-        or PullRequestQualification.__dict__.get("__init__")
-        is not _PULL_REQUEST_QUALIFICATION_INIT
-        or getattr(_PULL_REQUEST_QUALIFICATION_INIT, "__code__", None)
-        is not _PULL_REQUEST_QUALIFICATION_INIT_CODE
-        or type(qualification) is not _PULL_REQUEST_QUALIFICATION_TYPE
-    ):
-        raise CancellationError("pull request qualification authority changed")
-    for name, expected_present, expected_value in (
-        _PULL_REQUEST_QUALIFICATION_FIELD_CLASS_WITNESSES
-    ):
         if (
-            (name in PullRequestQualification.__dict__) is not expected_present
-            or PullRequestQualification.__dict__.get(name) is not expected_value
+            qualification_type.__dict__.get("__dict__")
+            is not qualification_dict_descriptor
+            or qualification_type.__dict__.get("__init__") is not qualification_init
+            or getattr(qualification_init, "__code__", None)
+            is not qualification_init_code
+            or type(qualification) is not qualification_type
         ):
             raise CancellationError("pull request qualification authority changed")
+        for name, expected_present, expected_value in field_class_witnesses:
+            if (
+                (name in qualification_type.__dict__) is not expected_present
+                or qualification_type.__dict__.get(name) is not expected_value
+            ):
+                raise CancellationError("pull request qualification authority changed")
 
-    state = _PULL_REQUEST_QUALIFICATION_DICT_DESCRIPTOR.__get__(
-        qualification,
-        _PULL_REQUEST_QUALIFICATION_TYPE,
-    )
-    if type(state) is not dict or set(state) != {
-        "head_sha",
-        "integration_capable",
-    }:
-        raise CancellationError("invalid pull request qualification state")
-    head_sha = dict.__getitem__(state, "head_sha")
-    integration_capable = dict.__getitem__(state, "integration_capable")
-    if type(head_sha) is not str or len(head_sha) != 40:
-        raise CancellationError("invalid live pull request head")
-    head_sha = head_sha.lower()
-    if any(ch not in "0123456789abcdef" for ch in head_sha):
-        raise CancellationError("invalid live pull request head")
-    if type(integration_capable) is not bool:
-        raise CancellationError("invalid pull request integration capability")
-    return head_sha, integration_capable
+        state = qualification_dict_descriptor.__get__(
+            qualification,
+            qualification_type,
+        )
+        if type(state) is not dict or set(state) != {
+            "head_sha",
+            "integration_capable",
+        }:
+            raise CancellationError("invalid pull request qualification state")
+        head_sha = dict.__getitem__(state, "head_sha")
+        integration_capable = dict.__getitem__(state, "integration_capable")
+        if type(head_sha) is not str or len(head_sha) != 40:
+            raise CancellationError("invalid live pull request head")
+        head_sha = head_sha.lower()
+        if any(ch not in "0123456789abcdef" for ch in head_sha):
+            raise CancellationError("invalid live pull request head")
+        if type(integration_capable) is not bool:
+            raise CancellationError("invalid pull request integration capability")
+        return head_sha, integration_capable
+
+    return read
+
+
+_pull_request_qualification_state = _build_pull_request_qualification_state_reader(
+    PullRequestQualification,
+    PullRequestQualification.__dict__["__dict__"],
+    PullRequestQualification.__dict__["__init__"],
+)
+del _build_pull_request_qualification_state_reader
 
 
 @dataclass(frozen=True)

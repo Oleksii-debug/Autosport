@@ -314,6 +314,45 @@ class ReleasePackageInputSymlinkFenceTests(unittest.TestCase):
 
             self.assertFalse(paths["package"].exists())
 
+    def test_windows_member_set_rejects_file_directory_prefix_collision(self) -> None:
+        with self.assertRaisesRegex(
+            ValueError,
+            "release package contains Windows file/directory path collision",
+        ):
+            release_package._validate_windows_member_set(
+                [
+                    "Autosport-V1/examples/demo/node",
+                    "Autosport-V1/examples/demo/NODE/child.txt",
+                ]
+            )
+
+    def test_builder_rejects_file_directory_casefold_collision(self) -> None:
+        if os.name == "nt":
+            self.skipTest("Windows cannot create case-variant file/directory siblings")
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paths = self._make_inputs(root)
+            file_member = paths["example"] / "node"
+            directory_member = paths["example"] / "NODE"
+            file_member.write_text("file\n", encoding="utf-8")
+            try:
+                directory_member.mkdir()
+            except FileExistsError:
+                self.skipTest("filesystem is case-insensitive")
+            (directory_member / "child.txt").write_text(
+                "child\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "release package contains Windows file/directory path collision",
+            ):
+                self._build(paths)
+
+            self.assertFalse(paths["package"].exists())
+
     def test_top_level_symlink_fails_before_existing_staging_is_deleted(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

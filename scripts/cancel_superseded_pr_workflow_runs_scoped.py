@@ -202,53 +202,105 @@ class WorkflowScopedGitHubApi(GitHubApi):
         self._recovery_workflow_name = workflow_name
         self._recovery_current_run_id = current_run_id
 
-    def _historical_associated_pr_number(self, head_sha: str) -> int:
+    def _historical_associated_pr_number(
+        self,
+        head_sha: str,
+        *,
+        _request_impl=GitHubApi._request,
+        _request_code=GitHubApi._request.__code__,
+        _pulls_per_page: int = _PULLS_PER_PAGE,
+        _encode_query=urlencode,
+        _error_type=CancellationError,
+        _absent_type=_HistoricalAssociationAbsent,
+        _ambiguous_type=_HistoricalAssociationAmbiguous,
+    ) -> int:
         """Resolve one historical commit association without requiring current-head equality.
 
-        This resolver is cleanup-only.  It never admits current/event authority: callers
+        This resolver is cleanup-only. It never admits current/event authority: callers
         may use it only after the target PR has already been identified by the canonical
-        current authority path.  Every page must identify exactly one distinct PR number.
+        current authority path. Every page must identify exactly one distinct PR number.
+
+        The request executable, pagination bound, query encoder, primitive validators and
+        exception classes are frozen at function-definition time. A canonical HTTP read
+        may execute arbitrary runtime callbacks; none of those callbacks may redirect a
+        later page, rewrite provider PR identity, rewrite the commit coordinate, or widen
+        a provider-capped page size so a real second page is silently skipped.
         """
 
-        head_sha = _require_sha(head_sha, field="historical workflow head sha")
+        def require_sha_primitive(value: object, *, field: str) -> str:
+            if type(value) is not str or len(value) != 40:
+                raise _error_type(f"invalid {field}")
+            canonical = value.lower()
+            if any(ch not in "0123456789abcdef" for ch in canonical):
+                raise _error_type(f"invalid {field}")
+            return canonical
+
+        def require_positive_int_primitive(value: object, *, field: str) -> int:
+            if type(value) is not int or value <= 0:
+                raise _error_type(f"invalid {field}")
+            return value
+
+        def request_dispatch_current() -> bool:
+            bound = getattr(self, "_request", None)
+            return (
+                getattr(_request_impl, "__code__", None) is _request_code
+                and getattr(bound, "__self__", None) is self
+                and getattr(bound, "__func__", None) is _request_impl
+            )
+
+        head_sha = require_sha_primitive(
+            head_sha,
+            field="historical workflow head sha",
+        )
+        if (
+            type(_pulls_per_page) is not int
+            or _pulls_per_page <= 0
+            or _pulls_per_page > 100
+            or not callable(_encode_query)
+            or not request_dispatch_current()
+        ):
+            raise _error_type("historical association authority is unavailable")
+
         associated_numbers: set[int] = set()
         page = 1
         while True:
-            query = urlencode({"per_page": _PULLS_PER_PAGE, "page": page})
-            payload = self._request(f"/commits/{head_sha}/pulls?{query}")
+            query = _encode_query({"per_page": _pulls_per_page, "page": page})
+            payload = _request_impl(self, f"/commits/{head_sha}/pulls?{query}")
+            if not request_dispatch_current():
+                raise _error_type("historical association request dispatch changed")
             if not isinstance(payload, list):
-                raise CancellationError(
+                raise _error_type(
                     "invalid historical commit pull-requests response"
                 )
             for item in payload:
                 if not isinstance(item, dict):
-                    raise CancellationError(
+                    raise _error_type(
                         "invalid historical associated pull request"
                     )
                 head = item.get("head")
                 if not isinstance(head, dict):
-                    raise CancellationError(
+                    raise _error_type(
                         "invalid historical associated pull request head"
                     )
-                _require_sha(
+                require_sha_primitive(
                     head.get("sha"),
                     field="historical associated pull request head",
                 )
                 associated_numbers.add(
-                    _require_positive_int(
+                    require_positive_int_primitive(
                         item.get("number"),
                         field="historical associated pull request number",
                     )
                 )
-            if len(payload) < _PULLS_PER_PAGE:
+            if len(payload) < _pulls_per_page:
                 break
             page += 1
         if not associated_numbers:
-            raise _HistoricalAssociationAbsent(
+            raise _absent_type(
                 "historical workflow head has no associated pull request"
             )
         if len(associated_numbers) != 1:
-            raise _HistoricalAssociationAmbiguous(
+            raise _ambiguous_type(
                 "historical workflow head resolves to multiple associated pull requests"
             )
         return next(iter(associated_numbers))
@@ -329,54 +381,115 @@ class WorkflowScopedGitHubApi(GitHubApi):
             status=run.status,
         )
 
-    def _historical_head_has_no_associated_prs(self, head_sha: str) -> bool:
+    def _historical_head_has_no_associated_prs(
+        self,
+        head_sha: str,
+        *,
+        _request_impl=GitHubApi._request,
+        _request_code=GitHubApi._request.__code__,
+        _pulls_per_page: int = _PULLS_PER_PAGE,
+        _encode_query=urlencode,
+        _error_type=CancellationError,
+    ) -> bool:
         """Return true only for a well-formed commit association response with zero PRs."""
 
-        head_sha = _require_sha(head_sha, field="historical workflow head sha")
+        def request_dispatch_current() -> bool:
+            bound = getattr(self, "_request", None)
+            return (
+                getattr(_request_impl, "__code__", None) is _request_code
+                and getattr(bound, "__self__", None) is self
+                and getattr(bound, "__func__", None) is _request_impl
+            )
+
+        if type(head_sha) is not str or len(head_sha) != 40:
+            raise _error_type("invalid historical workflow head sha")
+        head_sha = head_sha.lower()
+        if any(ch not in "0123456789abcdef" for ch in head_sha):
+            raise _error_type("invalid historical workflow head sha")
+        if (
+            type(_pulls_per_page) is not int
+            or _pulls_per_page <= 0
+            or _pulls_per_page > 100
+            or not callable(_encode_query)
+            or not request_dispatch_current()
+        ):
+            raise _error_type("historical association authority is unavailable")
+
         page = 1
         associated_numbers: set[int] = set()
         while True:
-            query = urlencode({"per_page": _PULLS_PER_PAGE, "page": page})
-            payload = self._request(f"/commits/{head_sha}/pulls?{query}")
+            query = _encode_query({"per_page": _pulls_per_page, "page": page})
+            payload = _request_impl(self, f"/commits/{head_sha}/pulls?{query}")
+            if not request_dispatch_current():
+                raise _error_type("historical association request dispatch changed")
             if not isinstance(payload, list):
-                raise CancellationError(
+                raise _error_type(
                     "invalid historical commit pull-requests response"
                 )
             for item in payload:
                 if not isinstance(item, dict):
-                    raise CancellationError(
+                    raise _error_type(
                         "invalid historical associated pull request"
                     )
-                associated_numbers.add(
-                    _require_positive_int(
-                        item.get("number"),
-                        field="historical associated pull request number",
+                pr_number = item.get("number")
+                if type(pr_number) is not int or pr_number <= 0:
+                    raise _error_type(
+                        "invalid historical associated pull request number"
                     )
-                )
-            if len(payload) < _PULLS_PER_PAGE:
+                associated_numbers.add(pr_number)
+            if len(payload) < _pulls_per_page:
                 break
             page += 1
         return not associated_numbers
 
-    def _canonical_branch_head(self, branch: str) -> str | None:
+
+    def _canonical_branch_head(
+        self,
+        branch: str,
+        *,
+        _request_impl=GitHubApi._request,
+        _request_code=GitHubApi._request.__code__,
+        _encode_branch=quote,
+        _allowed_http_error_type=_AllowedHttpError,
+        _error_type=CancellationError,
+    ) -> str | None:
         """Resolve one same-repository branch head; absence is authoritative."""
 
-        if not isinstance(branch, str) or not branch:
-            raise CancellationError("invalid canonical head branch")
-        encoded = quote(branch, safe="")
-        payload = self._request(
+        def request_dispatch_current() -> bool:
+            bound = getattr(self, "_request", None)
+            return (
+                getattr(_request_impl, "__code__", None) is _request_code
+                and getattr(bound, "__self__", None) is self
+                and getattr(bound, "__func__", None) is _request_impl
+            )
+
+        if type(branch) is not str or not branch or not callable(_encode_branch):
+            raise _error_type("invalid canonical head branch")
+        if not request_dispatch_current():
+            raise _error_type("canonical branch request dispatch changed")
+        encoded = _encode_branch(branch, safe="")
+        payload = _request_impl(
+            self,
             f"/git/ref/heads/{encoded}",
             allowed_http_errors=frozenset({404}),
         )
-        if isinstance(payload, _AllowedHttpError):
+        if not request_dispatch_current():
+            raise _error_type("canonical branch request dispatch changed")
+        if type(payload) is _allowed_http_error_type:
             if payload.status_code == 404:
                 return None
         if not isinstance(payload, dict):
-            raise CancellationError("invalid canonical branch response")
+            raise _error_type("invalid canonical branch response")
         target = payload.get("object")
         if not isinstance(target, dict):
-            raise CancellationError("invalid canonical branch target")
-        return _require_sha(target.get("sha"), field="canonical branch head")
+            raise _error_type("invalid canonical branch target")
+        target_sha = target.get("sha")
+        if type(target_sha) is not str or len(target_sha) != 40:
+            raise _error_type("invalid canonical branch head")
+        target_sha = target_sha.lower()
+        if any(ch not in "0123456789abcdef" for ch in target_sha):
+            raise _error_type("invalid canonical branch head")
+        return target_sha
 
     def _explicit_run_identity_matches(
         self,

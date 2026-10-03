@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from types import FunctionType
+from types import FunctionType, MappingProxyType
 
 from .domain import PaperTicket, TicketLeg
 from .economic_goal_provenance import provenance_for
@@ -1314,6 +1314,133 @@ def admit_paper_ticket(
         )
 
 
+
+def _seal_admission_consumer_closure_authority(
+    function: FunctionType,
+) -> FunctionType:
+    """Make the current-binding wrapper's executable closure immutable and witnessed.
+
+    The current-binding consumer reconstructs the inner function from closure-owned
+    globals on every call. For economic admission those globals already come from
+    the frozen admission graph and must remain immutable authority.
+    """
+
+    if type(function) is not FunctionType:
+        raise TypeError("canonical PAPER admission consumer must be a Python function")
+    closure = function.__closure__
+    if closure is None:
+        raise RuntimeError("canonical PAPER admission consumer closure is unavailable")
+
+    freevars = function.__code__.co_freevars
+    if len(freevars) != len(closure):
+        raise RuntimeError("canonical PAPER admission consumer closure is incomplete")
+
+    # The current-binding sealer consumes these mappings through dict(...) and
+    # get(...). A read-only proxy preserves those reads while closing in-place
+    # check-to-dispatch mutation.
+    for cell in closure:
+        try:
+            value = cell.cell_contents
+        except ValueError as exc:
+            raise RuntimeError(
+                "canonical PAPER admission consumer closure is incomplete"
+            ) from exc
+        if type(value) is dict:
+            cell.cell_contents = MappingProxyType(dict(value))
+
+    closure_witness: list[tuple[str, object, object]] = []
+    mapping_function_witnesses: list[
+        tuple[object, tuple[tuple[object, object, object | None], ...]]
+    ] = []
+    for name, cell in zip(freevars, closure, strict=True):
+        try:
+            value = cell.cell_contents
+        except ValueError as exc:
+            raise RuntimeError(
+                "canonical PAPER admission consumer closure is incomplete"
+            ) from exc
+        closure_witness.append((name, cell, value))
+        if type(value) is MappingProxyType:
+            entries = tuple(
+                (
+                    key,
+                    item,
+                    item.__code__ if type(item) is FunctionType else None,
+                )
+                for key, item in value.items()
+            )
+            mapping_function_witnesses.append((value, entries))
+
+    expected_closure = tuple(closure_witness)
+    expected_mapping_functions = tuple(mapping_function_witnesses)
+    expected_code = function.__code__
+    expected_function = function
+    exact_type = type
+    function_type = FunctionType
+    mapping_proxy_type = MappingProxyType
+
+    def require_authority() -> None:
+        if (
+            exact_type(expected_function) is not function_type
+            or expected_function.__code__ is not expected_code
+            or expected_function.__closure__ is not closure
+        ):
+            raise RuntimeError("PAPER admission sealed consumer authority changed")
+        current_closure = expected_function.__closure__
+        if current_closure is None or len(current_closure) != len(expected_closure):
+            raise RuntimeError("PAPER admission sealed consumer authority changed")
+        for index, (_name, expected_cell, expected_value) in enumerate(
+            expected_closure
+        ):
+            current_cell = current_closure[index]
+            if current_cell is not expected_cell:
+                raise RuntimeError("PAPER admission sealed consumer authority changed")
+            try:
+                current_value = current_cell.cell_contents
+            except ValueError as exc:
+                raise RuntimeError(
+                    "PAPER admission sealed consumer authority changed"
+                ) from exc
+            if current_value is not expected_value:
+                raise RuntimeError("PAPER admission sealed consumer authority changed")
+        for mapping, entries in expected_mapping_functions:
+            if exact_type(mapping) is not mapping_proxy_type:
+                raise RuntimeError("PAPER admission sealed consumer authority changed")
+            if tuple(mapping.keys()) != tuple(entry[0] for entry in entries):
+                raise RuntimeError("PAPER admission sealed consumer authority changed")
+            for key, expected_value, expected_value_code in entries:
+                if mapping.get(key) is not expected_value:
+                    raise RuntimeError(
+                        "PAPER admission sealed consumer authority changed"
+                    )
+                if expected_value_code is not None and (
+                    exact_type(expected_value) is not function_type
+                    or expected_value.__code__ is not expected_value_code
+                ):
+                    raise RuntimeError(
+                        "PAPER admission sealed consumer authority changed"
+                    )
+
+    require_authority_code = require_authority.__code__
+
+    def guarded(*args: object, **kwargs: object) -> object:
+        if (
+            exact_type(require_authority) is not function_type
+            or require_authority.__code__ is not require_authority_code
+        ):
+            raise RuntimeError("PAPER admission closure guard authority changed")
+        require_authority()
+        result = expected_function(*args, **kwargs)
+        require_authority()
+        return result
+
+    guarded.__name__ = function.__name__
+    guarded.__qualname__ = function.__qualname__
+    guarded.__doc__ = function.__doc__
+    guarded.__annotations__ = dict(function.__annotations__)
+    return guarded
+
+
 def _freeze_admission_module_globals() -> dict[str, object]:
     """Detach the complete admission helper graph from mutable module dispatch."""
 
@@ -1346,7 +1473,9 @@ _ADMISSION_FROZEN_GLOBALS = _freeze_admission_module_globals()
 _FROZEN_ADMIT_PAPER_TICKET = _ADMISSION_FROZEN_GLOBALS["admit_paper_ticket"]
 if type(_FROZEN_ADMIT_PAPER_TICKET) is not FunctionType:
     raise RuntimeError("canonical PAPER admission executable is unavailable")
-admit_paper_ticket = _seal_current_binding_consumer(_FROZEN_ADMIT_PAPER_TICKET)
+admit_paper_ticket = _seal_admission_consumer_closure_authority(
+    _seal_current_binding_consumer(_FROZEN_ADMIT_PAPER_TICKET)
+)
 del _FROZEN_ADMIT_PAPER_TICKET
 del _ADMISSION_FROZEN_GLOBALS
 del _seal_current_binding_consumer

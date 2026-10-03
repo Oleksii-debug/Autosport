@@ -1450,6 +1450,11 @@ def cancel_superseded_explicit_pr_runs(
     _qualification_reader_code=None,
     _identity_checker=None,
     _identity_checker_code=None,
+    _production_api_type=WorkflowScopedGitHubApi,
+    _production_qualification_reader=_trusted_live_pr_qualification,
+    _production_qualification_reader_code=_trusted_live_pr_qualification.__code__,
+    _production_identity_checker=_explicit_run_identity_is_current,
+    _production_identity_checker_code=_explicit_run_identity_is_current.__code__,
 ) -> tuple[int, ...]:
     """Sweep superseded runs for every explicit singleton PR in one workflow snapshot.
 
@@ -1465,12 +1470,22 @@ def cancel_superseded_explicit_pr_runs(
 
     if getattr(_cancel_effect, "__code__", None) is not _cancel_effect_code:
         raise CancellationError("canonical cancel effect authority changed")
-    if _qualification_reader is None:
-        _qualification_reader = _trusted_live_pr_qualification
-        _qualification_reader_code = getattr(_qualification_reader, "__code__", None)
-    if _identity_checker is None:
-        _identity_checker = _explicit_run_identity_is_current
-        _identity_checker_code = getattr(_identity_checker, "__code__", None)
+    if type(api) is _production_api_type:
+        _qualification_reader = _production_qualification_reader
+        _qualification_reader_code = _production_qualification_reader_code
+        _identity_checker = _production_identity_checker
+        _identity_checker_code = _production_identity_checker_code
+    elif isinstance(api, _production_api_type):
+        raise CancellationError("decision authority API type changed")
+    else:
+        # Compatibility fixtures may inject their own authority readers before entry.
+        # Production never derives these effect-authorizing helpers from mutable globals.
+        if _qualification_reader is None:
+            _qualification_reader = _trusted_live_pr_qualification
+            _qualification_reader_code = getattr(_qualification_reader, "__code__", None)
+        if _identity_checker is None:
+            _identity_checker = _explicit_run_identity_is_current
+            _identity_checker_code = getattr(_identity_checker, "__code__", None)
 
     def require_decision_authorities() -> None:
         if (
@@ -1658,6 +1673,11 @@ def _cancel_triggering_run_if_stale_or_nonqualifying(
     _qualification_reader_code=None,
     _identity_checker=None,
     _identity_checker_code=None,
+    _production_api_type=WorkflowScopedGitHubApi,
+    _production_qualification_reader=_trusted_live_pr_qualification,
+    _production_qualification_reader_code=_trusted_live_pr_qualification.__code__,
+    _production_identity_checker=_explicit_run_identity_is_current,
+    _production_identity_checker_code=_explicit_run_identity_is_current.__code__,
 ) -> bool:
     """Cancel a source run proven stale or same-head non-integration-capable.
 
@@ -1670,12 +1690,20 @@ def _cancel_triggering_run_if_stale_or_nonqualifying(
 
     if getattr(_cancel_effect, "__code__", None) is not _cancel_effect_code:
         raise CancellationError("canonical cancel effect authority changed")
-    if _qualification_reader is None:
-        _qualification_reader = _trusted_live_pr_qualification
-        _qualification_reader_code = getattr(_qualification_reader, "__code__", None)
-    if _identity_checker is None:
-        _identity_checker = _explicit_run_identity_is_current
-        _identity_checker_code = getattr(_identity_checker, "__code__", None)
+    if type(api) is _production_api_type:
+        _qualification_reader = _production_qualification_reader
+        _qualification_reader_code = _production_qualification_reader_code
+        _identity_checker = _production_identity_checker
+        _identity_checker_code = _production_identity_checker_code
+    elif isinstance(api, _production_api_type):
+        raise CancellationError("decision authority API type changed")
+    else:
+        if _qualification_reader is None:
+            _qualification_reader = _trusted_live_pr_qualification
+            _qualification_reader_code = getattr(_qualification_reader, "__code__", None)
+        if _identity_checker is None:
+            _identity_checker = _explicit_run_identity_is_current
+            _identity_checker_code = getattr(_identity_checker, "__code__", None)
 
     def require_decision_authorities() -> None:
         if (

@@ -906,6 +906,7 @@ def test_class_rebound_ledger_method_fails_before_hostile_dispatch(
     (
         "_canonical_bound_plan_authority_dispatch",
         "_canonical_supervised_ledger_dispatch",
+        "_canonical_trusted_now",
         "_canonical_bound_plan_witness",
         "_digest",
         "_time",
@@ -954,6 +955,7 @@ def test_supervised_composition_helper_alias_rebinding_fails_before_mutation(
     (
         "_canonical_bound_plan_authority_dispatch",
         "_canonical_supervised_ledger_dispatch",
+        "_canonical_trusted_now",
         "_durable_reserved_plan_fingerprint",
         "_require_reserved",
     ),
@@ -1081,27 +1083,46 @@ def test_supervised_approval_property_code_replacement_fails_before_mutation(
         ledger.saga(bound.execution_plan.plan_id)
 
 
-def test_supervised_entrypoint_raw_code_replacement_fails_before_mutation(
-    monkeypatch,
+def test_supervised_mutating_entrypoints_do_not_expose_raw_delegates() -> None:
+    for entrypoint in (
+        supervised_execution.reserve_supervised_plan,
+        supervised_execution.revoke_supervised_approval,
+        supervised_execution.begin_supervised_attempt,
+        supervised_execution.reconcile_provider_readback,
+        supervised_execution.reconcile_provider_not_found,
+    ):
+        assert not hasattr(entrypoint, "__wrapped__")
+
+
+def test_trusted_clock_defaults_replacement_fails_before_mutation(
     tmp_path,
 ) -> None:
     bound, approval, _, _ = _bound()
-    raw = reserve_supervised_plan.__wrapped__
+    ledger = RealExecutionLedger(tmp_path / "clock-defaults-rebound.jsonl")
+    clock = supervised_execution._trusted_now
+    original_defaults = clock.__defaults__
+    assert original_defaults is not None
 
-    def hostile(*args, **kwargs):
-        raise AssertionError("hostile reserve code executed")
+    class HostileDateTime:
+        @classmethod
+        def now(cls, _tz):
+            raise AssertionError("hostile trusted-clock datetime executed")
 
-    monkeypatch.setattr(raw, "__code__", hostile.__code__)
-    ledger = RealExecutionLedger(tmp_path / "entrypoint-code-rebound.jsonl")
+    try:
+        clock.__defaults__ = (
+            HostileDateTime,
+            original_defaults[1],
+            original_defaults[2],
+        )
+        with pytest.raises(
+            SupervisedExecutionError,
+            match="trusted clock authority changed",
+        ):
+            reserve_supervised_plan(ledger, bound, approval)
+    finally:
+        clock.__defaults__ = original_defaults
 
-    with pytest.raises(
-        SupervisedExecutionError,
-        match="canonical supervised execution entrypoint changed",
-    ):
-        reserve_supervised_plan(ledger, bound, approval)
-
-    with pytest.raises(KeyError):
-        ledger.saga(bound.execution_plan.plan_id)
+    assert not ledger.path.exists()
 
 
 @pytest.mark.parametrize(

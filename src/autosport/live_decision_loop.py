@@ -2739,9 +2739,13 @@ class PersistentLiveDecisionLoop:
             raise DecisionLedgerIntegrityError(
                 "legacy committed live decision lacks canonical intent provenance"
             )
-        if payload_version != 2:
+        if payload_version not in {2, 3}:
             raise DecisionLedgerIntegrityError(
                 "committed live decision has unsupported schema_version"
+            )
+        if payload_version == 2 and progress.provider_health_boundaries:
+            raise DecisionLedgerIntegrityError(
+                "legacy committed live decision cannot carry provider health horizons"
             )
 
         context_payload = {
@@ -2754,6 +2758,11 @@ class PersistentLiveDecisionLoop:
             "decision_context_sha256": progress.decision_context_sha256,
             "plan_sha256": progress.plan_sha256,
         }
+        if payload_version == 3:
+            context_payload["provider_health_boundaries"] = [
+                boundary.to_dict()
+                for boundary in progress.provider_health_boundaries
+            ]
         _, committed_decision_time = _canonical_timestamp(
             "committed decision_ts",
             progress.decision_ts,
@@ -2811,6 +2820,14 @@ class PersistentLiveDecisionLoop:
             or existing.payload.get("affected_input_ids")
             != progress.affected_input_ids
             or existing.payload.get("plan_sha256") != progress.plan_sha256
+            or (
+                payload_version == 3
+                and existing.payload.get("provider_health_boundaries")
+                != tuple(
+                    boundary.to_dict()
+                    for boundary in progress.provider_health_boundaries
+                )
+            )
             or existing.payload.get(MATERIAL_ACTION_ID_PAYLOAD_KEY)
             != progress.decision_id
         ):

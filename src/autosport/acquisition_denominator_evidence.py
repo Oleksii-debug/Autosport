@@ -18,159 +18,105 @@ from .source_universe_commitment import SourceUniverseCommitment
 
 _SCHEMA = "autosport.acquisition_denominator_evidence"
 _SCHEMA_VERSION = 1
-_CANONICAL_CYCLE_EVIDENCE = CollectorDeltaStore.collector_cycle_evidence
-_CANONICAL_CYCLE_EVIDENCE_DESCRIPTOR = inspect.getattr_static(
-    CollectorDeltaStore, "collector_cycle_evidence"
-)
-_CANONICAL_CYCLE_EVIDENCE_CODE = _CANONICAL_CYCLE_EVIDENCE.__code__
-_CANONICAL_SCHEDULED_SOURCE_UNIVERSE_RESOLVER = resolve_scheduled_source_universe
-_CANONICAL_SCHEDULED_SOURCE_UNIVERSE_RESOLVER_CODE = (
-    _CANONICAL_SCHEDULED_SOURCE_UNIVERSE_RESOLVER.__code__
-)
+def _install_canonical_acquisition_readers():
+    """Capture producer readers and their executable witnesses outside module globals."""
 
+    collector_store_type = CollectorDeltaStore
+    cycle_evidence = collector_store_type.collector_cycle_evidence
+    cycle_descriptor = inspect.getattr_static(
+        collector_store_type,
+        "collector_cycle_evidence",
+    )
+    cycle_code = getattr(cycle_evidence, "__code__", None)
 
-class AcquisitionDenominatorEvidenceError(ValueError):
-    """Scheduled acquisition evidence cannot support the frozen denominator."""
+    scheduled_resolver = resolve_scheduled_source_universe
+    scheduled_resolver_code = getattr(scheduled_resolver, "__code__", None)
+    if cycle_code is None or scheduled_resolver_code is None:
+        raise RuntimeError("canonical acquisition reader executable is unavailable")
 
-
-class AcquisitionCoverageStrength(StrEnum):
-    """Strongest generic coverage claim this composition can make."""
-
-    INCOMPLETE_OR_UNKNOWN = "INCOMPLETE_OR_UNKNOWN"
-    SCHEDULED_CYCLE_WINDOW_COMPLETE = "SCHEDULED_CYCLE_WINDOW_COMPLETE"
-
-
-def _canonical_json(value: object) -> bytes:
-    try:
-        return json.dumps(
-            value,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-            allow_nan=False,
-        ).encode("utf-8")
-    except (TypeError, ValueError) as exc:
-        raise AcquisitionDenominatorEvidenceError(
-            "acquisition denominator evidence is not canonical JSON"
-        ) from exc
-
-
-def _digest(value: object) -> str:
-    return hashlib.sha256(_canonical_json(value)).hexdigest()
-
-
-def _instant(value: object, name: str) -> datetime:
-    if type(value) is not str or not value or value.strip() != value:
-        raise AcquisitionDenominatorEvidenceError(
-            f"{name} must be a non-empty canonical timestamp"
-        )
-    try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError as exc:
-        raise AcquisitionDenominatorEvidenceError(
-            f"{name} must be ISO-8601"
-        ) from exc
-    if parsed.tzinfo is None or parsed.utcoffset() is None:
-        raise AcquisitionDenominatorEvidenceError(
-            f"{name} must include a timezone"
-        )
-    return parsed.astimezone(timezone.utc)
-
-
-def _expected_path(store: CollectorDeltaStore, expected_store_path: str | Path) -> Path:
-    if isinstance(expected_store_path, str):
-        if not expected_store_path or expected_store_path.strip() != expected_store_path:
+    def resolve_reader(
+        store: CollectorDeltaStore,
+        candidate_source_universe: SourceUniverseCommitment,
+        **kwargs: object,
+    ):
+        if (
+            globals().get("resolve_scheduled_source_universe") is not scheduled_resolver
+            or getattr(scheduled_resolver, "__code__", None)
+            is not scheduled_resolver_code
+        ):
             raise AcquisitionDenominatorEvidenceError(
-                "expected_store_path must be a non-empty trimmed path"
+                "canonical scheduled source-universe resolver is rebound"
             )
-        expected = Path(expected_store_path)
-    elif isinstance(expected_store_path, Path):
-        expected = expected_store_path
-    else:
-        raise TypeError("expected_store_path must be str or Path")
-    if getattr(store, "path", None) != expected:
-        raise AcquisitionDenominatorEvidenceError(
-            "collector store path does not match product-expected authority path"
+        resolved = scheduled_resolver(
+            store,
+            candidate_source_universe,
+            **kwargs,
         )
-    return expected
+        if (
+            globals().get("resolve_scheduled_source_universe") is not scheduled_resolver
+            or getattr(scheduled_resolver, "__code__", None)
+            is not scheduled_resolver_code
+        ):
+            raise AcquisitionDenominatorEvidenceError(
+                "canonical scheduled source-universe resolver changed during resolution"
+            )
+        return resolved
+
+    def cycle_reader(
+        store: CollectorDeltaStore,
+        *,
+        source_id: str,
+        start_cycle_seq: int,
+        end_cycle_seq: int,
+    ) -> tuple[dict[str, object], ...]:
+        if (
+            inspect.getattr_static(
+                collector_store_type,
+                "collector_cycle_evidence",
+                None,
+            )
+            is not cycle_descriptor
+            or getattr(cycle_evidence, "__code__", None) is not cycle_code
+        ):
+            raise AcquisitionDenominatorEvidenceError(
+                "canonical collector cycle reader is class/code-rebound"
+            )
+        if type(store) is not collector_store_type:
+            raise TypeError("store must be the exact canonical CollectorDeltaStore")
+        if "collector_cycle_evidence" in vars(store):
+            raise TypeError("canonical collector cycle reader is instance-rebound")
+        evidence = cycle_evidence(
+            store,
+            source_id=source_id,
+            start_cycle_seq=start_cycle_seq,
+            end_cycle_seq=end_cycle_seq,
+        )
+        if (
+            inspect.getattr_static(
+                collector_store_type,
+                "collector_cycle_evidence",
+                None,
+            )
+            is not cycle_descriptor
+            or getattr(cycle_evidence, "__code__", None) is not cycle_code
+        ):
+            raise AcquisitionDenominatorEvidenceError(
+                "canonical collector cycle reader changed during resolution"
+            )
+        if type(evidence) is not tuple:
+            raise AcquisitionDenominatorEvidenceError(
+                "collector cycle evidence must be an exact tuple"
+            )
+        return evidence
+
+    return resolve_reader, cycle_reader
 
 
-def _resolve_scheduled_source_universe_canonical(
-    store: CollectorDeltaStore,
-    candidate_source_universe: SourceUniverseCommitment,
-    **kwargs: object,
-):
-    if (
-        globals().get("resolve_scheduled_source_universe")
-        is not _CANONICAL_SCHEDULED_SOURCE_UNIVERSE_RESOLVER
-        or getattr(
-            _CANONICAL_SCHEDULED_SOURCE_UNIVERSE_RESOLVER,
-            "__code__",
-            None,
-        )
-        is not _CANONICAL_SCHEDULED_SOURCE_UNIVERSE_RESOLVER_CODE
-    ):
-        raise AcquisitionDenominatorEvidenceError(
-            "canonical scheduled source-universe resolver is rebound"
-        )
-    resolved = _CANONICAL_SCHEDULED_SOURCE_UNIVERSE_RESOLVER(
-        store,
-        candidate_source_universe,
-        **kwargs,
-    )
-    if (
-        globals().get("resolve_scheduled_source_universe")
-        is not _CANONICAL_SCHEDULED_SOURCE_UNIVERSE_RESOLVER
-        or getattr(
-            _CANONICAL_SCHEDULED_SOURCE_UNIVERSE_RESOLVER,
-            "__code__",
-            None,
-        )
-        is not _CANONICAL_SCHEDULED_SOURCE_UNIVERSE_RESOLVER_CODE
-    ):
-        raise AcquisitionDenominatorEvidenceError(
-            "canonical scheduled source-universe resolver changed during resolution"
-        )
-    return resolved
-
-
-def _cycle_evidence(
-    store: CollectorDeltaStore,
-    *,
-    source_id: str,
-    start_cycle_seq: int,
-    end_cycle_seq: int,
-) -> tuple[dict[str, object], ...]:
-    if (
-        inspect.getattr_static(CollectorDeltaStore, "collector_cycle_evidence", None)
-        is not _CANONICAL_CYCLE_EVIDENCE_DESCRIPTOR
-        or _CANONICAL_CYCLE_EVIDENCE.__code__ is not _CANONICAL_CYCLE_EVIDENCE_CODE
-    ):
-        raise AcquisitionDenominatorEvidenceError(
-            "canonical collector cycle reader is class/code-rebound"
-        )
-    if "collector_cycle_evidence" in vars(store):
-        raise TypeError("canonical collector cycle reader is instance-rebound")
-    evidence = _CANONICAL_CYCLE_EVIDENCE(
-        store,
-        source_id=source_id,
-        start_cycle_seq=start_cycle_seq,
-        end_cycle_seq=end_cycle_seq,
-    )
-    if (
-        inspect.getattr_static(CollectorDeltaStore, "collector_cycle_evidence", None)
-        is not _CANONICAL_CYCLE_EVIDENCE_DESCRIPTOR
-        or _CANONICAL_CYCLE_EVIDENCE.__code__ is not _CANONICAL_CYCLE_EVIDENCE_CODE
-    ):
-        raise AcquisitionDenominatorEvidenceError(
-            "canonical collector cycle reader changed during resolution"
-        )
-    if type(evidence) is not tuple:
-        raise AcquisitionDenominatorEvidenceError(
-            "collector cycle evidence must be an exact tuple"
-        )
-    return evidence
-
+(
+    _resolve_scheduled_source_universe_canonical,
+    _cycle_evidence,
+) = _install_canonical_acquisition_readers()
+del _install_canonical_acquisition_readers
 
 def _cycle_window_sha256(
     *,
@@ -548,9 +494,31 @@ def _install_acquisition_denominator_authority() -> None:
     ] = {}
     raw_build = build_acquisition_denominator_evidence
     raw_require = require_complete_acquisition_coverage
+    raw_build_code = raw_build.__code__
+    raw_require_code = raw_require.__code__
+    raw_resolve_reader = _resolve_scheduled_source_universe_canonical
+    raw_cycle_reader = _cycle_evidence
+    raw_resolve_reader_code = raw_resolve_reader.__code__
+    raw_cycle_reader_code = raw_cycle_reader.__code__
+
+    def require_canonical_reader_dispatch() -> None:
+        if (
+            getattr(raw_build, "__code__", None) is not raw_build_code
+            or globals().get("_resolve_scheduled_source_universe_canonical")
+            is not raw_resolve_reader
+            or getattr(raw_resolve_reader, "__code__", None)
+            is not raw_resolve_reader_code
+            or globals().get("_cycle_evidence") is not raw_cycle_reader
+            or getattr(raw_cycle_reader, "__code__", None) is not raw_cycle_reader_code
+        ):
+            raise AcquisitionDenominatorEvidenceError(
+                "canonical acquisition reader dispatch changed"
+            )
 
     def authoritative_build(*args: object, **kwargs: object) -> AcquisitionDenominatorEvidence:
+        require_canonical_reader_dispatch()
         evidence = raw_build(*args, **kwargs)
+        require_canonical_reader_dispatch()
         identity = id(evidence)
         digest = evidence.evidence_sha256
 
@@ -572,6 +540,10 @@ def _install_acquisition_denominator_authority() -> None:
     def authoritative_require(
         evidence: AcquisitionDenominatorEvidence,
     ) -> AcquisitionDenominatorEvidence:
+        if getattr(raw_require, "__code__", None) is not raw_require_code:
+            raise AcquisitionDenominatorEvidenceError(
+                "canonical acquisition requirement executable changed"
+            )
         if type(evidence) is not AcquisitionDenominatorEvidence:
             raise TypeError("evidence must be exact AcquisitionDenominatorEvidence")
         try:
@@ -590,7 +562,12 @@ def _install_acquisition_denominator_authority() -> None:
             raise AcquisitionDenominatorEvidenceError(
                 "acquisition denominator evidence is not current product-issued authority"
             )
-        return raw_require(evidence)
+        result = raw_require(evidence)
+        if getattr(raw_require, "__code__", None) is not raw_require_code:
+            raise AcquisitionDenominatorEvidenceError(
+                "canonical acquisition requirement executable changed"
+            )
+        return result
 
     globals()["build_acquisition_denominator_evidence"] = authoritative_build
     globals()["require_complete_acquisition_coverage"] = authoritative_require

@@ -539,6 +539,199 @@ def test_scheduled_resolver_alias_rebinding_cannot_mint_complete_coverage(
         assert hostile_calls == []
 
 
+
+def test_coordinated_resolver_and_old_module_witness_rebind_fails_closed(
+    monkeypatch,
+) -> None:
+    with TemporaryDirectory() as tmp:
+        path = Path(tmp) / "collector.db"
+        store = CollectorDeltaStore(path)
+        _ensure_schedule(store)
+        cycle = _start_slot(store, 0)
+        _finish(
+            store,
+            cycle,
+            completed_at="2026-09-22T00:00:05+00:00",
+        )
+        source = build_source_universe_commitment(
+            store,
+            expected_store_path=path,
+            source_id=SOURCE_ID,
+            start_cycle_seq=cycle,
+            end_cycle_seq=cycle,
+        )
+        hostile_calls: list[object] = []
+
+        def hostile_resolver(*args, **kwargs):
+            hostile_calls.append((args, kwargs))
+            raise AssertionError("forged resolver must not execute")
+
+        monkeypatch.setattr(
+            acquisition_denominator_evidence,
+            "resolve_scheduled_source_universe",
+            hostile_resolver,
+        )
+        # Recreate the old coordinated module-global witness attack. These names are
+        # intentionally no longer authority, even when moved with the forged code.
+        monkeypatch.setattr(
+            acquisition_denominator_evidence,
+            "_CANONICAL_SCHEDULED_SOURCE_UNIVERSE_RESOLVER",
+            hostile_resolver,
+            raising=False,
+        )
+        monkeypatch.setattr(
+            acquisition_denominator_evidence,
+            "_CANONICAL_SCHEDULED_SOURCE_UNIVERSE_RESOLVER_CODE",
+            hostile_resolver.__code__,
+            raising=False,
+        )
+
+        with pytest.raises(
+            AcquisitionDenominatorEvidenceError,
+            match="scheduled source-universe resolver is rebound",
+        ):
+            build_acquisition_denominator_evidence(
+                store,
+                source,
+                _universe(),
+                expected_store_path=path,
+                expected_source_id=SOURCE_ID,
+                expected_run_id=RUN_ID,
+                expected_start_slot_ordinal=0,
+                expected_end_slot_ordinal=0,
+            )
+
+        assert hostile_calls == []
+
+
+def test_coordinated_cycle_reader_and_old_module_witness_rebind_fails_closed(
+    monkeypatch,
+) -> None:
+    with TemporaryDirectory() as tmp:
+        path = Path(tmp) / "collector.db"
+        store = CollectorDeltaStore(path)
+        _ensure_schedule(store)
+        cycle = _start_slot(store, 0)
+        _finish(
+            store,
+            cycle,
+            completed_at="2026-09-22T00:00:05+00:00",
+        )
+        source = build_source_universe_commitment(
+            store,
+            expected_store_path=path,
+            source_id=SOURCE_ID,
+            start_cycle_seq=cycle,
+            end_cycle_seq=cycle,
+        )
+        hostile_calls: list[object] = []
+
+        def hostile_cycle_reader(self, **kwargs):
+            hostile_calls.append((self, kwargs))
+            return ()
+
+        monkeypatch.setattr(
+            CollectorDeltaStore,
+            "collector_cycle_evidence",
+            hostile_cycle_reader,
+        )
+        monkeypatch.setattr(
+            acquisition_denominator_evidence,
+            "_CANONICAL_CYCLE_EVIDENCE",
+            hostile_cycle_reader,
+            raising=False,
+        )
+        monkeypatch.setattr(
+            acquisition_denominator_evidence,
+            "_CANONICAL_CYCLE_EVIDENCE_DESCRIPTOR",
+            hostile_cycle_reader,
+            raising=False,
+        )
+        monkeypatch.setattr(
+            acquisition_denominator_evidence,
+            "_CANONICAL_CYCLE_EVIDENCE_CODE",
+            hostile_cycle_reader.__code__,
+            raising=False,
+        )
+
+        with pytest.raises(
+            AcquisitionDenominatorEvidenceError,
+            match="collector cycle reader is class/code-rebound",
+        ):
+            build_acquisition_denominator_evidence(
+                store,
+                source,
+                _universe(),
+                expected_store_path=path,
+                expected_source_id=SOURCE_ID,
+                expected_run_id=RUN_ID,
+                expected_start_slot_ordinal=0,
+                expected_end_slot_ordinal=0,
+            )
+
+        assert hostile_calls == []
+
+
+def test_reader_helper_rebinding_cannot_enter_authoritative_builder(monkeypatch) -> None:
+    hostile_calls: list[object] = []
+
+    def hostile_reader(*args, **kwargs):
+        hostile_calls.append((args, kwargs))
+        raise AssertionError("rebound helper must not execute")
+
+    monkeypatch.setattr(
+        acquisition_denominator_evidence,
+        "_resolve_scheduled_source_universe_canonical",
+        hostile_reader,
+    )
+
+    with TemporaryDirectory() as tmp:
+        path = Path(tmp) / "collector.db"
+        store = CollectorDeltaStore(path)
+        _ensure_schedule(store)
+        cycle = _start_slot(store, 0)
+        _finish(
+            store,
+            cycle,
+            completed_at="2026-09-22T00:00:05+00:00",
+        )
+        source = build_source_universe_commitment(
+            store,
+            expected_store_path=path,
+            source_id=SOURCE_ID,
+            start_cycle_seq=cycle,
+            end_cycle_seq=cycle,
+        )
+        with pytest.raises(
+            AcquisitionDenominatorEvidenceError,
+            match="canonical acquisition reader dispatch changed",
+        ):
+            build_acquisition_denominator_evidence(
+                store,
+                source,
+                _universe(),
+                expected_store_path=path,
+                expected_source_id=SOURCE_ID,
+                expected_run_id=RUN_ID,
+                expected_start_slot_ordinal=0,
+                expected_end_slot_ordinal=0,
+            )
+
+    assert hostile_calls == []
+
+
+def test_canonical_reader_expected_witnesses_are_not_module_capabilities() -> None:
+    for name in (
+        "_CANONICAL_CYCLE_EVIDENCE",
+        "_CANONICAL_CYCLE_EVIDENCE_DESCRIPTOR",
+        "_CANONICAL_CYCLE_EVIDENCE_CODE",
+        "_CANONICAL_SCHEDULED_SOURCE_UNIVERSE_RESOLVER",
+        "_CANONICAL_SCHEDULED_SOURCE_UNIVERSE_RESOLVER_CODE",
+        "_install_canonical_acquisition_readers",
+    ):
+        assert not hasattr(acquisition_denominator_evidence, name)
+
+
 def test_internal_issue_constructor_cannot_mint_positive_authority() -> None:
     with TemporaryDirectory() as tmp:
         path = Path(tmp) / "collector.db"

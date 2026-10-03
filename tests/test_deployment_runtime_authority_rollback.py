@@ -2653,3 +2653,75 @@ def test_runtime_authority_rejects_learning_environment_dependency_rebinding(
         match="learning-environment dependency was replaced",
     ):
         store.records()
+
+
+def test_runtime_authority_get_rejects_sha_rebinding_before_argument_validation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "deployment-runtime-authority.json"
+    store = DeploymentRuntimeAuthorityStore.initialize_pristine(
+        path,
+        authority_root=_authority_root(tmp_path),
+    )
+    hostile_calls: list[object] = []
+
+    def hostile_sha(value: object, name: str) -> str:
+        hostile_calls.append((value, name))
+        return "a" * 64
+
+    monkeypatch.setattr(deployment_runtime_authority, "_sha", hostile_sha)
+    with pytest.raises(
+        DeploymentRuntimeAuthorityError,
+        match="binding validator dispatch was replaced",
+    ):
+        store.get("a" * 64)
+
+    assert hostile_calls == []
+
+
+def test_runtime_authority_pristine_rejects_digest_rebinding_before_use(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hostile_calls: list[object] = []
+
+    def hostile_digest(value: object) -> str:
+        hostile_calls.append(value)
+        return "a" * 64
+
+    monkeypatch.setattr(deployment_runtime_authority, "_digest", hostile_digest)
+    with pytest.raises(
+        DeploymentRuntimeAuthorityError,
+        match="construction helper dispatch was replaced",
+    ):
+        DeploymentRuntimeAuthorityStore.initialize_pristine(
+            tmp_path / "deployment-runtime-authority.json",
+            authority_root=_authority_root(tmp_path),
+        )
+
+    assert hostile_calls == []
+
+
+def test_runtime_authority_pristine_bypasses_replaced_store_new(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hostile_calls: list[object] = []
+
+    def hostile_new(cls: object, *args: object, **kwargs: object) -> object:
+        hostile_calls.append((cls, args, kwargs))
+        raise AssertionError("hostile store __new__ executed")
+
+    monkeypatch.setattr(
+        DeploymentRuntimeAuthorityStore,
+        "__new__",
+        staticmethod(hostile_new),
+    )
+    store = DeploymentRuntimeAuthorityStore.initialize_pristine(
+        tmp_path / "deployment-runtime-authority.json",
+        authority_root=_authority_root(tmp_path),
+    )
+
+    assert hostile_calls == []
+    assert store.records() == ()

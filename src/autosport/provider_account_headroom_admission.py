@@ -1037,18 +1037,6 @@ class ProductInternalHeadroomReservation:
         return _reservation_is_issued(self)
 
 
-_ISSUED_LOCK = threading.RLock()
-_ISSUED: dict[
-    int,
-    tuple[weakref.ReferenceType[ProviderAccountHeadroomAssessment], str],
-] = {}
-_RESERVATION_ISSUED_LOCK = threading.RLock()
-_RESERVATION_ISSUED: dict[
-    int,
-    tuple[weakref.ReferenceType[ProductInternalHeadroomReservation], str],
-] = {}
-
-
 def _reservation_digest(value: ProductInternalHeadroomReservation) -> str:
     return _canonical_digest(
         {
@@ -1064,39 +1052,6 @@ def _reservation_digest(value: ProductInternalHeadroomReservation) -> str:
             "real_money_readiness": value.real_money_readiness,
         }
     )
-
-
-def _issue_reservation(value: ProductInternalHeadroomReservation) -> None:
-    key = id(value)
-    digest = _reservation_digest(value)
-
-    def cleanup(
-        reference: weakref.ReferenceType[ProductInternalHeadroomReservation],
-    ) -> None:
-        with _RESERVATION_ISSUED_LOCK:
-            current = _RESERVATION_ISSUED.get(key)
-            if current is not None and current[0] is reference:
-                _RESERVATION_ISSUED.pop(key, None)
-
-    reference = weakref.ref(value, cleanup)
-    with _RESERVATION_ISSUED_LOCK:
-        _RESERVATION_ISSUED[key] = (reference, digest)
-
-
-def _reservation_is_issued(value: ProductInternalHeadroomReservation) -> bool:
-    if type(value) is not ProductInternalHeadroomReservation:
-        return False
-    try:
-        digest = _reservation_digest(value)
-    except (ProviderAccountHeadroomError, TypeError, ValueError):
-        return False
-    with _RESERVATION_ISSUED_LOCK:
-        current = _RESERVATION_ISSUED.get(id(value))
-        return (
-            current is not None
-            and current[0]() is value
-            and current[1] == digest
-        )
 
 
 def _assessment_payload(value: ProviderAccountHeadroomAssessment) -> dict[str, object]:
@@ -1140,41 +1095,6 @@ def _assessment_payload(value: ProviderAccountHeadroomAssessment) -> dict[str, o
 
 def _assessment_digest(value: ProviderAccountHeadroomAssessment) -> str:
     return _canonical_digest(_assessment_payload(value))
-
-
-def _issue_assessment(value: ProviderAccountHeadroomAssessment) -> None:
-    key = id(value)
-
-    def cleanup(
-        reference: weakref.ReferenceType[ProviderAccountHeadroomAssessment],
-    ) -> None:
-        with _ISSUED_LOCK:
-            current = _ISSUED.get(key)
-            if current is not None and current[0] is reference:
-                _ISSUED.pop(key, None)
-
-    reference = weakref.ref(value, cleanup)
-    with _ISSUED_LOCK:
-        _ISSUED[key] = (reference, value.evidence_sha256)
-
-
-def _assert_issued(value: ProviderAccountHeadroomAssessment) -> None:
-    if type(value) is not ProviderAccountHeadroomAssessment:
-        raise ProviderAccountHeadroomError(
-            "assessment must be exact ProviderAccountHeadroomAssessment"
-        )
-    with _ISSUED_LOCK:
-        current = _ISSUED.get(id(value))
-        if (
-            current is None
-            or current[0]() is not value
-            or current[1] != value.evidence_sha256
-        ):
-            raise ProviderAccountHeadroomError(
-                "headroom assessment was not canonically issued"
-            )
-    if _assessment_digest(value) != value.evidence_sha256:
-        raise ProviderAccountHeadroomError("headroom assessment identity changed")
 
 
 def _require_live_balance(
@@ -1809,7 +1729,6 @@ def assess_provider_account_headroom(
             raise ProviderAccountHeadroomStale(
                 "execution ledger changed before headroom assessment issuance"
             )
-        _issue_assessment(assessment)
         return assessment
 
 
@@ -1993,5 +1912,147 @@ def reserve_observed_provider_headroom(
         post_reservation_ledger_sha256=post.sha256,
         post_reservation_event_count=post.event_count,
     )
-    _issue_reservation(reservation)
     return reservation
+
+def _install_headroom_issuance_authority() -> None:
+    assessment_lock = threading.RLock()
+    assessment_issued: dict[
+        int,
+        tuple[weakref.ReferenceType[ProviderAccountHeadroomAssessment], str],
+    ] = {}
+    reservation_lock = threading.RLock()
+    reservation_issued: dict[
+        int,
+        tuple[weakref.ReferenceType[ProductInternalHeadroomReservation], str],
+    ] = {}
+
+    raw_assess = assess_provider_account_headroom
+    raw_reserve = reserve_observed_provider_headroom
+
+    def issue_assessment(value: ProviderAccountHeadroomAssessment) -> None:
+        digest = _assessment_digest(value)
+        if digest != value.evidence_sha256:
+            raise ProviderAccountHeadroomError(
+                "headroom assessment identity changed before canonical issuance"
+            )
+        identity = id(value)
+
+        def clear(
+            reference: weakref.ReferenceType[ProviderAccountHeadroomAssessment],
+            *,
+            _identity: int = identity,
+        ) -> None:
+            with assessment_lock:
+                current = assessment_issued.get(_identity)
+                if current is not None and current[0] is reference:
+                    assessment_issued.pop(_identity, None)
+
+        reference = weakref.ref(value, clear)
+        with assessment_lock:
+            assessment_issued[identity] = (reference, digest)
+
+    def assert_issued(value: ProviderAccountHeadroomAssessment) -> None:
+        if type(value) is not ProviderAccountHeadroomAssessment:
+            raise ProviderAccountHeadroomError(
+                "assessment must be exact ProviderAccountHeadroomAssessment"
+            )
+        try:
+            digest = _assessment_digest(value)
+        except (ProviderAccountHeadroomError, TypeError, ValueError) as exc:
+            raise ProviderAccountHeadroomError(
+                "headroom assessment identity is invalid"
+            ) from exc
+        with assessment_lock:
+            current = assessment_issued.get(id(value))
+        if (
+            current is None
+            or current[0]() is not value
+            or current[1] != digest
+            or value.evidence_sha256 != digest
+        ):
+            raise ProviderAccountHeadroomError(
+                "headroom assessment was not canonically issued"
+            )
+
+    def issue_reservation(value: ProductInternalHeadroomReservation) -> None:
+        digest = _reservation_digest(value)
+        identity = id(value)
+
+        def clear(
+            reference: weakref.ReferenceType[ProductInternalHeadroomReservation],
+            *,
+            _identity: int = identity,
+        ) -> None:
+            with reservation_lock:
+                current = reservation_issued.get(_identity)
+                if current is not None and current[0] is reference:
+                    reservation_issued.pop(_identity, None)
+
+        reference = weakref.ref(value, clear)
+        with reservation_lock:
+            reservation_issued[identity] = (reference, digest)
+
+    def reservation_is_issued(value: ProductInternalHeadroomReservation) -> bool:
+        if type(value) is not ProductInternalHeadroomReservation:
+            return False
+        try:
+            digest = _reservation_digest(value)
+        except (ProviderAccountHeadroomError, TypeError, ValueError):
+            return False
+        with reservation_lock:
+            current = reservation_issued.get(id(value))
+        return (
+            current is not None
+            and current[0]() is value
+            and current[1] == digest
+        )
+
+    def authoritative_assess(
+        ledger: RealExecutionLedger,
+        acquired: AuthoritativeAccountSnapshot,
+        *,
+        plan_id: str,
+        action_id: str,
+        bound_plans: tuple[BoundSupervisedExecutionPlan, ...],
+        intents: tuple[OpportunityIntent, ...],
+    ) -> ProviderAccountHeadroomAssessment:
+        value = raw_assess(
+            ledger,
+            acquired,
+            plan_id=plan_id,
+            action_id=action_id,
+            bound_plans=bound_plans,
+            intents=intents,
+        )
+        issue_assessment(value)
+        return value
+
+    def authoritative_reserve(
+        ledger: RealExecutionLedger,
+        acquired: AuthoritativeAccountSnapshot,
+        assessment: ProviderAccountHeadroomAssessment,
+        *,
+        attempt_id: str,
+        bound_plans: tuple[BoundSupervisedExecutionPlan, ...],
+        intents: tuple[OpportunityIntent, ...] = (),
+    ) -> ProductInternalHeadroomReservation:
+        value = raw_reserve(
+            ledger,
+            acquired,
+            assessment,
+            attempt_id=attempt_id,
+            bound_plans=bound_plans,
+            intents=intents,
+        )
+        issue_reservation(value)
+        return value
+
+    globals()["_assert_issued"] = assert_issued
+    globals()["_reservation_is_issued"] = reservation_is_issued
+    globals()["assess_provider_account_headroom"] = authoritative_assess
+    globals()["reserve_observed_provider_headroom"] = authoritative_reserve
+
+
+_install_headroom_issuance_authority()
+del _install_headroom_issuance_authority
+

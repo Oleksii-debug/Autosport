@@ -401,6 +401,77 @@ def test_evidence_shape_rejects_impossible_internal_metrics(tmp_path):
         replace(evidence.points[0], realized_delta=Decimal("1"))
 
 
+def test_evidence_shape_rejects_lifecycle_and_path_claim_drift(tmp_path):
+    book = _initialize(tmp_path)
+    opened = _open(book, "shape-open", "10", "2026-09-20T10:00:00+00:00")
+    book.save(tmp_path / "paper_book.json")
+    open_evidence = resolve_paper_drawdown_evidence(tmp_path)
+
+    with pytest.raises(
+        PaperDrawdownEvidenceError,
+        match="open count does not match the path",
+    ):
+        replace(open_evidence, open_position_count=0)
+
+    duplicate_open = replace(
+        open_evidence.points[-1],
+        sequence=len(open_evidence.points),
+        point_id="paper-forged-duplicate-open",
+    )
+    with pytest.raises(
+        PaperDrawdownEvidenceError,
+        match="ticket may open only once",
+    ):
+        replace(
+            open_evidence,
+            points=open_evidence.points + (duplicate_open,),
+        )
+
+    book.settle(
+        opened.ticket_id,
+        set(),
+        settled_at="2026-09-20T11:00:00+00:00",
+    )
+    book.save(tmp_path / "paper_book.json")
+    loss_evidence = resolve_paper_drawdown_evidence(tmp_path)
+
+    with pytest.raises(
+        PaperDrawdownEvidenceError,
+        match="settlement availability does not match the path",
+    ):
+        replace(loss_evidence, settlement_availability_complete=False)
+
+    forged_settle = replace(loss_evidence.points[-1], sequence=1)
+    with pytest.raises(
+        PaperDrawdownEvidenceError,
+        match="settlement must follow one canonical open",
+    ):
+        replace(
+            loss_evidence,
+            points=(loss_evidence.points[0], forged_settle),
+            open_position_count=0,
+        )
+
+    with pytest.raises(
+        PaperDrawdownEvidenceError,
+        match="loss episode identity is not in the path",
+    ):
+        replace(
+            loss_evidence,
+            historical_max_drawdown_peak_id="paper-forged-peak",
+        )
+
+    with pytest.raises(
+        PaperDrawdownEvidenceError,
+        match="current drawdown exceeds historical maximum",
+    ):
+        replace(
+            loss_evidence,
+            current_drawdown_amount=loss_evidence.historical_max_drawdown_amount
+            + Decimal("1"),
+        )
+
+
 def test_resolver_rejects_in_place_captured_helper_code_rebinding(tmp_path):
     _initialize(tmp_path)
 

@@ -4,6 +4,7 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 import json
+import weakref
 
 import pytest
 
@@ -2406,7 +2407,7 @@ def test_headroom_issuance_closure_graph_exposes_no_mutable_identity_registry(
     )
 
 
-def test_closure_exposed_issuance_cache_miss_cannot_self_mint_assessment(
+def test_closure_exposed_issuance_state_is_read_only_and_has_no_mint_callable(
     monkeypatch,
     tmp_path,
 ) -> None:
@@ -2422,27 +2423,23 @@ def test_closure_exposed_issuance_cache_miss_cannot_self_mint_assessment(
     reconstructed = replace(issued)
 
     values = _headroom_authority_closure_values(
+        headroom_module.assess_provider_account_headroom,
         headroom_module.reserve_observed_provider_headroom,
     )
-    cache = next(
-        value
+    mappings = [
+        value for value in values if type(value).__name__ == "mappingproxy"
+    ]
+    assert mappings
+    assert all(type(value) is not dict for value in values)
+    assert not any(
+        callable(value)
+        and getattr(value, "__name__", None)
+        in {"issue_assessment", "issue_reservation"}
         for value in values
-        if getattr(getattr(value, "__wrapped__", None), "__name__", None)
-        == "assessment_issuance"
     )
-    identity_type = next(
-        value
-        for value in values
-        if isinstance(value, type) and value.__name__ == "_IdentityWeakRef"
-    )
-    state_reader = next(
-        value
-        for value in values
-        if callable(value) and getattr(value, "__name__", None) == "assessment_state"
-    )
+    with pytest.raises(TypeError):
+        mappings[0][id(reconstructed)] = (weakref.ref(reconstructed), ())
 
-    assert cache(identity_type(reconstructed), state_reader(reconstructed)) is False
-    assert cache.cache_info().maxsize == 4096
     with pytest.raises(
         ProviderAccountHeadroomError,
         match="not canonically issued",
@@ -2451,7 +2448,7 @@ def test_closure_exposed_issuance_cache_miss_cannot_self_mint_assessment(
             ledger,
             acquired,
             reconstructed,
-            attempt_id="closure-cache-self-mint",
+            attempt_id="closure-readonly-self-mint",
         )
 
 

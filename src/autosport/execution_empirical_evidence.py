@@ -1119,7 +1119,7 @@ def build_empirical_execution_evidence(
     return evidence
 
 
-POPULATION_SCHEMA_VERSION = 6
+POPULATION_SCHEMA_VERSION = 7
 
 
 @dataclass(frozen=True, slots=True, weakref_slot=True, init=False)
@@ -1143,9 +1143,17 @@ class EmpiricalExecutionPopulationEvidence:
     evaluation_protocol_authority_verified: bool
     evaluation_protocol_authority_status: str
     samples: tuple[EmpiricalExecutionEvidence, ...]
+    decision_count: int
+    plan_count: int
+    planned_action_count: int
+    attempted_action_count: int
     schema_version: int = POPULATION_SCHEMA_VERSION
 
     total_attempts: int = field(init=False)
+    unattempted_action_count: int = field(init=False)
+    retry_attempt_count: int = field(init=False)
+    submitted_attempt_count: int = field(init=False)
+    unsubmitted_attempt_count: int = field(init=False)
     state_counts: tuple[tuple[str, int], ...] = field(init=False)
     ledger_terminal_count: int = field(init=False)
     provider_verified_terminal_count: int = field(init=False)
@@ -1216,6 +1224,29 @@ class EmpiricalExecutionPopulationEvidence:
             raise EmpiricalExecutionEvidenceError(
                 "source_event_count must be positive int"
             )
+        for name in (
+            "decision_count",
+            "plan_count",
+            "planned_action_count",
+            "attempted_action_count",
+        ):
+            value = getattr(self, name)
+            if type(value) is not int or value < 1:
+                raise EmpiricalExecutionEvidenceError(
+                    f"{name} must be positive int"
+                )
+        if not (
+            self.decision_count
+            <= self.plan_count
+            <= self.planned_action_count
+        ):
+            raise EmpiricalExecutionEvidenceError(
+                "population decision/plan/action funnel is inconsistent"
+            )
+        if self.attempted_action_count > self.planned_action_count:
+            raise EmpiricalExecutionEvidenceError(
+                "attempted actions cannot exceed planned actions"
+            )
         if type(self.samples) is not tuple or not self.samples:
             raise EmpiricalExecutionEvidenceError(
                 "population evidence requires non-empty canonical sample tuple"
@@ -1254,6 +1285,23 @@ class EmpiricalExecutionPopulationEvidence:
                 )
 
         total = len(self.samples)
+        if total < self.attempted_action_count:
+            raise EmpiricalExecutionEvidenceError(
+                "attempt denominator cannot be smaller than attempted-action count"
+            )
+        unattempted_action_count = (
+            self.planned_action_count - self.attempted_action_count
+        )
+        retry_attempt_count = total - self.attempted_action_count
+        submitted_attempt_count = sum(
+            sample.submitted_at is not None for sample in self.samples
+        )
+        unsubmitted_attempt_count = total - submitted_attempt_count
+        if submitted_attempt_count > total:
+            raise EmpiricalExecutionEvidenceError(
+                "submitted attempts cannot exceed attempt denominator"
+            )
+
         counts = tuple(
             (
                 state.value,
@@ -1404,6 +1452,22 @@ class EmpiricalExecutionPopulationEvidence:
             )
 
         object.__setattr__(self, "total_attempts", total)
+        object.__setattr__(
+            self,
+            "unattempted_action_count",
+            unattempted_action_count,
+        )
+        object.__setattr__(self, "retry_attempt_count", retry_attempt_count)
+        object.__setattr__(
+            self,
+            "submitted_attempt_count",
+            submitted_attempt_count,
+        )
+        object.__setattr__(
+            self,
+            "unsubmitted_attempt_count",
+            unsubmitted_attempt_count,
+        )
         object.__setattr__(self, "state_counts", counts)
         object.__setattr__(
             self,
@@ -1564,7 +1628,35 @@ class EmpiricalExecutionPopulationEvidence:
             "sample_evidence_sha256s": [
                 sample.evidence_sha256 for sample in self.samples
             ],
+            "decision_count": self.decision_count,
+            "plan_count": self.plan_count,
+            "planned_action_count": self.planned_action_count,
+            "attempted_action_count": self.attempted_action_count,
+            "unattempted_action_count": self.unattempted_action_count,
+            "planned_action_attempt_rate": self._rate(
+                self.attempted_action_count,
+                self.planned_action_count,
+            ),
+            "unattempted_action_rate": self._rate(
+                self.unattempted_action_count,
+                self.planned_action_count,
+            ),
             "total_attempts": self.total_attempts,
+            "retry_attempt_count": self.retry_attempt_count,
+            "retry_attempt_rate": self._rate(
+                self.retry_attempt_count,
+                self.total_attempts,
+            ),
+            "submitted_attempt_count": self.submitted_attempt_count,
+            "unsubmitted_attempt_count": self.unsubmitted_attempt_count,
+            "submitted_attempt_rate": self._rate(
+                self.submitted_attempt_count,
+                self.total_attempts,
+            ),
+            "unsubmitted_attempt_rate": self._rate(
+                self.unsubmitted_attempt_count,
+                self.total_attempts,
+            ),
             "state_counts": state_counts,
             "state_rates": {
                 state: self._rate(count, self.total_attempts)
@@ -1703,6 +1795,10 @@ def _issue_empirical_execution_population_evidence(
     source_event_count: int,
     evaluation_protocol_sha256: str,
     samples: tuple[EmpiricalExecutionEvidence, ...],
+    decision_count: int,
+    plan_count: int,
+    planned_action_count: int,
+    attempted_action_count: int,
 ) -> EmpiricalExecutionPopulationEvidence:
     evidence = object.__new__(EmpiricalExecutionPopulationEvidence)
     object.__setattr__(evidence, "source_ledger_sha256", source_ledger_sha256)
@@ -1729,6 +1825,10 @@ def _issue_empirical_execution_population_evidence(
         EVALUATION_PROTOCOL_AUTHORITY_UNQUALIFIED,
     )
     object.__setattr__(evidence, "samples", samples)
+    object.__setattr__(evidence, "decision_count", decision_count)
+    object.__setattr__(evidence, "plan_count", plan_count)
+    object.__setattr__(evidence, "planned_action_count", planned_action_count)
+    object.__setattr__(evidence, "attempted_action_count", attempted_action_count)
     object.__setattr__(evidence, "schema_version", POPULATION_SCHEMA_VERSION)
     evidence.__post_init__()
     _register_issued_empirical_population(evidence)
@@ -1764,7 +1864,32 @@ def build_empirical_execution_population_evidence(
     except ExecutionLedgerIntegrityError:
         raise
 
+    plan_events = [
+        event
+        for event in events
+        if event.get("event_type") == EventType.PLAN_RESERVED.value
+    ]
+    decision_ids: set[str] = set()
+    plan_ids: set[str] = set()
+    planned_action_keys: set[tuple[str, str]] = set()
+    for event in plan_events:
+        plan = RealExecutionLedger._plan_from_dict(event["payload"]["plan"])
+        if plan.plan_id in plan_ids:
+            raise EmpiricalExecutionEvidenceUnavailable(
+                "verified snapshot contains duplicate plan reservation"
+            )
+        plan_ids.add(plan.plan_id)
+        decision_ids.add(plan.decision_id)
+        for action in plan.actions:
+            key = (plan.plan_id, action.action_id)
+            if key in planned_action_keys:
+                raise EmpiricalExecutionEvidenceUnavailable(
+                    "verified snapshot contains duplicate planned action"
+                )
+            planned_action_keys.add(key)
+
     attempt_ids: list[str] = []
+    attempted_action_keys: set[tuple[str, str]] = set()
     seen: set[str] = set()
     for event in events:
         if event.get("event_type") != EventType.ATTEMPT_RESERVED.value:
@@ -1776,6 +1901,13 @@ def build_empirical_execution_population_evidence(
             )
         seen.add(attempt_id)
         attempt_ids.append(attempt_id)
+        action_id = _text(event.get("action_id"), "action_id")
+        action_key = (_text(event.get("plan_id"), "plan_id"), action_id)
+        if action_key not in planned_action_keys:
+            raise EmpiricalExecutionEvidenceUnavailable(
+                "attempt reservation references action outside frozen plan funnel"
+            )
+        attempted_action_keys.add(action_key)
 
     if not attempt_ids:
         raise EmpiricalExecutionEvidenceUnavailable(
@@ -1801,5 +1933,9 @@ def build_empirical_execution_population_evidence(
         source_event_count=initial_snapshot.event_count,
         evaluation_protocol_sha256=protocol_sha256,
         samples=samples,
+        decision_count=len(decision_ids),
+        plan_count=len(plan_ids),
+        planned_action_count=len(planned_action_keys),
+        attempted_action_count=len(attempted_action_keys),
     )
 

@@ -983,6 +983,14 @@ def test_population_aggregate_keeps_complete_funnel_denominator(tmp_path):
 
     assert isinstance(aggregate, EmpiricalExecutionPopulationEvidence)
     assert aggregate.total_attempts == 7
+    assert aggregate.decision_count == 7
+    assert aggregate.plan_count == 7
+    assert aggregate.planned_action_count == 7
+    assert aggregate.attempted_action_count == 7
+    assert aggregate.unattempted_action_count == 0
+    assert aggregate.retry_attempt_count == 0
+    assert aggregate.submitted_attempt_count == 6
+    assert aggregate.unsubmitted_attempt_count == 1
     assert aggregate.source_product_authority_verified is False
     assert (
         aggregate.source_root_authority_status
@@ -1092,6 +1100,22 @@ def test_population_aggregate_keeps_complete_funnel_denominator(tmp_path):
         "numerator": 3,
         "denominator": 7,
     }
+    assert payload["planned_action_attempt_rate"] == {
+        "numerator": 7,
+        "denominator": 7,
+    }
+    assert payload["unattempted_action_rate"] == {
+        "numerator": 0,
+        "denominator": 7,
+    }
+    assert payload["submitted_attempt_rate"] == {
+        "numerator": 6,
+        "denominator": 7,
+    }
+    assert payload["unsubmitted_attempt_rate"] == {
+        "numerator": 1,
+        "denominator": 7,
+    }
     assert payload["reconciliation_evidence_rate"] == {
         "numerator": 1,
         "denominator": 7,
@@ -1103,6 +1127,47 @@ def test_population_aggregate_keeps_complete_funnel_denominator(tmp_path):
     assert payload["negative_reconciliation_rate"] == {
         "numerator": 1,
         "denominator": 7,
+    }
+
+
+def test_population_funnel_retains_planned_action_without_attempt(tmp_path):
+    ledger = _population_ledger(tmp_path)
+    unattempted_action = replace(
+        _action(),
+        action_id="leg-unattempted",
+        selection_id="selection-unattempted",
+        quote_id="quote-unattempted",
+    )
+    ledger.reserve_plan(
+        ExecutionPlan(
+            plan_id="plan-unattempted",
+            bookmaker_profile_version="profile-1",
+            decision_id="decision-unattempted",
+            approval_id="approval-unattempted",
+            created_at=DECISION,
+            actions=(unattempted_action,),
+        )
+    )
+
+    aggregate = build_empirical_execution_population_evidence(
+        ledger,
+        evaluation_protocol_sha256="8" * 64,
+    )
+    payload = aggregate.to_dict()
+
+    assert aggregate.total_attempts == 7
+    assert aggregate.decision_count == 8
+    assert aggregate.plan_count == 8
+    assert aggregate.planned_action_count == 8
+    assert aggregate.attempted_action_count == 7
+    assert aggregate.unattempted_action_count == 1
+    assert payload["planned_action_attempt_rate"] == {
+        "numerator": 7,
+        "denominator": 8,
+    }
+    assert payload["unattempted_action_rate"] == {
+        "numerator": 1,
+        "denominator": 8,
     }
 
 

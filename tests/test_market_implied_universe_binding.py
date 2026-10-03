@@ -338,6 +338,79 @@ class MarketImpliedUniverseBindingTests(unittest.TestCase):
         self.assertFalse(truth["promotion_authority"])
         self.assertFalse(truth["real_money_execution"])
 
+    def test_universe_loader_instance_shadow_cannot_mint_denominator(self) -> None:
+        self.persist_market()
+        evidence = self.evidence()
+        protocol = self.protocol(evidence)
+        store = self.evaluation_store(self.evaluation_row())
+        loaded = store.load()
+        self.assertIsNotNone(loaded)
+
+        store.load = lambda: loaded  # type: ignore[method-assign]
+        try:
+            with self.assertRaisesRegex(
+                MarketImpliedUniverseBindingError,
+                "must not shadow load reader",
+            ):
+                bind_market_implied_baseline_to_evaluation_universe(
+                    protocol=protocol,
+                    baseline_definition=self.definition(protocol),
+                    evidence=(evidence,),
+                    evaluation_store=store,
+                )
+        finally:
+            del store.load
+
+    def test_universe_loader_class_rebind_fails_closed(self) -> None:
+        self.persist_market()
+        evidence = self.evidence()
+        protocol = self.protocol(evidence)
+        store = self.evaluation_store(self.evaluation_row())
+        original_load = EvaluationUniverseStore.load
+
+        def forged_load(self):
+            return None
+
+        try:
+            EvaluationUniverseStore.load = forged_load  # type: ignore[method-assign]
+            with self.assertRaisesRegex(
+                MarketImpliedUniverseBindingError,
+                "load authority was rebound",
+            ):
+                bind_market_implied_baseline_to_evaluation_universe(
+                    protocol=protocol,
+                    baseline_definition=self.definition(protocol),
+                    evidence=(evidence,),
+                    evaluation_store=store,
+                )
+        finally:
+            EvaluationUniverseStore.load = original_load  # type: ignore[method-assign]
+
+    def test_universe_loader_in_place_code_mutation_fails_closed(self) -> None:
+        self.persist_market()
+        evidence = self.evidence()
+        protocol = self.protocol(evidence)
+        store = self.evaluation_store(self.evaluation_row())
+        original_code = EvaluationUniverseStore.load.__code__
+
+        def forged_load(self):
+            return None
+
+        try:
+            EvaluationUniverseStore.load.__code__ = forged_load.__code__
+            with self.assertRaisesRegex(
+                MarketImpliedUniverseBindingError,
+                "load executable was mutated",
+            ):
+                bind_market_implied_baseline_to_evaluation_universe(
+                    protocol=protocol,
+                    baseline_definition=self.definition(protocol),
+                    evidence=(evidence,),
+                    evaluation_store=store,
+                )
+        finally:
+            EvaluationUniverseStore.load.__code__ = original_code
+
     def test_unrelated_valid_market_cannot_be_relabelled_as_expected_row(self) -> None:
         self.persist_market(event_id="event-2")
         evidence = self.evidence(event_id="event-2")

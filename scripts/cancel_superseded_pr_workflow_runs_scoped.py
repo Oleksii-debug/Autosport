@@ -13,6 +13,7 @@ if __package__:
         _RUNS_PER_PAGE,
         CancellationError,
         GitHubApi,
+        PullRequestQualification,
         WorkflowRun,
         _pull_request_qualification_state,
         _require_positive_int,
@@ -32,6 +33,7 @@ else:
         _RUNS_PER_PAGE,
         CancellationError,
         GitHubApi,
+        PullRequestQualification,
         WorkflowRun,
         _pull_request_qualification_state,
         _require_positive_int,
@@ -858,7 +860,10 @@ def _build_live_pr_qualification_reader(
     if live_code is None or pull_code is None or request_code is None:
         raise RuntimeError("live PR qualification executable is unavailable")
 
-    def read(api: WorkflowScopedGitHubApi, pr_number: int):
+    def read(
+        api: WorkflowScopedGitHubApi,
+        pr_number: int,
+    ) -> PullRequestQualification:
         if not isinstance(api, WorkflowScopedGitHubApi):
             return api.live_pr_qualification(pr_number)
 
@@ -880,13 +885,51 @@ def _build_live_pr_qualification_reader(
 
         if not production_dispatch_current():
             raise CancellationError("live PR qualification dispatch changed")
-        qualification = live_pr_qualification(api, pr_number)
+        pr_number = _require_positive_int(
+            pr_number,
+            field="pull request number",
+        )
+        # This read is cancellation authority. Avoid the nested dynamic
+        # live_pr_qualification -> self._pull_request -> self._request path:
+        # a transient nested shadow could restore canonical dispatch before the outer
+        # pre/post witness observes it. Use the captured canonical transport directly.
+        payload = request_impl(api, f"/pulls/{pr_number}")
         if not production_dispatch_current():
             raise CancellationError("live PR qualification dispatch changed")
-        return qualification
+        if not isinstance(payload, dict):
+            raise CancellationError("invalid pull request response")
+        head = payload.get("head")
+        base = payload.get("base")
+        state = payload.get("state")
+        draft = payload.get("draft")
+        if not isinstance(head, dict) or not isinstance(base, dict):
+            raise CancellationError("invalid pull request head/base")
+        if state not in ("open", "closed") or type(draft) is not bool:
+            raise CancellationError("invalid pull request qualification state")
+        base_repo = base.get("repo")
+        if (
+            not isinstance(base_repo, dict)
+            or base_repo.get("full_name") != api._repository
+        ):
+            raise CancellationError("pull request base repository is not canonical")
+        head_repo = head.get("repo")
+        same_repository_head = (
+            isinstance(head_repo, dict)
+            and head_repo.get("full_name") == api._repository
+        )
+        return PullRequestQualification(
+            head_sha=_require_sha(
+                head.get("sha"),
+                field="live pull request head",
+            ),
+            integration_capable=(
+                state == "open"
+                and draft is False
+                and same_repository_head
+            ),
+        )
 
     return read
-
 
 _explicit_run_identity_is_current = _build_explicit_run_identity_checker(
     WorkflowScopedGitHubApi._explicit_run_identity_matches,

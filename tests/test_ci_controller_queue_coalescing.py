@@ -898,6 +898,88 @@ def test_live_pr_boundary_rejects_transitive_request_shadow(monkeypatch) -> None
     assert not invoked["value"]
 
 
+def test_live_pr_boundary_bypasses_transient_nested_request_shadow(
+    monkeypatch,
+) -> None:
+    api = WorkflowScopedGitHubApi(
+        repository="owner/repo",
+        token="token",
+        workflow_id=356678400,
+        workflow_name="CI",
+    )
+    canonical_request = scoped_controller.GitHubApi._request
+    canonical_pull_request = scoped_controller.GitHubApi._pull_request
+    canonical_validator = canonical_pull_request.__globals__["_require_positive_int"]
+    forged_invoked = {"value": False}
+
+    def forged_request(
+        _path: str,
+        *,
+        method: str = "GET",
+        allowed_http_errors: frozenset[int] = frozenset(),
+    ):
+        forged_invoked["value"] = True
+        # Restore canonical instance dispatch before the outer reader performs its
+        # post-read witness. The old nested helper path therefore cannot detect that
+        # these forged bytes supplied its qualification.
+        del api.__dict__["_request"]
+        return {
+            "state": "open",
+            "draft": False,
+            "head": {
+                "sha": STALE_HEAD,
+                "repo": {"full_name": "owner/repo"},
+            },
+            "base": {"repo": {"full_name": "owner/repo"}},
+        }
+
+    def arm_transient_shadow(value, *, field: str):
+        result = canonical_validator(value, field=field)
+        if field == "pull request number":
+            api._request = forged_request
+        return result
+
+    monkeypatch.setitem(
+        canonical_pull_request.__globals__,
+        "_require_positive_int",
+        arm_transient_shadow,
+    )
+
+    class FakeResponse:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, _exc_type, _exc, _tb):
+            return False
+
+        def read(self) -> bytes:
+            return (
+                b'{"state":"open","draft":false,'
+                b'"head":{"sha":"'
+                + HEAD.encode("ascii")
+                + b'","repo":{"full_name":"owner/repo"}},'
+                b'"base":{"repo":{"full_name":"owner/repo"}}}'
+            )
+
+    def canonical_urlopen(_request, *, timeout: int):
+        assert timeout == 20
+        return FakeResponse()
+
+    monkeypatch.setitem(
+        canonical_request.__globals__,
+        "urlopen",
+        canonical_urlopen,
+    )
+
+    assert _trusted_live_pr_qualification(api, 303) == PullRequestQualification(
+        head_sha=HEAD,
+        integration_capable=True,
+    )
+    assert not forged_invoked["value"]
+
+
 def test_controller_scheduler_coalesces_all_prs_per_source_workflow() -> None:
     text = Path(".github/workflows/pr-qualification-supersession.yml").read_text(
         encoding="utf-8"

@@ -233,8 +233,8 @@ def _build_standard_limit_admission_authority():
     # revision identifier through the reviewed public surface.
     review_material = {
         "generation_id": generation_id,
-        "available_from": _instant(available_from),
-        "expires_at": _instant(expires_at),
+        "available_from": instant(available_from),
+        "expires_at": instant(expires_at),
         "order_type": "LIMIT",
         "size_mode": "STANDARD_SIZE",
         "currency": "GBP",
@@ -274,6 +274,10 @@ def _build_standard_limit_admission_authority():
     hmac_compare = hmac.compare_digest
     weakref_fn = ref
     utc = timezone.utc
+    instant = _instant
+    aware_utc = _aware_utc
+    positive_decimal = _positive_decimal
+    exact_multiply = _exact_multiply
 
     def implementation_current() -> bool:
         return bool(
@@ -301,14 +305,14 @@ def _build_standard_limit_admission_authority():
             "size": str(value.size),
             "price": str(value.price),
             "gross_payout": str(value.gross_payout),
-            "decision_as_of": _instant(value.decision_as_of),
+            "decision_as_of": instant(value.decision_as_of),
             "session_context_id": value.session_context_id,
             "account_identity_id": value.account_identity_id,
             "jurisdiction_authority_id": value.jurisdiction_authority_id,
             "review_generation_id": value.review_generation_id,
             "review_semantic_sha256": value.review_semantic_sha256,
-            "review_available_from": _instant(value.review_available_from),
-            "review_expires_at": _instant(value.review_expires_at),
+            "review_available_from": instant(value.review_available_from),
+            "review_expires_at": instant(value.review_expires_at),
             "provider_acceptance_proven": False,
             "execution_authorized": False,
         }
@@ -420,8 +424,8 @@ def _build_standard_limit_admission_authority():
             raise BetfairStandardLimitAdmissionError(
                 "side must be exactly BACK or LAY"
             )
-        value_size = _positive_decimal(size, "size")
-        value_price = _positive_decimal(price, "price")
+        value_size = positive_decimal(size, "size")
+        value_price = positive_decimal(price, "price")
         if value_price <= Decimal("1"):
             raise BetfairStandardLimitAdmissionError(
                 "price must be greater than 1"
@@ -433,8 +437,8 @@ def _build_standard_limit_admission_authority():
             raise BetfairStandardLimitAdmissionError(
                 "bet_target_type must be PAYOUT, BACKERS_PROFIT, or None"
             )
-        decision_time = _aware_utc(as_of, "as_of")
-        gross_payout = _exact_multiply(value_size, value_price)
+        decision_time = aware_utc(as_of, "as_of")
+        gross_payout = exact_multiply(value_size, value_price)
 
         # Exact public types are required even for UNKNOWN construction because
         # the result binds their non-secret identifiers. Source authority is
@@ -636,7 +640,7 @@ def _build_standard_limit_admission_authority():
                 and value.review_expires_at == expires_at
                 and available_from <= value.decision_as_of < expires_at
                 and value.gross_payout
-                == _exact_multiply(value.size, value.price)
+                == exact_multiply(value.size, value.price)
                 and (
                     value.size >= min_size
                     or value.gross_payout >= min_payout
@@ -659,15 +663,6 @@ def _build_standard_limit_admission_authority():
         return value
 
     return assess, is_authoritative, require_authoritative
-
-
-(
-    assess_betfair_standard_limit_admission,
-    is_authoritative_betfair_standard_limit_admission,
-    require_authoritative_betfair_standard_limit_admission,
-) = _build_standard_limit_admission_authority()
-del _build_standard_limit_admission_authority
-
 
 def _currency_code(value: object) -> str:
     if (
@@ -758,3 +753,11 @@ def _exact_multiply(left: Decimal, right: Decimal) -> Decimal:
         context.prec = left_digits + right_digits + 4
         result = left * right
     return _positive_decimal(result, "gross_payout", product=True)
+
+
+(
+    assess_betfair_standard_limit_admission,
+    is_authoritative_betfair_standard_limit_admission,
+    require_authoritative_betfair_standard_limit_admission,
+) = _build_standard_limit_admission_authority()
+del _build_standard_limit_admission_authority

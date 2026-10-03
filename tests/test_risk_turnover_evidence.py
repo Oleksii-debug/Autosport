@@ -550,3 +550,90 @@ def test_decimal_scale_alias_preserves_turnover_identity(tmp_path):
     assert second.confirmed_turnover == Decimal("10")
     assert second.constituent_sha256 == first.constituent_sha256
     assert second.evidence_sha256 == first.evidence_sha256
+
+
+def test_goal_store_instance_load_shadow_cannot_mint_turnover_headroom(tmp_path):
+    store = _store(tmp_path)
+    window = store.current()
+    goal_store = _goal_store(store, max_turnover="0.5")
+    book = _book()
+    _open(book, window, stake="20", suffix="goal-shadow")
+
+    canonical = PaperDayTurnoverResolver.resolve(
+        book=book,
+        goal_store=goal_store,
+        window_store=store,
+        window_evidence=window,
+    )
+    goal_store.load = lambda: _goal(max_turnover="999")
+
+    observed = PaperDayTurnoverResolver.resolve(
+        book=book,
+        goal_store=goal_store,
+        window_store=store,
+        window_evidence=window,
+    )
+
+    assert observed == canonical
+    assert observed.turnover_cap == Decimal("50")
+    assert observed.residual_headroom == Decimal("30")
+
+
+def test_day_store_instance_require_current_shadow_cannot_accept_forged_window(tmp_path):
+    store = _store(tmp_path)
+    window = store.current()
+    goal_store = _goal_store(store)
+    book = _book()
+    _open(book, window, stake="10", suffix="window-shadow")
+    forged = replace(window, state_sha256="0" * 64)
+    store.require_current = lambda candidate: candidate
+
+    with pytest.raises(
+        PaperDayTurnoverEvidenceIncompleteError,
+        match="not current product authority",
+    ):
+        PaperDayTurnoverResolver.resolve(
+            book=book,
+            goal_store=goal_store,
+            window_store=store,
+            window_evidence=forged,
+        )
+
+
+def test_noncanonical_goal_store_path_fails_closed_before_goal_read(tmp_path):
+    store = _store(tmp_path)
+    window = store.current()
+    goal_store = _goal_store(store)
+    book = _book()
+    goal_store.path = goal_store.path.with_name("alternate_goal.json")
+
+    with pytest.raises(
+        PaperDayTurnoverEvidenceIncompleteError,
+        match="economic goal store path is not canonical",
+    ):
+        PaperDayTurnoverResolver.resolve(
+            book=book,
+            goal_store=goal_store,
+            window_store=store,
+            window_evidence=window,
+        )
+
+
+def test_noncanonical_day_store_path_fails_closed_before_window_read(tmp_path):
+    store = _store(tmp_path)
+    window = store.current()
+    goal_store = _goal_store(store)
+    book = _book()
+    store.state_path = store.state_path.with_name("alternate_day.json")
+
+    with pytest.raises(
+        PaperDayTurnoverEvidenceIncompleteError,
+        match="risk day store path is not canonical",
+    ):
+        PaperDayTurnoverResolver.resolve(
+            book=book,
+            goal_store=goal_store,
+            window_store=store,
+            window_evidence=window,
+        )
+

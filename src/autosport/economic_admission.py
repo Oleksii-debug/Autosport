@@ -927,6 +927,16 @@ def _capture_detached_function_graph(
     return function.__code__, tuple(bindings[key] for key in sorted(bindings))
 
 
+_RISK_POLICY_FIELD_DESCRIPTOR_WITNESSES = tuple(
+    (name, PaperRiskPolicy.__dict__[name])
+    for name in tuple(PaperRiskPolicy.__dataclass_fields__)
+)
+_ECONOMIC_GOAL_FIELD_DESCRIPTOR_WITNESSES = tuple(
+    (name, EconomicGoalContract.__dict__[name])
+    for name in tuple(EconomicGoalContract.__dataclass_fields__)
+)
+
+
 _DETACHED_RISK_HELPER_WITNESSES = tuple(
     (
         label,
@@ -1081,6 +1091,14 @@ def _require_admission_recovery_gate_authority() -> None:
 
 def _admission_risk_helper_authority_valid() -> bool:
     """Reject mutation of live or detached positive risk helper authority."""
+
+    for owner, witnesses in (
+        (PaperRiskPolicy, _RISK_POLICY_FIELD_DESCRIPTOR_WITNESSES),
+        (EconomicGoalContract, _ECONOMIC_GOAL_FIELD_DESCRIPTOR_WITNESSES),
+    ):
+        for name, expected_descriptor in witnesses:
+            if owner.__dict__.get(name) is not expected_descriptor:
+                return False
 
     try:
         _require_class_transition_graph(
@@ -1250,6 +1268,15 @@ def admit_paper_ticket(
         raise TypeError("context must be an exact ProposedTicketRiskContext or None")
     if type(legs) is not tuple or not legs:
         raise ValueError("legs must be a non-empty canonical tuple")
+    if not _admission_risk_helper_authority_valid():
+        return PaperAdmissionResult(
+            risk=RiskDecision(
+                False,
+                "virtual bankroll risk helper authority is invalid",
+            ),
+            ticket=None,
+            book=book,
+        )
 
     amount = _positive_decimal(stake)
     _validate_context_binding(

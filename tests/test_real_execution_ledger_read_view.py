@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+import autosport.real_execution_ledger as ledger_module
 from autosport.real_execution_ledger import (
     AcknowledgementStatus,
     AttemptState,
@@ -489,6 +490,95 @@ def test_plan_reservation_epoch_is_independent_from_quote_and_caller_plan_times(
         assert quote_time < plan_created_time < reserved_time < expiry_time
         assert view.plan_reserved_at != plan.created_at
         assert view.plan_reserved_at != action.quote_observed_at
+
+
+def test_plan_reservation_epoch_ignores_module_now_rebinding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hostile_at = "2002-01-01T00:00:00+00:00"
+    calls: list[str] = []
+
+    def hostile_now() -> str:
+        calls.append("hostile")
+        return hostile_at
+
+    monkeypatch.setattr(ledger_module, "_now", hostile_now)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        ledger = RealExecutionLedger(Path(tmp) / "real-execution.jsonl")
+        action = ExecutionAction(
+            action_id="action-clock-rebind",
+            bookmaker_id="betfair",
+            account_id="acct-1",
+            event_id="event-clock-rebind",
+            market_id="1.clock-rebind",
+            selection_id="101",
+            side="BACK",
+            requested_odds="2.20",
+            requested_stake="10",
+            quote_id="quote-clock-rebind",
+            quote_observed_at="2001-01-01T00:00:00+00:00",
+            expires_at="2099-01-01T00:00:00+00:00",
+        )
+        plan = ExecutionPlan(
+            plan_id="plan-clock-rebind",
+            bookmaker_profile_version="betfair-profile-v1",
+            decision_id="decision-clock-rebind",
+            approval_id="approval-clock-rebind",
+            created_at="2001-01-01T00:00:01+00:00",
+            actions=(action,),
+        )
+
+        ledger.reserve_plan(plan)
+        view = ledger.verified_execution_view(plan.plan_id)
+
+        assert calls == []
+        assert view.plan_reserved_at != hostile_at
+
+
+def test_plan_reservation_epoch_ignores_in_place_now_code_mutation() -> None:
+    hostile_at = "2003-01-01T00:00:00+00:00"
+    calls: list[str] = []
+
+    def hostile_now() -> str:
+        calls.append("hostile")
+        return hostile_at
+
+    original_code = ledger_module._now.__code__
+    ledger_module._now.__code__ = hostile_now.__code__
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = RealExecutionLedger(Path(tmp) / "real-execution.jsonl")
+            action = ExecutionAction(
+                action_id="action-clock-code",
+                bookmaker_id="betfair",
+                account_id="acct-1",
+                event_id="event-clock-code",
+                market_id="1.clock-code",
+                selection_id="101",
+                side="BACK",
+                requested_odds="2.20",
+                requested_stake="10",
+                quote_id="quote-clock-code",
+                quote_observed_at="2001-01-01T00:00:00+00:00",
+                expires_at="2099-01-01T00:00:00+00:00",
+            )
+            plan = ExecutionPlan(
+                plan_id="plan-clock-code",
+                bookmaker_profile_version="betfair-profile-v1",
+                decision_id="decision-clock-code",
+                approval_id="approval-clock-code",
+                created_at="2001-01-01T00:00:01+00:00",
+                actions=(action,),
+            )
+
+            ledger.reserve_plan(plan)
+            view = ledger.verified_execution_view(plan.plan_id)
+
+            assert calls == []
+            assert view.plan_reserved_at != hostile_at
+    finally:
+        ledger_module._now.__code__ = original_code
 
 
 def test_exact_plan_redelivery_preserves_original_reservation_epoch() -> None:

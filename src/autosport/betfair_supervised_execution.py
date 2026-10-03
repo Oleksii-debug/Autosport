@@ -496,6 +496,19 @@ class BetfairSupervisedExecutionError(RuntimeError):
 class BetfairPlaceOrdersAmbiguous(BetfairSupervisedExecutionError):
     """The provider effect is unknown and requires readback before retry."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        request_sha256: str | None = None,
+        response_sha256: str | None = None,
+        observed_at: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.request_sha256 = request_sha256
+        self.response_sha256 = response_sha256
+        self.observed_at = observed_at
+
 
 class PlaceOrdersOutcome(str, Enum):
     ACCEPTED = "ACCEPTED"
@@ -1161,14 +1174,23 @@ class BetfairSupervisedPlaceOrdersClient:
             if _observation_clock is None
             else _observation_clock
         )
-        return parser(
-            payload,
-            request_id=request_id,
-            request_sha256=request_sha256,
-            action=action,
-            provider_order_ref=provider_ref,
-            observed_at=observation_clock(),
-        )
+        observed_at = observation_clock()
+        try:
+            return parser(
+                payload,
+                request_id=request_id,
+                request_sha256=request_sha256,
+                action=action,
+                provider_order_ref=provider_ref,
+                observed_at=observed_at,
+            )
+        except BetfairPlaceOrdersAmbiguous as exc:
+            raise BetfairPlaceOrdersAmbiguous(
+                str(exc),
+                request_sha256=request_sha256,
+                response_sha256=sha256(payload).hexdigest(),
+                observed_at=observed_at,
+            ) from exc
 
 
 _CANONICAL_BETFAIR_PLACE_ACTION = BetfairSupervisedPlaceOrdersClient.place_action
@@ -1909,20 +1931,67 @@ def execute_betfair_supervised_action(
                 _response_parser=_CANONICAL_PARSE_PLACE_ORDERS_RESPONSE,
                 _observation_clock=_CANONICAL_PROVIDER_OBSERVATION_CLOCK,
             )
-        except BetfairPlaceOrdersAmbiguous:
+        except BetfairPlaceOrdersAmbiguous as exc:
+            ambiguous_evidence_id: str | None = None
+            ambiguous_observed_at = exc.observed_at
+            if (
+                exc.request_sha256 is not None
+                and exc.response_sha256 is not None
+                and ambiguous_observed_at is not None
+            ):
+                request_sha256 = _sha(
+                    exc.request_sha256,
+                    "ambiguous request_sha256",
+                )
+                response_sha256 = _sha(
+                    exc.response_sha256,
+                    "ambiguous response_sha256",
+                )
+                _time(
+                    ambiguous_observed_at,
+                    "ambiguous observed_at",
+                )
+                ambiguous_evidence_id = _digest(
+                    {
+                        "schema": "autosport.betfair_place_ambiguous_response",
+                        "schema_version": 1,
+                        "bookmaker_id": action.bookmaker_id,
+                        "account_id": action.account_id,
+                        "action_id": action.action_id,
+                        "provider_order_ref": provider_order_ref,
+                        "request_sha256": request_sha256,
+                        "response_sha256": response_sha256,
+                        "observed_at": ambiguous_observed_at,
+                    }
+                )
+                ledger.bind_provider_evidence(
+                    attempt_id=attempt_id,
+                    evidence_id=ambiguous_evidence_id,
+                    observed_at=ambiguous_observed_at,
+                    source=(
+                        "betfair:placeOrders:ambiguous:"
+                        f"{response_sha256}"
+                    ),
+                    request_sha256=request_sha256,
+                )
+            unknown_observed_at = (
+                ambiguous_observed_at
+                if ambiguous_observed_at is not None
+                else now()
+            )
             ledger.mark_unknown(
                 attempt_id,
                 reason=(
                     "betfair_placeOrders_ambiguous_effect_"
                     "requires_readback"
                 ),
-                observed_at=now(),
+                observed_at=unknown_observed_at,
             )
             return BetfairSupervisedExecutionResult(
                 PlaceOrdersOutcome.UNKNOWN,
                 attempt_id,
                 ledger.attempt_state(attempt_id),
-                None,
+                ambiguous_evidence_id,
                 None,
             )
         # After placeOrders may have produced an external effect, authority drift is

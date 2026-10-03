@@ -7,6 +7,8 @@ from autosport.secret_redaction import (
     REDACTED,
     redact_operator_text,
     redact_operator_value,
+    safe_exception_detail,
+    safe_exception_text,
 )
 
 
@@ -790,3 +792,52 @@ def test_over_nested_query_key_fails_closed_instead_of_leaking_value() -> None:
 
     assert rendered == f"https://provider.invalid/feed?{key}={REDACTED}"
     assert secret not in rendered
+
+def test_safe_exception_detail_never_executes_custom_exception_str() -> None:
+    secret = "AS-HOSTILE-EXCEPTION-SECRET-8d13"
+    calls: list[str] = []
+
+    class HostileProviderError(RuntimeError):
+        def __str__(self) -> str:
+            calls.append("exception-str")
+            raise AssertionError("custom exception __str__ must not run")
+
+    error = HostileProviderError(f"api_key={secret}")
+
+    detail = safe_exception_detail(
+        error,
+        extra_secret_values=(secret,),
+    )
+    rendered = safe_exception_text(
+        error,
+        extra_secret_values=(secret,),
+    )
+
+    assert calls == []
+    assert secret not in detail
+    assert secret not in rendered
+    assert REDACTED in detail
+    assert rendered.startswith("RuntimeError: ")
+
+
+def test_safe_exception_detail_never_renders_custom_argument_objects() -> None:
+    calls: list[str] = []
+
+    class HostileArgument:
+        def __str__(self) -> str:
+            calls.append("argument-str")
+            raise AssertionError("custom argument __str__ must not run")
+
+        def __repr__(self) -> str:
+            calls.append("argument-repr")
+            raise AssertionError("custom argument __repr__ must not run")
+
+    error = RuntimeError(HostileArgument())
+
+    assert safe_exception_detail(error) == "exception details unavailable"
+    assert (
+        safe_exception_text(error)
+        == "RuntimeError: exception details unavailable"
+    )
+    assert calls == []
+

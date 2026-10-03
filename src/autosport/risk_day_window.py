@@ -466,7 +466,7 @@ class _ProductDayRiskWindowStoreMeta(type):
 
     def __setattr__(cls, name: str, value: object) -> None:
         if (
-            name in {"__init__", "current", "require_current", "_publish_day", "_evidence"}
+            name in {"__init__", "current", "require_current", "require_current_under_lock", "_current_under_lock", "_publish_day", "_evidence"}
             and name in cls.__dict__
         ):
             raise TypeError(
@@ -476,7 +476,7 @@ class _ProductDayRiskWindowStoreMeta(type):
 
     def __delattr__(cls, name: str) -> None:
         if (
-            name in {"__init__", "current", "require_current", "_publish_day", "_evidence"}
+            name in {"__init__", "current", "require_current", "require_current_under_lock", "_current_under_lock", "_publish_day", "_evidence"}
             and name in cls.__dict__
         ):
             raise TypeError(
@@ -519,65 +519,74 @@ class ProductDayRiskWindowStore(metaclass=_ProductDayRiskWindowStoreMeta):
                 "risk day store must be the canonical exact store type"
             )
         with WorkspaceEconomicLock(self.workspace):
-            target_day = _clock_utc_instant(self._clock).date()
-            if os.path.lexists(self.state_path):
-                state_bytes = _read_regular_bytes(self.state_path)
-                payload, persisted_day = _decode_state(
-                    state_bytes,
-                    expected_workspace_instance_id=(
-                        self._authority.workspace_instance_id
-                    ),
-                )
-                observed_sha256 = hashlib.sha256(state_bytes).hexdigest()
-                recovery = _MONOTONIC_RECOVER(
-                    self._authority,
-                    observed_state_sha256=observed_sha256,
-                    tx_id=_transaction_id(payload),
-                    semantic_binding_sha256=_semantic_binding(payload),
-                )
-                if recovery.disposition not in {
-                    RecoveryDisposition.CURRENT,
-                    RecoveryDisposition.ABORTED_PREPARE,
-                    RecoveryDisposition.COMMITTED_PREPARE,
-                }:
-                    raise RiskDayWindowIntegrityError(
-                        "risk day state is not a recoverable authority tip"
-                    )
-                generation = recovery.committed_generation
-            else:
-                recovery = _MONOTONIC_RECOVER(
-                    self._authority,
-                    observed_state_sha256=None
-                )
-                if recovery.disposition not in {
-                    RecoveryDisposition.PRISTINE,
-                    RecoveryDisposition.ABORTED_PREPARE,
-                }:
-                    raise MonotonicAuthorityRollbackError(
-                        "risk day state is missing after authority establishment"
-                    )
-                return type(self)._publish_day(
-                    self,
-                    target_day,
-                    observed_sha256=None,
-                )
+            return type(self)._current_under_lock(self)
 
-            if target_day < persisted_day:
-                raise RiskDayWindowClockRollbackError(
-                    "UTC day moved behind the committed risk day"
+    def _current_under_lock(self) -> ProductDayRiskWindow:
+        """Resolve/advance the current day while the canonical workspace lock is held."""
+
+        if type(self) is not ProductDayRiskWindowStore:
+            raise RiskDayWindowIntegrityError(
+                "risk day store must be the canonical exact store type"
+            )
+        target_day = _clock_utc_instant(self._clock).date()
+        if os.path.lexists(self.state_path):
+            state_bytes = _read_regular_bytes(self.state_path)
+            payload, persisted_day = _decode_state(
+                state_bytes,
+                expected_workspace_instance_id=(
+                    self._authority.workspace_instance_id
+                ),
+            )
+            observed_sha256 = hashlib.sha256(state_bytes).hexdigest()
+            recovery = _MONOTONIC_RECOVER(
+                self._authority,
+                observed_state_sha256=observed_sha256,
+                tx_id=_transaction_id(payload),
+                semantic_binding_sha256=_semantic_binding(payload),
+            )
+            if recovery.disposition not in {
+                RecoveryDisposition.CURRENT,
+                RecoveryDisposition.ABORTED_PREPARE,
+                RecoveryDisposition.COMMITTED_PREPARE,
+            }:
+                raise RiskDayWindowIntegrityError(
+                    "risk day state is not a recoverable authority tip"
                 )
-            if target_day == persisted_day:
-                return type(self)._evidence(
-                    self,
-                    payload,
-                    observed_sha256,
-                    generation,
+            generation = recovery.committed_generation
+        else:
+            recovery = _MONOTONIC_RECOVER(
+                self._authority,
+                observed_state_sha256=None,
+            )
+            if recovery.disposition not in {
+                RecoveryDisposition.PRISTINE,
+                RecoveryDisposition.ABORTED_PREPARE,
+            }:
+                raise MonotonicAuthorityRollbackError(
+                    "risk day state is missing after authority establishment"
                 )
             return type(self)._publish_day(
                 self,
                 target_day,
-                observed_sha256=observed_sha256,
+                observed_sha256=None,
             )
+
+        if target_day < persisted_day:
+            raise RiskDayWindowClockRollbackError(
+                "UTC day moved behind the committed risk day"
+            )
+        if target_day == persisted_day:
+            return type(self)._evidence(
+                self,
+                payload,
+                observed_sha256,
+                generation,
+            )
+        return type(self)._publish_day(
+            self,
+            target_day,
+            observed_sha256=observed_sha256,
+        )
 
     def require_current(
         self,
@@ -596,6 +605,66 @@ class ProductDayRiskWindowStore(metaclass=_ProductDayRiskWindowStoreMeta):
         # Positive revalidation must bypass mutable exact-instance dispatch.
         # A caller-owned current attribute is not product clock/day authority.
         current = type(self).current(self)
+        if not current.product_clock_authoritative:
+            raise RiskDayWindowIntegrityError(
+                "test/synthetic clock cannot mint product day authority"
+            )
+        if candidate != current:
+            raise RiskDayWindowMismatchError(
+                "risk day evidence does not match current durable authority"
+            )
+        return current
+
+    def require_current_under_lock(
+        self,
+        candidate: ProductDayRiskWindow,
+        *,
+        workspace_lock: WorkspaceEconomicLock,
+    ) -> ProductDayRiskWindow:
+        """Re-resolve day authority without recursively acquiring the same workspace lock.
+
+        This seam is for canonical admission composition that already owns the exact
+        WorkspaceEconomicLock. It is not a second lock or day authority: it validates
+        the held lock object/path, then executes the same monotonic current-day state
+        machine used by current().
+        """
+
+        if type(self) is not ProductDayRiskWindowStore:
+            raise RiskDayWindowIntegrityError(
+                "risk day store must be the canonical exact store type"
+            )
+        if type(candidate) is not ProductDayRiskWindow:
+            raise RiskDayWindowMismatchError(
+                "candidate must be ProductDayRiskWindow evidence"
+            )
+        if type(workspace_lock) is not WorkspaceEconomicLock:
+            raise RiskDayWindowIntegrityError(
+                "current-day revalidation requires the canonical held workspace economic lock"
+            )
+        lock_workspace = workspace_lock.workspace.expanduser().resolve(strict=False)
+        if (
+            lock_workspace != self.workspace
+            or workspace_lock.path != self.workspace / WorkspaceEconomicLock.FILE_NAME
+            or workspace_lock._handle is None
+            or workspace_lock._handle.closed
+        ):
+            raise RiskDayWindowIntegrityError(
+                "current-day revalidation requires the canonical held workspace economic lock"
+            )
+        try:
+            # Bind the caller-owned lock handle back to the canonical lock pathname.
+            # Admission constructs this exact lock internally; no caller-supplied
+            # positive day evidence can substitute for the monotonic state resolved below.
+            WorkspaceEconomicLock._validate_open_handle_identity(
+                workspace_lock,
+                workspace_lock._handle,
+            )
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise RiskDayWindowIntegrityError(
+                "current-day revalidation requires the canonical held workspace economic lock"
+            ) from exc
+
+        current = type(self)._current_under_lock(self)
         if not current.product_clock_authoritative:
             raise RiskDayWindowIntegrityError(
                 "test/synthetic clock cannot mint product day authority"
@@ -751,6 +820,8 @@ for _method_name in (
     "__init__",
     "current",
     "require_current",
+    "require_current_under_lock",
+    "_current_under_lock",
     "_publish_day",
     "_evidence",
 ):

@@ -877,37 +877,30 @@ def _canonical_supervised_ledger_dispatch(
     ledger: RealExecutionLedger,
     *,
     _ledger_type=RealExecutionLedger,
-    _reserve_plan=RealExecutionLedger.reserve_plan,
-    _reserve_plan_code=getattr(RealExecutionLedger.reserve_plan, "__code__", None),
-    _saga=RealExecutionLedger.saga,
-    _saga_code=getattr(RealExecutionLedger.saga, "__code__", None),
-    _bind_issuance=RealExecutionLedger._bind_supervised_plan_issuance,
-    _bind_issuance_code=getattr(
-        RealExecutionLedger._bind_supervised_plan_issuance,
-        "__code__",
-        None,
+    _surface=(
+        ("reserve_plan", RealExecutionLedger.reserve_plan, getattr(RealExecutionLedger.reserve_plan, "__code__", None)),
+        ("saga", RealExecutionLedger.saga, getattr(RealExecutionLedger.saga, "__code__", None)),
+        ("_bind_supervised_plan_issuance", RealExecutionLedger._bind_supervised_plan_issuance, getattr(RealExecutionLedger._bind_supervised_plan_issuance, "__code__", None)),
+        ("supervised_plan_issuance_is_current", RealExecutionLedger.supervised_plan_issuance_is_current, getattr(RealExecutionLedger.supervised_plan_issuance_is_current, "__code__", None)),
+        ("bind_supervised_approval", RealExecutionLedger.bind_supervised_approval, getattr(RealExecutionLedger.bind_supervised_approval, "__code__", None)),
+        ("supervised_approval_is_active", RealExecutionLedger.supervised_approval_is_active, getattr(RealExecutionLedger.supervised_approval_is_active, "__code__", None)),
+        ("revoke_supervised_approval", RealExecutionLedger.revoke_supervised_approval, getattr(RealExecutionLedger.revoke_supervised_approval, "__code__", None)),
+        ("begin_attempt", RealExecutionLedger.begin_attempt, getattr(RealExecutionLedger.begin_attempt, "__code__", None)),
+        ("provider_order_reference", RealExecutionLedger.provider_order_reference, getattr(RealExecutionLedger.provider_order_reference, "__code__", None)),
+        ("provider_evidence_binding", RealExecutionLedger.provider_evidence_binding, getattr(RealExecutionLedger.provider_evidence_binding, "__code__", None)),
+        ("acknowledge", RealExecutionLedger.acknowledge, getattr(RealExecutionLedger.acknowledge, "__code__", None)),
+        ("reconcile_found", RealExecutionLedger.reconcile_found, getattr(RealExecutionLedger.reconcile_found, "__code__", None)),
+        ("bind_provider_evidence", RealExecutionLedger.bind_provider_evidence, getattr(RealExecutionLedger.bind_provider_evidence, "__code__", None)),
+        ("attempt_state", RealExecutionLedger.attempt_state, getattr(RealExecutionLedger.attempt_state, "__code__", None)),
+        ("reconcile_not_found", RealExecutionLedger.reconcile_not_found, getattr(RealExecutionLedger.reconcile_not_found, "__code__", None)),
     ),
-    _issuance_current=RealExecutionLedger.supervised_plan_issuance_is_current,
-    _issuance_current_code=getattr(
-        RealExecutionLedger.supervised_plan_issuance_is_current,
-        "__code__",
-        None,
-    ),
-):
+) -> dict[str, object]:
     if RealExecutionLedger is not _ledger_type or type(ledger) is not _ledger_type:
         raise SupervisedExecutionError(
             "canonical real execution ledger authority changed"
         )
-    for name, expected, expected_code in (
-        ("reserve_plan", _reserve_plan, _reserve_plan_code),
-        ("saga", _saga, _saga_code),
-        ("_bind_supervised_plan_issuance", _bind_issuance, _bind_issuance_code),
-        (
-            "supervised_plan_issuance_is_current",
-            _issuance_current,
-            _issuance_current_code,
-        ),
-    ):
+    bound: dict[str, object] = {}
+    for name, expected, expected_code in _surface:
         current = vars(_ledger_type).get(name)
         if (
             current is not expected
@@ -919,12 +912,8 @@ def _canonical_supervised_ledger_dispatch(
             raise SupervisedExecutionError(
                 "canonical real execution ledger authority changed"
             )
-    return (
-        _reserve_plan.__get__(ledger, _ledger_type),
-        _saga.__get__(ledger, _ledger_type),
-        _bind_issuance.__get__(ledger, _ledger_type),
-        _issuance_current.__get__(ledger, _ledger_type),
-    )
+        bound[name] = expected.__get__(ledger, _ledger_type)
+    return bound
 
 
 def _require_bound_plan_structure(
@@ -968,7 +957,9 @@ def _require_durable_approval(
     bound: BoundSupervisedExecutionPlan,
     approval: SupervisedApproval,
 ) -> None:
-    if not ledger.supervised_approval_is_active(
+    methods = _canonical_supervised_ledger_dispatch(ledger)
+    approval_is_active = methods["supervised_approval_is_active"]
+    if not approval_is_active(
         plan_id=bound.execution_plan.plan_id,
         approval_id=approval.ledger_identity,
         approval_fingerprint=approval.fingerprint,
@@ -984,9 +975,9 @@ def _durable_reserved_plan_fingerprint(
 ) -> str | None:
     _require_bound_plan_structure(bound)
     _canonical_bound_plan_authority_dispatch()
-    _, saga_reader, _, issuance_current = _canonical_supervised_ledger_dispatch(
-        ledger
-    )
+    methods = _canonical_supervised_ledger_dispatch(ledger)
+    saga_reader = methods["saga"]
+    issuance_current = methods["supervised_plan_issuance_is_current"]
     try:
         saga = saga_reader(bound.execution_plan.plan_id)
     except KeyError:
@@ -1018,9 +1009,11 @@ def reserve_supervised_plan(
     now = _trusted_now()
     _require_approval(bound, approval, now)
     _, assert_bound = _canonical_bound_plan_authority_dispatch()
-    reserve_plan, _, bind_issuance, issuance_current = (
-        _canonical_supervised_ledger_dispatch(ledger)
-    )
+    methods = _canonical_supervised_ledger_dispatch(ledger)
+    reserve_plan = methods["reserve_plan"]
+    bind_issuance = methods["_bind_supervised_plan_issuance"]
+    issuance_current = methods["supervised_plan_issuance_is_current"]
+    bind_approval = methods["bind_supervised_approval"]
     fingerprint = _durable_reserved_plan_fingerprint(ledger, bound)
     if fingerprint is None:
         assert_bound(bound)
@@ -1039,7 +1032,7 @@ def reserve_supervised_plan(
             raise SupervisedExecutionError(
                 "supervised plan issuance was not durably recorded"
             )
-    ledger.bind_supervised_approval(
+    bind_approval(
         plan_id=bound.execution_plan.plan_id,
         approval_id=approval.ledger_identity,
         approval_fingerprint=approval.fingerprint,
@@ -1063,7 +1056,10 @@ def revoke_supervised_approval(
         or approval.ledger_identity != bound.execution_plan.approval_id
     ):
         raise SupervisedExecutionError("approval identity mismatches bound plan")
-    ledger.revoke_supervised_approval(
+    revoke_approval = _canonical_supervised_ledger_dispatch(ledger)[
+        "revoke_supervised_approval"
+    ]
+    revoke_approval(
         plan_id=bound.execution_plan.plan_id,
         approval_id=approval.ledger_identity,
         approval_fingerprint=approval.fingerprint,
@@ -1089,7 +1085,8 @@ def begin_supervised_attempt(
     action = bound.action_for(action_id)
     if _time(now, "trusted current time") >= _time(action.expires_at, "expires_at"):
         raise SupervisedExecutionError("attempt is at/after quote expiry")
-    return ledger.begin_attempt(
+    begin_attempt = _canonical_supervised_ledger_dispatch(ledger)["begin_attempt"]
+    return begin_attempt(
         plan_id=bound.execution_plan.plan_id,
         action_id=action_id,
         attempt_id=attempt_id,
@@ -1103,7 +1100,8 @@ def _attempt_action(
     attempt_id: str,
 ) -> tuple[ExecutionAction, AttemptState]:
     _require_reserved(ledger, bound)
-    saga = ledger.saga(bound.execution_plan.plan_id)
+    saga_reader = _canonical_supervised_ledger_dispatch(ledger)["saga"]
+    saga = saga_reader(bound.execution_plan.plan_id)
     action_id = saga.attempt_action_ids.get(attempt_id)
     if action_id is None:
         raise SupervisedExecutionError("attempt does not belong to bound plan")
@@ -1119,7 +1117,10 @@ def _require_attempt_provider_order_reference(
 ) -> None:
     """Fail closed when #561 evidence is not bound to the attempt's durable provider ref."""
 
-    expected = ledger.provider_order_reference(
+    provider_order_reference = _canonical_supervised_ledger_dispatch(ledger)[
+        "provider_order_reference"
+    ]
+    expected = provider_order_reference(
         attempt_id=attempt_id,
         provider_id=action.bookmaker_id,
     )
@@ -1240,7 +1241,10 @@ def reconcile_provider_readback(
         readback.accepted_odds,
     )
 
-    direct_binding = ledger.provider_evidence_binding(attempt_id)
+    provider_evidence_binding = _canonical_supervised_ledger_dispatch(ledger)[
+        "provider_evidence_binding"
+    ]
+    direct_binding = provider_evidence_binding(attempt_id)
     reconciliation_evidence_id = (
         None if direct_binding is not None else readback.evidence_id
     )
@@ -1262,9 +1266,13 @@ def reconcile_provider_readback(
             raise SupervisedExecutionError(
                 "durable direct-ACK provider evidence conflicts on replay"
             )
-        ledger.acknowledge(acknowledgement)
+        acknowledge = _canonical_supervised_ledger_dispatch(ledger)["acknowledge"]
+        acknowledge(acknowledgement)
     elif state is AttemptState.UNKNOWN:
-        ledger.reconcile_found(
+        reconcile_found = _canonical_supervised_ledger_dispatch(ledger)[
+            "reconcile_found"
+        ]
+        reconcile_found(
             ExternalEffectReconciliation(
                 attempt_id=attempt_id,
                 evidence_id=readback.evidence_id,
@@ -1282,9 +1290,13 @@ def reconcile_provider_readback(
             accepted_stake=readback.accepted_stake,
             reconciliation_evidence_id=readback.evidence_id,
         )
-        ledger.acknowledge(acknowledgement)
+        acknowledge = _canonical_supervised_ledger_dispatch(ledger)["acknowledge"]
+        acknowledge(acknowledgement)
     elif state is AttemptState.SUBMITTED:
-        ledger.bind_provider_evidence(
+        bind_provider_evidence = _canonical_supervised_ledger_dispatch(ledger)[
+            "bind_provider_evidence"
+        ]
+        bind_provider_evidence(
             attempt_id=attempt_id,
             evidence_id=readback.evidence_id,
             observed_at=readback.observed_at,
@@ -1299,12 +1311,14 @@ def reconcile_provider_readback(
             accepted_stake=readback.accepted_stake,
             reconciliation_evidence_id=None,
         )
-        ledger.acknowledge(acknowledgement)
+        acknowledge = _canonical_supervised_ledger_dispatch(ledger)["acknowledge"]
+        acknowledge(acknowledgement)
     else:
         raise SupervisedExecutionError(
             "readback requires SUBMITTED/UNKNOWN or exact terminal replay"
         )
-    final = ledger.attempt_state(attempt_id)
+    attempt_state = _canonical_supervised_ledger_dispatch(ledger)["attempt_state"]
+    final = attempt_state(attempt_id)
     outcome = {
         AttemptState.ACCEPTED: ReadbackOutcome.ACCEPTED,
         AttemptState.PARTIAL: ReadbackOutcome.PARTIAL,
@@ -1374,7 +1388,10 @@ def reconcile_provider_not_found(
         adapter_version=readback.adapter_version,
         profile_version=readback.profile_version,
     )
-    ledger.reconcile_not_found(
+    reconcile_not_found = _canonical_supervised_ledger_dispatch(ledger)[
+        "reconcile_not_found"
+    ]
+    reconcile_not_found(
         ReconciliationSnapshot(
             attempt_id=attempt_id,
             evidence_id=readback.evidence_id,
@@ -1389,7 +1406,7 @@ def reconcile_provider_not_found(
     )
     return ReconciliationResult(
         ReadbackOutcome.NOT_FOUND,
-        ledger.attempt_state(attempt_id),
+        _canonical_supervised_ledger_dispatch(ledger)["attempt_state"](attempt_id),
         readback.evidence_id,
     )
 

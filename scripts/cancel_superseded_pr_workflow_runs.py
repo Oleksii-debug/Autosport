@@ -326,8 +326,12 @@ class GitHubApi:
             raise CancellationError(
                 "workflow run cancellation conflicted while run remains active"
             )
-        if payload is not None:
-            raise CancellationError("unexpected cancel response body")
+        # urllib only reaches this branch for a successful HTTP response.
+        # GitHub defines workflow-run cancellation success by HTTP 202 Accepted;
+        # any response body is non-authoritative and may vary independently of that
+        # status contract.  Do not convert an already-accepted cancellation into a
+        # controller failure merely because GitHub supplied JSON content.
+        del payload
 
 
 def _qualification_snapshot(

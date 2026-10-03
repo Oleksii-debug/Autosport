@@ -35,6 +35,32 @@ def test_cancel_conflict_is_benign_after_run_completed(monkeypatch) -> None:
     ]
 
 
+def test_cancel_accepts_nonempty_success_response_body(monkeypatch) -> None:
+    api = GitHubApi(repository="owner/repo", token="token")
+    calls: list[tuple[str, str, frozenset[int]]] = []
+
+    def fake_request(
+        path: str,
+        *,
+        method: str = "GET",
+        allowed_http_errors: frozenset[int] = frozenset(),
+    ) -> object:
+        calls.append((path, method, allowed_http_errors))
+        assert path == "/actions/runs/123/cancel"
+        assert method == "POST"
+        assert allowed_http_errors == frozenset({409})
+        # A successful HTTP response may carry JSON without changing the
+        # endpoint's 202 Accepted cancellation contract.
+        return {"message": "accepted"}
+
+    monkeypatch.setattr(api, "_request", fake_request)
+    api.cancel(123)
+
+    assert calls == [
+        ("/actions/runs/123/cancel", "POST", frozenset({409})),
+    ]
+
+
 def test_cancel_conflict_fails_closed_while_run_remains_active(monkeypatch) -> None:
     api = GitHubApi(repository="owner/repo", token="token")
 

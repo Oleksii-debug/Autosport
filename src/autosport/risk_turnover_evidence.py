@@ -389,6 +389,10 @@ class PaperDayTurnoverResolver:
         window_store: ProductDayRiskWindowStore,
         window_evidence: ProductDayRiskWindow,
     ) -> PaperDayTurnoverEvidence:
+        if cls is not PaperDayTurnoverResolver:
+            raise PaperDayTurnoverEvidenceIncompleteError(
+                "turnover resolver must be the canonical exact resolver class"
+            )
         if type(book) is not PaperBook:
             raise PaperDayTurnoverEvidenceIncompleteError(
                 "book must be canonical PaperBook"
@@ -563,11 +567,15 @@ class PaperDayTurnoverResolver:
         window_store: ProductDayRiskWindowStore,
         window_evidence: ProductDayRiskWindow,
     ) -> PaperDayTurnoverEvidence:
+        if cls is not PaperDayTurnoverResolver:
+            raise PaperDayTurnoverEvidenceMismatchError(
+                "turnover resolver must be the canonical exact resolver class"
+            )
         if type(candidate) is not PaperDayTurnoverEvidence:
             raise PaperDayTurnoverEvidenceMismatchError(
                 "candidate must be canonical PaperDayTurnoverEvidence"
             )
-        current = cls.resolve(
+        current = PaperDayTurnoverResolver.resolve(
             book=book,
             goal_store=goal_store,
             window_store=window_store,

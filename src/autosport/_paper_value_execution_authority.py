@@ -146,6 +146,48 @@ def _economic_risk_admission_paths(
     return root / f"{token}.json", root / f"{token}.pre-action.json"
 
 
+def _verified_decision_record_sha256(
+    ledger: JsonlDecisionLedger,
+    decision_id: str,
+) -> str:
+    """Return the exact durable DecisionLedger envelope digest for one decision."""
+
+    if type(ledger) is not JsonlDecisionLedger:
+        raise PaperExecutionAdoptionError(
+            "economic paper-value decision digest requires exact DecisionLedger authority"
+        )
+    try:
+        snapshot = ledger.verified_snapshot()
+        matches: list[str] = []
+        for line in snapshot.payload.decode("utf-8").splitlines():
+            envelope = json.loads(line)
+            record = envelope.get("record")
+            if type(record) is not dict or record.get("decision_id") != decision_id:
+                continue
+            digest = envelope.get("sha256")
+            if (
+                type(digest) is not str
+                or len(digest) != 64
+                or digest != digest.lower()
+                or any(character not in "0123456789abcdef" for character in digest)
+            ):
+                raise PaperExecutionAdoptionError(
+                    "economic paper-value durable decision digest is invalid"
+                )
+            matches.append(digest)
+    except PaperExecutionAdoptionError:
+        raise
+    except (UnicodeError, ValueError) as exc:
+        raise PaperExecutionAdoptionError(
+            "economic paper-value durable decision digest cannot be resolved"
+        ) from exc
+    if len(matches) != 1:
+        raise PaperExecutionAdoptionError(
+            "economic paper-value decision digest requires one exact durable record"
+        )
+    return matches[0]
+
+
 def _risk_admission_payload(
     *,
     record: DecisionRecord,
@@ -190,6 +232,7 @@ def _economic_risk_admission_payload(
     risk_policy: PaperRiskPolicy,
     execution_run_id: str,
     pre_action_book_sha256: str,
+    decision_record_sha256: str,
 ) -> dict[str, object]:
     if record.decision_kind != ECONOMIC_DECISION_KIND:
         raise PaperExecutionAdoptionError(
@@ -205,7 +248,19 @@ def _economic_risk_admission_payload(
     payload["schema"] = _ECONOMIC_RISK_ADMISSION_SCHEMA
     payload["schema_version"] = _ECONOMIC_RISK_ADMISSION_SCHEMA_VERSION
     payload["decision_kind"] = ECONOMIC_DECISION_KIND
-    payload["decision_record_sha256"] = _canonical_payload_sha256(record.to_dict())
+    if (
+        type(decision_record_sha256) is not str
+        or len(decision_record_sha256) != 64
+        or decision_record_sha256 != decision_record_sha256.lower()
+        or any(
+            character not in "0123456789abcdef"
+            for character in decision_record_sha256
+        )
+    ):
+        raise PaperExecutionAdoptionError(
+            "economic paper-value decision_record_sha256 is invalid"
+        )
+    payload["decision_record_sha256"] = decision_record_sha256
     payload.pop("witness_sha256", None)
     payload["witness_sha256"] = _canonical_payload_sha256(payload)
     return payload
@@ -487,12 +542,17 @@ def _issue_economic_risk_admission(
         raise PaperExecutionAdoptionError(
             "economic paper-value risk admission cannot validate pre-action PaperBook"
         )
+    decision_record_sha256 = _verified_decision_record_sha256(
+        ledger,
+        decision_id,
+    )
     witness = _economic_risk_admission_payload(
         record=record,
         descriptor=descriptor,
         risk_policy=agent.risk_policy,
         execution_run_id=expected_run_id,
         pre_action_book_sha256=pre_action_sha256,
+        decision_record_sha256=decision_record_sha256,
     )
     witness_path, pre_action_path = _economic_risk_admission_paths(
         ledger,
@@ -580,12 +640,17 @@ def _verify_economic_risk_admission(
         raise PaperExecutionAdoptionError(
             "economic paper-value risk admission pre-action PaperBook is invalid"
         )
+    decision_record_sha256 = _verified_decision_record_sha256(
+        ledger,
+        record.decision_id,
+    )
     expected = _economic_risk_admission_payload(
         record=record,
         descriptor=descriptor,
         risk_policy=agent.risk_policy,
         execution_run_id=expected_run_id,
         pre_action_book_sha256=pre_action_sha256,
+        decision_record_sha256=decision_record_sha256,
     )
     if witness != expected:
         raise PaperExecutionAdoptionError(

@@ -401,7 +401,16 @@ def test_canonical_economic_agent_issues_origin_witness_before_execution(
     assert payload["schema"] == "autosport.paper_value.economic_risk_admission"
     assert payload["decision_kind"] == ECONOMIC_DECISION_KIND
     assert payload["risk_policy_sha256"] == policy.provenance_sha256
-    assert len(payload["decision_record_sha256"]) == 64
+
+    durable_lines = ledger.verified_snapshot().payload.decode("utf-8").splitlines()
+    envelopes = [json.loads(line) for line in durable_lines]
+    matching = [
+        envelope
+        for envelope in envelopes
+        if envelope["record"]["decision_id"] == payload["decision_id"]
+    ]
+    assert len(matching) == 1
+    assert payload["decision_record_sha256"] == matching[0]["sha256"]
 
 
 def test_canonical_goal_less_agent_path_still_executes_after_risk_pass(tmp_path) -> None:

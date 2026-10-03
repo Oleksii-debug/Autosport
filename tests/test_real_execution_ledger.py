@@ -744,7 +744,7 @@ class RealExecutionLedgerTests(unittest.TestCase):
                     status=AcknowledgementStatus.ACCEPTED,
                     acknowledged_at=RETRY_RESERVED_AT,
                     accepted_odds="2.5",
-                    accepted_stake="5",
+                    accepted_stake="10",
                     reconciliation_evidence_id=reconciliation.evidence_id,
                 )
             )

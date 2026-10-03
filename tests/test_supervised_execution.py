@@ -67,6 +67,7 @@ from autosport.supervised_provider_evidence import (
     ProviderEvidenceError,
     VerifiedProviderAbsenceEvidence,
     VerifiedProviderEffectEvidence,
+    _evaluate_betfair_provider_state_semantics,
 )
 
 
@@ -524,14 +525,14 @@ def _provider_capture(
     return capture, None
 
 
-def _verified_state(bound, action, *, matched_stake: Decimal | None, **kwargs):
+def _semantic_state(bound, action, *, matched_stake: Decimal | None, **kwargs):
     capture, _ = _provider_capture(
         action,
         matched_stake=matched_stake,
         **kwargs,
     )
     binding = bound.profile_for(action.bookmaker_id, action.account_id)
-    return verify_betfair_provider_state(
+    return _evaluate_betfair_provider_state_semantics(
         action,
         _profile(),
         expected_profile_sha256=binding.profile_sha256,
@@ -616,7 +617,7 @@ def test_generic_snapshot_cannot_authorize_positive_but_verified_provider_pages_
         assert generic.outcome is ReadbackOutcome.UNKNOWN
         assert ledger.attempt_state("attempt-1") is AttemptState.UNKNOWN
 
-        verified = _verified_state(
+        verified = _semantic_state(
             bound,
             action,
             matched_stake=action.requested_stake / Decimal("2"),
@@ -665,7 +666,7 @@ def test_direct_submitted_ack_persists_exact_provider_evidence_across_restart() 
             attempt_id="attempt-direct",
         )
         ledger.mark_submitted("attempt-direct", submitted_at=SUBMITTED_AT)
-        verified = _verified_state(
+        verified = _semantic_state(
             bound,
             action,
             matched_stake=action.requested_stake,
@@ -738,7 +739,7 @@ def test_caller_cannot_clone_verified_effect_to_mint_ack() -> None:
         ledger, bound, _, action, _, _ = _ledger_with_unknown(
             Path(tmp) / "execution.jsonl"
         )
-        genuine = _verified_state(
+        genuine = _semantic_state(
             bound,
             action,
             matched_stake=action.requested_stake,
@@ -764,7 +765,7 @@ def test_complete_provider_absence_is_diagnostic_without_retry_authority() -> No
         ledger, bound, _, action, _, _ = _ledger_with_unknown(
             Path(tmp) / "execution.jsonl"
         )
-        verified = _verified_state(bound, action, matched_stake=None)
+        verified = _semantic_state(bound, action, matched_stake=None)
         assert isinstance(verified, VerifiedProviderAbsenceEvidence)
         result = reconcile_provider_not_found(
             ledger,
@@ -786,7 +787,7 @@ def test_betfair_timeout_unknown_requires_timeout_visibility_authority() -> None
             Path(tmp) / "execution.jsonl",
             unknown_reason="betfair_placeOrders_ambiguous_effect_requires_readback",
         )
-        verified = _verified_state(bound, action, matched_stake=None)
+        verified = _semantic_state(bound, action, matched_stake=None)
         assert isinstance(verified, VerifiedProviderAbsenceEvidence)
 
         with pytest.raises(
@@ -808,7 +809,7 @@ def test_betfair_timeout_unknown_still_accepts_positive_provider_effect() -> Non
             Path(tmp) / "execution.jsonl",
             unknown_reason="betfair_placeOrders_ambiguous_effect_requires_readback",
         )
-        verified = _verified_state(
+        verified = _semantic_state(
             bound,
             action,
             matched_stake=action.requested_stake,
@@ -831,7 +832,7 @@ def test_not_found_consumer_rejects_timeout_assertion_rebind(monkeypatch) -> Non
             Path(tmp) / "execution.jsonl",
             unknown_reason="betfair_placeOrders_ambiguous_effect_requires_readback",
         )
-        verified = _verified_state(bound, action, matched_stake=None)
+        verified = _semantic_state(bound, action, matched_stake=None)
         assert isinstance(verified, VerifiedProviderAbsenceEvidence)
 
         monkeypatch.setattr(
@@ -859,7 +860,7 @@ def test_not_found_consumer_rejects_verified_execution_view_rebind(
         ledger, bound, _, action, _, _ = _ledger_with_unknown(
             Path(tmp) / "execution.jsonl"
         )
-        verified = _verified_state(bound, action, matched_stake=None)
+        verified = _semantic_state(bound, action, matched_stake=None)
         assert isinstance(verified, VerifiedProviderAbsenceEvidence)
 
         monkeypatch.setattr(
@@ -922,7 +923,7 @@ def test_caller_cannot_clone_verified_absence_to_release_retry() -> None:
         ledger, bound, _, action, _, _ = _ledger_with_unknown(
             Path(tmp) / "execution.jsonl"
         )
-        genuine = _verified_state(bound, action, matched_stake=None)
+        genuine = _semantic_state(bound, action, matched_stake=None)
         assert isinstance(genuine, VerifiedProviderAbsenceEvidence)
         forged = replace(genuine)
 
@@ -1121,7 +1122,7 @@ def test_verified_readback_still_enforces_approved_slippage() -> None:
         ledger, bound, _, action, _, _ = _ledger_with_unknown(
             Path(tmp) / "execution.jsonl"
         )
-        verified = _verified_state(
+        verified = _semantic_state(
             bound,
             action,
             matched_stake=action.requested_stake,

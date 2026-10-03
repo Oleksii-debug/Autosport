@@ -880,15 +880,87 @@ _ADMISSION_RISK_HELPER_WITNESSES = (
 )
 
 
-def _resume_after_product_day_turnover(
-    *,
-    risk_policy: PaperRiskPolicy,
-    book: PaperBook,
-    amount: Decimal,
-    context: ProposedTicketRiskContext,
-    pre_evaluation_state: tuple[Decimal, Decimal, Decimal, int] | None,
-) -> RiskDecision:
-    """Continue canonical risk evaluation after replacing only turnover room."""
+def _capture_detached_function_graph(
+    function: FunctionType,
+) -> tuple[
+    object,
+    tuple[tuple[str, dict[str, object], object, object | None], ...],
+]:
+    """Witness one detached function plus its recursively used frozen namespace."""
+
+    if type(function) is not FunctionType:
+        raise RuntimeError("detached risk helper must be a Python function")
+    namespace = function.__globals__
+    pending = [function]
+    visited: set[int] = set()
+    bindings: dict[
+        tuple[int, str], tuple[str, dict[str, object], object, object | None]
+    ] = {}
+    while pending:
+        current = pending.pop()
+        marker = id(current)
+        if marker in visited:
+            continue
+        visited.add(marker)
+        if current.__globals__ is not namespace:
+            raise RuntimeError("detached risk helper namespace changed")
+        for name in current.__code__.co_names:
+            if name not in namespace:
+                continue
+            value = namespace[name]
+            key = (id(namespace), name)
+            if key not in bindings:
+                bindings[key] = (
+                    name,
+                    namespace,
+                    value,
+                    value.__code__ if type(value) is FunctionType else None,
+                )
+            if type(value) is FunctionType and value.__globals__ is namespace:
+                pending.append(value)
+    return function.__code__, tuple(bindings[key] for key in sorted(bindings))
+
+
+_DETACHED_RISK_HELPER_WITNESSES = tuple(
+    (
+        label,
+        function,
+        *_capture_detached_function_graph(function),
+    )
+    for label, function in (
+        ("history", _RISK_HISTORY_FROZEN),
+        ("quote", _RISK_QUOTE_FROZEN),
+        ("ruin", _RISK_RUIN_FROZEN),
+        ("derived", _RISK_DERIVED_FROZEN),
+    )
+)
+
+_RISK_POLICY_TRANSITION_METHOD_WITNESS, _RISK_POLICY_TRANSITION_GLOBAL_WITNESS = (
+    _capture_class_transition_graph(
+        PaperRiskPolicy,
+        (
+            "_book_state",
+            "_goal_history_rooms",
+            "_quote_risk_decision",
+            "_risk_of_ruin_evidence_decision",
+            "_derived_risk_values",
+        ),
+    )
+)
+
+
+def _admission_risk_helper_authority_valid() -> bool:
+    """Reject mutation of live or detached positive risk helper authority."""
+
+    try:
+        _require_class_transition_graph(
+            PaperRiskPolicy,
+            methods=_RISK_POLICY_TRANSITION_METHOD_WITNESS,
+            globals_witness=_RISK_POLICY_TRANSITION_GLOBAL_WITNESS,
+            error="paper risk transition graph changed",
+        )
+    except RuntimeError:
+        return False
 
     for (
         helper_name,
@@ -899,10 +971,7 @@ def _resume_after_product_day_turnover(
     ) in _ADMISSION_RISK_HELPER_WITNESSES:
         current_descriptor = PaperRiskPolicy.__dict__.get(helper_name)
         if current_descriptor is not expected_descriptor:
-            return RiskDecision(
-                False,
-                "virtual bankroll risk helper authority is invalid",
-            )
+            return False
         current_function = (
             current_descriptor.__func__
             if descriptor_wrapped
@@ -912,10 +981,42 @@ def _resume_after_product_day_turnover(
             current_function is not expected_function
             or current_function.__code__ is not expected_code
         ):
-            return RiskDecision(
-                False,
-                "virtual bankroll risk helper authority is invalid",
-            )
+            return False
+
+    for (
+        _label,
+        function,
+        expected_code,
+        bindings,
+    ) in _DETACHED_RISK_HELPER_WITNESSES:
+        if type(function) is not FunctionType or function.__code__ is not expected_code:
+            return False
+        for name, namespace, expected_value, expected_binding_code in bindings:
+            if namespace.get(name) is not expected_value:
+                return False
+            if expected_binding_code is not None and (
+                type(expected_value) is not FunctionType
+                or expected_value.__code__ is not expected_binding_code
+            ):
+                return False
+    return True
+
+
+def _resume_after_product_day_turnover(
+    *,
+    risk_policy: PaperRiskPolicy,
+    book: PaperBook,
+    amount: Decimal,
+    context: ProposedTicketRiskContext,
+    pre_evaluation_state: tuple[Decimal, Decimal, Decimal, int] | None,
+) -> RiskDecision:
+    """Continue canonical risk evaluation after replacing only turnover room."""
+
+    if not _admission_risk_helper_authority_valid():
+        return RiskDecision(
+            False,
+            "virtual bankroll risk helper authority is invalid",
+        )
 
     goal = risk_policy.economic_goal
     state = _RISK_BOOK_STATE(PaperRiskPolicy, book)
@@ -1123,23 +1224,29 @@ def admit_paper_ticket(
                 or decision.reason == "economic goal turnover limit exceeded"
             )
         ):
-            try:
-                quote_context = _quote_context_with_product_admission_time(
-                    context,
-                    day_authority.admission_ts,
-                )
-            except (TypeError, ValueError):
+            if not _admission_risk_helper_authority_valid():
                 decision = RiskDecision(
                     False,
-                    "economic goal product-time quote evidence is invalid",
+                    "virtual bankroll risk helper authority is invalid",
                 )
             else:
-                authoritative_quote_decision = _RISK_QUOTE_FROZEN(
-                    goal,
-                    quote_context,
-                )
-                if authoritative_quote_decision is not None:
-                    decision = authoritative_quote_decision
+                try:
+                    quote_context = _quote_context_with_product_admission_time(
+                        context,
+                        day_authority.admission_ts,
+                    )
+                except (TypeError, ValueError):
+                    decision = RiskDecision(
+                        False,
+                        "economic goal product-time quote evidence is invalid",
+                    )
+                else:
+                    authoritative_quote_decision = _RISK_QUOTE_FROZEN(
+                        goal,
+                        quote_context,
+                    )
+                    if authoritative_quote_decision is not None:
+                        decision = authoritative_quote_decision
 
         turnover_override_candidate = (
             not decision.allowed

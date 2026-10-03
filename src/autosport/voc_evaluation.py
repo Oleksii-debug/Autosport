@@ -13,6 +13,7 @@ from typing import Any, Mapping, Protocol, runtime_checkable
 
 from .decision_ledger import DecisionLedgerIntegrityError, JsonlDecisionLedger
 from .integrity import atomic_write_json
+from .json_integrity import strict_json_loads
 from .market_outcomes import MarketSettlementOutcomeAuthority
 from .scientific_registry import ScientificRegistry
 from .workspace_lock import WorkspaceEconomicLock
@@ -24,7 +25,7 @@ _ONE = Decimal("1")
 _ARITHMETIC_CONTEXT = Context(prec=50, rounding=ROUND_HALF_EVEN)
 VOC_CURRENT_CONTEXT_ACTION = "VOC_ROUTE_CONTEXT"
 VOC_CURRENT_CONTEXT_PAYLOAD_KEY = "voc_current_context"
-_VOC_CURRENT_CONTEXT_FIELDS = frozenset(
+_VOC_CURRENT_CONTEXT_FIELDS_V1 = frozenset(
     {
         "request_id",
         "decision_input_sha256",
@@ -34,6 +35,33 @@ _VOC_CURRENT_CONTEXT_FIELDS = frozenset(
         "regime_id",
         "urgency_id",
         "contradiction_state",
+    }
+)
+_VOC_CURRENT_CONTEXT_FIELDS_V2 = {
+    "request_id",
+    "decision_input_sha256",
+    "task_class",
+    "data_classification",
+    "sport_id",
+    "league_id",
+    "regime_id",
+    "urgency_id",
+    "contradiction_state",
+}
+_VOC_CURRENT_CONTEXT_FIELDS_V3 = {
+    *_VOC_CURRENT_CONTEXT_FIELDS_V2,
+    "routing_policy_id",
+    "routing_policy_version",
+    "routing_policy_sha256",
+    "cloud_permission",
+    "cloud_backend_id",
+}
+_VOC_CURRENT_CONTEXT_FIELDS = frozenset(_VOC_CURRENT_CONTEXT_FIELDS_V3)
+_VOC_CURRENT_CONTEXT_ALLOWED_FIELD_SETS = frozenset(
+    {
+        _VOC_CURRENT_CONTEXT_FIELDS_V1,
+        frozenset(_VOC_CURRENT_CONTEXT_FIELDS_V2),
+        _VOC_CURRENT_CONTEXT_FIELDS,
     }
 )
 
@@ -80,7 +108,7 @@ def _time(name: str, value: object) -> str:
 
 
 def _decimal(name: str, value: object) -> Decimal:
-    if not isinstance(value, Decimal) or not value.is_finite():
+    if type(value) is not Decimal or not value.is_finite():
         raise VOCEvaluationError(f"{name} must be a finite Decimal")
     return value
 
@@ -151,13 +179,16 @@ def resolve_voc_decision_context(
     if not isinstance(payload, Mapping):
         raise VOCEvaluationError("canonical current VOC decision payload is invalid")
     context = payload.get(VOC_CURRENT_CONTEXT_PAYLOAD_KEY)
-    if not isinstance(context, Mapping) or set(context) != _VOC_CURRENT_CONTEXT_FIELDS:
+    if not isinstance(context, Mapping):
+        raise VOCEvaluationError("canonical current VOC decision context schema is invalid")
+    context_fields = frozenset(context)
+    if context_fields not in _VOC_CURRENT_CONTEXT_ALLOWED_FIELD_SETS:
         raise VOCEvaluationError("canonical current VOC decision context schema is invalid")
     resolved: dict[str, str] = {}
-    for field in sorted(_VOC_CURRENT_CONTEXT_FIELDS):
-        if field == "decision_input_sha256":
+    for field in sorted(context_fields):
+        if field in {"decision_input_sha256", "routing_policy_sha256"}:
             resolved[field] = _sha256(
-                "canonical current VOC context decision_input_sha256",
+                f"canonical current VOC context {field}",
                 context.get(field),
             )
         else:
@@ -296,9 +327,9 @@ class PairedVOCEvaluation:
             self.latency_opportunity_cost_penalty,
         )
         _nonnegative("measured_compute_cost", self.measured_compute_cost)
-        if isinstance(self.paired_sample_count, bool) or not isinstance(self.paired_sample_count, int) or self.paired_sample_count < 1:
+        if type(self.paired_sample_count) is not int or self.paired_sample_count < 1:
             raise VOCEvaluationError("paired_sample_count must be a positive integer")
-        if isinstance(self.effective_sample_size, bool) or not isinstance(self.effective_sample_size, int) or self.effective_sample_size < 1:
+        if type(self.effective_sample_size) is not int or self.effective_sample_size < 1:
             raise VOCEvaluationError("effective_sample_size must be a positive integer")
         if self.effective_sample_size > self.paired_sample_count:
             raise VOCEvaluationError("effective_sample_size cannot exceed paired_sample_count")
@@ -424,7 +455,7 @@ class PairedVOCEvaluation:
         as_of: str,
         minimum_effective_sample_size: int,
     ) -> str | None:
-        if isinstance(minimum_effective_sample_size, bool) or not isinstance(minimum_effective_sample_size, int) or minimum_effective_sample_size < 1:
+        if type(minimum_effective_sample_size) is not int or minimum_effective_sample_size < 1:
             raise VOCEvaluationError("minimum_effective_sample_size must be positive")
         now = _instant("as_of", as_of)
         if self.provenance is not VOCEvaluationProvenance.MEASURED_SHADOW:
@@ -556,14 +587,12 @@ class OutcomeDerivedVOCScore:
         )
         _nonnegative("measured_compute_cost", self.measured_compute_cost)
         if (
-            isinstance(self.paired_sample_count, bool)
-            or not isinstance(self.paired_sample_count, int)
+            type(self.paired_sample_count) is not int
             or self.paired_sample_count < 1
         ):
             raise VOCEvaluationError("paired_sample_count must be positive")
         if (
-            isinstance(self.effective_sample_size, bool)
-            or not isinstance(self.effective_sample_size, int)
+            type(self.effective_sample_size) is not int
             or self.effective_sample_size < 1
             or self.effective_sample_size > self.paired_sample_count
         ):
@@ -964,7 +993,7 @@ class CanonicalVOCAuthorityResolver:
             raise VOCEvaluationError(
                 "canonical outcome-derived VOC score is missing"
             )
-        if not isinstance(score, OutcomeDerivedVOCScore):
+        if type(score) is not OutcomeDerivedVOCScore:
             raise VOCEvaluationError(
                 "canonical outcome-derived VOC score is invalid"
             )
@@ -1014,7 +1043,7 @@ class CanonicalVOCAuthorityResolver:
             if callable(episode_resolver)
             else score
         )
-        if not isinstance(episode_score, OutcomeDerivedVOCScore):
+        if type(episode_score) is not OutcomeDerivedVOCScore:
             raise VOCEvaluationError(
                 "canonical outcome-derived VOC episode score is missing"
             )
@@ -1315,7 +1344,7 @@ class CanonicalVOCAuthorityResolver:
         *,
         as_of: str,
     ) -> OutcomeDerivedVOCScore | None:
-        if not isinstance(evaluation, PairedVOCEvaluation):
+        if type(evaluation) is not PairedVOCEvaluation:
             raise TypeError("evaluation must be PairedVOCEvaluation")
         _instant("as_of", as_of)
         canonical = self._require_registry_result(evaluation, as_of=as_of)
@@ -1372,8 +1401,14 @@ class VOCEvaluationStore:
 
     def _load(self) -> dict[str, PairedVOCEvaluation]:
         try:
-            raw = json.loads(self.path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raw = strict_json_loads(self.path.read_text(encoding="utf-8"))
+        except (
+            OSError,
+            UnicodeDecodeError,
+            json.JSONDecodeError,
+            TypeError,
+            ValueError,
+        ) as exc:
             raise VOCEvaluationError("VOC evaluation store is unreadable") from exc
         if type(raw) is not dict or set(raw) != {
             "schema",
@@ -1402,7 +1437,7 @@ class VOCEvaluationStore:
 
     def record(self, evaluation: PairedVOCEvaluation) -> str:
         """Persist immutable evidence; persistence alone grants no CLOUD authority."""
-        if not isinstance(evaluation, PairedVOCEvaluation):
+        if type(evaluation) is not PairedVOCEvaluation:
             raise TypeError("evaluation must be PairedVOCEvaluation")
         with WorkspaceEconomicLock(self.path.parent):
             loaded = self._load()
@@ -1440,11 +1475,14 @@ class VOCEvaluationStore:
         resolved = resolver.resolve_decision_context(expected, as_of=as_of)
         if resolved is None:
             raise VOCEvaluationError("canonical current VOC decision context is missing")
-        if not isinstance(resolved, Mapping) or set(resolved) != _VOC_CURRENT_CONTEXT_FIELDS:
+        if not isinstance(resolved, Mapping):
+            raise VOCEvaluationError("canonical current VOC decision context schema is invalid")
+        resolved_fields = frozenset(resolved)
+        if resolved_fields not in _VOC_CURRENT_CONTEXT_ALLOWED_FIELD_SETS:
             raise VOCEvaluationError("canonical current VOC decision context schema is invalid")
         return {
             field: _text(f"canonical current VOC context {field}", resolved.get(field))
-            for field in sorted(_VOC_CURRENT_CONTEXT_FIELDS)
+            for field in sorted(resolved_fields)
         }
 
     def require(

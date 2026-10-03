@@ -43,6 +43,8 @@ _PROTECTED_ROOT_TYPES = (
 
 
 _INSTANCE_CALL_ROOT_NAMES = (
+    "provenance_payload",
+    "provenance_record",
     "derive_goal_stake",
     "derive_goal_stake_vector",
     "evaluate",

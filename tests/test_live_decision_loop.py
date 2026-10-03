@@ -7,6 +7,7 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from autosport.decision_ledger import (
@@ -1334,15 +1335,17 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
                         bus.publish(event)
                     finally:
                         store.close()
-                    return IngestionStats(
-                        source_id=event.source_id,
-                        received=1,
-                        accepted=1,
-                        rejected=0,
-                        elapsed_seconds=0.01,
-                        cursor="1",
-                        quality_flags=("PROVIDER_SEQUENCE_GAP",),
-                        health_status="degraded",
+                    return SimpleNamespace(
+                        stats=IngestionStats(
+                            source_id=event.source_id,
+                            received=1,
+                            accepted=1,
+                            rejected=0,
+                            elapsed_seconds=0.01,
+                            cursor="1",
+                            quality_flags=("PROVIDER_SEQUENCE_GAP",),
+                            health_status="degraded",
+                        )
                     )
                 return IngestionStats(
                     source_id=event.source_id,

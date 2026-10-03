@@ -1275,6 +1275,20 @@ class RealExecutionLedger:
                 raise ExecutionLedgerIntegrityError(
                     "attempt history does not begin with reservation"
                 )
+            if first["plan_id"].startswith("supervised-v2-"):
+                first_index = next(
+                    index
+                    for index, candidate in enumerate(events)
+                    if candidate is first
+                )
+                if not any(
+                    prior["event_type"] == EventType.SUPERVISED_PLAN_ISSUED.value
+                    and prior["plan_id"] == first["plan_id"]
+                    for prior in events[:first_index]
+                ):
+                    raise ExecutionLedgerIntegrityError(
+                        "supervised attempt reservation must follow product issuance"
+                    )
             if set(first["payload"]) != {"effect_fingerprint", "reserved_at"}:
                 raise ExecutionLedgerIntegrityError(
                     "ATTEMPT_RESERVED payload schema is invalid"
@@ -2126,6 +2140,14 @@ class RealExecutionLedger:
             plan_event, action = self._action_payload(
                 events, plan_id, action_id
             )
+            if plan_id.startswith("supervised-v2-") and not any(
+                event["event_type"] == EventType.SUPERVISED_PLAN_ISSUED.value
+                and event["plan_id"] == plan_id
+                for event in events
+            ):
+                raise ExecutionStateError(
+                    "supervised execution attempt requires prior product issuance"
+                )
             if self._stale(events, plan_id):
                 raise ExecutionStateError(
                     "execution plan is stale; recompute before another action"

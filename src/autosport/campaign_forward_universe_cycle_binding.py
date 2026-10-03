@@ -384,6 +384,16 @@ _CANONICAL_CYCLE_RECEIPT_FIELD_DESCRIPTORS = tuple(
     )
     for name in _CYCLE_RECEIPT_FIELD_NAMES
 )
+_INCEPTION_RECEIPT_FIELD_NAMES = tuple(
+    CampaignInceptionReceipt.__dataclass_fields__
+)
+_CANONICAL_INCEPTION_RECEIPT_FIELD_DESCRIPTORS = tuple(
+    (
+        name,
+        inspect.getattr_static(CampaignInceptionReceipt, name),
+    )
+    for name in _INCEPTION_RECEIPT_FIELD_NAMES
+)
 _CANONICAL_ARTIFACT_KIND = ARTIFACT_KIND
 _CANONICAL_HASHLIB = hashlib
 _CANONICAL_SHA256 = hashlib.sha256
@@ -435,6 +445,11 @@ def _require_dispatch_integrity() -> None:
         if inspect.getattr_static(CampaignCompleteBoardCycleReceipt, name) is not descriptor:
             raise CampaignForwardUniverseCycleBindingError(
                 "campaign cycle receipt field descriptor changed: " + name
+            )
+    for name, descriptor in _CANONICAL_INCEPTION_RECEIPT_FIELD_DESCRIPTORS:
+        if inspect.getattr_static(CampaignInceptionReceipt, name) is not descriptor:
+            raise CampaignForwardUniverseCycleBindingError(
+                "campaign inception receipt field descriptor changed: " + name
             )
     if (
         module_globals.get("_provider_universe_module")
@@ -616,6 +631,9 @@ def resolve_campaign_forward_universe_cycle_authority(
     expected_authority_issuer_function = _CANONICAL_AUTHORITY_ISSUER_FUNCTION
     expected_authority_issuer_code = _CANONICAL_AUTHORITY_ISSUER_CODE
     expected_cycle_receipt_field_descriptors = _CANONICAL_CYCLE_RECEIPT_FIELD_DESCRIPTORS
+    expected_inception_receipt_field_descriptors = (
+        _CANONICAL_INCEPTION_RECEIPT_FIELD_DESCRIPTORS
+    )
     expected_artifact_kind = _CANONICAL_ARTIFACT_KIND
     expected_collector_artifact_resolver = _CANONICAL_COLLECTOR_ARTIFACT_RESOLVER
     expected_provider_evidence_loader = _CANONICAL_PROVIDER_EVIDENCE_LOADER
@@ -644,6 +662,8 @@ def resolve_campaign_forward_universe_cycle_authority(
             or module_globals.get("_CANONICAL_AUTHORITY_ISSUER_FUNCTION") is not expected_authority_issuer_function
             or module_globals.get("_CANONICAL_AUTHORITY_ISSUER_CODE") is not expected_authority_issuer_code
             or module_globals.get("_CANONICAL_CYCLE_RECEIPT_FIELD_DESCRIPTORS") is not expected_cycle_receipt_field_descriptors
+            or module_globals.get("_CANONICAL_INCEPTION_RECEIPT_FIELD_DESCRIPTORS")
+            is not expected_inception_receipt_field_descriptors
             or module_globals.get("_CANONICAL_ARTIFACT_KIND") != expected_artifact_kind
             or module_globals.get("_CANONICAL_COLLECTOR_ARTIFACT_RESOLVER") is not expected_collector_artifact_resolver
             or module_globals.get("_CANONICAL_PROVIDER_EVIDENCE_LOADER") is not expected_provider_evidence_loader
@@ -850,6 +870,9 @@ def authorize_campaign_forward_source_receipts(
     expected_authority_issuer_function = _CANONICAL_AUTHORITY_ISSUER_FUNCTION
     expected_authority_issuer_code = _CANONICAL_AUTHORITY_ISSUER_CODE
     expected_cycle_receipt_field_descriptors = _CANONICAL_CYCLE_RECEIPT_FIELD_DESCRIPTORS
+    expected_inception_receipt_field_descriptors = (
+        _CANONICAL_INCEPTION_RECEIPT_FIELD_DESCRIPTORS
+    )
     expected_artifact_kind = _CANONICAL_ARTIFACT_KIND
     expected_collector_artifact_resolver = _CANONICAL_COLLECTOR_ARTIFACT_RESOLVER
     expected_provider_evidence_loader = _CANONICAL_PROVIDER_EVIDENCE_LOADER
@@ -886,6 +909,8 @@ def authorize_campaign_forward_source_receipts(
             or module_globals.get("_CANONICAL_AUTHORITY_ISSUER_FUNCTION") is not expected_authority_issuer_function
             or module_globals.get("_CANONICAL_AUTHORITY_ISSUER_CODE") is not expected_authority_issuer_code
             or module_globals.get("_CANONICAL_CYCLE_RECEIPT_FIELD_DESCRIPTORS") is not expected_cycle_receipt_field_descriptors
+            or module_globals.get("_CANONICAL_INCEPTION_RECEIPT_FIELD_DESCRIPTORS")
+            is not expected_inception_receipt_field_descriptors
             or module_globals.get("_CANONICAL_ARTIFACT_KIND") != expected_artifact_kind
             or module_globals.get("_CANONICAL_COLLECTOR_ARTIFACT_RESOLVER") is not expected_collector_artifact_resolver
             or module_globals.get("_CANONICAL_PROVIDER_EVIDENCE_LOADER") is not expected_provider_evidence_loader
@@ -1002,6 +1027,9 @@ def _seal_campaign_forward_universe_cycle_dispatch() -> None:
     expected_authority_issuer_function = _CANONICAL_AUTHORITY_ISSUER_FUNCTION
     expected_authority_issuer_code = _CANONICAL_AUTHORITY_ISSUER_CODE
     expected_cycle_receipt_field_descriptors = _CANONICAL_CYCLE_RECEIPT_FIELD_DESCRIPTORS
+    expected_inception_receipt_field_descriptors = (
+        _CANONICAL_INCEPTION_RECEIPT_FIELD_DESCRIPTORS
+    )
     expected_artifact_kind = _CANONICAL_ARTIFACT_KIND
     expected_collector_artifact_resolver = _CANONICAL_COLLECTOR_ARTIFACT_RESOLVER
     expected_provider_evidence_loader = _CANONICAL_PROVIDER_EVIDENCE_LOADER
@@ -1028,6 +1056,8 @@ def _seal_campaign_forward_universe_cycle_dispatch() -> None:
             or module_globals.get("_CANONICAL_AUTHORITY_ISSUER_FUNCTION") is not expected_authority_issuer_function
             or module_globals.get("_CANONICAL_AUTHORITY_ISSUER_CODE") is not expected_authority_issuer_code
             or module_globals.get("_CANONICAL_CYCLE_RECEIPT_FIELD_DESCRIPTORS") is not expected_cycle_receipt_field_descriptors
+            or module_globals.get("_CANONICAL_INCEPTION_RECEIPT_FIELD_DESCRIPTORS")
+            is not expected_inception_receipt_field_descriptors
             or module_globals.get("_CANONICAL_ARTIFACT_KIND") != expected_artifact_kind
             or module_globals.get("_CANONICAL_COLLECTOR_ARTIFACT_RESOLVER") is not expected_collector_artifact_resolver
             or module_globals.get("_CANONICAL_PROVIDER_EVIDENCE_LOADER") is not expected_provider_evidence_loader

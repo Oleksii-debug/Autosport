@@ -2268,12 +2268,6 @@ class AgentLoopRuntime:
     ) -> AgentLoopSnapshot:
         if not isinstance(attribution, OutcomeAttribution):
             raise TypeError("attribution must be OutcomeAttribution")
-        if any(
-            finding.evidence_grade is None for finding in attribution.findings
-        ):
-            raise AgentLoopError(
-                "new durable attribution findings require explicit evidence_grade"
-            )
         state = self._read()
         existing = next(
             (
@@ -2293,6 +2287,12 @@ class AgentLoopRuntime:
                     "attribution identity is bound to different immutable content"
                 )
             return self.snapshot()
+        if any(
+            finding.evidence_grade is None for finding in attribution.findings
+        ):
+            raise AgentLoopError(
+                "new durable attribution findings require explicit evidence_grade"
+            )
 
         def apply(state: dict[str, Any], now: str) -> None:
             if (

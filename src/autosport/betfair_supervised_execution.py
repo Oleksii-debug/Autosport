@@ -415,6 +415,15 @@ class BetfairInstructionReport:
                 raise BetfairSupervisedExecutionError(
                     "failed instruction cannot claim a matched stake"
                 )
+            if (
+                self.bet_id is not None
+                or self.placed_date is not None
+                or self.average_price_matched != 0
+                or self.order_status is not None
+            ):
+                raise BetfairSupervisedExecutionError(
+                    "failed instruction cannot claim provider placement evidence"
+                )
         elif self.error_code is not None:
             raise BetfairSupervisedExecutionError(
                 "successful instruction cannot claim provider error_code"

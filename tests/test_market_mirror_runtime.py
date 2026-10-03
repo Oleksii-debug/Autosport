@@ -11,6 +11,7 @@ from autosport.market_mirror import MarketMirror, MirrorUpdate
 from autosport.market_mirror_runtime import (
     BoundedMirrorInvalidationBuffer,
     FocusedMirrorDependencyIndex,
+    FocusedMirrorRegistryChanged,
 )
 from autosport.storage import SQLiteMarketStore
 
@@ -377,6 +378,54 @@ class BoundedMirrorInvalidationBufferTests(unittest.TestCase):
                 for event in snapshot.events
             },
         )
+
+    def test_drained_unrouted_key_invalidates_captured_routing_generation(self) -> None:
+        mirror = MarketMirror()
+        runtime = BoundedMirrorInvalidationBuffer(mirror)
+        dependencies = FocusedMirrorDependencyIndex(mirror)
+        dependencies.register("decision-all", source_ids="provider-a")
+
+        baseline = self.event(selection="selection-a", sequence=1, odds="2.00")
+        runtime.accept_persisted(baseline)
+        dependencies.affected_inputs(runtime.drain())
+        captured_routing_revision = dependencies.routing_revision
+
+        concurrent = self.event(selection="selection-b", sequence=2, odds="3.00")
+        runtime.accept_persisted(concurrent)
+        drained_but_unrouted = runtime.drain()
+
+        # Mirror truth already includes the new key and the invalidation buffer is
+        # empty, but incremental routing still reflects the older key set.
+        self.assertEqual(runtime.pending_count, 0)
+        self.assertEqual(dependencies.routing_revision, captured_routing_revision)
+        torn = dependencies.coherent_decision_views(
+            ("decision-all",),
+            as_of=datetime(2026, 9, 16, 19, 0, 10, tzinfo=timezone.utc),
+            max_age=timedelta(minutes=1),
+            incremental=True,
+        )
+        self.assertEqual(
+            tuple(event.selection_id for event in torn["decision-all"].events),
+            ("selection-a",),
+        )
+        self.assertEqual(torn["decision-all"].revision, mirror.revision)
+
+        affected = dependencies.affected_inputs(drained_but_unrouted)
+        self.assertEqual(affected, ("decision-all",))
+        self.assertGreater(
+            dependencies.routing_revision,
+            captured_routing_revision,
+        )
+        with self.assertRaisesRegex(
+            FocusedMirrorRegistryChanged,
+            "routing changed before decision publication",
+        ):
+            with dependencies.hold_input_ids(
+                ("decision-all",),
+                expected_routing_revision=captured_routing_revision,
+            ):
+                self.fail("stale routing generation must not reach publication")
+
 
     def test_focused_dependency_overflow_fails_safe_to_all_registered_inputs(self) -> None:
         mirror = MarketMirror()

@@ -35,11 +35,6 @@ _REQUEST_ELEMENT = {
 }
 _INTEGER_RE = re.compile(r"[0-9]+\Z")
 _DECIMAL_RE = re.compile(r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)\Z")
-_POSTING_CATEGORY_NAMES = {
-    1: "SETTLEMENT",
-    2: "COMMISSION",
-    3: "OTHER",
-}
 _CANONICAL_ACCOUNT_HTTPS_POST = _account._CANONICAL_HTTPS_POST
 _REQUIRE_CANONICAL_ACCOUNT_TRANSPORT = _account._require_canonical_account_transport
 
@@ -306,7 +301,13 @@ class BetdaqPostingObservation:
     def posting_category_name(self) -> str:
         """Provider-defined coarse class; future values remain explicit UNKNOWN."""
 
-        return _POSTING_CATEGORY_NAMES.get(self.posting_category, "UNKNOWN")
+        if self.posting_category == 1:
+            return "SETTLEMENT"
+        if self.posting_category == 2:
+            return "COMMISSION"
+        if self.posting_category == 3:
+            return "OTHER"
+        return "UNKNOWN"
 
     def provider_content_dict(self) -> dict[str, object]:
         """Return immutable provider-row economics without per-call envelope provenance."""
@@ -466,7 +467,9 @@ def coalesce_posting_replays(
     ListAccountPostingsById can re-resolve an already observed transaction. Per-call
     evidence remains attached to the retained observation, but request/response
     envelope differences cannot create a second economic effect. Conflicting content
-    for the same account-context + TransactionId fails closed.
+    for the same account-context + TransactionId fails closed. This helper never
+    upgrades window completeness, proves absence of sibling postings, or authorizes
+    scalar aggregation across independent responses.
     """
 
     if not readbacks:

@@ -1289,6 +1289,11 @@ class PersistentLiveDecisionLoop:
                 refresh_input_ids,
                 decision_time,
             )
+            provider_health_boundaries = self._capture_provider_health_boundaries(
+                snapshots,
+                decision_time,
+                require_eligible=True,
+            )
         except _ConcurrentDecisionSnapshot as exc:
             return LiveCycleResult(
                 LiveCycleStatus.BACKPRESSURE,
@@ -1339,6 +1344,7 @@ class PersistentLiveDecisionLoop:
                 expected_previous_progress=expected_previous_progress,
                 expected_mirror_revision=captured_mirror_revision,
                 expected_dependency_routing_revision=captured_routing_revision,
+                expected_provider_health_boundaries=provider_health_boundaries,
             )
         except _ConcurrentDecisionSnapshot as exc:
             return LiveCycleResult(
@@ -1368,6 +1374,7 @@ class PersistentLiveDecisionLoop:
             market_state_sha256=current_market_sha,
             affected_input_ids=affected,
             gate=_GATE_NORMAL,
+            provider_health_boundaries=provider_health_boundaries,
         )
         self._pending_affected.clear()
         self._needs_cache_rebuild = False
@@ -1626,6 +1633,12 @@ class PersistentLiveDecisionLoop:
                 "PaperBook changed before durable decision"
             )
 
+        self._verify_provider_health_boundaries(
+            progress.provider_health_boundaries,
+            decision_time,
+            require_eligible=(progress.gate == _GATE_NORMAL),
+        )
+
         if progress.gate == _GATE_NORMAL:
             self._refresh_intents_from_replay(
                 progress.registered_input_ids,
@@ -1730,6 +1743,7 @@ class PersistentLiveDecisionLoop:
             market_state_sha256=progress.market_state_sha256,
             affected_input_ids=progress.affected_input_ids,
             gate=progress.gate,
+            provider_health_boundaries=progress.provider_health_boundaries,
             detail=(
                 "recovered unfinished durable live decision before provider polling"
             ),
@@ -2092,6 +2106,11 @@ class PersistentLiveDecisionLoop:
                 now,
                 incremental=False,
             )
+            provider_health_boundaries = self._capture_provider_health_boundaries(
+                gap_snapshots,
+                now,
+                require_eligible=False,
+            )
             captured_mirror_revision = (
                 None
                 if not gap_snapshots
@@ -2108,6 +2127,7 @@ class PersistentLiveDecisionLoop:
                 expected_previous_progress=expected_previous_progress,
                 expected_mirror_revision=captured_mirror_revision,
                 expected_dependency_routing_revision=captured_routing_revision,
+                expected_provider_health_boundaries=provider_health_boundaries,
             )
         except _ConcurrentDecisionSnapshot as exc:
             self._needs_cache_rebuild = True
@@ -2133,6 +2153,7 @@ class PersistentLiveDecisionLoop:
             market_state_sha256=market_sha,
             affected_input_ids=affected,
             gate=_GATE_PROVIDER_GAP,
+            provider_health_boundaries=provider_health_boundaries,
             detail=(
                 "provider observation failed closed as a ZERO paper/shadow plan: "
                 f"{type(exc).__name__}"

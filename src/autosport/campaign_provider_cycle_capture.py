@@ -1408,15 +1408,30 @@ def _seal_campaign_provider_cycle_capture_dispatch() -> None:
                 "campaign provider-cycle capture implementation changed"
             )
 
+    def require_public_capture_surface() -> None:
+        if (
+            module_globals.get("capture_campaign_complete_game_board")
+            is not sealed_capture_campaign_complete_game_board
+        ):
+            raise expected_error(
+                "campaign provider-cycle public capture surface changed"
+            )
+
     def sealed_capture_campaign_complete_game_board(*args, **kwargs):
+        require_public_capture_surface()
         require_dispatch_integrity()
         result = expected_capture(*args, **kwargs)
         require_dispatch_integrity()
+        require_public_capture_surface()
         return result
 
     sealed_capture_campaign_complete_game_board.__name__ = expected_capture.__name__
     sealed_capture_campaign_complete_game_board.__qualname__ = expected_capture.__qualname__
     sealed_capture_campaign_complete_game_board.__doc__ = expected_capture.__doc__
+    if hasattr(sealed_capture_campaign_complete_game_board, "__wrapped__"):
+        raise RuntimeError(
+            "campaign provider-cycle capture seal must not expose unsealed delegate"
+        )
     module_globals["capture_campaign_complete_game_board"] = (
         sealed_capture_campaign_complete_game_board
     )

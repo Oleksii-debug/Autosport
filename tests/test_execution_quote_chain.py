@@ -543,6 +543,50 @@ def test_evidence_invariant_rejects_conflicting_future_request_digests(
         )
 
 
+def test_quote_chain_authority_surfaces_reject_runtime_class_rebinding() -> None:
+    evidence_type = execution_quote_chain.ExecutionQuoteChainEvidence
+
+    for name in (
+        "assert_projection_issued",
+        "submit_instruction_identity_bound",
+        "provider_request_correlation_bound",
+        "actual_submitted_instruction_bound",
+        "accepted_price_verified",
+        "chain_complete",
+        "evidence_sha256",
+        "to_dict",
+    ):
+        original = evidence_type.__dict__[name]
+        with pytest.raises(
+            TypeError,
+            match="quote-chain evidence authority surface is sealed",
+        ):
+            setattr(evidence_type, name, object())
+        assert evidence_type.__dict__[name] is original
+
+
+def test_quote_chain_builder_rejects_module_class_alias_rebinding(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    ledger = _submitted(tmp_path)
+
+    class ForgedEvidence:
+        pass
+
+    monkeypatch.setattr(
+        execution_quote_chain,
+        "ExecutionQuoteChainEvidence",
+        ForgedEvidence,
+    )
+
+    with pytest.raises(
+        ExecutionQuoteChainError,
+        match="quote-chain evidence class authority is unavailable",
+    ):
+        _project(ledger)
+
+
 def test_quote_chain_mint_state_is_not_importable_from_module_namespace() -> None:
     assert not hasattr(execution_quote_chain, "_QUOTE_CHAIN_EVIDENCE_ISSUANCE_TOKEN")
     assert not hasattr(execution_quote_chain, "_ISSUED_QUOTE_CHAIN_EVIDENCE")

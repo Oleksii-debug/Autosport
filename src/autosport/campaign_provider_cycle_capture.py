@@ -47,15 +47,16 @@ _CANONICAL_PATH_EQUALITY_CODE = getattr(_CANONICAL_PATH_EQUALITY, "__code__", No
 _CANONICAL_PATH_JOIN = Path.__truediv__
 _CANONICAL_PATH_JOIN_CODE = getattr(_CANONICAL_PATH_JOIN, "__code__", None)
 _CANONICAL_OBJECT_GETATTRIBUTE = object.__getattribute__
-_EVIDENCE_DIRECTORY = CompleteGameBoardEvidenceStore.DIRECTORY
 _EVIDENCE_DIRECTORY_SURFACE = inspect.getattr_static(
     CompleteGameBoardEvidenceStore,
     "DIRECTORY",
 )
+_EVIDENCE_DIRECTORY = _EVIDENCE_DIRECTORY_SURFACE
 _PRECOMMIT_ROUTING_SEAMS = {
     name: inspect.getattr_static(ForwardUniversePrecommitLocator, name)
     for name in ("workspace", "authority_root")
 }
+_PRECOMMIT_ROUTING_SEAM_ITEMS = tuple(_PRECOMMIT_ROUTING_SEAMS.items())
 _NEXT_SLOT = CollectorDeltaStore._next_collector_schedule_slot
 _SCHEDULE_DUE_AT = CollectorDeltaStore._collector_schedule_due_at
 _BEGIN_SCHEDULED = CollectorDeltaStore._begin_scheduled_collector_cycle
@@ -332,13 +333,22 @@ def _require_provider_evidence_campaign_scope(
             "DIRECTORY",
             None,
         )
-        != _EVIDENCE_DIRECTORY_SURFACE
-        or CompleteGameBoardEvidenceStore.DIRECTORY != _EVIDENCE_DIRECTORY
+        is not _EVIDENCE_DIRECTORY_SURFACE
     ):
         raise CampaignProviderCycleCaptureIntegrityError(
             "provider evidence directory authority changed"
         )
-    for name, descriptor in _PRECOMMIT_ROUTING_SEAMS.items():
+    if (
+        len(_PRECOMMIT_ROUTING_SEAMS) != len(_PRECOMMIT_ROUTING_SEAM_ITEMS)
+        or any(
+            _PRECOMMIT_ROUTING_SEAMS.get(name) is not descriptor
+            for name, descriptor in _PRECOMMIT_ROUTING_SEAM_ITEMS
+        )
+    ):
+        raise CampaignProviderCycleCaptureIntegrityError(
+            "campaign precommit routing witness table changed"
+        )
+    for name, descriptor in _PRECOMMIT_ROUTING_SEAM_ITEMS:
         if (
             inspect.getattr_static(
                 ForwardUniversePrecommitLocator,
@@ -593,6 +603,8 @@ def capture_campaign_complete_game_board(
         ("_EVIDENCE_SAVE", evidence_save),
         ("_EVIDENCE_PATH", evidence_path_for),
         ("_CANONICAL_PATH_EQUALITY", path_equal),
+        ("_CANONICAL_PATH_JOIN", _CANONICAL_PATH_JOIN),
+        ("_CANONICAL_OBJECT_GETATTRIBUTE", _CANONICAL_OBJECT_GETATTRIBUTE),
         ("_RECORD_ARTIFACT", record_artifact),
         ("_FINISH_CYCLE", finish_cycle),
         ("_RESOLVE_ARTIFACT", resolve_artifact),
@@ -628,6 +640,9 @@ def capture_campaign_complete_game_board(
     expected_receipt_issuer_function = _CANONICAL_CYCLE_RECEIPT_ISSUER_FUNCTION
     expected_receipt_issuer_code = _CANONICAL_CYCLE_RECEIPT_ISSUER_CODE
     expected_receipt_issuance_capability = _CANONICAL_RECEIPT_ISSUANCE_CAPABILITY
+    expected_evidence_directory_surface = _EVIDENCE_DIRECTORY_SURFACE
+    expected_precommit_routing_seams = _PRECOMMIT_ROUTING_SEAMS
+    expected_precommit_routing_items = _PRECOMMIT_ROUTING_SEAM_ITEMS
 
     def require_stable_dispatch() -> None:
         if (
@@ -743,6 +758,35 @@ def capture_campaign_complete_game_board(
         ):
             raise CampaignProviderCycleCaptureIntegrityError(
                 "campaign provider-cycle chronology/digest primitives changed"
+            )
+        if (
+            module_globals.get("_EVIDENCE_DIRECTORY_SURFACE")
+            is not expected_evidence_directory_surface
+            or expected_getattr_static(
+                CompleteGameBoardEvidenceStore,
+                "DIRECTORY",
+                None,
+            )
+            is not expected_evidence_directory_surface
+            or module_globals.get("_PRECOMMIT_ROUTING_SEAMS")
+            is not expected_precommit_routing_seams
+            or module_globals.get("_PRECOMMIT_ROUTING_SEAM_ITEMS")
+            is not expected_precommit_routing_items
+            or len(expected_precommit_routing_seams)
+            != len(expected_precommit_routing_items)
+            or any(
+                expected_precommit_routing_seams.get(name) is not descriptor
+                or expected_getattr_static(
+                    ForwardUniversePrecommitLocator,
+                    name,
+                    None,
+                )
+                is not descriptor
+                for name, descriptor in expected_precommit_routing_items
+            )
+        ):
+            raise CampaignProviderCycleCaptureIntegrityError(
+                "campaign provider evidence routing witness changed mid-capture"
             )
         for name, target, code in expected_codes:
             if module_globals.get(name) is not target:
@@ -1107,6 +1151,7 @@ def _seal_campaign_provider_cycle_capture_dispatch() -> None:
         "_EVIDENCE_DIRECTORY": _EVIDENCE_DIRECTORY,
         "_EVIDENCE_DIRECTORY_SURFACE": _EVIDENCE_DIRECTORY_SURFACE,
         "_PRECOMMIT_ROUTING_SEAMS": _PRECOMMIT_ROUTING_SEAMS,
+        "_PRECOMMIT_ROUTING_SEAM_ITEMS": _PRECOMMIT_ROUTING_SEAM_ITEMS,
     }
     expected_callables = tuple(
         (
@@ -1187,13 +1232,14 @@ def _seal_campaign_provider_cycle_capture_dispatch() -> None:
                 "campaign provider-cycle chronology/digest primitives changed"
             )
         if (
-            inspect.getattr_static(CompleteGameBoardEvidenceStore, "DIRECTORY", None)
-            != _EVIDENCE_DIRECTORY_SURFACE
-            or CompleteGameBoardEvidenceStore.DIRECTORY != _EVIDENCE_DIRECTORY
+            expected_getattr_static(CompleteGameBoardEvidenceStore, "DIRECTORY", None)
+            is not _EVIDENCE_DIRECTORY_SURFACE
+            or len(_PRECOMMIT_ROUTING_SEAMS) != len(_PRECOMMIT_ROUTING_SEAM_ITEMS)
             or any(
-                expected_getattr_static(ForwardUniversePrecommitLocator, name, None)
+                _PRECOMMIT_ROUTING_SEAMS.get(name) is not descriptor
+                or expected_getattr_static(ForwardUniversePrecommitLocator, name, None)
                 is not descriptor
-                for name, descriptor in _PRECOMMIT_ROUTING_SEAMS.items()
+                for name, descriptor in _PRECOMMIT_ROUTING_SEAM_ITEMS
             )
         ):
             raise expected_error(

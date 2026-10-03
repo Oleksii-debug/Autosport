@@ -37,7 +37,7 @@ def evidence(
         minimum_backer_stake=Decimal(minimum),
         observed_at=observed_at,
         valid_until=valid_until,
-        source_kind=MinimumStakeSourceKind.LIVE_PROVIDER_SURFACE,
+        source_kind=MinimumStakeSourceKind.READ_ONLY_PROVIDER_SURFACE,
         source_ref="betfair-es://exchange/minimum-stake",
         source_sha256="a" * 64,
     )
@@ -160,7 +160,7 @@ def test_missing_dynamic_minimum_is_unknown_not_admissible():
     assert result.minimum_backer_stake is None
 
 
-def test_future_minimum_evidence_is_unknown():
+def test_future_minimum_evidence_is_unknown_and_untrusted():
     ev = evidence(
         observed_at=T0 + timedelta(seconds=1),
         valid_until=T0 + timedelta(minutes=2),
@@ -171,7 +171,7 @@ def test_future_minimum_evidence_is_unknown():
         minimum_stake_evidence=ev,
     )
     assert result.state is SpainOrderAdmission.UNKNOWN
-    assert result.reason == "minimum_stake_evidence_is_future"
+    assert result.reason == "minimum_stake_provider_origin_unproven"
 
 
 @pytest.mark.parametrize("delta", [timedelta(0), timedelta(microseconds=1)])
@@ -186,31 +186,29 @@ def test_expired_minimum_evidence_is_unknown(delta):
         minimum_stake_evidence=ev,
     )
     assert result.state is SpainOrderAdmission.UNKNOWN
-    assert result.reason == "minimum_stake_evidence_is_expired"
+    assert result.reason == "minimum_stake_provider_origin_unproven"
 
 
-def test_stake_below_dynamic_minimum_is_rejected():
-    result = assess_betfair_spain_limit_order(
+def test_caller_minted_minimum_cannot_reject_or_admit_stake():
+    below = assess_betfair_spain_limit_order(
         backer_stake=Decimal("0.99"),
         as_of=T0,
         minimum_stake_evidence=evidence("1"),
     )
-    assert result.state is SpainOrderAdmission.REJECTED
-    assert result.minimum_backer_stake == Decimal("1")
-
-
-@pytest.mark.parametrize("stake", ["1", "2", "123.45"])
-def test_stake_at_or_above_dynamic_minimum_passes_narrow_precheck(stake):
-    result = assess_betfair_spain_limit_order(
-        backer_stake=Decimal(stake),
+    above = assess_betfair_spain_limit_order(
+        backer_stake=Decimal("123.45"),
         as_of=T0,
         minimum_stake_evidence=evidence("1"),
     )
-    assert result.state is SpainOrderAdmission.ADMISSIBLE
-    assert result.execution_authority is False
+    assert below.state is SpainOrderAdmission.UNKNOWN
+    assert above.state is SpainOrderAdmission.UNKNOWN
+    assert below.minimum_backer_stake is None
+    assert above.minimum_backer_stake is None
+    assert below.reason == "minimum_stake_provider_origin_unproven"
+    assert above.reason == "minimum_stake_provider_origin_unproven"
 
 
-def test_dynamic_minimum_can_change_without_code_change():
+def test_caller_can_change_structural_minimum_but_not_authority():
     at_one = assess_betfair_spain_limit_order(
         backer_stake=Decimal("1.50"),
         as_of=T0,
@@ -221,8 +219,8 @@ def test_dynamic_minimum_can_change_without_code_change():
         as_of=T0,
         minimum_stake_evidence=evidence("2"),
     )
-    assert at_one.state is SpainOrderAdmission.ADMISSIBLE
-    assert at_two.state is SpainOrderAdmission.REJECTED
+    assert at_one.state is SpainOrderAdmission.UNKNOWN
+    assert at_two.state is SpainOrderAdmission.UNKNOWN
 
 
 @pytest.mark.parametrize(
@@ -253,7 +251,7 @@ def test_minimum_evidence_identity_fails_closed(field, value, match):
         minimum_backer_stake=Decimal("1"),
         observed_at=T0,
         valid_until=T0 + timedelta(minutes=5),
-        source_kind=MinimumStakeSourceKind.LIVE_PROVIDER_SURFACE,
+        source_kind=MinimumStakeSourceKind.READ_ONLY_PROVIDER_SURFACE,
         source_ref="betfair-es://exchange/minimum-stake",
         source_sha256="a" * 64,
     )
@@ -270,7 +268,7 @@ def test_minimum_evidence_cannot_grant_execution_authority():
             minimum_backer_stake=Decimal("1"),
             observed_at=T0,
             valid_until=T0 + timedelta(minutes=5),
-            source_kind=MinimumStakeSourceKind.LIVE_PROVIDER_SURFACE,
+            source_kind=MinimumStakeSourceKind.READ_ONLY_PROVIDER_SURFACE,
             source_ref="betfair-es://exchange/minimum-stake",
             source_sha256="a" * 64,
             execution_authority=True,
@@ -280,3 +278,17 @@ def test_minimum_evidence_cannot_grant_execution_authority():
 def test_minimum_evidence_validity_window_must_advance():
     with pytest.raises(BetfairSpainGuardError, match="after observed"):
         evidence(observed_at=T0, valid_until=T0)
+
+
+def test_public_minimum_evidence_exposes_no_provider_or_current_constraint_authority():
+    ev = evidence()
+    assert ev.provider_origin_proven is False
+    assert ev.current_constraint_authority is False
+    assert ev.execution_authority is False
+
+
+def test_write_acceptance_probe_is_not_a_supported_minimum_source_kind():
+    assert {item.value for item in MinimumStakeSourceKind} == {
+        "READ_ONLY_PROVIDER_SURFACE",
+        "PROVIDER_DOCUMENTATION_SNAPSHOT",
+    }

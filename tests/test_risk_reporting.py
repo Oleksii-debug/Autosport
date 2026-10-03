@@ -4,6 +4,8 @@ from decimal import Decimal, getcontext, setcontext
 from pathlib import Path
 from unittest.mock import patch
 
+import autosport.risk_reporting as risk_reporting
+
 from autosport.domain import TicketLeg
 from autosport.economic_goal import EconomicGoalContract
 from autosport.paper import PaperBook
@@ -374,18 +376,31 @@ class PaperRiskReportingTests(unittest.TestCase):
     def test_risk_state_change_during_projection_fails_closed(self) -> None:
         book = PaperBook("100")
 
+        original_drawdown = risk_reporting._historical_max_drawdown
+        mutated = False
+
+        def mutate_state(current_book):
+            nonlocal mutated
+            if not mutated:
+                mutated = True
+                current_book.open_ticket(
+                    [TicketLeg("event-race", "market-race", "selection-race", Decimal("2"))],
+                    Decimal("1"),
+                )
+            return original_drawdown(current_book)
+
         with patch.object(
-            PaperRiskPolicy,
-            "risk_of_ruin_portfolio_sha256",
-            side_effect=("a" * 64, "b" * 64),
-        ) as digest:
+            risk_reporting,
+            "_historical_max_drawdown",
+            side_effect=mutate_state,
+        ):
             with self.assertRaisesRegex(
                 ValueError,
                 "canonical PAPER risk state changed during reporting",
             ):
                 build_paper_risk_report(book, self._goal())
 
-        self.assertEqual(digest.call_count, 2)
+        self.assertTrue(mutated)
 
     def test_corrupted_paper_state_fails_closed_instead_of_reporting_metrics(self) -> None:
         book = PaperBook("100")

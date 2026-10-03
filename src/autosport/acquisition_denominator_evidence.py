@@ -485,9 +485,14 @@ def require_complete_acquisition_coverage(
     if type(evidence) is not AcquisitionDenominatorEvidence:
         raise TypeError("evidence must be exact AcquisitionDenominatorEvidence")
     issued = _ISSUED.get(id(evidence))
-    expected_digest = _digest(
-        {"schema": _SCHEMA, **evidence.to_payload(include_digest=False)}
-    )
+    try:
+        expected_digest = _digest(
+            {"schema": _SCHEMA, **evidence.to_payload(include_digest=False)}
+        )
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise AcquisitionDenominatorEvidenceError(
+            "acquisition denominator evidence structure is invalid"
+        ) from exc
     if (
         issued is None
         or issued[0] is not evidence

@@ -291,6 +291,8 @@ def _scan_regular_source_tree(
     *,
     label: str,
     relative: Path = Path(),
+    windows_member_prefix: str | None = None,
+    archive_files: list[str] | None = None,
 ) -> None:
     """Validate one tree without descending through symlink/reparse directories."""
 
@@ -326,6 +328,13 @@ def _scan_regular_source_tree(
         source = path / entry.name
         child_relative = relative / entry.name
         child_text = child_relative.as_posix()
+        member_name = (
+            None
+            if windows_member_prefix is None
+            else f"{windows_member_prefix}/{child_text}"
+        )
+        if member_name is not None:
+            _validate_windows_member(member_name)
         try:
             metadata = entry.stat(follow_symlinks=False)
         except OSError as exc:
@@ -352,8 +361,12 @@ def _scan_regular_source_tree(
                 source,
                 label=label,
                 relative=child_relative,
+                windows_member_prefix=windows_member_prefix,
+                archive_files=archive_files,
             )
         elif stat.S_ISREG(metadata.st_mode):
+            if archive_files is not None and member_name is not None:
+                archive_files.append(member_name)
             continue
         else:
             raise ValueError(f"{label} contains a non-regular entry: {child_text}")
@@ -376,8 +389,23 @@ def _scan_regular_source_tree(
         raise ValueError(f"{label} directory changed during traversal: {target}")
 
 
-def _require_regular_source_tree(path: Path, *, label: str) -> None:
-    _scan_regular_source_tree(path, label=label)
+def _require_regular_source_tree(
+    path: Path,
+    *,
+    label: str,
+    windows_member_prefix: str | None = None,
+) -> None:
+    archive_files: list[str] | None = (
+        [] if windows_member_prefix is not None else None
+    )
+    _scan_regular_source_tree(
+        path,
+        label=label,
+        windows_member_prefix=windows_member_prefix,
+        archive_files=archive_files,
+    )
+    if archive_files is not None:
+        _validate_windows_member_set(archive_files)
 
 
 def _release_example_destination_name(path: Path) -> str:
@@ -420,6 +448,7 @@ def _copy_regular_source_tree(
     destination_root: Path,
     *,
     label: str,
+    windows_member_prefix: str | None = None,
 ) -> None:
     """Copy one tree while validating each directory before and after its children."""
 
@@ -473,6 +502,10 @@ def _copy_regular_source_tree(
             source = source_dir / entry.name
             child_relative = relative / entry.name
             child_text = child_relative.as_posix()
+            if windows_member_prefix is not None:
+                _validate_windows_member(
+                    f"{windows_member_prefix}/{child_text}"
+                )
             try:
                 metadata = entry.stat(follow_symlinks=False)
             except OSError as exc:
@@ -906,6 +939,9 @@ def build_windows_package(
     restart_recovery_path = Path(restart_recovery_path)
     output_zip = Path(output_zip)
     example_destination_name = _release_example_destination_name(example_dir)
+    example_member_prefix = (
+        f"{_PACKAGE_PREFIX}examples/{example_destination_name}"
+    )
 
     exe_snapshot = _require_regular_source_file(
         exe_path,
@@ -915,7 +951,11 @@ def build_windows_package(
         start_file,
         label="Windows start-file input",
     )
-    _require_regular_source_tree(example_dir, label="release example tree")
+    _require_regular_source_tree(
+        example_dir,
+        label="release example tree",
+        windows_member_prefix=example_member_prefix,
+    )
     diagnostic_snapshot = _require_regular_source_file(
         diagnostic_path,
         label="packaged diagnostic input",
@@ -977,6 +1017,7 @@ def build_windows_package(
         example_dir,
         package_dir / "examples" / example_destination_name,
         label="release example tree",
+        windows_member_prefix=example_member_prefix,
     )
     _require_regular_source_tree(package_dir, label="release package staging tree")
 

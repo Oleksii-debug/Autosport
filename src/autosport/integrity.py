@@ -31,6 +31,11 @@ _PATH_LOCKS: dict[str, threading.RLock] = {}
 _PATH_LOCK_LOCAL = threading.local()
 
 _SCIENTIFIC_REGISTRY_AUTHORITY_DOMAIN = "autosport.scientific-registry.v1"
+_CANONICAL_MONOTONIC_AUTHORITY_TYPE = MonotonicWorkspaceAuthority
+_CANONICAL_MONOTONIC_READ_HISTORY = MonotonicWorkspaceAuthority.read_history
+_CANONICAL_MONOTONIC_READ_HISTORY_CODE = MonotonicWorkspaceAuthority.read_history.__code__
+_CANONICAL_MONOTONIC_RECOVER = MonotonicWorkspaceAuthority.recover
+_CANONICAL_MONOTONIC_RECOVER_CODE = MonotonicWorkspaceAuthority.recover.__code__
 _SCIENTIFIC_REGISTRY_ENTRY_KEYS = frozenset(
     {
         "record_type",
@@ -167,13 +172,65 @@ def _looks_like_scientific_registry_state(payload: dict[str, Any]) -> bool:
     return True
 
 
+def _assert_scientific_registry_monotonic_read_dispatch(
+    authority: MonotonicWorkspaceAuthority,
+) -> None:
+    if (
+        MonotonicWorkspaceAuthority is not _CANONICAL_MONOTONIC_AUTHORITY_TYPE
+        or type(authority) is not _CANONICAL_MONOTONIC_AUTHORITY_TYPE
+        or vars(_CANONICAL_MONOTONIC_AUTHORITY_TYPE).get("read_history")
+        is not _CANONICAL_MONOTONIC_READ_HISTORY
+        or _CANONICAL_MONOTONIC_READ_HISTORY.__code__
+        is not _CANONICAL_MONOTONIC_READ_HISTORY_CODE
+        or vars(_CANONICAL_MONOTONIC_AUTHORITY_TYPE).get("recover")
+        is not _CANONICAL_MONOTONIC_RECOVER
+        or _CANONICAL_MONOTONIC_RECOVER.__code__
+        is not _CANONICAL_MONOTONIC_RECOVER_CODE
+    ):
+        raise RuntimeError(
+            "ScientificRegistry monotonic read/recovery dispatch changed"
+        )
+    instance_dict = object.__getattribute__(authority, "__dict__")
+    if "read_history" in instance_dict or "recover" in instance_dict:
+        raise RuntimeError(
+            "ScientificRegistry monotonic read/recovery instance dispatch changed"
+        )
+
+
+def _authority_read_history(
+    authority: MonotonicWorkspaceAuthority,
+):
+    _assert_scientific_registry_monotonic_read_dispatch(authority)
+    return _CANONICAL_MONOTONIC_READ_HISTORY(authority)
+
+
+def _authority_recover(
+    authority: MonotonicWorkspaceAuthority,
+    *,
+    observed_state_sha256: str | None,
+    tx_id: str | None = None,
+    semantic_binding_sha256: str | None = None,
+):
+    _assert_scientific_registry_monotonic_read_dispatch(authority)
+    return _CANONICAL_MONOTONIC_RECOVER(
+        authority,
+        observed_state_sha256=observed_state_sha256,
+        tx_id=tx_id,
+        semantic_binding_sha256=semantic_binding_sha256,
+    )
+
+
 def _scientific_registry_authority(destination: Path) -> MonotonicWorkspaceAuthority:
     workspace = destination.parent.resolve(strict=False)
-    return MonotonicWorkspaceAuthority(
+    if MonotonicWorkspaceAuthority is not _CANONICAL_MONOTONIC_AUTHORITY_TYPE:
+        raise RuntimeError("ScientificRegistry monotonic authority constructor changed")
+    authority = _CANONICAL_MONOTONIC_AUTHORITY_TYPE(
         workspace=workspace,
         domain=_SCIENTIFIC_REGISTRY_AUTHORITY_DOMAIN,
         key=destination.name,
     )
+    _assert_scientific_registry_monotonic_read_dispatch(authority)
+    return authority
 
 
 def _authority_binding(destination: Path, observed: str | None, intended: str, *, kind: str) -> str:
@@ -194,7 +251,7 @@ def _recover_or_bootstrap_scientific_registry_authority(
     destination: Path,
     observed: str | None,
 ) -> None:
-    history = authority.read_history()
+    history = _authority_read_history(authority)
     if not history:
         if observed is None:
             return
@@ -215,9 +272,10 @@ def _recover_or_bootstrap_scientific_registry_authority(
 
     pending = history[-1] if history[-1].phase is AuthorityPhase.PREPARE else None
     if pending is None:
-        authority.recover(observed_state_sha256=observed)
+        _authority_recover(authority, observed_state_sha256=observed)
         return
-    authority.recover(
+    _authority_recover(
+        authority,
         observed_state_sha256=observed,
         tx_id=pending.tx_id,
         semantic_binding_sha256=pending.semantic_binding_sha256,
@@ -281,7 +339,7 @@ def establish_validated_scientific_registry_read_baseline(
 
         observed = hashlib.sha256(current_bytes).hexdigest()
         authority = _scientific_registry_authority(destination)
-        if not authority.read_history():
+        if not _authority_read_history(authority):
             raise MonotonicAuthorityRollbackError(
                 "validated non-pristine scientific registry lacks independent authority history"
             )

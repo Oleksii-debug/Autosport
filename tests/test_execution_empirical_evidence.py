@@ -470,6 +470,40 @@ def test_rejected_attempt_is_not_a_fake_zero_slippage_sample(tmp_path):
     assert evidence.unaccepted_stake is None
 
 
+def test_receiptless_rejected_attempt_projects_canonical_terminal_evidence(tmp_path):
+    ledger = _ledger(tmp_path)
+    acknowledgement = ExternalAcknowledgement(
+        attempt_id="attempt-1",
+        external_receipt_id=None,
+        status=AcknowledgementStatus.REJECTED,
+        acknowledged_at=ACKED,
+    )
+    ledger._bind_provider_acknowledgement_evidence(
+        attempt_id="attempt-1",
+        evidence_id=EVIDENCE_ID,
+        observed_at=ACKED,
+        source="provider-response",
+        acknowledgement=acknowledgement,
+    )
+    ledger.acknowledge(acknowledgement)
+
+    evidence = build_empirical_execution_evidence(
+        ledger,
+        attempt_id="attempt-1",
+    )
+
+    assert evidence.attempt_state == "REJECTED"
+    assert evidence.ledger_terminal is True
+    assert evidence.external_receipt_id is None
+    assert evidence.acknowledgement_status == "REJECTED"
+    assert evidence.acknowledgement_payload_sha256 is not None
+    assert (
+        evidence.provider_evidence_acknowledgement_sha256
+        == evidence.acknowledgement_payload_sha256
+    )
+    assert evidence.slippage_status == SLIPPAGE_STATUS_NOT_APPLICABLE
+
+
 def test_exact_provider_provenance_cannot_mint_lay_slippage_without_root_authority(
     tmp_path,
 ):
@@ -791,7 +825,11 @@ def _population_ledger(tmp_path) -> RealExecutionLedger:
         }[state]
         acknowledgement = ExternalAcknowledgement(
             attempt_id=attempt_id,
-            external_receipt_id=f"receipt-{suffix}",
+            external_receipt_id=(
+                None
+                if status is AcknowledgementStatus.REJECTED
+                else f"receipt-{suffix}"
+            ),
             status=status,
             acknowledged_at=ACKED,
             accepted_odds=(

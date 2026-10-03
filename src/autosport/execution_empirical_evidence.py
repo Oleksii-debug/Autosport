@@ -429,9 +429,16 @@ class EmpiricalExecutionEvidence:
                     raise EmpiricalExecutionEvidenceError(
                         "terminal state must match acknowledgement_status"
                     )
-                if self.acknowledged_at is None or self.external_receipt_id is None:
+                if self.acknowledged_at is None:
                     raise EmpiricalExecutionEvidenceError(
-                        "acknowledged terminal attempt requires durable acknowledgement identity"
+                        "acknowledged terminal attempt requires acknowledgement time"
+                    )
+                if (
+                    state in {AttemptState.ACCEPTED, AttemptState.PARTIAL}
+                    and self.external_receipt_id is None
+                ):
+                    raise EmpiricalExecutionEvidenceError(
+                        "accepted/partial acknowledgement requires external receipt identity"
                     )
                 if reconciliation_present:
                     raise EmpiricalExecutionEvidenceError(

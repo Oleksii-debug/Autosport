@@ -327,3 +327,41 @@ def test_task_error_is_redacted_before_localized_live_presentation() -> None:
     assert rendered.startswith("Помилка поточного знімка:")
     assert message.error in rendered
     assert secret not in rendered
+
+
+
+def test_poll_join_interruption_preserves_terminal_message_and_busy_ownership() -> None:
+    worker = OneShotObservationWorker()
+    sentinel = object()
+
+    assert worker.start(lambda: sentinel) is True
+    helper = worker._thread
+    assert helper is not None
+    helper.join(timeout=2.0)
+    assert not helper.is_alive()
+    assert worker.busy is True
+
+    with mock.patch.object(
+        helper,
+        "join",
+        side_effect=KeyboardInterrupt("poll join interrupted"),
+    ):
+        try:
+            worker.poll()
+        except KeyboardInterrupt as exc:
+            assert str(exc) == "poll join interrupted"
+        else:
+            raise AssertionError("poll join interruption must propagate")
+
+    # The failed reap cannot consume the one terminal disposition or release the
+    # single-flight slot. A subsequent ordinary poll must recover deterministically.
+    assert worker.busy is True
+    assert worker._thread is helper
+    assert worker.start(lambda: object()) is False
+
+    message = worker.poll()
+    assert message is not None
+    assert message.result is sentinel
+    assert message.error is None
+    assert worker.busy is False
+    assert worker._thread is None

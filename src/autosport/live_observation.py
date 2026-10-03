@@ -211,7 +211,15 @@ class OneShotObservationWorker:
                 # terminal disposition from an unsupported self-poll.
                 self._messages.put_nowait(message)
                 raise RuntimeError("observation worker cannot poll itself")
-            thread.join()
+            try:
+                thread.join()
+            except BaseException:
+                # The terminal disposition was removed from the single-slot queue
+                # before reaping. If the caller's join is interrupted, preserve that
+                # disposition and retain single-flight ownership so a later poll can
+                # retry the reap instead of stranding the worker permanently busy.
+                self._messages.put_nowait(message)
+                raise
 
         with self._lock:
             if self._thread is thread:

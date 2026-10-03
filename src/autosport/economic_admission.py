@@ -854,6 +854,10 @@ _ECONOMIC_GOAL_LOAD_FROZEN = _freeze_external_python_function_graph(
 # Freeze the exact canonical risk helper descriptors used by the positive
 # post-turnover continuation. This mirrors PaperRiskPolicy.evaluate's own helper
 # witnesses so a later class/descriptor mutation cannot widen admission authority.
+_RISK_EVALUATE_DESCRIPTOR = PaperRiskPolicy.__dict__["evaluate"]
+_RISK_EVALUATE = _RISK_EVALUATE_DESCRIPTOR
+_RISK_EVALUATE_FROZEN = _freeze_external_python_function_graph(_RISK_EVALUATE)
+
 _RISK_BOOK_STATE_DESCRIPTOR = PaperRiskPolicy.__dict__["_book_state"]
 _RISK_HISTORY_DESCRIPTOR = PaperRiskPolicy.__dict__["_goal_history_rooms"]
 _RISK_QUOTE_DESCRIPTOR = PaperRiskPolicy.__dict__["_quote_risk_decision"]
@@ -872,6 +876,7 @@ _RISK_RUIN_FROZEN = _freeze_external_python_function_graph(_RISK_RUIN)
 _RISK_DERIVED_FROZEN = _freeze_external_python_function_graph(_RISK_DERIVED)
 
 _ADMISSION_RISK_HELPER_WITNESSES = (
+    ("evaluate", _RISK_EVALUATE_DESCRIPTOR, _RISK_EVALUATE, _RISK_EVALUATE.__code__, False),
     ("_book_state", _RISK_BOOK_STATE_DESCRIPTOR, _RISK_BOOK_STATE, _RISK_BOOK_STATE.__code__, True),
     ("_goal_history_rooms", _RISK_HISTORY_DESCRIPTOR, _RISK_HISTORY, _RISK_HISTORY.__code__, True),
     ("_quote_risk_decision", _RISK_QUOTE_DESCRIPTOR, _RISK_QUOTE, _RISK_QUOTE.__code__, True),
@@ -928,6 +933,7 @@ _DETACHED_RISK_HELPER_WITNESSES = tuple(
         *_capture_detached_function_graph(function),
     )
     for label, function in (
+        ("evaluate", _RISK_EVALUATE_FROZEN),
         ("history", _RISK_HISTORY_FROZEN),
         ("quote", _RISK_QUOTE_FROZEN),
         ("ruin", _RISK_RUIN_FROZEN),
@@ -1280,7 +1286,18 @@ def admit_paper_ticket(
             if day_authority is not None:
                 effective_placed_at = day_authority.admission_ts
 
-        decision = risk_policy.evaluate(working_book, amount, context=context)
+        if not _admission_risk_helper_authority_valid():
+            decision = RiskDecision(
+                False,
+                "virtual bankroll risk helper authority is invalid",
+            )
+        else:
+            decision = _RISK_EVALUATE_FROZEN(
+                risk_policy,
+                working_book,
+                amount,
+                context=context,
+            )
 
         # Quote freshness is admission-time truth, not caller-time truth. Keep the
         # original context for provenance-bound risk-of-ruin/history semantics, but

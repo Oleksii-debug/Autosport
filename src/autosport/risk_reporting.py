@@ -148,19 +148,23 @@ def _historical_max_drawdown(book: PaperBook) -> _HistoricalMaxDrawdown | None:
                 drawdown = running_peak - equity
             if drawdown < 0:
                 return None
+            if running_peak > 0:
+                # Fractional drawdown is a distinct historical maximum from the
+                # maximum absolute-money drawdown. Preserve the canonical risk
+                # precision, exponent bounds and deterministic ratio rounding.
+                ratio_context = PaperRiskPolicy._decimal_context()
+                ratio_context.traps[Inexact] = False
+                with localcontext(ratio_context):
+                    drawdown_fraction = drawdown / running_peak
+                if (
+                    maximum_fraction is None
+                    or drawdown_fraction > maximum_fraction
+                ):
+                    maximum_fraction = drawdown_fraction
+            else:
+                maximum_fraction = None
             if drawdown > maximum:
                 maximum = drawdown
-                if running_peak > 0:
-                    # This fraction is descriptive evidence, not money/risk
-                    # enforcement arithmetic. Preserve the canonical risk precision,
-                    # exponent bounds and rounding while allowing the deterministic
-                    # rounded representation required for recurring ratios.
-                    ratio_context = PaperRiskPolicy._decimal_context()
-                    ratio_context.traps[Inexact] = False
-                    with localcontext(ratio_context):
-                        maximum_fraction = drawdown / running_peak
-                else:
-                    maximum_fraction = None
                 maximum_peak_id = running_peak_id
                 maximum_trough_id = point_id
 

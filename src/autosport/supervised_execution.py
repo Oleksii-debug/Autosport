@@ -775,7 +775,7 @@ def _install_bound_supervised_execution_plan_authority() -> None:
     def assert_authoritative(value: BoundSupervisedExecutionPlan) -> None:
         try:
             witness = _bound_plan_witness(value)
-        except SupervisedExecutionError as exc:
+        except (SupervisedExecutionError, AttributeError, TypeError, ValueError) as exc:
             raise SupervisedExecutionError(
                 "bound supervised execution plan is not current canonical product issuance"
             ) from exc

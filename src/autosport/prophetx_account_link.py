@@ -497,20 +497,21 @@ class ProphetXAccountLinkController:
         cls,
         snapshot: AccountLinkPublicSnapshot | dict[str, object],
     ) -> tuple[AccountLinkState, str | None]:
-        """Project a public snapshot into a safe post-restart entry state."""
+        """Return a non-authoritative safe entry point after process restart.
 
-        payload = snapshot.to_dict() if type(snapshot) is AccountLinkPublicSnapshot else snapshot
+        A serialized/public UI snapshot is presentation data, not credential-store
+        authority. It can never rehydrate a linked credential by itself. Product
+        composition must re-resolve credential presence through the #1575-owned
+        secret lifecycle authority and then construct fresh runtime state.
+        """
+
+        payload = (
+            snapshot.to_dict()
+            if type(snapshot) is AccountLinkPublicSnapshot
+            else snapshot
+        )
         if type(payload) is not dict:
             raise AccountLinkInputError("snapshot must be a public snapshot mapping")
-        state = payload.get("state")
-        credential_present = payload.get("credential_present")
-        credential_ref = payload.get("credential_ref")
-        if (
-            state == AccountLinkState.LINKED_CREDENTIAL_STORED.value
-            and credential_present is True
-            and _opaque_ref(credential_ref)
-        ):
-            return AccountLinkState.LINKED_CREDENTIAL_STORED, credential_ref
         return AccountLinkState.LOGIN_FORM, None
 
     def _accept_login_outcome(self, outcome: LoginOutcome) -> None:

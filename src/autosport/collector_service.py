@@ -504,7 +504,14 @@ class HeadlessCollectorService:
         if binder is not None:
             if not callable(binder):
                 raise TypeError("source.bind_collector_store must be callable")
-            binder(delta_store)
+            try:
+                binder(delta_store)
+            except CollectorStorageBackpressureError as exc:
+                raise CollectorRetentionRequiredError(
+                    "RETENTION_REQUIRED: collector event migration reached the "
+                    "durable SQLite byte budget; run explicit pin-aware compaction "
+                    "or enlarge the configured budget, then retry"
+                ) from exc
             if (
                 getattr(source, "source_id", None) != source_id
                 or getattr(source, "stream_epoch", None) != stream_epoch

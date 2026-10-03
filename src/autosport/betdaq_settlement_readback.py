@@ -22,6 +22,7 @@ from . import betdaq_account_readonly as _account
 from .betdaq_account_readonly import (
     ADAPTER_ID,
     BetdaqAccountReadOnlyClient,
+    BetdaqAccountReadOnlyError,
 )
 
 _ECONOMIC_SCHEMA = "autosport.betdaq-economic-readback-v1"
@@ -37,6 +38,8 @@ _INTEGER_RE = re.compile(r"[0-9]+\Z")
 _DECIMAL_RE = re.compile(r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)\Z")
 _CANONICAL_ACCOUNT_HTTPS_POST = _account._CANONICAL_HTTPS_POST
 _REQUIRE_CANONICAL_ACCOUNT_TRANSPORT = _account._require_canonical_account_transport
+_CANONICAL_ACCOUNT_CURRENCY = _account._currency
+_MAX_XSD_LONG = 9_223_372_036_854_775_807
 _CANONICAL_ACCOUNT_HTTPS_POST_CODE = getattr(_CANONICAL_ACCOUNT_HTTPS_POST, "__code__", None)
 _CANONICAL_REQUIRE_ACCOUNT_TRANSPORT_CODE = getattr(
     _REQUIRE_CANONICAL_ACCOUNT_TRANSPORT,
@@ -246,14 +249,7 @@ class BetdaqOrderSettlementObservation:
                     "market_settled_at must use canonical UTC timestamp spelling"
                 )
         if self.currency is not None:
-            if (
-                type(self.currency) is not str
-                or not self.currency
-                or self.currency != self.currency.strip()
-            ):
-                raise BetdaqEconomicReadbackError(
-                    "settlement currency must be non-empty trimmed text when proven"
-                )
+            _provider_currency(self.currency, "settlement currency")
         if type(self.denomination_proven) is not bool:
             raise BetdaqEconomicReadbackError("denomination_proven must be bool")
         if type(self.scalar_economic_use_proven) is not bool:
@@ -381,14 +377,7 @@ class BetdaqPostingObservation:
         # Future provider enum values remain raw evidence per BETDAQ's schema-
         # evolution contract; they do not inherit known category semantics.
         _provider_id(self.transaction_id, "transaction_id")
-        if (
-            type(self.currency) is not str
-            or not self.currency
-            or self.currency != self.currency.strip()
-        ):
-            raise BetdaqEconomicReadbackError(
-                "posting currency must be non-empty trimmed provider text"
-            )
+        _provider_currency(self.currency, "posting currency")
         if type(self.evidence) is not BetdaqEconomicEvidence:
             raise BetdaqEconomicReadbackError(
                 "posting evidence must be canonical BETDAQ economic evidence"
@@ -468,12 +457,7 @@ class BetdaqPostingsReadback:
     def __post_init__(self) -> None:
         if self.method not in {"ListAccountPostings", "ListAccountPostingsById"}:
             raise BetdaqEconomicReadbackError("invalid postings readback method")
-        if (
-            type(self.currency) is not str
-            or not self.currency
-            or self.currency != self.currency.strip()
-        ):
-            raise BetdaqEconomicReadbackError("currency must be non-empty trimmed text")
+        _provider_currency(self.currency, "currency")
         for field in ("available_funds", "balance", "credit", "exposure"):
             _finite_decimal(getattr(self, field), field)
         if self.method == "ListAccountPostings":
@@ -1101,10 +1085,25 @@ def _optional_provider_attr(element: ET.Element, name: str) -> str | None:
     return _provider_id(raw, name)
 
 
+def _provider_currency(value: str, field: str) -> str:
+    if getattr(_account, "_currency", None) is not _CANONICAL_ACCOUNT_CURRENCY:
+        raise BetdaqEconomicReadbackError(
+            "canonical BETDAQ currency validator was replaced"
+        )
+    try:
+        return _CANONICAL_ACCOUNT_CURRENCY(value)
+    except BetdaqAccountReadOnlyError:
+        raise BetdaqEconomicReadbackError(
+            f"{field} must be canonical 3-letter uppercase provider currency"
+        ) from None
+
+
 def _provider_id(value: int | str, field: str) -> str:
     if type(value) is int:
-        if value < 0:
-            raise BetdaqEconomicReadbackError(f"{field} must be non-negative")
+        if value < 0 or value > _MAX_XSD_LONG:
+            raise BetdaqEconomicReadbackError(
+                f"{field} must fit non-negative provider xsd:long"
+            )
         return str(value)
     if (
         type(value) is not str
@@ -1117,6 +1116,10 @@ def _provider_id(value: int | str, field: str) -> str:
         )
     if len(value) > 1 and value.startswith("0"):
         raise BetdaqEconomicReadbackError(f"{field} must not contain leading zeroes")
+    if int(value) > _MAX_XSD_LONG:
+        raise BetdaqEconomicReadbackError(
+            f"{field} must fit non-negative provider xsd:long"
+        )
     return value
 
 

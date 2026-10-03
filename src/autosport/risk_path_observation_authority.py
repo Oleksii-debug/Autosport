@@ -7,6 +7,13 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 
+from .agent_loop import AgentLoopRuntime
+from .decision_ledger import (
+    ECONOMIC_DECISION_KIND,
+    DecisionLedgerIntegrityError,
+    DecisionRecord,
+    verify_economic_goal_binding,
+)
 from .domain import PaperTicket, TicketStatus
 from .paper import PaperBook
 from .paper_settlement_learning import (
@@ -33,6 +40,15 @@ _MAX_DECIMAL_TEXT = 512
 _BRIDGE_TYPE = PaperSettlementLearningBridge
 _BRIDGE_WITNESS = PaperSettlementLearningBridge.resolution_witness
 _BRIDGE_WITNESS_CODE = getattr(_BRIDGE_WITNESS, "__code__", None)
+_BRIDGE_DECISION_MATCHES = PaperSettlementLearningBridge._decision_matches
+_BRIDGE_DECISION_MATCHES_CODE = getattr(
+    _BRIDGE_DECISION_MATCHES,
+    "__code__",
+    None,
+)
+_LOOP_TYPE = AgentLoopRuntime
+_LOOP_READ = AgentLoopRuntime._read
+_LOOP_READ_CODE = getattr(_LOOP_READ, "__code__", None)
 _TX_TYPE = RunTransaction
 _TX_BASE = RunTransaction.verified_base_paper_book_snapshot
 _TX_TERMINAL = RunTransaction.verified_terminal_paper_book_snapshot
@@ -258,6 +274,12 @@ def _require_dispatch() -> None:
         or _BRIDGE_TYPE.resolution_witness is not _BRIDGE_WITNESS
         or getattr(_BRIDGE_WITNESS, "__code__", None)
         is not _BRIDGE_WITNESS_CODE
+        or _BRIDGE_TYPE._decision_matches is not _BRIDGE_DECISION_MATCHES
+        or getattr(_BRIDGE_DECISION_MATCHES, "__code__", None)
+        is not _BRIDGE_DECISION_MATCHES_CODE
+        or AgentLoopRuntime is not _LOOP_TYPE
+        or _LOOP_TYPE._read is not _LOOP_READ
+        or getattr(_LOOP_READ, "__code__", None) is not _LOOP_READ_CODE
         or RunTransaction is not _TX_TYPE
         or _TX_TYPE.verified_base_paper_book_snapshot is not _TX_BASE
         or _TX_TYPE.verified_terminal_paper_book_snapshot is not _TX_TERMINAL
@@ -283,7 +305,9 @@ def _require_dispatch() -> None:
         )
 
 
-def _committed_run_decision_ids(tx: RunTransaction) -> frozenset[str]:
+def _committed_run_decisions(
+    tx: RunTransaction,
+) -> dict[str, DecisionRecord]:
     completed = _TX_COMPLETED(tx)
     expected_new = _sha(
         completed.get("decision_ledger_sha256"),
@@ -315,7 +339,7 @@ def _committed_run_decision_ids(tx: RunTransaction) -> frozenset[str]:
             "retained run Decision Ledger is not the committed NEW ledger suffix"
         )
 
-    decision_ids: set[str] = set()
+    decisions: dict[str, DecisionRecord] = {}
     for line_number, line in enumerate(
         run.payload.decode("utf-8").splitlines(),
         start=1,
@@ -324,27 +348,93 @@ def _committed_run_decision_ids(tx: RunTransaction) -> frozenset[str]:
             line,
             label=f"retained run Decision Ledger line {line_number}",
         )
-        record = envelope.get("record") if type(envelope) is dict else None
-        decision_id = (
-            record.get("decision_id") if type(record) is dict else None
-        )
-        decision_id = _text(
-            decision_id,
-            f"retained run decision_id line {line_number}",
-        )
-        if decision_id in decision_ids:
+        raw = envelope.get("record") if type(envelope) is dict else None
+        if type(raw) is not dict:
+            raise ProductRunCapitalPathError(
+                "retained run Decision Ledger record is invalid"
+            )
+        if raw.get("decision_kind") != ECONOMIC_DECISION_KIND:
+            continue
+        try:
+            record = DecisionRecord(
+                replay_run_id=raw["replay_run_id"],
+                agent=raw["agent"],
+                observed_ts=raw["observed_ts"],
+                action=raw["action"],
+                payload=dict(raw["payload"]),
+                context_hash=raw["context_hash"],
+                decision_id=raw["decision_id"],
+                recorded_at=raw["recorded_at"],
+                decision_kind=ECONOMIC_DECISION_KIND,
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ProductRunCapitalPathError(
+                "retained economic run decision cannot be reconstructed"
+            ) from exc
+        if record.decision_id in decisions:
             raise ProductRunCapitalPathError(
                 "retained run Decision Ledger has duplicate decision identity"
             )
-        decision_ids.add(decision_id)
-    return frozenset(decision_ids)
+        decisions[record.decision_id] = record
+    if not decisions:
+        raise ProductRunCapitalPathError(
+            "completed risk-path run has no retained economic decisions"
+        )
+    return decisions
 
+
+def _require_agent_loop_resolution(
+    bridge: PaperSettlementLearningBridge,
+    witness: PaperSettlementLearningWitness,
+) -> None:
+    loop = bridge.agent_loop
+    if type(loop) is not _LOOP_TYPE:
+        raise ProductRunCapitalPathError(
+            "settlement witness AgentLoop is not canonical"
+        )
+    state = _LOOP_READ(loop)
+    resolutions = state.get("resolutions") if type(state) is dict else None
+    if type(resolutions) is not list:
+        raise ProductRunCapitalPathError(
+            "settlement witness AgentLoop resolution state is invalid"
+        )
+    matches = [
+        item
+        for item in resolutions
+        if type(item) is dict
+        and item.get("transition_id") == witness.transition.transition_id
+    ]
+    if len(matches) != 1:
+        raise ProductRunCapitalPathError(
+            "settlement witness lacks exact durable AgentLoop resolution"
+        )
+    item = matches[0]
+    if (
+        item.get("action_id") != witness.action.action_id
+        or item.get("outcome_id") != witness.outcome.outcome_id
+        or item.get("reward_id") != witness.reward.reward_id
+        or item.get("truth") != witness.reward.truth.value
+        or item.get("simulation_model_id") != witness.reward.simulation_model_id
+        or item.get("reward_value") != str(witness.reward.reward)
+        or _instant(
+            item.get("reward_available_at"),
+            "AgentLoop reward_available_at",
+        )
+        != _instant(
+            witness.reward.available_at,
+            "settlement reward available_at",
+        )
+    ):
+        raise ProductRunCapitalPathError(
+            "settlement witness differs from durable AgentLoop resolution"
+        )
 
 def _witness_effect(
     witness: PaperSettlementLearningWitness,
     *,
     ticket: PaperTicket,
-    decision_ids: frozenset[str],
+    decisions: dict[str, DecisionRecord],
+    bridge: PaperSettlementLearningBridge,
 ) -> dict[str, str]:
     if type(witness) is not PaperSettlementLearningWitness:
         raise ProductRunCapitalPathError(
@@ -356,10 +446,28 @@ def _witness_effect(
         )
     action = _pairs(witness.action.parameters, "settlement witness action parameters")
     decision_id = action.get("economic_decision_id")
-    if decision_id is None or decision_id not in decision_ids:
+    record = decisions.get(decision_id) if decision_id is not None else None
+    if record is None:
         raise ProductRunCapitalPathError(
             "settlement witness decision is not in the committed run suffix"
         )
+    try:
+        verify_economic_goal_binding(
+            record,
+            bridge.economic_goal,
+            risk_policy=bridge.risk_policy,
+        )
+        _BRIDGE_DECISION_MATCHES(
+            record,
+            ticket,
+            witness.action,
+            witness.observation,
+        )
+    except (DecisionLedgerIntegrityError, TypeError, ValueError) as exc:
+        raise ProductRunCapitalPathError(
+            "settlement witness differs from committed economic decision"
+        ) from exc
+    _require_agent_loop_resolution(bridge, witness)
     if action.get("paper_ticket_id") != ticket.ticket_id:
         raise ProductRunCapitalPathError(
             "settlement witness action does not bind the exact PaperTicket"
@@ -546,12 +654,22 @@ def resolve_product_run_capital_path_evidence(
         raise ProductRunCapitalPathError(
             "settlement bridge PaperBook belongs to another workspace"
         )
+    if Path(settlement_bridge.agent_loop.path).parent.resolve(strict=False) != root:
+        raise ProductRunCapitalPathError(
+            "settlement bridge AgentLoop belongs to another workspace"
+        )
 
     tx = _TX_TYPE(root, run_id)
+    if Path(settlement_bridge.decision_ledger.path).resolve(strict=False) != (
+        tx.run_ledger_path.resolve(strict=False)
+    ):
+        raise ProductRunCapitalPathError(
+            "settlement bridge Decision Ledger is not this run ledger"
+        )
     try:
         base = _TX_BASE(tx)
         final = _TX_TERMINAL(tx)
-        decision_ids = _committed_run_decision_ids(tx)
+        decisions = _committed_run_decisions(tx)
         base_book = PaperBook.load_bytes(base.payload)
         final_book = PaperBook.load_bytes(final.payload)
         changed = _changed_ticket_ids(base_book, final_book)
@@ -591,7 +709,8 @@ def resolve_product_run_capital_path_evidence(
             _witness_effect(
                 witness,
                 ticket=ticket,
-                decision_ids=decision_ids,
+                decisions=decisions,
+                bridge=settlement_bridge,
             )
         )
 

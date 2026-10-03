@@ -48,6 +48,27 @@ def test_known_secret_url_percent_spelling_is_redacted() -> None:
         assert REDACTED in rendered
 
 
+def test_known_secret_mixed_case_percent_hex_spelling_is_redacted() -> None:
+    secret = "Case+Sensitive/Token=AbC"
+    encoded = "Case%2bSensitive%2FToken%3dAbC"
+
+    rendered = redact_operator_text(
+        f"provider_opaque={encoded}",
+        extra_secret_values=(secret,),
+    )
+
+    assert encoded not in rendered
+    assert secret not in rendered
+    assert REDACTED in rendered
+
+    case_changed_literal = "case%2bSensitive%2FToken%3dAbC"
+    unchanged = redact_operator_text(
+        f"provider_opaque={case_changed_literal}",
+        extra_secret_values=(secret,),
+    )
+    assert unchanged == f"provider_opaque={case_changed_literal}"
+
+
 def test_known_secret_url_plus_spelling_is_redacted() -> None:
     secret = "AS URL SECRET + 291c"
     encoded = "AS+URL+SECRET+%2B+291c"

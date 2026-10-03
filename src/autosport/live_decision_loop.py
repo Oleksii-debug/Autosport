@@ -1513,15 +1513,25 @@ class PersistentLiveDecisionLoop:
         store = self._default_health_store
         if store is None:
             return ()
-        source_ids = tuple(
-            sorted(
-                {
-                    event.source_id
-                    for snapshot in snapshots.values()
-                    for event in snapshot.events
-                }
-            )
-        )
+        source_id_set = {
+            event.source_id
+            for snapshot in snapshots.values()
+            for event in snapshot.events
+        }
+        if self.provider is not None:
+            try:
+                source_id_set.add(
+                    _canonical_text(
+                        "provider.source_id",
+                        getattr(self.provider, "source_id", None),
+                    )
+                )
+            except (TypeError, ValueError) as exc:
+                raise _ConcurrentDecisionSnapshot(
+                    "live provider lost canonical source identity during decision "
+                    "snapshot capture"
+                ) from exc
+        source_ids = tuple(sorted(source_id_set))
         try:
             return self._provider_health_gate(store).bind_replay_boundaries(
                 source_ids,

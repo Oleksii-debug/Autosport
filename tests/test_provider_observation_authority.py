@@ -991,6 +991,60 @@ def test_store_save_rejects_workspace_lock_enter_rebind_before_dispatch(
     assert hostile_calls == []
 
 
+def test_store_save_rejects_snapshot_evidence_identity_descriptor_rebind(
+    tmp_path,
+    monkeypatch,
+):
+    snapshot = _capture(monkeypatch)
+    store = _store(tmp_path)
+    hostile_calls: list[str] = []
+
+    def hostile_evidence(_self):
+        hostile_calls.append("evidence_sha256")
+        raise AssertionError("hostile evidence identity executed")
+
+    monkeypatch.setattr(
+        CompleteGameBoardSnapshot,
+        "evidence_sha256",
+        property(hostile_evidence),
+    )
+
+    with pytest.raises(
+        ProviderObservationIntegrityError,
+        match="provider evidence snapshot dispatch changed",
+    ):
+        store.save(snapshot)
+
+    assert hostile_calls == []
+
+
+def test_store_save_rejects_request_source_identity_descriptor_rebind(
+    tmp_path,
+    monkeypatch,
+):
+    snapshot = _capture(monkeypatch)
+    store = _store(tmp_path)
+    hostile_calls: list[str] = []
+
+    def hostile_source(_self):
+        hostile_calls.append("source_id")
+        raise AssertionError("hostile request source identity executed")
+
+    monkeypatch.setattr(
+        CompleteGameBoardRequest,
+        "source_id",
+        property(hostile_source),
+    )
+
+    with pytest.raises(
+        ProviderObservationIntegrityError,
+        match="provider evidence request dispatch changed",
+    ):
+        store.save(snapshot)
+
+    assert hostile_calls == []
+
+
 def test_store_save_rejects_snapshot_payload_dispatch_rebind_before_dispatch(
     tmp_path,
     monkeypatch,

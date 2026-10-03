@@ -13,26 +13,90 @@ on:
       - '.gitattributes'
       - '.github/workflows/ci.yml'
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft, closed]
 
+permissions:
+  contents: read
+  pull-requests: read
+
+# Coalesce only scheduler-safe PR classes before runner allocation. Fresh qualification
+# events share one lane only for the same exact PR head, so a delayed stale-head event
+# can never evict current-head qualification. Draft/closed events use a separate
+# LIFECYCLE lane and cannot evict useful qualification before live admission. Exact
+# PR lanes are used only when a payload-rich head SHA exists; payload-empty/fork events
+# are run-unique and are not automatic Autosport qualification authority. Re-runs are
+# isolated by exact event head SHA. Non-PR
+# runs are run-unique so same-ref pushes cannot pre-cancel before execution. The
+# trusted controller and read-only admission helper remain the live truth authority.
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha && format('pr-{0}-{1}', github.event.number, (github.event.action == 'converted_to_draft' || github.event.action == 'closed' || github.event.pull_request.draft == true) && 'lifecycle' || (github.run_attempt != 1 && format('rerun-{0}', github.event.pull_request.head.sha) || format('qualify-{0}', github.event.pull_request.head.sha))) || format('run-{0}', github.run_id) }}
   cancel-in-progress: true
 
 jobs:
+  superseded_run_admission:
+    # Draft/closed PR lifecycle runs are already non-integration-capable. Skip this job
+    # at server-side job evaluation so they do not reserve an Ubuntu admission runner.
+    # ready_for_review has draft=false and still executes exact-head admission.
+    if: >-
+      github.event_name != 'pull_request' ||
+      (github.event.action != 'closed' &&
+      github.event.pull_request.head.sha &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.base.repo.full_name == github.repository &&
+      github.event.pull_request.draft == false)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      current_head: ${{ steps.lifecycle.outputs.current_head || steps.admission.outputs.current_head }}
+    steps:
+      - name: Admit non-PR events without PR checkout
+        if: github.event_name != 'pull_request'
+        id: lifecycle
+        run: echo "current_head=true" >> "$GITHUB_OUTPUT"
+      - name: Checkout exact PR head for read-only admission helper
+        if: github.event_name == 'pull_request' && github.event.action != 'closed'
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Reject stale PR head before heavy matrix allocation
+        if: github.event_name == 'pull_request' && github.event.action != 'closed'
+        id: admission
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: >-
+          python scripts/cancel_superseded_pr_workflow_runs.py
+          --pr-number "${{ github.event.pull_request.number }}"
+          --event-head-sha "${{ github.event.pull_request.head.sha }}"
+          --workflow-name "${{ github.workflow }}"
+          --current-run-id "${{ github.run_id }}"
+          --admission-only
+
   test:
+    needs: superseded_run_admission
+    # Draft/closed/stale PR runs are not integration-capable. Scheduler partitioning only
+    # coalesces equivalent qualification or lifecycle work; admission still re-resolves
+    # exact live PR state/head before this heavy matrix can allocate.
+    if: >-
+      needs.superseded_run_admission.outputs.current_head == 'true' &&
+      (github.event_name != 'pull_request' ||
+      (github.event.action != 'closed' && github.event.pull_request.draft == false))
     strategy:
       matrix:
         os: [ubuntu-latest, windows-latest]
         python-version: ['3.11', '3.12']
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
     env:
       AUTOSPORT_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 0
-      - uses: actions/setup-python@v5
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: ${{ matrix.python-version }}
       - name: Verify exact pristine source checkout before CI

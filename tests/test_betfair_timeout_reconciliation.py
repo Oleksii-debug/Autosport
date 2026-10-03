@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import gc
+from dataclasses import replace
 from datetime import datetime
 from decimal import Decimal
 import json
@@ -11,6 +12,7 @@ import autosport.betfair_timeout_reconciliation as timeout_resolution
 import autosport.real_execution_ledger as ledger_module
 import autosport.supervised_provider_evidence as provider_evidence
 from autosport.betfair_account_readonly import (
+    BetfairExecutionReadbackEnvelope,
     BetfairReadOnlyClient,
     BetfairSessionCredentials,
 )
@@ -33,8 +35,43 @@ from autosport.supervised_provider_evidence import (
 )
 
 
+def _find_closure_value(function, target_name: str):
+    pending = [function]
+    seen: set[int] = set()
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        closure = current.__closure__ or ()
+        for freevar, cell in zip(
+            current.__code__.co_freevars,
+            closure,
+            strict=True,
+        ):
+            try:
+                value = cell.cell_contents
+            except ValueError:
+                continue
+            if freevar == target_name:
+                return value
+            if callable(value) and hasattr(value, "__code__"):
+                pending.append(value)
+    raise AssertionError(f"closure value not found: {target_name}")
+
+
 LEDGER_TIMEOUT_BOUNDARY = "2026-09-21T18:00:00+00:00"
 UNKNOWN_OBSERVED_AT = "2026-09-21T17:59:57+00:00"
+
+
+def test_provider_evidence_exposes_no_timeout_absence_registrar() -> None:
+    # Timeout-horizon authority is consumed directly at the final supervised
+    # reconciliation boundary.  Provider evidence must expose no preregistration
+    # hook that a cold-import fake module can claim first.
+    assert not hasattr(
+        provider_evidence,
+        "_register_betfair_timeout_absence_authority_assertion",
+    )
 
 
 def _action() -> ExecutionAction:
@@ -200,7 +237,7 @@ def _resolve(
         "_timeout_elapsed_visibility_ready",
         lambda ledger, attempt_id, capture_started_monotonic_ns: elapsed_visibility_ready,
     )
-    result = timeout_resolution.resolve_betfair_timeout_provider_state(
+    result = timeout_resolution._resolve_betfair_timeout_provider_state_core(
         ledger,
         action,
         object(),
@@ -392,7 +429,7 @@ def test_foreign_or_missing_returned_customer_order_ref_cannot_become_absence(
         ProviderEvidenceError,
         match=rf"{surface}-order customerOrderRef conflicts with captured execution scope",
     ):
-        provider_evidence.verify_betfair_provider_state(
+        provider_evidence._evaluate_betfair_provider_state_semantics(
             action,
             profile,
             expected_profile_sha256=profile.profile_id,
@@ -401,7 +438,8 @@ def test_foreign_or_missing_returned_customer_order_ref_cannot_become_absence(
         )
 
 
-def test_timeout_resolver_propagates_foreign_customer_order_ref_failure(
+
+def test_timeout_resolver_core_propagates_foreign_customer_order_ref_failure(
     tmp_path,
     monkeypatch,
 ) -> None:
@@ -414,12 +452,17 @@ def test_timeout_resolver_propagates_foreign_customer_order_ref_failure(
         surface="current",
         returned_ref="f" * 32,
     )
+    monkeypatch.setattr(
+        timeout_resolution,
+        "verify_betfair_provider_state",
+        provider_evidence._evaluate_betfair_provider_state_semantics,
+    )
 
     with pytest.raises(
         ProviderEvidenceError,
         match="current-order customerOrderRef conflicts with captured execution scope",
     ):
-        timeout_resolution.resolve_betfair_timeout_provider_state(
+        timeout_resolution._resolve_betfair_timeout_provider_state_core(
             ledger,
             action,
             profile,
@@ -427,7 +470,6 @@ def test_timeout_resolver_propagates_foreign_customer_order_ref_failure(
             expected_profile_sha256=profile.profile_id,
             readback=capture,
         )
-
 
 def test_complete_empty_before_visibility_horizon_stays_indeterminate(
     tmp_path, monkeypatch
@@ -449,7 +491,7 @@ def test_complete_empty_before_visibility_horizon_stays_indeterminate(
         timeout_resolution.assert_betfair_timeout_absence_authoritative(evidence)
 
 
-def test_complete_empty_exactly_at_visibility_horizon_can_issue_absence(
+def test_semantic_core_at_visibility_horizon_does_not_issue_absence_authority(
     tmp_path, monkeypatch
 ) -> None:
     ledger, action, provider_ref, _ = _ledger_with_timeout(tmp_path, monkeypatch)
@@ -460,7 +502,11 @@ def test_complete_empty_exactly_at_visibility_horizon_can_issue_absence(
     assert result.kind is timeout_resolution.BetfairTimeoutResolutionKind.ABSENT_AFTER_VISIBILITY_HORIZON
     assert result.definitive is True
     assert result.evidence is evidence
-    timeout_resolution.assert_betfair_timeout_absence_authoritative(evidence)
+    with pytest.raises(
+        timeout_resolution.BetfairTimeoutResolutionError,
+        match="did not pass durable Betfair timeout visibility authority",
+    ):
+        timeout_resolution.assert_betfair_timeout_absence_authoritative(evidence)
 
 
 def test_capture_started_before_deadline_cannot_become_absence_when_last_rpc_finishes_late(
@@ -484,7 +530,7 @@ def test_capture_started_before_deadline_cannot_become_absence_when_last_rpc_fin
         timeout_resolution.assert_betfair_timeout_absence_authoritative(evidence)
 
 
-def test_complete_empty_inside_cleared_history_window_can_issue_absence(
+def test_semantic_core_inside_cleared_history_does_not_issue_absence_authority(
     tmp_path, monkeypatch
 ) -> None:
     ledger, action, provider_ref, _ = _ledger_with_timeout(tmp_path, monkeypatch)
@@ -496,7 +542,11 @@ def test_complete_empty_inside_cleared_history_window_can_issue_absence(
     assert result.kind is timeout_resolution.BetfairTimeoutResolutionKind.ABSENT_AFTER_VISIBILITY_HORIZON
     assert result.definitive is True
     assert result.evidence is evidence
-    timeout_resolution.assert_betfair_timeout_absence_authoritative(evidence)
+    with pytest.raises(
+        timeout_resolution.BetfairTimeoutResolutionError,
+        match="did not pass durable Betfair timeout visibility authority",
+    ):
+        timeout_resolution.assert_betfair_timeout_absence_authoritative(evidence)
 
 
 def test_complete_empty_exactly_at_cleared_history_boundary_fails_closed(
@@ -559,7 +609,7 @@ def test_direct_generic_bound_absence_is_not_timeout_authoritative(
     profile = _profile()
     capture = _empty_provider_capture(action, provider_ref)
 
-    direct = provider_evidence.verify_betfair_provider_state(
+    direct = provider_evidence._evaluate_betfair_provider_state_semantics(
         action,
         profile,
         expected_profile_sha256=profile.profile_id,
@@ -567,7 +617,7 @@ def test_direct_generic_bound_absence_is_not_timeout_authoritative(
         expected_provider_order_ref=provider_ref,
     )
     assert isinstance(direct, VerifiedProviderAbsenceEvidence)
-    with pytest.raises(ProviderEvidenceError, match="timeout-horizon authority"):
+    with pytest.raises(ProviderEvidenceError, match="not issued by canonical verifier"):
         provider_evidence.assert_verified_provider_evidence_authoritative(direct)
 
     monkeypatch.setattr(
@@ -575,17 +625,18 @@ def test_direct_generic_bound_absence_is_not_timeout_authoritative(
         "_timeout_elapsed_visibility_ready",
         lambda ledger, attempt_id, capture_started_monotonic_ns: True,
     )
-    resolved = timeout_resolution.resolve_betfair_timeout_provider_state(
-        ledger,
-        action,
-        profile,
-        attempt_id="attempt-1",
-        expected_profile_sha256=profile.profile_id,
-        readback=capture,
-    )
-    assert resolved.kind is timeout_resolution.BetfairTimeoutResolutionKind.ABSENT_AFTER_VISIBILITY_HORIZON
-    assert isinstance(resolved.evidence, VerifiedProviderAbsenceEvidence)
-    provider_evidence.assert_verified_provider_evidence_authoritative(resolved.evidence)
+    with pytest.raises(
+        timeout_resolution.BetfairTimeoutResolutionError,
+        match="timeout resolver executable authority changed",
+    ):
+        timeout_resolution.resolve_betfair_timeout_provider_state(
+            ledger,
+            action,
+            profile,
+            attempt_id="attempt-1",
+            expected_profile_sha256=profile.profile_id,
+            readback=capture,
+        )
 
 
 def test_bound_absence_not_issued_by_timeout_resolver_is_rejected() -> None:
@@ -598,6 +649,44 @@ def test_bound_absence_not_issued_by_timeout_resolver_is_rejected() -> None:
         match="did not pass durable Betfair timeout visibility authority",
     ):
         timeout_resolution.assert_betfair_timeout_absence_authoritative(evidence)
+
+
+def test_attempt_bound_timeout_assertion_rejects_unissued_exact_ref_evidence(
+    tmp_path, monkeypatch
+) -> None:
+    ledger, action, provider_ref, _ = _ledger_with_timeout(tmp_path, monkeypatch)
+    assert provider_ref is not None
+    evidence = _absence("2026-09-21T18:00:30+00:00", provider_ref)
+
+    with pytest.raises(
+        timeout_resolution.BetfairTimeoutResolutionError,
+        match="not bound to this timeout attempt",
+    ):
+        timeout_resolution.assert_betfair_timeout_absence_authoritative_for_attempt(
+            ledger,
+            action,
+            "attempt-1",
+            evidence,
+        )
+
+
+def test_attempt_bound_timeout_assertion_rejects_missing_provider_ref(
+    tmp_path, monkeypatch
+) -> None:
+    ledger, action, provider_ref, _ = _ledger_with_timeout(tmp_path, monkeypatch)
+    assert provider_ref is not None
+    evidence = _absence("2026-09-21T18:00:30+00:00", None)
+
+    with pytest.raises(
+        timeout_resolution.BetfairTimeoutResolutionError,
+        match="mismatches durable provider order reference",
+    ):
+        timeout_resolution.assert_betfair_timeout_absence_authoritative_for_attempt(
+            ledger,
+            action,
+            "attempt-1",
+            evidence,
+        )
 
 
 def test_legacy_unbound_absence_keeps_generic_authority_scope() -> None:
@@ -682,7 +771,7 @@ def test_noncanonical_unknown_reason_cannot_mint_timeout_authority(
         timeout_resolution.BetfairTimeoutResolutionError,
         match="not a canonical ambiguous Betfair",
     ):
-        timeout_resolution.resolve_betfair_timeout_provider_state(
+        timeout_resolution._resolve_betfair_timeout_provider_state_core(
             ledger,
             action,
             object(),
@@ -726,25 +815,22 @@ def _set_timeout_authority_wall_clock(monkeypatch, value: str) -> None:
     monkeypatch.setattr(timeout_resolution, "datetime", _AuthorityDateTime)
 
 
-def test_first_postdeadline_negative_capture_never_proves_elapsed_horizon(
+
+def test_first_postdeadline_negative_semantic_capture_never_proves_elapsed_horizon(
     tmp_path, monkeypatch
 ) -> None:
     ledger, action, provider_ref, _ = _ledger_with_timeout(tmp_path, monkeypatch)
     assert provider_ref is not None
-    _set_timeout_authority_wall_clock(
-        monkeypatch, "2026-09-21T18:00:16+00:00"
-    )
-    ticks = iter([1_000_000_000])
-    monkeypatch.setattr(timeout_resolution, "monotonic_ns", lambda: next(ticks))
+    evidence = _absence("2026-09-21T18:00:16+00:00", provider_ref)
 
-    capture = _empty_provider_capture(action, provider_ref)
-    result = timeout_resolution.resolve_betfair_timeout_provider_state(
+    result = _resolve(
+        monkeypatch,
         ledger,
         action,
-        _profile(),
-        attempt_id="attempt-1",
-        expected_profile_sha256=_profile().profile_id,
-        readback=capture,
+        provider_ref,
+        evidence,
+        capture_started_at="2026-09-21T18:00:16+00:00",
+        elapsed_visibility_ready=False,
     )
 
     assert (
@@ -754,149 +840,125 @@ def test_first_postdeadline_negative_capture_never_proves_elapsed_horizon(
     assert result.evidence is None
 
 
-def test_forward_wall_clock_jump_cannot_manufacture_elapsed_visibility(
-    tmp_path, monkeypatch
+def test_runtime_clock_rebind_cannot_change_capture_start_authority(
+    monkeypatch,
 ) -> None:
-    ledger, action, provider_ref, _ = _ledger_with_timeout(tmp_path, monkeypatch)
-    assert provider_ref is not None
+    action = _action()
+    provider_ref = "a" * 32
+    forged_wall = "2099-12-31T23:59:59+00:00"
+    forged_tick = 999_999_999_999_999_999
 
-    wall_values = iter(
-        [
-            datetime.fromisoformat("2026-09-21T18:00:01+00:00"),
-            datetime.fromisoformat("2026-09-21T18:00:30+00:00"),
-        ]
-    )
-
-    class _JumpingAuthorityDateTime(datetime):
+    class _ForgedDateTime(datetime):
         @classmethod
         def now(cls, tz=None):
-            value = next(wall_values)
+            value = datetime.fromisoformat(forged_wall)
             return value if tz is None else value.astimezone(tz)
 
-    monkeypatch.setattr(timeout_resolution, "datetime", _JumpingAuthorityDateTime)
-    ticks = iter([1_000_000_000, 1_200_000_000])
-    monkeypatch.setattr(timeout_resolution, "monotonic_ns", lambda: next(ticks))
-    profile = _profile()
+    monkeypatch.setattr(timeout_resolution, "datetime", _ForgedDateTime)
+    monkeypatch.setattr(timeout_resolution, "monotonic_ns", lambda: forged_tick)
 
-    first_capture = _empty_provider_capture(
-        action,
-        provider_ref,
-        observed_at="2026-09-21T18:00:01+00:00",
-    )
-    first = timeout_resolution.resolve_betfair_timeout_provider_state(
-        ledger,
-        action,
-        profile,
-        attempt_id="attempt-1",
-        expected_profile_sha256=profile.profile_id,
-        readback=first_capture,
-    )
-    assert first.evidence is None
-
-    second_capture = _empty_provider_capture(
-        action,
-        provider_ref,
-        observed_at="2026-09-21T18:00:30+00:00",
-    )
-    second = timeout_resolution.resolve_betfair_timeout_provider_state(
-        ledger,
-        action,
-        profile,
-        attempt_id="attempt-1",
-        expected_profile_sha256=profile.profile_id,
-        readback=second_capture,
+    capture = _empty_provider_capture(action, provider_ref)
+    captured_wall = timeout_resolution._betfair_readback_capture_started_at(capture)
+    captured_tick = timeout_resolution._betfair_readback_capture_started_monotonic_ns(
+        capture
     )
 
+    assert captured_wall is not None
+    assert captured_wall != forged_wall
+    assert captured_tick is not None
+    assert captured_tick != forged_tick
+
+
+def test_capture_start_authority_does_not_survive_readback_copy() -> None:
+    action = _action()
+    provider_ref = "a" * 32
+    capture = _empty_provider_capture(action, provider_ref)
+    copied = replace(capture)
+
+    assert timeout_resolution._betfair_readback_capture_started_at(capture) is not None
     assert (
-        second.kind
-        is timeout_resolution.BetfairTimeoutResolutionKind.INDETERMINATE_BEFORE_VISIBILITY_HORIZON
+        timeout_resolution._betfair_readback_capture_started_monotonic_ns(capture)
+        is not None
     )
-    assert second.evidence is None
+    assert timeout_resolution._betfair_readback_capture_started_at(copied) is None
+    assert (
+        timeout_resolution._betfair_readback_capture_started_monotonic_ns(copied)
+        is None
+    )
 
 
-def test_fresh_negative_capture_after_full_monotonic_horizon_can_issue_absence(
+def test_capture_start_authority_rejects_readback_fingerprint_method_rebind(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    action = _action()
+    provider_ref = "a" * 32
+    capture = _empty_provider_capture(action, provider_ref)
+
+    monkeypatch.setattr(
+        BetfairExecutionReadbackEnvelope,
+        "_authority_fingerprint",
+        lambda self: "0" * 64,
+    )
+
+    assert timeout_resolution._betfair_readback_capture_started_at(capture) is None
+    assert (
+        timeout_resolution._betfair_readback_capture_started_monotonic_ns(capture)
+        is None
+    )
+
+
+def test_full_semantic_visibility_horizon_qualifies_absence_without_issuing_authority(
     tmp_path, monkeypatch
 ) -> None:
     ledger, action, provider_ref, _ = _ledger_with_timeout(tmp_path, monkeypatch)
     assert provider_ref is not None
-    _set_timeout_authority_wall_clock(
-        monkeypatch, "2026-09-21T18:00:16+00:00"
-    )
-    ticks = iter([1_000_000_000, 16_000_000_000])
-    monkeypatch.setattr(timeout_resolution, "monotonic_ns", lambda: next(ticks))
-    profile = _profile()
+    evidence = _absence("2026-09-21T18:00:16+00:00", provider_ref)
 
-    first_capture = _empty_provider_capture(action, provider_ref)
-    first = timeout_resolution.resolve_betfair_timeout_provider_state(
+    result = _resolve(
+        monkeypatch,
         ledger,
         action,
-        profile,
-        attempt_id="attempt-1",
-        expected_profile_sha256=profile.profile_id,
-        readback=first_capture,
+        provider_ref,
+        evidence,
+        capture_started_at="2026-09-21T18:00:16+00:00",
+        elapsed_visibility_ready=True,
     )
-    assert (
-        first.kind
-        is timeout_resolution.BetfairTimeoutResolutionKind.INDETERMINATE_BEFORE_VISIBILITY_HORIZON
-    )
-    assert first.evidence is None
 
-    second_capture = _empty_provider_capture(action, provider_ref)
-    second = timeout_resolution.resolve_betfair_timeout_provider_state(
-        ledger,
-        action,
-        profile,
-        attempt_id="attempt-1",
-        expected_profile_sha256=profile.profile_id,
-        readback=second_capture,
-    )
     assert (
-        second.kind
+        result.kind
         is timeout_resolution.BetfairTimeoutResolutionKind.ABSENT_AFTER_VISIBILITY_HORIZON
     )
-    assert isinstance(second.evidence, VerifiedProviderAbsenceEvidence)
-    timeout_resolution.assert_betfair_timeout_absence_authoritative(second.evidence)
+    assert result.evidence is evidence
+    with pytest.raises(
+        timeout_resolution.BetfairTimeoutResolutionError,
+        match="did not pass durable Betfair timeout visibility authority",
+    ):
+        timeout_resolution.assert_betfair_timeout_absence_authoritative(evidence)
 
 
 def test_restart_requires_new_process_local_elapsed_horizon(
     tmp_path, monkeypatch
 ) -> None:
-    ledger, action, provider_ref, path = _ledger_with_timeout(tmp_path, monkeypatch)
-    assert provider_ref is not None
-    _set_timeout_authority_wall_clock(
-        monkeypatch, "2026-09-21T18:00:16+00:00"
-    )
-    ticks = iter([1_000_000_000, 16_000_000_000])
-    monkeypatch.setattr(timeout_resolution, "monotonic_ns", lambda: next(ticks))
-    profile = _profile()
+    ledger, _, _, path = _ledger_with_timeout(tmp_path, monkeypatch)
 
-    first_capture = _empty_provider_capture(action, provider_ref)
-    first = timeout_resolution.resolve_betfair_timeout_provider_state(
-        ledger,
-        action,
-        profile,
-        attempt_id="attempt-1",
-        expected_profile_sha256=profile.profile_id,
-        readback=first_capture,
+    assert (
+        timeout_resolution._timeout_elapsed_visibility_ready(
+            ledger,
+            "attempt-1",
+            1_000_000_000,
+        )
+        is False
     )
-    assert first.evidence is None
 
     restarted = RealExecutionLedger(path)
-    second_capture = _empty_provider_capture(action, provider_ref)
-    second = timeout_resolution.resolve_betfair_timeout_provider_state(
-        restarted,
-        action,
-        profile,
-        attempt_id="attempt-1",
-        expected_profile_sha256=profile.profile_id,
-        readback=second_capture,
-    )
     assert (
-        second.kind
-        is timeout_resolution.BetfairTimeoutResolutionKind.INDETERMINATE_BEFORE_VISIBILITY_HORIZON
+        timeout_resolution._timeout_elapsed_visibility_ready(
+            restarted,
+            "attempt-1",
+            16_000_000_000,
+        )
+        is False
     )
-    assert second.evidence is None
-
 
 def test_monotonic_capture_regression_fails_closed(tmp_path, monkeypatch) -> None:
     ledger, _, _, _ = _ledger_with_timeout(tmp_path, monkeypatch)
@@ -981,52 +1043,287 @@ def test_outside_history_absence_retires_elapsed_visibility_anchor(
     assert anchor_key not in timeout_resolution._timeout_elapsed_visibility_anchors
 
 
-def test_definitive_absence_anchor_lifetime_follows_live_authority_evidence(
+
+def test_semantic_timeout_core_cannot_register_absence_authority(
     tmp_path,
     monkeypatch,
 ) -> None:
     ledger, action, provider_ref, _ = _ledger_with_timeout(tmp_path, monkeypatch)
     assert provider_ref is not None
-    _set_timeout_authority_wall_clock(
+    evidence = _absence("2026-09-21T18:00:16+00:00", provider_ref)
+
+    result = _resolve(
         monkeypatch,
-        "2026-09-21T18:00:16+00:00",
-    )
-    ticks = iter([1_000_000_000, 16_000_000_000])
-    monkeypatch.setattr(timeout_resolution, "monotonic_ns", lambda: next(ticks))
-    profile = _profile()
-    anchor_key = (id(ledger), "attempt-1")
-
-    first_capture = _empty_provider_capture(action, provider_ref)
-    first = timeout_resolution.resolve_betfair_timeout_provider_state(
         ledger,
         action,
-        profile,
-        attempt_id="attempt-1",
-        expected_profile_sha256=profile.profile_id,
-        readback=first_capture,
+        provider_ref,
+        evidence,
+        capture_started_at="2026-09-21T18:00:16+00:00",
+        elapsed_visibility_ready=True,
     )
-    assert first.evidence is None
-    assert anchor_key in timeout_resolution._timeout_elapsed_visibility_anchors
 
-    second_capture = _empty_provider_capture(action, provider_ref)
-    second = timeout_resolution.resolve_betfair_timeout_provider_state(
-        ledger,
-        action,
-        profile,
-        attempt_id="attempt-1",
-        expected_profile_sha256=profile.profile_id,
-        readback=second_capture,
-    )
     assert (
-        second.kind
+        result.kind
         is timeout_resolution.BetfairTimeoutResolutionKind.ABSENT_AFTER_VISIBILITY_HORIZON
     )
-    assert isinstance(second.evidence, VerifiedProviderAbsenceEvidence)
-    timeout_resolution.assert_betfair_timeout_absence_authoritative(second.evidence)
-    assert anchor_key in timeout_resolution._timeout_elapsed_visibility_anchors
+    with pytest.raises(
+        timeout_resolution.BetfairTimeoutResolutionError,
+        match="did not pass durable Betfair timeout visibility authority",
+    ):
+        timeout_resolution.assert_betfair_timeout_absence_authoritative(evidence)
 
-    del second
-    gc.collect()
+def test_timeout_resolver_integrity_seals_are_immutable() -> None:
+    resolver = timeout_resolution.resolve_betfair_timeout_provider_state
+    for name in (
+        "sealed_resolver_graph",
+        "sealed_wrapper_bindings",
+        "sealed_ledger_descriptors",
+        "sealed_action_descriptors",
+    ):
+        sealed = _find_closure_value(resolver, name)
+        assert type(sealed) is tuple
+        assert sealed
 
-    assert anchor_key not in timeout_resolution._timeout_elapsed_visibility_anchors
+
+def test_public_timeout_authority_rejects_horizon_rebind(
+    tmp_path, monkeypatch
+) -> None:
+    ledger, action, provider_ref, _ = _ledger_with_timeout(tmp_path, monkeypatch)
+    assert provider_ref is not None
+    profile = _profile()
+    capture = _empty_provider_capture(action, provider_ref)
+
+    monkeypatch.setattr(
+        timeout_resolution,
+        "BETFAIR_TIMEOUT_VISIBILITY_HORIZON_SECONDS",
+        0,
+    )
+    with pytest.raises(
+        timeout_resolution.BetfairTimeoutResolutionError,
+        match="timeout resolver executable authority changed",
+    ):
+        timeout_resolution.resolve_betfair_timeout_provider_state(
+            ledger,
+            action,
+            profile,
+            attempt_id="attempt-1",
+            expected_profile_sha256=profile.profile_id,
+            readback=capture,
+        )
+
+
+def test_provider_absence_assertion_does_not_trust_rebound_timeout_symbol(
+    tmp_path, monkeypatch
+) -> None:
+    _, action, provider_ref, _ = _ledger_with_timeout(tmp_path, monkeypatch)
+    assert provider_ref is not None
+    profile = _profile()
+    capture = _empty_provider_capture(action, provider_ref)
+    direct = provider_evidence._evaluate_betfair_provider_state_semantics(
+        action,
+        profile,
+        expected_profile_sha256=profile.profile_id,
+        readback=capture,
+        expected_provider_order_ref=provider_ref,
+    )
+    assert isinstance(direct, VerifiedProviderAbsenceEvidence)
+
+    monkeypatch.setattr(
+        timeout_resolution,
+        "assert_betfair_timeout_absence_authoritative",
+        lambda evidence: None,
+    )
+    with pytest.raises(ProviderEvidenceError, match="not issued by canonical verifier"):
+        provider_evidence.assert_verified_provider_evidence_authoritative(direct)
+
+
+
+def test_timeout_absence_assertion_remains_local_to_timeout_module() -> None:
+    assert callable(timeout_resolution.assert_betfair_timeout_absence_authoritative)
+    assert not hasattr(
+        provider_evidence,
+        "_register_betfair_timeout_absence_authority_assertion",
+    )
+
+def test_provider_evidence_assertion_rejects_fingerprint_rebind(
+    tmp_path, monkeypatch
+) -> None:
+    _, action, provider_ref, _ = _ledger_with_timeout(tmp_path, monkeypatch)
+    assert provider_ref is not None
+    profile = _profile()
+    capture = _empty_provider_capture(action, provider_ref)
+    direct = provider_evidence._evaluate_betfair_provider_state_semantics(
+        action,
+        profile,
+        expected_profile_sha256=profile.profile_id,
+        readback=capture,
+        expected_provider_order_ref=provider_ref,
+    )
+    assert isinstance(direct, VerifiedProviderAbsenceEvidence)
+
+    monkeypatch.setattr(
+        provider_evidence,
+        "_verified_provider_evidence_fingerprint",
+        lambda evidence: "0" * 64,
+    )
+    with pytest.raises(
+        ProviderEvidenceError,
+        match="provider evidence authority binding changed",
+    ):
+        provider_evidence.assert_verified_provider_evidence_authoritative(direct)
+
+
+def test_provider_verifier_rejects_transitive_helper_rebind(
+    tmp_path, monkeypatch
+) -> None:
+    _, action, provider_ref, _ = _ledger_with_timeout(tmp_path, monkeypatch)
+    assert provider_ref is not None
+    profile = _profile()
+    capture = _empty_provider_capture(action, provider_ref)
+
+    monkeypatch.setattr(
+        provider_evidence,
+        "_complete_current_pages",
+        lambda pages: ((), "0" * 64, capture.observed_at),
+    )
+    with pytest.raises(
+        ProviderEvidenceError,
+        match="provider evidence executable authority changed",
+    ):
+        provider_evidence.verify_betfair_provider_state(
+            action,
+            profile,
+            expected_profile_sha256=profile.profile_id,
+            readback=capture,
+            expected_provider_order_ref=provider_ref,
+        )
+
+
+def test_timeout_authority_rejects_same_function_code_mutation(
+    tmp_path, monkeypatch
+) -> None:
+    ledger, action, provider_ref, _ = _ledger_with_timeout(tmp_path, monkeypatch)
+    assert provider_ref is not None
+    profile = _profile()
+    capture = _empty_provider_capture(action, provider_ref)
+    helper = timeout_resolution._absence_capture_floor
+
+    def forged_floor(readback):
+        del readback
+        return "2099-01-01T00:00:00+00:00"
+
+    monkeypatch.setattr(helper, "__code__", forged_floor.__code__)
+    with pytest.raises(
+        timeout_resolution.BetfairTimeoutResolutionError,
+        match="timeout resolver executable code changed",
+    ):
+        timeout_resolution.resolve_betfair_timeout_provider_state(
+            ledger,
+            action,
+            profile,
+            attempt_id="attempt-1",
+            expected_profile_sha256=profile.profile_id,
+            readback=capture,
+        )
+
+
+def test_provider_verifier_rejects_readback_origin_method_rebind(
+    tmp_path, monkeypatch
+) -> None:
+    _, action, provider_ref, _ = _ledger_with_timeout(tmp_path, monkeypatch)
+    assert provider_ref is not None
+    profile = _profile()
+    capture = _empty_provider_capture(action, provider_ref)
+
+    monkeypatch.setattr(
+        type(capture),
+        "assert_authoritative",
+        lambda self: None,
+    )
+    with pytest.raises(
+        ProviderEvidenceError,
+        match="provider readback origin authority method changed",
+    ):
+        provider_evidence.verify_betfair_provider_state(
+            action,
+            profile,
+            expected_profile_sha256=profile.profile_id,
+            readback=capture,
+            expected_provider_order_ref=provider_ref,
+        )
+
+
+def test_timeout_authority_rejects_durable_provider_ref_method_rebind(
+    tmp_path, monkeypatch
+) -> None:
+    ledger, action, _, _ = _ledger_with_timeout(tmp_path, monkeypatch)
+
+    monkeypatch.setattr(
+        RealExecutionLedger,
+        "provider_order_reference",
+        lambda self, *, attempt_id, provider_id: "f" * 32,
+    )
+    with pytest.raises(
+        timeout_resolution.BetfairTimeoutResolutionError,
+        match="timeout ledger authority method changed: provider_order_reference",
+    ):
+        timeout_resolution.resolve_betfair_timeout_provider_state(
+            ledger,
+            action,
+            object(),
+            attempt_id="attempt-1",
+            expected_profile_sha256="a" * 64,
+            readback=object(),
+        )
+
+def test_provider_verifier_rejects_capability_profile_method_rebind(
+    tmp_path, monkeypatch
+) -> None:
+    _, action, provider_ref, _ = _ledger_with_timeout(tmp_path, monkeypatch)
+    assert provider_ref is not None
+    profile = _profile()
+    capture = _empty_provider_capture(action, provider_ref)
+
+    monkeypatch.setattr(
+        BookmakerCapabilityProfile,
+        "require",
+        lambda self, capability: None,
+    )
+    with pytest.raises(
+        ProviderEvidenceError,
+        match="provider capability profile authority method changed: require",
+    ):
+        provider_evidence.verify_betfair_provider_state(
+            action,
+            profile,
+            expected_profile_sha256=profile.profile_id,
+            readback=capture,
+            expected_provider_order_ref=provider_ref,
+        )
+
+def test_provider_verifier_rejects_readback_subclass_override(
+    tmp_path, monkeypatch
+) -> None:
+    _, action, provider_ref, _ = _ledger_with_timeout(tmp_path, monkeypatch)
+    assert provider_ref is not None
+    profile = _profile()
+
+    class ForgedReadback(BetfairExecutionReadbackEnvelope):
+        __slots__ = ()
+
+        def assert_authoritative(self) -> None:
+            return None
+
+    forged = object.__new__(ForgedReadback)
+    with pytest.raises(
+        ProviderEvidenceError,
+        match="exact canonical action-scoped readback envelope",
+    ):
+        provider_evidence.verify_betfair_provider_state(
+            action,
+            profile,
+            expected_profile_sha256=profile.profile_id,
+            readback=forged,
+            expected_provider_order_ref=provider_ref,
+        )
 

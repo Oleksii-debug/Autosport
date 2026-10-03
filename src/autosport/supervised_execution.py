@@ -6,6 +6,23 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
 from enum import Enum
+import sys as _timeout_origin_sys
+
+_timeout_authority_module_name = (
+    f"{__package__}.betfair_timeout_reconciliation"
+)
+if _timeout_authority_module_name in _timeout_origin_sys.modules:
+    raise ImportError(
+        "Betfair timeout authority module was resolved before supervised consumer binding"
+    )
+
+from .betfair_timeout_reconciliation import (
+    BetfairTimeoutResolutionError,
+    _BETFAIR_AMBIGUOUS_UNKNOWN_REASON,
+    assert_betfair_timeout_absence_authoritative_for_attempt,
+)
+
+del _timeout_authority_module_name, _timeout_origin_sys
 
 from .bookmaker_capability import (
     BookmakerAccountSnapshot,
@@ -1053,10 +1070,17 @@ def reconcile_provider_not_found(
         )
     try:
         assert_verified_provider_evidence_authoritative(readback)
-    except ProviderEvidenceError as exc:
+        view = ledger.verified_execution_view(bound.execution_plan.plan_id)
+        attempts = [item for item in view.attempts if item.attempt.attempt_id == attempt_id]
+        if len(attempts) != 1:
+            raise BetfairTimeoutResolutionError(
+                "provider absence does not resolve one durable execution attempt"
+            )
+    except (ProviderEvidenceError, BetfairTimeoutResolutionError) as exc:
         raise SupervisedExecutionError(
             "verified complete provider absence evidence is not authoritative"
         ) from exc
+    attempt_view = attempts[0]
     action, state = _attempt_action(ledger, bound, attempt_id)
     if state is not AttemptState.UNKNOWN:
         raise SupervisedExecutionError("not-found readback requires UNKNOWN attempt")
@@ -1091,6 +1115,18 @@ def reconcile_provider_not_found(
         adapter_version=readback.adapter_version,
         profile_version=readback.profile_version,
     )
+    if attempt_view.unknown_reason == _BETFAIR_AMBIGUOUS_UNKNOWN_REASON:
+        try:
+            assert_betfair_timeout_absence_authoritative_for_attempt(
+                ledger,
+                action,
+                attempt_id,
+                readback,
+            )
+        except BetfairTimeoutResolutionError as exc:
+            raise SupervisedExecutionError(
+                "verified complete provider absence evidence is not authoritative"
+            ) from exc
     ledger.reconcile_not_found(
         ReconciliationSnapshot(
             attempt_id=attempt_id,
@@ -1109,6 +1145,173 @@ def reconcile_provider_not_found(
         ledger.attempt_state(attempt_id),
         readback.evidence_id,
     )
+
+
+def _install_provider_not_found_reconciliation_authority() -> None:
+    """Seal the final UNKNOWN -> NOT_FOUND release boundary against rebinding."""
+
+    raw_reconcile = reconcile_provider_not_found
+    raw_reconcile_code = raw_reconcile.__code__
+    sealed_error = SupervisedExecutionError
+    missing = object()
+
+    def function_code(value: object) -> object | None:
+        code = getattr(value, "__code__", None)
+        if code is not None:
+            return code
+        if isinstance(value, property) and value.fget is not None:
+            return getattr(value.fget, "__code__", None)
+        return None
+
+    def seal_function_graph(
+        root: object,
+    ) -> tuple[tuple[str, object, object | None], ...]:
+        module_globals = globals()
+        sealed: list[tuple[str, object, object | None]] = []
+        sealed_names: set[str] = set()
+        pending = [root]
+        visited: set[int] = set()
+        while pending:
+            function = pending.pop()
+            if id(function) in visited:
+                continue
+            visited.add(id(function))
+            code = getattr(function, "__code__", None)
+            if code is None or getattr(function, "__globals__", None) is not module_globals:
+                continue
+            for name in code.co_names:
+                if name not in module_globals or name in sealed_names:
+                    continue
+                value = module_globals[name]
+                value_code = function_code(value)
+                sealed.append((name, value, value_code))
+                sealed_names.add(name)
+                if (
+                    value_code is not None
+                    and getattr(value, "__globals__", None) is module_globals
+                ):
+                    pending.append(value)
+        return tuple(sealed)
+
+    sealed_function_graph = seal_function_graph(raw_reconcile)
+    sealed_descriptors: tuple[
+        tuple[type[object], str, object, object | None],
+        ...,
+    ] = tuple(
+        (owner, name, value, function_code(value))
+        for owner, name, value in (
+            (
+                RealExecutionLedger,
+                "saga",
+                RealExecutionLedger.saga,
+            ),
+            (
+                RealExecutionLedger,
+                "provider_order_reference",
+                RealExecutionLedger.provider_order_reference,
+            ),
+            (
+                RealExecutionLedger,
+                "reconcile_not_found",
+                RealExecutionLedger.reconcile_not_found,
+            ),
+            (
+                RealExecutionLedger,
+                "attempt_state",
+                RealExecutionLedger.attempt_state,
+            ),
+            (
+                RealExecutionLedger,
+                "verified_execution_view",
+                RealExecutionLedger.verified_execution_view,
+            ),
+            (
+                BoundSupervisedExecutionPlan,
+                "verify_binding",
+                BoundSupervisedExecutionPlan.verify_binding,
+            ),
+            (
+                BoundSupervisedExecutionPlan,
+                "action_for",
+                BoundSupervisedExecutionPlan.action_for,
+            ),
+            (
+                BoundSupervisedExecutionPlan,
+                "profile_for",
+                BoundSupervisedExecutionPlan.profile_for,
+            ),
+            (
+                ExecutionPlan,
+                "to_dict",
+                ExecutionPlan.to_dict,
+            ),
+            (
+                ExecutionPlan,
+                "fingerprint",
+                ExecutionPlan.fingerprint,
+            ),
+            (
+                ExecutionAction,
+                "to_dict",
+                ExecutionAction.to_dict,
+            ),
+            (
+                ReconciliationSnapshot,
+                "to_dict",
+                ReconciliationSnapshot.to_dict,
+            ),
+        )
+    )
+
+    def assert_executable_authority_intact() -> None:
+        module_globals = globals()
+        if raw_reconcile.__code__ is not raw_reconcile_code:
+            raise sealed_error("provider not-found reconciler executable code changed")
+        for name, expected, expected_code in sealed_function_graph:
+            current = module_globals.get(name, missing)
+            if current is not expected:
+                raise sealed_error(
+                    f"provider not-found executable authority changed: {name}"
+                )
+            if (
+                expected_code is not None
+                and function_code(current) is not expected_code
+            ):
+                raise sealed_error(
+                    f"provider not-found executable code changed: {name}"
+                )
+        for owner, name, expected, expected_code in sealed_descriptors:
+            current = getattr(owner, name, missing)
+            if current is not expected or function_code(current) is not expected_code:
+                raise sealed_error(
+                    f"provider not-found authority method changed: "
+                    f"{owner.__name__}.{name}"
+                )
+
+    def authoritative_reconcile_provider_not_found(
+        ledger: RealExecutionLedger,
+        bound: BoundSupervisedExecutionPlan,
+        *,
+        attempt_id: str,
+        readback: VerifiedProviderAbsenceEvidence | ProviderNotFoundReadback,
+    ) -> ReconciliationResult:
+        assert_executable_authority_intact()
+        result = raw_reconcile(
+            ledger,
+            bound,
+            attempt_id=attempt_id,
+            readback=readback,
+        )
+        assert_executable_authority_intact()
+        return result
+
+    globals()["reconcile_provider_not_found"] = (
+        authoritative_reconcile_provider_not_found
+    )
+
+
+_install_provider_not_found_reconciliation_authority()
+del _install_provider_not_found_reconciliation_authority
 
 
 def _position_receipt(position: BookmakerPositionObservation) -> str:

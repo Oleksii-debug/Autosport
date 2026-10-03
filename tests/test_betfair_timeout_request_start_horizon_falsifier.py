@@ -65,9 +65,9 @@ class _CrossingReadbackTransport:
         elif method.endswith("listCurrentOrders"):
             if self.current_request_started_at is None:
                 self.current_request_started_at = self.clock().isoformat()
-                # Simulate transport latency carrying the first exact-ref request
-                # over the provider's +15s visibility horizon. A later coherence
-                # reread must not overwrite that first-request timing evidence.
+                # Carry only the first exact-ref request across the provider
+                # visibility boundary. The coherence reread must not overwrite
+                # the original request-start authority.
                 self.clock.set(_AFTER_DEADLINE)
             result = {"currentOrders": [], "moreAvailable": False}
         elif method.endswith("listClearedOrders"):

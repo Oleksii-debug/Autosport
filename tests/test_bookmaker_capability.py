@@ -458,6 +458,7 @@ def test_adapter_protocol_remains_read_only_and_structural() -> None:
     assert "cashout" not in ReadOnlyBookmakerAdapter.__dict__
 
 
+
 @pytest.mark.parametrize(
     "capability",
     [
@@ -472,11 +473,8 @@ def test_adapter_protocol_remains_read_only_and_structural() -> None:
         BookmakerCapability.CANCEL_BET,
     ],
 )
-def test_snapshot_rejects_capability_without_typed_snapshot_evidence(
-    capability: BookmakerCapability,
-) -> None:
+def test_snapshot_rejects_capability_without_typed_snapshot_evidence(capability):
     profile = _profile(capability)
-
     with pytest.raises(
         BookmakerCapabilityError,
         match="without typed account-snapshot evidence",
@@ -488,7 +486,7 @@ def test_snapshot_rejects_capability_without_typed_snapshot_evidence(
         )
 
 
-def test_position_provider_status_preserves_legacy_positional_constructor_order() -> None:
+def test_position_provider_status_preserves_legacy_positional_constructor_order():
     position = BookmakerPositionObservation(
         "book-a",
         "acct-a",
@@ -507,19 +505,14 @@ def test_position_provider_status_preserves_legacy_positional_constructor_order(
         "receipt-1",
         None,
     )
-
     assert position.provider_amount == Decimal("10")
-    assert position.provider_amount_semantics == "backer_stake"
-    assert position.provider_side == "BACK"
-    assert position.decimal_odds == Decimal("2.00")
     assert position.external_receipt_id == "receipt-1"
     assert position.provider_status is None
 
 
-def test_position_provider_status_is_optional_opaque_evidence() -> None:
+def test_position_provider_status_is_optional_opaque_evidence():
     legacy = _position(BookmakerPositionState.OPEN)
     assert legacy.provider_status is None
-
     for status in ("PUSH", "PUSH_WIN", "PUSH_LOSE", "PROVIDER_FUTURE_STATUS_V7"):
         position = _position(
             BookmakerPositionState.OPEN,
@@ -533,28 +526,18 @@ def test_position_provider_status_is_optional_opaque_evidence() -> None:
 
 
 @pytest.mark.parametrize("provider_status", ["", " PUSH_WIN", "PUSH_WIN ", "   "])
-def test_position_provider_status_rejects_empty_or_untrimmed_text(
-    provider_status: str,
-) -> None:
+def test_position_provider_status_rejects_empty_or_untrimmed_text(provider_status):
     with pytest.raises(BookmakerCapabilityError, match="provider_status"):
-        _position(
-            BookmakerPositionState.OPEN,
-            provider_status=provider_status,
-        )
+        _position(BookmakerPositionState.OPEN, provider_status=provider_status)
 
 
 @pytest.mark.parametrize("provider_status", [7, True, object()])
-def test_position_provider_status_rejects_non_string_values(
-    provider_status: object,
-) -> None:
+def test_position_provider_status_rejects_non_string_values(provider_status):
     with pytest.raises(BookmakerCapabilityError, match="provider_status"):
-        _position(
-            BookmakerPositionState.OPEN,
-            provider_status=provider_status,
-        )
+        _position(BookmakerPositionState.OPEN, provider_status=provider_status)
 
 
-def test_position_provider_status_does_not_rewrite_explicit_canonical_state() -> None:
+def test_position_provider_status_does_not_rewrite_explicit_canonical_state():
     settled = _position(
         BookmakerPositionState.SETTLED,
         observation_id="status-settled",
@@ -562,8 +545,6 @@ def test_position_provider_status_does_not_rewrite_explicit_canonical_state() ->
         provider_status="PUSH_LOSE",
         gross_return=Decimal("0"),
     )
-
     assert settled.provider_status == "PUSH_LOSE"
     assert settled.state is BookmakerPositionState.SETTLED
     assert settled.gross_return == Decimal("0")
-

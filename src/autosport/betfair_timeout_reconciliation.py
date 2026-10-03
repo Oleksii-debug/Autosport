@@ -19,6 +19,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from enum import Enum
+from hashlib import sha256
 import json
 import threading
 from time import monotonic_ns
@@ -29,7 +30,7 @@ from .betfair_account_readonly import (
     BetfairReadOnlyClient,
 )
 from .bookmaker_capability import BookmakerCapabilityProfile
-from .real_execution_ledger import AttemptState, ExecutionAction, RealExecutionLedger
+from .real_execution_ledger import ExecutionAction, RealExecutionLedger
 from .supervised_provider_evidence import (
     VerifiedProviderAbsenceEvidence,
     VerifiedProviderEffectEvidence,
@@ -39,6 +40,7 @@ from .supervised_provider_evidence import (
 
 BETFAIR_TIMEOUT_VISIBILITY_HORIZON_SECONDS = 15
 BETFAIR_CLEARED_HISTORY_MAX_AGE_DAYS = 90
+_CANONICAL_DATETIME = datetime
 _BETFAIR_AMBIGUOUS_UNKNOWN_REASON = (
     "betfair_placeOrders_ambiguous_effect_requires_readback"
 )
@@ -80,7 +82,7 @@ def _time(value: str, name: str) -> datetime:
     if type(value) is not str or not value or value != value.strip():
         raise BetfairTimeoutResolutionError(f"{name} must be non-empty canonical text")
     try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        parsed = _CANONICAL_DATETIME.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError as exc:
         raise BetfairTimeoutResolutionError(f"{name} must be ISO-8601") from exc
     if parsed.tzinfo is None or parsed.utcoffset() is None:
@@ -89,17 +91,55 @@ def _time(value: str, name: str) -> datetime:
 
 
 def _install_betfair_readback_capture_start_authority() -> None:
-    """Bind canonical readback object identity to its system capture-start instant.
+    """Bind canonical readback to its capture-start instant without an id registry.
 
-    The existing BetfairReadOnlyClient origin seal remains authoritative for the
-    readback payload itself.  This second, narrower seal records when that exact
-    canonical capture began so a request started before the provider visibility
-    horizon cannot become negative authority merely because transport latency makes
-    its response timestamps cross the deadline.
+    Timing origin is stored only in non-init fields on the exact returned envelope.
+    A dataclass copy/reconstruction therefore carries no timing authority. Helpers
+    recompute a fingerprint over the structural readback plus both start clocks,
+    so post-capture mutation invalidates the timing witness.
     """
 
-    issued: dict[int, tuple[object, str, int]] = {}
     raw_read = BetfairReadOnlyClient.read_execution_readback
+    raw_read_code = raw_read.__code__
+    envelope_type = BetfairExecutionReadbackEnvelope
+    sealed_readback_fingerprint = envelope_type._authority_fingerprint
+    sealed_readback_fingerprint_code = sealed_readback_fingerprint.__code__
+    capture_datetime = datetime
+    capture_timezone_utc = timezone.utc
+    capture_monotonic_ns = monotonic_ns
+    json_dumps = json.dumps
+    sha256_fn = sha256
+
+    def require_readback_fingerprint_authority() -> None:
+        current = getattr(envelope_type, "_authority_fingerprint", None)
+        if (
+            current is not sealed_readback_fingerprint
+            or getattr(current, "__code__", None) is not sealed_readback_fingerprint_code
+            or sealed_readback_fingerprint.__code__ is not sealed_readback_fingerprint_code
+        ):
+            raise BetfairTimeoutResolutionError(
+                "Betfair readback fingerprint authority changed"
+            )
+
+    def timing_fingerprint(
+        readback: BetfairExecutionReadbackEnvelope,
+        started_at: str,
+        started_monotonic_ns: int,
+    ) -> str:
+        require_readback_fingerprint_authority()
+        payload = {
+            "readback_fingerprint": sealed_readback_fingerprint(readback),
+            "capture_started_at": started_at,
+            "capture_started_monotonic_ns": started_monotonic_ns,
+        }
+        encoded = json_dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            allow_nan=False,
+        ).encode("utf-8")
+        return sha256_fn(encoded).hexdigest()
 
     def authoritative_read(
         self: BetfairReadOnlyClient,
@@ -110,8 +150,12 @@ def _install_betfair_readback_capture_start_authority() -> None:
         page_size: int = 1000,
         max_pages: int = 100,
     ) -> BetfairExecutionReadbackEnvelope:
-        capture_started_at = datetime.now(timezone.utc).isoformat()
-        capture_started_monotonic_ns = monotonic_ns()
+        if raw_read.__code__ is not raw_read_code:
+            raise BetfairTimeoutResolutionError(
+                "canonical Betfair readback origin code changed"
+            )
+        capture_started_at = capture_datetime.now(capture_timezone_utc).isoformat()
+        capture_started_monotonic_ns = capture_monotonic_ns()
         capture = raw_read(
             self,
             action_id=action_id,
@@ -120,37 +164,80 @@ def _install_betfair_readback_capture_start_authority() -> None:
             page_size=page_size,
             max_pages=max_pages,
         )
-        capture_id = id(capture)
-
-        def forget(_weakref: object, *, key: int = capture_id) -> None:
-            issued.pop(key, None)
-
-        issued[capture_id] = (
-            ref(capture, forget),
+        if type(capture) is not envelope_type:
+            raise BetfairTimeoutResolutionError(
+                "canonical Betfair readback returned non-canonical envelope"
+            )
+        fingerprint = timing_fingerprint(
+            capture,
             capture_started_at,
             capture_started_monotonic_ns,
         )
+        object.__setattr__(
+            capture,
+            "_authority_capture_started_at",
+            capture_started_at,
+        )
+        object.__setattr__(
+            capture,
+            "_authority_capture_started_monotonic_ns",
+            capture_started_monotonic_ns,
+        )
+        object.__setattr__(
+            capture,
+            "_authority_capture_start_fingerprint",
+            fingerprint,
+        )
         return capture
+
+    def validated_capture_start(
+        readback: BetfairExecutionReadbackEnvelope,
+    ) -> tuple[str, int] | None:
+        if type(readback) is not envelope_type:
+            return None
+        try:
+            started_at = object.__getattribute__(
+                readback,
+                "_authority_capture_started_at",
+            )
+            started_monotonic_ns = object.__getattribute__(
+                readback,
+                "_authority_capture_started_monotonic_ns",
+            )
+            fingerprint = object.__getattribute__(
+                readback,
+                "_authority_capture_start_fingerprint",
+            )
+            if (
+                type(started_at) is not str
+                or type(started_monotonic_ns) is not int
+                or started_monotonic_ns < 0
+                or type(fingerprint) is not str
+            ):
+                return None
+            _time(started_at, "capture_started_at")
+            expected = timing_fingerprint(
+                readback,
+                started_at,
+                started_monotonic_ns,
+            )
+        except BaseException:
+            return None
+        if fingerprint != expected:
+            return None
+        return started_at, started_monotonic_ns
 
     def capture_started_at(
         readback: BetfairExecutionReadbackEnvelope,
     ) -> str | None:
-        if not isinstance(readback, BetfairExecutionReadbackEnvelope):
-            return None
-        record = issued.get(id(readback))
-        if record is None or record[0]() is not readback:
-            return None
-        return record[1]
+        record = validated_capture_start(readback)
+        return None if record is None else record[0]
 
     def capture_started_monotonic_ns(
         readback: BetfairExecutionReadbackEnvelope,
     ) -> int | None:
-        if not isinstance(readback, BetfairExecutionReadbackEnvelope):
-            return None
-        record = issued.get(id(readback))
-        if record is None or record[0]() is not readback:
-            return None
-        return record[2]
+        record = validated_capture_start(readback)
+        return None if record is None else record[1]
 
     BetfairReadOnlyClient.read_execution_readback = authoritative_read
     globals()["_betfair_readback_capture_started_at"] = capture_started_at
@@ -163,75 +250,91 @@ _install_betfair_readback_capture_start_authority()
 del _install_betfair_readback_capture_start_authority
 
 
-_timeout_elapsed_visibility_lock = threading.RLock()
-_timeout_elapsed_visibility_anchors: dict[
-    tuple[int, str], tuple[object, int]
-] = {}
+def _install_timeout_elapsed_visibility_authority() -> None:
+    """Keep elapsed-time anchors closure-local instead of caller-writable globals.
 
-
-def _timeout_elapsed_visibility_ready(
-    ledger: RealExecutionLedger,
-    attempt_id: str,
-    capture_started_monotonic_ns: int | None,
-) -> bool:
-    """Require one full in-process monotonic horizon before negative absence.
-
-    Durable UTC timestamps remain the audit chronology, but a wall clock can jump
-    forward.  The first canonical negative capture seen for one exact live ledger
-    instance/attempt therefore establishes a process-local monotonic anchor and is
-    never enough by itself.  Only a later fresh capture whose sealed request start is
-    at least the provider visibility horizon after that anchor may contribute
-    negative absence authority.
-
-    The anchor is intentionally process-local.  Reopening the durable ledger after a
-    restart creates a new object and therefore requires a fresh full monotonic
-    horizon instead of pretending that monotonic time survived the process boundary.
+    The monotonic horizon exists specifically to prevent a UTC clock discontinuity
+    from manufacturing Betfair negative-absence authority.  Exposing the live anchor
+    registry in module globals would let ordinary imports seed an older anchor and
+    manufacture the same authority without actually waiting.  Keep both the lock and
+    anchor registry behind the two installed callables instead.
     """
 
-    if type(attempt_id) is not str or not attempt_id or attempt_id != attempt_id.strip():
-        raise BetfairTimeoutResolutionError(
-            "elapsed visibility requires canonical attempt_id"
-        )
-    if (
-        type(capture_started_monotonic_ns) is not int
-        or capture_started_monotonic_ns < 0
-    ):
-        return False
+    anchor_lock = threading.RLock()
+    anchors: dict[tuple[int, str], tuple[object, int]] = {}
 
-    key = (id(ledger), attempt_id)
-    with _timeout_elapsed_visibility_lock:
-        record = _timeout_elapsed_visibility_anchors.get(key)
-        if record is None or record[0]() is not ledger:
-            def forget(_weakref: object, *, anchor_key: tuple[int, str] = key) -> None:
-                with _timeout_elapsed_visibility_lock:
-                    _timeout_elapsed_visibility_anchors.pop(anchor_key, None)
+    def timeout_elapsed_visibility_ready(
+        ledger: RealExecutionLedger,
+        attempt_id: str,
+        capture_started_monotonic_ns: int | None,
+    ) -> bool:
+        """Require one full in-process monotonic horizon before negative absence."""
 
-            _timeout_elapsed_visibility_anchors[key] = (
-                ref(ledger, forget),
-                capture_started_monotonic_ns,
+        if (
+            type(attempt_id) is not str
+            or not attempt_id
+            or attempt_id != attempt_id.strip()
+        ):
+            raise BetfairTimeoutResolutionError(
+                "elapsed visibility requires canonical attempt_id"
             )
+        if (
+            type(capture_started_monotonic_ns) is not int
+            or capture_started_monotonic_ns < 0
+        ):
             return False
 
-        anchor_ns = record[1]
-        if capture_started_monotonic_ns < anchor_ns:
-            raise BetfairTimeoutResolutionError(
-                "monotonic capture clock regressed within one process"
+        key = (id(ledger), attempt_id)
+        with anchor_lock:
+            record = anchors.get(key)
+            if record is None or record[0]() is not ledger:
+
+                def forget(
+                    _weakref: object,
+                    *,
+                    anchor_key: tuple[int, str] = key,
+                ) -> None:
+                    with anchor_lock:
+                        anchors.pop(anchor_key, None)
+
+                anchors[key] = (
+                    ref(ledger, forget),
+                    capture_started_monotonic_ns,
+                )
+                return False
+
+            anchor_ns = record[1]
+            if capture_started_monotonic_ns < anchor_ns:
+                raise BetfairTimeoutResolutionError(
+                    "monotonic capture clock regressed within one process"
+                )
+            required_ns = (
+                BETFAIR_TIMEOUT_VISIBILITY_HORIZON_SECONDS * 1_000_000_000
             )
-        required_ns = BETFAIR_TIMEOUT_VISIBILITY_HORIZON_SECONDS * 1_000_000_000
-        return capture_started_monotonic_ns - anchor_ns >= required_ns
+            return capture_started_monotonic_ns - anchor_ns >= required_ns
+
+    def retire_timeout_elapsed_visibility_anchor(
+        ledger: RealExecutionLedger,
+        attempt_id: str,
+    ) -> None:
+        """Release one process-local anchor after its authority is terminal."""
+
+        key = (id(ledger), attempt_id)
+        with anchor_lock:
+            record = anchors.get(key)
+            if record is not None and record[0]() is ledger:
+                anchors.pop(key, None)
+
+    globals()[
+        "_timeout_elapsed_visibility_ready"
+    ] = timeout_elapsed_visibility_ready
+    globals()[
+        "_retire_timeout_elapsed_visibility_anchor"
+    ] = retire_timeout_elapsed_visibility_anchor
 
 
-def _retire_timeout_elapsed_visibility_anchor(
-    ledger: RealExecutionLedger,
-    attempt_id: str,
-) -> None:
-    """Release one process-local elapsed-time anchor after its authority is terminal."""
-
-    key = (id(ledger), attempt_id)
-    with _timeout_elapsed_visibility_lock:
-        record = _timeout_elapsed_visibility_anchors.get(key)
-        if record is not None and record[0]() is ledger:
-            _timeout_elapsed_visibility_anchors.pop(key, None)
+_install_timeout_elapsed_visibility_authority()
+del _install_timeout_elapsed_visibility_authority
 
 
 def _absence_capture_page_times(
@@ -278,11 +381,16 @@ def _durable_timeout_authority(
     action: ExecutionAction,
     attempt_id: str,
 ) -> tuple[str, str, str]:
-    """Return durable provider ref, conservative timeout boundary, ledger SHA.
+    """Return provider ref, timeout boundary and SHA from one verified ledger view.
 
     `recorded_at` is deliberately used instead of the ATTEMPT_UNKNOWN payload's
     caller-supplied `observed_at`. The ledger writes `recorded_at` itself while
     appending the durable event; using that later boundary can only delay absence.
+
+    All authority-bearing attempt facts are derived from the same immutable verified
+    snapshot.  In particular, no separate state/reference read may be combined with
+    a later snapshot, because a concurrent terminal transition would create a
+    mixed-time authority view.
     """
 
     if type(ledger) is not RealExecutionLedger:
@@ -291,19 +399,15 @@ def _durable_timeout_authority(
         raise BetfairTimeoutResolutionError("action must be exact ExecutionAction")
     if type(attempt_id) is not str or not attempt_id or attempt_id != attempt_id.strip():
         raise BetfairTimeoutResolutionError("attempt_id must be non-empty canonical text")
-    try:
-        state = ledger.attempt_state(attempt_id)
-    except KeyError as exc:
-        raise BetfairTimeoutResolutionError("timeout attempt is not durable") from exc
-    if state is not AttemptState.UNKNOWN:
-        raise BetfairTimeoutResolutionError(
-            "timeout resolution requires a durable UNKNOWN attempt"
-        )
+
     snapshot = ledger.verified_snapshot()
     plan_events: list[dict[str, object]] = []
+    attempt_events: list[dict[str, object]] = []
     unknown_events: list[dict[str, object]] = []
     reserved_events: list[dict[str, object]] = []
     submitted_events: list[dict[str, object]] = []
+    provider_reference_events: list[dict[str, object]] = []
+    terminal_or_found_events: list[dict[str, object]] = []
     try:
         for raw_line in snapshot.payload.splitlines():
             envelope = json.loads(raw_line.decode("utf-8"))
@@ -313,17 +417,32 @@ def _durable_timeout_authority(
                 plan_events.append(event)
             if event.get("attempt_id") != attempt_id:
                 continue
+            attempt_events.append(event)
             if event_type == "ATTEMPT_RESERVED":
                 reserved_events.append(event)
             elif event_type == "ATTEMPT_SUBMITTED":
                 submitted_events.append(event)
             elif event_type == "ATTEMPT_UNKNOWN":
                 unknown_events.append(event)
+            elif event_type == "PROVIDER_ORDER_REFERENCE_BOUND":
+                provider_reference_events.append(event)
+            elif event_type in {
+                "RECONCILED_FOUND",
+                "EXTERNAL_ACKNOWLEDGEMENT",
+                "RECONCILED_NOT_FOUND",
+            }:
+                terminal_or_found_events.append(event)
     except (UnicodeDecodeError, json.JSONDecodeError, KeyError, AttributeError) as exc:
         raise BetfairTimeoutResolutionError(
             "verified execution ledger snapshot cannot be decoded"
         ) from exc
 
+    if not attempt_events:
+        raise BetfairTimeoutResolutionError("timeout attempt is not durable")
+    if terminal_or_found_events:
+        raise BetfairTimeoutResolutionError(
+            "verified ledger snapshot is no longer a durable UNKNOWN attempt"
+        )
     if len(reserved_events) != 1 or reserved_events[0].get("action_id") != action.action_id:
         raise BetfairTimeoutResolutionError(
             "timeout attempt does not bind the exact execution action"
@@ -365,25 +484,44 @@ def _durable_timeout_authority(
             "caller execution action differs from durable execution plan action"
         )
     durable_bookmaker_id = durable_action.get("bookmaker_id")
+    durable_account_id = durable_action.get("account_id")
     if not isinstance(durable_bookmaker_id, str):
         raise BetfairTimeoutResolutionError(
             "durable execution action bookmaker identity is malformed"
         )
-    provider_order_ref = ledger.provider_order_reference(
-        attempt_id=attempt_id,
-        provider_id=durable_bookmaker_id,
-    )
-    if provider_order_ref is None:
+    if not isinstance(durable_account_id, str):
         raise BetfairTimeoutResolutionError(
-            "timeout attempt lacks durable provider order reference"
+            "durable execution action account identity is malformed"
         )
+
+    if len(provider_reference_events) != 1:
+        raise BetfairTimeoutResolutionError(
+            "timeout attempt lacks one durable provider order reference"
+        )
+    provider_payload = provider_reference_events[0].get("payload")
+    if not isinstance(provider_payload, dict):
+        raise BetfairTimeoutResolutionError(
+            "durable provider order reference payload is malformed"
+        )
+    provider_order_ref = provider_payload.get("provider_order_ref")
+    if (
+        provider_payload.get("provider_id") != durable_bookmaker_id
+        or provider_payload.get("account_id") != durable_account_id
+        or not isinstance(provider_order_ref, str)
+        or not provider_order_ref
+        or provider_order_ref != provider_order_ref.strip()
+    ):
+        raise BetfairTimeoutResolutionError(
+            "durable provider order reference mismatches execution action"
+        )
+
     if len(submitted_events) != 1:
         raise BetfairTimeoutResolutionError(
             "timeout authority requires one durable provider submission boundary"
         )
     if len(unknown_events) != 1:
         raise BetfairTimeoutResolutionError(
-            "timeout attempt lacks one canonical uncertainty boundary"
+            "timeout resolution requires one durable UNKNOWN attempt boundary"
         )
     unknown = unknown_events[0]
     payload = unknown.get("payload")
@@ -399,8 +537,7 @@ def _durable_timeout_authority(
     _time(recorded_at, "durable timeout recorded_at")
     return provider_order_ref, recorded_at, snapshot.sha256
 
-
-def resolve_betfair_timeout_provider_state(
+def _resolve_betfair_timeout_provider_state_core(
     ledger: RealExecutionLedger,
     action: ExecutionAction,
     profile: BookmakerCapabilityProfile,
@@ -467,11 +604,6 @@ def resolve_betfair_timeout_provider_state(
     capture_started_monotonic_ns = (
         _betfair_readback_capture_started_monotonic_ns(readback)
     )
-    elapsed_visibility_ready = _timeout_elapsed_visibility_ready(
-        ledger,
-        attempt_id,
-        capture_started_monotonic_ns,
-    )
     capture_floor = _time(
         _absence_capture_floor(readback),
         "provider order-scope capture floor",
@@ -482,11 +614,25 @@ def resolve_betfair_timeout_provider_state(
     )
     if (
         capture_started is None
-        or not elapsed_visibility_ready
         or capture_started < deadline
         or observed < deadline
         or capture_floor < deadline
     ):
+        return BetfairTimeoutResolution(
+            BetfairTimeoutResolutionKind.INDETERMINATE_BEFORE_VISIBILITY_HORIZON,
+            timeout_boundary_at,
+            evidence.observed_at,
+            deadline_raw,
+            ledger_sha,
+            None,
+        )
+
+    elapsed_visibility_ready = _timeout_elapsed_visibility_ready(
+        ledger,
+        attempt_id,
+        capture_started_monotonic_ns,
+    )
+    if not elapsed_visibility_ready:
         return BetfairTimeoutResolution(
             BetfairTimeoutResolutionKind.INDETERMINATE_BEFORE_VISIBILITY_HORIZON,
             timeout_boundary_at,
@@ -540,7 +686,111 @@ def _install_betfair_timeout_absence_authority() -> None:
         ],
     ] = {}
     issued_lock = threading.RLock()
-    raw_resolve = resolve_betfair_timeout_provider_state
+    raw_resolve = _resolve_betfair_timeout_provider_state_core
+    raw_resolve_code = raw_resolve.__code__
+    sealed_error = BetfairTimeoutResolutionError
+    sealed_kind = BetfairTimeoutResolutionKind
+    sealed_absence_type = VerifiedProviderAbsenceEvidence
+    sealed_retire_anchor = _retire_timeout_elapsed_visibility_anchor
+    sealed_ledger_descriptors = tuple(
+        (name, value, getattr(value, "__code__", None))
+        for name, value in (
+            ("attempt_state", RealExecutionLedger.attempt_state),
+            ("verified_snapshot", RealExecutionLedger.verified_snapshot),
+            (
+                "provider_order_reference",
+                RealExecutionLedger.provider_order_reference,
+            ),
+        )
+    )
+    sealed_action_descriptors = (
+        (
+            "to_dict",
+            ExecutionAction.to_dict,
+            getattr(ExecutionAction.to_dict, "__code__", None),
+        ),
+    )
+    missing = object()
+
+    def seal_function_graph(
+        root: object,
+    ) -> tuple[tuple[str, object, object | None], ...]:
+        module_globals = globals()
+        sealed: list[tuple[str, object, object | None]] = []
+        sealed_names: set[str] = set()
+        pending = [root]
+        visited: set[int] = set()
+        while pending:
+            function = pending.pop()
+            if id(function) in visited:
+                continue
+            visited.add(id(function))
+            code = getattr(function, "__code__", None)
+            function_globals = getattr(function, "__globals__", None)
+            if code is None or function_globals is not module_globals:
+                continue
+            for name in code.co_names:
+                if name not in module_globals or name in sealed_names:
+                    continue
+                value = module_globals[name]
+                value_code = getattr(value, "__code__", None)
+                sealed.append((name, value, value_code))
+                sealed_names.add(name)
+                if (
+                    value_code is not None
+                    and getattr(value, "__globals__", None) is module_globals
+                ):
+                    pending.append(value)
+        return tuple(sealed)
+
+    sealed_resolver_graph = seal_function_graph(raw_resolve)
+    sealed_wrapper_bindings = (
+        ("BetfairTimeoutResolutionError", sealed_error),
+        ("BetfairTimeoutResolutionKind", sealed_kind),
+        ("VerifiedProviderAbsenceEvidence", sealed_absence_type),
+        ("_retire_timeout_elapsed_visibility_anchor", sealed_retire_anchor),
+    )
+
+    def assert_executable_authority_intact() -> None:
+        module_globals = globals()
+        if raw_resolve.__code__ is not raw_resolve_code:
+            raise sealed_error("timeout resolver executable code changed")
+        for name, expected, expected_code in sealed_resolver_graph:
+            current = module_globals.get(name, missing)
+            if current is not expected:
+                raise sealed_error(
+                    f"timeout resolver executable authority changed: {name}"
+                )
+            if (
+                expected_code is not None
+                and getattr(current, "__code__", None) is not expected_code
+            ):
+                raise sealed_error(
+                    f"timeout resolver executable code changed: {name}"
+                )
+        for name, expected in sealed_wrapper_bindings:
+            if module_globals.get(name, missing) is not expected:
+                raise sealed_error(
+                    f"timeout resolver authority binding changed: {name}"
+                )
+        for name, expected, expected_code in sealed_ledger_descriptors:
+            current = getattr(RealExecutionLedger, name, missing)
+            if (
+                current is not expected
+                or getattr(current, "__code__", None) is not expected_code
+            ):
+                raise sealed_error(
+                    f"timeout ledger authority method changed: {name}"
+                )
+        for name, expected, expected_code in sealed_action_descriptors:
+            current = getattr(ExecutionAction, name, missing)
+            if (
+                current is not expected
+                or getattr(current, "__code__", None) is not expected_code
+            ):
+                raise sealed_error(
+                    f"timeout action authority method changed: {name}"
+                )
 
     def authoritative_resolve(
         ledger: RealExecutionLedger,
@@ -551,6 +801,7 @@ def _install_betfair_timeout_absence_authority() -> None:
         expected_profile_sha256: str,
         readback: BetfairExecutionReadbackEnvelope,
     ) -> BetfairTimeoutResolution:
+        assert_executable_authority_intact()
         result = raw_resolve(
             ledger,
             action,
@@ -559,10 +810,11 @@ def _install_betfair_timeout_absence_authority() -> None:
             expected_profile_sha256=expected_profile_sha256,
             readback=readback,
         )
+        assert_executable_authority_intact()
         evidence = result.evidence
         if (
-            result.kind is BetfairTimeoutResolutionKind.ABSENT_AFTER_VISIBILITY_HORIZON
-            and isinstance(evidence, VerifiedProviderAbsenceEvidence)
+            result.kind is sealed_kind.ABSENT_AFTER_VISIBILITY_HORIZON
+            and isinstance(evidence, sealed_absence_type)
         ):
             evidence_key = id(evidence)
             anchor_key = (id(ledger), attempt_id)
@@ -592,7 +844,7 @@ def _install_betfair_timeout_absence_authority() -> None:
                         ) in issued.values()
                     ):
                         return
-                    _retire_timeout_elapsed_visibility_anchor(
+                    sealed_retire_anchor(
                         current_ledger,
                         elapsed_attempt_id,
                     )
@@ -608,23 +860,57 @@ def _install_betfair_timeout_absence_authority() -> None:
     def assert_betfair_timeout_absence_authoritative(
         evidence: VerifiedProviderAbsenceEvidence,
     ) -> None:
-        if not isinstance(evidence, VerifiedProviderAbsenceEvidence):
-            raise BetfairTimeoutResolutionError(
-                "timeout absence evidence type is not canonical"
-            )
+        assert_executable_authority_intact()
+        if type(evidence) is not sealed_absence_type:
+            raise sealed_error("timeout absence evidence type is not canonical")
         if evidence.provider_order_ref is None:
             return
         with issued_lock:
             record = issued.get(id(evidence))
             if record is None or record[0]() is not evidence:
-                raise BetfairTimeoutResolutionError(
+                raise sealed_error(
                     "provider absence did not pass durable Betfair timeout visibility authority"
+                )
+
+    def assert_betfair_timeout_absence_authoritative_for_attempt(
+        ledger: RealExecutionLedger,
+        action: ExecutionAction,
+        attempt_id: str,
+        evidence: VerifiedProviderAbsenceEvidence,
+    ) -> None:
+        """Bind positive timeout-absence authority to one durable attempt."""
+
+        assert_executable_authority_intact()
+        if type(evidence) is not sealed_absence_type:
+            raise sealed_error("timeout absence evidence type is not canonical")
+        provider_order_ref, _timeout_boundary_at, _ledger_sha = (
+            _durable_timeout_authority(ledger, action, attempt_id)
+        )
+        if evidence.provider_order_ref != provider_order_ref:
+            raise sealed_error(
+                "timeout absence evidence mismatches durable provider order reference"
+            )
+        expected_anchor_key = (id(ledger), attempt_id)
+        with issued_lock:
+            record = issued.get(id(evidence))
+            if (
+                record is None
+                or record[0]() is not evidence
+                or record[1] != expected_anchor_key
+                or record[2]() is not ledger
+            ):
+                raise sealed_error(
+                    "provider absence authority is not bound to this timeout attempt"
                 )
 
     globals()["resolve_betfair_timeout_provider_state"] = authoritative_resolve
     globals()[
         "assert_betfair_timeout_absence_authoritative"
     ] = assert_betfair_timeout_absence_authoritative
+    globals()[
+        "assert_betfair_timeout_absence_authoritative_for_attempt"
+    ] = assert_betfair_timeout_absence_authoritative_for_attempt
+
 
 _install_betfair_timeout_absence_authority()
 del _install_betfair_timeout_absence_authority

@@ -754,6 +754,16 @@ def _install_capital_risk_dispatch_authority() -> None:
     read_snapshot = _READ_VERIFIED_SNAPSHOT
     exact_globals = globals
     exact_getattr = getattr
+    exact_id = id
+    weakref_ref = weakref.ref
+    issue_lock = threading.RLock()
+    issued: dict[
+        int,
+        tuple[
+            weakref.ReferenceType[ExecutionCapitalAtRiskEvidence],
+            str,
+        ],
+    ] = {}
 
     def require_dispatch() -> None:
         namespace = exact_globals()
@@ -771,6 +781,37 @@ def _install_capital_risk_dispatch_authority() -> None:
                 "capital-risk ledger read dispatch changed"
             )
 
+    def register_product_issued(
+        value: ExecutionCapitalAtRiskEvidence,
+    ) -> None:
+        identity = exact_id(value)
+
+        def cleanup(
+            reference: weakref.ReferenceType[ExecutionCapitalAtRiskEvidence],
+        ) -> None:
+            with issue_lock:
+                current = issued.get(identity)
+                if current is not None and current[0] is reference:
+                    issued.pop(identity, None)
+
+        reference = weakref_ref(value, cleanup)
+        with issue_lock:
+            issued[identity] = (reference, value.evidence_sha256)
+
+    def require_product_issued(
+        value: ExecutionCapitalAtRiskEvidence,
+    ) -> None:
+        with issue_lock:
+            record = issued.get(exact_id(value))
+        if (
+            record is None
+            or record[0]() is not value
+            or record[1] != value.evidence_sha256
+        ):
+            raise ExecutionCapitalAtRiskError(
+                "capital-at-risk evidence is not current product-issued authority"
+            )
+
     def authoritative_resolve(
         ledger: RealExecutionLedger,
         plan_id: str,
@@ -778,6 +819,7 @@ def _install_capital_risk_dispatch_authority() -> None:
         require_dispatch()
         value = raw_resolve(ledger, plan_id)
         require_dispatch()
+        register_product_issued(value)
         return value
 
     def authoritative_currentness(
@@ -785,8 +827,10 @@ def _install_capital_risk_dispatch_authority() -> None:
         ledger: RealExecutionLedger,
     ) -> None:
         require_dispatch()
+        require_product_issued(self)
         raw_currentness(self, ledger)
         require_dispatch()
+        require_product_issued(self)
 
     globals()["resolve_execution_capital_at_risk"] = authoritative_resolve
     ExecutionCapitalAtRiskEvidence.assert_issued_current = authoritative_currentness

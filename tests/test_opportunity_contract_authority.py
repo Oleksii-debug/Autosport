@@ -260,3 +260,62 @@ def test_evidence_ref_subclasses_fail_closed_before_virtual_dispatch() -> None:
             evidence_refs=(hostile,),
         )
 
+class _HostileMarketEvent(MarketEvent):
+    __slots__ = ()
+
+    def to_dict(self) -> dict[str, object]:
+        raise AssertionError("MarketEvent subclass serialization must not execute")
+
+
+class _HostileQuoteRef(QuoteRef):
+    __slots__ = ()
+
+    @property
+    def identity_key(self) -> tuple[str, str, str, str, str, int]:
+        raise AssertionError("QuoteRef subclass identity dispatch must not execute")
+
+    @property
+    def quote_key(self) -> str:
+        raise AssertionError("QuoteRef subclass quote dispatch must not execute")
+
+
+def test_canonical_typed_subclasses_fail_closed_before_property_dispatch() -> None:
+    hostile_event = _HostileMarketEvent(
+        event_id="event-hostile-type",
+        market_id="market-hostile-type",
+        selection_id="selection-hostile-type",
+        decimal_odds=Decimal("2"),
+        observed_ts="2026-09-16T16:00:00+00:00",
+        source_id="provider-hostile-type",
+        sequence=1,
+        source_ts="2026-09-16T15:59:59+00:00",
+        ingest_ts="2026-09-16T16:00:01+00:00",
+    )
+    with pytest.raises(
+        OpportunityContractError,
+        match="quote source must be a MarketEvent",
+    ):
+        QuoteRef.from_market_event(hostile_event)
+
+    hostile_quote = _HostileQuoteRef(
+        event_id="event-hostile-quote",
+        market_id="market-hostile-quote",
+        selection_id="selection-hostile-quote",
+        source_id="provider-hostile-quote",
+        sequence=1,
+        decimal_odds=Decimal("2"),
+        observed_ts="2026-09-16T16:00:00+00:00",
+        source_ts="2026-09-16T15:59:59+00:00",
+        ingest_ts="2026-09-16T16:00:01+00:00",
+        market_event_hash=_HASH,
+    )
+    with pytest.raises(
+        OpportunityContractError,
+        match="opportunity quotes must be QuoteRef values",
+    ):
+        Opportunity(
+            strategy_class=StrategyClass.ARBITRAGE,
+            decision=OpportunityDecision.WAIT,
+            quotes=(hostile_quote,),
+        )
+

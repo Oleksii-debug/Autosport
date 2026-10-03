@@ -2694,3 +2694,100 @@ def test_economic_goal_provenance_sha256_rebinding_cannot_forge_contract_hash(
 
     assert hostile_calls == []
 
+def test_workspace_lock_low_level_lock_rebinding_cannot_remove_fence(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    acquired, _ = _acquire_balance(monkeypatch, tmp_path, "100")
+    target = _plan("target", _action("target-action", "10"))
+    ledger = _ledger_with_plans(tmp_path, target)
+    hostile_calls: list[object] = []
+
+    def hostile_lock_handle(handle):
+        hostile_calls.append(handle)
+
+    monkeypatch.setattr(
+        WorkspaceEconomicLock,
+        "_lock_handle",
+        staticmethod(hostile_lock_handle),
+    )
+
+    with pytest.raises(
+        ProviderAccountHeadroomError,
+        match="canonical monetary denomination authority changed",
+    ):
+        _assess(
+            ledger,
+            acquired,
+            plan_id="target",
+            action_id="target-action",
+        )
+
+    assert hostile_calls == []
+
+
+def test_workspace_lock_open_handle_rebinding_cannot_redirect_fence(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    acquired, _ = _acquire_balance(monkeypatch, tmp_path, "100")
+    target = _plan("target", _action("target-action", "10"))
+    ledger = _ledger_with_plans(tmp_path, target)
+    hostile_calls: list[object] = []
+
+    def hostile_open(self):
+        hostile_calls.append(self)
+        raise AssertionError("hostile lock open executed")
+
+    monkeypatch.setattr(
+        WorkspaceEconomicLock,
+        "_open_lock_handle",
+        hostile_open,
+    )
+
+    with pytest.raises(
+        ProviderAccountHeadroomError,
+        match="canonical monetary denomination authority changed",
+    ):
+        _assess(
+            ledger,
+            acquired,
+            plan_id="target",
+            action_id="target-action",
+        )
+
+    assert hostile_calls == []
+
+
+def test_workspace_lock_verification_descriptor_rebinding_cannot_bypass_fence(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    acquired, _ = _acquire_balance(monkeypatch, tmp_path, "100")
+    target = _plan("target", _action("target-action", "10"))
+    ledger = _ledger_with_plans(tmp_path, target)
+    hostile_calls: list[object] = []
+
+    def hostile_open_read_only(path):
+        hostile_calls.append(path)
+        raise AssertionError("hostile verification descriptor executed")
+
+    monkeypatch.setattr(
+        headroom_module._workspace_lock,
+        "_open_read_only_descriptor",
+        hostile_open_read_only,
+    )
+
+    with pytest.raises(
+        ProviderAccountHeadroomError,
+        match="canonical monetary denomination authority changed",
+    ):
+        _assess(
+            ledger,
+            acquired,
+            plan_id="target",
+            action_id="target-action",
+        )
+
+    assert hostile_calls == []
+

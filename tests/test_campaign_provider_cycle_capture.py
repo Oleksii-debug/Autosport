@@ -3290,6 +3290,127 @@ def test_campaign_capture_rejects_remaining_builtin_shadow_before_execution(
     assert hostile_calls == []
 
 
+def test_failure_cleanup_rejects_collector_finalizer_global_rebind(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    locator, store, spec, provider_store = _setup(tmp_path)
+    hostile_calls: list[str] = []
+    finalizer_witness = next(
+        item
+        for item in capture_module._STORE_CLASS_SEAM_GLOBAL_WITNESSES
+        if item[0] == "_finish_collector_cycle"
+    )
+    finalizer_globals = finalizer_witness[2]
+
+    def hostile_text(*_args, **_kwargs):
+        hostile_calls.append("_text")
+        raise AssertionError("hostile collector _text executed")
+
+    def mutating_failure(_request, _timeout):
+        monkeypatch.setitem(finalizer_globals, "_text", hostile_text)
+        raise OSError("forced provider transport failure")
+
+    monkeypatch.setattr(provider_module, "urlopen", mutating_failure)
+    monkeypatch.setattr(provider_module, "_default_clock", lambda: CAPTURED_AT)
+
+    with pytest.raises(
+        ProviderObservationUnsupportedError,
+        match="provider SSE initial-state acquisition failed",
+    ) as exc_info:
+        capture_module.capture_campaign_complete_game_board(
+            precommit_locator=locator,
+            store=store,
+            source_spec=spec,
+            evidence_store=provider_store,
+            request=_request(),
+            api_key="secret-value",
+            timeout_seconds=3.0,
+            clock=_clock(),
+        )
+
+    evidence = store.collector_cycle_evidence(
+        source_id=spec.source_id,
+        start_cycle_seq=1,
+        end_cycle_seq=1,
+    )
+    assert len(evidence) == 1
+    assert evidence[0]["terminal"] is None
+    assert hostile_calls == []
+    assert any(
+        "failure terminal also failed" in note
+        for note in getattr(exc_info.value, "__notes__", ())
+    )
+
+
+@pytest.mark.parametrize(
+    ("seam_name", "dependency_name", "attribute_name"),
+    [
+        ("_finish_collector_cycle", "sqlite3", "DatabaseError"),
+        ("_cycle_terminal_payload_json", "json", "dumps"),
+        ("_cycle_terminal_payload_sha256", "hashlib", "sha256"),
+    ],
+)
+def test_failure_cleanup_rejects_collector_module_attribute_rebind(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    seam_name: str,
+    dependency_name: str,
+    attribute_name: str,
+) -> None:
+    locator, store, spec, provider_store = _setup(tmp_path)
+    hostile_calls: list[str] = []
+    witness = next(
+        item
+        for item in capture_module._STORE_CLASS_SEAM_MODULE_ATTR_WITNESSES
+        if (
+            item[0] == seam_name
+            and item[1] == dependency_name
+            and item[3] == attribute_name
+        )
+    )
+    module = witness[2]
+
+    def hostile(*_args, **_kwargs):
+        hostile_calls.append(f"{dependency_name}.{attribute_name}")
+        raise AssertionError("hostile collector module attribute executed")
+
+    def mutating_failure(_request, _timeout):
+        monkeypatch.setattr(module, attribute_name, hostile)
+        raise OSError("forced provider transport failure")
+
+    monkeypatch.setattr(provider_module, "urlopen", mutating_failure)
+    monkeypatch.setattr(provider_module, "_default_clock", lambda: CAPTURED_AT)
+
+    with pytest.raises(
+        ProviderObservationUnsupportedError,
+        match="provider SSE initial-state acquisition failed",
+    ) as exc_info:
+        capture_module.capture_campaign_complete_game_board(
+            precommit_locator=locator,
+            store=store,
+            source_spec=spec,
+            evidence_store=provider_store,
+            request=_request(),
+            api_key="secret-value",
+            timeout_seconds=3.0,
+            clock=_clock(),
+        )
+
+    evidence = store.collector_cycle_evidence(
+        source_id=spec.source_id,
+        start_cycle_seq=1,
+        end_cycle_seq=1,
+    )
+    assert len(evidence) == 1
+    assert evidence[0]["terminal"] is None
+    assert hostile_calls == []
+    assert any(
+        "failure terminal also failed" in note
+        for note in getattr(exc_info.value, "__notes__", ())
+    )
+
+
 @pytest.mark.parametrize(
     "name",
     [

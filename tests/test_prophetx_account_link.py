@@ -251,7 +251,7 @@ def test_direct_key_generation_is_fail_closed_without_any_transport_call():
     assert snap.execution_enabled is False
 
 
-def test_manual_approved_token_import_uses_sink_once_and_retains_only_opaque_reference():
+def test_manual_approved_token_import_uses_sink_once_and_public_snapshot_hides_reference():
     ctl, _, sink, _ = controller()
 
     ctl.import_approved_api_token(
@@ -264,8 +264,8 @@ def test_manual_approved_token_import_uses_sink_once_and_retains_only_opaque_ref
     snap = ctl.public_snapshot()
     assert snap.state == AccountLinkState.LINKED_CREDENTIAL_STORED.value
     assert snap.credential_present is True
-    assert snap.credential_ref == "credential-ref-1"
     text = snapshot_text(ctl)
+    assert "credential-ref-1" not in text
     assert "ACCESS_SECRET" not in text
     assert "SUPER_SECRET" not in text
     assert snap.execution_enabled is False

@@ -500,9 +500,10 @@ def test_exact_selection_and_handicap_are_bound_into_result_identity(monkeypatch
     second.assert_authoritative()
 
 
-def test_instance_rpc_shadow_cannot_replace_canonical_readonly_acquisition(monkeypatch):
-    authority, client, transport = authority_for(monkeypatch, 
-        response([market_row("CLASSIC")], 1)
+def test_instance_rpc_shadow_revokes_product_origin_before_acquisition(monkeypatch):
+    authority, client, transport = authority_for(
+        monkeypatch,
+        response([market_row("CLASSIC")], 1),
     )
 
     client._rpc = lambda *_args, **_kwargs: (
@@ -510,10 +511,14 @@ def test_instance_rpc_shadow_cannot_replace_canonical_readonly_acquisition(monke
     ).throw(
         AssertionError("instance shadow must not execute")
     )
-    observation = authority.acquire("1.234")
 
-    assert observation.ladder_type == "CLASSIC"
-    assert len(transport.calls) == 1
+    with pytest.raises(
+        BetfairPriceLadderError,
+        match="authenticated origin is no longer authoritative",
+    ):
+        authority.acquire("1.234")
+
+    assert len(transport.calls) == 0
 
 
 def test_client_subclass_is_not_accepted_as_provider_authority(monkeypatch):

@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Callable
 
+from . import provider_observation_authority as _provider_observation_module
 from .campaign_inception import (
     CampaignInceptionReceipt,
     CampaignInceptionSourceSpec,
@@ -79,6 +80,21 @@ _EVIDENCE_CLASS_SEAM_CODES = {
     )
     for name, target in _EVIDENCE_CLASS_SEAMS.items()
 }
+_PROVIDER_REQUEST_SEAMS = {
+    "source_id": inspect.getattr_static(CompleteGameBoardRequest, "source_id"),
+}
+_PROVIDER_SNAPSHOT_SEAMS = {
+    name: inspect.getattr_static(CompleteGameBoardSnapshot, name)
+    for name in (
+        "captured_at",
+        "frame_sha256",
+        "evidence_sha256",
+    )
+}
+_PROVIDER_CANONICAL_ASSERT = (
+    _provider_observation_module._CANONICAL_ASSERT_COMPLETE_GAME_BOARD_AUTHORITATIVE
+)
+_PROVIDER_CANONICAL_ASSERT_CODE = _PROVIDER_CANONICAL_ASSERT.__code__
 
 
 class CampaignProviderCycleCaptureError(RuntimeError):
@@ -212,6 +228,34 @@ def _require_canonical_seams(
     if rebound:
         raise CampaignProviderCycleCaptureIntegrityError(
             "collector campaign capture seam is instance-rebound: " + ", ".join(rebound)
+        )
+    request_rebound = sorted(
+        name
+        for name, expected in _PROVIDER_REQUEST_SEAMS.items()
+        if inspect.getattr_static(CompleteGameBoardRequest, name, None) is not expected
+    )
+    if request_rebound:
+        raise CampaignProviderCycleCaptureIntegrityError(
+            "provider request authority seam is rebound: "
+            + ", ".join(request_rebound)
+        )
+    snapshot_rebound = sorted(
+        name
+        for name, expected in _PROVIDER_SNAPSHOT_SEAMS.items()
+        if inspect.getattr_static(CompleteGameBoardSnapshot, name, None) is not expected
+    )
+    if snapshot_rebound:
+        raise CampaignProviderCycleCaptureIntegrityError(
+            "provider snapshot authority seam is rebound: "
+            + ", ".join(snapshot_rebound)
+        )
+    if (
+        _provider_observation_module._CANONICAL_ASSERT_COMPLETE_GAME_BOARD_AUTHORITATIVE
+        is not _PROVIDER_CANONICAL_ASSERT
+        or _PROVIDER_CANONICAL_ASSERT.__code__ is not _PROVIDER_CANONICAL_ASSERT_CODE
+    ):
+        raise CampaignProviderCycleCaptureIntegrityError(
+            "provider evidence assertion authority changed"
         )
     evidence_state = vars(evidence_store)
     rebound = sorted(
@@ -387,6 +431,11 @@ def capture_campaign_complete_game_board(
     expected_json_dumps = json.dumps
     expected_datetime = datetime
     expected_utc = UTC
+    expected_provider_module = _provider_observation_module
+    expected_provider_request_seams = _PROVIDER_REQUEST_SEAMS
+    expected_provider_snapshot_seams = _PROVIDER_SNAPSHOT_SEAMS
+    expected_provider_assert = _PROVIDER_CANONICAL_ASSERT
+    expected_provider_assert_code = _PROVIDER_CANONICAL_ASSERT_CODE
 
     def require_stable_dispatch() -> None:
         if (
@@ -395,6 +444,34 @@ def capture_campaign_complete_game_board(
         ):
             raise CampaignProviderCycleCaptureIntegrityError(
                 "campaign provider-cycle reflection dispatch changed"
+            )
+        if (
+            module_globals.get("_provider_observation_module")
+            is not expected_provider_module
+            or module_globals.get("_PROVIDER_REQUEST_SEAMS")
+            is not expected_provider_request_seams
+            or module_globals.get("_PROVIDER_SNAPSHOT_SEAMS")
+            is not expected_provider_snapshot_seams
+            or module_globals.get("_PROVIDER_CANONICAL_ASSERT")
+            is not expected_provider_assert
+            or module_globals.get("_PROVIDER_CANONICAL_ASSERT_CODE")
+            is not expected_provider_assert_code
+            or expected_provider_module._CANONICAL_ASSERT_COMPLETE_GAME_BOARD_AUTHORITATIVE
+            is not expected_provider_assert
+            or expected_provider_assert.__code__ is not expected_provider_assert_code
+            or any(
+                expected_getattr_static(CompleteGameBoardRequest, name)
+                is not descriptor
+                for name, descriptor in expected_provider_request_seams.items()
+            )
+            or any(
+                expected_getattr_static(CompleteGameBoardSnapshot, name)
+                is not descriptor
+                for name, descriptor in expected_provider_snapshot_seams.items()
+            )
+        ):
+            raise CampaignProviderCycleCaptureIntegrityError(
+                "campaign provider acquisition authority changed"
             )
         if (
             module_globals.get("_RECEIPT_FIELD_NAMES")
@@ -550,6 +627,8 @@ def capture_campaign_complete_game_board(
             )
         evidence_path = evidence_save(evidence_store, snapshot)
         repeated_path = evidence_save(evidence_store, snapshot)
+        require_stable_dispatch()
+        require_seams(store, evidence_store)
         if evidence_path != repeated_path or evidence_path.name != (
             snapshot.evidence_sha256 + ".json"
         ):
@@ -740,6 +819,11 @@ def _seal_campaign_provider_cycle_capture_dispatch() -> None:
         "_INCEPTION_RECEIPT_FIELD_NAMES": expected_inception_field_names,
         "_INCEPTION_RECEIPT_FIELD_DESCRIPTORS": expected_inception_field_descriptors,
         "ARTIFACT_KIND": ARTIFACT_KIND,
+        "_provider_observation_module": _provider_observation_module,
+        "_PROVIDER_REQUEST_SEAMS": _PROVIDER_REQUEST_SEAMS,
+        "_PROVIDER_SNAPSHOT_SEAMS": _PROVIDER_SNAPSHOT_SEAMS,
+        "_PROVIDER_CANONICAL_ASSERT": _PROVIDER_CANONICAL_ASSERT,
+        "_PROVIDER_CANONICAL_ASSERT_CODE": _PROVIDER_CANONICAL_ASSERT_CODE,
     }
     expected_callables = tuple(
         (

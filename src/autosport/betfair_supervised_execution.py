@@ -1966,7 +1966,7 @@ def execute_betfair_supervised_action(
             raise BetfairSupervisedExecutionError(
                 "terminal Betfair execution requires canonical client, transport, and parser authority; executable code authority changed"
             )
-        begin_supervised_attempt(
+        execution_attempt = begin_supervised_attempt(
             ledger,
             bound,
             approval,
@@ -2009,13 +2009,16 @@ def execute_betfair_supervised_action(
             attempt_id=attempt_id,
             provider_id=action.bookmaker_id,
         )
+        submitted_at = execution_attempt.reserved_at
 
         def mark_submitted_after_stop_admission(
             request_sha256: str,
         ) -> None:
+            nonlocal submitted_at
+            submitted_at = _supervised_execution_runtime._trusted_now()
             ledger.mark_submitted(
                 attempt_id,
-                submitted_at=_supervised_execution_runtime._trusted_now(),
+                submitted_at=submitted_at,
                 request_sha256=request_sha256,
             )
 
@@ -2078,11 +2081,7 @@ def execute_betfair_supervised_action(
             unknown_observed_at = (
                 ambiguous_observed_at
                 if ambiguous_observed_at is not None
-                else _attempt_causal_observation_time(
-                    ledger,
-                    plan_id=bound.execution_plan.plan_id,
-                    attempt_id=attempt_id,
-                )
+                else submitted_at
             )
             ledger.mark_unknown(
                 attempt_id,

@@ -7,7 +7,7 @@ No provider I/O, credentials, execution, settlement, or money-moving authority.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from enum import Enum
 from hashlib import sha256
 import json
@@ -19,7 +19,20 @@ from .bookmaker_capability import (
     BookmakerCapabilityProfile,
     BookmakerCapabilityState,
 )
-from .bookmaker_integration_boundary import BookmakerIntegrationEvidence
+from .bookmaker_integration_boundary import (
+    BookmakerIntegrationEvidence,
+    BookmakerIntegrationKind,
+)
+from .bookmaker_capability_lifecycle import (
+    BETDAQ_AUTHENTICATED_MAX_OBSERVATION_AGE_SECONDS,
+    BETDAQ_AUTHENTICATED_SOURCE_CONTRACT_REF,
+    BETDAQ_AUTHENTICATED_VALIDATION_POLICY_VERSION,
+    BetdaqAuthenticatedCapabilityIssuance,
+    CapabilityEvidenceJournal,
+    CapabilityEvidenceStrength,
+    CapabilityLifecycleState,
+    CapabilityRequirement,
+)
 
 SCHEMA_VERSION = 1
 
@@ -217,7 +230,7 @@ class ProviderCapabilityEvidence:
         observed = _time(self.observed_at, "observed_at")
         if at < observed:
             return False
-        return self.expires_at is None or at <= _time(self.expires_at, "expires_at")
+        return self.expires_at is None or at < _time(self.expires_at, "expires_at")
 
     def to_canonical_dict(self) -> dict[str, object]:
         return {
@@ -608,6 +621,89 @@ def _install_provider_capability_authority():
     raw_issue = _issue_provider_capability_evidence_unsealed
     raw_build = _build_provider_capability_evidence_matrix_unsealed
 
+    def issue_betdaq_authenticated_read_evidence(
+        issuance: BetdaqAuthenticatedCapabilityIssuance,
+        integration: BookmakerIntegrationEvidence,
+    ) -> ProviderCapabilityEvidence:
+        """Compose matrix read authority from exact product-issued BETDAQ lifecycle proof."""
+
+        if type(issuance) is not BetdaqAuthenticatedCapabilityIssuance:
+            raise ProviderCapabilityEvidenceMatrixError(
+                "BETDAQ authenticated evidence requires exact lifecycle issuance"
+            )
+        if type(integration) is not BookmakerIntegrationEvidence:
+            raise ProviderCapabilityEvidenceMatrixError(
+                "BETDAQ authenticated evidence requires exact integration evidence"
+            )
+        try:
+            integration.verify_profile(issuance.profile)
+        except Exception as exc:
+            raise ProviderCapabilityEvidenceMatrixError(
+                "BETDAQ integration evidence does not bind lifecycle profile"
+            ) from exc
+        if integration.integration_kind is not BookmakerIntegrationKind.OFFICIAL_API:
+            raise ProviderCapabilityEvidenceMatrixError(
+                "BETDAQ authenticated lifecycle evidence requires official API integration"
+            )
+
+        lifecycle = issuance.evidence
+        journal = CapabilityEvidenceJournal()
+        journal.publish(lifecycle)
+        requirement = CapabilityRequirement(
+            lifecycle.capability,
+            CapabilityEvidenceStrength.OBSERVED_AUTHENTICATED,
+            lifecycle.scope,
+            BETDAQ_AUTHENTICATED_VALIDATION_POLICY_VERSION,
+            BETDAQ_AUTHENTICATED_SOURCE_CONTRACT_REF,
+            BETDAQ_AUTHENTICATED_MAX_OBSERVATION_AGE_SECONDS,
+            require_available=False,
+        )
+        decision = journal.resolve(
+            requirement,
+            {issuance.profile.profile_id: issuance.profile},
+            as_of=lifecycle.committed_at,
+        )
+        if (
+            not decision.allowed
+            or decision.lifecycle is not CapabilityLifecycleState.CURRENT
+            or decision.evidence_id != lifecycle.evidence_id
+        ):
+            raise ProviderCapabilityEvidenceMatrixError(
+                "BETDAQ lifecycle evidence is not current product-issued authenticated proof"
+            )
+
+        observed = _time(lifecycle.observed_at, "lifecycle.observed_at")
+        expiry_candidates = [
+            observed
+            + timedelta(seconds=BETDAQ_AUTHENTICATED_MAX_OBSERVATION_AGE_SECONDS),
+            _time(lifecycle.review_due_at, "lifecycle.review_due_at"),
+        ]
+        if lifecycle.provider_expires_at is not None:
+            expiry_candidates.append(
+                _time(lifecycle.provider_expires_at, "lifecycle.provider_expires_at")
+            )
+        expires_at = min(expiry_candidates).isoformat()
+
+        fact = ProviderCapabilityEvidence(
+            capability=lifecycle.capability,
+            profile_state=lifecycle.support_state,
+            grade=ProviderCapabilityTruthGrade.AUTHENTICATED_READ_PROVEN,
+            profile_id=issuance.profile.profile_id,
+            integration_evidence_id=integration.evidence_id,
+            environment=lifecycle.scope.environment,
+            application_mode="betdaq-authenticated-readonly",
+            observed_at=lifecycle.observed_at,
+            expires_at=expires_at,
+            evidence_ref=f"capability-lifecycle://{lifecycle.evidence_id}",
+            evidence_sha256=lifecycle.evidence_id,
+            endpoint_operation=BETDAQ_AUTHENTICATED_SOURCE_CONTRACT_REF,
+        )
+        issuance_key = id(fact)
+        issued_evidence[issuance_key] = fact
+        issued_evidence_seals[issuance_key] = fact.evidence_id
+        finalize(fact, issued_evidence_seals.pop, issuance_key, None)
+        return fact
+
     def issue_provider_capability_evidence(
         *,
         capability: BookmakerCapability,
@@ -718,6 +814,7 @@ def _install_provider_capability_authority():
 
     return (
         issue_provider_capability_evidence,
+        issue_betdaq_authenticated_read_evidence,
         is_product_issued,
         build_provider_capability_evidence_matrix,
         is_product_issued_matrix,
@@ -726,6 +823,7 @@ def _install_provider_capability_authority():
 
 (
     issue_provider_capability_evidence,
+    issue_betdaq_authenticated_read_evidence,
     _is_product_issued,
     build_provider_capability_evidence_matrix,
     _is_product_issued_matrix,

@@ -379,6 +379,25 @@ def _bound_plan_witness(value: BoundSupervisedExecutionPlan) -> str:
     )
 
 
+_BOUND_PLAN_WITNESS = _bound_plan_witness
+_BOUND_PLAN_WITNESS_CODE = getattr(_BOUND_PLAN_WITNESS, "__code__", None)
+
+
+def _canonical_bound_plan_witness(
+    value: BoundSupervisedExecutionPlan,
+    _witness=_BOUND_PLAN_WITNESS,
+    _witness_code=_BOUND_PLAN_WITNESS_CODE,
+) -> str:
+    if (
+        globals().get("_bound_plan_witness") is not _witness
+        or getattr(_witness, "__code__", None) is not _witness_code
+    ):
+        raise SupervisedExecutionError(
+            "canonical bound supervised execution plan witness changed"
+        )
+    return _witness(value)
+
+
 @dataclass(frozen=True, slots=True)
 class ProviderReadback:
     bookmaker_id: str
@@ -735,13 +754,13 @@ def _install_bound_supervised_execution_plan_authority() -> None:
     ] = {}
     raw_build = build_supervised_execution_plan
     raw_build_code = getattr(raw_build, "__code__", None)
-    witness_fn = _bound_plan_witness
+    witness_fn = _canonical_bound_plan_witness
     witness_code = getattr(witness_fn, "__code__", None)
 
     def require_internal_dispatch() -> None:
         if (
             getattr(raw_build, "__code__", None) is not raw_build_code
-            or globals().get("_bound_plan_witness") is not witness_fn
+            or globals().get("_canonical_bound_plan_witness") is not witness_fn
             or getattr(witness_fn, "__code__", None) is not witness_code
         ):
             raise SupervisedExecutionError(
@@ -853,9 +872,18 @@ def _canonical_bound_plan_authority_dispatch(
 
 def _require_bound_plan_structure(
     bound: BoundSupervisedExecutionPlan,
+    _witness=_canonical_bound_plan_witness,
+    _witness_code=getattr(_canonical_bound_plan_witness, "__code__", None),
 ) -> None:
+    if (
+        globals().get("_canonical_bound_plan_witness") is not _witness
+        or getattr(_witness, "__code__", None) is not _witness_code
+    ):
+        raise SupervisedExecutionError(
+            "canonical bound supervised execution plan witness changed"
+        )
     try:
-        _bound_plan_witness(bound)
+        _witness(bound)
     except (SupervisedExecutionError, AttributeError, TypeError, ValueError) as exc:
         raise SupervisedExecutionError(
             "bound supervised execution plan is not a canonical structural binding"

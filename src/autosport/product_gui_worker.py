@@ -5,6 +5,8 @@ import queue
 import re
 import threading
 from dataclasses import dataclass
+from decimal import Decimal
+from hashlib import sha256
 from pathlib import Path
 from typing import Callable
 
@@ -13,6 +15,9 @@ from .continuous_session import (
     ContinuousTickResult,
     SessionStoppedError,
 )
+from .domain import TicketStatus
+from .paper import PaperBook
+from .portfolio import PortfolioEngine
 from .operator_source_registry import (
     list_product_source_entries,
     resolve_product_source_runtime_binding,
@@ -28,6 +33,7 @@ from .trusted_runtime_code_profile import (
     require_product_owned_source_factory_identity,
     revoke_trusted_runtime_code_profile,
 )
+from .workspace_lock import WorkspaceEconomicLock
 
 
 RuntimeBuilder = Callable[[Path, str, str], AutonomousProductRuntime]
@@ -258,6 +264,120 @@ def _safe_error_type(exc: BaseException) -> str:
 
 
 @dataclass(frozen=True, slots=True)
+class ProductGuiEconomicTicket:
+    """Immutable presentation copy of one canonical durable PAPER ticket."""
+
+    ticket_id: str
+    status: str
+    stake: Decimal
+    combined_odds: Decimal
+    payout: Decimal
+    legs: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class ProductGuiEconomicSnapshot:
+    """Read-only economic truth captured after one canonical runtime tick."""
+
+    workspace: Path
+    session_id: str
+    source_id: str
+    cycle_index: int
+    as_of: str | None
+    paper_book_sha256: str | None
+    balance: Decimal
+    committed_stake: Decimal
+    tickets: tuple[ProductGuiEconomicTicket, ...]
+    portfolio_mode: str
+    portfolio_scenario_count: int
+    portfolio_worst_case: Decimal
+    portfolio_best_case: Decimal
+    portfolio_mean_case: Decimal
+
+
+def _capture_runtime_economic_snapshot(
+    runtime: AutonomousProductRuntime,
+    tick: ContinuousTickResult,
+    *,
+    _runtime_type: type[AutonomousProductRuntime] = AutonomousProductRuntime,
+    _tick_type: type[ContinuousTickResult] = ContinuousTickResult,
+    _paper_book_type: type[PaperBook] = PaperBook,
+    _portfolio_engine_type: type[PortfolioEngine] = PortfolioEngine,
+    _economic_lock_type: type[WorkspaceEconomicLock] = WorkspaceEconomicLock,
+    _sha256=sha256,
+) -> ProductGuiEconomicSnapshot:
+    """Capture economic presentation truth without reopening AutosportSession.
+
+    The caller keeps the canonical runtime operation fence held across the completed
+    tick and this read. The existing workspace economic lock serializes the exact
+    PaperBook byte snapshot against canonical economic writers.
+    """
+
+    if type(runtime) is not _runtime_type or type(tick) is not _tick_type:
+        raise RuntimeError("economic snapshot requires exact canonical runtime tick")
+    workspace = Path(runtime.workspace).expanduser().resolve(strict=False)
+    coordinator = runtime.coordinator
+    if (
+        Path(coordinator.workspace).expanduser().resolve(strict=False) != workspace
+        or tick.session_id != coordinator.session_id
+        or tick.source_id != runtime.manifest.source_id
+        or tick.cycle_index < 0
+    ):
+        raise RuntimeError("economic snapshot runtime identity mismatch")
+
+    with _economic_lock_type(workspace):
+        book_path = Path(coordinator.paper_book_path)
+        if book_path.exists():
+            payload = book_path.read_bytes()
+            paper_book_sha256 = _sha256(payload).hexdigest()
+            book = _paper_book_type.load_bytes(payload)
+        else:
+            paper_book_sha256 = None
+            book = _paper_book_type(runtime.manifest.initial_bankroll)
+
+        tickets = tuple(
+            ProductGuiEconomicTicket(
+                ticket_id=ticket.ticket_id,
+                status=ticket.status.value,
+                stake=ticket.stake,
+                combined_odds=ticket.combined_odds,
+                payout=ticket.payout,
+                legs=tuple(
+                    f"{leg.event_id}/{leg.market_id}/{leg.selection_id}@{leg.locked_odds}"
+                    for leg in ticket.legs
+                ),
+            )
+            for ticket in book.tickets.values()
+        )
+        committed_stake = sum(
+            (
+                ticket.stake
+                for ticket in book.tickets.values()
+                if ticket.status is TicketStatus.OPEN
+            ),
+            Decimal("0"),
+        )
+        portfolio = _portfolio_engine_type().analyse(list(book.tickets.values()))
+
+    return ProductGuiEconomicSnapshot(
+        workspace=workspace,
+        session_id=tick.session_id,
+        source_id=tick.source_id,
+        cycle_index=tick.cycle_index,
+        as_of=tick.last_success_at,
+        paper_book_sha256=paper_book_sha256,
+        balance=book.balance,
+        committed_stake=committed_stake,
+        tickets=tickets,
+        portfolio_mode=portfolio.mode,
+        portfolio_scenario_count=portfolio.scenario_count,
+        portfolio_worst_case=portfolio.worst_case,
+        portfolio_best_case=portfolio.best_case,
+        portfolio_mean_case=portfolio.mean_case,
+    )
+
+
+@dataclass(frozen=True, slots=True)
 class ProductGuiMessage:
     """One secret-safe projection from the canonical background product runtime."""
 
@@ -266,6 +386,7 @@ class ProductGuiMessage:
     tick: ContinuousTickResult | None = None
     error_type: str | None = None
     stop_reason: str | None = None
+    economic: ProductGuiEconomicSnapshot | None = None
 
     def __post_init__(self) -> None:
         if self.kind not in {"STARTED", "TICK", "STOPPED", "ERROR"}:
@@ -280,6 +401,17 @@ class ProductGuiMessage:
             raise ValueError("status message requires ContinuousSessionStatus")
         if self.kind == "TICK" and self.tick is None:
             raise ValueError("tick message requires ContinuousTickResult")
+        if self.economic is not None:
+            if self.kind != "TICK" or self.tick is None:
+                raise ValueError("economic snapshot is valid only for TICK messages")
+            if type(self.economic) is not ProductGuiEconomicSnapshot:
+                raise ValueError("economic snapshot must be canonical")
+            if (
+                self.economic.session_id != self.tick.session_id
+                or self.economic.source_id != self.tick.source_id
+                or self.economic.cycle_index != self.tick.cycle_index
+            ):
+                raise ValueError("economic snapshot does not match runtime tick identity")
         if self.kind == "ERROR" and self.error_type is None:
             raise ValueError("error message requires error_type")
         if self.kind != "STOPPED" and self.stop_reason is not None:
@@ -493,6 +625,10 @@ class ProductGuiWorker:
         initial_bankroll: str,
         poll_seconds: float,
         _profiled_runtime_builder: ProfiledRuntimeBuilder = _PROFILED_RUNTIME_BUILDER,
+        _economic_snapshot_builder: Callable[
+            [AutonomousProductRuntime, ContinuousTickResult],
+            ProductGuiEconomicSnapshot,
+        ] = _capture_runtime_economic_snapshot,
     ) -> None:
         runtime: AutonomousProductRuntime | None = None
         runtime_profile: TrustedRuntimeCodeProfile | None = None
@@ -556,14 +692,27 @@ class ProductGuiWorker:
 
                 while not self._stop_event.is_set():
                     try:
-                        tick = runtime.tick()
+                        economic = None
+                        if type(runtime) is AutonomousProductRuntime:
+                            # Keep one outer canonical runtime-operation fence across
+                            # tick completion and economic readback. runtime.tick()
+                            # re-enters the same RLock through its existing decorator.
+                            with runtime._operation_fence:
+                                tick = runtime.tick()
+                                economic = _economic_snapshot_builder(runtime, tick)
+                        else:
+                            # Compatibility-only injected runtimes are never product
+                            # economic authority and therefore cannot mint a snapshot.
+                            tick = runtime.tick()
                     except SessionStoppedError:
                         if not self._stop_event.is_set():
                             raise
                         break
                     if self._stop_event.is_set():
                         break
-                    self._messages.put(ProductGuiMessage(kind="TICK", tick=tick))
+                    self._messages.put(
+                        ProductGuiMessage(kind="TICK", tick=tick, economic=economic)
+                    )
                     if self._stop_event.wait(poll_seconds):
                         break
 

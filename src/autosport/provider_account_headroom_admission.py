@@ -183,6 +183,16 @@ _ECONOMIC_GOAL_PROVENANCE_TO_PAYLOAD_CODE = getattr(
     "__code__",
     None,
 )
+_ECONOMIC_GOAL_PROVENANCE_JSON_DUMPS = getattr(
+    getattr(_economic_goal_provenance, "json", None),
+    "dumps",
+    None,
+)
+_ECONOMIC_GOAL_PROVENANCE_HASHLIB_SHA256 = getattr(
+    getattr(_economic_goal_provenance, "hashlib", None),
+    "sha256",
+    None,
+)
 _BOUND_SUPERVISED_PLAN_TYPE = BoundSupervisedExecutionPlan
 _BOUND_SUPERVISED_BINDING_SHA256 = getattr(
     _supervised_execution,
@@ -424,6 +434,8 @@ def _canonical_denomination_dispatch(
     _provenance_canonical_json_code=_ECONOMIC_GOAL_PROVENANCE_CANONICAL_JSON_CODE,
     _provenance_to_payload=_ECONOMIC_GOAL_PROVENANCE_TO_PAYLOAD,
     _provenance_to_payload_code=_ECONOMIC_GOAL_PROVENANCE_TO_PAYLOAD_CODE,
+    _provenance_json_dumps=_ECONOMIC_GOAL_PROVENANCE_JSON_DUMPS,
+    _provenance_sha256=_ECONOMIC_GOAL_PROVENANCE_HASHLIB_SHA256,
     _bound_type=_BOUND_SUPERVISED_PLAN_TYPE,
     _bound_binding_sha=_BOUND_SUPERVISED_BINDING_SHA256,
     _bound_binding_sha_code=_BOUND_SUPERVISED_BINDING_SHA256_CODE,
@@ -537,6 +549,10 @@ def _canonical_denomination_dispatch(
         is not _provenance_to_payload
         or getattr(_provenance_to_payload, "__code__", None)
         is not _provenance_to_payload_code
+        or getattr(getattr(_economic_goal_provenance, "json", None), "dumps", None)
+        is not _provenance_json_dumps
+        or getattr(getattr(_economic_goal_provenance, "hashlib", None), "sha256", None)
+        is not _provenance_sha256
         or live_bound_type is not _bound_type
         or globals().get("BoundSupervisedExecutionPlan") is not _bound_type
         or getattr(_supervised_execution, "_bound_binding_sha256", None)

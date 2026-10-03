@@ -635,3 +635,62 @@ def test_reconstructed_quote_chain_cannot_mint_submit_binding(tmp_path) -> None:
         match="not issued by canonical ledger projection",
     ):
         _ = forged.evidence_sha256
+
+
+def test_issued_quote_chain_mutation_cannot_mint_submit_binding(tmp_path) -> None:
+    evidence = _project(_submitted(tmp_path))
+
+    object.__setattr__(
+        evidence,
+        "submission_instruction_sha256",
+        "a" * 64,
+    )
+    object.__setattr__(
+        evidence,
+        "provider_evidence_id",
+        "b" * 64,
+    )
+    object.__setattr__(
+        evidence,
+        "provider_evidence_observed_at",
+        PROVIDER,
+    )
+    object.__setattr__(
+        evidence,
+        "provider_evidence_source",
+        "caller-forged-provider-evidence",
+    )
+    object.__setattr__(
+        evidence,
+        "provider_request_sha256",
+        "a" * 64,
+    )
+    object.__setattr__(
+        evidence,
+        "chain_status",
+        CHAIN_SUBMIT_INSTRUCTION_BOUND,
+    )
+
+    for authority_name in (
+        "submit_instruction_identity_bound",
+        "provider_request_correlation_bound",
+        "actual_submitted_instruction_bound",
+    ):
+        with pytest.raises(
+            ExecutionQuoteChainError,
+            match="not issued by canonical ledger projection",
+        ):
+            getattr(evidence, authority_name)
+
+    with pytest.raises(
+        ExecutionQuoteChainError,
+        match="not issued by canonical ledger projection",
+    ):
+        evidence.to_dict()
+
+    with pytest.raises(
+        ExecutionQuoteChainError,
+        match="not issued by canonical ledger projection",
+    ):
+        _ = evidence.evidence_sha256
+

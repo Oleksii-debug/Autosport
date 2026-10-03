@@ -313,6 +313,71 @@ def test_cohort_dispatch_rebind_cannot_replace_frozen_denominator(monkeypatch):
         evaluate_strategy_external_validity(ledger, protocol, candidate, baselines)
 
 
+def test_subclassed_universe_cannot_cross_denominator_boundary():
+    ledger = _ledger(_row("candidate"))
+    canonical = ledger.universe
+
+    class ForgedUniverse(EvaluationUniverse):
+        pass
+
+    forged = ForgedUniverse._construct(
+        intake_snapshot=canonical.intake_snapshot,
+        universe_id=canonical.universe_id,
+        campaign_id=canonical.campaign_id,
+        research_protocol_id=canonical.research_protocol_id,
+        protocol_sha256=canonical.protocol_sha256,
+        frozen_at=canonical.frozen_at,
+        rows=canonical.rows,
+    )
+    forged_ledger = EvaluationUniverseLedger(forged)
+    protocol = _protocol(ledger)
+    candidate, baselines = _results(protocol)
+
+    with pytest.raises(
+        StrategyExternalValidityError,
+        match="exact canonical EvaluationUniverse",
+    ):
+        evaluate_strategy_external_validity(
+            forged_ledger,
+            protocol,
+            candidate,
+            baselines,
+        )
+
+
+def test_subclassed_funnel_event_cannot_cross_denominator_boundary():
+    ledger = _ledger(_row("candidate"))
+    row = ledger.universe.rows[0]
+
+    class ForgedFunnelEvent(FunnelEvent):
+        pass
+
+    forged_event = ForgedFunnelEvent(
+        row_id=row.row_id,
+        stage=FunnelStage.ATTEMPTED,
+        event_at="2026-09-20T00:06:00Z",
+        execution_model_id=row.execution_model_id,
+        execution_attempt_id="paper-attempt-forged-subclass",
+    )
+    forged_ledger = EvaluationUniverseLedger(
+        ledger.universe,
+        (forged_event,),
+    )
+    protocol = _protocol(ledger)
+    candidate, baselines = _results(protocol)
+
+    with pytest.raises(
+        StrategyExternalValidityError,
+        match="exact canonical FunnelEvent",
+    ):
+        evaluate_strategy_external_validity(
+            forged_ledger,
+            protocol,
+            candidate,
+            baselines,
+        )
+
+
 def test_live_theoretical_stage_does_not_replace_later_quote_proof():
     ledger = _ledger(_row("candidate"))
     protocol = _protocol(

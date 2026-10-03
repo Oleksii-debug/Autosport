@@ -1671,3 +1671,41 @@ def test_workflow_wide_sweep_preserves_sealed_scoped_cancel_boundary() -> None:
     assert sweep.index("current_qualification = _trusted_live_pr_qualification(") < sweep.index(
         "_cancel_run_or_defer_active_conflict(api, run_id)"
     )
+
+def test_live_pr_boundary_scoped_type_rebind_cannot_reopen_nested_request_shadow(
+    monkeypatch,
+) -> None:
+    api = WorkflowScopedGitHubApi(
+        repository="owner/repo",
+        token="token",
+        workflow_id=356678400,
+        workflow_name="CI",
+    )
+    forged_invoked = {"value": False}
+
+    def forged_request(_path: str, **_kwargs):
+        forged_invoked["value"] = True
+        return {
+            "state": "open",
+            "draft": False,
+            "head": {
+                "sha": STALE_HEAD,
+                "repo": {"full_name": "owner/repo"},
+            },
+            "base": {"repo": {"full_name": "owner/repo"}},
+        }
+
+    class ReboundScopedType:
+        pass
+
+    monkeypatch.setattr(
+        scoped_controller,
+        "WorkflowScopedGitHubApi",
+        ReboundScopedType,
+    )
+    monkeypatch.setattr(api, "_request", forged_request)
+
+    with pytest.raises(CancellationError, match="live PR qualification dispatch changed"):
+        _trusted_live_pr_qualification(api, 303)
+    assert not forged_invoked["value"]
+

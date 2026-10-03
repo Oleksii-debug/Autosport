@@ -552,11 +552,12 @@ class PaperRiskPolicy(metaclass=_PaperRiskPolicyMeta):
     Session/day loss, drawdown and turnover are enforced conservatively from the
     canonical PaperBook lifecycle and therefore survive snapshot restart without a
     second state authority. Risk-of-ruin remains evidence-gated because a balance
-    history is not a probability model. Event/market concentration is enforced
+    history is not a probability model. Event/market/sport concentration is enforced
     against the whole open stake set. Provider concentration is executable when
     every relevant open ticket carries canonical durable provider/bankroll
     provenance; missing historical provenance fails closed. Sport concentration
-    remains fail-closed until canonical sport identity exists.
+    uses canonical TicketLeg sport identity and fails closed when proposal or
+    historical open-ticket sport identity is missing.
     """
 
     max_ticket_fraction: Decimal = Decimal("0.02")

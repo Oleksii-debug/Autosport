@@ -43,8 +43,10 @@ _COHORT_TOKEN = object()
 # a self-consistent comparator from process-local bytes.
 _STORE_TYPE = SQLiteMarketStore
 _STORE_EVENTS = _STORE_TYPE.events
+_STORE_EVENTS_CODE = _STORE_EVENTS.__code__
 _OUTCOME_AUTHORITY_TYPE = MarketSettlementOutcomeAuthority
 _OUTCOME_ASSERT_AVAILABLE = _OUTCOME_AUTHORITY_TYPE.assert_available_as_of
+_OUTCOME_ASSERT_AVAILABLE_CODE = _OUTCOME_ASSERT_AVAILABLE.__code__
 
 
 def _text(value: object, name: str) -> str:
@@ -303,6 +305,10 @@ def _require_canonical_inputs(
         raise MarketImpliedBaselineError(
             "canonical market store events authority was rebound"
         )
+    if _STORE_EVENTS.__code__ is not _STORE_EVENTS_CODE:
+        raise MarketImpliedBaselineError(
+            "canonical market store events executable was mutated"
+        )
     if type(outcome_authority) is not _OUTCOME_AUTHORITY_TYPE:
         raise TypeError(
             "outcome_authority must be exact MarketSettlementOutcomeAuthority"
@@ -310,6 +316,10 @@ def _require_canonical_inputs(
     if _OUTCOME_AUTHORITY_TYPE.assert_available_as_of is not _OUTCOME_ASSERT_AVAILABLE:
         raise MarketImpliedBaselineError(
             "market outcome availability authority was rebound"
+        )
+    if _OUTCOME_ASSERT_AVAILABLE.__code__ is not _OUTCOME_ASSERT_AVAILABLE_CODE:
+        raise MarketImpliedBaselineError(
+            "market outcome availability executable was mutated"
         )
 
 

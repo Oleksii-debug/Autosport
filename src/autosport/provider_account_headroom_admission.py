@@ -91,6 +91,17 @@ _ASSERT_CAPITAL_ISSUED_CURRENT_CODE = getattr(
     None,
 )
 _ECONOMIC_GOAL_STORE_TYPE = EconomicGoalStore
+_ECONOMIC_GOAL_STORE_PATH_TYPE = getattr(_economic_goal_store, "Path", None)
+_ECONOMIC_GOAL_STORE_PATH_READ_TEXT = getattr(
+    _ECONOMIC_GOAL_STORE_PATH_TYPE,
+    "read_text",
+    None,
+)
+_ECONOMIC_GOAL_STORE_PATH_READ_TEXT_CODE = getattr(
+    _ECONOMIC_GOAL_STORE_PATH_READ_TEXT,
+    "__code__",
+    None,
+)
 _ECONOMIC_GOAL_STORE_FILE_NAME = EconomicGoalStore.FILE_NAME
 _ECONOMIC_GOAL_STORE_INIT = EconomicGoalStore.__init__
 _ECONOMIC_GOAL_STORE_INIT_CODE = getattr(_ECONOMIC_GOAL_STORE_INIT, "__code__", None)
@@ -356,6 +367,9 @@ def _canonical_ledger_workspace(
 def _canonical_denomination_dispatch(
     *,
     _store_type=_ECONOMIC_GOAL_STORE_TYPE,
+    _store_path_type=_ECONOMIC_GOAL_STORE_PATH_TYPE,
+    _store_path_read_text=_ECONOMIC_GOAL_STORE_PATH_READ_TEXT,
+    _store_path_read_text_code=_ECONOMIC_GOAL_STORE_PATH_READ_TEXT_CODE,
     _store_file_name=_ECONOMIC_GOAL_STORE_FILE_NAME,
     _store_init=_ECONOMIC_GOAL_STORE_INIT,
     _store_init_code=_ECONOMIC_GOAL_STORE_INIT_CODE,
@@ -441,6 +455,10 @@ def _canonical_denomination_dispatch(
     if (
         live_store_type is not _store_type
         or globals().get("EconomicGoalStore") is not _store_type
+        or getattr(_economic_goal_store, "Path", None) is not _store_path_type
+        or getattr(_store_path_type, "read_text", None) is not _store_path_read_text
+        or getattr(_store_path_read_text, "__code__", None)
+        is not _store_path_read_text_code
         or vars(live_store_type).get("FILE_NAME") != _store_file_name
         or live_store_init is not _store_init
         or getattr(_store_init, "__code__", None) is not _store_init_code

@@ -1011,6 +1011,92 @@ def test_day_turnover_override_does_not_bypass_local_ticket_limit(tmp_path):
     assert result.risk.reason == "ticket exceeds configured bankroll fraction"
 
 
+def test_risk_evaluate_class_rebind_cannot_bypass_local_risk_gates(tmp_path):
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    old = now - timedelta(days=2)
+    goal = _goal()
+    EconomicGoalStore(tmp_path).initialize_owner(goal)
+    book = _book_with_settled_turnover(placed_at=_timestamp(old), stake="50")
+    book.save(tmp_path / "paper_book.json")
+    candidate = _leg("candidate-evaluate-rebind")
+    context = _context(candidate, _timestamp(now))
+    policy = PaperRiskPolicy(
+        max_ticket_fraction=Decimal("0.00001"),
+        max_committed_fraction=Decimal("1"),
+        minimum_cash_reserve_fraction=Decimal("0"),
+        economic_goal=goal,
+    )
+    hostile_called = False
+    original = PaperRiskPolicy.evaluate
+
+    def hostile_evaluate(self, book, stake, *, context=None):
+        nonlocal hostile_called
+        del self, book, stake, context
+        hostile_called = True
+        return risk_module.RiskDecision(True, "allowed")
+
+    try:
+        PaperRiskPolicy.evaluate = hostile_evaluate
+        result = admit_paper_ticket(
+            workspace=tmp_path,
+            book=book,
+            risk_policy=policy,
+            stake=Decimal("0.01"),
+            legs=(candidate,),
+            reason="class-rebound evaluate must not become risk authority",
+            placed_at=_timestamp(now),
+            context=context,
+            provider_source_ids=("provider-1",),
+            bankroll_id="paper-bankroll",
+            currency="USD",
+        )
+    finally:
+        PaperRiskPolicy.evaluate = original
+
+    assert hostile_called is False
+    assert result.admitted is False
+    assert result.risk.reason == "virtual bankroll risk helper authority is invalid"
+    persisted = PaperBook.load(tmp_path / "paper_book.json")
+    assert set(persisted.tickets) == set(book.tickets)
+
+
+def test_risk_evaluate_code_replacement_cannot_bypass_local_risk_gates(tmp_path):
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    old = now - timedelta(days=2)
+    goal = _goal()
+    EconomicGoalStore(tmp_path).initialize_owner(goal)
+    book = _book_with_settled_turnover(placed_at=_timestamp(old), stake="50")
+    book.save(tmp_path / "paper_book.json")
+    candidate = _leg("candidate-evaluate-code")
+    context = _context(candidate, _timestamp(now))
+    policy = _policy(goal)
+    target = PaperRiskPolicy.evaluate
+    original_code = target.__code__
+
+    try:
+        target.__code__ = _replacement_code_preserving_freevars(target)
+        result = admit_paper_ticket(
+            workspace=tmp_path,
+            book=book,
+            risk_policy=policy,
+            stake=Decimal("0.01"),
+            legs=(candidate,),
+            reason="mutated evaluate code must not become risk authority",
+            placed_at=_timestamp(now),
+            context=context,
+            provider_source_ids=("provider-1",),
+            bankroll_id="paper-bankroll",
+            currency="USD",
+        )
+    finally:
+        target.__code__ = original_code
+
+    assert result.admitted is False
+    assert result.risk.reason == "virtual bankroll risk helper authority is invalid"
+    persisted = PaperBook.load(tmp_path / "paper_book.json")
+    assert set(persisted.tickets) == set(book.tickets)
+
+
 def test_day_turnover_override_does_not_bypass_quote_freshness(tmp_path):
     now = datetime.now(timezone.utc).replace(microsecond=0)
     old = now - timedelta(days=2)

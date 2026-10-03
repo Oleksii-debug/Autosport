@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 
+import autosport.market_implied_universe_binding as market_implied_universe_binding_module
 from autosport._evaluation_universe_structural_gate import (
     _authorize_structural_intake_for_tests,
 )
@@ -410,6 +411,56 @@ class MarketImpliedUniverseBindingTests(unittest.TestCase):
                 )
         finally:
             EvaluationUniverseStore.load.__code__ = original_code
+
+    def test_coordinated_universe_loader_and_witness_rebind_fails_closed(self) -> None:
+        self.persist_market()
+        evidence = self.evidence()
+        protocol = self.protocol(evidence)
+        store = self.evaluation_store(self.evaluation_row())
+        loaded = store.load()
+        self.assertIsNotNone(loaded)
+        original_load = EvaluationUniverseStore.load
+        sentinel = object()
+        witness_names = (
+            "_EVALUATION_STORE_TYPE",
+            "_EVALUATION_STORE_LOAD",
+            "_EVALUATION_STORE_LOAD_CODE",
+        )
+        previous = {
+            name: market_implied_universe_binding_module.__dict__.get(name, sentinel)
+            for name in witness_names
+        }
+
+        def forged_load(evaluation_store):
+            del evaluation_store
+            return loaded
+
+        try:
+            EvaluationUniverseStore.load = forged_load  # type: ignore[method-assign]
+            market_implied_universe_binding_module._EVALUATION_STORE_TYPE = (
+                EvaluationUniverseStore
+            )
+            market_implied_universe_binding_module._EVALUATION_STORE_LOAD = forged_load
+            market_implied_universe_binding_module._EVALUATION_STORE_LOAD_CODE = (
+                forged_load.__code__
+            )
+            with self.assertRaisesRegex(
+                MarketImpliedUniverseBindingError,
+                "canonical evaluation-universe load authority was rebound",
+            ):
+                bind_market_implied_baseline_to_evaluation_universe(
+                    protocol=protocol,
+                    baseline_definition=self.definition(protocol),
+                    evidence=(evidence,),
+                    evaluation_store=store,
+                )
+        finally:
+            EvaluationUniverseStore.load = original_load  # type: ignore[method-assign]
+            for name, value in previous.items():
+                if value is sentinel:
+                    market_implied_universe_binding_module.__dict__.pop(name, None)
+                else:
+                    market_implied_universe_binding_module.__dict__[name] = value
 
     def test_unrelated_valid_market_cannot_be_relabelled_as_expected_row(self) -> None:
         self.persist_market(event_id="event-2")

@@ -999,9 +999,9 @@ def _canonical_ledger_dispatch(
 
 
 _PRODUCT_MAX_ACCOUNT_SNAPSHOT_AGE = timedelta(seconds=30)
-# Version 2 binds the exact durable economic-goal denomination and the set of
-# liability-bearing supervised execution plans into every assessment identity.
-_SCHEMA_VERSION = 2
+# Version 3 additionally binds exact provider/account scope through the
+# denomination authority so same-currency foreign accounts cannot satisfy headroom.
+_SCHEMA_VERSION = 3
 _ZERO = Decimal("0")
 
 

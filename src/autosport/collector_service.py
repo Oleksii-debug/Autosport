@@ -92,7 +92,7 @@ def _require_source_callable_witness(
             raise CollectorServiceError(
                 f"source.{name} code changed during collector service run"
             )
-        return getattr(source, name)
+        return current  # type: ignore[return-value]
     if current is not expected_callable or getattr(current, "__code__", None) is not expected_code:
         raise CollectorServiceError(
             f"source.{name} authority changed during collector service run"
@@ -542,11 +542,7 @@ class HeadlessCollectorService:
             if binder is not None
             else None
         )
-        resolve_event_witness = (
-            _source_callable_witness(source, "resolve_event")
-            if binder is not None
-            else None
-        )
+        resolve_event_witness = None
         self.delta_store = delta_store
         self.lifecycle = lifecycle
         self.source = source
@@ -580,10 +576,10 @@ class HeadlessCollectorService:
             _require_source_callable_witness(
                 source, "bind_collector_store", binder_witness
             )
-            assert resolve_event_witness is not None
-            _require_source_callable_witness(
-                source, "resolve_event", resolve_event_witness
+            resolve_event_witness = _source_callable_witness(
+                source, "resolve_event"
             )
+        self._source_resolve_event_witness = resolve_event_witness
         self._archives_canonical_events = binder_witness is not None
         self.config = config or CollectorServiceConfig()
         self.clock = clock or (lambda: datetime.now(timezone.utc).isoformat())

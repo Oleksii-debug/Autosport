@@ -309,7 +309,7 @@ class ExecutionCapitalAtRiskEvidence:
             )
         _require_ledger_read_authority()
         try:
-            snapshot = _CANONICAL_VERIFIED_SNAPSHOT(ledger)
+            snapshot = _READ_VERIFIED_SNAPSHOT(ledger)
         except ExecutionLedgerIntegrityError as exc:
             raise ExecutionCapitalAtRiskStale(
                 "execution ledger currentness failed during capital-at-risk validation"
@@ -324,32 +324,72 @@ class ExecutionCapitalAtRiskEvidence:
             )
 
 
-_CANONICAL_VERIFIED_EXECUTION_VIEW = RealExecutionLedger.verified_execution_view
-_CANONICAL_VERIFIED_SNAPSHOT = RealExecutionLedger.verified_snapshot
-_CANONICAL_VERIFIED_EXECUTION_VIEW_CODE = _CANONICAL_VERIFIED_EXECUTION_VIEW.__code__
-_CANONICAL_VERIFIED_SNAPSHOT_CODE = _CANONICAL_VERIFIED_SNAPSHOT.__code__
-
-# Compatibility aliases remain intentionally observable. They are not authority:
-# any rebinding is treated as process-integrity failure before durable truth is read.
-_VERIFIED_EXECUTION_VIEW = _CANONICAL_VERIFIED_EXECUTION_VIEW
-_VERIFIED_SNAPSHOT = _CANONICAL_VERIFIED_SNAPSHOT
+# Compatibility aliases remain intentionally observable. They are not authority.
+# The actual reader identities and code witnesses live in the installer closure so
+# a caller cannot coherently move both the expected witness and the executable by
+# rewriting module globals.
+_VERIFIED_EXECUTION_VIEW = RealExecutionLedger.verified_execution_view
+_VERIFIED_SNAPSHOT = RealExecutionLedger.verified_snapshot
 
 
-def _require_ledger_read_authority() -> None:
-    if (
-        _VERIFIED_EXECUTION_VIEW is not _CANONICAL_VERIFIED_EXECUTION_VIEW
-        or _VERIFIED_SNAPSHOT is not _CANONICAL_VERIFIED_SNAPSHOT
-        or RealExecutionLedger.verified_execution_view
-        is not _CANONICAL_VERIFIED_EXECUTION_VIEW
-        or RealExecutionLedger.verified_snapshot is not _CANONICAL_VERIFIED_SNAPSHOT
-        or _CANONICAL_VERIFIED_EXECUTION_VIEW.__code__
-        is not _CANONICAL_VERIFIED_EXECUTION_VIEW_CODE
-        or _CANONICAL_VERIFIED_SNAPSHOT.__code__
-        is not _CANONICAL_VERIFIED_SNAPSHOT_CODE
-    ):
-        raise ExecutionCapitalAtRiskError(
-            "canonical execution-ledger read authority changed"
-        )
+def _install_ledger_read_authority():
+    ledger_type = RealExecutionLedger
+    verified_execution_view = ledger_type.verified_execution_view
+    verified_snapshot = ledger_type.verified_snapshot
+    execution_view_code = verified_execution_view.__code__
+    snapshot_code = verified_snapshot.__code__
+    exact_globals = globals
+    exact_getattr = getattr
+
+    def require() -> None:
+        namespace = exact_globals()
+        if (
+            namespace.get("RealExecutionLedger") is not ledger_type
+            or namespace.get("_VERIFIED_EXECUTION_VIEW")
+            is not verified_execution_view
+            or namespace.get("_VERIFIED_SNAPSHOT") is not verified_snapshot
+            or namespace.get("_READ_VERIFIED_EXECUTION_VIEW")
+            is not read_execution_view
+            or namespace.get("_READ_VERIFIED_SNAPSHOT") is not read_snapshot
+            or ledger_type.verified_execution_view is not verified_execution_view
+            or ledger_type.verified_snapshot is not verified_snapshot
+            or exact_getattr(verified_execution_view, "__code__", None)
+            is not execution_view_code
+            or exact_getattr(verified_snapshot, "__code__", None)
+            is not snapshot_code
+        ):
+            raise ExecutionCapitalAtRiskError(
+                "canonical execution-ledger read authority changed"
+            )
+
+    def read_execution_view(
+        ledger: RealExecutionLedger,
+        plan_id: str,
+    ) -> VerifiedExecutionPlanView:
+        require()
+        if type(ledger) is not ledger_type:
+            raise TypeError("ledger must be exact RealExecutionLedger")
+        value = verified_execution_view(ledger, plan_id)
+        require()
+        return value
+
+    def read_snapshot(ledger: RealExecutionLedger):
+        require()
+        if type(ledger) is not ledger_type:
+            raise TypeError("ledger must be exact RealExecutionLedger")
+        value = verified_snapshot(ledger)
+        require()
+        return value
+
+    return require, read_execution_view, read_snapshot
+
+
+(
+    _require_ledger_read_authority,
+    _READ_VERIFIED_EXECUTION_VIEW,
+    _READ_VERIFIED_SNAPSHOT,
+) = _install_ledger_read_authority()
+del _install_ledger_read_authority
 
 
 _ISSUED_LOCK = threading.RLock()
@@ -633,7 +673,7 @@ def resolve_execution_capital_at_risk(
 
     ledger_source_sha256 = _ledger_source_sha256(ledger)
     _require_ledger_read_authority()
-    view: VerifiedExecutionPlanView = _CANONICAL_VERIFIED_EXECUTION_VIEW(
+    view: VerifiedExecutionPlanView = _READ_VERIFIED_EXECUTION_VIEW(
         ledger,
         plan_id,
     )
@@ -691,7 +731,7 @@ def resolve_execution_capital_at_risk(
             "execution ledger source changed during capital-at-risk resolution"
         )
     _require_ledger_read_authority()
-    after = _CANONICAL_VERIFIED_SNAPSHOT(ledger)
+    after = _READ_VERIFIED_SNAPSHOT(ledger)
     _require_ledger_read_authority()
     if (
         after.sha256 != view.snapshot_sha256

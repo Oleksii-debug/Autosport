@@ -258,6 +258,79 @@ class FocusedMirrorDependencyIndex:
             max_age=max_age,
         )
 
+    def coherent_decision_views(
+        self,
+        input_ids: Iterable[str],
+        *,
+        as_of: datetime,
+        max_age: timedelta,
+        incremental: bool = True,
+    ) -> dict[str, MirrorSnapshot]:
+        """Read several focused inputs from one exact canonical mirror revision.
+
+        Incremental mode reads only the union of quote identities already maintained
+        by invalidation routing. Full mode takes one canonical whole-mirror active
+        view and filters that immutable cut. Either mode captures market values only
+        once, so callers cannot accidentally compose input A from revision N with
+        input B from revision N+1.
+        """
+        if isinstance(input_ids, (str, bytes)):
+            raise TypeError("input_ids must be an iterable of input_id strings")
+        try:
+            requested = tuple(input_ids)
+        except TypeError as exc:
+            raise TypeError("input_ids must be an iterable of input_id strings") from exc
+        if len(requested) != len(set(requested)):
+            raise ValueError("input_ids must be unique")
+
+        dependencies: list[FocusedMirrorDependency] = []
+        keys: set[MirrorQuoteKey] = set()
+        with self._lock:
+            for input_id in requested:
+                normalized_id = self._input_id(input_id)
+                try:
+                    dependency = self._dependencies[normalized_id]
+                except KeyError as exc:
+                    raise KeyError(
+                        f"unknown focused mirror input {normalized_id!r}"
+                    ) from exc
+                dependencies.append(dependency)
+                if incremental:
+                    keys.update(self._matched_keys.get(normalized_id, set()))
+
+        if incremental:
+            captured = self._mirror.active_view_for_keys(
+                tuple(sorted(keys)),
+                as_of=as_of,
+                max_age=max_age,
+            )
+        else:
+            captured = self._mirror.active_view(
+                as_of=as_of,
+                max_age=max_age,
+            )
+
+        with self._lock:
+            if any(
+                self._dependencies.get(dependency.input_id) != dependency
+                for dependency in dependencies
+            ):
+                raise RuntimeError(
+                    "focused mirror dependency registry changed during coherent capture"
+                )
+
+        return {
+            dependency.input_id: MirrorSnapshot(
+                revision=captured.revision,
+                events=tuple(
+                    event
+                    for event in captured.events
+                    if dependency.matches(event)
+                ),
+            )
+            for dependency in dependencies
+        }
+
     def replay_view(
         self,
         input_id: str,

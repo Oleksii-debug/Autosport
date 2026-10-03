@@ -19,6 +19,7 @@ _CANONICAL_CYCLE_EVIDENCE = CollectorDeltaStore.collector_cycle_evidence
 _CANONICAL_CYCLE_EVIDENCE_DESCRIPTOR = inspect.getattr_static(
     CollectorDeltaStore, "collector_cycle_evidence"
 )
+_CANONICAL_CYCLE_EVIDENCE_CODE = _CANONICAL_CYCLE_EVIDENCE.__code__
 _MAX_ISSUED = 2048
 _ISSUED: dict[int, tuple["AcquisitionDenominatorEvidence", str]] = {}
 
@@ -92,9 +93,10 @@ def _cycle_evidence(
     if (
         inspect.getattr_static(CollectorDeltaStore, "collector_cycle_evidence", None)
         is not _CANONICAL_CYCLE_EVIDENCE_DESCRIPTOR
+        or _CANONICAL_CYCLE_EVIDENCE.__code__ is not _CANONICAL_CYCLE_EVIDENCE_CODE
     ):
         raise AcquisitionDenominatorEvidenceError(
-            "canonical collector cycle reader is class-rebound"
+            "canonical collector cycle reader is class/code-rebound"
         )
     if "collector_cycle_evidence" in vars(store):
         raise TypeError("canonical collector cycle reader is instance-rebound")
@@ -107,6 +109,7 @@ def _cycle_evidence(
     if (
         inspect.getattr_static(CollectorDeltaStore, "collector_cycle_evidence", None)
         is not _CANONICAL_CYCLE_EVIDENCE_DESCRIPTOR
+        or _CANONICAL_CYCLE_EVIDENCE.__code__ is not _CANONICAL_CYCLE_EVIDENCE_CODE
     ):
         raise AcquisitionDenominatorEvidenceError(
             "canonical collector cycle reader changed during resolution"

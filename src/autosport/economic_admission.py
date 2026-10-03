@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-import hashlib
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
+from types import FunctionType
 
 from .domain import PaperTicket, TicketLeg
 from .economic_goal_provenance import provenance_for
@@ -12,7 +12,7 @@ from .economic_goal_store import EconomicGoalStore
 from .paper import PaperBook
 from .recovery import transaction_history_requires_recovery
 from .risk import PaperRiskPolicy, ProposedTicketRiskContext, RiskDecision
-from .risk_day_window import ProductDayRiskWindowStore
+from .risk_day_window import ProductDayRiskWindow, ProductDayRiskWindowStore
 from .risk_turnover_evidence import PaperDayTurnoverEvidence, PaperDayTurnoverResolver
 from .run_registry import RunRegistry, UnresolvedExperimentError
 from .run_transaction import RunTransaction
@@ -38,7 +38,7 @@ class _PaperDayTurnoverSnapshot:
 
     book: PaperBook
     evidence: PaperDayTurnoverEvidence
-    window_state_path: Path
+    window_evidence: ProductDayRiskWindow
 
 
 def _positive_decimal(value: Decimal | str) -> Decimal:
@@ -156,7 +156,7 @@ def _prepare_paper_day_turnover_snapshot(
     return _PaperDayTurnoverSnapshot(
         book=snapshot_book,
         evidence=evidence,
-        window_state_path=window_store.state_path,
+        window_evidence=window,
     )
 
 
@@ -167,8 +167,9 @@ def _revalidated_product_day_turnover_room(
     book: PaperBook,
     risk_policy: PaperRiskPolicy,
     placed_at: str,
+    workspace_lock: WorkspaceEconomicLock,
 ) -> Decimal | None:
-    """Return bounded UTC-day room only when the pre-lock evidence is still exact."""
+    """Return bounded UTC-day room only after canonical under-lock re-resolution."""
 
     if snapshot is None:
         return None
@@ -181,6 +182,17 @@ def _revalidated_product_day_turnover_room(
         durable_goal = EconomicGoalStore(root).load()
         if durable_goal != goal:
             return None
+
+        # Re-resolve the product clock + independent monotonic generation while the
+        # exact economic writer lock is already held. Raw risk-day bytes or wall-clock
+        # equality are not positive authority and cannot substitute for this check.
+        window_store = ProductDayRiskWindowStore(root)
+        current_window = ProductDayRiskWindowStore.require_current_under_lock(
+            window_store,
+            snapshot.window_evidence,
+            workspace_lock=workspace_lock,
+        )
+
         evidence = snapshot.evidence
         provenance = provenance_for(goal)
         if (
@@ -190,16 +202,15 @@ def _revalidated_product_day_turnover_room(
             or evidence.bankroll_id != goal.bankroll_id
             or evidence.currency != goal.currency
             or evidence.initial_bankroll != book.initial_bankroll
+            or evidence.day_key != current_window.day_key
+            or evidence.window_start != current_window.window_start
+            or evidence.window_end_exclusive != current_window.window_end_exclusive
+            or evidence.window_state_sha256 != current_window.state_sha256
+            or evidence.window_authority_generation
+            != current_window.authority_generation
+            or not current_window.product_clock_authoritative
             or evidence.breached
         ):
-            return None
-
-        state_bytes = snapshot.window_state_path.read_bytes()
-        if hashlib.sha256(state_bytes).hexdigest() != evidence.window_state_sha256:
-            return None
-        # A UTC-day rollover can occur after snapshot resolution but before this
-        # writer acquired the lock. Never spend yesterday's residual headroom.
-        if datetime.now(timezone.utc).date().isoformat() != evidence.day_key:
             return None
 
         candidate_time = _parse_utc_timestamp(placed_at)
@@ -220,6 +231,30 @@ def _revalidated_product_day_turnover_room(
         return None
 
 
+# Freeze the exact canonical risk helper descriptors used by the positive
+# post-turnover continuation. This mirrors PaperRiskPolicy.evaluate's own helper
+# witnesses so a later class/descriptor mutation cannot widen admission authority.
+_RISK_BOOK_STATE_DESCRIPTOR = PaperRiskPolicy.__dict__["_book_state"]
+_RISK_HISTORY_DESCRIPTOR = PaperRiskPolicy.__dict__["_goal_history_rooms"]
+_RISK_QUOTE_DESCRIPTOR = PaperRiskPolicy.__dict__["_quote_risk_decision"]
+_RISK_RUIN_DESCRIPTOR = PaperRiskPolicy.__dict__["_risk_of_ruin_evidence_decision"]
+_RISK_DERIVED_DESCRIPTOR = PaperRiskPolicy.__dict__["_derived_risk_values"]
+
+_RISK_BOOK_STATE = _RISK_BOOK_STATE_DESCRIPTOR.__func__
+_RISK_HISTORY = _RISK_HISTORY_DESCRIPTOR.__func__
+_RISK_QUOTE = _RISK_QUOTE_DESCRIPTOR.__func__
+_RISK_RUIN = _RISK_RUIN_DESCRIPTOR.__func__
+_RISK_DERIVED = _RISK_DERIVED_DESCRIPTOR
+
+_ADMISSION_RISK_HELPER_WITNESSES = (
+    ("_book_state", _RISK_BOOK_STATE_DESCRIPTOR, _RISK_BOOK_STATE, _RISK_BOOK_STATE.__code__, True),
+    ("_goal_history_rooms", _RISK_HISTORY_DESCRIPTOR, _RISK_HISTORY, _RISK_HISTORY.__code__, True),
+    ("_quote_risk_decision", _RISK_QUOTE_DESCRIPTOR, _RISK_QUOTE, _RISK_QUOTE.__code__, True),
+    ("_risk_of_ruin_evidence_decision", _RISK_RUIN_DESCRIPTOR, _RISK_RUIN, _RISK_RUIN.__code__, True),
+    ("_derived_risk_values", _RISK_DERIVED_DESCRIPTOR, _RISK_DERIVED, _RISK_DERIVED.__code__, False),
+)
+
+
 def _resume_after_product_day_turnover(
     *,
     risk_policy: PaperRiskPolicy,
@@ -228,22 +263,47 @@ def _resume_after_product_day_turnover(
     context: ProposedTicketRiskContext,
     pre_evaluation_state: tuple[Decimal, Decimal, Decimal, int] | None,
 ) -> RiskDecision:
-    """Continue the canonical evaluator after only its turnover gate is replaced.
+    """Continue canonical risk evaluation after replacing only turnover room."""
 
-    The ordinary evaluator must already have reached the turnover rejection, so
-    owner restrictions, absolute stake, concurrency and the first three durable
-    history rooms were checked by the canonical policy. This function rechecks
-    state/history before executing the exact canonical quote, ruin and local
-    bankroll checks that occur after turnover in PaperRiskPolicy.evaluate().
-    """
+    for (
+        helper_name,
+        expected_descriptor,
+        expected_function,
+        expected_code,
+        descriptor_wrapped,
+    ) in _ADMISSION_RISK_HELPER_WITNESSES:
+        current_descriptor = PaperRiskPolicy.__dict__.get(helper_name)
+        if current_descriptor is not expected_descriptor:
+            return RiskDecision(
+                False,
+                "virtual bankroll risk helper authority is invalid",
+            )
+        current_function = (
+            current_descriptor.__func__
+            if descriptor_wrapped
+            else current_descriptor
+        )
+        if (
+            current_function is not expected_function
+            or current_function.__code__ is not expected_code
+        ):
+            return RiskDecision(
+                False,
+                "virtual bankroll risk helper authority is invalid",
+            )
 
     goal = risk_policy.economic_goal
-    state = risk_policy._book_state(book)
+    state = _RISK_BOOK_STATE(PaperRiskPolicy, book)
     if goal is None or state is None or state != pre_evaluation_state:
         return RiskDecision(False, "virtual bankroll changed during risk evaluation")
     initial_bankroll, balance, committed_stake, _ = state
 
-    history_rooms = risk_policy._goal_history_rooms(book, goal, context=context)
+    history_rooms = _RISK_HISTORY(
+        PaperRiskPolicy,
+        book,
+        goal,
+        context=context,
+    )
     if history_rooms is None:
         return RiskDecision(False, "virtual bankroll risk history is invalid")
     session_room, day_room, drawdown_room, _ = history_rooms
@@ -255,19 +315,27 @@ def _resume_after_product_day_turnover(
         if amount > room:
             return RiskDecision(False, reason)
 
-    quote_decision = risk_policy._quote_risk_decision(goal, context)
+    quote_decision = _RISK_QUOTE(goal, context)
     if quote_decision is not None:
         return quote_decision
 
     if goal.max_risk_of_ruin < Decimal("1"):
-        ruin_decision = risk_policy._risk_of_ruin_evidence_decision(
-            book, amount, goal, context
+        ruin_decision = _RISK_RUIN(
+            PaperRiskPolicy,
+            book,
+            amount,
+            goal,
+            context,
         )
         if ruin_decision is not None:
             return ruin_decision
 
-    derived = risk_policy._derived_risk_values(
-        initial_bankroll, balance, committed_stake, amount
+    derived = _RISK_DERIVED(
+        risk_policy,
+        initial_bankroll,
+        balance,
+        committed_stake,
+        amount,
     )
     if derived is None:
         return RiskDecision(False, "virtual bankroll state is invalid")
@@ -284,7 +352,7 @@ def _resume_after_product_day_turnover(
         return RiskDecision(False, "aggregate committed stake limit exceeded")
     if remaining_balance < reserve_limit:
         return RiskDecision(False, "minimum virtual cash reserve would be violated")
-    if risk_policy._book_state(book) != state:
+    if _RISK_BOOK_STATE(PaperRiskPolicy, book) != state:
         return RiskDecision(False, "virtual bankroll changed during risk evaluation")
     return RiskDecision(True, "allowed")
 
@@ -346,7 +414,7 @@ def admit_paper_ticket(
         risk_policy=risk_policy,
     )
 
-    with WorkspaceEconomicLock(root):
+    with WorkspaceEconomicLock(root) as workspace_lock:
         registry_path = root / "run_registry.json"
         registry_missing = False
         try:
@@ -408,6 +476,7 @@ def admit_paper_ticket(
                 book=working_book,
                 risk_policy=risk_policy,
                 placed_at=placed_at,
+                workspace_lock=workspace_lock,
             )
             if turnover_room is not None and amount <= turnover_room:
                 decision = _resume_after_product_day_turnover(
@@ -453,9 +522,39 @@ def admit_paper_ticket(
         )
 
 
+def _freeze_admission_module_globals() -> dict[str, object]:
+    """Detach the complete admission helper graph from mutable module dispatch."""
+
+    source = globals()
+    frozen: dict[str, object] = dict(source)
+    for name, value in tuple(source.items()):
+        if type(value) is not FunctionType or value.__globals__ is not source:
+            continue
+        clone = FunctionType(
+            value.__code__,
+            frozen,
+            name=value.__name__,
+            argdefs=value.__defaults__,
+            closure=value.__closure__,
+        )
+        if value.__kwdefaults__ is not None:
+            clone.__kwdefaults__ = dict(value.__kwdefaults__)
+        clone.__qualname__ = value.__qualname__
+        clone.__doc__ = value.__doc__
+        clone.__annotations__ = dict(value.__annotations__)
+        frozen[name] = clone
+    return frozen
+
+
 from ._paperbook_current_binding_verifier import (
     seal_current_binding_consumer as _seal_current_binding_consumer,
 )
 
-admit_paper_ticket = _seal_current_binding_consumer(admit_paper_ticket)
+_ADMISSION_FROZEN_GLOBALS = _freeze_admission_module_globals()
+_FROZEN_ADMIT_PAPER_TICKET = _ADMISSION_FROZEN_GLOBALS["admit_paper_ticket"]
+if type(_FROZEN_ADMIT_PAPER_TICKET) is not FunctionType:
+    raise RuntimeError("canonical PAPER admission executable is unavailable")
+admit_paper_ticket = _seal_current_binding_consumer(_FROZEN_ADMIT_PAPER_TICKET)
+del _FROZEN_ADMIT_PAPER_TICKET
+del _ADMISSION_FROZEN_GLOBALS
 del _seal_current_binding_consumer

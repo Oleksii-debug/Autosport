@@ -60,8 +60,24 @@ _STORE_SEAMS = frozenset(
 _STORE_CLASS_SEAMS = {
     name: inspect.getattr_static(CollectorDeltaStore, name) for name in _STORE_SEAMS
 }
+_STORE_CLASS_SEAM_CODES = {
+    name: getattr(
+        getattr(target, "__func__", target),
+        "__code__",
+        None,
+    )
+    for name, target in _STORE_CLASS_SEAMS.items()
+}
 _EVIDENCE_CLASS_SEAMS = {
     "save": inspect.getattr_static(CompleteGameBoardEvidenceStore, "save"),
+}
+_EVIDENCE_CLASS_SEAM_CODES = {
+    name: getattr(
+        getattr(target, "__func__", target),
+        "__code__",
+        None,
+    )
+    for name, target in _EVIDENCE_CLASS_SEAMS.items()
 }
 
 
@@ -150,6 +166,21 @@ def _require_canonical_seams(
         raise CampaignProviderCycleCaptureIntegrityError(
             "collector campaign capture seam is class-rebound: " + ", ".join(rebound)
         )
+    code_changed = sorted(
+        name
+        for name, expected in _STORE_CLASS_SEAMS.items()
+        if getattr(
+            getattr(expected, "__func__", expected),
+            "__code__",
+            None,
+        )
+        is not _STORE_CLASS_SEAM_CODES[name]
+    )
+    if code_changed:
+        raise CampaignProviderCycleCaptureIntegrityError(
+            "collector campaign capture seam code changed: "
+            + ", ".join(code_changed)
+        )
     rebound = sorted(
         name
         for name, expected in _EVIDENCE_CLASS_SEAMS.items()
@@ -160,6 +191,21 @@ def _require_canonical_seams(
         raise CampaignProviderCycleCaptureIntegrityError(
             "provider evidence campaign capture seam is class-rebound: "
             + ", ".join(rebound)
+        )
+    code_changed = sorted(
+        name
+        for name, expected in _EVIDENCE_CLASS_SEAMS.items()
+        if getattr(
+            getattr(expected, "__func__", expected),
+            "__code__",
+            None,
+        )
+        is not _EVIDENCE_CLASS_SEAM_CODES[name]
+    )
+    if code_changed:
+        raise CampaignProviderCycleCaptureIntegrityError(
+            "provider evidence campaign capture seam code changed: "
+            + ", ".join(code_changed)
         )
     store_state = vars(store)
     rebound = sorted(name for name in _STORE_SEAMS if name in store_state)
@@ -469,6 +515,11 @@ def capture_campaign_complete_game_board(
                 raw_failure_completed_at = clock()
                 instant_function = getattr(instant, "__func__", instant)
                 finish_function = getattr(finish_cycle, "__func__", finish_cycle)
+                require_seams_function = getattr(
+                    require_seams,
+                    "__func__",
+                    require_seams,
+                )
                 expected_instant_code = next(
                     code
                     for name, target, code in expected_codes
@@ -479,8 +530,19 @@ def capture_campaign_complete_game_board(
                     for name, target, code in expected_codes
                     if name == "_FINISH_CYCLE" and target is finish_cycle
                 )
+                expected_require_seams_code = next(
+                    code
+                    for name, target, code in expected_codes
+                    if name == "_require_canonical_seams" and target is require_seams
+                )
                 if (
-                    module_globals.get("_instant") is not instant
+                    module_globals.get("inspect") is not expected_inspect
+                    or expected_inspect.getattr_static is not expected_getattr_static
+                    or module_globals.get("_require_canonical_seams")
+                    is not require_seams
+                    or getattr(require_seams_function, "__code__", None)
+                    is not expected_require_seams_code
+                    or module_globals.get("_instant") is not instant
                     or getattr(instant_function, "__code__", None)
                     is not expected_instant_code
                     or module_globals.get("_FINISH_CYCLE") is not finish_cycle
@@ -490,6 +552,7 @@ def capture_campaign_complete_game_board(
                     raise CampaignProviderCycleCaptureIntegrityError(
                         "campaign provider-cycle failure terminal dispatch changed"
                     )
+                require_seams(store, evidence_store)
                 failure_completed_at = instant(
                     raw_failure_completed_at,
                     "collector failure completed_at",

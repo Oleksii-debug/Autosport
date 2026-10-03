@@ -60,7 +60,7 @@ def test_current_run_is_never_selected_even_if_payload_is_inconsistent() -> None
     ) == ()
 
 
-def test_later_run_is_never_selected_even_if_live_head_read_is_stale() -> None:
+def test_delayed_stale_run_is_selected_even_with_later_run_id() -> None:
     assert select_superseded_runs(
         (
             _run(30, HEAD_A),
@@ -71,7 +71,7 @@ def test_later_run_is_never_selected_even_if_live_head_read_is_stale() -> None:
         live_head_sha=HEAD_B,
         workflow_name="CI",
         current_run_id=31,
-    ) == (30,)
+    ) == (30, 32)
 
 
 class FakeApi:
@@ -126,9 +126,9 @@ def test_stale_rerun_has_zero_cancellation_authority() -> None:
     assert api.cancelled == []
 
 
-def test_current_head_cancels_only_older_same_workflow_runs() -> None:
+def test_current_head_cancels_stale_runs_on_both_sides_of_run_id_ordering() -> None:
     api = FakeApi(
-        [HEAD_B, HEAD_B, HEAD_B],
+        [HEAD_B, HEAD_B, HEAD_B, HEAD_B],
         (
             _run(40, HEAD_A),
             _run(41, HEAD_B),
@@ -142,8 +142,8 @@ def test_current_head_cancels_only_older_same_workflow_runs() -> None:
         workflow_name="CI",
         current_run_id=41,
     )
-    assert result == CancellationResult(current_head=True, cancelled_run_ids=(40,))
-    assert api.cancelled == [40]
+    assert result == CancellationResult(current_head=True, cancelled_run_ids=(40, 42))
+    assert api.cancelled == [40, 42]
 
 
 def test_head_change_after_run_listing_revokes_cancellation_authority() -> None:

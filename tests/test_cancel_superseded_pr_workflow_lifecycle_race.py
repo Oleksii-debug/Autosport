@@ -20,7 +20,11 @@ def _payload(
     draft: bool = False,
 ) -> dict[str, object]:
     return {
-        "head": {"sha": head_sha},
+        "head": {
+            "sha": head_sha,
+            "repo": {"full_name": "owner/repo"},
+        },
+        "base": {"repo": {"full_name": "owner/repo"}},
         "state": state,
         "draft": draft,
     }

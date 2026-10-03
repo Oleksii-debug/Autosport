@@ -1185,3 +1185,188 @@ def test_bridge_rejects_caller_asserted_terminal_settlement_exactness() -> None:
                 attempt_id="attempt-1",
                 readback=readback,
             )
+
+def test_execution_money_inputs_reject_decimal_subclasses_before_virtual_dispatch() -> None:
+    class HostileDecimal(Decimal):
+        def is_finite(self):
+            raise AssertionError("hostile Decimal is_finite executed")
+
+    with pytest.raises(
+        SupervisedExecutionError,
+        match="max_slippage_fraction must be exact Decimal",
+    ):
+        ExecutionLegConstraint(
+            leg_id="a" * 64,
+            side="BACK",
+            quote_expires_at=QUOTE_EXPIRES_AT,
+            max_slippage_fraction=HostileDecimal("0.01"),
+        )
+
+    with pytest.raises(
+        SupervisedExecutionError,
+        match="accepted/partial readback requires exact positive odds/stake",
+    ):
+        ProviderReadback(
+            bookmaker_id="betfair",
+            account_id="account-1",
+            action_id="action-1",
+            adapter_id="betfair-rest-v1",
+            adapter_version="1",
+            profile_version=1,
+            event_id="event-1",
+            market_id="1.23456789",
+            selection_id="42",
+            external_receipt_id="receipt-1",
+            observed_at=READBACK_AT,
+            source_payload_sha256="b" * 64,
+            status=AcknowledgementStatus.ACCEPTED,
+            accepted_odds=HostileDecimal("2.00"),
+            accepted_stake=Decimal("10.00"),
+        )
+
+
+
+
+def test_execution_money_type_root_survives_module_decimal_rebind(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class ReboundHostileDecimal(Decimal):
+        def is_finite(self):
+            raise AssertionError("rebound Decimal is_finite executed")
+
+    monkeypatch.setattr(
+        supervised_execution_module,
+        "Decimal",
+        ReboundHostileDecimal,
+    )
+
+    with pytest.raises(
+        SupervisedExecutionError,
+        match="max_slippage_fraction must be exact Decimal",
+    ):
+        ExecutionLegConstraint(
+            leg_id="a" * 64,
+            side="BACK",
+            quote_expires_at=QUOTE_EXPIRES_AT,
+            max_slippage_fraction=ReboundHostileDecimal("0.01"),
+        )
+
+    with pytest.raises(
+        SupervisedExecutionError,
+        match="accepted/partial readback requires exact positive odds/stake",
+    ):
+        ProviderReadback(
+            bookmaker_id="betfair",
+            account_id="account-1",
+            action_id="action-1",
+            adapter_id="betfair-rest-v1",
+            adapter_version="1",
+            profile_version=1,
+            event_id="event-1",
+            market_id="1.23456789",
+            selection_id="42",
+            external_receipt_id="receipt-1",
+            observed_at=READBACK_AT,
+            source_payload_sha256="b" * 64,
+            status=AcknowledgementStatus.ACCEPTED,
+            accepted_odds=ReboundHostileDecimal("2.00"),
+            accepted_stake=Decimal("10.00"),
+        )
+
+
+def test_execution_money_type_root_ignores_function_default_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class HostileDecimal(Decimal):
+        def is_finite(self):
+            raise AssertionError("hostile Decimal is_finite executed")
+
+    monkeypatch.setattr(
+        ExecutionLegConstraint.__post_init__,
+        "__defaults__",
+        (HostileDecimal,),
+    )
+    monkeypatch.setattr(
+        ProviderReadback.__post_init__,
+        "__defaults__",
+        (HostileDecimal,),
+    )
+
+    with pytest.raises(
+        SupervisedExecutionError,
+        match="max_slippage_fraction must be exact Decimal",
+    ):
+        ExecutionLegConstraint(
+            leg_id="a" * 64,
+            side="BACK",
+            quote_expires_at=QUOTE_EXPIRES_AT,
+            max_slippage_fraction=HostileDecimal("0.01"),
+        )
+
+    with pytest.raises(
+        SupervisedExecutionError,
+        match="accepted/partial readback requires exact positive odds/stake",
+    ):
+        ProviderReadback(
+            bookmaker_id="betfair",
+            account_id="account-1",
+            action_id="action-1",
+            adapter_id="betfair-rest-v1",
+            adapter_version="1",
+            profile_version=1,
+            event_id="event-1",
+            market_id="1.23456789",
+            selection_id="42",
+            external_receipt_id="receipt-1",
+            observed_at=READBACK_AT,
+            source_payload_sha256="b" * 64,
+            status=AcknowledgementStatus.ACCEPTED,
+            accepted_odds=HostileDecimal("2.00"),
+            accepted_stake=HostileDecimal("10.00"),
+        )
+
+
+def test_slippage_math_ignores_kwdefault_decimal_constructor_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bound, _approval, _portfolio, _intent_value = _bound()
+    action = bound.execution_plan.actions[0]
+    constraint = bound.constraint_for(action.action_id)
+
+    def poisoned_decimal(*_args, **_kwargs):
+        raise AssertionError("kwdefault Decimal constructor executed")
+
+    monkeypatch.setattr(
+        supervised_execution_module._validate_slippage,
+        "__kwdefaults__",
+        {"_decimal_type": poisoned_decimal},
+    )
+
+    supervised_execution_module._validate_slippage(
+        action,
+        constraint,
+        action.requested_odds,
+    )
+
+
+def test_slippage_math_ignores_module_decimal_constructor_rebind(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bound, _approval, _portfolio, _intent_value = _bound()
+    action = bound.execution_plan.actions[0]
+    constraint = bound.constraint_for(action.action_id)
+
+    def poisoned_decimal(*_args, **_kwargs):
+        raise AssertionError("rebound Decimal constructor executed")
+
+    monkeypatch.setattr(
+        supervised_execution_module,
+        "Decimal",
+        poisoned_decimal,
+    )
+
+    supervised_execution_module._validate_slippage(
+        action,
+        constraint,
+        action.requested_odds,
+    )

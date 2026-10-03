@@ -217,13 +217,31 @@ class ExecutionLegConstraint:
                 "supervised bridge supports BACK only until upstream LAY liability authority exists"
             )
         _time(self.quote_expires_at, "quote_expires_at")
+        runtime_type = (1).__class__.__class__
+        method_descriptor_type = runtime_type(
+            runtime_type.__getattribute__(
+                "".__class__,
+                "__dict__",
+            )["upper"]
+        )
+        decimal_type = runtime_type(self.max_slippage_fraction)
+        decimal_namespace = runtime_type.__getattribute__(decimal_type, "__dict__")
+        as_tuple_descriptor = decimal_namespace.get("as_tuple")
+        is_finite_descriptor = decimal_namespace.get("is_finite")
         if (
-            not isinstance(self.max_slippage_fraction, Decimal)
+            runtime_type.__getattribute__(decimal_type, "__module__") != "decimal"
+            or runtime_type.__getattribute__(decimal_type, "__qualname__") != "Decimal"
+            or runtime_type(as_tuple_descriptor) is not method_descriptor_type
+            or runtime_type(is_finite_descriptor) is not method_descriptor_type
+            or as_tuple_descriptor.__objclass__ is not decimal_type
+            or is_finite_descriptor.__objclass__ is not decimal_type
             or not self.max_slippage_fraction.is_finite()
             or self.max_slippage_fraction < 0
             or self.max_slippage_fraction >= 1
         ):
-            raise SupervisedExecutionError("max_slippage_fraction must be exact Decimal in [0,1)")
+            raise SupervisedExecutionError(
+                "max_slippage_fraction must be exact Decimal in [0,1)"
+            )
 
     def to_dict(self) -> dict[str, str]:
         return {
@@ -423,16 +441,49 @@ class ProviderReadback:
             raise SupervisedExecutionError("reconciliation_evidence_required must be bool")
         if type(self.terminal_settlement_exact) is not bool:
             raise SupervisedExecutionError("terminal_settlement_exact must be bool")
-        if self.status in {AcknowledgementStatus.ACCEPTED, AcknowledgementStatus.PARTIAL}:
+        if self.status in {
+            AcknowledgementStatus.ACCEPTED,
+            AcknowledgementStatus.PARTIAL,
+        }:
+            runtime_type = (1).__class__.__class__
+            method_descriptor_type = runtime_type(
+                runtime_type.__getattribute__(
+                    "".__class__,
+                    "__dict__",
+                )["upper"]
+            )
+            decimal_values = (self.accepted_odds, self.accepted_stake)
+            exact_decimal_values = True
+            for value in decimal_values:
+                decimal_type = runtime_type(value)
+                decimal_namespace = runtime_type.__getattribute__(
+                    decimal_type,
+                    "__dict__",
+                )
+                as_tuple_descriptor = decimal_namespace.get("as_tuple")
+                is_finite_descriptor = decimal_namespace.get("is_finite")
+                if (
+                    runtime_type.__getattribute__(decimal_type, "__module__")
+                    != "decimal"
+                    or runtime_type.__getattribute__(decimal_type, "__qualname__")
+                    != "Decimal"
+                    or runtime_type(as_tuple_descriptor) is not method_descriptor_type
+                    or runtime_type(is_finite_descriptor) is not method_descriptor_type
+                    or as_tuple_descriptor.__objclass__ is not decimal_type
+                    or is_finite_descriptor.__objclass__ is not decimal_type
+                ):
+                    exact_decimal_values = False
+                    break
             if (
-                not isinstance(self.accepted_odds, Decimal)
+                not exact_decimal_values
                 or not self.accepted_odds.is_finite()
                 or self.accepted_odds <= 0
-                or not isinstance(self.accepted_stake, Decimal)
                 or not self.accepted_stake.is_finite()
                 or self.accepted_stake <= 0
             ):
-                raise SupervisedExecutionError("accepted/partial readback requires exact positive odds/stake")
+                raise SupervisedExecutionError(
+                    "accepted/partial readback requires exact positive odds/stake"
+                )
         elif self.accepted_odds is not None or self.accepted_stake is not None:
             raise SupervisedExecutionError("rejected readback cannot claim accepted odds/stake")
 
@@ -870,12 +921,38 @@ def _validate_slippage(
     constraint: ExecutionLegConstraint,
     accepted_odds: Decimal,
 ) -> None:
+    runtime_type = (1).__class__.__class__
+    method_descriptor_type = runtime_type(
+        runtime_type.__getattribute__(
+            "".__class__,
+            "__dict__",
+        )["upper"]
+    )
+    approved_fraction = constraint.max_slippage_fraction
+    decimal_type = runtime_type(approved_fraction)
+    decimal_namespace = runtime_type.__getattribute__(decimal_type, "__dict__")
+    as_tuple_descriptor = decimal_namespace.get("as_tuple")
+    is_finite_descriptor = decimal_namespace.get("is_finite")
+    if (
+        runtime_type.__getattribute__(decimal_type, "__module__") != "decimal"
+        or runtime_type.__getattribute__(decimal_type, "__qualname__") != "Decimal"
+        or runtime_type(as_tuple_descriptor) is not method_descriptor_type
+        or runtime_type(is_finite_descriptor) is not method_descriptor_type
+        or as_tuple_descriptor.__objclass__ is not decimal_type
+        or is_finite_descriptor.__objclass__ is not decimal_type
+        or runtime_type(action.requested_odds) is not decimal_type
+        or runtime_type(accepted_odds) is not decimal_type
+    ):
+        raise SupervisedExecutionError(
+            "slippage authority requires exact Decimal operands"
+        )
+    one = decimal_type("1")
     if action.side == "BACK":
-        limit = action.requested_odds * (Decimal("1") - constraint.max_slippage_fraction)
+        limit = action.requested_odds * (one - approved_fraction)
         if accepted_odds < limit:
             raise SupervisedExecutionError("accepted BACK odds exceed approved slippage")
     else:
-        limit = action.requested_odds * (Decimal("1") + constraint.max_slippage_fraction)
+        limit = action.requested_odds * (one + approved_fraction)
         if accepted_odds > limit:
             raise SupervisedExecutionError("accepted LAY odds exceed approved slippage")
 

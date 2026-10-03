@@ -16,6 +16,7 @@ _MAPPING_KEY_MAX_TUPLE_DEPTH = 32
 _MAPPING_KEY_MAX_NODES = 256
 _OPERATOR_VALUE_MAX_DEPTH = 64
 _OPERATOR_VALUE_MAX_NODES = 10_000
+_QUERY_KEY_MAX_DECODE_PASSES = 8
 
 _SENSITIVE_NORMALIZED_KEYS = frozenset(
     {
@@ -217,6 +218,21 @@ def _secret_values(extra_secret_values: Iterable[str]) -> tuple[str, ...]:
     return tuple(sorted(values, key=lambda item: (-len(item), item)))
 
 
+def _decode_query_key_for_classification(value: str) -> tuple[str, bool]:
+    """Return a bounded decoded query key plus unresolved-nesting truth."""
+
+    decoded = value
+    for _ in range(_QUERY_KEY_MAX_DECODE_PASSES):
+        next_decoded = unquote_plus(decoded)
+        if next_decoded == decoded:
+            return decoded, False
+        decoded = next_decoded
+
+    # A key that is still changing after the bounded decode budget is not safe
+    # to classify as ordinary. Callers must fail closed for its associated value.
+    return decoded, unquote_plus(decoded) != decoded
+
+
 def _redacted_value_literal(value: str) -> str:
     if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
         return value[0] + REDACTED + value[-1]
@@ -292,8 +308,10 @@ def redact_operator_text(
     )
 
     def redact_query(match: re.Match[str]) -> str:
-        decoded_key = unquote_plus(match.group("key"))
-        if not is_sensitive_key(decoded_key):
+        decoded_key, unresolved_nested_encoding = (
+            _decode_query_key_for_classification(match.group("key"))
+        )
+        if not unresolved_nested_encoding and not is_sensitive_key(decoded_key):
             return match.group(0)
         return match.group("prefix") + REDACTED
 

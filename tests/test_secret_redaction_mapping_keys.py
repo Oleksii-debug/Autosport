@@ -1,6 +1,10 @@
 from __future__ import annotations
 
-from autosport.secret_redaction import REDACTED, redact_operator_value
+from autosport.secret_redaction import (
+    REDACTED,
+    redact_operator_text,
+    redact_operator_value,
+)
 
 
 def test_explicit_secret_embedded_in_mapping_key_is_redacted() -> None:
@@ -520,3 +524,30 @@ def test_composite_mapping_keys_share_global_value_node_budget() -> None:
     }
 
     assert redact_operator_value(payload) == REDACTED
+
+
+
+def test_double_encoded_sensitive_query_key_redacts_value() -> None:
+    secret = "AS-QUERY-NESTED-SECRET-4d91"
+    rendered = redact_operator_text(
+        f"https://provider.invalid/feed?api%255Fkey={secret}"
+    )
+
+    assert rendered == (
+        "https://provider.invalid/feed?api%255Fkey=" + REDACTED
+    )
+    assert secret not in rendered
+
+
+def test_over_nested_query_key_fails_closed_instead_of_leaking_value() -> None:
+    secret = "AS-QUERY-OVER-NESTED-SECRET-b721"
+    key = "api%5Fkey"
+    for _ in range(9):
+        key = key.replace("%", "%25")
+
+    rendered = redact_operator_text(
+        f"https://provider.invalid/feed?{key}={secret}"
+    )
+
+    assert rendered == f"https://provider.invalid/feed?{key}={REDACTED}"
+    assert secret not in rendered

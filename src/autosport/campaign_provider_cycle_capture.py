@@ -41,6 +41,8 @@ _HEX = frozenset("0123456789abcdef")
 _CANONICAL_TYPE = type
 _CANONICAL_CALLABLE = callable
 _CANONICAL_GETATTR = getattr
+_CANONICAL_SORTED = sorted
+_CANONICAL_TYPE_ERROR = TypeError
 
 _CAPTURE = capture_parlay_complete_game_board
 _EVIDENCE_SAVE = CompleteGameBoardEvidenceStore.save
@@ -229,12 +231,12 @@ def _require_canonical_seams(
     evidence_store: CompleteGameBoardEvidenceStore,
 ) -> None:
     if _CANONICAL_TYPE(store) is not CollectorDeltaStore:
-        raise TypeError("store must be the exact canonical CollectorDeltaStore")
+        raise _CANONICAL_TYPE_ERROR("store must be the exact canonical CollectorDeltaStore")
     if _CANONICAL_TYPE(evidence_store) is not CompleteGameBoardEvidenceStore:
-        raise TypeError(
+        raise _CANONICAL_TYPE_ERROR(
             "evidence_store must be the exact CompleteGameBoardEvidenceStore"
         )
-    rebound = sorted(
+    rebound = _CANONICAL_SORTED(
         name
         for name, expected in _STORE_CLASS_SEAMS.items()
         if _CANONICAL_GETATTR_STATIC(CollectorDeltaStore, name, None) is not expected
@@ -243,7 +245,7 @@ def _require_canonical_seams(
         raise CampaignProviderCycleCaptureIntegrityError(
             "collector campaign capture seam is class-rebound: " + ", ".join(rebound)
         )
-    code_changed = sorted(
+    code_changed = _CANONICAL_SORTED(
         name
         for name, expected in _STORE_CLASS_SEAMS.items()
         if _CANONICAL_GETATTR(
@@ -258,7 +260,7 @@ def _require_canonical_seams(
             "collector campaign capture seam code changed: "
             + ", ".join(code_changed)
         )
-    rebound = sorted(
+    rebound = _CANONICAL_SORTED(
         name
         for name, expected in _EVIDENCE_CLASS_SEAMS.items()
         if _CANONICAL_GETATTR_STATIC(CompleteGameBoardEvidenceStore, name, None)
@@ -269,7 +271,7 @@ def _require_canonical_seams(
             "provider evidence campaign capture seam is class-rebound: "
             + ", ".join(rebound)
         )
-    code_changed = sorted(
+    code_changed = _CANONICAL_SORTED(
         name
         for name, expected in _EVIDENCE_CLASS_SEAMS.items()
         if _CANONICAL_GETATTR(
@@ -285,12 +287,12 @@ def _require_canonical_seams(
             + ", ".join(code_changed)
         )
     store_state = _CANONICAL_OBJECT_GETATTRIBUTE(store, "__dict__")
-    rebound = sorted(name for name in _STORE_SEAMS if name in store_state)
+    rebound = _CANONICAL_SORTED(name for name in _STORE_SEAMS if name in store_state)
     if rebound:
         raise CampaignProviderCycleCaptureIntegrityError(
             "collector campaign capture seam is instance-rebound: " + ", ".join(rebound)
         )
-    request_rebound = sorted(
+    request_rebound = _CANONICAL_SORTED(
         name
         for name, expected in _PROVIDER_REQUEST_SEAMS.items()
         if _CANONICAL_GETATTR_STATIC(CompleteGameBoardRequest, name, None) is not expected
@@ -300,7 +302,7 @@ def _require_canonical_seams(
             "provider request authority seam is rebound: "
             + ", ".join(request_rebound)
         )
-    snapshot_rebound = sorted(
+    snapshot_rebound = _CANONICAL_SORTED(
         name
         for name, expected in _PROVIDER_SNAPSHOT_SEAMS.items()
         if _CANONICAL_GETATTR_STATIC(CompleteGameBoardSnapshot, name, None) is not expected
@@ -319,7 +321,7 @@ def _require_canonical_seams(
             "provider evidence assertion authority changed"
         )
     evidence_state = _CANONICAL_OBJECT_GETATTRIBUTE(evidence_store, "__dict__")
-    rebound = sorted(
+    rebound = _CANONICAL_SORTED(
         name for name in ("save",) if name in evidence_state
     )
     if rebound:
@@ -750,6 +752,8 @@ def capture_campaign_complete_game_board(
     expected_type = _CANONICAL_TYPE
     expected_callable = _CANONICAL_CALLABLE
     expected_getattr = _CANONICAL_GETATTR
+    expected_sorted = _CANONICAL_SORTED
+    expected_type_error_alias = _CANONICAL_TYPE_ERROR
     expected_unshadowed_builtins = ("any", "len", "set", "sorted", "tuple")
 
     def require_stable_dispatch() -> None:
@@ -764,6 +768,8 @@ def capture_campaign_complete_game_board(
             module_globals.get("_CANONICAL_TYPE") is not expected_type
             or module_globals.get("_CANONICAL_CALLABLE") is not expected_callable
             or module_globals.get("_CANONICAL_GETATTR") is not expected_getattr
+            or module_globals.get("_CANONICAL_SORTED") is not expected_sorted
+            or module_globals.get("_CANONICAL_TYPE_ERROR") is not expected_type_error_alias
         ):
             raise CampaignProviderCycleCaptureIntegrityError(
                 "campaign provider-cycle builtin dispatch changed"
@@ -1173,6 +1179,9 @@ def capture_campaign_complete_game_board(
                     is not require_seams
                     or _CANONICAL_GETATTR(require_seams_function, "__code__", None)
                     is not expected_require_seams_code
+                    or module_globals.get("_CANONICAL_SORTED") is not expected_sorted
+                    or module_globals.get("_CANONICAL_TYPE_ERROR")
+                    is not expected_type_error_alias
                     or module_globals.get("_instant") is not instant
                     or _CANONICAL_GETATTR(instant_function, "__code__", None)
                     is not expected_instant_code
@@ -1287,6 +1296,8 @@ def _seal_campaign_provider_cycle_capture_dispatch() -> None:
         "_CANONICAL_TYPE": _CANONICAL_TYPE,
         "_CANONICAL_CALLABLE": _CANONICAL_CALLABLE,
         "_CANONICAL_GETATTR": _CANONICAL_GETATTR,
+        "_CANONICAL_SORTED": _CANONICAL_SORTED,
+        "_CANONICAL_TYPE_ERROR": _CANONICAL_TYPE_ERROR,
         "_CANONICAL_GETATTR_STATIC": _CANONICAL_GETATTR_STATIC,
         "_CANONICAL_GETATTR_STATIC_CODE": _CANONICAL_GETATTR_STATIC_CODE,
         "_CANONICAL_GETATTR_STATIC_GLOBALS": _CANONICAL_GETATTR_STATIC_GLOBALS,

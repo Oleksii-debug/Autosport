@@ -4,11 +4,15 @@ import hashlib
 import json
 import os
 import shutil
+import stat
 import struct
 import tempfile
 import zipfile
+from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, BinaryIO, Iterator
+
+from .workspace_lock import _open_read_only_descriptor
 
 _FIXED_ZIP_TIME = (1980, 1, 1, 0, 0, 0)
 _PACKAGE_PREFIX = "Autosport-V1/"
@@ -17,6 +21,8 @@ _WINDOWS_RESERVED_NAMES = {
     "prn",
     "aux",
     "nul",
+    "conin$",
+    "conout$",
     *(f"com{index}" for index in range(1, 10)),
     *(f"lpt{index}" for index in range(1, 10)),
     "com¹",
@@ -41,6 +47,8 @@ _ZIP_VOLUME = 0
 _ZIP_UTF8_FLAG = 0x800
 _ZIP_LOCAL_HEADER = struct.Struct("<IHHHHHIIIHH")
 _ZIP_LOCAL_HEADER_SIGNATURE = 0x04034B50
+_WINDOWS_REPARSE_POINT_FLAG = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+_MAX_RELEASE_SOURCE_TREE_DEPTH = 64
 
 
 class _DuplicateJsonKeyError(ValueError):
@@ -86,6 +94,456 @@ def _canonical_json_bytes(payload: dict[str, Any]) -> bytes:
         )
         + "\n"
     ).encode("utf-8")
+
+
+def _is_windows_reparse_point(metadata: object) -> bool:
+    return bool(
+        int(getattr(metadata, "st_file_attributes", 0))
+        & _WINDOWS_REPARSE_POINT_FLAG
+    )
+
+
+def _require_regular_source_file(
+    path: Path,
+    *,
+    label: str,
+) -> os.stat_result:
+    try:
+        metadata = path.lstat()
+    except OSError as exc:
+        raise ValueError(f"{label} is not an accessible regular file: {path}") from exc
+    if stat.S_ISLNK(metadata.st_mode):
+        raise ValueError(f"{label} must not be a symbolic link: {path}")
+    if _is_windows_reparse_point(metadata):
+        raise ValueError(f"{label} must not be a Windows reparse point: {path}")
+    if not stat.S_ISREG(metadata.st_mode):
+        raise ValueError(f"{label} must be a regular file: {path}")
+    return metadata
+
+
+def _same_regular_source_snapshot(
+    left: os.stat_result,
+    right: os.stat_result,
+) -> bool:
+    """Require one pathname/descriptor identity and unchanged byte metadata."""
+
+    return (
+        os.path.samestat(left, right)
+        and left.st_size == right.st_size
+        and left.st_mtime_ns == right.st_mtime_ns
+        and left.st_ctime_ns == right.st_ctime_ns
+        and left.st_nlink == right.st_nlink
+    )
+
+
+def _same_source_tree_directory_snapshot(
+    left: os.stat_result,
+    right: os.stat_result,
+) -> bool:
+    """Require one directory identity with unchanged entry-change metadata."""
+
+    return (
+        os.path.samestat(left, right)
+        and left.st_mode == right.st_mode
+        and left.st_size == right.st_size
+        and left.st_mtime_ns == right.st_mtime_ns
+        and left.st_ctime_ns == right.st_ctime_ns
+        and left.st_nlink == right.st_nlink
+    )
+
+
+@contextmanager
+def _open_regular_source_stream(
+    path: Path,
+    *,
+    label: str,
+    expected_snapshot: os.stat_result | None = None,
+) -> Iterator[BinaryIO]:
+    """Open one stable regular source without following its final pathname alias."""
+
+    initial_snapshot = _require_regular_source_file(path, label=label)
+    authority_snapshot = (
+        expected_snapshot if expected_snapshot is not None else initial_snapshot
+    )
+    if (
+        expected_snapshot is not None
+        and not _same_regular_source_snapshot(expected_snapshot, initial_snapshot)
+    ):
+        raise ValueError(f"{label} changed during open: {path}")
+    try:
+        try:
+            descriptor = _open_read_only_descriptor(path)
+        except OSError as exc:
+            try:
+                current = path.lstat()
+            except OSError:
+                raise ValueError(
+                    f"{label} could not be read safely: {path}"
+                ) from exc
+            if (
+                stat.S_ISLNK(current.st_mode)
+                or _is_windows_reparse_point(current)
+                or not stat.S_ISREG(current.st_mode)
+            ):
+                raise ValueError(f"{label} changed during open: {path}") from exc
+            raise
+
+        try:
+            stream = os.fdopen(descriptor, "rb", closefd=True)
+        except BaseException:
+            os.close(descriptor)
+            raise
+
+        with stream:
+            opened = os.fstat(stream.fileno())
+            current = path.lstat()
+            if (
+                not _same_regular_source_snapshot(
+                    authority_snapshot,
+                    opened,
+                )
+                or stat.S_ISLNK(current.st_mode)
+                or _is_windows_reparse_point(current)
+                or not stat.S_ISREG(current.st_mode)
+                or not _same_regular_source_snapshot(opened, current)
+            ):
+                raise ValueError(f"{label} changed during open: {path}")
+            yield stream
+            after_open = os.fstat(stream.fileno())
+            after = path.lstat()
+            if (
+                stat.S_ISLNK(after.st_mode)
+                or _is_windows_reparse_point(after)
+                or not stat.S_ISREG(after.st_mode)
+                or not _same_regular_source_snapshot(opened, after_open)
+                or not _same_regular_source_snapshot(after_open, after)
+            ):
+                raise ValueError(f"{label} changed during read: {path}")
+    except ValueError:
+        raise
+    except OSError as exc:
+        raise ValueError(f"{label} could not be read safely: {path}") from exc
+
+
+def _read_regular_source_bytes(
+    path: Path,
+    *,
+    label: str,
+    expected_snapshot: os.stat_result | None = None,
+) -> bytes:
+    """Read one source through the canonical stable no-follow stream boundary."""
+
+    with _open_regular_source_stream(
+        path,
+        label=label,
+        expected_snapshot=expected_snapshot,
+    ) as stream:
+        return stream.read()
+
+
+def _require_source_tree_directory(
+    path: Path,
+    *,
+    label: str,
+    relative: str | None,
+) -> os.stat_result:
+    try:
+        metadata = path.lstat()
+    except OSError as exc:
+        if relative is None:
+            raise ValueError(f"{label} is not an accessible directory: {path}") from exc
+        raise ValueError(f"{label} contains an inaccessible entry: {relative}") from exc
+    if stat.S_ISLNK(metadata.st_mode):
+        if relative is None:
+            raise ValueError(f"{label} must not be a symbolic link: {path}")
+        raise ValueError(f"{label} contains a symbolic link: {relative}")
+    if _is_windows_reparse_point(metadata):
+        if relative is None:
+            raise ValueError(f"{label} must not be a Windows reparse point: {path}")
+        raise ValueError(f"{label} contains a Windows reparse point: {relative}")
+    if not stat.S_ISDIR(metadata.st_mode):
+        if relative is None:
+            raise ValueError(f"{label} must be a directory: {path}")
+        raise ValueError(f"{label} contains a non-regular entry: {relative}")
+    return metadata
+
+
+def _source_tree_entry_names(
+    path: Path,
+    *,
+    label: str,
+    relative: str | None,
+) -> tuple[str, ...]:
+    """Return one exact directory-name snapshot without following entries."""
+
+    try:
+        with os.scandir(path) as iterator:
+            return tuple(sorted(entry.name for entry in iterator))
+    except OSError as exc:
+        target = relative or str(path)
+        raise ValueError(
+            f"{label} contains an inaccessible entry: {target}"
+        ) from exc
+
+
+def _scan_regular_source_tree(
+    path: Path,
+    *,
+    label: str,
+    relative: Path = Path(),
+) -> None:
+    """Validate one tree without descending through symlink/reparse directories."""
+
+    relative_text = relative.as_posix() if relative.parts else None
+    if len(relative.parts) > _MAX_RELEASE_SOURCE_TREE_DEPTH:
+        raise ValueError(
+            f"{label} exceeds supported directory depth: {relative_text}"
+        )
+    before = _require_source_tree_directory(
+        path,
+        label=label,
+        relative=relative_text,
+    )
+    try:
+        with os.scandir(path) as iterator:
+            entries = sorted(iterator, key=lambda entry: entry.name)
+    except OSError as exc:
+        target = relative_text or str(path)
+        raise ValueError(f"{label} contains an inaccessible entry: {target}") from exc
+
+    scanned = _require_source_tree_directory(
+        path,
+        label=label,
+        relative=relative_text,
+    )
+    if not _same_source_tree_directory_snapshot(before, scanned):
+        target = relative_text or "."
+        raise ValueError(
+            f"{label} directory changed during traversal: {target}"
+        )
+
+    for entry in entries:
+        source = path / entry.name
+        child_relative = relative / entry.name
+        child_text = child_relative.as_posix()
+        try:
+            metadata = entry.stat(follow_symlinks=False)
+        except OSError as exc:
+            raise ValueError(
+                f"{label} contains an inaccessible entry: {child_text}"
+            ) from exc
+        if stat.S_ISLNK(metadata.st_mode):
+            raise ValueError(f"{label} contains a symbolic link: {child_text}")
+        if _is_windows_reparse_point(metadata):
+            raise ValueError(
+                f"{label} contains a Windows reparse point: {child_text}"
+            )
+        if stat.S_ISDIR(metadata.st_mode):
+            current = _require_source_tree_directory(
+                source,
+                label=label,
+                relative=child_text,
+            )
+            if not _same_source_tree_directory_snapshot(metadata, current):
+                raise ValueError(
+                    f"{label} directory changed during traversal: {child_text}"
+                )
+            _scan_regular_source_tree(
+                source,
+                label=label,
+                relative=child_relative,
+            )
+        elif stat.S_ISREG(metadata.st_mode):
+            continue
+        else:
+            raise ValueError(f"{label} contains a non-regular entry: {child_text}")
+
+    final_names = _source_tree_entry_names(
+        path,
+        label=label,
+        relative=relative_text,
+    )
+    if final_names != tuple(entry.name for entry in entries):
+        target = relative_text or "."
+        raise ValueError(f"{label} directory changed during traversal: {target}")
+    after = _require_source_tree_directory(
+        path,
+        label=label,
+        relative=relative_text,
+    )
+    if not _same_source_tree_directory_snapshot(before, after):
+        target = relative_text or "."
+        raise ValueError(f"{label} directory changed during traversal: {target}")
+
+
+def _require_regular_source_tree(path: Path, *, label: str) -> None:
+    _scan_regular_source_tree(path, label=label)
+
+
+def _release_example_destination_name(path: Path) -> str:
+    """Return one Windows-safe staging component for the example source tree."""
+
+    name = path.name
+    if not name or name in {".", ".."}:
+        raise ValueError(
+            "release example tree must have a safe destination basename"
+        )
+    try:
+        _validate_windows_member(
+            f"{_PACKAGE_PREFIX}examples/{name}/example-entry"
+        )
+    except ValueError as exc:
+        raise ValueError(
+            "release example tree has an unsafe Windows destination basename"
+        ) from exc
+    return name
+
+
+def _copy_regular_source_file(
+    source: str | Path,
+    destination: str | Path,
+    *,
+    label: str,
+    expected_snapshot: os.stat_result | None = None,
+) -> None:
+    Path(destination).write_bytes(
+        _read_regular_source_bytes(
+            Path(source),
+            label=label,
+            expected_snapshot=expected_snapshot,
+        )
+    )
+
+
+def _copy_regular_source_tree(
+    source_root: Path,
+    destination_root: Path,
+    *,
+    label: str,
+) -> None:
+    """Copy one tree while validating each directory before and after its children."""
+
+    def copy_directory(
+        source_dir: Path,
+        destination_dir: Path,
+        *,
+        relative: Path,
+        expected_snapshot: os.stat_result | None = None,
+    ) -> None:
+        relative_text = relative.as_posix() if relative.parts else None
+        if len(relative.parts) > _MAX_RELEASE_SOURCE_TREE_DEPTH:
+            raise ValueError(
+                f"{label} exceeds supported directory depth: {relative_text}"
+            )
+        before = _require_source_tree_directory(
+            source_dir,
+            label=label,
+            relative=relative_text,
+        )
+        if expected_snapshot is not None and not _same_source_tree_directory_snapshot(
+            expected_snapshot,
+            before,
+        ):
+            target = relative_text or "."
+            raise ValueError(
+                f"{label} directory changed during traversal: {target}"
+            )
+        try:
+            with os.scandir(source_dir) as iterator:
+                entries = sorted(iterator, key=lambda entry: entry.name)
+        except OSError as exc:
+            target = relative_text or str(source_dir)
+            raise ValueError(
+                f"{label} contains an inaccessible entry: {target}"
+            ) from exc
+
+        scanned = _require_source_tree_directory(
+            source_dir,
+            label=label,
+            relative=relative_text,
+        )
+        if not _same_source_tree_directory_snapshot(before, scanned):
+            target = relative_text or "."
+            raise ValueError(
+                f"{label} directory changed during traversal: {target}"
+            )
+
+        destination_dir.mkdir(parents=True, exist_ok=True)
+        for entry in entries:
+            source = source_dir / entry.name
+            child_relative = relative / entry.name
+            child_text = child_relative.as_posix()
+            try:
+                metadata = entry.stat(follow_symlinks=False)
+            except OSError as exc:
+                raise ValueError(
+                    f"{label} contains an inaccessible entry: {child_text}"
+                ) from exc
+            if stat.S_ISLNK(metadata.st_mode):
+                raise ValueError(
+                    f"{label} contains a symbolic link: {child_text}"
+                )
+            if _is_windows_reparse_point(metadata):
+                raise ValueError(
+                    f"{label} contains a Windows reparse point: {child_text}"
+                )
+
+            destination = destination_dir / entry.name
+            if stat.S_ISDIR(metadata.st_mode):
+                current = _require_source_tree_directory(
+                    source,
+                    label=label,
+                    relative=child_text,
+                )
+                if not _same_source_tree_directory_snapshot(metadata, current):
+                    raise ValueError(
+                        f"{label} directory changed during traversal: {child_text}"
+                    )
+                copy_directory(
+                    source,
+                    destination,
+                    relative=child_relative,
+                    expected_snapshot=metadata,
+                )
+            elif stat.S_ISREG(metadata.st_mode):
+                destination.write_bytes(
+                    _read_regular_source_bytes(
+                        source,
+                        label=f"{label} file {child_text}",
+                        expected_snapshot=metadata,
+                    )
+                )
+            else:
+                raise ValueError(
+                    f"{label} contains a non-regular entry: {child_text}"
+                )
+
+        final_names = _source_tree_entry_names(
+            source_dir,
+            label=label,
+            relative=relative_text,
+        )
+        if final_names != tuple(entry.name for entry in entries):
+            target = relative_text or "."
+            raise ValueError(
+                f"{label} directory changed during traversal: {target}"
+            )
+        after = _require_source_tree_directory(
+            source_dir,
+            label=label,
+            relative=relative_text,
+        )
+        if not _same_source_tree_directory_snapshot(before, after):
+            target = relative_text or "."
+            raise ValueError(
+                f"{label} directory changed during traversal: {target}"
+            )
+
+    copy_directory(
+        source_root,
+        destination_root,
+        relative=Path(),
+    )
 
 
 def _sorted_package_files(package_dir: Path) -> list[Path]:
@@ -447,17 +905,80 @@ def build_windows_package(
     keyboard_path = Path(keyboard_path)
     restart_recovery_path = Path(restart_recovery_path)
     output_zip = Path(output_zip)
+    example_destination_name = _release_example_destination_name(example_dir)
+
+    exe_snapshot = _require_regular_source_file(
+        exe_path,
+        label="Autosport executable input",
+    )
+    start_snapshot = _require_regular_source_file(
+        start_file,
+        label="Windows start-file input",
+    )
+    _require_regular_source_tree(example_dir, label="release example tree")
+    diagnostic_snapshot = _require_regular_source_file(
+        diagnostic_path,
+        label="packaged diagnostic input",
+    )
+    accessibility_snapshot = _require_regular_source_file(
+        accessibility_path,
+        label="accessibility audit input",
+    )
+    keyboard_snapshot = _require_regular_source_file(
+        keyboard_path,
+        label="keyboard audit input",
+    )
+    restart_recovery_snapshot = _require_regular_source_file(
+        restart_recovery_path,
+        label="restart/recovery audit input",
+    )
+
     package_dir = output_zip.parent / "Autosport-V1"
     if package_dir.exists():
         shutil.rmtree(package_dir)
     package_dir.mkdir(parents=True)
-    shutil.copy2(exe_path, package_dir / "Autosport.exe")
-    shutil.copy2(start_file, package_dir / "WINDOWS_START_HERE.txt")
-    shutil.copy2(diagnostic_path, package_dir / "packaged-diagnostic.json")
-    shutil.copy2(accessibility_path, package_dir / "accessibility-audit.json")
-    shutil.copy2(keyboard_path, package_dir / "keyboard-audit.json")
-    shutil.copy2(restart_recovery_path, package_dir / "restart-recovery-audit.json")
-    shutil.copytree(example_dir, package_dir / "examples" / example_dir.name)
+    _copy_regular_source_file(
+        exe_path,
+        package_dir / "Autosport.exe",
+        label="Autosport executable input",
+        expected_snapshot=exe_snapshot,
+    )
+    _copy_regular_source_file(
+        start_file,
+        package_dir / "WINDOWS_START_HERE.txt",
+        label="Windows start-file input",
+        expected_snapshot=start_snapshot,
+    )
+    _copy_regular_source_file(
+        diagnostic_path,
+        package_dir / "packaged-diagnostic.json",
+        label="packaged diagnostic input",
+        expected_snapshot=diagnostic_snapshot,
+    )
+    _copy_regular_source_file(
+        accessibility_path,
+        package_dir / "accessibility-audit.json",
+        label="accessibility audit input",
+        expected_snapshot=accessibility_snapshot,
+    )
+    _copy_regular_source_file(
+        keyboard_path,
+        package_dir / "keyboard-audit.json",
+        label="keyboard audit input",
+        expected_snapshot=keyboard_snapshot,
+    )
+    _copy_regular_source_file(
+        restart_recovery_path,
+        package_dir / "restart-recovery-audit.json",
+        label="restart/recovery audit input",
+        expected_snapshot=restart_recovery_snapshot,
+    )
+    _copy_regular_source_tree(
+        example_dir,
+        package_dir / "examples" / example_destination_name,
+        label="release example tree",
+    )
+    _require_regular_source_tree(package_dir, label="release package staging tree")
 
     build_info = {
         "product": "Autosport",
@@ -491,9 +1012,17 @@ def build_windows_package(
         ("\n".join(lines) + "\n").encode("utf-8")
     )
 
-    archive_members = {
-        (Path("Autosport-V1") / path.relative_to(package_dir)).as_posix(): path.read_bytes()
+    archive_paths = [
+        (
+            (Path("Autosport-V1") / path.relative_to(package_dir)).as_posix(),
+            path,
+        )
         for path in _sorted_package_files(package_dir)
+    ]
+    _validate_windows_member_set([name for name, _ in archive_paths])
+    archive_members = {
+        name: path.read_bytes()
+        for name, path in archive_paths
     }
     writer_sha = _write_canonical_zip(output_zip, archive_members)
     return output_zip, writer_sha
@@ -509,13 +1038,17 @@ def verify_windows_package(
     _require_git_commit_sha(expected_source_sha, field="expected_source_sha")
     package_zip = Path(package_zip)
     digest = hashlib.sha256()
-    with package_zip.open("rb") as source, tempfile.SpooledTemporaryFile(
+    with tempfile.SpooledTemporaryFile(
         max_size=_PACKAGE_SNAPSHOT_MEMORY_LIMIT,
         mode="w+b",
     ) as snapshot:
-        for chunk in iter(lambda: source.read(1024 * 1024), b""):
-            digest.update(chunk)
-            snapshot.write(chunk)
+        with _open_regular_source_stream(
+            package_zip,
+            label="release package input",
+        ) as source:
+            for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                digest.update(chunk)
+                snapshot.write(chunk)
         package_sha = digest.hexdigest()
         snapshot.seek(0)
         with zipfile.ZipFile(snapshot, "r") as archive:
@@ -531,17 +1064,9 @@ def verify_windows_package(
             if len(names) != len(set(names)):
                 raise ValueError("release package contains duplicate member names")
             members: dict[str, bytes] = {}
-            windows_keys: dict[str, str] = {}
+            validated_names = _validate_windows_member_set(names)
             for name in names:
-                relative, windows_key = _validate_windows_member(name)
-                previous = windows_keys.get(windows_key)
-                if previous is not None:
-                    raise ValueError(
-                        "release package contains Windows path collision: "
-                        f"{previous} vs {name}"
-                    )
-                windows_keys[windows_key] = name
-                members[relative] = archive.read(name)
+                members[validated_names[name]] = archive.read(name)
             _require_canonical_zip_local_headers(snapshot, infos)
 
     required = {
@@ -711,6 +1236,36 @@ def _validate_windows_member(name: str) -> tuple[str, str]:
             raise ValueError(f"release package contains reserved Windows device name: {name}")
         normalized_parts.append(component.casefold())
     return relative, "/".join(normalized_parts)
+
+
+def _validate_windows_member_set(names: list[str]) -> dict[str, str]:
+    """Validate one complete Windows extraction file set and return relative names."""
+
+    relative_by_name: dict[str, str] = {}
+    normalized_to_name: dict[str, str] = {}
+    for name in names:
+        relative, windows_key = _validate_windows_member(name)
+        previous = normalized_to_name.get(windows_key)
+        if previous is not None:
+            raise ValueError(
+                "release package contains Windows path collision: "
+                f"{previous} vs {name}"
+            )
+        relative_by_name[name] = relative
+        normalized_to_name[windows_key] = name
+
+    for windows_key, name in normalized_to_name.items():
+        parts = windows_key.split("/")
+        for end in range(1, len(parts)):
+            file_prefix = "/".join(parts[:end])
+            conflicting_file = normalized_to_name.get(file_prefix)
+            if conflicting_file is not None:
+                raise ValueError(
+                    "release package contains Windows file/directory path collision: "
+                    f"{conflicting_file} vs {name}"
+                )
+
+    return relative_by_name
 
 
 def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:

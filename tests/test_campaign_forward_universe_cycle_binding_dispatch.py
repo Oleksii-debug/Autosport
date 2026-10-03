@@ -585,6 +585,55 @@ def test_verify_rejects_rebound_structural_verifier_alias(
     assert called == []
 
 
+def test_public_verifier_rejects_verification_code_rebind_before_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    verifier = binding.verify_campaign_forward_evidence
+    monkeypatch.setattr(binding, "VerificationCode", object)
+
+    with pytest.raises(
+        binding.CampaignForwardUniverseCycleBindingError,
+        match="structural evidence types changed|authority class or artifact kind changed",
+    ):
+        verifier(
+            precommit_locator=None,
+            collector_store=None,
+            source_spec=None,
+            cycle_receipt=None,
+            provider_evidence_store=None,
+            universe_store=None,
+            event_lifecycle=None,
+            evidence=None,
+        )
+
+
+def test_public_verifier_rejects_verification_code_and_witness_double_rebind(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    verifier = binding.verify_campaign_forward_evidence
+
+    class HostileCode:
+        PASS = object()
+
+    monkeypatch.setattr(binding, "VerificationCode", HostileCode)
+    monkeypatch.setattr(binding, "_CANONICAL_VERIFICATION_CODE", HostileCode)
+
+    with pytest.raises(
+        binding.CampaignForwardUniverseCycleBindingError,
+        match="structural evidence types changed",
+    ):
+        verifier(
+            precommit_locator=None,
+            collector_store=None,
+            source_spec=None,
+            cycle_receipt=None,
+            provider_evidence_store=None,
+            universe_store=None,
+            event_lifecycle=None,
+            evidence=None,
+        )
+
+
 def test_verify_rejects_rebound_structural_evidence_type(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

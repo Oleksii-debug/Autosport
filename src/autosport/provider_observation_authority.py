@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import builtins
 import hashlib
 import hmac
 import inspect
@@ -13,6 +14,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from types import ModuleType
 from typing import Mapping
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
@@ -1383,6 +1385,99 @@ def _seal_provider_evidence_store_dispatch() -> None:
     expected_os_fdopen = os.fdopen
     expected_os_fsync = os.fsync
 
+    expected_dependency_functions = (
+        tuple(
+            ("store." + name, function, code)
+            for name, _surface, function, code in expected_store_internal
+            if code is not None
+        )
+        + tuple(
+            ("authority." + name, function, code)
+            for name, _surface, function, code in expected_authority_methods
+            if code is not None
+        )
+        + tuple(
+            ("lock." + name, function, code)
+            for name, _surface, function, code in expected_lock_methods
+            if code is not None
+        )
+        + tuple(
+            ("snapshot." + name, function, code)
+            for name, _surface, function, code in expected_snapshot_methods
+            if code is not None
+        )
+        + tuple(
+            (
+                "runtime." + name,
+                expected_getattr(target, "__func__", target),
+                code,
+            )
+            for name, target, code in expected_runtime_callables
+            if code is not None
+        )
+    )
+    expected_dependency_global_witnesses = tuple(
+        (
+            name,
+            function,
+            function_globals,
+            tuple(
+                (
+                    dependency_name,
+                    function_globals[dependency_name],
+                    expected_getattr(
+                        function_globals[dependency_name],
+                        "__code__",
+                        None,
+                    ),
+                )
+                for dependency_name in code.co_names
+                if dependency_name in function_globals
+            ),
+        )
+        for name, function, code in expected_dependency_functions
+        for function_globals in (
+            expected_getattr(function, "__globals__", None),
+        )
+        if function_globals is not None
+    )
+    expected_dependency_module_attr_witnesses = tuple(
+        (
+            name,
+            dependency_name,
+            module,
+            attribute_name,
+            expected_getattr(module, attribute_name),
+            expected_getattr(
+                expected_getattr(module, attribute_name),
+                "__code__",
+                None,
+            ),
+        )
+        for name, function, _function_globals, global_items
+        in expected_dependency_global_witnesses
+        for dependency_name, module, _dependency_code in global_items
+        if expected_type(module) is ModuleType
+        for attribute_name in function.__code__.co_names
+        if hasattr(module, attribute_name)
+    )
+    expected_dependency_builtin_witnesses = tuple(
+        (
+            name,
+            function_globals,
+            builtins,
+            builtin_name,
+            expected_getattr(builtins, builtin_name),
+        )
+        for name, function, function_globals, _global_items
+        in expected_dependency_global_witnesses
+        for builtin_name in function.__code__.co_names
+        if (
+            builtin_name not in function_globals
+            and hasattr(builtins, builtin_name)
+        )
+    )
+
     def _require_surface_witnesses(owner, witnesses) -> bool:
         for name, surface, function, code in witnesses:
             current = expected_getattr_static(owner, name)
@@ -1452,6 +1547,60 @@ def _seal_provider_evidence_store_dispatch() -> None:
                 raise expected_error(
                     "provider evidence store authority witness changed"
                 )
+        if expected_any(
+            (
+                expected_getattr(function, "__globals__", None)
+                is not function_globals
+                or expected_any(
+                    function_globals.get(dependency_name) is not expected
+                    or expected_getattr(expected, "__code__", None) is not code
+                    for dependency_name, expected, code in global_items
+                )
+            )
+            for (
+                _name,
+                function,
+                function_globals,
+                global_items,
+            ) in expected_dependency_global_witnesses
+        ):
+            raise expected_error(
+                "provider evidence store dependency globals changed"
+            )
+        if expected_any(
+            (
+                expected_getattr(module, attribute_name, None) is not expected
+                or expected_getattr(expected, "__code__", None) is not code
+            )
+            for (
+                _name,
+                _dependency_name,
+                module,
+                attribute_name,
+                expected,
+                code,
+            ) in expected_dependency_module_attr_witnesses
+        ):
+            raise expected_error(
+                "provider evidence store dependency module dispatch changed"
+            )
+        if expected_any(
+            (
+                builtin_name in function_globals
+                or expected_getattr(builtin_module, builtin_name, None)
+                is not expected
+            )
+            for (
+                _name,
+                function_globals,
+                builtin_module,
+                builtin_name,
+                expected,
+            ) in expected_dependency_builtin_witnesses
+        ):
+            raise expected_error(
+                "provider evidence store dependency builtin dispatch changed"
+            )
         if not _require_surface_witnesses(store_type, expected_store_internal):
             raise expected_error(
                 "provider evidence store internal dispatch changed"

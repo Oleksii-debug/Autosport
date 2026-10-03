@@ -892,3 +892,84 @@ def test_store_save_rejects_getattr_static_helper_rebind_before_execution(
         helper_globals[name] = original
 
     assert hostile_calls == []
+
+
+
+def test_sealed_capture_rejects_shadowed_isinstance_before_execution(
+    monkeypatch,
+):
+    saved = authority_module.capture_parlay_complete_game_board
+    hostile_calls: list[str] = []
+
+    def hostile_isinstance(*_args, **_kwargs):
+        hostile_calls.append("isinstance")
+        raise AssertionError("hostile isinstance executed")
+
+    monkeypatch.setattr(
+        authority_module,
+        "isinstance",
+        hostile_isinstance,
+        raising=False,
+    )
+
+    with pytest.raises(
+        ProviderObservationIntegrityError,
+        match="provider production acquisition builtin dispatch shadowed",
+    ):
+        saved(api_key="secret-value", request=_request())
+
+    assert hostile_calls == []
+
+
+def test_sealed_capture_rejects_math_rebind_before_isfinite_dispatch(
+    monkeypatch,
+):
+    saved = authority_module.capture_parlay_complete_game_board
+    hostile_calls: list[str] = []
+
+    class HostileMath:
+        @staticmethod
+        def isfinite(_value):
+            hostile_calls.append("isfinite")
+            raise AssertionError("hostile isfinite executed")
+
+    monkeypatch.setattr(authority_module, "math", HostileMath)
+
+    with pytest.raises(
+        ProviderObservationIntegrityError,
+        match="provider production acquisition numeric validation changed",
+    ):
+        saved(api_key="secret-value", request=_request())
+
+    assert hostile_calls == []
+
+
+def test_production_origin_guard_rejects_getattr_static_helper_rebind(
+    monkeypatch,
+):
+    reader = authority_module._CANONICAL_GETATTR_STATIC
+    helper_globals = reader.__globals__
+    name = next(
+        candidate
+        for candidate in reader.__code__.co_names
+        if candidate in helper_globals
+        and getattr(helper_globals[candidate], "__code__", None) is not None
+    )
+    original = helper_globals[name]
+    hostile_calls: list[str] = []
+
+    def hostile(*_args, **_kwargs):
+        hostile_calls.append(name)
+        raise AssertionError("hostile inspect helper executed")
+
+    helper_globals[name] = hostile
+    try:
+        with pytest.raises(
+            ProviderObservationIntegrityError,
+            match="provider production acquisition origin is rebound",
+        ):
+            authority_module._require_production_capture_origin_integrity()
+    finally:
+        helper_globals[name] = original
+
+    assert hostile_calls == []

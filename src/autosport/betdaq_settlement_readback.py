@@ -406,9 +406,9 @@ class BetdaqPostingsReadback:
         for posting in self.postings:
             if type(posting) is not BetdaqPostingObservation:
                 raise BetdaqEconomicReadbackError("postings contain invalid observation")
-            if posting.evidence.evidence_id != self.evidence.evidence_id:
+            if posting.evidence != self.evidence:
                 raise BetdaqEconomicReadbackError(
-                    "posting evidence does not match readback authenticated context"
+                    "posting evidence does not match exact readback acquisition"
                 )
             if posting.currency != self.currency:
                 raise BetdaqEconomicReadbackError(

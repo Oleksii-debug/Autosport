@@ -657,6 +657,72 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             ).verified_records()
             self.assertEqual(len(records), 1)
 
+    def test_external_canonical_paperbook_advance_retries_before_decision(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            clock = _ManualClock(self.START + timedelta(seconds=1))
+            book = PaperBook("1000")
+            ledger = PaperExecutionLedger(workspace / "paper-execution.jsonl")
+            execution = PaperExecutionAdoptionRuntime(
+                book=book,
+                ledger=ledger,
+                config=PaperExecutionModelConfig(
+                    model_id="live-book-currentness-test",
+                    model_version="1",
+                    evidence_grade=EvidenceGrade.SYNTHETIC,
+                    evidence_source="live-book-currentness-test",
+                    seed="live-book-currentness-test",
+                    max_quote_age_ms=5_000,
+                    min_delay_ms=0,
+                    max_delay_ms=0,
+                    rejected_bps=0,
+                    partial_bps=0,
+                    unknown_bps=0,
+                    partial_fill_bps=5000,
+                    max_slippage_bps=0,
+                ),
+                max_quote_age=timedelta(seconds=5),
+                paper_book_path=workspace / "paper_book.json",
+            )
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(
+                    workspace,
+                    [(self._event(selection="selection-a", sequence=1),)],
+                ),
+                factory=_EmptyIntentFactory(),
+                clock=clock,
+                book=book,
+                paper_execution=execution,
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+
+            externally_advanced = PaperBook.load(workspace / "paper_book.json")
+            externally_advanced.open_ticket(
+                [
+                    TicketLeg(
+                        event_id="external-event",
+                        market_id="external-market",
+                        selection_id="external-selection",
+                        locked_odds=Decimal("2"),
+                        sport="table_tennis",
+                        exchange_side="back",
+                    )
+                ],
+                Decimal("10"),
+                placed_at=(
+                    self.START + timedelta(milliseconds=500)
+                ).isoformat(),
+            )
+            externally_advanced.save(workspace / "paper_book.json")
+
+            result = loop.run_cycle()
+
+            self.assertEqual(result.status, LiveCycleStatus.BACKPRESSURE)
+            self.assertIn("canonical PaperBook advanced", result.detail)
+            self.assertFalse((workspace / "decisions.jsonl").exists())
+            self.assertFalse(loop.progress_path.exists())
+
     def test_portfolio_change_during_market_cut_retries_before_decision(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

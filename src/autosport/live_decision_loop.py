@@ -2100,7 +2100,9 @@ class PersistentLiveDecisionLoop:
                     "retrying before economic action"
                 )
             durable_input_specs = self._load_input_registry() or ()
-            current_input_specs = tuple(self._input_specs.values())
+            current_input_specs = tuple(
+                sorted(self._input_specs.values(), key=lambda spec: spec.input_id)
+            )
             if durable_input_specs != current_input_specs:
                 raise _ConcurrentDecisionSnapshot(
                     "durable dependency registry changed during decision snapshot "
@@ -2124,6 +2126,26 @@ class PersistentLiveDecisionLoop:
                     "live dependency registry advanced during decision snapshot capture; "
                     "retrying before economic action"
                 )
+            canonical_live_book_path = self.workspace / "paper_book.json"
+            if (
+                self.paper_execution is not None
+                or canonical_live_book_path.exists()
+            ):
+                if not canonical_live_book_path.exists():
+                    raise LiveDecisionProgressError(
+                        "canonical live PaperBook disappeared before decision publication"
+                    )
+                try:
+                    durable_live_book = PaperBook.load(canonical_live_book_path)
+                except (OSError, TypeError, ValueError) as exc:
+                    raise LiveDecisionProgressError(
+                        "canonical live PaperBook is unreadable before decision publication"
+                    ) from exc
+                if not self._same_book_state(durable_live_book, self.book):
+                    raise _ConcurrentDecisionSnapshot(
+                        "canonical PaperBook advanced during decision snapshot capture; "
+                        "retrying before economic action"
+                    )
             if live_context_sha256 != expected_context_sha256:
                 raise _ConcurrentDecisionSnapshot(
                     "portfolio/risk/dependency context advanced during decision "

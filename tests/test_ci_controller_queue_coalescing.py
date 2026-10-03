@@ -1774,13 +1774,16 @@ def test_workflow_wide_sweep_preserves_sealed_scoped_cancel_boundary() -> None:
     assert "canonical base cancellation authority changed" in text
     assert "scoped cancellation revalidation dispatch changed" in text
     assert "base_cancel(self, run_id)" in text
-    assert "_trusted_live_pr_qualification(" in text
+    assert "_production_qualification_reader=_trusted_live_pr_qualification" in text
+    assert "_production_identity_checker=_explicit_run_identity_is_current" in text
     sweep = text.split("def cancel_superseded_explicit_pr_runs(", 1)[1].split(
         "def _cancel_triggering_run_if_stale_or_nonqualifying(", 1
     )[0]
-    assert sweep.index("current_qualification = _trusted_live_pr_qualification(") < sweep.index(
+    assert sweep.index("current_qualification = _qualification_reader(") < sweep.index(
         "_cancel_effect(api, run_id)"
     )
+    assert "qualification = _qualification_reader(api, pr_number)" in sweep
+    assert "if not _identity_checker(" in sweep
     assert "_cancel_effect_code=_cancel_run_or_defer_active_conflict.__code__" in sweep
 
 def test_trigger_ready_tuple_cannot_be_relabelled_nonqualifying_by_adapter_rebind(monkeypatch) -> None:
@@ -2572,6 +2575,194 @@ def test_trigger_decision_helpers_survive_inflight_identity_global_rebind(
         event_head_sha=STALE_HEAD,
         current_run_id=7015,
         qualification=(HEAD, True),
+    )
+    assert cancelled == [7015]
+    assert forged_calls == []
+
+def test_production_sweep_ignores_preentry_decision_global_rebind(
+    monkeypatch,
+) -> None:
+    api = WorkflowScopedGitHubApi(
+        repository="owner/repo",
+        token="token",
+        workflow_id=356678400,
+        workflow_name="CI",
+    )
+    canonical_request = scoped_controller.GitHubApi._request
+    cancelled: list[int] = []
+    forged_calls: list[str] = []
+
+    class FakeResponse:
+        status = 200
+
+        def __init__(self, body: bytes) -> None:
+            self.body = body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, _exc_type, _exc, _tb):
+            return False
+
+        def read(self) -> bytes:
+            return self.body
+
+    def canonical_urlopen(request, *, timeout: int):
+        assert timeout == 20
+        url = request.full_url
+        if url.endswith("/pulls/303"):
+            return FakeResponse(
+                (
+                    '{"state":"open","draft":false,'
+                    '"head":{"sha":"' + HEAD + '","repo":{"full_name":"owner/repo"}},'
+                    '"base":{"repo":{"full_name":"owner/repo"}}}'
+                ).encode()
+            )
+        if url.endswith("/actions/runs/7014"):
+            return FakeResponse(
+                (
+                    '{"id":7014,"workflow_id":356678400,'
+                    '"event":"pull_request","head_sha":"' + STALE_HEAD + '",'
+                    '"name":"CI","status":"queued",'
+                    '"pull_requests":[{"number":303}]}'
+                ).encode()
+            )
+        raise AssertionError(url)
+
+    def forged_qualification(*_args, **_kwargs):
+        forged_calls.append("qualification")
+        return (STALE_HEAD, False)
+
+    def forged_identity(*_args, **_kwargs):
+        forged_calls.append("identity")
+        return False
+
+    def fake_cancel(_api, run_id: int) -> bool:
+        cancelled.append(run_id)
+        return True
+
+    monkeypatch.setattr(
+        scoped_controller,
+        "_trusted_live_pr_qualification",
+        forged_qualification,
+    )
+    monkeypatch.setattr(
+        scoped_controller,
+        "_explicit_run_identity_is_current",
+        forged_identity,
+    )
+    monkeypatch.setitem(
+        canonical_request.__globals__,
+        "urlopen",
+        canonical_urlopen,
+    )
+
+    assert cancel_superseded_explicit_pr_runs(
+        api,
+        workflow_name="CI",
+        current_run_id=9999,
+        runs=(
+            WorkflowRun(
+                run_id=7014,
+                head_sha=STALE_HEAD,
+                workflow_name="CI",
+                pr_numbers=(303,),
+                status="queued",
+            ),
+        ),
+        _cancel_effect=fake_cancel,
+        _cancel_effect_code=fake_cancel.__code__,
+    ) == (7014,)
+    assert cancelled == [7014]
+    assert forged_calls == []
+
+
+def test_production_trigger_ignores_preentry_decision_global_rebind(
+    monkeypatch,
+) -> None:
+    api = WorkflowScopedGitHubApi(
+        repository="owner/repo",
+        token="token",
+        workflow_id=356678400,
+        workflow_name="CI",
+    )
+    canonical_request = scoped_controller.GitHubApi._request
+    cancelled: list[int] = []
+    forged_calls: list[str] = []
+
+    class FakeResponse:
+        status = 200
+
+        def __init__(self, body: bytes) -> None:
+            self.body = body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, _exc_type, _exc, _tb):
+            return False
+
+        def read(self) -> bytes:
+            return self.body
+
+    def canonical_urlopen(request, *, timeout: int):
+        assert timeout == 20
+        url = request.full_url
+        if url.endswith("/actions/runs/7015"):
+            return FakeResponse(
+                (
+                    '{"id":7015,"workflow_id":356678400,'
+                    '"event":"pull_request","head_sha":"' + STALE_HEAD + '",'
+                    '"name":"CI","status":"queued",'
+                    '"pull_requests":[{"number":303}]}'
+                ).encode()
+            )
+        if url.endswith("/pulls/303"):
+            return FakeResponse(
+                (
+                    '{"state":"open","draft":false,'
+                    '"head":{"sha":"' + HEAD + '","repo":{"full_name":"owner/repo"}},'
+                    '"base":{"repo":{"full_name":"owner/repo"}}}'
+                ).encode()
+            )
+        raise AssertionError(url)
+
+    def forged_qualification(*_args, **_kwargs):
+        forged_calls.append("qualification")
+        return (STALE_HEAD, False)
+
+    def forged_identity(*_args, **_kwargs):
+        forged_calls.append("identity")
+        return False
+
+    def fake_cancel(_api, run_id: int) -> bool:
+        cancelled.append(run_id)
+        return True
+
+    monkeypatch.setattr(
+        scoped_controller,
+        "_trusted_live_pr_qualification",
+        forged_qualification,
+    )
+    monkeypatch.setattr(
+        scoped_controller,
+        "_explicit_run_identity_is_current",
+        forged_identity,
+    )
+    monkeypatch.setitem(
+        canonical_request.__globals__,
+        "urlopen",
+        canonical_urlopen,
+    )
+
+    assert _cancel_triggering_run_if_stale_or_nonqualifying(
+        api,
+        pr_number=303,
+        event_head_sha=STALE_HEAD,
+        current_run_id=7015,
+        qualification=(HEAD, True),
+        _cancel_effect=fake_cancel,
+        _cancel_effect_code=fake_cancel.__code__,
     )
     assert cancelled == [7015]
     assert forged_calls == []

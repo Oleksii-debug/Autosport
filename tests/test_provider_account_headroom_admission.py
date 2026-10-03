@@ -2069,3 +2069,101 @@ def test_economic_goal_provenance_payload_rebinding_cannot_forge_goal_hash(
 
     assert hostile_calls == []
 
+def test_bound_binding_sha_rebinding_cannot_make_goal_binding_tautological(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    acquired, _ = _acquire_balance(monkeypatch, tmp_path, "100")
+    target = _plan("target", _action("target-action", "10"))
+    ledger = _ledger_with_plans(tmp_path, target)
+    hostile_calls: list[object] = []
+
+    def hostile_binding(execution_plan, *args):
+        hostile_calls.append((execution_plan, args))
+        return execution_plan.plan_id.removeprefix("supervised-v2-")
+
+    monkeypatch.setattr(
+        headroom_module._supervised_execution,
+        "_bound_binding_sha256",
+        hostile_binding,
+    )
+
+    with pytest.raises(
+        ProviderAccountHeadroomError,
+        match="canonical monetary denomination authority changed",
+    ):
+        _assess(
+            ledger,
+            acquired,
+            plan_id="target",
+            action_id="target-action",
+        )
+
+    assert hostile_calls == []
+
+
+def test_bound_plan_witness_rebinding_cannot_retain_stale_issuance(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    acquired, _ = _acquire_balance(monkeypatch, tmp_path, "100")
+    target = _plan("target", _action("target-action", "10"))
+    ledger = _ledger_with_plans(tmp_path, target)
+    hostile_calls: list[object] = []
+
+    def hostile_witness(bound):
+        hostile_calls.append(bound)
+        return bound.execution_plan.plan_id.removeprefix("supervised-v2-")
+
+    monkeypatch.setattr(
+        headroom_module._supervised_execution,
+        "_bound_plan_witness",
+        hostile_witness,
+    )
+
+    with pytest.raises(
+        ProviderAccountHeadroomError,
+        match="canonical monetary denomination authority changed",
+    ):
+        _assess(
+            ledger,
+            acquired,
+            plan_id="target",
+            action_id="target-action",
+        )
+
+    assert hostile_calls == []
+
+
+def test_bound_plan_digest_rebinding_cannot_forge_denomination_identity(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    acquired, _ = _acquire_balance(monkeypatch, tmp_path, "100")
+    target = _plan("target", _action("target-action", "10"))
+    ledger = _ledger_with_plans(tmp_path, target)
+    hostile_calls: list[object] = []
+
+    def hostile_digest(payload):
+        hostile_calls.append(payload)
+        return "0" * 64
+
+    monkeypatch.setattr(
+        headroom_module._supervised_execution,
+        "_digest",
+        hostile_digest,
+    )
+
+    with pytest.raises(
+        ProviderAccountHeadroomError,
+        match="canonical monetary denomination authority changed",
+    ):
+        _assess(
+            ledger,
+            acquired,
+            plan_id="target",
+            action_id="target-action",
+        )
+
+    assert hostile_calls == []
+

@@ -24,6 +24,16 @@ _WEBVIEW2_STORAGE_ERROR = (
     "Перевірте, що LOCALAPPDATA вказує на абсолютну папку вашого користувача, "
     "доступну для запису, і перезапустіть Автоспорт. Права адміністратора не потрібні."
 )
+_WORKSPACE_INSTANCE_BUSY_ERROR = (
+    "Автоспорт уже відкритий для цього workspace в іншому процесі. "
+    "Закрийте інший екземпляр Автоспорту та повторіть запуск. "
+    "Economic і live state не змінено."
+)
+_WORKSPACE_INSTANCE_LOCK_ERROR = (
+    "Автоспорт не може підтвердити одноосібний доступ до interactive workspace. "
+    "Перевірте доступ до папки workspace та повторіть запуск. "
+    "Economic і live state не змінено."
+)
 
 
 def _show_workspace_configuration_error(detail: str) -> None:
@@ -96,6 +106,47 @@ def _show_startup_error(message: str) -> None:
         pass
 
 
+def _run_owned_interactive_gui(workspace: Path) -> int:
+    """Run the interactive WebView stack while caller holds workspace ownership."""
+
+from autosport.webview2_release_environment import (
+    active_webview2_environment_overrides,
+)
+
+if active_webview2_environment_overrides():
+    _show_startup_error(_WEBVIEW2_STARTUP_ERROR)
+    return 3
+
+try:
+    from autosport.webview2_runtime_deployment import ensure_webview2_runtime
+
+    runtime_preflight = ensure_webview2_runtime()
+except Exception:
+    _show_startup_error(_WEBVIEW2_STARTUP_ERROR)
+    return 3
+
+if runtime_preflight.available is not True:
+    _show_startup_error(_WEBVIEW2_STARTUP_ERROR)
+    return 3
+
+from autosport.windows_webview_emergency_stop import EmergencyStopWebController
+from autosport.windows_webview_shell import (
+    AutosportWebBridge,
+    WindowsWebViewUnavailable,
+    launch_windows_shell,
+)
+
+try:
+    controller = EmergencyStopWebController(workspace)
+    return launch_windows_shell(AutosportWebBridge(controller))
+except WindowsWebViewUnavailable as exc:
+    if getattr(exc, "reason", None) == "storage":
+        _show_startup_error(_WEBVIEW2_STORAGE_ERROR)
+        return 2
+    _show_startup_error(_WEBVIEW2_STARTUP_ERROR)
+    return 3
+
+
 def _run_interactive_gui() -> int:
     from autosport.paths import (
         default_webview_storage_path,
@@ -125,42 +176,21 @@ def _run_interactive_gui() -> int:
         _show_workspace_access_error(workspace, exc)
         return 2
 
-    from autosport.webview2_release_environment import (
-        active_webview2_environment_overrides,
-    )
-
-    if active_webview2_environment_overrides():
-        _show_startup_error(_WEBVIEW2_STARTUP_ERROR)
-        return 3
-
-    try:
-        from autosport.webview2_runtime_deployment import ensure_webview2_runtime
-
-        runtime_preflight = ensure_webview2_runtime()
-    except Exception:
-        _show_startup_error(_WEBVIEW2_STARTUP_ERROR)
-        return 3
-
-    if runtime_preflight.available is not True:
-        _show_startup_error(_WEBVIEW2_STARTUP_ERROR)
-        return 3
-
-    from autosport.windows_webview_emergency_stop import EmergencyStopWebController
-    from autosport.windows_webview_shell import (
-        AutosportWebBridge,
-        WindowsWebViewUnavailable,
-        launch_windows_shell,
+    from autosport.workspace_lock import (
+        WorkspaceEconomicLockBusyError,
+        WorkspaceEconomicLockError,
+        WorkspaceInteractiveLock,
     )
 
     try:
-        controller = EmergencyStopWebController(workspace)
-        return launch_windows_shell(AutosportWebBridge(controller))
-    except WindowsWebViewUnavailable as exc:
-        if getattr(exc, "reason", None) == "storage":
-            _show_startup_error(_WEBVIEW2_STORAGE_ERROR)
-            return 2
-        _show_startup_error(_WEBVIEW2_STARTUP_ERROR)
-        return 3
+        with WorkspaceInteractiveLock(workspace):
+            return _run_owned_interactive_gui(workspace)
+    except WorkspaceEconomicLockBusyError:
+        _show_startup_error(_WORKSPACE_INSTANCE_BUSY_ERROR)
+        return 2
+    except (WorkspaceEconomicLockError, OSError):
+        _show_startup_error(_WORKSPACE_INSTANCE_LOCK_ERROR)
+        return 2
 
 
 def main(argv: list[str] | None = None) -> int:

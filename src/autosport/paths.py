@@ -113,6 +113,20 @@ def _windows_known_folder_local_app_data() -> Path:
             co_uninitialize()
 
 
+def _physical_storage_identity(path: Path, *, label: str) -> Path:
+    """Bind durable storage identity to its physically resolved absolute path."""
+
+    if not path.is_absolute():
+        raise ValueError(f"{label} storage identity must be absolute")
+    try:
+        resolved = path.resolve(strict=False)
+    except (OSError, RuntimeError) as exc:
+        raise ValueError(f"{label} storage identity could not be resolved safely") from exc
+    if not resolved.is_absolute():
+        raise ValueError(f"{label} storage identity must resolve to an absolute path")
+    return resolved
+
+
 def default_workspace() -> Path:
     override = os.environ.get("AUTOSPORT_WORKSPACE")
     if override is not None and override.strip():
@@ -128,7 +142,7 @@ def default_workspace() -> Path:
                 "AUTOSPORT_WORKSPACE must be an absolute path so durable workspace identity "
                 "does not depend on the process working directory"
             )
-        return override_path
+        return _physical_storage_identity(override_path, label="AUTOSPORT_WORKSPACE")
 
     local_app_data = os.environ.get("LOCALAPPDATA")
     if local_app_data:
@@ -138,7 +152,10 @@ def default_workspace() -> Path:
                 "LOCALAPPDATA must be an absolute path so durable workspace identity "
                 "does not depend on the process working directory"
             )
-        return local_app_data_path / "Autosport" / "workspace"
+        return _physical_storage_identity(
+            local_app_data_path / "Autosport" / "workspace",
+            label="workspace",
+        )
 
     if sys.platform == "win32":
         try:
@@ -152,7 +169,10 @@ def default_workspace() -> Path:
             raise ValueError(
                 "Windows LocalAppData known folder must resolve to an absolute path"
             )
-        return local_app_data_path / "Autosport" / "workspace"
+        return _physical_storage_identity(
+            local_app_data_path / "Autosport" / "workspace",
+            label="workspace",
+        )
 
     try:
         home = Path.home()
@@ -165,7 +185,10 @@ def default_workspace() -> Path:
             "home directory must be an absolute path so durable workspace identity "
             "does not depend on the process working directory"
         )
-    return home / ".autosport" / "workspace"
+    return _physical_storage_identity(
+        home / ".autosport" / "workspace",
+        label="workspace",
+    )
 
 
 def default_webview_storage_path() -> Path:
@@ -179,7 +202,10 @@ def default_webview_storage_path() -> Path:
                 "LOCALAPPDATA must be an absolute path so WebView storage identity "
                 "does not depend on the process working directory"
             )
-        return local_app_data_path / "Autosport" / "webview2"
+        return _physical_storage_identity(
+            local_app_data_path / "Autosport" / "webview2",
+            label="WebView",
+        )
 
     if sys.platform == "win32":
         try:
@@ -193,7 +219,10 @@ def default_webview_storage_path() -> Path:
                 "Windows LocalAppData known folder must resolve to an absolute path "
                 "for WebView storage"
             )
-        return local_app_data_path / "Autosport" / "webview2"
+        return _physical_storage_identity(
+            local_app_data_path / "Autosport" / "webview2",
+            label="WebView",
+        )
 
     try:
         home = Path.home()
@@ -206,7 +235,10 @@ def default_webview_storage_path() -> Path:
             "home directory must be an absolute path so WebView storage identity "
             "does not depend on the process working directory"
         )
-    return home / ".autosport" / "webview2"
+    return _physical_storage_identity(
+        home / ".autosport" / "webview2",
+        label="WebView",
+    )
 
 def validate_product_storage_roots(
     workspace: str | Path,

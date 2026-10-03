@@ -42,8 +42,9 @@ class ProviderTestMode(str, Enum):
 class ProviderCertifiedUse(str, Enum):
     """Mechanically bounded technical use classification.
 
-    SUPERVISED_EXECUTION_CAPABLE is technical qualification evidence only.  It is not
-    product execution permission and never authorizes real-money action by itself.
+    The executable values are compatibility vocabulary only.  This public
+    structural builder cannot emit them without a future product-owned durable
+    provider-evidence issuer; they never authorize real-money action by themselves.
     """
 
     REPLAY = "replay"
@@ -204,20 +205,14 @@ def _derive_allowed_uses(
         BookmakerCapability.LIVE_QUOTES_READ
     )
     account_bound = supports(BookmakerCapability.ACCOUNT_IDENTITY_READ)
-    limits_known = supports(BookmakerCapability.LIMITS_READ)
 
     if ProviderTestMode.REPLAY in tested:
         allowed.add(ProviderCertifiedUse.REPLAY)
     if ProviderTestMode.LIVE_OBSERVATION in tested and quote_read:
         allowed.add(ProviderCertifiedUse.LIVE_OBSERVATION)
-    if (
-        ProviderTestMode.OBSERVED_EXECUTABLE in tested
-        and quote_read
-        and account_bound
-        and limits_known
-        and supports(BookmakerCapability.BETSLIP_READ)
-    ):
-        allowed.add(ProviderCertifiedUse.OBSERVED_EXECUTABLE)
+    # Public capability/integration/test-evidence DTOs are structural metadata,
+    # not product-owned provider-observation authority.  Until a durable issuer
+    # is composed here, OBSERVED_EXECUTABLE must remain unavailable.
     account_detail_read = any(
         supports(capability)
         for capability in (
@@ -234,16 +229,10 @@ def _derive_allowed_uses(
         and account_detail_read
     ):
         allowed.add(ProviderCertifiedUse.ACCOUNT_READ_ONLY)
-    if (
-        ProviderTestMode.SUPERVISED_EXECUTION in tested
-        and quote_read
-        and account_bound
-        and limits_known
-        and supports(BookmakerCapability.PLACE_BET)
-        and supports(BookmakerCapability.BET_READBACK)
-        and supports(BookmakerCapability.OPEN_POSITIONS_READ)
-    ):
-        allowed.add(ProviderCertifiedUse.SUPERVISED_EXECUTION_CAPABLE)
+    # Likewise, structural support for write/readback/open-position capabilities
+    # does not certify an executable provider path.  A future positive path must
+    # re-resolve product-owned durable qualification evidence rather than caller
+    # DTO/hash construction.
     return tuple(sorted(allowed, key=lambda item: item.value))
 
 

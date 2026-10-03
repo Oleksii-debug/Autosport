@@ -190,10 +190,13 @@ def test_allowed_uses_require_mode_plus_exact_capability_prerequisites():
     assert set(artifact.allowed_uses) == {
         ProviderCertifiedUse.REPLAY,
         ProviderCertifiedUse.LIVE_OBSERVATION,
-        ProviderCertifiedUse.OBSERVED_EXECUTABLE,
         ProviderCertifiedUse.ACCOUNT_READ_ONLY,
-        ProviderCertifiedUse.SUPERVISED_EXECUTION_CAPABLE,
     }
+    assert ProviderCertifiedUse.OBSERVED_EXECUTABLE not in artifact.allowed_uses
+    assert (
+        ProviderCertifiedUse.SUPERVISED_EXECUTION_CAPABLE
+        not in artifact.allowed_uses
+    )
 
     profile = _profile(BookmakerCapability.LIVE_QUOTES_READ)
     _, _, limited = _artifact(
@@ -508,9 +511,12 @@ def test_conflicting_evidence_identity_is_rejected():
         )
 
 
-def test_artifact_exposes_technical_capability_not_execution_authority():
+def test_artifact_exposes_no_executable_certification_without_product_authority():
     _, _, artifact = _artifact()
-    artifact.require_use(ProviderCertifiedUse.SUPERVISED_EXECUTION_CAPABLE)
+    with pytest.raises(ProviderCertificationError):
+        artifact.require_use(ProviderCertifiedUse.OBSERVED_EXECUTABLE)
+    with pytest.raises(ProviderCertificationError):
+        artifact.require_use(ProviderCertifiedUse.SUPERVISED_EXECUTION_CAPABLE)
     payload = artifact.to_canonical_dict()
     for forbidden in (
         "execution_authorized",

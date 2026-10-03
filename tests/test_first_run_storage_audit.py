@@ -104,6 +104,7 @@ def test_audit_rejects_workspace_nested_inside_webview_storage(
 
     evidence = _read(output)
     assert evidence["status"] == "FAIL"
+    assert evidence["failure_stage"] == "storage_root_separation"
     assert evidence["error_type"] == "ValueError"
     assert evidence["real_money_execution"] is False
     assert evidence["human_tested"] is False

@@ -493,6 +493,25 @@ def _make_resolver() -> FunctionType:
     goal_load_code = goal_load.__code__
     goal_provenance = provenance_for
     goal_provenance_code = goal_provenance.__code__
+    goal_provenance_globals = goal_provenance.__globals__
+    goal_contract_sha256 = goal_provenance_globals.get("contract_sha256")
+    goal_canonical_json = goal_provenance_globals.get("_canonical_json")
+    goal_to_payload = goal_provenance_globals.get("economic_goal_to_payload")
+    if (
+        type(goal_contract_sha256) is not FunctionType
+        or type(goal_canonical_json) is not FunctionType
+        or type(goal_to_payload) is not FunctionType
+    ):
+        raise RuntimeError("economic-goal provenance dependency authority is unavailable")
+    goal_contract_sha256_code = goal_contract_sha256.__code__
+    goal_canonical_json_code = goal_canonical_json.__code__
+    goal_to_payload_code = goal_to_payload.__code__
+    goal_provenance_hashlib = goal_provenance_globals.get("hashlib")
+    goal_provenance_json = goal_provenance_globals.get("json")
+    if goal_provenance_hashlib is None or goal_provenance_json is None:
+        raise RuntimeError("economic-goal provenance primitive authority is unavailable")
+    goal_provenance_sha256 = goal_provenance_hashlib.sha256
+    goal_provenance_json_dumps = goal_provenance_json.dumps
     book_type = PaperBook
     book_load = book_type.load
     book_load_function = book_load.__func__
@@ -677,6 +696,16 @@ def _make_resolver() -> FunctionType:
             or goal_parser.__globals__.get("economic_goal_from_payload") is not goal_from_payload
             or goal_from_payload.__code__ is not goal_from_payload_code
             or goal_provenance.__code__ is not goal_provenance_code
+            or goal_provenance_globals.get("contract_sha256") is not goal_contract_sha256
+            or goal_contract_sha256.__code__ is not goal_contract_sha256_code
+            or goal_provenance_globals.get("_canonical_json") is not goal_canonical_json
+            or goal_canonical_json.__code__ is not goal_canonical_json_code
+            or goal_provenance_globals.get("economic_goal_to_payload") is not goal_to_payload
+            or goal_to_payload.__code__ is not goal_to_payload_code
+            or goal_provenance_globals.get("hashlib") is not goal_provenance_hashlib
+            or goal_provenance_hashlib.sha256 is not goal_provenance_sha256
+            or goal_provenance_globals.get("json") is not goal_provenance_json
+            or goal_provenance_json.dumps is not goal_provenance_json_dumps
             or book_load.__func__ is not book_load_function
             or book_load_function.__code__ is not book_load_code
             or book_load.__self__ is not book_load_owner
@@ -788,6 +817,17 @@ def _make_resolver() -> FunctionType:
             or goal_strict_json.__code__ is not goal_strict_json_code
             or goal_parser.__globals__.get("economic_goal_from_payload") is not goal_from_payload
             or goal_from_payload.__code__ is not goal_from_payload_code
+            or goal_provenance.__code__ is not goal_provenance_code
+            or goal_provenance_globals.get("contract_sha256") is not goal_contract_sha256
+            or goal_contract_sha256.__code__ is not goal_contract_sha256_code
+            or goal_provenance_globals.get("_canonical_json") is not goal_canonical_json
+            or goal_canonical_json.__code__ is not goal_canonical_json_code
+            or goal_provenance_globals.get("economic_goal_to_payload") is not goal_to_payload
+            or goal_to_payload.__code__ is not goal_to_payload_code
+            or goal_provenance_globals.get("hashlib") is not goal_provenance_hashlib
+            or goal_provenance_hashlib.sha256 is not goal_provenance_sha256
+            or goal_provenance_globals.get("json") is not goal_provenance_json
+            or goal_provenance_json.dumps is not goal_provenance_json_dumps
             or goal_store_init.__globals__.get("Path") is not goal_store_path_type
             or canonical_path_type.read_bytes is not path_read_bytes
             or canonical_path_type.read_text is not path_read_text

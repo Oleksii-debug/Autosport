@@ -24,7 +24,11 @@ from autosport.paper_execution_reality import (
     PaperExecutionLedger,
     PaperExecutionModelConfig,
 )
-from autosport.paper_strategy import Forecast, PaperValueAgent
+from autosport.paper_strategy import (
+    Forecast,
+    PaperDecisionReconciliationRequired,
+    PaperValueAgent,
+)
 from autosport.predictive_authority import resolve_authoritative_forecast_ref
 from autosport.risk import PaperRiskPolicy
 from autosport.uncertainty_sizing import (
@@ -286,12 +290,13 @@ class PaperValueUncertaintyAbstentionTests(unittest.TestCase):
     @staticmethod
     def _sizing_policy(
         *,
+        policy_id: str = "paper-value-canonical-sizing-v1",
         max_uncertainty_width: Decimal = Decimal("0.20"),
         max_bankroll_fraction: Decimal = Decimal("0.10"),
         fractional_kelly: Decimal = Decimal("1"),
     ) -> UncertaintySizingPolicy:
         return UncertaintySizingPolicy(
-            policy_id="paper-value-canonical-sizing-v1",
+            policy_id=policy_id,
             fractional_kelly=fractional_kelly,
             max_bankroll_fraction=max_bankroll_fraction,
             max_uncertainty_width=max_uncertainty_width,
@@ -523,6 +528,10 @@ class PaperValueUncertaintyAbstentionTests(unittest.TestCase):
                 sizing_decision.decision_fingerprint_sha256,
             )
             self.assertEqual(
+                payload["uncertainty_sizing_bankroll"],
+                str(sizing_decision.bankroll),
+            )
+            self.assertEqual(
                 payload["uncertainty_sizing_stake_ceiling"],
                 str(sizing_decision.stake_ceiling),
             )
@@ -530,6 +539,37 @@ class PaperValueUncertaintyAbstentionTests(unittest.TestCase):
                 Decimal(payload["requested_stake"]),
                 sizing_decision.stake_ceiling,
             )
+
+            # A restart observes the post-execution PaperBook balance, but must
+            # re-resolve the historical sizing decision against the exact
+            # decision-time bankroll persisted in the durable record.
+            ticket_ids = set(context.paper_book.tickets)
+            self.assertLess(context.paper_book.balance, sizing_decision.bankroll)
+            self._agent(
+                goal,
+                forecast,
+                predictive_ref=authorized_ref,
+                sizing_evidence=sizing_evidence,
+                sizing_policy=sizing_policy,
+            ).on_market_event(event, context)
+            self.assertEqual(set(context.paper_book.tickets), ticket_ids)
+
+            # Policy identity is part of the durable sizing decision even when
+            # the numerical ceiling aliases exactly.
+            changed_policy = self._sizing_policy(
+                policy_id="paper-value-canonical-sizing-v2",
+            )
+            with self.assertRaisesRegex(
+                PaperDecisionReconciliationRequired,
+                "uncertainty sizing authority",
+            ):
+                self._agent(
+                    goal,
+                    forecast,
+                    predictive_ref=authorized_ref,
+                    sizing_evidence=sizing_evidence,
+                    sizing_policy=changed_policy,
+                ).on_market_event(event, context)
 
     def test_resolver_minted_uncertainty_erases_positive_point_edge_before_material_action(
         self,

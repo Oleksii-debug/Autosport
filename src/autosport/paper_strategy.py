@@ -277,6 +277,7 @@ class PaperValueAgent:
         context: AgentContext,
         goal,
         qualified_probability: Decimal,
+        sizing_bankroll: Decimal,
     ) -> UncertaintySizingDecision | None:
         """Resolve the existing canonical uncertainty-sizing prerequisite.
 
@@ -358,7 +359,7 @@ class PaperValueAgent:
                 decision_ts=event.observed_ts,
                 bankroll_id=goal.bankroll_id,
                 currency=goal.currency,
-                bankroll=context.paper_book.balance,
+                bankroll=sizing_bankroll,
             )
             decision = evaluate_uncertainty_sizing(
                 evidence,
@@ -656,12 +657,37 @@ class PaperValueAgent:
 
         sizing_decision: UncertaintySizingDecision | None = None
         if goal is not None and type(forecast) is ForecastRecord:
+            sizing_bankroll = context.paper_book.balance
+            if persisted is not None:
+                raw_sizing_bankroll = persisted.payload.get(
+                    "uncertainty_sizing_bankroll"
+                )
+                if type(raw_sizing_bankroll) is not str:
+                    raise PaperDecisionReconciliationRequired(
+                        "durable paper-value decision lacks canonical uncertainty "
+                        "sizing bankroll"
+                    )
+                try:
+                    sizing_bankroll = Decimal(raw_sizing_bankroll)
+                except Exception as exc:
+                    raise PaperDecisionReconciliationRequired(
+                        "durable paper-value uncertainty sizing bankroll is invalid"
+                    ) from exc
+                if (
+                    not sizing_bankroll.is_finite()
+                    or sizing_bankroll <= 0
+                    or str(sizing_bankroll) != raw_sizing_bankroll
+                ):
+                    raise PaperDecisionReconciliationRequired(
+                        "durable paper-value uncertainty sizing bankroll is invalid"
+                    )
             sizing_decision = self._canonical_uncertainty_sizing_decision(
                 forecast=forecast,
                 event=event,
                 context=context,
                 goal=goal,
                 qualified_probability=qualified_probability,
+                sizing_bankroll=sizing_bankroll,
             )
             sizing_eligible = (
                 sizing_decision is not None
@@ -716,6 +742,8 @@ class PaperValueAgent:
                         != policy.fingerprint_sha256
                         or payload.get("uncertainty_sizing_decision_fingerprint")
                         != sizing_decision.decision_fingerprint_sha256
+                        or payload.get("uncertainty_sizing_bankroll")
+                        != str(sizing_decision.bankroll)
                         or payload.get("uncertainty_sizing_stake_ceiling")
                         != str(sizing_decision.stake_ceiling)
                         or payload.get(
@@ -871,6 +899,8 @@ class PaperValueAgent:
                                     policy.fingerprint_sha256,
                                 "uncertainty_sizing_decision_fingerprint":
                                     sizing_decision.decision_fingerprint_sha256,
+                                "uncertainty_sizing_bankroll":
+                                    str(sizing_decision.bankroll),
                                 "uncertainty_sizing_stake_ceiling":
                                     str(sizing_decision.stake_ceiling),
                                 "uncertainty_sizing_conservative_ev_per_stake":

@@ -200,6 +200,44 @@ def test_scoped_production_api_uses_captured_base_cancel_after_class_mutation(
     ]
 
 
+def test_scoped_production_api_rejects_in_place_base_cancel_code_rebind() -> None:
+    api = WorkflowScopedGitHubApi(
+        repository="owner/repo",
+        token="token",
+        workflow_id=1,
+        workflow_name="CI",
+    )
+    original_code = GitHubApi.cancel.__code__
+
+    def make_forged_cancel():
+        allowed_http_error_type = object()
+        cancellation_accepted = object()
+        request_impl = object()
+
+        def forged_cancel(self, run_id):
+            del self, run_id
+            return (
+                allowed_http_error_type,
+                cancellation_accepted,
+                request_impl,
+            )
+
+        return forged_cancel
+
+    forged_code = make_forged_cancel().__code__
+    assert len(forged_code.co_freevars) == len(original_code.co_freevars)
+
+    try:
+        GitHubApi.cancel.__code__ = forged_code
+        with pytest.raises(
+            CancellationError,
+            match="canonical base cancellation authority changed",
+        ):
+            api.cancel(123)
+    finally:
+        GitHubApi.cancel.__code__ = original_code
+
+
 @pytest.mark.parametrize(
     ("status", "body"),
     [

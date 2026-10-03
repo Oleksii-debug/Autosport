@@ -27,11 +27,42 @@ from autosport.campaign_provider_cycle_capture import (
 )
 from autosport.causal_collector import CollectorDeltaStore
 from autosport.campaign_forward_universe_cycle_binding import (
+    CampaignForwardEvidenceVerification,
     CampaignForwardUniverseCycleBindingError,
     resolve_campaign_forward_universe_cycle_authority,
+    verify_campaign_forward_evidence,
 )
-from autosport.forward_evidence_completeness import ForwardEvidenceProtocolEnvelope
-from autosport.provider_evaluation_universe import ProviderEvaluationUniverseStore
+from autosport.evaluation_universe import (
+    AttritionReason,
+    EvaluationRow,
+    EvaluationUniverseLedger,
+    FunnelStage,
+    SlotState,
+)
+from autosport.forward_evaluation_universe_binding import (
+    FORWARD_UNIVERSE_RULE_ID,
+    FORWARD_UNIVERSE_RULE_SHA256,
+    resolve_forward_universe_members,
+)
+from autosport.forward_evidence_completeness import (
+    AuthoritativeSourceReceipt,
+    CampaignCloseEnvelope,
+    CampaignEvidence,
+    CostEvidence,
+    DecisionState,
+    ForwardEvidenceProtocolEnvelope,
+    ForwardOpportunityEnvelope,
+    RevealBoundaryReceipt,
+    UniverseResult,
+    VerificationCode,
+    build_cohort_root,
+    verify_campaign,
+)
+from autosport.provider_evaluation_universe import (
+    ProviderEvaluationUniverseStore,
+    build_frozen_universe_from_complete_game_board,
+    complete_game_board_member_specs,
+)
 from autosport.forward_universe_precommit_authority import (
     ForwardUniversePrecommitLocator,
 )
@@ -51,6 +82,8 @@ F = "f" * 64
 ZERO = "0" * 64
 ONE = "1" * 64
 CAPTURED_AT = "2100-01-01T06:00:00.500000Z"
+PROTOCOL_SHA = "9" * 64
+FRESHNESS_SHA = "8" * 64
 
 
 class _FakeSseResponse:
@@ -124,6 +157,24 @@ def _frame() -> dict[str, object]:
                 "last_update": "2100-01-01T05:59:54Z",
             },
         ],
+    }
+
+
+def _empty_frame() -> dict[str, object]:
+    return {
+        "type": "initial_state",
+        "sport_key": "table_tennis",
+        "snapshot_scope": "current_game_board",
+        "snapshot_complete": True,
+        "truncated": False,
+        "resume_mode": "replace",
+        "partial": False,
+        "missing_books": [],
+        "truncated_books": [],
+        "snapshot_partial_reasons": [],
+        "count": 0,
+        "timestamp": 4102466400,
+        "data": [],
     }
 
 
@@ -275,6 +326,205 @@ def test_provider_io_occurs_only_after_authorized_scheduled_start(
     assert exact["attempted_at"] == "2100-01-01T06:00:00+00:00"
     assert exact["completed_at"] == "2100-01-01T06:00:01+00:00"
     assert exact["artifact_id"] == receipt.artifact_id
+
+
+def test_cycle_bound_structural_verifier_replaces_caller_receipts_and_fixes_scope(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    locator, store, spec, provider_store = _setup(tmp_path)
+    monkeypatch.setattr(
+        provider_module,
+        "urlopen",
+        lambda _request, _timeout: _FakeSseResponse(_empty_frame()),
+    )
+    monkeypatch.setattr(provider_module, "_default_clock", lambda: CAPTURED_AT)
+
+    snapshot, cycle_receipt = capture_campaign_complete_game_board(
+        precommit_locator=locator,
+        store=store,
+        source_spec=spec,
+        evidence_store=provider_store,
+        request=_request(),
+        api_key="secret-value",
+        timeout_seconds=3.0,
+        clock=_clock(),
+    )
+    members = complete_game_board_member_specs(snapshot, event_lifecycle=None)
+    assert len(members) == 1
+    member = members[0]
+    row = EvaluationRow(
+        row_key=member.row_key,
+        campaign_id="campaign-cycle-capture-test",
+        research_protocol_id="protocol-1",
+        protocol_sha256=PROTOCOL_SHA,
+        universe_id="universe-1",
+        slot_state=SlotState.NO_EVENT,
+        decision_stage=FunnelStage.OBSERVED_SLOT,
+        attrition_reason=AttritionReason.NO_EVENT,
+        sport=snapshot.request.sport_key,
+        provider_id="parlayapi",
+        source_id=snapshot.request.source_id,
+        event_id=None,
+        market_id=None,
+        selection_id=None,
+        source_at=member.source_at,
+        received_at=CAPTURED_AT,
+        committed_at=CAPTURED_AT,
+        detection_at=None,
+        decision_at=None,
+        quote_set_sha256=None,
+        freshness_policy_sha256=FRESHNESS_SHA,
+        strategy_version_id="strategy-v17",
+        model_version_id=None,
+        config_sha256=ONE,
+        portfolio_before_id="portfolio-1",
+        economic_goal_id="goal-1",
+        risk_policy_id="risk-1",
+        terminal_space_proof_id=None,
+        settlement_proof_id=None,
+        execution_model_id=None,
+        execution_run_id=None,
+        execution_plan_id=None,
+        execution_action_id=None,
+        decision_quote_id=None,
+        cost_contract_sha256=C,
+        outcome_reveal_not_before=None,
+        dependence_cluster_keys=("source:table_tennis",),
+    )
+    universe = build_frozen_universe_from_complete_game_board(
+        snapshot=snapshot,
+        event_lifecycle=None,
+        authority_id="provider-universe-1",
+        session_id="session-1",
+        universe_id="universe-1",
+        campaign_id="campaign-cycle-capture-test",
+        research_protocol_id="protocol-1",
+        protocol_sha256=PROTOCOL_SHA,
+        evaluation_not_before="2100-01-01T06:00:02Z",
+        frozen_at="2100-01-01T06:00:03Z",
+        rows=(row,),
+    )
+    universe_store = ProviderEvaluationUniverseStore(
+        tmp_path / "provider-universe-workspace",
+        authority_id="provider-universe-1",
+        source_id=spec.source_id,
+        authority_root=tmp_path / "provider-universe-authority",
+    )
+    universe_store.save(EvaluationUniverseLedger(universe))
+
+    protocol = ForwardEvidenceProtocolEnvelope(
+        campaign_id="campaign-cycle-capture-test",
+        scientific_protocol_sha256=PROTOCOL_SHA,
+        candidate_universe_rule_id=FORWARD_UNIVERSE_RULE_ID,
+        candidate_universe_rule_sha256=FORWARD_UNIVERSE_RULE_SHA256,
+        forward_evaluation_policy_sha256="7" * 64,
+        runtime_identity_sha256="6" * 64,
+        baseline_set_sha256="5" * 64,
+        protective_metric_set_sha256="4" * 64,
+        cost_policy_sha256="3" * 64,
+        precommit_anchor_lower=datetime(2099, 12, 31, 19, 0, tzinfo=timezone.utc),
+        precommit_anchor_upper=datetime(2099, 12, 31, 19, 30, tzinfo=timezone.utc),
+    )
+    expectations = resolve_forward_universe_members(
+        store=universe_store,
+        protocol=protocol,
+        precommit=locator,
+    )
+    assert len(expectations) == 1
+    expected = expectations[0]
+    opportunity = ForwardOpportunityEnvelope(
+        campaign_id=protocol.campaign_id,
+        protocol_sha256=protocol.protocol_sha256,
+        candidate_sequence=1,
+        opportunity_id=expected.opportunity_id,
+        source_receipt_id=expected.source_receipt_id,
+        source_receipt_sha256=expected.source_receipt_sha256,
+        causal_cutoff=expected.causal_cutoff,
+        observed_lower=expected.observed_lower,
+        observed_upper=expected.observed_upper,
+        universe_rule_result=expected.universe_rule_result,
+        universe_rule_reason_code=expected.universe_rule_reason_code,
+        provider_acquisition_state=expected.provider_acquisition_state,
+        reveal_boundary_receipt_id="boundary-1",
+        runtime_identity_sha256=protocol.runtime_identity_sha256,
+        predecessor_opportunity_sha256="GENESIS",
+        decision_state=DecisionState.NO_BET,
+    )
+    root = build_cohort_root(
+        (opportunity,),
+        anchor_lower=datetime(2100, 1, 1, 6, 0, 2, tzinfo=timezone.utc),
+        anchor_upper=datetime(2100, 1, 1, 6, 0, 2, 100000, tzinfo=timezone.utc),
+    )
+    boundary = RevealBoundaryReceipt(
+        receipt_id="boundary-1",
+        campaign_id=protocol.campaign_id,
+        event_or_market_id="empty-board-window",
+        provider_or_authority_id="provider-universe-1",
+        boundary_rule_id="test-empty-board-boundary-v1",
+        source_receipt_id=expected.source_receipt_id,
+        source_sha256=expected.source_receipt_sha256,
+        boundary_lower=datetime(2100, 1, 1, 6, 0, 10, tzinfo=timezone.utc),
+        boundary_upper=datetime(2100, 1, 1, 6, 0, 11, tzinfo=timezone.utc),
+        uncertainty_basis="deterministic integration fixture",
+    )
+    close = CampaignCloseEnvelope(
+        campaign_id=protocol.campaign_id,
+        protocol_sha256=protocol.protocol_sha256,
+        terminal_cohort_root_sha256=root.cohort_root_sha256,
+        final_candidate_count=1,
+        first_sequence=1,
+        last_sequence=1,
+        close_reason="integration fixture complete",
+        anchor_lower=datetime(2100, 1, 1, 6, 0, 3, tzinfo=timezone.utc),
+        anchor_upper=datetime(2100, 1, 1, 6, 0, 3, 100000, tzinfo=timezone.utc),
+    )
+    forged = AuthoritativeSourceReceipt(
+        receipt_id="forged-receipt",
+        receipt_sha256="f" * 64,
+        campaign_id=protocol.campaign_id,
+        opportunity_id="forged-opportunity",
+        universe_rule_result=UniverseResult.EXCLUDED,
+    )
+    evidence = CampaignEvidence(
+        protocol=protocol,
+        opportunities=(opportunity,),
+        cohort_roots=(root,),
+        closes=(close,),
+        reveal_boundaries=(boundary,),
+        authoritative_receipts=(forged,),
+        denominator_sequences=(1,),
+        cost_evidence=(CostEvidence(1, True),),
+    )
+
+    raw = verify_campaign(evidence)
+    assert raw.ok is False
+    assert VerificationCode.COHORT_OMISSION_DETECTED in raw.codes
+
+    result = verify_campaign_forward_evidence(
+        precommit_locator=locator,
+        collector_store=store,
+        source_spec=spec,
+        cycle_receipt=cycle_receipt,
+        provider_evidence_store=provider_store,
+        universe_store=universe_store,
+        event_lifecycle=None,
+        evidence=evidence,
+    )
+
+    assert type(result) is CampaignForwardEvidenceVerification
+    assert result.structural_ok is True
+    assert result.structural_codes == ("PASS",)
+    assert result.verification_scope == "CYCLE_BOUND_PROVIDER_UNIVERSE_STRUCTURAL_ONLY"
+    assert result.provider_universe_authority_resolved is True
+    assert result.promotion_ready is False
+    assert result.real_money_ready is False
+    assert result.candidate_count == 1
+    assert result.prospective_evaluation_plan_sha256 == campaign_evaluation_plan_sha256(spec)
+    assert result.universe_sha256 == universe.universe_sha256
+    assert result.membership_sha256 == universe.membership_sha256
+    assert len(result.campaign_cycle_authority_sha256) == 64
+    assert len(result.receipt_sha256) == 64
 
 
 def test_delayed_collector_start_after_precommit_window_blocks_before_provider_io(

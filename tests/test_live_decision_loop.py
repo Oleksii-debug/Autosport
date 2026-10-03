@@ -941,6 +941,33 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
                 ],
             )
 
+    def test_custom_observer_provider_gap_requires_identified_failed_health(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(
+                    workspace,
+                    [ProviderUnavailableError("provider unavailable")],
+                ),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START + timedelta(seconds=1)),
+            )
+            loop.register_input(
+                "input-a",
+                selection_ids="selection-a",
+            )
+
+            result = loop.run_cycle()
+
+            self.assertEqual(result.status, LiveCycleStatus.BACKPRESSURE)
+            self.assertIn("durable failed provider health evidence", result.detail)
+            self.assertFalse((workspace / "decisions.jsonl").exists())
+            self.assertFalse(
+                (workspace / PersistentLiveDecisionLoop.PROGRESS_FILE_NAME).exists()
+            )
+            self.assertFalse((workspace / "source_health.json").exists())
+
     def test_custom_observer_provider_gap_rejects_only_healthy_health_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

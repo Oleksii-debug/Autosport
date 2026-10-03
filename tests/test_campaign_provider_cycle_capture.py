@@ -91,7 +91,10 @@ def _private_provider_acquisition_origin():
     with provider_module._test_acquisition_origin(
         _capability=provider_module._TEST_ACQUISITION_CAPABILITY,
     ):
-        yield
+        with capture_module._test_campaign_clock_origin(
+            _capability=capture_module._TEST_CAMPAIGN_CLOCK_CAPABILITY,
+        ):
+            yield
 
 
 class _FakeSseResponse:
@@ -1856,3 +1859,97 @@ def test_public_provider_assert_rebind_is_not_used_by_durable_save(
 
     assert receipt.provider_evidence_sha256 == snapshot.evidence_sha256
     assert hostile_calls == []
+
+
+
+def test_campaign_test_clock_context_rejects_wrong_capability():
+    with pytest.raises(TypeError, match="private capability"):
+        with capture_module._test_campaign_clock_origin(_capability=object()):
+            pass
+
+
+def test_production_capture_rejects_caller_clock_without_test_capability(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    locator, store, spec, provider_store = _setup(tmp_path)
+    monkeypatch.setattr(
+        provider_module,
+        "urlopen",
+        lambda _request, _timeout: _FakeSseResponse(_frame()),
+    )
+    monkeypatch.setattr(provider_module, "_default_clock", lambda: CAPTURED_AT)
+
+    token = capture_module._CANONICAL_TEST_CAMPAIGN_CLOCK_ORIGIN.set(None)
+    try:
+        with pytest.raises(
+            CampaignProviderCycleCaptureIntegrityError,
+            match="clock must be product-owned",
+        ):
+            capture_campaign_complete_game_board(
+                precommit_locator=locator,
+                store=store,
+                source_spec=spec,
+                evidence_store=provider_store,
+                request=_request(),
+                api_key="secret-value",
+                timeout_seconds=3.0,
+                clock=_clock(),
+            )
+    finally:
+        capture_module._CANONICAL_TEST_CAMPAIGN_CLOCK_ORIGIN.reset(token)
+
+
+def test_production_capture_accepts_only_canonical_default_clock_identity(
+    tmp_path: Path,
+) -> None:
+    locator, store, spec, provider_store = _setup(tmp_path)
+    token = capture_module._CANONICAL_TEST_CAMPAIGN_CLOCK_ORIGIN.set(None)
+    try:
+        assert capture_module.capture_campaign_complete_game_board.__wrapped__.__defaults__ is None
+        assert (
+            capture_module.capture_campaign_complete_game_board.__wrapped__.__kwdefaults__[
+                "clock"
+            ]
+            is capture_module._CANONICAL_CAMPAIGN_CLOCK
+        )
+    finally:
+        capture_module._CANONICAL_TEST_CAMPAIGN_CLOCK_ORIGIN.reset(token)
+
+
+def test_campaign_clock_witness_double_rebind_fails_before_clock_execution(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    locator, store, spec, provider_store = _setup(tmp_path)
+    calls: list[str] = []
+
+    def hostile_clock() -> str:
+        calls.append("clock")
+        raise AssertionError("hostile clock executed")
+
+    monkeypatch.setattr(
+        capture_module,
+        "_CANONICAL_CAMPAIGN_CLOCK",
+        hostile_clock,
+    )
+    monkeypatch.setattr(
+        capture_module,
+        "_CANONICAL_CAMPAIGN_CLOCK_CODE",
+        hostile_clock.__code__,
+    )
+
+    with pytest.raises(
+        CampaignProviderCycleCaptureIntegrityError,
+        match="dispatch authority is rebound|campaign provider acquisition authority changed",
+    ):
+        capture_campaign_complete_game_board(
+            precommit_locator=locator,
+            store=store,
+            source_spec=spec,
+            evidence_store=provider_store,
+            request=_request(),
+            api_key="secret-value",
+        )
+
+    assert calls == []

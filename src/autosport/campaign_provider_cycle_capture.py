@@ -15,7 +15,7 @@ import json
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Callable
 
 from . import provider_observation_authority as _provider_observation_module
@@ -672,6 +672,24 @@ def capture_campaign_complete_game_board(
     require_seams(store, evidence_store)
     attempted_at = instant(raw_attempted_at, "collector attempted_at")
     attempted_instant = datetime.fromisoformat(attempted_at)
+    slot_due_instant = datetime.fromisoformat(
+        instant(slot.get("due_at"), "collector slot due_at")
+    )
+    try:
+        slot_deadline_instant = slot_due_instant + timedelta(
+            seconds=source_spec.interval_seconds
+        )
+    except (OverflowError, ValueError) as exc:
+        raise CampaignProviderCycleCaptureIntegrityError(
+            "collector fixed schedule slot window is not representable"
+        ) from exc
+    if (
+        attempted_instant < slot_due_instant
+        or attempted_instant >= slot_deadline_instant
+    ):
+        raise CampaignProviderCycleCaptureIntegrityError(
+            "collector START falls outside precommitted fixed schedule slot window"
+        )
     campaign_not_before = datetime.fromisoformat(
         instant(campaign.observation_not_before, "campaign observation_not_before")
     )
@@ -718,6 +736,10 @@ def capture_campaign_complete_game_board(
         if provider_captured_instant < attempted_instant:
             raise CampaignProviderCycleCaptureIntegrityError(
                 "provider observation predates authorized collector START"
+            )
+        if provider_captured_instant >= slot_deadline_instant:
+            raise CampaignProviderCycleCaptureIntegrityError(
+                "provider observation falls outside precommitted fixed schedule slot window"
             )
         raw_completed_at = effective_clock()
         require_stable_dispatch()

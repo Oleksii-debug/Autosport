@@ -980,6 +980,108 @@ def test_live_pr_boundary_bypasses_transient_nested_request_shadow(
     assert not forged_invoked["value"]
 
 
+def test_live_pr_boundary_coordinated_class_rebind_cannot_forge_head(
+    monkeypatch,
+) -> None:
+    api = WorkflowScopedGitHubApi(
+        repository="owner/repo",
+        token="token",
+        workflow_id=356678400,
+        workflow_name="CI",
+    )
+    canonical_request = scoped_controller.GitHubApi._request
+
+    class ForgedQualification:
+        def __init__(self, head_sha: str, integration_capable: bool) -> None:
+            del head_sha, integration_capable
+            self.head_sha = STALE_HEAD
+            self.integration_capable = True
+
+    forged_init = ForgedQualification.__dict__["__init__"]
+    authority_globals = scoped_controller._pull_request_qualification_state.__globals__
+    monkeypatch.setattr(
+        scoped_controller,
+        "PullRequestQualification",
+        ForgedQualification,
+    )
+    monkeypatch.setitem(
+        authority_globals,
+        "PullRequestQualification",
+        ForgedQualification,
+    )
+    # Recreate every legacy mutable witness binding from the V5 falsifier.
+    # The composition-time reader must ignore all of them.
+    monkeypatch.setitem(
+        authority_globals,
+        "_PULL_REQUEST_QUALIFICATION_TYPE",
+        ForgedQualification,
+    )
+    monkeypatch.setitem(
+        authority_globals,
+        "_PULL_REQUEST_QUALIFICATION_DICT_DESCRIPTOR",
+        ForgedQualification.__dict__["__dict__"],
+    )
+    monkeypatch.setitem(
+        authority_globals,
+        "_PULL_REQUEST_QUALIFICATION_INIT",
+        forged_init,
+    )
+    monkeypatch.setitem(
+        authority_globals,
+        "_PULL_REQUEST_QUALIFICATION_INIT_CODE",
+        forged_init.__code__,
+    )
+    monkeypatch.setitem(
+        authority_globals,
+        "_PULL_REQUEST_QUALIFICATION_FIELD_CLASS_WITNESSES",
+        tuple(
+            (
+                name,
+                name in ForgedQualification.__dict__,
+                ForgedQualification.__dict__.get(name),
+            )
+            for name in ("head_sha", "integration_capable")
+        ),
+    )
+
+    class FakeResponse:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, _exc_type, _exc, _tb):
+            return False
+
+        def read(self) -> bytes:
+            return (
+                b'{"state":"open","draft":false,'
+                b'"head":{"sha":"'
+                + HEAD.encode("ascii")
+                + b'","repo":{"full_name":"owner/repo"}},'
+                b'"base":{"repo":{"full_name":"owner/repo"}}}'
+            )
+
+    def canonical_urlopen(_request, *, timeout: int):
+        assert timeout == 20
+        return FakeResponse()
+
+    monkeypatch.setitem(
+        canonical_request.__globals__,
+        "urlopen",
+        canonical_urlopen,
+    )
+
+    forged = _trusted_live_pr_qualification(api, 303)
+    assert type(forged) is ForgedQualification
+    assert forged.head_sha == STALE_HEAD
+    with pytest.raises(
+        CancellationError,
+        match="pull request qualification authority changed",
+    ):
+        scoped_controller._pull_request_qualification_state(forged)
+
+
 def test_controller_scheduler_coalesces_all_prs_per_source_workflow() -> None:
     text = Path(".github/workflows/pr-qualification-supersession.yml").read_text(
         encoding="utf-8"

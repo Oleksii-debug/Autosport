@@ -316,6 +316,16 @@ _BOUND_SUPERVISED_DIGEST_CODE = getattr(
     "__code__",
     None,
 )
+_BOUND_SUPERVISED_JSON_DUMPS = getattr(
+    getattr(_supervised_execution, "json", None),
+    "dumps",
+    None,
+)
+_BOUND_SUPERVISED_HASHLIB_SHA256 = getattr(
+    getattr(_supervised_execution, "hashlib", None),
+    "sha256",
+    None,
+)
 _BOUND_SUPERVISED_PLAN_VERIFY = BoundSupervisedExecutionPlan.verify_binding
 _BOUND_SUPERVISED_PLAN_VERIFY_CODE = getattr(
     _BOUND_SUPERVISED_PLAN_VERIFY,
@@ -361,6 +371,16 @@ _PORTFOLIO_INTENT_SHA256_PAYLOAD = getattr(_portfolio_plan, "_sha256_payload", N
 _PORTFOLIO_INTENT_SHA256_PAYLOAD_CODE = getattr(
     _PORTFOLIO_INTENT_SHA256_PAYLOAD,
     "__code__",
+    None,
+)
+_PORTFOLIO_INTENT_JSON_DUMPS = getattr(
+    getattr(_portfolio_plan, "json", None),
+    "dumps",
+    None,
+)
+_PORTFOLIO_INTENT_HASHLIB_SHA256 = getattr(
+    getattr(_portfolio_plan, "hashlib", None),
+    "sha256",
     None,
 )
 _PAPER_RISK_POLICY_TYPE = getattr(_risk, "PaperRiskPolicy", None)
@@ -601,6 +621,8 @@ def _canonical_denomination_dispatch(
     _bound_witness_code=_BOUND_SUPERVISED_PLAN_WITNESS_CODE,
     _bound_digest=_BOUND_SUPERVISED_DIGEST,
     _bound_digest_code=_BOUND_SUPERVISED_DIGEST_CODE,
+    _bound_json_dumps=_BOUND_SUPERVISED_JSON_DUMPS,
+    _bound_sha256=_BOUND_SUPERVISED_HASHLIB_SHA256,
     _bound_verify=_BOUND_SUPERVISED_PLAN_VERIFY,
     _bound_verify_code=_BOUND_SUPERVISED_PLAN_VERIFY_CODE,
     _bound_assert=_ASSERT_BOUND_SUPERVISED_PLAN_AUTHORITY,
@@ -731,6 +753,10 @@ def _canonical_denomination_dispatch(
         or getattr(_bound_witness, "__code__", None) is not _bound_witness_code
         or getattr(_supervised_execution, "_digest", None) is not _bound_digest
         or getattr(_bound_digest, "__code__", None) is not _bound_digest_code
+        or getattr(getattr(_supervised_execution, "json", None), "dumps", None)
+        is not _bound_json_dumps
+        or getattr(getattr(_supervised_execution, "hashlib", None), "sha256", None)
+        is not _bound_sha256
         or live_bound_verify is not _bound_verify
         or getattr(_bound_verify, "__code__", None) is not _bound_verify_code
         or live_bound_assert is not _bound_assert
@@ -807,12 +833,16 @@ def _canonical_intent_denomination_dispatch(
     _intent_candidate_getter_code=_OPPORTUNITY_INTENT_CANDIDATE_GETTER_CODE,
     _intent_hash_payload=_PORTFOLIO_INTENT_SHA256_PAYLOAD,
     _intent_hash_payload_code=_PORTFOLIO_INTENT_SHA256_PAYLOAD_CODE,
+    _intent_json_dumps=_PORTFOLIO_INTENT_JSON_DUMPS,
+    _intent_sha256=_PORTFOLIO_INTENT_HASHLIB_SHA256,
     _risk_policy_type=_PAPER_RISK_POLICY_TYPE,
     _risk_candidate_descriptor=_PAPER_RISK_CANDIDATE_DESCRIPTOR,
     _risk_candidate_sha=_PAPER_RISK_CANDIDATE_SHA256,
     _risk_candidate_sha_code=_PAPER_RISK_CANDIDATE_SHA256_CODE,
     _risk_hash_payload=_RISK_SHA256_PAYLOAD,
     _risk_hash_payload_code=_RISK_SHA256_PAYLOAD_CODE,
+    _risk_json_dumps=_RISK_JSON_DUMPS,
+    _risk_sha256=_RISK_HASHLIB_SHA256,
     _context_type=_PROPOSED_RISK_CONTEXT_TYPE,
     _provider_accounts_descriptor=_RISK_CONTEXT_PROVIDER_ACCOUNTS_DESCRIPTOR,
     _bankroll_descriptor=_RISK_CONTEXT_BANKROLL_DESCRIPTOR,
@@ -838,6 +868,10 @@ def _canonical_intent_denomination_dispatch(
         or getattr(_portfolio_plan, "_sha256_payload", None) is not _intent_hash_payload
         or getattr(_intent_hash_payload, "__code__", None)
         is not _intent_hash_payload_code
+        or getattr(getattr(_portfolio_plan, "json", None), "dumps", None)
+        is not _intent_json_dumps
+        or getattr(getattr(_portfolio_plan, "hashlib", None), "sha256", None)
+        is not _intent_sha256
         or live_risk_policy_type is not _risk_policy_type
         or portfolio_risk_policy_type is not _risk_policy_type
         or vars(_risk_policy_type).get("risk_of_ruin_candidate_sha256")
@@ -848,6 +882,8 @@ def _canonical_intent_denomination_dispatch(
         is not _risk_candidate_sha_code
         or getattr(_risk, "_sha256_payload", None) is not _risk_hash_payload
         or getattr(_risk_hash_payload, "__code__", None) is not _risk_hash_payload_code
+        or getattr(getattr(_risk, "json", None), "dumps", None) is not _risk_json_dumps
+        or getattr(getattr(_risk, "hashlib", None), "sha256", None) is not _risk_sha256
         or live_context_type is not _context_type
         or globals().get("ProposedTicketRiskContext") is not _context_type
         or vars(_context_type).get("provider_accounts")

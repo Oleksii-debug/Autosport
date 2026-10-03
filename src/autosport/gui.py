@@ -337,12 +337,12 @@ class AutosportApp(tk.Tk):
         strategy_id = strategy_id_from_display(self.strategy_text.get())
         spec = strategy_spec(strategy_id)
         if not spec.requires_research_plan:
+            self.status.set(
+                text("ui.status.research_plan.not_required_short", strategy_id=strategy_id)
+            )
             messagebox.showinfo(
                 text("ui.dialog.title"),
                 text("ui.info.research_plan.not_supported", strategy_id=strategy_id),
-            )
-            self.status.set(
-                text("ui.status.research_plan.not_required_short", strategy_id=strategy_id)
             )
             return
         selected = filedialog.askopenfilename(
@@ -355,11 +355,11 @@ class AutosportApp(tk.Tk):
             plan = ResearchStrategyPlan.from_path(selected)
             validate_strategy_configuration(strategy_id, plan)
         except Exception as exc:
+            self.status.set(text("ui.status.research_plan.validation_failed"))
             messagebox.showerror(
                 text("ui.dialog.title"),
                 text("ui.error.research_plan.rejected", detail=_safe_exception_text(exc)),
             )
-            self.status.set(text("ui.status.research_plan.validation_failed"))
             return
         self.research_plan_path = Path(selected)
         self.research_plan = plan
@@ -877,7 +877,9 @@ class AutosportApp(tk.Tk):
             self.status.set(text("ui.status.replay.dataset_busy"))
             return
         if not self.dataset_path:
-            messagebox.showinfo(text("ui.dialog.title"), text("ui.info.replay.dataset_required"))
+            message_text = text("ui.info.replay.dataset_required")
+            self.status.set(message_text)
+            messagebox.showinfo(text("ui.dialog.title"), message_text)
             return
         if self.replay_worker.busy:
             self.status.set(text("ui.status.replay.already_busy"))
@@ -892,11 +894,11 @@ class AutosportApp(tk.Tk):
             strategy_id, research_plan = self._selected_replay_configuration()
             replay_workspace = Path(workspace_for_strategy(self.workspace, strategy_id, research_plan))
         except Exception as exc:
+            self.status.set(text("ui.status.replay.configuration_rejected"))
             messagebox.showerror(
                 text("ui.dialog.title"),
                 text("ui.error.replay.configuration", detail=_safe_exception_text(exc)),
             )
-            self.status.set(text("ui.status.replay.configuration_rejected"))
             return
 
         if replay_workspace in self._recovery_required_workspaces:

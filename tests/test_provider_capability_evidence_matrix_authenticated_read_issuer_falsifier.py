@@ -19,6 +19,8 @@ from autosport.bookmaker_integration_boundary import (
 )
 from autosport.bookmaker_capability_lifecycle import (
     BetdaqAuthenticatedCapabilityIssuance,
+    CapabilityAvailability,
+    CapabilityAvailabilityState,
     CapabilityEvidence,
     CapabilityEvidenceJournal,
     issue_betdaq_authenticated_capability_evidence,
@@ -615,3 +617,113 @@ def test_superseded_lifecycle_evidence_cannot_requalify_matrix_authority(
         )
 
     assert journal.to_json() == before
+
+
+@pytest.mark.parametrize(
+    "availability_state",
+    [
+        CapabilityAvailabilityState.DEGRADED,
+        CapabilityAvailabilityState.TEMPORARILY_UNAVAILABLE,
+    ],
+)
+def test_negative_runtime_availability_blocks_authenticated_matrix_admission(
+    monkeypatch,
+    availability_state,
+) -> None:
+    issuance = _product_issued_betdaq_balance(monkeypatch)
+    journal = CapabilityEvidenceJournal()
+    journal.publish(issuance.evidence)
+    journal.publish_availability(
+        CapabilityAvailability(
+            evidence_id=issuance.evidence.evidence_id,
+            state=availability_state,
+            observed_at="2026-09-21T10:01:15+00:00",
+            source_ref="betdaq-runtime-health",
+            source_payload_sha256="7" * 64,
+        )
+    )
+    before = journal.to_json()
+    integration = bind_bookmaker_integration(
+        issuance.profile,
+        integration_kind=BookmakerIntegrationKind.OFFICIAL_API,
+        observed_at="2026-09-21T10:01:30+00:00",
+        source_ref="betdaq-secure-api-health-aware",
+        source_payload_sha256="8" * 64,
+    )
+
+    with pytest.raises(
+        ProviderCapabilityEvidenceMatrixError,
+        match="negative runtime availability",
+    ):
+        issue_betdaq_authenticated_read_evidence(
+            issuance,
+            integration,
+            journal=journal,
+        )
+
+    assert journal.to_json() == before
+
+
+def test_future_negative_availability_does_not_retroactively_block_matrix_admission(
+    monkeypatch,
+) -> None:
+    issuance = _product_issued_betdaq_balance(monkeypatch)
+    journal = CapabilityEvidenceJournal()
+    journal.publish(issuance.evidence)
+    journal.publish_availability(
+        CapabilityAvailability(
+            evidence_id=issuance.evidence.evidence_id,
+            state=CapabilityAvailabilityState.TEMPORARILY_UNAVAILABLE,
+            observed_at="2026-09-21T10:02:00+00:00",
+            source_ref="betdaq-runtime-health-future",
+            source_payload_sha256="9" * 64,
+        )
+    )
+    integration = bind_bookmaker_integration(
+        issuance.profile,
+        integration_kind=BookmakerIntegrationKind.OFFICIAL_API,
+        observed_at="2026-09-21T10:01:30+00:00",
+        source_ref="betdaq-secure-api-before-outage",
+        source_payload_sha256="a" * 64,
+    )
+
+    fact = issue_betdaq_authenticated_read_evidence(
+        issuance,
+        integration,
+        journal=journal,
+    )
+
+    assert fact.grade is ProviderCapabilityTruthGrade.AUTHENTICATED_READ_PROVEN
+    assert fact.observed_at == "2026-09-21T10:01:30+00:00"
+
+
+def test_caller_available_assertion_does_not_become_required_positive_health_authority(
+    monkeypatch,
+) -> None:
+    issuance = _product_issued_betdaq_balance(monkeypatch)
+    journal = CapabilityEvidenceJournal()
+    journal.publish(issuance.evidence)
+    journal.publish_availability(
+        CapabilityAvailability(
+            evidence_id=issuance.evidence.evidence_id,
+            state=CapabilityAvailabilityState.AVAILABLE,
+            observed_at="2026-09-21T10:01:15+00:00",
+            source_ref="caller-available-is-audit-only",
+            source_payload_sha256="b" * 64,
+        )
+    )
+    integration = bind_bookmaker_integration(
+        issuance.profile,
+        integration_kind=BookmakerIntegrationKind.OFFICIAL_API,
+        observed_at="2026-09-21T10:01:30+00:00",
+        source_ref="betdaq-secure-api-independent-read-proof",
+        source_payload_sha256="c" * 64,
+    )
+
+    fact = issue_betdaq_authenticated_read_evidence(
+        issuance,
+        integration,
+        journal=journal,
+    )
+
+    assert fact.grade is ProviderCapabilityTruthGrade.AUTHENTICATED_READ_PROVEN

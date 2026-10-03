@@ -1079,15 +1079,33 @@ class ParlayApiProductSource:
         except (TypeError, ValueError, UnicodeError) as exc:
             raise ProductSourcePayloadError("provider quote is not canonical JSON evidence") from exc
 
-    def _read_provider_snapshot(self) -> tuple[str, tuple[ProviderQuote, ...], tuple[str, ...]]:
+    def _read_provider_snapshot(
+        self,
+        *,
+        provider: MarketProvider,
+        read_batch: Callable[[int], ProviderBatch],
+        source_id: str,
+    ) -> tuple[str, tuple[ProviderQuote, ...], tuple[str, ...]]:
         quotes: list[ProviderQuote] = []
         cursor: str | None = None
         flags: set[str] = set()
         while True:
-            batch = self.provider.read_batch(self._READ_BATCH_ITEMS)
+            if self.provider is not provider:
+                raise ProductSourcePayloadError(
+                    "product source provider changed during acquisition"
+                )
+            batch = read_batch(self._READ_BATCH_ITEMS)
+            if self.provider is not provider:
+                raise ProductSourcePayloadError(
+                    "product source provider changed during acquisition"
+                )
             if not isinstance(batch, ProviderBatch):
                 raise ProductSourcePayloadError("provider.read_batch must return ProviderBatch")
-            if batch.source_id != self.source_id:
+            if getattr(provider, "source_id", None) != source_id:
+                raise ProductSourcePayloadError(
+                    "provider source_id changed during acquisition"
+                )
+            if batch.source_id != source_id:
                 raise ProductSourcePayloadError("provider batch source_id changed")
             try:
                 batch_cursor = self._text(batch.cursor, "provider cursor")
@@ -1124,10 +1142,16 @@ class ParlayApiProductSource:
             ) from exc
         return value
 
-    def _catalog_events(self, quotes: tuple[ProviderQuote, ...]) -> tuple[CatalogEvent, ...]:
+    def _catalog_events(
+        self,
+        quotes: tuple[ProviderQuote, ...],
+        *,
+        source_id: str,
+        normalize: Callable[[str, ProviderQuote], MarketEvent],
+    ) -> tuple[CatalogEvent, ...]:
         values: dict[str, CatalogEvent] = {}
         for quote in quotes:
-            event = self.normalizer.normalize(self.source_id, quote)
+            event = normalize(source_id, quote)
             if event.sport is None:
                 raise ProductSourcePayloadError("provider quote requires canonical sport identity")
             scheduled = self._scheduled_start(event)
@@ -1138,7 +1162,7 @@ class ParlayApiProductSource:
                 else EventPhase.LIVE
             )
             candidate = CatalogEvent(
-                source_id=self.source_id,
+                source_id=source_id,
                 sport=event.sport,
                 event_id=quote.provider_event_id,
                 phase=phase,
@@ -1214,14 +1238,48 @@ class ParlayApiProductSource:
                 "product source acquisition compliance provenance is invalid"
             ) from exc
 
-        cursor, quotes, quality_flags = self._read_provider_snapshot()
-        catalog_events = self._catalog_events(quotes)
+        provider = self.provider
+        source_id = self.source_id
+        stream_epoch = self.stream_epoch
+        normalizer = self.normalizer
+        if type(normalizer) is not CanonicalNormalizer:
+            raise ProductSourceStateError(
+                "product source normalizer is not canonical"
+            )
+        read_batch = getattr(provider, "read_batch", None)
+        if not callable(read_batch):
+            raise ProductSourceStateError(
+                "product source provider read authority is unavailable"
+            )
+        normalize = normalizer.normalize
+        cursor, quotes, quality_flags = self._read_provider_snapshot(
+            provider=provider,
+            read_batch=read_batch,
+            source_id=source_id,
+        )
+        if (
+            self.provider is not provider
+            or self.source_id != source_id
+            or self.stream_epoch != stream_epoch
+        ):
+            raise ProductSourceStateError(
+                "product source identity changed during acquisition"
+            )
+        if self.normalizer is not normalizer:
+            raise ProductSourceStateError(
+                "product source normalizer changed during acquisition"
+            )
+        catalog_events = self._catalog_events(
+            quotes,
+            source_id=source_id,
+            normalize=normalize,
+        )
 
         normalized: list[tuple[ProviderQuote, MarketEvent, str]] = []
         seen_quotes: dict[str, str] = {}
         seen_dedupes: dict[str, str] = {}
         for quote in quotes:
-            event = self.normalizer.normalize(self.source_id, quote)
+            event = normalize(source_id, quote)
             digest = canonical_event_digest(event)
             previous_quote = seen_quotes.get(event.quote_key)
             if previous_quote is not None:

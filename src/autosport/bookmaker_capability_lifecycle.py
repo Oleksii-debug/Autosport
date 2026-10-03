@@ -643,10 +643,29 @@ class CapabilityEvidenceJournal:
             raise CapabilityEvidenceError(
                 "availability must be exact CapabilityAvailability"
             )
-        if availability.evidence_id not in self._evidence:
+        evidence = self._evidence.get(availability.evidence_id)
+        if evidence is None:
             raise CapabilityEvidenceError("availability references unknown evidence")
-        self._availability.setdefault(availability.availability_id, availability)
-        return availability.availability_id
+        if _time(availability.observed_at, "availability.observed_at") < _time(
+            evidence.observed_at, "evidence.observed_at"
+        ):
+            raise CapabilityEvidenceError(
+                "availability cannot precede its capability observation"
+            )
+        availability_id = availability.availability_id
+        if availability_id in self._availability:
+            return availability_id
+        for other_id, other in self._availability.items():
+            if (
+                other.evidence_id == availability.evidence_id
+                and other.observed_at == availability.observed_at
+                and other_id != availability_id
+            ):
+                raise CapabilityEvidenceError(
+                    "conflicting availability at the same observation timestamp"
+                )
+        self._availability[availability_id] = availability
+        return availability_id
 
     def resolve(
         self,

@@ -419,8 +419,18 @@ def test_resolver_rejects_in_place_captured_helper_code_rebinding(tmp_path):
     )
     original_code = canonical_sha256.__code__
 
+    sha256 = object()
+    json_dumps = object()
+
     def forged_sha256(_payload):
+        # Match the captured helper's two-cell closure so Python permits an
+        # in-place __code__ rebind while the function object identity stays fixed.
+        _ = (sha256, json_dumps)
         return "0" * 64
+
+    assert len(forged_sha256.__code__.co_freevars) == len(
+        canonical_sha256.__code__.co_freevars
+    )
 
     try:
         canonical_sha256.__code__ = forged_sha256.__code__

@@ -750,10 +750,25 @@ def test_currentness_rejects_snapshot_class_replacement_before_dispatch(
         "verified_snapshot",
         fake_snapshot,
     )
+    monkeypatch.setattr(
+        capital_risk_module,
+        "_require_ledger_read_authority",
+        lambda: None,
+    )
+    monkeypatch.setattr(
+        capital_risk_module,
+        "_READ_VERIFIED_EXECUTION_VIEW",
+        fake_view,
+    )
+    monkeypatch.setattr(
+        capital_risk_module,
+        "_READ_VERIFIED_SNAPSHOT",
+        fake_snapshot,
+    )
 
     with pytest.raises(
         ExecutionCapitalAtRiskError,
-        match="canonical execution-ledger read authority changed",
+        match="capital-risk ledger read dispatch changed",
     ):
         evidence.assert_issued_current(ledger)
 
@@ -821,10 +836,25 @@ def test_resolver_rejects_coordinated_reader_and_witness_rebinding(
         "verified_snapshot",
         fake_snapshot,
     )
+    monkeypatch.setattr(
+        capital_risk_module,
+        "_require_ledger_read_authority",
+        lambda: None,
+    )
+    monkeypatch.setattr(
+        capital_risk_module,
+        "_READ_VERIFIED_EXECUTION_VIEW",
+        fake_view,
+    )
+    monkeypatch.setattr(
+        capital_risk_module,
+        "_READ_VERIFIED_SNAPSHOT",
+        fake_snapshot,
+    )
 
     with pytest.raises(
         ExecutionCapitalAtRiskError,
-        match="canonical execution-ledger read authority changed",
+        match="capital-risk ledger read dispatch changed",
     ):
         resolve_execution_capital_at_risk(ledger, plan.plan_id)
 

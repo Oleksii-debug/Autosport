@@ -210,11 +210,28 @@ def _build_dispatch_guard():
     project = _PROJECT
     project_code = _PROJECT_CODE
     evidence_type = _EVIDENCE_TYPE
+    allowed_bet_outcomes = _ALLOWED_BET_OUTCOMES
+    allowed_sides = _ALLOWED_SIDES
+    schema = _SCHEMA
+    schema_version = _SCHEMA_VERSION
+    digest = _digest
+    digest_code = getattr(digest, "__code__", None)
+    canonical = _canonical
+    canonical_code = getattr(canonical, "__code__", None)
+    sha256_fn = sha256
+    json_module = json
+    json_dumps = json.dumps
+    error_type = BetfairOutcomeEvidenceError
     settlement_module = _settlement
     module_globals = globals()
+    builtin_vars = vars
+    builtin_getattr = getattr
+
+    if digest_code is None or canonical_code is None:
+        raise RuntimeError("Betfair settlement outcome digest authority is unavailable")
 
     def require_dispatch() -> None:
-        installed_current = vars(store_type).get("current")
+        installed_current = builtin_vars(store_type).get("current")
         installed_project = module_globals.get("_project")
         installed_evidence_type = module_globals.get(
             "BetfairBinarySelectionOutcomeEvidence"
@@ -222,13 +239,34 @@ def _build_dispatch_guard():
         if (
             settlement_module.BetfairSettlementRevisionStore is not store_type
             or settlement_module.BetfairSettlementRevision is not revision_type
+            or module_globals.get("_STORE_TYPE") is not store_type
+            or module_globals.get("_REVISION_TYPE") is not revision_type
+            or module_globals.get("_CURRENT") is not current
+            or module_globals.get("_CURRENT_CODE") is not current_code
             or installed_current is not current
-            or getattr(installed_current, "__code__", None) is not current_code
+            or builtin_getattr(installed_current, "__code__", None) is not current_code
             or installed_project is not project
-            or getattr(installed_project, "__code__", None) is not project_code
+            or builtin_getattr(installed_project, "__code__", None) is not project_code
+            or module_globals.get("_PROJECT") is not project
+            or module_globals.get("_PROJECT_CODE") is not project_code
             or installed_evidence_type is not evidence_type
+            or module_globals.get("_EVIDENCE_TYPE") is not evidence_type
+            or module_globals.get("_ALLOWED_BET_OUTCOMES") is not allowed_bet_outcomes
+            or module_globals.get("_ALLOWED_SIDES") is not allowed_sides
+            or module_globals.get("_SCHEMA") != schema
+            or module_globals.get("_SCHEMA_VERSION") != schema_version
+            or module_globals.get("_digest") is not digest
+            or builtin_getattr(module_globals.get("_digest"), "__code__", None)
+            is not digest_code
+            or module_globals.get("_canonical") is not canonical
+            or builtin_getattr(module_globals.get("_canonical"), "__code__", None)
+            is not canonical_code
+            or module_globals.get("sha256") is not sha256_fn
+            or module_globals.get("json") is not json_module
+            or builtin_getattr(json_module, "dumps", None) is not json_dumps
+            or module_globals.get("BetfairOutcomeEvidenceError") is not error_type
         ):
-            raise BetfairOutcomeEvidenceError(
+            raise error_type(
                 "Betfair settlement outcome authority dispatch changed"
             )
 
@@ -251,12 +289,14 @@ def _build_public_resolvers():
     project = _PROJECT
     error_type = BetfairOutcomeEvidenceError
     module_globals = globals()
+    builtin_type = type
+    builtin_getattr = getattr
 
     def require_public_dispatch(resolve, require) -> None:
         installed_guard = module_globals.get("_require_dispatch")
         if (
             installed_guard is not require_dispatch
-            or getattr(installed_guard, "__code__", None) is not require_dispatch_code
+            or builtin_getattr(installed_guard, "__code__", None) is not require_dispatch_code
             or module_globals.get("resolve_current_binary_selection_outcome") is not resolve
             or module_globals.get("require_current_binary_selection_outcome") is not require
         ):
@@ -272,12 +312,12 @@ def _build_public_resolvers():
     ) -> BetfairBinarySelectionOutcomeEvidence:
         """Project the exact current verified settlement revision into revocable outcome evidence."""
         require_public_dispatch(resolve, require_current)
-        if type(store) is not store_type:
+        if builtin_type(store) is not store_type:
             raise error_type(
                 "outcome evidence requires exact canonical settlement store"
             )
-        namespace = getattr(store, "__dict__", None)
-        if type(namespace) is dict and "current" in namespace:
+        namespace = builtin_getattr(store, "__dict__", None)
+        if builtin_type(namespace) is dict and "current" in namespace:
             raise error_type("settlement current dispatch is instance-shadowed")
 
         revision = current(
@@ -289,6 +329,8 @@ def _build_public_resolvers():
         if revision is None:
             raise error_type("current settlement revision is absent")
         evidence = project(revision)
+        if builtin_type(evidence) is not evidence_type:
+            raise error_type("outcome evidence producer returned non-canonical type")
 
         require_public_dispatch(resolve, require_current)
         current_revision = current(
@@ -313,7 +355,7 @@ def _build_public_resolvers():
     ) -> BetfairBinarySelectionOutcomeEvidence:
         """Revalidate revision-bound evidence immediately before downstream use."""
         require_public_dispatch(resolve, require_current)
-        if type(evidence) is not evidence_type:
+        if builtin_type(evidence) is not evidence_type:
             raise error_type("outcome evidence type is not canonical")
         current_evidence = resolve(
             store,

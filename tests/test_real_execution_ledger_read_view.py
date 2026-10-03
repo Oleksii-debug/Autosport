@@ -171,6 +171,59 @@ def test_submitted_request_identity_is_immutable_across_idempotent_replay() -> N
         assert attempt.submitted_request_sha256 == request_sha256
 
 
+def test_provider_evidence_request_identity_must_match_durable_submission() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "real-execution.jsonl"
+        ledger = RealExecutionLedger(path)
+        action = _action("action-a", "101")
+        plan = _plan(action)
+        ledger.reserve_plan(plan)
+        ledger.begin_attempt(
+            plan_id=plan.plan_id,
+            action_id=action.action_id,
+            attempt_id="attempt-a",
+            reserved_at=RESERVED_AT,
+        )
+        request_sha256 = hashlib.sha256(b"submitted-request-v1").hexdigest()
+        ledger.mark_submitted(
+            "attempt-a",
+            submitted_at=SUBMITTED_AT,
+            request_sha256=request_sha256,
+        )
+
+        with pytest.raises(
+            ExecutionIdentityConflict,
+            match="mismatches durable submission",
+        ):
+            ledger.bind_provider_evidence(
+                attempt_id="attempt-a",
+                evidence_id=hashlib.sha256(b"provider-report").hexdigest(),
+                observed_at=UNKNOWN_AT,
+                source="provider:report",
+                request_sha256=hashlib.sha256(b"different-request").hexdigest(),
+            )
+
+        assert ledger.provider_evidence_binding("attempt-a") is None
+        evidence_id = hashlib.sha256(b"provider-report").hexdigest()
+        ledger.bind_provider_evidence(
+            attempt_id="attempt-a",
+            evidence_id=evidence_id,
+            observed_at=UNKNOWN_AT,
+            source="provider:report",
+            request_sha256=request_sha256,
+        )
+
+        attempt = RealExecutionLedger(path).verified_execution_view(
+            plan.plan_id
+        ).attempts[0]
+        assert attempt.provider_evidence is not None
+        assert attempt.provider_evidence.evidence_id == evidence_id
+        assert attempt.provider_evidence.request_sha256 == request_sha256
+        assert attempt.provider_evidence.request_sha256 == (
+            attempt.submitted_request_sha256
+        )
+
+
 def test_legacy_submission_without_request_digest_remains_readable() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / "real-execution.jsonl"

@@ -844,6 +844,71 @@ def resolve_product_run_capital_path_evidence(
     return result
 
 
+def _seal_product_run_capital_path_resolver() -> None:
+    """Seal the public positive resolver to its exact result type and implementation."""
+
+    module_globals = globals()
+    evidence_type = ProductRunCapitalPathEvidence
+    error_type = ProductRunCapitalPathError
+    original_resolver = resolve_product_run_capital_path_evidence
+    original_code = original_resolver.__code__
+
+    def sealed_resolver(
+        *,
+        workspace: str | Path,
+        run_id: str,
+        member_index: int,
+        membership: ResolvedFixedNRiskMembership,
+        registry_path: str | Path,
+        sampling_manifest_json: str,
+        settlement_bridge: PaperSettlementLearningBridge,
+        authority_root: str | Path | None = None,
+    ) -> ProductRunCapitalPathEvidence:
+        if (
+            module_globals.get("resolve_product_run_capital_path_evidence")
+            is not sealed_resolver
+            or module_globals.get("ProductRunCapitalPathEvidence")
+            is not evidence_type
+            or original_resolver.__code__ is not original_code
+        ):
+            raise error_type(
+                "run-capital evidence resolver authority dispatch changed"
+            )
+        result = original_resolver(
+            workspace=workspace,
+            run_id=run_id,
+            member_index=member_index,
+            membership=membership,
+            registry_path=registry_path,
+            sampling_manifest_json=sampling_manifest_json,
+            settlement_bridge=settlement_bridge,
+            authority_root=authority_root,
+        )
+        if (
+            module_globals.get("resolve_product_run_capital_path_evidence")
+            is not sealed_resolver
+            or module_globals.get("ProductRunCapitalPathEvidence")
+            is not evidence_type
+            or original_resolver.__code__ is not original_code
+            or type(result) is not evidence_type
+        ):
+            raise error_type(
+                "run-capital evidence resolver authority dispatch changed"
+            )
+        return result
+
+    sealed_resolver.__name__ = original_resolver.__name__
+    sealed_resolver.__qualname__ = original_resolver.__qualname__
+    sealed_resolver.__doc__ = original_resolver.__doc__
+    sealed_resolver.__module__ = original_resolver.__module__
+    sealed_resolver.__annotations__ = dict(original_resolver.__annotations__)
+    module_globals["resolve_product_run_capital_path_evidence"] = sealed_resolver
+
+
+_seal_product_run_capital_path_resolver()
+del _seal_product_run_capital_path_resolver
+
+
 def _build_product_run_capital_path_evidence_verifier(
     resolver,
     evidence_type: type[ProductRunCapitalPathEvidence],

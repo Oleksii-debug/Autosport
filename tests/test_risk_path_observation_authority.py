@@ -636,6 +636,45 @@ def test_object_new_forgery_cannot_pass_canonical_evidence_verifier(
         )
 
 
+def test_saved_resolver_rejects_result_type_rebinding_before_attacker_executes(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    membership, workspace, registry_path, authority_root, manifest = (
+        _product_precommit(tmp_path, monkeypatch)
+    )
+    _tx, bridge, _ticket = _completed_run_with_settlement_bridge(workspace)
+    saved_resolver = authority.resolve_product_run_capital_path_evidence
+    attacker_called = False
+
+    class ForgedEvidence:
+        def __new__(cls, *_args, **_kwargs):
+            nonlocal attacker_called
+            attacker_called = True
+            return super().__new__(cls)
+
+    monkeypatch.setattr(
+        authority,
+        "ProductRunCapitalPathEvidence",
+        ForgedEvidence,
+    )
+    with pytest.raises(
+        ProductRunCapitalPathError,
+        match="resolver authority dispatch changed",
+    ):
+        saved_resolver(
+            workspace=workspace,
+            run_id=RUN_ID,
+            member_index=0,
+            membership=membership,
+            registry_path=registry_path,
+            sampling_manifest_json=manifest,
+            settlement_bridge=bridge,
+            authority_root=authority_root,
+        )
+    assert attacker_called is False
+
+
 def test_verifier_rejects_resolver_rebinding_before_attacker_executes(
     tmp_path,
     monkeypatch,

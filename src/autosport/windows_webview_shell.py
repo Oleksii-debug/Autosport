@@ -1116,6 +1116,10 @@ class AutosportWebController:
             if product_message is None:
                 break
             if product_message.kind == "STARTED" and product_message.status is not None:
+                # STARTED proves lifecycle/source identity only. The prior run's
+                # economic snapshot is not current for this run until a TICK carries
+                # a newly bound snapshot.
+                self._product_runtime_economic_snapshot = None
                 if not self._bind_product_runtime_identity(
                     workspace=Path(self._active_workspace),
                     session_id=product_message.status.session_id,
@@ -1177,6 +1181,9 @@ class AutosportWebController:
                 )
                 self._ok(self.product_runtime_status)
                 self._refresh_economic_projection()
+                # The live runtime portfolio snapshot has been retired. Do not
+                # present it beside the newly reopened durable bank/ticket state.
+                self.evaluation = [text("ui.status.evaluation.empty")]
             elif product_message.kind == "ERROR":
                 self._quarantine_product_runtime_truth(
                     Path(self._active_workspace)

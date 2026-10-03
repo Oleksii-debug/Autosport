@@ -47,13 +47,25 @@ _CANONICAL_PATH_EQUALITY_CODE = getattr(_CANONICAL_PATH_EQUALITY, "__code__", No
 _CANONICAL_PATH_JOIN = Path.__truediv__
 _CANONICAL_PATH_JOIN_CODE = getattr(_CANONICAL_PATH_JOIN, "__code__", None)
 _CANONICAL_OBJECT_GETATTRIBUTE = object.__getattribute__
-_EVIDENCE_DIRECTORY_SURFACE = inspect.getattr_static(
+_CANONICAL_GETATTR_STATIC = inspect.getattr_static
+_CANONICAL_GETATTR_STATIC_CODE = _CANONICAL_GETATTR_STATIC.__code__
+_CANONICAL_GETATTR_STATIC_GLOBALS = _CANONICAL_GETATTR_STATIC.__globals__
+_CANONICAL_GETATTR_STATIC_GLOBAL_ITEMS = tuple(
+    (
+        name,
+        _CANONICAL_GETATTR_STATIC_GLOBALS[name],
+        getattr(_CANONICAL_GETATTR_STATIC_GLOBALS[name], "__code__", None),
+    )
+    for name in _CANONICAL_GETATTR_STATIC_CODE.co_names
+    if name in _CANONICAL_GETATTR_STATIC_GLOBALS
+)
+_EVIDENCE_DIRECTORY_SURFACE = _CANONICAL_GETATTR_STATIC(
     CompleteGameBoardEvidenceStore,
     "DIRECTORY",
 )
 _EVIDENCE_DIRECTORY = _EVIDENCE_DIRECTORY_SURFACE
 _PRECOMMIT_ROUTING_SEAMS = {
-    name: inspect.getattr_static(ForwardUniversePrecommitLocator, name)
+    name: _CANONICAL_GETATTR_STATIC(ForwardUniversePrecommitLocator, name)
     for name in ("workspace", "authority_root")
 }
 _PRECOMMIT_ROUTING_SEAM_ITEMS = tuple(_PRECOMMIT_ROUTING_SEAMS.items())
@@ -79,7 +91,7 @@ _STORE_SEAMS = frozenset(
     }
 )
 _STORE_CLASS_SEAMS = {
-    name: inspect.getattr_static(CollectorDeltaStore, name) for name in _STORE_SEAMS
+    name: _CANONICAL_GETATTR_STATIC(CollectorDeltaStore, name) for name in _STORE_SEAMS
 }
 _STORE_CLASS_SEAM_CODES = {
     name: getattr(
@@ -90,8 +102,8 @@ _STORE_CLASS_SEAM_CODES = {
     for name, target in _STORE_CLASS_SEAMS.items()
 }
 _EVIDENCE_CLASS_SEAMS = {
-    "save": inspect.getattr_static(CompleteGameBoardEvidenceStore, "save"),
-    "_path": inspect.getattr_static(CompleteGameBoardEvidenceStore, "_path"),
+    "save": _CANONICAL_GETATTR_STATIC(CompleteGameBoardEvidenceStore, "save"),
+    "_path": _CANONICAL_GETATTR_STATIC(CompleteGameBoardEvidenceStore, "_path"),
 }
 _EVIDENCE_CLASS_SEAM_CODES = {
     name: getattr(
@@ -102,10 +114,10 @@ _EVIDENCE_CLASS_SEAM_CODES = {
     for name, target in _EVIDENCE_CLASS_SEAMS.items()
 }
 _PROVIDER_REQUEST_SEAMS = {
-    "source_id": inspect.getattr_static(CompleteGameBoardRequest, "source_id"),
+    "source_id": _CANONICAL_GETATTR_STATIC(CompleteGameBoardRequest, "source_id"),
 }
 _PROVIDER_SNAPSHOT_SEAMS = {
-    name: inspect.getattr_static(CompleteGameBoardSnapshot, name)
+    name: _CANONICAL_GETATTR_STATIC(CompleteGameBoardSnapshot, name)
     for name in (
         "captured_at",
         "frame_sha256",
@@ -221,7 +233,7 @@ def _require_canonical_seams(
     rebound = sorted(
         name
         for name, expected in _STORE_CLASS_SEAMS.items()
-        if inspect.getattr_static(CollectorDeltaStore, name, None) is not expected
+        if _CANONICAL_GETATTR_STATIC(CollectorDeltaStore, name, None) is not expected
     )
     if rebound:
         raise CampaignProviderCycleCaptureIntegrityError(
@@ -245,7 +257,7 @@ def _require_canonical_seams(
     rebound = sorted(
         name
         for name, expected in _EVIDENCE_CLASS_SEAMS.items()
-        if inspect.getattr_static(CompleteGameBoardEvidenceStore, name, None)
+        if _CANONICAL_GETATTR_STATIC(CompleteGameBoardEvidenceStore, name, None)
         is not expected
     )
     if rebound:
@@ -277,7 +289,7 @@ def _require_canonical_seams(
     request_rebound = sorted(
         name
         for name, expected in _PROVIDER_REQUEST_SEAMS.items()
-        if inspect.getattr_static(CompleteGameBoardRequest, name, None) is not expected
+        if _CANONICAL_GETATTR_STATIC(CompleteGameBoardRequest, name, None) is not expected
     )
     if request_rebound:
         raise CampaignProviderCycleCaptureIntegrityError(
@@ -287,7 +299,7 @@ def _require_canonical_seams(
     snapshot_rebound = sorted(
         name
         for name, expected in _PROVIDER_SNAPSHOT_SEAMS.items()
-        if inspect.getattr_static(CompleteGameBoardSnapshot, name, None) is not expected
+        if _CANONICAL_GETATTR_STATIC(CompleteGameBoardSnapshot, name, None) is not expected
     )
     if snapshot_rebound:
         raise CampaignProviderCycleCaptureIntegrityError(
@@ -334,6 +346,18 @@ def _build_provider_evidence_campaign_scope_guard(
     path_equal_code = getattr(path_equal, "__code__", None)
     path_join_code = getattr(path_join, "__code__", None)
     getattr_static_code = getattr(getattr_static, "__code__", None)
+    getattr_static_globals = getattr(getattr_static, "__globals__", None)
+    if type(getattr_static_globals) is not dict:
+        raise error_type("provider evidence scope reflection globals unavailable")
+    getattr_static_global_items = tuple(
+        (
+            name,
+            getattr_static_globals[name],
+            getattr(getattr_static_globals[name], "__code__", None),
+        )
+        for name in getattr_static_code.co_names
+        if name in getattr_static_globals
+    )
 
     def require_provider_evidence_campaign_scope(
         precommit_locator: ForwardUniversePrecommitLocator,
@@ -353,6 +377,12 @@ def _build_provider_evidence_campaign_scope_guard(
             getattr(path_equal, "__code__", None) is not path_equal_code
             or getattr(path_join, "__code__", None) is not path_join_code
             or getattr(getattr_static, "__code__", None) is not getattr_static_code
+            or getattr(getattr_static, "__globals__", None) is not getattr_static_globals
+            or any(
+                getattr_static_globals.get(name) is not target
+                or getattr(target, "__code__", None) is not code
+                for name, target, code in getattr_static_global_items
+            )
         ):
             raise error_type("provider evidence scope authority executable changed")
         if (
@@ -505,13 +535,13 @@ _RECEIPT_FIELD_NAMES = tuple(
 _RECEIPT_FIELD_DESCRIPTORS = tuple(
     (
         name,
-        inspect.getattr_static(CampaignCompleteBoardCycleReceipt, name),
+        _CANONICAL_GETATTR_STATIC(CampaignCompleteBoardCycleReceipt, name),
     )
     for name in _RECEIPT_FIELD_NAMES
 )
 
 _CANONICAL_CYCLE_RECEIPT_CLASS = CampaignCompleteBoardCycleReceipt
-_CANONICAL_CYCLE_RECEIPT_ISSUER = inspect.getattr_static(
+_CANONICAL_CYCLE_RECEIPT_ISSUER = _CANONICAL_GETATTR_STATIC(
     CampaignCompleteBoardCycleReceipt,
     "_issue",
 )
@@ -527,7 +557,7 @@ _INCEPTION_RECEIPT_FIELD_NAMES = tuple(
 _INCEPTION_RECEIPT_FIELD_DESCRIPTORS = tuple(
     (
         name,
-        inspect.getattr_static(CampaignInceptionReceipt, name),
+        _CANONICAL_GETATTR_STATIC(CampaignInceptionReceipt, name),
     )
     for name in _INCEPTION_RECEIPT_FIELD_NAMES
 )
@@ -638,7 +668,10 @@ def capture_campaign_complete_game_board(
         for name, target in expected_dispatch
     )
     expected_inspect = inspect
-    expected_getattr_static = inspect.getattr_static
+    expected_getattr_static = _CANONICAL_GETATTR_STATIC
+    expected_getattr_static_code = _CANONICAL_GETATTR_STATIC_CODE
+    expected_getattr_static_globals = _CANONICAL_GETATTR_STATIC_GLOBALS
+    expected_getattr_static_global_items = _CANONICAL_GETATTR_STATIC_GLOBAL_ITEMS
     expected_receipt_field_names = _RECEIPT_FIELD_NAMES
     expected_receipt_field_descriptors = _RECEIPT_FIELD_DESCRIPTORS
     expected_inception_field_names = _INCEPTION_RECEIPT_FIELD_NAMES
@@ -671,6 +704,13 @@ def capture_campaign_complete_game_board(
         if (
             module_globals.get("inspect") is not expected_inspect
             or expected_inspect.getattr_static is not expected_getattr_static
+            or expected_getattr_static.__code__ is not expected_getattr_static_code
+            or expected_getattr_static.__globals__ is not expected_getattr_static_globals
+            or any(
+                expected_getattr_static_globals.get(name) is not target
+                or getattr(target, "__code__", None) is not code
+                for name, target, code in expected_getattr_static_global_items
+            )
         ):
             raise CampaignProviderCycleCaptureIntegrityError(
                 "campaign provider-cycle reflection dispatch changed"
@@ -1116,7 +1156,10 @@ def _seal_campaign_provider_cycle_capture_dispatch() -> None:
     expected_capture = capture_campaign_complete_game_board
     expected_capture_code = expected_capture.__code__
     expected_inspect = inspect
-    expected_getattr_static = inspect.getattr_static
+    expected_getattr_static = _CANONICAL_GETATTR_STATIC
+    expected_getattr_static_code = _CANONICAL_GETATTR_STATIC_CODE
+    expected_getattr_static_globals = _CANONICAL_GETATTR_STATIC_GLOBALS
+    expected_getattr_static_global_items = _CANONICAL_GETATTR_STATIC_GLOBAL_ITEMS
     expected_receipt_field_names = _RECEIPT_FIELD_NAMES
     expected_receipt_field_descriptors = _RECEIPT_FIELD_DESCRIPTORS
     expected_inception_field_names = _INCEPTION_RECEIPT_FIELD_NAMES
@@ -1171,6 +1214,10 @@ def _seal_campaign_provider_cycle_capture_dispatch() -> None:
         "_CANONICAL_PATH_JOIN": _CANONICAL_PATH_JOIN,
         "_CANONICAL_PATH_JOIN_CODE": _CANONICAL_PATH_JOIN_CODE,
         "_CANONICAL_OBJECT_GETATTRIBUTE": _CANONICAL_OBJECT_GETATTRIBUTE,
+        "_CANONICAL_GETATTR_STATIC": _CANONICAL_GETATTR_STATIC,
+        "_CANONICAL_GETATTR_STATIC_CODE": _CANONICAL_GETATTR_STATIC_CODE,
+        "_CANONICAL_GETATTR_STATIC_GLOBALS": _CANONICAL_GETATTR_STATIC_GLOBALS,
+        "_CANONICAL_GETATTR_STATIC_GLOBAL_ITEMS": _CANONICAL_GETATTR_STATIC_GLOBAL_ITEMS,
         "_EVIDENCE_DIRECTORY": _EVIDENCE_DIRECTORY,
         "_EVIDENCE_DIRECTORY_SURFACE": _EVIDENCE_DIRECTORY_SURFACE,
         "_PRECOMMIT_ROUTING_SEAMS": _PRECOMMIT_ROUTING_SEAMS,
@@ -1221,7 +1268,16 @@ def _seal_campaign_provider_cycle_capture_dispatch() -> None:
                 raise expected_error(
                     "campaign provider-cycle dispatch authority is rebound: " + name
                 )
-        if expected_inspect.getattr_static is not expected_getattr_static:
+        if (
+            expected_inspect.getattr_static is not expected_getattr_static
+            or expected_getattr_static.__code__ is not expected_getattr_static_code
+            or expected_getattr_static.__globals__ is not expected_getattr_static_globals
+            or any(
+                expected_getattr_static_globals.get(name) is not target
+                or getattr(target, "__code__", None) is not code
+                for name, target, code in expected_getattr_static_global_items
+            )
+        ):
             raise expected_error(
                 "campaign provider-cycle reflection dispatch changed"
             )

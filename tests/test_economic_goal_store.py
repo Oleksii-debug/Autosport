@@ -328,6 +328,41 @@ def test_store_rejects_path_replacement_during_verified_read(
         store.load()
 
 
+def test_store_rejects_replacement_after_first_verification_open(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import autosport.economic_goal_store as goal_store
+
+    store = EconomicGoalStore(tmp_path)
+    store.initialize_owner(_goal())
+    replacement = tmp_path / "replacement-after-checkpoint.json"
+    replacement.write_bytes(store.path.read_bytes())
+
+    real_open = goal_store._open_read_only_descriptor
+    calls = 0
+
+    def redirected_final_open(path: Path) -> int:
+        nonlocal calls
+        if Path(path) == store.path:
+            calls += 1
+            if calls == 3:
+                return real_open(replacement)
+        return real_open(path)
+
+    monkeypatch.setattr(
+        goal_store,
+        "_open_read_only_descriptor",
+        redirected_final_open,
+    )
+
+    with pytest.raises(
+        EconomicGoalContractError,
+        match="pathname changed while being read",
+    ):
+        store.load()
+
+
 def test_corrupt_durable_file_fails_closed_on_restart(tmp_path) -> None:
     store = EconomicGoalStore(tmp_path)
     store.initialize_owner(_goal())

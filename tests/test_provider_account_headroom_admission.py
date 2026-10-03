@@ -630,6 +630,38 @@ def test_headroom_clock_rebinding_cannot_mint_fresh_balance(
     assert hostile_calls == []
 
 
+def test_headroom_clock_kwdefault_mutation_cannot_mint_fresh_balance(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    acquired, _ = _acquire_balance(monkeypatch, tmp_path, "100")
+    action = _action("a1", "10")
+    ledger = _ledger_with_plans(tmp_path, _plan("p1", action))
+    hostile_calls = []
+
+    def hostile_datetime_now(_tz):
+        hostile_calls.append(True)
+        assert acquired.snapshot.balance is not None
+        return datetime.fromisoformat(acquired.snapshot.balance.observed_at)
+
+    kwdefaults = headroom_module._utc_now.__kwdefaults__
+    assert isinstance(kwdefaults, dict)
+    monkeypatch.setitem(kwdefaults, "_datetime_now", hostile_datetime_now)
+
+    with pytest.raises(
+        ProviderAccountHeadroomError,
+        match="headroom clock authority changed",
+    ):
+        assess_provider_account_headroom(
+            ledger,
+            acquired,
+            plan_id="p1",
+            action_id="a1",
+        )
+
+    assert hostile_calls == []
+
+
 def test_freshness_is_bound_to_balance_observation_not_later_snapshot_time(
     monkeypatch,
     tmp_path,

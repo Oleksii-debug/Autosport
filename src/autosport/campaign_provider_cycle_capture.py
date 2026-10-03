@@ -491,13 +491,20 @@ def capture_campaign_complete_game_board(
             artifact_sha256=snapshot.evidence_sha256,
         )
         if (
-            collector_evidence.get("run_id") != source_spec.run_id
+            collector_evidence.get("source_id") != source_spec.source_id
+            or collector_evidence.get("run_id") != source_spec.run_id
+            or collector_evidence.get("stream_epoch") != source_spec.stream_epoch
+            or collector_evidence.get("cycle_seq") != cycle_seq
             or collector_evidence.get("schedule_id") != campaign.schedule_id
             or collector_evidence.get("gate_binding_sha256")
             != campaign.gate_binding_sha256
             or collector_evidence.get("authorization_sha256")
             != campaign.authority_record_sha256
             or collector_evidence.get("slot_ordinal") != slot.get("slot_ordinal")
+            or collector_evidence.get("due_at") != slot.get("due_at")
+            or collector_evidence.get("attempted_at") != attempted_at
+            or collector_evidence.get("completed_at") != completed_at
+            or collector_evidence.get("artifact_id") != artifact.get("artifact_id")
         ):
             raise CampaignProviderCycleCaptureIntegrityError(
                 "collector artifact evidence does not bind exact campaign authority"

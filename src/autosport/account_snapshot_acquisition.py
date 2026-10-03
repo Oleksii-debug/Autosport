@@ -1207,13 +1207,20 @@ def _install_account_snapshot_acquisition_authority() -> None:
 
         @staticmethod
         def _fingerprint(acquired: AuthoritativeAccountSnapshot) -> str:
+            current_snapshot_sha256 = _canonical_sha256(
+                _snapshot_payload(
+                    acquired.snapshot,
+                    include_local_times=True,
+                )
+            )
             return _canonical_sha256(
                 {
                     "acquisition_id": acquired.receipt.acquisition_id,
                     "acquisition_request_id_sha256": (
                         acquired.receipt.acquisition_request_id_sha256
                     ),
-                    "snapshot_sha256": acquired.receipt.snapshot_sha256,
+                    "receipt_snapshot_sha256": acquired.receipt.snapshot_sha256,
+                    "current_snapshot_sha256": current_snapshot_sha256,
                 }
             )
 

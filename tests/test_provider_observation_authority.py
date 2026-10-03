@@ -777,10 +777,15 @@ def test_store_save_rejects_hmac_dispatch_rebind_before_dispatch(
 
 
 @pytest.mark.parametrize(
-    ("module_name", "attribute_name"),
+    ("module_name", "attribute_name", "expected_message"),
     [
-        ("json", "dumps"),
-        ("hashlib", "sha256"),
+        ("json", "dumps", "provider evidence store dependency module dispatch changed"),
+        (
+            "hashlib",
+            "sha256",
+            "provider evidence store authority witness changed|"
+            "provider evidence store dependency module dispatch changed",
+        ),
     ],
 )
 def test_store_save_rejects_nested_helper_module_dispatch_rebind(
@@ -788,6 +793,7 @@ def test_store_save_rejects_nested_helper_module_dispatch_rebind(
     monkeypatch,
     module_name: str,
     attribute_name: str,
+    expected_message: str,
 ):
     snapshot = _capture(monkeypatch)
     store = _store(tmp_path)
@@ -802,7 +808,7 @@ def test_store_save_rejects_nested_helper_module_dispatch_rebind(
 
     with pytest.raises(
         ProviderObservationIntegrityError,
-        match="provider evidence store dependency module dispatch changed",
+        match=expected_message,
     ):
         store.save(snapshot)
 

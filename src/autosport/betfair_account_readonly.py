@@ -1277,6 +1277,45 @@ def _install_execution_readback_authority() -> None:
             "read_cleared_orders_page",
         )
     )
+    module_globals = globals()
+    missing = object()
+
+    def seal_function_graph(
+        roots: tuple[object, ...],
+    ) -> dict[str, tuple[object, object | None]]:
+        sealed: dict[str, tuple[object, object | None]] = {}
+        pending = list(roots)
+        visited: set[int] = set()
+        while pending:
+            function = pending.pop()
+            if id(function) in visited:
+                continue
+            visited.add(id(function))
+            code = getattr(function, "__code__", None)
+            if code is None or getattr(function, "__globals__", None) is not module_globals:
+                continue
+            for name in code.co_names:
+                if name not in module_globals or name in sealed:
+                    continue
+                value = module_globals[name]
+                value_code = getattr(value, "__code__", None)
+                sealed[name] = (value, value_code)
+                if (
+                    value_code is not None
+                    and getattr(value, "__globals__", None) is module_globals
+                ):
+                    pending.append(value)
+        return sealed
+
+    sealed_readback_graph = seal_function_graph(
+        (
+            raw_read,
+            validate_integrity,
+            fingerprint_method,
+            *(method for _, method, _ in readback_dispatch),
+        )
+    )
+
     identity_type = account_identity.BetfairAuthenticatedAccountIdentity
     identity_error = account_identity.BetfairAccountIdentityError
     resolve_identity = account_identity.resolve_betfair_authenticated_account_identity
@@ -1315,6 +1354,14 @@ def _install_execution_readback_authority() -> None:
                 getattr(client_type, name, None) is not expected
                 or getattr(expected, "__code__", None) is not expected_code
                 for name, expected, expected_code in readback_dispatch
+            )
+            or any(
+                module_globals.get(name, missing) is not expected
+                or (
+                    expected_code is not None
+                    and getattr(expected, "__code__", None) is not expected_code
+                )
+                for name, (expected, expected_code) in sealed_readback_graph.items()
             )
         ):
             raise BetfairReadOnlyError(

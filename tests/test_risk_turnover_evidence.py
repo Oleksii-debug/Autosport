@@ -6,6 +6,8 @@ from decimal import Decimal
 
 import pytest
 
+import autosport.risk_turnover_evidence as turnover_evidence
+
 from autosport.domain import TicketLeg
 from autosport.economic_goal import EconomicGoalContract
 from autosport.economic_goal_store import EconomicGoalStore
@@ -689,3 +691,109 @@ def test_turnover_require_current_rejects_subclass_before_override_dispatch(tmp_
             window_evidence=window,
         )
 
+
+
+def test_resolver_ignores_runtime_economic_goal_store_module_rebind(tmp_path):
+    store = _store(tmp_path)
+    window = store.current()
+    goal_store = _goal_store(store, max_turnover="0.5")
+    book = _book()
+    _open(book, window, stake="10", suffix="goal-module-rebind")
+    expected = PaperDayTurnoverResolver.resolve(
+        book=book,
+        goal_store=goal_store,
+        window_store=store,
+        window_evidence=window,
+    )
+
+    original = turnover_evidence.EconomicGoalStore
+    try:
+        turnover_evidence.EconomicGoalStore = object()
+        observed = PaperDayTurnoverResolver.resolve(
+            book=book,
+            goal_store=goal_store,
+            window_store=store,
+            window_evidence=window,
+        )
+    finally:
+        turnover_evidence.EconomicGoalStore = original
+
+    assert observed == expected
+
+
+def test_resolver_ignores_runtime_day_store_module_rebind(tmp_path):
+    store = _store(tmp_path)
+    window = store.current()
+    goal_store = _goal_store(store, max_turnover="0.5")
+    book = _book()
+    _open(book, window, stake="10", suffix="day-store-module-rebind")
+    expected = PaperDayTurnoverResolver.resolve(
+        book=book,
+        goal_store=goal_store,
+        window_store=store,
+        window_evidence=window,
+    )
+
+    original = turnover_evidence.ProductDayRiskWindowStore
+    try:
+        turnover_evidence.ProductDayRiskWindowStore = object()
+        observed = PaperDayTurnoverResolver.resolve(
+            book=book,
+            goal_store=goal_store,
+            window_store=store,
+            window_evidence=window,
+        )
+    finally:
+        turnover_evidence.ProductDayRiskWindowStore = original
+
+    assert observed == expected
+
+
+def test_resolver_ignores_runtime_captured_dependency_alias_rebind(tmp_path):
+    store = _store(tmp_path)
+    window = store.current()
+    goal_store = _goal_store(store, max_turnover="0.5")
+    book = _book()
+    _open(book, window, stake="10", suffix="dependency-alias-rebind")
+    expected = PaperDayTurnoverResolver.resolve(
+        book=book,
+        goal_store=goal_store,
+        window_store=store,
+        window_evidence=window,
+    )
+
+    original = turnover_evidence._RISK_DAY_REQUIRE_CURRENT
+    try:
+        turnover_evidence._RISK_DAY_REQUIRE_CURRENT = (
+            lambda candidate_store, candidate: replace(
+                candidate,
+                state_sha256="0" * 64,
+                product_clock_authoritative=True,
+            )
+        )
+        observed = PaperDayTurnoverResolver.resolve(
+            book=book,
+            goal_store=goal_store,
+            window_store=store,
+            window_evidence=window,
+        )
+    finally:
+        turnover_evidence._RISK_DAY_REQUIRE_CURRENT = original
+
+    assert observed == expected
+
+
+def test_resolver_class_authority_entrypoints_reject_runtime_replacement():
+    for name in ("resolve", "require_current"):
+        original = PaperDayTurnoverResolver.__dict__[name]
+        with pytest.raises(TypeError, match="authority method is sealed"):
+            setattr(PaperDayTurnoverResolver, name, classmethod(lambda cls, **kwargs: None))
+        assert PaperDayTurnoverResolver.__dict__[name] is original
+
+
+def test_resolver_class_authority_entrypoints_reject_runtime_deletion():
+    for name in ("resolve", "require_current"):
+        original = PaperDayTurnoverResolver.__dict__[name]
+        with pytest.raises(TypeError, match="authority method is sealed"):
+            delattr(PaperDayTurnoverResolver, name)
+        assert PaperDayTurnoverResolver.__dict__[name] is original

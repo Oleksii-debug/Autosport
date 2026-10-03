@@ -351,6 +351,7 @@ def capture_campaign_complete_game_board(
             "campaign collector next slot does not match inception receipt"
         )
     attempted_at = _instant(clock(), "collector attempted_at")
+    attempted_instant = datetime.fromisoformat(attempted_at)
     try:
         cycle_seq = begin_scheduled(
             store,
@@ -379,6 +380,20 @@ def capture_campaign_complete_game_board(
             raise CampaignProviderCycleCaptureIntegrityError(
                 "provider capture returned noncanonical snapshot type"
             )
+        provider_captured_at = _instant(
+            snapshot.captured_at,
+            "provider captured_at",
+        )
+        provider_captured_instant = datetime.fromisoformat(provider_captured_at)
+        if provider_captured_instant < attempted_instant:
+            raise CampaignProviderCycleCaptureIntegrityError(
+                "provider observation predates authorized collector START"
+            )
+        completed_at = _instant(clock(), "collector completed_at")
+        if datetime.fromisoformat(completed_at) < provider_captured_instant:
+            raise CampaignProviderCycleCaptureIntegrityError(
+                "provider observation falls after collector cycle completion"
+            )
         evidence_path = evidence_save(evidence_store, snapshot)
         repeated_path = evidence_save(evidence_store, snapshot)
         if evidence_path != repeated_path or evidence_path.name != (
@@ -402,7 +417,6 @@ def capture_campaign_complete_game_board(
             raise CampaignProviderCycleCaptureIntegrityError(
                 "collector artifact append returned noncanonical identity"
             )
-        completed_at = _instant(clock(), "collector completed_at")
         finish_cycle(
             store,
             source_id=source_spec.source_id,

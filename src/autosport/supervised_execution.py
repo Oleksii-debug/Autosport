@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal
 from enum import Enum
+from typing import Any
 
 from .bookmaker_capability import (
     BookmakerAccountSnapshot,
@@ -878,28 +879,124 @@ def _canonical_supervised_ledger_dispatch(
     *,
     _ledger_type=RealExecutionLedger,
     _surface=(
-        ("reserve_plan", RealExecutionLedger.reserve_plan, getattr(RealExecutionLedger.reserve_plan, "__code__", None)),
-        ("saga", RealExecutionLedger.saga, getattr(RealExecutionLedger.saga, "__code__", None)),
-        ("_bind_supervised_plan_issuance", RealExecutionLedger._bind_supervised_plan_issuance, getattr(RealExecutionLedger._bind_supervised_plan_issuance, "__code__", None)),
-        ("supervised_plan_issuance_is_current", RealExecutionLedger.supervised_plan_issuance_is_current, getattr(RealExecutionLedger.supervised_plan_issuance_is_current, "__code__", None)),
-        ("bind_supervised_approval", RealExecutionLedger.bind_supervised_approval, getattr(RealExecutionLedger.bind_supervised_approval, "__code__", None)),
-        ("supervised_approval_is_active", RealExecutionLedger.supervised_approval_is_active, getattr(RealExecutionLedger.supervised_approval_is_active, "__code__", None)),
-        ("revoke_supervised_approval", RealExecutionLedger.revoke_supervised_approval, getattr(RealExecutionLedger.revoke_supervised_approval, "__code__", None)),
-        ("begin_attempt", RealExecutionLedger.begin_attempt, getattr(RealExecutionLedger.begin_attempt, "__code__", None)),
-        ("provider_order_reference", RealExecutionLedger.provider_order_reference, getattr(RealExecutionLedger.provider_order_reference, "__code__", None)),
-        ("provider_evidence_binding", RealExecutionLedger.provider_evidence_binding, getattr(RealExecutionLedger.provider_evidence_binding, "__code__", None)),
-        ("acknowledge", RealExecutionLedger.acknowledge, getattr(RealExecutionLedger.acknowledge, "__code__", None)),
-        ("reconcile_found", RealExecutionLedger.reconcile_found, getattr(RealExecutionLedger.reconcile_found, "__code__", None)),
-        ("bind_provider_evidence", RealExecutionLedger.bind_provider_evidence, getattr(RealExecutionLedger.bind_provider_evidence, "__code__", None)),
-        ("attempt_state", RealExecutionLedger.attempt_state, getattr(RealExecutionLedger.attempt_state, "__code__", None)),
-        ("reconcile_not_found", RealExecutionLedger.reconcile_not_found, getattr(RealExecutionLedger.reconcile_not_found, "__code__", None)),
+        (
+            "reserve_plan",
+            RealExecutionLedger.reserve_plan,
+            getattr(RealExecutionLedger.reserve_plan, "__code__", None),
+        ),
+        (
+            "saga",
+            RealExecutionLedger.saga,
+            getattr(RealExecutionLedger.saga, "__code__", None),
+        ),
+        (
+            "_bind_supervised_plan_issuance",
+            RealExecutionLedger._bind_supervised_plan_issuance,
+            getattr(
+                RealExecutionLedger._bind_supervised_plan_issuance,
+                "__code__",
+                None,
+            ),
+        ),
+        (
+            "supervised_plan_issuance_is_current",
+            RealExecutionLedger.supervised_plan_issuance_is_current,
+            getattr(
+                RealExecutionLedger.supervised_plan_issuance_is_current,
+                "__code__",
+                None,
+            ),
+        ),
+        (
+            "bind_supervised_approval",
+            RealExecutionLedger.bind_supervised_approval,
+            getattr(
+                RealExecutionLedger.bind_supervised_approval,
+                "__code__",
+                None,
+            ),
+        ),
+        (
+            "supervised_approval_is_active",
+            RealExecutionLedger.supervised_approval_is_active,
+            getattr(
+                RealExecutionLedger.supervised_approval_is_active,
+                "__code__",
+                None,
+            ),
+        ),
+        (
+            "revoke_supervised_approval",
+            RealExecutionLedger.revoke_supervised_approval,
+            getattr(
+                RealExecutionLedger.revoke_supervised_approval,
+                "__code__",
+                None,
+            ),
+        ),
+        (
+            "begin_attempt",
+            RealExecutionLedger.begin_attempt,
+            getattr(RealExecutionLedger.begin_attempt, "__code__", None),
+        ),
+        (
+            "provider_order_reference",
+            RealExecutionLedger.provider_order_reference,
+            getattr(
+                RealExecutionLedger.provider_order_reference,
+                "__code__",
+                None,
+            ),
+        ),
+        (
+            "provider_evidence_binding",
+            RealExecutionLedger.provider_evidence_binding,
+            getattr(
+                RealExecutionLedger.provider_evidence_binding,
+                "__code__",
+                None,
+            ),
+        ),
+        (
+            "acknowledge",
+            RealExecutionLedger.acknowledge,
+            getattr(RealExecutionLedger.acknowledge, "__code__", None),
+        ),
+        (
+            "reconcile_found",
+            RealExecutionLedger.reconcile_found,
+            getattr(RealExecutionLedger.reconcile_found, "__code__", None),
+        ),
+        (
+            "bind_provider_evidence",
+            RealExecutionLedger.bind_provider_evidence,
+            getattr(
+                RealExecutionLedger.bind_provider_evidence,
+                "__code__",
+                None,
+            ),
+        ),
+        (
+            "attempt_state",
+            RealExecutionLedger.attempt_state,
+            getattr(RealExecutionLedger.attempt_state, "__code__", None),
+        ),
+        (
+            "reconcile_not_found",
+            RealExecutionLedger.reconcile_not_found,
+            getattr(
+                RealExecutionLedger.reconcile_not_found,
+                "__code__",
+                None,
+            ),
+        ),
     ),
-) -> dict[str, object]:
+) -> dict[str, Any]:
     if RealExecutionLedger is not _ledger_type or type(ledger) is not _ledger_type:
         raise SupervisedExecutionError(
             "canonical real execution ledger authority changed"
         )
-    bound: dict[str, object] = {}
+    bound: dict[str, Any] = {}
     for name, expected, expected_code in _surface:
         current = vars(_ledger_type).get(name)
         if (

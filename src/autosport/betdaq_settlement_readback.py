@@ -37,11 +37,38 @@ _INTEGER_RE = re.compile(r"[0-9]+\Z")
 _DECIMAL_RE = re.compile(r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)\Z")
 _CANONICAL_ACCOUNT_HTTPS_POST = _account._CANONICAL_HTTPS_POST
 _REQUIRE_CANONICAL_ACCOUNT_TRANSPORT = _account._require_canonical_account_transport
+_CANONICAL_ACCOUNT_HTTPS_POST_CODE = getattr(_CANONICAL_ACCOUNT_HTTPS_POST, "__code__", None)
+_CANONICAL_REQUIRE_ACCOUNT_TRANSPORT_CODE = getattr(
+    _REQUIRE_CANONICAL_ACCOUNT_TRANSPORT,
+    "__code__",
+    None,
+)
 _TERMINAL_ORDER_STATUS_CODES = _account._TERMINAL_STATUS_CODES
 
 
 class BetdaqEconomicReadbackError(RuntimeError):
     """BETDAQ settlement/posting readback contract or evidence error."""
+
+
+def _require_canonical_economic_transport_dispatch() -> None:
+    """Fail closed before any authority-bearing BETDAQ transport alias executes."""
+
+    live_post = globals().get("_CANONICAL_ACCOUNT_HTTPS_POST")
+    live_require = globals().get("_REQUIRE_CANONICAL_ACCOUNT_TRANSPORT")
+    account_post = getattr(_account, "_CANONICAL_HTTPS_POST", None)
+    account_require = getattr(_account, "_require_canonical_account_transport", None)
+    class_post = vars(_account.UrllibBetdaqSoapTransport).get("post")
+    if (
+        live_post is not account_post
+        or live_require is not account_require
+        or class_post is not account_post
+        or getattr(live_post, "__code__", None) is not _CANONICAL_ACCOUNT_HTTPS_POST_CODE
+        or getattr(live_require, "__code__", None)
+        is not _CANONICAL_REQUIRE_ACCOUNT_TRANSPORT_CODE
+    ):
+        raise BetdaqEconomicReadbackError(
+            "canonical BETDAQ economic transport dispatch was replaced"
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -665,6 +692,7 @@ class BetdaqEconomicReadbackClient:
         with client._call_lock:
             transport = client._transport
             try:
+                _require_canonical_economic_transport_dispatch()
                 _REQUIRE_CANONICAL_ACCOUNT_TRANSPORT(transport)
             except Exception:
                 raise BetdaqEconomicReadbackError(

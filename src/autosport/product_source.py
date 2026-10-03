@@ -726,22 +726,22 @@ class ParlayApiProductSource:
                 delta = CollectorDelta.from_dict(item["delta"])
                 pending_delta_ids.add(delta.delta_id)
 
-        retired_quote_digests: dict[str, str] = {}
-        retired_dedupe_digests: dict[str, str] = {}
+        # Record only whether the exact legacy *final* digest for each identity
+        # was witnessed among canonically retired events.  This avoids materializing
+        # every historical retired digest while correctly allowing multiple prices
+        # for one quote_key.  Retained archive evidence remains authoritative below.
+        retired_quote_matches: set[str] = set()
+        retired_dedupe_matches: set[str] = set()
 
-        def remember_retired(
-            mapping: dict[str, str],
+        def remember_retired_match(
+            matches: set[str],
+            history: dict[str, object],
             *,
             key: str,
             digest: str,
-            kind: str,
         ) -> None:
-            previous = mapping.get(key)
-            if previous is not None and previous != digest:
-                raise ProductSourceStateError(
-                    f"canonically retired legacy {kind} identity conflicts"
-                )
-            mapping[key] = digest
+            if history.get(key) == digest:
+                matches.add(key)
 
         cache_items = iter(cache.items())
         while True:
@@ -776,17 +776,17 @@ class ParlayApiProductSource:
             for delta_id in retired_delta_ids:
                 event = migrate[delta_id]
                 digest = canonical_event_digest(event)
-                remember_retired(
-                    retired_quote_digests,
+                remember_retired_match(
+                    retired_quote_matches,
+                    quote_history,
                     key=event.quote_key,
                     digest=digest,
-                    kind="quote",
                 )
-                remember_retired(
-                    retired_dedupe_digests,
+                remember_retired_match(
+                    retired_dedupe_matches,
+                    dedupe_history,
                     key=event.dedupe_key,
                     digest=digest,
-                    kind="dedupe",
                 )
 
         def verify_history(
@@ -795,7 +795,9 @@ class ParlayApiProductSource:
             quote: bool,
         ) -> None:
             items = iter(history.items())
-            retired = retired_quote_digests if quote else retired_dedupe_digests
+            retired_matches = (
+                retired_quote_matches if quote else retired_dedupe_matches
+            )
             while True:
                 chunk = tuple(
                     islice(
@@ -823,7 +825,7 @@ class ParlayApiProductSource:
                     if retained_digest is not None:
                         if retained_digest == digest:
                             continue
-                    elif retired.get(key) == digest:
+                    elif key in retired_matches:
                         continue
                     kind = "quote" if quote else "dedupe"
                     raise ProductSourceStateError(

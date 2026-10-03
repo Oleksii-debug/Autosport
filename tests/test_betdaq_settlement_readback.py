@@ -489,6 +489,120 @@ def test_economic_read_rejects_authenticated_context_rotation_during_dispatch(
     assert len(opener.calls) == 1
 
 
+def test_economic_read_rejects_account_context_resolver_replacement_before_dispatch(
+    monkeypatch,
+):
+    client, opener = economic_client(monkeypatch, postings_by_id(posting(9001)))
+    hostile_calls = []
+
+    def hostile(credentials, venue_id):
+        hostile_calls.append((credentials, venue_id))
+        raise AssertionError("hostile account-context resolver executed")
+
+    monkeypatch.setattr(account_module, "_authenticated_account_context", hostile)
+
+    with pytest.raises(
+        BetdaqEconomicReadbackError,
+        match="canonical BETDAQ authenticated account context authority was replaced",
+    ):
+        client.read_account_postings_by_id(9000)
+
+    assert hostile_calls == []
+    assert opener.calls == []
+
+
+def test_economic_read_rejects_account_context_resolver_code_mutation(
+    monkeypatch,
+):
+    client, opener = economic_client(monkeypatch, postings_by_id(posting(9001)))
+    resolver = account_module._authenticated_account_context
+
+    def hostile(credentials, venue_id):
+        raise AssertionError("mutated account-context resolver executed")
+
+    monkeypatch.setattr(resolver, "__code__", hostile.__code__)
+
+    with pytest.raises(
+        BetdaqEconomicReadbackError,
+        match="canonical BETDAQ authenticated account context authority was replaced",
+    ):
+        client.read_account_postings_by_id(9000)
+
+    assert opener.calls == []
+
+
+def test_economic_read_rejects_account_context_resolver_replacement_during_dispatch(
+    monkeypatch,
+):
+    payload = postings_by_id(posting(9001))
+    account = BetdaqAccountReadOnlyClient(
+        BetdaqCredentials("alice", "secret-pass", "secret-app"),
+        clock=clock_one,
+    )
+    hostile_calls = []
+
+    def hostile(credentials, venue_id):
+        hostile_calls.append((credentials, venue_id))
+        raise AssertionError("hostile post-dispatch account-context resolver executed")
+
+    class RotatingUrlopen:
+        def __init__(self):
+            self.calls = []
+
+        def __call__(self, request, *, timeout):
+            self.calls.append((request, timeout))
+            monkeypatch.setattr(
+                account_module,
+                "_authenticated_account_context",
+                hostile,
+            )
+            return _FakeHttpResponse(payload)
+
+    opener = RotatingUrlopen()
+    monkeypatch.setattr(account_module, "urlopen", opener)
+    client = BetdaqEconomicReadbackClient(account)
+
+    with pytest.raises(
+        BetdaqEconomicReadbackError,
+        match="canonical BETDAQ authenticated account context authority was replaced",
+    ):
+        client.read_account_postings_by_id(9000)
+
+    assert len(opener.calls) == 1
+    assert hostile_calls == []
+
+
+def test_economic_read_rejects_account_context_cache_replacement_during_dispatch(
+    monkeypatch,
+):
+    payload = postings_by_id(posting(9001))
+    account = BetdaqAccountReadOnlyClient(
+        BetdaqCredentials("alice", "secret-pass", "secret-app"),
+        clock=clock_one,
+    )
+
+    class ResettingUrlopen:
+        def __init__(self):
+            self.calls = []
+
+        def __call__(self, request, *, timeout):
+            self.calls.append((request, timeout))
+            monkeypatch.setattr(account_module, "_ACCOUNT_CONTEXTS", {})
+            return _FakeHttpResponse(payload)
+
+    opener = ResettingUrlopen()
+    monkeypatch.setattr(account_module, "urlopen", opener)
+    client = BetdaqEconomicReadbackClient(account)
+
+    with pytest.raises(
+        BetdaqEconomicReadbackError,
+        match="authenticated account context changed during economic acquisition",
+    ):
+        client.read_account_postings_by_id(9000)
+
+    assert len(opener.calls) == 1
+
+
 def test_transport_exception_is_sanitized(monkeypatch):
     secret = "password=super-secret&applicationIdentifier=private"
     client, _ = economic_client(monkeypatch, URLError(secret))

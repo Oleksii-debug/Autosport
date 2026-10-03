@@ -215,6 +215,66 @@ def test_exact_provider_ack_binding_is_visible_without_promoting_price_authority
     assert evidence.chain_complete is False
 
 
+def test_exact_request_and_provider_ack_binding_survive_restart(
+    tmp_path,
+) -> None:
+    ledger = _submitted(tmp_path, request_sha256=REQUEST_SHA256)
+    _ack(
+        ledger,
+        request_sha256=REQUEST_SHA256,
+    )
+    first = _project(ledger)
+
+    reopened = RealExecutionLedger(ledger.path)
+    second = _project(reopened)
+
+    assert first.actual_submitted_instruction_bound is True
+    assert first.acknowledgement_binding_matches is True
+    assert second.actual_submitted_instruction_bound is True
+    assert second.acknowledgement_binding_matches is True
+    assert second.accepted_price_verified is False
+    assert second.chain_complete is False
+    assert second.to_dict() == first.to_dict()
+    assert second.evidence_sha256 == first.evidence_sha256
+
+
+def test_crash_after_provider_ack_evidence_before_terminal_ack_stays_uncertain(
+    tmp_path,
+) -> None:
+    ledger = _submitted(tmp_path, request_sha256=REQUEST_SHA256)
+    acknowledgement = ExternalAcknowledgement(
+        attempt_id="attempt-1",
+        external_receipt_id="receipt-1",
+        status=AcknowledgementStatus.ACCEPTED,
+        acknowledged_at=ACKED,
+        accepted_odds=Decimal("2.08"),
+        accepted_stake=Decimal("10.00"),
+    )
+    ledger._bind_provider_acknowledgement_evidence(
+        attempt_id="attempt-1",
+        evidence_id=EVIDENCE_ID,
+        observed_at=ACKED,
+        source="provider-response",
+        request_sha256=REQUEST_SHA256,
+        acknowledgement=acknowledgement,
+    )
+
+    restarted = RealExecutionLedger(ledger.path)
+    assert restarted.recover_uncertain() == ("attempt-1",)
+
+    evidence = _project(restarted)
+
+    assert evidence.attempt_state == "UNKNOWN"
+    assert evidence.chain_status == CHAIN_SUBMIT_INSTRUCTION_BOUND
+    assert evidence.actual_submitted_instruction_bound is True
+    assert evidence.provider_acknowledgement_sha256 is not None
+    assert evidence.acknowledgement_status is None
+    assert evidence.acknowledgement_binding_matches is False
+    assert evidence.accepted_price_status == ACCEPTED_PRICE_UNKNOWN
+    assert evidence.accepted_price_verified is False
+    assert evidence.chain_complete is False
+
+
 def test_numeric_equal_acknowledgement_still_cannot_complete_chain(tmp_path) -> None:
     ledger = _submitted(tmp_path)
     _ack(ledger, odds=Decimal("2.10"), stake=Decimal("10.00"))

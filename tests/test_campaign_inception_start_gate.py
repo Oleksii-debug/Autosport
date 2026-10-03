@@ -605,6 +605,9 @@ def test_gate_authorization_is_exact_committed_authority_record(
     )
 
     assert receipt.evaluation_universe_sha256 == manifest.evaluation_universe_sha256
+    assert receipt.source_snapshot_sha256 == manifest.source_snapshot_sha256
+    assert receipt.observation_not_before == manifest.observation_not_before
+    assert receipt.observation_not_after == manifest.observation_not_after
     authority = _inception_authority(
         locator=locator,
         receipt=receipt,

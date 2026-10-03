@@ -192,6 +192,13 @@ def _make_account_identity_authority():
     canonical_network_post_code = getattr(canonical_network_post, "__code__", None)
     canonical_build_opener = readonly_module.build_opener
     canonical_build_opener_code = getattr(canonical_build_opener, "__code__", None)
+    canonical_redirect_handler_type = readonly_module._RejectBetfairRedirects
+    canonical_redirect_request = canonical_redirect_handler_type.redirect_request
+    canonical_redirect_request_code = getattr(
+        canonical_redirect_request,
+        "__code__",
+        None,
+    )
     canonical_rpc_code = getattr(canonical_rpc, "__code__", None)
     canonical_request_type = readonly_module.Request
     canonical_request_init = getattr(canonical_request_type, "__init__", None)
@@ -283,6 +290,9 @@ def _make_account_identity_authority():
         _readonly_module=readonly_module,
         _canonical_build_opener=canonical_build_opener,
         _canonical_build_opener_code=canonical_build_opener_code,
+        _canonical_redirect_handler_type=canonical_redirect_handler_type,
+        _canonical_redirect_request=canonical_redirect_request,
+        _canonical_redirect_request_code=canonical_redirect_request_code,
         _canonical_request_type=canonical_request_type,
         _canonical_request_init=canonical_request_init,
         _canonical_request_init_code=canonical_request_init_code,
@@ -320,6 +330,12 @@ def _make_account_identity_authority():
                 or _readonly_module.build_opener is not _canonical_build_opener
                 or _getattr(_canonical_build_opener, "__code__", None)
                 is not _canonical_build_opener_code
+                or _readonly_module._RejectBetfairRedirects
+                is not _canonical_redirect_handler_type
+                or _canonical_redirect_handler_type.redirect_request
+                is not _canonical_redirect_request
+                or _getattr(_canonical_redirect_request, "__code__", None)
+                is not _canonical_redirect_request_code
                 or _readonly_module.Request is not _canonical_request_type
                 or _getattr(_canonical_request_type, "__init__", None)
                 is not _canonical_request_init
@@ -457,6 +473,12 @@ def _make_account_identity_authority():
             and client_type._observed_at is canonical_observed_at
             and transport_type.post is canonical_network_post
             and readonly_module.build_opener is canonical_build_opener
+            and readonly_module._RejectBetfairRedirects
+            is canonical_redirect_handler_type
+            and canonical_redirect_handler_type.redirect_request
+            is canonical_redirect_request
+            and getattr(canonical_redirect_request, "__code__", None)
+            is canonical_redirect_request_code
         )
 
     def client_dispatch_is_current(client: BetfairReadOnlyClient) -> bool:

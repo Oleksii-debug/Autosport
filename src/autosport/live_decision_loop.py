@@ -2774,6 +2774,7 @@ class PersistentLiveDecisionLoop:
                     expected_provider_health_boundaries,
                     as_of=decision_time,
                     require_eligible=(gate == _GATE_NORMAL),
+                    require_failed=(gate == _GATE_PROVIDER_GAP),
                 ):
                     with self.dependencies.hold_input_ids(
                         expected_registered_input_ids,

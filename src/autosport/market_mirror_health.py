@@ -420,6 +420,7 @@ class HealthGatedMirrorDecisionIndex:
         *,
         as_of: datetime,
         require_eligible: bool = True,
+        require_failed: bool = False,
     ) -> Iterator[None]:
         """Hold the health writer fence while proving exact bound horizons.
 
@@ -430,8 +431,12 @@ class HealthGatedMirrorDecisionIndex:
         """
         if type(boundaries) is not tuple:
             raise TypeError("boundaries must be an exact tuple")
-        if type(require_eligible) is not bool:
-            raise TypeError("require_eligible must be a bool")
+        if type(require_eligible) is not bool or type(require_failed) is not bool:
+            raise TypeError("provider health publication requirements must be bools")
+        if require_eligible and require_failed:
+            raise ValueError(
+                "provider health publication cannot require eligible and failed together"
+            )
         for item in boundaries:
             if type(item) is not ProviderHealthReplayBoundary:
                 raise TypeError(
@@ -450,6 +455,7 @@ class HealthGatedMirrorDecisionIndex:
             return
 
         with self._health_store._writer_guard():
+            replayed_decisions = []
             for expected in boundaries:
                 latest_boundary = self._latest_durable_boundary(expected.source_id)
                 if latest_boundary != expected:
@@ -461,10 +467,22 @@ class HealthGatedMirrorDecisionIndex:
                     as_of=boundary,
                     replay_boundary=expected,
                 )
+                replayed_decisions.append(replayed)
                 if require_eligible and not replayed.eligible:
                     raise ValueError(
                         "provider health became ineligible before decision publication"
                     )
+            if (
+                require_failed
+                and replayed_decisions
+                and not any(
+                    decision.source_status == "failed"
+                    for decision in replayed_decisions
+                )
+            ):
+                raise ValueError(
+                    "provider health publication lacks durable failed evidence"
+                )
             yield
 
     def decision_view(

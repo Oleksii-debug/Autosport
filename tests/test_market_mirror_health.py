@@ -410,6 +410,85 @@ class HealthGatedMirrorDecisionIndexTests(unittest.TestCase):
                 ):
                     self.fail("advanced provider health must not enter publication")
 
+    def test_provider_gap_publication_fence_requires_durable_failed_health(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            _, _, health_store, gate = self.build_gate(directory)
+            self.record_healthy(
+                health_store,
+                "provider-a",
+                now="2026-09-17T12:00:05+00:00",
+            )
+            as_of = datetime(2026, 9, 17, 12, 0, 10, tzinfo=timezone.utc)
+            boundaries = gate.bind_replay_boundaries(
+                ("provider-a",),
+                as_of=as_of,
+                require_eligible=False,
+            )
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "lacks durable failed evidence",
+            ):
+                with gate.hold_replay_boundaries(
+                    boundaries,
+                    as_of=as_of,
+                    require_eligible=False,
+                    require_failed=True,
+                ):
+                    self.fail("healthy health must not authorize provider-gap publication")
+
+    def test_provider_gap_publication_fence_accepts_exact_failed_horizon(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            _, _, health_store, gate = self.build_gate(directory)
+            health_store.record_failure(
+                "provider-a",
+                now="2026-09-17T12:00:05+00:00",
+                error=TimeoutError("provider unavailable"),
+            )
+            as_of = datetime(2026, 9, 17, 12, 0, 10, tzinfo=timezone.utc)
+            boundaries = gate.bind_replay_boundaries(
+                ("provider-a",),
+                as_of=as_of,
+                require_eligible=False,
+            )
+
+            entered = False
+            with gate.hold_replay_boundaries(
+                boundaries,
+                as_of=as_of,
+                require_eligible=False,
+                require_failed=True,
+            ):
+                entered = True
+
+            self.assertTrue(entered)
+            replayed = gate.provider_health(
+                "provider-a",
+                as_of=as_of,
+                replay_boundary=boundaries[0],
+            )
+            self.assertEqual(
+                replayed.eligibility,
+                ProviderDecisionEligibility.FAILED,
+            )
+
+    def test_publication_fence_rejects_conflicting_health_requirements(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            _, _, _, gate = self.build_gate(directory)
+            as_of = datetime(2026, 9, 17, 12, 0, 10, tzinfo=timezone.utc)
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "cannot require eligible and failed together",
+            ):
+                with gate.hold_replay_boundaries(
+                    (),
+                    as_of=as_of,
+                    require_eligible=True,
+                    require_failed=True,
+                ):
+                    self.fail("conflicting health requirements must fail closed")
+
     def test_publication_fence_accepts_exact_unchanged_health_horizon(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             _, _, health_store, gate = self.build_gate(directory)

@@ -512,6 +512,54 @@ class _ProductDayAdmissionAuthority:
     admission_ts: str
 
 
+_DAY_AUTHORITY_FIELD_DESCRIPTOR_WITNESSES = tuple(
+    (
+        owner,
+        tuple(
+            (name, owner.__dict__[name])
+            for name in tuple(owner.__dataclass_fields__)
+        ),
+    )
+    for owner in (
+        _PaperDayTurnoverSnapshot,
+        _ProductDayAdmissionAuthority,
+        PaperDayTurnoverEvidence,
+        ProductDayRiskWindow,
+    )
+)
+
+
+def _require_day_authority_data_descriptors() -> None:
+    """Reject class-level rewrites of positive day/turnover evidence fields."""
+
+    for owner, witnesses in _DAY_AUTHORITY_FIELD_DESCRIPTOR_WITNESSES:
+        for name, expected_descriptor in witnesses:
+            if owner.__dict__.get(name) is not expected_descriptor:
+                raise RuntimeError(
+                    "economic admission day authority data descriptor changed"
+                )
+
+
+def _canonical_day_authority_field(
+    instance: object,
+    owner: type,
+    name: str,
+) -> object:
+    """Read one day-authority slot through its captured canonical descriptor."""
+
+    _require_day_authority_data_descriptors()
+    if type(instance) is not owner:
+        raise RuntimeError("economic admission day authority type changed")
+    for witness_owner, witnesses in _DAY_AUTHORITY_FIELD_DESCRIPTOR_WITNESSES:
+        if witness_owner is not owner:
+            continue
+        for field_name, descriptor in witnesses:
+            if field_name == name:
+                return descriptor.__get__(instance, owner)
+        break
+    raise RuntimeError("economic admission day authority field is unavailable")
+
+
 def _positive_decimal(value: Decimal | str) -> Decimal:
     if type(value) is Decimal:
         amount = value
@@ -596,7 +644,11 @@ def _product_clock_admission_timestamp(
 ) -> str | None:
     """Issue the admission instant from the same product clock as current day authority."""
 
-    if not current_window.product_clock_authoritative:
+    if not _canonical_day_authority_field(
+        current_window,
+        ProductDayRiskWindow,
+        "product_clock_authoritative",
+    ):
         return None
     clock = window_store._clock
     try:
@@ -612,8 +664,20 @@ def _product_clock_admission_timestamp(
         )
     except (OverflowError, OSError, ValueError):
         return None
-    window_start = _parse_utc_timestamp(current_window.window_start)
-    window_end = _parse_utc_timestamp(current_window.window_end_exclusive)
+    window_start = _parse_utc_timestamp(
+        _canonical_day_authority_field(
+            current_window,
+            ProductDayRiskWindow,
+            "window_start",
+        )
+    )
+    window_end = _parse_utc_timestamp(
+        _canonical_day_authority_field(
+            current_window,
+            ProductDayRiskWindow,
+            "window_end_exclusive",
+        )
+    )
     if (
         window_start is None
         or window_end is None
@@ -692,6 +756,7 @@ def _prepare_paper_day_turnover_snapshot(
     goal = risk_policy.economic_goal
     if goal is None or not _ADMISSION_PATH_EXISTS(book_path):
         return None
+    _require_day_authority_data_descriptors()
     _require_product_day_turnover_dispatch()
     try:
         goal_store = _canonical_economic_goal_store(root)
@@ -701,7 +766,11 @@ def _prepare_paper_day_turnover_snapshot(
         snapshot_book = _PAPERBOOK_LOAD_FUNCTION(PaperBook, book_path)
         window_store = ProductDayRiskWindowStore(root)
         window = window_store.current()
-        if not window.product_clock_authoritative:
+        if not _canonical_day_authority_field(
+            window,
+            ProductDayRiskWindow,
+            "product_clock_authoritative",
+        ):
             return None
         evidence = PaperDayTurnoverResolver.resolve(
             book=snapshot_book,
@@ -710,6 +779,7 @@ def _prepare_paper_day_turnover_snapshot(
             window_evidence=window,
         )
         _require_product_day_turnover_dispatch()
+        _require_day_authority_data_descriptors()
     except (ArithmeticError, OSError, RuntimeError, TypeError, ValueError):
         return None
     return _PaperDayTurnoverSnapshot(
@@ -732,12 +802,28 @@ def _revalidated_product_day_admission_authority(
 
     if snapshot is None:
         return None
+    _require_day_authority_data_descriptors()
     goal = risk_policy.economic_goal
     if goal is None:
         return None
     try:
         _require_product_day_turnover_dispatch()
-        if not _same_semantic_book_state(snapshot.book, book):
+        snapshot_book = _canonical_day_authority_field(
+            snapshot,
+            _PaperDayTurnoverSnapshot,
+            "book",
+        )
+        snapshot_window_evidence = _canonical_day_authority_field(
+            snapshot,
+            _PaperDayTurnoverSnapshot,
+            "window_evidence",
+        )
+        evidence = _canonical_day_authority_field(
+            snapshot,
+            _PaperDayTurnoverSnapshot,
+            "evidence",
+        )
+        if not _same_semantic_book_state(snapshot_book, book):
             return None
         goal_store = _canonical_economic_goal_store(root)
         durable_goal = _ECONOMIC_GOAL_LOAD_FROZEN(goal_store)
@@ -750,34 +836,87 @@ def _revalidated_product_day_admission_authority(
         window_store = ProductDayRiskWindowStore(root)
         current_window = ProductDayRiskWindowStore.require_current_under_lock(
             window_store,
-            snapshot.window_evidence,
+            snapshot_window_evidence,
             workspace_lock=workspace_lock,
         )
         _require_product_day_turnover_dispatch()
+        _require_day_authority_data_descriptors()
 
-        evidence = snapshot.evidence
         provenance = provenance_for(goal)
+        evidence_goal_id = _canonical_day_authority_field(
+            evidence, PaperDayTurnoverEvidence, "goal_id"
+        )
+        evidence_goal_revision = _canonical_day_authority_field(
+            evidence, PaperDayTurnoverEvidence, "goal_revision"
+        )
+        evidence_goal_sha = _canonical_day_authority_field(
+            evidence, PaperDayTurnoverEvidence, "goal_contract_sha256"
+        )
+        evidence_bankroll_id = _canonical_day_authority_field(
+            evidence, PaperDayTurnoverEvidence, "bankroll_id"
+        )
+        evidence_currency = _canonical_day_authority_field(
+            evidence, PaperDayTurnoverEvidence, "currency"
+        )
+        evidence_initial_bankroll = _canonical_day_authority_field(
+            evidence, PaperDayTurnoverEvidence, "initial_bankroll"
+        )
+        evidence_day_key = _canonical_day_authority_field(
+            evidence, PaperDayTurnoverEvidence, "day_key"
+        )
+        evidence_window_start = _canonical_day_authority_field(
+            evidence, PaperDayTurnoverEvidence, "window_start"
+        )
+        evidence_window_end = _canonical_day_authority_field(
+            evidence, PaperDayTurnoverEvidence, "window_end_exclusive"
+        )
+        evidence_state_sha = _canonical_day_authority_field(
+            evidence, PaperDayTurnoverEvidence, "window_state_sha256"
+        )
+        evidence_generation = _canonical_day_authority_field(
+            evidence, PaperDayTurnoverEvidence, "window_authority_generation"
+        )
+        evidence_breached = _canonical_day_authority_field(
+            evidence, PaperDayTurnoverEvidence, "breached"
+        )
+        current_day_key = _canonical_day_authority_field(
+            current_window, ProductDayRiskWindow, "day_key"
+        )
+        current_window_start = _canonical_day_authority_field(
+            current_window, ProductDayRiskWindow, "window_start"
+        )
+        current_window_end = _canonical_day_authority_field(
+            current_window, ProductDayRiskWindow, "window_end_exclusive"
+        )
+        current_state_sha = _canonical_day_authority_field(
+            current_window, ProductDayRiskWindow, "state_sha256"
+        )
+        current_generation = _canonical_day_authority_field(
+            current_window, ProductDayRiskWindow, "authority_generation"
+        )
+        current_clock_authoritative = _canonical_day_authority_field(
+            current_window, ProductDayRiskWindow, "product_clock_authoritative"
+        )
         if (
-            evidence.goal_id != goal.goal_id
-            or evidence.goal_revision != goal.revision
-            or evidence.goal_contract_sha256 != provenance.contract_sha256
-            or evidence.bankroll_id != goal.bankroll_id
-            or evidence.currency != goal.currency
-            or evidence.initial_bankroll != book.initial_bankroll
-            or evidence.day_key != current_window.day_key
-            or evidence.window_start != current_window.window_start
-            or evidence.window_end_exclusive != current_window.window_end_exclusive
-            or evidence.window_state_sha256 != current_window.state_sha256
-            or evidence.window_authority_generation
-            != current_window.authority_generation
-            or not current_window.product_clock_authoritative
-            or evidence.breached
+            evidence_goal_id != goal.goal_id
+            or evidence_goal_revision != goal.revision
+            or evidence_goal_sha != provenance.contract_sha256
+            or evidence_bankroll_id != goal.bankroll_id
+            or evidence_currency != goal.currency
+            or evidence_initial_bankroll != book.initial_bankroll
+            or evidence_day_key != current_day_key
+            or evidence_window_start != current_window_start
+            or evidence_window_end != current_window_end
+            or evidence_state_sha != current_state_sha
+            or evidence_generation != current_generation
+            or not current_clock_authoritative
+            or evidence_breached
         ):
             return None
 
         candidate_time = _parse_utc_timestamp(placed_at)
-        window_start = _parse_utc_timestamp(evidence.window_start)
-        window_end = _parse_utc_timestamp(evidence.window_end_exclusive)
+        window_start = _parse_utc_timestamp(evidence_window_start)
+        window_end = _parse_utc_timestamp(evidence_window_end)
         if (
             candidate_time is None
             or window_start is None
@@ -785,7 +924,11 @@ def _revalidated_product_day_admission_authority(
             or not (window_start <= candidate_time < window_end)
         ):
             return None
-        room = evidence.residual_headroom
+        room = _canonical_day_authority_field(
+            evidence,
+            PaperDayTurnoverEvidence,
+            "residual_headroom",
+        )
         if type(room) is not Decimal or not room.is_finite() or room < 0:
             return None
         admission_ts = _product_clock_admission_timestamp(
@@ -1407,7 +1550,11 @@ def admit_paper_ticket(
                 workspace_lock=workspace_lock,
             )
             if day_authority is not None:
-                effective_placed_at = day_authority.admission_ts
+                effective_placed_at = _canonical_day_authority_field(
+                    day_authority,
+                    _ProductDayAdmissionAuthority,
+                    "admission_ts",
+                )
 
         if not _admission_risk_helper_authority_valid():
             decision = RiskDecision(
@@ -1448,7 +1595,11 @@ def admit_paper_ticket(
                 try:
                     quote_context = _quote_context_with_product_admission_time(
                         context,
-                        day_authority.admission_ts,
+                        _canonical_day_authority_field(
+                            day_authority,
+                            _ProductDayAdmissionAuthority,
+                            "admission_ts",
+                        ),
                     )
                 except (TypeError, ValueError):
                     decision = RiskDecision(
@@ -1472,7 +1623,13 @@ def admit_paper_ticket(
             and context is not None
         )
         turnover_room = (
-            None if day_authority is None else day_authority.turnover_room
+            None
+            if day_authority is None
+            else _canonical_day_authority_field(
+                day_authority,
+                _ProductDayAdmissionAuthority,
+                "turnover_room",
+            )
         )
 
         if decision_allowed and goal is not None:

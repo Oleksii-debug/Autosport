@@ -7,6 +7,7 @@ import scripts.cancel_superseded_pr_workflow_runs_scoped as scoped_controller
 from scripts.cancel_superseded_pr_workflow_runs import CancellationError
 from scripts.cancel_superseded_pr_workflow_runs_scoped import (
     WorkflowScopedGitHubApi,
+    _explicit_run_identity_is_current,
     _trusted_live_pr_qualification,
 )
 
@@ -192,3 +193,81 @@ def test_scoped_live_qualification_ignores_repository_property_class_shadow(
 
     assert _trusted_live_pr_qualification(api, 303) == (HEAD, True)
     assert requested == ["https://api.github.com/repos/owner/repo/pulls/303"]
+
+
+def test_scoped_active_run_enumeration_rejects_workflow_binding_drift(
+    monkeypatch,
+) -> None:
+    api = WorkflowScopedGitHubApi(
+        repository="owner/repo",
+        token="token",
+        workflow_id=356678400,
+        workflow_name="CI",
+    )
+
+    def drifting_request(
+        path: str,
+        *,
+        method: str = "GET",
+        allowed_http_errors: frozenset[int] = frozenset(),
+    ):
+        assert method == "GET"
+        assert not allowed_http_errors
+        assert "/actions/workflows/356678400/runs?" in path
+        api.__dict__["_WorkflowScopedGitHubApi__workflow_id"] = 999
+        return {"total_count": 0, "workflow_runs": []}
+
+    monkeypatch.setattr(api, "_request", drifting_request)
+
+    with pytest.raises(CancellationError, match="source workflow binding changed"):
+        api._active_runs_for_status("queued")
+
+
+def test_explicit_run_identity_rejects_workflow_binding_drift_during_get(
+    monkeypatch,
+) -> None:
+    api = WorkflowScopedGitHubApi(
+        repository="owner/repo",
+        token="token",
+        workflow_id=356678400,
+        workflow_name="CI",
+    )
+    canonical_request = scoped_controller.GitHubApi._request
+
+    class FakeResponse:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, _exc_type, _exc, _tb):
+            return False
+
+        def read(self) -> bytes:
+            return (
+                b'{"id":77,"workflow_id":356678400,"event":"pull_request",'
+                b'"head_sha":"' + HEAD.encode("ascii") + b'",'
+                b'"name":"CI","status":"queued",'
+                b'"pull_requests":[{"number":303}]}'
+            )
+
+    def drifting_urlopen(request, *, timeout: int):
+        assert timeout == 20
+        assert request.full_url == (
+            "https://api.github.com/repos/owner/repo/actions/runs/77"
+        )
+        api.__dict__["_WorkflowScopedGitHubApi__workflow_id"] = 999
+        return FakeResponse()
+
+    monkeypatch.setitem(
+        canonical_request.__globals__,
+        "urlopen",
+        drifting_urlopen,
+    )
+
+    assert not _explicit_run_identity_is_current(
+        api,
+        run_id=77,
+        expected_head_sha=HEAD,
+        pr_number=303,
+    )

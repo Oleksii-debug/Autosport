@@ -112,9 +112,18 @@ class WorkflowScopedGitHubApi(GitHubApi):
         workflow_name: str,
     ) -> None:
         super().__init__(repository=repository, token=token)
-        self._workflow_id = _require_positive_int(workflow_id, field="workflow id")
+        canonical_workflow_id = _require_positive_int(
+            workflow_id,
+            field="workflow id",
+        )
         if not isinstance(workflow_name, str) or not workflow_name:
             raise CancellationError("workflow name is required")
+        # Keep the source-workflow trust root separate from compatibility aliases.
+        # The trusted Actions enumeration and run-identity boundaries snapshot these
+        # private coordinates and fail closed if they drift across an external read.
+        self.__workflow_id = canonical_workflow_id
+        self.__workflow_name = workflow_name
+        self._workflow_id = canonical_workflow_id
         self._workflow_name = workflow_name
         self._recovery_pr_number: int | None = None
         self._recovery_head_sha: str | None = None
@@ -148,7 +157,10 @@ class WorkflowScopedGitHubApi(GitHubApi):
         pr_number = _require_positive_int(pr_number, field="pull request number")
         event_head_sha = _require_sha(event_head_sha, field="event head sha")
         current_run_id = _require_positive_int(current_run_id, field="current run id")
-        if workflow_name != self._workflow_name:
+        if workflow_name != object.__getattribute__(
+            self,
+            "_WorkflowScopedGitHubApi__workflow_name",
+        ):
             raise CancellationError("workflow name does not match exact workflow id")
 
         self._recovery_pr_number = None
@@ -238,12 +250,16 @@ class WorkflowScopedGitHubApi(GitHubApi):
         self._recovered_runs.clear()
 
     def _canonicalize_workflow_identity(self, run: WorkflowRun) -> WorkflowRun:
-        if run.workflow_name == self._workflow_name:
+        workflow_name = object.__getattribute__(
+            self,
+            "_WorkflowScopedGitHubApi__workflow_name",
+        )
+        if run.workflow_name == workflow_name:
             return run
         return WorkflowRun(
             run_id=run.run_id,
             head_sha=run.head_sha,
-            workflow_name=self._workflow_name,
+            workflow_name=workflow_name,
             pr_numbers=run.pr_numbers,
             status=run.status,
         )
@@ -364,14 +380,23 @@ class WorkflowScopedGitHubApi(GitHubApi):
             field="expected workflow run head sha",
         )
         pr_number = _require_positive_int(pr_number, field="pull request number")
+        workflow_id_authority = object.__getattribute__(
+            self,
+            "_WorkflowScopedGitHubApi__workflow_id",
+        )
         payload = self._request(f"/actions/runs/{run_id}")
+        if object.__getattribute__(
+            self,
+            "_WorkflowScopedGitHubApi__workflow_id",
+        ) != workflow_id_authority:
+            return False
         if not isinstance(payload, dict):
             raise CancellationError("invalid workflow-run response")
         workflow_id = _require_positive_int(
             payload.get("workflow_id"),
             field="workflow run workflow id",
         )
-        if workflow_id != self._workflow_id or payload.get("event") != "pull_request":
+        if workflow_id != workflow_id_authority or payload.get("event") != "pull_request":
             return False
         run = parse_run(payload)
         return (
@@ -578,6 +603,14 @@ class WorkflowScopedGitHubApi(GitHubApi):
     def _active_runs_for_status(self, status: str) -> tuple[WorkflowRun, ...]:
         if status not in _ACTIVE_STATUSES:
             raise CancellationError("invalid active workflow status")
+        workflow_id = object.__getattribute__(
+            self,
+            "_WorkflowScopedGitHubApi__workflow_id",
+        )
+        workflow_name = object.__getattribute__(
+            self,
+            "_WorkflowScopedGitHubApi__workflow_name",
+        )
         runs: list[WorkflowRun] = []
         page = 1
         while True:
@@ -590,8 +623,21 @@ class WorkflowScopedGitHubApi(GitHubApi):
                 }
             )
             payload = self._request(
-                f"/actions/workflows/{self._workflow_id}/runs?{query}"
+                f"/actions/workflows/{workflow_id}/runs?{query}"
             )
+            if (
+                object.__getattribute__(
+                    self,
+                    "_WorkflowScopedGitHubApi__workflow_id",
+                )
+                != workflow_id
+                or object.__getattribute__(
+                    self,
+                    "_WorkflowScopedGitHubApi__workflow_name",
+                )
+                != workflow_name
+            ):
+                raise CancellationError("source workflow binding changed")
             if (
                 not isinstance(payload, dict)
                 or type(payload.get("total_count")) is not int
@@ -601,7 +647,15 @@ class WorkflowScopedGitHubApi(GitHubApi):
                 raise CancellationError("invalid workflow-runs response")
             page_runs = payload["workflow_runs"]
             for item in page_runs:
-                run = self._canonicalize_workflow_identity(parse_run(item))
+                run = parse_run(item)
+                if run.workflow_name != workflow_name:
+                    run = WorkflowRun(
+                        run_id=run.run_id,
+                        head_sha=run.head_sha,
+                        workflow_name=workflow_name,
+                        pr_numbers=run.pr_numbers,
+                        status=run.status,
+                    )
                 if not run.pr_numbers:
                     head_branch: str | None = None
                     if isinstance(item, dict):
@@ -777,6 +831,11 @@ def _build_explicit_run_identity_checker(
         """Fail closed when explicit identity or its transport dispatch changes."""
 
         if isinstance(api, workflow_scoped_api_type):
+            workflow_id_authority = object.__getattribute__(
+                api,
+                "_WorkflowScopedGitHubApi__workflow_id",
+            )
+
             def production_dispatch_current() -> bool:
                 bound = getattr(api, "_explicit_run_identity_matches", None)
                 bound_request = getattr(api, "_request", None)
@@ -814,7 +873,12 @@ def _build_explicit_run_identity_checker(
             workflow_id = payload.get("workflow_id")
             if type(workflow_id) is not int or workflow_id <= 0:
                 return False
-            if workflow_id != api._workflow_id or payload.get("event") != "pull_request":
+            if object.__getattribute__(
+                api,
+                "_WorkflowScopedGitHubApi__workflow_id",
+            ) != workflow_id_authority:
+                return False
+            if workflow_id != workflow_id_authority or payload.get("event") != "pull_request":
                 return False
             if type(payload.get("id")) is not int or payload.get("id") != run_id:
                 return False
@@ -1068,7 +1132,10 @@ def cancel_superseded_explicit_pr_runs(
     if (
         type(workflow_name) is not str
         or not workflow_name
-        or workflow_name != api._workflow_name
+        or workflow_name != object.__getattribute__(
+            api,
+            "_WorkflowScopedGitHubApi__workflow_name",
+        )
     ):
         raise CancellationError("workflow name does not match exact workflow id")
 

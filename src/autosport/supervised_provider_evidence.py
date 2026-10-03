@@ -332,6 +332,7 @@ def _require_bound_profile(
         raise ProviderEvidenceError("provider evidence predates capability profile")
 
 
+_REQUIRED_CURRENT_STATUSES = frozenset({"EXECUTABLE", "EXECUTION_COMPLETE"})
 _REQUIRED_CLEARED_STATUSES = ("SETTLED", "VOIDED", "LAPSED", "CANCELLED")
 
 
@@ -486,6 +487,10 @@ def _evaluate_betfair_provider_state_semantics(
             )
         if kind == "current":
             assert isinstance(order, BetfairCurrentOrderObservation)
+            if order.status not in _REQUIRED_CURRENT_STATUSES:
+                raise ProviderEvidenceError(
+                    "provider current order status is not a recognized Betfair state"
+                )
             if order.price is None or order.price != action.requested_odds:
                 raise ProviderEvidenceError(
                     "provider current order requested price conflicts with execution action"
@@ -496,6 +501,10 @@ def _evaluate_betfair_provider_state_semantics(
             ):
                 raise ProviderEvidenceError(
                     "provider current order requested stake conflicts with execution action"
+                )
+            if order.size_matched + order.size_remaining > order.requested_size:
+                raise ProviderEvidenceError(
+                    "provider current order matched plus remaining size exceeds requested size"
                 )
         if kind == "cleared":
             assert isinstance(order, BetfairClearedOrderObservation)

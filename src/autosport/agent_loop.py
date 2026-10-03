@@ -1214,7 +1214,10 @@ class AgentLoopRuntime:
             }
             graded_finding_fields = legacy_finding_fields | {"evidence_grade"}
             for raw_finding in findings_raw:
-                if type(raw_finding) is not dict or set(raw_finding) not in {
+                finding_fields = (
+                    frozenset(raw_finding) if type(raw_finding) is dict else None
+                )
+                if finding_fields not in {
                     frozenset(legacy_finding_fields),
                     frozenset(graded_finding_fields),
                 }:

@@ -2,6 +2,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 import autosport.economic_admission as economic_admission
+import autosport.risk as risk_module
 
 from autosport.domain import MarketEvent, TicketLeg
 from autosport.economic_admission import admit_paper_ticket
@@ -257,6 +258,62 @@ def test_day_turnover_override_does_not_bypass_quote_freshness(tmp_path):
     )
 
     assert baseline.reason == "economic goal turnover limit exceeded"
+    assert result.admitted is False
+    assert "quote" in result.risk.reason
+
+
+
+def test_risk_module_timestamp_rebind_cannot_bypass_post_turnover_quote_gate(tmp_path):
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    old = now - timedelta(days=2)
+    goal = _goal()
+    EconomicGoalStore(tmp_path).initialize_owner(goal)
+    book = _book_with_settled_turnover(placed_at=_timestamp(old), stake="50")
+    book.save(tmp_path / "paper_book.json")
+    candidate = _leg("candidate-risk-global-rebind")
+    stale_quote = MarketEvent(
+        event_id=candidate.event_id,
+        market_id=candidate.market_id,
+        selection_id=candidate.selection_id,
+        decimal_odds=candidate.locked_odds,
+        observed_ts=_timestamp(now - timedelta(hours=1)),
+        source_id="provider-1",
+        sequence=1,
+        source_ts=_timestamp(now - timedelta(hours=1, seconds=1)),
+        ingest_ts=_timestamp(now - timedelta(hours=1) + timedelta(seconds=1)),
+    )
+    context = ProposedTicketRiskContext(
+        legs=(candidate,),
+        quotes=(stale_quote,),
+        bankroll_id="paper-bankroll",
+        currency="USD",
+        proposal_ts=_timestamp(now),
+    )
+    policy = _policy(goal)
+    baseline = policy.evaluate(book, Decimal("0.01"), context=context)
+    assert baseline.reason == "economic goal turnover limit exceeded"
+
+    original = risk_module._canonical_context_timestamp
+    try:
+        risk_module._canonical_context_timestamp = (
+            lambda label, value: (_timestamp(now), now)
+        )
+        result = admit_paper_ticket(
+            workspace=tmp_path,
+            book=book,
+            risk_policy=policy,
+            stake=Decimal("0.01"),
+            legs=(candidate,),
+            reason="risk module timestamp rebind must not widen admission",
+            placed_at=_timestamp(now),
+            context=context,
+            provider_source_ids=("provider-1",),
+            bankroll_id="paper-bankroll",
+            currency="USD",
+        )
+    finally:
+        risk_module._canonical_context_timestamp = original
+
     assert result.admitted is False
     assert "quote" in result.risk.reason
 

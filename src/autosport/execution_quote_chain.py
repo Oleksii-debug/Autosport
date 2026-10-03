@@ -61,11 +61,11 @@ class ExecutionQuoteChainUnavailable(ExecutionQuoteChainError):
     """Requested plan/attempt cannot be projected from canonical durable facts."""
 
 
-class _ExecutionQuoteChainEvidenceMeta(type):
-    """Prevent ordinary runtime replacement of public authority-bearing surfaces."""
+def _build_execution_quote_chain_evidence_meta():
+    """Build a metaclass whose seal state is not module/class mutable authority."""
 
-    _sealed_classes: set[type] = set()
-    _protected_names = frozenset(
+    sealed_classes: set[type] = set()
+    protected_names = frozenset(
         {
             "assert_projection_issued",
             "submit_instruction_identity_bound",
@@ -78,26 +78,31 @@ class _ExecutionQuoteChainEvidenceMeta(type):
         }
     )
 
-    def __setattr__(cls, name: str, value: object) -> None:
-        if (
-            cls in __class__._sealed_classes
-            and name in __class__._protected_names
-        ):
-            raise TypeError(
-                "quote-chain evidence authority surface is sealed: " + name
-            )
-        super().__setattr__(name, value)
+    class _ExecutionQuoteChainEvidenceMeta(type):
+        def __setattr__(cls, name: str, value: object) -> None:
+            if cls in sealed_classes and name in protected_names:
+                raise TypeError(
+                    "quote-chain evidence authority surface is sealed: " + name
+                )
+            super().__setattr__(name, value)
 
-    def __delattr__(cls, name: str) -> None:
-        if cls in self_meta_sealed(cls) and name in self_meta_protected(cls):
-            raise TypeError(
-                "quote-chain evidence authority surface is sealed: " + name
-            )
-        super().__delattr__(name)
+        def __delattr__(cls, name: str) -> None:
+            if cls in sealed_classes and name in protected_names:
+                raise TypeError(
+                    "quote-chain evidence authority surface is sealed: " + name
+                )
+            super().__delattr__(name)
 
-    @classmethod
-    def seal(mcls, cls: type) -> None:
-        mcls._sealed_classes.add(cls)
+        @classmethod
+        def seal(mcls, cls: type) -> None:
+            sealed_classes.add(cls)
+
+    return _ExecutionQuoteChainEvidenceMeta
+
+
+_ExecutionQuoteChainEvidenceMeta = _build_execution_quote_chain_evidence_meta()
+del _build_execution_quote_chain_evidence_meta
+
 
 def _require_canonical_verified_execution_view_dispatch(
     ledger: RealExecutionLedger,

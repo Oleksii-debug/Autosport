@@ -18,6 +18,7 @@ from autosport.provider_capability_evidence_matrix import (
     ProviderCapabilityEvidence,
     ProviderCapabilityEvidenceMatrix,
     ProviderCapabilityEvidenceMatrixError,
+    ProviderCapabilityEvidenceMatrixJournal,
     ProviderCapabilityTruthGrade,
     build_provider_capability_evidence_matrix,
     issue_provider_capability_evidence,
@@ -707,6 +708,106 @@ def test_successor_rejects_integration_observation_regression():
         match="integration observation moved backwards",
     ):
         validate_capability_matrix_successor(first, second)
+
+
+def test_successor_time_must_advance_strictly():
+    first = matrix(as_of=T3)
+    same_instant = matrix(
+        version=2,
+        predecessor=first.matrix_id,
+        as_of=T3,
+    )
+    with pytest.raises(
+        ProviderCapabilityEvidenceMatrixError,
+        match="successor time must advance strictly",
+    ):
+        validate_capability_matrix_successor(first, same_instant)
+
+
+def test_matrix_journal_linearizes_successors_and_rejects_sibling_fork():
+    journal = ProviderCapabilityEvidenceMatrixJournal()
+    first = matrix(as_of=T3)
+    second = matrix(
+        version=2,
+        predecessor=first.matrix_id,
+        as_of=T4,
+    )
+    assert journal.publish(first) == first.matrix_id
+    assert journal.publish(first) == first.matrix_id
+    assert journal.publish(second) == second.matrix_id
+    assert journal.latest_for(first) is second
+
+    sibling = build_provider_capability_evidence_matrix(
+        first.profile,
+        first.integration,
+        environment=first.environment,
+        application_mode=first.application_mode,
+        matrix_version=2,
+        as_of=T4,
+        matrix_ref="matrix-2-sibling",
+        predecessor_matrix_id=first.matrix_id,
+    )
+    with pytest.raises(
+        ProviderCapabilityEvidenceMatrixError,
+        match="extend exact journal latest",
+    ):
+        journal.publish(sibling)
+
+
+def test_matrix_journal_rejects_second_root_for_same_authority_scope():
+    journal = ProviderCapabilityEvidenceMatrixJournal()
+    first = matrix(as_of=T3)
+    alternate_root = build_provider_capability_evidence_matrix(
+        first.profile,
+        first.integration,
+        environment=first.environment,
+        application_mode=first.application_mode,
+        matrix_version=1,
+        as_of=T3,
+        matrix_ref="alternate-root",
+    )
+    journal.publish(first)
+
+    with pytest.raises(
+        ProviderCapabilityEvidenceMatrixError,
+        match="already has a root",
+    ):
+        journal.publish(alternate_root)
+
+
+def test_matrix_journal_rejects_successor_without_root_and_copied_matrix():
+    first = matrix(as_of=T3)
+    second = matrix(
+        version=2,
+        predecessor=first.matrix_id,
+        as_of=T4,
+    )
+    empty = ProviderCapabilityEvidenceMatrixJournal()
+    with pytest.raises(
+        ProviderCapabilityEvidenceMatrixError,
+        match="requires an existing journal root",
+    ):
+        empty.publish(second)
+
+    copied = replace(first)
+    with pytest.raises(
+        ProviderCapabilityEvidenceMatrixError,
+        match="requires product-issued exact matrix",
+    ):
+        empty.publish(copied)
+
+
+def test_matrix_journal_detects_post_publication_mutation():
+    journal = ProviderCapabilityEvidenceMatrixJournal()
+    first = matrix(as_of=T3)
+    journal.publish(first)
+    object.__setattr__(first, "matrix_ref", "mutated-after-publication")
+
+    with pytest.raises(
+        ProviderCapabilityEvidenceMatrixError,
+        match="mutated after publication",
+    ):
+        journal.latest_for(first)
 
 
 def test_successor_validation_rejects_post_build_matrix_mutation():

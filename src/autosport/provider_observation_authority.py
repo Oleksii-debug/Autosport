@@ -809,6 +809,8 @@ def capture_parlay_complete_game_board(
 def _seal_provider_observation_capture_dispatch() -> None:
     module_globals = _CANONICAL_MODULE_GLOBALS
     expected_any = any
+    expected_math = _CANONICAL_MATH
+    expected_math_isfinite = _CANONICAL_MATH_ISFINITE
     expected_capture = capture_parlay_complete_game_board
     expected_capture_code = expected_capture.__code__
     expected_guard = _require_production_capture_origin_integrity
@@ -873,6 +875,13 @@ def _seal_provider_observation_capture_dispatch() -> None:
         ):
             raise ProviderObservationIntegrityError(
                 "provider production acquisition builtin dispatch shadowed"
+            )
+        if (
+            module_globals.get("math") is not expected_math
+            or expected_math.isfinite is not expected_math_isfinite
+        ):
+            raise ProviderObservationIntegrityError(
+                "provider production acquisition numeric validation changed"
             )
         if (
             module_globals.get("_require_production_capture_origin_integrity")

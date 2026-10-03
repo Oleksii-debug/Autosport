@@ -2704,3 +2704,92 @@ def test_terminal_recovery_still_requires_exact_bound_approval_identity() -> Non
             )
 
         assert len(transport.calls) == 1
+
+
+def test_terminal_redelivery_reports_reconciliation_evidence_over_earlier_ambiguity() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
+        initial_transport = _Transport(
+            lambda request: _response(
+                request,
+                matched=action.requested_stake,
+                average=action.requested_odds,
+                bet_id=None,
+                order_status="EXECUTION_COMPLETE",
+            )
+        )
+        write_client = _enabled_client(
+            profile,
+            initial_transport,
+            store=goal_store,
+        )
+        attempt_id = "attempt-reconciled-terminal-redelivery"
+
+        initial = execute_betfair_supervised_action(
+            ledger,
+            bound,
+            approval,
+            action_id=action.action_id,
+            attempt_id=attempt_id,
+            profile=profile,
+            client=write_client,
+        )
+        assert initial.outcome is PlaceOrdersOutcome.UNKNOWN
+        assert initial.evidence_id is not None
+
+        provider_ref = ledger.provider_order_reference(
+            attempt_id=attempt_id,
+            provider_id=action.bookmaker_id,
+        )
+        assert provider_ref is not None
+        read_transport = _ReadbackTransport(
+            provider_order_ref=provider_ref,
+            action=action,
+            include_effect=True,
+        )
+        read_client = BetfairReadOnlyClient(
+            BetfairSessionCredentials("app-key", "session-token"),
+            transport=read_transport,
+            clock=lambda: datetime.fromisoformat(
+                "2099-01-01T00:00:00+00:00"
+            ),
+            venue_id="betfair",
+            account_id="acct-1",
+        )
+        envelope = read_betfair_supervised_action_readback(
+            read_client,
+            ledger,
+            bound,
+            attempt_id=attempt_id,
+        )
+        verified = verify_betfair_provider_state(
+            action,
+            profile,
+            expected_profile_sha256=profile.profile_id,
+            readback=envelope,
+            expected_provider_order_ref=provider_ref,
+        )
+        reconciliation = reconcile_provider_readback(
+            ledger,
+            bound,
+            attempt_id=attempt_id,
+            readback=verified,
+        )
+        assert reconciliation.attempt_state is AttemptState.ACCEPTED
+        assert reconciliation.evidence_id != initial.evidence_id
+
+        redelivery = execute_betfair_supervised_action(
+            ledger,
+            bound,
+            approval,
+            action_id=action.action_id,
+            attempt_id=attempt_id,
+            profile=profile,
+            client=write_client,
+        )
+
+        assert redelivery.outcome is PlaceOrdersOutcome.ACCEPTED
+        assert redelivery.attempt_state is AttemptState.ACCEPTED
+        assert redelivery.evidence_id == reconciliation.evidence_id
+        assert redelivery.evidence_id != initial.evidence_id
+        assert len(initial_transport.calls) == 1

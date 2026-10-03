@@ -245,3 +245,37 @@ def test_local_windows_build_binds_real_process_recovery_before_and_after_packag
         "process_recovery_new_decision_ledger_sha256",
     ):
         assert required_binding in script
+
+def test_local_windows_build_known_folder_first_run_scrubs_all_storage_overrides() -> None:
+    script = _build_script_text()
+
+    save_local = "$originalLocalAppData = $env:LOCALAPPDATA"
+    save_workspace = "$originalAutosportWorkspace = $env:AUTOSPORT_WORKSPACE"
+    detect_local = "$hadLocalAppData = Test-Path Env:LOCALAPPDATA"
+    detect_workspace = "$hadAutosportWorkspace = Test-Path Env:AUTOSPORT_WORKSPACE"
+    remove_local = "Remove-Item Env:LOCALAPPDATA -ErrorAction SilentlyContinue"
+    remove_workspace = "Remove-Item Env:AUTOSPORT_WORKSPACE -ErrorAction SilentlyContinue"
+    process_a = "$firstRunProcessA = Start-Process -FilePath $extractedExe"
+    process_b = "$firstRunProcessB = Start-Process -FilePath $extractedExe"
+    restore_local = "$env:LOCALAPPDATA = $originalLocalAppData"
+    restore_workspace = "$env:AUTOSPORT_WORKSPACE = $originalAutosportWorkspace"
+    known_folder_claim = "extracted_first_run_storage_known_folder_status = 'PASS'"
+
+    save_local_index = script.index(save_local)
+    save_workspace_index = script.index(save_workspace, save_local_index)
+    detect_local_index = script.index(detect_local, save_local_index)
+    detect_workspace_index = script.index(detect_workspace, save_workspace_index)
+    remove_local_index = script.index(remove_local, detect_workspace_index)
+    remove_workspace_index = script.index(remove_workspace, remove_local_index)
+    process_a_index = script.index(process_a, remove_workspace_index)
+    process_b_index = script.index(process_b, process_a_index)
+    restore_local_index = script.index(restore_local, process_b_index)
+    restore_workspace_index = script.index(restore_workspace, restore_local_index)
+    known_folder_claim_index = script.index(known_folder_claim, restore_workspace_index)
+
+    assert save_local_index < detect_local_index < save_workspace_index < detect_workspace_index
+    assert detect_workspace_index < remove_local_index < remove_workspace_index < process_a_index
+    assert process_a_index < process_b_index < restore_local_index < restore_workspace_index
+    assert restore_workspace_index < known_folder_claim_index
+    assert script.count(remove_workspace) >= 2
+

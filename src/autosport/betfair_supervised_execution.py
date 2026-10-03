@@ -979,6 +979,30 @@ class BetfairPlaceExecutionReport:
         )
 
 
+_CANONICAL_BETFAIR_INSTRUCTION_REPORT_TYPE = BetfairInstructionReport
+_CANONICAL_BETFAIR_INSTRUCTION_REPORT_POST_INIT = (
+    BetfairInstructionReport.__post_init__
+)
+_CANONICAL_BETFAIR_INSTRUCTION_REPORT_POST_INIT_CODE = (
+    _CANONICAL_BETFAIR_INSTRUCTION_REPORT_POST_INIT.__code__
+)
+_CANONICAL_BETFAIR_PLACE_EXECUTION_REPORT_TYPE = BetfairPlaceExecutionReport
+_CANONICAL_BETFAIR_PLACE_EXECUTION_REPORT_POST_INIT = (
+    BetfairPlaceExecutionReport.__post_init__
+)
+_CANONICAL_BETFAIR_PLACE_EXECUTION_REPORT_POST_INIT_CODE = (
+    _CANONICAL_BETFAIR_PLACE_EXECUTION_REPORT_POST_INIT.__code__
+)
+_CANONICAL_BETFAIR_PLACE_EXECUTION_REPORT_EVIDENCE_GETTER = (
+    BetfairPlaceExecutionReport.evidence_id.fget
+)
+if _CANONICAL_BETFAIR_PLACE_EXECUTION_REPORT_EVIDENCE_GETTER is None:
+    raise RuntimeError("BetfairPlaceExecutionReport.evidence_id getter missing")
+_CANONICAL_BETFAIR_PLACE_EXECUTION_REPORT_EVIDENCE_GETTER_CODE = (
+    _CANONICAL_BETFAIR_PLACE_EXECUTION_REPORT_EVIDENCE_GETTER.__code__
+)
+
+
 @dataclass(frozen=True, slots=True)
 class BetfairSupervisedExecutionResult:
     outcome: PlaceOrdersOutcome
@@ -1608,6 +1632,11 @@ def _report_outcome(
     return PlaceOrdersOutcome.UNKNOWN
 
 
+
+_CANONICAL_REPORT_OUTCOME = _report_outcome
+_CANONICAL_REPORT_OUTCOME_CODE = _CANONICAL_REPORT_OUTCOME.__code__
+
+
 def read_betfair_supervised_action_readback(
     client: BetfairReadOnlyClient,
     ledger: RealExecutionLedger,
@@ -1845,6 +1874,37 @@ def execute_betfair_supervised_action(
             is not _CANONICAL_PARSE_PLACE_ORDERS_RESPONSE
             or _CANONICAL_PARSE_PLACE_ORDERS_RESPONSE.__code__
             is not _CANONICAL_PARSE_PLACE_ORDERS_RESPONSE_CODE
+            or BetfairInstructionReport
+            is not _CANONICAL_BETFAIR_INSTRUCTION_REPORT_TYPE
+            or _CANONICAL_BETFAIR_INSTRUCTION_REPORT_TYPE.__post_init__
+            is not _CANONICAL_BETFAIR_INSTRUCTION_REPORT_POST_INIT
+            or getattr(
+                _CANONICAL_BETFAIR_INSTRUCTION_REPORT_POST_INIT,
+                "__code__",
+                None,
+            )
+            is not _CANONICAL_BETFAIR_INSTRUCTION_REPORT_POST_INIT_CODE
+            or BetfairPlaceExecutionReport
+            is not _CANONICAL_BETFAIR_PLACE_EXECUTION_REPORT_TYPE
+            or _CANONICAL_BETFAIR_PLACE_EXECUTION_REPORT_TYPE.__post_init__
+            is not _CANONICAL_BETFAIR_PLACE_EXECUTION_REPORT_POST_INIT
+            or getattr(
+                _CANONICAL_BETFAIR_PLACE_EXECUTION_REPORT_POST_INIT,
+                "__code__",
+                None,
+            )
+            is not _CANONICAL_BETFAIR_PLACE_EXECUTION_REPORT_POST_INIT_CODE
+            or _CANONICAL_BETFAIR_PLACE_EXECUTION_REPORT_TYPE.evidence_id.fget
+            is not _CANONICAL_BETFAIR_PLACE_EXECUTION_REPORT_EVIDENCE_GETTER
+            or getattr(
+                _CANONICAL_BETFAIR_PLACE_EXECUTION_REPORT_EVIDENCE_GETTER,
+                "__code__",
+                None,
+            )
+            is not _CANONICAL_BETFAIR_PLACE_EXECUTION_REPORT_EVIDENCE_GETTER_CODE
+            or _report_outcome is not _CANONICAL_REPORT_OUTCOME
+            or getattr(_CANONICAL_REPORT_OUTCOME, "__code__", None)
+            is not _CANONICAL_REPORT_OUTCOME_CODE
             or _provider_observation_now
             is not _CANONICAL_PROVIDER_OBSERVATION_CLOCK
             or getattr(
@@ -2164,6 +2224,41 @@ def execute_betfair_supervised_action(
             is not _CANONICAL_PARSE_PLACE_ORDERS_RESPONSE
             or _CANONICAL_PARSE_PLACE_ORDERS_RESPONSE.__code__
             is not _CANONICAL_PARSE_PLACE_ORDERS_RESPONSE_CODE
+            or BetfairInstructionReport
+            is not _CANONICAL_BETFAIR_INSTRUCTION_REPORT_TYPE
+            or _CANONICAL_BETFAIR_INSTRUCTION_REPORT_TYPE.__post_init__
+            is not _CANONICAL_BETFAIR_INSTRUCTION_REPORT_POST_INIT
+            or getattr(
+                _CANONICAL_BETFAIR_INSTRUCTION_REPORT_POST_INIT,
+                "__code__",
+                None,
+            )
+            is not _CANONICAL_BETFAIR_INSTRUCTION_REPORT_POST_INIT_CODE
+            or BetfairPlaceExecutionReport
+            is not _CANONICAL_BETFAIR_PLACE_EXECUTION_REPORT_TYPE
+            or _CANONICAL_BETFAIR_PLACE_EXECUTION_REPORT_TYPE.__post_init__
+            is not _CANONICAL_BETFAIR_PLACE_EXECUTION_REPORT_POST_INIT
+            or getattr(
+                _CANONICAL_BETFAIR_PLACE_EXECUTION_REPORT_POST_INIT,
+                "__code__",
+                None,
+            )
+            is not _CANONICAL_BETFAIR_PLACE_EXECUTION_REPORT_POST_INIT_CODE
+            or _CANONICAL_BETFAIR_PLACE_EXECUTION_REPORT_TYPE.evidence_id.fget
+            is not _CANONICAL_BETFAIR_PLACE_EXECUTION_REPORT_EVIDENCE_GETTER
+            or getattr(
+                _CANONICAL_BETFAIR_PLACE_EXECUTION_REPORT_EVIDENCE_GETTER,
+                "__code__",
+                None,
+            )
+            is not _CANONICAL_BETFAIR_PLACE_EXECUTION_REPORT_EVIDENCE_GETTER_CODE
+            or _report_outcome is not _CANONICAL_REPORT_OUTCOME
+            or getattr(_CANONICAL_REPORT_OUTCOME, "__code__", None)
+            is not _CANONICAL_REPORT_OUTCOME_CODE
+            or type(report)
+            is not _CANONICAL_BETFAIR_PLACE_EXECUTION_REPORT_TYPE
+            or type(report.instruction)
+            is not _CANONICAL_BETFAIR_INSTRUCTION_REPORT_TYPE
             or _provider_observation_now
             is not _CANONICAL_PROVIDER_OBSERVATION_CLOCK
             or getattr(
@@ -2211,7 +2306,7 @@ def execute_betfair_supervised_action(
 
     evidence_id = report.evidence_id
     evidence_source = f"betfair:placeOrders:{report.response_sha256}"
-    outcome = _report_outcome(report, action)
+    outcome = _CANONICAL_REPORT_OUTCOME(report, action)
     receipt = report.instruction.bet_id
 
     if outcome is PlaceOrdersOutcome.UNKNOWN:

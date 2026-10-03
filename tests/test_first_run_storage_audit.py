@@ -147,3 +147,73 @@ def test_windows_entry_dispatches_first_run_storage_audit_without_gui() -> None:
 
     assert exit_code == 0
     run_audit.assert_called_once_with("evidence.json")
+
+def test_audit_fails_closed_before_webview_probe_when_workspace_is_unwritable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    local_app_data = tmp_path / "Local"
+    output = tmp_path / "audit.json"
+    calls: list[str] = []
+    monkeypatch.setenv("LOCALAPPDATA", str(local_app_data))
+    monkeypatch.delenv("AUTOSPORT_WORKSPACE", raising=False)
+
+    def deny_workspace(_path: Path) -> None:
+        calls.append("workspace")
+        raise PermissionError("secret workspace detail")
+
+    def webview_probe(_path: Path) -> None:
+        calls.append("webview")
+
+    monkeypatch.setattr(
+        "autosport.first_run_storage_audit.probe_workspace_writable",
+        deny_workspace,
+    )
+    monkeypatch.setattr(
+        "autosport.first_run_storage_audit.probe_webview_storage_writable",
+        webview_probe,
+    )
+
+    assert run_first_run_storage_audit(output) == 1
+    evidence = _read(output)
+    assert calls == ["workspace"]
+    assert evidence["status"] == "FAIL"
+    assert evidence["error_type"] == "PermissionError"
+    assert "secret workspace detail" not in output.read_text(encoding="utf-8")
+
+
+def test_audit_fails_closed_when_webview_storage_is_unwritable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    local_app_data = tmp_path / "Local"
+    output = tmp_path / "audit.json"
+    calls: list[tuple[str, Path]] = []
+    monkeypatch.setenv("LOCALAPPDATA", str(local_app_data))
+    monkeypatch.delenv("AUTOSPORT_WORKSPACE", raising=False)
+
+    def workspace_probe(path: Path) -> None:
+        calls.append(("workspace", path))
+
+    def deny_webview(path: Path) -> None:
+        calls.append(("webview", path))
+        raise PermissionError("secret WebView detail")
+
+    monkeypatch.setattr(
+        "autosport.first_run_storage_audit.probe_workspace_writable",
+        workspace_probe,
+    )
+    monkeypatch.setattr(
+        "autosport.first_run_storage_audit.probe_webview_storage_writable",
+        deny_webview,
+    )
+
+    assert run_first_run_storage_audit(output) == 1
+    evidence = _read(output)
+    assert calls == [
+        ("workspace", local_app_data / "Autosport" / "workspace"),
+        ("webview", local_app_data / "Autosport" / "webview2"),
+    ]
+    assert evidence["status"] == "FAIL"
+    assert evidence["error_type"] == "PermissionError"
+    assert "secret WebView detail" not in output.read_text(encoding="utf-8")

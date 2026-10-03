@@ -661,6 +661,7 @@ _CANONICAL_JSON = json
 _CANONICAL_JSON_DUMPS = json.dumps
 _CANONICAL_DATETIME = datetime
 _CANONICAL_TIMEZONE = timezone
+_CANONICAL_MODULE_GLOBALS = globals()
 _CANONICAL_INSPECT = inspect
 _CANONICAL_GETATTR_STATIC = inspect.getattr_static
 _CANONICAL_GETATTR_STATIC_CODE = _CANONICAL_GETATTR_STATIC.__code__
@@ -677,7 +678,11 @@ _CANONICAL_GETATTR_STATIC_GLOBAL_ITEMS = tuple(
 
 
 def _require_dispatch_integrity() -> None:
-    module_globals = globals()
+    module_globals = _CANONICAL_MODULE_GLOBALS
+    if module_globals.get("_CANONICAL_MODULE_GLOBALS") is not module_globals:
+        raise CampaignForwardUniverseCycleBindingError(
+            "campaign forward-cycle module authority mapping changed"
+        )
     if (
         module_globals.get("inspect") is not _CANONICAL_INSPECT
         or _CANONICAL_INSPECT.getattr_static is not _CANONICAL_GETATTR_STATIC
@@ -968,7 +973,7 @@ def resolve_campaign_forward_universe_cycle_authority(
 ) -> CampaignForwardUniverseCycleAuthority:
     """Re-resolve exact campaign -> cycle -> provider snapshot -> #1185 universe."""
 
-    module_globals = globals()
+    module_globals = _CANONICAL_MODULE_GLOBALS
     integrity_guard = _require_dispatch_integrity
     integrity_guard_code = integrity_guard.__code__
     expected_hashlib = hashlib
@@ -977,6 +982,7 @@ def resolve_campaign_forward_universe_cycle_authority(
     expected_json_dumps = json.dumps
     expected_datetime = datetime
     expected_timezone = timezone
+    expected_module_globals = _CANONICAL_MODULE_GLOBALS
     expected_inspect = _CANONICAL_INSPECT
     expected_getattr_static = _CANONICAL_GETATTR_STATIC
     expected_getattr_static_code = _CANONICAL_GETATTR_STATIC_CODE
@@ -1018,7 +1024,10 @@ def resolve_campaign_forward_universe_cycle_authority(
                 "campaign forward-cycle integrity guard changed mid-resolution"
             )
         if (
-            module_globals.get("inspect") is not expected_inspect
+            module_globals.get("_CANONICAL_MODULE_GLOBALS")
+            is not expected_module_globals
+            or module_globals is not expected_module_globals
+            or module_globals.get("inspect") is not expected_inspect
             or module_globals.get("_CANONICAL_INSPECT") is not expected_inspect
             or module_globals.get("_CANONICAL_GETATTR_STATIC")
             is not expected_getattr_static
@@ -1277,7 +1286,7 @@ def authorize_campaign_forward_source_receipts(
 ) -> tuple[AuthoritativeSourceReceipt, ...]:
     """Authorize #1185 receipts only while the cycle-bound provider authority is stable."""
 
-    module_globals = globals()
+    module_globals = _CANONICAL_MODULE_GLOBALS
     integrity_guard = _require_dispatch_integrity
     integrity_guard_code = integrity_guard.__code__
     resolve_authority = resolve_campaign_forward_universe_cycle_authority
@@ -1288,6 +1297,7 @@ def authorize_campaign_forward_source_receipts(
     expected_json_dumps = json.dumps
     expected_datetime = datetime
     expected_timezone = timezone
+    expected_module_globals = _CANONICAL_MODULE_GLOBALS
     expected_inspect = _CANONICAL_INSPECT
     expected_getattr_static = _CANONICAL_GETATTR_STATIC
     expected_getattr_static_code = _CANONICAL_GETATTR_STATIC_CODE
@@ -1337,7 +1347,10 @@ def authorize_campaign_forward_source_receipts(
                 "campaign forward-cycle resolver changed during authorization"
             )
         if (
-            module_globals.get("inspect") is not expected_inspect
+            module_globals.get("_CANONICAL_MODULE_GLOBALS")
+            is not expected_module_globals
+            or module_globals is not expected_module_globals
+            or module_globals.get("inspect") is not expected_inspect
             or module_globals.get("_CANONICAL_INSPECT") is not expected_inspect
             or module_globals.get("_CANONICAL_GETATTR_STATIC")
             is not expected_getattr_static
@@ -1569,7 +1582,7 @@ _INTERNAL_CALLABLES = tuple(
 def _seal_campaign_forward_universe_cycle_dispatch() -> None:
     """Seal exported composite authority paths around the private integrity guard."""
 
-    module_globals = globals()
+    module_globals = _CANONICAL_MODULE_GLOBALS
     expected_error = CampaignForwardUniverseCycleBindingError
     expected_guard = _require_dispatch_integrity
     expected_guard_code = expected_guard.__code__
@@ -1596,6 +1609,7 @@ def _seal_campaign_forward_universe_cycle_dispatch() -> None:
     expected_verification_result_field_descriptors = (
         _CANONICAL_VERIFICATION_RESULT_FIELD_DESCRIPTORS
     )
+    expected_module_globals = _CANONICAL_MODULE_GLOBALS
     expected_inspect = _CANONICAL_INSPECT
     expected_getattr_static = _CANONICAL_GETATTR_STATIC
     expected_getattr_static_code = _CANONICAL_GETATTR_STATIC_CODE
@@ -1650,7 +1664,10 @@ def _seal_campaign_forward_universe_cycle_dispatch() -> None:
                 "campaign forward-cycle integrity guard changed"
             )
         if (
-            module_globals.get("inspect") is not expected_inspect
+            module_globals.get("_CANONICAL_MODULE_GLOBALS")
+            is not expected_module_globals
+            or module_globals is not expected_module_globals
+            or module_globals.get("inspect") is not expected_inspect
             or module_globals.get("_CANONICAL_INSPECT") is not expected_inspect
             or module_globals.get("_CANONICAL_GETATTR_STATIC")
             is not expected_getattr_static
@@ -1786,7 +1803,10 @@ def _seal_campaign_forward_universe_cycle_dispatch() -> None:
                 "campaign forward-cycle structural evidence types changed"
             )
         if (
-            module_globals.get("inspect") is not expected_inspect
+            module_globals.get("_CANONICAL_MODULE_GLOBALS")
+            is not expected_module_globals
+            or module_globals is not expected_module_globals
+            or module_globals.get("inspect") is not expected_inspect
             or module_globals.get("_CANONICAL_INSPECT") is not expected_inspect
             or module_globals.get("_CANONICAL_GETATTR_STATIC")
             is not expected_getattr_static

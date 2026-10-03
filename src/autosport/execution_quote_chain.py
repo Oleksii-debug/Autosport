@@ -397,9 +397,19 @@ class ExecutionQuoteChainEvidence(metaclass=_ExecutionQuoteChainEvidenceMeta):
             "reserved_at": self.reserved_at,
             "submitted_at": self.submitted_at,
             "submission_instruction_sha256": self.submission_instruction_sha256,
-            "submit_instruction_identity_bound": self.submit_instruction_identity_bound,
-            "provider_request_correlation_bound": self.provider_request_correlation_bound,
-            "actual_submitted_instruction_bound": self.actual_submitted_instruction_bound,
+            "submit_instruction_identity_bound": (
+                self.submission_instruction_sha256 is not None
+            ),
+            "provider_request_correlation_bound": (
+                self.submission_instruction_sha256 is not None
+                and self.provider_request_sha256
+                == self.submission_instruction_sha256
+            ),
+            "actual_submitted_instruction_bound": (
+                self.submission_instruction_sha256 is not None
+                and self.provider_request_sha256
+                == self.submission_instruction_sha256
+            ),
             "chain_status": self.chain_status,
             "provider_order_ref": self.provider_order_ref,
             "provider_evidence_id": self.provider_evidence_id,
@@ -628,13 +638,13 @@ def _install_quote_chain_evidence_authority() -> None:
     def submit_instruction_identity_bound(
         self: ExecutionQuoteChainEvidence,
     ) -> bool:
-        _lookup(self, require_fingerprint=False)
+        _lookup(self, require_fingerprint=True)
         return self.submission_instruction_sha256 is not None
 
     def provider_request_correlation_bound(
         self: ExecutionQuoteChainEvidence,
     ) -> bool:
-        _lookup(self, require_fingerprint=False)
+        _lookup(self, require_fingerprint=True)
         return (
             self.submission_instruction_sha256 is not None
             and self.provider_request_sha256 == self.submission_instruction_sha256
@@ -643,7 +653,7 @@ def _install_quote_chain_evidence_authority() -> None:
     def actual_submitted_instruction_bound(
         self: ExecutionQuoteChainEvidence,
     ) -> bool:
-        _lookup(self, require_fingerprint=False)
+        _lookup(self, require_fingerprint=True)
         return (
             self.submission_instruction_sha256 is not None
             and self.provider_request_sha256 == self.submission_instruction_sha256

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from threading import RLock
 from typing import Iterable
 
 
@@ -134,6 +135,7 @@ class BetfairMarketBookPerMarketRateGate:
     """
 
     def __init__(self, state: MarketBookRateGateState | None = None) -> None:
+        self._lock = RLock()
         self._accepted: dict[str, list[int]] = {}
         self._last_scheduled_at_utc_us: int | None = None
         if state is not None:
@@ -150,15 +152,16 @@ class BetfairMarketBookPerMarketRateGate:
         return BETFAIR_MARKETBOOK_RATE_POLICY_VERSION
 
     def snapshot(self) -> MarketBookRateGateState:
-        return MarketBookRateGateState(
-            policy_version=BETFAIR_MARKETBOOK_RATE_POLICY_VERSION,
-            last_scheduled_at_utc_us=self._last_scheduled_at_utc_us,
-            markets=tuple(
-                MarketBookRateWindowState(market_id, tuple(self._accepted[market_id]))
-                for market_id in sorted(self._accepted)
-                if self._accepted[market_id]
-            ),
-        )
+        with self._lock:
+            return MarketBookRateGateState(
+                policy_version=BETFAIR_MARKETBOOK_RATE_POLICY_VERSION,
+                last_scheduled_at_utc_us=self._last_scheduled_at_utc_us,
+                markets=tuple(
+                    MarketBookRateWindowState(market_id, tuple(self._accepted[market_id]))
+                    for market_id in sorted(self._accepted)
+                    if self._accepted[market_id]
+                ),
+            )
 
     def reserve(
         self,
@@ -166,46 +169,47 @@ class BetfairMarketBookPerMarketRateGate:
         *,
         scheduled_at: datetime,
     ) -> MarketBookRateDecision:
-        normalized_ids = _normalize_market_ids(market_ids)
-        scheduled_us = _utc_microseconds(scheduled_at)
-        if (
-            self._last_scheduled_at_utc_us is not None
-            and scheduled_us < self._last_scheduled_at_utc_us
-        ):
-            raise ValueError("scheduled_at must not move backwards")
+        with self._lock:
+            normalized_ids = _normalize_market_ids(market_ids)
+            scheduled_us = _utc_microseconds(scheduled_at)
+            if (
+                self._last_scheduled_at_utc_us is not None
+                and scheduled_us < self._last_scheduled_at_utc_us
+            ):
+                raise ValueError("scheduled_at must not move backwards")
 
-        cutoff = scheduled_us - _WINDOW_MICROSECONDS
-        working: dict[str, list[int]] = {}
-        for market_id, accepted in self._accepted.items():
-            retained = [timestamp for timestamp in accepted if timestamp > cutoff]
-            if retained:
-                working[market_id] = retained
+            cutoff = scheduled_us - _WINDOW_MICROSECONDS
+            working: dict[str, list[int]] = {}
+            for market_id, accepted in self._accepted.items():
+                retained = [timestamp for timestamp in accepted if timestamp > cutoff]
+                if retained:
+                    working[market_id] = retained
 
-        blocked: list[str] = []
-        next_eligible: list[int] = []
-        for market_id in normalized_ids:
-            accepted = working.get(market_id, [])
-            if len(accepted) >= _MAX_CALLS_PER_WINDOW:
-                blocked.append(market_id)
-                next_eligible.append(accepted[0] + _WINDOW_MICROSECONDS)
+            blocked: list[str] = []
+            next_eligible: list[int] = []
+            for market_id in normalized_ids:
+                accepted = working.get(market_id, [])
+                if len(accepted) >= _MAX_CALLS_PER_WINDOW:
+                    blocked.append(market_id)
+                    next_eligible.append(accepted[0] + _WINDOW_MICROSECONDS)
 
-        self._accepted = working
-        self._last_scheduled_at_utc_us = scheduled_us
+            self._accepted = working
+            self._last_scheduled_at_utc_us = scheduled_us
 
-        if blocked:
+            if blocked:
+                return MarketBookRateDecision(
+                    market_ids=normalized_ids,
+                    scheduled_at_utc_us=scheduled_us,
+                    allowed=False,
+                    blocked_market_ids=tuple(blocked),
+                    next_eligible_at_utc_us=max(next_eligible),
+                )
+
+            for market_id in normalized_ids:
+                self._accepted.setdefault(market_id, []).append(scheduled_us)
+
             return MarketBookRateDecision(
                 market_ids=normalized_ids,
                 scheduled_at_utc_us=scheduled_us,
-                allowed=False,
-                blocked_market_ids=tuple(blocked),
-                next_eligible_at_utc_us=max(next_eligible),
+                allowed=True,
             )
-
-        for market_id in normalized_ids:
-            self._accepted.setdefault(market_id, []).append(scheduled_us)
-
-        return MarketBookRateDecision(
-            market_ids=normalized_ids,
-            scheduled_at_utc_us=scheduled_us,
-            allowed=True,
-        )

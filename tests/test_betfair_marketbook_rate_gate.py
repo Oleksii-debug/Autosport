@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from threading import Barrier, Thread
 
 import pytest
 
@@ -203,3 +204,93 @@ def test_blocked_batch_does_not_consume_unblocked_market_capacity() -> None:
     for offset in range(5):
         assert gate.reserve(("cold",), scheduled_at=T0 + timedelta(milliseconds=20 + offset)).allowed
     assert not gate.reserve(("cold",), scheduled_at=T0 + timedelta(milliseconds=30)).allowed
+
+
+def test_mutable_rate_state_reads_are_serialized_by_one_gate_lock() -> None:
+    gate = BetfairMarketBookPerMarketRateGate()
+    assert gate.reserve(("1.1",), scheduled_at=T0).allowed
+
+    class LockProbe:
+        def __init__(self) -> None:
+            self.depth = 0
+            self.entries = 0
+
+        def __enter__(self) -> "LockProbe":
+            assert self.depth == 0
+            self.depth = 1
+            self.entries += 1
+            return self
+
+        def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+            assert self.depth == 1
+            self.depth = 0
+
+    probe = LockProbe()
+
+    class GuardedAccepted(dict[str, list[int]]):
+        def _assert_guarded(self) -> None:
+            assert probe.depth == 1
+
+        def __iter__(self):  # type: ignore[no-untyped-def]
+            self._assert_guarded()
+            return super().__iter__()
+
+        def __getitem__(self, key: str) -> list[int]:
+            self._assert_guarded()
+            return super().__getitem__(key)
+
+        def items(self):  # type: ignore[no-untyped-def]
+            self._assert_guarded()
+            return super().items()
+
+    gate._accepted = GuardedAccepted(gate._accepted)
+    gate._lock = probe  # type: ignore[assignment]
+    snapshot = gate.snapshot()
+    assert snapshot.markets[0].market_id == "1.1"
+
+    gate._accepted = GuardedAccepted(gate._accepted)
+    decision = gate.reserve(("1.2",), scheduled_at=T0 + timedelta(microseconds=1))
+    assert decision.allowed
+    assert probe.entries == 2
+    assert probe.depth == 0
+
+
+def test_competing_fifth_call_reservations_are_serialized() -> None:
+    gate = BetfairMarketBookPerMarketRateGate()
+    for index in range(4):
+        assert gate.reserve(
+            ("1.234",),
+            scheduled_at=T0 + timedelta(microseconds=index),
+        ).allowed
+
+    start = Barrier(3)
+    decisions = []
+    errors: list[BaseException] = []
+
+    def reserve_fifth() -> None:
+        try:
+            start.wait()
+            decisions.append(
+                gate.reserve(
+                    ("1.234",),
+                    scheduled_at=T0 + timedelta(microseconds=10),
+                )
+            )
+        except BaseException as exc:  # pragma: no cover - surfaced below
+            errors.append(exc)
+
+    workers = [Thread(target=reserve_fifth) for _ in range(2)]
+    for worker in workers:
+        worker.start()
+    start.wait()
+    for worker in workers:
+        worker.join()
+
+    assert errors == []
+    assert len(decisions) == 2
+    assert sum(decision.allowed for decision in decisions) == 1
+    assert sum(not decision.allowed for decision in decisions) == 1
+
+    state = gate.snapshot()
+    window = next(item for item in state.markets if item.market_id == "1.234")
+    assert len(window.accepted_at_utc_us) == 5

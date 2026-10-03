@@ -85,6 +85,10 @@ class FocusedMirrorDependencyIndex:
         self._matched_keys: dict[str, set[MirrorQuoteKey]] = {}
         self._lock = RLock()
         self._publication_input_guard: tuple[str, ...] | None = None
+        # Monotonic generation for selector/key-routing state. Mirror revision alone
+        # cannot detect the short interval after an invalidation batch is drained
+        # but before its changed keys have been routed into _matched_keys.
+        self._routing_revision = 0
 
     @staticmethod
     def _input_id(value: str) -> str:
@@ -149,6 +153,7 @@ class FocusedMirrorDependencyIndex:
                             )
                         self._dependencies[normalized_id] = dependency
                         self._matched_keys[normalized_id] = initial_keys
+                        self._routing_revision += 1
                     return dependency
             except MarketMirrorRevisionChanged:
                 continue
@@ -165,6 +170,8 @@ class FocusedMirrorDependencyIndex:
                 )
             removed = self._dependencies.pop(normalized_id, None)
             self._matched_keys.pop(normalized_id, None)
+            if removed is not None:
+                self._routing_revision += 1
             return removed is not None
 
     @property
@@ -172,10 +179,18 @@ class FocusedMirrorDependencyIndex:
         with self._lock:
             return tuple(sorted(self._dependencies))
 
+    @property
+    def routing_revision(self) -> int:
+        """Return the exact dependency/key-routing generation."""
+        with self._lock:
+            return self._routing_revision
+
     @contextmanager
     def hold_input_ids(
         self,
         expected_input_ids: tuple[str, ...],
+        *,
+        expected_routing_revision: int | None = None,
     ) -> Iterator[None]:
         """Linearize a short publication step against one exact dependency registry."""
 
@@ -186,6 +201,13 @@ class FocusedMirrorDependencyIndex:
         expected = tuple(sorted(expected_input_ids))
         if len(expected) != len(set(expected)):
             raise ValueError("expected_input_ids must be unique")
+        if expected_routing_revision is not None and (
+            type(expected_routing_revision) is not int
+            or expected_routing_revision < 0
+        ):
+            raise TypeError(
+                "expected_routing_revision must be a non-negative integer or None"
+            )
         with self._lock:
             if self._publication_input_guard is not None:
                 raise FocusedMirrorRegistryChanged(
@@ -196,12 +218,26 @@ class FocusedMirrorDependencyIndex:
                 raise FocusedMirrorRegistryChanged(
                     "focused mirror dependency registry changed before decision publication"
                 )
+            if (
+                expected_routing_revision is not None
+                and self._routing_revision != expected_routing_revision
+            ):
+                raise FocusedMirrorRegistryChanged(
+                    "focused mirror dependency routing changed before decision publication"
+                )
             self._publication_input_guard = expected
             try:
                 yield
                 if tuple(sorted(self._dependencies)) != expected:
                     raise FocusedMirrorRegistryChanged(
                         "focused mirror dependency registry changed during decision publication"
+                    )
+                if (
+                    expected_routing_revision is not None
+                    and self._routing_revision != expected_routing_revision
+                ):
+                    raise FocusedMirrorRegistryChanged(
+                        "focused mirror dependency routing changed during decision publication"
                     )
             finally:
                 self._publication_input_guard = None
@@ -238,11 +274,15 @@ class FocusedMirrorDependencyIndex:
                 for dependency in dependencies
             }
             with self._lock:
+                routing_changed = False
                 for dependency in dependencies:
                     if self._dependencies.get(dependency.input_id) == dependency:
-                        self._matched_keys[dependency.input_id] = rebuilt[
-                            dependency.input_id
-                        ]
+                        rebuilt_keys = rebuilt[dependency.input_id]
+                        if self._matched_keys.get(dependency.input_id, set()) != rebuilt_keys:
+                            self._matched_keys[dependency.input_id] = rebuilt_keys
+                            routing_changed = True
+                if routing_changed:
+                    self._routing_revision += 1
             return tuple(dependency.input_id for dependency in dependencies)
         if not batch.changed_keys or not dependencies:
             return ()
@@ -259,6 +299,7 @@ class FocusedMirrorDependencyIndex:
 
         affected: list[str] = []
         with self._lock:
+            routing_changed = False
             for dependency in dependencies:
                 if self._dependencies.get(dependency.input_id) != dependency:
                     continue
@@ -267,10 +308,15 @@ class FocusedMirrorDependencyIndex:
                 for event in changed_events:
                     if not dependency.matches(event):
                         continue
-                    matched.add((event.source_id, event.quote_key))
+                    key = (event.source_id, event.quote_key)
+                    if key not in matched:
+                        matched.add(key)
+                        routing_changed = True
                     dependency_affected = True
                 if dependency_affected:
                     affected.append(dependency.input_id)
+            if routing_changed:
+                self._routing_revision += 1
         return tuple(affected)
 
     @staticmethod
@@ -363,6 +409,7 @@ class FocusedMirrorDependencyIndex:
         dependencies: list[FocusedMirrorDependency] = []
         keys: set[MirrorQuoteKey] = set()
         with self._lock:
+            captured_routing_revision = self._routing_revision
             for input_id in requested:
                 normalized_id = self._input_id(input_id)
                 try:
@@ -392,8 +439,12 @@ class FocusedMirrorDependencyIndex:
                 self._dependencies.get(dependency.input_id) != dependency
                 for dependency in dependencies
             ):
-                raise RuntimeError(
+                raise FocusedMirrorRegistryChanged(
                     "focused mirror dependency registry changed during coherent capture"
+                )
+            if self._routing_revision != captured_routing_revision:
+                raise FocusedMirrorRegistryChanged(
+                    "focused mirror dependency routing changed during coherent capture"
                 )
 
         return {

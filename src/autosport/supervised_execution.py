@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import functools
 import hashlib
 import json
 import threading
@@ -1938,7 +1937,6 @@ def _install_supervised_execution_composition_guard() -> None:
         raw = globals()[name]
         raw_code = getattr(raw, "__code__", None)
 
-        @functools.wraps(raw)
         def guarded(*args, __raw=raw, __raw_code=raw_code, **kwargs):
             require_pristine_composition()
             if (
@@ -1950,6 +1948,17 @@ def _install_supervised_execution_composition_guard() -> None:
                 )
             return __raw(*args, **kwargs)
 
+        # Preserve diagnostic metadata without functools.wraps(): __wrapped__ would
+        # expose the unguarded mutating delegate as an ordinary public function
+        # attribute and permit callers to bypass composition validation.
+        guarded.__name__ = raw.__name__
+        guarded.__qualname__ = raw.__qualname__
+        guarded.__doc__ = raw.__doc__
+        guarded.__module__ = raw.__module__
+        if hasattr(guarded, "__wrapped__"):
+            raise RuntimeError(
+                "supervised execution composition guard must not expose raw delegate"
+            )
         globals()[name] = guarded
 
 

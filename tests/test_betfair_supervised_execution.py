@@ -2588,3 +2588,119 @@ def test_terminal_attempt_redelivery_is_idempotent_under_new_stop_and_expiry(
         assert second.evidence_id == first.evidence_id
         assert second.external_receipt_id == first.external_receipt_id
         assert len(transport.calls) == 1
+
+
+def test_reserved_attempt_does_not_bypass_new_stop() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
+        attempt_id = "attempt-reserved-stop"
+        begin_supervised_attempt(
+            ledger,
+            bound,
+            approval,
+            action_id=action.action_id,
+            attempt_id=attempt_id,
+        )
+        goal_store.persist_automatic_successor(
+            _goal(revision=2, emergency_stop=True)
+        )
+        transport = _Transport(lambda request: _response(request))
+        client = _enabled_client(profile, transport, store=goal_store)
+
+        with pytest.raises(
+            BetfairSupervisedExecutionError,
+            match="emergency STOP",
+        ):
+            execute_betfair_supervised_action(
+                ledger,
+                bound,
+                approval,
+                action_id=action.action_id,
+                attempt_id=attempt_id,
+                profile=profile,
+                client=client,
+            )
+
+        assert ledger.attempt_state(attempt_id) is AttemptState.RESERVED
+        assert transport.calls == []
+
+
+def test_reserved_attempt_does_not_bypass_expired_approval(monkeypatch) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
+        attempt_id = "attempt-reserved-expired"
+        begin_supervised_attempt(
+            ledger,
+            bound,
+            approval,
+            action_id=action.action_id,
+            attempt_id=attempt_id,
+        )
+        monkeypatch.setattr(
+            "autosport.supervised_execution._trusted_now",
+            lambda: "2026-09-19T09:00:00+00:00",
+        )
+        transport = _Transport(lambda request: _response(request))
+        client = _enabled_client(profile, transport, store=goal_store)
+
+        with pytest.raises(
+            SupervisedExecutionError,
+            match="approval",
+        ):
+            execute_betfair_supervised_action(
+                ledger,
+                bound,
+                approval,
+                action_id=action.action_id,
+                attempt_id=attempt_id,
+                profile=profile,
+                client=client,
+            )
+
+        assert ledger.attempt_state(attempt_id) is AttemptState.RESERVED
+        assert transport.calls == []
+
+
+def test_terminal_recovery_still_requires_exact_bound_approval_identity() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
+        transport = _Transport(
+            lambda request: _response(
+                request,
+                matched=action.requested_stake,
+                average=action.requested_odds,
+            )
+        )
+        client = _enabled_client(profile, transport, store=goal_store)
+        attempt_id = "attempt-terminal-approval-identity"
+        first = execute_betfair_supervised_action(
+            ledger,
+            bound,
+            approval,
+            action_id=action.action_id,
+            attempt_id=attempt_id,
+            profile=profile,
+            client=client,
+        )
+        assert first.outcome is PlaceOrdersOutcome.ACCEPTED
+        assert len(transport.calls) == 1
+
+        wrong_approval = replace(
+            approval,
+            evidence_sha256="d" * 64,
+        )
+        with pytest.raises(
+            BetfairSupervisedExecutionError,
+            match="approval identity mismatches bound execution plan",
+        ):
+            execute_betfair_supervised_action(
+                ledger,
+                bound,
+                wrong_approval,
+                action_id=action.action_id,
+                attempt_id=attempt_id,
+                profile=profile,
+                client=client,
+            )
+
+        assert len(transport.calls) == 1

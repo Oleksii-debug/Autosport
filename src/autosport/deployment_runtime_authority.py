@@ -178,6 +178,10 @@ def _sha(value: object, name: str) -> str:
     return text
 
 
+_CANONICAL_SHA_VALIDATOR: Final = _sha
+_CANONICAL_SHA_VALIDATOR_CODE: Final = _sha.__code__
+
+
 def _instant(value: object, name: str) -> datetime:
     text = _text(value, name)
     try:
@@ -244,6 +248,10 @@ def _digest(value: object) -> str:
     return _CANONICAL_HASHLIB_SHA256(
         _CANONICAL_JSON_ENCODER(value).encode("utf-8")
     ).hexdigest()
+
+
+_CANONICAL_DIGEST: Final = _digest
+_CANONICAL_DIGEST_CODE: Final = _digest.__code__
 
 
 def _fsync_directory(path: Path) -> None:
@@ -979,6 +987,15 @@ class DeploymentRuntimeAuthorityStore:
         return tuple(records)
 
     def _assert_binding_integrity(self) -> None:
+        if (
+            _sha is not _CANONICAL_SHA_VALIDATOR
+            or _CANONICAL_SHA_VALIDATOR.__code__ is not _CANONICAL_SHA_VALIDATOR_CODE
+            or _digest is not _CANONICAL_DIGEST
+            or _CANONICAL_DIGEST.__code__ is not _CANONICAL_DIGEST_CODE
+        ):
+            raise DeploymentRuntimeAuthorityError(
+                "runtime authority binding validator dispatch was replaced"
+            )
         path = object.__getattribute__(self, "_binding_path")
         workspace = object.__getattribute__(self, "_binding_workspace")
         authority = object.__getattribute__(self, "_binding_authority")
@@ -1010,7 +1027,7 @@ class DeploymentRuntimeAuthorityStore:
             raise DeploymentRuntimeAuthorityError(
                 "runtime authority binding integrity mismatch"
             )
-        expected_semantic_binding_sha256 = _digest(
+        expected_semantic_binding_sha256 = _CANONICAL_DIGEST(
             {
                 "schema": _AUTHORITY_BINDING_SCHEMA,
                 "schema_version": _AUTHORITY_BINDING_SCHEMA_VERSION,
@@ -1021,7 +1038,7 @@ class DeploymentRuntimeAuthorityStore:
             }
         )
         if (
-            _sha(
+            _CANONICAL_SHA_VALIDATOR(
                 semantic_binding_sha256,
                 "runtime authority semantic binding",
             )

@@ -1873,3 +1873,101 @@ def test_workspace_lock_path_factory_rebinding_cannot_redirect_goal_fence(
             action_id="target-action",
         )
 
+def test_economic_goal_from_json_rebinding_cannot_restore_stale_owner_goal(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    acquired, _ = _acquire_balance(monkeypatch, tmp_path, "100")
+    target = _plan("target", _action("target-action", "10"))
+    ledger = _ledger_with_plans(tmp_path, target)
+    hostile_calls: list[object] = []
+
+    def hostile_from_json(text):
+        hostile_calls.append(text)
+        return _HEADROOM_GOAL
+
+    monkeypatch.setattr(
+        headroom_module._economic_goal_store,
+        "economic_goal_from_json",
+        hostile_from_json,
+    )
+
+    with pytest.raises(
+        ProviderAccountHeadroomError,
+        match="canonical monetary denomination authority changed",
+    ):
+        _assess(
+            ledger,
+            acquired,
+            plan_id="target",
+            action_id="target-action",
+        )
+
+    assert hostile_calls == []
+
+
+def test_economic_goal_strict_json_rebinding_cannot_restore_stale_owner_goal(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    acquired, _ = _acquire_balance(monkeypatch, tmp_path, "100")
+    target = _plan("target", _action("target-action", "10"))
+    ledger = _ledger_with_plans(tmp_path, target)
+    hostile_calls: list[object] = []
+
+    def hostile_strict_json(text):
+        hostile_calls.append(text)
+        raise AssertionError("hostile economic-goal parser executed")
+
+    monkeypatch.setattr(
+        headroom_module._economic_goal_store,
+        "strict_json_loads",
+        hostile_strict_json,
+    )
+
+    with pytest.raises(
+        ProviderAccountHeadroomError,
+        match="canonical monetary denomination authority changed",
+    ):
+        _assess(
+            ledger,
+            acquired,
+            plan_id="target",
+            action_id="target-action",
+        )
+
+    assert hostile_calls == []
+
+
+def test_economic_goal_from_payload_rebinding_cannot_restore_stale_owner_goal(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    acquired, _ = _acquire_balance(monkeypatch, tmp_path, "100")
+    target = _plan("target", _action("target-action", "10"))
+    ledger = _ledger_with_plans(tmp_path, target)
+    hostile_calls: list[object] = []
+
+    def hostile_from_payload(payload):
+        hostile_calls.append(payload)
+        return _HEADROOM_GOAL
+
+    monkeypatch.setattr(
+        headroom_module._economic_goal_store,
+        "economic_goal_from_payload",
+        hostile_from_payload,
+    )
+
+    with pytest.raises(
+        ProviderAccountHeadroomError,
+        match="canonical monetary denomination authority changed",
+    ):
+        _assess(
+            ledger,
+            acquired,
+            plan_id="target",
+            action_id="target-action",
+        )
+
+    assert hostile_calls == []
+

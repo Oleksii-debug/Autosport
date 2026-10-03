@@ -84,11 +84,12 @@ APPROVAL_EXPIRES_AT = "2026-09-18T13:25:00+00:00"
 
 
 @pytest.fixture(autouse=True)
-def _fixed_trusted_execution_clock(monkeypatch) -> None:
-    monkeypatch.setattr(
-        "autosport.supervised_execution._trusted_now",
-        lambda: RESERVED_AT,
-    )
+def _fixed_trusted_execution_clock():
+    token = supervised_execution._TEST_TRUSTED_NOW.set(RESERVED_AT)
+    try:
+        yield
+    finally:
+        supervised_execution._TEST_TRUSTED_NOW.reset(token)
 
 
 def _goal() -> EconomicGoalContract:
@@ -1498,23 +1499,92 @@ def test_reservation_rejects_future_dated_product_issued_plan(tmp_path) -> None:
     assert not ledger.path.exists()
 
 
+def test_trusted_clock_alias_rebind_fails_before_plan_reservation(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    bound, approval, _, _ = _bound()
+    ledger = RealExecutionLedger(tmp_path / "clock-alias-rebind.jsonl")
+    hostile_calls: list[str] = []
+
+    def hostile_now():
+        hostile_calls.append("clock")
+        return RESERVED_AT
+
+    monkeypatch.setattr(supervised_execution, "_trusted_now", hostile_now)
+
+    with pytest.raises(
+        SupervisedExecutionError,
+        match="trusted clock authority changed",
+    ):
+        reserve_supervised_plan(ledger, bound, approval)
+
+    assert hostile_calls == []
+    assert not ledger.path.exists()
+
+
+def test_trusted_clock_module_datetime_rebind_cannot_control_reservation_time(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    bound, approval, _, _ = _bound()
+    ledger = RealExecutionLedger(tmp_path / "clock-global-rebind.jsonl")
+
+    class HostileDateTime:
+        @classmethod
+        def now(cls, _tz):
+            raise AssertionError("module-level datetime must not control trusted clock")
+
+    monkeypatch.setattr(supervised_execution, "datetime", HostileDateTime)
+
+    fingerprint = reserve_supervised_plan(ledger, bound, approval)
+
+    assert fingerprint == bound.execution_plan.fingerprint
+    assert ledger.verify_integrity() >= 3
+
+
+def test_trusted_clock_code_mutation_fails_before_plan_reservation(tmp_path) -> None:
+    bound, approval, _, _ = _bound()
+    ledger = RealExecutionLedger(tmp_path / "clock-code-rebind.jsonl")
+    clock = supervised_execution._trusted_now
+    original_code = clock.__code__
+
+    def hostile_clock(_datetime=None, _utc=None, _test_now=None):
+        raise AssertionError("mutated trusted clock executed")
+
+    assert len(hostile_clock.__code__.co_freevars) == len(original_code.co_freevars)
+    try:
+        clock.__code__ = hostile_clock.__code__
+        with pytest.raises(
+            SupervisedExecutionError,
+            match="trusted clock authority changed",
+        ):
+            reserve_supervised_plan(ledger, bound, approval)
+    finally:
+        clock.__code__ = original_code
+
+    assert not ledger.path.exists()
+
+
 def test_trusted_clock_prevents_backdating_expired_quote(monkeypatch) -> None:
     bound, approval, _, _ = _bound()
     with tempfile.TemporaryDirectory() as tmp:
         ledger = RealExecutionLedger(Path(tmp) / "execution.jsonl")
         reserve_supervised_plan(ledger, bound, approval)
-        monkeypatch.setattr(
-            "autosport.supervised_execution._trusted_now",
-            lambda: "2026-09-18T13:21:01+00:00",
+        token = supervised_execution._TEST_TRUSTED_NOW.set(
+            "2026-09-18T13:21:01+00:00"
         )
-        with pytest.raises(SupervisedExecutionError, match="quote expiry"):
-            begin_supervised_attempt(
-                ledger,
-                bound,
-                approval,
-                action_id=bound.execution_plan.actions[0].action_id,
-                attempt_id="attempt-too-late",
-            )
+        try:
+            with pytest.raises(SupervisedExecutionError, match="quote expiry"):
+                begin_supervised_attempt(
+                    ledger,
+                    bound,
+                    approval,
+                    action_id=bound.execution_plan.actions[0].action_id,
+                    attempt_id="attempt-too-late",
+                )
+        finally:
+            supervised_execution._TEST_TRUSTED_NOW.reset(token)
 
 
 def test_generic_snapshot_cannot_authorize_positive_but_verified_provider_pages_can() -> None:

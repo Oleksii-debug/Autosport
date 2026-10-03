@@ -411,6 +411,9 @@ def capture_campaign_complete_game_board(
         or slot.get("schedule_id") != campaign.schedule_id
         or slot.get("stream_epoch") != source_spec.stream_epoch
         or slot.get("max_items") != source_spec.max_items
+        or type(slot.get("slot_ordinal")) is not int
+        or slot.get("slot_ordinal") < source_spec.evaluation_start_slot_ordinal
+        or slot.get("slot_ordinal") > source_spec.evaluation_end_slot_ordinal
     ):
         raise CampaignProviderCycleCaptureIntegrityError(
             "campaign collector next slot does not match inception receipt"
@@ -420,6 +423,16 @@ def capture_campaign_complete_game_board(
     require_seams(store, evidence_store)
     attempted_at = instant(raw_attempted_at, "collector attempted_at")
     attempted_instant = datetime.fromisoformat(attempted_at)
+    campaign_not_before = datetime.fromisoformat(
+        instant(campaign.observation_not_before, "campaign observation_not_before")
+    )
+    campaign_not_after = datetime.fromisoformat(
+        instant(campaign.observation_not_after, "campaign observation_not_after")
+    )
+    if attempted_instant < campaign_not_before or attempted_instant > campaign_not_after:
+        raise CampaignProviderCycleCaptureIntegrityError(
+            "collector START falls outside precommitted campaign observation window"
+        )
     try:
         cycle_seq = begin_scheduled(
             store,
@@ -461,9 +474,18 @@ def capture_campaign_complete_game_board(
         require_stable_dispatch()
         require_seams(store, evidence_store)
         completed_at = instant(raw_completed_at, "collector completed_at")
-        if datetime.fromisoformat(completed_at) < provider_captured_instant:
+        completed_instant = datetime.fromisoformat(completed_at)
+        if completed_instant < provider_captured_instant:
             raise CampaignProviderCycleCaptureIntegrityError(
                 "provider observation falls after collector cycle completion"
+            )
+        if (
+            provider_captured_instant < campaign_not_before
+            or provider_captured_instant > campaign_not_after
+            or completed_instant > campaign_not_after
+        ):
+            raise CampaignProviderCycleCaptureIntegrityError(
+                "provider cycle falls outside precommitted campaign observation window"
             )
         evidence_path = evidence_save(evidence_store, snapshot)
         repeated_path = evidence_save(evidence_store, snapshot)

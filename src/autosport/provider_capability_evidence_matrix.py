@@ -662,14 +662,19 @@ def _install_provider_capability_authority():
             )
 
         lifecycle = issuance.evidence
-        if journal is None:
-            journal = CapabilityEvidenceJournal()
-        elif type(journal) is not CapabilityEvidenceJournal:
+        caller_journal = journal
+        if caller_journal is None:
+            validation_journal = CapabilityEvidenceJournal()
+        elif type(caller_journal) is not CapabilityEvidenceJournal:
             raise ProviderCapabilityEvidenceMatrixError(
                 "BETDAQ authenticated evidence journal must be exact CapabilityEvidenceJournal"
             )
+        else:
+            validation_journal = CapabilityEvidenceJournal.from_json(
+                caller_journal.to_json()
+            )
         try:
-            journal.publish(lifecycle)
+            validation_journal.publish(lifecycle)
         except CapabilityEvidenceError as exc:
             raise ProviderCapabilityEvidenceMatrixError(
                 "BETDAQ authenticated evidence requires a valid lifecycle predecessor chain"
@@ -683,7 +688,7 @@ def _install_provider_capability_authority():
             BETDAQ_AUTHENTICATED_MAX_OBSERVATION_AGE_SECONDS,
             require_available=False,
         )
-        decision = journal.resolve(
+        decision = validation_journal.resolve(
             requirement,
             {issuance.profile.profile_id: issuance.profile},
             as_of=lifecycle.committed_at,
@@ -732,6 +737,14 @@ def _install_provider_capability_authority():
             evidence_sha256=lifecycle.evidence_id,
             endpoint_operation=BETDAQ_AUTHENTICATED_SOURCE_CONTRACT_REF,
         )
+        if caller_journal is not None:
+            try:
+                caller_journal.publish(lifecycle)
+            except CapabilityEvidenceError as exc:
+                raise ProviderCapabilityEvidenceMatrixError(
+                    "BETDAQ lifecycle journal changed before successor commit"
+                ) from exc
+
         issuance_key = id(fact)
         issued_evidence[issuance_key] = fact
         issued_evidence_seals[issuance_key] = fact.evidence_id

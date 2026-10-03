@@ -1634,6 +1634,10 @@ class PersistentLiveDecisionLoop:
             )
         store = self._health_store_for_boundaries(boundaries)
         if store is None:
+            if require_failed:
+                raise LiveDecisionProgressError(
+                    "bound provider health does not contain durable failed evidence"
+                )
             return
         gate = self._provider_health_gate(store)
         replayed_decisions = []
@@ -1655,7 +1659,6 @@ class PersistentLiveDecisionLoop:
                 )
         if (
             require_failed
-            and replayed_decisions
             and not any(
                 decision.source_status == "failed"
                 for decision in replayed_decisions

@@ -307,6 +307,7 @@ def _response(
     matched: Decimal | str = "0",
     average: Decimal | str = "0",
     bet_id: str | None = "bet-123",
+    order_status: str | None = None,
 ) -> bytes:
     params = request["params"]
     instruction = params["instructions"][0]
@@ -324,6 +325,8 @@ def _response(
     }
     if bet_id is not None:
         report["betId"] = bet_id
+    if order_status is not None:
+        report["orderStatus"] = order_status
     if instruction_status == "FAILURE":
         report["errorCode"] = "BET_TAKEN_OR_LAPSED"
     if execution_status == "FAILURE":
@@ -1484,3 +1487,253 @@ def test_client_repr_never_exposes_session_credentials() -> None:
     assert "super-secret-app" not in rendered
     assert "super-secret-session" not in rendered
     assert "enabled=False" in rendered
+
+
+def test_processed_with_errors_single_success_is_unknown() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
+        transport = _Transport(
+            lambda request: _response(
+                request,
+                execution_status="PROCESSED_WITH_ERRORS",
+                matched=action.requested_stake / Decimal("2"),
+                average=action.requested_odds,
+                order_status="EXECUTION_COMPLETE",
+            )
+        )
+        client = _enabled_client(profile, transport, store=goal_store)
+
+        result = execute_betfair_supervised_action(
+            ledger,
+            bound,
+            approval,
+            action_id=action.action_id,
+            attempt_id="attempt-processed-with-errors-success",
+            profile=profile,
+            client=client,
+            clock=lambda: SUBMITTED_AT,
+        )
+
+        assert result.outcome is PlaceOrdersOutcome.UNKNOWN
+        assert result.attempt_state is AttemptState.UNKNOWN
+        assert result.evidence_id is None
+        assert result.external_receipt_id is None
+        assert not ledger.can_retry_action(
+            plan_id=bound.execution_plan.plan_id,
+            action_id=action.action_id,
+        )
+
+
+def test_success_report_with_root_error_code_is_unknown() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
+
+        def contradictory_success_response(request: dict[str, object]) -> bytes:
+            payload = json.loads(
+                _response(
+                    request,
+                    matched=action.requested_stake,
+                    average=action.requested_odds,
+                    order_status="EXECUTION_COMPLETE",
+                ).decode("utf-8")
+            )
+            payload["result"]["errorCode"] = "BET_ACTION_ERROR"
+            return json.dumps(payload).encode("utf-8")
+
+        transport = _Transport(contradictory_success_response)
+        client = _enabled_client(profile, transport, store=goal_store)
+
+        result = execute_betfair_supervised_action(
+            ledger,
+            bound,
+            approval,
+            action_id=action.action_id,
+            attempt_id="attempt-success-root-error",
+            profile=profile,
+            client=client,
+            clock=lambda: SUBMITTED_AT,
+        )
+
+        assert result.outcome is PlaceOrdersOutcome.UNKNOWN
+        assert result.attempt_state is AttemptState.UNKNOWN
+        assert result.evidence_id is None
+        assert result.external_receipt_id is None
+
+
+@pytest.mark.parametrize(
+    "order_status",
+    (None, "EXECUTABLE"),
+)
+def test_immediate_partial_requires_execution_complete_before_terminal_ack(
+    order_status: str | None,
+) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
+        transport = _Transport(
+            lambda request: _response(
+                request,
+                matched=action.requested_stake / Decimal("2"),
+                average=action.requested_odds,
+                order_status=order_status,
+            )
+        )
+        client = _enabled_client(profile, transport, store=goal_store)
+
+        result = execute_betfair_supervised_action(
+            ledger,
+            bound,
+            approval,
+            action_id=action.action_id,
+            attempt_id=f"attempt-live-partial-{order_status or 'missing'}",
+            profile=profile,
+            client=client,
+            clock=lambda: SUBMITTED_AT,
+        )
+
+        assert result.outcome is PlaceOrdersOutcome.UNKNOWN
+        assert result.attempt_state is AttemptState.UNKNOWN
+        assert result.evidence_id is not None
+        assert result.external_receipt_id == "bet-123"
+        view = ledger.verified_execution_view(
+            bound.execution_plan.plan_id
+        ).attempts[0]
+        assert view.acknowledgement is None
+        assert view.provider_evidence is not None
+        assert not ledger.can_retry_action(
+            plan_id=bound.execution_plan.plan_id,
+            action_id=action.action_id,
+        )
+
+
+def test_full_match_with_executable_order_status_fails_closed() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
+        transport = _Transport(
+            lambda request: _response(
+                request,
+                matched=action.requested_stake,
+                average=action.requested_odds,
+                order_status="EXECUTABLE",
+            )
+        )
+        client = _enabled_client(profile, transport, store=goal_store)
+
+        result = execute_betfair_supervised_action(
+            ledger,
+            bound,
+            approval,
+            action_id=action.action_id,
+            attempt_id="attempt-full-executable-conflict",
+            profile=profile,
+            client=client,
+            clock=lambda: SUBMITTED_AT,
+        )
+
+        assert result.outcome is PlaceOrdersOutcome.UNKNOWN
+        assert result.attempt_state is AttemptState.UNKNOWN
+        assert result.evidence_id is not None
+        view = ledger.verified_execution_view(
+            bound.execution_plan.plan_id
+        ).attempts[0]
+        assert view.acknowledgement is None
+        assert view.provider_evidence is not None
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "wrong_handicap",
+        "missing_handicap",
+        "wrong_persistence",
+        "missing_persistence",
+    ),
+)
+def test_placeorders_exact_echo_binds_handicap_and_persistence(
+    mutation: str,
+) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
+
+        def mismatched_echo_response(request: dict[str, object]) -> bytes:
+            payload = json.loads(
+                _response(
+                    request,
+                    matched=action.requested_stake,
+                    average=action.requested_odds,
+                ).decode("utf-8")
+            )
+            instruction = payload["result"]["instructionReports"][0][
+                "instruction"
+            ]
+            if mutation == "wrong_handicap":
+                instruction["handicap"] = 1.5
+            elif mutation == "missing_handicap":
+                del instruction["handicap"]
+            elif mutation == "wrong_persistence":
+                instruction["limitOrder"]["persistenceType"] = "PERSIST"
+            elif mutation == "missing_persistence":
+                del instruction["limitOrder"]["persistenceType"]
+            else:  # pragma: no cover - parameter list is closed above
+                raise AssertionError(f"unexpected mutation: {mutation}")
+            return json.dumps(payload).encode("utf-8")
+
+        transport = _Transport(mismatched_echo_response)
+        client = _enabled_client(profile, transport, store=goal_store)
+
+        result = execute_betfair_supervised_action(
+            ledger,
+            bound,
+            approval,
+            action_id=action.action_id,
+            attempt_id=f"attempt-echo-{mutation}",
+            profile=profile,
+            client=client,
+            clock=lambda: SUBMITTED_AT,
+        )
+
+        assert result.outcome is PlaceOrdersOutcome.UNKNOWN
+        assert result.attempt_state is AttemptState.UNKNOWN
+        assert result.evidence_id is None
+        assert result.external_receipt_id is None
+        assert not ledger.can_retry_action(
+            plan_id=bound.execution_plan.plan_id,
+            action_id=action.action_id,
+        )
+        assert len(transport.calls) == 1
+
+
+def test_placeorders_exact_echo_accepts_numeric_zero_handicap() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
+
+        def numeric_zero_echo_response(request: dict[str, object]) -> bytes:
+            payload = json.loads(
+                _response(
+                    request,
+                    matched=action.requested_stake,
+                    average=action.requested_odds,
+                ).decode("utf-8")
+            )
+            payload["result"]["instructionReports"][0]["instruction"][
+                "handicap"
+            ] = 0.0
+            return json.dumps(payload).encode("utf-8")
+
+        transport = _Transport(numeric_zero_echo_response)
+        client = _enabled_client(profile, transport, store=goal_store)
+
+        result = execute_betfair_supervised_action(
+            ledger,
+            bound,
+            approval,
+            action_id=action.action_id,
+            attempt_id="attempt-echo-zero-handicap",
+            profile=profile,
+            client=client,
+            clock=lambda: SUBMITTED_AT,
+        )
+
+        assert result.outcome is PlaceOrdersOutcome.ACCEPTED
+        assert result.attempt_state is AttemptState.ACCEPTED
+        assert result.evidence_id is not None
+        assert result.external_receipt_id == "bet-123"

@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import json
-from types import FunctionType
+from types import FunctionType, MappingProxyType
+from weakref import ref
 
 import pytest
 
@@ -416,3 +417,154 @@ def test_durable_resolve_remains_non_authoritative_without_new_provider_read(
             acquisition_id="durable-cannot-self-promote-again",
         )
     assert durable.source_authority_proven is False
+
+def test_closure_boundary_live_registry_rejects_mangled_slot_mint(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    calls = _install_transport(
+        monkeypatch,
+        [_DEVELOPER_APPS, _DETAILS, _FUNDS],
+    )
+    acquirer = BetfairAccountSnapshotAcquirer(
+        tmp_path / "account.sqlite3",
+        _credentials("A"),
+        account_id="default-account",
+    )
+    live = acquirer.acquire(
+        _balance_capabilities(),
+        acquisition_id="immutable-live-witness",
+    )
+    assert len(calls) == 3
+    durable = acquirer.resolve(live.receipt.acquisition_id)
+    assert live.source_authority_proven is True
+    assert durable.source_authority_proven is False
+
+    authority = _extract_inner_authority_boundary(
+        _extract_outer_guard_raw_acquire()
+    )
+    live_registry = getattr(
+        authority,
+        "_AccountSnapshotAuthorityBoundary__live",
+    )
+    assert type(live_registry) is MappingProxyType
+
+    with pytest.raises(TypeError):
+        live_registry[durable.receipt.acquisition_id] = (
+            ref(durable),
+            authority._fingerprint(durable),
+            _credentials("A"),
+        )
+
+    with pytest.raises(
+        AccountSnapshotAcquisitionError,
+        match="not issued by live canonical provider acquisition",
+    ):
+        authority.assert_live(durable)
+    authority.assert_live(live)
+    assert durable.source_authority_proven is False
+
+
+def test_closure_boundary_forged_registry_copy_cannot_mint_live_authority(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    _install_transport(
+        monkeypatch,
+        [_DEVELOPER_APPS, _DETAILS, _FUNDS],
+    )
+    acquirer = BetfairAccountSnapshotAcquirer(
+        tmp_path / "account.sqlite3",
+        _credentials("A"),
+        account_id="default-account",
+    )
+    live = acquirer.acquire(
+        _balance_capabilities(),
+        acquisition_id="forged-live-copy",
+    )
+    durable = acquirer.resolve(live.receipt.acquisition_id)
+    authority = _extract_inner_authority_boundary(
+        _extract_outer_guard_raw_acquire()
+    )
+    live_registry = getattr(
+        authority,
+        "_AccountSnapshotAuthorityBoundary__live",
+    )
+    forged = dict(live_registry)
+    forged[durable.receipt.acquisition_id] = (
+        ref(durable),
+        authority._fingerprint(durable),
+        _credentials("A"),
+    )
+
+    assert forged[durable.receipt.acquisition_id] != (
+        live_registry[durable.receipt.acquisition_id]
+    )
+    with pytest.raises(
+        AccountSnapshotAcquisitionError,
+        match="not issued by live canonical provider acquisition",
+    ):
+        authority.assert_live(durable)
+    authority.assert_live(live)
+    assert durable.source_authority_proven is False
+
+
+@pytest.mark.parametrize(
+    "storage_name",
+    (
+        "_AccountSnapshotAuthorityBoundary__issued",
+        "_AccountSnapshotAuthorityBoundary__live",
+        "_AccountSnapshotAuthorityBoundary__lock",
+    ),
+)
+def test_closure_boundary_authority_storage_cannot_be_reassigned(
+    tmp_path,
+    storage_name: str,
+) -> None:
+    acquirer = BetfairAccountSnapshotAcquirer(
+        tmp_path / "account.sqlite3",
+        _credentials("A"),
+        account_id="default-account",
+    )
+    authority = _extract_inner_authority_boundary(
+        _extract_outer_guard_raw_acquire()
+    )
+    original = getattr(authority, storage_name)
+
+    with pytest.raises(
+        AttributeError,
+        match="account snapshot authority storage is immutable",
+    ):
+        setattr(authority, storage_name, original)
+
+    assert getattr(authority, storage_name) is original
+    del acquirer
+
+
+def test_closure_boundary_registry_snapshots_are_read_only(
+    tmp_path,
+) -> None:
+    acquirer = BetfairAccountSnapshotAcquirer(
+        tmp_path / "account.sqlite3",
+        _credentials("A"),
+        account_id="default-account",
+    )
+    authority = _extract_inner_authority_boundary(
+        _extract_outer_guard_raw_acquire()
+    )
+    issued = getattr(
+        authority,
+        "_AccountSnapshotAuthorityBoundary__issued",
+    )
+    live = getattr(
+        authority,
+        "_AccountSnapshotAuthorityBoundary__live",
+    )
+    assert type(issued) is MappingProxyType
+    assert type(live) is MappingProxyType
+
+    with pytest.raises(TypeError):
+        issued[id(acquirer)] = issued[id(acquirer)]
+    with pytest.raises(TypeError):
+        live["forged"] = object()
+

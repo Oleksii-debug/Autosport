@@ -101,12 +101,133 @@ def test_authorize_rejects_rebound_resolver_before_hostile_execution(
 
     with pytest.raises(
         binding.CampaignForwardUniverseCycleBindingError,
-        match=(
-            "campaign forward-cycle internal dispatch is rebound: "
-            "resolve_campaign_forward_universe_cycle_authority"
-        ),
+        match="campaign forward-cycle public authority surface changed",
     ):
         binding.authorize_campaign_forward_source_receipts(
+            precommit_locator=None,
+            collector_store=None,
+            source_spec=None,
+            cycle_receipt=None,
+            provider_evidence_store=None,
+            universe_store=None,
+            protocol=None,
+            event_lifecycle=None,
+            opportunities=(),
+        )
+
+    assert called == []
+
+
+
+def test_authorize_rejects_rebound_integrity_guard_before_hostile_execution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    called: list[str] = []
+
+    def hostile() -> None:
+        called.append("guard")
+        raise AssertionError("hostile integrity guard executed")
+
+    authorizer = binding.authorize_campaign_forward_source_receipts
+    monkeypatch.setattr(binding, "_require_dispatch_integrity", hostile)
+
+    with pytest.raises(
+        binding.CampaignForwardUniverseCycleBindingError,
+        match="campaign forward-cycle integrity guard changed",
+    ):
+        authorizer(
+            precommit_locator=None,
+            collector_store=None,
+            source_spec=None,
+            cycle_receipt=None,
+            provider_evidence_store=None,
+            universe_store=None,
+            protocol=None,
+            event_lifecycle=None,
+            opportunities=(),
+        )
+
+    assert called == []
+
+
+def test_authorize_rejects_rebound_reflection_module_before_execution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authorizer = binding.authorize_campaign_forward_source_receipts
+    monkeypatch.setattr(binding, "inspect", object())
+
+    with pytest.raises(
+        binding.CampaignForwardUniverseCycleBindingError,
+        match="campaign forward-cycle reflection dispatch changed",
+    ):
+        authorizer(
+            precommit_locator=None,
+            collector_store=None,
+            source_spec=None,
+            cycle_receipt=None,
+            provider_evidence_store=None,
+            universe_store=None,
+            protocol=None,
+            event_lifecycle=None,
+            opportunities=(),
+        )
+
+
+def test_saved_resolver_rejects_public_surface_rebind_before_hostile_execution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    called: list[str] = []
+    resolver = binding.resolve_campaign_forward_universe_cycle_authority
+
+    def hostile(**_kwargs):
+        called.append("resolver")
+        raise AssertionError("hostile public resolver executed")
+
+    monkeypatch.setattr(
+        binding,
+        "resolve_campaign_forward_universe_cycle_authority",
+        hostile,
+    )
+
+    with pytest.raises(
+        binding.CampaignForwardUniverseCycleBindingError,
+        match="campaign forward-cycle resolver surface changed",
+    ):
+        resolver(
+            precommit_locator=None,
+            collector_store=None,
+            source_spec=None,
+            cycle_receipt=None,
+            provider_evidence_store=None,
+            universe_store=None,
+            protocol=None,
+            event_lifecycle=None,
+        )
+
+    assert called == []
+
+
+def test_saved_authorizer_rejects_public_surface_rebind_before_hostile_execution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    called: list[str] = []
+    authorizer = binding.authorize_campaign_forward_source_receipts
+
+    def hostile(**_kwargs):
+        called.append("authorizer")
+        raise AssertionError("hostile public authorizer executed")
+
+    monkeypatch.setattr(
+        binding,
+        "authorize_campaign_forward_source_receipts",
+        hostile,
+    )
+
+    with pytest.raises(
+        binding.CampaignForwardUniverseCycleBindingError,
+        match="campaign forward-cycle public authority surface changed",
+    ):
+        authorizer(
             precommit_locator=None,
             collector_store=None,
             source_spec=None,

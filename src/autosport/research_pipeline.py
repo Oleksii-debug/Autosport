@@ -652,10 +652,11 @@ class DeterministicResearchCritic:
                         reasons.append("latest evidence hash is absent from ForecastRecord")
                     if latest.decimal_odds != leg.decimal_odds:
                         reasons.append("candidate odds do not match latest evidence")
+                    quality_flags = set(latest.quality_flags)
+                    for item in included:
+                        quality_flags.update(item.quality_flags)
                     blocked = sorted(
-                        set(latest.quality_flags).intersection(
-                            self.policy.blocked_quality_flags
-                        )
+                        quality_flags.intersection(self.policy.blocked_quality_flags)
                     )
                     if blocked:
                         reasons.append(

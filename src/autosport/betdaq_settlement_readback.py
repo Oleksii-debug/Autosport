@@ -34,6 +34,12 @@ _CANONICAL_SECURE_ENDPOINT = _account._SECURE_ENDPOINT
 _CANONICAL_EXTERNAL_NS = _account._EXTERNAL_NS
 _CANONICAL_SOAP11_NS = _account._SOAP11_NS
 _CANONICAL_SOAP12_NS = _account._SOAP12_NS
+_CANONICAL_ACCOUNT_PROTOCOL_AUTHORITY = _account._canonical_betdaq_protocol_authority
+_CANONICAL_ACCOUNT_PROTOCOL_AUTHORITY_CODE = getattr(
+    _CANONICAL_ACCOUNT_PROTOCOL_AUTHORITY,
+    "__code__",
+    None,
+)
 _CANONICAL_ACCOUNT_CURRENCY = _account._currency
 _CANONICAL_ACCOUNT_CURRENCY_CODE = getattr(_CANONICAL_ACCOUNT_CURRENCY, "__code__", None)
 _CANONICAL_ACCOUNT_CONTEXT_DISPATCH = _account._canonical_account_context_dispatch
@@ -63,93 +69,157 @@ class BetdaqEconomicReadbackError(RuntimeError):
     """BETDAQ settlement/posting readback contract or evidence error."""
 
 
-def _canonical_economic_protocol_authority() -> tuple[str, str, str, str]:
-    """Return the exact existing BETDAQ HTTPS/SOAP wire contract."""
-
-    live = (
-        getattr(_account, "_SECURE_ENDPOINT", None),
-        getattr(_account, "_EXTERNAL_NS", None),
-        getattr(_account, "_SOAP11_NS", None),
-        getattr(_account, "_SOAP12_NS", None),
-    )
-    canonical = (
+def _canonical_economic_protocol_authority(
+    *,
+    _account_protocol=_CANONICAL_ACCOUNT_PROTOCOL_AUTHORITY,
+    _account_protocol_code=_CANONICAL_ACCOUNT_PROTOCOL_AUTHORITY_CODE,
+    _expected=(
         _CANONICAL_SECURE_ENDPOINT,
         _CANONICAL_EXTERNAL_NS,
         _CANONICAL_SOAP11_NS,
         _CANONICAL_SOAP12_NS,
+    ),
+) -> tuple[str, str, str, str]:
+    """Reuse the shared account wire authority with captured local anchors."""
+
+    live_account_protocol = getattr(
+        _account,
+        "_canonical_betdaq_protocol_authority",
+        None,
     )
-    if live != canonical or any(type(value) is not str for value in live):
+    aliases = (
+        globals().get("_CANONICAL_SECURE_ENDPOINT"),
+        globals().get("_CANONICAL_EXTERNAL_NS"),
+        globals().get("_CANONICAL_SOAP11_NS"),
+        globals().get("_CANONICAL_SOAP12_NS"),
+    )
+    if (
+        live_account_protocol is not _account_protocol
+        or getattr(live_account_protocol, "__code__", None)
+        is not _account_protocol_code
+        or globals().get("_CANONICAL_ACCOUNT_PROTOCOL_AUTHORITY")
+        is not _account_protocol
+        or globals().get("_CANONICAL_ACCOUNT_PROTOCOL_AUTHORITY_CODE")
+        is not _account_protocol_code
+        or aliases != _expected
+    ):
         raise BetdaqEconomicReadbackError(
             "canonical BETDAQ economic protocol authority was replaced"
         )
-    return canonical
+    try:
+        live = _account_protocol()
+    except BetdaqAccountReadOnlyError:
+        raise BetdaqEconomicReadbackError(
+            "canonical BETDAQ economic protocol authority was replaced"
+        ) from None
+    if live != _expected:
+        raise BetdaqEconomicReadbackError(
+            "canonical BETDAQ economic protocol authority was replaced"
+        )
+    return _expected
 
 
-def _canonical_economic_transport_dispatch():
-    """Return witnessed transport callables before any authority-bearing dispatch."""
+def _canonical_economic_transport_dispatch(
+    *,
+    _post=_CANONICAL_ACCOUNT_HTTPS_POST,
+    _post_code=_CANONICAL_ACCOUNT_HTTPS_POST_CODE,
+    _require=_REQUIRE_CANONICAL_ACCOUNT_TRANSPORT,
+    _require_code=_CANONICAL_REQUIRE_ACCOUNT_TRANSPORT_CODE,
+    _transport_type=_account.UrllibBetdaqSoapTransport,
+):
+    """Return captured shared transport callables after exact live validation."""
 
     live_post = globals().get("_CANONICAL_ACCOUNT_HTTPS_POST")
     live_require = globals().get("_REQUIRE_CANONICAL_ACCOUNT_TRANSPORT")
     account_post = getattr(_account, "_CANONICAL_HTTPS_POST", None)
     account_require = getattr(_account, "_require_canonical_account_transport", None)
-    class_post = vars(_account.UrllibBetdaqSoapTransport).get("post")
+    class_post = vars(_transport_type).get("post")
     if (
-        live_post is not account_post
-        or live_require is not account_require
-        or class_post is not account_post
-        or getattr(live_post, "__code__", None) is not _CANONICAL_ACCOUNT_HTTPS_POST_CODE
-        or getattr(live_require, "__code__", None)
-        is not _CANONICAL_REQUIRE_ACCOUNT_TRANSPORT_CODE
+        live_post is not _post
+        or live_require is not _require
+        or account_post is not _post
+        or account_require is not _require
+        or class_post is not _post
+        or getattr(_post, "__code__", None) is not _post_code
+        or getattr(_require, "__code__", None) is not _require_code
+        or globals().get("_CANONICAL_ACCOUNT_HTTPS_POST_CODE") is not _post_code
+        or globals().get("_CANONICAL_REQUIRE_ACCOUNT_TRANSPORT_CODE")
+        is not _require_code
     ):
         raise BetdaqEconomicReadbackError(
             "canonical BETDAQ economic transport dispatch was replaced"
         )
-    # Return exact local references so a module-global rebind after this witness
-    # cannot redirect this individual acquisition between check and dispatch.
-    return live_require, live_post
+    return _require, _post
 
 
-def _canonical_authenticated_account_context_dispatch():
-    """Reuse the shared account-context authority and verify its exact resolver."""
+def _canonical_authenticated_account_context_dispatch(
+    *,
+    _dispatch=_CANONICAL_ACCOUNT_CONTEXT_DISPATCH,
+    _dispatch_code=_CANONICAL_ACCOUNT_CONTEXT_DISPATCH_CODE,
+    _resolver=_CANONICAL_AUTHENTICATED_ACCOUNT_CONTEXT,
+    _resolver_code=_CANONICAL_AUTHENTICATED_ACCOUNT_CONTEXT_CODE,
+    _context_type=_CANONICAL_AUTHENTICATED_ACCOUNT_CONTEXT_TYPE,
+):
+    """Reuse captured shared account-context authority without alias trust."""
 
     live_dispatch = getattr(_account, "_canonical_account_context_dispatch", None)
+    local_aliases = (
+        globals().get("_CANONICAL_ACCOUNT_CONTEXT_DISPATCH"),
+        globals().get("_CANONICAL_ACCOUNT_CONTEXT_DISPATCH_CODE"),
+        globals().get("_CANONICAL_AUTHENTICATED_ACCOUNT_CONTEXT"),
+        globals().get("_CANONICAL_AUTHENTICATED_ACCOUNT_CONTEXT_CODE"),
+        globals().get("_CANONICAL_AUTHENTICATED_ACCOUNT_CONTEXT_TYPE"),
+    )
+    expected_aliases = (
+        _dispatch,
+        _dispatch_code,
+        _resolver,
+        _resolver_code,
+        _context_type,
+    )
     if (
-        live_dispatch is not _CANONICAL_ACCOUNT_CONTEXT_DISPATCH
-        or getattr(live_dispatch, "__code__", None)
-        is not _CANONICAL_ACCOUNT_CONTEXT_DISPATCH_CODE
+        live_dispatch is not _dispatch
+        or getattr(live_dispatch, "__code__", None) is not _dispatch_code
+        or local_aliases != expected_aliases
     ):
         raise BetdaqEconomicReadbackError(
             "canonical BETDAQ authenticated account context authority was replaced"
         )
     try:
-        live_resolver = live_dispatch()
-    except _account.BetdaqAccountReadOnlyError:
+        live_resolver = _dispatch()
+    except BetdaqAccountReadOnlyError:
         raise BetdaqEconomicReadbackError(
             "canonical BETDAQ authenticated account context authority was replaced"
         ) from None
     live_type = getattr(_account, "BetdaqAuthenticatedAccountContext", None)
     if (
-        live_resolver is not _CANONICAL_AUTHENTICATED_ACCOUNT_CONTEXT
-        or getattr(live_resolver, "__code__", None)
-        is not _CANONICAL_AUTHENTICATED_ACCOUNT_CONTEXT_CODE
-        or live_type is not _CANONICAL_AUTHENTICATED_ACCOUNT_CONTEXT_TYPE
+        live_resolver is not _resolver
+        or getattr(live_resolver, "__code__", None) is not _resolver_code
+        or live_type is not _context_type
     ):
         raise BetdaqEconomicReadbackError(
             "canonical BETDAQ authenticated account context authority was replaced"
         )
-    return live_resolver
+    return _resolver
 
 
-def _canonical_terminal_order_status_codes() -> frozenset[int]:
-    """Resolve the existing account adapter's exact terminal-order authority."""
+def _canonical_terminal_order_status_codes(
+    *,
+    _expected=_TERMINAL_ORDER_STATUS_CODES,
+) -> frozenset[int]:
+    """Resolve the captured existing account terminal-order authority."""
 
     live_codes = globals().get("_TERMINAL_ORDER_STATUS_CODES")
     account_codes = getattr(_account, "_TERMINAL_STATUS_CODES", None)
-    if live_codes is not account_codes or type(live_codes) is not frozenset:
+    if (
+        live_codes is not _expected
+        or account_codes is not _expected
+        or type(_expected) is not frozenset
+    ):
         raise BetdaqEconomicReadbackError(
             "canonical BETDAQ terminal order status authority was replaced"
         )
-    return live_codes
+    return _expected
 
 
 def _economic_request_identity(method: str, attributes: dict[str, str]) -> str:
@@ -1253,17 +1323,25 @@ def _optional_provider_attr(element: ET.Element, name: str) -> str | None:
     return _provider_id(raw, name)
 
 
-def _provider_currency(value: str, field: str) -> str:
+def _provider_currency(
+    value: str,
+    field: str,
+    *,
+    _currency=_CANONICAL_ACCOUNT_CURRENCY,
+    _currency_code=_CANONICAL_ACCOUNT_CURRENCY_CODE,
+) -> str:
     live_currency = getattr(_account, "_currency", None)
     if (
-        live_currency is not _CANONICAL_ACCOUNT_CURRENCY
-        or getattr(live_currency, "__code__", None) is not _CANONICAL_ACCOUNT_CURRENCY_CODE
+        live_currency is not _currency
+        or getattr(live_currency, "__code__", None) is not _currency_code
+        or globals().get("_CANONICAL_ACCOUNT_CURRENCY") is not _currency
+        or globals().get("_CANONICAL_ACCOUNT_CURRENCY_CODE") is not _currency_code
     ):
         raise BetdaqEconomicReadbackError(
             "canonical BETDAQ currency validator was replaced"
         )
     try:
-        return _CANONICAL_ACCOUNT_CURRENCY(value)
+        return _currency(value)
     except BetdaqAccountReadOnlyError:
         raise BetdaqEconomicReadbackError(
             f"{field} must be canonical 3-letter uppercase provider currency"

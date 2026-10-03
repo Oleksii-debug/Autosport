@@ -1185,6 +1185,126 @@ def test_order_result_sibling_smuggling_is_rejected(monkeypatch):
         client.read_order_details(123)
 
 
+def test_order_result_rejects_unknown_provider_attribute(monkeypatch):
+    payload = order_details().replace(
+        b"<GetOrderDetailsResult ",
+        b'<GetOrderDetailsResult FutureContractField="unexpected" ',
+        1,
+    )
+    client, _ = economic_client(monkeypatch, payload)
+
+    with pytest.raises(
+        BetdaqEconomicReadbackError,
+        match="GetOrderDetailsResult contains unexpected provider attribute",
+    ):
+        client.read_order_details(123)
+
+
+def test_order_settlement_rejects_unknown_provider_attribute(monkeypatch):
+    payload = order_details().replace(
+        b"<OrderSettlementInformation ",
+        b'<OrderSettlementInformation FutureSettlementField="unexpected" ',
+        1,
+    )
+    client, _ = economic_client(monkeypatch, payload)
+
+    with pytest.raises(
+        BetdaqEconomicReadbackError,
+        match="OrderSettlementInformation contains unexpected provider attribute",
+    ):
+        client.read_order_details(123)
+
+
+@pytest.mark.parametrize(
+    ("payload", "method_name", "read"),
+    (
+        (
+            postings_window(posting(9001)).replace(
+                b"<ListAccountPostingsResult ",
+                b'<ListAccountPostingsResult FutureWindowField="unexpected" ',
+                1,
+            ),
+            "ListAccountPostingsResult",
+            "window",
+        ),
+        (
+            postings_by_id(posting(9001)).replace(
+                b"<ListAccountPostingsByIdResult ",
+                b'<ListAccountPostingsByIdResult FutureCursorField="unexpected" ',
+                1,
+            ),
+            "ListAccountPostingsByIdResult",
+            "by_id",
+        ),
+    ),
+)
+def test_postings_result_rejects_unknown_provider_attribute(
+    monkeypatch,
+    payload,
+    method_name,
+    read,
+):
+    client, _ = economic_client(monkeypatch, payload)
+
+    with pytest.raises(
+        BetdaqEconomicReadbackError,
+        match=method_name + " contains unexpected provider attribute",
+    ):
+        if read == "window":
+            client.read_account_postings(
+                datetime(2026, 9, 22, 23, 0, tzinfo=timezone.utc),
+                datetime(2026, 9, 23, 0, 0, tzinfo=timezone.utc),
+            )
+        else:
+            client.read_account_postings_by_id(9000)
+
+
+def test_posting_row_rejects_unknown_provider_attribute(monkeypatch):
+    row = posting(9001).replace(
+        "<Order ",
+        '<Order FuturePostingField="unexpected" ',
+        1,
+    )
+    client, _ = economic_client(monkeypatch, postings_by_id(row))
+
+    with pytest.raises(
+        BetdaqEconomicReadbackError,
+        match="posting row contains unexpected provider attribute",
+    ):
+        client.read_account_postings_by_id(9000)
+
+
+def test_order_result_accepts_all_documented_unprojected_attributes(monkeypatch):
+    documented = (
+        'ExpiresAt="2026-09-23T01:00:00Z" '
+        'ValidFrom="2026-09-22T21:59:00Z" '
+        'RestrictOrderToBroker="false" '
+        'OrderFillType="2" '
+        'FillOrKillThreshold="0" '
+        'MarketStatus="1" '
+        'ExpectedSelectionResetCount="0" '
+        'WithdrawlRepriceOption="0" '
+        'WithdrawalRepriceOption="0" '
+        'CancelOnInRunning="false" '
+        'CancelIfSelectionReset="false" '
+        'MarketType="1" '
+        'ExpectedWithdrawlSequenceNumber="0" '
+        'ExpectedWithdrawalSequenceNumber="0" '
+    ).encode()
+    payload = order_details().replace(
+        b"<GetOrderDetailsResult ",
+        b"<GetOrderDetailsResult " + documented,
+        1,
+    )
+    client, _ = economic_client(monkeypatch, payload)
+
+    value = client.read_order_details(123)
+
+    assert value.order_id == "123"
+    assert value.order_status_code == 4
+    assert value.final_settlement_proven is True
+
+
 
 class _AdversarialDecimal(Decimal):
     def is_finite(self):

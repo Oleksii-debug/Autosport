@@ -1451,6 +1451,135 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             self.assertEqual(resumed_observer.calls, 1)
             self.assertEqual(len(ledger.verified_records()), 2)
 
+    def test_paper_execution_model_swap_invalidates_pending_decision_cut(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            clock = _ManualClock(self.START + timedelta(seconds=1))
+            book = PaperBook("1000")
+            ledger = PaperExecutionLedger(workspace / "paper-execution.jsonl")
+
+            def model(model_id, seed):
+                return PaperExecutionModelConfig(
+                    model_id=model_id,
+                    model_version="1",
+                    evidence_grade=EvidenceGrade.SYNTHETIC,
+                    evidence_source=model_id,
+                    seed=seed,
+                    max_quote_age_ms=5_000,
+                    min_delay_ms=0,
+                    max_delay_ms=0,
+                    rejected_bps=0,
+                    partial_bps=0,
+                    unknown_bps=0,
+                    partial_fill_bps=5000,
+                    max_slippage_bps=0,
+                )
+
+            execution_a = PaperExecutionAdoptionRuntime(
+                book=book,
+                ledger=ledger,
+                config=model("live-model-a", "seed-a"),
+                max_quote_age=timedelta(seconds=5),
+                paper_book_path=workspace / "paper_book.json",
+            )
+            execution_b = PaperExecutionAdoptionRuntime(
+                book=book,
+                ledger=ledger,
+                config=model("live-model-b", "seed-b"),
+                max_quote_age=timedelta(seconds=5),
+                paper_book_path=workspace / "paper_book.json",
+            )
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(
+                    workspace,
+                    [(self._event(selection="selection-a", sequence=1),), ()],
+                ),
+                factory=_EmptyIntentFactory(),
+                clock=clock,
+                book=book,
+                paper_execution=execution_a,
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+
+            context_a = loop._decision_context_sha256()
+            loop.paper_execution = execution_b
+            context_b = loop._decision_context_sha256()
+            self.assertNotEqual(context_a, context_b)
+            loop.paper_execution = execution_a
+
+            real_refresh = loop._refresh_intents_from_snapshots
+
+            def refresh_then_swap_execution(snapshots):
+                real_refresh(snapshots)
+                loop.paper_execution = execution_b
+
+            with patch.object(
+                loop,
+                "_refresh_intents_from_snapshots",
+                side_effect=refresh_then_swap_execution,
+            ):
+                with self.assertRaisesRegex(
+                    LiveDecisionProgressError,
+                    "progress changed before durable ledger publication",
+                ):
+                    loop.run_cycle()
+
+            self.assertFalse((workspace / "decisions.jsonl").exists())
+            self.assertEqual(loop._load_progress().phase, "pending")
+
+            loop.paper_execution = execution_a
+            clock.value = self.START + timedelta(seconds=2)
+            recovered = loop.run_cycle()
+            self.assertEqual(recovered.status, LiveCycleStatus.DECIDED)
+            self.assertEqual(
+                len(
+                    JsonlDecisionLedger(
+                        workspace / "decisions.jsonl"
+                    ).verified_records()
+                ),
+                1,
+            )
+
+    def test_live_loop_rejects_noncanonical_paper_execution_ledger(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            book = PaperBook("1000")
+            execution = PaperExecutionAdoptionRuntime(
+                book=book,
+                ledger=PaperExecutionLedger(workspace / "alternate-paper-execution.jsonl"),
+                config=PaperExecutionModelConfig(
+                    model_id="alternate-ledger-test",
+                    model_version="1",
+                    evidence_grade=EvidenceGrade.SYNTHETIC,
+                    evidence_source="alternate-ledger-test",
+                    seed="alternate-ledger-test",
+                    max_quote_age_ms=5_000,
+                    min_delay_ms=0,
+                    max_delay_ms=0,
+                    rejected_bps=0,
+                    partial_bps=0,
+                    unknown_bps=0,
+                    partial_fill_bps=5000,
+                    max_slippage_bps=0,
+                ),
+                max_quote_age=timedelta(seconds=5),
+                paper_book_path=workspace / "paper_book.json",
+            )
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "canonical live workspace PAPER execution ledger",
+            ):
+                self._loop(
+                    workspace,
+                    observer=_DurableObserver(workspace, [()]),
+                    factory=_EmptyIntentFactory(),
+                    clock=_ManualClock(self.START + timedelta(seconds=1)),
+                    book=book,
+                    paper_execution=execution,
+                )
+
     def test_post_execution_book_publish_restart_reuses_durable_plan_and_ticket(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

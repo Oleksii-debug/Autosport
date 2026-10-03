@@ -770,6 +770,14 @@ class PersistentLiveDecisionLoop:
                 raise ValueError(
                     "paper_execution must persist the canonical live workspace PaperBook"
                 )
+            canonical_execution_ledger_path = (
+                self.workspace / "paper-execution.jsonl"
+            )
+            if paper_execution.ledger.path != canonical_execution_ledger_path:
+                raise ValueError(
+                    "paper_execution must use the canonical live workspace PAPER "
+                    "execution ledger"
+                )
         self.paper_execution = paper_execution
         self.ingestion_policy = ingestion_policy
         self.max_quote_age = max_quote_age
@@ -1276,6 +1284,28 @@ class PersistentLiveDecisionLoop:
             and left._settlement_times == right._settlement_times
         )
 
+    def _paper_execution_model_fingerprint(self) -> str | None:
+        runtime = self.paper_execution
+        if runtime is None:
+            return None
+        if not isinstance(runtime, PaperExecutionAdoptionRuntime):
+            raise LiveDecisionProgressError(
+                "paper_execution runtime authority changed type"
+            )
+        if runtime.book is not self.book:
+            raise LiveDecisionProgressError(
+                "paper_execution runtime changed canonical PaperBook"
+            )
+        if runtime.paper_book_path != self.workspace / "paper_book.json":
+            raise LiveDecisionProgressError(
+                "paper_execution runtime changed canonical PaperBook path"
+            )
+        if runtime.ledger.path != self.workspace / "paper-execution.jsonl":
+            raise LiveDecisionProgressError(
+                "paper_execution runtime changed canonical execution ledger"
+            )
+        return runtime.config.fingerprint
+
     def _input_registry_sha256(self) -> str:
         return _canonical_json_sha256(
             {
@@ -1306,7 +1336,7 @@ class PersistentLiveDecisionLoop:
         return _canonical_json_sha256(
             {
                 "schema": "autosport.live_decision_runtime_context",
-                "schema_version": 3,
+                "schema_version": 4,
                 "mode": self.mode.value,
                 "intent_strategy_version_id": provenance.strategy_version_id,
                 "intent_model_version_id": provenance.model_version_id,
@@ -1317,6 +1347,9 @@ class PersistentLiveDecisionLoop:
                 "risk_policy_sha256": self.authority.risk_policy.provenance_sha256,
                 "book_state_sha256": book_state_sha256,
                 "input_registry_sha256": self._input_registry_sha256(),
+                "paper_execution_model_fingerprint": (
+                    self._paper_execution_model_fingerprint()
+                ),
                 "max_quote_age_seconds": str(
                     _timedelta_decimal_seconds(self.max_quote_age)
                 ),

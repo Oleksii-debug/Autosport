@@ -505,5 +505,33 @@ class MarketOutcomeAuthorityIntegrityTests(unittest.TestCase):
             authority.assert_issued_integrity()
 
 
+    def test_normal_authority_access_rejects_in_place_property_code_replacement(
+        self,
+    ) -> None:
+        authority = self._authority()
+        descriptor = vars(MarketSettlementOutcomeAuthority)["terminal_states"]
+        getter = descriptor.fget
+        self.assertIsNotNone(getter)
+        original_code = getter.__code__
+
+        def hostile(instance):
+            del instance
+            raise AssertionError("hostile property code executed")
+
+        self.assertEqual(original_code.co_freevars, ())
+        self.assertEqual(hostile.__code__.co_freevars, ())
+        getter.__code__ = hostile.__code__
+        try:
+            with self.assertRaisesRegex(
+                ValueError,
+                "canonical market outcome authority class dispatch was replaced",
+            ):
+                _ = authority.terminal_states
+        finally:
+            getter.__code__ = original_code
+
+        self.assertEqual(len(authority.terminal_states), 9)
+
+
 if __name__ == "__main__":
     unittest.main()

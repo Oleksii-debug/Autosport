@@ -381,11 +381,16 @@ def _install_ledger_read_authority():
         "_stale",
         "_read_verified_state",
     )
+    def descriptor_code(value: object) -> object | None:
+        if isinstance(value, (classmethod, staticmethod)):
+            value = value.__func__
+        return exact_getattr(value, "__code__", None)
+
     ledger_methods = tuple(
         (
             name,
             ledger_type.__dict__.get(name, missing),
-            exact_getattr(ledger_type.__dict__.get(name, missing), "__code__", None),
+            descriptor_code(ledger_type.__dict__.get(name, missing)),
         )
         for name in ledger_method_names
     )
@@ -432,7 +437,7 @@ def _install_ledger_read_authority():
             current = ledger_type.__dict__.get(name, missing)
             if (
                 current is not expected
-                or exact_getattr(current, "__code__", None) is not expected_code
+                or descriptor_code(current) is not expected_code
             ):
                 raise ExecutionCapitalAtRiskError(
                     "canonical execution-ledger read authority changed"

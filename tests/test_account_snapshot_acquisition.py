@@ -651,7 +651,7 @@ def test_current_generation_guard_consults_durable_generation_not_only_process_s
 
     with pytest.raises(
         AccountSnapshotAcquisitionError,
-        match="durable current canonical provider acquisition.*balance_read",
+        match="current canonical provider acquisition.*balance_read.*durable generation",
     ):
         with hold_current_account_snapshot_acquisition(
             second,

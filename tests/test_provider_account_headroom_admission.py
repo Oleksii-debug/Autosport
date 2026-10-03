@@ -2565,3 +2565,67 @@ def test_economic_goal_path_read_rebinding_cannot_supply_forged_goal(
 
     assert hostile_calls == []
 
+def test_strict_json_module_loads_rebinding_cannot_forge_owner_goal(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    acquired, _ = _acquire_balance(monkeypatch, tmp_path, "100")
+    target = _plan("target", _action("target-action", "10"))
+    ledger = _ledger_with_plans(tmp_path, target)
+    hostile_calls: list[object] = []
+
+    def hostile_loads(*args, **kwargs):
+        hostile_calls.append((args, kwargs))
+        return {}
+
+    monkeypatch.setattr(
+        headroom_module._json_integrity.json,
+        "loads",
+        hostile_loads,
+    )
+
+    with pytest.raises(
+        ProviderAccountHeadroomError,
+        match="canonical monetary denomination authority changed",
+    ):
+        _assess(
+            ledger,
+            acquired,
+            plan_id="target",
+            action_id="target-action",
+        )
+
+    assert hostile_calls == []
+
+
+def test_strict_json_validator_rebinding_cannot_forge_owner_goal(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    acquired, _ = _acquire_balance(monkeypatch, tmp_path, "100")
+    target = _plan("target", _action("target-action", "10"))
+    ledger = _ledger_with_plans(tmp_path, target)
+    hostile_calls: list[object] = []
+
+    def hostile_validate(value):
+        hostile_calls.append(value)
+
+    monkeypatch.setattr(
+        headroom_module._json_integrity,
+        "_validate_strict_json_value",
+        hostile_validate,
+    )
+
+    with pytest.raises(
+        ProviderAccountHeadroomError,
+        match="canonical monetary denomination authority changed",
+    ):
+        _assess(
+            ledger,
+            acquired,
+            plan_id="target",
+            action_id="target-action",
+        )
+
+    assert hostile_calls == []
+

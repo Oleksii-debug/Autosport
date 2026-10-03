@@ -716,6 +716,32 @@ class ParlayApiProductSourceTests(unittest.TestCase):
             with self.assertRaises(ProductSourceStateError):
                 source.resolve_event(delta)
 
+    def test_lazy_store_creation_ignores_mutable_module_constructor_alias(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            source = ParlayApiProductSource(
+                _Provider([]),
+                workspace=Path(directory) / "workspace",
+                authority_root=Path(directory) / "authority",
+                lawful_terms_ref="terms:parlayapi:v1",
+                retention_ref="retention:parlayapi:v1",
+            )
+            hostile_calls = []
+
+            class AttackerStore:
+                def __init__(self, *args, **kwargs):
+                    hostile_calls.append((args, kwargs))
+                    raise AssertionError("hostile store constructor executed")
+
+            with patch.object(
+                product_source_module,
+                "CollectorDeltaStore",
+                AttackerStore,
+            ):
+                store = source._require_collector_store()
+
+            self.assertIs(type(store), CollectorDeltaStore)
+            self.assertEqual(hostile_calls, [])
+
     def test_collector_store_binding_rejects_subclass_authority(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory) / "workspace"

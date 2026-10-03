@@ -1091,3 +1091,238 @@ def test_post_init_hardlink_split_cannot_bootstrap_alias_authority(
 
     assert alias.read_bytes() == valid_old_bytes
 
+
+
+def test_runtime_authority_rejects_hashlib_module_rebinding_before_recovery(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "deployment-runtime-authority.json"
+    store = DeploymentRuntimeAuthorityStore.initialize_pristine(
+        path,
+        authority_root=_authority_root(tmp_path),
+    )
+    _append(store, 0)
+    hostile_calls: list[bytes] = []
+
+    class HostileHashlib:
+        @staticmethod
+        def sha256(value: bytes) -> object:
+            hostile_calls.append(value)
+            raise AssertionError("hostile SHA-256 executed")
+
+    monkeypatch.setattr(deployment_runtime_authority, "hashlib", HostileHashlib)
+    with pytest.raises(
+        DeploymentRuntimeAuthorityError,
+        match="digest dispatch was replaced",
+    ):
+        store.records()
+
+    assert hostile_calls == []
+
+
+def test_runtime_authority_rejects_sha256_member_rebinding_before_recovery(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "deployment-runtime-authority.json"
+    store = DeploymentRuntimeAuthorityStore.initialize_pristine(
+        path,
+        authority_root=_authority_root(tmp_path),
+    )
+    _append(store, 0)
+    hostile_calls: list[bytes] = []
+
+    def hostile_sha256(value: bytes) -> object:
+        hostile_calls.append(value)
+        raise AssertionError("hostile SHA-256 executed")
+
+    monkeypatch.setattr(
+        deployment_runtime_authority.hashlib,
+        "sha256",
+        hostile_sha256,
+    )
+    with pytest.raises(
+        DeploymentRuntimeAuthorityError,
+        match="digest dispatch was replaced",
+    ):
+        store.records()
+
+    assert hostile_calls == []
+
+
+def test_runtime_authority_rejects_json_module_rebinding_before_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "deployment-runtime-authority.json"
+    store = DeploymentRuntimeAuthorityStore.initialize_pristine(
+        path,
+        authority_root=_authority_root(tmp_path),
+    )
+    _append(store, 0)
+    hostile_calls: list[object] = []
+
+    class HostileJson:
+        @staticmethod
+        def dumps(value: object, **kwargs: object) -> str:
+            hostile_calls.append((value, kwargs))
+            raise AssertionError("hostile JSON serialization executed")
+
+        @staticmethod
+        def loads(value: str) -> object:
+            hostile_calls.append(value)
+            raise AssertionError("hostile JSON parsing executed")
+
+    monkeypatch.setattr(deployment_runtime_authority, "json", HostileJson)
+    with pytest.raises(
+        DeploymentRuntimeAuthorityError,
+        match="JSON serialization dispatch was replaced",
+    ):
+        store.records()
+
+    assert hostile_calls == []
+
+
+def test_runtime_authority_rejects_json_dumps_member_rebinding_before_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "deployment-runtime-authority.json"
+    store = DeploymentRuntimeAuthorityStore.initialize_pristine(
+        path,
+        authority_root=_authority_root(tmp_path),
+    )
+    _append(store, 0)
+    hostile_calls: list[object] = []
+
+    def hostile_dumps(value: object, **kwargs: object) -> str:
+        hostile_calls.append((value, kwargs))
+        raise AssertionError("hostile JSON serialization executed")
+
+    monkeypatch.setattr(
+        deployment_runtime_authority.json,
+        "dumps",
+        hostile_dumps,
+    )
+    with pytest.raises(
+        DeploymentRuntimeAuthorityError,
+        match="JSON serialization dispatch was replaced",
+    ):
+        store.records()
+
+    assert hostile_calls == []
+
+
+def test_runtime_authority_rejects_canonical_json_alias_rebinding_before_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "deployment-runtime-authority.json"
+    store = DeploymentRuntimeAuthorityStore.initialize_pristine(
+        path,
+        authority_root=_authority_root(tmp_path),
+    )
+    _append(store, 0)
+    hostile_calls: list[object] = []
+
+    def hostile_encoder(value: object) -> str:
+        hostile_calls.append(value)
+        raise AssertionError("hostile canonical encoder executed")
+
+    monkeypatch.setattr(
+        deployment_runtime_authority,
+        "_canonical_json",
+        hostile_encoder,
+    )
+    with pytest.raises(
+        DeploymentRuntimeAuthorityError,
+        match="digest dispatch was replaced",
+    ):
+        store.records()
+
+    assert hostile_calls == []
+
+
+def test_runtime_authority_rejects_canonical_json_code_replacement_before_read(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "deployment-runtime-authority.json"
+    store = DeploymentRuntimeAuthorityStore.initialize_pristine(
+        path,
+        authority_root=_authority_root(tmp_path),
+    )
+    _append(store, 0)
+    target = deployment_runtime_authority._canonical_json
+    original_code = target.__code__
+
+    def hostile_encoder(value: object) -> str:
+        del value
+        raise AssertionError("hostile canonical encoder code executed")
+
+    assert hostile_encoder.__code__.co_freevars == original_code.co_freevars
+    target.__code__ = hostile_encoder.__code__
+    try:
+        with pytest.raises(
+            DeploymentRuntimeAuthorityError,
+            match="digest dispatch was replaced",
+        ):
+            store.records()
+    finally:
+        target.__code__ = original_code
+
+
+def test_runtime_authority_rejects_uuid_module_rebinding_before_prepare(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "deployment-runtime-authority.json"
+    store = DeploymentRuntimeAuthorityStore.initialize_pristine(
+        path,
+        authority_root=_authority_root(tmp_path),
+    )
+    hostile_calls: list[None] = []
+
+    class HostileUuid:
+        @staticmethod
+        def uuid4() -> object:
+            hostile_calls.append(None)
+            raise AssertionError("hostile uuid4 executed")
+
+    monkeypatch.setattr(deployment_runtime_authority, "uuid", HostileUuid)
+    with pytest.raises(
+        DeploymentRuntimeAuthorityError,
+        match="transaction-id dispatch was replaced",
+    ):
+        _append(store, 0)
+
+    assert hostile_calls == []
+
+
+def test_runtime_authority_rejects_uuid4_member_rebinding_before_prepare(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "deployment-runtime-authority.json"
+    store = DeploymentRuntimeAuthorityStore.initialize_pristine(
+        path,
+        authority_root=_authority_root(tmp_path),
+    )
+    hostile_calls: list[None] = []
+
+    def hostile_uuid4() -> object:
+        hostile_calls.append(None)
+        raise AssertionError("hostile uuid4 executed")
+
+    monkeypatch.setattr(
+        deployment_runtime_authority.uuid,
+        "uuid4",
+        hostile_uuid4,
+    )
+    with pytest.raises(
+        DeploymentRuntimeAuthorityError,
+        match="transaction-id dispatch was replaced",
+    ):
+        _append(store, 0)
+
+    assert hostile_calls == []

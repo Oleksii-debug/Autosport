@@ -927,6 +927,43 @@ def _capture_detached_function_graph(
     return function.__code__, tuple(bindings[key] for key in sorted(bindings))
 
 
+_RISK_DECISION_TYPE = RiskDecision
+_RISK_DECISION_ALLOWED_DESCRIPTOR = RiskDecision.__dict__["allowed"]
+_RISK_DECISION_REASON_DESCRIPTOR = RiskDecision.__dict__["reason"]
+
+
+def _require_risk_decision_authority() -> None:
+    """Bind rejection/approval routing to exact canonical decision slots."""
+
+    if (
+        RiskDecision is not _RISK_DECISION_TYPE
+        or _RISK_DECISION_TYPE.__dict__.get("allowed")
+        is not _RISK_DECISION_ALLOWED_DESCRIPTOR
+        or _RISK_DECISION_TYPE.__dict__.get("reason")
+        is not _RISK_DECISION_REASON_DESCRIPTOR
+    ):
+        raise RuntimeError("economic admission risk decision authority changed")
+
+
+def _canonical_risk_decision_state(
+    decision: RiskDecision,
+) -> tuple[bool, str]:
+    _require_risk_decision_authority()
+    if type(decision) is not _RISK_DECISION_TYPE:
+        raise RuntimeError("economic admission risk decision type changed")
+    allowed = _RISK_DECISION_ALLOWED_DESCRIPTOR.__get__(
+        decision,
+        _RISK_DECISION_TYPE,
+    )
+    reason = _RISK_DECISION_REASON_DESCRIPTOR.__get__(
+        decision,
+        _RISK_DECISION_TYPE,
+    )
+    if type(allowed) is not bool or type(reason) is not str or not reason:
+        raise RuntimeError("economic admission risk decision state is invalid")
+    return allowed, reason
+
+
 _RISK_POLICY_FIELD_DESCRIPTOR_WITNESSES = tuple(
     (name, PaperRiskPolicy.__dict__[name])
     for name in tuple(PaperRiskPolicy.__dataclass_fields__)
@@ -1268,6 +1305,7 @@ def admit_paper_ticket(
         raise TypeError("context must be an exact ProposedTicketRiskContext or None")
     if type(legs) is not tuple or not legs:
         raise ValueError("legs must be a non-empty canonical tuple")
+    _require_risk_decision_authority()
     if not _admission_risk_helper_authority_valid():
         return PaperAdmissionResult(
             risk=RiskDecision(
@@ -1384,6 +1422,10 @@ def admit_paper_ticket(
                 context=context,
             )
 
+        decision_allowed, decision_reason = _canonical_risk_decision_state(
+            decision
+        )
+
         # Quote freshness is admission-time truth, not caller-time truth. Keep the
         # original context for provenance-bound risk-of-ruin/history semantics, but
         # independently re-run the canonical quote gate against the product-owned
@@ -1393,8 +1435,8 @@ def admit_paper_ticket(
             and day_authority is not None
             and context is not None
             and (
-                decision.allowed
-                or decision.reason == "economic goal turnover limit exceeded"
+                decision_allowed
+                or decision_reason == "economic goal turnover limit exceeded"
             )
         ):
             if not _admission_risk_helper_authority_valid():
@@ -1421,16 +1463,19 @@ def admit_paper_ticket(
                     if authoritative_quote_decision is not None:
                         decision = authoritative_quote_decision
 
+        decision_allowed, decision_reason = _canonical_risk_decision_state(
+            decision
+        )
         turnover_override_candidate = (
-            not decision.allowed
-            and decision.reason == "economic goal turnover limit exceeded"
+            not decision_allowed
+            and decision_reason == "economic goal turnover limit exceeded"
             and context is not None
         )
         turnover_room = (
             None if day_authority is None else day_authority.turnover_room
         )
 
-        if decision.allowed and goal is not None:
+        if decision_allowed and goal is not None:
             if day_authority is None:
                 decision = RiskDecision(
                     False,
@@ -1451,7 +1496,8 @@ def admit_paper_ticket(
                     context=context,
                     pre_evaluation_state=pre_evaluation_state,
                 )
-        if not decision.allowed:
+        decision_allowed, _ = _canonical_risk_decision_state(decision)
+        if not decision_allowed:
             return PaperAdmissionResult(
                 risk=decision,
                 ticket=None,

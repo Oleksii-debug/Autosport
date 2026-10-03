@@ -344,6 +344,9 @@ $report = [ordered]@{
     process_family_ids = @()
     root_name = $null
     descendant_count = 0
+    duplicate_launch_status = 'NOT_RUN'
+    duplicate_launch_exit_code = $null
+    duplicate_launch_dialog_title = $null
     controls = @()
     failures = @()
     real_money_execution = $false
@@ -352,6 +355,7 @@ $report = [ordered]@{
 }
 
 $process = $null
+$duplicateProcess = $null
 $lastFamilyIds = @()
 $uiaRoot = $null
 try {
@@ -427,6 +431,69 @@ try {
     if ($null -eq $semanticReady -or $null -eq $uiaRoot) {
         throw "Timed out waiting for WebView2 semantic UIA readiness (automation_id=330) across packaged process family"
     }
+
+    # While the real packaged semantic shell is alive, a second normal launch must
+    # fail at the product-owned interactive lock boundary rather than opening a
+    # second WebView2/operator instance against either shared mutable root.
+    $duplicateProcess = Start-Process -FilePath $exePath -WorkingDirectory $launchWorkingDirectory -PassThru
+    $duplicateDeadline = [DateTime]::UtcNow.AddSeconds([Math]::Min(10, $TimeoutSeconds))
+    $duplicateRoot = $null
+    $duplicateFamilyIds = @()
+    while ([DateTime]::UtcNow -lt $duplicateDeadline) {
+        $duplicateFamilyIds = @(Get-ProcessFamilyIds -RootProcessId $duplicateProcess.Id)
+        $duplicateRoot = Find-UiaRootForProcessFamily -ProcessIds $duplicateFamilyIds
+        if ($null -ne $duplicateRoot) { break }
+        Start-Sleep -Milliseconds 100
+    }
+    if ($null -eq $duplicateRoot) {
+        throw "Second packaged launch did not expose the bounded duplicate-instance dialog"
+    }
+
+    $duplicateTitle = [string]$duplicateRoot.Current.Name
+    $report.duplicate_launch_dialog_title = $duplicateTitle
+    if ($duplicateTitle -ne 'Автоспорт — помилка запуску') {
+        throw "Second packaged launch exposed an unexpected top-level window"
+    }
+    if ($null -ne (Find-UiaElementForProcessFamily -ProcessIds $duplicateFamilyIds -AutomationId '330')) {
+        throw "Second packaged launch exposed a second semantic WebView operator surface"
+    }
+
+    $duplicateNames = @()
+    try {
+        $duplicateDescendants = $duplicateRoot.FindAll(
+            [System.Windows.Automation.TreeScope]::Descendants,
+            [System.Windows.Automation.Condition]::TrueCondition
+        )
+        foreach ($item in $duplicateDescendants) {
+            $name = [string]$item.Current.Name
+            if (-not [string]::IsNullOrWhiteSpace($name)) { $duplicateNames += $name }
+        }
+    } catch {
+        throw "Second packaged launch duplicate-instance dialog could not be inspected"
+    }
+    $duplicateText = $duplicateNames -join ' '
+    if ($duplicateText -notmatch 'уже відкритий' -or $duplicateText -notmatch 'Economic і live state не змінено') {
+        throw "Second packaged launch did not expose the bounded duplicate-instance recovery copy"
+    }
+
+    $duplicateWindowPattern = $null
+    if ($duplicateRoot.TryGetCurrentPattern(
+        [System.Windows.Automation.WindowPattern]::Pattern,
+        [ref]$duplicateWindowPattern
+    ) -and $null -ne $duplicateWindowPattern) {
+        ([System.Windows.Automation.WindowPattern]$duplicateWindowPattern).Close()
+    } else {
+        $duplicateRoot.SetFocus()
+        [System.Windows.Forms.SendKeys]::SendWait('%{F4}')
+    }
+    if (-not $duplicateProcess.WaitForExit(5000)) {
+        throw "Second packaged launch did not terminate after duplicate-instance dialog dismissal"
+    }
+    if ($duplicateProcess.ExitCode -ne 2) {
+        throw "Second packaged launch returned unexpected exit code $($duplicateProcess.ExitCode)"
+    }
+    $report.duplicate_launch_exit_code = [int]$duplicateProcess.ExitCode
+    $report.duplicate_launch_status = 'PASS'
 
     $report.process_family_ids = @($lastFamilyIds | Sort-Object -Unique)
     $report.process_id = [int]$uiaRoot.Current.ProcessId
@@ -559,6 +626,21 @@ try {
 } catch {
     $report.failures += "$($_.Exception.GetType().Name): $($_.Exception.Message)"
 } finally {
+    if ($null -ne $duplicateProcess) {
+        try {
+            $duplicateCleanupIds = @(Get-ProcessFamilyIds -RootProcessId $duplicateProcess.Id | Sort-Object -Unique -Descending)
+        } catch {
+            $duplicateCleanupIds = @($duplicateProcess.Id)
+        }
+        foreach ($cleanupId in $duplicateCleanupIds) {
+            try {
+                $candidate = Get-Process -Id $cleanupId -ErrorAction Stop
+                if (-not $candidate.HasExited) {
+                    Stop-Process -Id $cleanupId -Force -ErrorAction SilentlyContinue
+                }
+            } catch {}
+        }
+    }
     if ($null -ne $process) {
         try {
             $cleanupIds = @(Get-ProcessFamilyIds -RootProcessId $process.Id | Sort-Object -Unique -Descending)

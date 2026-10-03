@@ -17,6 +17,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from types import ModuleType
 from typing import Callable
 
 from . import provider_observation_authority as _provider_observation_module
@@ -112,6 +113,53 @@ _STORE_CLASS_SEAM_CODES = {
 _STORE_CLASS_SEAM_WITNESSES = tuple(
     (name, target, _STORE_CLASS_SEAM_CODES[name])
     for name, target in _STORE_CLASS_SEAMS.items()
+)
+_STORE_CLASS_SEAM_GLOBAL_WITNESSES = tuple(
+    (
+        name,
+        function,
+        function_globals,
+        tuple(
+            (
+                dependency_name,
+                function_globals[dependency_name],
+                _CANONICAL_GETATTR(
+                    function_globals[dependency_name],
+                    "__code__",
+                    None,
+                ),
+            )
+            for dependency_name in code.co_names
+            if dependency_name in function_globals
+        ),
+    )
+    for name, target, code in _STORE_CLASS_SEAM_WITNESSES
+    if code is not None
+    for function in (_CANONICAL_GETATTR(target, "__func__", target),)
+    for function_globals in (
+        _CANONICAL_GETATTR(function, "__globals__", None),
+    )
+    if function_globals is not None
+)
+_STORE_CLASS_SEAM_MODULE_ATTR_WITNESSES = tuple(
+    (
+        name,
+        dependency_name,
+        module,
+        attribute_name,
+        _CANONICAL_GETATTR(module, attribute_name),
+        _CANONICAL_GETATTR(
+            _CANONICAL_GETATTR(module, attribute_name),
+            "__code__",
+            None,
+        ),
+    )
+    for name, function, function_globals, global_items
+    in _STORE_CLASS_SEAM_GLOBAL_WITNESSES
+    for dependency_name, module, _dependency_code in global_items
+    if _CANONICAL_TYPE(module) is ModuleType
+    for attribute_name in function.__code__.co_names
+    if hasattr(module, attribute_name)
 )
 _EVIDENCE_CLASS_SEAMS = {
     "save": _CANONICAL_GETATTR_STATIC(CompleteGameBoardEvidenceStore, "save"),
@@ -272,6 +320,45 @@ def _require_canonical_seams(
             "collector campaign capture seam code changed: "
             + ", ".join(code_changed)
         )
+    global_changed = _CANONICAL_SORTED(
+        name
+        for name, function, function_globals, global_items
+        in _STORE_CLASS_SEAM_GLOBAL_WITNESSES
+        if (
+            _CANONICAL_GETATTR(function, "__globals__", None)
+            is not function_globals
+            or any(
+                function_globals.get(dependency_name) is not expected
+                or _CANONICAL_GETATTR(expected, "__code__", None) is not code
+                for dependency_name, expected, code in global_items
+            )
+        )
+    )
+    if global_changed:
+        raise CampaignProviderCycleCaptureIntegrityError(
+            "collector campaign capture global dispatch changed: "
+            + ", ".join(global_changed)
+        )
+    module_attr_changed = _CANONICAL_SORTED(
+        name + ":" + dependency_name + "." + attribute_name
+        for (
+            name,
+            dependency_name,
+            module,
+            attribute_name,
+            expected,
+            code,
+        ) in _STORE_CLASS_SEAM_MODULE_ATTR_WITNESSES
+        if (
+            _CANONICAL_GETATTR(module, attribute_name, None) is not expected
+            or _CANONICAL_GETATTR(expected, "__code__", None) is not code
+        )
+    )
+    if module_attr_changed:
+        raise CampaignProviderCycleCaptureIntegrityError(
+            "collector campaign capture module dispatch changed: "
+            + ", ".join(module_attr_changed)
+        )
     rebound = _CANONICAL_SORTED(
         name
         for name, expected, _code in _EVIDENCE_CLASS_SEAM_WITNESSES
@@ -380,6 +467,45 @@ def _require_failure_terminal_seams(
         raise CampaignProviderCycleCaptureIntegrityError(
             "collector failure-terminal seam code changed: "
             + ", ".join(code_changed)
+        )
+    global_changed = _CANONICAL_SORTED(
+        name
+        for name, function, function_globals, global_items
+        in _STORE_CLASS_SEAM_GLOBAL_WITNESSES
+        if (
+            _CANONICAL_GETATTR(function, "__globals__", None)
+            is not function_globals
+            or any(
+                function_globals.get(dependency_name) is not expected
+                or _CANONICAL_GETATTR(expected, "__code__", None) is not code
+                for dependency_name, expected, code in global_items
+            )
+        )
+    )
+    if global_changed:
+        raise CampaignProviderCycleCaptureIntegrityError(
+            "collector failure-terminal global dispatch changed: "
+            + ", ".join(global_changed)
+        )
+    module_attr_changed = _CANONICAL_SORTED(
+        name + ":" + dependency_name + "." + attribute_name
+        for (
+            name,
+            dependency_name,
+            module,
+            attribute_name,
+            expected,
+            code,
+        ) in _STORE_CLASS_SEAM_MODULE_ATTR_WITNESSES
+        if (
+            _CANONICAL_GETATTR(module, attribute_name, None) is not expected
+            or _CANONICAL_GETATTR(expected, "__code__", None) is not code
+        )
+    )
+    if module_attr_changed:
+        raise CampaignProviderCycleCaptureIntegrityError(
+            "collector failure-terminal module dispatch changed: "
+            + ", ".join(module_attr_changed)
         )
     store_state = _CANONICAL_OBJECT_GETATTRIBUTE(store, "__dict__")
     rebound = _CANONICAL_SORTED(name for name in _STORE_SEAMS if name in store_state)

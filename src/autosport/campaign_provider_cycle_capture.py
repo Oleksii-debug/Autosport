@@ -125,9 +125,14 @@ _EVIDENCE_CLASS_SEAM_CODES = {
     )
     for name, target in _EVIDENCE_CLASS_SEAMS.items()
 }
+_EVIDENCE_CLASS_SEAM_WITNESSES = tuple(
+    (name, target, _EVIDENCE_CLASS_SEAM_CODES[name])
+    for name, target in _EVIDENCE_CLASS_SEAMS.items()
+)
 _PROVIDER_REQUEST_SEAMS = {
     "source_id": _CANONICAL_GETATTR_STATIC(CompleteGameBoardRequest, "source_id"),
 }
+_PROVIDER_REQUEST_SEAM_ITEMS = tuple(_PROVIDER_REQUEST_SEAMS.items())
 _PROVIDER_SNAPSHOT_SEAMS = {
     name: _CANONICAL_GETATTR_STATIC(CompleteGameBoardSnapshot, name)
     for name in (
@@ -136,6 +141,7 @@ _PROVIDER_SNAPSHOT_SEAMS = {
         "evidence_sha256",
     )
 }
+_PROVIDER_SNAPSHOT_SEAM_ITEMS = tuple(_PROVIDER_SNAPSHOT_SEAMS.items())
 _PROVIDER_CANONICAL_ASSERT = (
     _provider_observation_module._CANONICAL_ASSERT_COMPLETE_GAME_BOARD_AUTHORITATIVE
 )
@@ -268,7 +274,7 @@ def _require_canonical_seams(
         )
     rebound = _CANONICAL_SORTED(
         name
-        for name, expected in _EVIDENCE_CLASS_SEAMS.items()
+        for name, expected, _code in _EVIDENCE_CLASS_SEAM_WITNESSES
         if _CANONICAL_GETATTR_STATIC(CompleteGameBoardEvidenceStore, name, None)
         is not expected
     )
@@ -279,13 +285,13 @@ def _require_canonical_seams(
         )
     code_changed = _CANONICAL_SORTED(
         name
-        for name, expected in _EVIDENCE_CLASS_SEAMS.items()
+        for name, expected, code in _EVIDENCE_CLASS_SEAM_WITNESSES
         if _CANONICAL_GETATTR(
             _CANONICAL_GETATTR(expected, "__func__", expected),
             "__code__",
             None,
         )
-        is not _EVIDENCE_CLASS_SEAM_CODES[name]
+        is not code
     )
     if code_changed:
         raise CampaignProviderCycleCaptureIntegrityError(
@@ -300,7 +306,7 @@ def _require_canonical_seams(
         )
     request_rebound = _CANONICAL_SORTED(
         name
-        for name, expected in _PROVIDER_REQUEST_SEAMS.items()
+        for name, expected in _PROVIDER_REQUEST_SEAM_ITEMS
         if _CANONICAL_GETATTR_STATIC(CompleteGameBoardRequest, name, None) is not expected
     )
     if request_rebound:
@@ -310,7 +316,7 @@ def _require_canonical_seams(
         )
     snapshot_rebound = _CANONICAL_SORTED(
         name
-        for name, expected in _PROVIDER_SNAPSHOT_SEAMS.items()
+        for name, expected in _PROVIDER_SNAPSHOT_SEAM_ITEMS
         if _CANONICAL_GETATTR_STATIC(CompleteGameBoardSnapshot, name, None) is not expected
     )
     if snapshot_rebound:

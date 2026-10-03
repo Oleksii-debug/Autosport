@@ -1009,6 +1009,16 @@ class PersistentLiveDecisionLoop:
                     and self._progress.phase == _PHASE_COMMITTED
                 ):
                     self._verify_committed_progress_ledger_binding(self._progress)
+                    _, committed_decision_time = _canonical_timestamp(
+                        "committed decision_ts",
+                        self._progress.decision_ts,
+                    )
+                    self._verify_provider_health_boundaries(
+                        self._progress.provider_health_boundaries,
+                        committed_decision_time,
+                        require_eligible=(self._progress.gate == _GATE_NORMAL),
+                        require_failed=(self._progress.gate == _GATE_PROVIDER_GAP),
+                    )
         elif (
             self._progress is not None
             and self._progress.phase == _PHASE_COMMITTED

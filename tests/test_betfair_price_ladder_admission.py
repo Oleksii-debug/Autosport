@@ -703,3 +703,38 @@ def test_module_rpc_alias_rebinding_cannot_redirect_authoritative_acquisition(mo
     observation.assert_authoritative()
     assert forged_called is False
     assert len(transport.calls) == 1
+
+
+def test_provider_parser_helper_rebinding_fails_closed_before_acquisition(monkeypatch):
+    authority, _, transport = authority_for(
+        monkeypatch,
+        response([market_row("FUTURE_PROVIDER_LADDER")], 1),
+    )
+    monkeypatch.setattr(
+        _ladder,
+        "_provider_required_text",
+        lambda *_args, **_kwargs: "CLASSIC",
+    )
+
+    with pytest.raises(
+        BetfairPriceLadderError,
+        match="canonical dispatch _provider_required_text was rebound",
+    ):
+        authority.acquire("1.234")
+
+    assert len(transport.calls) == 0
+
+
+def test_tick_predicate_rebinding_cannot_turn_invalid_price_positive(monkeypatch):
+    authority, observation, _, _ = acquire_for(monkeypatch, "CLASSIC")
+    monkeypatch.setattr(_ladder, "_classic_tick", lambda _price: True)
+
+    with pytest.raises(
+        BetfairPriceLadderError,
+        match="canonical dispatch _classic_tick was rebound",
+    ):
+        authority.resolve(
+            observation=observation,
+            market_id="1.234",
+            price="2.01",
+        )

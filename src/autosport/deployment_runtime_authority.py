@@ -1122,7 +1122,52 @@ _CANONICAL_RECORD_CODEC_REQUIREMENT: Final = _require_canonical_record_codec
 _CANONICAL_RECORD_CODEC_REQUIREMENT_CODE: Final = _require_canonical_record_codec.__code__
 
 
-class DeploymentRuntimeAuthorityStore:
+_IMMUTABLE_STORE_ROOT_SURFACE: Final = frozenset(
+    {
+        "__new__",
+        "__init__",
+        "__getattribute__",
+        "__setattr__",
+        "__delattr__",
+        "__slots__",
+        "initialize_pristine",
+        "path",
+        "workspace",
+        "_lock",
+        "_authority",
+        "_semantic_binding_sha256",
+        "_binding_path",
+        "_binding_workspace",
+        "_binding_lock",
+        "_binding_authority",
+        "_binding_semantic_binding_sha256",
+        "_binding_workspace_identity_binding",
+        "_binding_authority_root_selection_binding",
+        "_binding_authority_root_selection_context",
+        "_binding_root_selection_store_root",
+        "_WRITE_ONCE_AUTHORITY_BINDINGS",
+        "_WRITE_ONCE_AUTHORITY_STORAGE_BINDINGS",
+    }
+)
+
+
+class _DeploymentRuntimeAuthorityStoreMeta(type):
+    def __setattr__(cls, name: str, value: object) -> None:
+        if name in _IMMUTABLE_STORE_ROOT_SURFACE:
+            raise TypeError(
+                f"runtime authority store root surface is immutable: {name}"
+            )
+        super().__setattr__(name, value)
+
+    def __delattr__(cls, name: str) -> None:
+        if name in _IMMUTABLE_STORE_ROOT_SURFACE:
+            raise TypeError(
+                f"runtime authority store root surface is immutable: {name}"
+            )
+        super().__delattr__(name)
+
+
+class DeploymentRuntimeAuthorityStore(metaclass=_DeploymentRuntimeAuthorityStoreMeta):
     """Rollback-resistant append-only runtime authority file.
 
     The local file remains the canonical domain payload and hash chain. The

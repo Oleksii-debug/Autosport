@@ -22,6 +22,13 @@ from weakref import WeakKeyDictionary
 
 from . import _paper_execution_decision_origin as _origin
 from . import _paper_execution_decision_origin_instance_guard as _instance_guard
+from .campaign_inception import (
+    CampaignInceptionReceipt,
+    CampaignInceptionSourceSpec,
+    establish_campaign_inception,
+)
+from .causal_collector import CollectorDeltaStore
+from .forward_universe_precommit_authority import ForwardUniversePrecommitLocator
 from .learning_environment import (
     CausalLearningEnvironment,
     LearningEnvironmentError,
@@ -30,6 +37,11 @@ from .learning_environment import (
 from .paper_campaign_admission import (
     PaperCampaignAdmissionCoordinator,
     PaperCampaignAdmissionError,
+    _FORWARD_OBSERVATION_BINDING_KEYS,
+    _FORWARD_OBSERVATION_CAMPAIGN_ID,
+    _FORWARD_OBSERVATION_EVALUATION_PLAN_SHA256,
+    _FORWARD_OBSERVATION_INCEPTION_RECEIPT_SHA256,
+    _FORWARD_OBSERVATION_SOURCE_ID,
 )
 from .paper_execution_adoption import PaperExecutionAdoptionRuntime
 
@@ -159,10 +171,7 @@ def _install() -> None:
     if getattr(PaperExecutionAdoptionRuntime, _INSTALL_SENTINEL, False):
         return
 
-    bindings: WeakKeyDictionary[
-        PaperExecutionAdoptionRuntime,
-        tuple[CausalLearningEnvironment, str],
-    ] = WeakKeyDictionary()
+    bindings = WeakKeyDictionary()
     bindings_lock = RLock()
 
     if not hasattr(PaperExecutionAdoptionRuntime, _RUNTIME_INIT_SENTINEL):
@@ -188,6 +197,19 @@ def _install() -> None:
     stable_checkpoint = CausalLearningEnvironment.checkpoint
     stable_origin_to_dict = _origin.DecisionRecordOrigin.to_dict
     product_runtime_context = _instance_guard._PRODUCT_ORIGIN_RUNTIME
+    stable_establish_campaign_inception = establish_campaign_inception
+    stable_establish_campaign_inception_code = (
+        stable_establish_campaign_inception.__code__
+    )
+    campaign_receipt_type = CampaignInceptionReceipt
+    campaign_locator_type = ForwardUniversePrecommitLocator
+    campaign_store_type = CollectorDeltaStore
+    campaign_source_spec_type = CampaignInceptionSourceSpec
+    campaign_binding_keys = _FORWARD_OBSERVATION_BINDING_KEYS
+    campaign_id_key = _FORWARD_OBSERVATION_CAMPAIGN_ID
+    campaign_source_id_key = _FORWARD_OBSERVATION_SOURCE_ID
+    campaign_receipt_key = _FORWARD_OBSERVATION_INCEPTION_RECEIPT_SHA256
+    campaign_plan_key = _FORWARD_OBSERVATION_EVALUATION_PLAN_SHA256
     json_loads = json.loads
     json_dumps = json.dumps
 
@@ -196,10 +218,23 @@ def _install() -> None:
         self: PaperExecutionAdoptionRuntime,
         *args,
         learning_environment: CausalLearningEnvironment | None = None,
+        campaign_precommit_locator: ForwardUniversePrecommitLocator | None = None,
+        campaign_collector_store: CollectorDeltaStore | None = None,
+        campaign_source_spec: CampaignInceptionSourceSpec | None = None,
         **kwargs,
     ) -> None:
         stable_runtime_init(self, *args, **kwargs)
+        campaign_args = (
+            campaign_precommit_locator,
+            campaign_collector_store,
+            campaign_source_spec,
+        )
+        campaign_requested = any(value is not None for value in campaign_args)
         if learning_environment is None:
+            if campaign_requested:
+                raise TypeError(
+                    "forward campaign execution requires learning_environment"
+                )
             return
         if type(learning_environment) is not CausalLearningEnvironment:
             raise TypeError(
@@ -211,10 +246,53 @@ def _install() -> None:
             raise _origin.PaperExecutionDecisionOriginError(
                 "campaign learning environment must be at a durable checkpoint before decision"
             ) from exc
+
+        campaign_binding = None
+        if campaign_requested:
+            if (
+                type(campaign_precommit_locator) is not campaign_locator_type
+                or type(campaign_collector_store) is not campaign_store_type
+                or type(campaign_source_spec) is not campaign_source_spec_type
+            ):
+                raise TypeError(
+                    "forward campaign execution requires exact precommit locator, "
+                    "collector store, and source spec"
+                )
+            if (
+                stable_establish_campaign_inception.__code__
+                is not stable_establish_campaign_inception_code
+            ):
+                raise _origin.PaperExecutionDecisionOriginError(
+                    "campaign inception resolver executable changed"
+                )
+            receipt = stable_establish_campaign_inception(
+                precommit_locator=campaign_precommit_locator,
+                store=campaign_collector_store,
+                source_spec=campaign_source_spec,
+            )
+            if (
+                stable_establish_campaign_inception.__code__
+                is not stable_establish_campaign_inception_code
+                or type(receipt) is not campaign_receipt_type
+            ):
+                raise _origin.PaperExecutionDecisionOriginError(
+                    "campaign inception authority could not be established canonically"
+                )
+            campaign_binding = (
+                campaign_precommit_locator,
+                campaign_collector_store,
+                campaign_source_spec,
+                receipt.receipt_sha256,
+                receipt.campaign_id,
+                receipt.source_id,
+                receipt.evaluation_universe_sha256,
+            )
+
         with bindings_lock:
             bindings[self] = (
                 learning_environment,
                 learning_environment.environment_id,
+                campaign_binding,
             )
 
     def issue_predecision_learning_observation(
@@ -232,7 +310,7 @@ def _install() -> None:
             binding = bindings.get(self)
         if binding is None:
             return None
-        environment, bound_environment_id = binding
+        environment, bound_environment_id, campaign_binding = binding
         if environment.environment_id != bound_environment_id:
             raise _origin.PaperExecutionDecisionOriginError(
                 "campaign learning environment identity changed before decision"
@@ -253,10 +331,61 @@ def _install() -> None:
                 "decision-time learning evidence must be canonical string pairs"
             )
         keys = [item[0] for item in evidence]
-        if len(keys) != len(set(keys)) or "environment_checkpoint_id" in keys:
+        reserved = frozenset(("environment_checkpoint_id", *campaign_binding_keys))
+        if (
+            len(keys) != len(set(keys))
+            or any(key in reserved for key in keys)
+        ):
             raise _origin.PaperExecutionDecisionOriginError(
-                "decision-time learning evidence keys must be unique"
+                "decision-time learning evidence keys must be unique and product-owned"
             )
+
+        campaign_evidence: tuple[tuple[str, str], ...] = ()
+        if campaign_binding is not None:
+            (
+                campaign_precommit_locator,
+                campaign_collector_store,
+                campaign_source_spec,
+                expected_receipt_sha256,
+                expected_campaign_id,
+                expected_source_id,
+                expected_plan_sha256,
+            ) = campaign_binding
+            if (
+                stable_establish_campaign_inception.__code__
+                is not stable_establish_campaign_inception_code
+            ):
+                raise _origin.PaperExecutionDecisionOriginError(
+                    "campaign inception resolver executable changed"
+                )
+            current_receipt = stable_establish_campaign_inception(
+                precommit_locator=campaign_precommit_locator,
+                store=campaign_collector_store,
+                source_spec=campaign_source_spec,
+            )
+            if (
+                stable_establish_campaign_inception.__code__
+                is not stable_establish_campaign_inception_code
+                or type(current_receipt) is not campaign_receipt_type
+                or current_receipt.receipt_sha256 != expected_receipt_sha256
+                or current_receipt.campaign_id != expected_campaign_id
+                or current_receipt.source_id != expected_source_id
+                or current_receipt.evaluation_universe_sha256
+                != expected_plan_sha256
+            ):
+                raise _origin.PaperExecutionDecisionOriginError(
+                    "campaign inception authority changed before decision"
+                )
+            campaign_evidence = (
+                (campaign_id_key, current_receipt.campaign_id),
+                (campaign_source_id_key, current_receipt.source_id),
+                (campaign_receipt_key, current_receipt.receipt_sha256),
+                (
+                    campaign_plan_key,
+                    current_receipt.evaluation_universe_sha256,
+                ),
+            )
+
         try:
             checkpoint = stable_checkpoint(environment)
             observation = Observation(
@@ -267,6 +396,7 @@ def _install() -> None:
                     sorted(
                         (
                             *evidence,
+                            *campaign_evidence,
                             ("environment_checkpoint_id", checkpoint.checkpoint_id),
                         )
                     )
@@ -325,7 +455,7 @@ def _install() -> None:
             binding = bindings.get(runtime)
         if binding is None:
             return base
-        _, bound_environment_id = binding
+        _, bound_environment_id, _campaign_binding = binding
 
         # The exact DecisionLedger verifier already resolved these bytes from the
         # economic DecisionRecord. #727 is only a carrier: it must never mint or

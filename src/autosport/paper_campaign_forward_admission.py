@@ -134,9 +134,29 @@ def _build_sealed_forward_admission():
             raise expected_error(
                 "campaign cycle receipt has no canonical campaign identity"
             )
+        source_id = exact_getattr(cycle_receipt, "source_id", None)
+        campaign_receipt_sha256 = exact_getattr(
+            cycle_receipt,
+            "campaign_receipt_sha256",
+            None,
+        )
         if receipt.campaign_id != campaign_id:
             raise expected_error(
                 "forward verification campaign differs from admission campaign"
+            )
+        if (
+            exact_type(source_id) is not exact_str
+            or receipt.source_id != source_id
+        ):
+            raise expected_error(
+                "forward verification source differs from admission campaign cycle"
+            )
+        if (
+            exact_type(campaign_receipt_sha256) is not exact_str
+            or receipt.campaign_receipt_sha256 != campaign_receipt_sha256
+        ):
+            raise expected_error(
+                "forward verification inception receipt differs from campaign cycle"
             )
         if (
             receipt.verification_scope != expected_scope
@@ -162,6 +182,11 @@ def _build_sealed_forward_admission():
             "schema": "autosport.paper_campaign_forward_verification",
             "schema_version": 1,
             "campaign_id": receipt.campaign_id,
+            "source_id": receipt.source_id,
+            "campaign_receipt_sha256": sha(
+                receipt.campaign_receipt_sha256,
+                "campaign_receipt_sha256",
+            ),
             "protocol_sha256": sha(receipt.protocol_sha256, "protocol_sha256"),
             "structural_result_sha256": sha(
                 receipt.structural_result_sha256,

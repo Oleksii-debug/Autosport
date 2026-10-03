@@ -455,6 +455,8 @@ class CampaignForwardEvidenceVerification:
 
     schema_version: int
     campaign_id: str
+    source_id: str
+    campaign_receipt_sha256: str
     protocol_sha256: str
     structural_result_sha256: str
     structural_ok: bool
@@ -562,6 +564,11 @@ class CampaignForwardEvidenceVerification:
         payload = {
             "schema_version": _SCHEMA_VERSION,
             "campaign_id": _text(authority.campaign_id, "campaign_id"),
+            "source_id": _text(authority.source_id, "source_id"),
+            "campaign_receipt_sha256": _sha(
+                authority.campaign_receipt_sha256,
+                "campaign_receipt_sha256",
+            ),
             "protocol_sha256": protocol_sha256,
             "structural_result_sha256": structural_result_sha256,
             "structural_ok": structural_result.ok,

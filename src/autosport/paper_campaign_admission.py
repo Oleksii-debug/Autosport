@@ -43,6 +43,22 @@ _EXECUTION_ATTEMPT_ID = "paper_execution_attempt_id"
 _EXECUTION_TICKET_ID = "paper_execution_ticket_id"
 _FORWARD_VERIFICATION_DECISION_FIELD = "campaign_forward_verification"
 _FORWARD_VERIFICATION_ACTION_PARAMETER = "campaign_forward_verification_receipt_sha256"
+_FORWARD_OBSERVATION_CAMPAIGN_ID = "campaign_forward_campaign_id"
+_FORWARD_OBSERVATION_SOURCE_ID = "campaign_forward_source_id"
+_FORWARD_OBSERVATION_INCEPTION_RECEIPT_SHA256 = (
+    "campaign_forward_inception_receipt_sha256"
+)
+_FORWARD_OBSERVATION_EVALUATION_PLAN_SHA256 = (
+    "campaign_forward_evaluation_plan_sha256"
+)
+_FORWARD_OBSERVATION_BINDING_KEYS = frozenset(
+    {
+        _FORWARD_OBSERVATION_CAMPAIGN_ID,
+        _FORWARD_OBSERVATION_SOURCE_ID,
+        _FORWARD_OBSERVATION_INCEPTION_RECEIPT_SHA256,
+        _FORWARD_OBSERVATION_EVALUATION_PLAN_SHA256,
+    }
+)
 _EXECUTION_FIELDS = frozenset(
     {
         _EXECUTION_DECISION_ID,
@@ -203,6 +219,54 @@ _CURRENT_FORWARD_VERIFICATION, _install_forward_verification_runner = (
     _build_forward_verification_context()
 )
 del _build_forward_verification_context
+
+
+def _require_forward_observation_binding(
+    observation: Observation,
+    verification: dict[str, object],
+) -> None:
+    if type(observation) is not Observation:
+        raise PaperCampaignAdmissionError(
+            "forward admission requires exact canonical learning Observation"
+        )
+    if type(verification) is not dict:
+        raise PaperCampaignAdmissionError(
+            "forward admission verification payload is not canonical"
+        )
+    pairs = observation.evidence
+    if (
+        type(pairs) is not tuple
+        or any(
+            type(item) is not tuple
+            or len(item) != 2
+            or type(item[0]) is not str
+            or type(item[1]) is not str
+            for item in pairs
+        )
+        or len({item[0] for item in pairs}) != len(pairs)
+    ):
+        raise PaperCampaignAdmissionError(
+            "forward admission learning Observation evidence is noncanonical"
+        )
+    evidence = dict(pairs)
+    expected = {
+        _FORWARD_OBSERVATION_CAMPAIGN_ID: verification.get("campaign_id"),
+        _FORWARD_OBSERVATION_SOURCE_ID: verification.get("source_id"),
+        _FORWARD_OBSERVATION_INCEPTION_RECEIPT_SHA256: verification.get(
+            "campaign_receipt_sha256"
+        ),
+        _FORWARD_OBSERVATION_EVALUATION_PLAN_SHA256: verification.get(
+            "prospective_evaluation_plan_sha256"
+        ),
+    }
+    if any(type(value) is not str or not value for value in expected.values()):
+        raise PaperCampaignAdmissionError(
+            "forward admission verification lacks predecision campaign identity"
+        )
+    if any(evidence.get(name) != value for name, value in expected.items()):
+        raise PaperCampaignAdmissionError(
+            "predecision learning Observation is not bound to forward campaign authority"
+        )
 
 
 class PaperCampaignAdmissionCoordinator(_base.PaperCampaignAdmissionCoordinator):
@@ -717,6 +781,10 @@ class PaperCampaignAdmissionCoordinator(_base.PaperCampaignAdmissionCoordinator)
             )
         forward_verification = _CURRENT_FORWARD_VERIFICATION()
         if forward_verification is not None:
+            _require_forward_observation_binding(
+                observation,
+                forward_verification,
+            )
             payload[_FORWARD_VERIFICATION_DECISION_FIELD] = forward_verification
         payload.update(
             {

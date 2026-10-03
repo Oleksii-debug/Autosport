@@ -36,7 +36,7 @@ def _sealed_tuple_from_callable(candidate: object):
             value = cell.cell_contents
         except ValueError:
             continue
-        if type(value) is tuple and len(value) == 16 and value[0] == _SEAL_MARKER:
+        if type(value) is tuple and len(value) == 17 and value[0] == _SEAL_MARKER:
             return value
     return None
 
@@ -62,6 +62,21 @@ def _initial_seal():
                 "__code__",
                 None,
             ),
+        ),
+        (
+            _admission_module._require_forward_observation_binding,
+            getattr(
+                _admission_module._require_forward_observation_binding,
+                "__code__",
+                None,
+            ),
+            (
+                _admission_module._FORWARD_OBSERVATION_CAMPAIGN_ID,
+                _admission_module._FORWARD_OBSERVATION_SOURCE_ID,
+                _admission_module._FORWARD_OBSERVATION_INCEPTION_RECEIPT_SHA256,
+                _admission_module._FORWARD_OBSERVATION_EVALUATION_PLAN_SHA256,
+            ),
+            _admission_module._FORWARD_OBSERVATION_BINDING_KEYS,
         ),
         WeakKeyDictionary(),
         RLock(),
@@ -91,9 +106,14 @@ def _build_guard(seal):
     forward_context_reader = seal[12]
     forward_context = forward_context_reader[0]
     forward_context_code = forward_context_reader[1]
-    path_bindings = seal[13]
-    path_bindings_lock = seal[14]
-    admission_dispatch = seal[15]
+    forward_observation_seal = seal[13]
+    forward_observation_verifier = forward_observation_seal[0]
+    forward_observation_verifier_code = forward_observation_seal[1]
+    forward_observation_keys = forward_observation_seal[2]
+    forward_observation_key_set = forward_observation_seal[3]
+    path_bindings = seal[14]
+    path_bindings_lock = seal[15]
+    admission_dispatch = seal[16]
     canonical_json = admission_dispatch[0]
     canonical_json_dumps = admission_dispatch[1]
     canonical_json_loads = admission_dispatch[2]
@@ -198,6 +218,19 @@ def _build_guard(seal):
             != forward_action_parameter
             or _admission_module._CURRENT_FORWARD_VERIFICATION is not forward_context
             or getattr(forward_context, "__code__", None) is not forward_context_code
+            or _admission_module._require_forward_observation_binding
+            is not forward_observation_verifier
+            or getattr(forward_observation_verifier, "__code__", None)
+            is not forward_observation_verifier_code
+            or (
+                _admission_module._FORWARD_OBSERVATION_CAMPAIGN_ID,
+                _admission_module._FORWARD_OBSERVATION_SOURCE_ID,
+                _admission_module._FORWARD_OBSERVATION_INCEPTION_RECEIPT_SHA256,
+                _admission_module._FORWARD_OBSERVATION_EVALUATION_PLAN_SHA256,
+            )
+            != forward_observation_keys
+            or _admission_module._FORWARD_OBSERVATION_BINDING_KEYS
+            != forward_observation_key_set
         ):
             raise PaperCampaignAdmissionError(
                 "PAPER admission forward-verification routing changed after guard installation"

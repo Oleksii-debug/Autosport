@@ -1040,21 +1040,72 @@ class ProviderCapabilityEvidenceMatrixJournal:
         return matrix_id
 
     def latest_for(
-        self, anchor: ProviderCapabilityEvidenceMatrix
+        self,
+        anchor: ProviderCapabilityEvidenceMatrix,
+        *,
+        as_of: str | None = None,
     ) -> ProviderCapabilityEvidenceMatrix | None:
+        """Return latest same-scope matrix, optionally at one historical cutoff.
+
+        Historical replay must not resolve a successor that became authoritative only
+        after the requested cutoff. The journal is already linearized by publish(), so
+        walking predecessor ids from the current latest preserves exact lineage while
+        avoiding future-state leakage.
+        """
+
         if type(anchor) is not ProviderCapabilityEvidenceMatrix:
             raise ProviderCapabilityEvidenceMatrixError(
                 "matrix journal anchor must be exact matrix"
             )
-        latest_id = self._latest_by_scope.get(_matrix_authority_scope(anchor))
+        cutoff = None if as_of is None else _time(as_of, "as_of")
+
+        # A matrix already published into this journal cannot be used as a mutable
+        # scope selector. Detect exact-object mutation before consulting its current
+        # payload-derived authority scope.
+        for stored_id, stored in self._matrices.items():
+            if stored is anchor:
+                if (
+                    not _is_product_issued_matrix(stored)
+                    or stored.matrix_id != stored_id
+                ):
+                    raise ProviderCapabilityEvidenceMatrixError(
+                        "journal anchor matrix was mutated after publication"
+                    )
+                break
+
+        scope = _matrix_authority_scope(anchor)
+        latest_id = self._latest_by_scope.get(scope)
         if latest_id is None:
             return None
-        matrix = self._matrices[latest_id]
-        if not _is_product_issued_matrix(matrix):
-            raise ProviderCapabilityEvidenceMatrixError(
-                "journal latest matrix was mutated after publication"
-            )
-        return matrix
+
+        current_id: str | None = latest_id
+        visited: set[str] = set()
+        while current_id is not None:
+            if current_id in visited:
+                raise ProviderCapabilityEvidenceMatrixError(
+                    "matrix journal lineage contains a cycle"
+                )
+            visited.add(current_id)
+            matrix = self._matrices.get(current_id)
+            if matrix is None:
+                raise ProviderCapabilityEvidenceMatrixError(
+                    "matrix journal lineage is incomplete"
+                )
+            if (
+                not _is_product_issued_matrix(matrix)
+                or matrix.matrix_id != current_id
+            ):
+                raise ProviderCapabilityEvidenceMatrixError(
+                    "journal matrix was mutated after publication"
+                )
+            if _matrix_authority_scope(matrix) != scope:
+                raise ProviderCapabilityEvidenceMatrixError(
+                    "journal matrix authority scope changed after publication"
+                )
+            if cutoff is None or _time(matrix.as_of, "matrix.as_of") <= cutoff:
+                return matrix
+            current_id = matrix.predecessor_matrix_id
+        return None
 
 
 def validate_capability_matrix_successor(

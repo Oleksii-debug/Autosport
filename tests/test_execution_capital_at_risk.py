@@ -1030,3 +1030,84 @@ def test_public_closure_graph_cannot_mint_underreported_risk_authority(
     ):
         forged.assert_issued_current(ledger)
 
+def test_derivation_helper_rebinding_cannot_understate_current_risk(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    ledger, plan = _ledger(tmp_path, _action(stake="10"))
+    _attempt(ledger, plan)
+    canonical = resolve_execution_capital_at_risk(ledger, plan.plan_id)
+    assert canonical.max_plausible_capital_at_risk == Decimal("10")
+
+    called = False
+
+    def forged_attempt(view):
+        nonlocal called
+        called = True
+        action = view.action
+        one = Decimal("1")
+        zero = Decimal("0")
+        return capital_risk_module.AttemptCapitalAtRisk(
+            attempt_id=view.attempt.attempt_id,
+            action_id=action.action_id,
+            state=view.state,
+            bookmaker_id=action.bookmaker_id,
+            account_id=action.account_id,
+            event_id=action.event_id,
+            market_id=action.market_id,
+            selection_id=action.selection_id,
+            side=action.side,
+            requested_stake=one,
+            requested_odds=action.requested_odds,
+            requested_capital_at_limit=one,
+            confirmed_open_capital=zero,
+            contingent_unknown_capital=one,
+            confirmed_released_capital=zero,
+            max_plausible_capital_at_risk=one,
+        )
+
+    monkeypatch.setattr(capital_risk_module, "_attempt_risk", forged_attempt)
+
+    with pytest.raises(
+        ExecutionCapitalAtRiskError,
+        match="capital-risk ledger read dispatch changed",
+    ):
+        resolve_execution_capital_at_risk(ledger, plan.plan_id)
+
+    with pytest.raises(
+        ExecutionCapitalAtRiskError,
+        match="capital-risk ledger read dispatch changed",
+    ):
+        canonical.assert_issued_current(ledger)
+
+    assert called is False
+
+
+def test_derivation_helper_inplace_code_mutation_is_rejected_before_execution(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    ledger, plan = _ledger(tmp_path, _action(stake="10"))
+    _attempt(ledger, plan)
+    canonical = resolve_execution_capital_at_risk(ledger, plan.plan_id)
+
+    called: list[bool] = []
+
+    def forged_attempt(_view):
+        called.append(True)
+        raise AssertionError("mutated risk helper must not execute")
+
+    monkeypatch.setattr(
+        capital_risk_module._attempt_risk,
+        "__code__",
+        forged_attempt.__code__,
+    )
+
+    with pytest.raises(
+        ExecutionCapitalAtRiskError,
+        match="capital-risk ledger read dispatch changed",
+    ):
+        canonical.assert_issued_current(ledger)
+
+    assert called == []
+

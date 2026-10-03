@@ -866,10 +866,12 @@ class AutosportApp(tk.Tk):
             return
 
         replay_workspace = Path(replay_workspace)
-        self._active_workspace = replay_workspace
-        self._active_strategy_id = strategy_id
-        self._active_research_plan = research_plan
-        self._recovery_required_workspaces.add(replay_workspace)
+
+        # Teardown still belongs to the currently attached economic workspace.
+        # Do not adopt the newly selected recovery target until that teardown is
+        # proven successful: if session workspace metadata is unavailable, the
+        # quarantine fallback must remain the prior _active_workspace rather than
+        # misattributing uncertain old state to an untouched new target.
         teardown_succeeded = self._hide_uncertain_economic_state(
             text("ui.status.recovery.in_progress_ticket")
         )
@@ -879,6 +881,11 @@ class AutosportApp(tk.Tk):
             self._append_log(detail)
             messagebox.showerror(text("ui.dialog.title"), detail)
             return
+
+        self._active_workspace = replay_workspace
+        self._active_strategy_id = strategy_id
+        self._active_research_plan = research_plan
+        self._recovery_required_workspaces.add(replay_workspace)
 
         try:
             report = reconcile_late_crashes(replay_workspace)

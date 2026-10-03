@@ -291,6 +291,20 @@ class ParlayApiProviderStateTests(unittest.TestCase):
         self.assertFalse(metadata["provider_block_topped_up"])
         self.assertFalse(metadata["provider_block_freshness_complete"])
 
+    def test_topped_up_survives_even_when_other_block_freshness_is_missing(self):
+        event = copy.deepcopy(EVENT)
+        event["bookmakers"][0]["topped_up"] = True
+        del event["bookmakers"][0]["last_update_ms"]
+        batch = self._provider(
+            HttpJsonResponse([event], 200, {"X-Provider-State": provider_state_header()})
+        ).read_batch()
+        self.assertEqual(
+            batch.quality_flags,
+            ("BOOKMAKER_BLOCK_FRESHNESS_MISSING", "UPSTREAM_BOOKMAKER_TOPPED_UP"),
+        )
+        self.assertTrue(batch.quotes[0].metadata["provider_block_topped_up"])
+        self.assertFalse(batch.quotes[0].metadata["provider_block_freshness_complete"])
+
     def test_malformed_block_freshness_fails_closed(self):
         invalid = (
             ("stale_seconds", True),

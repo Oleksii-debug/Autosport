@@ -702,7 +702,7 @@ def _provider_state_quality_flags(
             freshness = _parse_bookmaker_block_freshness(bookmaker)
             if not freshness.complete:
                 flags.add("BOOKMAKER_BLOCK_FRESHNESS_MISSING")
-            elif freshness.topped_up:
+            if freshness.topped_up:
                 flags.add("UPSTREAM_BOOKMAKER_TOPPED_UP")
 
             if provider_state is None:

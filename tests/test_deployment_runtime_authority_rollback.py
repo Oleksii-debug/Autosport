@@ -3482,3 +3482,126 @@ def test_runtime_authority_store_root_surface_cannot_be_deleted(
         delattr(DeploymentRuntimeAuthorityStore, name)
 
     assert store.records() == ()
+
+
+def test_runtime_authority_rejects_hardlinked_injected_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "deployment-runtime-authority.json"
+    authority_root = _authority_root(tmp_path)
+    store = DeploymentRuntimeAuthorityStore.initialize_pristine(
+        path,
+        authority_root=authority_root,
+    )
+    _append(store, 0)
+    external = tmp_path / "external-runtime-authority.json"
+
+    def hardlink_writer(target: Path, payload: object) -> None:
+        external.write_text(
+            deployment_runtime_authority._canonical_json(payload) + "\n",
+            encoding="utf-8",
+        )
+        target.unlink()
+        try:
+            target.hardlink_to(external)
+        except OSError as exc:
+            pytest.skip(f"hard links unavailable in this environment: {exc}")
+
+    monkeypatch.setattr(store, "_write_atomic_path", hardlink_writer)
+    with pytest.raises(
+        DeploymentRuntimeAuthorityError,
+        match="single-link regular file",
+    ):
+        _append(store, 1)
+
+    assert path.exists()
+    assert external.exists()
+
+
+def test_runtime_authority_accepts_injected_nonfsync_writer_only_after_finalization(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "deployment-runtime-authority.json"
+    store = DeploymentRuntimeAuthorityStore.initialize_pristine(
+        path,
+        authority_root=_authority_root(tmp_path),
+    )
+
+    def nondurable_writer(target: Path, payload: object) -> None:
+        target.write_text(
+            deployment_runtime_authority._canonical_json(payload) + "\n",
+            encoding="utf-8",
+        )
+
+    monkeypatch.setattr(store, "_write_atomic_path", nondurable_writer)
+    runtime_authority_id = _append(store, 0)
+
+    records = store.records()
+    assert len(records) == 1
+    assert records[0].runtime_authority_id == runtime_authority_id
+
+
+@pytest.mark.parametrize(
+    "helper_name",
+    ("_durably_finalize_published_path", "_fsync_directory"),
+)
+def test_runtime_authority_rejects_publication_durability_helper_rebinding(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    helper_name: str,
+) -> None:
+    path = tmp_path / "deployment-runtime-authority.json"
+    store = DeploymentRuntimeAuthorityStore.initialize_pristine(
+        path,
+        authority_root=_authority_root(tmp_path),
+    )
+    hostile_calls: list[object] = []
+
+    def hostile(*args: object, **kwargs: object) -> None:
+        hostile_calls.append((args, kwargs))
+
+    monkeypatch.setattr(
+        deployment_runtime_authority,
+        helper_name,
+        hostile,
+    )
+    with pytest.raises(
+        DeploymentRuntimeAuthorityError,
+        match="publication finalizer dispatch was replaced|publication durability dispatch was replaced",
+    ):
+        _append(store, 0)
+
+    assert hostile_calls == []
+
+
+@pytest.mark.parametrize("member_name", ("open", "fstat", "lstat", "fsync", "close"))
+def test_runtime_authority_rejects_publication_os_dispatch_rebinding(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    member_name: str,
+) -> None:
+    path = tmp_path / "deployment-runtime-authority.json"
+    store = DeploymentRuntimeAuthorityStore.initialize_pristine(
+        path,
+        authority_root=_authority_root(tmp_path),
+    )
+    hostile_calls: list[object] = []
+
+    def hostile(*args: object, **kwargs: object) -> object:
+        hostile_calls.append((args, kwargs))
+        raise AssertionError("hostile publication OS primitive executed")
+
+    monkeypatch.setattr(
+        deployment_runtime_authority.os,
+        member_name,
+        hostile,
+    )
+    with pytest.raises(
+        DeploymentRuntimeAuthorityError,
+        match="publication durability dispatch was replaced|durability dispatch was replaced",
+    ):
+        _append(store, 0)
+
+    assert hostile_calls == []

@@ -36,12 +36,12 @@ _BRIDGE_WITNESS_CODE = getattr(_BRIDGE_WITNESS, "__code__", None)
 _TX_TYPE = RunTransaction
 _TX_BASE = RunTransaction.verified_base_paper_book_snapshot
 _TX_TERMINAL = RunTransaction.verified_terminal_paper_book_snapshot
-_TX_MANIFEST = RunTransaction._read_manifest
+_TX_COMPLETED = RunTransaction._completed_registry_item
 _TX_LEDGER = RunTransaction._verified_canonical_decision_ledger
 _TX_REQUIRE_RUN = RunTransaction._require_run_decision_identity
 _TX_BASE_CODE = getattr(_TX_BASE, "__code__", None)
 _TX_TERMINAL_CODE = getattr(_TX_TERMINAL, "__code__", None)
-_TX_MANIFEST_CODE = getattr(_TX_MANIFEST, "__code__", None)
+_TX_COMPLETED_CODE = getattr(_TX_COMPLETED, "__code__", None)
 _TX_LEDGER_CODE = getattr(_TX_LEDGER.__func__, "__code__", None)
 _TX_REQUIRE_RUN_CODE = getattr(_TX_REQUIRE_RUN.__func__, "__code__", None)
 _PRECOMMIT = resolve_fixed_n_iid_precommit_authority
@@ -261,14 +261,14 @@ def _require_dispatch() -> None:
         or RunTransaction is not _TX_TYPE
         or _TX_TYPE.verified_base_paper_book_snapshot is not _TX_BASE
         or _TX_TYPE.verified_terminal_paper_book_snapshot is not _TX_TERMINAL
-        or _TX_TYPE._read_manifest is not _TX_MANIFEST
+        or _TX_TYPE._completed_registry_item is not _TX_COMPLETED
         or _TX_TYPE._verified_canonical_decision_ledger.__func__
         is not _TX_LEDGER.__func__
         or _TX_TYPE._require_run_decision_identity.__func__
         is not _TX_REQUIRE_RUN.__func__
         or getattr(_TX_BASE, "__code__", None) is not _TX_BASE_CODE
         or getattr(_TX_TERMINAL, "__code__", None) is not _TX_TERMINAL_CODE
-        or getattr(_TX_MANIFEST, "__code__", None) is not _TX_MANIFEST_CODE
+        or getattr(_TX_COMPLETED, "__code__", None) is not _TX_COMPLETED_CODE
         or getattr(_TX_LEDGER.__func__, "__code__", None)
         is not _TX_LEDGER_CODE
         or getattr(_TX_REQUIRE_RUN.__func__, "__code__", None)
@@ -284,11 +284,10 @@ def _require_dispatch() -> None:
 
 
 def _committed_run_decision_ids(tx: RunTransaction) -> frozenset[str]:
-    manifest = _TX_MANIFEST(tx)
-    expected_new = _TX_TYPE._hash_field(
-        manifest,
-        "new",
-        "decision_ledger_sha256",
+    completed = _TX_COMPLETED(tx)
+    expected_new = _sha(
+        completed.get("decision_ledger_sha256"),
+        "completed decision_ledger_sha256",
     )
     staged = _TX_LEDGER(
         tx.staged_ledger_path,

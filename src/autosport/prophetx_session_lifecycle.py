@@ -426,6 +426,79 @@ class ProphetXLoginAdmission:
     attempt_id: str | None = None
     retry_at: datetime | None = None
 
+    def __post_init__(self) -> None:
+        if type(self.action) is not ProphetXLoginAdmissionAction:
+            raise ProphetXSessionLifecycleError(
+                "action must be an exact ProphetXLoginAdmissionAction"
+            )
+        if self.snapshot is not None and type(
+            self.snapshot
+        ) is not ProphetXSessionSnapshot:
+            raise ProphetXSessionLifecycleError(
+                "snapshot must be an exact ProphetXSessionSnapshot"
+            )
+        if self.attempt_id is not None:
+            _sha256_hex(self.attempt_id, "attempt_id")
+        if self.retry_at is not None:
+            _aware_utc(self.retry_at, "retry_at")
+
+        if self.action is ProphetXLoginAdmissionAction.CREATE_LOGIN:
+            if (
+                self.snapshot is None
+                or self.snapshot.state is not ProphetXSessionState.LOGIN_IN_FLIGHT
+                or self.attempt_id is None
+                or self.attempt_id != self.snapshot.attempt_id
+                or self.retry_at != self.snapshot.slot_hold_until
+            ):
+                raise ProphetXSessionLifecycleError(
+                    "create-login admission requires its exact durable reservation"
+                )
+        elif self.action is ProphetXLoginAdmissionAction.START_RENEWAL:
+            if (
+                self.snapshot is None
+                or self.snapshot.state is not ProphetXSessionState.RENEWING
+                or self.attempt_id is None
+                or self.attempt_id != self.snapshot.attempt_id
+            ):
+                raise ProphetXSessionLifecycleError(
+                    "start-renewal admission requires its exact durable reservation"
+                )
+        elif self.attempt_id is not None:
+            raise ProphetXSessionLifecycleError(
+                "only effect-start admissions may expose an attempt id"
+            )
+
+        if (
+            self.action is ProphetXLoginAdmissionAction.REUSE_ACTIVE
+            and (
+                self.snapshot is None
+                or self.snapshot.state is not ProphetXSessionState.ACTIVE
+            )
+        ):
+            raise ProphetXSessionLifecycleError(
+                "active reuse requires an active durable snapshot"
+            )
+        if (
+            self.action is ProphetXLoginAdmissionAction.RENEWAL_REQUIRED
+            and (
+                self.snapshot is None
+                or self.snapshot.state is not ProphetXSessionState.RENEWAL_DUE
+            )
+        ):
+            raise ProphetXSessionLifecycleError(
+                "renewal-required admission requires renewal-due state"
+            )
+        if (
+            self.action is ProphetXLoginAdmissionAction.CREDENTIAL_REJECTED
+            and (
+                self.snapshot is None
+                or self.snapshot.state is not ProphetXSessionState.CREDENTIAL_REJECTED
+            )
+        ):
+            raise ProphetXSessionLifecycleError(
+                "credential-rejected admission requires rejected durable state"
+            )
+
     @property
     def login_authorized(self) -> bool:
         return self.action is ProphetXLoginAdmissionAction.CREATE_LOGIN

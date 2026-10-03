@@ -169,6 +169,109 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
         finally:
             connection.close()
 
+    @staticmethod
+    def _verify_event_payload_schema_structure(
+        connection: sqlite3.Connection,
+    ) -> None:
+        """Prove the marker still names the exact retention-coupled schema."""
+
+        expected_columns = (
+            ("delta_id", "TEXT", 1, 1),
+            ("source_id", "TEXT", 1, 0),
+            ("stream_epoch", "TEXT", 1, 0),
+            ("quote_key", "TEXT", 1, 0),
+            ("dedupe_key", "TEXT", 1, 0),
+            ("event_id", "TEXT", 1, 0),
+            ("canonical_event_digest", "TEXT", 1, 0),
+            ("payload_json", "TEXT", 1, 0),
+        )
+        columns = tuple(
+            (row["name"], row["type"], int(row["notnull"]), int(row["pk"]))
+            for row in connection.execute(
+                f"PRAGMA table_info({_EVENT_PAYLOAD_TABLE})"
+            ).fetchall()
+        )
+        if columns != expected_columns:
+            raise ValueError(
+                "collector event payload schema integrity guard is missing"
+            )
+
+        foreign_keys = connection.execute(
+            f"PRAGMA foreign_key_list({_EVENT_PAYLOAD_TABLE})"
+        ).fetchall()
+        if len(foreign_keys) != 1:
+            raise ValueError(
+                "collector event payload schema integrity guard is missing"
+            )
+        foreign_key = foreign_keys[0]
+        if (
+            foreign_key["table"] != "collector_deltas"
+            or foreign_key["from"] != "delta_id"
+            or foreign_key["to"] != "delta_id"
+            or str(foreign_key["on_update"]).upper() != "NO ACTION"
+            or str(foreign_key["on_delete"]).upper() != "CASCADE"
+        ):
+            raise ValueError(
+                "collector event payload schema integrity guard is missing"
+            )
+
+        expected_indexes = {
+            _EVENT_PAYLOAD_QUOTE_INDEX: (
+                "source_id",
+                "stream_epoch",
+                "quote_key",
+            ),
+            _EVENT_PAYLOAD_DEDUPE_INDEX: (
+                "source_id",
+                "stream_epoch",
+                "dedupe_key",
+            ),
+        }
+        for index_name, expected_fields in expected_indexes.items():
+            index_object = connection.execute(
+                "SELECT type, tbl_name FROM sqlite_master WHERE name=?",
+                (index_name,),
+            ).fetchone()
+            if (
+                index_object is None
+                or index_object["type"] != "index"
+                or index_object["tbl_name"] != _EVENT_PAYLOAD_TABLE
+            ):
+                raise ValueError(
+                    "collector event payload schema integrity guard is missing"
+                )
+            fields = tuple(
+                row["name"]
+                for row in connection.execute(
+                    f"PRAGMA index_info({index_name})"
+                ).fetchall()
+            )
+            if fields != expected_fields:
+                raise ValueError(
+                    "collector event payload schema integrity guard is missing"
+                )
+
+        trigger = connection.execute(
+            "SELECT type, tbl_name, sql FROM sqlite_master WHERE name=?",
+            (_EVENT_PAYLOAD_IMMUTABLE_UPDATE_TRIGGER,),
+        ).fetchone()
+        expected_trigger_sql = " ".join(
+            (
+                f"CREATE TRIGGER {_EVENT_PAYLOAD_IMMUTABLE_UPDATE_TRIGGER}",
+                f"BEFORE UPDATE ON {_EVENT_PAYLOAD_TABLE} BEGIN",
+                "SELECT RAISE(ABORT, 'collector event payload evidence is immutable'); END",
+            )
+        )
+        if (
+            trigger is None
+            or trigger["type"] != "trigger"
+            or trigger["tbl_name"] != _EVENT_PAYLOAD_TABLE
+            or " ".join(str(trigger["sql"]).split()) != expected_trigger_sql
+        ):
+            raise ValueError(
+                "collector event payload schema integrity guard is missing"
+            )
+
     def _ensure_projection_integrity_guard(self) -> None:
         """One-time reconcile indexed projections, then make them SQL-immutable.
 
@@ -246,6 +349,7 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
                 raise ValueError(
                     "collector event payload schema integrity guard is missing"
                 )
+            self._verify_event_payload_schema_structure(connection)
             connection.execute(
                 "CREATE TABLE IF NOT EXISTS collector_cycle_starts_v1 ("
                 "source_id TEXT NOT NULL,"

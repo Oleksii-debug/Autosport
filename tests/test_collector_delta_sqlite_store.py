@@ -127,6 +127,28 @@ class CollectorSQLiteStoreTests(unittest.TestCase):
             ):
                 CollectorDeltaStore(path)
 
+    def test_event_payload_schema_rejects_same_name_weakened_index(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "collector.json"
+            CollectorDeltaStore(path)
+
+            connection = sqlite3.connect(path)
+            try:
+                connection.execute("DROP INDEX collector_event_payloads_v1_quote")
+                connection.execute(
+                    "CREATE INDEX collector_event_payloads_v1_quote "
+                    "ON collector_event_payloads_v1(source_id, stream_epoch, dedupe_key)"
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "event payload schema integrity guard is missing",
+            ):
+                CollectorDeltaStore(path)
+
     def test_runtime_append_archives_event_atomically_and_resolves_exact_payload(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = CollectorDeltaStore(Path(tmp) / "collector.json")

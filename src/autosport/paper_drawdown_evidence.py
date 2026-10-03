@@ -49,32 +49,32 @@ class PaperRealizedEquityPoint:
 
     def __post_init__(self) -> None:
         if type(self.sequence) is not int or self.sequence < 0:
-            raise PaperDrawdownEvidenceError("equity point sequence must be non-negative")
+            raise error_type("equity point sequence must be non-negative")
         if type(self.point_id) is not str or not self.point_id:
-            raise PaperDrawdownEvidenceError("equity point identity is required")
+            raise error_type("equity point identity is required")
         if self.action not in {"initial", "open", "settle"}:
-            raise PaperDrawdownEvidenceError("equity point action is invalid")
+            raise error_type("equity point action is invalid")
         if self.action == "initial":
             if self.ticket_id is not None or self.event_time is not None:
-                raise PaperDrawdownEvidenceError(
+                raise error_type(
                     "initial equity point cannot carry ticket/time identity"
                 )
         elif type(self.ticket_id) is not str or not self.ticket_id:
-            raise PaperDrawdownEvidenceError("lifecycle equity point requires ticket_id")
+            raise error_type("lifecycle equity point requires ticket_id")
         for name, value in (
             ("equity", self.equity),
             ("realized_delta", self.realized_delta),
         ):
             if type(value) is not Decimal or not value.is_finite():
-                raise PaperDrawdownEvidenceError(
+                raise error_type(
                     f"equity point {name} must be a finite exact Decimal"
                 )
         if self.equity < 0:
-            raise PaperDrawdownEvidenceError("equity point cannot be negative")
+            raise error_type("equity point cannot be negative")
         if self.event_time is not None and (
             type(self.event_time) is not str or not self.event_time
         ):
-            raise PaperDrawdownEvidenceError(
+            raise error_type(
                 "equity point event_time must be non-empty or None"
             )
 
@@ -109,15 +109,15 @@ class PaperRealizedDrawdownEvidence:
 
     def __post_init__(self) -> None:
         if self.schema != DRAW_DOWN_EVIDENCE_SCHEMA:
-            raise PaperDrawdownEvidenceError("drawdown evidence schema is invalid")
+            raise error_type("drawdown evidence schema is invalid")
         if self.scope != DRAW_DOWN_SCOPE or self.metric_class != DRAW_DOWN_METRIC_CLASS:
-            raise PaperDrawdownEvidenceError("drawdown evidence scope/metric is invalid")
+            raise error_type("drawdown evidence scope/metric is invalid")
         if type(self.goal_id) is not str or not self.goal_id:
-            raise PaperDrawdownEvidenceError("drawdown evidence goal_id is required")
+            raise error_type("drawdown evidence goal_id is required")
         if type(self.goal_revision) is not int or self.goal_revision < 1:
-            raise PaperDrawdownEvidenceError("drawdown evidence goal revision is invalid")
+            raise error_type("drawdown evidence goal revision is invalid")
         if type(self.bankroll_id) is not str or not self.bankroll_id:
-            raise PaperDrawdownEvidenceError("drawdown evidence bankroll_id is required")
+            raise error_type("drawdown evidence bankroll_id is required")
         if (
             type(self.currency) is not str
             or len(self.currency) != 3
@@ -125,7 +125,7 @@ class PaperRealizedDrawdownEvidence:
             or not self.currency.isalpha()
             or self.currency != self.currency.upper()
         ):
-            raise PaperDrawdownEvidenceError("drawdown evidence currency is invalid")
+            raise error_type("drawdown evidence currency is invalid")
         for name in (
             "goal_contract_sha256",
             "source_state_sha256",
@@ -139,7 +139,7 @@ class PaperRealizedDrawdownEvidence:
                 or value != value.lower()
                 or any(ch not in "0123456789abcdef" for ch in value)
             ):
-                raise PaperDrawdownEvidenceError(
+                raise error_type(
                     f"drawdown evidence {name} must be lowercase SHA-256"
                 )
         values = (
@@ -155,44 +155,50 @@ class PaperRealizedDrawdownEvidence:
             type(value) is not Decimal or not value.is_finite() or value < 0
             for value in values
         ):
-            raise PaperDrawdownEvidenceError(
+            raise error_type(
                 "drawdown evidence monetary metrics must be non-negative finite Decimals"
             )
         if self.initial_equity <= 0 or self.peak_equity <= 0:
-            raise PaperDrawdownEvidenceError(
+            raise error_type(
                 "drawdown evidence initial/peak equity must be positive"
             )
         if self.current_equity > self.peak_equity:
-            raise PaperDrawdownEvidenceError(
+            raise error_type(
                 "drawdown evidence current equity cannot exceed peak"
             )
         if self.minimum_equity > self.current_equity and len(self.points) <= 1:
-            raise PaperDrawdownEvidenceError("drawdown evidence minimum equity is invalid")
+            raise error_type("drawdown evidence minimum equity is invalid")
         if type(self.open_position_count) is not int or self.open_position_count < 0:
-            raise PaperDrawdownEvidenceError("drawdown evidence open count is invalid")
+            raise error_type("drawdown evidence open count is invalid")
         if self.as_known_at_supported is not False:
-            raise PaperDrawdownEvidenceError(
+            raise error_type(
                 "current-history drawdown evidence cannot claim AS_KNOWN_AT authority"
             )
         if type(self.points) is not tuple or not self.points:
-            raise PaperDrawdownEvidenceError("drawdown evidence requires a non-empty path")
+            raise error_type("drawdown evidence requires a non-empty path")
         if tuple(point.sequence for point in self.points) != tuple(range(len(self.points))):
-            raise PaperDrawdownEvidenceError(
+            raise error_type(
                 "drawdown evidence points must use contiguous canonical sequence"
             )
         if self.points[0].action != "initial":
-            raise PaperDrawdownEvidenceError("drawdown evidence path must begin at initial equity")
+            raise error_type("drawdown evidence path must begin at initial equity")
         if self.points[0].equity != self.initial_equity:
-            raise PaperDrawdownEvidenceError(
+            raise error_type(
                 "drawdown evidence initial point does not match initial equity"
             )
         if self.points[-1].equity != self.current_equity:
-            raise PaperDrawdownEvidenceError(
+            raise error_type(
                 "drawdown evidence final point does not match current equity"
             )
 
 
 def _make_resolver() -> FunctionType:
+    error_type = PaperDrawdownEvidenceError
+    evidence_schema = DRAW_DOWN_EVIDENCE_SCHEMA
+    path_schema = DRAW_DOWN_PATH_SCHEMA
+    source_schema = DRAW_DOWN_SOURCE_SCHEMA
+    metric_class = DRAW_DOWN_METRIC_CLASS
+    scope = DRAW_DOWN_SCOPE
     path_type = Path
     goal_store_type = EconomicGoalStore
     goal_load = EconomicGoalStore.load
@@ -249,7 +255,7 @@ def _make_resolver() -> FunctionType:
         nonzero_count = 0
         for value in values:
             if type(value) is not decimal_type or not value.is_finite():
-                raise PaperDrawdownEvidenceError(
+                raise error_type(
                     "drawdown arithmetic requires finite exact Decimals"
                 )
             if value.is_zero():
@@ -286,7 +292,7 @@ def _make_resolver() -> FunctionType:
             or book_load_function.__code__ is not book_load_code
             or book_load.__self__ is not book_load_owner
         ):
-            raise PaperDrawdownEvidenceError(
+            raise error_type(
                 "drawdown durable source resolver authority changed"
             )
         root = path_type(workspace).expanduser().resolve(strict=False)
@@ -297,7 +303,7 @@ def _make_resolver() -> FunctionType:
             book = book_load(book_path)
             provenance = goal_provenance(goal)
         except (ArithmeticError, OSError, RuntimeError, TypeError, ValueError) as exc:
-            raise PaperDrawdownEvidenceError(
+            raise error_type(
                 "canonical PAPER drawdown source cannot be resolved"
             ) from exc
 
@@ -306,7 +312,7 @@ def _make_resolver() -> FunctionType:
                 ticket.bankroll_id != goal.bankroll_id
                 or ticket.currency != goal.currency
             ):
-                raise PaperDrawdownEvidenceError(
+                raise error_type(
                     "PAPER drawdown source ticket denomination is not bound to the durable goal"
                 )
 
@@ -361,7 +367,7 @@ def _make_resolver() -> FunctionType:
             )
         source_state_sha256 = canonical_sha256(
             {
-                "schema": DRAW_DOWN_SOURCE_SCHEMA,
+                "schema": source_schema,
                 "goal_contract_sha256": provenance.contract_sha256,
                 "initial_bankroll": str(book.initial_bankroll),
                 "balance": str(book.balance),
@@ -447,16 +453,16 @@ def _make_resolver() -> FunctionType:
         expected_current_equity = exact_sum((book.balance, committed))
         current_drawdown = exact_sum((running_peak, -equity))
         if equity != expected_current_equity:
-            raise PaperDrawdownEvidenceError(
+            raise error_type(
                 "realized-settled equity path is inconsistent with canonical PaperBook"
             )
         if equity < 0 or current_drawdown < 0:
-            raise PaperDrawdownEvidenceError(
+            raise error_type(
                 "realized-settled equity path contains invalid negative state"
             )
 
         path_payload = {
-            "schema": DRAW_DOWN_PATH_SCHEMA,
+            "schema": path_schema,
             "bankroll_id": goal.bankroll_id,
             "currency": goal.currency,
             "goal_contract_sha256": provenance.contract_sha256,
@@ -476,9 +482,9 @@ def _make_resolver() -> FunctionType:
         path_sha256 = canonical_sha256(path_payload)
 
         evidence_payload = {
-            "schema": DRAW_DOWN_EVIDENCE_SCHEMA,
-            "scope": DRAW_DOWN_SCOPE,
-            "metric_class": DRAW_DOWN_METRIC_CLASS,
+            "schema": evidence_schema,
+            "scope": scope,
+            "metric_class": metric_class,
             "goal_id": goal.goal_id,
             "goal_revision": goal.revision,
             "goal_contract_sha256": provenance.contract_sha256,
@@ -502,9 +508,9 @@ def _make_resolver() -> FunctionType:
         }
         evidence_sha256 = canonical_sha256(evidence_payload)
         return exact_evidence_type(
-            schema=DRAW_DOWN_EVIDENCE_SCHEMA,
-            scope=DRAW_DOWN_SCOPE,
-            metric_class=DRAW_DOWN_METRIC_CLASS,
+            schema=evidence_schema,
+            scope=scope,
+            metric_class=metric_class,
             goal_id=goal.goal_id,
             goal_revision=goal.revision,
             goal_contract_sha256=provenance.contract_sha256,
@@ -551,14 +557,14 @@ def _freeze_resolver(function: FunctionType) -> FunctionType:
             or function.__code__ is not expected_code
             or function.__closure__ is not expected_closure
         ):
-            raise PaperDrawdownEvidenceError(
+            raise error_type(
                 "drawdown resolver executable authority changed"
             )
         if expected_closure is not None:
             assert expected_closure_values is not None
             for cell, expected in zip(expected_closure, expected_closure_values):
                 if cell.cell_contents is not expected:
-                    raise PaperDrawdownEvidenceError(
+                    raise error_type(
                         "drawdown resolver dependency authority changed"
                     )
         return function(workspace)

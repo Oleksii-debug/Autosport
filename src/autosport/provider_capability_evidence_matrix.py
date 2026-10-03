@@ -631,6 +631,19 @@ def _install_provider_capability_authority():
         WeakValueDictionary()
     )
     issued_evidence_seals: dict[int, str] = {}
+    issued_betdaq_contexts: dict[
+        int,
+        tuple[
+            CapabilityEvidenceJournal,
+            object,
+            CapabilityRequirement,
+        ],
+    ] = {}
+
+    def forget_issued_evidence(issuance_key: int) -> None:
+        issued_evidence_seals.pop(issuance_key, None)
+        issued_betdaq_contexts.pop(issuance_key, None)
+
     issued_matrices: WeakValueDictionary[int, ProviderCapabilityEvidenceMatrix] = (
         WeakValueDictionary()
     )
@@ -770,7 +783,12 @@ def _install_provider_capability_authority():
         issuance_key = id(fact)
         issued_evidence[issuance_key] = fact
         issued_evidence_seals[issuance_key] = fact.evidence_id
-        finalize(fact, issued_evidence_seals.pop, issuance_key, None)
+        issued_betdaq_contexts[issuance_key] = (
+            validation_journal if caller_journal is None else caller_journal,
+            lifecycle,
+            requirement,
+        )
+        finalize(fact, forget_issued_evidence, issuance_key)
         return fact
 
     def issue_provider_capability_evidence(
@@ -811,7 +829,7 @@ def _install_provider_capability_authority():
         issuance_key = id(fact)
         issued_evidence[issuance_key] = fact
         issued_evidence_seals[issuance_key] = fact.evidence_id
-        finalize(fact, issued_evidence_seals.pop, issuance_key, None)
+        finalize(fact, forget_issued_evidence, issuance_key)
         return fact
 
     def is_product_issued(fact: ProviderCapabilityEvidence) -> bool:
@@ -845,6 +863,53 @@ def _install_provider_capability_authority():
         evidence: Iterable[ProviderCapabilityEvidence] = (),
         predecessor_matrix_id: str | None = None,
     ) -> ProviderCapabilityEvidenceMatrix:
+        evidence_tuple = tuple(evidence)
+        for fact in evidence_tuple:
+            if (
+                type(fact) is ProviderCapabilityEvidence
+                and fact.grade
+                is ProviderCapabilityTruthGrade.AUTHENTICATED_READ_PROVEN
+            ):
+                context = issued_betdaq_contexts.get(id(fact))
+                if context is None or not is_product_issued(fact):
+                    raise ProviderCapabilityEvidenceMatrixError(
+                        "authenticated matrix fact lost lifecycle provenance context"
+                    )
+                journal, lifecycle, requirement = context
+                try:
+                    validation_journal = journal.staged_with_exact_evidence(lifecycle)
+                except CapabilityEvidenceError as exc:
+                    raise ProviderCapabilityEvidenceMatrixError(
+                        "authenticated matrix fact lifecycle context is invalid"
+                    ) from exc
+                if (
+                    validation_journal.latest_evidence_id_for(lifecycle)
+                    != lifecycle.evidence_id
+                ):
+                    raise ProviderCapabilityEvidenceMatrixError(
+                        "authenticated matrix fact lifecycle evidence is superseded"
+                    )
+                decision = validation_journal.resolve(
+                    requirement,
+                    {profile.profile_id: profile},
+                    as_of=as_of,
+                )
+                if (
+                    not decision.allowed
+                    or decision.lifecycle is not CapabilityLifecycleState.CURRENT
+                    or decision.evidence_id != lifecycle.evidence_id
+                ):
+                    raise ProviderCapabilityEvidenceMatrixError(
+                        "authenticated matrix fact is not current at matrix as_of"
+                    )
+                if decision.availability in {
+                    CapabilityAvailabilityState.DEGRADED,
+                    CapabilityAvailabilityState.TEMPORARILY_UNAVAILABLE,
+                }:
+                    raise ProviderCapabilityEvidenceMatrixError(
+                        "authenticated matrix fact has negative runtime availability"
+                    )
+
         matrix = raw_build(
             profile,
             integration,
@@ -853,7 +918,7 @@ def _install_provider_capability_authority():
             matrix_version=matrix_version,
             as_of=as_of,
             matrix_ref=matrix_ref,
-            evidence=evidence,
+            evidence=evidence_tuple,
             predecessor_matrix_id=predecessor_matrix_id,
         )
         issuance_key = id(matrix)

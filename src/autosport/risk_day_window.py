@@ -18,6 +18,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, datetime, time as datetime_time, timedelta, timezone
 from pathlib import Path
+from types import FunctionType
 from typing import Final
 
 from .integrity import atomic_write_json
@@ -460,7 +461,29 @@ def _decode_state(
     return canonical, day
 
 
-class ProductDayRiskWindowStore:
+class _ProductDayRiskWindowStoreMeta(type):
+    """Prevent runtime replacement/deletion of positive day-authority entrypoints."""
+
+    _SEALED_METHOD_NAMES: Final = frozenset(
+        {"__init__", "current", "require_current", "_publish_day", "_evidence"}
+    )
+
+    def __setattr__(cls, name: str, value: object) -> None:
+        if name in cls._SEALED_METHOD_NAMES and name in cls.__dict__:
+            raise TypeError(
+                "canonical ProductDayRiskWindowStore authority method is sealed"
+            )
+        super().__setattr__(name, value)
+
+    def __delattr__(cls, name: str) -> None:
+        if name in cls._SEALED_METHOD_NAMES and name in cls.__dict__:
+            raise TypeError(
+                "canonical ProductDayRiskWindowStore authority method is sealed"
+            )
+        super().__delattr__(name)
+
+
+class ProductDayRiskWindowStore(metaclass=_ProductDayRiskWindowStoreMeta):
     """Issue/re-resolve one rollback-resistant UTC calendar-day boundary."""
 
     def __init__(
@@ -504,7 +527,8 @@ class ProductDayRiskWindowStore:
                     ),
                 )
                 observed_sha256 = hashlib.sha256(state_bytes).hexdigest()
-                recovery = self._authority.recover(
+                recovery = _MONOTONIC_RECOVER(
+                    self._authority,
                     observed_state_sha256=observed_sha256,
                     tx_id=_transaction_id(payload),
                     semantic_binding_sha256=_semantic_binding(payload),
@@ -519,7 +543,8 @@ class ProductDayRiskWindowStore:
                     )
                 generation = recovery.committed_generation
             else:
-                recovery = self._authority.recover(
+                recovery = _MONOTONIC_RECOVER(
+                    self._authority,
                     observed_state_sha256=None
                 )
                 if recovery.disposition not in {
@@ -594,7 +619,8 @@ class ProductDayRiskWindowStore:
         binding = _semantic_binding(payload)
         tx_id = _transaction_id(payload)
 
-        self._authority.prepare(
+        _MONOTONIC_PREPARE(
+            self._authority,
             tx_id=tx_id,
             observed_state_sha256=observed_sha256,
             intended_state_sha256=intended_sha256,
@@ -607,7 +633,8 @@ class ProductDayRiskWindowStore:
             raise RiskDayWindowIntegrityError(
                 "published risk day state does not match prepared authority digest"
             )
-        committed = self._authority.commit(
+        committed = _MONOTONIC_COMMIT(
+            self._authority,
             tx_id=tx_id,
             observed_state_sha256=published_sha256,
             semantic_binding_sha256=binding,
@@ -634,3 +661,102 @@ class ProductDayRiskWindowStore:
             authority_generation=generation,
             product_clock_authoritative=_is_product_clock(self._clock),
         )
+
+
+# Capture the existing monotonic transition entrypoints once. The monotonic authority
+# remains the sole durable freshness authority; this consumer merely avoids caller-
+# mutable instance/class dispatch while invoking that already-canonical implementation.
+_MONOTONIC_RECOVER = MonotonicWorkspaceAuthority.recover
+_MONOTONIC_PREPARE = MonotonicWorkspaceAuthority.prepare
+_MONOTONIC_COMMIT = MonotonicWorkspaceAuthority.commit
+
+
+def _freeze_risk_day_module_globals() -> dict[str, object]:
+    """Clone this module's Python helper graph into one detached globals mapping."""
+
+    source = globals()
+    frozen: dict[str, object] = dict(source)
+    function_type = FunctionType
+    for name, value in tuple(source.items()):
+        if type(value) is not function_type or value.__globals__ is not source:
+            continue
+        clone = function_type(
+            value.__code__,
+            frozen,
+            name=value.__name__,
+            argdefs=value.__defaults__,
+            closure=value.__closure__,
+        )
+        if value.__kwdefaults__ is not None:
+            clone.__kwdefaults__ = dict(value.__kwdefaults__)
+        clone.__qualname__ = value.__qualname__
+        clone.__doc__ = value.__doc__
+        clone.__annotations__ = dict(value.__annotations__)
+        frozen[name] = clone
+    # External monotonic methods are captured as exact function objects. Do not clone
+    # their implementation graph here; that belongs to its own authority lineage.
+    frozen["_MONOTONIC_RECOVER"] = _MONOTONIC_RECOVER
+    frozen["_MONOTONIC_PREPARE"] = _MONOTONIC_PREPARE
+    frozen["_MONOTONIC_COMMIT"] = _MONOTONIC_COMMIT
+    return frozen
+
+
+def _seal_risk_day_store_method(
+    function: FunctionType,
+    frozen_globals: dict[str, object],
+) -> FunctionType:
+    """Run one canonical store method against the detached helper snapshot."""
+
+    if type(function) is not FunctionType:
+        raise TypeError("risk day store authority method must be a Python function")
+    function_type = FunctionType
+    code = function.__code__
+    defaults = function.__defaults__
+    kwdefaults = (
+        None if function.__kwdefaults__ is None else dict(function.__kwdefaults__)
+    )
+    closure = function.__closure__
+    name = function.__name__
+    qualname = function.__qualname__
+    doc = function.__doc__
+    annotations = dict(function.__annotations__)
+
+    def sealed(*args, **kwargs):
+        if type(function) is not function_type or function.__code__ is not code:
+            raise RiskDayWindowIntegrityError(
+                "canonical risk day store executable authority changed"
+            )
+        delegate = function_type(
+            code,
+            frozen_globals,
+            name=name,
+            argdefs=defaults,
+            closure=closure,
+        )
+        if kwdefaults is not None:
+            delegate.__kwdefaults__ = dict(kwdefaults)
+        return delegate(*args, **kwargs)
+
+    sealed.__name__ = name
+    sealed.__qualname__ = qualname
+    sealed.__doc__ = doc
+    sealed.__annotations__ = annotations
+    return sealed
+
+
+_RISK_DAY_FROZEN_GLOBALS = _freeze_risk_day_module_globals()
+for _method_name in (
+    "__init__",
+    "current",
+    "require_current",
+    "_publish_day",
+    "_evidence",
+):
+    _raw_method = ProductDayRiskWindowStore.__dict__[_method_name]
+    type.__setattr__(
+        ProductDayRiskWindowStore,
+        _method_name,
+        _seal_risk_day_store_method(_raw_method, _RISK_DAY_FROZEN_GLOBALS),
+    )
+del _method_name
+del _raw_method

@@ -861,14 +861,8 @@ def test_explicit_run_boundary_checker_rejects_request_code_mutation_during_get(
         monkeypatch.setattr(canonical_request, "__code__", forged_request.__code__)
         return FakeResponse()
 
-    monkeypatch.setattr(
-        scoped_controller,
-        "urlopen",
-        mutating_urlopen,
-        raising=False,
-    )
     # _request is defined in the canonical sibling module, so mutate its urlopen
-    # global there rather than relying on the scoped-module alias.
+    # global through the captured function's actual globals.
     monkeypatch.setitem(canonical_request.__globals__, "urlopen", mutating_urlopen)
 
     assert not _explicit_run_identity_is_current(

@@ -84,6 +84,7 @@ _SEALED_STORE_DISPATCH_NAMES: Final = frozenset(
         "append",
         "get",
         "records",
+        "_configure",
         "_read_payload",
         "_records_from_payload",
         "_state_sha256",

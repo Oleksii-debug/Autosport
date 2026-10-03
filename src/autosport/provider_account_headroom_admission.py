@@ -116,6 +116,36 @@ _ECONOMIC_GOAL_PROVENANCE_FOR_CODE = getattr(
     "__code__",
     None,
 )
+_ECONOMIC_GOAL_PROVENANCE_CONTRACT_SHA256 = getattr(
+    _economic_goal_provenance,
+    "contract_sha256",
+    None,
+)
+_ECONOMIC_GOAL_PROVENANCE_CONTRACT_SHA256_CODE = getattr(
+    _ECONOMIC_GOAL_PROVENANCE_CONTRACT_SHA256,
+    "__code__",
+    None,
+)
+_ECONOMIC_GOAL_PROVENANCE_CANONICAL_JSON = getattr(
+    _economic_goal_provenance,
+    "_canonical_json",
+    None,
+)
+_ECONOMIC_GOAL_PROVENANCE_CANONICAL_JSON_CODE = getattr(
+    _ECONOMIC_GOAL_PROVENANCE_CANONICAL_JSON,
+    "__code__",
+    None,
+)
+_ECONOMIC_GOAL_PROVENANCE_TO_PAYLOAD = getattr(
+    _economic_goal_provenance,
+    "economic_goal_to_payload",
+    None,
+)
+_ECONOMIC_GOAL_PROVENANCE_TO_PAYLOAD_CODE = getattr(
+    _ECONOMIC_GOAL_PROVENANCE_TO_PAYLOAD,
+    "__code__",
+    None,
+)
 _BOUND_SUPERVISED_PLAN_TYPE = BoundSupervisedExecutionPlan
 _BOUND_SUPERVISED_PLAN_VERIFY = BoundSupervisedExecutionPlan.verify_binding
 _BOUND_SUPERVISED_PLAN_VERIFY_CODE = getattr(
@@ -310,6 +340,12 @@ def _canonical_denomination_dispatch(
     _store_strict_json_code=_ECONOMIC_GOAL_STRICT_JSON_LOADS_CODE,
     _provenance=_ECONOMIC_GOAL_PROVENANCE_FOR,
     _provenance_code=_ECONOMIC_GOAL_PROVENANCE_FOR_CODE,
+    _provenance_contract_sha=_ECONOMIC_GOAL_PROVENANCE_CONTRACT_SHA256,
+    _provenance_contract_sha_code=_ECONOMIC_GOAL_PROVENANCE_CONTRACT_SHA256_CODE,
+    _provenance_canonical_json=_ECONOMIC_GOAL_PROVENANCE_CANONICAL_JSON,
+    _provenance_canonical_json_code=_ECONOMIC_GOAL_PROVENANCE_CANONICAL_JSON_CODE,
+    _provenance_to_payload=_ECONOMIC_GOAL_PROVENANCE_TO_PAYLOAD,
+    _provenance_to_payload_code=_ECONOMIC_GOAL_PROVENANCE_TO_PAYLOAD_CODE,
     _bound_type=_BOUND_SUPERVISED_PLAN_TYPE,
     _bound_verify=_BOUND_SUPERVISED_PLAN_VERIFY,
     _bound_verify_code=_BOUND_SUPERVISED_PLAN_VERIFY_CODE,
@@ -378,6 +414,18 @@ def _canonical_denomination_dispatch(
         or getattr(_economic_goal_provenance, "provenance_for", None) is not _provenance
         or globals().get("provenance_for") is not _provenance
         or getattr(_provenance, "__code__", None) is not _provenance_code
+        or getattr(_economic_goal_provenance, "contract_sha256", None)
+        is not _provenance_contract_sha
+        or getattr(_provenance_contract_sha, "__code__", None)
+        is not _provenance_contract_sha_code
+        or getattr(_economic_goal_provenance, "_canonical_json", None)
+        is not _provenance_canonical_json
+        or getattr(_provenance_canonical_json, "__code__", None)
+        is not _provenance_canonical_json_code
+        or getattr(_economic_goal_provenance, "economic_goal_to_payload", None)
+        is not _provenance_to_payload
+        or getattr(_provenance_to_payload, "__code__", None)
+        is not _provenance_to_payload_code
         or live_bound_type is not _bound_type
         or globals().get("BoundSupervisedExecutionPlan") is not _bound_type
         or live_bound_verify is not _bound_verify

@@ -16,6 +16,7 @@ from autosport.risk_day_window import (
     RiskDayWindowIntegrityError,
     RiskDayWindowMismatchError,
 )
+from autosport.workspace_lock import WorkspaceEconomicLock
 
 
 def _epoch_ns(value: str) -> int:
@@ -333,6 +334,64 @@ class ProductClockBoundaryTests(unittest.TestCase):
             self.assertTrue(evidence.product_clock_authoritative)
             self.assertEqual(store.require_current(evidence), evidence)
 
+    def test_require_current_under_held_lock_reuses_existing_writer_lock(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            store = ProductDayRiskWindowStore(
+                root / "workspace",
+                authority_root=root / "machine-authority",
+            )
+            evidence = store.current()
+
+            with WorkspaceEconomicLock(store.workspace) as workspace_lock:
+                observed = store.require_current_under_lock(
+                    evidence,
+                    workspace_lock=workspace_lock,
+                )
+
+            self.assertEqual(observed, evidence)
+            self.assertTrue(observed.product_clock_authoritative)
+
+    def test_require_current_under_lock_rejects_unheld_lock_object(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            store = ProductDayRiskWindowStore(
+                root / "workspace",
+                authority_root=root / "machine-authority",
+            )
+            evidence = store.current()
+            workspace_lock = WorkspaceEconomicLock(store.workspace)
+
+            with self.assertRaisesRegex(
+                RiskDayWindowIntegrityError,
+                "held workspace economic lock",
+            ):
+                store.require_current_under_lock(
+                    evidence,
+                    workspace_lock=workspace_lock,
+                )
+
+    def test_require_current_under_lock_rechecks_monotonic_state(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            store = ProductDayRiskWindowStore(
+                root / "workspace",
+                authority_root=root / "machine-authority",
+            )
+            evidence = store.current()
+            payload = json.loads(store.state_path.read_text(encoding="utf-8"))
+            payload["transition_id"] = "f" * 32
+
+            with WorkspaceEconomicLock(store.workspace) as workspace_lock:
+                atomic_write_json(store.state_path, payload)
+                with self.assertRaises(
+                    (RiskDayWindowIntegrityError, MonotonicAuthorityRollbackError)
+                ):
+                    store.require_current_under_lock(
+                        evidence,
+                        workspace_lock=workspace_lock,
+                    )
+
     def test_require_current_rejects_window_subclass_before_equality(self) -> None:
         with TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -477,7 +536,7 @@ class ProductClockBoundaryTests(unittest.TestCase):
             day_window._clock_utc_instant = original
 
     def test_class_authority_entrypoints_reject_runtime_replacement(self) -> None:
-        for name in ("current", "require_current", "_publish_day", "_evidence"):
+        for name in ("current", "require_current", "require_current_under_lock", "_current_under_lock", "_publish_day", "_evidence"):
             with self.subTest(name=name):
                 original = ProductDayRiskWindowStore.__dict__[name]
                 with self.assertRaisesRegex(TypeError, "authority method is sealed"):

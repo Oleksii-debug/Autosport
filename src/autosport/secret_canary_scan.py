@@ -138,6 +138,9 @@ def _open_readonly_no_follow(path: Path) -> int:
 _PERCENT_HEX = re.compile(r"%[0-9A-F]{2}")
 _PERCENT_HEX_BYTES = re.compile(rb"%[0-9A-Fa-f]{2}")
 _BASE64_RUN_BYTES = re.compile(rb"[A-Za-z0-9+/_-]{4,}={0,2}")
+_BASE64_FOLDED_RUN_BYTES = re.compile(
+    rb"(?:[A-Za-z0-9+/_-]{4,}\\r?\\n)+[A-Za-z0-9+/_-]{2,}={0,2}"
+)
 _HEX_DIGITS = frozenset(b"0123456789abcdefABCDEF")
 
 
@@ -180,23 +183,24 @@ def _base64_decoded_contains(value: bytes, needle: bytes) -> bool:
 
     if not needle:
         return False
-    for match in _BASE64_RUN_BYTES.finditer(value):
-        token = match.group(0)
-        for offset in range(min(4, len(token))):
-            candidate = token[offset:]
-            if len(candidate) < 4:
-                continue
-            padded = candidate + (b"=" * ((-len(candidate)) % 4))
-            try:
-                decoded = base64.b64decode(
-                    padded,
-                    altchars=b"-_",
-                    validate=True,
-                )
-            except (binascii.Error, ValueError):
-                continue
-            if needle in decoded:
-                return True
+    for pattern in (_BASE64_RUN_BYTES, _BASE64_FOLDED_RUN_BYTES):
+        for match in pattern.finditer(value):
+            token = match.group(0).replace(b"\r", b"").replace(b"\n", b"")
+            for offset in range(min(4, len(token))):
+                candidate = token[offset:]
+                if len(candidate) < 4:
+                    continue
+                padded = candidate + (b"=" * ((-len(candidate)) % 4))
+                try:
+                    decoded = base64.b64decode(
+                        padded,
+                        altchars=b"-_",
+                        validate=True,
+                    )
+                except (binascii.Error, ValueError):
+                    continue
+                if needle in decoded:
+                    return True
     return False
 
 

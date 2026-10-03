@@ -99,6 +99,34 @@ def test_urlsafe_unpadded_base64_wrapper_cannot_hide_embedded_canary(
     assert canary not in repr(report)
 
 
+def test_line_wrapped_base64_cannot_hide_canary_across_chunks(
+    tmp_path: Path,
+) -> None:
+    canary = "secret-canary-0123456789"
+    raw = canary.encode("utf-8")
+    # 56 bytes before the canary place the MIME 76-column fold inside the
+    # canary's encoded span, so neither individual Base64 line contains the
+    # complete decoded secret.
+    payload = base64.encodebytes(b"A" * 55 + b":" + raw + b":tail")
+    assert raw not in payload
+    assert b"\n" in payload
+    assert base64.b64encode(raw) not in payload
+
+    (tmp_path / "wrapped-auth-diagnostic.txt").write_bytes(payload)
+
+    report = secret_canary_scan.scan_secret_canary(
+        tmp_path,
+        canary,
+        chunk_size=7,
+    )
+
+    assert report.status == "LEAK"
+    assert report.exit_code == 2
+    assert len(report.findings) == 1
+    assert "base64-semantic" in report.findings[0].encodings
+    assert canary not in repr(report)
+
+
 @pytest.mark.parametrize("ensure_ascii", [False, True])
 def test_json_string_serialization_cannot_hide_canary(
     tmp_path: Path,

@@ -254,6 +254,92 @@ def test_provider_io_occurs_only_after_authorized_scheduled_start(
     assert exact["authorization_sha256"] == receipt.campaign_authority_record_sha256
 
 
+def test_provider_observation_cannot_predate_authorized_cycle_start(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    locator, store, spec, provider_store = _setup(tmp_path)
+
+    monkeypatch.setattr(
+        provider_module,
+        "urlopen",
+        lambda _request, _timeout: _FakeSseResponse(_frame()),
+    )
+    monkeypatch.setattr(
+        provider_module,
+        "_default_clock",
+        lambda: "2100-01-01T05:59:59.999999Z",
+    )
+
+    with pytest.raises(
+        CampaignProviderCycleCaptureIntegrityError,
+        match="predates authorized collector START",
+    ):
+        capture_campaign_complete_game_board(
+            precommit_locator=locator,
+            store=store,
+            source_spec=spec,
+            evidence_store=provider_store,
+            request=_request(),
+            api_key="secret-value",
+            timeout_seconds=3.0,
+            clock=_clock(),
+        )
+
+    evidence = store.collector_cycle_evidence(
+        source_id=spec.source_id,
+        start_cycle_seq=1,
+        end_cycle_seq=1,
+    )
+    assert len(evidence) == 1
+    terminal = evidence[0]["terminal"]
+    assert terminal["status"] == "LOCAL_FAILURE"
+    assert "observed_artifacts" not in terminal
+
+
+def test_provider_observation_cannot_postdate_cycle_completion(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    locator, store, spec, provider_store = _setup(tmp_path)
+
+    monkeypatch.setattr(
+        provider_module,
+        "urlopen",
+        lambda _request, _timeout: _FakeSseResponse(_frame()),
+    )
+    monkeypatch.setattr(
+        provider_module,
+        "_default_clock",
+        lambda: "2100-01-01T06:00:01.500000Z",
+    )
+
+    with pytest.raises(
+        CampaignProviderCycleCaptureIntegrityError,
+        match="falls after collector cycle completion",
+    ):
+        capture_campaign_complete_game_board(
+            precommit_locator=locator,
+            store=store,
+            source_spec=spec,
+            evidence_store=provider_store,
+            request=_request(),
+            api_key="secret-value",
+            timeout_seconds=3.0,
+            clock=_clock(),
+        )
+
+    evidence = store.collector_cycle_evidence(
+        source_id=spec.source_id,
+        start_cycle_seq=1,
+        end_cycle_seq=1,
+    )
+    assert len(evidence) == 1
+    terminal = evidence[0]["terminal"]
+    assert terminal["status"] == "LOCAL_FAILURE"
+    assert "observed_artifacts" not in terminal
+
+
 def test_provider_failure_records_terminal_failure_without_artifact(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

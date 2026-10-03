@@ -358,6 +358,29 @@ class ProductClockBoundaryTests(unittest.TestCase):
 
             self.assertEqual(_HostileWindow.hook_calls, 0)
 
+    def test_require_current_bypasses_instance_current_shadow(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            store = ProductDayRiskWindowStore(
+                root / "workspace",
+                authority_root=root / "machine-authority",
+            )
+            evidence = store.current()
+            forged = ProductDayRiskWindow(
+                workspace_instance_id=evidence.workspace_instance_id,
+                day_key=evidence.day_key,
+                window_start=evidence.window_start,
+                window_end_exclusive=evidence.window_end_exclusive,
+                state_sha256="0" * 64,
+                authority_generation=evidence.authority_generation,
+                product_clock_authoritative=True,
+                timezone=evidence.timezone,
+            )
+            store.current = lambda: forged
+
+            with self.assertRaises(RiskDayWindowMismatchError):
+                ProductDayRiskWindowStore.require_current(store, forged)
+
     def test_runtime_product_clock_rebind_is_downgraded(self) -> None:
         original = day_window._PRODUCT_TIME_NS
         try:

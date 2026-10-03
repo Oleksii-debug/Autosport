@@ -480,14 +480,6 @@ class RealExecutionLedger:
             raise ExecutionLedgerIntegrityError(
                 "execution ledger monotonic authority could not be initialized"
             ) from exc
-        self._monotonic_semantic_binding_sha256 = _digest(
-            {
-                "schema": "autosport.real_execution_ledger.monotonic-binding",
-                "schema_version": 1,
-                "ledger_key": authority_key,
-            }
-        )
-
     def _sync_parent_directory(self) -> None:
         """Durably publish this ledger pathname on platforms that require it."""
 
@@ -772,21 +764,25 @@ class RealExecutionLedger:
     def _monotonic_state_sha256(raw: bytes) -> str | None:
         return None if not raw else hashlib.sha256(raw).hexdigest()
 
-    def _monotonic_tx_id(self, state_sha256: str) -> str:
-        return f"real-execution-ledger:{state_sha256}"
-
-    def _recover_monotonic_state(self, raw: bytes) -> None:
+    def _recover_monotonic_state(
+        self,
+        raw: bytes,
+        events: list[dict[str, Any]],
+    ) -> None:
         observed = self._monotonic_state_sha256(raw)
+        tx_id: str | None = None
+        semantic_binding_sha256: str | None = None
+        if events:
+            latest_event = events[-1]
+            tx_id = latest_event["event_id"]
+            semantic_binding_sha256 = _digest(latest_event)
         try:
-            if observed is None:
-                _MONOTONIC_RECOVER(self._monotonic_authority, observed_state_sha256=None)
-            else:
-                _MONOTONIC_RECOVER(
-                    self._monotonic_authority,
-                    observed_state_sha256=observed,
-                    tx_id=self._monotonic_tx_id(observed),
-                    semantic_binding_sha256=self._monotonic_semantic_binding_sha256,
-                )
+            _MONOTONIC_RECOVER(
+                self._monotonic_authority,
+                observed_state_sha256=observed,
+                tx_id=tx_id,
+                semantic_binding_sha256=semantic_binding_sha256,
+            )
         except MonotonicWorkspaceAuthorityError as exc:
             raise ExecutionLedgerIntegrityError(
                 "execution ledger rollback/monotonic authority check failed"
@@ -806,7 +802,7 @@ class RealExecutionLedger:
                     "execution ledger could not be read"
                 ) from exc
         events = self._parse(raw)
-        self._recover_monotonic_state(raw)
+        self._recover_monotonic_state(raw, events)
         return raw, events
 
     def _events(self) -> list[dict[str, Any]]:
@@ -843,20 +839,22 @@ class RealExecutionLedger:
             "payload": payload,
         }
         self._validate_event(event)
-        envelope = _canonical({"sha256": _digest(event), "event": event})
+        event_digest = _digest(event)
+        envelope = _canonical({"sha256": event_digest, "event": event})
         raw_before, _ = self._read_verified_state()
         encoded_event = (envelope + "\n").encode("utf-8")
         intended_raw = raw_before + encoded_event
         observed_sha256 = self._monotonic_state_sha256(raw_before)
         intended_sha256 = hashlib.sha256(intended_raw).hexdigest()
-        tx_id = self._monotonic_tx_id(intended_sha256)
+        tx_id = event["event_id"]
+        semantic_binding_sha256 = event_digest
         try:
             _MONOTONIC_PREPARE(
                 self._monotonic_authority,
                 tx_id=tx_id,
                 observed_state_sha256=observed_sha256,
                 intended_state_sha256=intended_sha256,
-                semantic_binding_sha256=self._monotonic_semantic_binding_sha256,
+                semantic_binding_sha256=semantic_binding_sha256,
             )
         except MonotonicWorkspaceAuthorityError as exc:
             raise ExecutionLedgerIntegrityError(
@@ -882,13 +880,16 @@ class RealExecutionLedger:
             raise ExecutionLedgerIntegrityError(
                 "execution ledger changed during durable append"
             )
+        # The independent COMMIT is allowed to advance only after the exact
+        # fsynced readback remains a canonical, semantically valid ledger.
+        self._parse(actual_raw)
         self._path_durable = True
         try:
             _MONOTONIC_COMMIT(
                 self._monotonic_authority,
                 tx_id=tx_id,
                 observed_state_sha256=intended_sha256,
-                semantic_binding_sha256=self._monotonic_semantic_binding_sha256,
+                semantic_binding_sha256=semantic_binding_sha256,
             )
         except MonotonicWorkspaceAuthorityError as exc:
             raise ExecutionLedgerIntegrityError(

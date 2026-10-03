@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import threading
 
 import pytest
@@ -357,6 +359,34 @@ def test_same_instance_other_thread_cannot_recover_active_prepare(
     assert reader_counts == [1]
     assert RealExecutionLedger(path).verified_snapshot().event_count == 1
 
+
+
+
+def test_monotonic_transaction_binds_exact_appended_event(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    path = _isolated_ledger_path(tmp_path, monkeypatch)
+    ledger = RealExecutionLedger(path)
+    ledger.reserve_plan(_plan())
+    snapshot = ledger.verified_snapshot()
+
+    envelope = json.loads(path.read_text(encoding="utf-8"))
+    event = envelope["event"]
+    canonical_event = json.dumps(
+        event,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    event_digest = hashlib.sha256(canonical_event).hexdigest()
+    history = ledger._monotonic_authority.read_history()
+
+    assert history[-1].phase.value == "COMMIT"
+    assert history[-1].tx_id == event["event_id"]
+    assert history[-1].semantic_binding_sha256 == event_digest
+    assert history[-1].intended_state_sha256 == snapshot.sha256
 
 def test_snapshot_cas_cannot_admit_valid_rolled_back_prefix(
     tmp_path,

@@ -6,6 +6,21 @@ __version__ = "0.1.0"
 # facade subclasses or calls the legacy compatibility implementation.
 from . import _paper_execution_anti_rollback as _paper_execution_anti_rollback  # noqa: F401,E402
 from . import _paper_execution_freshness as _paper_execution_freshness  # noqa: F401,E402
+
+# Compose the one canonical PaperBook durable-authority graph before any execution
+# surface imports PaperExecutionAdoptionRuntime/RunTransaction. Order is semantic:
+# generation CAS extends the owning witness guard; stdlib member targets freeze before
+# the positive load/save graph is cloned; surface/helper witnesses seal that graph;
+# only then may obsolete pre-generation handles be removed and risk roots finalized.
+from . import _paperbook_preload_authority_guard as _paperbook_preload_authority_guard  # noqa: F401,E402
+from . import _paperbook_preload_generation_cas_guard as _paperbook_preload_generation_cas_guard  # noqa: F401,E402
+from . import _paperbook_preload_module_member_freeze as _paperbook_preload_module_member_freeze  # noqa: F401,E402
+from . import _paperbook_preload_authority_root_freeze as _paperbook_preload_authority_root_freeze  # noqa: F401,E402
+from . import _paperbook_preload_load_dispatch_guard as _paperbook_preload_load_dispatch_guard  # noqa: F401,E402
+from . import _paperbook_preload_surface_type_guard as _paperbook_preload_surface_type_guard  # noqa: F401,E402
+from . import _paperbook_preload_wrapper_helper_guard as _paperbook_preload_wrapper_helper_guard  # noqa: F401,E402
+from . import _paperbook_preload_generation_handle_cleanup as _paperbook_preload_generation_handle_cleanup  # noqa: F401,E402
+
 from . import _paper_execution_append_recovery as _paper_execution_append_recovery  # noqa: F401,E402
 from . import _paper_value_execution_authority as _paper_value_execution_authority  # noqa: F401,E402
 from . import _paper_value_risk_admission_recovery as _paper_value_risk_admission_recovery  # noqa: F401,E402
@@ -154,10 +169,6 @@ from . import _policy_evaluation_canonical_reader_authority as _policy_evaluatio
 # Install the exact arbitrary-quantum floor after the owning proposal implementation.
 from . import _robust_portfolio_quantum_grid as _robust_portfolio_quantum_grid  # noqa: F401,E402
 
-# Product-owned risk randomization must expose only the closure-sealed public issuer,
-# never its implementation hook that accepts caller-supplied entropy.
-from . import _risk_randomization_precommit_internal_guard as _risk_randomization_precommit_internal_guard  # noqa: F401,E402
-
 # Caller-owned market-filter containers cannot remain authority-bearing after the
 # authenticated Betfair subscription starts. Snapshot once, then let the canonical
 # existing issuer hash and send only that detached product-owned value.
@@ -180,3 +191,15 @@ from . import _drift_decimal_resource_guard as _drift_decimal_resource_guard  # 
 # K07 authenticated account identity must acquire account details from a sealed
 # product-origin snapshot, not mutable live-client fields during provider I/O.
 from . import _betfair_account_identity_io_snapshot_guard as _betfair_account_identity_io_snapshot_guard  # noqa: F401,E402
+
+# RunRegistry availability and run-state updates are whole-image authority
+# transitions. Serialize the entire read/modify/write cycle, not only final replace.
+from . import _outcome_availability_registry_serialization as _outcome_availability_registry_serialization  # noqa: F401,E402
+
+# Seal the two-phase availability clock against mutable function defaults, module
+# dispatch rebinding and direct mutation of cloned UTC-clock/begin globals.
+from . import _outcome_availability_clock_dispatch_guard as _outcome_availability_clock_dispatch_guard  # noqa: F401,E402
+
+# Product-owned risk randomization must expose only the closure-sealed public issuer,
+# never its implementation hook that accepts caller-supplied entropy.
+from . import _risk_randomization_precommit_internal_guard as _risk_randomization_precommit_internal_guard  # noqa: F401,E402

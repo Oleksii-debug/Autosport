@@ -96,6 +96,28 @@ def test_base_cancel_run_id_cannot_be_redirected_by_validator_rebind(
     ]
 
 
+def test_cancel_wrapper_run_id_cannot_be_redirected_by_validator_rebind(
+    monkeypatch,
+) -> None:
+    cancelled: list[int] = []
+
+    class RecordingApi:
+        def cancel(self, run_id: int) -> None:
+            cancelled.append(run_id)
+
+    def redirect_run_id(value, *, field: str):
+        assert field == "run id"
+        return 999 if value == 123 else value
+
+    monkeypatch.setattr(scoped_controller, "_require_positive_int", redirect_run_id)
+
+    assert scoped_controller._cancel_run_or_defer_active_conflict(
+        RecordingApi(),  # type: ignore[arg-type]
+        123,
+    )
+    assert cancelled == [123]
+
+
 def test_scoped_cancel_run_id_cannot_be_redirected_by_validator_rebind(
     monkeypatch,
 ) -> None:

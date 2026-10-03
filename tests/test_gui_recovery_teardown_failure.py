@@ -278,6 +278,40 @@ def test_close_success_destroys_only_after_session_teardown() -> None:
     assert app._recovery_required_workspaces == set()
 
 
+def test_recovery_retarget_does_not_misattribute_failed_prior_teardown() -> None:
+    app = _base_partial_app()
+    prior_workspace = Path("economic-workspace")
+    selected_workspace = Path("selected-recovery-workspace")
+
+    class _NoWorkspaceFailingSession:
+        def close(self) -> None:
+            raise OSError("prior session teardown failed")
+
+    app.session = _NoWorkspaceFailingSession()
+    app.replay_worker = SimpleNamespace(busy=False)
+    app.live_worker = SimpleNamespace(busy=False)
+    app.evidence_export_worker = SimpleNamespace(busy=False)
+    app._selected_replay_configuration = lambda: ("research-v1", None)
+    app._open_session = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+        AssertionError("recovery must not reopen after teardown failure")
+    )
+
+    with (
+        patch("autosport.gui.workspace_for_strategy", return_value=selected_workspace),
+        patch("autosport.gui.reconcile_late_crashes") as reconcile,
+        patch("autosport.gui.messagebox.showerror") as showerror,
+    ):
+        AutosportApp.repair_workspace(app)
+
+    reconcile.assert_not_called()
+    assert app.session is None
+    assert app._active_workspace == prior_workspace
+    assert prior_workspace in app._recovery_required_workspaces
+    assert selected_workspace not in app._recovery_required_workspaces
+    assert any("prior session teardown failed" in line for line in app._logs)
+    showerror.assert_called_once()
+
+
 def test_recovery_stops_before_reconcile_after_pre_reconcile_teardown_failure() -> None:
     app = _base_partial_app()
     app.replay_worker = SimpleNamespace(busy=False)

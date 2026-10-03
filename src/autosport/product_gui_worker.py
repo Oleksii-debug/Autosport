@@ -425,6 +425,17 @@ class ProductGuiEconomicSnapshot:
             raise ValueError(
                 "economic snapshot portfolio bounds are internally inconsistent"
             )
+        if not any(ticket.status == "open" for ticket in self.tickets):
+            if (
+                self.portfolio_mode != "exact"
+                or self.portfolio_scenario_count != 1
+                or self.portfolio_worst_case != Decimal("0")
+                or self.portfolio_best_case != Decimal("0")
+                or self.portfolio_mean_case != Decimal("0")
+            ):
+                raise ValueError(
+                    "economic snapshot empty-open portfolio must be exact zero state"
+                )
 
 
 def _capture_runtime_economic_snapshot(

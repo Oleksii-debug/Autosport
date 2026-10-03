@@ -15,7 +15,7 @@ import json
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import Callable
 
 from . import provider_observation_authority as _provider_observation_module
@@ -41,6 +41,7 @@ _HEX = frozenset("0123456789abcdef")
 _CAPTURE = capture_parlay_complete_game_board
 _EVIDENCE_SAVE = CompleteGameBoardEvidenceStore.save
 _NEXT_SLOT = CollectorDeltaStore._next_collector_schedule_slot
+_SCHEDULE_DUE_AT = CollectorDeltaStore._collector_schedule_due_at
 _BEGIN_SCHEDULED = CollectorDeltaStore._begin_scheduled_collector_cycle
 _RECORD_ARTIFACT = CollectorDeltaStore._record_collector_cycle_observation_artifact
 _FINISH_CYCLE = CollectorDeltaStore._finish_collector_cycle
@@ -462,6 +463,7 @@ def capture_campaign_complete_game_board(
     instant = _instant
     establish_inception = establish_campaign_inception
     next_slot = _NEXT_SLOT
+    schedule_due_at = _SCHEDULE_DUE_AT
     begin_scheduled = _BEGIN_SCHEDULED
     provider_capture = _CAPTURE
     evidence_save = _EVIDENCE_SAVE
@@ -475,6 +477,7 @@ def capture_campaign_complete_game_board(
         ("_instant", instant),
         ("establish_campaign_inception", establish_inception),
         ("_NEXT_SLOT", next_slot),
+        ("_SCHEDULE_DUE_AT", schedule_due_at),
         ("_BEGIN_SCHEDULED", begin_scheduled),
         ("_CAPTURE", provider_capture),
         ("_EVIDENCE_SAVE", evidence_save),
@@ -498,7 +501,6 @@ def capture_campaign_complete_game_board(
     expected_json = json
     expected_json_dumps = json.dumps
     expected_datetime = datetime
-    expected_timedelta = timedelta
     expected_utc = UTC
     expected_campaign_clock = _CANONICAL_CAMPAIGN_CLOCK
     expected_campaign_clock_code = _CANONICAL_CAMPAIGN_CLOCK_CODE
@@ -625,7 +627,6 @@ def capture_campaign_complete_game_board(
             or module_globals.get("json") is not expected_json
             or expected_json.dumps is not expected_json_dumps
             or module_globals.get("datetime") is not expected_datetime
-            or module_globals.get("timedelta") is not expected_timedelta
             or module_globals.get("UTC") is not expected_utc
         ):
             raise CampaignProviderCycleCaptureIntegrityError(
@@ -678,10 +679,15 @@ def capture_campaign_complete_game_board(
         instant(slot.get("due_at"), "collector slot due_at")
     )
     try:
-        slot_deadline_instant = slot_due_instant + expected_timedelta(
-            seconds=source_spec.interval_seconds
+        slot_deadline_at = schedule_due_at(
+            anchor_at=source_spec.anchor_at,
+            interval_seconds=repr(source_spec.interval_seconds),
+            slot_ordinal=slot.get("slot_ordinal") + 1,
         )
-    except (OverflowError, ValueError) as exc:
+        slot_deadline_instant = datetime.fromisoformat(
+            instant(slot_deadline_at, "collector next slot due_at")
+        )
+    except (OverflowError, TypeError, ValueError) as exc:
         raise CampaignProviderCycleCaptureIntegrityError(
             "collector fixed schedule slot window is not representable"
         ) from exc
@@ -933,7 +939,6 @@ def _seal_campaign_provider_cycle_capture_dispatch() -> None:
     expected_json = json
     expected_json_dumps = json.dumps
     expected_datetime = datetime
-    expected_timedelta = timedelta
     expected_utc = UTC
     expected_values = {
         "CollectorDeltaStore": CollectorDeltaStore,
@@ -949,7 +954,6 @@ def _seal_campaign_provider_cycle_capture_dispatch() -> None:
         "hashlib": expected_hashlib,
         "json": expected_json,
         "datetime": expected_datetime,
-        "timedelta": expected_timedelta,
         "UTC": expected_utc,
         "_RECEIPT_FIELD_NAMES": expected_receipt_field_names,
         "_RECEIPT_FIELD_DESCRIPTORS": expected_receipt_field_descriptors,
@@ -984,6 +988,7 @@ def _seal_campaign_provider_cycle_capture_dispatch() -> None:
             ("_CAPTURE", _CAPTURE),
             ("_EVIDENCE_SAVE", _EVIDENCE_SAVE),
             ("_NEXT_SLOT", _NEXT_SLOT),
+            ("_SCHEDULE_DUE_AT", _SCHEDULE_DUE_AT),
             ("_BEGIN_SCHEDULED", _BEGIN_SCHEDULED),
             ("_RECORD_ARTIFACT", _RECORD_ARTIFACT),
             ("_FINISH_CYCLE", _FINISH_CYCLE),

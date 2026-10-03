@@ -1005,16 +1005,29 @@ def _canonical_account_snapshot_authority(
 def _current_balance_generation_lock(
     workspace,
     acquired: AuthoritativeAccountSnapshot,
+    *,
+    _account_authority=_canonical_account_snapshot_authority,
+    _account_authority_code=getattr(_canonical_account_snapshot_authority, "__code__", None),
+    _economic_lock=_canonical_economic_lock,
+    _economic_lock_code=getattr(_canonical_economic_lock, "__code__", None),
 ):
     """Serialize product economic truth with the current BALANCE_READ generation."""
 
-    _, hold_current = _canonical_account_snapshot_authority()
+    if (
+        globals().get("_canonical_account_snapshot_authority") is not _account_authority
+        or getattr(_account_authority, "__code__", None) is not _account_authority_code
+        or globals().get("_canonical_economic_lock") is not _economic_lock
+        or getattr(_economic_lock, "__code__", None) is not _economic_lock_code
+    ):
+        raise ProviderAccountHeadroomError(
+            "current balance generation lock dependency authority changed"
+        )
+    _, hold_current = _account_authority()
     required = frozenset({BookmakerCapability.BALANCE_READ})
     # Lock order is deliberate: serialize the durable economic workspace first,
     # then hold the exact current BALANCE_READ generation while the caller reads or
-    # commits product-economic state. Calling this context manager recursively here
-    # would never reach either authority boundary.
-    with _canonical_economic_lock(workspace):
+    # commits product-economic state.
+    with _economic_lock(workspace):
         try:
             with hold_current(acquired, required):
                 yield

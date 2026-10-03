@@ -759,3 +759,144 @@ def test_currentness_rejects_snapshot_class_replacement_before_dispatch(
 
     assert called is False
 
+def test_resolver_rejects_coordinated_reader_and_witness_rebinding(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    ledger, plan = _ledger(tmp_path, _action(stake="10"))
+    called = False
+
+    def fake_view(self, plan_id):
+        nonlocal called
+        called = True
+        raise AssertionError("coordinated forged execution reader must not run")
+
+    def fake_snapshot(self):
+        raise AssertionError("coordinated forged snapshot reader must not run")
+
+    monkeypatch.setattr(
+        capital_risk_module,
+        "_VERIFIED_EXECUTION_VIEW",
+        fake_view,
+    )
+    monkeypatch.setattr(
+        capital_risk_module,
+        "_VERIFIED_SNAPSHOT",
+        fake_snapshot,
+    )
+    # Recreate the exact pre-repair exploit surface: move the public
+    # "canonical" witnesses and their code witnesses together with the class
+    # methods. The repaired authority ignores these caller-mintable witnesses.
+    monkeypatch.setattr(
+        capital_risk_module,
+        "_CANONICAL_VERIFIED_EXECUTION_VIEW",
+        fake_view,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        capital_risk_module,
+        "_CANONICAL_VERIFIED_SNAPSHOT",
+        fake_snapshot,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        capital_risk_module,
+        "_CANONICAL_VERIFIED_EXECUTION_VIEW_CODE",
+        fake_view.__code__,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        capital_risk_module,
+        "_CANONICAL_VERIFIED_SNAPSHOT_CODE",
+        fake_snapshot.__code__,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        RealExecutionLedger,
+        "verified_execution_view",
+        fake_view,
+    )
+    monkeypatch.setattr(
+        RealExecutionLedger,
+        "verified_snapshot",
+        fake_snapshot,
+    )
+
+    with pytest.raises(
+        ExecutionCapitalAtRiskError,
+        match="canonical execution-ledger read authority changed",
+    ):
+        resolve_execution_capital_at_risk(ledger, plan.plan_id)
+
+    assert called is False
+
+
+def test_currentness_rejects_coordinated_snapshot_witness_rebinding(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    ledger, plan = _ledger(tmp_path, _action(stake="10"))
+    evidence = resolve_execution_capital_at_risk(ledger, plan.plan_id)
+    called = False
+
+    def fake_view(self, plan_id):
+        raise AssertionError("forged execution reader must not run")
+
+    def fake_snapshot(self):
+        nonlocal called
+        called = True
+        raise AssertionError("coordinated forged snapshot reader must not run")
+
+    monkeypatch.setattr(
+        capital_risk_module,
+        "_VERIFIED_EXECUTION_VIEW",
+        fake_view,
+    )
+    monkeypatch.setattr(
+        capital_risk_module,
+        "_VERIFIED_SNAPSHOT",
+        fake_snapshot,
+    )
+    monkeypatch.setattr(
+        capital_risk_module,
+        "_CANONICAL_VERIFIED_EXECUTION_VIEW",
+        fake_view,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        capital_risk_module,
+        "_CANONICAL_VERIFIED_SNAPSHOT",
+        fake_snapshot,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        capital_risk_module,
+        "_CANONICAL_VERIFIED_EXECUTION_VIEW_CODE",
+        fake_view.__code__,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        capital_risk_module,
+        "_CANONICAL_VERIFIED_SNAPSHOT_CODE",
+        fake_snapshot.__code__,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        RealExecutionLedger,
+        "verified_execution_view",
+        fake_view,
+    )
+    monkeypatch.setattr(
+        RealExecutionLedger,
+        "verified_snapshot",
+        fake_snapshot,
+    )
+
+    with pytest.raises(
+        ExecutionCapitalAtRiskError,
+        match="canonical execution-ledger read authority changed",
+    ):
+        evidence.assert_issued_current(ledger)
+
+    assert called is False
+

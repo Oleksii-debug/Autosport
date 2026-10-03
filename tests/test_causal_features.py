@@ -214,6 +214,37 @@ def test_future_cache_entry_is_not_visible_at_decision_time() -> None:
     assert cache.get("candidate.feature", at=BASE + timedelta(minutes=2)) == Decimal("7")
 
 
+def test_cache_replacement_cannot_backdate_or_rewrite_same_availability() -> None:
+    cache = AvailabilityCache()
+    cache.put(
+        "candidate.feature",
+        Decimal("7"),
+        available_at=BASE + timedelta(minutes=2),
+    )
+
+    for replacement_at in (
+        BASE + timedelta(minutes=1),
+        BASE + timedelta(minutes=2),
+    ):
+        with pytest.raises(FeatureLeakageError, match="must advance"):
+            cache.put(
+                "candidate.feature",
+                Decimal("9"),
+                available_at=replacement_at,
+            )
+
+    assert cache.get("candidate.feature", at=BASE + timedelta(minutes=2)) == Decimal("7")
+
+    cache.put(
+        "candidate.feature",
+        Decimal("9"),
+        available_at=BASE + timedelta(minutes=3),
+    )
+    with pytest.raises(FeatureLeakageError, match="future cache"):
+        cache.get("candidate.feature", at=BASE + timedelta(minutes=2))
+    assert cache.get("candidate.feature", at=BASE + timedelta(minutes=3)) == Decimal("9")
+
+
 def test_naive_timestamps_fail_closed() -> None:
     with pytest.raises(CausalFeatureError, match="timezone-aware"):
         FeaturePoint(Decimal("1"), datetime(2026, 1, 1))

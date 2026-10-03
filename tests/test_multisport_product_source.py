@@ -5,12 +5,13 @@ import tempfile
 import unittest
 from decimal import Decimal
 from pathlib import Path
-from unittest.mock import patch, sentinel
+from unittest.mock import Mock, patch, sentinel
 
 from autosport.domain import MarketType
 from autosport.product_source import (
     ParlayApiProductSource,
     ProductSourcePayloadError,
+    _capture_parlay_sport_product_source_factory,
     create_parlay_sport_product_source,
 )
 from autosport.providers import ProviderBatch, ProviderQuote
@@ -351,18 +352,14 @@ class MultiSportProductSourceTests(unittest.TestCase):
             "AUTOSPORT_PARLAY_LAWFUL_TERMS_REF": "terms:parlayapi:v1",
             "AUTOSPORT_PARLAY_RETENTION_REF": "retention:parlayapi:v1",
         }
-        with (
-            patch.dict("os.environ", env, clear=True),
-            patch(
-                "autosport.product_source.ParlayApiSportProvider",
-                return_value=sentinel.provider,
-            ) as provider_type,
-            patch(
-                "autosport.product_source.ParlayApiProductSource",
-                return_value=sentinel.source,
-            ) as source_type,
-        ):
-            result = create_parlay_sport_product_source("basketball_nba")
+        provider_type = Mock(return_value=sentinel.provider)
+        source_type = Mock(return_value=sentinel.source)
+        with patch.dict("os.environ", env, clear=True):
+            factory = _capture_parlay_sport_product_source_factory(
+                provider_type=provider_type,
+                source_type=source_type,
+            )
+            result = factory("basketball_nba")
 
         self.assertIs(result, sentinel.source)
         provider_type.assert_called_once_with(

@@ -148,7 +148,9 @@ class RunTransactionDecisionBindingTests(unittest.TestCase):
             tx.stage_outputs(PaperBook.load(book_path), ledger_path)
 
             replacement = PaperBook("20000")
-            replacement.save(tx.staged_book_path)
+            replacement_path = root / "replacement-paper-book.json"
+            replacement.save(replacement_path)
+            tx.staged_book_path.write_bytes(replacement_path.read_bytes())
 
             with self.assertRaisesRegex(
                 RunTransactionError,

@@ -449,6 +449,10 @@ class DeploymentRuntimeAuthorityStore:
         *,
         authority_root: str | Path | None = None,
     ) -> None:
+        if type(self) is not DeploymentRuntimeAuthorityStore:
+            raise TypeError(
+                "runtime authority store must be exact DeploymentRuntimeAuthorityStore"
+            )
         self._configure(path, authority_root=authority_root)
         with self._lock, WorkspaceEconomicLock(self.workspace):
             self._read_validated_records_locked()
@@ -460,6 +464,10 @@ class DeploymentRuntimeAuthorityStore:
         *,
         authority_root: str | Path | None = None,
     ) -> "DeploymentRuntimeAuthorityStore":
+        if cls is not DeploymentRuntimeAuthorityStore:
+            raise TypeError(
+                "runtime authority store must be exact DeploymentRuntimeAuthorityStore"
+            )
         destination = Path(path).expanduser().resolve(strict=False)
         destination.parent.mkdir(parents=True, exist_ok=True)
         payload = {

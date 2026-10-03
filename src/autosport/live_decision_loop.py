@@ -2464,7 +2464,11 @@ class PersistentLiveDecisionLoop:
             self.authority.risk_policy,
         )
         payload_version = existing.payload.get("schema_version")
-        if payload_version not in {1, 2}:
+        if payload_version == 1:
+            raise DecisionLedgerIntegrityError(
+                "legacy committed live decision lacks canonical intent provenance"
+            )
+        if payload_version != 2:
             raise DecisionLedgerIntegrityError(
                 "committed live decision has unsupported schema_version"
             )
@@ -2479,37 +2483,36 @@ class PersistentLiveDecisionLoop:
             "decision_context_sha256": progress.decision_context_sha256,
             "plan_sha256": progress.plan_sha256,
         }
-        if payload_version == 2:
-            _, committed_decision_time = _canonical_timestamp(
-                "committed decision_ts",
-                progress.decision_ts,
+        _, committed_decision_time = _canonical_timestamp(
+            "committed decision_ts",
+            progress.decision_ts,
+        )
+        try:
+            self.intent_provenance.assert_available_at(committed_decision_time)
+        except LiveDecisionProgressError as exc:
+            raise DecisionLedgerIntegrityError(
+                "committed live decision intent provenance was not causally "
+                "available at decision time"
+            ) from exc
+        provenance = self.intent_provenance
+        if (
+            existing.payload.get("intent_strategy_version_id")
+            != provenance.strategy_version_id
+            or existing.payload.get("intent_model_version_id")
+            != provenance.model_version_id
+            or existing.payload.get("intent_provenance_sha256")
+            != provenance.provenance_sha256
+        ):
+            raise DecisionLedgerIntegrityError(
+                "committed live decision intent provenance conflicts with canonical registry"
             )
-            try:
-                self.intent_provenance.assert_available_at(committed_decision_time)
-            except LiveDecisionProgressError as exc:
-                raise DecisionLedgerIntegrityError(
-                    "committed live decision intent provenance was not causally "
-                    "available at decision time"
-                ) from exc
-            provenance = self.intent_provenance
-            if (
-                existing.payload.get("intent_strategy_version_id")
-                != provenance.strategy_version_id
-                or existing.payload.get("intent_model_version_id")
-                != provenance.model_version_id
-                or existing.payload.get("intent_provenance_sha256")
-                != provenance.provenance_sha256
-            ):
-                raise DecisionLedgerIntegrityError(
-                    "committed live decision intent provenance conflicts with canonical registry"
-                )
-            context_payload.update(
-                {
-                    "intent_strategy_version_id": provenance.strategy_version_id,
-                    "intent_model_version_id": provenance.model_version_id,
-                    "intent_provenance_sha256": provenance.provenance_sha256,
-                }
-            )
+        context_payload.update(
+            {
+                "intent_strategy_version_id": provenance.strategy_version_id,
+                "intent_model_version_id": provenance.model_version_id,
+                "intent_provenance_sha256": provenance.provenance_sha256,
+            }
+        )
 
         expected_context_hash = _canonical_json_sha256(context_payload)
         expected_decision_id = f"live-{expected_context_hash}"

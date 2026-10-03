@@ -102,6 +102,38 @@ def test_known_secret_nested_family_then_mixed_encoding_is_redacted() -> None:
     assert REDACTED in rendered
 
 
+def test_known_secret_alternating_base64_url_base64_is_redacted() -> None:
+    secret = "AS+ALT/SECRET=5d91"
+    first_base64 = base64.b64encode(secret.encode("utf-8")).decode("ascii")
+    url_encoded = quote(first_base64, safe="")
+    encoded = base64.b64encode(url_encoded.encode("utf-8")).decode("ascii")
+
+    rendered = redact_operator_text(
+        f"provider_opaque={encoded}",
+        extra_secret_values=(secret,),
+    )
+
+    assert encoded not in rendered
+    assert secret not in rendered
+    assert REDACTED in rendered
+
+
+def test_known_secret_alternating_url_base64_url_is_redacted() -> None:
+    secret = "AS+ALT/SECRET=8a31"
+    first_url = quote(secret, safe="")
+    base64_encoded = base64.b64encode(first_url.encode("utf-8")).decode("ascii")
+    encoded = quote(base64_encoded, safe="")
+
+    rendered = redact_operator_text(
+        f"provider_opaque={encoded}",
+        extra_secret_values=(secret,),
+    )
+
+    assert encoded not in rendered
+    assert secret not in rendered
+    assert REDACTED in rendered
+
+
 def test_known_secret_url_percent_spelling_is_redacted() -> None:
     secret = "AS+URL/SECRET=7f31"
     variants = (

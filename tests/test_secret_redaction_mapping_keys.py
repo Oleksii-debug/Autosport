@@ -1,10 +1,59 @@
 from __future__ import annotations
 
+import base64
+
 from autosport.secret_redaction import (
     REDACTED,
     redact_operator_text,
     redact_operator_value,
 )
+
+
+def test_known_secret_reversible_base64_spellings_are_redacted() -> None:
+    secret = "AS-RUNTIME-BASE64-SECRET-7f31"
+    raw = secret.encode("utf-8")
+    variants = (
+        base64.b64encode(raw).decode("ascii"),
+        base64.b64encode(raw).decode("ascii").rstrip("="),
+        base64.urlsafe_b64encode(raw).decode("ascii"),
+        base64.urlsafe_b64encode(raw).decode("ascii").rstrip("="),
+    )
+
+    for encoded in variants:
+        assert secret not in encoded
+        rendered = redact_operator_text(
+            f"provider_opaque={encoded}",
+            extra_secret_values=(secret,),
+        )
+        assert encoded not in rendered
+        assert secret not in rendered
+        assert REDACTED in rendered
+
+
+def test_environment_secret_base64_spelling_is_redacted(monkeypatch) -> None:
+    secret = "AS-RUNTIME-ENV-BASE64-SECRET-291c"
+    monkeypatch.setenv("AUTOSPORT_TEST_API_KEY", secret)
+    encoded = base64.urlsafe_b64encode(secret.encode("utf-8")).decode("ascii").rstrip("=")
+
+    rendered = redact_operator_text(f"provider_opaque={encoded}")
+
+    assert encoded not in rendered
+    assert secret not in rendered
+    assert REDACTED in rendered
+
+
+def test_known_secret_base64_in_structured_bytes_value_is_redacted() -> None:
+    secret = "AS-RUNTIME-BYTES-BASE64-SECRET-4a12"
+    encoded = base64.b64encode(secret.encode("utf-8")).rstrip(b"=")
+
+    redacted = redact_operator_value(
+        {"provider_detail": b"opaque:" + encoded},
+        extra_secret_values=(secret,),
+    )
+
+    assert encoded not in redacted["provider_detail"]
+    assert secret.encode("utf-8") not in redacted["provider_detail"]
+    assert REDACTED.encode("utf-8") in redacted["provider_detail"]
 
 
 def test_explicit_secret_embedded_in_mapping_key_is_redacted() -> None:

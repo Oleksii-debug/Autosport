@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import builtins
 import os
 import re
@@ -218,6 +219,26 @@ def _secret_values(extra_secret_values: Iterable[str]) -> tuple[str, ...]:
     return tuple(sorted(values, key=lambda item: (-len(item), item)))
 
 
+def _reversible_base64_secret_values(secrets: Iterable[str]) -> tuple[str, ...]:
+    """Return reversible Base64 spellings only for already-known secret values."""
+
+    values: set[str] = set()
+    for secret in secrets:
+        raw = secret.encode("utf-8")
+        standard = base64.b64encode(raw).decode("ascii")
+        urlsafe = base64.urlsafe_b64encode(raw).decode("ascii")
+        values.update(
+            {
+                standard,
+                standard.rstrip("="),
+                urlsafe,
+                urlsafe.rstrip("="),
+            }
+        )
+    values.discard("")
+    return tuple(sorted(values, key=lambda item: (-len(item), item)))
+
+
 def _decode_query_key_for_classification(value: str) -> tuple[str, bool]:
     """Return a bounded decoded query key plus unresolved-nesting truth."""
 
@@ -301,6 +322,18 @@ def redact_operator_text(
                 part = part.replace(secret, REDACTED)
             parts[index] = part
         rendered = REDACTED.join(parts)
+
+        # Base64 is reversible credential material, not a redaction.  Derive
+        # only spellings of secrets that are already authoritative for this
+        # redaction call; do not attempt to classify arbitrary opaque tokens.
+        encoded_secrets = _reversible_base64_secret_values(secrets)
+        if encoded_secrets:
+            parts = rendered.split(REDACTED)
+            for index, part in enumerate(parts):
+                for encoded_secret in encoded_secrets:
+                    part = part.replace(encoded_secret, REDACTED)
+                parts[index] = part
+            rendered = REDACTED.join(parts)
 
     rendered = _URL_USERINFO_RE.sub(
         lambda match: match.group("scheme") + REDACTED + "@",

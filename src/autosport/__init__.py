@@ -169,6 +169,10 @@ from . import _paper_campaign_admission_consumer_guard as _paper_campaign_admiss
 # Extend that same executable seal through canonical PaperBook ticket resolution;
 # no new ticket/source authority is introduced here.
 from . import _paper_campaign_admission_ticket_resolution_guard as _paper_campaign_admission_ticket_resolution_guard  # noqa: F401,E402
+# Prospective forward campaign admission is a distinct composition boundary. It
+# re-resolves the cycle-bound structural verification and injects only its canonical
+# resolver-issued identity into the existing #708 intent/retry contract.
+from . import paper_campaign_forward_admission as _paper_campaign_forward_admission  # noqa: F401,E402
 
 # Product PolicyEvaluation issuance already exact-fences the FactoryArtifactStore
 # surface. Seal the lower canonical file reader that _stable_snapshot dispatches to

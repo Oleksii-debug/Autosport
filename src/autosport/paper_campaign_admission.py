@@ -41,6 +41,8 @@ _EXECUTION_DECISION_ID = "paper_execution_decision_id"
 _EXECUTION_RUN_ID = "paper_execution_run_id"
 _EXECUTION_ATTEMPT_ID = "paper_execution_attempt_id"
 _EXECUTION_TICKET_ID = "paper_execution_ticket_id"
+_FORWARD_VERIFICATION_DECISION_FIELD = "campaign_forward_verification"
+_FORWARD_VERIFICATION_ACTION_PARAMETER = "campaign_forward_verification_receipt_sha256"
 _EXECUTION_FIELDS = frozenset(
     {
         _EXECUTION_DECISION_ID,
@@ -85,6 +87,10 @@ class _ExecutionAdmissionBinding:
 
 _ACTIVE_EXECUTION_BINDING: ContextVar[_ExecutionAdmissionBinding | None] = ContextVar(
     "autosport_paper_campaign_execution_binding",
+    default=None,
+)
+_ACTIVE_FORWARD_VERIFICATION: ContextVar[dict[str, object] | None] = ContextVar(
+    "autosport_paper_campaign_forward_verification",
     default=None,
 )
 
@@ -587,6 +593,19 @@ class PaperCampaignAdmissionCoordinator(_base.PaperCampaignAdmissionCoordinator)
             raise PaperCampaignAdmissionError(
                 "decision_payload attempts to replace PAPER execution authority fields"
             )
+        if _FORWARD_VERIFICATION_DECISION_FIELD in payload:
+            raise PaperCampaignAdmissionError(
+                "decision_payload cannot claim campaign forward verification authority"
+            )
+        forward_verification = _ACTIVE_FORWARD_VERIFICATION.get()
+        if forward_verification is not None:
+            if type(forward_verification) is not dict:
+                raise PaperCampaignAdmissionError(
+                    "campaign forward verification context is invalid"
+                )
+            payload[_FORWARD_VERIFICATION_DECISION_FIELD] = dict(
+                forward_verification
+            )
         payload.update(
             {
                 _EXECUTION_DECISION_ID: binding.decision_id,
@@ -607,12 +626,27 @@ class PaperCampaignAdmissionCoordinator(_base.PaperCampaignAdmissionCoordinator)
             raise PaperCampaignAdmissionError(
                 "action_parameters attempt to replace PAPER execution authority fields"
             )
+        if _FORWARD_VERIFICATION_ACTION_PARAMETER in supplied_parameter_keys:
+            raise PaperCampaignAdmissionError(
+                "action_parameters cannot claim campaign forward verification authority"
+            )
+        forward_parameter = (
+            ()
+            if forward_verification is None
+            else (
+                (
+                    _FORWARD_VERIFICATION_ACTION_PARAMETER,
+                    str(forward_verification["receipt_sha256"]),
+                ),
+            )
+        )
         bound_parameters = tuple(
             (*action_parameters,
              (_EXECUTION_DECISION_ID, binding.decision_id),
              (_EXECUTION_RUN_ID, binding.run_id),
              (_EXECUTION_ATTEMPT_ID, binding.attempt_id),
-             (_EXECUTION_TICKET_ID, binding.ticket_id))
+             (_EXECUTION_TICKET_ID, binding.ticket_id),
+             *forward_parameter)
         )
 
         token = _ACTIVE_EXECUTION_BINDING.set(binding)

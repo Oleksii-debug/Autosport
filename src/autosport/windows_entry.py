@@ -106,8 +106,8 @@ def _show_startup_error(message: str) -> None:
         pass
 
 
-def _run_owned_interactive_gui(workspace: Path) -> int:
-    """Run the interactive WebView stack while caller holds workspace ownership."""
+def _run_owned_interactive_gui(workspace: Path, webview_storage: Path) -> int:
+    """Run the interactive WebView stack while caller holds both storage ownership locks."""
 
     from autosport.webview2_release_environment import (
         active_webview2_environment_overrides,
@@ -138,7 +138,10 @@ def _run_owned_interactive_gui(workspace: Path) -> int:
 
     try:
         controller = EmergencyStopWebController(workspace)
-        return launch_windows_shell(AutosportWebBridge(controller))
+        return launch_windows_shell(
+            AutosportWebBridge(controller),
+            storage_path=webview_storage,
+        )
     except WindowsWebViewUnavailable as exc:
         if getattr(exc, "reason", None) == "storage":
             _show_startup_error(_WEBVIEW2_STORAGE_ERROR)
@@ -190,7 +193,7 @@ def _run_interactive_gui() -> int:
             WorkspaceInteractiveLock(workspace),
             WorkspaceInteractiveLock(webview_storage.parent),
         ):
-            return _run_owned_interactive_gui(workspace)
+            return _run_owned_interactive_gui(workspace, webview_storage)
     except WorkspaceEconomicLockBusyError:
         _show_startup_error(_WORKSPACE_INSTANCE_BUSY_ERROR)
         return 2

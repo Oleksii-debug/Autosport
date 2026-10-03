@@ -136,6 +136,31 @@ def test_windows_shell_passes_exact_canonical_storage_path_to_pywebview(
     assert bridge.closed is True
 
 
+def test_prevalidated_webview_storage_path_is_not_reresolved(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prevalidated = tmp_path / "locked Local" / "Autosport" / "webview2"
+    _clear_webview2_environment_overrides(monkeypatch)
+
+    def forbidden_reresolve() -> Path:
+        raise AssertionError("prevalidated WebView storage must not be re-resolved")
+
+    monkeypatch.setattr(
+        "autosport.windows_webview_shell.default_webview_storage_path",
+        forbidden_reresolve,
+    )
+    calls: dict[str, object] = {}
+    monkeypatch.setitem(sys.modules, "webview", _fake_webview(calls))
+
+    assert launch_windows_shell(_Bridge(), storage_path=prevalidated) == 0
+
+    start = calls["start"]
+    assert isinstance(start, dict)
+    assert start["storage_path"] == str(prevalidated)
+    assert Path(start["storage_path"]).is_absolute()
+
+
 @pytest.mark.parametrize(
     ("name", "value"),
     [

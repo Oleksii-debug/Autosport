@@ -2141,12 +2141,17 @@ def launch_windows_shell(
     bridge: AutosportWebBridge | None = None,
     *,
     title: str | None = None,
+    storage_path: Path | None = None,
 ) -> int:
     _reject_webview2_environment_overrides()
 
     try:
-        storage_path = default_webview_storage_path()
-    except (OSError, RuntimeError, ValueError) as exc:
+        storage_path = (
+            default_webview_storage_path()
+            if storage_path is None
+            else Path(storage_path)
+        )
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
         raise WindowsWebViewUnavailable(
             "Autosport could not resolve its canonical WebView storage path"
         ) from exc

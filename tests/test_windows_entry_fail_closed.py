@@ -126,8 +126,13 @@ class WindowsEntrypointFailClosedTests(unittest.TestCase):
         class WindowsWebViewUnavailable(RuntimeError):
             pass
 
-        def launch_windows_shell(bridge: AutosportWebBridge) -> int:
+        def launch_windows_shell(
+            bridge: AutosportWebBridge,
+            *,
+            storage_path: Path,
+        ) -> int:
             self.assertIsInstance(bridge.controller, EmergencyStopWebController)
+            self.assertTrue(storage_path.is_absolute())
             calls.append("webview")
             return 17
 

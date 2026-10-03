@@ -192,6 +192,7 @@ def _intent_for_action(
     *,
     bankroll_id: str = _HEADROOM_GOAL.bankroll_id,
     currency: str = _HEADROOM_GOAL.currency,
+    provider_account_id: str | None = None,
 ) -> OpportunityIntent:
     odds = Decimal(str(action.requested_odds))
     leg = TicketLeg(
@@ -214,7 +215,12 @@ def _intent_for_action(
     context = ProposedTicketRiskContext(
         legs=(leg,),
         quotes=(quote_event,),
-        provider_accounts=((action.bookmaker_id, action.account_id),),
+        provider_accounts=(
+            (
+                action.bookmaker_id,
+                action.account_id if provider_account_id is None else provider_account_id,
+            ),
+        ),
         bankroll_id=bankroll_id,
         currency=currency,
         proposal_ts=action.quote_observed_at,
@@ -253,6 +259,7 @@ def _plan(
     economic_goal_contract_sha256: str = _HEADROOM_GOAL_SHA256,
     intent_bankroll_id: str = _HEADROOM_GOAL.bankroll_id,
     intent_currency: str = _HEADROOM_GOAL.currency,
+    intent_account_id: str | None = None,
 ) -> tuple[str, BoundSupervisedExecutionPlan, OpportunityIntent, str]:
     intent_id = f"intent-{plan_id}"
     intent = _intent_for_action(
@@ -260,6 +267,7 @@ def _plan(
         intent_id,
         bankroll_id=intent_bankroll_id,
         currency=intent_currency,
+        provider_account_id=intent_account_id,
     )
     book = PaperBook("1000")
     graph = PortfolioDependencyGraph.for_inputs(book, (intent,))
@@ -2245,4 +2253,77 @@ def test_workspace_lock_new_cannot_return_hostile_context(
         )
 
     assert hostile_entries == []
+
+def test_target_intent_provider_account_must_cover_execution_account(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    acquired, _ = _acquire_balance(monkeypatch, tmp_path, "100")
+    target = _plan(
+        "target",
+        _action("target-action", "10", account_id="acct-1"),
+        intent_account_id="acct-2",
+    )
+    ledger = _ledger_with_plans(tmp_path, target)
+
+    with pytest.raises(
+        ProviderAccountHeadroomUnsupported,
+        match="intent provider-account scope does not cover execution account",
+    ):
+        _assess(
+            ledger,
+            acquired,
+            plan_id="target",
+            action_id="target-action",
+        )
+
+
+def test_liability_intent_provider_account_must_cover_execution_account(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    acquired, _ = _acquire_balance(monkeypatch, tmp_path, "100")
+    target = _plan("target", _action("target-action", "10"))
+    liability = _plan(
+        "liability",
+        _action("liability-action", "20", account_id="acct-1"),
+        intent_account_id="acct-2",
+    )
+    ledger = _ledger_with_plans(tmp_path, target, liability)
+    ledger.begin_attempt(
+        plan_id=_actual_plan_id(ledger, "liability"),
+        action_id=_actual_action_id(ledger, "liability", "liability-action"),
+        attempt_id="liability-account-scope-attempt",
+    )
+
+    with pytest.raises(
+        ProviderAccountHeadroomUnsupported,
+        match="intent provider-account scope does not cover execution account",
+    ):
+        _assess(
+            ledger,
+            acquired,
+            plan_id="target",
+            action_id="target-action",
+        )
+
+
+def test_denomination_authority_binds_provider_account_identity(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    acquired, _ = _acquire_balance(monkeypatch, tmp_path, "100")
+    target = _plan("target", _action("target-action", "10"))
+    ledger = _ledger_with_plans(tmp_path, target)
+
+    assessment = _assess(
+        ledger,
+        acquired,
+        plan_id="target",
+        action_id="target-action",
+    )
+
+    assert assessment.provider_id == "betfair"
+    assert assessment.account_id == "acct-1"
+    assert len(assessment.denomination_authority_sha256) == 64
 

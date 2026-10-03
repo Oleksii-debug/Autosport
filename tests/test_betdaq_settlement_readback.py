@@ -566,16 +566,13 @@ def test_economic_read_rejects_in_place_clock_code_mutation_during_dispatch(
     monkeypatch,
 ):
     payload = postings_by_id(posting(9001))
-    hostile_calls = []
-
     def mutable_clock():
         return datetime(2026, 10, 3, 10, 0, tzinfo=timezone.utc)
 
     original_code = mutable_clock.__code__
 
     def hostile_clock():
-        hostile_calls.append(True)
-        return datetime(2000, 1, 1, tzinfo=timezone.utc)
+        raise AssertionError("mutated evidence clock executed")
 
     account = BetdaqAccountReadOnlyClient(
         BetdaqCredentials("alice", "secret-pass", "secret-app"),
@@ -605,7 +602,6 @@ def test_economic_read_rejects_in_place_clock_code_mutation_during_dispatch(
         mutable_clock.__code__ = original_code
 
     assert len(opener.calls) == 1
-    assert hostile_calls == []
 
 
 def test_economic_private_call_cannot_be_widened_to_provider_write_by_globals(

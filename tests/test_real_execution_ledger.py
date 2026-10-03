@@ -1923,6 +1923,11 @@ class RealExecutionLedgerTests(unittest.TestCase):
 
 
 
+    def test_supervised_plan_issuance_mutation_is_not_public_api(self):
+        self.assertFalse(
+            hasattr(RealExecutionLedger, "bind_supervised_plan_issuance")
+        )
+
     def test_supervised_plan_issuance_requires_reserved_plan(self):
         with tempfile.TemporaryDirectory() as tmp:
             ledger = RealExecutionLedger(Path(tmp) / "real.jsonl")
@@ -1936,7 +1941,7 @@ class RealExecutionLedgerTests(unittest.TestCase):
                 ExecutionStateError,
                 "requires reserved plan",
             ):
-                ledger.bind_supervised_plan_issuance(
+                ledger._bind_supervised_plan_issuance(
                     plan_id=current.plan_id,
                     bound_plan_witness=witness,
                     plan_fingerprint=current.fingerprint,
@@ -1953,12 +1958,12 @@ class RealExecutionLedgerTests(unittest.TestCase):
             )
             ledger.reserve_plan(current)
 
-            ledger.bind_supervised_plan_issuance(
+            ledger._bind_supervised_plan_issuance(
                 plan_id=current.plan_id,
                 bound_plan_witness=witness,
                 plan_fingerprint=current.fingerprint,
             )
-            ledger.bind_supervised_plan_issuance(
+            ledger._bind_supervised_plan_issuance(
                 plan_id=current.plan_id,
                 bound_plan_witness=witness,
                 plan_fingerprint=current.fingerprint,
@@ -1988,7 +1993,7 @@ class RealExecutionLedgerTests(unittest.TestCase):
                 ExecutionIdentityConflict,
                 "witness mismatches plan identity",
             ):
-                ledger.bind_supervised_plan_issuance(
+                ledger._bind_supervised_plan_issuance(
                     plan_id=current.plan_id,
                     bound_plan_witness="d" * 64,
                     plan_fingerprint=current.fingerprint,
@@ -1998,7 +2003,7 @@ class RealExecutionLedgerTests(unittest.TestCase):
                 ExecutionIdentityConflict,
                 "fingerprint mismatches durable plan",
             ):
-                ledger.bind_supervised_plan_issuance(
+                ledger._bind_supervised_plan_issuance(
                     plan_id=current.plan_id,
                     bound_plan_witness=witness,
                     plan_fingerprint="e" * 64,
@@ -2022,7 +2027,7 @@ class RealExecutionLedgerTests(unittest.TestCase):
                 plan_id=f"supervised-v2-{witness}",
             )
             ledger.reserve_plan(current)
-            ledger.bind_supervised_plan_issuance(
+            ledger._bind_supervised_plan_issuance(
                 plan_id=current.plan_id,
                 bound_plan_witness=witness,
                 plan_fingerprint=current.fingerprint,

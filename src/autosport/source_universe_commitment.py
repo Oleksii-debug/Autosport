@@ -638,7 +638,7 @@ def _seal_source_universe_dispatch() -> None:
             )
             if current_class_seams.get(name) is not expected_surface:
                 raise expected_error_type(
-                    "source-universe class read-seam witness map drifted: " + name
+                    "source-universe canonical durable read seam drifted: " + name
                 )
             if current_surface is not expected_surface:
                 raise expected_error_type(

@@ -126,7 +126,7 @@ class OneShotObservationWorker:
             rendered = safe_exception_text(exc)
         except BaseException:
             return "BaseException: exception details unavailable"
-        if not isinstance(rendered, str) or not rendered:
+        if type(rendered) is not str or not rendered:
             return "BaseException: exception details unavailable"
         return rendered
 

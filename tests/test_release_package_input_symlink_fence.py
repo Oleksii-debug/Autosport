@@ -830,13 +830,14 @@ class ReleasePackageInputSymlinkFenceTests(unittest.TestCase):
             swapped = False
             follow_open_attempted = False
 
-            def validate_then_swap(path: Path, *, label: str) -> None:
+            def validate_then_swap(path: Path, *, label: str) -> os.stat_result:
                 nonlocal swapped
-                real_require(path, label=label)
+                snapshot = real_require(path, label=label)
                 if Path(path) == package_path and not swapped:
                     swapped = True
                     package_path.unlink()
                     self._symlink_or_skip(outside, package_path)
+                return snapshot
 
             def forbid_following_path_open(path: Path, *args, **kwargs):
                 nonlocal follow_open_attempted
@@ -915,13 +916,14 @@ class ReleasePackageInputSymlinkFenceTests(unittest.TestCase):
             swapped = False
             follow_open_attempted = False
 
-            def validate_then_swap(path: Path, *, label: str) -> None:
+            def validate_then_swap(path: Path, *, label: str) -> os.stat_result:
                 nonlocal swapped
-                real_require(path, label=label)
+                snapshot = real_require(path, label=label)
                 if Path(path) == data_path and not swapped:
                     swapped = True
                     data_path.unlink()
                     self._symlink_or_skip(outside, data_path)
+                return snapshot
 
             def forbid_following_path_open(path: Path, *args, **kwargs):
                 nonlocal follow_open_attempted
@@ -961,13 +963,14 @@ class ReleasePackageInputSymlinkFenceTests(unittest.TestCase):
             real_require = release_package._require_regular_source_file
             swapped = False
 
-            def validate_then_swap(path: Path, *, label: str) -> None:
+            def validate_then_swap(path: Path, *, label: str) -> os.stat_result:
                 nonlocal swapped
-                real_require(path, label=label)
+                snapshot = real_require(path, label=label)
                 if Path(path) == package_path and not swapped:
                     swapped = True
                     package_path.unlink()
                     self._symlink_or_skip(outside, package_path)
+                return snapshot
 
             with patch.object(
                 release_package,

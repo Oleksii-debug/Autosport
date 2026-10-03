@@ -273,3 +273,31 @@ def test_semantically_invalid_available_at_is_rejected_before_authority_recovery
         ):
             ScientificRegistry(path)
         assert path.read_bytes() == corrupted
+
+
+def test_valid_registry_transplant_into_fresh_workspace_cannot_bootstrap_authority(
+    tmp_path,
+):
+    source_path = tmp_path / "source-workspace" / "scientific_registry.json"
+    source = ScientificRegistry.initialize_pristine(source_path)
+    source.append(_question())
+    transplanted_bytes = source_path.read_bytes()
+
+    target_path = tmp_path / "fresh-workspace" / "scientific_registry.json"
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    target_path.write_bytes(transplanted_bytes)
+
+    for _attempt in range(2):
+        with pytest.raises(
+            MonotonicAuthorityRollbackError,
+            match="authority|history|rollback|unproven",
+        ):
+            ScientificRegistry(target_path)
+        assert target_path.read_bytes() == transplanted_bytes
+
+    with pytest.raises(
+        MonotonicAuthorityRollbackError,
+        match="authority|history|rollback|unproven",
+    ):
+        ScientificRegistry.initialize_pristine(target_path)
+    assert target_path.read_bytes() == transplanted_bytes

@@ -701,14 +701,16 @@ class CapabilityEvidenceJournal:
             candidates,
             key=lambda item: (_time(item[1].committed_at, "committed_at"), item[0]),
         )
-        availability = self._latest_availability(evidence_id, decision_at)
-        # AVAILABLE is a positive runtime observation. The public DTO records the
-        # assertion for audit/restart, but cannot mint provider-health authority by
-        # itself. Conservative negative/degraded states remain usable immediately.
+        availability = self._latest_negative_availability(
+            evidence_id, decision_at
+        )
+        # AVAILABLE and UNKNOWN are non-authoritative audit observations. They cannot
+        # mint provider health and must not erase a prior conservative negative state.
+        # Recovery from DEGRADED/TEMPORARILY_UNAVAILABLE therefore requires a fresh
+        # lifecycle successor rather than a caller-authored positive health assertion.
         state = (
             CapabilityAvailabilityState.UNKNOWN
             if availability is None
-            or availability.state is CapabilityAvailabilityState.AVAILABLE
             else availability.state
         )
         profile = profiles.get(evidence.profile_id)
@@ -722,13 +724,18 @@ class CapabilityEvidenceJournal:
             )
         return _evaluate(evidence, evidence_id, profile, requirement, decision_at, state)
 
-    def _latest_availability(
+    def _latest_negative_availability(
         self, evidence_id: str, as_of: datetime
     ) -> CapabilityAvailability | None:
         items = [
             item
             for item in self._availability.values()
             if item.evidence_id == evidence_id
+            and item.state
+            in {
+                CapabilityAvailabilityState.DEGRADED,
+                CapabilityAvailabilityState.TEMPORARILY_UNAVAILABLE,
+            }
             and _time(item.observed_at, "availability.observed_at") <= as_of
         ]
         if not items:

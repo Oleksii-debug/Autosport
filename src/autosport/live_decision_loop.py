@@ -22,6 +22,7 @@ from .decision_ledger import (
     verify_economic_goal_binding,
 )
 from .economic_goal_provenance import provenance_for
+from .domain import MarketEvent
 from .event_lifecycle import CatalogCheckpoint, CatalogPage, ContinuousEventLifecycle
 from .ingestion_health import IngestionPolicy, SourceHealthStore
 from .integrity import atomic_write_json
@@ -1652,6 +1653,16 @@ class PersistentLiveDecisionLoop:
         boundary = as_of.astimezone(timezone.utc)
 
         def require_available(event: MarketEvent) -> None:
+            if event.status not in MarketMirror._DECISION_ELIGIBLE_STATUSES:
+                return
+            source_time = MarketMirror._utc_timestamp(
+                event.source_ts or event.observed_ts
+            )
+            if source_time is None:
+                return
+            source_age = boundary - source_time
+            if not timedelta(0) <= source_age <= self.max_quote_age:
+                return
             observed = MarketMirror._utc_timestamp(event.observed_ts)
             ingested = MarketMirror._utc_timestamp(event.ingest_ts)
             if (

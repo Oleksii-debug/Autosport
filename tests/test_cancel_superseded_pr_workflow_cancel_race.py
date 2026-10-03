@@ -9,6 +9,7 @@ from scripts.cancel_superseded_pr_workflow_runs import (
     CancellationError,
     GitHubApi,
 )
+from scripts.cancel_superseded_pr_workflow_runs_scoped import WorkflowScopedGitHubApi
 
 
 def test_cancel_conflict_is_benign_after_run_completed(monkeypatch) -> None:
@@ -111,6 +112,38 @@ def test_cancel_rejects_class_mutated_request_dispatch(monkeypatch) -> None:
         match="cancellation request dispatch changed",
     ):
         api.cancel(123)
+
+
+def test_cancel_rejects_subclass_request_override_even_with_internal_witness() -> None:
+    class _ForgedRequestApi(GitHubApi):
+        def _request(self, *_args, **_kwargs):
+            return controller_module._CANCELLATION_ACCEPTED
+
+    api = _ForgedRequestApi(repository="owner/repo", token="token")
+
+    with pytest.raises(
+        CancellationError,
+        match="cancellation request dispatch changed",
+    ):
+        api.cancel(123)
+
+
+def test_scoped_production_api_inherits_canonical_cancel_transport_dispatch(
+    monkeypatch,
+) -> None:
+    api = WorkflowScopedGitHubApi(
+        repository="owner/repo",
+        token="token",
+        workflow_id=1,
+        workflow_name="CI",
+    )
+    monkeypatch.setattr(
+        controller_module,
+        "urlopen",
+        lambda *_args, **_kwargs: _FakeSuccessResponse(202, b"accepted"),
+    )
+
+    api.cancel(123)
 
 
 @pytest.mark.parametrize(

@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 import autosport._outcome_availability_clock_dispatch_guard as availability_guard
 import autosport.outcome_trust as outcome_trust
+import autosport.run_registry as run_registry_module
 from autosport.outcome_trust import (
     OutcomeLineageBinding,
     OutcomeLineageTrustError,
@@ -181,6 +182,67 @@ class OutcomeAvailabilityGlobalStrictFenceTests(unittest.TestCase):
                     "outcome trust parser dispatch was rebound",
                 ):
                     self._begin(registry, binding, "run-parser-rebind")
+
+            self.assertEqual(hostile_calls, 0)
+
+
+    def test_rebound_run_registry_payload_parser_fails_before_attacker_dispatch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            registry = self._new_registry(tmp)
+            binding = self._binding(
+                source_identity="official-results:payload-parser-rebind",
+                record_id="event:payload-parser-rebind",
+                label="payload-parser-rebind",
+            )
+            hostile_calls = 0
+
+            def hostile_parser(_value, *, context):
+                nonlocal hostile_calls
+                hostile_calls += 1
+                raise AssertionError(
+                    f"rebound RunRegistry payload parser must not execute: {context}"
+                )
+
+            with patch.object(
+                run_registry_module,
+                "outcome_lineage_binding_from_payload",
+                new=hostile_parser,
+            ):
+                with self.assertRaisesRegex(
+                    OutcomeLineageTrustError,
+                    "RunRegistry outcome lineage payload parser dispatch was rebound",
+                ):
+                    self._begin(registry, binding, "run-payload-parser-rebind")
+
+            self.assertEqual(hostile_calls, 0)
+
+    def test_rebound_outcome_trust_payload_parser_fails_before_attacker_dispatch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            registry = self._new_registry(tmp)
+            binding = self._binding(
+                source_identity="official-results:source-parser-rebind",
+                record_id="event:source-parser-rebind",
+                label="source-parser-rebind",
+            )
+            hostile_calls = 0
+
+            def hostile_parser(_value, *, context):
+                nonlocal hostile_calls
+                hostile_calls += 1
+                raise AssertionError(
+                    f"rebound outcome-trust payload parser must not execute: {context}"
+                )
+
+            with patch.object(
+                outcome_trust,
+                "outcome_lineage_binding_from_payload",
+                new=hostile_parser,
+            ):
+                with self.assertRaisesRegex(
+                    OutcomeLineageTrustError,
+                    "outcome trust lineage payload parser dispatch was rebound",
+                ):
+                    self._begin(registry, binding, "run-source-parser-rebind")
 
             self.assertEqual(hostile_calls, 0)
 

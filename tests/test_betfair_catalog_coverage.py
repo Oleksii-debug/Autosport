@@ -486,6 +486,17 @@ def test_coverage_record_rejects_authenticated_result_resolver_rebinding(
         )
 
     assert forged_calls == []
+    with pytest.raises(
+        BetfairCatalogCoverageError,
+        match="authenticated discovery result resolver dispatch changed",
+    ):
+        resolve_catalog_coverage(
+            store,
+            expected_store_path=store.path,
+            plan_id=plan.plan_id,
+            live_acquisitions=(acquisition,),
+        )
+
     assert pending_catalog_coverage_leaves(
         store,
         expected_store_path=store.path,
@@ -524,11 +535,114 @@ def test_coverage_record_rejects_authenticated_result_resolver_code_mutation(
             acquisition=acquisition,
         )
 
+    with pytest.raises(
+        BetfairCatalogCoverageError,
+        match="authenticated discovery result resolver dispatch changed",
+    ):
+        resolve_catalog_coverage(
+            store,
+            expected_store_path=store.path,
+            plan_id=plan.plan_id,
+            live_acquisitions=(acquisition,),
+        )
+
     assert pending_catalog_coverage_leaves(
         store,
         expected_store_path=store.path,
         plan_id=plan.plan_id,
     ) == (root,)
+
+
+
+def test_coverage_rejects_producer_result_resolver_rebinding(
+    tmp_path,
+    monkeypatch,
+):
+    store, plan, root, acquisition = _coverage_plan_root_acquisition_for_dispatch_guard(
+        tmp_path,
+        monkeypatch,
+    )
+    forged_calls = []
+
+    def forged_producer_result(_acquisition):
+        forged_calls.append(True)
+        return []
+
+    monkeypatch.setattr(
+        _coverage,
+        "resolve_authoritative_betfair_authenticated_discovery_result",
+        forged_producer_result,
+    )
+
+    with pytest.raises(
+        BetfairCatalogCoverageError,
+        match="authenticated discovery result resolver dispatch changed",
+    ):
+        record_catalog_coverage_acquisition(
+            store,
+            expected_store_path=store.path,
+            plan_id=plan.plan_id,
+            leaf_id=root.leaf_id,
+            acquisition=acquisition,
+        )
+
+    with pytest.raises(
+        BetfairCatalogCoverageError,
+        match="authenticated discovery result resolver dispatch changed",
+    ):
+        resolve_catalog_coverage(
+            store,
+            expected_store_path=store.path,
+            plan_id=plan.plan_id,
+            live_acquisitions=(acquisition,),
+        )
+
+    assert forged_calls == []
+
+
+def test_coverage_rejects_producer_result_resolver_code_mutation(
+    tmp_path,
+    monkeypatch,
+):
+    store, plan, root, acquisition = _coverage_plan_root_acquisition_for_dispatch_guard(
+        tmp_path,
+        monkeypatch,
+    )
+    canonical_resolver = (
+        _coverage.resolve_authoritative_betfair_authenticated_discovery_result
+    )
+
+    def forged_producer_result(_acquisition):
+        return []
+
+    monkeypatch.setattr(
+        canonical_resolver,
+        "__code__",
+        forged_producer_result.__code__,
+    )
+
+    with pytest.raises(
+        BetfairCatalogCoverageError,
+        match="authenticated discovery result resolver dispatch changed",
+    ):
+        record_catalog_coverage_acquisition(
+            store,
+            expected_store_path=store.path,
+            plan_id=plan.plan_id,
+            leaf_id=root.leaf_id,
+            acquisition=acquisition,
+        )
+
+    with pytest.raises(
+        BetfairCatalogCoverageError,
+        match="authenticated discovery result resolver dispatch changed",
+    ):
+        resolve_catalog_coverage(
+            store,
+            expected_store_path=store.path,
+            plan_id=plan.plan_id,
+            live_acquisitions=(acquisition,),
+        )
 
 
 def test_parent_market_missing_from_categorical_child_fails_reconciliation(

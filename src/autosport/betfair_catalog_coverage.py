@@ -1627,6 +1627,10 @@ def _make_catalogue_coverage_runtime():
     parser_code = parser.__code__
     provider_result_resolver = _provider_result_from_acquisition
     provider_result_resolver_code = provider_result_resolver.__code__
+    producer_result_resolver = (
+        resolve_authoritative_betfair_authenticated_discovery_result
+    )
+    producer_result_resolver_code = producer_result_resolver.__code__
     record_impl = _record_catalog_coverage_acquisition_impl
     resolve_impl = _resolve_catalog_coverage_impl
 
@@ -1659,6 +1663,11 @@ def _make_catalogue_coverage_runtime():
         if (
             _provider_result_from_acquisition is not provider_result_resolver
             or provider_result_resolver.__code__ is not provider_result_resolver_code
+            or (
+                resolve_authoritative_betfair_authenticated_discovery_result
+                is not producer_result_resolver
+            )
+            or producer_result_resolver.__code__ is not producer_result_resolver_code
         ):
             raise BetfairCatalogCoverageError(
                 "authenticated discovery result resolver dispatch changed"
@@ -1667,6 +1676,11 @@ def _make_catalogue_coverage_runtime():
         if (
             _provider_result_from_acquisition is not provider_result_resolver
             or provider_result_resolver.__code__ is not provider_result_resolver_code
+            or (
+                resolve_authoritative_betfair_authenticated_discovery_result
+                is not producer_result_resolver
+            )
+            or producer_result_resolver.__code__ is not producer_result_resolver_code
         ):
             raise BetfairCatalogCoverageError(
                 "authenticated discovery result resolver dispatch changed"

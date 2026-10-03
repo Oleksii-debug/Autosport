@@ -3266,6 +3266,88 @@ def test_failure_cleanup_ignores_shadowed_seam_builtins_after_provider_callback(
     assert hostile_calls == []
 
 
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "class_save",
+        "instance_save",
+        "module_save_alias",
+        "class_path",
+    ],
+)
+def test_provider_failure_terminal_survives_evidence_surface_corruption(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: str,
+) -> None:
+    locator, store, spec, provider_store = _setup(tmp_path)
+    hostile_calls: list[str] = []
+
+    def hostile(*_args, **_kwargs):
+        hostile_calls.append(mutation)
+        raise AssertionError(f"hostile evidence seam executed: {mutation}")
+
+    def mutating_failure(_request, _timeout):
+        if mutation == "class_save":
+            monkeypatch.setattr(
+                CompleteGameBoardEvidenceStore,
+                "save",
+                hostile,
+            )
+        elif mutation == "instance_save":
+            monkeypatch.setattr(
+                provider_store,
+                "save",
+                hostile,
+                raising=False,
+            )
+        elif mutation == "module_save_alias":
+            monkeypatch.setattr(
+                capture_module,
+                "_EVIDENCE_SAVE",
+                hostile,
+            )
+        elif mutation == "class_path":
+            monkeypatch.setattr(
+                CompleteGameBoardEvidenceStore,
+                "_path",
+                hostile,
+            )
+        else:
+            raise AssertionError(f"unknown mutation: {mutation}")
+        raise OSError("forced provider transport failure")
+
+    monkeypatch.setattr(provider_module, "urlopen", mutating_failure)
+    monkeypatch.setattr(provider_module, "_default_clock", lambda: CAPTURED_AT)
+
+    with pytest.raises(
+        ProviderObservationUnsupportedError,
+        match="provider SSE initial-state acquisition failed",
+    ):
+        capture_module.capture_campaign_complete_game_board(
+            precommit_locator=locator,
+            store=store,
+            source_spec=spec,
+            evidence_store=provider_store,
+            request=_request(),
+            api_key="secret-value",
+            timeout_seconds=3.0,
+            clock=_clock(),
+        )
+
+    evidence = store.collector_cycle_evidence(
+        source_id=spec.source_id,
+        start_cycle_seq=1,
+        end_cycle_seq=1,
+    )
+    assert len(evidence) == 1
+    terminal = evidence[0]["terminal"]
+    assert terminal["status"] == "LOCAL_FAILURE"
+    assert terminal["completed_at"] == terminal["attempted_at"]
+    assert "observed_artifacts" not in terminal
+    assert hostile_calls == []
+
+
 def test_failure_cleanup_uses_captured_base_exception_after_provider_callback(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

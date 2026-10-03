@@ -2025,6 +2025,62 @@ class RealExecutionLedgerTests(unittest.TestCase):
 
 
 
+
+    def test_legacy_supervised_approval_binding_without_expiry_remains_readable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "real.jsonl"
+            ledger = RealExecutionLedger(path)
+            current = plan(action())
+            ledger.reserve_plan(current)
+            ledger.bind_supervised_approval(
+                plan_id=current.plan_id,
+                approval_id=current.approval_id,
+                approval_fingerprint="0" * 64,
+                approved_at=TS,
+                evidence_sha256="1" * 64,
+            )
+
+            self.assertEqual(ledger.verify_integrity(), 2)
+            restarted = RealExecutionLedger(path)
+            self.assertTrue(
+                restarted.supervised_approval_is_active(
+                    plan_id=current.plan_id,
+                    approval_id=current.approval_id,
+                    approval_fingerprint="0" * 64,
+                )
+            )
+
+
+    def test_supervised_v2_approval_binding_requires_durable_expiry(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = RealExecutionLedger(Path(tmp) / "real.jsonl")
+            witness = "1" * 64
+            approval_fingerprint = "2" * 64
+            current = plan(
+                action(),
+                plan_id=f"supervised-v2-{witness}",
+                approval_id=f"approval-1@{approval_fingerprint}",
+            )
+            ledger.reserve_plan(current)
+            ledger._bind_supervised_plan_issuance(
+                plan_id=current.plan_id,
+                bound_plan_witness=witness,
+                plan_fingerprint=current.fingerprint,
+            )
+
+            with self.assertRaisesRegex(
+                ExecutionStateError,
+                "requires durable expiry",
+            ):
+                ledger.bind_supervised_approval(
+                    plan_id=current.plan_id,
+                    approval_id=current.approval_id,
+                    approval_fingerprint=approval_fingerprint,
+                    approved_at=TS,
+                    evidence_sha256="3" * 64,
+                )
+
+
     def test_supervised_attempt_requires_prior_product_issuance(self):
         with tempfile.TemporaryDirectory() as tmp:
             ledger = RealExecutionLedger(Path(tmp) / "real.jsonl")

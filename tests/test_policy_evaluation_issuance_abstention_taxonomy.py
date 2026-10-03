@@ -342,3 +342,58 @@ def test_candidate_projection_keeps_reconciled_predictive_utility_semantics():
     assert Decimal(issued.metric_value) == Decimal("0.75")
     assert Decimal(issued.total_cost) == Decimal("0.5")
     assert projection["projection_rule"] == "predictive_net_utility=-policy_loss"
+
+
+
+def test_no_action_issuance_versions_corrected_projection_without_changing_generic_v3():
+    protocol = _protocol(
+        ("case-a",),
+        supported_baseline_kind=BaselineKind.NO_BET_WAIT,
+    )
+    authority = issuance.ProductPolicyEvaluationWorkspace(
+        workspace="unused-for-identity-only",
+        workspace_instance_id="workspace-instance-v1",
+        workspace_locator_sha256=_sha("workspace-locator"),
+    )
+    no_action_target = issuance._target(protocol, BaselineKind.NO_BET_WAIT)
+    candidate_target = _target()
+
+    assert issuance._NO_ACTION_ISSUER_SOURCE_SHA256 == hashlib.sha256(
+        b"autosport.external-validity-policy-issuance.no-action.v1"
+    ).hexdigest()
+    assert issuance._issuer_source_sha256(no_action_target) == (
+        issuance._NO_ACTION_ISSUER_SOURCE_SHA256
+    )
+    assert issuance._issuer_source_sha256(candidate_target) == issuance._ISSUER_SOURCE_SHA256
+
+    legacy_no_action_v3 = issuance._digest(
+        {
+            "schema_version": 3,
+            "kind": "autosport-external-validity-product-issuance-identity-v3",
+            "workspace_instance_id": authority.workspace_instance_id,
+            "workspace_locator_sha256": authority.workspace_locator_sha256,
+            "protocol_sha256": protocol.identity_sha256,
+            "evidence_scope_sha256": protocol.evidence_scope.identity_sha256,
+            "cohort_sha256": protocol.evidence_scope.cohort_sha256,
+            "policy_id": no_action_target.policy_id,
+            "policy_artifact_sha256": no_action_target.policy_artifact_sha256,
+            "baseline_definition_sha256": no_action_target.baseline_definition_sha256,
+        }
+    )
+    assert issuance._issuance_id(authority, protocol, no_action_target) != legacy_no_action_v3
+
+    generic_candidate_v3 = issuance._digest(
+        {
+            "schema_version": 3,
+            "kind": "autosport-external-validity-product-issuance-identity-v3",
+            "workspace_instance_id": authority.workspace_instance_id,
+            "workspace_locator_sha256": authority.workspace_locator_sha256,
+            "protocol_sha256": protocol.identity_sha256,
+            "evidence_scope_sha256": protocol.evidence_scope.identity_sha256,
+            "cohort_sha256": protocol.evidence_scope.cohort_sha256,
+            "policy_id": candidate_target.policy_id,
+            "policy_artifact_sha256": candidate_target.policy_artifact_sha256,
+            "baseline_definition_sha256": candidate_target.baseline_definition_sha256,
+        }
+    )
+    assert issuance._issuance_id(authority, protocol, candidate_target) == generic_candidate_v3

@@ -99,6 +99,10 @@ class ProductPolicyEvaluationWorkspace:
 
 
 _ISSUER_SOURCE_SHA256 = "aa95112ec260878167b36071f2682f196cb27f8731c677e14d1d7659aac28c90"
+# SHA-256("autosport.external-validity-policy-issuance.no-action.v1").
+# Preserve the generic evaluator identity for unchanged candidate/other-baseline
+# projections while versioning the corrected factual-zero NO_ACTION semantics.
+_NO_ACTION_ISSUER_SOURCE_SHA256 = "8c6c5cbcbdf4e6e54bdea34cc7b0087c7dd5d7c287dbf11af8ddb969cdc64285"
 _RESULT_ARTIFACT_KIND = "external-validity-policy-result"
 _BUNDLE_ID_PREFIX = "external-validity-policy-result:"
 _BOOTSTRAP_REPLICATES = 1024
@@ -837,25 +841,37 @@ def _target(protocol: FrozenBaselineProtocol, baseline_kind: BaselineKind | None
     )
 
 
+def _issuer_source_sha256(target: _Target) -> str:
+    if target.baseline_kind is BaselineKind.NO_BET_WAIT:
+        return _NO_ACTION_ISSUER_SOURCE_SHA256
+    return _ISSUER_SOURCE_SHA256
+
+
 def _issuance_id(
     authority: ProductPolicyEvaluationWorkspace,
     protocol: FrozenBaselineProtocol,
     target: _Target,
 ) -> str:
-    return _digest(
-        {
-            "schema_version": 3,
-            "kind": "autosport-external-validity-product-issuance-identity-v3",
-            "workspace_instance_id": authority.workspace_instance_id,
-            "workspace_locator_sha256": authority.workspace_locator_sha256,
-            "protocol_sha256": protocol.identity_sha256,
-            "evidence_scope_sha256": protocol.evidence_scope.identity_sha256,
-            "cohort_sha256": protocol.evidence_scope.cohort_sha256,
-            "policy_id": target.policy_id,
-            "policy_artifact_sha256": target.policy_artifact_sha256,
-            "baseline_definition_sha256": target.baseline_definition_sha256,
-        }
-    )
+    identity = {
+        "schema_version": 3,
+        "kind": "autosport-external-validity-product-issuance-identity-v3",
+        "workspace_instance_id": authority.workspace_instance_id,
+        "workspace_locator_sha256": authority.workspace_locator_sha256,
+        "protocol_sha256": protocol.identity_sha256,
+        "evidence_scope_sha256": protocol.evidence_scope.identity_sha256,
+        "cohort_sha256": protocol.evidence_scope.cohort_sha256,
+        "policy_id": target.policy_id,
+        "policy_artifact_sha256": target.policy_artifact_sha256,
+        "baseline_definition_sha256": target.baseline_definition_sha256,
+    }
+    if target.baseline_kind is BaselineKind.NO_BET_WAIT:
+        # The factual-zero NO_ACTION projection supersedes the earlier generic-v3
+        # semantics.  Bind it to a new slot so any already-materialized hindsight-
+        # valued artifact can never collide with or be reinterpreted as repaired truth.
+        identity["schema_version"] = 4
+        identity["kind"] = "autosport-external-validity-product-issuance-identity-v4"
+        identity["projection_evaluator_source_sha256"] = _issuer_source_sha256(target)
+    return _digest(identity)
 
 
 def _require_source_factory_evaluation(
@@ -1450,6 +1466,11 @@ def _derive_policy_evaluation(
         "source_metric": "policy_loss",
         "projection_metric": protocol.primary_metric,
         "projection_rule": projection_rule,
+        **(
+            {"projection_evaluator_source_sha256": _issuer_source_sha256(target)}
+            if target.baseline_kind is BaselineKind.NO_BET_WAIT
+            else {}
+        ),
         "uncertainty_method": protocol.uncertainty_method,
         "bootstrap_replicates": _BOOTSTRAP_REPLICATES,
         "bootstrap_schedule": "sha256-frozen-protocol-cohort-sample-blocks-v1",
@@ -1554,7 +1575,7 @@ def issue_product_policy_evaluation(
     bundle = EvaluationBundleRef(
         evaluation_bundle_id=evaluation_bundle_id,
         bundle_sha256=evaluation.evaluation_bundle_sha256,
-        evaluator_source_sha256=_ISSUER_SOURCE_SHA256,
+        evaluator_source_sha256=_issuer_source_sha256(target),
         dataset_snapshot_id=source.dataset_snapshot_id,
         protocol_sha256=protocol.identity_sha256,
         artifact_hashes=artifact_hashes,
@@ -1634,7 +1655,7 @@ def resolve_product_policy_evaluation(
     if _sha256(
         bundle_payload.get("evaluator_source_sha256"),
         "issued EvaluationBundle.evaluator_source_sha256",
-    ) != _ISSUER_SOURCE_SHA256:
+    ) != _issuer_source_sha256(target):
         raise ProductPolicyEvaluationIssuanceError(
             "issued EvaluationBundle evaluator authority mismatch"
         )

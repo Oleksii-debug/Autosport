@@ -46,6 +46,7 @@ def _build_sealed_forward_admission():
     verify = forward_module.verify_campaign_forward_evidence
     verify_code = getattr(verify, "__code__", None)
     receipt_type = forward_module.CampaignForwardEvidenceVerification
+    cycle_receipt_type = forward_module.CampaignCompleteBoardCycleReceipt
     expected_scope = "CYCLE_BOUND_PROVIDER_UNIVERSE_STRUCTURAL_ONLY"
 
     exact_type = type
@@ -55,7 +56,44 @@ def _build_sealed_forward_admission():
     exact_len = len
     exact_any = any
     exact_getattr = getattr
+    exact_tuple = tuple
     exact_type_error = TypeError
+
+    receipt_field_names = (
+        "schema_version",
+        "campaign_id",
+        "source_id",
+        "campaign_receipt_sha256",
+        "protocol_sha256",
+        "structural_result_sha256",
+        "structural_ok",
+        "structural_codes",
+        "terminal_root_sha256",
+        "candidate_count",
+        "campaign_cycle_authority_sha256",
+        "prospective_evaluation_plan_sha256",
+        "universe_sha256",
+        "membership_sha256",
+        "verification_scope",
+        "provider_universe_authority_resolved",
+        "promotion_ready",
+        "real_money_ready",
+        "receipt_sha256",
+    )
+    receipt_field_descriptors = exact_tuple(
+        (name, getattr_static(receipt_type, name))
+        for name in receipt_field_names
+    )
+    cycle_identity_field_names = (
+        "campaign_id",
+        "source_id",
+        "campaign_receipt_sha256",
+    )
+    cycle_identity_field_descriptors = exact_tuple(
+        (name, getattr_static(cycle_receipt_type, name))
+        for name in cycle_identity_field_names
+    )
+
     hex_chars = frozenset("0123456789abcdef")
     unshadowed_builtins = (
         "type",
@@ -65,6 +103,7 @@ def _build_sealed_forward_admission():
         "len",
         "any",
         "getattr",
+        "tuple",
         "TypeError",
     )
     holder: dict[str, object] = {}
@@ -110,10 +149,40 @@ def _build_sealed_forward_admission():
             or exact_getattr(verify, "__code__", None) is not verify_code
             or forward_module.CampaignForwardEvidenceVerification
             is not receipt_type
+            or forward_module.CampaignCompleteBoardCycleReceipt
+            is not cycle_receipt_type
+            or exact_any(
+                getattr_static(receipt_type, name) is not descriptor
+                for name, descriptor in receipt_field_descriptors
+            )
+            or exact_any(
+                getattr_static(cycle_receipt_type, name) is not descriptor
+                for name, descriptor in cycle_identity_field_descriptors
+            )
         ):
             raise expected_error(
                 "campaign forward admission authority surface changed"
             )
+
+    def read_stored_fields(
+        value: object,
+        *,
+        expected_type: type,
+        descriptors: tuple[tuple[str, object], ...],
+        label: str,
+    ) -> dict[str, object]:
+        if exact_type(value) is not expected_type:
+            raise expected_error(f"{label} has noncanonical type")
+        require_surfaces()
+        state = exact_dict()
+        for name, descriptor in descriptors:
+            if getattr_static(expected_type, name) is not descriptor:
+                raise expected_error(
+                    "campaign forward admission authority surface changed"
+                )
+            state[name] = descriptor.__get__(value, expected_type)
+        require_surfaces()
+        return state
 
     def sha(value: object, name: str) -> str:
         if (
@@ -125,99 +194,127 @@ def _build_sealed_forward_admission():
         return value
 
     def receipt_payload(receipt: object, *, cycle_receipt: object) -> dict[str, object]:
-        if exact_type(receipt) is not receipt_type:
+        cycle_state = read_stored_fields(
+            cycle_receipt,
+            expected_type=cycle_receipt_type,
+            descriptors=cycle_identity_field_descriptors,
+            label="campaign cycle receipt",
+        )
+        receipt_state = read_stored_fields(
+            receipt,
+            expected_type=receipt_type,
+            descriptors=receipt_field_descriptors,
+            label="forward verifier receipt",
+        )
+
+        if (
+            exact_type(receipt_state["schema_version"]) is not exact_int
+            or receipt_state["schema_version"] != 1
+        ):
             raise expected_error(
-                "forward verifier returned noncanonical receipt"
+                "forward verification schema version is not canonical"
             )
-        campaign_id = exact_getattr(cycle_receipt, "campaign_id", None)
+        campaign_id = cycle_state["campaign_id"]
         if exact_type(campaign_id) is not exact_str:
             raise expected_error(
                 "campaign cycle receipt has no canonical campaign identity"
             )
-        source_id = exact_getattr(cycle_receipt, "source_id", None)
-        campaign_receipt_sha256 = exact_getattr(
-            cycle_receipt,
-            "campaign_receipt_sha256",
-            None,
-        )
-        if receipt.campaign_id != campaign_id:
+        source_id = cycle_state["source_id"]
+        campaign_receipt_sha256 = cycle_state["campaign_receipt_sha256"]
+        if receipt_state["campaign_id"] != campaign_id:
             raise expected_error(
                 "forward verification campaign differs from admission campaign"
             )
         if (
             exact_type(source_id) is not exact_str
-            or receipt.source_id != source_id
+            or receipt_state["source_id"] != source_id
         ):
             raise expected_error(
                 "forward verification source differs from admission campaign cycle"
             )
         if (
             exact_type(campaign_receipt_sha256) is not exact_str
-            or receipt.campaign_receipt_sha256 != campaign_receipt_sha256
+            or receipt_state["campaign_receipt_sha256"]
+            != campaign_receipt_sha256
         ):
             raise expected_error(
                 "forward verification inception receipt differs from campaign cycle"
             )
         if (
-            receipt.verification_scope != expected_scope
-            or receipt.provider_universe_authority_resolved is not True
-            or receipt.promotion_ready is not False
-            or receipt.real_money_ready is not False
+            receipt_state["verification_scope"] != expected_scope
+            or receipt_state["provider_universe_authority_resolved"] is not True
+            or receipt_state["promotion_ready"] is not False
+            or receipt_state["real_money_ready"] is not False
         ):
             raise expected_error(
                 "forward verification truth boundary is not canonical"
             )
-        if receipt.structural_ok is not True or receipt.structural_codes != ("PASS",):
+        if (
+            receipt_state["structural_ok"] is not True
+            or exact_type(receipt_state["structural_codes"]) is not exact_tuple
+            or receipt_state["structural_codes"] != ("PASS",)
+        ):
             raise expected_error(
                 "forward structural verification did not pass"
             )
         if (
-            exact_type(receipt.candidate_count) is not exact_int
-            or receipt.candidate_count < 0
+            exact_type(receipt_state["candidate_count"]) is not exact_int
+            or receipt_state["candidate_count"] < 0
         ):
             raise expected_error(
                 "forward verification candidate count is invalid"
             )
+
+        terminal_root_sha256 = receipt_state["terminal_root_sha256"]
         return {
             "schema": "autosport.paper_campaign_forward_verification",
             "schema_version": 1,
-            "campaign_id": receipt.campaign_id,
-            "source_id": receipt.source_id,
+            "campaign_id": receipt_state["campaign_id"],
+            "source_id": receipt_state["source_id"],
             "campaign_receipt_sha256": sha(
-                receipt.campaign_receipt_sha256,
+                receipt_state["campaign_receipt_sha256"],
                 "campaign_receipt_sha256",
             ),
-            "protocol_sha256": sha(receipt.protocol_sha256, "protocol_sha256"),
+            "protocol_sha256": sha(
+                receipt_state["protocol_sha256"],
+                "protocol_sha256",
+            ),
             "structural_result_sha256": sha(
-                receipt.structural_result_sha256,
+                receipt_state["structural_result_sha256"],
                 "structural_result_sha256",
             ),
             "terminal_root_sha256": (
                 None
-                if receipt.terminal_root_sha256 is None
-                else sha(receipt.terminal_root_sha256, "terminal_root_sha256")
+                if terminal_root_sha256 is None
+                else sha(terminal_root_sha256, "terminal_root_sha256")
             ),
-            "candidate_count": receipt.candidate_count,
+            "candidate_count": receipt_state["candidate_count"],
             "campaign_cycle_authority_sha256": sha(
-                receipt.campaign_cycle_authority_sha256,
+                receipt_state["campaign_cycle_authority_sha256"],
                 "campaign_cycle_authority_sha256",
             ),
             "prospective_evaluation_plan_sha256": sha(
-                receipt.prospective_evaluation_plan_sha256,
+                receipt_state["prospective_evaluation_plan_sha256"],
                 "prospective_evaluation_plan_sha256",
             ),
-            "universe_sha256": sha(receipt.universe_sha256, "universe_sha256"),
+            "universe_sha256": sha(
+                receipt_state["universe_sha256"],
+                "universe_sha256",
+            ),
             "membership_sha256": sha(
-                receipt.membership_sha256,
+                receipt_state["membership_sha256"],
                 "membership_sha256",
             ),
-            "verification_scope": receipt.verification_scope,
+            "verification_scope": receipt_state["verification_scope"],
             "provider_universe_authority_resolved": True,
             "structural_ok": True,
             "structural_codes": ["PASS"],
             "promotion_ready": False,
             "real_money_ready": False,
-            "receipt_sha256": sha(receipt.receipt_sha256, "receipt_sha256"),
+            "receipt_sha256": sha(
+                receipt_state["receipt_sha256"],
+                "receipt_sha256",
+            ),
         }
 
     def resolve_payload(
@@ -244,8 +341,6 @@ def _build_sealed_forward_admission():
         )
         require_surfaces()
         return receipt_payload(receipt, cycle_receipt=cycle_receipt)
-
-    exact_tuple = tuple
 
     def resolve_request(request: object) -> dict[str, object]:
         if exact_type(request) is not exact_tuple or exact_len(request) != 8:

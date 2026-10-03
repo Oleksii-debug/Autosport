@@ -525,3 +525,72 @@ def test_legacy_admit_rejects_digest_json_surface_rebind_before_authority_dispat
 
     assert hostile_calls == []
     assert _admissions(fixture) == {}
+
+
+def test_forward_receipt_payload_rejects_receipt_field_shadow_without_execution(
+    monkeypatch,
+):
+    receipt_payload = _closure_function(
+        admit_forward_verified,
+        module_name=forward_admission_module.__name__,
+        function_name="receipt_payload",
+    )
+    receipt_type = forward_module.CampaignForwardEvidenceVerification
+    cycle_type = forward_module.CampaignCompleteBoardCycleReceipt
+    receipt = object.__new__(receipt_type)
+    cycle_receipt = object.__new__(cycle_type)
+    object.__setattr__(cycle_receipt, "campaign_id", "campaign-1")
+    object.__setattr__(cycle_receipt, "source_id", "source-1")
+    object.__setattr__(cycle_receipt, "campaign_receipt_sha256", "a" * 64)
+    hostile_calls: list[str] = []
+
+    def hostile_campaign_id(_self):
+        hostile_calls.append("campaign_id")
+        return "campaign-1"
+
+    monkeypatch.setattr(
+        receipt_type,
+        "campaign_id",
+        property(hostile_campaign_id),
+    )
+
+    with pytest.raises(
+        PaperCampaignForwardAdmissionError,
+        match="authority surface changed",
+    ):
+        receipt_payload(receipt, cycle_receipt=cycle_receipt)
+
+    assert hostile_calls == []
+
+
+def test_forward_receipt_payload_rejects_cycle_field_shadow_without_execution(
+    monkeypatch,
+):
+    receipt_payload = _closure_function(
+        admit_forward_verified,
+        module_name=forward_admission_module.__name__,
+        function_name="receipt_payload",
+    )
+    receipt_type = forward_module.CampaignForwardEvidenceVerification
+    cycle_type = forward_module.CampaignCompleteBoardCycleReceipt
+    receipt = object.__new__(receipt_type)
+    cycle_receipt = object.__new__(cycle_type)
+    hostile_calls: list[str] = []
+
+    def hostile_campaign_id(_self):
+        hostile_calls.append("campaign_id")
+        return "campaign-1"
+
+    monkeypatch.setattr(
+        cycle_type,
+        "campaign_id",
+        property(hostile_campaign_id),
+    )
+
+    with pytest.raises(
+        PaperCampaignForwardAdmissionError,
+        match="authority surface changed",
+    ):
+        receipt_payload(receipt, cycle_receipt=cycle_receipt)
+
+    assert hostile_calls == []

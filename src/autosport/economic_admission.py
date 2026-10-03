@@ -231,6 +231,42 @@ def _revalidated_product_day_turnover_room(
         return None
 
 
+def _freeze_external_python_function_graph(function: FunctionType) -> FunctionType:
+    """Detach one Python function and its same-module helper graph from rebinding."""
+
+    if type(function) is not FunctionType or function.__closure__ is not None:
+        raise RuntimeError("canonical risk helper must be a closure-free Python function")
+    source_globals = function.__globals__
+    frozen_globals: dict[str, object] = dict(source_globals)
+    clones: dict[str, FunctionType] = {}
+    for name, value in tuple(source_globals.items()):
+        if (
+            type(value) is FunctionType
+            and value.__globals__ is source_globals
+            and value.__closure__ is None
+        ):
+            clone = FunctionType(
+                value.__code__,
+                frozen_globals,
+                name=value.__name__,
+                argdefs=value.__defaults__,
+            )
+            if value.__kwdefaults__ is not None:
+                clone.__kwdefaults__ = dict(value.__kwdefaults__)
+            clone.__annotations__ = dict(value.__annotations__)
+            clone.__qualname__ = value.__qualname__
+            clone.__doc__ = value.__doc__
+            clones[name] = clone
+    frozen_globals.update(clones)
+    frozen = clones.get(function.__name__)
+    if (
+        type(frozen) is not FunctionType
+        or frozen.__code__ is not function.__code__
+    ):
+        raise RuntimeError("canonical risk helper frozen graph is unavailable")
+    return frozen
+
+
 # Freeze the exact canonical risk helper descriptors used by the positive
 # post-turnover continuation. This mirrors PaperRiskPolicy.evaluate's own helper
 # witnesses so a later class/descriptor mutation cannot widen admission authority.
@@ -245,6 +281,11 @@ _RISK_HISTORY = _RISK_HISTORY_DESCRIPTOR.__func__
 _RISK_QUOTE = _RISK_QUOTE_DESCRIPTOR.__func__
 _RISK_RUIN = _RISK_RUIN_DESCRIPTOR.__func__
 _RISK_DERIVED = _RISK_DERIVED_DESCRIPTOR
+
+_RISK_HISTORY_FROZEN = _freeze_external_python_function_graph(_RISK_HISTORY)
+_RISK_QUOTE_FROZEN = _freeze_external_python_function_graph(_RISK_QUOTE)
+_RISK_RUIN_FROZEN = _freeze_external_python_function_graph(_RISK_RUIN)
+_RISK_DERIVED_FROZEN = _freeze_external_python_function_graph(_RISK_DERIVED)
 
 _ADMISSION_RISK_HELPER_WITNESSES = (
     ("_book_state", _RISK_BOOK_STATE_DESCRIPTOR, _RISK_BOOK_STATE, _RISK_BOOK_STATE.__code__, True),
@@ -298,7 +339,7 @@ def _resume_after_product_day_turnover(
         return RiskDecision(False, "virtual bankroll changed during risk evaluation")
     initial_bankroll, balance, committed_stake, _ = state
 
-    history_rooms = _RISK_HISTORY(
+    history_rooms = _RISK_HISTORY_FROZEN(
         PaperRiskPolicy,
         book,
         goal,
@@ -315,12 +356,12 @@ def _resume_after_product_day_turnover(
         if amount > room:
             return RiskDecision(False, reason)
 
-    quote_decision = _RISK_QUOTE(goal, context)
+    quote_decision = _RISK_QUOTE_FROZEN(goal, context)
     if quote_decision is not None:
         return quote_decision
 
     if goal.max_risk_of_ruin < Decimal("1"):
-        ruin_decision = _RISK_RUIN(
+        ruin_decision = _RISK_RUIN_FROZEN(
             PaperRiskPolicy,
             book,
             amount,
@@ -330,7 +371,7 @@ def _resume_after_product_day_turnover(
         if ruin_decision is not None:
             return ruin_decision
 
-    derived = _RISK_DERIVED(
+    derived = _RISK_DERIVED_FROZEN(
         risk_policy,
         initial_bankroll,
         balance,

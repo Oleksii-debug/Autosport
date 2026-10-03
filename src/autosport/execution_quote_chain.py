@@ -19,7 +19,9 @@ outcome resolver supplies that missing authority.
 
 from __future__ import annotations
 
-from dataclasses import InitVar, dataclass, field
+from dataclasses import dataclass, field
+from threading import RLock
+from types import MappingProxyType
 from decimal import Decimal
 from weakref import ReferenceType, ref
 
@@ -43,7 +45,6 @@ ACCEPTED_PRICE_NOT_APPLICABLE = "NOT_APPLICABLE"
 ACCEPTED_PRICE_ACKNOWLEDGED_UNVERIFIED = "ACKNOWLEDGED_UNVERIFIED"
 ACCEPTED_PRICE_UNKNOWN = "UNKNOWN"
 
-_QUOTE_CHAIN_EVIDENCE_ISSUANCE_TOKEN = object()
 
 _CANONICAL_REAL_EXECUTION_LEDGER = RealExecutionLedger
 _CANONICAL_VERIFIED_EXECUTION_VIEW = RealExecutionLedger.verified_execution_view
@@ -154,9 +155,8 @@ class ExecutionQuoteChainEvidence:
 
     schema_version: int = SCHEMA_VERSION
     _evidence_sha256: str = field(init=False, repr=False)
-    _issuance_token: InitVar[object | None] = None
 
-    def __post_init__(self, _issuance_token: object | None) -> None:
+    def __post_init__(self) -> None:
         if type(self.schema_version) is not int or self.schema_version != SCHEMA_VERSION:
             raise ExecutionQuoteChainError("unsupported quote-chain evidence schema")
         if type(self.source_event_count) is not int or self.source_event_count < 1:
@@ -275,37 +275,16 @@ class ExecutionQuoteChainEvidence:
                 "provider acknowledgement digest cannot match without acknowledgement"
             )
 
-        if _issuance_token is not _QUOTE_CHAIN_EVIDENCE_ISSUANCE_TOKEN:
-            raise ExecutionQuoteChainError(
-                "quote-chain evidence must be issued by canonical ledger projection"
-            )
-        object.__setattr__(
-            self,
-            "_evidence_sha256",
-            _digest(self.to_dict(include_evidence_sha256=False)),
-        )
+        # Product issuance is attached only after canonical ledger projection.
+        # Caller construction remains structurally valid but has no authority.
+        object.__setattr__(self, "_evidence_sha256", "")
 
     def assert_projection_issued(self) -> None:
         """Verify this object came from the canonical ledger projection builder."""
 
-        issued = _ISSUED_QUOTE_CHAIN_EVIDENCE.get(id(self))
-        try:
-            current_fingerprint = _digest(
-                self.to_dict(include_evidence_sha256=False)
-            )
-        except Exception as exc:
-            raise ExecutionQuoteChainError(
-                "quote-chain evidence is no longer canonical"
-            ) from exc
-        if (
-            issued is None
-            or issued[0]() is not self
-            or issued[1] != current_fingerprint
-            or self._evidence_sha256 != current_fingerprint
-        ):
-            raise ExecutionQuoteChainError(
-                "quote-chain evidence was not issued by canonical ledger projection"
-            )
+        raise ExecutionQuoteChainError(
+            "quote-chain evidence was not issued by canonical ledger projection"
+        )
 
     @property
     def submit_instruction_identity_bound(self) -> bool:
@@ -407,27 +386,6 @@ class ExecutionQuoteChainEvidence:
             payload["evidence_sha256"] = self.evidence_sha256
         return payload
 
-
-_ISSUED_QUOTE_CHAIN_EVIDENCE: dict[
-    int, tuple[ReferenceType[ExecutionQuoteChainEvidence], str]
-] = {}
-
-
-def _register_issued_quote_chain_evidence(
-    evidence: ExecutionQuoteChainEvidence,
-) -> None:
-    identity = id(evidence)
-
-    def _discard(reference: ReferenceType[ExecutionQuoteChainEvidence]) -> None:
-        current = _ISSUED_QUOTE_CHAIN_EVIDENCE.get(identity)
-        if current is not None and current[0] is reference:
-            _ISSUED_QUOTE_CHAIN_EVIDENCE.pop(identity, None)
-
-    reference = ref(evidence, _discard)
-    _ISSUED_QUOTE_CHAIN_EVIDENCE[identity] = (
-        reference,
-        evidence._evidence_sha256,
-    )
 
 
 def build_execution_quote_chain_evidence(
@@ -572,7 +530,140 @@ def build_execution_quote_chain_evidence(
         acknowledged_odds=acknowledged_odds,
         acknowledged_stake=acknowledged_stake,
         accepted_price_status=accepted_price_status,
-        _issuance_token=_QUOTE_CHAIN_EVIDENCE_ISSUANCE_TOKEN,
     )
-    _register_issued_quote_chain_evidence(evidence)
     return evidence
+
+
+def _install_quote_chain_evidence_authority() -> None:
+    """Keep the only issuance registry and mint path outside module globals."""
+
+    raw_builder = build_execution_quote_chain_evidence
+    raw_to_dict = ExecutionQuoteChainEvidence.to_dict
+    digest = _digest
+    issued_lock = RLock()
+    issued_snapshot = MappingProxyType({})
+
+    def _lookup(
+        evidence: ExecutionQuoteChainEvidence,
+        *,
+        require_fingerprint: bool,
+    ):
+        with issued_lock:
+            record = issued_snapshot.get(id(evidence))
+        if record is None or record[0]() is not evidence:
+            raise ExecutionQuoteChainError(
+                "quote-chain evidence was not issued by canonical ledger projection"
+            )
+        if not require_fingerprint:
+            return record
+        fingerprint = record[1]
+        if type(fingerprint) is not str or not fingerprint:
+            raise ExecutionQuoteChainError(
+                "quote-chain evidence issuance is incomplete"
+            )
+        try:
+            current = digest(
+                raw_to_dict(evidence, include_evidence_sha256=False)
+            )
+        except Exception as exc:
+            raise ExecutionQuoteChainError(
+                "quote-chain evidence is no longer canonical"
+            ) from exc
+        if (
+            fingerprint != current
+            or evidence._evidence_sha256 != current
+        ):
+            raise ExecutionQuoteChainError(
+                "quote-chain evidence was not issued by canonical ledger projection"
+            )
+        return record
+
+    def assert_projection_issued(self: ExecutionQuoteChainEvidence) -> None:
+        _lookup(self, require_fingerprint=True)
+
+    def actual_submitted_instruction_bound(
+        self: ExecutionQuoteChainEvidence,
+    ) -> bool:
+        _lookup(self, require_fingerprint=False)
+        return self.provider_request_correlation_bound
+
+    def evidence_sha256(self: ExecutionQuoteChainEvidence) -> str:
+        assert_projection_issued(self)
+        return self._evidence_sha256
+
+    def to_dict(
+        self: ExecutionQuoteChainEvidence,
+        *,
+        include_evidence_sha256: bool = True,
+    ) -> dict[str, object]:
+        assert_projection_issued(self)
+        payload = raw_to_dict(self, include_evidence_sha256=False)
+        if include_evidence_sha256:
+            payload["evidence_sha256"] = self._evidence_sha256
+        return payload
+
+    def issue(
+        ledger: RealExecutionLedger,
+        *,
+        plan_id: str,
+        attempt_id: str,
+    ) -> ExecutionQuoteChainEvidence:
+        nonlocal issued_snapshot
+        evidence = raw_builder(
+            ledger,
+            plan_id=plan_id,
+            attempt_id=attempt_id,
+        )
+        identity = id(evidence)
+
+        def discard(reference: ReferenceType[ExecutionQuoteChainEvidence]) -> None:
+            nonlocal issued_snapshot
+            with issued_lock:
+                current = issued_snapshot.get(identity)
+                if current is None or current[0] is not reference:
+                    return
+                updated = dict(issued_snapshot)
+                updated.pop(identity, None)
+                issued_snapshot = MappingProxyType(updated)
+
+        reference = ref(evidence, discard)
+        with issued_lock:
+            updated = dict(issued_snapshot)
+            updated[identity] = (reference, None)
+            issued_snapshot = MappingProxyType(updated)
+        try:
+            fingerprint = digest(
+                raw_to_dict(evidence, include_evidence_sha256=False)
+            )
+            object.__setattr__(evidence, "_evidence_sha256", fingerprint)
+            with issued_lock:
+                current = issued_snapshot.get(identity)
+                if current is None or current[0] is not reference:
+                    raise ExecutionQuoteChainError(
+                        "quote-chain evidence issuance disappeared"
+                    )
+                updated = dict(issued_snapshot)
+                updated[identity] = (reference, fingerprint)
+                issued_snapshot = MappingProxyType(updated)
+            assert_projection_issued(evidence)
+            return evidence
+        except Exception:
+            with issued_lock:
+                current = issued_snapshot.get(identity)
+                if current is not None and current[0] is reference:
+                    updated = dict(issued_snapshot)
+                    updated.pop(identity, None)
+                    issued_snapshot = MappingProxyType(updated)
+            raise
+
+    ExecutionQuoteChainEvidence.assert_projection_issued = assert_projection_issued
+    ExecutionQuoteChainEvidence.actual_submitted_instruction_bound = property(
+        actual_submitted_instruction_bound
+    )
+    ExecutionQuoteChainEvidence.evidence_sha256 = property(evidence_sha256)
+    ExecutionQuoteChainEvidence.to_dict = to_dict
+    globals()["build_execution_quote_chain_evidence"] = issue
+
+
+_install_quote_chain_evidence_authority()
+del _install_quote_chain_evidence_authority

@@ -5,6 +5,8 @@ from decimal import Decimal
 
 import pytest
 
+import autosport.execution_quote_chain as execution_quote_chain
+
 from autosport.execution_quote_chain import (
     ACCEPTED_PRICE_ACKNOWLEDGED_UNVERIFIED,
     ACCEPTED_PRICE_NOT_APPLICABLE,
@@ -539,3 +541,34 @@ def test_evidence_invariant_rejects_conflicting_future_request_digests(
             provider_request_sha256="b" * 64,
             chain_status=CHAIN_SUBMIT_INSTRUCTION_BOUND,
         )
+
+
+def test_quote_chain_mint_state_is_not_importable_from_module_namespace() -> None:
+    assert not hasattr(execution_quote_chain, "_QUOTE_CHAIN_EVIDENCE_ISSUANCE_TOKEN")
+    assert not hasattr(execution_quote_chain, "_ISSUED_QUOTE_CHAIN_EVIDENCE")
+    assert not hasattr(execution_quote_chain, "_register_issued_quote_chain_evidence")
+
+
+def test_reconstructed_quote_chain_cannot_mint_submit_binding(tmp_path) -> None:
+    canonical = _project(_submitted(tmp_path))
+    forged = replace(
+        canonical,
+        submission_instruction_sha256="a" * 64,
+        provider_evidence_id="b" * 64,
+        provider_evidence_observed_at=PROVIDER,
+        provider_evidence_source="caller-forged-provider-evidence",
+        provider_request_sha256="a" * 64,
+        chain_status=CHAIN_SUBMIT_INSTRUCTION_BOUND,
+    )
+
+    with pytest.raises(
+        ExecutionQuoteChainError,
+        match="not issued by canonical ledger projection",
+    ):
+        _ = forged.actual_submitted_instruction_bound
+
+    with pytest.raises(
+        ExecutionQuoteChainError,
+        match="not issued by canonical ledger projection",
+    ):
+        _ = forged.evidence_sha256

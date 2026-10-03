@@ -63,6 +63,24 @@ _CANONICAL_MONOTONIC_AUTHORITY_CLASS_SURFACE: Final = tuple(
     )
 )
 
+_CANONICAL_MONOTONIC_AUTHORITY_METHOD_SURFACE: Final = {
+    name: (
+        descriptor,
+        getattr(
+            getattr(descriptor, "__func__", descriptor),
+            "__code__",
+            None,
+        ),
+    )
+    for name in ("prepare", "commit", "recover", "read_history")
+    for descriptor in (
+        vars(MonotonicWorkspaceAuthority).get(
+            name,
+            _MISSING_AUTHORITY_CLASS_SLOT,
+        ),
+    )
+}
+
 # The instance dictionary is retained for explicit crash/fault injection seams, but
 # positive/read authority must never dispatch through caller-owned instance shadows.
 # These methods either expose validated durable truth or are part of its verification
@@ -123,6 +141,41 @@ def _assert_canonical_monotonic_authority_constructor() -> None:
             raise DeploymentRuntimeAuthorityError(
                 "monotonic workspace authority constructor dispatch was replaced"
             )
+
+
+def _canonical_monotonic_authority_method(
+    authority: MonotonicWorkspaceAuthority,
+    name: str,
+) -> Any:
+    if type(authority) is not _CANONICAL_MONOTONIC_AUTHORITY_TYPE:
+        raise DeploymentRuntimeAuthorityError(
+            "monotonic workspace authority method dispatch was replaced"
+        )
+    expected = _CANONICAL_MONOTONIC_AUTHORITY_METHOD_SURFACE.get(name)
+    current = vars(_CANONICAL_MONOTONIC_AUTHORITY_TYPE).get(
+        name,
+        _MISSING_AUTHORITY_CLASS_SLOT,
+    )
+    if expected is None:
+        raise DeploymentRuntimeAuthorityError(
+            "monotonic workspace authority method dispatch was replaced"
+        )
+    expected_descriptor, expected_code = expected
+    current_callable = getattr(current, "__func__", current)
+    if (
+        current is not expected_descriptor
+        or (
+            expected_code is not None
+            and getattr(current_callable, "__code__", None) is not expected_code
+        )
+    ):
+        raise DeploymentRuntimeAuthorityError(
+            "monotonic workspace authority method dispatch was replaced"
+        )
+    return expected_descriptor.__get__(
+        authority,
+        _CANONICAL_MONOTONIC_AUTHORITY_TYPE,
+    )
 
 
 def _construct_monotonic_authority(
@@ -744,7 +797,10 @@ class DeploymentRuntimeAuthorityStore:
             store = cls.__new__(cls)
             store._configure(destination, authority_root=authority_root)
             store._assert_binding_integrity()
-            recovery = store._authority.recover(observed_state_sha256=None)
+            recovery = _canonical_monotonic_authority_method(
+                store._authority,
+                "recover",
+            )(observed_state_sha256=None)
             if recovery.committed_state_sha256 is not None:
                 raise DeploymentRuntimeAuthorityError(
                     "runtime authority workspace is not pristine"
@@ -752,7 +808,10 @@ class DeploymentRuntimeAuthorityStore:
 
             intended_sha256 = store._state_sha256(payload)
             tx_id = store._new_transaction_id()
-            store._authority.prepare(
+            _canonical_monotonic_authority_method(
+                store._authority,
+                "prepare",
+            )(
                 tx_id=tx_id,
                 observed_state_sha256=None,
                 intended_state_sha256=intended_sha256,
@@ -767,7 +826,10 @@ class DeploymentRuntimeAuthorityStore:
                 raise DeploymentRuntimeAuthorityError(
                     "published pristine runtime authority state does not match prepared digest"
                 )
-            store._authority.commit(
+            _canonical_monotonic_authority_method(
+                store._authority,
+                "commit",
+            )(
                 tx_id=tx_id,
                 observed_state_sha256=published_sha256,
                 semantic_binding_sha256=store._semantic_binding_sha256,
@@ -816,7 +878,10 @@ class DeploymentRuntimeAuthorityStore:
         try:
             raw = self.path.read_text(encoding="utf-8")
         except FileNotFoundError as exc:
-            self._authority.recover(observed_state_sha256=None)
+            _canonical_monotonic_authority_method(
+            self._authority,
+            "recover",
+        )(observed_state_sha256=None)
             raise DeploymentRuntimeAuthorityError(
                 "cannot read runtime authority store"
             ) from exc
@@ -946,7 +1011,10 @@ class DeploymentRuntimeAuthorityStore:
     ) -> None:
         self._assert_binding_integrity()
         state_sha256 = self._state_sha256(payload)
-        history = self._authority.read_history()
+        history = _canonical_monotonic_authority_method(
+            self._authority,
+            "read_history",
+        )()
         if any(
             record.semantic_binding_sha256 != self._semantic_binding_sha256
             for record in history
@@ -962,7 +1030,10 @@ class DeploymentRuntimeAuthorityStore:
             and latest.intended_state_sha256 == state_sha256
             else None
         )
-        recovery = self._authority.recover(
+        recovery = _canonical_monotonic_authority_method(
+            self._authority,
+            "recover",
+        )(
             observed_state_sha256=state_sha256,
             tx_id=pending_tx_id,
             semantic_binding_sha256=(
@@ -1060,7 +1131,10 @@ class DeploymentRuntimeAuthorityStore:
             }
             intended_sha256 = self._state_sha256(payload)
             tx_id = self._new_transaction_id()
-            self._authority.prepare(
+            _canonical_monotonic_authority_method(
+                self._authority,
+                "prepare",
+            )(
                 tx_id=tx_id,
                 observed_state_sha256=observed_sha256,
                 intended_state_sha256=intended_sha256,
@@ -1075,7 +1149,10 @@ class DeploymentRuntimeAuthorityStore:
                 raise DeploymentRuntimeAuthorityError(
                     "published runtime authority state does not match prepared digest"
                 )
-            self._authority.commit(
+            _canonical_monotonic_authority_method(
+                self._authority,
+                "commit",
+            )(
                 tx_id=tx_id,
                 observed_state_sha256=published_sha256,
                 semantic_binding_sha256=self._semantic_binding_sha256,

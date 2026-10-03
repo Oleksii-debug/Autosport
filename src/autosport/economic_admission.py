@@ -1131,6 +1131,9 @@ def _revalidated_product_day_admission_authority(
         )
         if admission_ts is None:
             return None
+        admission_time = _parse_utc_timestamp(admission_ts)
+        if admission_time is None or admission_time < candidate_time:
+            return None
         _require_product_day_turnover_dispatch()
         return _ProductDayAdmissionAuthority(
             turnover_room=room,

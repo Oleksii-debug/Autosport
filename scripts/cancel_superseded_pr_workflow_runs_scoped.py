@@ -210,6 +210,7 @@ class WorkflowScopedGitHubApi(GitHubApi):
         _request_code=GitHubApi._request.__code__,
         _pulls_per_page: int = _PULLS_PER_PAGE,
         _encode_query=urlencode,
+        _encode_query_code=urlencode.__code__,
         _error_type=CancellationError,
         _absent_type=_HistoricalAssociationAbsent,
         _ambiguous_type=_HistoricalAssociationAmbiguous,
@@ -246,6 +247,7 @@ class WorkflowScopedGitHubApi(GitHubApi):
                 getattr(_request_impl, "__code__", None) is _request_code
                 and getattr(bound, "__self__", None) is self
                 and getattr(bound, "__func__", None) is _request_impl
+                and getattr(_encode_query, "__code__", None) is _encode_query_code
             )
 
         head_sha = require_sha_primitive(
@@ -257,6 +259,7 @@ class WorkflowScopedGitHubApi(GitHubApi):
             or _pulls_per_page <= 0
             or _pulls_per_page > 100
             or not callable(_encode_query)
+            or getattr(_encode_query, "__code__", None) is not _encode_query_code
             or not request_dispatch_current()
         ):
             raise _error_type("historical association authority is unavailable")
@@ -389,6 +392,7 @@ class WorkflowScopedGitHubApi(GitHubApi):
         _request_code=GitHubApi._request.__code__,
         _pulls_per_page: int = _PULLS_PER_PAGE,
         _encode_query=urlencode,
+        _encode_query_code=urlencode.__code__,
         _error_type=CancellationError,
     ) -> bool:
         """Return true only for a well-formed commit association response with zero PRs."""
@@ -399,6 +403,7 @@ class WorkflowScopedGitHubApi(GitHubApi):
                 getattr(_request_impl, "__code__", None) is _request_code
                 and getattr(bound, "__self__", None) is self
                 and getattr(bound, "__func__", None) is _request_impl
+                and getattr(_encode_query, "__code__", None) is _encode_query_code
             )
 
         if type(head_sha) is not str or len(head_sha) != 40:
@@ -411,6 +416,7 @@ class WorkflowScopedGitHubApi(GitHubApi):
             or _pulls_per_page <= 0
             or _pulls_per_page > 100
             or not callable(_encode_query)
+            or getattr(_encode_query, "__code__", None) is not _encode_query_code
             or not request_dispatch_current()
         ):
             raise _error_type("historical association authority is unavailable")
@@ -450,6 +456,7 @@ class WorkflowScopedGitHubApi(GitHubApi):
         _request_impl=GitHubApi._request,
         _request_code=GitHubApi._request.__code__,
         _encode_branch=quote,
+        _encode_branch_code=quote.__code__,
         _allowed_http_error_type=_AllowedHttpError,
         _error_type=CancellationError,
     ) -> str | None:
@@ -461,9 +468,15 @@ class WorkflowScopedGitHubApi(GitHubApi):
                 getattr(_request_impl, "__code__", None) is _request_code
                 and getattr(bound, "__self__", None) is self
                 and getattr(bound, "__func__", None) is _request_impl
+                and getattr(_encode_branch, "__code__", None) is _encode_branch_code
             )
 
-        if type(branch) is not str or not branch or not callable(_encode_branch):
+        if (
+            type(branch) is not str
+            or not branch
+            or not callable(_encode_branch)
+            or getattr(_encode_branch, "__code__", None) is not _encode_branch_code
+        ):
             raise _error_type("invalid canonical head branch")
         if not request_dispatch_current():
             raise _error_type("canonical branch request dispatch changed")
@@ -835,6 +848,10 @@ class WorkflowScopedGitHubApi(GitHubApi):
         _active_statuses: tuple[str, ...] = _ACTIVE_STATUSES,
         _runs_per_page: int = _RUNS_PER_PAGE,
         _encode_query=urlencode,
+        _encode_query_code=urlencode.__code__,
+        _run_parser=parse_run,
+        _run_parser_code=parse_run.__code__,
+        _workflow_run_type=WorkflowRun,
     ) -> tuple[WorkflowRun, ...]:
         if (
             type(_active_statuses) is not tuple
@@ -848,6 +865,8 @@ class WorkflowScopedGitHubApi(GitHubApi):
             or _runs_per_page <= 0
             or _runs_per_page > 100
             or not callable(_encode_query)
+            or getattr(_encode_query, "__code__", None) is not _encode_query_code
+            or getattr(_run_parser, "__code__", None) is not _run_parser_code
         ):
             raise CancellationError("active workflow pagination authority is unavailable")
         workflow_id = object.__getattribute__(
@@ -858,6 +877,23 @@ class WorkflowScopedGitHubApi(GitHubApi):
             self,
             "_WorkflowScopedGitHubApi__workflow_name",
         )
+        recovery_reader = self._recover_candidate_run_reference
+        recovery_func = getattr(recovery_reader, "__func__", recovery_reader)
+        recovery_code = getattr(recovery_func, "__code__", None)
+
+        def snapshot_helpers_current() -> bool:
+            bound_recovery = self._recover_candidate_run_reference
+            return (
+                getattr(_encode_query, "__code__", None) is _encode_query_code
+                and getattr(_run_parser, "__code__", None) is _run_parser_code
+                and recovery_code is not None
+                and getattr(bound_recovery, "__func__", bound_recovery) is recovery_func
+                and getattr(recovery_func, "__code__", None) is recovery_code
+            )
+
+        if not snapshot_helpers_current():
+            raise CancellationError("active workflow snapshot authority changed")
+
         runs: list[WorkflowRun] = []
         page = 1
         while True:
@@ -872,6 +908,8 @@ class WorkflowScopedGitHubApi(GitHubApi):
             payload = self._request(
                 f"/actions/workflows/{workflow_id}/runs?{query}"
             )
+            if not snapshot_helpers_current():
+                raise CancellationError("active workflow snapshot authority changed")
             if (
                 object.__getattribute__(
                     self,
@@ -894,9 +932,9 @@ class WorkflowScopedGitHubApi(GitHubApi):
                 raise CancellationError("invalid workflow-runs response")
             page_runs = payload["workflow_runs"]
             for item in page_runs:
-                run = parse_run(item)
+                run = _run_parser(item)
                 if run.workflow_name != workflow_name:
-                    run = WorkflowRun(
+                    run = _workflow_run_type(
                         run_id=run.run_id,
                         head_sha=run.head_sha,
                         workflow_name=workflow_name,
@@ -946,7 +984,7 @@ class WorkflowScopedGitHubApi(GitHubApi):
                     # cleanup for the remainder of this exact-workflow snapshot.
                     self._explicit_active_run_ids.add(run.run_id)
                     self._unbound_active_runs.pop(run.run_id, None)
-                runs.append(self._recover_candidate_run_reference(run))
+                runs.append(recovery_reader(run))
             total_count = payload["total_count"]
             # Active-run collections are inherently moving while a controller scans
             # them. A short page is therefore a safe terminal snapshot even when the

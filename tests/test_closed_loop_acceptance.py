@@ -11,6 +11,7 @@ from autosport.agent_loop import (
     AgentLoopPhase,
     AgentLoopRuntime,
     AttributionComponent,
+    AttributionEvidenceGrade,
     AttributionFinding,
     AttributionStatus,
     ExternalEffectState,
@@ -186,6 +187,7 @@ def _resolved_agent_episode(tmp_path):
             AttributionFinding(
                 component=AttributionComponent.RANDOMNESS,
                 status=AttributionStatus.UNKNOWN,
+                evidence_grade=AttributionEvidenceGrade.NOT_IDENTIFIABLE,
                 evidence_sha256=RANDOMNESS_SHA,
                 evidence_available_at="2025-12-31T00:00:03+00:00",
                 reason_code="UNRESOLVED_RANDOMNESS",

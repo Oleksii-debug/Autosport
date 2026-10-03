@@ -8,6 +8,7 @@ from autosport.agent_loop import (
     AgentLoopPhase,
     AgentLoopRuntime,
     AttributionComponent,
+    AttributionEvidenceGrade,
     AttributionFinding,
     AttributionStatus,
     ExternalEffectState,
@@ -459,6 +460,7 @@ def test_resume_rejects_checkpoint_older_than_durable_agent_loop(tmp_path):
     finding = AttributionFinding(
         component=AttributionComponent.DATA,
         status=AttributionStatus.SUPPORTED,
+        evidence_grade=AttributionEvidenceGrade.FACTUAL_MECHANICAL,
         evidence_sha256="d" * 64,
         evidence_available_at=T1,
         contribution=Decimal("0"),

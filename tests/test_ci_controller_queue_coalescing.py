@@ -47,6 +47,29 @@ def test_stale_triggering_source_run_is_cancelled_after_live_snapshot_recheck() 
     assert api.cancelled == [91]
 
 
+def test_trigger_boundary_qualification_read_failure_fails_closed() -> None:
+    qualification = PullRequestQualification(
+        head_sha=HEAD,
+        integration_capable=False,
+    )
+
+    class ReadFailureApi(FakeApi):
+        def live_pr_qualification(self, pr_number: int) -> PullRequestQualification:
+            assert pr_number == 2039
+            raise CancellationError("fixture boundary reread unavailable")
+
+    api = ReadFailureApi(qualification)
+
+    assert not _cancel_triggering_run_if_stale_or_nonqualifying(
+        api,  # type: ignore[arg-type]
+        pr_number=2039,
+        event_head_sha=HEAD,
+        current_run_id=91,
+        qualification=qualification,
+    )
+    assert api.cancelled == []
+
+
 def test_current_ready_source_run_is_preserved() -> None:
     qualification = PullRequestQualification(
         head_sha=HEAD,

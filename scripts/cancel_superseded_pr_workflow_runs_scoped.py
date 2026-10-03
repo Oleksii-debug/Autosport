@@ -607,7 +607,13 @@ def _cancel_triggering_run_if_stale_or_nonqualifying(
     )
     if not stale and not same_head_nonqualifying:
         return False
-    if api.live_pr_qualification(pr_number) != qualification:
+    try:
+        current_qualification = api.live_pr_qualification(pr_number)
+    except CancellationError:
+        # A failed authority reread grants no trigger cancellation authority, but it
+        # must not invalidate independently completed workflow-wide cleanup.
+        return False
+    if current_qualification != qualification:
         return False
     api.cancel(current_run_id)
     return True
@@ -669,14 +675,21 @@ def main(argv: list[str] | None = None) -> int:
         if trigger_pr_number is not None:
             # Refresh after the potentially long sweep; the helper itself rereads once
             # more immediately before cancelling this exact triggering source run.
-            trigger_qualification = api.live_pr_qualification(trigger_pr_number)
-            _cancel_triggering_run_if_stale_or_nonqualifying(
-                api,
-                pr_number=trigger_pr_number,
-                event_head_sha=event_head_sha,
-                current_run_id=current_run_id,
-                qualification=trigger_qualification,
-            )
+            try:
+                trigger_qualification = api.live_pr_qualification(trigger_pr_number)
+            except CancellationError:
+                # Trigger qualification is authority for this one source run only.
+                # Failure proves no cancellation authority and must not turn already
+                # completed workflow-wide reconciliation into a controller failure.
+                trigger_qualification = None
+            if trigger_qualification is not None:
+                _cancel_triggering_run_if_stale_or_nonqualifying(
+                    api,
+                    pr_number=trigger_pr_number,
+                    event_head_sha=event_head_sha,
+                    current_run_id=current_run_id,
+                    qualification=trigger_qualification,
+                )
     except CancellationError as exc:
         print(f"superseded-run cancellation failed: {exc}", file=sys.stderr)
         return 2

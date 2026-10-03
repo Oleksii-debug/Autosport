@@ -247,9 +247,11 @@ def test_qualification_constructor_code_mutation_is_rejected() -> None:
     def forged_init(self, head_sha, integration_capable):
         del self, head_sha, integration_capable
 
-    assert len(forged_init.__code__.co_freevars) == len(original_code.co_freevars)
+    forged_code = forged_init.__code__.replace(
+        co_freevars=original_code.co_freevars,
+    )
     try:
-        target.__code__ = forged_init.__code__
+        target.__code__ = forged_code
         with pytest.raises(
             CancellationError,
             match="pull request qualification authority changed",

@@ -884,6 +884,40 @@ class BetdaqEconomicReadbackClient:
     def read_order_details(self, order_id: int | str) -> BetdaqOrderSettlementObservation:
         order = _provider_id(order_id, "order_id")
         result, evidence = self._call("GetOrderDetails", {"OrderId": order})
+        _require_known_provider_attributes(
+            result,
+            allowed=(
+                "SelectionId",
+                "OrderStatus",
+                "IssuedAt",
+                "LastChangedAt",
+                "ExpiresAt",
+                "ValidFrom",
+                "RestrictOrderToBroker",
+                "OrderFillType",
+                "FillOrKillThreshold",
+                "MarketId",
+                "MarketStatus",
+                "RequestedStake",
+                "RequestedPrice",
+                "ExpectedSelectionResetCount",
+                "TotalStake",
+                "UnmatchedStake",
+                "AveragePrice",
+                "MatchingTimeStamp",
+                "Polarity",
+                "WithdrawlRepriceOption",
+                "WithdrawalRepriceOption",
+                "CancelOnInRunning",
+                "CancelIfSelectionReset",
+                "SequenceNumber",
+                "MarketType",
+                "ExpectedWithdrawlSequenceNumber",
+                "ExpectedWithdrawalSequenceNumber",
+                "PunterReferenceNumber",
+            ),
+            context="BETDAQ GetOrderDetailsResult",
+        )
         settlement_nodes = [
             child
             for child in result
@@ -894,6 +928,17 @@ class BetdaqEconomicReadbackClient:
                 "GetOrderDetails has duplicate OrderSettlementInformation"
             )
         settlement = settlement_nodes[0] if settlement_nodes else None
+        if settlement is not None:
+            _require_known_provider_attributes(
+                settlement,
+                allowed=(
+                    "GrossSettlementAmount",
+                    "OrderCommission",
+                    "MarketCommission",
+                    "MarketSettledDate",
+                ),
+                context="BETDAQ OrderSettlementInformation",
+            )
         gross = (
             None
             if settlement is None
@@ -1300,6 +1345,22 @@ def _parse_economic_soap_result(payload: bytes, method: str) -> ET.Element:
     return result
 
 
+def _require_known_provider_attributes(
+    element: ET.Element,
+    *,
+    allowed: tuple[str, ...],
+    context: str,
+) -> None:
+    unexpected = tuple(
+        sorted(name for name in element.attrib if name not in allowed)
+    )
+    if unexpected:
+        raise BetdaqEconomicReadbackError(
+            f"{context} contains unexpected provider attribute: "
+            + ", ".join(unexpected)
+        )
+
+
 def _split_tag(tag: str) -> tuple[str, str]:
     if type(tag) is not str:
         raise BetdaqEconomicReadbackError("BETDAQ XML tag must be text")
@@ -1330,6 +1391,28 @@ def _parse_postings_result(
         raise BetdaqEconomicReadbackError(
             "BETDAQ postings result must contain exactly one Orders element"
         )
+    _require_known_provider_attributes(
+        result,
+        allowed=(
+            (
+                "Currency",
+                "AvailableFunds",
+                "Balance",
+                "Credit",
+                "Exposure",
+                "HaveAllPostingsBeenReturned",
+            )
+            if method == "ListAccountPostings"
+            else (
+                "Currency",
+                "AvailableFunds",
+                "Balance",
+                "Credit",
+                "Exposure",
+            )
+        ),
+        context=f"BETDAQ {method}Result",
+    )
     currency = _required_attr(result, "Currency")
     # The provider API specification gives two paging-order laws that are
     # authority-bearing for continuation:
@@ -1353,6 +1436,20 @@ def _parse_postings_result(
             raise BetdaqEconomicReadbackError(
                 "BETDAQ postings Orders contains unexpected element"
             )
+        _require_known_provider_attributes(
+            child,
+            allowed=(
+                "PostedAt",
+                "Description",
+                "Amount",
+                "ResultingBalance",
+                "PostingCategory",
+                "OrderId",
+                "MarketId",
+                "TransactionId",
+            ),
+            context="BETDAQ posting row",
+        )
         transaction_id = _provider_id(
             _required_attr(child, "TransactionId"), "TransactionId"
         )

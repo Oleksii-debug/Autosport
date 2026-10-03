@@ -51,6 +51,33 @@ class _CancellationAuthorityChanged(CancellationError):
     """A valid candidate lost cancellation authority during the boundary reread."""
 
 
+_ACTIVE_CANCELLATION_CONFLICT_MESSAGE = (
+    "workflow run cancellation conflicted while run remains active"
+)
+
+
+def _cancel_run_or_defer_active_conflict(api, run_id: int) -> bool:
+    """Attempt one authorized cancel without promoting a 409-active race to success.
+
+    Canonical GitHubApi.cancel() proves HTTP 202 acceptance or completed status after a
+    409. Its exact 409-active error means this controller obtained no cancellation
+    effect because another actor may already be racing the same run. Defer that run to a
+    later sweep, but preserve every other cancellation error as fatal/unknown.
+    """
+
+    run_id = _require_positive_int(run_id, field="run id")
+    try:
+        api.cancel(run_id)
+    except CancellationError as exc:
+        if (
+            exc.__class__ is CancellationError
+            and str(exc) == _ACTIVE_CANCELLATION_CONFLICT_MESSAGE
+        ):
+            return False
+        raise
+    return True
+
+
 class WorkflowScopedGitHubApi(GitHubApi):
     """Trusted controller API narrowed to one exact source workflow id.
 
@@ -572,11 +599,13 @@ class WorkflowScopedGitHubApi(GitHubApi):
                     head_branch,
                 )
                 try:
-                    self.cancel(run_id)
+                    did_cancel = _cancel_run_or_defer_active_conflict(self, run_id)
                 except _CancellationAuthorityChanged:
                     self._zero_association_recovered_runs.pop(run_id, None)
                     continue
                 self._zero_association_recovered_runs.pop(run_id, None)
+                if not did_cancel:
+                    continue
                 cancelled.append(run_id)
                 continue
             except _HistoricalAssociationAmbiguous:
@@ -595,11 +624,13 @@ class WorkflowScopedGitHubApi(GitHubApi):
                 continue
             self._recovered_runs[run_id] = (pr_number, candidate_head_sha)
             try:
-                self.cancel(run_id)
+                did_cancel = _cancel_run_or_defer_active_conflict(self, run_id)
             except _CancellationAuthorityChanged:
                 self._recovered_runs.pop(run_id, None)
                 continue
             self._recovered_runs.pop(run_id, None)
+            if not did_cancel:
+                continue
             cancelled.append(run_id)
         return tuple(cancelled)
 
@@ -735,7 +766,8 @@ def cancel_superseded_explicit_pr_runs(
                 break
             if current_qualification != qualification:
                 break
-            api.cancel(run_id)
+            if not _cancel_run_or_defer_active_conflict(api, run_id):
+                continue
             cancelled.append(run_id)
             cancelled_ids.add(run_id)
     return tuple(cancelled)
@@ -775,8 +807,7 @@ def _cancel_triggering_run_if_stale_or_nonqualifying(
         return False
     if current_qualification != qualification:
         return False
-    api.cancel(current_run_id)
-    return True
+    return _cancel_run_or_defer_active_conflict(api, current_run_id)
 
 
 def main(argv: list[str] | None = None) -> int:

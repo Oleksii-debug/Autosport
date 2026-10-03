@@ -13,7 +13,6 @@ from .market_bus import MarketEventBus, MarketEventDeliveryError
 from .market_mirror import MarketMirror
 from .market_mirror_runtime import BoundedMirrorInvalidationBuffer
 from .providers import MarketProvider, ProviderBatch
-from .secret_redaction import safe_exception_text
 from .session import ObservationResult
 from .storage import SQLiteMarketStore
 
@@ -23,8 +22,6 @@ Clock = Callable[[], str]
 
 _MAX_SNAPSHOT_BATCHES = 256
 _MAX_BATCH_ATTEMPTS = 2
-_TERMINAL_ERROR_MAX_CHARS = 2048
-_TERMINAL_ERROR_TRUNCATION = "... [truncated]"
 
 
 @dataclass(frozen=True, slots=True)
@@ -111,7 +108,7 @@ class OneShotObservationWorker:
                 # setup disposition while retaining _thread/_busy ownership so a
                 # later poll can finish the reap instead of stranding the slot.
                 self._messages.put_nowait(
-                    ObservationWorkerMessage(error=self._safe_terminal_error(exc))
+                    ObservationWorkerMessage(error="BaseException: exception details unavailable")
                 )
                 raise
             if isinstance(exc, Exception):
@@ -130,23 +127,12 @@ class OneShotObservationWorker:
         if thread.ident is not None:
             thread.join()
 
-    @staticmethod
-    def _safe_terminal_error(_exc: BaseException) -> str:
-        """Return the fixed secret-free terminal disposition.
-
-        Exception-derived bytes are deliberately excluded from the poll/UIA
-        boundary. Detailed renderer output is not authority-bearing and cannot
-        be allowed to become a secret exfiltration path under runtime tampering.
-        """
-
-        return "BaseException: exception details unavailable"
-
     def _publish_setup_failure(self, exc: Exception) -> None:
         # Preserve the established caller contract: False means "already busy";
         # an ordinary setup failure returns True and publishes one terminal error.
         self._thread = None
         self._messages.put(
-            ObservationWorkerMessage(error=self._safe_terminal_error(exc))
+            ObservationWorkerMessage(error="BaseException: exception details unavailable")
         )
 
     def _release_unstarted_slot(self) -> None:
@@ -173,7 +159,7 @@ class OneShotObservationWorker:
             # not terminate the GUI process. Publish a terminal failure so poll()
             # clears the single-flight state instead of leaving live observation
             # permanently busy after the worker thread has already died.
-            message = ObservationWorkerMessage(error=self._safe_terminal_error(exc))
+            message = ObservationWorkerMessage(error="BaseException: exception details unavailable")
         self._messages.put(message)
 
     def poll(self) -> ObservationWorkerMessage | None:

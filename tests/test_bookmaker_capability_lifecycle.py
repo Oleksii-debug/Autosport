@@ -14,6 +14,7 @@ from autosport.bookmaker_capability import (
     BookmakerCapabilityState,
 )
 from autosport.bookmaker_capability_lifecycle import (
+    BETDAQ_AUTHENTICATED_MAX_OBSERVATION_AGE_SECONDS,
     BETDAQ_AUTHENTICATED_SOURCE_CONTRACT_REF,
     BETDAQ_AUTHENTICATED_VALIDATION_POLICY_VERSION,
     BetdaqAuthenticatedCapabilityIssuance,
@@ -137,6 +138,31 @@ def test_product_issued_betdaq_authenticated_evidence_can_authorize_bounded_read
     assert decision.lifecycle is CapabilityLifecycleState.CURRENT
     assert decision.availability is CapabilityAvailabilityState.UNKNOWN
     assert "product-issued authenticated" in decision.reason
+
+
+def test_betdaq_product_policy_rejects_caller_extended_freshness(monkeypatch):
+    issuance, _ = _betdaq_authenticated_issuance(monkeypatch)
+    journal = CapabilityEvidenceJournal()
+    journal.publish(issuance.evidence)
+    requirement = CapabilityRequirement(
+        BookmakerCapability.BALANCE_READ,
+        CapabilityEvidenceStrength.OBSERVED_AUTHENTICATED,
+        issuance.evidence.scope,
+        BETDAQ_AUTHENTICATED_VALIDATION_POLICY_VERSION,
+        BETDAQ_AUTHENTICATED_SOURCE_CONTRACT_REF,
+        BETDAQ_AUTHENTICATED_MAX_OBSERVATION_AGE_SECONDS + 1,
+        require_available=False,
+    )
+
+    decision = journal.resolve(
+        requirement,
+        {issuance.profile.profile_id: issuance.profile},
+        as_of="2026-09-21T10:02:00+00:00",
+    )
+
+    assert not decision.allowed
+    assert decision.lifecycle is CapabilityLifecycleState.REVALIDATION_REQUIRED
+    assert "exceeds BETDAQ product policy" in decision.reason
 
 
 def test_product_issued_betdaq_evidence_does_not_mint_available_health(monkeypatch):

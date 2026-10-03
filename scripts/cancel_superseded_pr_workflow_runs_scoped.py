@@ -578,6 +578,7 @@ def _explicit_singleton_pr_for_current_run(
     *,
     workflow_name: str,
     current_run_id: int,
+    event_head_sha: str,
 ) -> int | None:
     """Derive current source-run PR identity only from one consistent explicit snapshot.
 
@@ -589,6 +590,7 @@ def _explicit_singleton_pr_for_current_run(
     """
 
     current_run_id = _require_positive_int(current_run_id, field="current run id")
+    event_head_sha = _require_sha(event_head_sha, field="event head sha")
     if type(workflow_name) is not str or not workflow_name:
         raise CancellationError("workflow name is required")
     current_entries = tuple(
@@ -596,7 +598,10 @@ def _explicit_singleton_pr_for_current_run(
         for run in runs
         if run.run_id == current_run_id and run.workflow_name == workflow_name
     )
-    if not current_entries or any(len(run.pr_numbers) != 1 for run in current_entries):
+    if not current_entries or any(
+        run.head_sha != event_head_sha or len(run.pr_numbers) != 1
+        for run in current_entries
+    ):
         return None
     pr_numbers = {run.pr_numbers[0] for run in current_entries}
     if len(pr_numbers) != 1:
@@ -776,6 +781,7 @@ def main(argv: list[str] | None = None) -> int:
                 sweep_runs,
                 workflow_name=args.workflow_name,
                 current_run_id=current_run_id,
+                event_head_sha=event_head_sha,
             )
         sweep_cancelled = cancel_superseded_explicit_pr_runs(
             api,
@@ -788,10 +794,11 @@ def main(argv: list[str] | None = None) -> int:
         # An explicitly identified triggering source run has its own
         # live-qualification boundary below, so keep it out of orphan cleanup to avoid
         # a second cancellation race if the Actions list has meanwhile lost embedded
-        # PR references. A zero-identity trigger has no separate PR boundary below;
-        # when active_runs() recorded that exact current run as truly unbound, the
-        # historical orphan resolver is its only authorized cleanup path and must be
-        # allowed to consider it.
+        # PR references. A still-zero trigger has no separate PR boundary below; when
+        # the exact snapshot recorded that current run as truly unbound, the historical
+        # orphan resolver is its only authorized cleanup path and must be allowed to
+        # consider it. A zero event identity recovered from a same-run/same-head explicit
+        # singleton snapshot uses the ordinary trigger boundary below instead.
         orphan_excluded_run_ids = (
             (current_run_id, *sweep_cancelled)
             if trigger_pr_number is not None

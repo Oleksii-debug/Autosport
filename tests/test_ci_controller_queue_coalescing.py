@@ -141,22 +141,32 @@ def test_current_run_snapshot_identity_requires_one_consistent_singleton() -> No
         (singleton,),
         workflow_name="CI",
         current_run_id=91,
+        event_head_sha=HEAD,
     ) == 2039
 
     assert _explicit_singleton_pr_for_current_run(
         (singleton, _run(91, HEAD, (2039, 2040))),
         workflow_name="CI",
         current_run_id=91,
+        event_head_sha=HEAD,
     ) is None
     assert _explicit_singleton_pr_for_current_run(
         (singleton, _run(91, HEAD, (2040,))),
         workflow_name="CI",
         current_run_id=91,
+        event_head_sha=HEAD,
     ) is None
     assert _explicit_singleton_pr_for_current_run(
         (_run(92, HEAD, (2039,)),),
         workflow_name="CI",
         current_run_id=91,
+        event_head_sha=HEAD,
+    ) is None
+    assert _explicit_singleton_pr_for_current_run(
+        (_run(91, STALE_HEAD, (2039,)),),
+        workflow_name="CI",
+        current_run_id=91,
+        event_head_sha=HEAD,
     ) is None
 
 

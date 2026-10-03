@@ -91,6 +91,43 @@ _ASSERT_CAPITAL_ISSUED_CURRENT_CODE = getattr(
     "__code__",
     None,
 )
+_CAPITAL_RISK_VERIFIED_EXECUTION_VIEW = getattr(
+    _capital_risk,
+    "_VERIFIED_EXECUTION_VIEW",
+    None,
+)
+_CAPITAL_RISK_VERIFIED_SNAPSHOT = getattr(
+    _capital_risk,
+    "_VERIFIED_SNAPSHOT",
+    None,
+)
+_CAPITAL_RISK_HELPER_NAMES = (
+    "_ledger_source_sha256",
+    "_attempt_risk",
+    "_requested_limit_capital",
+    "_accepted_capital",
+    "_sum_capital",
+    "_add",
+    "_subtract",
+    "_subtract_nonnegative",
+    "_evidence_payload",
+    "_evidence_digest",
+    "_issue",
+)
+_CAPITAL_RISK_HELPERS = tuple(
+    (
+        name,
+        getattr(_capital_risk, name, None),
+        getattr(getattr(_capital_risk, name, None), "__code__", None),
+    )
+    for name in _CAPITAL_RISK_HELPER_NAMES
+)
+_CAPITAL_RISK_JSON_DUMPS = getattr(getattr(_capital_risk, "json", None), "dumps", None)
+_CAPITAL_RISK_HASHLIB_SHA256 = getattr(
+    getattr(_capital_risk, "hashlib", None),
+    "sha256",
+    None,
+)
 _ECONOMIC_GOAL_STORE_TYPE = EconomicGoalStore
 _ECONOMIC_GOAL_STORE_PATH_TYPE = getattr(_economic_goal_store, "Path", None)
 _ECONOMIC_GOAL_STORE_PATH_READ_TEXT = getattr(
@@ -388,15 +425,33 @@ def _canonical_capital_risk_dispatch(
     _resolve_code=_RESOLVE_CAPITAL_AT_RISK_CODE,
     _assert_current=_ASSERT_CAPITAL_ISSUED_CURRENT,
     _assert_current_code=_ASSERT_CAPITAL_ISSUED_CURRENT_CODE,
+    _verified_execution_view=_CAPITAL_RISK_VERIFIED_EXECUTION_VIEW,
+    _verified_snapshot=_CAPITAL_RISK_VERIFIED_SNAPSHOT,
+    _helpers=_CAPITAL_RISK_HELPERS,
+    _json_dumps=_CAPITAL_RISK_JSON_DUMPS,
+    _sha256=_CAPITAL_RISK_HASHLIB_SHA256,
 ):
     live_resolve = getattr(_capital_risk, "resolve_execution_capital_at_risk", None)
     live_assert = vars(ExecutionCapitalAtRiskEvidence).get("assert_issued_current")
+    helper_changed = any(
+        getattr(_capital_risk, name, None) is not expected
+        or getattr(expected, "__code__", None) is not expected_code
+        for name, expected, expected_code in _helpers
+    )
     if (
         live_resolve is not _resolve
         or globals().get("resolve_execution_capital_at_risk") is not _resolve
         or getattr(_resolve, "__code__", None) is not _resolve_code
         or live_assert is not _assert_current
         or getattr(_assert_current, "__code__", None) is not _assert_current_code
+        or getattr(_capital_risk, "_VERIFIED_EXECUTION_VIEW", None)
+        is not _verified_execution_view
+        or getattr(_capital_risk, "_VERIFIED_SNAPSHOT", None) is not _verified_snapshot
+        or _verified_execution_view is not _VERIFIED_EXECUTION_VIEW
+        or _verified_snapshot is not _VERIFIED_SNAPSHOT
+        or helper_changed
+        or getattr(getattr(_capital_risk, "json", None), "dumps", None) is not _json_dumps
+        or getattr(getattr(_capital_risk, "hashlib", None), "sha256", None) is not _sha256
     ):
         raise ProviderAccountHeadroomError(
             "canonical capital-at-risk headroom authority changed"

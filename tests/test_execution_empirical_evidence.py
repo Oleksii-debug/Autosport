@@ -322,6 +322,57 @@ def test_unknown_positive_reconciliation_is_retained_pending_terminal_ack(tmp_pa
     assert evidence.slippage_status == SLIPPAGE_STATUS_UNKNOWN
 
 
+def test_direct_construction_cannot_forge_reconciliation_receipt_without_evidence(
+    tmp_path,
+):
+    evidence = build_empirical_execution_evidence(
+        _ledger(tmp_path),
+        attempt_id="attempt-1",
+    )
+
+    with pytest.raises(
+        EmpiricalExecutionEvidenceError,
+        match="receipt requires durable reconciliation evidence",
+    ):
+        replace(
+            evidence,
+            reconciliation_external_receipt_id="forged-receipt",
+        )
+
+
+def test_positive_reconciliation_direct_construction_requires_receipt_identity(
+    tmp_path,
+):
+    ledger = _ledger(tmp_path)
+    ledger.mark_unknown(
+        "attempt-1",
+        reason="provider timeout after submission",
+        observed_at="2026-09-21T10:00:02+00:00",
+    )
+    ledger.reconcile_found(
+        ExternalEffectReconciliation(
+            attempt_id="attempt-1",
+            evidence_id=RECONCILIATION_ID,
+            external_receipt_id="receipt-pending-1",
+            observed_at=RECONCILIATION_AT,
+            source=RECONCILIATION_SOURCE,
+        )
+    )
+    evidence = build_empirical_execution_evidence(
+        ledger,
+        attempt_id="attempt-1",
+    )
+
+    with pytest.raises(
+        EmpiricalExecutionEvidenceError,
+        match="positive reconciliation requires receipt identity",
+    ):
+        replace(
+            evidence,
+            reconciliation_external_receipt_id=None,
+        )
+
+
 def test_provider_evidence_does_not_turn_nonterminal_attempt_into_slippage_sample(
     tmp_path,
 ):

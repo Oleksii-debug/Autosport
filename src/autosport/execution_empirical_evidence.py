@@ -398,6 +398,20 @@ class EmpiricalExecutionEvidence:
             self.reconciliation_evidence_observed_at,
             self.reconciliation_external_effect_found,
         )
+        if not reconciliation_present:
+            if self.reconciliation_external_receipt_id is not None:
+                raise EmpiricalExecutionEvidenceError(
+                    "reconciliation receipt requires durable reconciliation evidence"
+                )
+        elif self.reconciliation_external_effect_found is True:
+            if self.reconciliation_external_receipt_id is None:
+                raise EmpiricalExecutionEvidenceError(
+                    "positive reconciliation requires receipt identity"
+                )
+        elif self.reconciliation_external_receipt_id is not None:
+            raise EmpiricalExecutionEvidenceError(
+                "not-found reconciliation cannot claim receipt identity"
+            )
 
         try:
             state = AttemptState(self.attempt_state)

@@ -415,6 +415,24 @@ def test_reservation_rejects_structurally_valid_but_unissued_bound_plan(tmp_path
         ledger.saga(reconstructed.execution_plan.plan_id)
 
 
+def test_live_issued_plan_closes_crash_window_after_raw_plan_reservation(
+    tmp_path,
+) -> None:
+    bound, approval, _, _ = _bound()
+    ledger = RealExecutionLedger(tmp_path / "live-crash-window-ledger.jsonl")
+    ledger.reserve_plan(bound.execution_plan)
+
+    fingerprint = reserve_supervised_plan(ledger, bound, approval)
+    witness = supervised_execution._bound_plan_witness(bound)
+
+    assert fingerprint == bound.execution_plan.fingerprint
+    assert ledger.supervised_plan_issuance_is_current(
+        plan_id=bound.execution_plan.plan_id,
+        bound_plan_witness=witness,
+        plan_fingerprint=fingerprint,
+    )
+
+
 def test_durable_issuance_allows_structural_reconstruction_after_restart(tmp_path) -> None:
     bound, approval, _, _ = _bound()
     path = tmp_path / "durable-supervised-restart.jsonl"

@@ -684,6 +684,9 @@ def capture_campaign_complete_game_board(
     expected_dispatch = (
         ("_require_canonical_seams", require_seams),
         ("_require_provider_evidence_campaign_scope", require_evidence_scope),
+        ("_text", _text),
+        ("_sha", _sha),
+        ("_digest", _digest),
         ("_instant", instant),
         ("establish_campaign_inception", establish_inception),
         ("_NEXT_SLOT", next_slot),
@@ -753,6 +756,8 @@ def capture_campaign_complete_game_board(
     expected_precommit_routing_items = _PRECOMMIT_ROUTING_SEAM_ITEMS
     expected_integrity_error = integrity_error
     expected_artifact_kind = artifact_kind
+    expected_schema_version = _SCHEMA_VERSION
+    expected_hex = _HEX
     expected_type = _CANONICAL_TYPE
     expected_callable = _CANONICAL_CALLABLE
     expected_getattr = _CANONICAL_GETATTR
@@ -772,6 +777,13 @@ def capture_campaign_complete_game_board(
         if module_globals.get("ARTIFACT_KIND") != expected_artifact_kind:
             raise integrity_error(
                 "campaign provider-cycle artifact kind authority changed"
+            )
+        if (
+            module_globals.get("_SCHEMA_VERSION") != expected_schema_version
+            or module_globals.get("_HEX") is not expected_hex
+        ):
+            raise integrity_error(
+                "campaign provider-cycle schema/hash authority changed"
             )
         for builtin_name in expected_unshadowed_builtins:
             if builtin_name in module_globals:

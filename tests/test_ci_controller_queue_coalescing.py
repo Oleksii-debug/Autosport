@@ -1776,6 +1776,91 @@ def test_trigger_ready_tuple_cannot_be_relabelled_nonqualifying_by_adapter_rebin
     assert forged_calls == {"state": 0, "cancel": 0}
 
 
+def test_sweep_trusted_tuple_head_cannot_be_rewritten_by_sha_helper_rebind(monkeypatch) -> None:
+    current_head = "8" * 40
+    forged_head = "9" * 40
+    cancel_calls = {"count": 0}
+
+    monkeypatch.setattr(
+        scoped_controller,
+        "_trusted_live_pr_qualification",
+        lambda *_args, **_kwargs: (current_head, True),
+    )
+    monkeypatch.setattr(
+        scoped_controller,
+        "_explicit_run_identity_is_current",
+        lambda *_args, **_kwargs: True,
+    )
+
+    def forged_sha(value, *, field: str):
+        if field == "pull request head sha":
+            return forged_head
+        return value
+
+    monkeypatch.setattr(scoped_controller, "_require_sha", forged_sha)
+
+    def forged_cancel(_api, _run_id):
+        cancel_calls["count"] += 1
+        return True
+
+    monkeypatch.setattr(
+        scoped_controller,
+        "_cancel_run_or_defer_active_conflict",
+        forged_cancel,
+    )
+
+    api = SweepApi((_run(50, current_head, (501,)),), {})
+    assert cancel_superseded_explicit_pr_runs(
+        api,  # type: ignore[arg-type]
+        workflow_name="CI",
+        current_run_id=99,
+    ) == ()
+    assert cancel_calls == {"count": 0}
+
+
+def test_trigger_trusted_tuple_head_cannot_be_rewritten_by_sha_helper_rebind(monkeypatch) -> None:
+    ready_head = "7" * 40
+    forged_head = "8" * 40
+    cancel_calls = {"count": 0}
+
+    def forged_sha(value, *, field: str):
+        if field == "pull request head sha":
+            return forged_head
+        return value
+
+    monkeypatch.setattr(scoped_controller, "_require_sha", forged_sha)
+    monkeypatch.setattr(
+        scoped_controller,
+        "_explicit_run_identity_is_current",
+        lambda *_args, **_kwargs: True,
+    )
+    monkeypatch.setattr(
+        scoped_controller,
+        "_trusted_live_pr_qualification",
+        lambda *_args, **_kwargs: (ready_head, True),
+    )
+
+    def forged_cancel(_api, _run_id):
+        cancel_calls["count"] += 1
+        return True
+
+    monkeypatch.setattr(
+        scoped_controller,
+        "_cancel_run_or_defer_active_conflict",
+        forged_cancel,
+    )
+
+    api = SweepApi((), {})
+    assert not _cancel_triggering_run_if_stale_or_nonqualifying(
+        api,  # type: ignore[arg-type]
+        pr_number=303,
+        event_head_sha=ready_head,
+        current_run_id=7012,
+        qualification=(ready_head, True),
+    )
+    assert cancel_calls == {"count": 0}
+
+
 def test_explicit_run_boundary_scoped_type_rebind_cannot_reopen_dynamic_request_shadow(
     monkeypatch,
 ) -> None:

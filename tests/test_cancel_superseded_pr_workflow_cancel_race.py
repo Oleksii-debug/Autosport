@@ -371,6 +371,7 @@ def test_scoped_cancel_helper_dispatch_metadata_is_immutable_and_complete() -> N
         "_canonical_branch_head",
         "live_pr_qualification",
         "_pull_request",
+        "_explicit_run_identity_matches",
     )
     assert all(
         type(entry) is tuple

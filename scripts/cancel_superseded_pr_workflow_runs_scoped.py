@@ -338,6 +338,46 @@ class WorkflowScopedGitHubApi(GitHubApi):
             raise CancellationError("invalid canonical branch target")
         return _require_sha(target.get("sha"), field="canonical branch head")
 
+    def _explicit_run_identity_matches(
+        self,
+        *,
+        run_id: int,
+        expected_head_sha: str,
+        pr_number: int,
+    ) -> bool:
+        """Re-read one source run and require its explicit identity to remain exact.
+
+        The workflow-wide scan is moving: GitHub can expose different pull-request
+        metadata for the same run while statuses are enumerated.  A stable singleton
+        observation therefore grants only provisional cancellation authority.  Before
+        an explicit candidate reaches the irreversible cancel boundary, bind the exact
+        run id back to this source workflow and require the same head and exact singleton
+        PR reference.  Any transition to completed/unknown, empty/multi-reference,
+        another PR, another head, another workflow or another event fails closed.
+        """
+
+        run_id = _require_positive_int(run_id, field="run id")
+        expected_head_sha = _require_sha(
+            expected_head_sha,
+            field="expected workflow run head sha",
+        )
+        pr_number = _require_positive_int(pr_number, field="pull request number")
+        payload = self._request(f"/actions/runs/{run_id}")
+        if not isinstance(payload, dict):
+            raise CancellationError("invalid workflow-run response")
+        workflow_id = _require_positive_int(
+            payload.get("workflow_id"),
+            field="workflow run workflow id",
+        )
+        if workflow_id != self._workflow_id or payload.get("event") != "pull_request":
+            return False
+        run = parse_run(payload)
+        return (
+            run.run_id == run_id
+            and run.head_sha == expected_head_sha
+            and run.pr_numbers == (pr_number,)
+        )
+
     def _build_cancel(
         base_cancel,
         request_impl,
@@ -346,6 +386,7 @@ class WorkflowScopedGitHubApi(GitHubApi):
         canonical_branch_head,
         live_pr_qualification,
         pull_request,
+        explicit_run_identity_matches,
     ):
         base_cancel_code = getattr(base_cancel, "__code__", None)
         helper_dispatch = (
@@ -378,6 +419,11 @@ class WorkflowScopedGitHubApi(GitHubApi):
                 "_pull_request",
                 pull_request,
                 getattr(pull_request, "__code__", None),
+            ),
+            (
+                "_explicit_run_identity_matches",
+                explicit_run_identity_matches,
+                getattr(explicit_run_identity_matches, "__code__", None),
             ),
         )
         if any(
@@ -503,6 +549,7 @@ class WorkflowScopedGitHubApi(GitHubApi):
         _canonical_branch_head,
         GitHubApi.live_pr_qualification,
         GitHubApi._pull_request,
+        _explicit_run_identity_matches,
     )
     del _build_cancel
 
@@ -681,6 +728,35 @@ class WorkflowScopedGitHubApi(GitHubApi):
         return tuple(cancelled)
 
 
+def _explicit_run_identity_is_current(
+    api: WorkflowScopedGitHubApi,
+    *,
+    run_id: int,
+    expected_head_sha: str,
+    pr_number: int,
+) -> bool:
+    """Fail closed when an explicit run no longer matches its scanned identity."""
+
+    resolver = getattr(api, "_explicit_run_identity_matches", None)
+    if resolver is None:
+        # Focused test doubles predate the production boundary resolver. Production
+        # WorkflowScopedGitHubApi always supplies it.
+        return True
+    if not callable(resolver):
+        return False
+    try:
+        return (
+            resolver(
+                run_id=run_id,
+                expected_head_sha=expected_head_sha,
+                pr_number=pr_number,
+            )
+            is True
+        )
+    except CancellationError:
+        return False
+
+
 def _explicit_singleton_pr_for_current_run(
     runs: tuple[WorkflowRun, ...],
     *,
@@ -804,6 +880,9 @@ def cancel_superseded_explicit_pr_runs(
             continue
         stable_singletons.append(first)
     explicit_singleton_runs = tuple(stable_singletons)
+    explicit_singletons_by_id = {
+        run.run_id: run for run in explicit_singleton_runs
+    }
     pr_numbers = sorted(
         {
             run.pr_numbers[0]
@@ -833,8 +912,17 @@ def cancel_superseded_explicit_pr_runs(
         for run_id in selected:
             if run_id in cancelled_ids:
                 continue
-            # A head/state/draft move or reread failure revokes authority only for
-            # this PR group. Other independently resolved groups can still progress.
+            candidate = explicit_singletons_by_id[run_id]
+            if not _explicit_run_identity_is_current(
+                api,
+                run_id=run_id,
+                expected_head_sha=candidate.head_sha,
+                pr_number=pr_number,
+            ):
+                continue
+            # The run-identity reread above may itself take a network round trip. Keep
+            # live PR head/lifecycle qualification as the final external authority
+            # check before the irreversible cancellation.
             try:
                 current_qualification = api.live_pr_qualification(pr_number)
             except CancellationError:
@@ -873,6 +961,13 @@ def _cancel_triggering_run_if_stale_or_nonqualifying(
         and not qualification.integration_capable
     )
     if not stale and not same_head_nonqualifying:
+        return False
+    if not _explicit_run_identity_is_current(
+        api,
+        run_id=current_run_id,
+        expected_head_sha=event_head_sha,
+        pr_number=pr_number,
+    ):
         return False
     try:
         current_qualification = api.live_pr_qualification(pr_number)

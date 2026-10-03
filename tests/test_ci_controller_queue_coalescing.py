@@ -152,6 +152,42 @@ def test_trigger_active_cancel_conflict_is_deferred_without_false_success() -> N
     assert api.cancelled == []
 
 
+def test_trigger_boundary_run_identity_change_revokes_cancellation() -> None:
+    qualification = PullRequestQualification(
+        head_sha=HEAD,
+        integration_capable=False,
+    )
+
+    class IdentityMovedApi(FakeApi):
+        def _explicit_run_identity_matches(
+            self,
+            *,
+            run_id: int,
+            expected_head_sha: str,
+            pr_number: int,
+        ) -> bool:
+            assert run_id == 91
+            assert expected_head_sha == HEAD
+            assert pr_number == 2039
+            return False
+
+        def live_pr_qualification(self, pr_number: int) -> PullRequestQualification:
+            raise AssertionError(
+                "revoked run identity must stop before PR qualification reread"
+            )
+
+    api = IdentityMovedApi(qualification)
+
+    assert not _cancel_triggering_run_if_stale_or_nonqualifying(
+        api,  # type: ignore[arg-type]
+        pr_number=2039,
+        event_head_sha=HEAD,
+        current_run_id=91,
+        qualification=qualification,
+    )
+    assert api.cancelled == []
+
+
 def test_current_ready_source_run_is_preserved() -> None:
     qualification = PullRequestQualification(
         head_sha=HEAD,
@@ -581,6 +617,57 @@ def test_orphan_recovery_active_cancel_conflict_clears_temporary_authority() -> 
     assert api._zero_association_recovered_runs == {}
 
 
+def test_explicit_run_boundary_requires_exact_workflow_head_and_singleton(
+    monkeypatch,
+) -> None:
+    api = WorkflowScopedGitHubApi(
+        repository="owner/repo",
+        token="token",
+        workflow_id=356678400,
+        workflow_name="CI",
+    )
+    payload: dict[str, object] = {
+        "id": 7012,
+        "workflow_id": 356678400,
+        "event": "pull_request",
+        "head_sha": HEAD,
+        "name": "CI",
+        "status": "queued",
+        "pull_requests": [{"number": 303}],
+    }
+
+    monkeypatch.setattr(api, "_request", lambda _path: payload)
+
+    assert api._explicit_run_identity_matches(
+        run_id=7012,
+        expected_head_sha=HEAD,
+        pr_number=303,
+    )
+
+    payload["pull_requests"] = [{"number": 303}, {"number": 304}]
+    assert not api._explicit_run_identity_matches(
+        run_id=7012,
+        expected_head_sha=HEAD,
+        pr_number=303,
+    )
+
+    payload["pull_requests"] = [{"number": 303}]
+    payload["head_sha"] = STALE_HEAD
+    assert not api._explicit_run_identity_matches(
+        run_id=7012,
+        expected_head_sha=HEAD,
+        pr_number=303,
+    )
+
+    payload["head_sha"] = HEAD
+    payload["workflow_id"] = 356678489
+    assert not api._explicit_run_identity_matches(
+        run_id=7012,
+        expected_head_sha=HEAD,
+        pr_number=303,
+    )
+
+
 def test_controller_scheduler_coalesces_all_prs_per_source_workflow() -> None:
     text = Path(".github/workflows/pr-qualification-supersession.yml").read_text(
         encoding="utf-8"
@@ -615,9 +702,21 @@ class SweepApi:
         }
         self.cancelled: list[int] = []
         self.reads: list[int] = []
+        self.identity_results: dict[int, bool] = {}
+        self.identity_reads: list[tuple[int, str, int]] = []
 
     def active_runs(self) -> tuple[WorkflowRun, ...]:
         return self._runs
+
+    def _explicit_run_identity_matches(
+        self,
+        *,
+        run_id: int,
+        expected_head_sha: str,
+        pr_number: int,
+    ) -> bool:
+        self.identity_reads.append((run_id, expected_head_sha, pr_number))
+        return self.identity_results.get(run_id, True)
 
     def live_pr_qualification(self, pr_number: int) -> PullRequestQualification:
         self.reads.append(pr_number)
@@ -704,6 +803,42 @@ def test_workflow_wide_sweep_active_cancel_conflict_does_not_starve_other_prs() 
     ) == (20,)
     assert api.cancelled == [20]
     assert api.reads == [101, 101, 202, 202]
+
+
+def test_boundary_run_identity_change_revokes_only_that_sweep_candidate() -> None:
+    one = PullRequestQualification(
+        head_sha="1" * 40,
+        integration_capable=True,
+    )
+    two = PullRequestQualification(
+        head_sha="2" * 40,
+        integration_capable=True,
+    )
+    api = SweepApi(
+        (
+            _run(10, "3" * 40, (101,)),
+            _run(20, "4" * 40, (202,)),
+        ),
+        {
+            101: [one],
+            202: [two, two],
+        },
+    )
+    api.identity_results[10] = False
+
+    assert cancel_superseded_explicit_pr_runs(
+        api,  # type: ignore[arg-type]
+        workflow_name="CI",
+        current_run_id=99,
+    ) == (20,)
+    assert api.cancelled == [20]
+    assert api.identity_reads == [
+        (10, "3" * 40, 101),
+        (20, "4" * 40, 202),
+    ]
+    # The revoked run never consumes a final PR-qualification reread. The independent
+    # second group still receives both its initial and immediate pre-POST checks.
+    assert api.reads == [101, 202, 202]
 
 
 def test_current_trigger_only_group_needs_no_sweep_qualification_read() -> None:

@@ -13,6 +13,7 @@ from decimal import (
     Underflow,
     localcontext,
 )
+from functools import partial
 from pathlib import Path
 from types import FunctionType
 
@@ -1330,13 +1331,64 @@ def _make_resolver() -> FunctionType:
     return resolver
 
 
-def _freeze_resolver(function: FunctionType) -> FunctionType:
-    error_type = PaperDrawdownEvidenceError
+def _invoke_frozen_resolver(
+    function: FunctionType,
+    expected_code: object,
+    expected_closure: tuple[object, ...] | None,
+    expected_closure_values: tuple[object, ...] | None,
+    expected_closure_function_codes: tuple[object | None, ...] | None,
+    function_type: type,
+    exact_type: type,
+    error_type: type[PaperDrawdownEvidenceError],
+    workspace: str | Path,
+) -> PaperRealizedDrawdownEvidence:
+    """Invoke one resolver against a read-only witness bundle.
+
+    The witness values are supplied through functools.partial.args.  CPython exposes
+    that tuple for inspection but makes both the args attribute and the tuple itself
+    read-only, so a caller cannot coherently replace the executable and its expected
+    witnesses through the public resolver as it could with closure cell_contents.
+    """
+
+    if (
+        exact_type(function) is not function_type
+        or function.__code__ is not expected_code
+        or function.__closure__ is not expected_closure
+    ):
+        raise error_type("drawdown resolver executable authority changed")
+    if expected_closure is not None:
+        if (
+            expected_closure_values is None
+            or expected_closure_function_codes is None
+            or len(expected_closure) != len(expected_closure_values)
+            or len(expected_closure) != len(expected_closure_function_codes)
+        ):
+            raise error_type("drawdown resolver witness bundle is invalid")
+        for cell, expected, expected_function_code in zip(
+            expected_closure,
+            expected_closure_values,
+            expected_closure_function_codes,
+            strict=True,
+        ):
+            current = cell.cell_contents
+            if current is not expected:
+                raise error_type("drawdown resolver dependency authority changed")
+            if (
+                expected_function_code is not None
+                and (
+                    type(current) is not function_type
+                    or current.__code__ is not expected_function_code
+                )
+            ):
+                raise error_type(
+                    "drawdown resolver dependency executable authority changed"
+                )
+    return function(workspace)
+
+
+def _freeze_resolver(function: FunctionType):
     if type(function) is not FunctionType:
         raise TypeError("drawdown resolver must be a Python function")
-    function_type = FunctionType
-    exact_type = type
-    expected_code = function.__code__
     expected_closure = function.__closure__
     expected_closure_values = (
         None
@@ -1347,77 +1399,78 @@ def _freeze_resolver(function: FunctionType) -> FunctionType:
         None
         if expected_closure_values is None
         else tuple(
-            value.__code__ if type(value) is function_type else None
+            value.__code__ if type(value) is FunctionType else None
             for value in expected_closure_values
         )
     )
-
-    def frozen(workspace: str | Path) -> PaperRealizedDrawdownEvidence:
-        if (
-            exact_type(function) is not function_type
-            or function.__code__ is not expected_code
-            or function.__closure__ is not expected_closure
-        ):
-            raise error_type(
-                "drawdown resolver executable authority changed"
-            )
-        if expected_closure is not None:
-            assert expected_closure_values is not None
-            assert expected_closure_function_codes is not None
-            for cell, expected, expected_function_code in zip(
-                expected_closure,
-                expected_closure_values,
-                expected_closure_function_codes,
-            ):
-                current = cell.cell_contents
-                if current is not expected:
-                    raise error_type(
-                        "drawdown resolver dependency authority changed"
-                    )
-                if (
-                    expected_function_code is not None
-                    and (
-                        type(current) is not function_type
-                        or current.__code__ is not expected_function_code
-                    )
-                ):
-                    raise error_type(
-                        "drawdown resolver dependency executable authority changed"
-                    )
-        return function(workspace)
-
-    return frozen
+    return partial(
+        _invoke_frozen_resolver,
+        function,
+        function.__code__,
+        expected_closure,
+        expected_closure_values,
+        expected_closure_function_codes,
+        FunctionType,
+        type,
+        PaperDrawdownEvidenceError,
+    )
 
 
 resolve_paper_drawdown_evidence = _freeze_resolver(_make_resolver())
 
 
-def _make_require_current(resolver: FunctionType) -> FunctionType:
-    expected_code = resolver.__code__
-    exact_evidence_type = PaperRealizedDrawdownEvidence
-    function_type = FunctionType
-    exact_type = type
+def _invoke_require_current(
+    resolver: object,
+    resolver_partial_type: type,
+    resolver_function: FunctionType,
+    resolver_function_code: object,
+    resolver_args: tuple[object, ...],
+    evidence_type: type[PaperRealizedDrawdownEvidence],
+    mismatch_error_type: type[PaperDrawdownEvidenceMismatchError],
+    workspace: str | Path,
+    candidate: PaperRealizedDrawdownEvidence,
+) -> PaperRealizedDrawdownEvidence:
+    if type(candidate) is not evidence_type:
+        raise mismatch_error_type(
+            "candidate must be canonical PaperRealizedDrawdownEvidence"
+        )
+    if (
+        type(resolver) is not resolver_partial_type
+        or resolver.func is not resolver_function
+        or resolver_function.__code__ is not resolver_function_code
+        or resolver.keywords
+        or len(resolver.args) != len(resolver_args)
+        or any(
+            current is not expected
+            for current, expected in zip(
+                resolver.args,
+                resolver_args,
+                strict=True,
+            )
+        )
+    ):
+        raise mismatch_error_type("drawdown resolver executable authority changed")
+    current = resolver(workspace)
+    if current != candidate:
+        raise mismatch_error_type(
+            "drawdown evidence is not current canonical product authority"
+        )
+    return current
 
-    def require_current(
-        workspace: str | Path,
-        candidate: PaperRealizedDrawdownEvidence,
-    ) -> PaperRealizedDrawdownEvidence:
-        if type(candidate) is not exact_evidence_type:
-            raise PaperDrawdownEvidenceMismatchError(
-                "candidate must be canonical PaperRealizedDrawdownEvidence"
-            )
-        if exact_type(resolver) is not function_type or resolver.__code__ is not expected_code:
-            raise PaperDrawdownEvidenceMismatchError(
-                "drawdown resolver executable authority changed"
-            )
-        current = resolver(workspace)
-        if current != candidate:
-            raise PaperDrawdownEvidenceMismatchError(
-                "drawdown evidence is not current canonical product authority"
-            )
-        return current
 
-    return require_current
+def _make_require_current(resolver: object):
+    if type(resolver) is not partial:
+        raise TypeError("current drawdown resolver must use the canonical partial guard")
+    return partial(
+        _invoke_require_current,
+        resolver,
+        type(resolver),
+        resolver.func,
+        resolver.func.__code__,
+        resolver.args,
+        PaperRealizedDrawdownEvidence,
+        PaperDrawdownEvidenceMismatchError,
+    )
 
 
 require_current_paper_drawdown_evidence = _make_require_current(
@@ -1426,3 +1479,6 @@ require_current_paper_drawdown_evidence = _make_require_current(
 
 del _make_require_current
 del _make_resolver
+del _freeze_resolver
+del _invoke_frozen_resolver
+del _invoke_require_current

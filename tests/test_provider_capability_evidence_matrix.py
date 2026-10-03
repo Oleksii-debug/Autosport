@@ -848,6 +848,45 @@ def test_matrix_journal_rejects_successor_without_root_and_copied_matrix():
         empty.publish(copied)
 
 
+def test_matrix_journal_latest_requires_exact_published_anchor():
+    journal = ProviderCapabilityEvidenceMatrixJournal()
+    first = matrix(as_of=T3)
+    journal.publish(first)
+
+    copied = replace(first)
+    with pytest.raises(
+        ProviderCapabilityEvidenceMatrixError,
+        match="anchor is not an exact published matrix",
+    ):
+        journal.latest_for(copied)
+
+    alternate_root = build_provider_capability_evidence_matrix(
+        first.profile,
+        first.integration,
+        environment=first.environment,
+        application_mode=first.application_mode,
+        matrix_version=1,
+        as_of=T3,
+        matrix_ref="unpublished-alternate-root",
+    )
+    with pytest.raises(
+        ProviderCapabilityEvidenceMatrixError,
+        match="anchor is not an exact published matrix",
+    ):
+        journal.latest_for(alternate_root)
+
+
+def test_matrix_journal_latest_rejects_unpublished_anchor_on_empty_journal():
+    first = matrix(as_of=T3)
+    journal = ProviderCapabilityEvidenceMatrixJournal()
+
+    with pytest.raises(
+        ProviderCapabilityEvidenceMatrixError,
+        match="anchor is not an exact published matrix",
+    ):
+        journal.latest_for(first, as_of=T3)
+
+
 def test_matrix_journal_detects_post_publication_mutation():
     journal = ProviderCapabilityEvidenceMatrixJournal()
     first = matrix(as_of=T3)

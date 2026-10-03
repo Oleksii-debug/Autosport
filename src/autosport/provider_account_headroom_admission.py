@@ -312,6 +312,44 @@ _WORKSPACE_ECONOMIC_LOCK_RELEASE_CODE = getattr(
     None,
 )
 _WORKSPACE_ECONOMIC_LOCK_PATH_FACTORY = getattr(_workspace_lock, "Path", None)
+_WORKSPACE_ECONOMIC_LOCK_TRANSITIVE_METHOD_NAMES = (
+    "_open_lock_handle",
+    "_open_new_lock_handle",
+    "_validate_existing_lock_path",
+    "_validate_open_handle_identity",
+    "_require_regular_file",
+    "_require_single_link",
+    "_lock_handle",
+    "_unlock_handle",
+)
+_WORKSPACE_ECONOMIC_LOCK_TRANSITIVE_METHODS = tuple(
+    (
+        name,
+        getattr(WorkspaceEconomicLock, name, None),
+        getattr(getattr(WorkspaceEconomicLock, name, None), "__code__", None),
+    )
+    for name in _WORKSPACE_ECONOMIC_LOCK_TRANSITIVE_METHOD_NAMES
+)
+_WORKSPACE_ECONOMIC_LOCK_OPEN_READ_ONLY_DESCRIPTOR = getattr(
+    _workspace_lock,
+    "_open_read_only_descriptor",
+    None,
+)
+_WORKSPACE_ECONOMIC_LOCK_OPEN_READ_ONLY_DESCRIPTOR_CODE = getattr(
+    _WORKSPACE_ECONOMIC_LOCK_OPEN_READ_ONLY_DESCRIPTOR,
+    "__code__",
+    None,
+)
+_WORKSPACE_ECONOMIC_LOCK_SECONDARY_NOTE = getattr(
+    _workspace_lock,
+    "_add_secondary_failure_note",
+    None,
+)
+_WORKSPACE_ECONOMIC_LOCK_SECONDARY_NOTE_CODE = getattr(
+    _WORKSPACE_ECONOMIC_LOCK_SECONDARY_NOTE,
+    "__code__",
+    None,
+)
 _WORKSPACE_ECONOMIC_LOCK_ENTER = WorkspaceEconomicLock.__enter__
 _WORKSPACE_ECONOMIC_LOCK_ENTER_CODE = getattr(
     _WORKSPACE_ECONOMIC_LOCK_ENTER,
@@ -456,6 +494,11 @@ def _canonical_denomination_dispatch(
     _lock_release=_WORKSPACE_ECONOMIC_LOCK_RELEASE,
     _lock_release_code=_WORKSPACE_ECONOMIC_LOCK_RELEASE_CODE,
     _lock_path_factory=_WORKSPACE_ECONOMIC_LOCK_PATH_FACTORY,
+    _lock_transitive_methods=_WORKSPACE_ECONOMIC_LOCK_TRANSITIVE_METHODS,
+    _lock_open_read_only=_WORKSPACE_ECONOMIC_LOCK_OPEN_READ_ONLY_DESCRIPTOR,
+    _lock_open_read_only_code=_WORKSPACE_ECONOMIC_LOCK_OPEN_READ_ONLY_DESCRIPTOR_CODE,
+    _lock_secondary_note=_WORKSPACE_ECONOMIC_LOCK_SECONDARY_NOTE,
+    _lock_secondary_note_code=_WORKSPACE_ECONOMIC_LOCK_SECONDARY_NOTE_CODE,
     _lock_enter=_WORKSPACE_ECONOMIC_LOCK_ENTER,
     _lock_enter_code=_WORKSPACE_ECONOMIC_LOCK_ENTER_CODE,
     _lock_exit=_WORKSPACE_ECONOMIC_LOCK_EXIT,
@@ -498,6 +541,11 @@ def _canonical_denomination_dispatch(
     )
     live_lock_exit = (
         vars(live_lock_type).get("__exit__") if live_lock_type is _lock_type else None
+    )
+    transitive_lock_changed = any(
+        getattr(live_lock_type, name, None) is not expected
+        or getattr(expected, "__code__", None) is not expected_code
+        for name, expected, expected_code in _lock_transitive_methods
     )
     if (
         live_store_type is not _store_type
@@ -579,6 +627,15 @@ def _canonical_denomination_dispatch(
         or live_lock_release is not _lock_release
         or getattr(_lock_release, "__code__", None) is not _lock_release_code
         or getattr(_workspace_lock, "Path", None) is not _lock_path_factory
+        or transitive_lock_changed
+        or getattr(_workspace_lock, "_open_read_only_descriptor", None)
+        is not _lock_open_read_only
+        or getattr(_lock_open_read_only, "__code__", None)
+        is not _lock_open_read_only_code
+        or getattr(_workspace_lock, "_add_secondary_failure_note", None)
+        is not _lock_secondary_note
+        or getattr(_lock_secondary_note, "__code__", None)
+        is not _lock_secondary_note_code
         or live_lock_enter is not _lock_enter
         or getattr(_lock_enter, "__code__", None) is not _lock_enter_code
         or live_lock_exit is not _lock_exit

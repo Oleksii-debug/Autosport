@@ -263,6 +263,14 @@ def test_provider_io_occurs_only_after_authorized_scheduled_start(
     )
     assert exact["evidence_sha256"] == receipt.collector_artifact_evidence_sha256
     assert exact["authorization_sha256"] == receipt.campaign_authority_record_sha256
+    assert exact["source_id"] == spec.source_id
+    assert exact["run_id"] == spec.run_id
+    assert exact["stream_epoch"] == spec.stream_epoch
+    assert exact["cycle_seq"] == receipt.cycle_seq
+    assert exact["slot_ordinal"] == receipt.slot_ordinal
+    assert exact["attempted_at"] == "2100-01-01T06:00:00+00:00"
+    assert exact["completed_at"] == "2100-01-01T06:00:01+00:00"
+    assert exact["artifact_id"] == receipt.artifact_id
 
 
 def test_provider_observation_cannot_predate_authorized_cycle_start(

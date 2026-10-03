@@ -301,3 +301,39 @@ def test_valid_registry_transplant_into_fresh_workspace_cannot_bootstrap_authori
     ):
         ScientificRegistry.initialize_pristine(target_path)
     assert target_path.read_bytes() == transplanted_bytes
+
+
+def test_pristine_registry_can_reopen_and_first_append_establishes_authority(tmp_path):
+    path = tmp_path / "scientific_registry.json"
+    ScientificRegistry.initialize_pristine(path)
+    pristine_bytes = path.read_bytes()
+
+    reopened = ScientificRegistry(path)
+    assert path.read_bytes() == pristine_bytes
+
+    record_id = reopened.append(_question())
+    assert record_id == "question-1"
+    committed_bytes = path.read_bytes()
+    assert committed_bytes != pristine_bytes
+
+    verified = ScientificRegistry(path)
+    assert verified.get("ResearchQuestion", "question-1") is not None
+    assert path.read_bytes() == committed_bytes
+
+
+def test_current_authoritative_registry_reopen_is_byte_idempotent(tmp_path):
+    path = tmp_path / "scientific_registry.json"
+    registry = ScientificRegistry.initialize_pristine(path)
+    registry.append(_question())
+    registry.append(_hypothesis())
+    committed_bytes = path.read_bytes()
+
+    for _attempt in range(3):
+        reopened = ScientificRegistry(path)
+        assert reopened.causal_precedes(
+            "ResearchQuestion",
+            "question-1",
+            "Hypothesis",
+            "hypothesis-1",
+        )
+        assert path.read_bytes() == committed_bytes

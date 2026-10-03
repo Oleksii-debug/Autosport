@@ -209,6 +209,13 @@ class RunTransaction:
         """Return exact BASE bytes after re-resolving the canonical run identity."""
 
         manifest = self._read_manifest()
+        if manifest.get("retained") != {
+            "base_paper_book": "paper_book.base.json",
+            "terminal_paper_book": "paper_book.terminal.json",
+        }:
+            raise RunTransactionError(
+                "transaction lacks retained base PaperBook evidence contract"
+            )
         experiment_key = manifest.get("experiment_key")
         if not isinstance(experiment_key, str) or not experiment_key:
             raise RunTransactionError(

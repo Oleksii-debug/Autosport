@@ -203,9 +203,20 @@ def test_expired_evidence_does_not_renew_on_later_matrix_rebuild():
         p, i, environment="production", application_mode="live-key-readonly",
         matrix_version=1, as_of=T4, matrix_ref="restart", evidence=(f,)
     )
+    accepted = frozenset({ProviderCapabilityTruthGrade.CONFIGURED})
+    assert m.qualifies(
+        BookmakerCapability.BALANCE_READ,
+        accepted_grades=accepted,
+        at_time=T2,
+    )
     assert not m.qualifies(
         BookmakerCapability.BALANCE_READ,
-        accepted_grades=frozenset({ProviderCapabilityTruthGrade.CONFIGURED}),
+        accepted_grades=accepted,
+        at_time=T3,
+    )
+    assert not m.qualifies(
+        BookmakerCapability.BALANCE_READ,
+        accepted_grades=accepted,
         at_time=T4,
     )
 
@@ -475,7 +486,7 @@ def test_future_fact_and_noncanonical_scopes_fail_closed():
         )
 
 
-def test_documentation_can_be_recorded_without_account_permission_but_never_mints_write():
+def test_documentation_can_be_recorded_for_audit_but_cannot_override_unknown_profile():
     p = profile(place=BookmakerCapabilityState.UNKNOWN)
     i = integration(p)
     documented = evidence(
@@ -494,7 +505,7 @@ def test_documentation_can_be_recorded_without_account_permission_but_never_mint
         matrix_ref="matrix-docs",
         evidence=(documented,),
     )
-    assert m.qualifies(
+    assert not m.qualifies(
         BookmakerCapability.PLACE_BET,
         accepted_grades=frozenset({ProviderCapabilityTruthGrade.DECLARED_DOCUMENTED}),
         at_time=T3,
@@ -503,6 +514,9 @@ def test_documentation_can_be_recorded_without_account_permission_but_never_mint
         BookmakerCapability.PLACE_BET,
         accepted_grades=frozenset({ProviderCapabilityTruthGrade.WRITE_PERMISSION_PROVEN}),
         at_time=T3,
+    )
+    assert m.fact_for(BookmakerCapability.PLACE_BET).grade is (
+        ProviderCapabilityTruthGrade.DECLARED_DOCUMENTED
     )
     assert m.provider_write_authorized is False
     assert m.execution_authorized is False

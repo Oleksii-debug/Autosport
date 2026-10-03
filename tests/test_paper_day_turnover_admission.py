@@ -7,6 +7,7 @@ import pytest
 
 import autosport.economic_admission as economic_admission
 import autosport.monotonic_workspace_authority as monotonic_module
+import autosport.paper as paper_module
 import autosport.recovery as recovery_module
 import autosport.risk as risk_module
 
@@ -109,14 +110,25 @@ def _book_with_settled_turnover(
         admission = admission.astimezone(timezone.utc)
         start = admission.replace(hour=0, minute=0, second=0, microsecond=0)
         end = start + timedelta(days=1)
-        book._record_product_day_admission(
+        # This fixture models chronology that was already issued on a prior real
+        # product day. It seeds the causal-history fixture below the production writer
+        # so the writer itself cannot mint historical authority from caller scalars.
+        witness = book._validate_product_day_admission_witness(
+            (
+                placed_at,
+                start.date().isoformat(),
+                _timestamp(start),
+                _timestamp(end),
+                "a" * 64,
+                1,
+            ),
+            ticket_id=ticket.ticket_id,
+        )
+        book._product_day_admissions[ticket.ticket_id] = witness
+        paper_module._advance_paperbook_product_day_admission(
+            book,
             ticket.ticket_id,
-            admission_ts=placed_at,
-            day_key=start.date().isoformat(),
-            window_start=_timestamp(start),
-            window_end_exclusive=_timestamp(end),
-            window_state_sha256="a" * 64,
-            window_authority_generation=1,
+            witness,
         )
     book.settle(ticket.ticket_id, set(), {ticket.legs[0].quote_key})
     return book
@@ -881,6 +893,37 @@ def test_goal_store_constructor_rebinding_cannot_mint_day_headroom(tmp_path):
     assert result.risk.reason == "economic goal turnover limit exceeded"
     persisted = PaperBook.load(tmp_path / "paper_book.json")
     assert persisted.tickets.keys() == book.tickets.keys()
+
+
+def test_direct_chronology_writer_cannot_forge_previous_product_day(tmp_path):
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    old = now - timedelta(days=2)
+    store = ProductDayRiskWindowStore(tmp_path)
+    current = store.current()
+    book = PaperBook("100")
+    leg = _leg("forged-history")
+    ticket = book.open_ticket(
+        [leg],
+        Decimal("4"),
+        placed_at=_timestamp(old),
+        bankroll_id="paper-bankroll",
+        currency="USD",
+    )
+
+    with WorkspaceEconomicLock(tmp_path) as workspace_lock:
+        with pytest.raises(
+            ValueError,
+            match="product-day admission witness is not one canonical UTC day",
+        ):
+            book._record_product_day_admission(
+                ticket.ticket_id,
+                admission_ts=_timestamp(old),
+                window_store=store,
+                window_evidence=current,
+                workspace_lock=workspace_lock,
+            )
+
+    assert book._product_day_admissions == {}
 
 
 def test_product_issued_current_utc_day_releases_old_day_turnover(tmp_path):

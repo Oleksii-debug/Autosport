@@ -22,6 +22,8 @@ from weakref import WeakKeyDictionary
 
 from .domain import PaperTicket, TicketLeg, TicketStatus, utc_now_iso
 from .forecasting import parse_iso_timestamp
+from .risk_day_window import ProductDayRiskWindow, ProductDayRiskWindowStore
+from .workspace_lock import WorkspaceEconomicLock
 
 
 _PAPER_DECIMAL_PRECISION = 28
@@ -33,6 +35,15 @@ _SCHEMA_MISSING = object()
 
 _LifecycleEntry = tuple[str, str, tuple[str, ...], tuple[str, ...]]
 _ProductDayAdmissionWitness = tuple[str, str, str, str, str, int]
+
+_PRODUCT_DAY_REQUIRE_CURRENT_UNDER_LOCK = (
+    ProductDayRiskWindowStore.__dict__["require_current_under_lock"]
+)
+_PRODUCT_DAY_REQUIRE_CURRENT_UNDER_LOCK_CODE = getattr(
+    _PRODUCT_DAY_REQUIRE_CURRENT_UNDER_LOCK,
+    "__code__",
+    None,
+)
 
 
 def _ticket_opening_commitment(ticket: PaperTicket) -> tuple[object, ...]:
@@ -453,17 +464,16 @@ class PaperBook:
         ticket_id: str,
         *,
         admission_ts: str,
-        day_key: str,
-        window_start: str,
-        window_end_exclusive: str,
-        window_state_sha256: str,
-        window_authority_generation: int,
+        window_store: ProductDayRiskWindowStore,
+        window_evidence: ProductDayRiskWindow,
+        workspace_lock: WorkspaceEconomicLock,
     ) -> None:
-        """Bind one opened ticket to canonical product-day admission chronology.
+        """Bind one opened ticket to re-resolved current product-day chronology.
 
-        This is an internal composition seam. The ordinary placed_at field remains
-        caller-facing provenance; this witness is written only after product-day
-        authority has been revalidated under the workspace economic lock.
+        The caller-facing placed_at value is not day authority. A positive chronology
+        witness can be written only from the canonical product clock/day state
+        re-resolved while the exact workspace economic writer lock is held. Historical
+        scalar fields therefore cannot manufacture future turnover headroom.
         """
 
         _require_ticket_opening_authority(self)
@@ -474,14 +484,39 @@ class PaperBook:
             raise ValueError("PaperBook product-day admission references unknown ticket")
         if ticket_id in self._product_day_admissions:
             raise ValueError("PaperBook product-day admission authority cannot be rebound")
+        if type(window_store) is not ProductDayRiskWindowStore:
+            raise ValueError("PaperBook product-day window store is not canonical")
+        if type(window_evidence) is not ProductDayRiskWindow:
+            raise ValueError("PaperBook product-day window evidence is not canonical")
+        if type(workspace_lock) is not WorkspaceEconomicLock:
+            raise ValueError("PaperBook product-day workspace lock is not canonical")
+        if (
+            ProductDayRiskWindowStore.__dict__.get("require_current_under_lock")
+            is not _PRODUCT_DAY_REQUIRE_CURRENT_UNDER_LOCK
+            or getattr(_PRODUCT_DAY_REQUIRE_CURRENT_UNDER_LOCK, "__code__", None)
+            is not _PRODUCT_DAY_REQUIRE_CURRENT_UNDER_LOCK_CODE
+        ):
+            raise ValueError("PaperBook product-day authority executable changed")
+
+        current_window = _PRODUCT_DAY_REQUIRE_CURRENT_UNDER_LOCK(
+            window_store,
+            window_evidence,
+            workspace_lock=workspace_lock,
+        )
+        if (
+            type(current_window) is not ProductDayRiskWindow
+            or not current_window.product_clock_authoritative
+        ):
+            raise ValueError("PaperBook product-day admission requires product clock authority")
+
         witness = self._validate_product_day_admission_witness(
             (
                 admission_ts,
-                day_key,
-                window_start,
-                window_end_exclusive,
-                window_state_sha256,
-                window_authority_generation,
+                current_window.day_key,
+                current_window.window_start,
+                current_window.window_end_exclusive,
+                current_window.state_sha256,
+                current_window.authority_generation,
             ),
             ticket_id=ticket_id,
         )

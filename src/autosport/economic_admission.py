@@ -658,6 +658,8 @@ class _ProductDayAdmissionAuthority:
     window_end_exclusive: str
     window_state_sha256: str
     window_authority_generation: int
+    window_store: ProductDayRiskWindowStore
+    window_evidence: ProductDayRiskWindow
 
 
 _DAY_AUTHORITY_FIELD_DESCRIPTOR_WITNESSES = tuple(
@@ -1149,6 +1151,8 @@ def _revalidated_product_day_admission_authority(
             window_end_exclusive=current_window_end,
             window_state_sha256=current_state_sha,
             window_authority_generation=current_generation,
+            window_store=window_store,
+            window_evidence=current_window,
         )
     except (ArithmeticError, OSError, RuntimeError, TypeError, ValueError):
         return None
@@ -2058,31 +2062,17 @@ def admit_paper_ticket(
                     _ProductDayAdmissionAuthority,
                     "admission_ts",
                 ),
-                day_key=_canonical_day_authority_field(
+                window_store=_canonical_day_authority_field(
                     day_authority,
                     _ProductDayAdmissionAuthority,
-                    "day_key",
+                    "window_store",
                 ),
-                window_start=_canonical_day_authority_field(
+                window_evidence=_canonical_day_authority_field(
                     day_authority,
                     _ProductDayAdmissionAuthority,
-                    "window_start",
+                    "window_evidence",
                 ),
-                window_end_exclusive=_canonical_day_authority_field(
-                    day_authority,
-                    _ProductDayAdmissionAuthority,
-                    "window_end_exclusive",
-                ),
-                window_state_sha256=_canonical_day_authority_field(
-                    day_authority,
-                    _ProductDayAdmissionAuthority,
-                    "window_state_sha256",
-                ),
-                window_authority_generation=_canonical_day_authority_field(
-                    day_authority,
-                    _ProductDayAdmissionAuthority,
-                    "window_authority_generation",
-                ),
+                workspace_lock=workspace_lock,
             )
         _require_paperbook_admission_authority()
         _PAPERBOOK_SAVE_FUNCTION(working_book, book_path)

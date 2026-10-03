@@ -109,6 +109,26 @@ class ProductDayRiskWindowStoreTests(unittest.TestCase):
 
         self.assertFalse(store.state_path.exists())
 
+    def test_workspace_lock_validator_dependency_rebind_fails_closed(self) -> None:
+        store = self._store()
+        validator_globals = WorkspaceEconomicLock._validate_open_handle_identity.__globals__
+        original_open = validator_globals["_open_read_only_descriptor"]
+
+        def hostile_open(_path) -> int:
+            raise AssertionError("mutated lock descriptor opener executed")
+
+        try:
+            validator_globals["_open_read_only_descriptor"] = hostile_open
+            with self.assertRaisesRegex(
+                RiskDayWindowIntegrityError,
+                "workspace economic lock dependency authority changed",
+            ):
+                store.current()
+        finally:
+            validator_globals["_open_read_only_descriptor"] = original_open
+
+        self.assertFalse(store.state_path.exists())
+
     def test_workspace_lock_acquire_rebind_fails_before_day_authority(self) -> None:
         store = self._store()
         original_acquire = WorkspaceEconomicLock.acquire

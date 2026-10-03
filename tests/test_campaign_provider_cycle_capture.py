@@ -689,6 +689,52 @@ def test_durable_resolver_scope_guard_survives_coordinated_source_rebind(
     assert hostile_calls == []
 
 
+def test_public_durable_resolver_rejects_scope_guard_rebind_before_execution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hostile_calls: list[str] = []
+
+    class ForgedScopeError(RuntimeError):
+        pass
+
+    def hostile_scope_guard(_locator, _store):
+        hostile_calls.append("scope")
+        return None
+
+    monkeypatch.setattr(
+        binding_module,
+        "_PROVIDER_EVIDENCE_SCOPE",
+        hostile_scope_guard,
+    )
+    monkeypatch.setattr(
+        binding_module,
+        "_PROVIDER_EVIDENCE_SCOPE_ERROR",
+        ForgedScopeError,
+    )
+    monkeypatch.setattr(
+        binding_module,
+        "CampaignProviderCycleCaptureIntegrityError",
+        ForgedScopeError,
+    )
+
+    with pytest.raises(
+        CampaignForwardUniverseCycleBindingError,
+        match="campaign forward-cycle authority witness globals changed",
+    ):
+        resolve_campaign_forward_universe_cycle_authority(
+            precommit_locator=None,
+            collector_store=None,
+            source_spec=None,
+            cycle_receipt=None,
+            provider_evidence_store=None,
+            universe_store=None,
+            protocol=None,
+            event_lifecycle=None,
+        )
+
+    assert hostile_calls == []
+
+
 def test_first_clock_cannot_redirect_provider_evidence_authority_root(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

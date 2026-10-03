@@ -1988,10 +1988,12 @@ def admit_paper_ticket(
                 book=working_book,
             )
 
-        # Positive mutation may only occur while the exact risk/proposal graph,
-        # virtual-bankroll state and crash/recovery blockers still match the authority
-        # that produced the approval. No approved decision can outlive a drift in any
-        # of those inputs before the irreversible ticket mutation.
+        # Positive mutation may only occur while crash/recovery, PaperBook,
+        # risk/proposal executable authority and the exact approved bankroll state all
+        # still match. Keep the risk/state reread last so it is adjacent to the
+        # irreversible ticket mutation after the other final guards finish.
+        _require_admission_recovery_gate_authority()
+        _require_paperbook_admission_authority()
         _require_risk_decision_authority()
         if not _admission_risk_helper_authority_valid():
             return PaperAdmissionResult(
@@ -2002,7 +2004,11 @@ def admit_paper_ticket(
                 ticket=None,
                 book=working_book,
             )
-        if _RISK_BOOK_STATE(PaperRiskPolicy, working_book) != pre_evaluation_state:
+        if (
+            pre_evaluation_state is None
+            or _RISK_BOOK_STATE(PaperRiskPolicy, working_book)
+            != pre_evaluation_state
+        ):
             return PaperAdmissionResult(
                 risk=RiskDecision(
                     False,
@@ -2011,8 +2017,6 @@ def admit_paper_ticket(
                 ticket=None,
                 book=working_book,
             )
-        _require_admission_recovery_gate_authority()
-        _require_paperbook_admission_authority()
         opened = _PAPERBOOK_OPEN_TICKET_FUNCTION(
             working_book,
             legs,

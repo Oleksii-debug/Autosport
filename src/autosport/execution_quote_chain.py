@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 from threading import RLock
 from types import MappingProxyType
 from decimal import Decimal
+from operator import attrgetter
 from weakref import ReferenceType, ref
 
 from .real_execution_ledger import (
@@ -77,6 +78,8 @@ def _build_execution_quote_chain_evidence_meta():
             "acknowledgement_binding_matches",
             "accepted_price_verified",
             "chain_complete",
+            "_accepted_price_verified_constant",
+            "_chain_complete_constant",
             "evidence_sha256",
             "to_dict",
         }
@@ -370,17 +373,24 @@ class ExecutionQuoteChainEvidence(metaclass=_ExecutionQuoteChainEvidenceMeta):
 
         return self._acknowledgement_binding_matches
 
-    @property
-    def accepted_price_verified(self) -> bool:
-        """Whether accepted economics are provider-origin verified end-to-end."""
+    # These two claims are intentionally hard-false until a future typed
+    # provider-outcome authority exists.  Keep their getters out of mutable
+    # Python bytecode: a sealed property descriptor still exposes a Python
+    # fget.__code__ object that hostile in-process code can replace in place.
+    # slots=True prevents an instance from shadowing these sealed class
+    # constants, while the metaclass prevents class rebinding after issuance
+    # authority is installed.
+    _accepted_price_verified_constant = False
+    _chain_complete_constant = False
 
-        return False
-
-    @property
-    def chain_complete(self) -> bool:
-        """Whether decision -> actual submit -> accepted quote chain is complete."""
-
-        return False
+    accepted_price_verified = property(
+        attrgetter("_accepted_price_verified_constant"),
+        doc="Whether accepted economics are provider-origin verified end-to-end.",
+    )
+    chain_complete = property(
+        attrgetter("_chain_complete_constant"),
+        doc="Whether decision -> actual submit -> accepted quote chain is complete.",
+    )
 
     @property
     def evidence_sha256(self) -> str:

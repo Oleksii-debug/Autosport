@@ -240,3 +240,62 @@ def test_saved_authorizer_rejects_public_surface_rebind_before_hostile_execution
         )
 
     assert called == []
+
+
+def test_saved_resolver_rejects_internal_witness_table_erasure_before_hostile_helper(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    called: list[str] = []
+    resolver = binding.resolve_campaign_forward_universe_cycle_authority
+
+    def hostile(*_args, **_kwargs):
+        called.append("chronology")
+        raise AssertionError("hostile chronology helper executed")
+
+    monkeypatch.setattr(binding, "_INTERNAL_CALLABLES", ())
+    monkeypatch.setattr(
+        binding,
+        "_require_cycle_observation_chronology",
+        hostile,
+    )
+
+    with pytest.raises(
+        binding.CampaignForwardUniverseCycleBindingError,
+        match="witness tables changed",
+    ):
+        resolver(
+            precommit_locator=None,
+            collector_store=None,
+            source_spec=None,
+            cycle_receipt=None,
+            provider_evidence_store=None,
+            universe_store=None,
+            protocol=None,
+            event_lifecycle=None,
+        )
+
+    assert called == []
+
+
+def test_saved_authorizer_rejects_provider_witness_map_in_place_mutation() -> None:
+    authorizer = binding.authorize_campaign_forward_source_receipts
+    original = dict(binding._PROVIDER_UNIVERSE_VALUES)
+    binding._PROVIDER_UNIVERSE_VALUES.clear()
+    try:
+        with pytest.raises(
+            binding.CampaignForwardUniverseCycleBindingError,
+            match="witness tables changed",
+        ):
+            authorizer(
+                precommit_locator=None,
+                collector_store=None,
+                source_spec=None,
+                cycle_receipt=None,
+                provider_evidence_store=None,
+                universe_store=None,
+                protocol=None,
+                event_lifecycle=None,
+                opportunities=(),
+            )
+    finally:
+        binding._PROVIDER_UNIVERSE_VALUES.update(original)

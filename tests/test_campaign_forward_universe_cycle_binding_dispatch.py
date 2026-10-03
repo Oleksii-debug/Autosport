@@ -197,6 +197,68 @@ def test_authority_private_issuer_rejects_subclass() -> None:
         )
 
 
+def test_verification_private_issuer_rejects_subclass() -> None:
+    class HostileVerification(binding.CampaignForwardEvidenceVerification):
+        pass
+
+    with pytest.raises(TypeError, match="exact canonical class"):
+        HostileVerification._issue(
+            _issuance_capability=binding._VERIFICATION_ISSUANCE_CAPABILITY,
+            authority=object(),
+            structural_result=object(),
+        )
+
+
+def test_saved_verifier_rejects_issuance_capability_rebind_before_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    verifier = binding.verify_campaign_forward_evidence
+    monkeypatch.setattr(binding, "_VERIFICATION_ISSUANCE_CAPABILITY", object())
+
+    with pytest.raises(
+        binding.CampaignForwardUniverseCycleBindingError,
+        match="authority witness globals changed",
+    ):
+        verifier(
+            precommit_locator=None,
+            collector_store=None,
+            source_spec=None,
+            cycle_receipt=None,
+            provider_evidence_store=None,
+            universe_store=None,
+            event_lifecycle=None,
+            evidence=None,
+        )
+
+
+def test_saved_verifier_rejects_capability_and_witness_double_rebind(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    verifier = binding.verify_campaign_forward_evidence
+    hostile = object()
+    monkeypatch.setattr(binding, "_VERIFICATION_ISSUANCE_CAPABILITY", hostile)
+    monkeypatch.setattr(
+        binding,
+        "_CANONICAL_VERIFICATION_ISSUANCE_CAPABILITY",
+        hostile,
+    )
+
+    with pytest.raises(
+        binding.CampaignForwardUniverseCycleBindingError,
+        match="authority witness globals changed",
+    ):
+        verifier(
+            precommit_locator=None,
+            collector_store=None,
+            source_spec=None,
+            cycle_receipt=None,
+            provider_evidence_store=None,
+            universe_store=None,
+            event_lifecycle=None,
+            evidence=None,
+        )
+
+
 def test_composed_verification_issuer_rebind_fails_closed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

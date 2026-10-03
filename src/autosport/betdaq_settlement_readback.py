@@ -574,6 +574,11 @@ class BetdaqPostingsReadback:
                 posted_at = datetime.fromisoformat(
                     posting.posted_at[:-1] + "+00:00"
                 )
+                if posted_at < start_utc or posted_at > end_utc:
+                    raise BetdaqEconomicReadbackError(
+                        "canonical ListAccountPostings readback contains posting "
+                        "outside requested window"
+                    )
                 if (
                     previous_posted_at is not None
                     and posted_at < previous_posted_at

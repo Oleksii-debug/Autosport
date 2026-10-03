@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+import autosport.real_execution_ledger as ledger_module
 from autosport.real_execution_ledger import (
     AcknowledgementStatus,
     AttemptState,
@@ -401,3 +402,331 @@ def test_verified_execution_view_rejects_unknown_plan() -> None:
         ledger = RealExecutionLedger(Path(tmp) / "real-execution.jsonl")
         with pytest.raises(KeyError):
             ledger.verified_execution_view("missing-plan")
+
+def test_view_exposes_exact_durable_plan_reservation_epoch() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "real-execution.jsonl"
+        ledger = RealExecutionLedger(path)
+        action = ExecutionAction(
+            action_id="action-epoch",
+            bookmaker_id="betfair",
+            account_id="acct-1",
+            event_id="event-epoch",
+            market_id="1.epoch",
+            selection_id="101",
+            side="BACK",
+            requested_odds="2.20",
+            requested_stake="10",
+            quote_id="quote-epoch",
+            quote_observed_at="2001-01-01T00:00:00+00:00",
+            expires_at="2099-01-01T00:00:00+00:00",
+        )
+        plan = ExecutionPlan(
+            plan_id="plan-epoch",
+            bookmaker_profile_version="betfair-profile-v1",
+            decision_id="decision-epoch",
+            approval_id="approval-epoch",
+            created_at="2001-01-01T00:00:01+00:00",
+            actions=(action,),
+        )
+
+        ledger.reserve_plan(plan)
+        snapshot = ledger.verified_snapshot()
+        view = ledger.verified_execution_view(plan.plan_id)
+        events = RealExecutionLedger._parse(snapshot.payload)
+        reserved = [
+            event
+            for event in events
+            if event["plan_id"] == plan.plan_id
+            and event["event_type"] == "PLAN_RESERVED"
+        ]
+
+        assert len(reserved) == 1
+        assert view.snapshot_sha256 == snapshot.sha256
+        assert view.event_count == snapshot.event_count
+        assert view.plan_reserved_event_id == reserved[0]["event_id"]
+        assert view.plan_reserved_at == reserved[0]["recorded_at"]
+        assert view.plan_reserved_event_id
+        assert view.plan_reserved_at
+
+
+def test_plan_reservation_epoch_is_independent_from_quote_and_caller_plan_times() -> None:
+    from datetime import datetime
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "real-execution.jsonl"
+        ledger = RealExecutionLedger(path)
+        action = ExecutionAction(
+            action_id="action-time",
+            bookmaker_id="betfair",
+            account_id="acct-1",
+            event_id="event-time",
+            market_id="1.time",
+            selection_id="101",
+            side="BACK",
+            requested_odds="2.20",
+            requested_stake="10",
+            quote_id="quote-time",
+            quote_observed_at="2001-01-01T00:00:00+00:00",
+            expires_at="2099-01-01T00:00:00+00:00",
+        )
+        plan = ExecutionPlan(
+            plan_id="plan-time",
+            bookmaker_profile_version="betfair-profile-v1",
+            decision_id="decision-time",
+            approval_id="approval-time",
+            created_at="2001-01-01T00:00:01+00:00",
+            actions=(action,),
+        )
+
+        ledger.reserve_plan(plan)
+        view = ledger.verified_execution_view(plan.plan_id)
+
+        quote_time = datetime.fromisoformat(action.quote_observed_at)
+        plan_created_time = datetime.fromisoformat(plan.created_at)
+        reserved_time = datetime.fromisoformat(view.plan_reserved_at)
+        expiry_time = datetime.fromisoformat(action.expires_at)
+
+        assert quote_time < plan_created_time < reserved_time < expiry_time
+        assert view.plan_reserved_at != plan.created_at
+        assert view.plan_reserved_at != action.quote_observed_at
+
+
+def test_plan_reservation_epoch_ignores_module_now_rebinding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hostile_at = "2002-01-01T00:00:00+00:00"
+    calls: list[str] = []
+
+    def hostile_now() -> str:
+        calls.append("hostile")
+        return hostile_at
+
+    monkeypatch.setattr(ledger_module, "_now", hostile_now)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        ledger = RealExecutionLedger(Path(tmp) / "real-execution.jsonl")
+        action = ExecutionAction(
+            action_id="action-clock-rebind",
+            bookmaker_id="betfair",
+            account_id="acct-1",
+            event_id="event-clock-rebind",
+            market_id="1.clock-rebind",
+            selection_id="101",
+            side="BACK",
+            requested_odds="2.20",
+            requested_stake="10",
+            quote_id="quote-clock-rebind",
+            quote_observed_at="2001-01-01T00:00:00+00:00",
+            expires_at="2099-01-01T00:00:00+00:00",
+        )
+        plan = ExecutionPlan(
+            plan_id="plan-clock-rebind",
+            bookmaker_profile_version="betfair-profile-v1",
+            decision_id="decision-clock-rebind",
+            approval_id="approval-clock-rebind",
+            created_at="2001-01-01T00:00:01+00:00",
+            actions=(action,),
+        )
+
+        ledger.reserve_plan(plan)
+        view = ledger.verified_execution_view(plan.plan_id)
+
+        assert calls == []
+        assert view.plan_reserved_at != hostile_at
+
+
+def test_plan_reservation_epoch_ignores_in_place_now_code_mutation() -> None:
+    hostile_at = "2003-01-01T00:00:00+00:00"
+    calls: list[str] = []
+
+    def hostile_now() -> str:
+        calls.append("hostile")
+        return hostile_at
+
+    original_code = ledger_module._now.__code__
+    ledger_module._now.__code__ = hostile_now.__code__
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = RealExecutionLedger(Path(tmp) / "real-execution.jsonl")
+            action = ExecutionAction(
+                action_id="action-clock-code",
+                bookmaker_id="betfair",
+                account_id="acct-1",
+                event_id="event-clock-code",
+                market_id="1.clock-code",
+                selection_id="101",
+                side="BACK",
+                requested_odds="2.20",
+                requested_stake="10",
+                quote_id="quote-clock-code",
+                quote_observed_at="2001-01-01T00:00:00+00:00",
+                expires_at="2099-01-01T00:00:00+00:00",
+            )
+            plan = ExecutionPlan(
+                plan_id="plan-clock-code",
+                bookmaker_profile_version="betfair-profile-v1",
+                decision_id="decision-clock-code",
+                approval_id="approval-clock-code",
+                created_at="2001-01-01T00:00:01+00:00",
+                actions=(action,),
+            )
+
+            ledger.reserve_plan(plan)
+            view = ledger.verified_execution_view(plan.plan_id)
+
+            assert calls == []
+            assert view.plan_reserved_at != hostile_at
+    finally:
+        ledger_module._now.__code__ = original_code
+
+
+def test_plan_reservation_event_id_ignores_uuid4_rebinding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    def hostile_uuid4() -> str:
+        calls.append("hostile")
+        return "attacker-selected-event-id"
+
+    monkeypatch.setattr(ledger_module.uuid, "uuid4", hostile_uuid4)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        ledger = RealExecutionLedger(Path(tmp) / "real-execution.jsonl")
+        action = ExecutionAction(
+            action_id="action-event-id",
+            bookmaker_id="betfair",
+            account_id="acct-1",
+            event_id="event-event-id",
+            market_id="1.event-id",
+            selection_id="101",
+            side="BACK",
+            requested_odds="2.20",
+            requested_stake="10",
+            quote_id="quote-event-id",
+            quote_observed_at="2001-01-01T00:00:00+00:00",
+            expires_at="2099-01-01T00:00:00+00:00",
+        )
+        plan = ExecutionPlan(
+            plan_id="plan-event-id",
+            bookmaker_profile_version="betfair-profile-v1",
+            decision_id="decision-event-id",
+            approval_id="approval-event-id",
+            created_at="2001-01-01T00:00:01+00:00",
+            actions=(action,),
+        )
+
+        ledger.reserve_plan(plan)
+        view = ledger.verified_execution_view(plan.plan_id)
+
+        assert calls == []
+        assert view.plan_reserved_event_id != "attacker-selected-event-id"
+        parsed = ledger_module.uuid.UUID(view.plan_reserved_event_id)
+        assert parsed.version == 4
+
+
+def test_exact_plan_redelivery_preserves_original_reservation_epoch() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "real-execution.jsonl"
+        ledger = RealExecutionLedger(path)
+        action = ExecutionAction(
+            action_id="action-replay",
+            bookmaker_id="betfair",
+            account_id="acct-1",
+            event_id="event-replay",
+            market_id="1.replay",
+            selection_id="101",
+            side="BACK",
+            requested_odds="2.20",
+            requested_stake="10",
+            quote_id="quote-replay",
+            quote_observed_at="2001-01-01T00:00:00+00:00",
+            expires_at="2099-01-01T00:00:00+00:00",
+        )
+        plan = ExecutionPlan(
+            plan_id="plan-replay",
+            bookmaker_profile_version="betfair-profile-v1",
+            decision_id="decision-replay",
+            approval_id="approval-replay",
+            created_at="2001-01-01T00:00:01+00:00",
+            actions=(action,),
+        )
+
+        ledger.reserve_plan(plan)
+        before = ledger.verified_execution_view(plan.plan_id)
+        before_count = ledger.verify_integrity()
+
+        assert ledger.reserve_plan(plan) == plan.fingerprint
+
+        after = ledger.verified_execution_view(plan.plan_id)
+        assert ledger.verify_integrity() == before_count
+        assert after.plan_reserved_event_id == before.plan_reserved_event_id
+        assert after.plan_reserved_at == before.plan_reserved_at
+        assert after == before
+
+
+def test_plan_reservation_epoch_is_restart_stable_and_snapshot_bound() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "real-execution.jsonl"
+        ledger = RealExecutionLedger(path)
+        first = ExecutionAction(
+            action_id="action-a",
+            bookmaker_id="betfair",
+            account_id="acct-1",
+            event_id="event-a",
+            market_id="1.a",
+            selection_id="101",
+            side="BACK",
+            requested_odds="2.20",
+            requested_stake="10",
+            quote_id="quote-a",
+            quote_observed_at="2001-01-01T00:00:00+00:00",
+            expires_at="2099-01-01T00:00:00+00:00",
+        )
+        second = ExecutionAction(
+            action_id="action-b",
+            bookmaker_id="betfair",
+            account_id="acct-1",
+            event_id="event-b",
+            market_id="1.b",
+            selection_id="202",
+            side="BACK",
+            requested_odds="2.40",
+            requested_stake="5",
+            quote_id="quote-b",
+            quote_observed_at="2001-01-01T00:00:00+00:00",
+            expires_at="2099-01-01T00:00:00+00:00",
+        )
+        first_plan = ExecutionPlan(
+            plan_id="plan-a",
+            bookmaker_profile_version="betfair-profile-v1",
+            decision_id="decision-a",
+            approval_id="approval-a",
+            created_at="2001-01-01T00:00:01+00:00",
+            actions=(first,),
+        )
+        second_plan = ExecutionPlan(
+            plan_id="plan-b",
+            bookmaker_profile_version="betfair-profile-v1",
+            decision_id="decision-b",
+            approval_id="approval-b",
+            created_at="2001-01-01T00:00:01+00:00",
+            actions=(second,),
+        )
+
+        ledger.reserve_plan(first_plan)
+        frozen = ledger.verified_execution_view(first_plan.plan_id)
+        restarted = RealExecutionLedger(path).verified_execution_view(first_plan.plan_id)
+        assert restarted == frozen
+
+        ledger.reserve_plan(second_plan)
+        advanced = ledger.verified_execution_view(first_plan.plan_id)
+        other = ledger.verified_execution_view(second_plan.plan_id)
+
+        assert advanced.plan_reserved_event_id == frozen.plan_reserved_event_id
+        assert advanced.plan_reserved_at == frozen.plan_reserved_at
+        assert advanced.snapshot_sha256 != frozen.snapshot_sha256
+        assert advanced.event_count == frozen.event_count + 1
+        assert other.plan_reserved_event_id != frozen.plan_reserved_event_id
+

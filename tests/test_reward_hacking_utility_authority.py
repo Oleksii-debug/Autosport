@@ -473,7 +473,9 @@ def test_repeated_hostile_utility_variants_cannot_activity_farm_policy_generatio
     assert policy.generation == 0
 
 
-def test_durable_store_rejects_duplicate_authority_key_even_when_last_value_is_valid(tmp_path) -> None:
+def test_durable_store_rejects_duplicate_authority_key_even_when_last_value_is_valid(
+    tmp_path,
+) -> None:
     policy, action, reward, transition, _ = _scenario()
     original = _utility(policy, action, reward, transition)
     path = tmp_path / "policy-utility.json"

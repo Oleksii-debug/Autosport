@@ -10,6 +10,7 @@ from autosport.agent_loop import (
     AgentLoopPhase,
     AgentLoopRuntime,
     AttributionComponent,
+    AttributionEvidenceGrade,
     AttributionFinding,
     AttributionStatus,
     ConflictingAgentLoopEvidenceError,
@@ -167,6 +168,7 @@ def _attribution(environment, transition, outcome, reward, **overrides):
             AttributionFinding(
                 component=AttributionComponent.FORECAST,
                 status=AttributionStatus.SUPPORTED,
+                evidence_grade=AttributionEvidenceGrade.FACTUAL_MECHANICAL,
                 evidence_sha256=EVIDENCE_SHA,
                 evidence_available_at="2026-09-19T13:05:03Z",
                 contribution=Decimal("0.10"),
@@ -175,6 +177,7 @@ def _attribution(environment, transition, outcome, reward, **overrides):
             AttributionFinding(
                 component=AttributionComponent.RANDOMNESS,
                 status=AttributionStatus.UNKNOWN,
+                evidence_grade=AttributionEvidenceGrade.NOT_IDENTIFIABLE,
                 evidence_sha256=RANDOMNESS_SHA,
                 evidence_available_at="2026-09-19T13:05:03Z",
                 reason_code="UNRESOLVED_RANDOMNESS",
@@ -1044,6 +1047,7 @@ def test_future_evidence_and_observed_simulated_relabel_fail_closed(
             AttributionFinding(
                 component=AttributionComponent.RANDOMNESS,
                 status=AttributionStatus.UNKNOWN,
+                evidence_grade=AttributionEvidenceGrade.NOT_IDENTIFIABLE,
                 evidence_sha256=RANDOMNESS_SHA,
                 evidence_available_at="2026-09-19T13:06:00Z",
                 reason_code="FUTURE_EVIDENCE",
@@ -1078,6 +1082,7 @@ def test_attribution_must_bind_exact_reward_and_unknown_cannot_invent_credit(
         AttributionFinding(
             component=AttributionComponent.RANDOMNESS,
             status=AttributionStatus.UNKNOWN,
+                evidence_grade=AttributionEvidenceGrade.NOT_IDENTIFIABLE,
             evidence_sha256=RANDOMNESS_SHA,
             evidence_available_at="2026-09-19T13:05:03Z",
             contribution=Decimal("1"),
@@ -1247,6 +1252,7 @@ def test_attribution_and_postmortem_identity_keys_are_causal_and_immutable():
     finding = AttributionFinding(
         component=AttributionComponent.RANDOMNESS,
         status=AttributionStatus.UNKNOWN,
+                evidence_grade=AttributionEvidenceGrade.NOT_IDENTIFIABLE,
         evidence_sha256=RANDOMNESS_SHA,
         evidence_available_at="2026-09-19T13:05:03Z",
         reason_code="UNRESOLVED",

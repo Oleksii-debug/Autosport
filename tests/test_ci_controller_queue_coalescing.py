@@ -1539,6 +1539,65 @@ def test_consistent_duplicate_run_observations_authorize_only_one_cancel() -> No
     assert api.cancelled == [49]
 
 
+def test_rebound_selector_cannot_cancel_current_run_or_widen_pr_group(monkeypatch) -> None:
+    qualification = PullRequestQualification(
+        head_sha="7" * 40,
+        integration_capable=True,
+    )
+    api = SweepApi(
+        (
+            _run(50, "8" * 40, (501,)),
+            _run(51, "7" * 40, (501,)),
+            _run(60, "9" * 40, (601,)),
+        ),
+        {501: [qualification]},
+    )
+
+    # A mutable selector must not be able to redirect this PR group's sweep to the
+    # triggering source run. The outer authority independently validates the result.
+    monkeypatch.setattr(
+        scoped_controller,
+        "select_superseded_runs",
+        lambda *_args, **_kwargs: (51,),
+    )
+
+    assert cancel_superseded_explicit_pr_runs(
+        api,  # type: ignore[arg-type]
+        workflow_name="CI",
+        current_run_id=51,
+    ) == ()
+    assert api.cancelled == []
+    assert api.identity_reads == []
+
+
+def test_rebound_selector_cannot_import_another_pr_group(monkeypatch) -> None:
+    qualification = PullRequestQualification(
+        head_sha="7" * 40,
+        integration_capable=True,
+    )
+    api = SweepApi(
+        (
+            _run(50, "8" * 40, (501,)),
+            _run(60, "9" * 40, (601,)),
+        ),
+        {501: [qualification]},
+    )
+
+    monkeypatch.setattr(
+        scoped_controller,
+        "select_superseded_runs",
+        lambda *_args, **_kwargs: (60,),
+    )
+
+    assert cancel_superseded_explicit_pr_runs(
+        api,  # type: ignore[arg-type]
+        workflow_name="CI",
+        current_run_id=99,
+    ) == ()
+    assert api.cancelled == []
+    assert api.identity_reads == []
+
+
 def test_one_pr_authority_move_does_not_block_other_pr_group() -> None:
     one_initial = PullRequestQualification(
         head_sha="7" * 40,

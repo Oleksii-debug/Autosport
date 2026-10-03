@@ -134,6 +134,7 @@ def _open_regular_source_stream(
     path: Path,
     *,
     label: str,
+    expected_snapshot: os.stat_result | None = None,
 ) -> Iterator[BinaryIO]:
     """Open one stable regular source without following its final pathname alias."""
 
@@ -166,7 +167,14 @@ def _open_regular_source_stream(
             opened = os.fstat(stream.fileno())
             current = path.lstat()
             if (
-                stat.S_ISLNK(current.st_mode)
+                (
+                    expected_snapshot is not None
+                    and not _same_regular_source_snapshot(
+                        expected_snapshot,
+                        opened,
+                    )
+                )
+                or stat.S_ISLNK(current.st_mode)
                 or _is_windows_reparse_point(current)
                 or not stat.S_ISREG(current.st_mode)
                 or not _same_regular_source_snapshot(opened, current)
@@ -189,10 +197,19 @@ def _open_regular_source_stream(
         raise ValueError(f"{label} could not be read safely: {path}") from exc
 
 
-def _read_regular_source_bytes(path: Path, *, label: str) -> bytes:
+def _read_regular_source_bytes(
+    path: Path,
+    *,
+    label: str,
+    expected_snapshot: os.stat_result | None = None,
+) -> bytes:
     """Read one source through the canonical stable no-follow stream boundary."""
 
-    with _open_regular_source_stream(path, label=label) as stream:
+    with _open_regular_source_stream(
+        path,
+        label=label,
+        expected_snapshot=expected_snapshot,
+    ) as stream:
         return stream.read()
 
 
@@ -247,6 +264,17 @@ def _scan_regular_source_tree(
     except OSError as exc:
         target = relative_text or str(path)
         raise ValueError(f"{label} contains an inaccessible entry: {target}") from exc
+
+    scanned = _require_source_tree_directory(
+        path,
+        label=label,
+        relative=relative_text,
+    )
+    if not os.path.samestat(before, scanned):
+        target = relative_text or "."
+        raise ValueError(
+            f"{label} directory changed during traversal: {target}"
+        )
 
     for entry in entries:
         source = path / entry.name
@@ -342,6 +370,17 @@ def _copy_regular_source_tree(
                 f"{label} contains an inaccessible entry: {target}"
             ) from exc
 
+        scanned = _require_source_tree_directory(
+            source_dir,
+            label=label,
+            relative=relative_text,
+        )
+        if not os.path.samestat(before, scanned):
+            target = relative_text or "."
+            raise ValueError(
+                f"{label} directory changed during traversal: {target}"
+            )
+
         destination_dir.mkdir(parents=True, exist_ok=True)
         for entry in entries:
             source = source_dir / entry.name
@@ -383,6 +422,7 @@ def _copy_regular_source_tree(
                     _read_regular_source_bytes(
                         source,
                         label=f"{label} file {child_text}",
+                        expected_snapshot=metadata,
                     )
                 )
             else:

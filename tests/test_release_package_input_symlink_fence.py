@@ -201,6 +201,128 @@ class ReleasePackageInputSymlinkFenceTests(unittest.TestCase):
             self.assertFalse(paths["package"].exists())
 
 
+    def test_example_regular_file_replacement_after_scan_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paths = self._make_inputs(root)
+            source = paths["example"] / "market.jsonl"
+            original = root / "market-original.jsonl"
+            real_read = release_package._read_regular_source_bytes
+            swapped = False
+
+            def replace_then_read(
+                path: Path,
+                *,
+                label: str,
+                expected_snapshot: os.stat_result | None = None,
+            ) -> bytes:
+                nonlocal swapped
+                if path == source and expected_snapshot is not None and not swapped:
+                    swapped = True
+                    source.replace(original)
+                    source.write_text(
+                        '{"market":"replacement"}\n',
+                        encoding="utf-8",
+                    )
+                return real_read(
+                    path,
+                    label=label,
+                    expected_snapshot=expected_snapshot,
+                )
+
+            with patch.object(
+                release_package,
+                "_read_regular_source_bytes",
+                side_effect=replace_then_read,
+            ):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "release example tree file market.jsonl changed during open",
+                ):
+                    self._build(paths)
+
+            self.assertTrue(swapped)
+            staged = (
+                root
+                / "Autosport-V1"
+                / "examples"
+                / paths["example"].name
+                / "market.jsonl"
+            )
+            self.assertFalse(staged.exists())
+            self.assertFalse(paths["package"].exists())
+
+    def test_example_root_swap_after_scandir_is_rejected_before_child_read(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paths = self._make_inputs(root)
+            outside = root / "outside-tree"
+            outside.mkdir()
+            secret = outside / "outside-secret.json"
+            secret.write_text('{"secret":true}\n', encoding="utf-8")
+            preserved = root / "example-original"
+
+            real_scandir = release_package.os.scandir
+            real_read = release_package._read_regular_source_bytes
+            example_scan_count = 0
+            swapped = False
+            secret_read = False
+
+            def swap_on_copy_scan(path: object):
+                nonlocal example_scan_count, swapped
+                if Path(path) == paths["example"]:
+                    example_scan_count += 1
+                    if example_scan_count == 2:
+                        swapped = True
+                        paths["example"].replace(preserved)
+                        self._symlink_or_skip(outside, paths["example"])
+                return real_scandir(path)
+
+            def observe_read(
+                path: Path,
+                *,
+                label: str,
+                expected_snapshot: os.stat_result | None = None,
+            ) -> bytes:
+                nonlocal secret_read
+                if path.name == secret.name:
+                    secret_read = True
+                return real_read(
+                    path,
+                    label=label,
+                    expected_snapshot=expected_snapshot,
+                )
+
+            with (
+                patch.object(
+                    release_package.os,
+                    "scandir",
+                    side_effect=swap_on_copy_scan,
+                ),
+                patch.object(
+                    release_package,
+                    "_read_regular_source_bytes",
+                    side_effect=observe_read,
+                ),
+            ):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "release example tree must not be a symbolic link",
+                ):
+                    self._build(paths)
+
+            self.assertTrue(swapped)
+            self.assertFalse(secret_read)
+            staged_secret = (
+                root
+                / "Autosport-V1"
+                / "examples"
+                / paths["example"].name
+                / secret.name
+            )
+            self.assertFalse(staged_secret.exists())
+            self.assertFalse(paths["package"].exists())
+
     def test_top_level_windows_reparse_file_fails_before_existing_staging_is_deleted(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -357,12 +479,21 @@ class ReleasePackageInputSymlinkFenceTests(unittest.TestCase):
                     )
                 return metadata
 
-            def read_without_secret(path: Path, *, label: str) -> bytes:
+            def read_without_secret(
+                path: Path,
+                *,
+                label: str,
+                expected_snapshot: os.stat_result | None = None,
+            ) -> bytes:
                 nonlocal secret_read
                 if path == secret:
                     secret_read = True
                     raise AssertionError("late reparse target file must never be read")
-                return real_read(path, label=label)
+                return real_read(
+                    path,
+                    label=label,
+                    expected_snapshot=expected_snapshot,
+                )
 
             with (
                 patch.object(

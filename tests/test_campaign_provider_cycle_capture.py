@@ -339,6 +339,40 @@ def test_provider_io_occurs_only_after_authorized_scheduled_start(
     assert exact["artifact_id"] == receipt.artifact_id
 
 
+
+def test_campaign_capture_uses_captured_path_equality_after_runtime_rebind(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    locator, store, spec, provider_store = _setup(tmp_path)
+    hostile_calls: list[str] = []
+
+    def fake_urlopen(request, timeout):
+        del request, timeout
+        return _FakeSseResponse(_frame())
+
+    def hostile_path_equality(_left, _right):
+        hostile_calls.append("path-eq")
+        return False
+
+    monkeypatch.setattr(provider_module, "urlopen", fake_urlopen)
+    monkeypatch.setattr(provider_module, "_default_clock", lambda: CAPTURED_AT)
+    monkeypatch.setattr(Path, "__eq__", hostile_path_equality)
+
+    snapshot, receipt = capture_campaign_complete_game_board(
+        precommit_locator=locator,
+        store=store,
+        source_spec=spec,
+        evidence_store=provider_store,
+        request=_request(),
+        api_key="secret-value",
+        timeout_seconds=3.0,
+        clock=_clock(),
+    )
+
+    assert receipt.provider_evidence_sha256 == snapshot.evidence_sha256
+    assert hostile_calls == []
+
 def test_provider_io_rejects_slot_zero_start_at_next_slot_boundary(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

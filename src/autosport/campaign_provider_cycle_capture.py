@@ -1013,6 +1013,9 @@ def capture_campaign_complete_game_board(
     expected_store_class_seam_module_attr_witnesses = (
         _STORE_CLASS_SEAM_MODULE_ATTR_WITNESSES
     )
+    expected_store_class_seam_builtin_witnesses = (
+        _STORE_CLASS_SEAM_BUILTIN_WITNESSES
+    )
     expected_object_getattribute = _CANONICAL_OBJECT_GETATTRIBUTE
     expected_artifact_kind = artifact_kind
     expected_schema_version = _SCHEMA_VERSION
@@ -1043,6 +1046,8 @@ def capture_campaign_complete_game_board(
             is not expected_store_class_seam_global_witnesses
             or module_globals.get("_STORE_CLASS_SEAM_MODULE_ATTR_WITNESSES")
             is not expected_store_class_seam_module_attr_witnesses
+            or module_globals.get("_STORE_CLASS_SEAM_BUILTIN_WITNESSES")
+            is not expected_store_class_seam_builtin_witnesses
             or module_globals.get("_CANONICAL_OBJECT_GETATTRIBUTE")
             is not expected_object_getattribute
         ):
@@ -1632,6 +1637,7 @@ def _seal_campaign_provider_cycle_capture_dispatch() -> None:
         "_STORE_CLASS_SEAM_WITNESSES": _STORE_CLASS_SEAM_WITNESSES,
         "_STORE_CLASS_SEAM_GLOBAL_WITNESSES": _STORE_CLASS_SEAM_GLOBAL_WITNESSES,
         "_STORE_CLASS_SEAM_MODULE_ATTR_WITNESSES": _STORE_CLASS_SEAM_MODULE_ATTR_WITNESSES,
+        "_STORE_CLASS_SEAM_BUILTIN_WITNESSES": _STORE_CLASS_SEAM_BUILTIN_WITNESSES,
         "_EVIDENCE_DIRECTORY": _EVIDENCE_DIRECTORY,
         "_EVIDENCE_DIRECTORY_SURFACE": _EVIDENCE_DIRECTORY_SURFACE,
         "_PRECOMMIT_ROUTING_SEAMS": _PRECOMMIT_ROUTING_SEAMS,

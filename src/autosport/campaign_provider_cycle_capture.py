@@ -498,6 +498,7 @@ def capture_campaign_complete_game_board(
     expected_json = json
     expected_json_dumps = json.dumps
     expected_datetime = datetime
+    expected_timedelta = timedelta
     expected_utc = UTC
     expected_campaign_clock = _CANONICAL_CAMPAIGN_CLOCK
     expected_campaign_clock_code = _CANONICAL_CAMPAIGN_CLOCK_CODE
@@ -624,6 +625,7 @@ def capture_campaign_complete_game_board(
             or module_globals.get("json") is not expected_json
             or expected_json.dumps is not expected_json_dumps
             or module_globals.get("datetime") is not expected_datetime
+            or module_globals.get("timedelta") is not expected_timedelta
             or module_globals.get("UTC") is not expected_utc
         ):
             raise CampaignProviderCycleCaptureIntegrityError(
@@ -676,7 +678,7 @@ def capture_campaign_complete_game_board(
         instant(slot.get("due_at"), "collector slot due_at")
     )
     try:
-        slot_deadline_instant = slot_due_instant + timedelta(
+        slot_deadline_instant = slot_due_instant + expected_timedelta(
             seconds=source_spec.interval_seconds
         )
     except (OverflowError, ValueError) as exc:
@@ -931,6 +933,7 @@ def _seal_campaign_provider_cycle_capture_dispatch() -> None:
     expected_json = json
     expected_json_dumps = json.dumps
     expected_datetime = datetime
+    expected_timedelta = timedelta
     expected_utc = UTC
     expected_values = {
         "CollectorDeltaStore": CollectorDeltaStore,
@@ -946,6 +949,7 @@ def _seal_campaign_provider_cycle_capture_dispatch() -> None:
         "hashlib": expected_hashlib,
         "json": expected_json,
         "datetime": expected_datetime,
+        "timedelta": expected_timedelta,
         "UTC": expected_utc,
         "_RECEIPT_FIELD_NAMES": expected_receipt_field_names,
         "_RECEIPT_FIELD_DESCRIPTORS": expected_receipt_field_descriptors,

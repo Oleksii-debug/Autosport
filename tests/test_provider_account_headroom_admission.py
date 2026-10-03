@@ -2935,3 +2935,70 @@ def test_capital_evidence_digest_rebinding_cannot_mint_zero_liability(
 
     assert hostile_calls == []
 
+def test_capital_attempt_type_rebinding_cannot_forge_zero_liability(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    acquired, _ = _acquire_balance(monkeypatch, tmp_path, "100")
+    target = _plan("target", _action("target-action", "10"))
+    ledger = _ledger_with_plans(tmp_path, target)
+    hostile_calls: list[object] = []
+
+    class HostileAttemptCapital:
+        def __init__(self, *args, **kwargs):
+            hostile_calls.append((args, kwargs))
+
+    monkeypatch.setattr(
+        headroom_module._capital_risk,
+        "AttemptCapitalAtRisk",
+        HostileAttemptCapital,
+    )
+
+    with pytest.raises(
+        ProviderAccountHeadroomError,
+        match="canonical capital-at-risk headroom authority changed",
+    ):
+        _assess(
+            ledger,
+            acquired,
+            plan_id="target",
+            action_id="target-action",
+        )
+
+    assert hostile_calls == []
+
+
+def test_capital_attempt_state_rebinding_cannot_reclassify_reserved_liability(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    acquired, _ = _acquire_balance(monkeypatch, tmp_path, "100")
+    target = _plan("target", _action("target-action", "10"))
+    ledger = _ledger_with_plans(tmp_path, target)
+
+    class HostileAttemptState:
+        RESERVED = object()
+        SUBMITTED = object()
+        UNKNOWN = object()
+        ACCEPTED = object()
+        PARTIAL = object()
+        REJECTED = object()
+        RECONCILED_NOT_FOUND = object()
+
+    monkeypatch.setattr(
+        headroom_module._capital_risk,
+        "AttemptState",
+        HostileAttemptState,
+    )
+
+    with pytest.raises(
+        ProviderAccountHeadroomError,
+        match="canonical capital-at-risk headroom authority changed",
+    ):
+        _assess(
+            ledger,
+            acquired,
+            plan_id="target",
+            action_id="target-action",
+        )
+

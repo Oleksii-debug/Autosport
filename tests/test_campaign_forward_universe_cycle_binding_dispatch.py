@@ -5,6 +5,7 @@ import inspect
 import pytest
 
 import autosport.campaign_forward_universe_cycle_binding as binding
+from autosport.campaign_inception import CampaignInceptionReceipt
 
 
 def test_authority_issuer_rebind_fails_before_hostile_execution(
@@ -421,3 +422,35 @@ def test_saved_resolver_rejects_issuer_and_witness_double_rebind(
         )
 
     assert hostile_calls == []
+
+
+def test_saved_resolver_rejects_inception_window_descriptor_replacement() -> None:
+    resolver = binding.resolve_campaign_forward_universe_cycle_authority
+    original = vars(CampaignInceptionReceipt)["observation_not_after"]
+
+    type.__setattr__(
+        CampaignInceptionReceipt,
+        "observation_not_after",
+        property(lambda _self: "2200-01-01T00:00:00+00:00"),
+    )
+    try:
+        with pytest.raises(
+            binding.CampaignForwardUniverseCycleBindingError,
+            match="inception receipt field descriptor changed",
+        ):
+            resolver(
+                precommit_locator=None,
+                collector_store=None,
+                source_spec=None,
+                cycle_receipt=None,
+                provider_evidence_store=None,
+                universe_store=None,
+                protocol=None,
+                event_lifecycle=None,
+            )
+    finally:
+        type.__setattr__(
+            CampaignInceptionReceipt,
+            "observation_not_after",
+            original,
+        )

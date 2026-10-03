@@ -417,3 +417,132 @@ def test_module_exposes_no_registration_or_registry_mint_hook():
         "_build_bound_authority_runtime",
     ):
         assert not hasattr(subject, name), name
+
+
+def test_product_login_route_binds_to_exact_current_k07_context(monkeypatch, tmp_path):
+    """Exercise the full route -> credentials -> K07 -> bound-context composition."""
+
+    import json
+    import urllib.request as _urllib_request
+
+    from autosport.betfair_account_identity import (
+        build_betfair_authenticated_client,
+        resolve_betfair_authenticated_account_identity,
+    )
+
+    endpoint = cert_login_endpoint(BetfairLoginJurisdiction.SPAIN)
+    login_payload = b'{"sessionToken":"session-from-login","loginStatus":"SUCCESS"}'
+
+    class LoginResponse:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+        def geturl(self):
+            return endpoint
+
+        def read(self, limit):
+            assert limit > len(login_payload)
+            return login_payload
+
+    def fake_opener_open(self, request, data=None, timeout=0):
+        assert data is None
+        assert request.full_url == endpoint
+        assert timeout > 0
+        return LoginResponse()
+
+    # Keep Autosport's canonical login function/transport intact while replacing
+    # only lower stdlib effects. The resulting object still truthfully claims
+    # process-local selected-route authority, never remote-provider attestation.
+    monkeypatch.setattr(
+        subject.ssl.SSLContext,
+        "load_cert_chain",
+        lambda self, certfile, keyfile=None, password=None: None,
+    )
+    monkeypatch.setattr(_urllib_request.OpenerDirector, "open", fake_opener_open)
+
+    secrets = BetfairNonInteractiveLoginSecrets(
+        "application-key",
+        "user",
+        "password",
+        tmp_path / "client.crt",
+        tmp_path / "client.key",
+    )
+    session = login_betfair_noninteractive(
+        secrets,
+        jurisdiction=BetfairLoginJurisdiction.SPAIN,
+    )
+    assert is_authoritative_betfair_session_origin(
+        session.origin,
+        credentials=session.credentials,
+    )
+
+    class AccountResponse:
+        def __init__(self, payload):
+            self._payload = payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+        def read(self, limit):
+            assert limit > len(self._payload)
+            return self._payload
+
+    class AccountOpener:
+        def open(self, request, data=None, timeout=0):
+            assert data is None
+            assert timeout > 0
+            rpc = json.loads(request.data.decode("utf-8"))
+            assert rpc["method"] == "AccountAPING/v1.0/getAccountDetails"
+            payload = json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "id": rpc["id"],
+                    "result": {
+                        "currencyCode": "EUR",
+                        "localeCode": "es",
+                        "region": "ESP",
+                        "timezone": "Europe/Madrid",
+                    },
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            return AccountResponse(payload)
+
+    monkeypatch.setattr(_urllib_request, "_opener", AccountOpener())
+
+    client = build_betfair_authenticated_client(session.credentials)
+    identity = resolve_betfair_authenticated_account_identity(client)
+    bound = subject.bind_betfair_authenticated_jurisdiction(
+        session.origin,
+        identity,
+        client=client,
+    )
+
+    assert bound.jurisdiction is BetfairLoginJurisdiction.SPAIN
+    assert bound.session_context_id == identity.session_context_id
+    assert bound.account_identity_id == identity.identity_id
+    assert is_authoritative_betfair_authenticated_jurisdiction(
+        bound,
+        client=client,
+    )
+    assert bound.remote_provider_origin_proven is False
+    assert bound.remote_provider_jurisdiction_proven is False
+    assert bound.execution_authorized is False
+
+    client._credentials = BetfairSessionCredentials(
+        "application-key",
+        "rotated-session",
+    )
+    assert not is_authoritative_betfair_authenticated_jurisdiction(
+        bound,
+        client=client,
+    )

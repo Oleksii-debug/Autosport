@@ -92,6 +92,8 @@ _STORE_SEAMS = frozenset(
         "_connect_path",
         "_path_file_identity",
         "_schedule_authority_sha256",
+        "_cycle_terminal_payload_json",
+        "_cycle_terminal_payload_sha256",
         "_collector_schedule_id",
         "_collector_schedule_due_at",
     }
@@ -327,6 +329,53 @@ def _require_canonical_seams(
     if rebound:
         raise CampaignProviderCycleCaptureIntegrityError(
             "provider evidence campaign capture seam is instance-rebound: "
+            + ", ".join(rebound)
+        )
+
+
+def _require_failure_terminal_seams(
+    store: CollectorDeltaStore,
+) -> None:
+    """Validate only collector authority required to close an already-started failure.
+
+    Provider evidence surfaces are intentionally excluded: a provider/evidence callback
+    may be the thing that failed or was corrupted, but that must not strand an immutable
+    collector START without a terminal receipt.
+    """
+
+    if _CANONICAL_TYPE(store) is not CollectorDeltaStore:
+        raise _CANONICAL_TYPE_ERROR(
+            "store must be the exact canonical CollectorDeltaStore"
+        )
+    rebound = _CANONICAL_SORTED(
+        name
+        for name, expected in _STORE_CLASS_SEAMS.items()
+        if _CANONICAL_GETATTR_STATIC(CollectorDeltaStore, name, None) is not expected
+    )
+    if rebound:
+        raise CampaignProviderCycleCaptureIntegrityError(
+            "collector failure-terminal seam is class-rebound: " + ", ".join(rebound)
+        )
+    code_changed = _CANONICAL_SORTED(
+        name
+        for name, expected in _STORE_CLASS_SEAMS.items()
+        if _CANONICAL_GETATTR(
+            _CANONICAL_GETATTR(expected, "__func__", expected),
+            "__code__",
+            None,
+        )
+        is not _STORE_CLASS_SEAM_CODES[name]
+    )
+    if code_changed:
+        raise CampaignProviderCycleCaptureIntegrityError(
+            "collector failure-terminal seam code changed: "
+            + ", ".join(code_changed)
+        )
+    store_state = _CANONICAL_OBJECT_GETATTRIBUTE(store, "__dict__")
+    rebound = _CANONICAL_SORTED(name for name in _STORE_SEAMS if name in store_state)
+    if rebound:
+        raise CampaignProviderCycleCaptureIntegrityError(
+            "collector failure-terminal seam is instance-rebound: "
             + ", ".join(rebound)
         )
 
@@ -666,6 +715,7 @@ def capture_campaign_complete_game_board(
             "provider request source_id does not match campaign collector source"
         )
     require_seams = _require_canonical_seams
+    require_failure_terminal_seams = _require_failure_terminal_seams
     require_evidence_scope = _require_provider_evidence_campaign_scope
     instant = _instant
     establish_inception = establish_campaign_inception
@@ -683,6 +733,7 @@ def capture_campaign_complete_game_board(
     module_globals = _CANONICAL_MODULE_GLOBALS
     expected_dispatch = (
         ("_require_canonical_seams", require_seams),
+        ("_require_failure_terminal_seams", require_failure_terminal_seams),
         ("_require_provider_evidence_campaign_scope", require_evidence_scope),
         ("_text", _text),
         ("_sha", _sha),
@@ -706,11 +757,6 @@ def capture_campaign_complete_game_board(
     expected_codes = tuple(
         (name, target, _CANONICAL_GETATTR(_CANONICAL_GETATTR(target, "__func__", target), "__code__", None))
         for name, target in expected_dispatch
-    )
-    expected_require_seams_code = _CANONICAL_GETATTR(
-        _CANONICAL_GETATTR(require_seams, "__func__", require_seams),
-        "__code__",
-        None,
     )
     expected_finish_code = _CANONICAL_GETATTR(
         _CANONICAL_GETATTR(finish_cycle, "__func__", finish_cycle),
@@ -1180,10 +1226,18 @@ def capture_campaign_complete_game_board(
         if not terminal_written:
             try:
                 finish_function = _CANONICAL_GETATTR(finish_cycle, "__func__", finish_cycle)
-                require_seams_function = _CANONICAL_GETATTR(
-                    require_seams,
+                require_failure_terminal_seams_function = _CANONICAL_GETATTR(
+                    require_failure_terminal_seams,
                     "__func__",
-                    require_seams,
+                    require_failure_terminal_seams,
+                )
+                expected_failure_terminal_seams_code = next(
+                    code
+                    for name, target, code in expected_codes
+                    if (
+                        name == "_require_failure_terminal_seams"
+                        and target is require_failure_terminal_seams
+                    )
                 )
                 if (
                     module_globals.get("inspect") is not expected_inspect
@@ -1194,10 +1248,14 @@ def capture_campaign_complete_game_board(
                     or expected_json.dumps is not expected_json_dumps
                     or module_globals.get("datetime") is not expected_datetime
                     or module_globals.get("UTC") is not expected_utc
-                    or module_globals.get("_require_canonical_seams")
-                    is not require_seams
-                    or _CANONICAL_GETATTR(require_seams_function, "__code__", None)
-                    is not expected_require_seams_code
+                    or module_globals.get("_require_failure_terminal_seams")
+                    is not require_failure_terminal_seams
+                    or _CANONICAL_GETATTR(
+                        require_failure_terminal_seams_function,
+                        "__code__",
+                        None,
+                    )
+                    is not expected_failure_terminal_seams_code
                     or module_globals.get("_CANONICAL_SORTED") is not expected_sorted
                     or module_globals.get("_CANONICAL_TYPE_ERROR")
                     is not expected_type_error_alias
@@ -1208,7 +1266,7 @@ def capture_campaign_complete_game_board(
                     raise integrity_error(
                         "campaign provider-cycle failure terminal dispatch changed"
                     )
-                require_seams(store, evidence_store)
+                require_failure_terminal_seams(store)
                 finish_cycle(
                     store,
                     source_id=source_spec.source_id,

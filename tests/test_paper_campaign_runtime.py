@@ -22,6 +22,46 @@ _SPEC.loader.exec_module(_legacy)
 
 
 class PaperCampaignRuntimeTests(_legacy.PaperCampaignRuntimeTests):
+    def test_paper_ticket_freezes_agent_loop_deployment_binding(self) -> None:
+        """The PAPER ticket producer cannot omit the active deployment identity."""
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            binding_id = "d" * 64
+            (
+                _leg,
+                _book,
+                _ticket_id,
+                decision,
+                _environment,
+                _baseline,
+                _observation,
+                _bridge,
+                runtime,
+            ) = _legacy._fixture(
+                root,
+                activation_binding_id=binding_id,
+            )
+
+            snapshot = runtime.agent_loop.snapshot()
+            self.assertEqual(snapshot.activation_binding_id, binding_id)
+            self.assertIs(snapshot.phase, _legacy.AgentLoopPhase.WAIT_OUTCOME)
+
+            durable = json.loads(
+                (root / "agent-loop.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(len(durable["decisions"]), 1)
+            stored = durable["decisions"][0]
+            self.assertIn(
+                ["activation_binding_id", binding_id],
+                stored["parameters"],
+            )
+            self.assertIn(
+                ["economic_decision_id", decision.decision_id],
+                stored["parameters"],
+            )
+            self.assertEqual(stored["action_id"], snapshot.action_id)
+
     def test_late_reflection_semantics_keep_actual_first_availability(self) -> None:
         """Precommitted semantics become usable when the reward becomes available."""
 

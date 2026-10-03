@@ -620,6 +620,13 @@ class AgentLoopRuntime:
             )
         ):
             raise AgentLoopError("AgentLoop identity fields mismatch")
+        if (
+            version == AGENT_LOOP_LEGACY_SCHEMA_VERSION
+            and "activation_binding_id" in identity
+        ):
+            raise AgentLoopError(
+                "legacy AgentLoop cannot carry deployment activation binding"
+            )
         _text(identity["loop_id"], "loop_id")
         for key in (
             "environment_id",
@@ -766,6 +773,10 @@ class AgentLoopRuntime:
                     raise AgentLoopError("decision intent does not bind observation")
                 raw_parameters = record["parameters"]
                 if raw_parameters is None:
+                    if identity.get("activation_binding_id") is not None:
+                        raise AgentLoopError(
+                            "deployment-bound decision lacks canonical activation binding evidence"
+                        )
                     decisions_without_canonical_parameters.add(record["action_id"])
                 else:
                     if type(raw_parameters) is not list:
@@ -791,6 +802,10 @@ class AgentLoopRuntime:
                         raise AgentLoopError(
                             "decision parameters are not canonical"
                         ) from exc
+                    AgentLoopRuntime._require_action_deployment_binding(
+                        canonical_action,
+                        identity,
+                    )
                     canonical_parameters = [
                         [key, value] for key, value in canonical_action.parameters
                     ]
@@ -1716,6 +1731,71 @@ class AgentLoopRuntime:
 
         return self._mutate(at, apply)
 
+    def bind_action_parameters(
+        self,
+        parameters: tuple[tuple[str, str], ...],
+    ) -> tuple[tuple[str, str], ...]:
+        """Bind reserved deployment identity for any canonical action producer.
+
+        Callers own ordinary action parameters but cannot mint or override the
+        activation binding id. Deployment-bound runtimes inject the exact
+        immutable AgentLoop identity before Action hashing; legacy runtimes leave
+        parameters unchanged and the commit fence still rejects forged binding.
+        """
+
+        if type(parameters) is not tuple:
+            raise TypeError("parameters must be a canonical tuple")
+        for entry in parameters:
+            if (
+                type(entry) is not tuple
+                or len(entry) != 2
+                or type(entry[0]) is not str
+                or type(entry[1]) is not str
+            ):
+                raise AgentLoopError(
+                    "action parameters must be canonical key/value tuples"
+                )
+        if any(key == "activation_binding_id" for key, _ in parameters):
+            raise ConflictingAgentLoopEvidenceError(
+                "caller cannot supply reserved activation_binding_id"
+            )
+        binding_id = self.snapshot().activation_binding_id
+        if binding_id is None:
+            return parameters
+        return tuple(
+            sorted(
+                (
+                    *parameters,
+                    ("activation_binding_id", binding_id),
+                )
+            )
+        )
+
+    @staticmethod
+    def _require_action_deployment_binding(
+        action: Action,
+        identity: dict[str, Any],
+    ) -> None:
+        expected = identity.get("activation_binding_id")
+        bound = next(
+            (
+                value
+                for key, value in action.parameters
+                if key == "activation_binding_id"
+            ),
+            None,
+        )
+        if expected is None:
+            if bound is not None:
+                raise ConflictingAgentLoopEvidenceError(
+                    "action cannot mint deployment identity outside a deployment-bound AgentLoop"
+                )
+            return
+        if bound != expected:
+            raise ConflictingAgentLoopEvidenceError(
+                "action activation binding conflicts with AgentLoop deployment identity"
+            )
+
     @staticmethod
     def _require_action_authority(
         action: Action,
@@ -1729,6 +1809,7 @@ class AgentLoopRuntime:
             raise TypeError("observation must be Observation")
         identity = state["identity"]
         current = state["current"]
+        AgentLoopRuntime._require_action_deployment_binding(action, identity)
         if episode.environment_id != identity["environment_id"]:
             raise AgentLoopError("episode belongs to another environment")
         if episode.episode_id != identity["episode_id"]:

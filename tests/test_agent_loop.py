@@ -233,7 +233,7 @@ def _legacy_v2_runtime_through_attribution(tmp_path):
         at="2026-09-19T13:05:04Z",
     )
     assert runtime.snapshot().phase is AgentLoopPhase.REFLECT
-    return runtime
+    return runtime, environment
 
 
 def test_schema_v2_restart_upgrades_only_from_canonical_checkpoint(tmp_path):
@@ -408,6 +408,26 @@ def test_schema_v2_restart_upgrades_only_from_canonical_checkpoint(tmp_path):
     )
 
 
+
+def test_schema_v2_deployment_binding_cannot_relabel_legacy_decision_on_upgrade(
+    tmp_path,
+):
+    runtime, _ = _legacy_v2_runtime_through_attribution(tmp_path)
+    relabelled = json_load(runtime.path)
+    relabelled["identity"]["activation_binding_id"] = "a" * 64
+    rewrite_with_valid_state_digest(runtime.path, relabelled)
+    before_reopen = runtime.path.read_bytes()
+
+    with pytest.raises(
+        AgentLoopError,
+        match="legacy AgentLoop cannot carry deployment activation binding",
+    ):
+        AgentLoopRuntime(runtime.path)
+
+    assert runtime.path.read_bytes() == before_reopen
+    assert json_load(runtime.path)["schema_version"] == 2
+
+
 def test_schema_v2_self_consistent_malformed_state_fails_closed(tmp_path):
     environment = _environment()
     runtime = _runtime(tmp_path, environment)
@@ -423,7 +443,7 @@ def test_schema_v2_self_consistent_malformed_state_fails_closed(tmp_path):
 def test_schema_v2_self_consistent_orphaned_current_attribution_fails_closed(
     tmp_path,
 ):
-    runtime = _legacy_v2_runtime_through_attribution(tmp_path)
+    runtime, _ = _legacy_v2_runtime_through_attribution(tmp_path)
     malformed = json_load(runtime.path)
     malformed["current"]["attribution_id"] = "f" * 64
     rewrite_with_valid_state_digest(runtime.path, malformed)
@@ -436,7 +456,7 @@ def test_schema_v2_self_consistent_orphaned_current_attribution_fails_closed(
 
 
 def test_schema_v2_self_consistent_resolution_cross_link_fails_closed(tmp_path):
-    runtime = _legacy_v2_runtime_through_attribution(tmp_path)
+    runtime, _ = _legacy_v2_runtime_through_attribution(tmp_path)
     malformed = json_load(runtime.path)
     malformed["resolutions"][0]["action_id"] = "e" * 64
     rewrite_with_valid_state_digest(runtime.path, malformed)
@@ -449,7 +469,7 @@ def test_schema_v2_self_consistent_resolution_cross_link_fails_closed(tmp_path):
 
 
 def test_schema_v2_self_consistent_effect_and_phase_rewrites_fail_closed(tmp_path):
-    runtime = _legacy_v2_runtime_through_attribution(tmp_path)
+    runtime, _ = _legacy_v2_runtime_through_attribution(tmp_path)
     valid = json_load(runtime.path)
 
     wrong_effect = json.loads(json.dumps(valid))
@@ -668,6 +688,40 @@ def test_direct_action_cannot_bypass_episode_admissible_set(tmp_path):
     ):
         runtime.commit_action(
             unauthorized,
+            episode=environment.episode,
+            observation=observation,
+            effect_state=ExternalEffectState.NONE,
+            at="2026-09-19T13:00:05Z",
+        )
+
+    snapshot = runtime.snapshot()
+    assert snapshot.phase is AgentLoopPhase.ACT_OR_ABSTAIN
+    assert snapshot.action_id is None
+
+
+def test_direct_action_cannot_mint_deployment_binding_on_unbound_loop(tmp_path):
+    environment = _environment()
+    runtime = _runtime(tmp_path, environment)
+    observation = _observation(environment)
+    runtime.begin_observation(
+        observation,
+        environment_identity=environment.identity,
+        at="2026-09-19T13:00:01Z",
+    )
+    _advance_to_action(runtime)
+    forged = environment.act(
+        observation,
+        action_type="WAIT",
+        decision_at="2026-09-19T13:00:05Z",
+        parameters=(("activation_binding_id", "a" * 64),),
+    )
+
+    with pytest.raises(
+        ConflictingAgentLoopEvidenceError,
+        match="action cannot mint deployment identity outside a deployment-bound AgentLoop",
+    ):
+        runtime.commit_action(
+            forged,
             episode=environment.episode,
             observation=observation,
             effect_state=ExternalEffectState.NONE,

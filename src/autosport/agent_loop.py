@@ -206,9 +206,9 @@ class AttributionFinding:
     status: AttributionStatus
     evidence_sha256: str
     evidence_available_at: str
-    evidence_grade: AttributionEvidenceGrade | None = None
     contribution: Decimal | None = None
     reason_code: str = "UNSPECIFIED"
+    evidence_grade: AttributionEvidenceGrade | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.component, AttributionComponent):

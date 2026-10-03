@@ -12,6 +12,7 @@ from autosport.campaign_inception import (
     CampaignInceptionIntegrityError,
     CampaignInceptionReceipt,
     CampaignInceptionSourceSpec,
+    campaign_evaluation_plan_sha256,
     establish_campaign_inception,
 )
 from autosport.campaign_precommit_manifest import (
@@ -72,7 +73,27 @@ def _setup(
     CampaignInceptionSourceSpec,
     Path,
 ]:
-    selected = _manifest() if manifest is None else manifest
+    source_id = manifest.source_id if manifest is not None else "betfair:exchange"
+    store_path = tmp_path / "collector.db"
+    store = CollectorDeltaStore(store_path)
+    spec = CampaignInceptionSourceSpec(
+        expected_store_path=store_path,
+        source_id=source_id,
+        run_id="run-1",
+        stream_epoch="epoch-1",
+        anchor_at="2100-01-01T06:00:00+00:00",
+        interval_seconds=10,
+        max_items=250,
+        evaluation_start_slot_ordinal=0,
+        evaluation_end_slot_ordinal=1,
+    )
+    selected = (
+        _manifest(
+            evaluation_universe_sha256=campaign_evaluation_plan_sha256(spec),
+        )
+        if manifest is None
+        else manifest
+    )
     workspace = tmp_path / "workspace"
     evidence = workspace / "evidence"
     evidence.mkdir(parents=True)
@@ -88,19 +109,6 @@ def _setup(
         manifest_path=manifest_path,
         workspace=workspace,
         authority_root=authority_root,
-    )
-    store_path = tmp_path / "collector.db"
-    store = CollectorDeltaStore(store_path)
-    spec = CampaignInceptionSourceSpec(
-        expected_store_path=store_path,
-        source_id=selected.source_id,
-        run_id="run-1",
-        stream_epoch="epoch-1",
-        anchor_at="2100-01-01T06:00:00+00:00",
-        interval_seconds=10,
-        max_items=250,
-        evaluation_start_slot_ordinal=0,
-        evaluation_end_slot_ordinal=1,
     )
     return selected, locator, store, spec, authority_root
 
@@ -605,6 +613,7 @@ def test_gate_authorization_is_exact_committed_authority_record(
     )
 
     assert receipt.evaluation_universe_sha256 == manifest.evaluation_universe_sha256
+    assert receipt.evaluation_universe_sha256 == campaign_evaluation_plan_sha256(spec)
     assert receipt.source_snapshot_sha256 == manifest.source_snapshot_sha256
     assert receipt.observation_not_before == manifest.observation_not_before
     assert receipt.observation_not_after == manifest.observation_not_after
@@ -625,6 +634,35 @@ def test_gate_authorization_is_exact_committed_authority_record(
     )
     assert status is not None
     assert status["authorization_sha256"] == history[-1].record_sha256
+
+def test_inception_rejects_realized_digest_substitution_before_start_gate(
+    tmp_path: Path,
+) -> None:
+    manifest = _manifest(evaluation_universe_sha256=B)
+    _manifest_value, locator, store, spec, _authority_root = _setup(
+        tmp_path,
+        manifest=manifest,
+    )
+    assert manifest.evaluation_universe_sha256 != campaign_evaluation_plan_sha256(spec)
+
+    with pytest.raises(
+        CampaignInceptionConflictError,
+        match="evaluation plan does not match exact collector schedule plan",
+    ):
+        establish_campaign_inception(
+            precommit_locator=locator,
+            store=store,
+            source_spec=spec,
+        )
+
+    assert (
+        store._collector_schedule_start_gate_status(
+            source_id=spec.source_id,
+            run_id=spec.run_id,
+        )
+        is None
+    )
+
 
 def test_inception_rejects_receipt_field_mapping_erasure_before_start_gate(
     tmp_path: Path,

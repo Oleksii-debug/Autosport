@@ -93,6 +93,7 @@ def _install_https_test_dispatch(monkeypatch: pytest.MonkeyPatch) -> None:
         )
         response.code = 200
         response.msg = "OK"
+        response.info = lambda: {}
         return response
 
     monkeypatch.setattr(

@@ -7,8 +7,14 @@ from decimal import Decimal
 import pytest
 
 from autosport.agents import AgentContext
-from autosport.decision_ledger import DecisionRecord, JsonlDecisionLedger
+from autosport.decision_ledger import (
+    ECONOMIC_DECISION_KIND,
+    DecisionRecord,
+    EconomicDecisionAuthority,
+    JsonlDecisionLedger,
+)
 from autosport.domain import MarketEvent
+from autosport.economic_goal import EconomicGoalContract
 from autosport.paper import PaperBook
 from autosport.paper_execution_adoption import (
     PaperExecutionAdoptionError,
@@ -43,6 +49,21 @@ def _config() -> PaperExecutionModelConfig:
         unknown_bps=0,
         partial_fill_bps=5_000,
         max_slippage_bps=0,
+    )
+
+
+def _goal() -> EconomicGoalContract:
+    return EconomicGoalContract(
+        goal_id="goal-paper-value-authority",
+        revision=1,
+        bankroll_id="paper-bankroll",
+        currency="USD",
+        max_stake_fraction=Decimal("0.10"),
+        max_capital_at_risk_fraction=Decimal("0.50"),
+        max_risk_of_ruin=Decimal("1"),
+        max_concurrent_positions=2,
+        max_quote_age_seconds=Decimal("5"),
+        minimum_data_quality=Decimal("0"),
     )
 
 
@@ -271,6 +292,116 @@ def test_caller_authored_general_restart_record_cannot_be_first_execution_author
     assert book.balance == Decimal("100.00")
     assert not book.tickets
     assert not runtime.ledger.events()
+
+
+def test_caller_authored_economic_restart_record_cannot_be_first_execution_authority(
+    tmp_path,
+) -> None:
+    book = PaperBook("100.00")
+    runtime = _runtime(tmp_path, book)
+    event = _event()
+    ledger = JsonlDecisionLedger(tmp_path / "decisions.jsonl")
+    goal = _goal()
+    policy = PaperRiskPolicy(economic_goal=goal)
+    agent = PaperValueAgent(
+        {event.quote_key: _forecast(event)},
+        stake=Decimal("1.00"),
+        minimum_expected_profit_per_unit=Decimal("0"),
+        risk_policy=policy,
+    )
+    context = AgentContext(
+        book,
+        replay_run_id="replay-economic-forgery",
+        decision_ledger=ledger,
+        paper_execution=runtime,
+        paper_provider_accounts=(("provider-a", "account-a"),),
+    )
+    decision_id = agent._material_action_id(context, event)
+    descriptor = runtime.prepare_paper_value_action(
+        event=event,
+        stake=Decimal("1.00"),
+        decision_id=decision_id,
+        account_id="account-a",
+        bankroll_id=goal.bankroll_id,
+        currency=goal.currency,
+    )
+    action = descriptor.execution_plan.actions[0]
+    record = DecisionRecord(
+        replay_run_id=context.replay_run_id,
+        agent=agent.name,
+        observed_ts=event.observed_ts,
+        action="OPEN_PAPER_VALUE_TICKET",
+        payload={
+            "quote_key": event.quote_key,
+            "forecast_model": "caller-model",
+            "probability": "0.99",
+            "expected_profit_per_unit": "0.98",
+            "stake": str(action.requested_stake),
+            "requested_stake": str(action.requested_stake),
+            "material_action_id": decision_id,
+            "execution_plan_id": descriptor.execution_plan.plan_id,
+            "execution_plan_fingerprint": descriptor.execution_plan.fingerprint,
+            "execution_run_id": runtime.expected_run_id(descriptor, decision_id),
+            "execution_authority_json": descriptor.intent_evidence_json,
+        },
+        context_hash=context.market_context_hash(),
+        decision_id=decision_id,
+        decision_kind=ECONOMIC_DECISION_KIND,
+    )
+    ledger.append_economic(
+        record,
+        EconomicDecisionAuthority(goal, policy),
+    )
+
+    with pytest.raises(
+        PaperExecutionAdoptionError,
+        match="durable ECONOMIC paper-value action lacks canonical risk admission witness",
+    ):
+        agent.on_market_event(event, context)
+
+    assert book.balance == Decimal("100.00")
+    assert not book.tickets
+    assert not runtime.ledger.events()
+
+
+def test_canonical_economic_agent_issues_origin_witness_before_execution(
+    tmp_path,
+) -> None:
+    book = PaperBook("100.00")
+    runtime = _runtime(tmp_path, book)
+    event = _event()
+    ledger = JsonlDecisionLedger(tmp_path / "decisions.jsonl")
+    goal = _goal()
+    policy = PaperRiskPolicy(economic_goal=goal)
+    agent = PaperValueAgent(
+        {event.quote_key: _forecast(event)},
+        stake=Decimal("1.00"),
+        minimum_expected_profit_per_unit=Decimal("0"),
+        risk_policy=policy,
+    )
+    context = AgentContext(
+        book,
+        replay_run_id="replay-economic-canonical",
+        decision_ledger=ledger,
+        paper_execution=runtime,
+        paper_provider_accounts=(("provider-a", "account-a"),),
+    )
+
+    agent.on_market_event(event, context)
+
+    assert len(book.tickets) == 1
+    witness_root = tmp_path / ".paper-value-economic-risk-admissions"
+    witnesses = tuple(
+        path
+        for path in witness_root.glob("*.json")
+        if not path.name.endswith(".pre-action.json")
+    )
+    assert len(witnesses) == 1
+    payload = json.loads(witnesses[0].read_text(encoding="utf-8"))
+    assert payload["schema"] == "autosport.paper_value.economic_risk_admission"
+    assert payload["decision_kind"] == ECONOMIC_DECISION_KIND
+    assert payload["risk_policy_sha256"] == policy.provenance_sha256
+    assert len(payload["decision_record_sha256"]) == 64
 
 
 def test_canonical_goal_less_agent_path_still_executes_after_risk_pass(tmp_path) -> None:

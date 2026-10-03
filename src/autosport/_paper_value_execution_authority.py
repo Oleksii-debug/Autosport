@@ -14,7 +14,7 @@ from .decision_ledger import (
     DecisionRecord,
     JsonlDecisionLedger,
 )
-from .domain import MarketEvent, TicketLeg
+from .domain import MarketEvent
 from .integrity import atomic_write_json
 from .json_integrity import strict_json_loads
 from .paper import PaperBook
@@ -25,9 +25,8 @@ from .paper_execution_adoption import (
     PreparedPaperExecution,
 )
 from .paper_strategy import PaperDecisionReconciliationRequired, PaperValueAgent
-from .price_truth import paper_quote_rejection_reason
 from .real_execution_ledger import ExecutionPlan
-from .risk import PaperRiskPolicy, ProposedTicketRiskContext
+from .risk import PaperRiskPolicy
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,6 +105,17 @@ _RISK_ADMISSION_FIELDS = frozenset(
     }
 )
 
+_ECONOMIC_RISK_ADMISSION_SCHEMA = "autosport.paper_value.economic_risk_admission"
+_ECONOMIC_RISK_ADMISSION_SCHEMA_VERSION = 1
+_ECONOMIC_RISK_ADMISSION_DIR = ".paper-value-economic-risk-admissions"
+_ECONOMIC_RISK_ADMISSION_FIELDS = frozenset(
+    {
+        *_RISK_ADMISSION_FIELDS,
+        "decision_kind",
+        "decision_record_sha256",
+    }
+)
+
 
 def _canonical_payload_sha256(payload: dict[str, object]) -> str:
     raw = json.dumps(
@@ -124,6 +134,15 @@ def _risk_admission_paths(
 ) -> tuple[Path, Path]:
     token = hashlib.sha256(decision_id.encode("utf-8")).hexdigest()
     root = ledger.path.parent / _RISK_ADMISSION_DIR
+    return root / f"{token}.json", root / f"{token}.pre-action.json"
+
+
+def _economic_risk_admission_paths(
+    ledger: JsonlDecisionLedger,
+    decision_id: str,
+) -> tuple[Path, Path]:
+    token = hashlib.sha256(decision_id.encode("utf-8")).hexdigest()
+    root = ledger.path.parent / _ECONOMIC_RISK_ADMISSION_DIR
     return root / f"{token}.json", root / f"{token}.pre-action.json"
 
 
@@ -162,6 +181,84 @@ def _risk_admission_payload(
     }
     payload["witness_sha256"] = _canonical_payload_sha256(payload)
     return payload
+
+
+def _economic_risk_admission_payload(
+    *,
+    record: DecisionRecord,
+    descriptor: PaperValueExecutionDescriptor,
+    risk_policy: PaperRiskPolicy,
+    execution_run_id: str,
+    pre_action_book_sha256: str,
+) -> dict[str, object]:
+    if record.decision_kind != ECONOMIC_DECISION_KIND:
+        raise PaperExecutionAdoptionError(
+            "economic paper-value risk admission requires ECONOMIC decision authority"
+        )
+    payload = _risk_admission_payload(
+        record=record,
+        descriptor=descriptor,
+        risk_policy=risk_policy,
+        execution_run_id=execution_run_id,
+        pre_action_book_sha256=pre_action_book_sha256,
+    )
+    payload["schema"] = _ECONOMIC_RISK_ADMISSION_SCHEMA
+    payload["schema_version"] = _ECONOMIC_RISK_ADMISSION_SCHEMA_VERSION
+    payload["decision_kind"] = ECONOMIC_DECISION_KIND
+    payload["decision_record_sha256"] = _canonical_payload_sha256(record.to_dict())
+    payload.pop("witness_sha256", None)
+    payload["witness_sha256"] = _canonical_payload_sha256(payload)
+    return payload
+
+
+def _load_economic_risk_admission(
+    ledger: JsonlDecisionLedger,
+    decision_id: str,
+) -> tuple[dict[str, object], PaperBook]:
+    witness_path, pre_action_path = _economic_risk_admission_paths(
+        ledger,
+        decision_id,
+    )
+    if witness_path.is_symlink() or pre_action_path.is_symlink():
+        raise PaperExecutionAdoptionError(
+            "economic paper-value risk admission witness path is not canonical"
+        )
+    try:
+        raw = strict_json_loads(witness_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise PaperExecutionAdoptionError(
+            "durable ECONOMIC paper-value action lacks canonical risk admission witness"
+        ) from exc
+    if type(raw) is not dict or set(raw) != _ECONOMIC_RISK_ADMISSION_FIELDS:
+        raise PaperExecutionAdoptionError(
+            "economic paper-value risk admission witness schema is invalid"
+        )
+    if (
+        raw.get("schema") != _ECONOMIC_RISK_ADMISSION_SCHEMA
+        or raw.get("schema_version") != _ECONOMIC_RISK_ADMISSION_SCHEMA_VERSION
+        or raw.get("decision_kind") != ECONOMIC_DECISION_KIND
+        or raw.get("decision_id") != decision_id
+    ):
+        raise PaperExecutionAdoptionError(
+            "economic paper-value risk admission witness identity is invalid"
+        )
+    witness_sha256 = raw.get("witness_sha256")
+    unsigned = dict(raw)
+    unsigned.pop("witness_sha256", None)
+    if (
+        type(witness_sha256) is not str
+        or witness_sha256 != _canonical_payload_sha256(unsigned)
+    ):
+        raise PaperExecutionAdoptionError(
+            "economic paper-value risk admission witness digest mismatch"
+        )
+    try:
+        pre_action_book = PaperBook.load(pre_action_path)
+    except (OSError, TypeError, ValueError) as exc:
+        raise PaperExecutionAdoptionError(
+            "economic paper-value risk admission pre-action PaperBook is unreadable"
+        ) from exc
+    return raw, pre_action_book
 
 
 def _load_general_risk_admission(
@@ -325,6 +422,200 @@ def _issue_general_risk_admission(
         raise PaperExecutionAdoptionError(
             "paper-value risk admission witness did not persist exactly"
         )
+
+
+def _issue_economic_risk_admission(
+    *,
+    agent: PaperValueAgent,
+    context,
+    descriptor: PaperValueExecutionDescriptor,
+    decision_id: str,
+    started_at: str,
+) -> None:
+    """Persist canonical ECONOMIC fresh-risk origin before #623 reservation."""
+
+    ledger = context.decision_ledger
+    runtime = context.paper_execution
+    goal = agent.risk_policy.economic_goal
+    if (
+        not isinstance(ledger, JsonlDecisionLedger)
+        or not isinstance(runtime, PaperExecutionAdoptionRuntime)
+        or goal is None
+    ):
+        raise PaperExecutionAdoptionError(
+            "economic paper-value risk admission requires canonical runtime/goal authority"
+        )
+    try:
+        record = ledger.verified_economic_decision_for_material_action(
+            decision_id,
+            goal,
+            risk_policy=agent.risk_policy,
+        )
+    except Exception as exc:
+        raise PaperExecutionAdoptionError(
+            "economic paper-value risk admission lacks exact durable decision authority"
+        ) from exc
+    if record is None:
+        raise PaperExecutionAdoptionError(
+            "economic paper-value risk admission requires one exact durable decision"
+        )
+    expected_run_id = runtime.expected_run_id(descriptor, decision_id)
+    if (
+        record.decision_kind != ECONOMIC_DECISION_KIND
+        or record.replay_run_id != context.replay_run_id
+        or record.agent != PaperValueAgent.name
+        or record.action != _PAPER_VALUE_ACTION
+        or record.observed_ts != started_at
+        or record.payload.get("material_action_id") != decision_id
+        or record.payload.get("requested_stake")
+        != str(descriptor.execution_plan.actions[0].requested_stake)
+        or record.payload.get("execution_plan_id") != descriptor.execution_plan.plan_id
+        or record.payload.get("execution_plan_fingerprint")
+        != descriptor.execution_plan.fingerprint
+        or record.payload.get("execution_run_id") != expected_run_id
+        or record.payload.get("execution_authority_json")
+        != descriptor.intent_evidence_json
+    ):
+        raise PaperExecutionAdoptionError(
+            "economic paper-value risk admission decision binding is invalid"
+        )
+
+    pre_action_sha256 = agent.risk_policy.risk_of_ruin_portfolio_sha256(
+        context.paper_book
+    )
+    if pre_action_sha256 is None:
+        raise PaperExecutionAdoptionError(
+            "economic paper-value risk admission cannot validate pre-action PaperBook"
+        )
+    witness = _economic_risk_admission_payload(
+        record=record,
+        descriptor=descriptor,
+        risk_policy=agent.risk_policy,
+        execution_run_id=expected_run_id,
+        pre_action_book_sha256=pre_action_sha256,
+    )
+    witness_path, pre_action_path = _economic_risk_admission_paths(
+        ledger,
+        decision_id,
+    )
+    witness_path.parent.mkdir(parents=True, exist_ok=True)
+    if witness_path.is_symlink() or pre_action_path.is_symlink():
+        raise PaperExecutionAdoptionError(
+            "economic paper-value risk admission witness path is not canonical"
+        )
+
+    if pre_action_path.exists():
+        try:
+            persisted_pre_action = PaperBook.load(pre_action_path)
+        except (OSError, TypeError, ValueError) as exc:
+            raise PaperExecutionAdoptionError(
+                "economic paper-value risk admission pre-action PaperBook is unreadable"
+            ) from exc
+        persisted_sha256 = agent.risk_policy.risk_of_ruin_portfolio_sha256(
+            persisted_pre_action
+        )
+        if (
+            persisted_sha256 != pre_action_sha256
+            or not runtime._same_book_state(context.paper_book, persisted_pre_action)
+        ):
+            raise PaperExecutionAdoptionError(
+                "economic paper-value risk admission conflicts with existing pre-action state"
+            )
+    else:
+        context.paper_book.save(pre_action_path)
+        persisted_pre_action = PaperBook.load(pre_action_path)
+        persisted_sha256 = agent.risk_policy.risk_of_ruin_portfolio_sha256(
+            persisted_pre_action
+        )
+        if (
+            persisted_sha256 != pre_action_sha256
+            or not runtime._same_book_state(context.paper_book, persisted_pre_action)
+        ):
+            raise PaperExecutionAdoptionError(
+                "economic paper-value risk admission pre-action state did not persist exactly"
+            )
+
+    if witness_path.exists():
+        existing, _ = _load_economic_risk_admission(ledger, decision_id)
+        if existing != witness:
+            raise PaperExecutionAdoptionError(
+                "economic paper-value risk admission conflicts with existing witness"
+            )
+        return
+    atomic_write_json(witness_path, witness)
+    verified, _ = _load_economic_risk_admission(ledger, decision_id)
+    if verified != witness:
+        raise PaperExecutionAdoptionError(
+            "economic paper-value risk admission witness did not persist exactly"
+        )
+
+
+def _verify_economic_risk_admission(
+    *,
+    agent: PaperValueAgent,
+    context,
+    record: DecisionRecord,
+    descriptor: PaperValueExecutionDescriptor,
+    expected_run_id: str,
+) -> None:
+    """Verify canonical ECONOMIC fresh-risk origin and restart book topology."""
+
+    ledger = context.decision_ledger
+    runtime = context.paper_execution
+    if (
+        not isinstance(ledger, JsonlDecisionLedger)
+        or not isinstance(runtime, PaperExecutionAdoptionRuntime)
+    ):
+        raise PaperExecutionAdoptionError(
+            "durable ECONOMIC paper-value recovery lacks canonical runtime authority"
+        )
+    witness, pre_action_book = _load_economic_risk_admission(
+        ledger,
+        record.decision_id,
+    )
+    pre_action_sha256 = agent.risk_policy.risk_of_ruin_portfolio_sha256(
+        pre_action_book
+    )
+    if pre_action_sha256 is None:
+        raise PaperExecutionAdoptionError(
+            "economic paper-value risk admission pre-action PaperBook is invalid"
+        )
+    expected = _economic_risk_admission_payload(
+        record=record,
+        descriptor=descriptor,
+        risk_policy=agent.risk_policy,
+        execution_run_id=expected_run_id,
+        pre_action_book_sha256=pre_action_sha256,
+    )
+    if witness != expected:
+        raise PaperExecutionAdoptionError(
+            "durable ECONOMIC paper-value risk admission binding changed across restart"
+        )
+
+    prepared = runtime._mint_prepared(
+        PreparedPaperExecution(
+            execution_plan=descriptor.execution_plan,
+            exposure_bindings=descriptor.exposure_bindings,
+            intent_evidence_json=descriptor.intent_evidence_json,
+        )
+    )
+    try:
+        validator = getattr(runtime, "assert_recoverable_book_state", None)
+        if validator is None:
+            if not runtime._same_book_state(runtime.book, pre_action_book):
+                raise PaperExecutionAdoptionError(
+                    "economic paper-value recovery PaperBook differs from pre-action witness"
+                )
+        else:
+            validator(
+                pre_action_book=pre_action_book,
+                prepared=prepared,
+                trigger_id=record.decision_id,
+                started_at=record.observed_ts,
+                materialize_exposure=True,
+            )
+    finally:
+        runtime._prepared_authorities.pop(id(prepared), None)
 
 
 def _verify_general_risk_admission(
@@ -656,37 +947,17 @@ def _first_execution_risk_authority(
     ):
         return "durable-execution-recovery"
 
-    if paper_quote_rejection_reason(durable_event, stake) is not None:
-        raise PaperExecutionAdoptionError(
-            "durable economic paper-value decision no longer proves quote execution safety"
-        )
-    provider_account = authority["provider_account"]
-    assert isinstance(provider_account, list)
-    leg = TicketLeg(
-        durable_event.event_id,
-        durable_event.market_id,
-        durable_event.selection_id,
-        durable_event.decimal_odds,
-        sport=durable_event.sport,
+    # A generic ECONOMIC ledger record plus a fresh re-evaluation must not become
+    # first-execution authority.  Require the product-issued witness that proves
+    # this exact durable record crossed the canonical fresh PaperValue risk gate.
+    _verify_economic_risk_admission(
+        agent=agent,
+        context=context,
+        record=record,
+        descriptor=descriptor,
+        expected_run_id=expected_run_id,
     )
-    proposal_context = ProposedTicketRiskContext(
-        legs=(leg,),
-        quotes=(durable_event,),
-        provider_accounts=((provider_account[0], provider_account[1]),),
-        bankroll_id=goal.bankroll_id,
-        currency=goal.currency,
-        proposal_ts=record.observed_ts,
-    )
-    risk = agent.risk_policy.evaluate(
-        context.paper_book,
-        stake,
-        context=proposal_context,
-    )
-    if not risk.allowed:
-        raise PaperExecutionAdoptionError(
-            "durable economic paper-value decision no longer proves its first execution risk gate"
-        )
-    return "fresh-risk-evaluation"
+    return "durable-risk-admission-recovery"
 
 
 def _resume_durable_paper_value(
@@ -870,6 +1141,14 @@ def _canonical_agent_call(
             )
         if goal is None:
             _issue_general_risk_admission(
+                agent=agent,
+                context=context,
+                descriptor=descriptor,
+                decision_id=decision_id,
+                started_at=started_at,
+            )
+        else:
+            _issue_economic_risk_admission(
                 agent=agent,
                 context=context,
                 descriptor=descriptor,

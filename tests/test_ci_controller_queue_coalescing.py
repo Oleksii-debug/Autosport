@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from scripts.cancel_superseded_pr_workflow_runs import (
     CancellationError,
     PullRequestQualification,
@@ -68,6 +70,29 @@ def test_trigger_boundary_qualification_read_failure_fails_closed() -> None:
         qualification=qualification,
     )
     assert api.cancelled == []
+
+
+def test_trigger_cancel_effect_failure_is_not_swallowed() -> None:
+    qualification = PullRequestQualification(
+        head_sha=HEAD,
+        integration_capable=False,
+    )
+
+    class CancelFailureApi(FakeApi):
+        def cancel(self, run_id: int) -> None:
+            assert run_id == 91
+            raise CancellationError("fixture cancel effect unknown")
+
+    api = CancelFailureApi(qualification)
+
+    with pytest.raises(CancellationError, match="fixture cancel effect unknown"):
+        _cancel_triggering_run_if_stale_or_nonqualifying(
+            api,  # type: ignore[arg-type]
+            pr_number=2039,
+            event_head_sha=HEAD,
+            current_run_id=91,
+            qualification=qualification,
+        )
 
 
 def test_current_ready_source_run_is_preserved() -> None:

@@ -213,3 +213,29 @@ def test_owner_lease_rejects_rebound_product_root_resolver(
             state_path=tmp_path / "heartbeat.json",
         )
 
+def test_different_punters_cannot_share_one_durable_state_writer(
+    tmp_path,
+) -> None:
+    """Independent Punter owners cannot concurrently mutate one state/anchor pair."""
+    shared_state = tmp_path / "shared" / "heartbeat.json"
+    first = BetdaqHeartbeatSafetyController(
+        account_client=_client("state-writer-account-a"),
+        stop_authority=ExecutionStopAuthority(tmp_path / "stop-a.jsonl"),
+        state_path=shared_state,
+    )
+    second = None
+    try:
+        with pytest.raises(
+            BetdaqHeartbeatSafetyError,
+            match="another process owns",
+        ):
+            second = BetdaqHeartbeatSafetyController(
+                account_client=_client("state-writer-account-b"),
+                stop_authority=ExecutionStopAuthority(tmp_path / "stop-b.jsonl"),
+                state_path=shared_state,
+            )
+    finally:
+        if second is not None:
+            second.close()
+        first.close()
+

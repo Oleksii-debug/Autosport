@@ -488,6 +488,7 @@ def test_restart_fence_never_restores_remote_active_from_disk(
         action=HeartbeatAction.CANCEL_ORDERS,
     )
 
+    first._state_lease.close()
     first._lease.close()
     first._closed = True
     monkeypatch.setattr(
@@ -562,3 +563,47 @@ def test_state_and_anchor_tamper_fail_closed(
     anchor.write_text(raw.replace('"sequence":2', '"sequence":1'), encoding="utf-8")
     with pytest.raises(BetdaqHeartbeatSafetyError, match="anchor"):
         BetdaqHeartbeatSafetyStore(tmp_path / "heartbeat.json").history()
+
+def test_same_process_account_rotation_revokes_persisted_active_generation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1735 falsifier 3/law 8: account A evidence cannot qualify account B."""
+    provider = _ProviderQueue([_soap("RegisterHeartbeat")])
+    first, stop, clock = _controller(tmp_path, monkeypatch, provider)
+    registered = first.register(
+        threshold_ms=6000,
+        action=HeartbeatAction.CANCEL_ORDERS,
+    )
+
+    # Simulate abrupt owner loss without the normal LOCAL_CLOSE_FENCE while the
+    # Python process itself remains alive; the next controller uses another Punter.
+    first._state_lease.close()
+    first._lease.close()
+    first._closed = True
+    rotated_client = BetdaqAccountReadOnlyClient(
+        BetdaqCredentials(
+            username="bob",
+            password="bob-secret-password",
+            application_identifier="bob-app",
+        ),
+        clock=clock,
+    )
+    second = BetdaqHeartbeatSafetyController(
+        account_client=rotated_client,
+        stop_authority=stop,
+        state_path=tmp_path / "heartbeat.json",
+    )
+    try:
+        status = second.status()
+        assert status.event is not None
+        assert status.event.state is HeartbeatState.REVOKED
+        assert status.event.operation == "LOCAL_ACCOUNT_CONTEXT_FENCE"
+        assert status.event.generation_id == registered.generation_id
+        assert status.event.account_context_id == registered.account_context_id
+        assert status.reconciliation_required is True
+        assert status.provider_registration_active is False
+        assert len(provider.requests) == 1
+    finally:
+        second.close()
+

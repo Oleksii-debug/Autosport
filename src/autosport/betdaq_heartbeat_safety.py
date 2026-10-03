@@ -432,6 +432,20 @@ def _account_owner_lease_path(
     )
 
 
+def _state_writer_lease_path(state_path: str | Path) -> Path:
+    """Return one canonical local writer lease for a durable heartbeat state file."""
+
+    try:
+        canonical = Path(state_path).expanduser().resolve(strict=False)
+    except (OSError, RuntimeError) as exc:
+        raise BetdaqHeartbeatSafetyError(
+            "heartbeat state path cannot be canonicalized"
+        ) from exc
+    return canonical.with_name(
+        f".{canonical.name}.betdaq-heartbeat-state.owner.lock"
+    )
+
+
 class _ProcessLease:
     """Hold one non-blocking process lease for an exact canonical authority path."""
 
@@ -797,8 +811,24 @@ class BetdaqHeartbeatSafetyController:
         self._lease = _ProcessLease(
             _account_owner_lease_path(account_client, stop_authority)
         )
+        try:
+            self._state_lease = _ProcessLease(
+                _state_writer_lease_path(self._store.path)
+            )
+        except BaseException:
+            self._lease.close()
+            raise
         self._closed = False
-        self._apply_restart_fence()
+        try:
+            self._apply_restart_fence()
+            self._fence_account_context_if_needed()
+        except BaseException:
+            self._closed = True
+            try:
+                self._state_lease.close()
+            finally:
+                self._lease.close()
+            raise
 
     def __enter__(self) -> "BetdaqHeartbeatSafetyController":
         return self
@@ -850,7 +880,26 @@ class BetdaqHeartbeatSafetyController:
             reconciliation_required=True,
         )
 
+    def _fence_account_context_if_needed(self) -> None:
+        latest = self._latest()
+        if latest is None or latest.state.value not in _REMOTE_ACTIVE_STATES:
+            return
+        if latest.account_context_id == self._context_id():
+            return
+        self._store.append(
+            generation_id=latest.generation_id,
+            predecessor_generation_id=latest.predecessor_generation_id,
+            account_context_id=latest.account_context_id,
+            state=HeartbeatState.REVOKED,
+            threshold_ms=latest.threshold_ms,
+            registered_action=latest.registered_action,
+            operation="LOCAL_ACCOUNT_CONTEXT_FENCE",
+            observed_at=self._now(),
+            reconciliation_required=True,
+        )
+
     def _fence_stop_if_needed(self) -> None:
+        self._fence_account_context_if_needed()
         latest = self._latest()
         if latest is None or latest.state.value not in _REMOTE_ACTIVE_STATES:
             return
@@ -877,6 +926,7 @@ class BetdaqHeartbeatSafetyController:
             latest is not None
             and latest.state.value in _REMOTE_ACTIVE_STATES
             and latest.process_instance_id == _PROCESS_INSTANCE_ID
+            and latest.account_context_id == self._context_id()
         )
         return HeartbeatSafetyStatus(
             event=latest,
@@ -1165,6 +1215,7 @@ class BetdaqHeartbeatSafetyController:
 
     def deregister(self) -> HeartbeatEvent:
         self._require_open()
+        self._fence_account_context_if_needed()
         latest = self._latest()
         if latest is None:
             raise BetdaqHeartbeatSafetyError("no heartbeat generation exists")
@@ -1230,8 +1281,11 @@ class BetdaqHeartbeatSafetyController:
                     reconciliation_required=True,
                 )
         finally:
-            self._lease.close()
-            self._closed = True
+            try:
+                self._state_lease.close()
+            finally:
+                self._lease.close()
+                self._closed = True
 
     def _latest_pulse_for_generation(
         self,

@@ -413,6 +413,40 @@ def _make_bound_plan_authority_registry():
     _issue_bound_supervised_execution_plan,
     assert_bound_supervised_execution_plan_authoritative,
 ) = _make_bound_plan_authority_registry()
+_ISSUE_BOUND_SUPERVISED_EXECUTION_PLAN = _issue_bound_supervised_execution_plan
+_ISSUE_BOUND_SUPERVISED_EXECUTION_PLAN_CODE = getattr(
+    _ISSUE_BOUND_SUPERVISED_EXECUTION_PLAN,
+    "__code__",
+    None,
+)
+_ASSERT_BOUND_SUPERVISED_EXECUTION_PLAN_AUTHORITATIVE = (
+    assert_bound_supervised_execution_plan_authoritative
+)
+_ASSERT_BOUND_SUPERVISED_EXECUTION_PLAN_AUTHORITATIVE_CODE = getattr(
+    _ASSERT_BOUND_SUPERVISED_EXECUTION_PLAN_AUTHORITATIVE,
+    "__code__",
+    None,
+)
+
+
+def _canonical_bound_plan_authority_dispatch(
+    *,
+    _issue=_ISSUE_BOUND_SUPERVISED_EXECUTION_PLAN,
+    _issue_code=_ISSUE_BOUND_SUPERVISED_EXECUTION_PLAN_CODE,
+    _assert=_ASSERT_BOUND_SUPERVISED_EXECUTION_PLAN_AUTHORITATIVE,
+    _assert_code=_ASSERT_BOUND_SUPERVISED_EXECUTION_PLAN_AUTHORITATIVE_CODE,
+):
+    if (
+        globals().get("_issue_bound_supervised_execution_plan") is not _issue
+        or getattr(_issue, "__code__", None) is not _issue_code
+        or globals().get("assert_bound_supervised_execution_plan_authoritative")
+        is not _assert
+        or getattr(_assert, "__code__", None) is not _assert_code
+    ):
+        raise SupervisedExecutionError(
+            "canonical bound supervised execution plan authority changed"
+        )
+    return _issue, _assert
 
 
 @dataclass(frozen=True, slots=True)
@@ -761,7 +795,8 @@ def build_supervised_execution_plan(
         bindings,
         constraints,
     )
-    return _issue_bound_supervised_execution_plan(bound)
+    issue_bound, _ = _canonical_bound_plan_authority_dispatch()
+    return issue_bound(bound)
 
 
 def _require_approval(
@@ -769,7 +804,8 @@ def _require_approval(
     approval: SupervisedApproval,
     at: str,
 ) -> None:
-    assert_bound_supervised_execution_plan_authoritative(bound)
+    _, assert_bound = _canonical_bound_plan_authority_dispatch()
+    assert_bound(bound)
     approval.require_active(at)
     if (
         approval.portfolio_plan_sha256 != bound.portfolio_plan_sha256
@@ -796,7 +832,8 @@ def _require_durable_approval(
 
 
 def _require_reserved(ledger: RealExecutionLedger, bound: BoundSupervisedExecutionPlan) -> None:
-    assert_bound_supervised_execution_plan_authoritative(bound)
+    _, assert_bound = _canonical_bound_plan_authority_dispatch()
+    assert_bound(bound)
     try:
         saga = ledger.saga(bound.execution_plan.plan_id)
     except KeyError as exc:

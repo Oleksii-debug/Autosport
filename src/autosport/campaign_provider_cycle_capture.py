@@ -47,6 +47,7 @@ _CANONICAL_PATH_EQUALITY_CODE = getattr(_CANONICAL_PATH_EQUALITY, "__code__", No
 _CANONICAL_PATH_JOIN = Path.__truediv__
 _CANONICAL_PATH_JOIN_CODE = getattr(_CANONICAL_PATH_JOIN, "__code__", None)
 _CANONICAL_OBJECT_GETATTRIBUTE = object.__getattribute__
+_CANONICAL_MODULE_GLOBALS = globals()
 _CANONICAL_GETATTR_STATIC = inspect.getattr_static
 _CANONICAL_GETATTR_STATIC_CODE = _CANONICAL_GETATTR_STATIC.__code__
 _CANONICAL_GETATTR_STATIC_GLOBALS = _CANONICAL_GETATTR_STATIC.__globals__
@@ -280,7 +281,7 @@ def _require_canonical_seams(
             "provider evidence campaign capture seam code changed: "
             + ", ".join(code_changed)
         )
-    store_state = vars(store)
+    store_state = _CANONICAL_OBJECT_GETATTRIBUTE(store, "__dict__")
     rebound = sorted(name for name in _STORE_SEAMS if name in store_state)
     if rebound:
         raise CampaignProviderCycleCaptureIntegrityError(
@@ -314,7 +315,7 @@ def _require_canonical_seams(
         raise CampaignProviderCycleCaptureIntegrityError(
             "provider evidence assertion authority changed"
         )
-    evidence_state = vars(evidence_store)
+    evidence_state = _CANONICAL_OBJECT_GETATTRIBUTE(evidence_store, "__dict__")
     rebound = sorted(
         name for name in ("save",) if name in evidence_state
     )
@@ -643,7 +644,7 @@ def capture_campaign_complete_game_board(
     finish_cycle = _FINISH_CYCLE
     resolve_artifact = _RESOLVE_ARTIFACT
     issue_receipt = _issue_receipt
-    module_globals = globals()
+    module_globals = _CANONICAL_MODULE_GLOBALS
     expected_dispatch = (
         ("_require_canonical_seams", require_seams),
         ("_require_provider_evidence_campaign_scope", require_evidence_scope),
@@ -1151,7 +1152,7 @@ def capture_campaign_complete_game_board(
 def _seal_campaign_provider_cycle_capture_dispatch() -> None:
     """Seal authority-bearing capture dispatch against runtime rebinding."""
 
-    module_globals = globals()
+    module_globals = _CANONICAL_MODULE_GLOBALS
     expected_error = CampaignProviderCycleCaptureIntegrityError
     expected_capture = capture_campaign_complete_game_board
     expected_capture_code = expected_capture.__code__
@@ -1214,6 +1215,7 @@ def _seal_campaign_provider_cycle_capture_dispatch() -> None:
         "_CANONICAL_PATH_JOIN": _CANONICAL_PATH_JOIN,
         "_CANONICAL_PATH_JOIN_CODE": _CANONICAL_PATH_JOIN_CODE,
         "_CANONICAL_OBJECT_GETATTRIBUTE": _CANONICAL_OBJECT_GETATTRIBUTE,
+        "_CANONICAL_MODULE_GLOBALS": _CANONICAL_MODULE_GLOBALS,
         "_CANONICAL_GETATTR_STATIC": _CANONICAL_GETATTR_STATIC,
         "_CANONICAL_GETATTR_STATIC_CODE": _CANONICAL_GETATTR_STATIC_CODE,
         "_CANONICAL_GETATTR_STATIC_GLOBALS": _CANONICAL_GETATTR_STATIC_GLOBALS,

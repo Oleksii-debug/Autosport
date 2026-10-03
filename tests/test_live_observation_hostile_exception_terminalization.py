@@ -179,6 +179,55 @@ def test_renderer_hostile_str_subclass_uses_secret_free_terminal_fallback() -> N
     assert worker.busy is False
 
 
+def test_oversized_task_error_is_redacted_then_bounded_and_releases_busy() -> None:
+    worker = OneShotObservationWorker()
+    secret = "live-worker-secret-bounded-2056"
+    oversized_tail = "x" * 10_000
+
+    def task():
+        raise RuntimeError(
+            f"Authorization: Bearer {secret}; ordinary=provider-timeout;{oversized_tail}"
+        )
+
+    assert worker.start(task) is True
+    message = _wait_for_terminal(worker)
+
+    assert message.result is None
+    assert message.error is not None
+    assert len(message.error) == 2048
+    assert message.error.endswith("... [truncated]")
+    assert "[REDACTED]" in message.error
+    assert "ordinary=provider-timeout" in message.error
+    assert secret not in message.error
+    assert worker.busy is False
+
+    rendered = text("ui.error.live.snapshot", detail=message.error)
+    assert message.error in rendered
+    assert secret not in rendered
+
+
+def test_oversized_thread_constructor_error_is_bounded_and_pollable() -> None:
+    worker = OneShotObservationWorker()
+    oversized = "setup-" + ("y" * 10_000)
+
+    with mock.patch(
+        "autosport.live_observation.threading.Thread",
+        side_effect=RuntimeError(oversized),
+    ):
+        assert worker.start(lambda: object()) is True
+
+    assert worker._thread is None
+    assert worker.busy is True
+    message = worker.poll()
+    assert message is not None
+    assert message.result is None
+    assert message.error is not None
+    assert len(message.error) == 2048
+    assert message.error.startswith("RuntimeError: setup-")
+    assert message.error.endswith("... [truncated]")
+    assert worker.busy is False
+
+
 def test_task_error_is_redacted_before_localized_live_presentation() -> None:
     worker = OneShotObservationWorker()
     secret = "live-worker-secret-2056"

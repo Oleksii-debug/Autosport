@@ -23,6 +23,8 @@ Clock = Callable[[], str]
 
 _MAX_SNAPSHOT_BATCHES = 256
 _MAX_BATCH_ATTEMPTS = 2
+_TERMINAL_ERROR_MAX_CHARS = 2048
+_TERMINAL_ERROR_TRUNCATION = "... [truncated]"
 
 
 @dataclass(frozen=True, slots=True)
@@ -128,6 +130,9 @@ class OneShotObservationWorker:
             return "BaseException: exception details unavailable"
         if type(rendered) is not str or not rendered:
             return "BaseException: exception details unavailable"
+        if len(rendered) > _TERMINAL_ERROR_MAX_CHARS:
+            keep = _TERMINAL_ERROR_MAX_CHARS - len(_TERMINAL_ERROR_TRUNCATION)
+            rendered = rendered[:keep] + _TERMINAL_ERROR_TRUNCATION
         return rendered
 
     def _publish_setup_failure(self, exc: Exception) -> None:

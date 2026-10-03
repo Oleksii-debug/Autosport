@@ -128,6 +128,16 @@ _CAPITAL_RISK_HASHLIB_SHA256 = getattr(
     "sha256",
     None,
 )
+_CAPITAL_RISK_EVIDENCE_TYPE = getattr(
+    _capital_risk,
+    "ExecutionCapitalAtRiskEvidence",
+    None,
+)
+_CAPITAL_RISK_ATTEMPT_TYPE = getattr(_capital_risk, "AttemptCapitalAtRisk", None)
+_CAPITAL_RISK_ATTEMPT_STATE = getattr(_capital_risk, "AttemptState", None)
+_CAPITAL_RISK_ACK_STATUS = getattr(_capital_risk, "AcknowledgementStatus", None)
+_CAPITAL_RISK_DECIMAL_TYPE = getattr(_capital_risk, "Decimal", None)
+_CAPITAL_RISK_LOCALCONTEXT = getattr(_capital_risk, "localcontext", None)
 _ECONOMIC_GOAL_STORE_TYPE = EconomicGoalStore
 _ECONOMIC_GOAL_STORE_PATH_TYPE = getattr(_economic_goal_store, "Path", None)
 _ECONOMIC_GOAL_STORE_PATH_READ_TEXT = getattr(
@@ -430,6 +440,12 @@ def _canonical_capital_risk_dispatch(
     _helpers=_CAPITAL_RISK_HELPERS,
     _json_dumps=_CAPITAL_RISK_JSON_DUMPS,
     _sha256=_CAPITAL_RISK_HASHLIB_SHA256,
+    _evidence_type=_CAPITAL_RISK_EVIDENCE_TYPE,
+    _attempt_type=_CAPITAL_RISK_ATTEMPT_TYPE,
+    _attempt_state=_CAPITAL_RISK_ATTEMPT_STATE,
+    _ack_status=_CAPITAL_RISK_ACK_STATUS,
+    _decimal_type=_CAPITAL_RISK_DECIMAL_TYPE,
+    _localcontext=_CAPITAL_RISK_LOCALCONTEXT,
 ):
     live_resolve = getattr(_capital_risk, "resolve_execution_capital_at_risk", None)
     live_assert = vars(ExecutionCapitalAtRiskEvidence).get("assert_issued_current")

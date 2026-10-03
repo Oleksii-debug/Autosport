@@ -10,6 +10,7 @@ import urllib.request as _urllib_request
 import pytest
 
 from autosport import betfair_account_identity as account_identity_module
+import autosport.betfair_account_readonly as readonly_module
 from autosport.betfair_account_identity import (
     BetfairAccountIdentityError,
     build_betfair_authenticated_client,
@@ -448,6 +449,57 @@ def test_execution_origin_predicate_rejects_transitive_network_dispatch_rebind(
 
     monkeypatch.setattr(owner, name, hostile)
     assert getattr(owner, name) is not original
+    assert predicate() is False
+
+
+@pytest.mark.parametrize(
+    ("name", "replacement"),
+    (
+        ("Request", object),
+        ("_READ_METHOD_ENDPOINT", {}),
+        ("BETTING_JSON_RPC_ENDPOINT", "https://example.invalid/json-rpc"),
+        ("_LIST_CURRENT_ORDERS", "SportsAPING/v1.0/listClearedOrders"),
+    ),
+)
+def test_execution_origin_predicate_rejects_request_or_endpoint_rebind(
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    replacement,
+) -> None:
+    predicate = _closure_value(
+        BetfairReadOnlyClient.read_execution_readback,
+        "origin_dispatch_current",
+    )
+    assert predicate() is True
+
+    monkeypatch.setattr(readonly_module, name, replacement)
+    assert predicate() is False
+
+
+@pytest.mark.parametrize(
+    "target",
+    (
+        UrllibBetfairHttpTransport.post,
+        BetfairReadOnlyClient._rpc,
+    ),
+)
+def test_execution_origin_predicate_rejects_in_place_request_code_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+    target,
+) -> None:
+    predicate = _closure_value(
+        BetfairReadOnlyClient.read_execution_readback,
+        "origin_dispatch_current",
+    )
+    assert predicate() is True
+    original_code = target.__code__
+
+    def hostile(*args, **kwargs):
+        del args, kwargs
+        raise AssertionError("hostile request code must not become provider origin")
+
+    assert len(hostile.__code__.co_freevars) == len(original_code.co_freevars)
+    monkeypatch.setattr(target, "__code__", hostile.__code__)
     assert predicate() is False
 
 

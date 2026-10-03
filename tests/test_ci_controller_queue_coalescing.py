@@ -317,69 +317,117 @@ def test_event_pr_reference_mode_preserves_multi_reference_ambiguity() -> None:
             )
 
 
-def test_ambiguous_event_never_recovers_current_run_singleton_snapshot(
-    monkeypatch,
-) -> None:
-    instances = []
+def _scoped_main_args() -> list[str]:
+    return [
+        "--pr-number",
+        "0",
+        "--event-pr-reference-mode",
+        "ambiguous",
+        "--event-head-sha",
+        HEAD,
+        "--workflow-name",
+        "CI",
+        "--workflow-id",
+        "356678400",
+        "--current-run-id",
+        "91",
+    ]
 
-    class FakeScopedApi:
-        def __init__(self, **kwargs) -> None:
-            self.kwargs = kwargs
-            instances.append(self)
 
-        def cancel_historical_unbound_runs(
-            self,
-            *,
-            exclude_run_ids: tuple[int, ...],
-        ) -> tuple[int, ...]:
-            assert 91 in exclude_run_ids
-            return ()
+def test_main_rejects_preentry_scoped_api_rebind(monkeypatch) -> None:
+    forged_calls: list[str] = []
 
-        def live_pr_qualification(self, pr_number: int):
-            raise AssertionError(
-                f"ambiguous event must not resolve trigger PR authority: {pr_number}"
-            )
+    class ForgedScopedApi:
+        def __init__(self, **_kwargs) -> None:
+            forged_calls.append("init")
 
     monkeypatch.setattr(
         scoped_controller,
         "WorkflowScopedGitHubApi",
-        FakeScopedApi,
+        ForgedScopedApi,
     )
+
+    assert scoped_controller.main(_scoped_main_args()) == 2
+    assert forged_calls == []
+
+
+def test_main_rejects_preentry_sweep_dispatch_rebind(monkeypatch) -> None:
+    forged_calls: list[str] = []
+
+    def forged_sweep(*_args, **_kwargs) -> tuple[int, ...]:
+        forged_calls.append("sweep")
+        return ()
+
     monkeypatch.setattr(
         scoped_controller,
         "cancel_superseded_explicit_pr_runs",
-        lambda *args, **kwargs: (),
+        forged_sweep,
     )
+
+    assert scoped_controller.main(_scoped_main_args()) == 2
+    assert forged_calls == []
+
+
+def test_main_rejects_preentry_event_identity_rebind(monkeypatch) -> None:
+    forged_calls: list[str] = []
+
+    def forged_identity(*_args, **_kwargs) -> tuple[int, bool]:
+        forged_calls.append("identity")
+        return (2039, False)
+
     monkeypatch.setattr(
         scoped_controller,
-        "_explicit_singleton_pr_for_current_run",
-        lambda *args, **kwargs: (_ for _ in ()).throw(
-            AssertionError(
-                "multi-reference event must not collapse to later singleton snapshot"
-            )
-        ),
+        "_validated_event_pr_identity",
+        forged_identity,
     )
-    monkeypatch.setenv("GITHUB_REPOSITORY", "Oleksii-debug/Autosport")
-    monkeypatch.setenv("GITHUB_TOKEN", "test-token")
 
-    assert scoped_controller.main(
-        [
-            "--pr-number",
-            "0",
-            "--event-pr-reference-mode",
-            "ambiguous",
-            "--event-head-sha",
-            HEAD,
-            "--workflow-name",
-            "CI",
-            "--workflow-id",
-            "356678400",
-            "--current-run-id",
-            "91",
-        ]
-    ) == 0
-    assert len(instances) == 1
+    assert scoped_controller.main(_scoped_main_args()) == 2
+    assert forged_calls == []
 
+
+def test_main_rejects_preentry_active_run_method_rebind(monkeypatch) -> None:
+    forged_calls: list[str] = []
+
+    def forged_active_runs(_self) -> tuple[WorkflowRun, ...]:
+        forged_calls.append("active")
+        return ()
+
+    monkeypatch.setattr(
+        WorkflowScopedGitHubApi,
+        "active_runs",
+        forged_active_runs,
+    )
+
+    assert scoped_controller.main(_scoped_main_args()) == 2
+    assert forged_calls == []
+
+
+def test_main_rejects_preentry_orphan_method_rebind(monkeypatch) -> None:
+    forged_calls: list[str] = []
+
+    def forged_orphan(_self, **_kwargs) -> tuple[int, ...]:
+        forged_calls.append("orphan")
+        return ()
+
+    monkeypatch.setattr(
+        WorkflowScopedGitHubApi,
+        "cancel_historical_unbound_runs",
+        forged_orphan,
+    )
+
+    assert scoped_controller.main(_scoped_main_args()) == 2
+    assert forged_calls == []
+
+
+def test_main_rejects_preentry_sweep_code_mutation(monkeypatch) -> None:
+    target = scoped_controller.cancel_superseded_explicit_pr_runs
+
+    def forged_sweep(*_args, **_kwargs) -> tuple[int, ...]:
+        return ()
+
+    monkeypatch.setattr(target, "__code__", forged_sweep.__code__)
+
+    assert scoped_controller.main(_scoped_main_args()) == 2
 
 def test_later_explicit_observation_revokes_stale_unbound_candidate(monkeypatch) -> None:
     api = WorkflowScopedGitHubApi(

@@ -697,6 +697,96 @@ class PaperValueUncertaintyAbstentionTests(unittest.TestCase):
                 decision.stake_ceiling,
             )
 
+    def test_predictive_verifier_rebinding_cannot_authorize_self_attested_ref(
+        self,
+    ) -> None:
+        goal = self._goal()
+        event = self._event()
+        forecast = self._forecast(event, uncertainty=Decimal("0.01"))
+        caller_ref = self._self_attested_ref(event, forecast)
+
+        original = ForecastRef.predictive_eligibility_reason
+
+        def permissive(
+            self,
+            decision_time,
+            *,
+            expected_model_id,
+        ):
+            return None
+
+        try:
+            ForecastRef.predictive_eligibility_reason = permissive
+            with tempfile.TemporaryDirectory() as tmp:
+                context, ledger_path = self._context(Path(tmp), event)
+                self._agent(
+                    goal,
+                    forecast,
+                    predictive_ref=caller_ref,
+                ).on_market_event(event, context)
+
+                self.assertEqual(context.paper_book.tickets, {})
+                self.assertFalse(ledger_path.exists())
+                self.assertTrue(
+                    any(
+                        "predictive authority verifier integrity changed" in note
+                        for note in context.notes
+                    )
+                )
+        finally:
+            ForecastRef.predictive_eligibility_reason = original
+
+    def test_predictive_verifier_code_mutation_fails_closed_before_authority(
+        self,
+    ) -> None:
+        goal = self._goal()
+        event = self._event()
+        forecast = self._forecast(event, uncertainty=Decimal("0.01"))
+        caller_ref = self._self_attested_ref(event, forecast)
+        verifier = ForecastRef.predictive_eligibility_reason
+        original_code = verifier.__code__
+
+        def replacement_factory():
+            closure_anchor = object()
+
+            def permissive(
+                self,
+                decision_time,
+                *,
+                expected_model_id,
+            ):
+                if closure_anchor is None:
+                    return "unreachable"
+                return None
+
+            return permissive
+
+        replacement = replacement_factory()
+        self.assertEqual(
+            len(replacement.__code__.co_freevars),
+            len(verifier.__code__.co_freevars),
+        )
+        try:
+            verifier.__code__ = replacement.__code__
+            with tempfile.TemporaryDirectory() as tmp:
+                context, ledger_path = self._context(Path(tmp), event)
+                self._agent(
+                    goal,
+                    forecast,
+                    predictive_ref=caller_ref,
+                ).on_market_event(event, context)
+
+                self.assertEqual(context.paper_book.tickets, {})
+                self.assertFalse(ledger_path.exists())
+                self.assertTrue(
+                    any(
+                        "predictive authority verifier integrity changed" in note
+                        for note in context.notes
+                    )
+                )
+        finally:
+            verifier.__code__ = original_code
+
     def test_predictive_reference_mapping_is_snapshotted_and_key_bound(self) -> None:
         event = self._event()
         forecast = self._forecast(event, uncertainty=Decimal("0.01"))

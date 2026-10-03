@@ -591,7 +591,7 @@ class ProphetXSessionLifecycle:
                         session_lineage_id=current.session_lineage_id,
                         access_expires_at=expires,
                         slot_hold_until=expires,
-                        transient_failures=current.transient_failures,
+                        transient_failures=0,
                         last_failure_class=current.last_failure_class,
                     )
                     self._write_state(updated)

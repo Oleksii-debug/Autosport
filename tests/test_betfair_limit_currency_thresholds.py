@@ -2,9 +2,11 @@ from decimal import Decimal, localcontext
 
 import pytest
 
+import autosport.betfair_limit_currency_thresholds as threshold_module
 from autosport.betfair_limit_currency_thresholds import (
     CURRENCY_PARAMETERS,
     RULESET_EFFECTIVE_INTERVAL_PROVEN,
+    BetfairCurrencyParameters,
     BetfairCurrencyThresholdAssessment,
     BetfairCurrencyThresholdError,
     BetfairCurrencyThresholdState,
@@ -305,3 +307,44 @@ def test_hard_false_authority_surface_uses_non_python_getters_and_is_sealed():
 
     with pytest.raises(AttributeError):
         object.__setattr__(result, "real_money_execution", True)
+
+
+def test_historical_currency_parameter_rows_are_structurally_immutable():
+    rules = CURRENCY_PARAMETERS["GBP"]
+
+    with pytest.raises(AttributeError):
+        object.__setattr__(rules, "min_bet_size", Decimal("0.01"))
+
+    with pytest.raises(TypeError):
+        CURRENCY_PARAMETERS["GBP"] = rules  # type: ignore[index]
+
+    assert CURRENCY_PARAMETERS["GBP"].min_bet_size == Decimal("2")
+
+
+def test_evaluator_keeps_canonical_snapshot_when_public_mapping_is_rebound(
+    monkeypatch,
+):
+    forged = dict(CURRENCY_PARAMETERS)
+    forged["GBP"] = BetfairCurrencyParameters(
+        currency_code="GBP",
+        min_bet_size=Decimal("0.01"),
+        min_bsp_liability=Decimal("10"),
+        min_bet_payout=Decimal("0.01"),
+    )
+    monkeypatch.setattr(threshold_module, "CURRENCY_PARAMETERS", forged)
+
+    result = threshold_module.evaluate_standard_limit_currency_thresholds(
+        currency_code="GBP",
+        side="BACK",
+        price=Decimal("2"),
+        size=Decimal("1"),
+    )
+
+    assert result.min_bet_size == Decimal("2")
+    assert result.min_bet_payout == Decimal("10")
+    assert (
+        result.state
+        is BetfairCurrencyThresholdState.SNAPSHOT_BELOW_THRESHOLDS
+    )
+    assert result.current_provider_constraint_proven is False
+    assert result.execution_authorized is False

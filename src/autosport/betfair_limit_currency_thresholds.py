@@ -21,6 +21,7 @@ from decimal import Decimal, localcontext
 from enum import Enum
 from operator import attrgetter
 from types import MappingProxyType
+from typing import NamedTuple
 
 RULESET_ID = "betfair-currency-parameters-page2686993-v3"
 RULESET_SOURCE_URL = (
@@ -87,18 +88,31 @@ class BetfairCurrencyThresholdState(str, Enum):
     UNSUPPORTED_CURRENCY = "UNSUPPORTED_CURRENCY"
 
 
-@dataclass(frozen=True, slots=True)
-class BetfairCurrencyParameters:
+class BetfairCurrencyParameters(NamedTuple):
+    """Structurally immutable row from the historical first-party snapshot."""
+
     currency_code: str
     min_bet_size: Decimal
     min_bsp_liability: Decimal
     min_bet_payout: Decimal
 
-    def __post_init__(self) -> None:
-        _currency_code(self.currency_code)
-        _positive_decimal(self.min_bet_size, "min_bet_size")
-        _positive_decimal(self.min_bsp_liability, "min_bsp_liability")
-        _positive_decimal(self.min_bet_payout, "min_bet_payout")
+
+def _build_currency_parameters(
+    currency_code: str,
+    min_bet_size: Decimal,
+    min_bsp_liability: Decimal,
+    min_bet_payout: Decimal,
+) -> BetfairCurrencyParameters:
+    _currency_code(currency_code)
+    _positive_decimal(min_bet_size, "min_bet_size")
+    _positive_decimal(min_bsp_liability, "min_bsp_liability")
+    _positive_decimal(min_bet_payout, "min_bet_payout")
+    return BetfairCurrencyParameters(
+        currency_code=currency_code,
+        min_bet_size=min_bet_size,
+        min_bsp_liability=min_bsp_liability,
+        min_bet_payout=min_bet_payout,
+    )
 
 
 _RULE_ROWS = (
@@ -124,7 +138,7 @@ _RULE_ROWS = (
 )
 CURRENCY_PARAMETERS = MappingProxyType(
     {
-        code: BetfairCurrencyParameters(
+        code: _build_currency_parameters(
             currency_code=code,
             min_bet_size=Decimal(min_bet),
             min_bsp_liability=Decimal(min_bsp),
@@ -133,6 +147,7 @@ CURRENCY_PARAMETERS = MappingProxyType(
         for code, min_bet, min_bsp, min_payout in _RULE_ROWS
     }
 )
+del _build_currency_parameters
 
 
 def _build_currency_threshold_assessment_meta():
@@ -300,88 +315,102 @@ class BetfairCurrencyThresholdAssessment(
 _BetfairCurrencyThresholdAssessmentMeta.seal(BetfairCurrencyThresholdAssessment)
 
 
-def evaluate_standard_limit_currency_thresholds(
-    *,
-    currency_code: str,
-    side: str,
-    price: Decimal,
-    size: Decimal | None,
-    bet_target_type: str | None = None,
-) -> BetfairCurrencyThresholdAssessment:
-    """Compare a standard-size LIMIT against the historical threshold snapshot.
+def _build_standard_limit_currency_threshold_evaluator():
+    """Capture the canonical immutable snapshot used by all diagnostic calls."""
 
-    ``size`` is Betfair LIMIT's backer's-stake field for both BACK and LAY.
-    Target-sized orders use different economics and remain outside this module.
+    currency_parameters = CURRENCY_PARAMETERS
 
-    A below-minimum stake with sufficient payout is *not* promoted to satisfied:
-    Betfair restricts that exception by jurisdiction, and this module has no
-    product-owned jurisdiction authority.
-    """
+    def evaluate_standard_limit_currency_thresholds(
+        *,
+        currency_code: str,
+        side: str,
+        price: Decimal,
+        size: Decimal | None,
+        bet_target_type: str | None = None,
+    ) -> BetfairCurrencyThresholdAssessment:
+        """Compare a standard-size LIMIT against the historical threshold snapshot.
 
-    code = _currency_code(currency_code)
-    if type(side) is not str or side not in {"BACK", "LAY"}:
-        raise BetfairCurrencyThresholdError("side must be exactly BACK or LAY")
-    value_price = _positive_decimal(price, "price")
-    if value_price <= Decimal("1"):
-        raise BetfairCurrencyThresholdError("price must be greater than 1")
-    if bet_target_type is not None and (
-        type(bet_target_type) is not str
-        or bet_target_type not in {"PAYOUT", "BACKERS_PROFIT"}
-    ):
-        raise BetfairCurrencyThresholdError(
-            "bet_target_type must be PAYOUT, BACKERS_PROFIT, or None"
-        )
+        ``size`` is Betfair LIMIT's backer's-stake field for both BACK and LAY.
+        Target-sized orders use different economics and remain outside this module.
 
-    rules = CURRENCY_PARAMETERS.get(code)
-    if rules is None:
-        if size is not None:
-            _positive_decimal(size, "size")
+        A below-minimum stake with sufficient payout is *not* promoted to satisfied:
+        Betfair restricts that exception by jurisdiction, and this module has no
+        product-owned jurisdiction authority.
+        """
+
+        code = _currency_code(currency_code)
+        if type(side) is not str or side not in {"BACK", "LAY"}:
+            raise BetfairCurrencyThresholdError("side must be exactly BACK or LAY")
+        value_price = _positive_decimal(price, "price")
+        if value_price <= Decimal("1"):
+            raise BetfairCurrencyThresholdError("price must be greater than 1")
+        if bet_target_type is not None and (
+            type(bet_target_type) is not str
+            or bet_target_type not in {"PAYOUT", "BACKERS_PROFIT"}
+        ):
+            raise BetfairCurrencyThresholdError(
+                "bet_target_type must be PAYOUT, BACKERS_PROFIT, or None"
+            )
+
+        rules = currency_parameters.get(code)
+        if rules is None:
+            if size is not None:
+                _positive_decimal(size, "size")
+            return BetfairCurrencyThresholdAssessment(
+                state=BetfairCurrencyThresholdState.UNSUPPORTED_CURRENCY,
+                currency_code=code,
+                side=side,
+                size=None,
+                price=value_price,
+                gross_payout=None,
+                min_bet_size=None,
+                min_bet_payout=None,
+            )
+
+        if bet_target_type is not None:
+            if size is not None:
+                _positive_decimal(size, "size")
+            return BetfairCurrencyThresholdAssessment(
+                state=BetfairCurrencyThresholdState.TARGET_SIZING_OUTSIDE_SCOPE,
+                currency_code=code,
+                side=side,
+                size=None,
+                price=value_price,
+                gross_payout=None,
+                min_bet_size=rules.min_bet_size,
+                min_bet_payout=rules.min_bet_payout,
+            )
+
+        if size is None:
+            raise BetfairCurrencyThresholdError("standard-size LIMIT requires size")
+        value_size = _positive_decimal(size, "size")
+        gross_payout = _exact_multiply(value_size, value_price)
+
+        if value_size >= rules.min_bet_size:
+            state = BetfairCurrencyThresholdState.SNAPSHOT_STANDARD_MINIMUM_MET
+        elif gross_payout >= rules.min_bet_payout:
+            state = (
+                BetfairCurrencyThresholdState.SNAPSHOT_LOWER_PAYOUT_MECHANIC_MET_REQUIRES_JURISDICTION
+            )
+        else:
+            state = BetfairCurrencyThresholdState.SNAPSHOT_BELOW_THRESHOLDS
+
         return BetfairCurrencyThresholdAssessment(
-            state=BetfairCurrencyThresholdState.UNSUPPORTED_CURRENCY,
+            state=state,
             currency_code=code,
             side=side,
-            size=None,
+            size=value_size,
             price=value_price,
-            gross_payout=None,
-            min_bet_size=None,
-            min_bet_payout=None,
-        )
-
-    if bet_target_type is not None:
-        if size is not None:
-            _positive_decimal(size, "size")
-        return BetfairCurrencyThresholdAssessment(
-            state=BetfairCurrencyThresholdState.TARGET_SIZING_OUTSIDE_SCOPE,
-            currency_code=code,
-            side=side,
-            size=None,
-            price=value_price,
-            gross_payout=None,
+            gross_payout=gross_payout,
             min_bet_size=rules.min_bet_size,
             min_bet_payout=rules.min_bet_payout,
         )
 
-    if size is None:
-        raise BetfairCurrencyThresholdError("standard-size LIMIT requires size")
-    value_size = _positive_decimal(size, "size")
-    gross_payout = _exact_multiply(value_size, value_price)
 
-    if value_size >= rules.min_bet_size:
-        state = BetfairCurrencyThresholdState.SNAPSHOT_STANDARD_MINIMUM_MET
-    elif gross_payout >= rules.min_bet_payout:
-        state = (
-            BetfairCurrencyThresholdState.SNAPSHOT_LOWER_PAYOUT_MECHANIC_MET_REQUIRES_JURISDICTION
-        )
-    else:
-        state = BetfairCurrencyThresholdState.SNAPSHOT_BELOW_THRESHOLDS
+    return evaluate_standard_limit_currency_thresholds
 
-    return BetfairCurrencyThresholdAssessment(
-        state=state,
-        currency_code=code,
-        side=side,
-        size=value_size,
-        price=value_price,
-        gross_payout=gross_payout,
-        min_bet_size=rules.min_bet_size,
-        min_bet_payout=rules.min_bet_payout,
-    )
+
+evaluate_standard_limit_currency_thresholds = (
+    _build_standard_limit_currency_threshold_evaluator()
+)
+del _build_standard_limit_currency_threshold_evaluator

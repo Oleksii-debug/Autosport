@@ -38,9 +38,40 @@ class MarketImpliedUniverseBindingError(ValueError):
 _ROW_TOKEN = object()
 _COHORT_TOKEN = object()
 _HEX = frozenset("0123456789abcdef")
-_EVALUATION_STORE_TYPE = EvaluationUniverseStore
-_EVALUATION_STORE_LOAD = _EVALUATION_STORE_TYPE.load
-_EVALUATION_STORE_LOAD_CODE = _EVALUATION_STORE_LOAD.__code__
+
+
+def _build_canonical_evaluation_loader(store_type, store_load):
+    store_load_code = getattr(store_load, "__code__", None)
+    if store_load_code is None:
+        raise RuntimeError("canonical evaluation-universe loader is unavailable")
+
+    def load_canonical_evaluation_universe(
+        evaluation_store: EvaluationUniverseStore,
+    ):
+        if type(evaluation_store) is not store_type:
+            raise TypeError("evaluation_store must be exact EvaluationUniverseStore")
+        namespace = getattr(evaluation_store, "__dict__", None)
+        if isinstance(namespace, dict) and "load" in namespace:
+            raise MarketImpliedUniverseBindingError(
+                "canonical evaluation-universe store must not shadow load reader"
+            )
+        if store_type.load is not store_load:
+            raise MarketImpliedUniverseBindingError(
+                "canonical evaluation-universe load authority was rebound"
+            )
+        if getattr(store_load, "__code__", None) is not store_load_code:
+            raise MarketImpliedUniverseBindingError(
+                "canonical evaluation-universe load executable was mutated"
+            )
+        return store_load(evaluation_store)
+
+    return load_canonical_evaluation_universe
+
+
+_CANONICAL_EVALUATION_LOADER = _build_canonical_evaluation_loader(
+    EvaluationUniverseStore,
+    EvaluationUniverseStore.load,
+)
 
 
 def _text(value: object, name: str) -> str:
@@ -79,27 +110,6 @@ def _digest(payload: Mapping[str, Any] | Sequence[Any]) -> str:
         allow_nan=False,
     ).encode("utf-8")
     return hashlib.sha256(raw).hexdigest()
-
-
-def _load_canonical_evaluation_universe(
-    evaluation_store: EvaluationUniverseStore,
-):
-    if type(evaluation_store) is not _EVALUATION_STORE_TYPE:
-        raise TypeError("evaluation_store must be exact EvaluationUniverseStore")
-    namespace = getattr(evaluation_store, "__dict__", None)
-    if isinstance(namespace, dict) and "load" in namespace:
-        raise MarketImpliedUniverseBindingError(
-            "canonical evaluation-universe store must not shadow load reader"
-        )
-    if _EVALUATION_STORE_TYPE.load is not _EVALUATION_STORE_LOAD:
-        raise MarketImpliedUniverseBindingError(
-            "canonical evaluation-universe load authority was rebound"
-        )
-    if _EVALUATION_STORE_LOAD.__code__ is not _EVALUATION_STORE_LOAD_CODE:
-        raise MarketImpliedUniverseBindingError(
-            "canonical evaluation-universe load executable was mutated"
-        )
-    return _EVALUATION_STORE_LOAD(evaluation_store)
 
 
 @dataclass(frozen=True, slots=True)
@@ -292,12 +302,13 @@ def _assert_row_matches_market_evidence(
     )
 
 
-def bind_market_implied_baseline_to_evaluation_universe(
+def _bind_market_implied_baseline_to_evaluation_universe_impl(
     *,
     protocol: FrozenBaselineProtocol,
     baseline_definition: BaselineDefinition,
     evidence: Sequence[MarketImpliedBaselineEvidence],
     evaluation_store: EvaluationUniverseStore,
+    _canonical_loader,
 ) -> MarketImpliedUniverseCohortEvidence:
     """Bind market-implied probabilities to the complete durable evaluation universe.
 
@@ -308,7 +319,7 @@ def bind_market_implied_baseline_to_evaluation_universe(
     lower-level outcome-roster origin truth.
     """
 
-    ledger = _load_canonical_evaluation_universe(evaluation_store)
+    ledger = _canonical_loader(evaluation_store)
     if ledger is None:
         raise MarketImpliedUniverseBindingError(
             "canonical evaluation-universe store has no durable ledger"
@@ -346,3 +357,40 @@ def bind_market_implied_baseline_to_evaluation_universe(
         row_bindings=bindings,
         _token=_COHORT_TOKEN,
     )
+
+
+
+def _seal_market_implied_universe_binding(implementation, canonical_loader):
+    implementation_code = getattr(implementation, "__code__", None)
+    if implementation_code is None:
+        raise RuntimeError("canonical market-implied universe binder is unavailable")
+
+    def bind_market_implied_baseline_to_evaluation_universe(
+        *,
+        protocol: FrozenBaselineProtocol,
+        baseline_definition: BaselineDefinition,
+        evidence: Sequence[MarketImpliedBaselineEvidence],
+        evaluation_store: EvaluationUniverseStore,
+    ) -> MarketImpliedUniverseCohortEvidence:
+        if getattr(implementation, "__code__", None) is not implementation_code:
+            raise MarketImpliedUniverseBindingError(
+                "canonical market-implied universe binder executable was mutated"
+            )
+        return implementation(
+            protocol=protocol,
+            baseline_definition=baseline_definition,
+            evidence=evidence,
+            evaluation_store=evaluation_store,
+            _canonical_loader=canonical_loader,
+        )
+
+    return bind_market_implied_baseline_to_evaluation_universe
+
+
+bind_market_implied_baseline_to_evaluation_universe = (
+    _seal_market_implied_universe_binding(
+        _bind_market_implied_baseline_to_evaluation_universe_impl,
+        _CANONICAL_EVALUATION_LOADER,
+    )
+)
+del _CANONICAL_EVALUATION_LOADER

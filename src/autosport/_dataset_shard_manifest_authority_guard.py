@@ -49,6 +49,19 @@ def _install() -> None:
     canonical_path = manifest_module.Path
     canonical_pure_posix_path = manifest_module.PurePosixPath
     canonical_concrete_path_type = exact_type(canonical_path())
+    canonical_os = manifest_module.os
+    canonical_os_path = exact_getattr(canonical_os, "path")
+    canonical_path_resolve = exact_getattr(canonical_concrete_path_type, "resolve")
+    canonical_path_resolve_globals = exact_getattr(
+        canonical_path_resolve,
+        "__globals__",
+        None,
+    )
+    if exact_type(canonical_path_resolve_globals) is not dict:
+        raise RuntimeError("canonical Path.resolve globals are unavailable")
+    canonical_pathlib_os = canonical_path_resolve_globals.get("os")
+    if canonical_pathlib_os is not canonical_os:
+        raise RuntimeError("canonical Path.resolve os authority is unavailable")
     builtins_module = builtins
 
     canonical_path_open = exact_getattr(canonical_concrete_path_type, "open")
@@ -392,6 +405,15 @@ def _install() -> None:
                     "canonical dataset shard class executable changed: "
                     f"{owner_label}.{slot_name}"
                 )
+
+        if (
+            exact_getattr(canonical_os, "path", None) is not canonical_os_path
+            or canonical_path_resolve_globals.get("os") is not canonical_pathlib_os
+            or exact_getattr(canonical_pathlib_os, "path", None) is not canonical_os_path
+        ):
+            raise error_type(
+                "canonical dataset shard dependency owner changed: os.path"
+            )
 
         if (
             exact_getattr(canonical_path_open, "__globals__", None)

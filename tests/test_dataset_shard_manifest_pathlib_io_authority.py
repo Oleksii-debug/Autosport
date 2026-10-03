@@ -67,3 +67,56 @@ def test_registered_entry_rejects_pathlib_io_rebind_before_shard_open(
         path_globals["io"] = canonical_io
 
     assert hostile_calls == []
+
+def test_registered_entry_rejects_os_path_owner_rebind_before_path_resolve(
+    tmp_path: Path,
+) -> None:
+    payload = b"os-path-owner-must-stay-canonical"
+    (tmp_path / "shard.bin").write_bytes(payload)
+    descriptor = DatasetShardDescriptor(
+        ordinal=0,
+        shard_id="s0",
+        relative_path="shard.bin",
+        byte_size=len(payload),
+        content_sha256=hashlib.sha256(payload).hexdigest(),
+        event_start_utc="2026-09-01T00:00:00Z",
+        event_end_utc="2026-09-01T00:59:59Z",
+    )
+    registry = ScientificRegistry.initialize_pristine(
+        tmp_path / "scientific-registry.json"
+    )
+    authority = DatasetSnapshotLineageAuthority.initialize_pristine(
+        tmp_path / "dataset-snapshot-lineage.json",
+        registry,
+        authority_root=tmp_path.with_name(
+            tmp_path.name + "-dataset-lineage-machine-state"
+        ),
+    )
+
+    canonical_os_path = shard_manifest.os.path
+    hostile_calls: list[str] = []
+
+    def hostile_realpath(path, *args, **kwargs):
+        hostile_calls.append("called")
+        return canonical_os_path.realpath(path, *args, **kwargs)
+
+    shard_manifest.os.path = SimpleNamespace(
+        realpath=hostile_realpath,
+        expanduser=canonical_os_path.expanduser,
+    )
+    try:
+        with pytest.raises(
+            DatasetShardManifestError,
+            match="authority|canonical|dependency|owner|os.path",
+        ):
+            verify_registered_dataset_shards(
+                authority,
+                snapshot_id="snapshot-owner-rebind",
+                shard_root=tmp_path,
+                shards=(descriptor,),
+            )
+    finally:
+        shard_manifest.os.path = canonical_os_path
+
+    assert hostile_calls == []
+

@@ -49,18 +49,26 @@ def _build_settlement_callback_authority():
 
     missing_callback_value = object()
     canonical_object_getattribute = object.__getattribute__
+    exact_type = type
+    exact_type_getattribute = type.__getattribute__
+    exact_len = len
+    exact_any = any
+    exact_zip = zip
+    exact_tuple = tuple
+    exact_callable = callable
+    exact_dict_get = dict.get
 
     def capture_python_surface(function: FunctionType) -> tuple[object, ...]:
         closure = function.__closure__
         closure_cells = () if closure is None else closure
         try:
-            closure_values = tuple(cell.cell_contents for cell in closure_cells)
+            closure_values = exact_tuple(cell.cell_contents for cell in closure_cells)
         except ValueError as exc:
             raise ContinuousSessionError(
                 "settlement callback executable closure is unavailable"
             ) from exc
         kwdefaults = function.__kwdefaults__
-        kwdefault_items = () if kwdefaults is None else tuple(kwdefaults.items())
+        kwdefault_items = () if kwdefaults is None else exact_tuple(kwdefaults.items())
         return (
             function,
             function.__code__,
@@ -69,7 +77,7 @@ def _build_settlement_callback_authority():
             kwdefaults,
             kwdefault_items,
             closure,
-            tuple(closure_cells),
+            exact_tuple(closure_cells),
             closure_values,
         )
 
@@ -88,7 +96,7 @@ def _build_settlement_callback_authority():
                 continue
             seen.add(current)
             current_builtins = current.__builtins__
-            if type(current_builtins) is not dict:
+            if exact_type(current_builtins) is not dict:
                 raise ContinuousSessionError(
                     "settlement callback builtin namespace is unavailable"
                 )
@@ -102,11 +110,11 @@ def _build_settlement_callback_authority():
                 )
                 value_surface = (
                     capture_python_surface(value)
-                    if type(value) is FunctionType
+                    if exact_type(value) is FunctionType
                     else None
                 )
                 builtin_value = (
-                    dict.get(
+                    exact_dict_get(
                         current_builtins,
                         global_name,
                         missing_callback_value,
@@ -124,7 +132,7 @@ def _build_settlement_callback_authority():
                 )
                 if (
                     value is not missing_callback_value
-                    and type(value) is FunctionType
+                    and exact_type(value) is FunctionType
                     and value.__globals__ is root_globals
                     and value not in seen
                 ):
@@ -133,10 +141,10 @@ def _build_settlement_callback_authority():
                 (
                     capture_python_surface(current),
                     current_builtins,
-                    tuple(bindings),
+                    exact_tuple(bindings),
                 )
             )
-        return tuple(graph)
+        return exact_tuple(graph)
 
     def capture_python_callable(function: FunctionType) -> tuple[object, ...]:
         return (
@@ -163,19 +171,32 @@ def _build_settlement_callback_authority():
             raise ContinuousSessionError(
                 f"settlement {name} dispatch must remain callable"
             )
-        if not callable(callback):
+        if not exact_callable(callback):
             raise ContinuousSessionError(
                 f"settlement {name} dispatch must remain callable"
             )
-        if type(callback) is MethodType and type(callback.__func__) is FunctionType:
+        if exact_type(callback) is MethodType and exact_type(callback.__func__) is FunctionType:
             return callback, (
                 "method",
                 callback.__self__,
                 *capture_python_callable(callback.__func__),
             )
-        if type(callback) is FunctionType:
+        if exact_type(callback) is FunctionType:
             return callback, ("function", *capture_python_callable(callback))
-        return callback, ("opaque", callback, type(callback))
+        callback_type = exact_type(callback)
+        call_target = exact_type_getattribute(callback_type, "__call__")
+        call_witness = (
+            capture_python_callable(call_target)
+            if exact_type(call_target) is FunctionType
+            else None
+        )
+        return callback, (
+            "opaque",
+            callback,
+            callback_type,
+            call_target,
+            call_witness,
+        )
 
     def require_python_surface(
         witness: tuple[object, ...],
@@ -194,7 +215,7 @@ def _build_settlement_callback_authority():
             expected_closure_values,
         ) = witness
         if (
-            type(function) is not FunctionType
+            exact_type(function) is not FunctionType
             or function.__code__ is not expected_code
             or function.__globals__ is not expected_globals
             or function.__defaults__ is not expected_defaults
@@ -206,8 +227,8 @@ def _build_settlement_callback_authority():
             )
         if expected_kwdefaults is not None:
             if (
-                len(expected_kwdefaults) != len(expected_kwdefault_items)
-                or any(
+                exact_len(expected_kwdefaults) != exact_len(expected_kwdefault_items)
+                or exact_any(
                     expected_kwdefaults.get(key, missing_callback_value) is not value
                     for key, value in expected_kwdefault_items
                 )
@@ -218,10 +239,10 @@ def _build_settlement_callback_authority():
         current_closure = function.__closure__
         current_cells = () if current_closure is None else current_closure
         if (
-            len(current_cells) != len(expected_closure_cells)
-            or any(
+            exact_len(current_cells) != exact_len(expected_closure_cells)
+            or exact_any(
                 current is not expected
-                for current, expected in zip(
+                for current, expected in exact_zip(
                     current_cells,
                     expected_closure_cells,
                 )
@@ -231,16 +252,16 @@ def _build_settlement_callback_authority():
                 f"settlement {label} executable changed during tick"
             )
         try:
-            current_values = tuple(cell.cell_contents for cell in current_cells)
+            current_values = exact_tuple(cell.cell_contents for cell in current_cells)
         except ValueError as exc:
             raise ContinuousSessionError(
                 f"settlement {label} executable changed during tick"
             ) from exc
         if (
-            len(current_values) != len(expected_closure_values)
-            or any(
+            exact_len(current_values) != exact_len(expected_closure_values)
+            or exact_any(
                 current is not expected
-                for current, expected in zip(
+                for current, expected in exact_zip(
                     current_values,
                     expected_closure_values,
                 )
@@ -259,9 +280,9 @@ def _build_settlement_callback_authority():
             require_python_surface(function_witness, label=label)
             function = function_witness[0]
             if (
-                type(function) is not FunctionType
+                exact_type(function) is not FunctionType
                 or function.__builtins__ is not expected_builtins
-                or type(expected_builtins) is not dict
+                or exact_type(expected_builtins) is not dict
             ):
                 raise ContinuousSessionError(
                     f"settlement {label} builtin namespace changed during tick"
@@ -279,7 +300,7 @@ def _build_settlement_callback_authority():
                             f"settlement {label} global binding changed during tick"
                         )
                     if (
-                        dict.get(
+                        exact_dict_get(
                             expected_builtins,
                             global_name,
                             missing_callback_value,
@@ -308,7 +329,7 @@ def _build_settlement_callback_authority():
         *,
         label: str,
     ) -> None:
-        if len(witness) != 10:
+        if exact_len(witness) != 10:
             raise ContinuousSessionError(
                 f"settlement {label} dispatch witness is unavailable"
             )
@@ -325,8 +346,9 @@ def _build_settlement_callback_authority():
         *,
         label: str,
         optional: bool = False,
+        relookup: bool = True,
     ) -> None:
-        current = stable_callback_lookup(owner, name)
+        current = stable_callback_lookup(owner, name) if relookup else callback
         if callback is None:
             if not optional or current is not None:
                 raise ContinuousSessionError(
@@ -343,7 +365,7 @@ def _build_settlement_callback_authority():
             function_witness = witness[2:]
             expected_function = function_witness[0]
             if (
-                type(current) is not MethodType
+                exact_type(current) is not MethodType
                 or current.__self__ is not expected_self
                 or current.__func__ is not expected_function
             ):
@@ -361,10 +383,19 @@ def _build_settlement_callback_authority():
                 )
             require_python_callable(function_witness, label=label)
             return
-        if kind != "opaque" or current is not witness[1] or type(current) is not witness[2]:
+        if kind != "opaque" or current is not witness[1] or exact_type(current) is not witness[2]:
             raise ContinuousSessionError(
                 f"settlement {label} dispatch changed during tick"
             )
+        expected_type = witness[2]
+        expected_call_target = witness[3]
+        call_witness = witness[4]
+        if exact_type_getattribute(expected_type, "__call__") is not expected_call_target:
+            raise ContinuousSessionError(
+                f"settlement {label} invocation slot changed during tick"
+            )
+        if call_witness is not None:
+            require_python_callable(call_witness, label=f"{label} invocation")
 
 
     return capture_callback, require_callback
@@ -1420,15 +1451,38 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         _object_getattribute: Callable[[object, str], object],
         _capture_callback_fn: Callable[..., tuple[object | None, tuple[object, ...] | None]],
         _require_callback_fn: Callable[..., None],
+        _captured_outcome_authority: object | None = None,
+        _captured_outcome_resolve: object | None = None,
+        _captured_outcome_resolve_witness: tuple[object, ...] | None = None,
     ) -> tuple[SettlementResolution, ...]:
         del _object_getattribute
         outcome_authority = self.outcome_authority
         if outcome_authority is None:
+            if (
+                _captured_outcome_authority is not None
+                or _captured_outcome_resolve is not None
+                or _captured_outcome_resolve_witness is not None
+            ):
+                raise ContinuousSessionError(
+                    "settlement outcome authority changed during tick"
+                )
             return ()
-        resolve, resolve_witness = _capture_callback_fn(
-            outcome_authority,
-            "resolve",
-        )
+        if (
+            _captured_outcome_authority is None
+            and _captured_outcome_resolve is None
+            and _captured_outcome_resolve_witness is None
+        ):
+            resolve, resolve_witness = _capture_callback_fn(
+                outcome_authority,
+                "resolve",
+            )
+        else:
+            if _captured_outcome_authority is not outcome_authority:
+                raise ContinuousSessionError(
+                    "settlement outcome authority changed during tick"
+                )
+            resolve = _captured_outcome_resolve
+            resolve_witness = _captured_outcome_resolve_witness
         if resolve is None or resolve_witness is None:
             raise ContinuousSessionError(
                 "settlement outcome authority resolve dispatch must remain callable"
@@ -1445,6 +1499,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             resolve,
             resolve_witness,
             label="outcome authority resolve",
+            relookup=False,
         )
 
         resolutions: list[SettlementResolution] = []
@@ -1762,7 +1817,12 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                     newly_registered.append(input_id)
 
             require_learning_handoff()
-            authority_resolutions = self._settlement_resolutions(as_of=now)
+            authority_resolutions = self._settlement_resolutions(
+                as_of=now,
+                _captured_outcome_authority=outcome_authority,
+                _captured_outcome_resolve=outcome_resolve,
+                _captured_outcome_resolve_witness=outcome_resolve_witness,
+            )
             require_learning_handoff()
             resolutions = _snapshot_fn(
                 authority_resolutions,

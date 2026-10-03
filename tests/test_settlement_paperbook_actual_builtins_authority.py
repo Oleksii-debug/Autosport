@@ -96,3 +96,68 @@ def test_outcome_callback_cannot_replace_tuple_to_erase_provider_provenance(
         builtins.tuple = canonical_tuple
 
     assert erased_provenance_calls == []
+
+def test_outcome_callback_cannot_retarget_prelearning_len_dispatch(
+    tmp_path: Path,
+) -> None:
+    book = PaperBook("100")
+    leg = TicketLeg("event-1", "winner", "alice", Decimal("2"))
+    book.open_ticket(
+        [leg],
+        "10",
+        placed_at="2026-09-22T07:00:00+00:00",
+        provider_source_ids=("provider-a",),
+    )
+    paper_book_path = tmp_path / "paper_book.json"
+    book.save(paper_book_path)
+    resolution = SettlementResolution(
+        event_identity="provider-a:event-1",
+        settlement_ref="provider-result:prelearning-len",
+        quote_outcomes={leg.quote_key: "win"},
+        evidence_id="provider-a-outcome-prelearning-len",
+        evidence_sha256="5" * 64,
+        available_at="2026-09-22T07:01:00+00:00",
+    )
+
+    canonical_len = builtins.len
+    canonical_type = builtins.type
+    canonical_all = builtins.all
+    hostile_calls: list[str] = []
+
+    def hostile_len(value):
+        if (
+            canonical_type(value) is tuple
+            and value
+            and canonical_all(canonical_type(item).__name__ == "cell" for item in value)
+        ):
+            hostile_calls.append("prelearning-closure")
+            builtins.len = canonical_len
+        return canonical_len(value)
+
+    class OutcomeAuthority:
+        def resolve(self, record, *, as_of: str):
+            del record, as_of
+            builtins.len = hostile_len
+            return resolution
+
+    coordinator = object.__new__(ContinuousSessionCoordinator)
+    coordinator.paper_book_path = paper_book_path
+    coordinator.initial_bankroll = "100"
+    coordinator.outcome_authority = OutcomeAuthority()
+    coordinator.lifecycle = _Lifecycle(
+        SimpleNamespace(
+            phase=EventPhase.COMPLETED,
+            settlement_ref=resolution.settlement_ref,
+            identity=resolution.event_identity,
+        )
+    )
+
+    try:
+        result = coordinator._settlement_resolutions(
+            as_of="2026-09-22T07:02:00+00:00",
+        )
+        assert canonical_len(result) == 1
+        assert hostile_calls == []
+    finally:
+        builtins.len = canonical_len
+

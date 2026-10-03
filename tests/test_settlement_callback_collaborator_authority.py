@@ -589,3 +589,59 @@ def test_tick_rejects_lifecycle_records_outcome_code_retarget_before_dispatch(
         assert handoff.reconcile_calls == 0
     finally:
         type(authority).resolve.__code__ = canonical_code
+
+_OPAQUE_RESOLVE_CALLS: list[str] = []
+
+
+class _OpaqueResolve:
+    def __init__(self, resolution: SettlementResolution) -> None:
+        self._resolution = resolution
+
+    def __call__(self, _record, *, as_of: str):
+        del _record, as_of
+        return self._resolution
+
+
+class _OpaqueOutcomeAuthority:
+    def __init__(self, resolution: SettlementResolution) -> None:
+        self.resolve = _OpaqueResolve(resolution)
+
+
+def _hostile_opaque_resolve(self, _record, *, as_of: str):
+    del self, _record
+    _OPAQUE_RESOLVE_CALLS.append(as_of)
+    raise AssertionError("hostile opaque outcome resolver executed")
+
+
+def test_tick_rejects_opaque_callback_call_slot_retarget_before_invocation(
+    tmp_path: Path,
+) -> None:
+    resolution, paper_book_path = _build_resolution_and_book(tmp_path)
+    authority = _OpaqueOutcomeAuthority(resolution)
+    handoff = _LearningHandoff()
+    canonical_call = _OpaqueResolve.__dict__["__call__"]
+
+    def mutate() -> None:
+        type.__setattr__(_OpaqueResolve, "__call__", _hostile_opaque_resolve)
+
+    coordinator = _coordinator(
+        tmp_path,
+        resolution=resolution,
+        paper_book_path=paper_book_path,
+        outcome_authority=authority,
+        learning_handoff=handoff,
+        collector=_Collector(mutate),
+    )
+    _OPAQUE_RESOLVE_CALLS.clear()
+    try:
+        with pytest.raises(
+            ContinuousSessionError,
+            match="settlement outcome authority resolve (invocation slot|dispatch|executable) changed during tick",
+        ):
+            coordinator.tick()
+        assert _OPAQUE_RESOLVE_CALLS == []
+        assert handoff.prepare_calls == 0
+        assert handoff.reconcile_calls == 0
+    finally:
+        type.__setattr__(_OpaqueResolve, "__call__", canonical_call)
+

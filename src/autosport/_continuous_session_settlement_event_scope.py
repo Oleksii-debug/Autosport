@@ -27,6 +27,10 @@ def _install() -> None:
     exact_set = set
     exact_id = id
     exact_getattr = getattr
+    exact_len = len
+    exact_any = any
+    exact_zip = zip
+    exact_tuple = tuple
 
     # `PaperBook` identity alone is not the load authority: a callback can preserve
     # the exact class object while retargeting its class-level loader or fresh-book
@@ -71,7 +75,7 @@ def _install() -> None:
                 () if dependency_closure is None else dependency_closure
             )
             try:
-                dependency_closure_values = tuple(
+                dependency_closure_values = exact_tuple(
                     cell.cell_contents for cell in dependency_closure_cells
                 )
             except ValueError as exc:
@@ -83,7 +87,7 @@ def _install() -> None:
             dependency_kwdefault_items = (
                 ()
                 if dependency_kwdefaults is None
-                else tuple(dependency_kwdefaults.items())
+                else exact_tuple(dependency_kwdefaults.items())
             )
             dependency_bindings: list[tuple[str, object]] = []
             for dependency_name in dependency.__code__.co_names:
@@ -109,12 +113,12 @@ def _install() -> None:
                     dependency_kwdefaults,
                     dependency_kwdefault_items,
                     dependency_closure,
-                    tuple(dependency_closure_cells),
+                    exact_tuple(dependency_closure_cells),
                     dependency_closure_values,
-                    tuple(dependency_bindings),
+                    exact_tuple(dependency_bindings),
                 )
             )
-        return tuple(graph)
+        return exact_tuple(graph)
 
     def capture_builtin_fallback_graph(
         graph: tuple[tuple[object, ...], ...],
@@ -132,7 +136,7 @@ def _install() -> None:
                 raise TypeError(
                     f"canonical PaperBook {label} builtins must be an exact dict"
                 )
-            builtin_bindings = tuple(
+            builtin_bindings = exact_tuple(
                 (
                     dependency_name,
                     dependency_builtins.get(dependency_name, missing_slot),
@@ -147,7 +151,7 @@ def _install() -> None:
                     builtin_bindings,
                 )
             )
-        return tuple(builtin_graph)
+        return exact_tuple(builtin_graph)
 
     canonical_load_descriptor = paper_book_dict.get("load", missing_slot)
     if exact_type(canonical_load_descriptor) is not classmethod:
@@ -159,10 +163,10 @@ def _install() -> None:
     canonical_load_globals = canonical_load_target.__globals__
     canonical_load_closure = canonical_load_target.__closure__
     canonical_load_closure_cells = (
-        () if canonical_load_closure is None else tuple(canonical_load_closure)
+        () if canonical_load_closure is None else exact_tuple(canonical_load_closure)
     )
     try:
-        canonical_load_closure_values = tuple(
+        canonical_load_closure_values = exact_tuple(
             cell.cell_contents for cell in canonical_load_closure_cells
         )
     except ValueError as exc:
@@ -247,10 +251,10 @@ def _install() -> None:
     canonical_save_globals = canonical_save_target.__globals__
     canonical_save_closure = canonical_save_target.__closure__
     canonical_save_closure_cells = (
-        () if canonical_save_closure is None else tuple(canonical_save_closure)
+        () if canonical_save_closure is None else exact_tuple(canonical_save_closure)
     )
     try:
-        canonical_save_closure_values = tuple(
+        canonical_save_closure_values = exact_tuple(
             cell.cell_contents for cell in canonical_save_closure_cells
         )
     except ValueError as exc:
@@ -359,7 +363,7 @@ def _install() -> None:
             closure_values: tuple[object, ...] | None = None
             if closure is not None:
                 try:
-                    closure_values = tuple(cell.cell_contents for cell in closure)
+                    closure_values = exact_tuple(cell.cell_contents for cell in closure)
                 except ValueError as exc:
                     raise TypeError(
                         "canonical PaperBook save verifier closure is unavailable"
@@ -375,7 +379,7 @@ def _install() -> None:
                     closure_values,
                 )
             )
-        canonical_save_verifier_witnesses = tuple(canonical_save_verifier_witness_list)
+        canonical_save_verifier_witnesses = exact_tuple(canonical_save_verifier_witness_list)
 
         # The final wrapper-helper shallow-copies the original load-dispatch globals,
         # while these verifier FunctionTypes keep executing against that ORIGINAL
@@ -402,7 +406,7 @@ def _install() -> None:
                 () if dependency_closure is None else dependency_closure
             )
             try:
-                dependency_closure_values = tuple(
+                dependency_closure_values = exact_tuple(
                     cell.cell_contents for cell in dependency_closure_cells
                 )
             except ValueError as exc:
@@ -414,7 +418,7 @@ def _install() -> None:
             dependency_kwdefault_items = (
                 ()
                 if dependency_kwdefaults is None
-                else tuple(dependency_kwdefaults.items())
+                else exact_tuple(dependency_kwdefaults.items())
             )
             dependency_bindings: list[tuple[str, object]] = []
             for dependency_name in dependency.__code__.co_names:
@@ -444,12 +448,12 @@ def _install() -> None:
                     dependency_kwdefaults,
                     dependency_kwdefault_items,
                     dependency_closure,
-                    tuple(dependency_closure_cells),
+                    exact_tuple(dependency_closure_cells),
                     dependency_closure_values,
-                    tuple(dependency_bindings),
+                    exact_tuple(dependency_bindings),
                 )
             )
-        canonical_save_verifier_dependency_graph = tuple(
+        canonical_save_verifier_dependency_graph = exact_tuple(
             verifier_dependency_graph_list
         )
         canonical_save_verifier_builtin_graph = capture_builtin_fallback_graph(
@@ -465,7 +469,7 @@ def _install() -> None:
         canonical_save_value_witnesses = canonical_save_authority_globals[
             "_VALUE_TYPE_CALLABLE_WITNESSES"
         ]
-        canonical_save_authority_binding_snapshot = tuple(
+        canonical_save_authority_binding_snapshot = exact_tuple(
             canonical_save_authority_globals.items()
         )
 
@@ -534,9 +538,9 @@ def _install() -> None:
             return None
         return target
 
-    paper_book_callable_surface = tuple(
+    paper_book_callable_surface = exact_tuple(
         (name, slot, target, target.__code__)
-        for name, slot in tuple(paper_book_dict.items())
+        for name, slot in exact_tuple(paper_book_dict.items())
         if (target := paper_book_executable(slot)) is not None
     )
 
@@ -561,7 +565,7 @@ def _install() -> None:
             return owner, slot, target, target.__code__
         raise TypeError("canonical PaperBook pathlib callable is unavailable: " + name)
 
-    path_callable_surface = tuple(
+    path_callable_surface = exact_tuple(
         (name, *resolve_path_callable(name))
         for name in ("exists", "stat", "read_bytes", "open")
     )
@@ -612,7 +616,7 @@ def _install() -> None:
                 "canonical PaperBook load closure authority changed"
             )
         try:
-            current_load_closure_values = tuple(
+            current_load_closure_values = exact_tuple(
                 cell.cell_contents for cell in canonical_load_closure_cells
             )
         except ValueError as exc:
@@ -620,10 +624,10 @@ def _install() -> None:
                 "canonical PaperBook load closure contents changed"
             ) from exc
         if (
-            len(current_load_closure_values) != len(canonical_load_closure_values)
-            or any(
+            exact_len(current_load_closure_values) != exact_len(canonical_load_closure_values)
+            or exact_any(
                 current is not expected
-                for current, expected in zip(
+                for current, expected in exact_zip(
                     current_load_closure_values,
                     canonical_load_closure_values,
                 )
@@ -687,9 +691,9 @@ def _install() -> None:
                         "canonical PaperBook frozen load dependency executable changed"
                     )
                 if expected_dependency_kwdefaults is not None and (
-                    len(expected_dependency_kwdefaults)
-                    != len(expected_dependency_kwdefault_items)
-                    or any(
+                    exact_len(expected_dependency_kwdefaults)
+                    != exact_len(expected_dependency_kwdefault_items)
+                    or exact_any(
                         expected_dependency_kwdefaults.get(key, missing_slot)
                         is not value
                         for key, value in expected_dependency_kwdefault_items
@@ -705,11 +709,11 @@ def _install() -> None:
                     else current_dependency_closure
                 )
                 if (
-                    len(current_dependency_cells)
-                    != len(expected_dependency_closure_cells)
-                    or any(
+                    exact_len(current_dependency_cells)
+                    != exact_len(expected_dependency_closure_cells)
+                    or exact_any(
                         current is not expected
-                        for current, expected in zip(
+                        for current, expected in exact_zip(
                             current_dependency_cells,
                             expected_dependency_closure_cells,
                         )
@@ -719,7 +723,7 @@ def _install() -> None:
                         "canonical PaperBook frozen load dependency closure changed"
                     )
                 try:
-                    current_dependency_closure_values = tuple(
+                    current_dependency_closure_values = exact_tuple(
                         cell.cell_contents for cell in current_dependency_cells
                     )
                 except ValueError as exc:
@@ -727,11 +731,11 @@ def _install() -> None:
                         "canonical PaperBook frozen load dependency closure changed"
                     ) from exc
                 if (
-                    len(current_dependency_closure_values)
-                    != len(expected_dependency_closure_values)
-                    or any(
+                    exact_len(current_dependency_closure_values)
+                    != exact_len(expected_dependency_closure_values)
+                    or exact_any(
                         current is not expected
-                        for current, expected in zip(
+                        for current, expected in exact_zip(
                             current_dependency_closure_values,
                             expected_dependency_closure_values,
                         )
@@ -793,7 +797,7 @@ def _install() -> None:
                 "canonical PaperBook save closure authority changed"
             )
         try:
-            current_save_closure_values = tuple(
+            current_save_closure_values = exact_tuple(
                 cell.cell_contents for cell in canonical_save_closure_cells
             )
         except ValueError as exc:
@@ -801,10 +805,10 @@ def _install() -> None:
                 "canonical PaperBook save closure contents changed"
             ) from exc
         if (
-            len(current_save_closure_values) != len(canonical_save_closure_values)
-            or any(
+            exact_len(current_save_closure_values) != exact_len(canonical_save_closure_values)
+            or exact_any(
                 current is not expected
-                for current, expected in zip(
+                for current, expected in exact_zip(
                     current_save_closure_values,
                     canonical_save_closure_values,
                 )
@@ -868,9 +872,9 @@ def _install() -> None:
                         "canonical PaperBook frozen save dependency executable changed"
                     )
                 if expected_dependency_kwdefaults is not None and (
-                    len(expected_dependency_kwdefaults)
-                    != len(expected_dependency_kwdefault_items)
-                    or any(
+                    exact_len(expected_dependency_kwdefaults)
+                    != exact_len(expected_dependency_kwdefault_items)
+                    or exact_any(
                         expected_dependency_kwdefaults.get(key, missing_slot)
                         is not value
                         for key, value in expected_dependency_kwdefault_items
@@ -886,11 +890,11 @@ def _install() -> None:
                     else current_dependency_closure
                 )
                 if (
-                    len(current_dependency_cells)
-                    != len(expected_dependency_closure_cells)
-                    or any(
+                    exact_len(current_dependency_cells)
+                    != exact_len(expected_dependency_closure_cells)
+                    or exact_any(
                         current is not expected
-                        for current, expected in zip(
+                        for current, expected in exact_zip(
                             current_dependency_cells,
                             expected_dependency_closure_cells,
                         )
@@ -900,7 +904,7 @@ def _install() -> None:
                         "canonical PaperBook frozen save dependency closure changed"
                     )
                 try:
-                    current_dependency_closure_values = tuple(
+                    current_dependency_closure_values = exact_tuple(
                         cell.cell_contents for cell in current_dependency_cells
                     )
                 except ValueError as exc:
@@ -908,11 +912,11 @@ def _install() -> None:
                         "canonical PaperBook frozen save dependency closure changed"
                     ) from exc
                 if (
-                    len(current_dependency_closure_values)
-                    != len(expected_dependency_closure_values)
-                    or any(
+                    exact_len(current_dependency_closure_values)
+                    != exact_len(expected_dependency_closure_values)
+                    or exact_any(
                         current is not expected
-                        for current, expected in zip(
+                        for current, expected in exact_zip(
                             current_dependency_closure_values,
                             expected_dependency_closure_values,
                         )
@@ -953,8 +957,8 @@ def _install() -> None:
                         )
         if canonical_save_authority_binding_snapshot:
             if (
-                len(canonical_save_authority_globals)
-                != len(canonical_save_authority_binding_snapshot)
+                exact_len(canonical_save_authority_globals)
+                != exact_len(canonical_save_authority_binding_snapshot)
             ):
                 raise session_module.ContinuousSessionError(
                     "canonical PaperBook save wrapper authority changed"
@@ -989,9 +993,9 @@ def _install() -> None:
                     )
                 if expected_dependency_kwdefaults is not None:
                     if (
-                        len(expected_dependency_kwdefaults)
-                        != len(expected_dependency_kwdefault_items)
-                        or any(
+                        exact_len(expected_dependency_kwdefaults)
+                        != exact_len(expected_dependency_kwdefault_items)
+                        or exact_any(
                             expected_dependency_kwdefaults.get(
                                 key,
                                 missing_slot,
@@ -1011,11 +1015,11 @@ def _install() -> None:
                     else current_dependency_closure
                 )
                 if (
-                    len(current_dependency_cells)
-                    != len(expected_dependency_closure_cells)
-                    or any(
+                    exact_len(current_dependency_cells)
+                    != exact_len(expected_dependency_closure_cells)
+                    or exact_any(
                         current is not expected
-                        for current, expected in zip(
+                        for current, expected in exact_zip(
                             current_dependency_cells,
                             expected_dependency_closure_cells,
                         )
@@ -1025,7 +1029,7 @@ def _install() -> None:
                         "canonical PaperBook save verifier dependency closure changed"
                     )
                 try:
-                    current_dependency_closure_values = tuple(
+                    current_dependency_closure_values = exact_tuple(
                         cell.cell_contents for cell in current_dependency_cells
                     )
                 except ValueError as exc:
@@ -1033,11 +1037,11 @@ def _install() -> None:
                         "canonical PaperBook save verifier dependency closure changed"
                     ) from exc
                 if (
-                    len(current_dependency_closure_values)
-                    != len(expected_dependency_closure_values)
-                    or any(
+                    exact_len(current_dependency_closure_values)
+                    != exact_len(expected_dependency_closure_values)
+                    or exact_any(
                         current is not expected
-                        for current, expected in zip(
+                        for current, expected in exact_zip(
                             current_dependency_closure_values,
                             expected_dependency_closure_values,
                         )
@@ -1101,7 +1105,7 @@ def _install() -> None:
                     )
                 if expected_closure is not None:
                     try:
-                        current_closure_values = tuple(
+                        current_closure_values = exact_tuple(
                             cell.cell_contents for cell in expected_closure
                         )
                     except ValueError as exc:
@@ -1110,10 +1114,10 @@ def _install() -> None:
                         ) from exc
                     if (
                         expected_closure_values is None
-                        or len(current_closure_values) != len(expected_closure_values)
-                        or any(
+                        or exact_len(current_closure_values) != exact_len(expected_closure_values)
+                        or exact_any(
                             current is not expected
-                            for current, expected in zip(
+                            for current, expected in exact_zip(
                                 current_closure_values,
                                 expected_closure_values,
                             )
@@ -1275,7 +1279,7 @@ def _install() -> None:
             # Once durable provider provenance exists, only one of those exact source
             # identities may authorize this ticket. A bare event identity must never
             # erase that boundary.
-            if any(
+            if exact_any(
                 event_identity == f"{source_id}:{leg.event_id}"
                 for source_id in source_ids
             ):
@@ -1359,7 +1363,7 @@ def _install() -> None:
         for ticket in book.tickets.values():
             if ticket.status.value != "open":
                 continue
-            matches_resolution = any(
+            matches_resolution = exact_any(
                 leg_matches_event_scope(ticket, leg, resolution.event_identity)
                 and leg.quote_key in resolution_quote_keys
                 for leg in ticket.legs
@@ -1401,7 +1405,7 @@ def _install() -> None:
         seen_prelearning_target_ids.add(target_identity)
         target_code = target.__code__
         target_closure = target.__closure__ or ()
-        if len(target_closure) != len(target_code.co_freevars):
+        if exact_len(target_closure) != exact_len(target_code.co_freevars):
             raise TypeError("canonical pre-learning helper closure is malformed")
         cell_witnesses: list[tuple[object, object]] = []
         for cell in target_closure:
@@ -1415,9 +1419,9 @@ def _install() -> None:
             if exact_type(value) is function_type:
                 pending_prelearning_targets.append(value)
         canonical_prelearning_graph_list.append(
-            (target, target_code, tuple(cell_witnesses))
+            (target, target_code, exact_tuple(cell_witnesses))
         )
-    canonical_prelearning_graph = tuple(canonical_prelearning_graph_list)
+    canonical_prelearning_graph = exact_tuple(canonical_prelearning_graph_list)
 
     def settlement_resolutions(self: Any, *args: Any, **kwargs: Any):
         # Prove the install-time graph before outcome resolution. This rejects closure
@@ -1429,11 +1433,11 @@ def _install() -> None:
                     "canonical pre-learning settlement authority changed"
                 )
             current_closure = target.__closure__ or ()
-            if len(current_closure) != len(expected_cells):
+            if exact_len(current_closure) != exact_len(expected_cells):
                 raise session_module.ContinuousSessionError(
                     "canonical pre-learning settlement authority changed"
                 )
-            for current_cell, (expected_cell, expected_value) in zip(
+            for current_cell, (expected_cell, expected_value) in exact_zip(
                 current_closure,
                 expected_cells,
             ):
@@ -1464,11 +1468,11 @@ def _install() -> None:
                     "canonical pre-learning settlement authority changed"
                 )
             current_closure = target.__closure__ or ()
-            if len(current_closure) != len(expected_cells):
+            if exact_len(current_closure) != exact_len(expected_cells):
                 raise session_module.ContinuousSessionError(
                     "canonical pre-learning settlement authority changed"
                 )
-            for current_cell, (expected_cell, expected_value) in zip(
+            for current_cell, (expected_cell, expected_value) in exact_zip(
                 current_closure,
                 expected_cells,
             ):

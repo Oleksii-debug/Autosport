@@ -2158,3 +2158,232 @@ def test_live_pr_boundary_scoped_type_rebind_cannot_reopen_nested_request_shadow
         _trusted_live_pr_qualification(api, 303)
     assert not forged_invoked["value"]
 
+def test_historical_association_pr_identity_ignores_rebound_compat_validators(
+    monkeypatch,
+) -> None:
+    api = WorkflowScopedGitHubApi(
+        repository="owner/repo",
+        token="token",
+        workflow_id=356678400,
+        workflow_name="CI",
+    )
+    canonical_request = scoped_controller.GitHubApi._request
+    requested: list[str] = []
+
+    class FakeResponse:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, _exc_type, _exc, _tb):
+            return False
+
+        def read(self) -> bytes:
+            return (
+                b'[{"number":303,"head":{"sha":"'
+                + HEAD.encode("ascii")
+                + b'"}}]'
+            )
+
+    def canonical_urlopen(request, *, timeout: int):
+        assert timeout == 20
+        requested.append(request.full_url)
+        return FakeResponse()
+
+    monkeypatch.setattr(
+        scoped_controller,
+        "_require_positive_int",
+        lambda _value, *, field: 999,
+    )
+    monkeypatch.setattr(
+        scoped_controller,
+        "_require_sha",
+        lambda _value, *, field: STALE_HEAD,
+    )
+    monkeypatch.setitem(
+        canonical_request.__globals__,
+        "urlopen",
+        canonical_urlopen,
+    )
+
+    assert api._historical_associated_pr_number(HEAD) == 303
+    assert requested == [
+        "https://api.github.com/repos/owner/repo/commits/"
+        + HEAD
+        + "/pulls?per_page=100&page=1"
+    ]
+
+
+def test_historical_association_pagination_bound_cannot_be_rebound_to_hide_ambiguity(
+    monkeypatch,
+) -> None:
+    api = WorkflowScopedGitHubApi(
+        repository="owner/repo",
+        token="token",
+        workflow_id=356678400,
+        workflow_name="CI",
+    )
+    canonical_request = scoped_controller.GitHubApi._request
+    requested: list[str] = []
+    item_303 = (
+        b'{"number":303,"head":{"sha":"'
+        + HEAD.encode("ascii")
+        + b'"}}'
+    )
+    page_one = b"[" + b",".join([item_303] * 100) + b"]"
+    page_two = (
+        b'[{"number":304,"head":{"sha":"'
+        + HEAD.encode("ascii")
+        + b'"}}]'
+    )
+
+    class FakeResponse:
+        status = 200
+
+        def __init__(self, body: bytes) -> None:
+            self.body = body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, _exc_type, _exc, _tb):
+            return False
+
+        def read(self) -> bytes:
+            return self.body
+
+    def canonical_urlopen(request, *, timeout: int):
+        assert timeout == 20
+        requested.append(request.full_url)
+        if "page=1" in request.full_url:
+            return FakeResponse(page_one)
+        if "page=2" in request.full_url:
+            return FakeResponse(page_two)
+        raise AssertionError(request.full_url)
+
+    # GitHub caps per_page at 100. If a mutable module global can widen the local
+    # comparison to 101 after composition, a real 100-row first page looks terminal
+    # and a second associated PR can be hidden.
+    monkeypatch.setattr(scoped_controller, "_PULLS_PER_PAGE", 101)
+    monkeypatch.setitem(
+        canonical_request.__globals__,
+        "urlopen",
+        canonical_urlopen,
+    )
+
+    with pytest.raises(scoped_controller._HistoricalAssociationAmbiguous):
+        api._historical_associated_pr_number(HEAD)
+
+    assert requested == [
+        "https://api.github.com/repos/owner/repo/commits/"
+        + HEAD
+        + "/pulls?per_page=100&page=1",
+        "https://api.github.com/repos/owner/repo/commits/"
+        + HEAD
+        + "/pulls?per_page=100&page=2",
+    ]
+
+
+def test_zero_association_commit_coordinate_ignores_rebound_sha_helper(
+    monkeypatch,
+) -> None:
+    api = WorkflowScopedGitHubApi(
+        repository="owner/repo",
+        token="token",
+        workflow_id=356678400,
+        workflow_name="CI",
+    )
+    canonical_request = scoped_controller.GitHubApi._request
+    requested: list[str] = []
+
+    class FakeResponse:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, _exc_type, _exc, _tb):
+            return False
+
+        def read(self) -> bytes:
+            return b"[]"
+
+    def canonical_urlopen(request, *, timeout: int):
+        assert timeout == 20
+        requested.append(request.full_url)
+        return FakeResponse()
+
+    monkeypatch.setattr(
+        scoped_controller,
+        "_require_sha",
+        lambda _value, *, field: STALE_HEAD,
+    )
+    monkeypatch.setitem(
+        canonical_request.__globals__,
+        "urlopen",
+        canonical_urlopen,
+    )
+
+    assert api._historical_head_has_no_associated_prs(HEAD)
+    assert requested == [
+        "https://api.github.com/repos/owner/repo/commits/"
+        + HEAD
+        + "/pulls?per_page=100&page=1"
+    ]
+
+
+def test_canonical_branch_head_ignores_rebound_sha_and_quote_helpers(
+    monkeypatch,
+) -> None:
+    api = WorkflowScopedGitHubApi(
+        repository="owner/repo",
+        token="token",
+        workflow_id=356678400,
+        workflow_name="CI",
+    )
+    canonical_request = scoped_controller.GitHubApi._request
+    requested: list[str] = []
+
+    class FakeResponse:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, _exc_type, _exc, _tb):
+            return False
+
+        def read(self) -> bytes:
+            return (
+                b'{"object":{"sha":"'
+                + STALE_HEAD.encode("ascii")
+                + b'"}}'
+            )
+
+    def canonical_urlopen(request, *, timeout: int):
+        assert timeout == 20
+        requested.append(request.full_url)
+        return FakeResponse()
+
+    monkeypatch.setattr(
+        scoped_controller,
+        "_require_sha",
+        lambda _value, *, field: HEAD,
+    )
+    monkeypatch.setattr(
+        scoped_controller,
+        "quote",
+        lambda _value, *, safe="": "attacker%2Fredirect",
+    )
+    monkeypatch.setitem(
+        canonical_request.__globals__,
+        "urlopen",
+        canonical_urlopen,
+    )
+
+    assert api._canonical_branch_head("feature/original") == STALE_HEAD
+    assert requested == [
+        "https://api.github.com/repos/owner/repo/git/ref/heads/feature%2Foriginal"
+    ]
+

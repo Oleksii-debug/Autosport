@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from hashlib import sha256
 import json
+import shutil
 from unittest.mock import patch
 
 import pytest
@@ -162,6 +163,88 @@ def test_bound_runtime_captures_exact_roots_and_reopens_same_generation(tmp_path
     assert reopened.authority_generation_sha256 == checkpoint.generation_sha256
     assert reopened.authority_generation_sha256 == runtime.authority_generation_sha256
 
+
+
+def test_existing_runtime_without_monotonic_history_requires_explicit_migration(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    authority_root = tmp_path.parent / f".{tmp_path.name}-sport-memory-authority"
+    monkeypatch.setenv("AUTOSPORT_MONOTONIC_AUTHORITY_ROOT", str(authority_root))
+    identity, opponent = _canonical_stores(tmp_path, populated=True)
+    checkpoint_path, runtime_path = _paths(tmp_path)
+
+    runtime = initialize_or_open_bound_sport_memory_runtime(
+        runtime_path,
+        checkpoint_path,
+        identity,
+        opponent,
+    )
+    runtime.materialize(
+        participant_entity_id="p-alex",
+        scope=_scope(),
+        causal_cutoff=T2,
+        published_at=T3,
+        code_sha256=SHA_A,
+        dependency_sha256=SHA_B,
+        min_support=1,
+    )
+
+    shutil.rmtree(authority_root)
+    reopened_identity = ParticipantIdentityRegistry(identity.path)
+    reopened_opponent = OpponentIntelligenceStore(
+        opponent.path,
+        reopened_identity,
+    )
+    with pytest.raises(
+        SportMemoryCheckpointError,
+        match="lacks independent monotonic history",
+    ):
+        open_bound_sport_memory_runtime(
+            runtime_path,
+            checkpoint_path,
+            reopened_identity,
+            reopened_opponent,
+        )
+
+
+def test_pristine_checkpoint_free_legacy_prefix_establishes_monotonic_baseline(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    authority_root = tmp_path.parent / f".{tmp_path.name}-sport-memory-authority"
+    monkeypatch.setenv("AUTOSPORT_MONOTONIC_AUTHORITY_ROOT", str(authority_root))
+    identity, opponent = _canonical_stores(tmp_path)
+    checkpoint_path, runtime_path = _paths(tmp_path)
+    authority, verified_opponent = checkpoint_module._capture_checkpoint_and_opponent(
+        identity,
+        opponent,
+    )
+    legacy = SportMemoryRuntime(
+        runtime_path,
+        verified_opponent,
+        authority_generation_sha256=authority.generation_sha256,
+    )
+    legacy._persist()
+    assert runtime_path.is_file()
+    assert not checkpoint_path.exists()
+    assert not checkpoint_module._read_runtime_authority_history(
+        checkpoint_module._runtime_monotonic_authority(runtime_path)
+    )
+
+    reopened = initialize_or_open_bound_sport_memory_runtime(
+        runtime_path,
+        checkpoint_path,
+        identity,
+        opponent,
+    )
+
+    assert checkpoint_path.is_file()
+    assert reopened.participant_history("p-alex", _scope()) == ()
+    history = checkpoint_module._read_runtime_authority_history(
+        checkpoint_module._runtime_monotonic_authority(runtime_path)
+    )
+    assert history
 
 def test_valid_old_runtime_rollback_is_rejected_by_independent_monotonic_authority(
     tmp_path,

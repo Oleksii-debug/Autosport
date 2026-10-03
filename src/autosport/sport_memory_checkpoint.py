@@ -822,8 +822,12 @@ class BoundSportMemoryRuntime(SportMemoryRuntime):
             assert observed_before is not None
             monotonic = _runtime_monotonic_authority(runtime_path)
             history = _read_runtime_authority_history(monotonic)
-            if history:
-                _recover_existing_runtime_authority(monotonic, observed_before)
+            if not history:
+                raise SportMemoryCheckpointError(
+                    "sport-memory runtime lacks independent monotonic history; "
+                    "explicit migration is required"
+                )
+            _recover_existing_runtime_authority(monotonic, observed_before)
 
             try:
                 durable = SportMemoryRuntime(
@@ -842,16 +846,7 @@ class BoundSportMemoryRuntime(SportMemoryRuntime):
                 raise SportMemoryCheckpointError(
                     "sport-memory runtime changed during monotonic refresh"
                 )
-            if history:
-                _recover_existing_runtime_authority(monotonic, observed_after)
-            else:
-                _bootstrap_validated_runtime_authority(
-                    monotonic,
-                    runtime_path=runtime_path,
-                    checkpoint_path=seal.checkpoint_path,
-                    authority_generation_sha256=seal.authority_generation_sha256,
-                    observed_state_sha256=observed_after,
-                )
+            _recover_existing_runtime_authority(monotonic, observed_after)
             object.__setattr__(self, "_artifacts", dict(durable._artifacts))
             object.__setattr__(
                 self,
@@ -913,12 +908,9 @@ class BoundSportMemoryRuntime(SportMemoryRuntime):
                     ) from exc
                 _verify_runtime_snapshot_bindings(durable, verified_opponent)
                 if not history:
-                    _bootstrap_validated_runtime_authority(
-                        monotonic,
-                        runtime_path=runtime_path,
-                        checkpoint_path=seal.checkpoint_path,
-                        authority_generation_sha256=seal.authority_generation_sha256,
-                        observed_state_sha256=observed,
+                    raise SportMemoryCheckpointError(
+                        "existing sport-memory runtime lacks independent monotonic "
+                        "history; explicit migration is required"
                     )
                 self._merge_durable_runtime_state(durable)
 
@@ -1342,6 +1334,27 @@ def initialize_or_open_bound_sport_memory_runtime(
                                 authority,
                                 verified_opponent,
                             )
+                            observed_runtime_sha256 = _runtime_state_sha256(runtime)
+                            assert observed_runtime_sha256 is not None
+                            runtime_authority = _runtime_monotonic_authority(runtime)
+                            runtime_history = _read_runtime_authority_history(
+                                runtime_authority
+                            )
+                            if runtime_history:
+                                _recover_existing_runtime_authority(
+                                    runtime_authority,
+                                    observed_runtime_sha256,
+                                )
+                            else:
+                                _bootstrap_validated_runtime_authority(
+                                    runtime_authority,
+                                    runtime_path=runtime,
+                                    checkpoint_path=checkpoint,
+                                    authority_generation_sha256=(
+                                        authority.generation_sha256
+                                    ),
+                                    observed_state_sha256=observed_runtime_sha256,
+                                )
                         else:
                             _new_bound_runtime(
                                 runtime,

@@ -275,14 +275,6 @@ class BetdaqPostingObservation:
             _provider_id(self.order_id, "order_id")
         if self.market_id is not None:
             _provider_id(self.market_id, "market_id")
-        if self.posting_category == 1 and self.order_id is None:
-            raise BetdaqEconomicReadbackError(
-                "BETDAQ Settlement posting requires provider OrderId"
-            )
-        if self.posting_category == 2 and self.market_id is None:
-            raise BetdaqEconomicReadbackError(
-                "BETDAQ Commission posting requires provider MarketId"
-            )
         _provider_id(self.transaction_id, "transaction_id")
         if (
             type(self.currency) is not str
@@ -296,18 +288,6 @@ class BetdaqPostingObservation:
             raise BetdaqEconomicReadbackError(
                 "posting evidence must be canonical BETDAQ economic evidence"
             )
-
-    @property
-    def posting_category_name(self) -> str:
-        """Provider-defined coarse class; future values remain explicit UNKNOWN."""
-
-        if self.posting_category == 1:
-            return "SETTLEMENT"
-        if self.posting_category == 2:
-            return "COMMISSION"
-        if self.posting_category == 3:
-            return "OTHER"
-        return "UNKNOWN"
 
     def provider_content_dict(self) -> dict[str, object]:
         """Return immutable provider-row economics without per-call envelope provenance."""
@@ -849,14 +829,10 @@ def _parse_postings_result(
             "BETDAQ postings result must contain exactly one Orders element"
         )
     currency = _required_attr(result, "Currency")
-    cursor_transaction = (
-        int(query_transaction_id)
-        if method == "ListAccountPostingsById" and query_transaction_id is not None
-        else None
-    )
-    previous_posted_at: datetime | None = None
-    previous_transaction: int | None = None
-    previous_resulting_balance: Decimal | None = None
+    # BETDAQ's public operation contract exposes the raw row fields but does not
+    # document cursor exclusivity, row sorting, PostingCategory numeric meanings,
+    # or that returned rows are a contiguous account-ledger slice. Preserve exact
+    # provider order/raw values and enforce only identities the response proves.
     deduped: dict[str, BetdaqPostingObservation] = {}
     ordered_ids: list[str] = []
     for child in containers[0]:
@@ -879,30 +855,6 @@ def _parse_postings_result(
             currency=currency,
             evidence=evidence,
         )
-        if method == "ListAccountPostings":
-            posted_at = datetime.fromisoformat(
-                posting.posted_at.removesuffix("Z") + "+00:00"
-            )
-            if previous_posted_at is not None and posted_at < previous_posted_at:
-                raise BetdaqEconomicReadbackError(
-                    "BETDAQ posting window rows are not ordered by PostedAt"
-                )
-            previous_posted_at = posted_at
-        else:
-            transaction_value = int(transaction_id)
-            if cursor_transaction is None or transaction_value <= cursor_transaction:
-                raise BetdaqEconomicReadbackError(
-                    "BETDAQ ById row must advance beyond requested TransactionId"
-                )
-            if (
-                previous_transaction is not None
-                and transaction_value <= previous_transaction
-            ):
-                raise BetdaqEconomicReadbackError(
-                    "BETDAQ ById rows must have strictly increasing TransactionId"
-                )
-            previous_transaction = transaction_value
-
         previous = deduped.get(transaction_id)
         if previous is not None:
             if previous.provider_content_dict() != posting.provider_content_dict():
@@ -910,15 +862,6 @@ def _parse_postings_result(
                     "same BETDAQ transaction id has conflicting economic content"
                 )
             continue
-        if (
-            previous_resulting_balance is not None
-            and previous_resulting_balance + posting.amount
-            != posting.resulting_balance
-        ):
-            raise BetdaqEconomicReadbackError(
-                "BETDAQ posting ResultingBalance chain is inconsistent"
-            )
-        previous_resulting_balance = posting.resulting_balance
         deduped[transaction_id] = posting
         ordered_ids.append(transaction_id)
     return BetdaqPostingsReadback(

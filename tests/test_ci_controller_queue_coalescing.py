@@ -1672,6 +1672,48 @@ def test_workflow_wide_sweep_preserves_sealed_scoped_cancel_boundary() -> None:
         "_cancel_run_or_defer_active_conflict(api, run_id)"
     )
 
+def test_explicit_run_boundary_scoped_type_rebind_cannot_reopen_dynamic_request_shadow(
+    monkeypatch,
+) -> None:
+    api = WorkflowScopedGitHubApi(
+        repository="owner/repo",
+        token="token",
+        workflow_id=356678400,
+        workflow_name="CI",
+    )
+    forged_invoked = {"value": False}
+
+    def forged_request(_path: str, **_kwargs):
+        forged_invoked["value"] = True
+        return {
+            "id": 7012,
+            "workflow_id": 356678400,
+            "event": "pull_request",
+            "head_sha": HEAD,
+            "name": "CI",
+            "status": "queued",
+            "pull_requests": [{"number": 303}],
+        }
+
+    class ReboundScopedType:
+        pass
+
+    monkeypatch.setattr(
+        scoped_controller,
+        "WorkflowScopedGitHubApi",
+        ReboundScopedType,
+    )
+    monkeypatch.setattr(api, "_request", forged_request)
+
+    assert not _explicit_run_identity_is_current(
+        api,
+        run_id=7012,
+        expected_head_sha=HEAD,
+        pr_number=303,
+    )
+    assert not forged_invoked["value"]
+
+
 def test_live_pr_boundary_scoped_type_rebind_cannot_reopen_nested_request_shadow(
     monkeypatch,
 ) -> None:

@@ -519,7 +519,10 @@ def capture_campaign_complete_game_board(
     except BaseException as exc:
         if not terminal_written:
             try:
-                raw_failure_completed_at = clock()
+                try:
+                    raw_failure_completed_at = clock()
+                except BaseException:
+                    raw_failure_completed_at = attempted_at
                 instant_function = getattr(instant, "__func__", instant)
                 finish_function = getattr(finish_cycle, "__func__", finish_cycle)
                 require_seams_function = getattr(
@@ -560,10 +563,13 @@ def capture_campaign_complete_game_board(
                         "campaign provider-cycle failure terminal dispatch changed"
                     )
                 require_seams(store, evidence_store)
-                failure_completed_at = instant(
-                    raw_failure_completed_at,
-                    "collector failure completed_at",
-                )
+                try:
+                    failure_completed_at = instant(
+                        raw_failure_completed_at,
+                        "collector failure completed_at",
+                    )
+                except (TypeError, ValueError):
+                    failure_completed_at = attempted_at
                 if failure_completed_at < attempted_at:
                     failure_completed_at = attempted_at
                 finish_cycle(

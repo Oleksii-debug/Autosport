@@ -523,3 +523,52 @@ def test_transplant_rejects_scientific_authority_helper_rebinding(
         ScientificRegistry(target_path)
 
     assert hostile_calls == []
+
+
+def test_transplant_rejects_monotonic_new_insertion(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    target_path = _transplanted_registry_path(tmp_path)
+    hostile_calls: list[object] = []
+
+    def hostile_new(cls: object, *args: object, **kwargs: object) -> object:
+        hostile_calls.append((cls, args, kwargs))
+        raise AssertionError("hostile monotonic __new__ executed")
+
+    monkeypatch.setattr(
+        MonotonicWorkspaceAuthority,
+        "__new__",
+        staticmethod(hostile_new),
+    )
+    with pytest.raises(
+        RuntimeError,
+        match="ScientificRegistry monotonic read/recovery dispatch changed",
+    ):
+        ScientificRegistry(target_path)
+
+    assert hostile_calls == []
+
+
+def test_transplant_rejects_authority_helper_guard_rebinding(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    target_path = _transplanted_registry_path(tmp_path)
+    hostile_calls: list[None] = []
+
+    def hostile_guard() -> None:
+        hostile_calls.append(None)
+
+    monkeypatch.setattr(
+        integrity,
+        "_assert_scientific_registry_authority_helpers",
+        hostile_guard,
+    )
+    with pytest.raises(
+        RuntimeError,
+        match="ScientificRegistry authority helper guard dispatch changed",
+    ):
+        ScientificRegistry(target_path)
+
+    assert hostile_calls == []

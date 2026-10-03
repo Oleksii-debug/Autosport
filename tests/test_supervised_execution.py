@@ -42,6 +42,7 @@ from autosport.portfolio_plan import (
 from autosport.real_execution_ledger import (
     AcknowledgementStatus,
     AttemptState,
+    EventType,
     RealExecutionLedger,
 )
 from autosport.risk import PaperRiskPolicy, ProposedTicketRiskContext
@@ -415,21 +416,54 @@ def test_reservation_rejects_structurally_valid_but_unissued_bound_plan(tmp_path
         ledger.saga(reconstructed.execution_plan.plan_id)
 
 
-def test_live_issued_plan_closes_crash_window_after_raw_plan_reservation(
+def test_first_supervised_reservation_persists_issuance_atomically(
     tmp_path,
 ) -> None:
     bound, approval, _, _ = _bound()
-    ledger = RealExecutionLedger(tmp_path / "live-crash-window-ledger.jsonl")
-    ledger.reserve_plan(bound.execution_plan)
+    ledger = RealExecutionLedger(tmp_path / "atomic-supervised-reservation.jsonl")
 
     fingerprint = reserve_supervised_plan(ledger, bound, approval)
     witness = supervised_execution._bound_plan_witness(bound)
+    events = ledger._events()
+    reservation = next(
+        event
+        for event in events
+        if event["event_type"] == EventType.PLAN_RESERVED.value
+    )
 
     assert fingerprint == bound.execution_plan.fingerprint
+    assert reservation["payload"]["supervised_plan_issuance"] == {
+        "bound_plan_witness": witness,
+        "plan_fingerprint": fingerprint,
+    }
+    assert not any(
+        event["event_type"] == EventType.SUPERVISED_PLAN_ISSUED.value
+        for event in events
+    )
     assert ledger.supervised_plan_issuance_is_current(
         plan_id=bound.execution_plan.plan_id,
         bound_plan_witness=witness,
         plan_fingerprint=fingerprint,
+    )
+
+
+def test_live_issued_plan_does_not_upgrade_legacy_raw_reservation(
+    tmp_path,
+) -> None:
+    bound, approval, _, _ = _bound()
+    ledger = RealExecutionLedger(tmp_path / "legacy-raw-reservation.jsonl")
+    ledger.reserve_plan(bound.execution_plan)
+
+    with pytest.raises(
+        SupervisedExecutionError,
+        match="lacks atomic supervised product issuance",
+    ):
+        reserve_supervised_plan(ledger, bound, approval)
+
+    assert not ledger.supervised_plan_issuance_is_current(
+        plan_id=bound.execution_plan.plan_id,
+        bound_plan_witness=supervised_execution._bound_plan_witness(bound),
+        plan_fingerprint=bound.execution_plan.fingerprint,
     )
 
 
@@ -541,9 +575,10 @@ def test_supervised_ledger_dispatch_in_place_code_replacement_fails_before_mutat
 @pytest.mark.parametrize(
     "method_name",
     (
-        "reserve_plan",
+        "_mutate",
+        "_events",
+        "_append",
         "saga",
-        "_bind_supervised_plan_issuance",
         "supervised_plan_issuance_is_current",
         "bind_supervised_approval",
         "supervised_approval_is_active",

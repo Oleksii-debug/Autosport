@@ -2396,101 +2396,12 @@ class RealExecutionLedgerTests(unittest.TestCase):
 
 
 
-    def test_supervised_plan_issuance_cannot_precede_plan_reservation(self):
+    def test_generic_plan_reservation_does_not_mint_supervised_issuance(self):
         with tempfile.TemporaryDirectory() as tmp:
             ledger = RealExecutionLedger(Path(tmp) / "real.jsonl")
             witness = "a" * 64
-            current = plan(
-                action(),
-                plan_id=f"supervised-v2-{witness}",
-            )
+            current = plan(action(), plan_id=f"supervised-v2-{witness}")
             ledger.reserve_plan(current)
-            ledger._bind_supervised_plan_issuance(
-                plan_id=current.plan_id,
-                bound_plan_witness=witness,
-                plan_fingerprint=current.fingerprint,
-            )
-
-            events = ledger._events()
-            self.assertEqual(len(events), 2)
-            issuance = next(
-                event
-                for event in events
-                if event["event_type"] == EventType.SUPERVISED_PLAN_ISSUED.value
-            )
-            reservation = next(
-                event
-                for event in events
-                if event["event_type"] == EventType.PLAN_RESERVED.value
-            )
-
-            with self.assertRaisesRegex(
-                ExecutionLedgerIntegrityError,
-                "precedes plan reservation",
-            ):
-                RealExecutionLedger._validate_semantics([issuance, reservation])
-
-
-    def test_supervised_plan_issuance_is_idempotent_and_survives_restart(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "real.jsonl"
-            ledger = RealExecutionLedger(path)
-            witness = "b" * 64
-            current = plan(
-                action(),
-                plan_id=f"supervised-v2-{witness}",
-            )
-            ledger.reserve_plan(current)
-            ledger._bind_supervised_plan_issuance(
-                plan_id=current.plan_id,
-                bound_plan_witness=witness,
-                plan_fingerprint=current.fingerprint,
-            )
-            ledger._bind_supervised_plan_issuance(
-                plan_id=current.plan_id,
-                bound_plan_witness=witness,
-                plan_fingerprint=current.fingerprint,
-            )
-
-            self.assertEqual(ledger.verify_integrity(), 2)
-            restarted = RealExecutionLedger(path)
-            self.assertTrue(
-                restarted.supervised_plan_issuance_is_current(
-                    plan_id=current.plan_id,
-                    bound_plan_witness=witness,
-                    plan_fingerprint=current.fingerprint,
-                )
-            )
-
-    def test_supervised_plan_issuance_rejects_witness_or_fingerprint_conflict(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            ledger = RealExecutionLedger(Path(tmp) / "real.jsonl")
-            witness = "c" * 64
-            current = plan(
-                action(),
-                plan_id=f"supervised-v2-{witness}",
-            )
-            ledger.reserve_plan(current)
-
-            with self.assertRaisesRegex(
-                ExecutionIdentityConflict,
-                "witness mismatches plan identity",
-            ):
-                ledger._bind_supervised_plan_issuance(
-                    plan_id=current.plan_id,
-                    bound_plan_witness="d" * 64,
-                    plan_fingerprint=current.fingerprint,
-                )
-
-            with self.assertRaisesRegex(
-                ExecutionIdentityConflict,
-                "fingerprint mismatches durable plan",
-            ):
-                ledger._bind_supervised_plan_issuance(
-                    plan_id=current.plan_id,
-                    bound_plan_witness=witness,
-                    plan_fingerprint="e" * 64,
-                )
 
             self.assertFalse(
                 ledger.supervised_plan_issuance_is_current(
@@ -2500,61 +2411,67 @@ class RealExecutionLedgerTests(unittest.TestCase):
                 )
             )
 
-    def test_restart_rejects_hash_valid_supervised_issuance_rebinding(self):
+    def test_separate_supervised_plan_issuance_writer_is_not_exposed(self):
+        self.assertFalse(
+            hasattr(RealExecutionLedger, "_bind_supervised_plan_issuance")
+        )
+
+    def test_atomic_supervised_plan_issuance_schema_is_valid(self):
         with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "real.jsonl"
-            ledger = RealExecutionLedger(path)
-            witness = "f" * 64
-            current = plan(
-                action(),
-                plan_id=f"supervised-v2-{witness}",
-            )
+            ledger = RealExecutionLedger(Path(tmp) / "real.jsonl")
+            witness = "b" * 64
+            current = plan(action(), plan_id=f"supervised-v2-{witness}")
             ledger.reserve_plan(current)
-            ledger._bind_supervised_plan_issuance(
-                plan_id=current.plan_id,
-                bound_plan_witness=witness,
-                plan_fingerprint=current.fingerprint,
-            )
+            event = json.loads(json.dumps(ledger._events()[0]))
+            event["payload"]["supervised_plan_issuance"] = {
+                "bound_plan_witness": witness,
+                "plan_fingerprint": current.fingerprint,
+            }
 
-            lines = [
-                json.loads(line)
-                for line in path.read_text(encoding="utf-8").splitlines()
-            ]
-            issuance = next(
-                envelope
-                for envelope in lines
-                if envelope["event"]["event_type"]
-                == EventType.SUPERVISED_PLAN_ISSUED.value
-            )
-            issuance["event"]["payload"]["bound_plan_witness"] = "0" * 64
-            body = json.dumps(
-                issuance["event"],
-                ensure_ascii=False,
-                sort_keys=True,
-                separators=(",", ":"),
-                allow_nan=False,
-            )
-            issuance["sha256"] = hashlib.sha256(body.encode()).hexdigest()
-            path.write_text(
-                "\n".join(
-                    json.dumps(
-                        envelope,
-                        ensure_ascii=False,
-                        sort_keys=True,
-                        separators=(",", ":"),
-                    )
-                    for envelope in lines
-                )
-                + "\n",
-                encoding="utf-8",
-            )
+            RealExecutionLedger._validate_semantics([event])
 
-            restarted = RealExecutionLedger(path)
+    def test_atomic_and_legacy_supervised_issuance_cannot_coexist(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = RealExecutionLedger(Path(tmp) / "real.jsonl")
+            witness = "c" * 64
+            current = plan(action(), plan_id=f"supervised-v2-{witness}")
+            ledger.reserve_plan(current)
+            reservation = json.loads(json.dumps(ledger._events()[0]))
+            reservation["payload"]["supervised_plan_issuance"] = {
+                "bound_plan_witness": witness,
+                "plan_fingerprint": current.fingerprint,
+            }
+            legacy = json.loads(json.dumps(reservation))
+            legacy["event_id"] = "legacy-supervised-issuance"
+            legacy["event_type"] = EventType.SUPERVISED_PLAN_ISSUED.value
+            legacy["payload"] = {
+                "bound_plan_witness": witness,
+                "plan_fingerprint": current.fingerprint,
+            }
+
+            with self.assertRaisesRegex(
+                ExecutionLedgerIntegrityError,
+                "multiple supervised plan issuance bindings",
+            ):
+                RealExecutionLedger._validate_semantics([reservation, legacy])
+
+    def test_atomic_supervised_issuance_rejects_witness_rebinding(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = RealExecutionLedger(Path(tmp) / "real.jsonl")
+            witness = "d" * 64
+            current = plan(action(), plan_id=f"supervised-v2-{witness}")
+            ledger.reserve_plan(current)
+            event = json.loads(json.dumps(ledger._events()[0]))
+            event["payload"]["supervised_plan_issuance"] = {
+                "bound_plan_witness": "0" * 64,
+                "plan_fingerprint": current.fingerprint,
+            }
+
             with self.assertRaisesRegex(
                 ExecutionLedgerIntegrityError,
                 "witness mismatches plan identity",
             ):
-                restarted.verify_integrity()
+                RealExecutionLedger._validate_semantics([event])
 
 
 if __name__ == "__main__":

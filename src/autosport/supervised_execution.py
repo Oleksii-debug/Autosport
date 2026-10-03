@@ -33,6 +33,7 @@ from .real_execution_ledger import (
     ExecutionAction,
     ExecutionAttempt,
     ExecutionPlan,
+    EventType,
     ExternalAcknowledgement,
     ExternalEffectReconciliation,
     RealExecutionLedger,
@@ -916,12 +917,10 @@ def _canonical_supervised_issuance_ledger_dispatch(
     _surface=tuple(
         (name, method, getattr(method, "__code__", None))
         for name, method in (
-            ("reserve_plan", RealExecutionLedger.reserve_plan),
+            ("_mutate", RealExecutionLedger._mutate),
+            ("_events", RealExecutionLedger._events),
+            ("_append", RealExecutionLedger._append),
             ("saga", RealExecutionLedger.saga),
-            (
-                "_bind_supervised_plan_issuance",
-                RealExecutionLedger._bind_supervised_plan_issuance,
-            ),
             (
                 "supervised_plan_issuance_is_current",
                 RealExecutionLedger.supervised_plan_issuance_is_current,
@@ -1063,16 +1062,55 @@ def reserve_supervised_plan(
     methods = _canonical_supervised_issuance_ledger_dispatch(ledger)
     fingerprint = _durable_reserved_plan_fingerprint(ledger, bound)
     if fingerprint is None:
+        # First durable product issuance still requires the live product issuer.
+        # Reservation + issuance are one PLAN_RESERVED append/monotonic transaction.
         assert_bound(bound)
-        fingerprint = methods["reserve_plan"](bound.execution_plan)
+        plan = bound.execution_plan
         witness = _canonical_bound_plan_witness(bound)
-        methods["_bind_supervised_plan_issuance"](
-            plan_id=bound.execution_plan.plan_id,
-            bound_plan_witness=witness,
-            plan_fingerprint=fingerprint,
-        )
+        fingerprint = plan.fingerprint
+        issuance = {
+            "bound_plan_witness": witness,
+            "plan_fingerprint": fingerprint,
+        }
+
+        def reserve_atomically() -> str:
+            events = methods["_events"]()
+            prior = [
+                event
+                for event in events
+                if event["plan_id"] == plan.plan_id
+                and event["event_type"] == EventType.PLAN_RESERVED.value
+            ]
+            if prior:
+                if len(prior) != 1:
+                    raise SupervisedExecutionError(
+                        "durable execution plan has ambiguous reservations"
+                    )
+                if prior[0]["payload"]["plan_fingerprint"] != fingerprint:
+                    raise SupervisedExecutionError(
+                        "durable execution-plan fingerprint mismatch"
+                    )
+                if prior[0]["payload"].get("supervised_plan_issuance") == issuance:
+                    return fingerprint
+                raise SupervisedExecutionError(
+                    "existing plan reservation lacks atomic supervised product issuance"
+                )
+            methods["_append"](
+                EventType.PLAN_RESERVED,
+                plan.plan_id,
+                None,
+                None,
+                {
+                    "plan_fingerprint": fingerprint,
+                    "plan": plan.to_dict(),
+                    "supervised_plan_issuance": issuance,
+                },
+            )
+            return fingerprint
+
+        fingerprint = methods["_mutate"](reserve_atomically)
         if not methods["supervised_plan_issuance_is_current"](
-            plan_id=bound.execution_plan.plan_id,
+            plan_id=plan.plan_id,
             bound_plan_witness=witness,
             plan_fingerprint=fingerprint,
         ):

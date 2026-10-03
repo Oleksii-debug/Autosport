@@ -2837,3 +2837,113 @@ def test_completion_clock_cannot_rebind_cycle_receipt_issuer(
         )
 
     assert hostile_calls == []
+
+
+
+def test_provider_scope_reflection_helper_rebind_fails_closed(
+    tmp_path: Path,
+) -> None:
+    locator, _store, _spec, provider_store = _setup(tmp_path)
+    helper_globals = capture_module._CANONICAL_GETATTR_STATIC_GLOBALS
+    dependency = next(
+        item
+        for item in capture_module._CANONICAL_GETATTR_STATIC_GLOBAL_ITEMS
+        if item[2] is not None
+    )
+    name, original, _code = dependency
+    hostile_calls: list[str] = []
+
+    def hostile(*_args, **_kwargs):
+        hostile_calls.append(name)
+        raise AssertionError("hostile inspect helper executed")
+
+    helper_globals[name] = hostile
+    try:
+        with pytest.raises(
+            CampaignProviderCycleCaptureIntegrityError,
+            match="provider evidence scope authority executable changed",
+        ):
+            binding_module._PROVIDER_EVIDENCE_SCOPE(
+                locator,
+                provider_store,
+            )
+    finally:
+        helper_globals[name] = original
+
+    assert hostile_calls == []
+
+
+def test_public_capture_rejects_reflection_helper_rebind_before_provider_io(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    locator, store, spec, provider_store = _setup(tmp_path)
+    capture = capture_module.capture_campaign_complete_game_board
+    helper_globals = capture_module._CANONICAL_GETATTR_STATIC_GLOBALS
+    dependency = next(
+        item
+        for item in capture_module._CANONICAL_GETATTR_STATIC_GLOBAL_ITEMS
+        if item[2] is not None
+    )
+    name, original, _code = dependency
+    hostile_calls: list[str] = []
+    provider_calls: list[str] = []
+
+    def hostile(*_args, **_kwargs):
+        hostile_calls.append(name)
+        raise AssertionError("hostile inspect helper executed")
+
+    monkeypatch.setattr(
+        provider_module,
+        "urlopen",
+        lambda *_args, **_kwargs: provider_calls.append("provider"),
+    )
+    helper_globals[name] = hostile
+    try:
+        with pytest.raises(
+            CampaignProviderCycleCaptureIntegrityError,
+            match="campaign provider-cycle reflection dispatch changed",
+        ):
+            capture(
+                precommit_locator=locator,
+                store=store,
+                source_spec=spec,
+                evidence_store=provider_store,
+                request=_request(),
+                api_key="secret-value",
+                timeout_seconds=3.0,
+                clock=_clock(),
+            )
+    finally:
+        helper_globals[name] = original
+
+    assert hostile_calls == []
+    assert provider_calls == []
+
+
+def test_public_capture_rejects_reflection_dependency_witness_rebind(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    locator, store, spec, provider_store = _setup(tmp_path)
+    capture = capture_module.capture_campaign_complete_game_board
+    monkeypatch.setattr(
+        capture_module,
+        "_CANONICAL_GETATTR_STATIC_GLOBAL_ITEMS",
+        (),
+    )
+
+    with pytest.raises(
+        CampaignProviderCycleCaptureIntegrityError,
+        match="dispatch authority is rebound: _CANONICAL_GETATTR_STATIC_GLOBAL_ITEMS",
+    ):
+        capture(
+            precommit_locator=locator,
+            store=store,
+            source_spec=spec,
+            evidence_store=provider_store,
+            request=_request(),
+            api_key="secret-value",
+            timeout_seconds=3.0,
+            clock=_clock(),
+        )

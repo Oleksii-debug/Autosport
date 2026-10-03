@@ -2790,6 +2790,67 @@ def test_runtime_authority_get_rejects_sha_rebinding_before_argument_validation(
     assert hostile_calls == []
 
 
+@pytest.mark.parametrize(
+    "member_name",
+    ("open", "fstat", "lstat", "fsync", "close", "replace"),
+)
+def test_runtime_authority_pristine_rejects_publication_os_dispatch_before_use(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    member_name: str,
+) -> None:
+    path = tmp_path / "deployment-runtime-authority.json"
+    authority_root = _authority_root(tmp_path)
+    hostile_calls: list[object] = []
+
+    def hostile(*args: object, **kwargs: object) -> object:
+        hostile_calls.append((args, kwargs))
+        raise AssertionError("hostile pristine publication OS primitive executed")
+
+    monkeypatch.setattr(deployment_runtime_authority.os, member_name, hostile)
+    with pytest.raises(
+        DeploymentRuntimeAuthorityError,
+        match="publication durability dispatch was replaced",
+    ):
+        DeploymentRuntimeAuthorityStore.initialize_pristine(
+            path,
+            authority_root=authority_root,
+        )
+
+    assert hostile_calls == []
+    assert not path.exists()
+
+
+@pytest.mark.parametrize(
+    "helper_name",
+    ("_fsync_directory", "_durably_finalize_published_path"),
+)
+def test_runtime_authority_pristine_rejects_publication_helper_rebinding_before_use(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    helper_name: str,
+) -> None:
+    path = tmp_path / "deployment-runtime-authority.json"
+    authority_root = _authority_root(tmp_path)
+    hostile_calls: list[object] = []
+
+    def hostile(*args: object, **kwargs: object) -> None:
+        hostile_calls.append((args, kwargs))
+
+    monkeypatch.setattr(deployment_runtime_authority, helper_name, hostile)
+    with pytest.raises(
+        DeploymentRuntimeAuthorityError,
+        match="publication durability dispatch was replaced",
+    ):
+        DeploymentRuntimeAuthorityStore.initialize_pristine(
+            path,
+            authority_root=authority_root,
+        )
+
+    assert hostile_calls == []
+    assert not path.exists()
+
+
 def test_runtime_authority_pristine_rejects_digest_rebinding_before_use(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -3744,7 +3805,7 @@ def test_runtime_authority_rejects_publication_durability_helper_rebinding(
     assert hostile_calls == []
 
 
-@pytest.mark.parametrize("member_name", ("open", "fstat", "lstat", "fsync", "close"))
+@pytest.mark.parametrize("member_name", ("open", "fstat", "lstat", "fsync", "close", "replace"))
 def test_runtime_authority_rejects_publication_os_dispatch_rebinding(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

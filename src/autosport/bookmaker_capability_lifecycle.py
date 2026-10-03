@@ -27,6 +27,31 @@ _BETDAQ_CANONICAL_HTTPS_POST_CODE = _BETDAQ_CANONICAL_HTTPS_POST.__code__
 _BETDAQ_ERROR_TYPE = _betdaq_account.BetdaqAccountReadOnlyError
 _BETDAQ_READ_ACCOUNT_EVIDENCE = _BETDAQ_CLIENT_TYPE.read_account_evidence
 _BETDAQ_READ_ACCOUNT_EVIDENCE_CODE = _BETDAQ_READ_ACCOUNT_EVIDENCE.__code__
+_BETDAQ_READ_ACCOUNT_BALANCE = _BETDAQ_CLIENT_TYPE.read_account_balance
+_BETDAQ_READ_COMPLETE_CURRENT_ORDERS = _BETDAQ_CLIENT_TYPE.read_complete_current_orders
+_BETDAQ_READ_BOOTSTRAP_PAGE = _BETDAQ_CLIENT_TYPE.read_bootstrap_page
+_BETDAQ_READ_ORDERS_CHANGED_SINCE = _BETDAQ_CLIENT_TYPE.read_orders_changed_since
+_BETDAQ_CALL = _BETDAQ_CLIENT_TYPE._call
+_BETDAQ_REQUEST_XML = _BETDAQ_CLIENT_TYPE._request_xml
+_BETDAQ_OBSERVED_AT = _BETDAQ_CLIENT_TYPE._observed_at
+_BETDAQ_CANONICAL_CLIENT_METHODS = (
+    ("read_account_evidence", _BETDAQ_READ_ACCOUNT_EVIDENCE, _BETDAQ_READ_ACCOUNT_EVIDENCE.__code__),
+    ("read_account_balance", _BETDAQ_READ_ACCOUNT_BALANCE, _BETDAQ_READ_ACCOUNT_BALANCE.__code__),
+    (
+        "read_complete_current_orders",
+        _BETDAQ_READ_COMPLETE_CURRENT_ORDERS,
+        _BETDAQ_READ_COMPLETE_CURRENT_ORDERS.__code__,
+    ),
+    ("read_bootstrap_page", _BETDAQ_READ_BOOTSTRAP_PAGE, _BETDAQ_READ_BOOTSTRAP_PAGE.__code__),
+    (
+        "read_orders_changed_since",
+        _BETDAQ_READ_ORDERS_CHANGED_SINCE,
+        _BETDAQ_READ_ORDERS_CHANGED_SINCE.__code__,
+    ),
+    ("_call", _BETDAQ_CALL, _BETDAQ_CALL.__code__),
+    ("_request_xml", _BETDAQ_REQUEST_XML, _BETDAQ_REQUEST_XML.__code__),
+    ("_observed_at", _BETDAQ_OBSERVED_AT, _BETDAQ_OBSERVED_AT.__code__),
+)
 _BETDAQ_REQUIRE_CANONICAL_TRANSPORT = _betdaq_account._require_canonical_account_transport
 _BETDAQ_REQUIRE_CANONICAL_TRANSPORT_CODE = _BETDAQ_REQUIRE_CANONICAL_TRANSPORT.__code__
 _BETDAQ_AUTHENTICATED_CONTEXT = _betdaq_account._authenticated_account_context
@@ -300,6 +325,15 @@ class BetdaqAuthenticatedCapabilityIssuance:
 
 
 def _require_current_betdaq_issuance_surface() -> None:
+    for name, expected, expected_code in _BETDAQ_CANONICAL_CLIENT_METHODS:
+        current = getattr(_BETDAQ_CLIENT_TYPE, name, None)
+        if (
+            current is not expected
+            or getattr(current, "__code__", None) is not expected_code
+        ):
+            raise CapabilityEvidenceError(
+                "canonical BETDAQ account-evidence issuance surface changed"
+            )
     if (
         _betdaq_account.BetdaqAccountReadOnlyClient is not _BETDAQ_CLIENT_TYPE
         or _betdaq_account.BetdaqCredentials is not _BETDAQ_CREDENTIAL_TYPE
@@ -326,6 +360,20 @@ def _require_current_betdaq_issuance_surface() -> None:
         )
 
 
+def _require_exact_betdaq_client_dispatch(client: object) -> None:
+    for name, expected, _ in _BETDAQ_CANONICAL_CLIENT_METHODS:
+        if name == "read_account_evidence":
+            continue
+        bound = getattr(client, name, None)
+        if (
+            getattr(bound, "__self__", None) is not client
+            or getattr(bound, "__func__", None) is not expected
+        ):
+            raise CapabilityEvidenceError(
+                "BETDAQ capability issuance client dispatch was replaced or shadowed"
+            )
+
+
 def issue_betdaq_authenticated_capability_evidence(
     client: object,
     capability: BookmakerCapability,
@@ -347,6 +395,7 @@ def issue_betdaq_authenticated_capability_evidence(
         raise CapabilityEvidenceError(
             "BETDAQ capability issuance requires exact canonical read-only client"
         )
+    _require_exact_betdaq_client_dispatch(client)
     if getattr(client, "_venue_id", None) != _BETDAQ_VENUE_ID:
         raise CapabilityEvidenceError(
             "BETDAQ capability issuance requires the canonical betdaq venue"

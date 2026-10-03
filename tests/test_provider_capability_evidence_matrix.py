@@ -635,34 +635,41 @@ def test_successor_rejects_integration_mechanism_drift():
 
 
 def test_successor_rejects_profile_version_and_observation_regression():
-    first_profile = replace(profile(), profile_version=2, observed_at=T1)
-    first = matrix(p=first_profile)
-
-    version_regressed = replace(first_profile, profile_version=1, observed_at=T2)
+    versioned_profile = replace(profile(), profile_version=2)
+    versioned_first = matrix(p=versioned_profile)
+    version_regressed = replace(versioned_profile, profile_version=1)
     version_regressed_matrix = matrix(
         p=version_regressed,
         version=2,
-        predecessor=first.matrix_id,
+        predecessor=versioned_first.matrix_id,
         as_of=T4,
     )
     with pytest.raises(
         ProviderCapabilityEvidenceMatrixError,
         match="profile version regressed",
     ):
-        validate_capability_matrix_successor(first, version_regressed_matrix)
+        validate_capability_matrix_successor(
+            versioned_first,
+            version_regressed_matrix,
+        )
 
-    observation_regressed = replace(first_profile, observed_at=T0)
+    later_profile = replace(profile(), profile_version=2, observed_at=T1)
+    later_first = matrix(p=later_profile)
+    observation_regressed = replace(later_profile, observed_at=T0)
     observation_regressed_matrix = matrix(
         p=observation_regressed,
         version=2,
-        predecessor=first.matrix_id,
+        predecessor=later_first.matrix_id,
         as_of=T4,
     )
     with pytest.raises(
         ProviderCapabilityEvidenceMatrixError,
         match="profile observation moved backwards",
     ):
-        validate_capability_matrix_successor(first, observation_regressed_matrix)
+        validate_capability_matrix_successor(
+            later_first,
+            observation_regressed_matrix,
+        )
 
 
 def test_successor_rejects_integration_observation_regression():

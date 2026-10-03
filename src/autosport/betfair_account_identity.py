@@ -206,6 +206,19 @@ def _make_account_identity_authority():
             "_LIST_MARKET_CATALOGUE",
         )
     )
+    canonical_http_client_ssl = getattr(_http_client, "ssl", None)
+    canonical_ssl_context_type = _ssl.SSLContext
+    canonical_ssl_socket_type = _ssl.SSLSocket
+    canonical_default_https_context = getattr(
+        _ssl,
+        "_create_default_https_context",
+        None,
+    )
+    canonical_default_https_context_code = getattr(
+        canonical_default_https_context,
+        "__code__",
+        None,
+    )
     canonical_identity_init = identity_type.__init__
     canonical_identity_post_init = identity_type.__post_init__
 
@@ -276,6 +289,14 @@ def _make_account_identity_authority():
                 != canonical_account_endpoint
                 or readonly_module.BETTING_JSON_RPC_ENDPOINT
                 != canonical_betting_endpoint
+                or getattr(_http_client, "ssl", None)
+                is not canonical_http_client_ssl
+                or _ssl.SSLContext is not canonical_ssl_context_type
+                or _ssl.SSLSocket is not canonical_ssl_socket_type
+                or getattr(_ssl, "_create_default_https_context", None)
+                is not canonical_default_https_context
+                or getattr(canonical_default_https_context, "__code__", None)
+                is not canonical_default_https_context_code
                 or tuple(
                     getattr(readonly_module, name, missing_value)
                     for name in (

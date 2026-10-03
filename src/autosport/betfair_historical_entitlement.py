@@ -18,6 +18,7 @@ from datetime import date, datetime, timezone
 from hashlib import sha256
 import json
 from typing import Mapping
+import urllib.request as _urllib_request
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urljoin, urlsplit
 from urllib.request import HTTPRedirectHandler, OpenerDirector, Request, build_opener
@@ -462,7 +463,18 @@ class UrllibBetfairHistoricalTransport:
 _CANONICAL_BUILD_OPENER = build_opener
 _CANONICAL_REQUEST_TYPE = Request
 _CANONICAL_OPENER_OPEN = OpenerDirector.open
+_CANONICAL_OPENER_INTERNAL_OPEN = OpenerDirector._open
+_CANONICAL_OPENER_CALL_CHAIN = OpenerDirector._call_chain
+_CANONICAL_OPENER_ERROR = OpenerDirector.error
 _CANONICAL_REDIRECT_REQUEST = _SameOriginRedirectHandler.redirect_request
+_CANONICAL_STDLIB_REDIRECT_HANDLER = _urllib_request.HTTPRedirectHandler
+_CANONICAL_HTTPS_HANDLER = _urllib_request.HTTPSHandler
+_CANONICAL_HTTPS_OPEN = _urllib_request.HTTPSHandler.https_open
+_CANONICAL_HTTPS_REQUEST = _urllib_request.HTTPSHandler.https_request
+_CANONICAL_ABSTRACT_HTTP_HANDLER = _urllib_request.AbstractHTTPHandler
+_CANONICAL_HTTP_DO_OPEN = _urllib_request.AbstractHTTPHandler.do_open
+_CANONICAL_HTTP_ERROR_PROCESSOR = _urllib_request.HTTPErrorProcessor
+_CANONICAL_HTTPS_RESPONSE = _urllib_request.HTTPErrorProcessor.https_response
 _CANONICAL_HISTORICAL_POST_JSON = UrllibBetfairHistoricalTransport.post_json
 _CANONICAL_HISTORICAL_GET_FILE = UrllibBetfairHistoricalTransport.get_file
 _CANONICAL_HISTORICAL_REQUEST = UrllibBetfairHistoricalTransport._request
@@ -487,6 +499,32 @@ _HISTORICAL_TRANSPORT_CONTRACT_SHA256 = sha256(
 ).hexdigest()
 
 
+def _opener_dispatch_snapshot(
+    opener: object,
+) -> tuple[tuple[str, object, tuple[object, ...]], ...] | None:
+    records: list[tuple[str, object, tuple[object, ...]]] = []
+    for map_name in ("handle_open", "process_request", "process_response"):
+        mapping = getattr(opener, map_name, None)
+        if type(mapping) is not dict:
+            return None
+        for key, handlers in mapping.items():
+            if type(key) not in (str, int) or type(handlers) is not list:
+                return None
+            records.append((map_name, key, tuple(handlers)))
+    error_mapping = getattr(opener, "handle_error", None)
+    if type(error_mapping) is not dict:
+        return None
+    for protocol, by_code in error_mapping.items():
+        if type(protocol) not in (str, int) or type(by_code) is not dict:
+            return None
+        for code, handlers in by_code.items():
+            if type(code) not in (str, int) or type(handlers) is not list:
+                return None
+            records.append((f"handle_error:{protocol}", code, tuple(handlers)))
+    records.sort(key=lambda item: (item[0], type(item[1]).__name__, str(item[1])))
+    return tuple(records)
+
+
 def _canonical_historical_network_transport(
     transport: object,
 ) -> bool:
@@ -507,6 +545,19 @@ def _canonical_historical_network_transport(
         or quote is not _CANONICAL_QUOTE
         or _SameOriginRedirectHandler.redirect_request
         is not _CANONICAL_REDIRECT_REQUEST
+        or _urllib_request.OpenerDirector is not OpenerDirector
+        or OpenerDirector.open is not _CANONICAL_OPENER_OPEN
+        or OpenerDirector._open is not _CANONICAL_OPENER_INTERNAL_OPEN
+        or OpenerDirector._call_chain is not _CANONICAL_OPENER_CALL_CHAIN
+        or OpenerDirector.error is not _CANONICAL_OPENER_ERROR
+        or _urllib_request.HTTPRedirectHandler is not _CANONICAL_STDLIB_REDIRECT_HANDLER
+        or _urllib_request.HTTPSHandler is not _CANONICAL_HTTPS_HANDLER
+        or _CANONICAL_HTTPS_HANDLER.https_open is not _CANONICAL_HTTPS_OPEN
+        or _CANONICAL_HTTPS_HANDLER.https_request is not _CANONICAL_HTTPS_REQUEST
+        or _urllib_request.AbstractHTTPHandler is not _CANONICAL_ABSTRACT_HTTP_HANDLER
+        or _CANONICAL_ABSTRACT_HTTP_HANDLER.do_open is not _CANONICAL_HTTP_DO_OPEN
+        or _urllib_request.HTTPErrorProcessor is not _CANONICAL_HTTP_ERROR_PROCESSOR
+        or _CANONICAL_HTTP_ERROR_PROCESSOR.https_response is not _CANONICAL_HTTPS_RESPONSE
     ):
         return False
     state = getattr(transport, "__dict__", None)
@@ -530,7 +581,9 @@ def _canonical_historical_network_transport(
     ):
         return False
     opener_state = getattr(opener, "__dict__", None)
-    if type(opener_state) is not dict or "open" in opener_state:
+    if type(opener_state) is not dict or any(
+        name in opener_state for name in ("open", "_open", "_call_chain", "error")
+    ):
         return False
     open_call = state["_opener_open"]
     if (
@@ -542,6 +595,76 @@ def _canonical_historical_network_transport(
     if type(handlers) is not list:
         return False
     if tuple(id(handler) for handler in handlers) != state["_opener_handler_ids"]:
+        return False
+
+    redirect_handlers = tuple(
+        handler
+        for handler in handlers
+        if isinstance(handler, _CANONICAL_STDLIB_REDIRECT_HANDLER)
+    )
+    if (
+        len(redirect_handlers) != 1
+        or type(redirect_handlers[0]) is not _SameOriginRedirectHandler
+        or "redirect_request" in vars(redirect_handlers[0])
+    ):
+        return False
+
+    https_handlers = tuple(
+        handler for handler in handlers if isinstance(handler, _CANONICAL_HTTPS_HANDLER)
+    )
+    if len(https_handlers) != 1 or type(https_handlers[0]) is not _CANONICAL_HTTPS_HANDLER:
+        return False
+    https_handler = https_handlers[0]
+    if any(
+        name in vars(https_handler) for name in ("https_open", "https_request", "do_open")
+    ):
+        return False
+
+    dispatch = _opener_dispatch_snapshot(opener)
+    if dispatch is None:
+        return False
+    https_open_handlers = tuple(
+        values
+        for map_name, key, values in dispatch
+        if map_name == "handle_open" and key == "https"
+    )
+    https_request_handlers = tuple(
+        values
+        for map_name, key, values in dispatch
+        if map_name == "process_request" and key == "https"
+    )
+    https_response_handlers = tuple(
+        values
+        for map_name, key, values in dispatch
+        if map_name == "process_response" and key == "https"
+    )
+    redirect_error_handlers = tuple(
+        values
+        for map_name, key, values in dispatch
+        if map_name == "handle_error:http" and key in {301, 302, 303, 307, 308}
+    )
+    if (
+        len(https_open_handlers) != 1
+        or len(https_open_handlers[0]) != 1
+        or https_open_handlers[0][0] is not https_handler
+        or len(https_request_handlers) != 1
+        or len(https_request_handlers[0]) != 1
+        or https_request_handlers[0][0] is not https_handler
+        or len(https_response_handlers) != 1
+        or len(https_response_handlers[0]) != 1
+        or type(https_response_handlers[0][0]) is not _CANONICAL_HTTP_ERROR_PROCESSOR
+        or "https_response" in vars(https_response_handlers[0][0])
+        or len(redirect_error_handlers) != 5
+        or any(
+            len(values) != 1 or values[0] is not redirect_handlers[0]
+            for values in redirect_error_handlers
+        )
+        or any(
+            not any(handler is registered for registered in handlers)
+            for _map_name, _key, values in dispatch
+            for handler in values
+        )
+    ):
         return False
     return True
 

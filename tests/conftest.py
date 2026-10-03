@@ -3,7 +3,9 @@ from __future__ import annotations
 from collections.abc import Mapping
 from datetime import timedelta
 from itertools import count
+import json
 from pathlib import Path
+import urllib.request as _urllib_request
 
 import pytest
 
@@ -121,6 +123,59 @@ def _bind_legacy_paper_value_execution_authority(request, monkeypatch, tmp_path)
 
     monkeypatch.setattr(module, "AgentContext", execution_bound_context)
 
+
+# Wave E exact-fences BetfairReadOnlyClient transport dispatch. The Historical Data
+# suite predates that repair and used to monkeypatch UrllibBetfairHttpTransport.post,
+# which now correctly destroys K07 authority. Keep the suite on the canonical K07
+# transport and fake only urllib's test opener, matching the supported K07 race tests.
+@pytest.fixture(autouse=True)
+def _historical_data_k07_network_fixture_bridge(request, monkeypatch):
+    module = request.module
+    if module is None or module.__name__.rsplit(".", 1)[-1] != "test_betfair_historical_entitlement":
+        return
+
+    def install_details_transport(test_monkeypatch: pytest.MonkeyPatch) -> None:
+        class Response:
+            def __init__(self, payload: bytes) -> None:
+                self._payload = payload
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, traceback):
+                return False
+
+            def read(self, limit: int) -> bytes:
+                assert limit >= len(self._payload)
+                return self._payload
+
+        class Opener:
+            def open(self, fullurl, data=None, timeout: float = 0):
+                assert data is None
+                request = fullurl
+                assert request.full_url == module.ACCOUNT_JSON_RPC_ENDPOINT
+                decoded = json.loads(request.data.decode("utf-8"))
+                payload = json.dumps(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": decoded["id"],
+                        "result": {
+                            "currencyCode": "EUR",
+                            "localeCode": "en",
+                            "region": "GBR",
+                            "timezone": "Europe/London",
+                        },
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+                return Response(payload)
+
+        test_monkeypatch.setattr(_urllib_request, "_opener", Opener())
+
+    monkeypatch.setattr(module, "_install_details_transport", install_details_transport)
+
+
 # These files predate the #662 product-semantic splice and exercise provider membership,
 # persistence/recovery, and PAPER transition behavior rather than semantic provenance.
 # Keep their old fixture path private and narrowly scoped; all other tests see the
@@ -140,3 +195,31 @@ def _legacy_provider_semantic_fixture_bridge(request):
         yield
     finally:
         _set_legacy_provider_semantic_bypass_for_tests(False)
+
+
+@pytest.fixture(autouse=True)
+def _deterministic_betfair_mid_frame_reconnect_clock(request, monkeypatch):
+    """Isolate the partial-frame recovery test from wall-clock scheduling jitter.
+
+    The production transport deliberately applies reconnect backoff after an abnormal
+    established-session failure. Dedicated backoff tests assert that contract. The
+    partial-frame test has a different purpose: proving stale bytes cannot cross a
+    reconnect boundary. Advance a deterministic monotonic clock only for that one
+    scenario so it reaches the next eligible reconnect instant without sleeping.
+    """
+
+    if Path(str(request.node.fspath)).name != "test_betfair_stream_transport.py":
+        return
+    if request.node.name != "test_disconnect_mid_frame_discards_partial_bytes_before_reconnect":
+        return
+
+    from autosport import betfair_stream_transport as stream
+
+    now = [100.0]
+
+    def monotonic() -> float:
+        value = now[0]
+        now[0] += 1.0
+        return value
+
+    monkeypatch.setattr(stream.time, "monotonic", monotonic)

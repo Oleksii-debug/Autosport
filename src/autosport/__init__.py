@@ -144,3 +144,20 @@ from . import _trial_family_cross_ledger_witness as _trial_family_cross_ledger_w
 # Replay must recognize the cross-ledger witness kind, but callers must not mint that
 # authority through the legacy generic trial-event append seam.
 from . import _trial_family_witness_mint_guard as _trial_family_witness_mint_guard  # noqa: F401,E402
+
+# Product PolicyEvaluation issuance already exact-fences the FactoryArtifactStore
+# surface. Seal the lower canonical file reader that _stable_snapshot dispatches to
+# so a class/module rebind cannot inject forged bytes beneath that trusted surface.
+from . import _policy_evaluation_canonical_reader_authority as _policy_evaluation_canonical_reader_authority  # noqa: F401,E402
+
+# Robust portfolio stakes are monetary grid values, not Decimal exponent values.
+# Install the exact arbitrary-quantum floor after the owning proposal implementation.
+from . import _robust_portfolio_quantum_grid as _robust_portfolio_quantum_grid  # noqa: F401,E402
+
+# K07 authenticated account identity must acquire account details from a sealed
+# product-origin snapshot, not mutable live-client fields during provider I/O.
+from . import _betfair_account_identity_io_snapshot_guard as _betfair_account_identity_io_snapshot_guard  # noqa: F401,E402
+
+# Positive Historical Data provenance must use a closure-hidden canonical urllib
+# dispatch snapshot; structural/synthetic transports remain explicitly non-authority.
+from . import _betfair_historical_entitlement_io_snapshot_guard as _betfair_historical_entitlement_io_snapshot_guard  # noqa: F401,E402

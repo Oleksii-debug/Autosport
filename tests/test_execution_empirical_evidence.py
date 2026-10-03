@@ -1256,6 +1256,54 @@ def test_population_aggregate_keeps_complete_funnel_denominator(tmp_path):
     }
 
 
+def test_population_funnel_retains_plan_only_zero_attempt_denominator(tmp_path):
+    ledger = RealExecutionLedger(tmp_path / "plan-only-execution.jsonl")
+    action = _action(
+        action_id="leg-plan-only",
+        selection_id="selection-plan-only",
+        quote_id="quote-plan-only",
+    )
+    ledger.reserve_plan(
+        ExecutionPlan(
+            plan_id="plan-only",
+            bookmaker_profile_version="profile-1",
+            decision_id="decision-plan-only",
+            approval_id="approval-plan-only",
+            created_at=DECISION,
+            actions=(action,),
+        )
+    )
+
+    aggregate = build_empirical_execution_population_evidence(
+        ledger,
+        evaluation_protocol_sha256="9" * 64,
+    )
+    payload = aggregate.to_dict()
+
+    assert aggregate.decision_count == 1
+    assert aggregate.plan_count == 1
+    assert aggregate.planned_action_count == 1
+    assert aggregate.attempted_action_count == 0
+    assert aggregate.unattempted_action_count == 1
+    assert aggregate.total_attempts == 0
+    assert aggregate.submitted_attempt_count == 0
+    assert aggregate.unsubmitted_attempt_count == 0
+    assert aggregate.samples == ()
+    assert payload["planned_action_attempt_rate"] == {
+        "numerator": 0,
+        "denominator": 1,
+    }
+    assert payload["unattempted_action_rate"] == {
+        "numerator": 1,
+        "denominator": 1,
+    }
+    assert payload["submitted_attempt_rate"] == {
+        "numerator": 0,
+        "denominator": 0,
+    }
+    assert all(value == 0 for value in payload["state_counts"].values())
+
+
 def test_population_funnel_retains_planned_action_without_attempt(tmp_path):
     ledger = _population_ledger(tmp_path)
     unattempted_action = replace(

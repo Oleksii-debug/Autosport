@@ -1245,7 +1245,7 @@ def build_empirical_execution_evidence(
     return evidence
 
 
-POPULATION_SCHEMA_VERSION = 10
+POPULATION_SCHEMA_VERSION = 11
 
 
 @dataclass(frozen=True, slots=True, weakref_slot=True, init=False)
@@ -1354,13 +1354,19 @@ class EmpiricalExecutionPopulationEvidence:
             "decision_count",
             "plan_count",
             "planned_action_count",
-            "attempted_action_count",
         ):
             value = getattr(self, name)
             if type(value) is not int or value < 1:
                 raise EmpiricalExecutionEvidenceError(
                     f"{name} must be positive int"
                 )
+        if (
+            type(self.attempted_action_count) is not int
+            or self.attempted_action_count < 0
+        ):
+            raise EmpiricalExecutionEvidenceError(
+                "attempted_action_count must be non-negative int"
+            )
         if not (
             self.decision_count
             <= self.plan_count
@@ -1373,9 +1379,9 @@ class EmpiricalExecutionPopulationEvidence:
             raise EmpiricalExecutionEvidenceError(
                 "attempted actions cannot exceed planned actions"
             )
-        if type(self.samples) is not tuple or not self.samples:
+        if type(self.samples) is not tuple:
             raise EmpiricalExecutionEvidenceError(
-                "population evidence requires non-empty canonical sample tuple"
+                "population samples must be canonical tuple"
             )
         if any(type(sample) is not EmpiricalExecutionEvidence for sample in self.samples):
             raise EmpiricalExecutionEvidenceError(
@@ -2035,9 +2041,9 @@ def build_empirical_execution_population_evidence(
             )
         attempted_action_keys.add(action_key)
 
-    if not attempt_ids:
+    if not planned_action_keys:
         raise EmpiricalExecutionEvidenceUnavailable(
-            "verified snapshot contains no execution attempts"
+            "verified snapshot contains no planned execution actions"
         )
 
     samples = tuple(

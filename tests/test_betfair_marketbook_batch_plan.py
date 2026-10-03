@@ -236,3 +236,32 @@ def test_plan_never_grants_dispatch_or_execution_authority():
     assert p.evidence_payload["complete_market_coverage"] is True
     assert p.evidence_payload["provider_dispatch_authorized"] is False
     assert p.evidence_payload["execution_authorized"] is False
+
+
+def test_provider_scope_and_policy_version_are_closed_product_truth():
+    with pytest.raises(MarketBookBatchPlanError, match="provider_scope_id must be BETFAIR"):
+        plan(1, provider_scope_id="OTHER")
+    with pytest.raises(MarketBookBatchPlanError, match="unsupported batch plan policy_version"):
+        plan(1, policy_version="betfair-marketbook-batch-plan-v999")
+
+
+def test_matched_since_requires_canonical_timezone_aware_instant():
+    with pytest.raises(MarketBookBatchPlanError, match="timezone-aware ISO-8601"):
+        plan(1, order_projection="ALL", matched_since="not-a-time")
+    with pytest.raises(MarketBookBatchPlanError, match="timezone-aware ISO-8601"):
+        plan(1, order_projection="ALL", matched_since="2026-09-22T00:00:00")
+
+    utc = plan(
+        1,
+        order_projection="ALL",
+        matched_since="2026-09-22T00:00:00Z",
+    )
+    offset = plan(
+        1,
+        order_projection="ALL",
+        matched_since="2026-09-22T02:00:00+02:00",
+    )
+    assert utc.matched_since == "2026-09-22T00:00:00Z"
+    assert offset.matched_since == utc.matched_since
+    assert offset.request_contract_id == utc.request_contract_id
+    assert offset.plan_id == utc.plan_id

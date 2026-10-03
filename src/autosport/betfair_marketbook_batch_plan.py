@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 import hashlib
 import json
 from typing import Mapping, Sequence
@@ -58,6 +59,23 @@ def _positive_int(value: object, name: str) -> int | None:
     if value is not None and (isinstance(value, bool) or not isinstance(value, int) or value <= 0):
         raise MarketBookBatchPlanError(f"{name} must be a positive integer or None")
     return value
+
+
+def _instant(value: object, name: str) -> str | None:
+    raw = _token(value, name)
+    if raw is None:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise MarketBookBatchPlanError(
+            f"{name} must be timezone-aware ISO-8601"
+        ) from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise MarketBookBatchPlanError(
+            f"{name} must be timezone-aware ISO-8601"
+        )
+    return parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def _fraction(value) -> dict[str, int]:
@@ -163,7 +181,7 @@ class MarketBookReadPlan:
             self.customer_strategy_refs,
             "customer_strategy_refs",
         )
-        matched_since = _token(self.matched_since, "matched_since")
+        matched_since = _instant(self.matched_since, "matched_since")
         bet_ids = _tokens(self.bet_ids, "bet_ids")
         if order is None:
             order_only_fields_present = (
@@ -188,6 +206,20 @@ class MarketBookReadPlan:
             raise MarketBookBatchPlanError(
                 "bet_ids leave no identifier capacity for a listMarketBook market_id"
             )
+        provider_scope_id = _token(
+            self.provider_scope_id,
+            "provider_scope_id",
+            optional=False,
+        )
+        if provider_scope_id != "BETFAIR":
+            raise MarketBookBatchPlanError("provider_scope_id must be BETFAIR")
+        policy_version = _token(
+            self.policy_version,
+            "policy_version",
+            optional=False,
+        )
+        if policy_version != PLAN_POLICY_VERSION:
+            raise MarketBookBatchPlanError("unsupported batch plan policy_version")
         return {
             "market_ids": market_ids,
             "market_status": status,
@@ -206,8 +238,8 @@ class MarketBookReadPlan:
             "locale": _token(self.locale, "locale"),
             "rollup_model": rollup_model,
             "rollup_limit": rollup_limit,
-            "provider_scope_id": _token(self.provider_scope_id, "provider_scope_id", optional=False),
-            "policy_version": _token(self.policy_version, "policy_version", optional=False),
+            "provider_scope_id": provider_scope_id,
+            "policy_version": policy_version,
         }
 
     @property

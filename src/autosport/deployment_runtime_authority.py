@@ -1443,7 +1443,43 @@ class DeploymentRuntimeAuthorityStore:
             raise DeploymentRuntimeAuthorityError(
                 "runtime authority static contract was replaced"
             )
-        destination = _CANONICAL_PATH_TYPE(path).expanduser().resolve(strict=False)
+        candidate_path = _CANONICAL_PATH_TYPE(path)
+        current_path_type = type(candidate_path)
+        if current_path_type is not _CANONICAL_CONCRETE_PATH_TYPE:
+            raise DeploymentRuntimeAuthorityError(
+                "runtime authority concrete path type was replaced"
+            )
+        for current, expected, expected_code in (
+            (
+                current_path_type.expanduser,
+                _CANONICAL_PATH_EXPANDUSER,
+                _CANONICAL_PATH_EXPANDUSER_CODE,
+            ),
+            (
+                current_path_type.resolve,
+                _CANONICAL_PATH_RESOLVE,
+                _CANONICAL_PATH_RESOLVE_CODE,
+            ),
+            (
+                current_path_type.read_text,
+                _CANONICAL_PATH_READ_TEXT,
+                _CANONICAL_PATH_READ_TEXT_CODE,
+            ),
+        ):
+            if (
+                current is not expected
+                or (
+                    expected_code is not None
+                    and getattr(current, "__code__", None) is not expected_code
+                )
+            ):
+                raise DeploymentRuntimeAuthorityError(
+                    "runtime authority path dispatch was replaced"
+                )
+        destination = _CANONICAL_PATH_RESOLVE(
+            _CANONICAL_PATH_EXPANDUSER(candidate_path),
+            strict=False,
+        )
         destination.parent.mkdir(parents=True, exist_ok=True)
         payload = {
             "schema": STORE_SCHEMA,

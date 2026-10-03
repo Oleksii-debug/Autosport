@@ -544,9 +544,11 @@ class AutosportApp(tk.Tk):
         if not self.__dict__.get("_close_teardown_unresolved", False):
             return
         target = self.__dict__.get("_close_teardown_workspace")
-        if target is not None and Path(target) != Path(workspace):
-            return
-        if target is None and self._recovery_required_workspaces:
+        # Workspace-scoped recovery can only prove teardown reconciliation when
+        # the failed detached session was bound to that exact workspace. If the
+        # teardown identity was unavailable, recovering an arbitrary known
+        # workspace must never launder the unknown economic state into "safe".
+        if target is None or Path(target) != Path(workspace):
             return
         self._close_teardown_unresolved = False
         self._close_teardown_workspace = None

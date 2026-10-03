@@ -197,6 +197,36 @@ def test_close_teardown_failure_keeps_window_open_and_quarantines_workspace() ->
     )
 
 
+def test_unknown_close_teardown_identity_cannot_be_cleared_by_workspace_recovery() -> None:
+    app = _base_partial_app()
+    app._close_teardown_unresolved = True
+    app._close_teardown_workspace = None
+    app._recovery_required_workspaces = set()
+    recovered_workspace = Path("selected-recovery-workspace")
+
+    AutosportApp._clear_close_teardown_after_recovery(app, recovered_workspace)
+
+    assert app._close_teardown_unresolved is True
+    assert app._close_teardown_workspace is None
+
+    # The still-running application must continue to reject close gestures until
+    # a stronger authority than workspace-scoped recovery resolves the unknown
+    # detached economic state.
+    app.session = None
+    destroy_calls, bell_calls = _configure_close_app(app)
+    with patch("autosport.gui.messagebox.showerror") as showerror:
+        AutosportApp.close_app(app)
+
+    assert destroy_calls == []
+    assert bell_calls == ["bell"]
+    assert app._close_teardown_unresolved is True
+    assert app.status.value == text("ui.status.close.teardown_blocked")
+    showerror.assert_called_once_with(
+        text("ui.dialog.title"),
+        text("ui.error.close.teardown"),
+    )
+
+
 def test_close_teardown_latch_clears_only_after_matching_recovery() -> None:
     app = _base_partial_app()
     failed_workspace = Path("economic-workspace")

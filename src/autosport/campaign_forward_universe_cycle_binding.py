@@ -1905,7 +1905,7 @@ def _seal_campaign_forward_universe_cycle_dispatch() -> None:
             )
         expected_guard()
 
-    def sealed_resolve_campaign_forward_universe_cycle_authority(*args, **kwargs):
+    def require_public_resolver_surface() -> None:
         if (
             module_globals.get(
                 "resolve_campaign_forward_universe_cycle_authority"
@@ -1915,12 +1915,8 @@ def _seal_campaign_forward_universe_cycle_dispatch() -> None:
             raise expected_error(
                 "campaign forward-cycle resolver surface changed"
             )
-        require_sealed_surface()
-        result = expected_resolve(*args, **kwargs)
-        require_sealed_surface()
-        return result
 
-    def sealed_authorize_campaign_forward_source_receipts(*args, **kwargs):
+    def require_public_authority_surface() -> None:
         if (
             module_globals.get("authorize_campaign_forward_source_receipts")
             is not sealed_authorize_campaign_forward_source_receipts
@@ -1932,12 +1928,8 @@ def _seal_campaign_forward_universe_cycle_dispatch() -> None:
             raise expected_error(
                 "campaign forward-cycle public authority surface changed"
             )
-        require_sealed_surface()
-        result = expected_authorize(*args, **kwargs)
-        require_sealed_surface()
-        return result
 
-    def sealed_verify_campaign_forward_evidence(*args, **kwargs):
+    def require_public_verification_surface() -> None:
         if (
             module_globals.get("verify_campaign_forward_evidence")
             is not sealed_verify_campaign_forward_evidence
@@ -1951,9 +1943,29 @@ def _seal_campaign_forward_universe_cycle_dispatch() -> None:
             raise expected_error(
                 "campaign forward-cycle public verification surface changed"
             )
+
+    def sealed_resolve_campaign_forward_universe_cycle_authority(*args, **kwargs):
+        require_public_resolver_surface()
+        require_sealed_surface()
+        result = expected_resolve(*args, **kwargs)
+        require_sealed_surface()
+        require_public_resolver_surface()
+        return result
+
+    def sealed_authorize_campaign_forward_source_receipts(*args, **kwargs):
+        require_public_authority_surface()
+        require_sealed_surface()
+        result = expected_authorize(*args, **kwargs)
+        require_sealed_surface()
+        require_public_authority_surface()
+        return result
+
+    def sealed_verify_campaign_forward_evidence(*args, **kwargs):
+        require_public_verification_surface()
         require_sealed_surface()
         result = expected_verify(*args, **kwargs)
         require_sealed_surface()
+        require_public_verification_surface()
         return result
 
     sealed_resolve_campaign_forward_universe_cycle_authority.__name__ = (
@@ -1977,6 +1989,15 @@ def _seal_campaign_forward_universe_cycle_dispatch() -> None:
     sealed_verify_campaign_forward_evidence.__name__ = expected_verify.__name__
     sealed_verify_campaign_forward_evidence.__qualname__ = expected_verify.__qualname__
     sealed_verify_campaign_forward_evidence.__doc__ = expected_verify.__doc__
+    for sealed in (
+        sealed_resolve_campaign_forward_universe_cycle_authority,
+        sealed_authorize_campaign_forward_source_receipts,
+        sealed_verify_campaign_forward_evidence,
+    ):
+        if hasattr(sealed, "__wrapped__"):
+            raise RuntimeError(
+                "campaign forward-cycle seal must not expose unsealed delegate"
+            )
     module_globals["resolve_campaign_forward_universe_cycle_authority"] = (
         sealed_resolve_campaign_forward_universe_cycle_authority
     )

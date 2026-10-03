@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+import autosport.campaign_provider_cycle_capture as capture_module
 import autosport.provider_observation_authority as provider_module
 from autosport.campaign_inception import CampaignInceptionSourceSpec
 from autosport.campaign_precommit_manifest import (
@@ -366,3 +367,89 @@ def test_instance_rebound_collector_seam_rejects_before_provider_io(
             clock=_clock(),
         )
     assert calls == []
+
+@pytest.mark.parametrize(
+    "alias_name",
+    [
+        "_CAPTURE",
+        "_EVIDENCE_SAVE",
+        "_NEXT_SLOT",
+        "_BEGIN_SCHEDULED",
+        "_RECORD_ARTIFACT",
+        "_FINISH_CYCLE",
+        "_RESOLVE_ARTIFACT",
+        "establish_campaign_inception",
+        "_issue_receipt",
+    ],
+)
+def test_module_dispatch_rebind_rejects_before_hostile_or_provider_execution(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    alias_name: str,
+) -> None:
+    locator, store, spec, provider_store = _setup(tmp_path)
+    calls: list[str] = []
+
+    def hostile(*_args, **_kwargs):
+        calls.append("hostile")
+        raise AssertionError("hostile dispatch executed")
+
+    def fake_urlopen(_request, _timeout):
+        calls.append("provider")
+        return _FakeSseResponse(_frame())
+
+    monkeypatch.setattr(provider_module, "urlopen", fake_urlopen)
+    monkeypatch.setattr(capture_module, alias_name, hostile)
+    with pytest.raises(
+        CampaignProviderCycleCaptureIntegrityError,
+        match="dispatch authority is rebound",
+    ):
+        capture_campaign_complete_game_board(
+            precommit_locator=locator,
+            store=store,
+            source_spec=spec,
+            evidence_store=provider_store,
+            request=_request(),
+            api_key="secret-value",
+            clock=_clock(),
+        )
+    assert calls == []
+
+
+def test_module_dispatch_in_place_code_mutation_rejects_before_execution(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    locator, store, spec, provider_store = _setup(tmp_path)
+    calls: list[str] = []
+
+    def fake_urlopen(_request, _timeout):
+        calls.append("provider")
+        return _FakeSseResponse(_frame())
+
+    def hostile(*_args, **_kwargs):
+        raise AssertionError("hostile dispatch code executed")
+
+    monkeypatch.setattr(provider_module, "urlopen", fake_urlopen)
+    target = capture_module._NEXT_SLOT
+    original_code = target.__code__
+    assert original_code.co_freevars == hostile.__code__.co_freevars
+    target.__code__ = hostile.__code__
+    try:
+        with pytest.raises(
+            CampaignProviderCycleCaptureIntegrityError,
+            match="dispatch code changed: _NEXT_SLOT",
+        ):
+            capture_campaign_complete_game_board(
+                precommit_locator=locator,
+                store=store,
+                source_spec=spec,
+                evidence_store=provider_store,
+                request=_request(),
+                api_key="secret-value",
+                clock=_clock(),
+            )
+    finally:
+        target.__code__ = original_code
+    assert calls == []
+

@@ -277,15 +277,66 @@ def capture_campaign_complete_game_board(
         raise CampaignProviderCycleCaptureIntegrityError(
             "provider request source_id does not match campaign collector source"
         )
-    _require_canonical_seams(store, evidence_store)
+    require_seams = _require_canonical_seams
+    establish_inception = establish_campaign_inception
+    next_slot = _NEXT_SLOT
+    begin_scheduled = _BEGIN_SCHEDULED
+    provider_capture = _CAPTURE
+    evidence_save = _EVIDENCE_SAVE
+    record_artifact = _RECORD_ARTIFACT
+    finish_cycle = _FINISH_CYCLE
+    resolve_artifact = _RESOLVE_ARTIFACT
+    issue_receipt = _issue_receipt
+    module_globals = globals()
+    expected_dispatch = (
+        ("_require_canonical_seams", require_seams),
+        ("establish_campaign_inception", establish_inception),
+        ("_NEXT_SLOT", next_slot),
+        ("_BEGIN_SCHEDULED", begin_scheduled),
+        ("_CAPTURE", provider_capture),
+        ("_EVIDENCE_SAVE", evidence_save),
+        ("_RECORD_ARTIFACT", record_artifact),
+        ("_FINISH_CYCLE", finish_cycle),
+        ("_RESOLVE_ARTIFACT", resolve_artifact),
+        ("_issue_receipt", issue_receipt),
+    )
+    expected_codes = tuple(
+        (name, target, getattr(getattr(target, "__func__", target), "__code__", None))
+        for name, target in expected_dispatch
+    )
+    expected_inspect = inspect
+    expected_getattr_static = inspect.getattr_static
 
-    campaign = establish_campaign_inception(
+    def require_stable_dispatch() -> None:
+        if (
+            module_globals.get("inspect") is not expected_inspect
+            or expected_inspect.getattr_static is not expected_getattr_static
+        ):
+            raise CampaignProviderCycleCaptureIntegrityError(
+                "campaign provider-cycle reflection dispatch changed"
+            )
+        for name, target, code in expected_codes:
+            if module_globals.get(name) is not target:
+                raise CampaignProviderCycleCaptureIntegrityError(
+                    "campaign provider-cycle dispatch authority is rebound: " + name
+                )
+            function = getattr(target, "__func__", target)
+            if getattr(function, "__code__", None) is not code:
+                raise CampaignProviderCycleCaptureIntegrityError(
+                    "campaign provider-cycle dispatch code changed: " + name
+                )
+
+    require_stable_dispatch()
+    require_seams(store, evidence_store)
+
+    campaign = establish_inception(
         precommit_locator=precommit_locator,
         store=store,
         source_spec=source_spec,
     )
-    _require_canonical_seams(store, evidence_store)
-    slot = _NEXT_SLOT(
+    require_stable_dispatch()
+    require_seams(store, evidence_store)
+    slot = next_slot(
         store,
         source_id=source_spec.source_id,
         run_id=source_spec.run_id,
@@ -301,7 +352,7 @@ def capture_campaign_complete_game_board(
         )
     attempted_at = _instant(clock(), "collector attempted_at")
     try:
-        cycle_seq = _BEGIN_SCHEDULED(
+        cycle_seq = begin_scheduled(
             store,
             source_id=source_spec.source_id,
             run_id=source_spec.run_id,
@@ -318,24 +369,25 @@ def capture_campaign_complete_game_board(
 
     terminal_written = False
     try:
-        snapshot = _CAPTURE(
+        snapshot = provider_capture(
             api_key=api_key,
             request=request,
             timeout_seconds=timeout_seconds,
         )
+        require_stable_dispatch()
         if type(snapshot) is not CompleteGameBoardSnapshot:
             raise CampaignProviderCycleCaptureIntegrityError(
                 "provider capture returned noncanonical snapshot type"
             )
-        evidence_path = _EVIDENCE_SAVE(evidence_store, snapshot)
-        repeated_path = _EVIDENCE_SAVE(evidence_store, snapshot)
+        evidence_path = evidence_save(evidence_store, snapshot)
+        repeated_path = evidence_save(evidence_store, snapshot)
         if evidence_path != repeated_path or evidence_path.name != (
             snapshot.evidence_sha256 + ".json"
         ):
             raise CampaignProviderCycleCaptureIntegrityError(
                 "provider evidence store did not retain exact captured identity"
             )
-        artifact = _RECORD_ARTIFACT(
+        artifact = record_artifact(
             store,
             source_id=source_spec.source_id,
             cycle_seq=cycle_seq,
@@ -351,7 +403,7 @@ def capture_campaign_complete_game_board(
                 "collector artifact append returned noncanonical identity"
             )
         completed_at = _instant(clock(), "collector completed_at")
-        _FINISH_CYCLE(
+        finish_cycle(
             store,
             source_id=source_spec.source_id,
             cycle_seq=cycle_seq,
@@ -363,7 +415,7 @@ def capture_campaign_complete_game_board(
             duplicate_delta_ids=(),
         )
         terminal_written = True
-        collector_evidence = _RESOLVE_ARTIFACT(
+        collector_evidence = resolve_artifact(
             store,
             source_id=source_spec.source_id,
             cycle_seq=cycle_seq,
@@ -382,8 +434,9 @@ def capture_campaign_complete_game_board(
             raise CampaignProviderCycleCaptureIntegrityError(
                 "collector artifact evidence does not bind exact campaign authority"
             )
-        _require_canonical_seams(store, evidence_store)
-        return snapshot, _issue_receipt(
+        require_stable_dispatch()
+        require_seams(store, evidence_store)
+        return snapshot, issue_receipt(
             campaign=campaign,
             snapshot=snapshot,
             collector_evidence=collector_evidence,
@@ -391,7 +444,7 @@ def capture_campaign_complete_game_board(
     except BaseException as exc:
         if not terminal_written:
             try:
-                _FINISH_CYCLE(
+                finish_cycle(
                     store,
                     source_id=source_spec.source_id,
                     cycle_seq=cycle_seq,
@@ -412,6 +465,125 @@ def capture_campaign_complete_game_board(
                 except BaseException:
                     pass
         raise
+
+
+def _seal_campaign_provider_cycle_capture_dispatch() -> None:
+    """Seal authority-bearing capture dispatch against runtime rebinding."""
+
+    module_globals = globals()
+    expected_error = CampaignProviderCycleCaptureIntegrityError
+    expected_capture = capture_campaign_complete_game_board
+    expected_capture_code = expected_capture.__code__
+    expected_inspect = inspect
+    expected_getattr_static = inspect.getattr_static
+    expected_values = {
+        "CollectorDeltaStore": CollectorDeltaStore,
+        "CompleteGameBoardEvidenceStore": CompleteGameBoardEvidenceStore,
+        "CompleteGameBoardRequest": CompleteGameBoardRequest,
+        "CompleteGameBoardSnapshot": CompleteGameBoardSnapshot,
+        "CampaignInceptionReceipt": CampaignInceptionReceipt,
+        "CampaignInceptionSourceSpec": CampaignInceptionSourceSpec,
+        "ForwardUniversePrecommitLocator": ForwardUniversePrecommitLocator,
+        "CampaignCompleteBoardCycleReceipt": CampaignCompleteBoardCycleReceipt,
+        "CampaignProviderCycleCaptureIntegrityError": expected_error,
+        "inspect": expected_inspect,
+        "ARTIFACT_KIND": ARTIFACT_KIND,
+    }
+    expected_callables = tuple(
+        (
+            name,
+            target,
+            getattr(getattr(target, "__func__", target), "__code__", None),
+        )
+        for name, target in (
+            ("_CAPTURE", _CAPTURE),
+            ("_EVIDENCE_SAVE", _EVIDENCE_SAVE),
+            ("_NEXT_SLOT", _NEXT_SLOT),
+            ("_BEGIN_SCHEDULED", _BEGIN_SCHEDULED),
+            ("_RECORD_ARTIFACT", _RECORD_ARTIFACT),
+            ("_FINISH_CYCLE", _FINISH_CYCLE),
+            ("_RESOLVE_ARTIFACT", _RESOLVE_ARTIFACT),
+            ("establish_campaign_inception", establish_campaign_inception),
+            ("_require_canonical_seams", _require_canonical_seams),
+            ("_issue_receipt", _issue_receipt),
+            ("_text", _text),
+            ("_sha", _sha),
+            ("_instant", _instant),
+            ("_digest", _digest),
+        )
+    )
+    expected_issue_surface = expected_getattr_static(
+        CampaignCompleteBoardCycleReceipt,
+        "_issue",
+    )
+    expected_issue_function = getattr(
+        expected_issue_surface,
+        "__func__",
+        expected_issue_surface,
+    )
+    expected_issue_code = getattr(expected_issue_function, "__code__", None)
+
+    def require_dispatch_integrity() -> None:
+        for name, expected in expected_values.items():
+            if module_globals.get(name) is not expected:
+                raise expected_error(
+                    "campaign provider-cycle dispatch authority is rebound: " + name
+                )
+        if expected_inspect.getattr_static is not expected_getattr_static:
+            raise expected_error(
+                "campaign provider-cycle reflection dispatch changed"
+            )
+        for name, expected, code in expected_callables:
+            if module_globals.get(name) is not expected:
+                raise expected_error(
+                    "campaign provider-cycle dispatch authority is rebound: " + name
+                )
+            function = getattr(expected, "__func__", expected)
+            if getattr(function, "__code__", None) is not code:
+                raise expected_error(
+                    "campaign provider-cycle dispatch code changed: " + name
+                )
+        current_issue_surface = expected_getattr_static(
+            CampaignCompleteBoardCycleReceipt,
+            "_issue",
+        )
+        if current_issue_surface is not expected_issue_surface:
+            raise expected_error(
+                "campaign provider-cycle receipt issuer is rebound"
+            )
+        current_issue_function = getattr(
+            current_issue_surface,
+            "__func__",
+            current_issue_surface,
+        )
+        if (
+            current_issue_function is not expected_issue_function
+            or getattr(current_issue_function, "__code__", None)
+            is not expected_issue_code
+        ):
+            raise expected_error(
+                "campaign provider-cycle receipt issuer code changed"
+            )
+        if expected_capture.__code__ is not expected_capture_code:
+            raise expected_error(
+                "campaign provider-cycle capture implementation changed"
+            )
+
+    def sealed_capture_campaign_complete_game_board(*args, **kwargs):
+        require_dispatch_integrity()
+        result = expected_capture(*args, **kwargs)
+        require_dispatch_integrity()
+        return result
+
+    sealed_capture_campaign_complete_game_board.__name__ = expected_capture.__name__
+    sealed_capture_campaign_complete_game_board.__qualname__ = expected_capture.__qualname__
+    sealed_capture_campaign_complete_game_board.__doc__ = expected_capture.__doc__
+    module_globals["capture_campaign_complete_game_board"] = (
+        sealed_capture_campaign_complete_game_board
+    )
+
+
+_seal_campaign_provider_cycle_capture_dispatch()
 
 
 __all__ = [

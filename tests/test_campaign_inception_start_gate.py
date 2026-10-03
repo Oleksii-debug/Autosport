@@ -25,7 +25,6 @@ from autosport.forward_universe_precommit_authority import (
 from autosport.monotonic_workspace_authority import (
     AuthorityPhase,
     MonotonicWorkspaceAuthority,
-    MonotonicWorkspaceAuthorityError,
 )
 
 
@@ -127,60 +126,93 @@ def _state_file(locator: ForwardUniversePrecommitLocator) -> Path:
     return paths[0]
 
 
-def test_receipt_commit_precedes_exact_gate_authorization(
+def _stage_pending_inception(
+    *,
+    locator: ForwardUniversePrecommitLocator,
+    store: CollectorDeltaStore,
+    spec: CampaignInceptionSourceSpec,
+    publish_local_state: bool,
+) -> None:
+    """Model a process crash after durable PREPARE without rebinding product code."""
+
+    manifest, witness = inception_module._resolve_precommit(locator)
+    inception_module._validate_schedule_window(manifest, spec)
+    precommit = inception_module._precommit_payload(manifest, witness)
+    gate_binding = inception_module._gate_binding_sha256(
+        precommit=precommit,
+        spec=spec,
+    )
+    prepared = inception_module._CANONICAL_PRESTART_PREPARER(
+        store,
+        expected_store_path=spec.expected_store_path,
+        expected_source_id=spec.source_id,
+        expected_run_id=spec.run_id,
+        expected_stream_epoch=spec.stream_epoch,
+        anchor_at=spec.anchor_at,
+        interval_seconds=spec.interval_seconds,
+        max_items=spec.max_items,
+        evaluation_start_slot_ordinal=spec.evaluation_start_slot_ordinal,
+        evaluation_end_slot_ordinal=spec.evaluation_end_slot_ordinal,
+        gate_binding_sha256=gate_binding,
+    )
+    payload = inception_module._new_state_payload(
+        precommit=precommit,
+        spec=spec,
+        prepared=prepared,
+    )
+    tx_id, semantic, _prepared_payload = inception_module._validate_state(
+        payload,
+        precommit=precommit,
+        spec=spec,
+    )
+    state_sha256 = inception_module._digest(payload)
+    authority = inception_module._authority(
+        locator=locator,
+        witness=witness,
+        campaign_id=manifest.campaign_id,
+    )
+    authority.prepare(
+        tx_id=tx_id,
+        observed_state_sha256=None,
+        intended_state_sha256=state_sha256,
+        semantic_binding_sha256=semantic,
+    )
+    if publish_local_state:
+        inception_module._write_state(
+            inception_module._state_path(locator.workspace, manifest.campaign_id),
+            payload,
+        )
+
+
+def test_gate_authorization_is_exact_committed_authority_record(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manifest, locator, store, spec, authority_root = _setup(tmp_path)
-    original_authorize = inception_module._CANONICAL_GATE_AUTHORIZE
-    observed_commit_tips: list[str] = []
 
-    def checked_authorize(
-        target: CollectorDeltaStore,
-        **kwargs: object,
-    ) -> dict[str, object]:
-        authority = MonotonicWorkspaceAuthority(
-            workspace=locator.workspace,
-            domain=AUTHORITY_DOMAIN,
-            key=manifest.campaign_id,
-            authority_root=authority_root,
-        )
-        history = authority.read_history()
-        assert history
-        assert history[-1].phase is AuthorityPhase.COMMIT
-        observed_commit_tips.append(history[-1].record_sha256)
-        return original_authorize(target, **kwargs)
-
-    monkeypatch.setattr(
-        inception_module,
-        "_CANONICAL_GATE_AUTHORIZE",
-        checked_authorize,
-    )
     receipt = establish_campaign_inception(
         precommit_locator=locator,
         store=store,
         source_spec=spec,
     )
 
-    assert observed_commit_tips == [receipt.authority_record_sha256]
     assert receipt.evaluation_universe_sha256 == manifest.evaluation_universe_sha256
-    status = store._collector_schedule_start_gate_status(
-        source_id=spec.source_id,
-        run_id=spec.run_id,
-    )
-    assert status is not None
-    assert status["authorization_sha256"] == receipt.authority_record_sha256
-
     authority = _inception_authority(
         locator=locator,
         receipt=receipt,
         authority_root=authority_root,
     )
     history = authority.read_history()
+    assert history
     assert history[-1].phase is AuthorityPhase.COMMIT
     assert history[-1].record_sha256 == receipt.authority_record_sha256
     assert history[-1].intended_state_sha256 == receipt.receipt_sha256
 
+    status = store._collector_schedule_start_gate_status(
+        source_id=spec.source_id,
+        run_id=spec.run_id,
+    )
+    assert status is not None
+    assert status["authorization_sha256"] == history[-1].record_sha256
 
 def test_receipt_is_resolver_issued_not_caller_constructible() -> None:
     with pytest.raises(TypeError, match="resolver-issued"):
@@ -230,26 +262,14 @@ def test_exact_retry_after_first_start_reopens_same_receipt(
 
 def test_crash_after_prepare_before_local_receipt_keeps_start_blocked_and_recovers(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _manifest_value, locator, store, spec, _authority_root = _setup(tmp_path)
-    original_write = inception_module._write_state
-    writes = 0
-
-    def fail_first_write(path: Path, payload: object) -> None:
-        nonlocal writes
-        writes += 1
-        if writes == 1:
-            raise OSError("forced state publication crash")
-        original_write(path, payload)
-
-    monkeypatch.setattr(inception_module, "_write_state", fail_first_write)
-    with pytest.raises(OSError, match="forced state publication crash"):
-        establish_campaign_inception(
-            precommit_locator=locator,
-            store=store,
-            source_spec=spec,
-        )
+    _stage_pending_inception(
+        locator=locator,
+        store=store,
+        spec=spec,
+        publish_local_state=False,
+    )
 
     status = store._collector_schedule_start_gate_status(
         source_id=spec.source_id,
@@ -286,32 +306,16 @@ def test_crash_after_prepare_before_local_receipt_keeps_start_blocked_and_recove
         == receipt.authority_record_sha256
     )
 
-
 def test_crash_after_local_receipt_before_commit_recovers_exact_pending_generation(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _manifest_value, locator, store, spec, _authority_root = _setup(tmp_path)
-    original_commit = MonotonicWorkspaceAuthority.commit
-    calls = 0
-
-    def fail_first_commit(self: MonotonicWorkspaceAuthority, **kwargs: object):
-        nonlocal calls
-        calls += 1
-        if calls == 1:
-            raise MonotonicWorkspaceAuthorityError("forced commit crash")
-        return original_commit(self, **kwargs)
-
-    monkeypatch.setattr(MonotonicWorkspaceAuthority, "commit", fail_first_commit)
-    with pytest.raises(
-        CampaignInceptionIntegrityError,
-        match="cannot durably commit campaign inception authority",
-    ):
-        establish_campaign_inception(
-            precommit_locator=locator,
-            store=store,
-            source_spec=spec,
-        )
+    _manifest_value, locator, store, spec, authority_root = _setup(tmp_path)
+    _stage_pending_inception(
+        locator=locator,
+        store=store,
+        spec=spec,
+        publish_local_state=True,
+    )
 
     assert _state_file(locator).is_file()
     status = store._collector_schedule_start_gate_status(
@@ -320,6 +324,14 @@ def test_crash_after_local_receipt_before_commit_recovers_exact_pending_generati
     )
     assert status is not None
     assert status["authorization_sha256"] is None
+
+    pending_authority = MonotonicWorkspaceAuthority(
+        workspace=locator.workspace,
+        domain=AUTHORITY_DOMAIN,
+        key=_manifest().campaign_id,
+        authority_root=authority_root,
+    )
+    assert pending_authority.read_history()[-1].phase is AuthorityPhase.PREPARE
 
     receipt = establish_campaign_inception(
         precommit_locator=locator,
@@ -333,7 +345,7 @@ def test_crash_after_local_receipt_before_commit_recovers_exact_pending_generati
         )["authorization_sha256"]
         == receipt.authority_record_sha256
     )
-
+    assert pending_authority.read_history()[-1].phase is AuthorityPhase.COMMIT
 
 def test_deleted_local_receipt_is_reconstructed_from_exact_committed_authority(
     tmp_path: Path,
@@ -503,6 +515,213 @@ def test_source_mismatch_is_rejected_before_schedule_mutation(
     assert (
         store._collector_schedule_start_gate_status(
             source_id="another:source",
+            run_id=spec.run_id,
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize(
+    "alias_name",
+    (
+        "_CANONICAL_WITNESS_RESOLVER",
+        "_CANONICAL_MANIFEST_LOADER",
+        "_CANONICAL_PRESTART_PREPARER",
+        "_CANONICAL_NEXT_SLOT",
+        "_CANONICAL_GATE_STATUS",
+        "_CANONICAL_GATE_AUTHORIZE",
+        "_CANONICAL_SCHEDULE_ID",
+        "_CANONICAL_SCHEDULE_DUE_AT",
+    ),
+)
+def test_inception_rejects_canonical_alias_rebind_before_hostile_dispatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    alias_name: str,
+) -> None:
+    _manifest_value, locator, store, spec, _authority_root = _setup(tmp_path)
+    original = getattr(inception_module, alias_name)
+    calls: list[str] = []
+
+    def hostile(*args: object, **kwargs: object):
+        calls.append(alias_name)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(inception_module, alias_name, hostile)
+    with pytest.raises(
+        CampaignInceptionIntegrityError,
+        match="canonical dispatch authority is rebound",
+    ):
+        establish_campaign_inception(
+            precommit_locator=locator,
+            store=store,
+            source_spec=spec,
+        )
+
+    assert calls == []
+    assert (
+        store._collector_schedule_start_gate_status(
+            source_id=spec.source_id,
+            run_id=spec.run_id,
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize(
+    "alias_name",
+    (
+        "_CANONICAL_PATH_EQUALITY",
+        "_CANONICAL_PATH_FSPATH",
+        "_CANONICAL_OS_FSPATH",
+        "_CANONICAL_ABSPATH",
+    ),
+)
+def test_inception_rejects_path_alias_rebind_before_prestart_dispatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    alias_name: str,
+) -> None:
+    _manifest_value, locator, store, spec, _authority_root = _setup(tmp_path)
+    original = getattr(inception_module, alias_name)
+    calls: list[str] = []
+
+    def hostile(*args: object, **kwargs: object):
+        calls.append(alias_name)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(inception_module, alias_name, hostile)
+    with pytest.raises(
+        CampaignInceptionIntegrityError,
+        match="path dispatch authority is rebound or mutated",
+    ):
+        establish_campaign_inception(
+            precommit_locator=locator,
+            store=store,
+            source_spec=spec,
+        )
+
+    assert calls == []
+    assert (
+        store._collector_schedule_start_gate_status(
+            source_id=spec.source_id,
+            run_id=spec.run_id,
+        )
+        is None
+    )
+
+
+def test_inception_rejects_os_fspath_rebind_before_path_canonicalization(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _manifest_value, locator, store, spec, _authority_root = _setup(tmp_path)
+    original = inception_module.os.fspath
+    hostile_calls: list[object] = []
+
+    def hostile(value: object) -> str:
+        hostile_calls.append(value)
+        return original(value)
+
+    monkeypatch.setattr(inception_module.os, "fspath", hostile)
+    with pytest.raises(
+        CampaignInceptionIntegrityError,
+        match="filesystem dispatch authority is rebound",
+    ):
+        establish_campaign_inception(
+            precommit_locator=locator,
+            store=store,
+            source_spec=spec,
+        )
+
+    assert hostile_calls == []
+    assert (
+        store._collector_schedule_start_gate_status(
+            source_id=spec.source_id,
+            run_id=spec.run_id,
+        )
+        is None
+    )
+
+
+def test_inception_rejects_path_equality_rebind_before_prestart_dispatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _manifest_value, locator, store, spec, _authority_root = _setup(tmp_path)
+    had_own_equality = "__eq__" in vars(Path)
+    original_own_equality = vars(Path).get("__eq__")
+    hostile_calls: list[bool] = []
+
+    def hostile_equality(_left: object, _right: object) -> bool:
+        hostile_calls.append(True)
+        return True
+
+    setattr(Path, "__eq__", hostile_equality)
+    try:
+        with pytest.raises(
+            CampaignInceptionIntegrityError,
+            match=r"dynamic method authority drifted: Path\.__eq__",
+        ):
+            establish_campaign_inception(
+                precommit_locator=locator,
+                store=store,
+                source_spec=spec,
+            )
+    finally:
+        if had_own_equality:
+            setattr(Path, "__eq__", original_own_equality)
+        else:
+            delattr(Path, "__eq__")
+
+    assert hostile_calls == []
+    assert (
+        store._collector_schedule_start_gate_status(
+            source_id=spec.source_id,
+            run_id=spec.run_id,
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize(
+    "helper_name",
+    (
+        "_resolve_precommit",
+        "_write_state",
+        "_prepared_payload_from_existing_gate",
+        "_resolve_gate_and_authorize",
+        "_issue_receipt",
+    ),
+)
+def test_inception_rejects_helper_rebind_before_state_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    helper_name: str,
+) -> None:
+    _manifest_value, locator, store, spec, _authority_root = _setup(tmp_path)
+    original = getattr(inception_module, helper_name)
+    calls: list[str] = []
+
+    def hostile(*args: object, **kwargs: object):
+        calls.append(helper_name)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(inception_module, helper_name, hostile)
+    with pytest.raises(
+        CampaignInceptionIntegrityError,
+        match="helper dispatch authority is rebound",
+    ):
+        establish_campaign_inception(
+            precommit_locator=locator,
+            store=store,
+            source_spec=spec,
+        )
+
+    assert calls == []
+    assert (
+        store._collector_schedule_start_gate_status(
+            source_id=spec.source_id,
             run_id=spec.run_id,
         )
         is None

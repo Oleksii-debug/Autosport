@@ -4,6 +4,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import autosport.scheduled_source_universe as scheduled_module
+
 from autosport.causal_collector import CollectorDeltaStore
 from autosport.scheduled_source_universe import (
     PreparedScheduledSourceUniverse,
@@ -194,6 +196,126 @@ class ScheduledSourceUniversePrestartTests(unittest.TestCase):
                 self.assertEqual(hostile_calls, [])
             finally:
                 CollectorDeltaStore._collector_schedule_start_gate_status = original
+
+
+    def test_prestart_alias_rebind_fails_before_hostile_dispatch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "collector.db"
+            store = CollectorDeltaStore(path)
+            original = scheduled_module._CANONICAL_PRESTART_ENSURE
+            hostile_calls: list[str] = []
+
+            def hostile(*args, **kwargs):
+                hostile_calls.append("called")
+                return original(*args, **kwargs)
+
+            scheduled_module._CANONICAL_PRESTART_ENSURE = hostile
+            try:
+                with self.assertRaisesRegex(
+                    ScheduledSourceUniverseError,
+                    "canonical dispatch authority is rebound",
+                ):
+                    self._prepare(store, path)
+            finally:
+                scheduled_module._CANONICAL_PRESTART_ENSURE = original
+
+            self.assertEqual(hostile_calls, [])
+            self.assertIsNone(
+                store._collector_schedule_start_gate_status(
+                    source_id="source-x",
+                    run_id="run-1",
+                )
+            )
+
+    def test_path_equality_rebind_cannot_admit_wrong_prestart_store(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "collector.db"
+            wrong_path = Path(tmp) / "wrong.db"
+            store = CollectorDeltaStore(path)
+            had_own_equality = "__eq__" in vars(Path)
+            original_own_equality = vars(Path).get("__eq__")
+            hostile_calls: list[bool] = []
+
+            def hostile_equality(_left, _right):
+                hostile_calls.append(True)
+                return True
+
+            setattr(Path, "__eq__", hostile_equality)
+            try:
+                with self.assertRaisesRegex(
+                    ScheduledSourceUniverseError,
+                    "product-expected authority path",
+                ):
+                    self._prepare(store, wrong_path)
+            finally:
+                if had_own_equality:
+                    setattr(Path, "__eq__", original_own_equality)
+                else:
+                    delattr(Path, "__eq__")
+
+            self.assertEqual(hostile_calls, [])
+            self.assertIsNone(
+                store._collector_schedule_start_gate_status(
+                    source_id="source-x",
+                    run_id="run-1",
+                )
+            )
+
+    def test_canonical_path_equality_code_mutation_fails_before_prestart(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "collector.db"
+            store = CollectorDeltaStore(path)
+            equality = scheduled_module._CANONICAL_PATH_EQUALITY
+            original_code = equality.__code__
+
+            def hostile_equality(_left, _right):
+                raise AssertionError("hostile pre-START equality executed")
+
+            equality.__code__ = hostile_equality.__code__
+            try:
+                with self.assertRaisesRegex(
+                    ScheduledSourceUniverseError,
+                    "path comparison authority is rebound or mutated",
+                ):
+                    self._prepare(store, path)
+            finally:
+                equality.__code__ = original_code
+
+            self.assertIsNone(
+                store._collector_schedule_start_gate_status(
+                    source_id="source-x",
+                    run_id="run-1",
+                )
+            )
+
+    def test_prepared_issuer_rebind_fails_before_schedule_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "collector.db"
+            store = CollectorDeltaStore(path)
+            original = PreparedScheduledSourceUniverse.__dict__["_issue"]
+            hostile_calls: list[str] = []
+
+            def hostile_issue(cls, payload):
+                hostile_calls.append("called")
+                return original.__func__(cls, payload)
+
+            PreparedScheduledSourceUniverse._issue = classmethod(hostile_issue)
+            try:
+                with self.assertRaisesRegex(
+                    ScheduledSourceUniverseError,
+                    "result issuance surface is rebound or mutated",
+                ):
+                    self._prepare(store, path)
+            finally:
+                PreparedScheduledSourceUniverse._issue = original
+
+            self.assertEqual(hostile_calls, [])
+            self.assertIsNone(
+                store._collector_schedule_start_gate_status(
+                    source_id="source-x",
+                    run_id="run-1",
+                )
+            )
 
 
 if __name__ == "__main__":

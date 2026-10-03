@@ -65,6 +65,10 @@ _CANONICAL_GATE_STATUS = CollectorDeltaStore._collector_schedule_start_gate_stat
 _CANONICAL_GATE_AUTHORIZE = CollectorDeltaStore._authorize_collector_schedule_start_gate
 _CANONICAL_SCHEDULE_ID = CollectorDeltaStore._collector_schedule_id
 _CANONICAL_SCHEDULE_DUE_AT = CollectorDeltaStore._collector_schedule_due_at
+_CANONICAL_PATH_EQUALITY = Path.__eq__
+_CANONICAL_PATH_FSPATH = Path.__fspath__
+_CANONICAL_OS_FSPATH = os.fspath
+_CANONICAL_ABSPATH = os.path.abspath
 _CANONICAL_STORE_SEAMS = frozenset(
     {
         "_next_collector_schedule_slot",
@@ -667,6 +671,27 @@ def _expected_schedule_id(spec: CampaignInceptionSourceSpec) -> str:
     return _sha256(result, "expected schedule_id")
 
 
+def _canonical_absolute_path_text(value: object) -> str:
+    """Resolve a Path through import-time captured path/filesystem dispatch only."""
+
+    if not isinstance(value, Path):
+        raise CampaignInceptionIntegrityError(
+            "campaign inception path identity is unavailable"
+        )
+    try:
+        raw = _CANONICAL_PATH_FSPATH(value)
+        canonical = _CANONICAL_ABSPATH(raw)
+    except (OSError, TypeError, ValueError) as exc:
+        raise CampaignInceptionIntegrityError(
+            "campaign inception path identity cannot be canonicalized"
+        ) from exc
+    if type(raw) is not str or type(canonical) is not str:
+        raise CampaignInceptionIntegrityError(
+            "campaign inception path identity is noncanonical"
+        )
+    return canonical
+
+
 def _prepared_payload_from_existing_gate(
     *,
     store: CollectorDeltaStore,
@@ -676,7 +701,10 @@ def _prepared_payload_from_existing_gate(
     """Reconstruct the original slot-zero preparation without creating authority."""
 
     _require_store_seams(store)
-    if Path(os.path.abspath(store.path)) != spec.expected_store_path:
+    if (
+        _canonical_absolute_path_text(store.path)
+        != _canonical_absolute_path_text(spec.expected_store_path)
+    ):
         raise CampaignInceptionIntegrityError(
             "collector store path changed from campaign receipt"
         )
@@ -756,7 +784,10 @@ def _resolve_gate_and_authorize(
     authority_record_sha256: str,
 ) -> None:
     _require_store_seams(store)
-    if Path(os.path.abspath(store.path)) != spec.expected_store_path:
+    if (
+        _canonical_absolute_path_text(store.path)
+        != _canonical_absolute_path_text(spec.expected_store_path)
+    ):
         raise CampaignInceptionIntegrityError(
             "collector store path changed from campaign receipt"
         )
@@ -1094,3 +1125,398 @@ __all__ = [
     "CampaignInceptionSourceSpec",
     "establish_campaign_inception",
 ]
+
+
+def _seal_campaign_inception_dispatch() -> None:
+    """Seal campaign-inception positive dispatch against ordinary runtime rebinding.
+
+    The seal composes the already-selected precommit, schedule, monotonic-authority,
+    lock and receipt authorities. It creates no independent trust root.
+    """
+
+    module_globals = globals()
+    expected_error_type = CampaignInceptionIntegrityError
+    expected_store_type = CollectorDeltaStore
+    expected_locator_type = ForwardUniversePrecommitLocator
+    expected_spec_type = CampaignInceptionSourceSpec
+    expected_receipt_type = CampaignInceptionReceipt
+    expected_prepared_type = PreparedScheduledSourceUniverse
+    expected_manifest_type = CampaignPrecommitManifest
+    expected_witness_type = CampaignPrecommitPublicationWitness
+    expected_authority_type = MonotonicWorkspaceAuthority
+    expected_lock_type = WorkspaceEconomicLock
+    expected_path_type = Path
+    expected_path_equality = _CANONICAL_PATH_EQUALITY
+    expected_path_equality_code = getattr(expected_path_equality, "__code__", None)
+    expected_path_fspath = _CANONICAL_PATH_FSPATH
+    expected_path_fspath_code = getattr(expected_path_fspath, "__code__", None)
+    expected_canonical_abspath = _CANONICAL_ABSPATH
+    expected_canonical_abspath_code = getattr(
+        expected_canonical_abspath, "__code__", None
+    )
+    expected_inspect = inspect
+    expected_getattr_static = inspect.getattr_static
+    expected_getattr_static_code = getattr(expected_getattr_static, "__code__", None)
+    expected_hashlib = hashlib
+    expected_sha256 = hashlib.sha256
+    expected_json = json
+    expected_json_dumps = json.dumps
+    expected_json_dumps_code = getattr(expected_json_dumps, "__code__", None)
+    expected_os = os
+    expected_os_path = os.path
+    expected_os_fspath = os.fspath
+    expected_abspath = os.path.abspath
+    expected_os_open = os.open
+    expected_os_fdopen = os.fdopen
+    expected_os_fsync = os.fsync
+    expected_os_replace = os.replace
+    expected_os_close = os.close
+    expected_uuid = uuid
+    expected_uuid4 = uuid.uuid4
+    expected_math = math
+    expected_isfinite = math.isfinite
+    expected_strict_json_loads = strict_json_loads
+    expected_strict_json_loads_code = getattr(
+        expected_strict_json_loads, "__code__", None
+    )
+    expected_schema = SCHEMA
+    expected_schema_version = SCHEMA_VERSION
+    expected_authority_domain = AUTHORITY_DOMAIN
+    expected_state_dir = _STATE_DIR
+    expected_hex = _HEX
+    expected_store_seam_names = _CANONICAL_STORE_SEAMS
+    expected_store_seam_map = _CANONICAL_STORE_CLASS_SEAMS
+
+    def underlying(value: object) -> object:
+        return getattr(value, "__func__", value)
+
+    alias_witnesses = tuple(
+        (
+            name,
+            value,
+            underlying(value),
+            getattr(underlying(value), "__code__", None),
+        )
+        for name, value in (
+            ("_CANONICAL_WITNESS_RESOLVER", _CANONICAL_WITNESS_RESOLVER),
+            ("_CANONICAL_MANIFEST_LOADER", _CANONICAL_MANIFEST_LOADER),
+            ("_CANONICAL_PRESTART_PREPARER", _CANONICAL_PRESTART_PREPARER),
+            ("_CANONICAL_NEXT_SLOT", _CANONICAL_NEXT_SLOT),
+            ("_CANONICAL_GATE_STATUS", _CANONICAL_GATE_STATUS),
+            ("_CANONICAL_GATE_AUTHORIZE", _CANONICAL_GATE_AUTHORIZE),
+            ("_CANONICAL_SCHEDULE_ID", _CANONICAL_SCHEDULE_ID),
+            ("_CANONICAL_SCHEDULE_DUE_AT", _CANONICAL_SCHEDULE_DUE_AT),
+            ("_CANONICAL_PATH_EQUALITY", _CANONICAL_PATH_EQUALITY),
+            ("_CANONICAL_PATH_FSPATH", _CANONICAL_PATH_FSPATH),
+            ("_CANONICAL_OS_FSPATH", _CANONICAL_OS_FSPATH),
+            ("_CANONICAL_ABSPATH", _CANONICAL_ABSPATH),
+        )
+    )
+    helper_witnesses = tuple(
+        (name, value, getattr(value, "__code__", None))
+        for name, value in (
+            ("_text", _text),
+            ("_sha256", _sha256),
+            ("_instant", _instant),
+            ("_canonical_bytes", _canonical_bytes),
+            ("_digest", _digest),
+            ("_campaign_key", _campaign_key),
+            ("_state_path", _state_path),
+            ("_fsync_directory", _fsync_directory),
+            ("_write_state", _write_state),
+            ("_read_state", _read_state),
+            ("_require_store_seams", _require_store_seams),
+            ("_resolve_precommit", _resolve_precommit),
+            ("_precommit_payload", _precommit_payload),
+            ("_validate_schedule_window", _validate_schedule_window),
+            ("_gate_binding_sha256", _gate_binding_sha256),
+            ("_semantic_binding_sha256", _semantic_binding_sha256),
+            ("_new_state_payload", _new_state_payload),
+            ("_validate_state", _validate_state),
+            ("_authority", _authority),
+            ("_record_for_recovery", _record_for_recovery),
+            ("_expected_schedule_id", _expected_schedule_id),
+            (
+                "_canonical_absolute_path_text",
+                _canonical_absolute_path_text,
+            ),
+            (
+                "_prepared_payload_from_existing_gate",
+                _prepared_payload_from_existing_gate,
+            ),
+            ("_require_store_seams_class_only", _require_store_seams_class_only),
+            ("_resolve_gate_and_authorize", _resolve_gate_and_authorize),
+            ("_issue_receipt", _issue_receipt),
+        )
+    )
+    store_seam_witnesses = tuple(
+        (
+            name,
+            surface,
+            underlying(surface),
+            getattr(underlying(surface), "__code__", None),
+        )
+        for name, surface in sorted(expected_store_seam_map.items())
+    )
+
+    def class_surface_witness(owner: object, name: str) -> tuple[object, str, object, object, object]:
+        surface = expected_getattr_static(owner, name)
+        candidate = getattr(surface, "__func__", None)
+        if candidate is None and isinstance(surface, property):
+            candidate = surface.fget
+        if candidate is None:
+            candidate = surface
+        return owner, name, surface, candidate, getattr(candidate, "__code__", None)
+
+    dynamic_surface_witnesses = tuple(
+        class_surface_witness(owner, name)
+        for owner, names in (
+            (
+                expected_path_type,
+                ("__new__", "__eq__", "__fspath__"),
+            ),
+            (
+                expected_authority_type,
+                ("__init__", "prepare", "commit", "recover", "read_history"),
+            ),
+            (
+                expected_lock_type,
+                ("__init__", "acquire", "release", "__enter__", "__exit__"),
+            ),
+            (
+                expected_spec_type,
+                ("__post_init__", "payload"),
+            ),
+            (
+                expected_receipt_type,
+                ("_issue", "to_dict"),
+            ),
+            (
+                expected_prepared_type,
+                ("_issue", "to_dict"),
+            ),
+            (
+                expected_locator_type,
+                ("__post_init__", "absolute_manifest_path"),
+            ),
+        )
+        for name in names
+    )
+
+    original_establish = establish_campaign_inception
+    original_establish_code = original_establish.__code__
+
+    def require_dispatch_integrity() -> None:
+        for name, expected in (
+            ("CampaignInceptionIntegrityError", expected_error_type),
+            ("CollectorDeltaStore", expected_store_type),
+            ("ForwardUniversePrecommitLocator", expected_locator_type),
+            ("CampaignInceptionSourceSpec", expected_spec_type),
+            ("CampaignInceptionReceipt", expected_receipt_type),
+            ("PreparedScheduledSourceUniverse", expected_prepared_type),
+            ("CampaignPrecommitManifest", expected_manifest_type),
+            ("CampaignPrecommitPublicationWitness", expected_witness_type),
+            ("MonotonicWorkspaceAuthority", expected_authority_type),
+            ("WorkspaceEconomicLock", expected_lock_type),
+            ("Path", expected_path_type),
+        ):
+            if module_globals.get(name) is not expected:
+                raise expected_error_type(
+                    "campaign inception type dispatch authority is rebound: " + name
+                )
+
+        if (
+            module_globals.get("SCHEMA") != expected_schema
+            or module_globals.get("SCHEMA_VERSION") != expected_schema_version
+            or module_globals.get("AUTHORITY_DOMAIN") != expected_authority_domain
+            or module_globals.get("_STATE_DIR") != expected_state_dir
+            or module_globals.get("_HEX") is not expected_hex
+        ):
+            raise expected_error_type("campaign inception schema/domain authority is rebound")
+
+        if (
+            module_globals.get("_CANONICAL_PATH_EQUALITY")
+            is not expected_path_equality
+            or getattr(expected_path_equality, "__code__", None)
+            is not expected_path_equality_code
+            or module_globals.get("_CANONICAL_PATH_FSPATH")
+            is not expected_path_fspath
+            or getattr(expected_path_fspath, "__code__", None)
+            is not expected_path_fspath_code
+            or module_globals.get("_CANONICAL_OS_FSPATH")
+            is not expected_os_fspath
+            or module_globals.get("_CANONICAL_ABSPATH")
+            is not expected_canonical_abspath
+            or getattr(expected_canonical_abspath, "__code__", None)
+            is not expected_canonical_abspath_code
+        ):
+            raise expected_error_type(
+                "campaign inception path dispatch authority is rebound or mutated"
+            )
+
+        if (
+            module_globals.get("inspect") is not expected_inspect
+            or expected_inspect.getattr_static is not expected_getattr_static
+            or getattr(expected_getattr_static, "__code__", None)
+            is not expected_getattr_static_code
+        ):
+            raise expected_error_type(
+                "campaign inception reflection dispatch authority is rebound"
+            )
+        if (
+            module_globals.get("hashlib") is not expected_hashlib
+            or expected_hashlib.sha256 is not expected_sha256
+        ):
+            raise expected_error_type(
+                "campaign inception digest dispatch authority is rebound"
+            )
+        if (
+            module_globals.get("json") is not expected_json
+            or expected_json.dumps is not expected_json_dumps
+            or getattr(expected_json_dumps, "__code__", None)
+            is not expected_json_dumps_code
+        ):
+            raise expected_error_type(
+                "campaign inception canonical JSON dispatch authority is rebound"
+            )
+        if (
+            module_globals.get("os") is not expected_os
+            or expected_os.path is not expected_os_path
+            or expected_os.fspath is not expected_os_fspath
+            or expected_os_path.abspath is not expected_abspath
+            or expected_os.open is not expected_os_open
+            or expected_os.fdopen is not expected_os_fdopen
+            or expected_os.fsync is not expected_os_fsync
+            or expected_os.replace is not expected_os_replace
+            or expected_os.close is not expected_os_close
+        ):
+            raise expected_error_type(
+                "campaign inception filesystem dispatch authority is rebound"
+            )
+        if (
+            module_globals.get("uuid") is not expected_uuid
+            or expected_uuid.uuid4 is not expected_uuid4
+            or module_globals.get("math") is not expected_math
+            or expected_math.isfinite is not expected_isfinite
+        ):
+            raise expected_error_type(
+                "campaign inception identity/number dispatch authority is rebound"
+            )
+        if (
+            module_globals.get("strict_json_loads") is not expected_strict_json_loads
+            or getattr(expected_strict_json_loads, "__code__", None)
+            is not expected_strict_json_loads_code
+        ):
+            raise expected_error_type(
+                "campaign inception strict JSON authority is rebound"
+            )
+
+        if module_globals.get("_CANONICAL_STORE_SEAMS") is not expected_store_seam_names:
+            raise expected_error_type(
+                "campaign inception store seam-name authority is rebound"
+            )
+        current_seam_map = module_globals.get("_CANONICAL_STORE_CLASS_SEAMS")
+        if (
+            current_seam_map is not expected_store_seam_map
+            or type(current_seam_map) is not dict
+            or set(current_seam_map) != set(expected_store_seam_names)
+        ):
+            raise expected_error_type(
+                "campaign inception store seam witness map is rebound"
+            )
+
+        for name, expected_surface, expected_callable, expected_code in store_seam_witnesses:
+            current_surface = expected_getattr_static(expected_store_type, name, None)
+            current_callable = underlying(current_surface)
+            if (
+                current_seam_map.get(name) is not expected_surface
+                or current_surface is not expected_surface
+                or current_callable is not expected_callable
+                or getattr(current_callable, "__code__", None) is not expected_code
+            ):
+                raise expected_error_type(
+                    "campaign inception collector seam authority drifted: " + name
+                )
+
+        for name, expected_alias, expected_callable, expected_code in alias_witnesses:
+            current_alias = module_globals.get(name)
+            if (
+                current_alias is not expected_alias
+                or underlying(current_alias) is not expected_callable
+                or getattr(expected_callable, "__code__", None) is not expected_code
+            ):
+                raise expected_error_type(
+                    "campaign inception canonical dispatch authority is rebound: " + name
+                )
+
+        for name, expected_helper, expected_code in helper_witnesses:
+            if (
+                module_globals.get(name) is not expected_helper
+                or getattr(expected_helper, "__code__", None) is not expected_code
+            ):
+                raise expected_error_type(
+                    "campaign inception helper dispatch authority is rebound: " + name
+                )
+
+        for owner, name, expected_surface, expected_callable, expected_code in dynamic_surface_witnesses:
+            current_surface = expected_getattr_static(owner, name, None)
+            current_callable = getattr(current_surface, "__func__", None)
+            if current_callable is None and isinstance(current_surface, property):
+                current_callable = current_surface.fget
+            if current_callable is None:
+                current_callable = current_surface
+            if (
+                current_surface is not expected_surface
+                or current_callable is not expected_callable
+                or getattr(current_callable, "__code__", None) is not expected_code
+            ):
+                raise expected_error_type(
+                    "campaign inception dynamic method authority drifted: "
+                    + owner.__name__
+                    + "."
+                    + name
+                )
+
+        if original_establish.__code__ is not original_establish_code:
+            raise expected_error_type(
+                "campaign inception establishment executable changed"
+            )
+
+    def sealed_establish_campaign_inception(
+        *,
+        precommit_locator: ForwardUniversePrecommitLocator,
+        store: CollectorDeltaStore,
+        source_spec: CampaignInceptionSourceSpec,
+    ) -> CampaignInceptionReceipt:
+        if (
+            module_globals.get("establish_campaign_inception")
+            is not sealed_establish_campaign_inception
+        ):
+            raise expected_error_type(
+                "campaign inception public establishment authority is rebound"
+            )
+        require_dispatch_integrity()
+        result = original_establish(
+            precommit_locator=precommit_locator,
+            store=store,
+            source_spec=source_spec,
+        )
+        require_dispatch_integrity()
+        if type(result) is not expected_receipt_type:
+            raise expected_error_type(
+                "campaign inception establishment returned noncanonical receipt type"
+            )
+        return result
+
+    sealed_establish_campaign_inception.__name__ = original_establish.__name__
+    sealed_establish_campaign_inception.__qualname__ = original_establish.__qualname__
+    sealed_establish_campaign_inception.__doc__ = original_establish.__doc__
+    sealed_establish_campaign_inception.__module__ = original_establish.__module__
+    sealed_establish_campaign_inception.__annotations__ = dict(
+        original_establish.__annotations__
+    )
+    module_globals["establish_campaign_inception"] = sealed_establish_campaign_inception
+
+
+_seal_campaign_inception_dispatch()
+del _seal_campaign_inception_dispatch

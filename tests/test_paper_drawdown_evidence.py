@@ -35,12 +35,12 @@ def _goal() -> EconomicGoalContract:
     )
 
 
-def _leg(suffix: str) -> TicketLeg:
+def _leg(suffix: str, odds: str = "2") -> TicketLeg:
     return TicketLeg(
         event_id=f"event-{suffix}",
         market_id=f"market-{suffix}",
         selection_id=f"selection-{suffix}",
-        locked_odds=Decimal("2"),
+        locked_odds=Decimal(odds),
     )
 
 
@@ -59,9 +59,10 @@ def _open(
     *,
     bankroll_id: str = "paper-bankroll",
     currency: str = "USD",
+    odds: str = "2",
 ):
     return book.open_ticket(
-        [_leg(suffix)],
+        [_leg(suffix, odds)],
         Decimal(stake),
         placed_at=placed_at,
         bankroll_id=bankroll_id,
@@ -185,6 +186,51 @@ def test_recovery_does_not_erase_historical_max_drawdown(tmp_path):
     assert evidence.historical_max_drawdown_amount == Decimal("50")
     assert evidence.historical_max_drawdown_fraction == Decimal("0.5")
     assert evidence.recovered_to_peak is True
+
+
+def test_fractional_max_is_independent_of_largest_absolute_drawdown(tmp_path):
+    book = _initialize(tmp_path)
+    first_loss = _open(book, "fraction-loss", "50", "2026-09-20T10:00:00+00:00")
+    book.settle(
+        first_loss.ticket_id,
+        set(),
+        settled_at="2026-09-20T11:00:00+00:00",
+    )
+    new_peak = _open(
+        book,
+        "high-peak",
+        "50",
+        "2026-09-20T12:00:00+00:00",
+        odds="24",
+    )
+    book.settle(
+        new_peak.ticket_id,
+        {new_peak.legs[0].quote_key},
+        settled_at="2026-09-20T13:00:00+00:00",
+    )
+    second_loss = _open(book, "amount-loss", "60", "2026-09-20T14:00:00+00:00")
+    book.settle(
+        second_loss.ticket_id,
+        set(),
+        settled_at="2026-09-20T15:00:00+00:00",
+    )
+    book.save(tmp_path / "paper_book.json")
+
+    evidence = resolve_paper_drawdown_evidence(tmp_path)
+    report = build_paper_risk_report(book, _goal())
+
+    assert evidence.peak_equity == Decimal("1200")
+    assert evidence.current_equity == Decimal("1140")
+    assert evidence.historical_max_drawdown_amount == Decimal("60")
+    assert evidence.historical_max_drawdown_fraction == Decimal("0.5")
+    assert evidence.historical_max_drawdown_peak_id == (
+        f"paper-lifecycle:3:settle:{new_peak.ticket_id}"
+    )
+    assert evidence.historical_max_drawdown_trough_id == (
+        f"paper-lifecycle:5:settle:{second_loss.ticket_id}"
+    )
+    assert report.historical_max_drawdown_amount == Decimal("60")
+    assert report.historical_max_drawdown_fraction == Decimal("0.5")
 
 
 def test_product_evidence_matches_merged_risk_report_drawdown_projection(tmp_path):

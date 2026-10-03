@@ -64,9 +64,12 @@ class ExecutionQuoteChainUnavailable(ExecutionQuoteChainError):
 def _build_execution_quote_chain_evidence_meta():
     """Build a metaclass whose seal state is not module/class mutable authority."""
 
-    sealed_classes: set[type] = set()
+    sealed_classes: dict[type, frozenset[str]] = {}
     protected_names = frozenset(
         {
+            "__dataclass_fields__",
+            "__init__",
+            "__post_init__",
             "assert_projection_issued",
             "submit_instruction_identity_bound",
             "provider_request_correlation_bound",
@@ -80,14 +83,20 @@ def _build_execution_quote_chain_evidence_meta():
 
     class _ExecutionQuoteChainEvidenceMeta(type):
         def __setattr__(cls, name: str, value: object) -> None:
-            if cls in sealed_classes and name in protected_names:
+            sealed_fields = sealed_classes.get(cls)
+            if sealed_fields is not None and (
+                name in protected_names or name in sealed_fields
+            ):
                 raise TypeError(
                     "quote-chain evidence authority surface is sealed: " + name
                 )
             super().__setattr__(name, value)
 
         def __delattr__(cls, name: str) -> None:
-            if cls in sealed_classes and name in protected_names:
+            sealed_fields = sealed_classes.get(cls)
+            if sealed_fields is not None and (
+                name in protected_names or name in sealed_fields
+            ):
                 raise TypeError(
                     "quote-chain evidence authority surface is sealed: " + name
                 )
@@ -95,7 +104,7 @@ def _build_execution_quote_chain_evidence_meta():
 
         @classmethod
         def seal(mcls, cls: type) -> None:
-            sealed_classes.add(cls)
+            sealed_classes[cls] = frozenset(cls.__dataclass_fields__)
 
     return _ExecutionQuoteChainEvidenceMeta
 
@@ -590,12 +599,96 @@ def build_execution_quote_chain_evidence(
 def _install_quote_chain_evidence_authority() -> None:
     """Keep the only issuance registry and mint path outside module globals."""
 
+    module_namespace = globals()
     canonical_evidence_type = ExecutionQuoteChainEvidence
+    canonical_evidence_init = ExecutionQuoteChainEvidence.__init__
+    canonical_evidence_init_code = canonical_evidence_init.__code__
+    canonical_evidence_post_init = ExecutionQuoteChainEvidence.__post_init__
+    canonical_evidence_post_init_code = canonical_evidence_post_init.__code__
     raw_builder = build_execution_quote_chain_evidence
+    raw_builder_code = raw_builder.__code__
     raw_to_dict = ExecutionQuoteChainEvidence.to_dict
+    raw_to_dict_code = raw_to_dict.__code__
     digest = _digest
+    unavailable_type = ExecutionQuoteChainUnavailable
     issued_lock = RLock()
     issued_snapshot = MappingProxyType({})
+
+    function_witnesses = (
+        (
+            "_read_canonical_verified_execution_view",
+            _read_canonical_verified_execution_view,
+            _read_canonical_verified_execution_view.__code__,
+        ),
+        (
+            "_require_canonical_verified_execution_view_dispatch",
+            _require_canonical_verified_execution_view_dispatch,
+            _require_canonical_verified_execution_view_dispatch.__code__,
+        ),
+        ("_digest", _digest, getattr(_digest, "__code__", None)),
+        ("_sha256_text", _sha256_text, getattr(_sha256_text, "__code__", None)),
+        ("_decimal_text", _decimal_text, getattr(_decimal_text, "__code__", None)),
+    )
+    identity_witnesses = (
+        ("RealExecutionLedger", _CANONICAL_REAL_EXECUTION_LEDGER),
+        ("_CANONICAL_REAL_EXECUTION_LEDGER", _CANONICAL_REAL_EXECUTION_LEDGER),
+        ("AttemptState", AttemptState),
+        ("_CANONICAL_VERIFIED_EXECUTION_VIEW", _CANONICAL_VERIFIED_EXECUTION_VIEW),
+        (
+            "_CANONICAL_VERIFIED_EXECUTION_VIEW_CODE",
+            _CANONICAL_VERIFIED_EXECUTION_VIEW_CODE,
+        ),
+        ("ExecutionQuoteChainError", ExecutionQuoteChainError),
+        ("ExecutionQuoteChainUnavailable", ExecutionQuoteChainUnavailable),
+    )
+    value_witnesses = (
+        ("SCHEMA_VERSION", SCHEMA_VERSION),
+        ("CHAIN_NOT_SUBMITTED", CHAIN_NOT_SUBMITTED),
+        ("CHAIN_SUBMISSION_UNKNOWN", CHAIN_SUBMISSION_UNKNOWN),
+        ("CHAIN_SUBMIT_INSTRUCTION_UNBOUND", CHAIN_SUBMIT_INSTRUCTION_UNBOUND),
+        ("CHAIN_SUBMIT_INSTRUCTION_BOUND", CHAIN_SUBMIT_INSTRUCTION_BOUND),
+        ("ACCEPTED_PRICE_NOT_APPLICABLE", ACCEPTED_PRICE_NOT_APPLICABLE),
+        (
+            "ACCEPTED_PRICE_ACKNOWLEDGED_UNVERIFIED",
+            ACCEPTED_PRICE_ACKNOWLEDGED_UNVERIFIED,
+        ),
+        ("ACCEPTED_PRICE_UNKNOWN", ACCEPTED_PRICE_UNKNOWN),
+    )
+
+    def _require_projection_dependency_authority() -> None:
+        if (
+            raw_builder.__code__ is not raw_builder_code
+            or raw_to_dict.__code__ is not raw_to_dict_code
+            or canonical_evidence_type.__dict__.get("__init__")
+            is not canonical_evidence_init
+            or canonical_evidence_init.__code__ is not canonical_evidence_init_code
+            or canonical_evidence_type.__dict__.get("__post_init__")
+            is not canonical_evidence_post_init
+            or canonical_evidence_post_init.__code__
+            is not canonical_evidence_post_init_code
+        ):
+            raise unavailable_type(
+                "quote-chain projection dependency authority is unavailable"
+            )
+        for name, expected, expected_code in function_witnesses:
+            current = module_namespace.get(name)
+            if (
+                current is not expected
+                or getattr(current, "__code__", None) is not expected_code
+            ):
+                raise unavailable_type(
+                    "quote-chain projection dependency authority is unavailable"
+                )
+        for name, expected in identity_witnesses:
+            if module_namespace.get(name) is not expected:
+                raise unavailable_type(
+                    "quote-chain projection dependency authority is unavailable"
+                )
+        for name, expected in value_witnesses:
+            if module_namespace.get(name) != expected:
+                raise unavailable_type(
+                    "quote-chain projection dependency authority is unavailable"
+                )
 
     def _lookup(
         evidence: ExecutionQuoteChainEvidence,
@@ -615,6 +708,7 @@ def _install_quote_chain_evidence_authority() -> None:
             raise ExecutionQuoteChainError(
                 "quote-chain evidence issuance is incomplete"
             )
+        _require_projection_dependency_authority()
         try:
             current = digest(
                 raw_to_dict(evidence, include_evidence_sha256=False)
@@ -623,6 +717,8 @@ def _install_quote_chain_evidence_authority() -> None:
             raise ExecutionQuoteChainError(
                 "quote-chain evidence is no longer canonical"
             ) from exc
+        finally:
+            _require_projection_dependency_authority()
         if (
             fingerprint != current
             or evidence._evidence_sha256 != current
@@ -681,17 +777,21 @@ def _install_quote_chain_evidence_authority() -> None:
         attempt_id: str,
     ) -> ExecutionQuoteChainEvidence:
         nonlocal issued_snapshot
-        if globals().get("ExecutionQuoteChainEvidence") is not canonical_evidence_type:
+        _require_projection_dependency_authority()
+        if module_namespace.get("ExecutionQuoteChainEvidence") is not canonical_evidence_type:
             raise ExecutionQuoteChainError(
                 "quote-chain evidence class authority is unavailable"
             )
-        evidence = raw_builder(
-            ledger,
-            plan_id=plan_id,
-            attempt_id=attempt_id,
-        )
+        try:
+            evidence = raw_builder(
+                ledger,
+                plan_id=plan_id,
+                attempt_id=attempt_id,
+            )
+        finally:
+            _require_projection_dependency_authority()
         if (
-            globals().get("ExecutionQuoteChainEvidence") is not canonical_evidence_type
+            module_namespace.get("ExecutionQuoteChainEvidence") is not canonical_evidence_type
             or type(evidence) is not canonical_evidence_type
         ):
             raise ExecutionQuoteChainError(
@@ -715,9 +815,13 @@ def _install_quote_chain_evidence_authority() -> None:
             updated[identity] = (reference, None)
             issued_snapshot = MappingProxyType(updated)
         try:
-            fingerprint = digest(
-                raw_to_dict(evidence, include_evidence_sha256=False)
-            )
+            _require_projection_dependency_authority()
+            try:
+                fingerprint = digest(
+                    raw_to_dict(evidence, include_evidence_sha256=False)
+                )
+            finally:
+                _require_projection_dependency_authority()
             object.__setattr__(evidence, "_evidence_sha256", fingerprint)
             with issued_lock:
                 current = issued_snapshot.get(identity)

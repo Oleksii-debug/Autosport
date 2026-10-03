@@ -252,6 +252,53 @@ class ReleasePackageInputSymlinkFenceTests(unittest.TestCase):
             self.assertFalse(staged.exists())
             self.assertFalse(paths["package"].exists())
 
+    def test_example_directory_entry_added_during_copy_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paths = self._make_inputs(root)
+            source = paths["example"] / "market.jsonl"
+            late = paths["example"] / "late-added.json"
+            real_read = release_package._read_regular_source_bytes
+            injected = False
+
+            def inject_then_read(
+                path: Path,
+                *,
+                label: str,
+                expected_snapshot: os.stat_result | None = None,
+            ) -> bytes:
+                nonlocal injected
+                if path == source and expected_snapshot is not None and not injected:
+                    late.write_text('{"late":true}\n', encoding="utf-8")
+                    injected = True
+                return real_read(
+                    path,
+                    label=label,
+                    expected_snapshot=expected_snapshot,
+                )
+
+            with patch.object(
+                release_package,
+                "_read_regular_source_bytes",
+                side_effect=inject_then_read,
+            ):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    r"release example tree directory changed during traversal: \.",
+                ):
+                    self._build(paths)
+
+            self.assertTrue(injected)
+            staged_late = (
+                root
+                / "Autosport-V1"
+                / "examples"
+                / paths["example"].name
+                / late.name
+            )
+            self.assertFalse(staged_late.exists())
+            self.assertFalse(paths["package"].exists())
+
     def test_example_root_swap_after_scandir_is_rejected_before_child_read(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

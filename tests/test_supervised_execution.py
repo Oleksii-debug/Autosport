@@ -532,6 +532,32 @@ def test_supervised_issuance_ledger_dispatch_rebinding_fails_before_hostile_code
         "reconcile_not_found",
     ),
 )
+def test_supervised_ledger_dispatch_in_place_code_replacement_fails_before_mutation(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    bound, approval, _, _ = _bound()
+    ledger = RealExecutionLedger(tmp_path / "ledger-dispatch-code-rebind.jsonl")
+
+    def hostile_current(*args, **kwargs):
+        raise AssertionError("hostile ledger code executed")
+
+    monkeypatch.setattr(
+        RealExecutionLedger.supervised_plan_issuance_is_current,
+        "__code__",
+        hostile_current.__code__,
+    )
+
+    with pytest.raises(
+        SupervisedExecutionError,
+        match="canonical real execution ledger authority changed",
+    ):
+        reserve_supervised_plan(ledger, bound, approval)
+
+    with pytest.raises(KeyError):
+        ledger.saga(bound.execution_plan.plan_id)
+
+
 def test_supervised_ledger_dispatch_surface_rebinding_fails_closed(
     method_name,
     monkeypatch,

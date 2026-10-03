@@ -913,51 +913,53 @@ def _canonical_supervised_issuance_ledger_dispatch(
     ledger: RealExecutionLedger,
     *,
     _ledger_type=RealExecutionLedger,
-    _surface=(
-        ("reserve_plan", RealExecutionLedger.reserve_plan),
-        ("saga", RealExecutionLedger.saga),
-        (
-            "_bind_supervised_plan_issuance",
-            RealExecutionLedger._bind_supervised_plan_issuance,
-        ),
-        (
-            "supervised_plan_issuance_is_current",
-            RealExecutionLedger.supervised_plan_issuance_is_current,
-        ),
-        ("bind_supervised_approval", RealExecutionLedger.bind_supervised_approval),
-        (
-            "supervised_approval_is_active",
-            RealExecutionLedger.supervised_approval_is_active,
-        ),
-        ("begin_attempt", RealExecutionLedger.begin_attempt),
-        (
-            "revoke_supervised_approval",
-            RealExecutionLedger.revoke_supervised_approval,
-        ),
-        (
-            "provider_order_reference",
-            RealExecutionLedger.provider_order_reference,
-        ),
-        (
-            "provider_evidence_binding",
-            RealExecutionLedger.provider_evidence_binding,
-        ),
-        ("acknowledge", RealExecutionLedger.acknowledge),
-        ("reconcile_found", RealExecutionLedger.reconcile_found),
-        ("bind_provider_evidence", RealExecutionLedger.bind_provider_evidence),
-        ("attempt_state", RealExecutionLedger.attempt_state),
-        ("reconcile_not_found", RealExecutionLedger.reconcile_not_found),
+    _surface=tuple(
+        (name, method, getattr(method, "__code__", None))
+        for name, method in (
+            ("reserve_plan", RealExecutionLedger.reserve_plan),
+            ("saga", RealExecutionLedger.saga),
+            (
+                "_bind_supervised_plan_issuance",
+                RealExecutionLedger._bind_supervised_plan_issuance,
+            ),
+            (
+                "supervised_plan_issuance_is_current",
+                RealExecutionLedger.supervised_plan_issuance_is_current,
+            ),
+            ("bind_supervised_approval", RealExecutionLedger.bind_supervised_approval),
+            (
+                "supervised_approval_is_active",
+                RealExecutionLedger.supervised_approval_is_active,
+            ),
+            ("begin_attempt", RealExecutionLedger.begin_attempt),
+            (
+                "revoke_supervised_approval",
+                RealExecutionLedger.revoke_supervised_approval,
+            ),
+            (
+                "provider_order_reference",
+                RealExecutionLedger.provider_order_reference,
+            ),
+            (
+                "provider_evidence_binding",
+                RealExecutionLedger.provider_evidence_binding,
+            ),
+            ("acknowledge", RealExecutionLedger.acknowledge),
+            ("reconcile_found", RealExecutionLedger.reconcile_found),
+            ("bind_provider_evidence", RealExecutionLedger.bind_provider_evidence),
+            ("attempt_state", RealExecutionLedger.attempt_state),
+            ("reconcile_not_found", RealExecutionLedger.reconcile_not_found),
+        )
     ),
 ):
     if RealExecutionLedger is not _ledger_type or type(ledger) is not _ledger_type:
         raise SupervisedExecutionError("canonical real execution ledger authority changed")
     bound = {}
-    for name, expected in _surface:
+    for name, expected, expected_code in _surface:
         current = vars(_ledger_type).get(name)
         if (
             current is not expected
-            or getattr(current, "__code__", None)
-            is not getattr(expected, "__code__", None)
+            or getattr(current, "__code__", None) is not expected_code
         ):
             raise SupervisedExecutionError(
                 "canonical real execution ledger authority changed"

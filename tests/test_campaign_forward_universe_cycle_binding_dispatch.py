@@ -454,6 +454,20 @@ def test_public_verifier_rejects_scope_constant_rebind_before_dispatch(
         )
 
 
+def test_positive_resolver_uses_captured_authority_issuer_not_live_class_lookup() -> None:
+    sealed = binding.resolve_campaign_forward_universe_cycle_authority
+    closure = {
+        name: cell.cell_contents
+        for name, cell in zip(sealed.__code__.co_freevars, sealed.__closure__ or ())
+    }
+    implementation = closure["expected_resolve"]
+
+    assert "_CANONICAL_AUTHORITY_ISSUER_FUNCTION" in implementation.__code__.co_names
+    assert "_CANONICAL_AUTHORITY_CLASS" in implementation.__code__.co_names
+    assert "_CANONICAL_AUTHORITY_ISSUANCE_CAPABILITY" in implementation.__code__.co_names
+    assert "_issue" not in implementation.__code__.co_names
+
+
 def test_authority_issuer_rebind_fails_before_hostile_execution(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

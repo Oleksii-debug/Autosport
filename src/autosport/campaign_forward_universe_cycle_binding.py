@@ -1125,8 +1125,9 @@ def resolve_campaign_forward_universe_cycle_authority(
         )
 
     require_stable_integrity()
-    return CampaignForwardUniverseCycleAuthority._issue(
-        _issuance_capability=_AUTHORITY_ISSUANCE_CAPABILITY,
+    return _CANONICAL_AUTHORITY_ISSUER_FUNCTION(
+        _CANONICAL_AUTHORITY_CLASS,
+        _issuance_capability=_CANONICAL_AUTHORITY_ISSUANCE_CAPABILITY,
         campaign_id=campaign.campaign_id,
         source_id=cycle_receipt.source_id,
         cycle_receipt_sha256=cycle_receipt.receipt_sha256,

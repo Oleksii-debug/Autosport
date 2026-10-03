@@ -297,7 +297,8 @@ class GitHubApi:
             raise CancellationError("GitHub API returned invalid JSON") from exc
 
     def _pull_request(self, pr_number: int) -> dict[str, object]:
-        pr_number = _require_positive_int(pr_number, field="pull request number")
+        if type(pr_number) is not int or pr_number <= 0:
+            raise CancellationError("invalid pull request number")
         payload = self._request(f"/pulls/{pr_number}")
         if not isinstance(payload, dict):
             raise CancellationError("invalid pull request response")

@@ -25,7 +25,9 @@ from .account_snapshot_acquisition import (
 )
 from .bookmaker_capability import BookmakerCapability
 from .economic_goal import EconomicGoalContractError
+from . import economic_goal_provenance as _economic_goal_provenance
 from .economic_goal_provenance import provenance_for
+from . import economic_goal_store as _economic_goal_store
 from .economic_goal_store import EconomicGoalStore
 from . import execution_capital_at_risk as _capital_risk
 from .execution_capital_at_risk import (
@@ -42,10 +44,12 @@ from .real_execution_ledger import (
     RealExecutionLedger,
     VerifiedExecutionPlanView,
 )
+from . import supervised_execution as _supervised_execution
 from .supervised_execution import (
     BoundSupervisedExecutionPlan,
     SupervisedExecutionError,
 )
+from . import workspace_lock as _workspace_lock
 from .workspace_lock import WorkspaceEconomicLock
 
 
@@ -71,6 +75,37 @@ _RESOLVE_CAPITAL_AT_RISK_CODE = getattr(_RESOLVE_CAPITAL_AT_RISK, "__code__", No
 _ASSERT_CAPITAL_ISSUED_CURRENT = ExecutionCapitalAtRiskEvidence.assert_issued_current
 _ASSERT_CAPITAL_ISSUED_CURRENT_CODE = getattr(
     _ASSERT_CAPITAL_ISSUED_CURRENT,
+    "__code__",
+    None,
+)
+_ECONOMIC_GOAL_STORE_TYPE = EconomicGoalStore
+_ECONOMIC_GOAL_STORE_INIT = EconomicGoalStore.__init__
+_ECONOMIC_GOAL_STORE_INIT_CODE = getattr(_ECONOMIC_GOAL_STORE_INIT, "__code__", None)
+_ECONOMIC_GOAL_STORE_LOAD = EconomicGoalStore.load
+_ECONOMIC_GOAL_STORE_LOAD_CODE = getattr(_ECONOMIC_GOAL_STORE_LOAD, "__code__", None)
+_ECONOMIC_GOAL_PROVENANCE_FOR = provenance_for
+_ECONOMIC_GOAL_PROVENANCE_FOR_CODE = getattr(
+    _ECONOMIC_GOAL_PROVENANCE_FOR,
+    "__code__",
+    None,
+)
+_BOUND_SUPERVISED_PLAN_TYPE = BoundSupervisedExecutionPlan
+_BOUND_SUPERVISED_PLAN_VERIFY = BoundSupervisedExecutionPlan.verify_binding
+_BOUND_SUPERVISED_PLAN_VERIFY_CODE = getattr(
+    _BOUND_SUPERVISED_PLAN_VERIFY,
+    "__code__",
+    None,
+)
+_WORKSPACE_ECONOMIC_LOCK_TYPE = WorkspaceEconomicLock
+_WORKSPACE_ECONOMIC_LOCK_ENTER = WorkspaceEconomicLock.__enter__
+_WORKSPACE_ECONOMIC_LOCK_ENTER_CODE = getattr(
+    _WORKSPACE_ECONOMIC_LOCK_ENTER,
+    "__code__",
+    None,
+)
+_WORKSPACE_ECONOMIC_LOCK_EXIT = WorkspaceEconomicLock.__exit__
+_WORKSPACE_ECONOMIC_LOCK_EXIT_CODE = getattr(
+    _WORKSPACE_ECONOMIC_LOCK_EXIT,
     "__code__",
     None,
 )
@@ -114,6 +149,82 @@ def _canonical_capital_risk_dispatch(
             "canonical capital-at-risk headroom authority changed"
         )
     return _resolve, _assert_current
+
+
+def _canonical_denomination_dispatch(
+    *,
+    _store_type=_ECONOMIC_GOAL_STORE_TYPE,
+    _store_init=_ECONOMIC_GOAL_STORE_INIT,
+    _store_init_code=_ECONOMIC_GOAL_STORE_INIT_CODE,
+    _store_load=_ECONOMIC_GOAL_STORE_LOAD,
+    _store_load_code=_ECONOMIC_GOAL_STORE_LOAD_CODE,
+    _provenance=_ECONOMIC_GOAL_PROVENANCE_FOR,
+    _provenance_code=_ECONOMIC_GOAL_PROVENANCE_FOR_CODE,
+    _bound_type=_BOUND_SUPERVISED_PLAN_TYPE,
+    _bound_verify=_BOUND_SUPERVISED_PLAN_VERIFY,
+    _bound_verify_code=_BOUND_SUPERVISED_PLAN_VERIFY_CODE,
+    _lock_type=_WORKSPACE_ECONOMIC_LOCK_TYPE,
+    _lock_enter=_WORKSPACE_ECONOMIC_LOCK_ENTER,
+    _lock_enter_code=_WORKSPACE_ECONOMIC_LOCK_ENTER_CODE,
+    _lock_exit=_WORKSPACE_ECONOMIC_LOCK_EXIT,
+    _lock_exit_code=_WORKSPACE_ECONOMIC_LOCK_EXIT_CODE,
+):
+    live_store_type = getattr(_economic_goal_store, "EconomicGoalStore", None)
+    live_store_init = (
+        vars(live_store_type).get("__init__") if live_store_type is _store_type else None
+    )
+    live_store_load = (
+        vars(live_store_type).get("load") if live_store_type is _store_type else None
+    )
+    live_bound_type = getattr(
+        _supervised_execution,
+        "BoundSupervisedExecutionPlan",
+        None,
+    )
+    live_bound_verify = (
+        vars(live_bound_type).get("verify_binding")
+        if live_bound_type is _bound_type
+        else None
+    )
+    live_lock_type = getattr(_workspace_lock, "WorkspaceEconomicLock", None)
+    live_lock_enter = (
+        vars(live_lock_type).get("__enter__") if live_lock_type is _lock_type else None
+    )
+    live_lock_exit = (
+        vars(live_lock_type).get("__exit__") if live_lock_type is _lock_type else None
+    )
+    if (
+        live_store_type is not _store_type
+        or globals().get("EconomicGoalStore") is not _store_type
+        or live_store_init is not _store_init
+        or getattr(_store_init, "__code__", None) is not _store_init_code
+        or live_store_load is not _store_load
+        or getattr(_store_load, "__code__", None) is not _store_load_code
+        or getattr(_economic_goal_provenance, "provenance_for", None) is not _provenance
+        or globals().get("provenance_for") is not _provenance
+        or getattr(_provenance, "__code__", None) is not _provenance_code
+        or live_bound_type is not _bound_type
+        or globals().get("BoundSupervisedExecutionPlan") is not _bound_type
+        or live_bound_verify is not _bound_verify
+        or getattr(_bound_verify, "__code__", None) is not _bound_verify_code
+        or live_lock_type is not _lock_type
+        or globals().get("WorkspaceEconomicLock") is not _lock_type
+        or live_lock_enter is not _lock_enter
+        or getattr(_lock_enter, "__code__", None) is not _lock_enter_code
+        or live_lock_exit is not _lock_exit
+        or getattr(_lock_exit, "__code__", None) is not _lock_exit_code
+    ):
+        raise ProviderAccountHeadroomError(
+            "canonical monetary denomination authority changed"
+        )
+    return (
+        _store_type,
+        _store_load,
+        _provenance,
+        _bound_type,
+        _bound_verify,
+        _lock_type,
+    )
 
 
 def _canonical_account_snapshot_authority(
@@ -762,18 +873,19 @@ def _require_live_balance(
 def _validated_bound_plan_map(
     bound_plans: tuple[BoundSupervisedExecutionPlan, ...],
 ) -> dict[str, BoundSupervisedExecutionPlan]:
+    _, _, _, bound_type, verify_binding, _ = _canonical_denomination_dispatch()
     if type(bound_plans) is not tuple or not bound_plans:
         raise ProviderAccountHeadroomUnsupported(
             "exact bound supervised execution plans are required for monetary denomination"
         )
     result: dict[str, BoundSupervisedExecutionPlan] = {}
     for bound in bound_plans:
-        if type(bound) is not BoundSupervisedExecutionPlan:
+        if type(bound) is not bound_type:
             raise ProviderAccountHeadroomUnsupported(
                 "denomination coverage must contain exact BoundSupervisedExecutionPlan values"
             )
         try:
-            bound.verify_binding()
+            verify_binding(bound)
         except SupervisedExecutionError as exc:
             raise ProviderAccountHeadroomUnsupported(
                 "bound supervised execution plan failed canonical binding verification"
@@ -792,11 +904,14 @@ def _current_economic_goal_denomination(
     *,
     provider_currency: str,
 ) -> str:
+    store_type, store_load, derive_provenance, _, _, _ = (
+        _canonical_denomination_dispatch()
+    )
     workspace = ledger.path.resolve(strict=False).parent
-    store = EconomicGoalStore(workspace)
+    store = store_type(workspace)
     try:
-        goal = store.load()
-        goal_sha256 = provenance_for(goal).contract_sha256
+        goal = store_load(store)
+        goal_sha256 = derive_provenance(goal).contract_sha256
     except EconomicGoalContractError as exc:
         raise ProviderAccountHeadroomUnsupported(
             "durable economic-goal denomination authority is unavailable"
@@ -819,8 +934,13 @@ def _require_plan_denomination(
         raise ProviderAccountHeadroomUnsupported(
             "relevant execution plan lacks exact supervised denomination binding"
         )
+    _, _, _, bound_type, verify_binding, _ = _canonical_denomination_dispatch()
+    if type(bound) is not bound_type:
+        raise ProviderAccountHeadroomUnsupported(
+            "relevant denomination binding is not canonical"
+        )
     try:
-        bound.verify_binding()
+        verify_binding(bound)
     except SupervisedExecutionError as exc:
         raise ProviderAccountHeadroomUnsupported(
             "relevant supervised plan binding is no longer canonical"
@@ -991,7 +1111,7 @@ def assess_provider_account_headroom(
     bound_by_plan_id = _validated_bound_plan_map(bound_plans)
     workspace = ledger.path.resolve(strict=False).parent
 
-    with WorkspaceEconomicLock(workspace):
+    with _canonical_denomination_dispatch()[-1](workspace):
         economic_goal_contract_sha256 = _current_economic_goal_denomination(
             ledger,
             provider_currency=currency,
@@ -1189,7 +1309,7 @@ def reserve_observed_provider_headroom(
             )
         bound_by_plan_id = _validated_bound_plan_map(bound_plans)
         workspace = ledger.path.resolve(strict=False).parent
-        with WorkspaceEconomicLock(workspace):
+        with _canonical_denomination_dispatch()[-1](workspace):
             current_goal_sha256 = _current_economic_goal_denomination(
                 ledger,
                 provider_currency=current_currency,

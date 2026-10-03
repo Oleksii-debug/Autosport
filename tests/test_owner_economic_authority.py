@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -49,6 +50,38 @@ def test_owner_authority_absent_contract_can_be_confirmed_once_and_read_back_aft
     assert restarted.lines_uk == persisted.lines_uk
 
 
+def test_all_canonical_risk_ceilings_are_explicit_and_survive_restart(
+    tmp_path: Path,
+) -> None:
+    values = _values(
+        max_event_concentration_fraction="0.11",
+        max_market_concentration_fraction="0.22",
+        max_provider_concentration_fraction="0.33",
+        max_sport_concentration_fraction="0.44",
+        max_turnover_fraction="0.55",
+        max_execution_slippage_fraction="0.006",
+    )
+
+    parsed = build_initial_owner_contract(values, emergency_stop=False)
+    assert parsed.max_event_concentration_fraction == Decimal("0.11")
+    assert parsed.max_market_concentration_fraction == Decimal("0.22")
+    assert parsed.max_provider_concentration_fraction == Decimal("0.33")
+    assert parsed.max_sport_concentration_fraction == Decimal("0.44")
+    assert parsed.max_turnover_fraction == Decimal("0.55")
+    assert parsed.max_execution_slippage_fraction == Decimal("0.006")
+
+    persisted = OwnerEconomicAuthorityService(tmp_path).initialize_from_form(
+        values,
+        emergency_stop=False,
+        confirmed=True,
+    )
+    assert persisted.contract == parsed
+    restarted = OwnerEconomicAuthorityService(tmp_path).read_view()
+    assert restarted.state == "valid"
+    assert restarted.contract == parsed
+    assert restarted.lines_uk == persisted.lines_uk
+
+
 def test_confirmation_cancel_never_creates_a_contract(tmp_path: Path) -> None:
     service = OwnerEconomicAuthorityService(tmp_path)
 
@@ -80,6 +113,12 @@ def test_initial_form_rejects_unexpected_keys_without_silently_discarding_them(
     (
         ("max_stake_fraction", "NaN"),
         ("max_day_loss_fraction", "Infinity"),
+        ("max_event_concentration_fraction", "NaN"),
+        ("max_market_concentration_fraction", "Infinity"),
+        ("max_provider_concentration_fraction", "-Infinity"),
+        ("max_sport_concentration_fraction", "1e0"),
+        ("max_turnover_fraction", "NaN"),
+        ("max_execution_slippage_fraction", "1e-2"),
         ("max_quote_age_seconds", "1e2"),
         ("max_concurrent_positions", "0"),
     ),

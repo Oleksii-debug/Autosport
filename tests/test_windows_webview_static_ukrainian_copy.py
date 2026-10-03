@@ -90,3 +90,17 @@ def test_static_copy_preserves_machine_identity_exceptions() -> None:
     assert "WebView2" in copy
     assert "NVDA" in copy
     assert "NVDA_VERIFIED" in copy
+
+
+def test_owner_form_exposes_all_canonical_risk_ceiling_fields() -> None:
+    html = _HTML.read_text(encoding="utf-8")
+    fields = (
+        "max_event_concentration_fraction",
+        "max_market_concentration_fraction",
+        "max_provider_concentration_fraction",
+        "max_sport_concentration_fraction",
+        "max_turnover_fraction",
+        "max_execution_slippage_fraction",
+    )
+    for field in fields:
+        assert f'data-owner-field="{field}"' in html

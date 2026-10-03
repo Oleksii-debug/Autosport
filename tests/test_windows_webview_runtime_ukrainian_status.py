@@ -32,6 +32,31 @@ class _QueuedProductWorker:
         return True
 
 
+def _runtime_status(
+    *,
+    cycles_completed: int,
+    provider_unavailable: bool = False,
+    source_last_success_at: str | None = None,
+    source_gap_state: str | None = None,
+    source_sync_state: str | None = None,
+    source_state_projection_backlog: bool = False,
+    invalidation_pending_count: int = 0,
+    invalidation_full_refresh_required: bool = False,
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        session_id="session-1",
+        source_id="source-1",
+        cycles_completed=cycles_completed,
+        source_provider_unavailable=provider_unavailable,
+        source_last_success_at=source_last_success_at,
+        source_gap_state=source_gap_state,
+        source_sync_state=source_sync_state,
+        source_state_projection_backlog=source_state_projection_backlog,
+        invalidation_pending_count=invalidation_pending_count,
+        invalidation_full_refresh_required=invalidation_full_refresh_required,
+    )
+
+
 def _controller(tmp_path: Path, message: object) -> AutosportWebController:
     controller = AutosportWebController.__new__(AutosportWebController)
     controller._lock = threading.RLock()
@@ -65,11 +90,7 @@ def test_started_runtime_status_uses_ukrainian_operator_copy(tmp_path: Path) -> 
         tmp_path,
         SimpleNamespace(
             kind="STARTED",
-            status=SimpleNamespace(
-                session_id="session-1",
-                source_id="source-1",
-                cycles_completed=0,
-            ),
+            status=_runtime_status(cycles_completed=0),
             tick=None,
             stop_reason=None,
             error_type=None,
@@ -116,11 +137,7 @@ def test_stopped_runtime_status_uses_ukrainian_operator_copy(tmp_path: Path) -> 
         tmp_path,
         SimpleNamespace(
             kind="STOPPED",
-            status=SimpleNamespace(
-                session_id="session-1",
-                source_id="source-1",
-                cycles_completed=3,
-            ),
+            status=_runtime_status(cycles_completed=3),
             tick=None,
             stop_reason="operator_stop",
             error_type=None,
@@ -158,11 +175,7 @@ def test_runtime_identity_projection_comes_from_canonical_started_status(
         tmp_path,
         SimpleNamespace(
             kind="STARTED",
-            status=SimpleNamespace(
-                session_id="session-1",
-                source_id="source-1",
-                cycles_completed=0,
-            ),
+            status=_runtime_status(cycles_completed=0),
             tick=None,
             stop_reason=None,
             error_type=None,
@@ -185,11 +198,7 @@ def test_runtime_identity_drift_quarantines_workspace_and_requests_stop(
         tmp_path,
         SimpleNamespace(
             kind="STARTED",
-            status=SimpleNamespace(
-                session_id="session-1",
-                source_id="source-1",
-                cycles_completed=0,
-            ),
+            status=_runtime_status(cycles_completed=0),
             tick=None,
             stop_reason=None,
             error_type=None,
@@ -385,3 +394,55 @@ def test_runtime_source_truth_is_keyboard_readable_in_semantic_shell() -> None:
 
     assert "productRuntime.source_status" in javascript
     assert "productRuntime.source_last_success_at" in javascript
+
+
+def test_started_runtime_reprojects_durable_source_truth_before_first_new_tick(
+    tmp_path: Path,
+) -> None:
+    controller = _controller(
+        tmp_path,
+        SimpleNamespace(
+            kind="STARTED",
+            status=_runtime_status(
+                cycles_completed=4,
+                provider_unavailable=True,
+                source_last_success_at="2026-10-03T07:59:00+00:00",
+                source_gap_state=GapState.DETECTED.value,
+                source_sync_state=SyncState.GAP_DETECTED.value,
+            ),
+            tick=None,
+            stop_reason=None,
+            error_type=None,
+        ),
+    )
+
+    controller._poll_workers()
+    projection = controller._product_runtime_source_projection()
+
+    assert projection["provider_unavailable"] is True
+    assert projection["attention_required"] is True
+    assert projection["last_success_at"] == "2026-10-03T07:59:00+00:00"
+    assert "недоступ" in projection["status"].casefold()
+
+
+def test_started_runtime_without_prior_source_observation_remains_unknown(
+    tmp_path: Path,
+) -> None:
+    controller = _controller(
+        tmp_path,
+        SimpleNamespace(
+            kind="STARTED",
+            status=_runtime_status(cycles_completed=0),
+            tick=None,
+            stop_reason=None,
+            error_type=None,
+        ),
+    )
+
+    controller._poll_workers()
+    projection = controller._product_runtime_source_projection()
+
+    assert projection["provider_unavailable"] is False
+    assert projection["attention_required"] is None
+    assert projection["last_success_at"] == ""
+    assert "ще не підтверджено" in projection["status"].casefold()

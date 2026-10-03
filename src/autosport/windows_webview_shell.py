@@ -627,18 +627,16 @@ class AutosportWebController:
             or "",
         }
 
-    def _project_product_runtime_source_tick(self, tick: object) -> bool:
-        try:
-            provider_unavailable = tick.source_provider_unavailable
-            gap_states = tick.source_gap_states
-            sync_states = tick.source_sync_states
-            full_refresh_required = tick.full_refresh_required
-            invalidation_backlog = tick.invalidation_backlog
-            last_success_at = tick.last_success_at
-        except AttributeError:
-            self._quarantine_product_runtime_truth(Path(self._active_workspace))
-            return False
-
+    def _apply_product_runtime_source_projection(
+        self,
+        *,
+        provider_unavailable: object,
+        gap_states: object,
+        sync_states: object,
+        full_refresh_required: object,
+        invalidation_backlog: object,
+        last_success_at: object,
+    ) -> bool:
         if (
             type(provider_unavailable) is not bool
             or type(gap_states) is not tuple
@@ -678,6 +676,14 @@ class AutosportWebController:
             }
             for value in canonical_sync_states
         )
+        has_observation = bool(
+            provider_unavailable
+            or canonical_gap_states
+            or canonical_sync_states
+            or full_refresh_required
+            or invalidation_backlog
+            or last_success_at is not None
+        )
         attention_required = bool(
             provider_unavailable
             or gap_attention
@@ -687,7 +693,9 @@ class AutosportWebController:
         )
 
         self._product_runtime_source_provider_unavailable = provider_unavailable
-        self._product_runtime_source_attention_required = attention_required
+        self._product_runtime_source_attention_required = (
+            attention_required if has_observation else None
+        )
         self._product_runtime_source_last_success_at = last_success_at
 
         if provider_unavailable:
@@ -700,12 +708,68 @@ class AutosportWebController:
                 "Останній канонічний цикл має прогалину, повторну синхронізацію "
                 "або чергу оновлення. Дані потребують уваги."
             )
+        elif not has_observation:
+            self.product_runtime_source_status = (
+                "Стан зовнішнього джерела ще не підтверджено канонічним циклом."
+            )
         else:
             self.product_runtime_source_status = (
                 "Останній канонічний цикл не повідомляє про недоступність, "
                 "невирішену прогалину або чергу оновлення."
             )
         return True
+
+    def _project_product_runtime_source_tick(self, tick: object) -> bool:
+        try:
+            return self._apply_product_runtime_source_projection(
+                provider_unavailable=tick.source_provider_unavailable,
+                gap_states=tick.source_gap_states,
+                sync_states=tick.source_sync_states,
+                full_refresh_required=tick.full_refresh_required,
+                invalidation_backlog=tick.invalidation_backlog,
+                last_success_at=tick.last_success_at,
+            )
+        except AttributeError:
+            self._quarantine_product_runtime_truth(Path(self._active_workspace))
+            return False
+
+    def _project_product_runtime_source_status(self, status: object) -> bool:
+        try:
+            provider_unavailable = status.source_provider_unavailable
+            source_gap_state = status.source_gap_state
+            source_sync_state = status.source_sync_state
+            projection_backlog = status.source_state_projection_backlog
+            invalidation_pending_count = status.invalidation_pending_count
+            full_refresh_required = status.invalidation_full_refresh_required
+            last_success_at = status.source_last_success_at
+        except AttributeError:
+            self._quarantine_product_runtime_truth(Path(self._active_workspace))
+            return False
+
+        if (
+            type(projection_backlog) is not bool
+            or isinstance(invalidation_pending_count, bool)
+            or not isinstance(invalidation_pending_count, int)
+            or invalidation_pending_count < 0
+            or (source_gap_state is None) != (source_sync_state is None)
+        ):
+            self._quarantine_product_runtime_truth(Path(self._active_workspace))
+            return False
+
+        gap_states = () if source_gap_state is None else (source_gap_state,)
+        sync_states = () if source_sync_state is None else (source_sync_state,)
+        return self._apply_product_runtime_source_projection(
+            provider_unavailable=provider_unavailable,
+            gap_states=gap_states,
+            sync_states=sync_states,
+            full_refresh_required=full_refresh_required,
+            invalidation_backlog=bool(
+                projection_backlog
+                or invalidation_pending_count > 0
+                or full_refresh_required
+            ),
+            last_success_at=last_success_at,
+        )
 
     def _refresh_economic_projection(self) -> None:
         strategy_id = self.strategy_id
@@ -906,6 +970,10 @@ class AutosportWebController:
                     source_id=product_message.status.source_id,
                 ):
                     continue
+                if not self._project_product_runtime_source_status(
+                    product_message.status
+                ):
+                    continue
                 self.product_runtime_status = (
                     "Тривалий імітаційний режим активний: "
                     f"джерело {product_message.status.source_id}; "
@@ -933,6 +1001,10 @@ class AutosportWebController:
                     workspace=Path(self._active_workspace),
                     session_id=product_message.status.session_id,
                     source_id=product_message.status.source_id,
+                ):
+                    continue
+                if not self._project_product_runtime_source_status(
+                    product_message.status
                 ):
                     continue
                 reason = {

@@ -720,6 +720,35 @@ def _explicit_singleton_pr_for_current_run(
     )
 
 
+def _validated_event_pr_identity(
+    pr_number: int,
+    *,
+    reference_mode: str,
+) -> tuple[int | None, bool]:
+    """Preserve event-level empty vs multi-reference identity without collapsing them.
+
+    A workflow_run event that carried multiple PR references is permanently ambiguous
+    for cancellation of that exact triggering source run. A later Actions snapshot may
+    be used to recover a singleton only when the event carried no PR reference at all;
+    it must never erase positive evidence that the event was multi-reference.
+    """
+
+    if type(pr_number) is not int or pr_number < 0:
+        raise CancellationError("pull request number cannot be negative")
+    if reference_mode == "singleton":
+        return (
+            _require_positive_int(pr_number, field="pull request number"),
+            False,
+        )
+    if reference_mode not in ("empty", "ambiguous"):
+        raise CancellationError("invalid event pull request reference mode")
+    if pr_number != 0:
+        raise CancellationError(
+            "non-singleton event pull request mode requires zero pull request number"
+        )
+    return None, reference_mode == "ambiguous"
+
+
 def cancel_superseded_explicit_pr_runs(
     api: WorkflowScopedGitHubApi,
     *,
@@ -859,6 +888,11 @@ def _cancel_triggering_run_if_stale_or_nonqualifying(
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--pr-number", type=int, required=True)
+    parser.add_argument(
+        "--event-pr-reference-mode",
+        choices=("empty", "singleton", "ambiguous"),
+        required=True,
+    )
     parser.add_argument("--event-head-sha", required=True)
     parser.add_argument("--workflow-name", required=True)
     parser.add_argument("--workflow-id", type=int, required=True)
@@ -876,22 +910,18 @@ def main(argv: list[str] | None = None) -> int:
             args.current_run_id,
             field="current run id",
         )
-        if args.pr_number < 0:
-            raise CancellationError("pull request number cannot be negative")
+        trigger_pr_number, event_identity_ambiguous = _validated_event_pr_identity(
+            args.pr_number,
+            reference_mode=args.event_pr_reference_mode,
+        )
 
         # The triggering event's explicit singleton PR is retained only for the
         # separately boundary-revalidated triggering-source-run decision after the
-        # workflow-wide sweep. A zero value means the event did not carry one
-        # unambiguous PR identity; that must not block cleanup for every other explicit
-        # PR in the exact source workflow. Missing-reference source runs are handled
-        # uniformly by the existing workflow-wide orphan resolver after the shared
-        # active-run scan, so trigger-specific pre-recovery is unnecessary.
-        trigger_pr_number: int | None = None
-        if args.pr_number > 0:
-            trigger_pr_number = _require_positive_int(
-                args.pr_number,
-                field="pull request number",
-            )
+        # workflow-wide sweep. Empty and multi-reference event identity are deliberately
+        # distinct: an empty event may recover one same-run/same-head singleton from the
+        # exact Actions snapshot, while a multi-reference event permanently withholds
+        # single-PR cancellation authority for that triggering source run. Neither case
+        # blocks cleanup for independent explicit PR groups in the source workflow.
 
         # One exact-workflow snapshot now reconciles every explicit singleton PR group.
         # If the trigger event itself carried no unambiguous PR identity, retain this
@@ -900,7 +930,7 @@ def main(argv: list[str] | None = None) -> int:
         # race without granting identity from scheduler state or historical heuristics.
         sweep_runs: tuple[WorkflowRun, ...] | None = None
         snapshot_trigger_pr_number: int | None = None
-        if trigger_pr_number is None:
+        if trigger_pr_number is None and not event_identity_ambiguous:
             sweep_runs = api.active_runs()
             snapshot_trigger_pr_number = _explicit_singleton_pr_for_current_run(
                 sweep_runs,
@@ -926,7 +956,7 @@ def main(argv: list[str] | None = None) -> int:
         # singleton snapshot uses the ordinary trigger boundary below instead.
         orphan_excluded_run_ids = (
             (current_run_id, *sweep_cancelled)
-            if trigger_pr_number is not None
+            if trigger_pr_number is not None or event_identity_ambiguous
             else sweep_cancelled
         )
         orphan_cancelled = api.cancel_historical_unbound_runs(

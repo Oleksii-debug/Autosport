@@ -46,7 +46,7 @@ jobs:
           ref: ${{ github.sha }}
           fetch-depth: 1
           persist-credentials: false
-      - name: Cancel obsolete-head runs for this PR and workflow
+      - name: Reconcile obsolete runs across this source workflow
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: >-

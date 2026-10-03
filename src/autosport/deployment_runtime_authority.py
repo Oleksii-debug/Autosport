@@ -47,6 +47,17 @@ _CANONICAL_RLOCK_FACTORY: Final = RLock
 _CANONICAL_WORKSPACE_ECONOMIC_LOCK_TYPE: Final = WorkspaceEconomicLock
 _CANONICAL_MONOTONIC_AUTHORITY_INIT: Final = MonotonicWorkspaceAuthority.__init__
 _CANONICAL_OBJECT_NEW: Final = object.__new__
+_CANONICAL_HASHLIB_MODULE: Final = hashlib
+_CANONICAL_HASHLIB_SHA256: Final = hashlib.sha256
+_CANONICAL_HASHLIB_SHA256_CODE: Final = getattr(hashlib.sha256, "__code__", None)
+_CANONICAL_JSON_MODULE: Final = json
+_CANONICAL_JSON_DUMPS: Final = json.dumps
+_CANONICAL_JSON_DUMPS_CODE: Final = getattr(json.dumps, "__code__", None)
+_CANONICAL_JSON_LOADS: Final = json.loads
+_CANONICAL_JSON_LOADS_CODE: Final = getattr(json.loads, "__code__", None)
+_CANONICAL_UUID_MODULE: Final = uuid
+_CANONICAL_UUID4: Final = uuid.uuid4
+_CANONICAL_UUID4_CODE: Final = getattr(uuid.uuid4, "__code__", None)
 _MISSING_AUTHORITY_CLASS_SLOT: Final = object()
 _CANONICAL_MONOTONIC_AUTHORITY_CLASS_SURFACE: Final = tuple(
     (
@@ -186,8 +197,20 @@ def _utc_now_timestamp() -> str:
 
 
 def _canonical_json(value: object) -> str:
+    if (
+        json is not _CANONICAL_JSON_MODULE
+        or _CANONICAL_JSON_MODULE.dumps is not _CANONICAL_JSON_DUMPS
+        or (
+            _CANONICAL_JSON_DUMPS_CODE is not None
+            and getattr(_CANONICAL_JSON_DUMPS, "__code__", None)
+            is not _CANONICAL_JSON_DUMPS_CODE
+        )
+    ):
+        raise DeploymentRuntimeAuthorityError(
+            "runtime authority JSON serialization dispatch was replaced"
+        )
     try:
-        return json.dumps(
+        return _CANONICAL_JSON_DUMPS(
             value,
             ensure_ascii=False,
             sort_keys=True,
@@ -198,8 +221,28 @@ def _canonical_json(value: object) -> str:
         raise DeploymentRuntimeAuthorityError("runtime authority is not canonical JSON") from exc
 
 
+_CANONICAL_JSON_ENCODER: Final = _canonical_json
+_CANONICAL_JSON_ENCODER_CODE: Final = _canonical_json.__code__
+
+
 def _digest(value: object) -> str:
-    return hashlib.sha256(_canonical_json(value).encode("utf-8")).hexdigest()
+    if (
+        hashlib is not _CANONICAL_HASHLIB_MODULE
+        or _CANONICAL_HASHLIB_MODULE.sha256 is not _CANONICAL_HASHLIB_SHA256
+        or (
+            _CANONICAL_HASHLIB_SHA256_CODE is not None
+            and getattr(_CANONICAL_HASHLIB_SHA256, "__code__", None)
+            is not _CANONICAL_HASHLIB_SHA256_CODE
+        )
+        or _canonical_json is not _CANONICAL_JSON_ENCODER
+        or _CANONICAL_JSON_ENCODER.__code__ is not _CANONICAL_JSON_ENCODER_CODE
+    ):
+        raise DeploymentRuntimeAuthorityError(
+            "runtime authority digest dispatch was replaced"
+        )
+    return _CANONICAL_HASHLIB_SHA256(
+        _CANONICAL_JSON_ENCODER(value).encode("utf-8")
+    ).hexdigest()
 
 
 def _fsync_directory(path: Path) -> None:
@@ -804,13 +847,39 @@ class DeploymentRuntimeAuthorityStore:
 
     @staticmethod
     def _state_sha256(payload: Mapping[str, object]) -> str:
-        return hashlib.sha256(
-            (_canonical_json(payload) + "\n").encode("utf-8")
+        if (
+            hashlib is not _CANONICAL_HASHLIB_MODULE
+            or _CANONICAL_HASHLIB_MODULE.sha256 is not _CANONICAL_HASHLIB_SHA256
+            or (
+                _CANONICAL_HASHLIB_SHA256_CODE is not None
+                and getattr(_CANONICAL_HASHLIB_SHA256, "__code__", None)
+                is not _CANONICAL_HASHLIB_SHA256_CODE
+            )
+            or _canonical_json is not _CANONICAL_JSON_ENCODER
+            or _CANONICAL_JSON_ENCODER.__code__ is not _CANONICAL_JSON_ENCODER_CODE
+        ):
+            raise DeploymentRuntimeAuthorityError(
+                "runtime authority state-digest dispatch was replaced"
+            )
+        return _CANONICAL_HASHLIB_SHA256(
+            (_CANONICAL_JSON_ENCODER(payload) + "\n").encode("utf-8")
         ).hexdigest()
 
     @staticmethod
     def _new_transaction_id() -> str:
-        return f"deployment-runtime-{uuid.uuid4().hex}"
+        if (
+            uuid is not _CANONICAL_UUID_MODULE
+            or _CANONICAL_UUID_MODULE.uuid4 is not _CANONICAL_UUID4
+            or (
+                _CANONICAL_UUID4_CODE is not None
+                and getattr(_CANONICAL_UUID4, "__code__", None)
+                is not _CANONICAL_UUID4_CODE
+            )
+        ):
+            raise DeploymentRuntimeAuthorityError(
+                "runtime authority transaction-id dispatch was replaced"
+            )
+        return f"deployment-runtime-{_CANONICAL_UUID4().hex}"
 
     def _read_payload(self) -> dict[str, object]:
         try:
@@ -828,8 +897,22 @@ class DeploymentRuntimeAuthorityStore:
             raise DeploymentRuntimeAuthorityError(
                 "runtime authority store is not canonical text"
             )
+        if (
+            json is not _CANONICAL_JSON_MODULE
+            or _CANONICAL_JSON_MODULE.loads is not _CANONICAL_JSON_LOADS
+            or (
+                _CANONICAL_JSON_LOADS_CODE is not None
+                and getattr(_CANONICAL_JSON_LOADS, "__code__", None)
+                is not _CANONICAL_JSON_LOADS_CODE
+            )
+            or _canonical_json is not _CANONICAL_JSON_ENCODER
+            or _CANONICAL_JSON_ENCODER.__code__ is not _CANONICAL_JSON_ENCODER_CODE
+        ):
+            raise DeploymentRuntimeAuthorityError(
+                "runtime authority JSON parsing dispatch was replaced"
+            )
         try:
-            payload = json.loads(raw)
+            payload = _CANONICAL_JSON_LOADS(raw)
         except json.JSONDecodeError as exc:
             raise DeploymentRuntimeAuthorityError(
                 "runtime authority store is not valid JSON"
@@ -849,7 +932,7 @@ class DeploymentRuntimeAuthorityStore:
             raise DeploymentRuntimeAuthorityError(
                 "unsupported runtime authority store schema"
             )
-        if _canonical_json(payload) + "\n" != raw:
+        if _CANONICAL_JSON_ENCODER(payload) + "\n" != raw:
             raise DeploymentRuntimeAuthorityError(
                 "runtime authority store is not canonical JSON"
             )

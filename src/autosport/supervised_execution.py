@@ -379,93 +379,6 @@ def _bound_plan_witness(value: BoundSupervisedExecutionPlan) -> str:
     )
 
 
-def _make_bound_plan_authority_registry():
-    lock = threading.RLock()
-    issued: dict[
-        int,
-        tuple[weakref.ReferenceType[BoundSupervisedExecutionPlan], str],
-    ] = {}
-
-    def issue(value: BoundSupervisedExecutionPlan) -> BoundSupervisedExecutionPlan:
-        witness = _bound_plan_witness(value)
-        identity = id(value)
-
-        def clear(
-            ref: weakref.ReferenceType[BoundSupervisedExecutionPlan],
-            *,
-            _identity: int = identity,
-        ) -> None:
-            with lock:
-                record = issued.get(_identity)
-                if record is not None and record[0] is ref:
-                    issued.pop(_identity, None)
-
-        ref = weakref.ref(value, clear)
-        with lock:
-            issued[identity] = (ref, witness)
-        return value
-
-    def assert_authoritative(value: BoundSupervisedExecutionPlan) -> None:
-        try:
-            witness = _bound_plan_witness(value)
-        except SupervisedExecutionError as exc:
-            raise SupervisedExecutionError(
-                "bound supervised execution plan is not current canonical product issuance"
-            ) from exc
-        with lock:
-            record = issued.get(id(value))
-        if (
-            record is None
-            or record[0]() is not value
-            or record[1] != witness
-        ):
-            raise SupervisedExecutionError(
-                "bound supervised execution plan is not current canonical product issuance"
-            )
-
-    return issue, assert_authoritative
-
-
-(
-    _issue_bound_supervised_execution_plan,
-    assert_bound_supervised_execution_plan_authoritative,
-) = _make_bound_plan_authority_registry()
-_ISSUE_BOUND_SUPERVISED_EXECUTION_PLAN = _issue_bound_supervised_execution_plan
-_ISSUE_BOUND_SUPERVISED_EXECUTION_PLAN_CODE = getattr(
-    _ISSUE_BOUND_SUPERVISED_EXECUTION_PLAN,
-    "__code__",
-    None,
-)
-_ASSERT_BOUND_SUPERVISED_EXECUTION_PLAN_AUTHORITATIVE = (
-    assert_bound_supervised_execution_plan_authoritative
-)
-_ASSERT_BOUND_SUPERVISED_EXECUTION_PLAN_AUTHORITATIVE_CODE = getattr(
-    _ASSERT_BOUND_SUPERVISED_EXECUTION_PLAN_AUTHORITATIVE,
-    "__code__",
-    None,
-)
-
-
-def _canonical_bound_plan_authority_dispatch(
-    *,
-    _issue=_ISSUE_BOUND_SUPERVISED_EXECUTION_PLAN,
-    _issue_code=_ISSUE_BOUND_SUPERVISED_EXECUTION_PLAN_CODE,
-    _assert=_ASSERT_BOUND_SUPERVISED_EXECUTION_PLAN_AUTHORITATIVE,
-    _assert_code=_ASSERT_BOUND_SUPERVISED_EXECUTION_PLAN_AUTHORITATIVE_CODE,
-):
-    if (
-        globals().get("_issue_bound_supervised_execution_plan") is not _issue
-        or getattr(_issue, "__code__", None) is not _issue_code
-        or globals().get("assert_bound_supervised_execution_plan_authoritative")
-        is not _assert
-        or getattr(_assert, "__code__", None) is not _assert_code
-    ):
-        raise SupervisedExecutionError(
-            "canonical bound supervised execution plan authority changed"
-        )
-    return _issue, _assert
-
-
 @dataclass(frozen=True, slots=True)
 class ProviderReadback:
     bookmaker_id: str
@@ -802,7 +715,7 @@ def build_supervised_execution_plan(
         created_at=created_at,
         actions=tuple(actions),
     )
-    bound = BoundSupervisedExecutionPlan(
+    return BoundSupervisedExecutionPlan(
         execution,
         plan_sha,
         economic_goal_contract_sha256,
@@ -812,8 +725,114 @@ def build_supervised_execution_plan(
         bindings,
         constraints,
     )
-    issue_bound, _ = _canonical_bound_plan_authority_dispatch()
-    return issue_bound(bound)
+
+
+def _install_bound_supervised_execution_plan_authority() -> None:
+    lock = threading.RLock()
+    issued: dict[
+        int,
+        tuple[weakref.ReferenceType[BoundSupervisedExecutionPlan], str],
+    ] = {}
+    raw_build = build_supervised_execution_plan
+
+    def authoritative_build(
+        portfolio_plan: PortfolioPlan,
+        intents: tuple[OpportunityIntent, ...],
+        routing_proposal: ParallelRoutingProposal,
+        profiles: tuple[BookmakerCapabilityProfile, ...],
+        approval: SupervisedApproval,
+        constraints: tuple[ExecutionLegConstraint, ...],
+        *,
+        created_at: str,
+    ) -> BoundSupervisedExecutionPlan:
+        value = raw_build(
+            portfolio_plan,
+            intents,
+            routing_proposal,
+            profiles,
+            approval,
+            constraints,
+            created_at=created_at,
+        )
+        witness = _bound_plan_witness(value)
+        identity = id(value)
+
+        def clear(
+            reference: weakref.ReferenceType[BoundSupervisedExecutionPlan],
+            *,
+            _identity: int = identity,
+        ) -> None:
+            with lock:
+                record = issued.get(_identity)
+                if record is not None and record[0] is reference:
+                    issued.pop(_identity, None)
+
+        reference = weakref.ref(value, clear)
+        with lock:
+            issued[identity] = (reference, witness)
+        return value
+
+    def assert_authoritative(value: BoundSupervisedExecutionPlan) -> None:
+        try:
+            witness = _bound_plan_witness(value)
+        except SupervisedExecutionError as exc:
+            raise SupervisedExecutionError(
+                "bound supervised execution plan is not current canonical product issuance"
+            ) from exc
+        with lock:
+            record = issued.get(id(value))
+        if (
+            record is None
+            or record[0]() is not value
+            or record[1] != witness
+        ):
+            raise SupervisedExecutionError(
+                "bound supervised execution plan is not current canonical product issuance"
+            )
+
+    globals()["build_supervised_execution_plan"] = authoritative_build
+    globals()[
+        "assert_bound_supervised_execution_plan_authoritative"
+    ] = assert_authoritative
+
+
+_install_bound_supervised_execution_plan_authority()
+del _install_bound_supervised_execution_plan_authority
+
+_BUILD_SUPERVISED_EXECUTION_PLAN = build_supervised_execution_plan
+_BUILD_SUPERVISED_EXECUTION_PLAN_CODE = getattr(
+    _BUILD_SUPERVISED_EXECUTION_PLAN,
+    "__code__",
+    None,
+)
+_ASSERT_BOUND_SUPERVISED_EXECUTION_PLAN_AUTHORITATIVE = (
+    assert_bound_supervised_execution_plan_authoritative
+)
+_ASSERT_BOUND_SUPERVISED_EXECUTION_PLAN_AUTHORITATIVE_CODE = getattr(
+    _ASSERT_BOUND_SUPERVISED_EXECUTION_PLAN_AUTHORITATIVE,
+    "__code__",
+    None,
+)
+
+
+def _canonical_bound_plan_authority_dispatch(
+    *,
+    _build=_BUILD_SUPERVISED_EXECUTION_PLAN,
+    _build_code=_BUILD_SUPERVISED_EXECUTION_PLAN_CODE,
+    _assert=_ASSERT_BOUND_SUPERVISED_EXECUTION_PLAN_AUTHORITATIVE,
+    _assert_code=_ASSERT_BOUND_SUPERVISED_EXECUTION_PLAN_AUTHORITATIVE_CODE,
+):
+    if (
+        globals().get("build_supervised_execution_plan") is not _build
+        or getattr(_build, "__code__", None) is not _build_code
+        or globals().get("assert_bound_supervised_execution_plan_authoritative")
+        is not _assert
+        or getattr(_assert, "__code__", None) is not _assert_code
+    ):
+        raise SupervisedExecutionError(
+            "canonical bound supervised execution plan authority changed"
+        )
+    return _build, _assert
 
 
 def _require_approval(

@@ -164,7 +164,10 @@ class BetfairHistoricalMarketDefinitionOrigin:
             raise BetfairHistoricalMarketDefinitionOriginError(
                 "package_tier must be exact HistoricalPackageTier"
             )
-        if _provider_path_package_tier(self.provider_path) is not self.package_tier:
+        if (
+            _CANONICAL_PROVIDER_PATH_PACKAGE_TIER(self.provider_path)
+            is not self.package_tier
+        ):
             raise BetfairHistoricalMarketDefinitionOriginError(
                 "package_tier does not match authoritative provider_path package tier"
             )
@@ -192,7 +195,7 @@ class BetfairHistoricalMarketDefinitionOrigin:
             raise BetfairHistoricalMarketDefinitionOriginError(
                 "market_definition_json is invalid"
             ) from exc
-        canonical, digest = _canonical_market_definition(decoded)
+        canonical, digest = _CANONICAL_MARKET_DEFINITION(decoded)
         if canonical != self.market_definition_json or digest != self.market_definition_sha256:
             raise BetfairHistoricalMarketDefinitionOriginError(
                 "marketDefinition canonical identity mismatch"
@@ -432,6 +435,53 @@ def _definition_in_record(
     return matches[0] if matches else None
 
 
+_CANONICAL_REPLAY_HISTORICAL_UNTIL = replay_betfair_historical_until
+_CANONICAL_REPLAY_HISTORICAL_UNTIL_CODE = getattr(
+    replay_betfair_historical_until,
+    "__code__",
+    None,
+)
+_CANONICAL_DEFINITION_IN_RECORD = _definition_in_record
+_CANONICAL_DEFINITION_IN_RECORD_CODE = _definition_in_record.__code__
+_CANONICAL_MARKET_DEFINITION = _canonical_market_definition
+_CANONICAL_MARKET_DEFINITION_CODE = _canonical_market_definition.__code__
+_CANONICAL_PROVIDER_PATH_PACKAGE_TIER = _provider_path_package_tier
+_CANONICAL_PROVIDER_PATH_PACKAGE_TIER_CODE = _provider_path_package_tier.__code__
+
+
+def _assert_canonical_origin_derivation_dispatch() -> None:
+    checks = (
+        (
+            replay_betfair_historical_until,
+            _CANONICAL_REPLAY_HISTORICAL_UNTIL,
+            _CANONICAL_REPLAY_HISTORICAL_UNTIL_CODE,
+        ),
+        (
+            _definition_in_record,
+            _CANONICAL_DEFINITION_IN_RECORD,
+            _CANONICAL_DEFINITION_IN_RECORD_CODE,
+        ),
+        (
+            _canonical_market_definition,
+            _CANONICAL_MARKET_DEFINITION,
+            _CANONICAL_MARKET_DEFINITION_CODE,
+        ),
+        (
+            _provider_path_package_tier,
+            _CANONICAL_PROVIDER_PATH_PACKAGE_TIER,
+            _CANONICAL_PROVIDER_PATH_PACKAGE_TIER_CODE,
+        ),
+    )
+    for current, expected, expected_code in checks:
+        if (
+            current is not expected
+            or getattr(expected, "__code__", None) is not expected_code
+        ):
+            raise BetfairHistoricalMarketDefinitionOriginError(
+                "canonical historical marketDefinition derivation dispatch was replaced"
+            )
+
+
 def bind_betfair_historical_market_definition_origin(
     *,
     witness: HistoricalProviderOriginWitness,
@@ -447,6 +497,8 @@ def bind_betfair_historical_market_definition_origin(
     requires the live process-local #1345 provider capability for the exact bytes;
     the witness's real download ``retrieved_at`` remains the product acquisition time.
     """
+
+    _assert_canonical_origin_derivation_dispatch()
 
     if type(witness) is not HistoricalProviderOriginWitness:
         raise TypeError("witness must be exact HistoricalProviderOriginWitness")
@@ -469,7 +521,9 @@ def bind_betfair_historical_market_definition_origin(
         )
     if type(package_tier) is not HistoricalPackageTier:
         raise TypeError("package_tier must be exact HistoricalPackageTier")
-    provider_path_tier = _provider_path_package_tier(witness.provider_path)
+    provider_path_tier = _CANONICAL_PROVIDER_PATH_PACKAGE_TIER(
+        witness.provider_path
+    )
     if provider_path_tier is not package_tier:
         raise BetfairHistoricalMarketDefinitionOriginError(
             "package_tier does not match authoritative provider_path package tier"
@@ -486,14 +540,17 @@ def bind_betfair_historical_market_definition_origin(
         parser_revision=_PARSER_REVISION,
         compression=HistoricalCompression.BZ2,
     )
-    window = replay_betfair_historical_until(
+    window = _CANONICAL_REPLAY_HISTORICAL_UNTIL(
         raw_bytes,
         source,
         cutoff_pt_ms=cutoff_pt_ms,
     )
     selected: tuple[BetfairHistoricalReplayRecord, object] | None = None
     for record in window.records:
-        definition = _definition_in_record(record, market_id=market)
+        definition = _CANONICAL_DEFINITION_IN_RECORD(
+            record,
+            market_id=market,
+        )
         if definition is not None:
             selected = (record, definition)
     if selected is None:
@@ -502,7 +559,9 @@ def bind_betfair_historical_market_definition_origin(
         )
 
     record, definition = selected
-    canonical_definition, definition_sha = _canonical_market_definition(definition)
+    canonical_definition, definition_sha = _CANONICAL_MARKET_DEFINITION(
+        definition
+    )
     origin = BetfairHistoricalMarketDefinitionOrigin(
         provider_origin_witness_sha256=witness.witness_sha256,
         transport_contract_sha256=witness.transport_contract_sha256,

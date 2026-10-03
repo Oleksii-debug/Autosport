@@ -174,7 +174,7 @@ def test_relabelling_predictive_evidence_cannot_satisfy_arbitrage_contract() -> 
     assert evaluation.proof_gate_decision is OpportunityDecision.WAIT
 
 
-def test_complete_proof_is_only_a_proof_gate_candidate_not_execution_authority() -> None:
+def test_complete_requirement_labels_remain_requirements_only() -> None:
     required = _required(StrategyClass.ARBITRAGE)
 
     evaluation = evaluate_strategy_proofs(
@@ -184,8 +184,8 @@ def test_complete_proof_is_only_a_proof_gate_candidate_not_execution_authority()
     )
 
     assert evaluation.proof_contract_satisfied is True
-    assert evaluation.positive_action_candidate is True
-    assert evaluation.proof_gate_decision is OpportunityDecision.ACTIONABLE
+    assert evaluation.positive_action_candidate is False
+    assert evaluation.proof_gate_decision is OpportunityDecision.WAIT
     assert evaluation.missing_proofs == ()
     assert evaluation.execution_authorized is False
 
@@ -280,7 +280,7 @@ def test_callers_cannot_mint_noncanonical_contract_or_execution_authority() -> N
             required_proofs=shortened,
         )
 
-    with pytest.raises(StrategyProofContractError, match="cannot authorize"):
+    with pytest.raises(StrategyProofContractError, match="cannot mint a positive"):
         StrategyProofEvaluation(
             strategy_class=StrategyClass.ARBITRAGE,
             claims_probability_edge=False,
@@ -289,6 +289,62 @@ def test_callers_cannot_mint_noncanonical_contract_or_execution_authority() -> N
             missing_proofs=(),
             proof_contract_satisfied=True,
             positive_action_candidate=True,
+            proof_gate_decision=OpportunityDecision.WAIT,
+            execution_authorized=False,
+        )
+
+    with pytest.raises(StrategyProofContractError, match="cannot mint an actionable"):
+        StrategyProofEvaluation(
+            strategy_class=StrategyClass.ARBITRAGE,
+            claims_probability_edge=False,
+            required_proofs=canonical.required_proofs,
+            present_proofs=canonical.required_proofs,
+            missing_proofs=(),
+            proof_contract_satisfied=True,
+            positive_action_candidate=False,
             proof_gate_decision=OpportunityDecision.ACTIONABLE,
+            execution_authorized=False,
+        )
+
+    with pytest.raises(StrategyProofContractError, match="cannot authorize"):
+        StrategyProofEvaluation(
+            strategy_class=StrategyClass.ARBITRAGE,
+            claims_probability_edge=False,
+            required_proofs=canonical.required_proofs,
+            present_proofs=canonical.required_proofs,
+            missing_proofs=(),
+            proof_contract_satisfied=True,
+            positive_action_candidate=False,
+            proof_gate_decision=OpportunityDecision.WAIT,
             execution_authorized=True,
         )
+
+@pytest.mark.parametrize(
+    ("strategy_class", "claims_probability_edge"),
+    [
+        (StrategyClass.ARBITRAGE, False),
+        (StrategyClass.PREDICTIVE_EDGE, True),
+    ],
+)
+def test_all_required_bare_labels_cannot_mint_actionable_truth(
+    strategy_class: StrategyClass,
+    claims_probability_edge: bool,
+) -> None:
+    contract = proof_contract_for(
+        strategy_class,
+        claims_probability_edge=claims_probability_edge,
+    )
+
+    evaluation = evaluate_strategy_proofs(
+        strategy_class,
+        frozenset(contract.required_proofs),
+        claims_probability_edge=claims_probability_edge,
+    )
+
+    assert evaluation.required_proofs == contract.required_proofs
+    assert evaluation.missing_proofs == ()
+    assert evaluation.proof_contract_satisfied is True
+    assert evaluation.positive_action_candidate is False
+    assert evaluation.proof_gate_decision is OpportunityDecision.WAIT
+    assert evaluation.execution_authorized is False
+

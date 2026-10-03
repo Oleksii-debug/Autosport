@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from copy import deepcopy
 from decimal import Decimal
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import hashlib
 import json
+import threading
 from urllib.parse import parse_qs, urlparse
 
 import pytest
@@ -198,31 +200,46 @@ def test_origin_forgery_during_injected_transport_fails_before_publication() -> 
     assert calls == 1
 
 
-def test_default_https_transport_binds_exact_raw_digest_and_size(monkeypatch) -> None:
+def test_default_fixed_origin_transport_binds_exact_raw_digest_and_size() -> None:
     payload = sample_payload()
     for price_row in payload["events"][0]["markets"][0]["runners"][0]["prices"]:
         price_row["decimal-odds"] = float(price_row["decimal-odds"])
         price_row["available-amount"] = float(price_row["available-amount"])
     raw = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    seen_tokens: list[str | None] = []
 
-    class FakeResponse:
-        status = 200
-        headers: dict[str, str] = {}
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            seen_tokens.append(self.headers.get("session-token"))
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
 
-        def __enter__(self):
-            return self
+        def log_message(self, format, *args) -> None:
+            return None
 
-        def __exit__(self, exc_type, exc, traceback):
-            return False
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        response = matchbook_module._default_transport(
+            f"http://127.0.0.1:{server.server_port}/edge/rest/events",
+            {"session-token": "secret-session-token"},
+            2.0,
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
 
-        def read(self) -> bytes:
-            return raw
+    expected_digest = hashlib.sha256(raw).hexdigest()
+    assert seen_tokens == ["secret-session-token"]
+    assert response.body_sha256 == expected_digest
+    assert response.body_size_bytes == len(raw)
+    assert response.payload == _decode_provider_json(raw)
 
-    monkeypatch.setattr(
-        matchbook_module,
-        "urlopen",
-        lambda request, timeout: FakeResponse(),
-    )
     client = MatchbookReadOnlyProvider(
         "secret-session-token",
         sport_key="soccer",
@@ -231,16 +248,83 @@ def test_default_https_transport_binds_exact_raw_digest_and_size(monkeypatch) ->
         clock=lambda: OBSERVED,
         sequence_allocator=_sequence_allocator(),
     )
+    assert client._provider_origin_verified is True
 
-    batch = client.read_batch()
-    expected_digest = hashlib.sha256(raw).hexdigest()
-    assert batch.quotes
-    for quote in batch.quotes:
-        assert quote.metadata["provider_origin_verified"] is True
-        assert quote.metadata["parsed_payload_bound_to_raw_response"] is True
-        assert quote.metadata["response_sha256"] == expected_digest
-        assert quote.metadata["response_size_bytes"] == len(raw)
-        assert "secret-session-token" not in repr(quote.metadata)
+
+@pytest.mark.parametrize("status_code", [301, 302, 303, 307, 308])
+def test_default_transport_rejects_redirect_before_forwarding_secret(
+    status_code: int,
+) -> None:
+    sink_requests: list[str | None] = []
+    source_requests: list[str | None] = []
+
+    class SinkHandler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            sink_requests.append(self.headers.get("session-token"))
+            self.send_response(200)
+            self.end_headers()
+
+        def log_message(self, format, *args) -> None:
+            return None
+
+    sink = ThreadingHTTPServer(("127.0.0.1", 0), SinkHandler)
+    sink_thread = threading.Thread(target=sink.serve_forever, daemon=True)
+    sink_thread.start()
+
+    class SourceHandler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            source_requests.append(self.headers.get("session-token"))
+            self.send_response(status_code)
+            self.send_header(
+                "Location",
+                f"http://127.0.0.1:{sink.server_port}/redirect-target",
+            )
+            self.end_headers()
+
+        def log_message(self, format, *args) -> None:
+            return None
+
+    source = ThreadingHTTPServer(("127.0.0.1", 0), SourceHandler)
+    source_thread = threading.Thread(target=source.serve_forever, daemon=True)
+    source_thread.start()
+    try:
+        with pytest.raises(MatchbookTransportError) as excinfo:
+            matchbook_module._default_transport(
+                f"http://127.0.0.1:{source.server_port}/edge/rest/events",
+                {"session-token": "secret-session-token"},
+                2.0,
+            )
+        assert excinfo.value.status_code == status_code
+        assert source_requests == ["secret-session-token"]
+        assert sink_requests == []
+    finally:
+        source.shutdown()
+        source.server_close()
+        source_thread.join(timeout=2)
+        sink.shutdown()
+        sink.server_close()
+        sink_thread.join(timeout=2)
+
+
+def test_in_place_default_transport_code_mutation_revokes_provider_origin() -> None:
+    original_code = matchbook_module._default_transport.__code__
+
+    def forged_transport(url, headers, timeout):
+        raise RuntimeError("forged transport must not be trusted")
+
+    try:
+        matchbook_module._default_transport.__code__ = forged_transport.__code__
+        client = MatchbookReadOnlyProvider(
+            "secret-session-token",
+            sport_key="soccer",
+            currency="EUR",
+            sport_ids=(15,),
+            clock=lambda: OBSERVED,
+            sequence_allocator=_sequence_allocator(),
+        )
+        assert client._provider_origin_verified is False
+    finally:
+        matchbook_module._default_transport.__code__ = original_code
 
 
 @pytest.mark.parametrize(

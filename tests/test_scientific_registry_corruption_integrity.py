@@ -446,3 +446,28 @@ def test_transplant_rejects_monotonic_constructor_alias_replacement(
         match="ScientificRegistry monotonic authority constructor changed",
     ):
         ScientificRegistry(target_path)
+
+
+def test_valid_old_registry_restore_is_rejected_as_monotonic_rollback(tmp_path):
+    path = tmp_path / "scientific_registry.json"
+    registry = ScientificRegistry.initialize_pristine(path)
+    registry.append(_question())
+    valid_old_bytes = path.read_bytes()
+
+    registry.append(_hypothesis())
+    current_bytes = path.read_bytes()
+    assert current_bytes != valid_old_bytes
+
+    path.write_bytes(valid_old_bytes)
+
+    for _attempt in range(2):
+        with pytest.raises(
+            MonotonicAuthorityRollbackError,
+            match="rolled back|unproven|authority|state",
+        ):
+            ScientificRegistry(path)
+        assert path.read_bytes() == valid_old_bytes
+
+    with pytest.raises(MonotonicAuthorityRollbackError):
+        ScientificRegistry.initialize_pristine(path)
+    assert path.read_bytes() == valid_old_bytes

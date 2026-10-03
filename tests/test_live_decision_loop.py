@@ -1534,6 +1534,71 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
                 1,
             )
 
+    def test_stale_peer_cannot_overwrite_another_pending_decision_cut(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+
+            def fail_after_pending(input_id, snapshot):
+                raise RuntimeError("simulated process loss after pending cursor")
+
+            fail_after_pending.strategy_version_id = "live-test-strategy-v1"
+            first = self._loop(
+                workspace,
+                observer=_DurableObserver(
+                    workspace,
+                    [(self._event(selection="selection-a", sequence=1),)],
+                ),
+                factory=fail_after_pending,
+                clock=_ManualClock(self.START + timedelta(seconds=1)),
+            )
+            first.register_input("input-a", selection_ids="selection-a")
+
+            # Construct the peer before the first writer publishes PENDING so its
+            # in-memory progress generation is deliberately stale (None).
+            peer_observer = _DurableObserver(workspace, [()])
+            peer = self._loop(
+                workspace,
+                observer=peer_observer,
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START + timedelta(seconds=2)),
+            )
+            self.assertIsNone(peer._progress)
+
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "simulated process loss after pending cursor",
+            ):
+                first.run_cycle()
+
+            durable_before = first._load_progress()
+            self.assertIsNotNone(durable_before)
+            self.assertEqual(durable_before.phase, "pending")
+
+            raced = peer.run_cycle()
+
+            self.assertEqual(raced.status, LiveCycleStatus.BACKPRESSURE)
+            self.assertIn("progress advanced during snapshot assembly", raced.detail)
+            self.assertEqual(peer_observer.calls, 1)
+            self.assertEqual(peer._load_progress(), durable_before)
+            self.assertFalse((workspace / "decisions.jsonl").exists())
+
+            resumed = self._loop(
+                workspace,
+                observer=_DurableObserver(workspace, [()]),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START + timedelta(seconds=3)),
+            )
+            recovered = resumed.run_cycle()
+            self.assertEqual(recovered.status, LiveCycleStatus.DECIDED)
+            self.assertEqual(
+                len(
+                    JsonlDecisionLedger(
+                        workspace / "decisions.jsonl"
+                    ).verified_records()
+                ),
+                1,
+            )
+
     def test_pending_restart_recovers_before_polling_new_quote(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

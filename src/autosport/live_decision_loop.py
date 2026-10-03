@@ -1079,6 +1079,11 @@ class PersistentLiveDecisionLoop:
         ):
             return self._recover_unfinished_progress()
 
+        # Optimistic generation token for the durable progress cursor. Provider
+        # observation remains outside the workspace economic lock, but publication
+        # must prove that no peer evaluator advanced/replaced this generation.
+        expected_previous_progress = self._progress
+
         catalog_now = _require_utc_clock(self.clock)
         try:
             if self.catalog_lifecycle is not None:
@@ -1089,6 +1094,7 @@ class PersistentLiveDecisionLoop:
             return self._persist_provider_gap(
                 _require_utc_clock(self.clock),
                 exc,
+                expected_previous_progress=expected_previous_progress,
             )
 
         now = _require_utc_clock(self.clock)
@@ -1181,6 +1187,7 @@ class PersistentLiveDecisionLoop:
                 gate=_GATE_NORMAL,
                 expected_decision_context_sha256=decision_context_sha256,
                 expected_registered_input_ids=registered_input_ids,
+                expected_previous_progress=expected_previous_progress,
             )
         except _ConcurrentDecisionSnapshot as exc:
             return LiveCycleResult(
@@ -1712,6 +1719,8 @@ class PersistentLiveDecisionLoop:
         self,
         now: datetime,
         exc: Exception,
+        *,
+        expected_previous_progress: _Progress | None,
     ) -> LiveCycleResult:
         decision_ts = now.isoformat()
         affected = self.dependencies.input_ids
@@ -1726,6 +1735,7 @@ class PersistentLiveDecisionLoop:
                 gate=_GATE_PROVIDER_GAP,
                 expected_decision_context_sha256=decision_context_sha256,
                 expected_registered_input_ids=affected,
+                expected_previous_progress=expected_previous_progress,
             )
         except _ConcurrentDecisionSnapshot as exc:
             self._needs_cache_rebuild = True
@@ -2030,6 +2040,7 @@ class PersistentLiveDecisionLoop:
         gate: str,
         expected_decision_context_sha256: str,
         expected_registered_input_ids: tuple[str, ...],
+        expected_previous_progress: _Progress | None,
     ) -> PaperBook:
         _, decision_time = _canonical_timestamp("decision_ts", decision_ts)
         self.intent_provenance.assert_available_at(decision_time)
@@ -2042,6 +2053,12 @@ class PersistentLiveDecisionLoop:
         ):
             raise TypeError("expected_registered_input_ids must be a tuple of strings")
         with WorkspaceEconomicLock(self.workspace):
+            durable_previous_progress = self._load_progress()
+            if durable_previous_progress != expected_previous_progress:
+                raise _ConcurrentDecisionSnapshot(
+                    "live decision progress advanced during snapshot assembly; "
+                    "retrying before economic action"
+                )
             durable_input_specs = self._load_input_registry() or ()
             current_input_specs = tuple(self._input_specs.values())
             if durable_input_specs != current_input_specs:

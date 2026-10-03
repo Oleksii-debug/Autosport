@@ -19,6 +19,9 @@ from .run_transaction import RunTransaction
 from .workspace_lock import WorkspaceEconomicLock
 
 
+_ECONOMIC_GOAL_FILE_NAME = EconomicGoalStore.FILE_NAME
+
+
 # The admission critical section is only atomic while the exact reviewed
 # WorkspaceEconomicLock executable graph remains installed. Freezing this module's
 # globals preserves the class object, not its mutable Python class attributes, so
@@ -219,6 +222,23 @@ def _parse_utc_timestamp(value: str) -> datetime | None:
     return parsed.astimezone(timezone.utc)
 
 
+def _canonical_economic_goal_store(root: Path) -> EconomicGoalStore:
+    """Construct the exact durable goal store and reject constructor/path drift."""
+
+    if EconomicGoalStore.__dict__.get("FILE_NAME") != _ECONOMIC_GOAL_FILE_NAME:
+        raise RuntimeError("economic goal store authority changed")
+    store = EconomicGoalStore(root)
+    if type(store) is not EconomicGoalStore:
+        raise RuntimeError("economic goal store authority changed")
+    expected_workspace = root.expanduser().resolve(strict=False)
+    if (
+        store.workspace.expanduser().resolve(strict=False) != expected_workspace
+        or store.path != expected_workspace / _ECONOMIC_GOAL_FILE_NAME
+    ):
+        raise RuntimeError("economic goal store path is not canonical")
+    return store
+
+
 def _prepare_paper_day_turnover_snapshot(
     *,
     root: Path,
@@ -238,8 +258,8 @@ def _prepare_paper_day_turnover_snapshot(
     if goal is None or not book_path.exists():
         return None
     try:
-        goal_store = EconomicGoalStore(root)
-        if goal_store.load() != goal:
+        goal_store = _canonical_economic_goal_store(root)
+        if _ECONOMIC_GOAL_LOAD_FROZEN(goal_store) != goal:
             return None
         snapshot_book = PaperBook.load(book_path)
         window_store = ProductDayRiskWindowStore(root)
@@ -280,7 +300,8 @@ def _revalidated_product_day_turnover_room(
     try:
         if not _same_semantic_book_state(snapshot.book, book):
             return None
-        durable_goal = EconomicGoalStore(root).load()
+        goal_store = _canonical_economic_goal_store(root)
+        durable_goal = _ECONOMIC_GOAL_LOAD_FROZEN(goal_store)
         if durable_goal != goal:
             return None
 
@@ -371,6 +392,14 @@ def _freeze_external_python_function_graph(function: FunctionType) -> FunctionTy
     frozen.__qualname__ = function.__qualname__
     frozen.__doc__ = function.__doc__
     return frozen
+
+
+# Durable goal truth is part of the positive under-lock admission boundary. Keep the
+# exact load implementation and all same-module parsing helpers detached from later
+# EconomicGoalStore method/global rebinding, just like the risk suffix below.
+_ECONOMIC_GOAL_LOAD_FROZEN = _freeze_external_python_function_graph(
+    EconomicGoalStore.__dict__["load"]
+)
 
 
 # Freeze the exact canonical risk helper descriptors used by the positive

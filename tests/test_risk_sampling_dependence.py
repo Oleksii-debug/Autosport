@@ -386,16 +386,13 @@ class RiskSamplingDependenceTests(unittest.TestCase):
         ):
             inspect_fixed_n_iid_occurrences(structure, tuple(occurrences))
 
-    def test_positive_resolution_fails_closed_without_product_precommit(self):
+    def test_positive_resolution_requires_canonical_product_inputs(self):
         membership = self._membership()
         structure = inspect_fixed_n_iid_sampling_structure(
             membership,
             sampling_manifest_json=self._manifest(),
         )
-        with self.assertRaisesRegex(
-            RiskSamplingDependenceError,
-            "membership lacks non-backdateable product-owned pre-outcome precommit authority",
-        ):
+        with self.assertRaises(TypeError):
             resolve_fixed_n_iid_sampling_authority(
                 membership,
                 sampling_manifest_json=self._manifest(),

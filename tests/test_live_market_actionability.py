@@ -8,6 +8,7 @@ import autosport.live_market_actionability as live_actionability
 from autosport.domain import MarketEvent
 from autosport.live_market_actionability import (
     LiveInputCurrentViewOutcome,
+    LiveInputRecheckTrigger,
     LiveInputWaitReason,
     LiveMarketActionabilityError,
     RegisteredLiveInputCurrentView,
@@ -95,6 +96,9 @@ def test_fresh_open_registered_input_waits_without_product_origin() -> None:
     assert result.wait_reasons == (
         LiveInputWaitReason.PRODUCT_ORIGIN_UNPROVEN,
     )
+    assert result.recheck_triggers == (
+        LiveInputRecheckTrigger.PRODUCT_ORIGIN_BINDING,
+    )
     assert len(result.components) == 1
     assert result.components[0].wait_reasons == ()
     assert result.is_product_issued is False
@@ -118,6 +122,9 @@ def test_no_matching_component_waits_instead_of_treating_empty_as_current() -> N
     assert result.outcome is LiveInputCurrentViewOutcome.WAIT
     assert result.current_view_eligible is False
     assert result.wait_reasons == (LiveInputWaitReason.NO_COMPONENTS,)
+    assert result.recheck_triggers == (
+        LiveInputRecheckTrigger.MATCHING_COMPONENT_CHANGE,
+    )
     assert result.components == ()
 
 
@@ -143,6 +150,7 @@ def test_stale_source_time_cannot_be_laundered_by_recent_receipt() -> None:
 
     assert result.outcome is LiveInputCurrentViewOutcome.WAIT
     assert result.wait_reasons == (LiveInputWaitReason.STALE,)
+    assert result.recheck_triggers == (LiveInputRecheckTrigger.FRESH_OBSERVATION,)
     assert result.components[0].age_microseconds == 600_000_000
 
 
@@ -227,6 +235,64 @@ def test_weakest_component_blocks_multi_component_registered_input() -> None:
     assert sum(not item.wait_reasons for item in result.components) == 1
 
 
+def test_wait_recheck_triggers_are_evidence_driven_not_timer_driven() -> None:
+    suspended_updates, suspended_dependencies = _runtime(_event(status="suspended"))
+    suspended = _evaluate(suspended_updates, suspended_dependencies)
+    assert suspended.recheck_triggers == (
+        LiveInputRecheckTrigger.MARKET_STATUS_CHANGE,
+    )
+
+    future_updates, future_dependencies = _runtime(
+        _event(ingest_at=AS_OF + timedelta(microseconds=1))
+    )
+    future = _evaluate(future_updates, future_dependencies)
+    assert future.recheck_triggers == (
+        LiveInputRecheckTrigger.CAUSALLY_ADMISSIBLE_OBSERVATION,
+    )
+
+    invalid_event = _event()
+    invalid_event = MarketEvent(
+        event_id=invalid_event.event_id,
+        market_id=invalid_event.market_id,
+        selection_id=invalid_event.selection_id,
+        decimal_odds=invalid_event.decimal_odds,
+        observed_ts="invalid",
+        source_id=invalid_event.source_id,
+        sequence=invalid_event.sequence,
+        status=invalid_event.status,
+        source_ts=invalid_event.source_ts,
+        ingest_ts=invalid_event.ingest_ts,
+        sport=invalid_event.sport,
+    )
+    invalid_updates, invalid_dependencies = _runtime(invalid_event)
+    invalid = _evaluate(invalid_updates, invalid_dependencies)
+    assert invalid.recheck_triggers == (
+        LiveInputRecheckTrigger.VALID_CAUSAL_OBSERVATION,
+    )
+
+    assert all("sleep" not in trigger.value for trigger in LiveInputRecheckTrigger)
+    assert all("timer" not in trigger.value for trigger in LiveInputRecheckTrigger)
+
+
+def test_multi_reason_wait_deduplicates_and_sorts_recheck_triggers() -> None:
+    updates, dependencies = _runtime(
+        _event(
+            status="suspended",
+            observed_at=AS_OF - timedelta(minutes=5),
+        )
+    )
+    result = _evaluate(updates, dependencies, max_age=timedelta(seconds=30))
+
+    assert result.wait_reasons == (
+        LiveInputWaitReason.NON_OPEN_STATUS,
+        LiveInputWaitReason.STALE,
+    )
+    assert result.recheck_triggers == (
+        LiveInputRecheckTrigger.FRESH_OBSERVATION,
+        LiveInputRecheckTrigger.MARKET_STATUS_CHANGE,
+    )
+
+
 def test_repeated_evaluation_is_deterministic_until_canonical_mirror_changes() -> None:
     first_event = _event()
     updates, dependencies = _runtime(first_event)
@@ -262,6 +328,7 @@ def test_caller_constructed_result_cannot_mint_positive_authority() -> None:
         mirror_revision=result.mirror_revision,
         outcome=LiveInputCurrentViewOutcome.CURRENT_VIEW_ELIGIBLE,
         wait_reasons=(),
+        recheck_triggers=(),
         components=result.components,
         evidence_sha256=result.evidence_sha256,
     )

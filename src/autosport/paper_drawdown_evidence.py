@@ -339,6 +339,12 @@ def _make_resolver() -> FunctionType:
     metric_class = DRAW_DOWN_METRIC_CLASS
     scope = DRAW_DOWN_SCOPE
     path_type = Path
+    path_new = Path.__new__
+    path_init = Path.__init__
+    path_expanduser = Path.expanduser
+    path_resolve = Path.resolve
+    path_truediv = Path.__truediv__
+    canonical_path_type = type(Path())
     goal_store_type = EconomicGoalStore
     goal_load = EconomicGoalStore.load
     goal_load_code = goal_load.__code__
@@ -434,8 +440,36 @@ def _make_resolver() -> FunctionType:
             raise error_type(
                 "drawdown durable source resolver authority changed"
             )
-        root = path_type(workspace).expanduser().resolve(strict=False)
-        book_path = root / "paper_book.json"
+        if (
+            path_type.__new__ is not path_new
+            or path_type.__init__ is not path_init
+            or path_type.expanduser is not path_expanduser
+            or path_type.resolve is not path_resolve
+            or path_type.__truediv__ is not path_truediv
+        ):
+            raise error_type(
+                "drawdown workspace path authority changed"
+            )
+        workspace_path = path_type(workspace)
+        if type(workspace_path) is not canonical_path_type:
+            raise error_type(
+                "drawdown workspace path type is not canonical"
+            )
+        expanded = path_expanduser(workspace_path)
+        if type(expanded) is not canonical_path_type:
+            raise error_type(
+                "drawdown expanded workspace path type is not canonical"
+            )
+        root = path_resolve(expanded, strict=False)
+        if type(root) is not canonical_path_type:
+            raise error_type(
+                "drawdown resolved workspace path type is not canonical"
+            )
+        book_path = path_truediv(root, "paper_book.json")
+        if type(book_path) is not canonical_path_type:
+            raise error_type(
+                "drawdown book path type is not canonical"
+            )
         goal_store = goal_store_type(root)
         try:
             goal = goal_load(goal_store)

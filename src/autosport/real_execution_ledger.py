@@ -1171,7 +1171,7 @@ class RealExecutionLedger:
             supervised_issuance[event["plan_id"]] = (witness, fingerprint)
 
         approval_state: dict[
-            str, tuple[str, str, datetime, datetime, bool]
+            str, tuple[str, str, datetime, datetime | None, bool]
         ] = {}
         for event_index, event in enumerate(events):
             kind = event["event_type"]
@@ -1200,12 +1200,21 @@ class RealExecutionLedger:
                     raise ExecutionLedgerIntegrityError(
                         "supervised approval binding must follow product issuance"
                     )
-                if set(payload) != {
+                required_fields = {
                     "approval_id",
                     "approval_fingerprint",
                     "approved_at",
-                    "expires_at",
                     "evidence_sha256",
+                }
+                payload_fields = set(payload)
+                if event["plan_id"].startswith("supervised-v2-"):
+                    if payload_fields != required_fields | {"expires_at"}:
+                        raise ExecutionLedgerIntegrityError(
+                            "supervised approval binding schema is invalid"
+                        )
+                elif payload_fields not in {
+                    frozenset(required_fields),
+                    frozenset(required_fields | {"expires_at"}),
                 }:
                     raise ExecutionLedgerIntegrityError(
                         "supervised approval binding schema is invalid"
@@ -1214,8 +1223,12 @@ class RealExecutionLedger:
                     _sha256_text(payload["approval_fingerprint"], "approval_fingerprint")
                     _sha256_text(payload["evidence_sha256"], "evidence_sha256")
                     approved_at = _timestamp(payload["approved_at"], "approved_at")
-                    expires_at = _timestamp(payload["expires_at"], "expires_at")
-                    if expires_at <= approved_at:
+                    expires_at = (
+                        None
+                        if "expires_at" not in payload
+                        else _timestamp(payload["expires_at"], "expires_at")
+                    )
+                    if expires_at is not None and expires_at <= approved_at:
                         raise ValueError("approval expiry must follow approval time")
                 except (KeyError, TypeError, ValueError) as exc:
                     raise ExecutionLedgerIntegrityError(
@@ -1824,14 +1837,16 @@ class RealExecutionLedger:
         approval_id: str,
         approval_fingerprint: str,
         approved_at: str,
-        expires_at: str,
         evidence_sha256: str,
+        expires_at: str | None = None,
     ) -> None:
         _text(approval_id, "approval_id")
         _sha256_text(approval_fingerprint, "approval_fingerprint")
         approved_time = _timestamp(approved_at, "approved_at")
-        expires_time = _timestamp(expires_at, "expires_at")
-        if expires_time <= approved_time:
+        expires_time = (
+            None if expires_at is None else _timestamp(expires_at, "expires_at")
+        )
+        if expires_time is not None and expires_time <= approved_time:
             raise ValueError("approval expires_at must follow approved_at")
         _sha256_text(evidence_sha256, "evidence_sha256")
 
@@ -1846,6 +1861,10 @@ class RealExecutionLedger:
                     "approval identity mismatches durable execution plan"
                 )
             if plan_id.startswith("supervised-v2-"):
+                if expires_at is None:
+                    raise ExecutionStateError(
+                        "supervised approval binding requires durable expiry"
+                    )
                 issuance = [
                     event
                     for event in events
@@ -1885,9 +1904,10 @@ class RealExecutionLedger:
                 "approval_id": approval_id,
                 "approval_fingerprint": approval_fingerprint,
                 "approved_at": approved_at,
-                "expires_at": expires_at,
                 "evidence_sha256": evidence_sha256,
             }
+            if expires_at is not None:
+                payload["expires_at"] = expires_at
             if bindings:
                 if len(bindings) == 1 and bindings[0]["payload"] == payload:
                     return

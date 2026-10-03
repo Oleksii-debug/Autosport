@@ -146,6 +146,26 @@ def test_source_spec_rejects_virtual_interval_before_numeric_dispatch(
     assert calls == []
 
 
+def test_source_spec_rejects_unrepresentable_integer_interval(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(
+        CampaignInceptionIntegrityError,
+        match="representable as a finite float",
+    ):
+        CampaignInceptionSourceSpec(
+            expected_store_path=tmp_path / "collector.db",
+            source_id="betfair:exchange",
+            run_id="run-1",
+            stream_epoch="epoch-1",
+            anchor_at="2100-01-01T06:00:00+00:00",
+            interval_seconds=10**10_000,
+            max_items=250,
+            evaluation_start_slot_ordinal=0,
+            evaluation_end_slot_ordinal=1,
+        )
+
+
 def test_source_spec_rejects_path_subclass_before_virtual_dispatch(
     tmp_path: Path,
 ) -> None:
@@ -874,6 +894,31 @@ def test_schedule_outside_precommitted_window_is_rejected_before_gate(
             precommit_locator=locator,
             store=store,
             source_spec=outside,
+        )
+
+    assert (
+        store._collector_schedule_start_gate_status(
+            source_id=spec.source_id,
+            run_id=spec.run_id,
+        )
+        is None
+    )
+
+
+def test_unrepresentable_schedule_window_is_rejected_before_gate(
+    tmp_path: Path,
+) -> None:
+    _manifest_value, locator, store, spec, _authority_root = _setup(tmp_path)
+    oversized = replace(spec, evaluation_end_slot_ordinal=10**10_000)
+
+    with pytest.raises(
+        CampaignInceptionConflictError,
+        match="representable prospective window",
+    ):
+        establish_campaign_inception(
+            precommit_locator=locator,
+            store=store,
+            source_spec=oversized,
         )
 
     assert (

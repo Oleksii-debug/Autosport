@@ -2448,3 +2448,131 @@ def test_active_run_pagination_bound_cannot_be_rebound_to_hide_second_page(
         "event=pull_request&status=queued&per_page=100&page=2",
     ]
 
+def test_sweep_decision_helpers_are_captured_before_active_run_callback_rebind(
+    monkeypatch,
+) -> None:
+    cancelled: list[int] = []
+    forged_calls: list[str] = []
+
+    class FixtureApi:
+        _WorkflowScopedGitHubApi__workflow_name = "CI"
+
+        def active_runs(self) -> tuple[WorkflowRun, ...]:
+            monkeypatch.setattr(
+                scoped_controller,
+                "_trusted_live_pr_qualification",
+                lambda *_args, **_kwargs: forged_calls.append("qualification")
+                or (STALE_HEAD, False),
+            )
+            monkeypatch.setattr(
+                scoped_controller,
+                "_explicit_run_identity_is_current",
+                lambda *_args, **_kwargs: forged_calls.append("identity") or False,
+            )
+            return (
+                WorkflowRun(
+                    run_id=7014,
+                    head_sha=STALE_HEAD,
+                    workflow_name="CI",
+                    pr_numbers=(303,),
+                    status="queued",
+                ),
+            )
+
+        def cancel(self, run_id: int) -> None:
+            cancelled.append(run_id)
+
+    def trusted_qualification(_api, pr_number: int):
+        assert pr_number == 303
+        return (HEAD, True)
+
+    def trusted_identity(
+        _api,
+        *,
+        run_id: int,
+        expected_head_sha: str,
+        pr_number: int,
+    ) -> bool:
+        assert run_id == 7014
+        assert expected_head_sha == STALE_HEAD
+        assert pr_number == 303
+        return True
+
+    monkeypatch.setattr(
+        scoped_controller,
+        "_trusted_live_pr_qualification",
+        trusted_qualification,
+    )
+    monkeypatch.setattr(
+        scoped_controller,
+        "_explicit_run_identity_is_current",
+        trusted_identity,
+    )
+
+    assert cancel_superseded_explicit_pr_runs(
+        FixtureApi(),  # type: ignore[arg-type]
+        workflow_name="CI",
+        current_run_id=9999,
+    ) == (7014,)
+    assert cancelled == [7014]
+    assert forged_calls == []
+
+
+def test_trigger_decision_helpers_survive_inflight_identity_global_rebind(
+    monkeypatch,
+) -> None:
+    cancelled: list[int] = []
+    forged_calls: list[str] = []
+
+    class FixtureApi:
+        def cancel(self, run_id: int) -> None:
+            cancelled.append(run_id)
+
+    def trusted_qualification(_api, pr_number: int):
+        assert pr_number == 303
+        return (HEAD, True)
+
+    def trusted_identity(
+        _api,
+        *,
+        run_id: int,
+        expected_head_sha: str,
+        pr_number: int,
+    ) -> bool:
+        assert run_id == 7015
+        assert expected_head_sha == STALE_HEAD
+        assert pr_number == 303
+        monkeypatch.setattr(
+            scoped_controller,
+            "_trusted_live_pr_qualification",
+            lambda *_args, **_kwargs: forged_calls.append("qualification")
+            or (STALE_HEAD, False),
+        )
+        monkeypatch.setattr(
+            scoped_controller,
+            "_explicit_run_identity_is_current",
+            lambda *_args, **_kwargs: forged_calls.append("identity") or False,
+        )
+        return True
+
+    monkeypatch.setattr(
+        scoped_controller,
+        "_trusted_live_pr_qualification",
+        trusted_qualification,
+    )
+    monkeypatch.setattr(
+        scoped_controller,
+        "_explicit_run_identity_is_current",
+        trusted_identity,
+    )
+
+    assert _cancel_triggering_run_if_stale_or_nonqualifying(
+        FixtureApi(),  # type: ignore[arg-type]
+        pr_number=303,
+        event_head_sha=STALE_HEAD,
+        current_run_id=7015,
+        qualification=(HEAD, True),
+    )
+    assert cancelled == [7015]
+    assert forged_calls == []
+

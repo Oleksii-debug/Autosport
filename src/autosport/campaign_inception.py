@@ -11,9 +11,9 @@ authority. Before any collector START it composes:
 
 Only after the inception state is durably COMMITTED in the monotonic authority is the
 exact schedule gate authorized. The later #1185 provider-universe resolver remains a
-post-observation validation step: this receipt binds the prospectively selected
-evaluation_universe_sha256 from #1257, never fabricates a post-observation universe
-receipt before its rows exist.
+post-observation validation step: the legacy #1257 `evaluation_universe_sha256` slot
+is bound here to a deterministic prospective schedule plan, while the realized
+provider-derived universe/membership digests are resolved only after capture.
 """
 
 import hashlib
@@ -58,6 +58,7 @@ AUTHORITY_DOMAIN = "research.forward-campaign-inception-causality"
 _STATE_DIR = "campaign-inception-v1"
 _HEX = frozenset("0123456789abcdef")
 _MAX_STATE_BYTES = 1024 * 1024
+_EVALUATION_PLAN_DOMAIN = "autosport.campaign-evaluation-plan.v1"
 
 _CANONICAL_WITNESS_RESOLVER = resolve_campaign_precommit_publication_witness
 _CANONICAL_MANIFEST_LOADER = load_campaign_precommit_manifest
@@ -437,6 +438,28 @@ class CampaignInceptionSourceSpec:
         }
 
 
+def campaign_evaluation_plan_sha256(
+    source_spec: CampaignInceptionSourceSpec,
+) -> str:
+    """Deterministic pre-observation identity for the exact campaign schedule plan."""
+
+    if type(source_spec) is not CampaignInceptionSourceSpec:
+        raise TypeError("source_spec must be exact CampaignInceptionSourceSpec")
+    return _digest(
+        {
+            "domain": _EVALUATION_PLAN_DOMAIN,
+            "source_id": source_spec.source_id,
+            "run_id": source_spec.run_id,
+            "stream_epoch": source_spec.stream_epoch,
+            "anchor_at": source_spec.anchor_at,
+            "interval_seconds": repr(source_spec.interval_seconds),
+            "max_items": source_spec.max_items,
+            "evaluation_start_slot_ordinal": source_spec.evaluation_start_slot_ordinal,
+            "evaluation_end_slot_ordinal": source_spec.evaluation_end_slot_ordinal,
+        }
+    )
+
+
 @dataclass(frozen=True, slots=True, init=False)
 class CampaignInceptionReceipt:
     """Resolver-issued receipt proving durable inception before gated START."""
@@ -646,8 +669,9 @@ def _semantic_binding_sha256(
             "source_spec": spec.payload(),
             "prepared_schedule": dict(prepared),
             "admission_rule": (
-                "exact campaign receipt COMMIT before exact gated scheduled START; "
-                "post-observation universe must re-resolve to prospectively frozen digest"
+                "exact prospective schedule-plan digest + campaign receipt COMMIT "
+                "before exact gated scheduled START; realized provider universe and "
+                "membership must re-resolve from the exact authorized capture cycle"
             ),
         }
     )
@@ -1111,6 +1135,11 @@ def establish_campaign_inception(
     _require_store_seams(store)
     manifest, witness = _resolve_precommit(precommit_locator)
     _validate_schedule_window(manifest, source_spec)
+    expected_plan_sha256 = campaign_evaluation_plan_sha256(source_spec)
+    if manifest.evaluation_universe_sha256 != expected_plan_sha256:
+        raise CampaignInceptionConflictError(
+            "campaign precommit evaluation plan does not match exact collector schedule plan"
+        )
     precommit = _precommit_payload(manifest, witness)
     gate_binding = _gate_binding_sha256(precommit=precommit, spec=source_spec)
     state_path = _state_path(precommit_locator.workspace, manifest.campaign_id)
@@ -1316,6 +1345,7 @@ __all__ = [
     "CampaignInceptionIntegrityError",
     "CampaignInceptionReceipt",
     "CampaignInceptionSourceSpec",
+    "campaign_evaluation_plan_sha256",
     "establish_campaign_inception",
 ]
 
@@ -1388,6 +1418,7 @@ def _seal_campaign_inception_dispatch() -> None:
     expected_state_dir = _STATE_DIR
     expected_hex = _HEX
     expected_max_state_bytes = _MAX_STATE_BYTES
+    expected_evaluation_plan_domain = _EVALUATION_PLAN_DOMAIN
     expected_store_seam_names = _CANONICAL_STORE_SEAMS
     expected_store_seam_map = _CANONICAL_STORE_CLASS_SEAMS
 
@@ -1435,6 +1466,7 @@ def _seal_campaign_inception_dispatch() -> None:
             ("_resolve_precommit", _resolve_precommit),
             ("_precommit_payload", _precommit_payload),
             ("_validate_schedule_window", _validate_schedule_window),
+            ("campaign_evaluation_plan_sha256", campaign_evaluation_plan_sha256),
             ("_gate_binding_sha256", _gate_binding_sha256),
             ("_semantic_binding_sha256", _semantic_binding_sha256),
             ("_new_state_payload", _new_state_payload),
@@ -1572,6 +1604,7 @@ def _seal_campaign_inception_dispatch() -> None:
             or module_globals.get("_STATE_DIR") != expected_state_dir
             or module_globals.get("_HEX") is not expected_hex
             or module_globals.get("_MAX_STATE_BYTES") != expected_max_state_bytes
+            or module_globals.get("_EVALUATION_PLAN_DOMAIN") != expected_evaluation_plan_domain
         ):
             raise expected_error_type("campaign inception schema/domain authority is rebound")
 

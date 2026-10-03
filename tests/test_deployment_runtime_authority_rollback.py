@@ -2276,3 +2276,189 @@ def test_runtime_authority_rejects_path_normalization_module_rebinding(
         match="path-normalization dispatch was replaced",
     ):
         store.records()
+
+
+@pytest.mark.parametrize(
+    "helper_name",
+    (
+        "_new_local_lock",
+        "_workspace_economic_lock",
+        "_construct_monotonic_authority",
+        "_assert_canonical_monotonic_authority_constructor",
+    ),
+)
+def test_runtime_authority_rejects_construction_helper_alias_rebinding(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    helper_name: str,
+) -> None:
+    hostile_calls: list[object] = []
+
+    def hostile(*args: object, **kwargs: object) -> object:
+        hostile_calls.append((args, kwargs))
+        raise AssertionError("hostile construction helper executed")
+
+    monkeypatch.setattr(deployment_runtime_authority, helper_name, hostile)
+    with pytest.raises(
+        DeploymentRuntimeAuthorityError,
+        match="construction helper dispatch was replaced|constructor guard dispatch was replaced",
+    ):
+        DeploymentRuntimeAuthorityStore.initialize_pristine(
+            tmp_path / "deployment-runtime-authority.json",
+            authority_root=_authority_root(tmp_path),
+        )
+
+    assert hostile_calls == []
+
+
+@pytest.mark.parametrize(
+    "helper_name",
+    (
+        "_new_local_lock",
+        "_workspace_economic_lock",
+        "_construct_monotonic_authority",
+        "_assert_canonical_monotonic_authority_constructor",
+    ),
+)
+def test_runtime_authority_rejects_construction_helper_code_replacement(
+    tmp_path: Path,
+    helper_name: str,
+) -> None:
+    target = getattr(deployment_runtime_authority, helper_name)
+    original_code = target.__code__
+
+    def hostile(*args: object, **kwargs: object) -> object:
+        del args, kwargs
+        raise AssertionError("hostile construction helper code executed")
+
+    assert hostile.__code__.co_freevars == original_code.co_freevars
+    target.__code__ = hostile.__code__
+    try:
+        with pytest.raises(
+            DeploymentRuntimeAuthorityError,
+            match="construction helper dispatch was replaced|constructor guard dispatch was replaced",
+        ):
+            DeploymentRuntimeAuthorityStore.initialize_pristine(
+                tmp_path / "deployment-runtime-authority.json",
+                authority_root=_authority_root(tmp_path),
+            )
+    finally:
+        target.__code__ = original_code
+
+
+@pytest.mark.parametrize(
+    ("name", "replacement"),
+    (
+        ("Path", object),
+        ("AuthorityPhase", object),
+        ("RecoveryDisposition", object),
+        ("MONOTONIC_AUTHORITY_ID", "hostile.monotonic.authority"),
+    ),
+)
+def test_runtime_authority_rejects_core_dependency_alias_rebinding(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    replacement: object,
+) -> None:
+    monkeypatch.setattr(deployment_runtime_authority, name, replacement)
+    with pytest.raises(
+        DeploymentRuntimeAuthorityError,
+        match="static contract was replaced",
+    ):
+        DeploymentRuntimeAuthorityStore.initialize_pristine(
+            tmp_path / "deployment-runtime-authority.json",
+            authority_root=_authority_root(tmp_path),
+        )
+
+
+def test_runtime_authority_rejects_local_lock_storage_rebinding(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "deployment-runtime-authority.json"
+    store = DeploymentRuntimeAuthorityStore.initialize_pristine(
+        path,
+        authority_root=_authority_root(tmp_path),
+    )
+    object.__setattr__(store, "_binding_lock", object())
+
+    with pytest.raises(
+        DeploymentRuntimeAuthorityError,
+        match="binding integrity mismatch",
+    ):
+        store.records()
+
+
+@pytest.mark.parametrize("name", ("datetime", "timezone"))
+def test_runtime_authority_rejects_time_dependency_alias_rebinding(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+) -> None:
+    path = tmp_path / "deployment-runtime-authority.json"
+    store = DeploymentRuntimeAuthorityStore.initialize_pristine(
+        path,
+        authority_root=_authority_root(tmp_path),
+    )
+
+    monkeypatch.setattr(deployment_runtime_authority, name, object())
+    with pytest.raises(
+        DeploymentRuntimeAuthorityError,
+        match="semantic type dispatch was replaced",
+    ):
+        store.records()
+
+
+def test_runtime_authority_rejects_record_init_descriptor_replacement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "deployment-runtime-authority.json"
+    store = DeploymentRuntimeAuthorityStore.initialize_pristine(
+        path,
+        authority_root=_authority_root(tmp_path),
+    )
+    hostile_calls: list[object] = []
+
+    def hostile_init(self: object, *args: object, **kwargs: object) -> None:
+        hostile_calls.append((self, args, kwargs))
+
+    monkeypatch.setattr(
+        DeploymentRuntimeAuthorityRecord,
+        "__init__",
+        hostile_init,
+    )
+    with pytest.raises(
+        DeploymentRuntimeAuthorityError,
+        match="record codec dispatch was replaced",
+    ):
+        store.records()
+
+    assert hostile_calls == []
+
+
+def test_runtime_authority_rejects_record_init_code_replacement(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "deployment-runtime-authority.json"
+    store = DeploymentRuntimeAuthorityStore.initialize_pristine(
+        path,
+        authority_root=_authority_root(tmp_path),
+    )
+    target = vars(DeploymentRuntimeAuthorityRecord)["__init__"]
+    original_code = target.__code__
+
+    def hostile_init(self: object, *args: object, **kwargs: object) -> None:
+        del self, args, kwargs
+        raise AssertionError("hostile runtime record init code executed")
+
+    assert hostile_init.__code__.co_freevars == original_code.co_freevars
+    target.__code__ = hostile_init.__code__
+    try:
+        with pytest.raises(
+            DeploymentRuntimeAuthorityError,
+            match="record codec dispatch was replaced",
+        ):
+            store.records()
+    finally:
+        target.__code__ = original_code

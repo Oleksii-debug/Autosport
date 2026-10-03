@@ -1899,3 +1899,81 @@ def test_runtime_authority_rejects_record_codec_requirement_code_replacement(
             store.records()
     finally:
         target.__code__ = original_code
+
+
+@pytest.mark.parametrize(
+    "helper_name",
+    (
+        "_text",
+        "_timestamp",
+        "_environment_payload",
+        "_action_semantics_payload",
+        "_environment_from_payload",
+        "_action_semantics_from_payload",
+    ),
+)
+def test_runtime_authority_rejects_record_helper_alias_rebinding(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    helper_name: str,
+) -> None:
+    path = tmp_path / "deployment-runtime-authority.json"
+    store = DeploymentRuntimeAuthorityStore.initialize_pristine(
+        path,
+        authority_root=_authority_root(tmp_path),
+    )
+    hostile_calls: list[object] = []
+
+    def hostile(*args: object, **kwargs: object) -> object:
+        hostile_calls.append((args, kwargs))
+        raise AssertionError("hostile runtime record helper executed")
+
+    monkeypatch.setattr(
+        deployment_runtime_authority,
+        helper_name,
+        hostile,
+    )
+    with pytest.raises(
+        DeploymentRuntimeAuthorityError,
+        match="record helper dispatch was replaced",
+    ):
+        store.records()
+
+    assert hostile_calls == []
+
+
+@pytest.mark.parametrize(
+    "helper_name",
+    (
+        "_timestamp",
+        "_environment_payload",
+        "_action_semantics_payload",
+        "_action_semantics_from_payload",
+    ),
+)
+def test_runtime_authority_rejects_record_helper_code_replacement(
+    tmp_path: Path,
+    helper_name: str,
+) -> None:
+    path = tmp_path / "deployment-runtime-authority.json"
+    store = DeploymentRuntimeAuthorityStore.initialize_pristine(
+        path,
+        authority_root=_authority_root(tmp_path),
+    )
+    target = getattr(deployment_runtime_authority, helper_name)
+    original_code = target.__code__
+
+    def hostile(*args: object, **kwargs: object) -> object:
+        del args, kwargs
+        raise AssertionError("hostile runtime record helper code executed")
+
+    assert hostile.__code__.co_freevars == original_code.co_freevars
+    target.__code__ = hostile.__code__
+    try:
+        with pytest.raises(
+            DeploymentRuntimeAuthorityError,
+            match="record helper dispatch was replaced",
+        ):
+            store.records()
+    finally:
+        target.__code__ = original_code

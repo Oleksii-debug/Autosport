@@ -47,8 +47,10 @@ class _FakeHttpResponse:
     def __exit__(self, exc_type, exc, traceback):
         return False
 
-    def read(self):
-        return self.payload
+    def read(self, limit=None):
+        if limit is None:
+            return self.payload
+        return self.payload[:limit]
 
 
 class QueueUrlopen:
@@ -187,6 +189,33 @@ def test_credentials_and_client_repr_do_not_expose_secure_values():
     assert "secret-app" not in value
     c = BetdaqAccountReadOnlyClient(credentials, transport=QueueTransport(), clock=clock)
     assert "secret" not in repr(c)
+
+
+@pytest.mark.parametrize("value", (0, -1, True, 1.5, "1024"))
+def test_canonical_transport_rejects_invalid_response_size_limit(value):
+    with pytest.raises(ValueError, match="max_response_bytes must be a positive integer"):
+        UrllibBetdaqSoapTransport(max_response_bytes=value)
+
+
+def test_canonical_transport_rejects_oversized_response_before_xml_materialization(
+    monkeypatch,
+):
+    opener = QueueUrlopen(b"x" * 17)
+    _install_https_test_dispatch(monkeypatch, opener)
+    transport = UrllibBetdaqSoapTransport(max_response_bytes=16)
+
+    with pytest.raises(
+        BetdaqAccountReadOnlyError,
+        match="BETDAQ response exceeded the size limit",
+    ):
+        transport.post(
+            betdaq_account_module._SECURE_ENDPOINT,
+            headers={"Content-Type": "text/xml"},
+            body=b"<request/>",
+            timeout_seconds=1.0,
+        )
+
+    assert len(opener.calls) == 1
 
 
 def test_process_global_urllib_opener_cannot_serve_canonical_account_evidence(

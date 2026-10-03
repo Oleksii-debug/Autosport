@@ -210,7 +210,10 @@ class ExecutionLegConstraint:
     quote_expires_at: str
     max_slippage_fraction: Decimal
 
-    def __post_init__(self) -> None:
+    def __post_init__(
+        self,
+        _decimal_type: type[Decimal] = Decimal,
+    ) -> None:
         _sha(self.leg_id, "leg_id")
         if _text(self.side, "side") != "BACK":
             raise SupervisedExecutionError(
@@ -218,7 +221,7 @@ class ExecutionLegConstraint:
             )
         _time(self.quote_expires_at, "quote_expires_at")
         if (
-            not isinstance(self.max_slippage_fraction, Decimal)
+            type(self.max_slippage_fraction) is not _decimal_type
             or not self.max_slippage_fraction.is_finite()
             or self.max_slippage_fraction < 0
             or self.max_slippage_fraction >= 1
@@ -396,7 +399,10 @@ class ProviderReadback:
     accepted_stake: Decimal | None = None
     terminal_settlement_exact: bool = False
 
-    def __post_init__(self) -> None:
+    def __post_init__(
+        self,
+        _decimal_type: type[Decimal] = Decimal,
+    ) -> None:
         for name in (
             "bookmaker_id",
             "account_id",
@@ -425,10 +431,10 @@ class ProviderReadback:
             raise SupervisedExecutionError("terminal_settlement_exact must be bool")
         if self.status in {AcknowledgementStatus.ACCEPTED, AcknowledgementStatus.PARTIAL}:
             if (
-                not isinstance(self.accepted_odds, Decimal)
+                type(self.accepted_odds) is not _decimal_type
                 or not self.accepted_odds.is_finite()
                 or self.accepted_odds <= 0
-                or not isinstance(self.accepted_stake, Decimal)
+                or type(self.accepted_stake) is not _decimal_type
                 or not self.accepted_stake.is_finite()
                 or self.accepted_stake <= 0
             ):
@@ -869,13 +875,19 @@ def _validate_slippage(
     action: ExecutionAction,
     constraint: ExecutionLegConstraint,
     accepted_odds: Decimal,
+    *,
+    _decimal_type: type[Decimal] = Decimal,
 ) -> None:
     if action.side == "BACK":
-        limit = action.requested_odds * (Decimal("1") - constraint.max_slippage_fraction)
+        limit = action.requested_odds * (
+            _decimal_type("1") - constraint.max_slippage_fraction
+        )
         if accepted_odds < limit:
             raise SupervisedExecutionError("accepted BACK odds exceed approved slippage")
     else:
-        limit = action.requested_odds * (Decimal("1") + constraint.max_slippage_fraction)
+        limit = action.requested_odds * (
+            _decimal_type("1") + constraint.max_slippage_fraction
+        )
         if accepted_odds > limit:
             raise SupervisedExecutionError("accepted LAY odds exceed approved slippage")
 

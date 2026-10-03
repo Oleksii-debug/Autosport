@@ -1333,13 +1333,45 @@ def _derive_policy_evaluation(
         )
 
     challenger_metrics = policy_evaluation.get("challenger_metrics")
-    if type(challenger_metrics) is not dict or "policy_loss" not in challenger_metrics:
+    required_challenger_metrics = {
+        "policy_loss",
+        "abstention_rate",
+        "action_rate",
+    }
+    if (
+        type(challenger_metrics) is not dict
+        or not required_challenger_metrics.issubset(challenger_metrics)
+    ):
         raise ProductPolicyEvaluationIssuanceError(
-            "source policy evaluator lacks exact challenger policy_loss"
+            "source policy evaluator lacks exact challenger policy/abstention metrics"
         )
     policy_loss = _decimal(
         challenger_metrics.get("policy_loss"), "source challenger policy_loss"
     )
+    abstention_rate = _decimal(
+        challenger_metrics.get("abstention_rate"),
+        "source challenger abstention_rate",
+        nonnegative=True,
+    )
+    action_rate = _decimal(
+        challenger_metrics.get("action_rate"),
+        "source challenger action_rate",
+        nonnegative=True,
+    )
+    with localcontext() as context:
+        context.prec = 80
+        expected_abstention_rate = Decimal(abstention_count) / Decimal(observed_count)
+        expected_action_rate = Decimal(scored_count) / Decimal(observed_count)
+    if (
+        abstention_rate > 1
+        or action_rate > 1
+        or abstention_rate != expected_abstention_rate
+        or action_rate != expected_action_rate
+        or abstention_rate + action_rate != 1
+    ):
+        raise ProductPolicyEvaluationIssuanceError(
+            "source policy evaluator abstention metrics do not reconcile to canonical samples"
+        )
     if metric_value != -policy_loss:
         raise ProductPolicyEvaluationIssuanceError(
             "source sample utility does not reconcile to canonical policy_loss"

@@ -100,7 +100,21 @@ def _source(
             "kind": "autosport-policy-paired-causal-evaluation-v1",
             "completed_at": T1,
             "samples": samples,
-            "challenger_metrics": {"policy_loss": "0"},
+            "challenger_metrics": {
+                "policy_loss": "0",
+                "abstention_rate": (
+                    "1"
+                    if all(action in {"NO_BET", "WAIT", configured_abstain_action}
+                           for _sample_id, action in actions)
+                    else "0"
+                ),
+                "action_rate": (
+                    "0"
+                    if all(action in {"NO_BET", "WAIT", configured_abstain_action}
+                           for _sample_id, action in actions)
+                    else "1"
+                ),
+            },
         },
         evaluator_config={"abstain_action": configured_abstain_action},
     )
@@ -162,4 +176,25 @@ def test_product_issuance_rejects_material_bet_as_abstain_action():
             protocol,
             _target(),
             _source(actions, configured_abstain_action="BET"),
+        )
+
+
+def test_product_issuance_rejects_abstention_metric_disagreement():
+    actions = (("case-a", "NO_BET"), ("case-b", "WAIT"))
+    protocol = _protocol(("case-a", "case-b"))
+    source = _source(actions)
+    source.policy_evaluation["challenger_metrics"] = {
+        "policy_loss": "0",
+        "abstention_rate": "0",
+        "action_rate": "1",
+    }
+
+    with pytest.raises(
+        issuance.ProductPolicyEvaluationIssuanceError,
+        match="abstention metrics do not reconcile",
+    ):
+        issuance._derive_policy_evaluation(
+            protocol,
+            _target(),
+            source,
         )

@@ -526,3 +526,67 @@ def test_main_rejects_preentry_admission_code_mutation(monkeypatch) -> None:
 
     assert controller_module.main(_main_admission_args()) == 2
 
+
+def test_main_orchestration_roots_are_not_caller_injectable() -> None:
+    forged_calls: list[str] = []
+
+    def forged_admit(**_kwargs) -> CancellationResult:
+        forged_calls.append("admit")
+        return CancellationResult(current_head=True, cancelled_run_ids=())
+
+    def forged_cancel(**_kwargs) -> CancellationResult:
+        forged_calls.append("cancel")
+        return CancellationResult(current_head=True, cancelled_run_ids=(999,))
+
+    def forged_output(_result: object) -> None:
+        forged_calls.append("output")
+
+    class ForgedApi:
+        def __init__(self, **_kwargs) -> None:
+            forged_calls.append("api")
+
+    forged_globals = {
+        "admit_current_head": forged_admit,
+        "cancel_superseded": forged_cancel,
+        "_write_github_output": forged_output,
+        "GitHubApi": ForgedApi,
+    }
+
+    assert controller_module.main.__kwdefaults__ is None
+    with pytest.raises(TypeError, match="unexpected keyword argument"):
+        controller_module.main(
+            _main_admission_args(),
+            _module_globals=forged_globals,
+            _admit_impl=forged_admit,
+            _admit_code=forged_admit.__code__,
+            _cancel_impl=forged_cancel,
+            _cancel_code=forged_cancel.__code__,
+            _output_writer=forged_output,
+            _output_writer_code=forged_output.__code__,
+            _api_type=ForgedApi,
+            _api_init=ForgedApi.__init__,
+            _api_init_code=ForgedApi.__init__.__code__,
+        )
+    assert forged_calls == []
+
+
+def test_main_kwdefaults_metadata_cannot_rebase_orchestration(
+    monkeypatch,
+) -> None:
+    forged_calls: list[str] = []
+
+    def forged_admit(**_kwargs) -> CancellationResult:
+        forged_calls.append("admit")
+        return CancellationResult(current_head=True, cancelled_run_ids=())
+
+    monkeypatch.setattr(
+        controller_module.main,
+        "__kwdefaults__",
+        {"_admit_impl": forged_admit, "_admit_code": forged_admit.__code__},
+    )
+    monkeypatch.setattr(controller_module, "admit_current_head", forged_admit)
+    monkeypatch.setenv("GITHUB_REPOSITORY", "owner/repo")
+    monkeypatch.setenv("GITHUB_TOKEN", "token")
+
+    assert controller_module.main(_main_admission_args()) == 2
+    assert forged_calls == []

@@ -3019,3 +3019,96 @@ def test_scoped_active_run_scan_rejects_inflight_workflow_run_constructor_mutati
     ):
         api._active_runs_for_status("queued")
 
+
+def test_scoped_main_orchestration_roots_are_not_caller_injectable() -> None:
+    forged_calls: list[str] = []
+
+    class ForgedScopedApi:
+        def __init__(self, **_kwargs) -> None:
+            forged_calls.append("api")
+
+        def active_runs(self):
+            forged_calls.append("active")
+            return ()
+
+        def cancel_historical_unbound_runs(self, **_kwargs):
+            forged_calls.append("orphan")
+            return ()
+
+    def forged_sweep(*_args, **_kwargs):
+        forged_calls.append("sweep")
+        return ()
+
+    def forged_trigger(*_args, **_kwargs):
+        forged_calls.append("trigger")
+        return False
+
+    def forged_snapshot(*_args, **_kwargs):
+        forged_calls.append("snapshot")
+        return None
+
+    def forged_qualification(*_args, **_kwargs):
+        forged_calls.append("qualification")
+        return (HEAD, True)
+
+    def forged_event(*_args, **_kwargs):
+        forged_calls.append("event")
+        return (2039, False)
+
+    forged_globals = {
+        "WorkflowScopedGitHubApi": ForgedScopedApi,
+        "cancel_superseded_explicit_pr_runs": forged_sweep,
+        "_cancel_triggering_run_if_stale_or_nonqualifying": forged_trigger,
+        "_explicit_singleton_pr_for_current_run": forged_snapshot,
+        "_trusted_live_pr_qualification": forged_qualification,
+        "_validated_event_pr_identity": forged_event,
+    }
+
+    assert scoped_controller.main.__kwdefaults__ is None
+    with pytest.raises(TypeError, match="unexpected keyword argument"):
+        scoped_controller.main(
+            _scoped_main_args(),
+            _module_globals=forged_globals,
+            _api_type=ForgedScopedApi,
+            _api_init=ForgedScopedApi.__init__,
+            _api_init_code=ForgedScopedApi.__init__.__code__,
+            _active_runs_impl=ForgedScopedApi.active_runs,
+            _active_runs_code=ForgedScopedApi.active_runs.__code__,
+            _orphan_impl=ForgedScopedApi.cancel_historical_unbound_runs,
+            _orphan_code=ForgedScopedApi.cancel_historical_unbound_runs.__code__,
+            _sweep_impl=forged_sweep,
+            _sweep_code=forged_sweep.__code__,
+            _trigger_impl=forged_trigger,
+            _trigger_code=forged_trigger.__code__,
+            _snapshot_identity_impl=forged_snapshot,
+            _snapshot_identity_code=forged_snapshot.__code__,
+            _trusted_qualification_impl=forged_qualification,
+            _trusted_qualification_code=forged_qualification.__code__,
+            _event_identity_impl=forged_event,
+            _event_identity_code=forged_event.__code__,
+        )
+    assert forged_calls == []
+
+
+def test_scoped_main_kwdefaults_metadata_cannot_rebase_orchestration(
+    monkeypatch,
+) -> None:
+    forged_calls: list[str] = []
+
+    def forged_sweep(*_args, **_kwargs):
+        forged_calls.append("sweep")
+        return ()
+
+    monkeypatch.setattr(
+        scoped_controller.main,
+        "__kwdefaults__",
+        {"_sweep_impl": forged_sweep, "_sweep_code": forged_sweep.__code__},
+    )
+    monkeypatch.setattr(
+        scoped_controller,
+        "cancel_superseded_explicit_pr_runs",
+        forged_sweep,
+    )
+
+    assert scoped_controller.main(_scoped_main_args()) == 2
+    assert forged_calls == []

@@ -1065,88 +1065,97 @@ def _write_github_output(result: CancellationResult) -> None:
         raise CancellationError("unable to write GITHUB_OUTPUT") from exc
 
 
-def main(
-    argv: list[str] | None = None,
-    *,
-    _module_globals=globals(),
-    _admit_impl=admit_current_head,
-    _admit_code=admit_current_head.__code__,
-    _cancel_impl=cancel_superseded,
-    _cancel_code=cancel_superseded.__code__,
-    _output_writer=_write_github_output,
-    _output_writer_code=_write_github_output.__code__,
-    _api_type=GitHubApi,
-    _api_init=GitHubApi.__dict__["__init__"],
-    _api_init_code=GitHubApi.__dict__["__init__"].__code__,
-) -> int:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--pr-number", type=int, required=True)
-    parser.add_argument("--event-head-sha", required=True)
-    parser.add_argument("--workflow-name", required=True)
-    parser.add_argument("--current-run-id", type=int, required=True)
-    parser.add_argument("--admission-only", action="store_true")
-    args = parser.parse_args(argv)
+def _build_main(*, module_globals, admit_impl, cancel_impl, output_writer, api_type):
+    """Freeze controller orchestration roots in closure-owned composition state."""
 
-    def orchestration_authority_current() -> bool:
-        return (
-            _module_globals.get("admit_current_head") is _admit_impl
-            and getattr(_admit_impl, "__code__", None) is _admit_code
-            and _module_globals.get("cancel_superseded") is _cancel_impl
-            and getattr(_cancel_impl, "__code__", None) is _cancel_code
-            and _module_globals.get("_write_github_output") is _output_writer
-            and getattr(_output_writer, "__code__", None) is _output_writer_code
-            and _module_globals.get("GitHubApi") is _api_type
-            and _api_type.__dict__.get("__init__") is _api_init
-            and getattr(_api_init, "__code__", None) is _api_init_code
-        )
+    admit_code = getattr(admit_impl, "__code__", None)
+    cancel_code = getattr(cancel_impl, "__code__", None)
+    output_writer_code = getattr(output_writer, "__code__", None)
+    api_init = api_type.__dict__.get("__init__")
+    api_init_code = getattr(api_init, "__code__", None)
 
-    try:
-        if not orchestration_authority_current():
-            raise CancellationError("main orchestration authority changed")
+    def main(argv: list[str] | None = None) -> int:
+        parser = argparse.ArgumentParser()
+        parser.add_argument("--pr-number", type=int, required=True)
+        parser.add_argument("--event-head-sha", required=True)
+        parser.add_argument("--workflow-name", required=True)
+        parser.add_argument("--current-run-id", type=int, required=True)
+        parser.add_argument("--admission-only", action="store_true")
+        args = parser.parse_args(argv)
 
-        api = _api_type(
-            repository=os.environ.get("GITHUB_REPOSITORY", ""),
-            token=os.environ.get("GITHUB_TOKEN", ""),
-        )
-        if not orchestration_authority_current():
-            raise CancellationError("main orchestration authority changed")
+        def orchestration_authority_current() -> bool:
+            return (
+                module_globals.get("admit_current_head") is admit_impl
+                and getattr(admit_impl, "__code__", None) is admit_code
+                and module_globals.get("cancel_superseded") is cancel_impl
+                and getattr(cancel_impl, "__code__", None) is cancel_code
+                and module_globals.get("_write_github_output") is output_writer
+                and getattr(output_writer, "__code__", None) is output_writer_code
+                and module_globals.get("GitHubApi") is api_type
+                and api_type.__dict__.get("__init__") is api_init
+                and getattr(api_init, "__code__", None) is api_init_code
+            )
 
-        pr_number = args.pr_number
-        if pr_number <= 0:
+        try:
+            if not orchestration_authority_current():
+                raise CancellationError("main orchestration authority changed")
+
+            api = api_type(
+                repository=os.environ.get("GITHUB_REPOSITORY", ""),
+                token=os.environ.get("GITHUB_TOKEN", ""),
+            )
+            if not orchestration_authority_current():
+                raise CancellationError("main orchestration authority changed")
+
+            pr_number = args.pr_number
+            if pr_number <= 0:
+                if args.admission_only:
+                    raise CancellationError("admission requires an explicit pull request number")
+                pr_number = api.associated_pr_number(args.event_head_sha)
+            elif type(pr_number) is not int:
+                raise CancellationError("invalid pull request number")
+
+            if not orchestration_authority_current():
+                raise CancellationError("main orchestration authority changed")
+
             if args.admission_only:
-                raise CancellationError("admission requires an explicit pull request number")
-            pr_number = api.associated_pr_number(args.event_head_sha)
-        elif type(pr_number) is not int:
-            raise CancellationError("invalid pull request number")
+                result = admit_impl(
+                    api=api,
+                    pr_number=pr_number,
+                    event_head_sha=args.event_head_sha,
+                )
+            else:
+                result = cancel_impl(
+                    api=api,
+                    pr_number=pr_number,
+                    event_head_sha=args.event_head_sha,
+                    workflow_name=args.workflow_name,
+                    current_run_id=args.current_run_id,
+                )
 
-        if not orchestration_authority_current():
-            raise CancellationError("main orchestration authority changed")
+            if not orchestration_authority_current():
+                raise CancellationError("main orchestration authority changed")
+            output_writer(result)
+        except CancellationError as exc:
+            print(f"superseded-run cancellation failed: {exc}", file=sys.stderr)
+            return 2
+        cancelled = ",".join(str(item) for item in result.cancelled_run_ids)
+        print("cancelled superseded workflow runs: " + cancelled)
+        return 0
 
-        if args.admission_only:
-            result = _admit_impl(
-                api=api,
-                pr_number=pr_number,
-                event_head_sha=args.event_head_sha,
-            )
-        else:
-            result = _cancel_impl(
-                api=api,
-                pr_number=pr_number,
-                event_head_sha=args.event_head_sha,
-                workflow_name=args.workflow_name,
-                current_run_id=args.current_run_id,
-            )
 
-        if not orchestration_authority_current():
-            raise CancellationError("main orchestration authority changed")
-        _output_writer(result)
-    except CancellationError as exc:
-        print(f"superseded-run cancellation failed: {exc}", file=sys.stderr)
-        return 2
-    cancelled = ",".join(str(item) for item in result.cancelled_run_ids)
-    print("cancelled superseded workflow runs: " + cancelled)
-    return 0
 
+    return main
+
+
+main = _build_main(
+    module_globals=globals(),
+    admit_impl=admit_current_head,
+    cancel_impl=cancel_superseded,
+    output_writer=_write_github_output,
+    api_type=GitHubApi,
+)
+del _build_main
 
 if __name__ == "__main__":
     raise SystemExit(main())

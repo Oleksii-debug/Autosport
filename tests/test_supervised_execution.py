@@ -415,6 +415,85 @@ def test_reservation_rejects_structurally_valid_but_unissued_bound_plan(tmp_path
         ledger.saga(reconstructed.execution_plan.plan_id)
 
 
+def test_durable_issuance_allows_structural_reconstruction_after_restart(tmp_path) -> None:
+    bound, approval, _, _ = _bound()
+    path = tmp_path / "durable-supervised-restart.jsonl"
+    ledger = RealExecutionLedger(path)
+    fingerprint = reserve_supervised_plan(ledger, bound, approval)
+
+    reconstructed = replace(bound)
+    with pytest.raises(
+        SupervisedExecutionError,
+        match="not current canonical product issuance",
+    ):
+        assert_bound_supervised_execution_plan_authoritative(reconstructed)
+
+    restarted = RealExecutionLedger(path)
+    replay = reserve_supervised_plan(restarted, reconstructed, approval)
+    assert replay == fingerprint
+
+    action = reconstructed.execution_plan.actions[0]
+    attempt = begin_supervised_attempt(
+        restarted,
+        reconstructed,
+        approval,
+        action_id=action.action_id,
+        attempt_id="restart-attempt-1",
+    )
+    assert attempt.attempt_id == "restart-attempt-1"
+    assert restarted.attempt_state("restart-attempt-1") is AttemptState.RESERVED
+
+
+def test_reserved_plan_without_durable_product_issuance_cannot_be_reconstructed(
+    tmp_path,
+) -> None:
+    bound, approval, _, _ = _bound()
+    reconstructed = replace(bound)
+    ledger = RealExecutionLedger(tmp_path / "missing-durable-issuance.jsonl")
+    ledger.reserve_plan(bound.execution_plan)
+
+    with pytest.raises(
+        SupervisedExecutionError,
+        match="not current canonical product issuance",
+    ):
+        reserve_supervised_plan(ledger, reconstructed, approval)
+
+    assert ledger.supervised_plan_issuance_is_current(
+        plan_id=bound.execution_plan.plan_id,
+        bound_plan_witness=supervised_execution._bound_plan_witness(bound),
+        plan_fingerprint=bound.execution_plan.fingerprint,
+    ) is False
+
+
+def test_supervised_issuance_ledger_dispatch_rebinding_fails_before_hostile_code(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    bound, approval, _, _ = _bound()
+    ledger = RealExecutionLedger(tmp_path / "issuance-dispatch-rebind.jsonl")
+    hostile_calls = []
+
+    def hostile_current(self, **kwargs):
+        hostile_calls.append((self, kwargs))
+        return True
+
+    monkeypatch.setattr(
+        RealExecutionLedger,
+        "supervised_plan_issuance_is_current",
+        hostile_current,
+    )
+
+    with pytest.raises(
+        SupervisedExecutionError,
+        match="canonical real execution ledger authority changed",
+    ):
+        reserve_supervised_plan(ledger, bound, approval)
+
+    assert hostile_calls == []
+    with pytest.raises(KeyError):
+        ledger.saga(bound.execution_plan.plan_id)
+
+
 def test_product_issuer_is_not_importable_from_module_namespace() -> None:
     assert not hasattr(
         supervised_execution,

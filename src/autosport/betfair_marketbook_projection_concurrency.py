@@ -5,9 +5,9 @@ from datetime import datetime, timezone
 
 
 BETFAIR_MARKETBOOK_PROJECTION_CONCURRENCY_POLICY_VERSION = (
-    "betfair.list-market-book.projection-concurrency.v2-no-auto-expiry"
+    "betfair.list-market-book.local-projection-pressure.v3-conservative"
 )
-_MAX_PROJECTION_REQUESTS_IN_FLIGHT = 3
+_MAX_LOCAL_PROJECTION_REQUESTS_UNRESOLVED = 3
 _EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 
 
@@ -59,8 +59,8 @@ class MarketBookProjectionConcurrencyState:
             raise TypeError("last_observed_at_utc_us must be a non-boolean int or None")
         if type(self.active) is not tuple:
             raise TypeError("active must be a tuple")
-        if len(self.active) > _MAX_PROJECTION_REQUESTS_IN_FLIGHT:
-            raise ValueError("projection concurrency state exceeds provider maximum")
+        if len(self.active) > _MAX_LOCAL_PROJECTION_REQUESTS_UNRESOLVED:
+            raise ValueError("projection concurrency state exceeds conservative local maximum")
         ids: list[str] = []
         for lease in self.active:
             if type(lease) is not MarketBookProjectionLease:
@@ -84,22 +84,33 @@ class MarketBookProjectionConcurrencyDecision:
     projection_bearing: bool
     allowed: bool
     active_projection_requests: int
+    provider_limit_coverage_complete: bool = False
+    provider_dispatch_authorized: bool = False
 
 
 class BetfairMarketBookProjectionConcurrencyGate:
-    """Pure fail-safe state kernel for Betfair projection request concurrency.
+    """Conservative local pressure gate for projection-bearing listMarketBook calls.
 
-    Betfair documents a three-request concurrency limit for listMarketBook calls
-    carrying OrderProjection and/or MatchProjection. This class models only local
-    product admission state. Price-only reads bypass this bucket.
+    Betfair's current TOO_MANY_REQUESTS guidance is account-scoped rather than a
+    standalone exact listMarketBook in-flight counter: projection-bearing
+    listMarketBook calls contend with listCurrentOrders and listMarketProfitAndLoss,
+    and the provider describes a limit involving queued requests that are ready for
+    processing while already-processing requests do not count.
 
-    Active projection leases NEVER expire merely because caller time advanced. A
-    caller-chosen timeout cannot prove that the provider stopped counting a request
-    as in-flight. Slots therefore release only through complete for the exact active
-    request. On restart unresolved leases remain blocking; a separate product
-    recovery authority must establish when they are safe to resolve. This kernel does
-    no network I/O, scheduling, sleeping, retry or recovery, and its public decisions
-    are not provider evidence or financial/execution permission.
+    This kernel therefore does NOT claim to model the provider queue or complete
+    account-wide headroom. It deliberately applies a stricter local fail-safe cap of
+    three unresolved projection-bearing listMarketBook requests. Price-only reads
+    bypass this local bucket. Passing the gate proves only that this product-local
+    conservative cap has room; it never proves provider acceptance, complete
+    account-scoped limit coverage, or dispatch authorization.
+
+    Active local leases NEVER expire merely because caller time advanced. A
+    caller-chosen timeout cannot prove provider queue/processing state or establish
+    that another account-scoped operation stopped contending. Slots therefore release
+    only through complete for the exact active local request. On restart unresolved
+    leases remain blocking; a separate product recovery authority must establish when
+    they are safe to resolve. This kernel does no network I/O, scheduling, sleeping,
+    retry, cross-operation accounting, or recovery.
     """
 
     def __init__(
@@ -168,7 +179,7 @@ class BetfairMarketBookProjectionConcurrencyGate:
                 active_projection_requests=len(self._active),
             )
 
-        if len(self._active) >= _MAX_PROJECTION_REQUESTS_IN_FLIGHT:
+        if len(self._active) >= _MAX_LOCAL_PROJECTION_REQUESTS_UNRESOLVED:
             return MarketBookProjectionConcurrencyDecision(
                 request_id=request_id,
                 observed_at_utc_us=observed_us,

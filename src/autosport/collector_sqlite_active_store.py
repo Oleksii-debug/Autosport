@@ -34,6 +34,7 @@ _EVENT_PAYLOAD_SCHEMA_META_KEY = "collector_event_payload_schema_v1"
 _EVENT_PAYLOAD_QUOTE_INDEX = "collector_event_payloads_v1_quote"
 _EVENT_PAYLOAD_DEDUPE_INDEX = "collector_event_payloads_v1_dedupe"
 _EVENT_PAYLOAD_IMMUTABLE_UPDATE_TRIGGER = "collector_event_payloads_immutable_update_v1"
+_EVENT_PAYLOAD_RETENTION_DELETE_TRIGGER = "collector_event_payloads_retention_delete_v1"
 _EVENT_PAYLOAD_MAX_QUERY_KEYS = 50_000
 _EVENT_PAYLOAD_QUERY_CHUNK = 400
 _INDEXED_PROJECTION_FIELDS = (
@@ -271,6 +272,30 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
             raise ValueError(
                 "collector event payload schema integrity guard is missing"
             )
+        delete_trigger = connection.execute(
+            "SELECT type, tbl_name, sql FROM sqlite_master WHERE name=?",
+            (_EVENT_PAYLOAD_RETENTION_DELETE_TRIGGER,),
+        ).fetchone()
+        expected_delete_trigger_sql = " ".join(
+            (
+                f"CREATE TRIGGER {_EVENT_PAYLOAD_RETENTION_DELETE_TRIGGER}",
+                f"BEFORE DELETE ON {_EVENT_PAYLOAD_TABLE}",
+                "WHEN NOT EXISTS (SELECT 1 FROM collector_delta_tombstones_v1",
+                "WHERE delta_id=OLD.delta_id AND source_id=OLD.source_id",
+                "AND stream_epoch=OLD.stream_epoch)",
+                "BEGIN SELECT RAISE(ABORT, 'collector event payload deletion requires retention tombstone'); END",
+            )
+        )
+        if (
+            delete_trigger is None
+            or delete_trigger["type"] != "trigger"
+            or delete_trigger["tbl_name"] != _EVENT_PAYLOAD_TABLE
+            or " ".join(str(delete_trigger["sql"]).split())
+            != expected_delete_trigger_sql
+        ):
+            raise ValueError(
+                "collector event payload schema integrity guard is missing"
+            )
 
     def _ensure_projection_integrity_guard(self) -> None:
         """One-time reconcile indexed projections, then make them SQL-immutable.
@@ -292,12 +317,13 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
                 row["name"]
                 for row in connection.execute(
                     "SELECT name FROM sqlite_master "
-                    "WHERE name IN (?,?,?,?)",
+                    "WHERE name IN (?,?,?,?,?)",
                     (
                         _EVENT_PAYLOAD_TABLE,
                         _EVENT_PAYLOAD_QUOTE_INDEX,
                         _EVENT_PAYLOAD_DEDUPE_INDEX,
                         _EVENT_PAYLOAD_IMMUTABLE_UPDATE_TRIGGER,
+                        _EVENT_PAYLOAD_RETENTION_DELETE_TRIGGER,
                     ),
                 ).fetchall()
             }
@@ -306,6 +332,10 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
                 _EVENT_PAYLOAD_QUOTE_INDEX,
                 _EVENT_PAYLOAD_DEDUPE_INDEX,
                 _EVENT_PAYLOAD_IMMUTABLE_UPDATE_TRIGGER,
+                _EVENT_PAYLOAD_RETENTION_DELETE_TRIGGER,
+            }
+            legacy_event_objects_v1 = required_event_objects - {
+                _EVENT_PAYLOAD_RETENTION_DELETE_TRIGGER
             }
             if event_schema_marker is None:
                 if event_object_names:
@@ -339,11 +369,36 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
                     "SELECT RAISE(ABORT, 'collector event payload evidence is immutable'); END"
                 )
                 connection.execute(
-                    "INSERT INTO collector_meta(key, value) VALUES(?, '1')",
+                    f"CREATE TRIGGER {_EVENT_PAYLOAD_RETENTION_DELETE_TRIGGER} "
+                    f"BEFORE DELETE ON {_EVENT_PAYLOAD_TABLE} "
+                    "WHEN NOT EXISTS (SELECT 1 FROM collector_delta_tombstones_v1 "
+                    "WHERE delta_id=OLD.delta_id AND source_id=OLD.source_id "
+                    "AND stream_epoch=OLD.stream_epoch) BEGIN "
+                    "SELECT RAISE(ABORT, 'collector event payload deletion requires retention tombstone'); END"
+                )
+                connection.execute(
+                    "INSERT INTO collector_meta(key, value) VALUES(?, '2')",
+                    (_EVENT_PAYLOAD_SCHEMA_META_KEY,),
+                )
+            elif event_schema_marker[0] == "1":
+                if event_object_names != legacy_event_objects_v1:
+                    raise ValueError(
+                        "collector event payload schema integrity guard is missing"
+                    )
+                connection.execute(
+                    f"CREATE TRIGGER {_EVENT_PAYLOAD_RETENTION_DELETE_TRIGGER} "
+                    f"BEFORE DELETE ON {_EVENT_PAYLOAD_TABLE} "
+                    "WHEN NOT EXISTS (SELECT 1 FROM collector_delta_tombstones_v1 "
+                    "WHERE delta_id=OLD.delta_id AND source_id=OLD.source_id "
+                    "AND stream_epoch=OLD.stream_epoch) BEGIN "
+                    "SELECT RAISE(ABORT, 'collector event payload deletion requires retention tombstone'); END"
+                )
+                connection.execute(
+                    "UPDATE collector_meta SET value='2' WHERE key=?",
                     (_EVENT_PAYLOAD_SCHEMA_META_KEY,),
                 )
             elif (
-                event_schema_marker[0] != "1"
+                event_schema_marker[0] != "2"
                 or event_object_names != required_event_objects
             ):
                 raise ValueError(

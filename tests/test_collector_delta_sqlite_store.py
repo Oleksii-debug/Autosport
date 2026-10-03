@@ -288,7 +288,7 @@ class CollectorSQLiteStoreTests(unittest.TestCase):
 
             self.assertIsNone(store.get(delta.delta_id))
 
-    def test_event_payload_is_deleted_with_retained_delta_parent(self):
+    def test_event_payload_delete_requires_canonical_retention_tombstone(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "collector.json"
             store = CollectorDeltaStore(path)
@@ -303,17 +303,70 @@ class CollectorSQLiteStoreTests(unittest.TestCase):
 
             connection = store._connect()
             try:
+                with self.assertRaisesRegex(
+                    sqlite3.IntegrityError,
+                    "requires retention tombstone",
+                ):
+                    connection.execute(
+                        "DELETE FROM collector_event_payloads_v1 WHERE delta_id=?",
+                        (delta.delta_id,),
+                    )
+                connection.rollback()
+                with self.assertRaisesRegex(
+                    sqlite3.IntegrityError,
+                    "requires retention tombstone",
+                ):
+                    connection.execute(
+                        "DELETE FROM collector_deltas WHERE delta_id=?",
+                        (delta.delta_id,),
+                    )
+                connection.rollback()
+                self.assertEqual(store.resolve_event(delta), event)
+
                 connection.execute("BEGIN IMMEDIATE")
+                connection.execute(
+                    "INSERT INTO collector_delta_tombstones_v1("
+                    "delta_id, source_id, stream_epoch, payload_sha256, "
+                    "compacted_at, plan_id"
+                    ") SELECT delta_id, source_id, stream_epoch, payload_sha256, ?, ? "
+                    "FROM collector_deltas WHERE delta_id=?",
+                    (
+                        "2026-01-02T00:00:00+00:00",
+                        "retention-test-plan",
+                        delta.delta_id,
+                    ),
+                )
                 connection.execute(
                     "DELETE FROM collector_deltas WHERE delta_id=?",
                     (delta.delta_id,),
                 )
                 connection.commit()
             finally:
+                if connection.in_transaction:
+                    connection.rollback()
                 connection.close()
 
             with self.assertRaisesRegex(ValueError, "not retained exactly"):
                 store.resolve_event(delta)
+
+    def test_event_payload_schema_rejects_missing_retention_delete_guard(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "collector.json"
+            CollectorDeltaStore(path)
+            connection = sqlite3.connect(path)
+            try:
+                connection.execute(
+                    "DROP TRIGGER collector_event_payloads_retention_delete_v1"
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "event payload schema integrity guard is missing",
+            ):
+                CollectorDeltaStore(path)
 
     def test_legacy_json_migrates_once_and_preserves_exact_backup(self):
         with tempfile.TemporaryDirectory() as tmp:

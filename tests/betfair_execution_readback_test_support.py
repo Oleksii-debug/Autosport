@@ -77,6 +77,28 @@ class _QueuedOpener:
         assert not self._responses, "unused Betfair readback fixture responses"
 
 
+def _install_https_opener_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+    opener,
+) -> None:
+    """Intercept below each fresh canonical opener used by deterministic fixtures."""
+
+    def fake_do_open(_self, _http_class, request, **_kwargs):
+        response = opener.open(
+            request,
+            timeout=getattr(request, "timeout", 0),
+        )
+        response.code = 200
+        response.msg = "OK"
+        return response
+
+    monkeypatch.setattr(
+        _urllib_request.AbstractHTTPHandler,
+        "do_open",
+        fake_do_open,
+    )
+
+
 def authoritative_execution_readback(
     responses: list[bytes],
     *,
@@ -91,9 +113,7 @@ def authoritative_execution_readback(
 
     opener = _QueuedOpener(responses)
     with pytest.MonkeyPatch.context() as monkeypatch:
-        # Preserve autosport.betfair_account_readonly.urlopen and its canonical
-        # transport identity. Only stdlib's process opener below it is replaced.
-        monkeypatch.setattr(_urllib_request, "_opener", opener)
+        _install_https_opener_dispatch(monkeypatch, opener)
         client = build_betfair_authenticated_client(
             BetfairSessionCredentials("fixture-app-key", "fixture-session-token"),
             account_label=account_id,
@@ -121,7 +141,7 @@ def authoritative_execution_readback_with_client(
 ) -> tuple[BetfairReadOnlyClient, object]:
     opener = _QueuedOpener(responses)
     with pytest.MonkeyPatch.context() as monkeypatch:
-        monkeypatch.setattr(_urllib_request, "_opener", opener)
+        _install_https_opener_dispatch(monkeypatch, opener)
         client = build_betfair_authenticated_client(
             BetfairSessionCredentials("fixture-app-key", "fixture-session-token"),
             account_label=account_id,
@@ -179,9 +199,8 @@ def canonical_authenticated_readback_client(transport, *, account_id: str):
     """Yield a K07 client while deterministic betting I/O stays below canonical transport."""
 
     with pytest.MonkeyPatch.context() as monkeypatch:
-        monkeypatch.setattr(
-            _urllib_request,
-            "_opener",
+        _install_https_opener_dispatch(
+            monkeypatch,
             _DelegatingOpener(transport),
         )
         client = build_betfair_authenticated_client(

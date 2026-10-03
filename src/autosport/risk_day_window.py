@@ -612,7 +612,8 @@ class ProductDayRiskWindowStore:
             observed_state_sha256=published_sha256,
             semantic_binding_sha256=binding,
         )
-        return self._evidence(
+        return type(self)._evidence(
+            self,
             payload,
             published_sha256,
             committed.generation,

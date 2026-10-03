@@ -2175,6 +2175,7 @@ class PersistentLiveDecisionLoop:
         market_state_sha256: str,
         affected_input_ids: tuple[str, ...],
         gate: str,
+        provider_health_boundaries: tuple[ProviderHealthReplayBoundary, ...],
         detail: str = "",
         decision_context_sha256_override: str | None = None,
     ) -> LiveCycleResult:
@@ -2186,10 +2187,28 @@ class PersistentLiveDecisionLoop:
                 "recovery decision_context_sha256",
                 decision_context_sha256_override,
             )
+        progress_health_probe = _Progress(
+            loop_id=self.loop_id,
+            phase=_PHASE_PENDING,
+            decision_ts=plan.decision_ts,
+            market_state_sha256=market_state_sha256,
+            decision_context_sha256=decision_context_sha256,
+            affected_input_ids=affected_input_ids,
+            registered_input_ids=self.dependencies.input_ids,
+            decision_id=None,
+            plan_sha256=None,
+            ledger_offset=None,
+            gate=gate,
+            provider_health_boundaries=provider_health_boundaries,
+        )
+        provider_health_boundaries = progress_health_probe.provider_health_boundaries
+        health_payload = [
+            boundary.to_dict() for boundary in provider_health_boundaries
+        ]
         provenance = self.intent_provenance
         context_payload = {
             "schema": "autosport.live_decision_context",
-            "schema_version": 2,
+            "schema_version": 3,
             "loop_id": self.loop_id,
             "mode": self.mode.value,
             "gate": gate,
@@ -2199,6 +2218,7 @@ class PersistentLiveDecisionLoop:
             "intent_model_version_id": provenance.model_version_id,
             "intent_provenance_sha256": provenance.provenance_sha256,
             "plan_sha256": plan.plan_sha256,
+            "provider_health_boundaries": health_payload,
         }
         context_hash = _canonical_json_sha256(context_payload)
         decision_id = f"live-{context_hash}"
@@ -2231,7 +2251,7 @@ class PersistentLiveDecisionLoop:
 
         record_payload = {
             "schema": "autosport.persistent_live_decision",
-            "schema_version": 2,
+            "schema_version": 3,
             "loop_id": self.loop_id,
             "mode": self.mode.value,
             "gate": gate,
@@ -2241,14 +2261,14 @@ class PersistentLiveDecisionLoop:
             "intent_model_version_id": provenance.model_version_id,
             "intent_provenance_sha256": provenance.provenance_sha256,
             "affected_input_ids": list(affected_input_ids),
+            "provider_health_boundaries": health_payload,
             "plan_sha256": plan.plan_sha256,
             "plan": plan.to_dict(),
             MATERIAL_ACTION_ID_PAYLOAD_KEY: decision_id,
         }
         if expected_execution_payload is not None:
-            # Keep the established top-level live-decision schema/version so the
-            # decision identity remains stable; execution adoption is additive,
-            # separately versioned evidence.
+            # Execution adoption remains separately versioned evidence inside the
+            # health-bound live-decision schema.
             record_payload["paper_execution"] = expected_execution_payload
 
         record = DecisionRecord(
@@ -2286,6 +2306,8 @@ class PersistentLiveDecisionLoop:
                 or durable_progress.affected_input_ids != affected_input_ids
                 or durable_progress.registered_input_ids != self.dependencies.input_ids
                 or durable_progress.gate != gate
+                or durable_progress.provider_health_boundaries
+                != provider_health_boundaries
             ):
                 raise LiveDecisionProgressError(
                     "live decision progress changed before durable ledger publication"
@@ -2315,6 +2337,7 @@ class PersistentLiveDecisionLoop:
                     plan_sha256=plan.plan_sha256,
                     ledger_offset=ledger_offset,
                     gate=gate,
+                    provider_health_boundaries=provider_health_boundaries,
                 )
                 atomic_write_json(self.progress_path, durable_progress.to_dict())
                 self._progress = durable_progress
@@ -2334,6 +2357,7 @@ class PersistentLiveDecisionLoop:
                     plan_sha256=plan.plan_sha256,
                     ledger_offset=ledger_offset,
                     gate=gate,
+                    provider_health_boundaries=provider_health_boundaries,
                 )
                 atomic_write_json(self.progress_path, durable_progress.to_dict())
                 self._progress = durable_progress
@@ -2359,6 +2383,11 @@ class PersistentLiveDecisionLoop:
                     or existing.payload.get("intent_provenance_sha256")
                     != provenance.provenance_sha256
                     or existing.payload.get("gate") != gate
+                    or existing.payload.get("provider_health_boundaries")
+                    != tuple(
+                        boundary.to_dict()
+                        for boundary in provider_health_boundaries
+                    )
                     or existing.payload.get(MATERIAL_ACTION_ID_PAYLOAD_KEY)
                     != decision_id
                 ):
@@ -2404,6 +2433,7 @@ class PersistentLiveDecisionLoop:
                 plan_sha256=plan.plan_sha256,
                 ledger_offset=ledger_offset,
                 gate=gate,
+                provider_health_boundaries=provider_health_boundaries,
             )
             atomic_write_json(self.progress_path, committed.to_dict())
             self._progress = committed

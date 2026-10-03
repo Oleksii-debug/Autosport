@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from decimal import Decimal
+from types import SimpleNamespace
 
 import pytest
 
@@ -118,6 +119,59 @@ def _project(ledger: RealExecutionLedger):
         ledger,
         plan_id="plan-1",
         attempt_id="attempt-1",
+    )
+
+
+def _future_request_view(
+    ledger: RealExecutionLedger,
+    *,
+    submitted_request_sha256: str | None,
+    provider_request_sha256: str | None,
+    acknowledgement: object | None = None,
+    replace_acknowledgement: bool = False,
+):
+    """Simulate only the additive read-view fields supplied by canonical #794."""
+
+    view = ledger.verified_execution_view("plan-1")
+    assert len(view.attempts) == 1
+    attempt = view.attempts[0]
+    provider = attempt.provider_evidence
+    future_provider = (
+        None
+        if provider is None
+        else SimpleNamespace(
+            evidence_id=provider.evidence_id,
+            observed_at=provider.observed_at,
+            source=provider.source,
+            request_sha256=provider_request_sha256,
+            acknowledgement_sha256=provider.acknowledgement_sha256,
+        )
+    )
+    future_attempt = SimpleNamespace(
+        attempt=attempt.attempt,
+        action=attempt.action,
+        state=attempt.state,
+        submitted_at=attempt.submitted_at,
+        submitted_request_sha256=submitted_request_sha256,
+        unknown_reason=attempt.unknown_reason,
+        unknown_observed_at=attempt.unknown_observed_at,
+        provider_order_ref=attempt.provider_order_ref,
+        provider_evidence=future_provider,
+        acknowledgement=(
+            acknowledgement
+            if replace_acknowledgement
+            else attempt.acknowledgement
+        ),
+        found_reconciliations=attempt.found_reconciliations,
+        not_found_reconciliation=attempt.not_found_reconciliation,
+    )
+    return SimpleNamespace(
+        snapshot_sha256=view.snapshot_sha256,
+        event_count=view.event_count,
+        plan=view.plan,
+        plan_fingerprint=view.plan_fingerprint,
+        stale=view.stale,
+        attempts=(future_attempt,),
     )
 
 
@@ -456,67 +510,97 @@ def test_evidence_digest_covers_negative_authority_state(tmp_path) -> None:
 
 def test_successor_request_binding_advances_request_truth_without_promoting_price(
     tmp_path,
+    monkeypatch,
 ) -> None:
     ledger = _submitted(tmp_path)
     _bind_provider(ledger)
-    evidence = _project(ledger)
     request_sha256 = "a" * 64
-
-    successor_shape = replace(
-        evidence,
-        submission_instruction_sha256=request_sha256,
+    future_view = _future_request_view(
+        ledger,
+        submitted_request_sha256=request_sha256,
         provider_request_sha256=request_sha256,
-        chain_status=CHAIN_SUBMIT_INSTRUCTION_BOUND,
+    )
+    monkeypatch.setattr(
+        RealExecutionLedger,
+        "verified_execution_view",
+        lambda self, plan_id: future_view,
     )
 
-    assert successor_shape.submit_instruction_identity_bound is True
-    assert successor_shape.provider_request_correlation_bound is True
-    assert successor_shape.actual_submitted_instruction_bound is True
-    assert successor_shape.accepted_price_status == ACCEPTED_PRICE_UNKNOWN
-    assert successor_shape.accepted_price_verified is False
-    assert successor_shape.chain_complete is False
-    payload = successor_shape.to_dict()
+    evidence = _project(ledger)
+
+    assert evidence.chain_status == CHAIN_SUBMIT_INSTRUCTION_BOUND
+    assert evidence.submit_instruction_identity_bound is True
+    assert evidence.provider_request_correlation_bound is True
+    assert evidence.actual_submitted_instruction_bound is True
+    assert evidence.accepted_price_status == ACCEPTED_PRICE_UNKNOWN
+    assert evidence.accepted_price_verified is False
+    assert evidence.chain_complete is False
+    payload = evidence.to_dict()
     assert payload["submission_instruction_sha256"] == request_sha256
     assert payload["provider_request_sha256"] == request_sha256
+
+    with pytest.raises(
+        ExecutionQuoteChainError,
+        match="must be issued by canonical ledger projection",
+    ):
+        replace(evidence, provider_evidence_source="caller-forged-source")
 
 
 def test_provider_request_digest_cannot_conflict_with_durable_submission(
     tmp_path,
+    monkeypatch,
 ) -> None:
     ledger = _submitted(tmp_path)
     _bind_provider(ledger)
-    evidence = _project(ledger)
+    future_view = _future_request_view(
+        ledger,
+        submitted_request_sha256="a" * 64,
+        provider_request_sha256="b" * 64,
+    )
+    monkeypatch.setattr(
+        RealExecutionLedger,
+        "verified_execution_view",
+        lambda self, plan_id: future_view,
+    )
 
     with pytest.raises(
-        ExecutionQuoteChainError,
-        match="provider request digest conflicts with durable submission",
+        ExecutionQuoteChainUnavailable,
+        match="provider request evidence conflicts with durable submitted request",
     ):
-        replace(
-            evidence,
-            submission_instruction_sha256="a" * 64,
-            provider_request_sha256="b" * 64,
-            chain_status=CHAIN_SUBMIT_INSTRUCTION_BOUND,
-        )
+        _project(ledger)
 
 
 def test_future_canonical_rejected_ack_may_omit_external_receipt(
     tmp_path,
+    monkeypatch,
 ) -> None:
     ledger = _submitted(tmp_path)
     _bind_provider(ledger)
-    _ack(
-        ledger,
+    future_acknowledgement = SimpleNamespace(
+        external_receipt_id=None,
         status=AcknowledgementStatus.REJECTED,
-        odds=None,
-        stake=None,
+        acknowledged_at=ACKED,
+        accepted_odds=None,
+        accepted_stake=None,
     )
+    future_view = _future_request_view(
+        ledger,
+        submitted_request_sha256=None,
+        provider_request_sha256=None,
+        acknowledgement=future_acknowledgement,
+        replace_acknowledgement=True,
+    )
+    monkeypatch.setattr(
+        RealExecutionLedger,
+        "verified_execution_view",
+        lambda self, plan_id: future_view,
+    )
+
     evidence = _project(ledger)
 
-    successor_shape = replace(evidence, external_receipt_id=None)
-
-    assert successor_shape.acknowledgement_status == "REJECTED"
-    assert successor_shape.external_receipt_id is None
-    assert successor_shape.accepted_price_status == ACCEPTED_PRICE_NOT_APPLICABLE
-    assert successor_shape.accepted_price_verified is False
-    assert successor_shape.chain_complete is False
+    assert evidence.acknowledgement_status == "REJECTED"
+    assert evidence.external_receipt_id is None
+    assert evidence.accepted_price_status == ACCEPTED_PRICE_NOT_APPLICABLE
+    assert evidence.accepted_price_verified is False
+    assert evidence.chain_complete is False
 

@@ -791,16 +791,16 @@ def _build_explicit_run_identity_checker(
 
             if not production_dispatch_current():
                 return False
+            if type(run_id) is not int or run_id <= 0:
+                return False
+            if type(pr_number) is not int or pr_number <= 0:
+                return False
+            if type(expected_head_sha) is not str or len(expected_head_sha) != 40:
+                return False
+            expected_head_sha = expected_head_sha.lower()
+            if any(ch not in "0123456789abcdef" for ch in expected_head_sha):
+                return False
             try:
-                run_id = _require_positive_int(run_id, field="run id")
-                expected_head_sha = _require_sha(
-                    expected_head_sha,
-                    field="expected workflow run head sha",
-                )
-                pr_number = _require_positive_int(
-                    pr_number,
-                    field="pull request number",
-                )
                 # Call the captured canonical transport directly. This removes dynamic
                 # self._request dispatch from the authority-producing GET itself; a
                 # concurrent class/instance rebound therefore cannot shape the response.

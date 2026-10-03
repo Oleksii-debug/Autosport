@@ -272,6 +272,47 @@ def test_canonical_https_request_opener_authority_replacement_fails_before_io(
     assert hostile_calls == []
 
 
+@pytest.mark.parametrize(
+    ("live_name", "alias_name", "code_alias_name"),
+    (
+        ("Request", "_CANONICAL_REQUEST_TYPE", None),
+        ("build_opener", "_CANONICAL_BUILD_OPENER", "_CANONICAL_BUILD_OPENER_CODE"),
+    ),
+)
+def test_coordinated_https_live_and_canonical_alias_rebind_fails_before_io(
+    monkeypatch,
+    live_name,
+    alias_name,
+    code_alias_name,
+):
+    hostile_calls = []
+
+    def hostile(*args, **kwargs):
+        hostile_calls.append((args, kwargs))
+        raise AssertionError("coordinated hostile urllib authority executed")
+
+    monkeypatch.setattr(betdaq_account_module, live_name, hostile)
+    monkeypatch.setattr(betdaq_account_module, alias_name, hostile)
+    if code_alias_name is not None:
+        monkeypatch.setattr(
+            betdaq_account_module,
+            code_alias_name,
+            hostile.__code__,
+        )
+
+    value = BetdaqAccountReadOnlyClient(
+        BetdaqCredentials("alice", "p@ss", "app-id"),
+        clock=clock,
+    )
+    with pytest.raises(
+        BetdaqAccountReadOnlyError,
+        match="canonical BETDAQ HTTPS request/opener authority was replaced",
+    ):
+        value.read_account_balance()
+
+    assert hostile_calls == []
+
+
 def test_canonical_build_opener_code_mutation_fails_before_io(monkeypatch):
     value = BetdaqAccountReadOnlyClient(
         BetdaqCredentials("alice", "p@ss", "app-id"),
@@ -291,6 +332,43 @@ def test_canonical_build_opener_code_mutation_fails_before_io(monkeypatch):
         match="canonical BETDAQ HTTPS request/opener authority was replaced",
     ):
         value.read_account_balance()
+
+
+@pytest.mark.parametrize(
+    ("attribute", "alias", "replacement"),
+    (
+        (
+            "_SECURE_ENDPOINT",
+            "_CANONICAL_SECURE_ENDPOINT",
+            "https://example.invalid/foreign",
+        ),
+        ("_EXTERNAL_NS", "_CANONICAL_EXTERNAL_NS", "urn:foreign:betdaq"),
+        ("_SOAP11_NS", "_CANONICAL_SOAP11_NS", "urn:foreign:soap11"),
+        ("_SOAP12_NS", "_CANONICAL_SOAP12_NS", "urn:foreign:soap12"),
+    ),
+)
+def test_coordinated_protocol_live_and_canonical_alias_rebind_fails_closed(
+    monkeypatch,
+    attribute,
+    alias,
+    replacement,
+):
+    opener = QueueUrlopen(balance())
+    _install_https_test_dispatch(monkeypatch, opener)
+    monkeypatch.setattr(betdaq_account_module, attribute, replacement)
+    monkeypatch.setattr(betdaq_account_module, alias, replacement)
+    value = BetdaqAccountReadOnlyClient(
+        BetdaqCredentials("alice", "p@ss", "app-id"),
+        clock=clock,
+    )
+
+    with pytest.raises(
+        BetdaqAccountReadOnlyError,
+        match="canonical BETDAQ account protocol authority was replaced",
+    ):
+        value.read_account_balance()
+
+    assert opener.calls == []
 
 
 @pytest.mark.parametrize(
@@ -395,6 +473,86 @@ def test_account_context_authority_replacement_fails_before_provider_io(
 
     assert hostile_calls == []
     assert opener.calls == []
+
+
+@pytest.mark.parametrize(
+    ("live_name", "alias_name", "code_alias_name"),
+    (
+        (
+            "_credential_context_binding",
+            "_CANONICAL_CREDENTIAL_CONTEXT_BINDING",
+            "_CANONICAL_CREDENTIAL_CONTEXT_BINDING_CODE",
+        ),
+        (
+            "_authenticated_account_context",
+            "_CANONICAL_AUTHENTICATED_ACCOUNT_CONTEXT",
+            "_CANONICAL_AUTHENTICATED_ACCOUNT_CONTEXT_CODE",
+        ),
+    ),
+)
+def test_coordinated_context_live_and_canonical_alias_rebind_fails_before_io(
+    monkeypatch,
+    live_name,
+    alias_name,
+    code_alias_name,
+):
+    opener = QueueUrlopen(balance())
+    _install_https_test_dispatch(monkeypatch, opener)
+    hostile_calls = []
+
+    def hostile(*args, **kwargs):
+        hostile_calls.append((args, kwargs))
+        raise AssertionError("coordinated hostile context authority executed")
+
+    monkeypatch.setattr(betdaq_account_module, live_name, hostile)
+    monkeypatch.setattr(betdaq_account_module, alias_name, hostile)
+    monkeypatch.setattr(
+        betdaq_account_module,
+        code_alias_name,
+        hostile.__code__,
+    )
+    value = BetdaqAccountReadOnlyClient(
+        BetdaqCredentials("alice", "p@ss", "app-id"),
+        clock=clock,
+    )
+
+    with pytest.raises(
+        BetdaqAccountReadOnlyError,
+        match="canonical BETDAQ authenticated account context authority was replaced",
+    ):
+        value.read_account_evidence(
+            frozenset({BookmakerCapability.BALANCE_READ})
+        )
+
+    assert opener.calls == []
+    assert hostile_calls == []
+
+
+def test_coordinated_transport_class_and_canonical_alias_rebind_fails_before_io(
+    monkeypatch,
+):
+    hostile_calls = []
+
+    def hostile(self, *args, **kwargs):
+        hostile_calls.append((self, args, kwargs))
+        raise AssertionError("coordinated hostile transport post executed")
+
+    monkeypatch.setattr(UrllibBetdaqSoapTransport, "post", hostile)
+    monkeypatch.setattr(betdaq_account_module, "_CANONICAL_HTTPS_POST", hostile)
+    value = BetdaqAccountReadOnlyClient(
+        BetdaqCredentials("alice", "p@ss", "app-id"),
+        clock=clock,
+    )
+
+    with pytest.raises(
+        BetdaqAccountReadOnlyError,
+        match="canonical BETDAQ account transport was replaced or shadowed",
+    ):
+        value.read_account_evidence(
+            frozenset({BookmakerCapability.BALANCE_READ})
+        )
+
+    assert hostile_calls == []
 
 
 def test_account_context_resolver_replacement_during_provider_io_fails_closed(

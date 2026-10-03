@@ -269,29 +269,52 @@ def test_attempted_execution_without_outcome_is_materially_unresolved():
     assert "material_funnel_state_unresolved" in report.external_evidence_gaps
 
 
-def test_generic_paper_outcome_stage_cannot_mint_paper_model(monkeypatch):
+def test_current_stage_dispatch_rebind_cannot_launder_funnel_truth(monkeypatch):
     ledger = _ledger(_row("candidate"))
+    protocol = _protocol(ledger)
+    candidate, baselines = _results(protocol)
     monkeypatch.setattr(
         EvaluationUniverseLedger,
         "current_stage",
         lambda self, row_id: FunnelStage.ACCEPTED,
+    )
+
+    with pytest.raises(
+        StrategyExternalValidityError,
+        match="denominator dispatch changed",
+    ):
+        evaluate_strategy_external_validity(ledger, protocol, candidate, baselines)
+
+
+def test_cohort_dispatch_rebind_cannot_replace_frozen_denominator(monkeypatch):
+    ledger = _ledger(
+        _row("candidate"),
+        _row("wait", slot=SlotState.WAIT_ZERO),
     )
     protocol = _protocol(ledger)
     candidate, baselines = _results(protocol)
-
-    report = evaluate_strategy_external_validity(ledger, protocol, candidate, baselines)
-
-    assert report.evidence_grade is StrategyEvidenceGrade.THEORETICAL
-    assert "strategy_specific_paper_proof_not_verified" in report.external_evidence_gaps
-
-
-def test_live_paper_stage_does_not_replace_later_quote_proof(monkeypatch):
-    ledger = _ledger(_row("candidate"))
+    original = ledger.cohort()
     monkeypatch.setattr(
         EvaluationUniverseLedger,
-        "current_stage",
-        lambda self, row_id: FunnelStage.ACCEPTED,
+        "cohort",
+        lambda self: type(original)(
+            original.universe_sha256,
+            original.membership_sha256,
+            (original.row_ids[0],),
+            original.stage_counts,
+            original.attrition_counts,
+        ),
     )
+
+    with pytest.raises(
+        StrategyExternalValidityError,
+        match="denominator dispatch changed",
+    ):
+        evaluate_strategy_external_validity(ledger, protocol, candidate, baselines)
+
+
+def test_live_theoretical_stage_does_not_replace_later_quote_proof():
+    ledger = _ledger(_row("candidate"))
     protocol = _protocol(
         ledger,
         strategy_class=StrategyClass.LIVE_PRICE_MOVEMENT,
@@ -302,22 +325,16 @@ def test_live_paper_stage_does_not_replace_later_quote_proof(monkeypatch):
     report = evaluate_strategy_external_validity(ledger, protocol, candidate, baselines)
 
     assert report.evidence_grade is StrategyEvidenceGrade.THEORETICAL
-    assert "strategy_specific_paper_proof_not_verified" in report.external_evidence_gaps
     assert (
         "external_later_quote_execution_evidence_not_verified"
         in report.external_evidence_gaps
     )
 
 
-def test_hedge_paper_stage_does_not_replace_same_trajectory_comparator(monkeypatch):
+def test_hedge_theoretical_stage_does_not_replace_same_trajectory_comparator():
     ledger = _ledger(
         _row("candidate-a", portfolio_before_id="portfolio-a"),
         _row("candidate-b", portfolio_before_id="portfolio-b"),
-    )
-    monkeypatch.setattr(
-        EvaluationUniverseLedger,
-        "current_stage",
-        lambda self, row_id: FunnelStage.ACCEPTED,
     )
     protocol = _protocol(
         ledger,
@@ -330,7 +347,6 @@ def test_hedge_paper_stage_does_not_replace_same_trajectory_comparator(monkeypat
 
     assert report.portfolio_before_ids == ("portfolio-a", "portfolio-b")
     assert report.evidence_grade is StrategyEvidenceGrade.THEORETICAL
-    assert "strategy_specific_paper_proof_not_verified" in report.external_evidence_gaps
     assert (
         "external_same_trajectory_counterfactual_execution_not_verified"
         in report.external_evidence_gaps
@@ -344,17 +360,11 @@ def test_hedge_paper_stage_does_not_replace_same_trajectory_comparator(monkeypat
         (StrategyClass.DUTCHING, EvaluationContractFamily.DUTCHING_EXECUTION),
     ),
 )
-def test_multileg_paper_stage_does_not_replace_complete_economic_proof(
-    monkeypatch,
+def test_multileg_theoretical_stage_does_not_replace_complete_economic_proof(
     strategy_class,
     family,
 ):
     ledger = _ledger(_row("candidate", terminal=True))
-    monkeypatch.setattr(
-        EvaluationUniverseLedger,
-        "current_stage",
-        lambda self, row_id: FunnelStage.ACCEPTED,
-    )
     protocol = _protocol(
         ledger,
         strategy_class=strategy_class,
@@ -365,7 +375,6 @@ def test_multileg_paper_stage_does_not_replace_complete_economic_proof(
     report = evaluate_strategy_external_validity(ledger, protocol, candidate, baselines)
 
     assert report.evidence_grade is StrategyEvidenceGrade.THEORETICAL
-    assert "strategy_specific_paper_proof_not_verified" in report.external_evidence_gaps
     assert (
         "external_multi_leg_acceptance_and_settlement_not_verified"
         in report.external_evidence_gaps

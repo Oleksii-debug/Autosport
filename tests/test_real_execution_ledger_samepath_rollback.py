@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from autosport.monotonic_workspace_authority import MonotonicAuthorityConflictError
+from autosport.monotonic_workspace_authority import MonotonicAuthorityIntegrityError
 from autosport.real_execution_ledger import (
     ExecutionAction,
     ExecutionLedgerBusyError,
@@ -121,10 +121,21 @@ def test_durable_append_with_interrupted_authority_commit_recovers_exact_tip(
     ledger = RealExecutionLedger(path)
     current_plan = _plan()
 
-    def fail_commit(**_kwargs) -> None:
-        raise MonotonicAuthorityConflictError("injected commit interruption")
+    original_append_record = ledger._monotonic_authority._append_record
+    append_calls = 0
 
-    monkeypatch.setattr(ledger._monotonic_authority, "commit", fail_commit)
+    def interrupt_second_authority_record(record, index) -> None:
+        nonlocal append_calls
+        append_calls += 1
+        if append_calls == 2:
+            raise MonotonicAuthorityIntegrityError("injected commit interruption")
+        original_append_record(record, index)
+
+    monkeypatch.setattr(
+        ledger._monotonic_authority,
+        "_append_record",
+        interrupt_second_authority_record,
+    )
     with pytest.raises(
         ExecutionLedgerIntegrityError,
         match="monotonic COMMIT failed",
@@ -214,3 +225,35 @@ def test_reader_cannot_abort_active_writer_prepare_window(
     assert ledger.reserve_plan(current_plan) == current_plan.fingerprint
     assert competing_read_was_fenced
     assert RealExecutionLedger(path).verified_snapshot().event_count == 1
+
+
+
+def test_instance_recover_shadow_cannot_accept_rolled_back_bytes(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    path = _isolated_ledger_path(tmp_path, monkeypatch)
+    ledger = RealExecutionLedger(path)
+    current_plan = _plan()
+    ledger.reserve_plan(current_plan)
+    bytes_s1 = path.read_bytes()
+    ledger.begin_attempt(
+        plan_id=current_plan.plan_id,
+        action_id=current_plan.actions[0].action_id,
+        attempt_id="attempt-shadow",
+        reserved_at=RESERVED_AT,
+    )
+
+    path.write_bytes(bytes_s1)
+    reopened = RealExecutionLedger(path)
+    monkeypatch.setattr(
+        reopened._monotonic_authority,
+        "recover",
+        lambda **_kwargs: None,
+    )
+
+    with pytest.raises(
+        ExecutionLedgerIntegrityError,
+        match="rollback|monotonic|authority",
+    ):
+        reopened.verified_snapshot()

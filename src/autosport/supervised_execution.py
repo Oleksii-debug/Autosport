@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
 from enum import Enum
+from types import MappingProxyType
 
 from .bookmaker_capability import (
     BookmakerAccountSnapshot,
@@ -748,10 +749,8 @@ def build_supervised_execution_plan(
 
 def _install_bound_supervised_execution_plan_authority() -> None:
     lock = threading.RLock()
-    issued: dict[
-        int,
-        tuple[weakref.ReferenceType[BoundSupervisedExecutionPlan], str],
-    ] = {}
+    immutable_mapping_type = MappingProxyType
+    issued = immutable_mapping_type({})
     raw_build = build_supervised_execution_plan
     raw_build_code = getattr(raw_build, "__code__", None)
     witness_fn = _canonical_bound_plan_witness
@@ -796,14 +795,19 @@ def _install_bound_supervised_execution_plan_authority() -> None:
             *,
             _identity: int = identity,
         ) -> None:
+            nonlocal issued
             with lock:
                 record = issued.get(_identity)
                 if record is not None and record[0] is reference:
-                    issued.pop(_identity, None)
+                    updated = dict(issued)
+                    updated.pop(_identity, None)
+                    issued = immutable_mapping_type(updated)
 
         reference = weakref.ref(value, clear)
         with lock:
-            issued[identity] = (reference, witness)
+            updated = dict(issued)
+            updated[identity] = (reference, witness)
+            issued = immutable_mapping_type(updated)
         return value
 
     def assert_authoritative(value: BoundSupervisedExecutionPlan) -> None:

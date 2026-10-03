@@ -96,6 +96,20 @@ _ECONOMIC_GOAL_STORE_INIT = EconomicGoalStore.__init__
 _ECONOMIC_GOAL_STORE_INIT_CODE = getattr(_ECONOMIC_GOAL_STORE_INIT, "__code__", None)
 _ECONOMIC_GOAL_STORE_LOAD = EconomicGoalStore.load
 _ECONOMIC_GOAL_STORE_LOAD_CODE = getattr(_ECONOMIC_GOAL_STORE_LOAD, "__code__", None)
+_ECONOMIC_GOAL_FROM_JSON = getattr(_economic_goal_store, "economic_goal_from_json", None)
+_ECONOMIC_GOAL_FROM_JSON_CODE = getattr(_ECONOMIC_GOAL_FROM_JSON, "__code__", None)
+_ECONOMIC_GOAL_FROM_PAYLOAD = getattr(_economic_goal_store, "economic_goal_from_payload", None)
+_ECONOMIC_GOAL_FROM_PAYLOAD_CODE = getattr(
+    _ECONOMIC_GOAL_FROM_PAYLOAD,
+    "__code__",
+    None,
+)
+_ECONOMIC_GOAL_STRICT_JSON_LOADS = getattr(_economic_goal_store, "strict_json_loads", None)
+_ECONOMIC_GOAL_STRICT_JSON_LOADS_CODE = getattr(
+    _ECONOMIC_GOAL_STRICT_JSON_LOADS,
+    "__code__",
+    None,
+)
 _ECONOMIC_GOAL_PROVENANCE_FOR = provenance_for
 _ECONOMIC_GOAL_PROVENANCE_FOR_CODE = getattr(
     _ECONOMIC_GOAL_PROVENANCE_FOR,
@@ -288,6 +302,12 @@ def _canonical_denomination_dispatch(
     _store_init_code=_ECONOMIC_GOAL_STORE_INIT_CODE,
     _store_load=_ECONOMIC_GOAL_STORE_LOAD,
     _store_load_code=_ECONOMIC_GOAL_STORE_LOAD_CODE,
+    _store_from_json=_ECONOMIC_GOAL_FROM_JSON,
+    _store_from_json_code=_ECONOMIC_GOAL_FROM_JSON_CODE,
+    _store_from_payload=_ECONOMIC_GOAL_FROM_PAYLOAD,
+    _store_from_payload_code=_ECONOMIC_GOAL_FROM_PAYLOAD_CODE,
+    _store_strict_json=_ECONOMIC_GOAL_STRICT_JSON_LOADS,
+    _store_strict_json_code=_ECONOMIC_GOAL_STRICT_JSON_LOADS_CODE,
     _provenance=_ECONOMIC_GOAL_PROVENANCE_FOR,
     _provenance_code=_ECONOMIC_GOAL_PROVENANCE_FOR_CODE,
     _bound_type=_BOUND_SUPERVISED_PLAN_TYPE,

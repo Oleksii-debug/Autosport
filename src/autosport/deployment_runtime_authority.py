@@ -910,11 +910,18 @@ class DeploymentRuntimeAuthorityStore:
             raise DeploymentRuntimeAuthorityError(
                 "runtime authority binding integrity mismatch"
             )
+        workspace_binding = authority.workspace_binding
         if (
             path.parent != workspace
             or authority.workspace != workspace
             or authority.domain != _AUTHORITY_DOMAIN
             or authority.key != path.name
+            or workspace_binding.workspace != workspace
+            or workspace_binding.workspace_instance_id
+            != authority.workspace_instance_id
+            or workspace_binding.authority_root != authority.authority_root
+            or authority.workspace_binding_path
+            != workspace_binding.workspace_marker_path
         ):
             raise DeploymentRuntimeAuthorityError(
                 "runtime authority binding integrity mismatch"

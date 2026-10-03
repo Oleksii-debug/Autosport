@@ -1776,6 +1776,112 @@ def test_trigger_ready_tuple_cannot_be_relabelled_nonqualifying_by_adapter_rebin
     assert forged_calls == {"state": 0, "cancel": 0}
 
 
+def test_sweep_cancel_effect_global_rebind_during_final_reread_cannot_redirect(
+    monkeypatch,
+) -> None:
+    current_head = "6" * 40
+    stale_head = "5" * 40
+    qualification = PullRequestQualification(
+        head_sha=current_head,
+        integration_capable=True,
+    )
+    forged_calls: list[int] = []
+
+    def forged_cancel(_api, run_id: int) -> bool:
+        forged_calls.append(run_id)
+        return True
+
+    class RebindingSweepApi(SweepApi):
+        def live_pr_qualification(self, pr_number: int) -> PullRequestQualification:
+            result = super().live_pr_qualification(pr_number)
+            if len(self.reads) == 2:
+                monkeypatch.setattr(
+                    scoped_controller,
+                    "_cancel_run_or_defer_active_conflict",
+                    forged_cancel,
+                )
+            return result
+
+    api = RebindingSweepApi(
+        (_run(50, stale_head, (501,)),),
+        {501: [qualification, qualification]},
+    )
+
+    assert cancel_superseded_explicit_pr_runs(
+        api,  # type: ignore[arg-type]
+        workflow_name="CI",
+        current_run_id=99,
+    ) == (50,)
+    assert api.cancelled == [50]
+    assert forged_calls == []
+
+
+def test_trigger_cancel_effect_global_rebind_during_final_reread_cannot_redirect(
+    monkeypatch,
+) -> None:
+    qualification = PullRequestQualification(
+        head_sha=HEAD,
+        integration_capable=False,
+    )
+    forged_calls: list[int] = []
+
+    def forged_cancel(_api, run_id: int) -> bool:
+        forged_calls.append(run_id)
+        return True
+
+    class RebindingTriggerApi(FakeApi):
+        def live_pr_qualification(self, pr_number: int) -> PullRequestQualification:
+            result = super().live_pr_qualification(pr_number)
+            monkeypatch.setattr(
+                scoped_controller,
+                "_cancel_run_or_defer_active_conflict",
+                forged_cancel,
+            )
+            return result
+
+    api = RebindingTriggerApi(qualification)
+
+    assert _cancel_triggering_run_if_stale_or_nonqualifying(
+        api,  # type: ignore[arg-type]
+        pr_number=2039,
+        event_head_sha=HEAD,
+        current_run_id=91,
+        qualification=qualification,
+    )
+    assert api.cancelled == [91]
+    assert forged_calls == []
+
+
+def test_sweep_rejects_captured_cancel_effect_code_drift() -> None:
+    qualification = PullRequestQualification(
+        head_sha="6" * 40,
+        integration_capable=True,
+    )
+    api = SweepApi(
+        (_run(50, "5" * 40, (501,)),),
+        {501: [qualification, qualification]},
+    )
+
+    def forged_cancel(_api, _run_id: int) -> bool:
+        return True
+
+    canonical_effect = (
+        cancel_superseded_explicit_pr_runs.__kwdefaults__["_cancel_effect"]
+    )
+    with pytest.raises(
+        CancellationError,
+        match="canonical cancel effect authority changed",
+    ):
+        cancel_superseded_explicit_pr_runs(
+            api,  # type: ignore[arg-type]
+            workflow_name="CI",
+            current_run_id=99,
+            _cancel_effect=canonical_effect,
+            _cancel_effect_code=forged_cancel.__code__,
+        )
+    assert api.cancelled == []
+
+
 def test_sweep_trusted_tuple_head_cannot_be_rewritten_by_sha_helper_rebind(monkeypatch) -> None:
     current_head = "8" * 40
     forged_head = "9" * 40

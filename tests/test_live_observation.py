@@ -2,6 +2,7 @@ import tempfile
 import threading
 import time
 import unittest
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from unittest.mock import patch
@@ -168,6 +169,47 @@ class LiveObservationTests(unittest.TestCase):
                 self.assertEqual(updates.pending_count, 2)
             finally:
                 store.close()
+
+    def test_live_ingestion_receipt_time_fences_historical_replay(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._observe(tmp)
+            store = SQLiteMarketStore(Path(tmp) / "market.db")
+            try:
+                before_receipt = MarketMirror.replay_view_from_store(
+                    store,
+                    as_of=datetime(
+                        2026,
+                        9,
+                        12,
+                        20,
+                        0,
+                        1,
+                        tzinfo=timezone.utc,
+                    ),
+                    max_age=timedelta(minutes=5),
+                )
+                after_receipt = MarketMirror.replay_view_from_store(
+                    store,
+                    as_of=datetime(
+                        2026,
+                        9,
+                        12,
+                        20,
+                        0,
+                        3,
+                        tzinfo=timezone.utc,
+                    ),
+                    max_age=timedelta(minutes=5),
+                )
+            finally:
+                store.close()
+
+            self.assertEqual(before_receipt.events, ())
+            self.assertEqual(len(after_receipt.events), 2)
+            self.assertEqual(
+                {event.ingest_ts for event in after_receipt.events},
+                {_RECEIVE_TIME},
+            )
 
     def test_duplicate_provider_sequence_preserves_first_receipt_time(self):
         with tempfile.TemporaryDirectory() as tmp:

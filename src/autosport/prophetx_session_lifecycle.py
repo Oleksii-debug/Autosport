@@ -238,6 +238,79 @@ class ProphetXSessionSnapshot:
                 "retryable state requires retry_not_before"
             )
 
+        if self.state is ProphetXSessionState.LOGIN_IN_FLIGHT:
+            if (
+                self.session_lineage_id is not None
+                or self.access_expires_at is not None
+                or self.retry_not_before is not None
+            ):
+                raise ProphetXSessionLifecycleError(
+                    "login_in_flight cannot carry session or retry evidence"
+                )
+            if self.slot_hold_until <= self.attempt_started_at:
+                raise ProphetXSessionLifecycleError(
+                    "login_in_flight slot hold must follow attempt start"
+                )
+        elif self.attempt_id is not None or self.attempt_started_at is not None:
+            raise ProphetXSessionLifecycleError(
+                "attempt evidence is only valid for login_in_flight"
+            )
+
+        if self.state in {
+            ProphetXSessionState.ACTIVE,
+            ProphetXSessionState.RENEWAL_DUE,
+        }:
+            if self.access_expires_at <= self.last_transition_at:
+                raise ProphetXSessionLifecycleError(
+                    "active access expiry must follow the latest transition"
+                )
+            if self.slot_hold_until < self.access_expires_at:
+                raise ProphetXSessionLifecycleError(
+                    "active slot hold cannot precede access expiry"
+                )
+            if self.retry_not_before is not None:
+                raise ProphetXSessionLifecycleError(
+                    "active session state cannot carry login retry evidence"
+                )
+
+        if self.state in {
+            ProphetXSessionState.SESSION_POOL_EXHAUSTED,
+            ProphetXSessionState.WAIT_FOR_PROVIDER_SESSION_EXPIRY,
+        }:
+            if self.slot_hold_until is None:
+                raise ProphetXSessionLifecycleError(
+                    "provider-slot wait state requires slot_hold_until"
+                )
+            if (
+                self.session_lineage_id is not None
+                or self.access_expires_at is not None
+                or self.retry_not_before is not None
+            ):
+                raise ProphetXSessionLifecycleError(
+                    "provider-slot wait cannot carry active-session or retry evidence"
+                )
+
+        if self.state in {
+            ProphetXSessionState.AUTH_RETRYABLE_FAILURE,
+            ProphetXSessionState.PROVIDER_UNAVAILABLE,
+        } and (
+            self.session_lineage_id is not None
+            or self.access_expires_at is not None
+            or self.slot_hold_until is not None
+        ):
+            raise ProphetXSessionLifecycleError(
+                "retryable login state cannot carry provider-slot authority"
+            )
+
+        if self.state is ProphetXSessionState.CREDENTIAL_REJECTED and (
+            self.session_lineage_id is not None
+            or self.access_expires_at is not None
+            or self.retry_not_before is not None
+        ):
+            raise ProphetXSessionLifecycleError(
+                "credential-rejected state cannot carry active-session or retry evidence"
+            )
+
     def to_json_dict(
         self,
         *,

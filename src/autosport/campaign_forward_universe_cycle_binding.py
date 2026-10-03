@@ -356,6 +356,12 @@ _CANONICAL_CYCLE_RECEIPT_FIELD_DESCRIPTORS = tuple(
     for name in _CYCLE_RECEIPT_FIELD_NAMES
 )
 _CANONICAL_ARTIFACT_KIND = ARTIFACT_KIND
+_CANONICAL_HASHLIB = hashlib
+_CANONICAL_SHA256 = hashlib.sha256
+_CANONICAL_JSON = json
+_CANONICAL_JSON_DUMPS = json.dumps
+_CANONICAL_DATETIME = datetime
+_CANONICAL_TIMEZONE = timezone
 
 
 def _require_dispatch_integrity() -> None:
@@ -367,6 +373,17 @@ def _require_dispatch_integrity() -> None:
     ):
         raise CampaignForwardUniverseCycleBindingError(
             "campaign forward-cycle authority class or artifact kind changed"
+        )
+    if (
+        module_globals.get("hashlib") is not _CANONICAL_HASHLIB
+        or _CANONICAL_HASHLIB.sha256 is not _CANONICAL_SHA256
+        or module_globals.get("json") is not _CANONICAL_JSON
+        or _CANONICAL_JSON.dumps is not _CANONICAL_JSON_DUMPS
+        or module_globals.get("datetime") is not _CANONICAL_DATETIME
+        or module_globals.get("timezone") is not _CANONICAL_TIMEZONE
+    ):
+        raise CampaignForwardUniverseCycleBindingError(
+            "campaign forward-cycle chronology/digest primitives changed"
         )
     current_issuer = inspect.getattr_static(
         _CANONICAL_AUTHORITY_CLASS,
@@ -548,7 +565,38 @@ def resolve_campaign_forward_universe_cycle_authority(
 ) -> CampaignForwardUniverseCycleAuthority:
     """Re-resolve exact campaign -> cycle -> provider snapshot -> #1185 universe."""
 
-    _require_dispatch_integrity()
+    module_globals = globals()
+    integrity_guard = _require_dispatch_integrity
+    integrity_guard_code = integrity_guard.__code__
+    expected_hashlib = hashlib
+    expected_sha256 = hashlib.sha256
+    expected_json = json
+    expected_json_dumps = json.dumps
+    expected_datetime = datetime
+    expected_timezone = timezone
+
+    def require_stable_integrity() -> None:
+        if (
+            module_globals.get("_require_dispatch_integrity") is not integrity_guard
+            or integrity_guard.__code__ is not integrity_guard_code
+        ):
+            raise CampaignForwardUniverseCycleBindingError(
+                "campaign forward-cycle integrity guard changed mid-resolution"
+            )
+        if (
+            module_globals.get("hashlib") is not expected_hashlib
+            or expected_hashlib.sha256 is not expected_sha256
+            or module_globals.get("json") is not expected_json
+            or expected_json.dumps is not expected_json_dumps
+            or module_globals.get("datetime") is not expected_datetime
+            or module_globals.get("timezone") is not expected_timezone
+        ):
+            raise CampaignForwardUniverseCycleBindingError(
+                "campaign forward-cycle chronology/digest primitives changed"
+            )
+        integrity_guard()
+
+    require_stable_integrity()
     if type(precommit_locator) is not ForwardUniversePrecommitLocator:
         raise TypeError("precommit_locator must be exact ForwardUniversePrecommitLocator")
     if type(collector_store) is not CollectorDeltaStore:
@@ -577,7 +625,7 @@ def resolve_campaign_forward_universe_cycle_authority(
         store=collector_store,
         source_spec=source_spec,
     )
-    _require_dispatch_integrity()
+    require_stable_integrity()
 
     collector_evidence = _RESOLVE_ARTIFACT(
         collector_store,
@@ -590,7 +638,7 @@ def resolve_campaign_forward_universe_cycle_authority(
         raise CampaignForwardUniverseCycleBindingError(
             "collector artifact resolver returned noncanonical evidence"
         )
-    _require_dispatch_integrity()
+    require_stable_integrity()
 
     snapshot = _LOAD_PROVIDER_EVIDENCE(
         provider_evidence_store,
@@ -600,12 +648,12 @@ def resolve_campaign_forward_universe_cycle_authority(
         raise CampaignForwardUniverseCycleBindingError(
             "provider evidence resolver returned noncanonical snapshot"
         )
-    _require_dispatch_integrity()
+    require_stable_integrity()
     _require_cycle_observation_chronology(
         snapshot=snapshot,
         collector_evidence=collector_evidence,
     )
-    _require_dispatch_integrity()
+    require_stable_integrity()
 
     expected_receipt = _expected_cycle_receipt_payload(
         campaign=campaign,
@@ -638,7 +686,7 @@ def resolve_campaign_forward_universe_cycle_authority(
         raise CampaignForwardUniverseCycleBindingError(
             "durable provider evaluation universe is unavailable"
         )
-    _require_dispatch_integrity()
+    require_stable_integrity()
 
     universe = _rebuild_exact_provider_universe(
         ledger=ledger,
@@ -678,7 +726,7 @@ def resolve_campaign_forward_universe_cycle_authority(
             "forward universe identity conflicts with cycle-derived durable universe"
         )
 
-    _require_dispatch_integrity()
+    require_stable_integrity()
     return CampaignForwardUniverseCycleAuthority._issue(
         campaign_id=campaign.campaign_id,
         source_id=cycle_receipt.source_id,
@@ -705,8 +753,49 @@ def authorize_campaign_forward_source_receipts(
 ) -> tuple[AuthoritativeSourceReceipt, ...]:
     """Authorize #1185 receipts only while the cycle-bound provider authority is stable."""
 
-    _require_dispatch_integrity()
-    before = resolve_campaign_forward_universe_cycle_authority(
+    module_globals = globals()
+    integrity_guard = _require_dispatch_integrity
+    integrity_guard_code = integrity_guard.__code__
+    resolve_authority = resolve_campaign_forward_universe_cycle_authority
+    resolve_authority_code = resolve_authority.__code__
+    expected_hashlib = hashlib
+    expected_sha256 = hashlib.sha256
+    expected_json = json
+    expected_json_dumps = json.dumps
+    expected_datetime = datetime
+    expected_timezone = timezone
+
+    def require_stable_authorization_dispatch() -> None:
+        if (
+            module_globals.get("_require_dispatch_integrity") is not integrity_guard
+            or integrity_guard.__code__ is not integrity_guard_code
+        ):
+            raise CampaignForwardUniverseCycleBindingError(
+                "campaign forward-cycle integrity guard changed during authorization"
+            )
+        if (
+            module_globals.get("resolve_campaign_forward_universe_cycle_authority")
+            is not resolve_authority
+            or resolve_authority.__code__ is not resolve_authority_code
+        ):
+            raise CampaignForwardUniverseCycleBindingError(
+                "campaign forward-cycle resolver changed during authorization"
+            )
+        if (
+            module_globals.get("hashlib") is not expected_hashlib
+            or expected_hashlib.sha256 is not expected_sha256
+            or module_globals.get("json") is not expected_json
+            or expected_json.dumps is not expected_json_dumps
+            or module_globals.get("datetime") is not expected_datetime
+            or module_globals.get("timezone") is not expected_timezone
+        ):
+            raise CampaignForwardUniverseCycleBindingError(
+                "campaign forward-cycle chronology/digest primitives changed"
+            )
+        integrity_guard()
+
+    require_stable_authorization_dispatch()
+    before = resolve_authority(
         precommit_locator=precommit_locator,
         collector_store=collector_store,
         source_spec=source_spec,
@@ -716,7 +805,7 @@ def authorize_campaign_forward_source_receipts(
         protocol=protocol,
         event_lifecycle=event_lifecycle,
     )
-    _require_dispatch_integrity()
+    require_stable_authorization_dispatch()
     try:
         receipts = _AUTHORIZE_FORWARD_RECEIPTS(
             store=universe_store,
@@ -728,8 +817,8 @@ def authorize_campaign_forward_source_receipts(
         raise CampaignForwardUniverseCycleBindingError(
             "forward source receipt authorization failed"
         ) from exc
-    _require_dispatch_integrity()
-    after = resolve_campaign_forward_universe_cycle_authority(
+    require_stable_authorization_dispatch()
+    after = resolve_authority(
         precommit_locator=precommit_locator,
         collector_store=collector_store,
         source_spec=source_spec,
@@ -786,6 +875,12 @@ def _seal_campaign_forward_universe_cycle_dispatch() -> None:
     expected_authorize_code = expected_authorize.__code__
     expected_inspect = inspect
     expected_getattr_static = inspect.getattr_static
+    expected_hashlib = hashlib
+    expected_sha256 = hashlib.sha256
+    expected_json = json
+    expected_json_dumps = json.dumps
+    expected_datetime = datetime
+    expected_timezone = timezone
     expected_internal_callables = _INTERNAL_CALLABLES
     expected_captured_callables = _CAPTURED_CALLABLES
     expected_provider_callables = _PROVIDER_UNIVERSE_CALLABLES
@@ -820,6 +915,17 @@ def _seal_campaign_forward_universe_cycle_dispatch() -> None:
         ):
             raise expected_error(
                 "campaign forward-cycle reflection dispatch changed"
+            )
+        if (
+            module_globals.get("hashlib") is not expected_hashlib
+            or expected_hashlib.sha256 is not expected_sha256
+            or module_globals.get("json") is not expected_json
+            or expected_json.dumps is not expected_json_dumps
+            or module_globals.get("datetime") is not expected_datetime
+            or module_globals.get("timezone") is not expected_timezone
+        ):
+            raise expected_error(
+                "campaign forward-cycle chronology/digest primitives changed"
             )
         if expected_resolve.__code__ is not expected_resolve_code:
             raise expected_error(

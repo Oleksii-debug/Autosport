@@ -555,7 +555,9 @@ class ProductDayRiskWindowStore:
             raise RiskDayWindowMismatchError(
                 "candidate must be ProductDayRiskWindow evidence"
             )
-        current = self.current()
+        # Positive revalidation must bypass mutable exact-instance dispatch.
+        # A caller-owned current attribute is not product clock/day authority.
+        current = ProductDayRiskWindowStore.current(self)
         if not current.product_clock_authoritative:
             raise RiskDayWindowIntegrityError(
                 "test/synthetic clock cannot mint product day authority"

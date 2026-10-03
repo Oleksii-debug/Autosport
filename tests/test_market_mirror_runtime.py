@@ -379,6 +379,37 @@ class BoundedMirrorInvalidationBufferTests(unittest.TestCase):
             },
         )
 
+    def test_coherent_views_do_not_share_mutable_event_metadata(self) -> None:
+        mirror = MarketMirror()
+        dependencies = FocusedMirrorDependencyIndex(mirror)
+        dependencies.register("decision-a", selection_ids="selection-a")
+        dependencies.register("decision-b", selection_ids="selection-a")
+        base = self.event(selection="selection-a", sequence=1)
+        event = MarketEvent.from_dict(
+            {
+                **base.to_dict(),
+                "metadata": {"nested": {"origin": "canonical"}},
+            }
+        )
+        mirror.apply(event)
+
+        views = dependencies.coherent_decision_views(
+            ("decision-a", "decision-b"),
+            as_of=datetime(2026, 9, 16, 19, 0, 10, tzinfo=timezone.utc),
+            max_age=timedelta(minutes=1),
+            incremental=False,
+        )
+        views["decision-a"].events[0].metadata["nested"]["origin"] = "mutated-a"
+
+        self.assertEqual(
+            views["decision-b"].events[0].metadata,
+            {"nested": {"origin": "canonical"}},
+        )
+        self.assertEqual(
+            mirror.snapshot()[0].metadata,
+            {"nested": {"origin": "canonical"}},
+        )
+
     def test_atomic_drain_and_route_retains_dirty_state_on_routing_failure(self) -> None:
         mirror = MarketMirror()
         runtime = BoundedMirrorInvalidationBuffer(mirror)

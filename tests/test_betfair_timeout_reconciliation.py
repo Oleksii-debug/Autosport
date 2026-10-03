@@ -35,6 +35,31 @@ from autosport.supervised_provider_evidence import (
 )
 
 
+def _find_closure_value(function, target_name: str):
+    pending = [function]
+    seen: set[int] = set()
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        closure = current.__closure__ or ()
+        for freevar, cell in zip(
+            current.__code__.co_freevars,
+            closure,
+            strict=True,
+        ):
+            try:
+                value = cell.cell_contents
+            except ValueError:
+                continue
+            if freevar == target_name:
+                return value
+            if callable(value) and hasattr(value, "__code__"):
+                pending.append(value)
+    raise AssertionError(f"closure value not found: {target_name}")
+
+
 LEDGER_TIMEOUT_BOUNDARY = "2026-09-21T18:00:00+00:00"
 UNKNOWN_OBSERVED_AT = "2026-09-21T17:59:57+00:00"
 
@@ -1039,6 +1064,19 @@ def test_semantic_timeout_core_cannot_register_absence_authority(
         match="did not pass durable Betfair timeout visibility authority",
     ):
         timeout_resolution.assert_betfair_timeout_absence_authoritative(evidence)
+
+def test_timeout_resolver_integrity_seals_are_immutable() -> None:
+    resolver = timeout_resolution.resolve_betfair_timeout_provider_state
+    for name in (
+        "sealed_resolver_graph",
+        "sealed_wrapper_bindings",
+        "sealed_ledger_descriptors",
+        "sealed_action_descriptors",
+    ):
+        sealed = _find_closure_value(resolver, name)
+        assert type(sealed) is tuple
+        assert sealed
+
 
 def test_public_timeout_authority_rejects_horizon_rebind(
     tmp_path, monkeypatch

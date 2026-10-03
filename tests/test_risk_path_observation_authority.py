@@ -147,13 +147,6 @@ def _completed_run_with_settlement_bridge(
         locked_odds=Decimal("2.00"),
         sport="table_tennis",
     )
-    ticket = book.open_ticket(
-        (leg,),
-        Decimal("10"),
-        placed_at="2026-09-03T10:00:10+00:00",
-        bankroll_id=goal.bankroll_id,
-        currency=goal.currency,
-    )
     book_path = workspace / "paper_book.json"
     book.save(book_path)
     base_book_sha = hashlib.sha256(book_path.read_bytes()).hexdigest()
@@ -182,7 +175,13 @@ def _completed_run_with_settlement_bridge(
         base_decision_ledger_sha256=base_ledger_sha,
     )
     book = PaperBook.load(book_path)
-    ticket = book.tickets[ticket.ticket_id]
+    ticket = book.open_ticket(
+        (leg,),
+        Decimal("10"),
+        placed_at="2026-09-03T10:00:10+00:00",
+        bankroll_id=goal.bankroll_id,
+        currency=goal.currency,
+    )
 
     identity = EnvironmentIdentity(
         source_id="risk-path-source",

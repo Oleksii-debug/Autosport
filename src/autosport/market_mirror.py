@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from enum import Enum
@@ -8,6 +9,10 @@ from threading import RLock
 
 from .domain import MarketEvent, _quote_identity
 from .storage import SQLiteMarketStore
+
+
+class MarketMirrorRevisionChanged(RuntimeError):
+    """The canonical mirror advanced past a decision's captured revision."""
 
 
 class MirrorUpdate(str, Enum):
@@ -54,6 +59,23 @@ class MarketMirror:
         """Return the exact current mirror revision without copying market state."""
         with self._lock:
             return self._revision
+
+    @contextmanager
+    def hold_revision(self, expected_revision: int) -> Iterator[None]:
+        """Linearize a short publication step against one captured mirror revision."""
+
+        if type(expected_revision) is not int or expected_revision < 0:
+            raise ValueError("expected_revision must be a non-negative integer")
+        with self._lock:
+            if self._revision != expected_revision:
+                raise MarketMirrorRevisionChanged(
+                    "market mirror revision changed before decision publication"
+                )
+            yield
+            if self._revision != expected_revision:
+                raise MarketMirrorRevisionChanged(
+                    "market mirror revision changed during decision publication"
+                )
 
     @staticmethod
     def _key(event: MarketEvent) -> tuple[str, str]:

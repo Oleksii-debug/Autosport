@@ -147,9 +147,7 @@ def test_missing_class_specific_proof_fails_closed_to_wait_decision() -> None:
         claims_probability_edge=False,
     )
 
-    assert evaluation.proof_contract_satisfied is False
-    assert evaluation.positive_action_candidate is False
-    assert evaluation.proof_gate_decision is OpportunityDecision.WAIT
+    assert evaluation.required_labels_present is False
     assert evaluation.missing_proofs == (
         ProofRequirement.COMPLETE_TERMINAL_OUTCOME_SPACE,
     )
@@ -168,10 +166,9 @@ def test_relabelling_predictive_evidence_cannot_satisfy_arbitrage_contract() -> 
         claims_probability_edge=False,
     )
 
-    assert evaluation.proof_contract_satisfied is False
+    assert evaluation.required_labels_present is False
     assert ProofRequirement.COMPLETE_TERMINAL_OUTCOME_SPACE in evaluation.missing_proofs
     assert ProofRequirement.MINIMUM_TERMINAL_NET_PNL in evaluation.missing_proofs
-    assert evaluation.proof_gate_decision is OpportunityDecision.WAIT
 
 
 def test_complete_requirement_labels_remain_requirements_only() -> None:
@@ -183,11 +180,11 @@ def test_complete_requirement_labels_remain_requirements_only() -> None:
         claims_probability_edge=False,
     )
 
-    assert evaluation.proof_contract_satisfied is True
-    assert evaluation.positive_action_candidate is False
-    assert evaluation.proof_gate_decision is OpportunityDecision.WAIT
+    assert evaluation.required_labels_present is True
     assert evaluation.missing_proofs == ()
     assert evaluation.execution_authorized is False
+    assert not hasattr(evaluation, "positive_action_candidate")
+    assert not hasattr(evaluation, "proof_gate_decision")
 
 
 def test_extra_wrong_class_proofs_do_not_replace_required_proofs() -> None:
@@ -213,8 +210,6 @@ def test_extra_wrong_class_proofs_do_not_replace_required_proofs() -> None:
     )
 
     assert evaluation.missing_proofs == (ProofRequirement.FORECAST_PROBABILITY,)
-    assert evaluation.positive_action_candidate is False
-    assert evaluation.proof_gate_decision is OpportunityDecision.WAIT
 
 
 def test_contracts_and_evaluations_are_frozen() -> None:
@@ -280,32 +275,6 @@ def test_callers_cannot_mint_noncanonical_contract_or_execution_authority() -> N
             required_proofs=shortened,
         )
 
-    with pytest.raises(StrategyProofContractError, match="cannot mint a positive"):
-        StrategyProofEvaluation(
-            strategy_class=StrategyClass.ARBITRAGE,
-            claims_probability_edge=False,
-            required_proofs=canonical.required_proofs,
-            present_proofs=canonical.required_proofs,
-            missing_proofs=(),
-            proof_contract_satisfied=True,
-            positive_action_candidate=True,
-            proof_gate_decision=OpportunityDecision.WAIT,
-            execution_authorized=False,
-        )
-
-    with pytest.raises(StrategyProofContractError, match="cannot mint an actionable"):
-        StrategyProofEvaluation(
-            strategy_class=StrategyClass.ARBITRAGE,
-            claims_probability_edge=False,
-            required_proofs=canonical.required_proofs,
-            present_proofs=canonical.required_proofs,
-            missing_proofs=(),
-            proof_contract_satisfied=True,
-            positive_action_candidate=False,
-            proof_gate_decision=OpportunityDecision.ACTIONABLE,
-            execution_authorized=False,
-        )
-
     with pytest.raises(StrategyProofContractError, match="cannot authorize"):
         StrategyProofEvaluation(
             strategy_class=StrategyClass.ARBITRAGE,
@@ -313,9 +282,7 @@ def test_callers_cannot_mint_noncanonical_contract_or_execution_authority() -> N
             required_proofs=canonical.required_proofs,
             present_proofs=canonical.required_proofs,
             missing_proofs=(),
-            proof_contract_satisfied=True,
-            positive_action_candidate=False,
-            proof_gate_decision=OpportunityDecision.WAIT,
+            required_labels_present=True,
             execution_authorized=True,
         )
 
@@ -344,8 +311,8 @@ def test_all_required_bare_labels_cannot_mint_actionable_truth(
 
     assert evaluation.required_proofs == contract.required_proofs
     assert evaluation.missing_proofs == ()
-    assert evaluation.proof_contract_satisfied is True
-    assert evaluation.positive_action_candidate is False
-    assert evaluation.proof_gate_decision is OpportunityDecision.WAIT
+    assert evaluation.required_labels_present is True
     assert evaluation.execution_authorized is False
+    assert not hasattr(evaluation, "positive_action_candidate")
+    assert not hasattr(evaluation, "proof_gate_decision")
 

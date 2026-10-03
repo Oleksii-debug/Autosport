@@ -177,12 +177,20 @@ def parse_run(
     _sha_validator_code=_require_sha.__code__,
     _active_statuses: tuple[str, ...] = _ACTIVE_STATUSES,
     _workflow_run_type=WorkflowRun,
+    _workflow_run_dict_descriptor=WorkflowRun.__dict__["__dict__"],
+    _workflow_run_init=WorkflowRun.__dict__["__init__"],
+    _workflow_run_init_code=WorkflowRun.__dict__["__init__"].__code__,
 ) -> WorkflowRun:
     if (
         getattr(_positive_int, "__code__", None) is not _positive_int_code
         or getattr(_sha_validator, "__code__", None) is not _sha_validator_code
         or type(_active_statuses) is not tuple
         or not _active_statuses
+        or _workflow_run_type.__dict__.get("__dict__")
+        is not _workflow_run_dict_descriptor
+        or _workflow_run_type.__dict__.get("__init__") is not _workflow_run_init
+        or getattr(_workflow_run_init, "__code__", None)
+        is not _workflow_run_init_code
     ):
         raise CancellationError("workflow run parser authority changed")
     if not isinstance(payload, dict):
@@ -205,13 +213,40 @@ def parse_run(
         pr_numbers.append(
             _positive_int(item.get("number"), field="pull request number")
         )
-    return _workflow_run_type(
+    run = _workflow_run_type(
         run_id=run_id,
         head_sha=head_sha,
         workflow_name=name,
         pr_numbers=tuple(pr_numbers),
         status=status,
     )
+    if (
+        _workflow_run_type.__dict__.get("__dict__")
+        is not _workflow_run_dict_descriptor
+        or _workflow_run_type.__dict__.get("__init__") is not _workflow_run_init
+        or getattr(_workflow_run_init, "__code__", None)
+        is not _workflow_run_init_code
+        or type(run) is not _workflow_run_type
+    ):
+        raise CancellationError("workflow run parser authority changed")
+    state = _workflow_run_dict_descriptor.__get__(run, _workflow_run_type)
+    if type(state) is not dict or set(state) != {
+        "run_id",
+        "head_sha",
+        "workflow_name",
+        "pr_numbers",
+        "status",
+    }:
+        raise CancellationError("workflow run parser authority changed")
+    if (
+        dict.__getitem__(state, "run_id") != run_id
+        or dict.__getitem__(state, "head_sha") != head_sha
+        or dict.__getitem__(state, "workflow_name") != name
+        or dict.__getitem__(state, "pr_numbers") != tuple(pr_numbers)
+        or dict.__getitem__(state, "status") != status
+    ):
+        raise CancellationError("workflow run parser authority changed")
+    return run
 
 
 def select_superseded_runs(

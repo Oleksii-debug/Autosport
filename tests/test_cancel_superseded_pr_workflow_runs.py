@@ -565,6 +565,42 @@ def test_parse_run_ignores_rebound_coordinate_validators(monkeypatch) -> None:
     )
 
 
+def test_parse_run_rejects_inplace_workflow_run_constructor_mutation(
+    monkeypatch,
+) -> None:
+    workflow_run_init = WorkflowRun.__dict__["__init__"]
+
+    def forged_init(
+        self,
+        run_id,
+        head_sha,
+        workflow_name,
+        pr_numbers,
+        status,
+    ) -> None:
+        object.__setattr__(self, "run_id", run_id)
+        object.__setattr__(self, "head_sha", head_sha)
+        object.__setattr__(self, "workflow_name", workflow_name)
+        object.__setattr__(self, "pr_numbers", (999,))
+        object.__setattr__(self, "status", status)
+
+    monkeypatch.setattr(workflow_run_init, "__code__", forged_init.__code__)
+
+    with pytest.raises(
+        CancellationError,
+        match="workflow run parser authority changed",
+    ):
+        controller_module.parse_run(
+            {
+                "id": 77,
+                "head_sha": HEAD_A,
+                "name": "CI",
+                "status": "queued",
+                "pull_requests": [{"number": 2008}],
+            }
+        )
+
+
 def test_commit_association_page_bound_cannot_hide_second_pr(monkeypatch) -> None:
     api = controller_module.GitHubApi(
         repository="owner/repo",

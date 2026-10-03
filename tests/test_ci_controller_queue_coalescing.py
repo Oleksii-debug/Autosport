@@ -2910,3 +2910,61 @@ def test_scoped_active_run_scan_rejects_inflight_request_dispatch_rebind(
 
     assert forged_calls == []
 
+def test_scoped_active_run_scan_rejects_inflight_workflow_run_constructor_mutation(
+    monkeypatch,
+) -> None:
+    api = WorkflowScopedGitHubApi(
+        repository="owner/repo",
+        token="token",
+        workflow_id=356678400,
+        workflow_name="CI",
+    )
+    workflow_run_init = WorkflowRun.__dict__["__init__"]
+
+    def forged_init(
+        self,
+        run_id,
+        head_sha,
+        workflow_name,
+        pr_numbers,
+        status,
+    ) -> None:
+        object.__setattr__(self, "run_id", run_id)
+        object.__setattr__(self, "head_sha", head_sha)
+        object.__setattr__(self, "workflow_name", workflow_name)
+        object.__setattr__(self, "pr_numbers", (999,))
+        object.__setattr__(self, "status", status)
+
+    def first_request(
+        path: str,
+        *,
+        method: str = "GET",
+        allowed_http_errors: frozenset[int] = frozenset(),
+    ) -> object:
+        assert method == "GET"
+        assert not allowed_http_errors
+        assert "status=queued" in path
+        monkeypatch.setattr(workflow_run_init, "__code__", forged_init.__code__)
+        return {
+            "total_count": 1,
+            "workflow_runs": [
+                {
+                    "id": 71,
+                    "head_sha": HEAD,
+                    "name": "CI",
+                    "status": "queued",
+                    "pull_requests": [{"number": 303}],
+                    "head_branch": "feature/head",
+                    "head_repository": {"full_name": "owner/repo"},
+                }
+            ],
+        }
+
+    monkeypatch.setattr(api, "_request", first_request)
+
+    with pytest.raises(
+        CancellationError,
+        match="workflow run parser authority changed",
+    ):
+        api._active_runs_for_status("queued")
+

@@ -329,3 +329,35 @@ def test_issuance_witness_rejects_naive_available_at() -> None:
         assert campaign_authority_module._read_issuance_witnesses(registry) == before
     finally:
         fixture.doCleanups()
+
+
+def test_prior_witness_remains_idempotent_after_later_issuance() -> None:
+    fixture, authority = _fixture_authority_with_goal(_goal())
+    try:
+        issued = authority.denomination_binding()
+        assert issued is not None
+        registry = authority._registry()
+        initial = campaign_authority_module._read_issuance_witnesses(registry)
+        assert len(initial) == 1
+        first = initial[0]
+
+        campaign_authority_module._append_issuance_witness(
+            registry,
+            binding_key="later-idempotency-falsifier",
+            binding_payload_sha256="3" * 64,
+            available_at=issued.available_at + timedelta(seconds=1),
+        )
+        after_later = campaign_authority_module._read_issuance_witnesses(registry)
+        assert len(after_later) == 2
+
+        resolved = campaign_authority_module._append_issuance_witness(
+            registry,
+            binding_key=str(first["binding_key"]),
+            binding_payload_sha256=str(first["binding_payload_sha256"]),
+            available_at=issued.available_at,
+        )
+
+        assert resolved == first
+        assert campaign_authority_module._read_issuance_witnesses(registry) == after_later
+    finally:
+        fixture.doCleanups()

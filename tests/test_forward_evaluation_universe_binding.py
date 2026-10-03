@@ -65,12 +65,13 @@ FRESHNESS_SHA = "3" * 64
 CONFIG_SHA = "4" * 64
 COST_SHA = "5" * 64
 RUNTIME_SHA = "6" * 64
+PROSPECTIVE_PLAN_SHA = "0" * 64
 
 
 # Test-only convenience.  Production has no fallback: the #1185 APIs require the
 # independent locator explicitly.  Each real ProviderEvaluationUniverseStore fixture
-# receives a locator issued from a separate precommit workspace after exact universe
-# construction, and the wrappers forward it unchanged.
+# receives a locator issued from a separate precommit workspace with a prospective
+# plan identity deliberately distinct from the later realized universe digest.
 def resolve_forward_universe_members(*, store, protocol):
     return _resolve_forward_universe_members(
         store=store,
@@ -240,7 +241,7 @@ def _prospective_precommit(
     tmp_path: Path,
     *,
     source_id: str,
-    evaluation_universe_sha256: str,
+    prospective_evaluation_plan_sha256: str,
 ) -> ForwardUniversePrecommitLocator:
     workspace = (tmp_path / "precommit-workspace").resolve()
     evidence = workspace / "evidence"
@@ -255,7 +256,7 @@ def _prospective_precommit(
         committed_at="2020-01-01T00:00:00Z",
         observation_not_before="2100-01-02T07:00:00Z",
         observation_not_after="2100-01-03T00:00:00Z",
-        evaluation_universe_sha256=evaluation_universe_sha256,
+        evaluation_universe_sha256=prospective_evaluation_plan_sha256,
         strategy_version_id="strategy-1",
         champion_version_id="model-1",
         baseline_version_id="baseline-1",
@@ -326,7 +327,7 @@ def _stored_universe(tmp_path, monkeypatch, *, empty: bool) -> ProviderEvaluatio
     reopened._test_forward_precommit_locator = _prospective_precommit(
         tmp_path,
         source_id=snapshot.request.source_id,
-        evaluation_universe_sha256=universe.universe_sha256,
+        prospective_evaluation_plan_sha256=PROSPECTIVE_PLAN_SHA,
     )
     return reopened
 
@@ -416,6 +417,8 @@ def test_post_observation_identity_projects_exact_guarded_universe(
     ledger = ProviderEvaluationUniverseStore.load(store)
     assert ledger is not None
 
+    assert identity.prospective_evaluation_plan_sha256 == PROSPECTIVE_PLAN_SHA
+    assert identity.prospective_evaluation_plan_sha256 != ledger.universe.universe_sha256
     assert identity.universe_sha256 == ledger.universe.universe_sha256
     assert identity.membership_sha256 == ledger.universe.membership_sha256
     assert identity.member_count == len(expectations) == len(ledger.universe.rows)

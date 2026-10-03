@@ -1013,3 +1013,110 @@ def test_failure_clock_transitive_store_seam_code_mutation_fails_closed(
     )
     assert len(evidence) == 1
     assert evidence[0]["terminal"] is None
+
+
+def test_first_clock_cannot_rebind_chronology_primitive_before_start(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    locator, store, spec, provider_store = _setup(tmp_path)
+    provider_calls: list[str] = []
+
+    def mutating_clock() -> str:
+        monkeypatch.setattr(capture_module, "datetime", object())
+        return "2100-01-01T06:00:00+00:00"
+
+    monkeypatch.setattr(
+        provider_module,
+        "urlopen",
+        lambda _request, _timeout: provider_calls.append("provider"),
+    )
+
+    with pytest.raises(
+        CampaignProviderCycleCaptureIntegrityError,
+        match="chronology/digest primitives changed",
+    ):
+        capture_campaign_complete_game_board(
+            precommit_locator=locator,
+            store=store,
+            source_spec=spec,
+            evidence_store=provider_store,
+            request=_request(),
+            api_key="secret-value",
+            timeout_seconds=3.0,
+            clock=mutating_clock,
+        )
+
+    assert provider_calls == []
+    assert store.collector_cycle_evidence(
+        source_id=spec.source_id,
+        start_cycle_seq=1,
+        end_cycle_seq=1,
+    ) == ()
+
+
+def test_completion_clock_cannot_mutate_sha256_primitive_before_artifact(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    locator, store, spec, provider_store = _setup(tmp_path)
+    hostile_calls: list[str] = []
+    original_sha256 = capture_module.hashlib.sha256
+    clock_calls = 0
+
+    def hostile_sha256(*_args, **_kwargs):
+        hostile_calls.append("sha256")
+        raise AssertionError("hostile sha256 executed")
+
+    def mutating_clock() -> str:
+        nonlocal clock_calls
+        clock_calls += 1
+        if clock_calls == 2:
+            monkeypatch.setattr(
+                capture_module.hashlib,
+                "sha256",
+                hostile_sha256,
+            )
+        return (
+            "2100-01-01T06:00:00+00:00"
+            if clock_calls == 1
+            else "2100-01-01T06:00:01+00:00"
+        )
+
+    monkeypatch.setattr(
+        provider_module,
+        "urlopen",
+        lambda _request, _timeout: _FakeSseResponse(_frame()),
+    )
+    monkeypatch.setattr(provider_module, "_default_clock", lambda: CAPTURED_AT)
+
+    try:
+        with pytest.raises(
+            CampaignProviderCycleCaptureIntegrityError,
+            match="chronology/digest primitives changed",
+        ):
+            capture_campaign_complete_game_board(
+                precommit_locator=locator,
+                store=store,
+                source_spec=spec,
+                evidence_store=provider_store,
+                request=_request(),
+                api_key="secret-value",
+                timeout_seconds=3.0,
+                clock=mutating_clock,
+            )
+    finally:
+        monkeypatch.setattr(
+            capture_module.hashlib,
+            "sha256",
+            original_sha256,
+        )
+
+    assert hostile_calls == []
+    evidence = store.collector_cycle_evidence(
+        source_id=spec.source_id,
+        start_cycle_seq=1,
+        end_cycle_seq=1,
+    )
+    assert len(evidence) == 1
+    assert evidence[0]["terminal"] is None

@@ -660,6 +660,7 @@ def _validate_state(
     if (
         set(payload) != expected
         or payload.get("schema") != SCHEMA
+        or type(payload.get("schema_version")) is not int
         or payload.get("schema_version") != SCHEMA_VERSION
     ):
         raise CampaignInceptionIntegrityError(
@@ -699,16 +700,36 @@ def _validate_state(
         raise CampaignInceptionIntegrityError(
             "prepared schedule payload schema is noncanonical"
         )
+    try:
+        expected_due_at = _CANONICAL_SCHEDULE_DUE_AT(
+            anchor_at=spec.anchor_at,
+            interval_seconds=repr(spec.interval_seconds),
+            slot_ordinal=0,
+        )
+    except (TypeError, ValueError) as exc:
+        raise CampaignInceptionIntegrityError(
+            "cannot resolve exact inception slot-zero due time"
+        ) from exc
     if (
-        prepared.get("source_id") != spec.source_id
+        type(prepared.get("schema_version")) is not int
+        or prepared.get("schema_version") != 1
+        or prepared.get("source_id") != spec.source_id
         or prepared.get("run_id") != spec.run_id
         or prepared.get("stream_epoch") != spec.stream_epoch
         or prepared.get("schedule_policy") != "fixed_interval_v1"
+        or prepared.get("anchor_at") != spec.anchor_at
+        or prepared.get("interval_seconds") != repr(spec.interval_seconds)
+        or type(prepared.get("max_items")) is not int
+        or prepared.get("max_items") != spec.max_items
+        or type(prepared.get("evaluation_start_slot_ordinal")) is not int
         or prepared.get("evaluation_start_slot_ordinal")
         != spec.evaluation_start_slot_ordinal
+        or type(prepared.get("evaluation_end_slot_ordinal")) is not int
         or prepared.get("evaluation_end_slot_ordinal")
         != spec.evaluation_end_slot_ordinal
+        or type(prepared.get("next_slot_ordinal")) is not int
         or prepared.get("next_slot_ordinal") != 0
+        or prepared.get("next_due_at") != expected_due_at
         or prepared.get("gate_binding_sha256")
         != _gate_binding_sha256(precommit=precommit, spec=spec)
     ):
@@ -716,7 +737,16 @@ def _validate_state(
             "prepared schedule does not match exact inception source specification"
         )
     _sha256(prepared.get("schedule_id"), "schedule_id")
-    _sha256(prepared.get("prestart_sha256"), "prestart_sha256")
+    claimed_prestart = _sha256(
+        prepared.get("prestart_sha256"),
+        "prestart_sha256",
+    )
+    prestart_material = dict(prepared)
+    prestart_material.pop("prestart_sha256")
+    if claimed_prestart != _digest(prestart_material):
+        raise CampaignInceptionIntegrityError(
+            "prepared schedule prestart digest mismatch"
+        )
     tx_id = _text(payload.get("tx_id"), "tx_id", max_length=256)
     semantic = _sha256(
         payload.get("semantic_binding_sha256"),

@@ -512,6 +512,49 @@ def test_supervised_issuance_ledger_dispatch_rebinding_fails_before_hostile_code
         ledger.saga(bound.execution_plan.plan_id)
 
 
+@pytest.mark.parametrize(
+    "method_name",
+    (
+        "reserve_plan",
+        "saga",
+        "_bind_supervised_plan_issuance",
+        "supervised_plan_issuance_is_current",
+        "bind_supervised_approval",
+        "supervised_approval_is_active",
+        "begin_attempt",
+        "revoke_supervised_approval",
+        "provider_order_reference",
+        "provider_evidence_binding",
+        "acknowledge",
+        "reconcile_found",
+        "bind_provider_evidence",
+        "attempt_state",
+        "reconcile_not_found",
+    ),
+)
+def test_supervised_ledger_dispatch_surface_rebinding_fails_closed(
+    method_name,
+    monkeypatch,
+    tmp_path,
+) -> None:
+    ledger = RealExecutionLedger(tmp_path / f"ledger-dispatch-{method_name}.jsonl")
+    hostile_calls = []
+
+    def hostile(*args, **kwargs):
+        hostile_calls.append((args, kwargs))
+        raise AssertionError("hostile ledger dispatch executed")
+
+    monkeypatch.setattr(RealExecutionLedger, method_name, hostile)
+
+    with pytest.raises(
+        SupervisedExecutionError,
+        match="canonical real execution ledger authority changed",
+    ):
+        supervised_execution._canonical_supervised_issuance_ledger_dispatch(ledger)
+
+    assert hostile_calls == []
+
+
 def test_product_issuer_is_not_importable_from_module_namespace() -> None:
     assert not hasattr(
         supervised_execution,

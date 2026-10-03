@@ -340,6 +340,33 @@ class ProposedTicketRiskContextTests(unittest.TestCase):
         self.assertFalse(decision.allowed)
         self.assertEqual(decision.reason, "proposed ticket quote evidence is required")
 
+    def test_zero_concurrent_position_cap_disables_all_new_paper_positions(self) -> None:
+        policy = self._permissive_policy(
+            self._goal(max_concurrent_positions=0)
+        )
+        book = PaperBook("100")
+        context = self._context()
+
+        self.assertIsNone(
+            policy.derive_goal_stake(
+                book,
+                Decimal("1"),
+                context=context,
+            )
+        )
+        decision = policy.evaluate(
+            book,
+            Decimal("1"),
+            context=context,
+        )
+        self.assertFalse(decision.allowed)
+        self.assertEqual(
+            decision.reason,
+            "economic goal concurrent position limit exceeded",
+        )
+        self.assertEqual(book.tickets, {})
+
+
     def test_existing_economic_goal_limit_remains_authoritative_with_context(self) -> None:
         policy = self._permissive_policy(
             self._goal(max_stake_amount=Decimal("1"))

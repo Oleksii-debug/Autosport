@@ -234,11 +234,11 @@ class ChampionAgentEpisode:
                     runtime_authority_store=runtime_authority_store,
                 )
             )
-            if _instant(activation_binding.activation_at, "activation_at") != _instant(
+            if _instant(activation_binding.activation_at, "activation_at") > _instant(
                 at, "at"
             ):
                 raise ChampionAgentEpisodeError(
-                    "activation binding time must equal AgentLoop initialization"
+                    "activation binding cannot postdate AgentLoop initialization"
                 )
             authority_identity = training_identity
             authority_as_of = activation_binding.activation_at
@@ -496,20 +496,11 @@ class ChampionAgentEpisode:
             )
         admitted = frozenset(self.environment.episode.admissible_actions)
         action_type = self.policy.choose(admissible_actions=admitted)
-        effective_parameters = parameters
-        if self.activation_binding is not None:
-            if any(key == "activation_binding_id" for key, _ in parameters):
-                raise ChampionAgentEpisodeError(
-                    "caller cannot override activation_binding_id"
-                )
-            effective_parameters = tuple(
-                sorted(
-                    (
-                        *parameters,
-                        ("activation_binding_id", self.activation_binding.binding_id),
-                    )
-                )
+        if any(key == "activation_binding_id" for key, _ in parameters):
+            raise ChampionAgentEpisodeError(
+                "caller cannot override activation_binding_id"
             )
+        effective_parameters = self.agent_loop.bind_action_parameters(parameters)
         return self.environment.act(
             observation,
             action_type=action_type,

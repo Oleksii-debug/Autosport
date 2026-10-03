@@ -489,6 +489,76 @@ def test_economic_read_rejects_authenticated_context_rotation_during_dispatch(
     assert len(opener.calls) == 1
 
 
+@pytest.mark.parametrize(
+    ("attribute", "replacement"),
+    (
+        ("_SECURE_ENDPOINT", "https://example.invalid/foreign"),
+        ("_EXTERNAL_NS", "urn:foreign:betdaq"),
+        ("_SOAP11_NS", "urn:foreign:soap11"),
+        ("_SOAP12_NS", "urn:foreign:soap12"),
+    ),
+)
+def test_economic_read_rejects_protocol_authority_replacement_before_dispatch(
+    monkeypatch,
+    attribute,
+    replacement,
+):
+    client, opener = economic_client(monkeypatch, postings_by_id(posting(9001)))
+    monkeypatch.setattr(account_module, attribute, replacement)
+
+    with pytest.raises(
+        BetdaqEconomicReadbackError,
+        match="canonical BETDAQ economic protocol authority was replaced",
+    ):
+        client.read_account_postings_by_id(9000)
+
+    assert opener.calls == []
+
+
+@pytest.mark.parametrize(
+    ("attribute", "replacement"),
+    (
+        ("_SECURE_ENDPOINT", "https://example.invalid/foreign"),
+        ("_EXTERNAL_NS", "urn:foreign:betdaq"),
+        ("_SOAP11_NS", "urn:foreign:soap11"),
+        ("_SOAP12_NS", "urn:foreign:soap12"),
+    ),
+)
+def test_economic_read_rejects_protocol_authority_replacement_during_dispatch(
+    monkeypatch,
+    attribute,
+    replacement,
+):
+    payload = postings_by_id(posting(9001))
+    account = BetdaqAccountReadOnlyClient(
+        BetdaqCredentials("alice", "secret-pass", "secret-app"),
+        clock=clock_one,
+    )
+    canonical_endpoint = account_module._SECURE_ENDPOINT
+
+    class RotatingProtocolUrlopen:
+        def __init__(self):
+            self.calls = []
+
+        def __call__(self, request, *, timeout):
+            self.calls.append((request, timeout))
+            monkeypatch.setattr(account_module, attribute, replacement)
+            return _FakeHttpResponse(payload)
+
+    opener = RotatingProtocolUrlopen()
+    monkeypatch.setattr(account_module, "urlopen", opener)
+    client = BetdaqEconomicReadbackClient(account)
+
+    with pytest.raises(
+        BetdaqEconomicReadbackError,
+        match="canonical BETDAQ economic protocol authority was replaced",
+    ):
+        client.read_account_postings_by_id(9000)
+
+    assert len(opener.calls) == 1
+    assert opener.calls[0][0].full_url == canonical_endpoint
+
+
 def test_economic_read_rejects_account_context_resolver_replacement_before_dispatch(
     monkeypatch,
 ):

@@ -524,6 +524,38 @@ def test_sealed_capture_rejects_public_surface_rebind(monkeypatch):
 
 
 
+def test_sealed_capture_rejects_mid_call_integrity_error_rebind(monkeypatch):
+    saved = capture_parlay_complete_game_board
+    hostile_calls: list[str] = []
+
+    def hostile_error(*_args, **_kwargs):
+        hostile_calls.append("error")
+        raise AssertionError("hostile provider integrity error executed")
+
+    def mutating_urlopen(_request, _timeout):
+        monkeypatch.setattr(
+            authority_module,
+            "ProviderObservationIntegrityError",
+            hostile_error,
+        )
+        return _FakeSseResponse(_complete_frame())
+
+    monkeypatch.setattr(authority_module, "urlopen", mutating_urlopen)
+    monkeypatch.setattr(authority_module, "_default_clock", lambda: CAPTURED_AT)
+
+    with pytest.raises(
+        ProviderObservationIntegrityError,
+        match="provider production acquisition witness changed",
+    ):
+        saved(
+            api_key="secret-value",
+            request=_request(),
+            timeout_seconds=3.0,
+        )
+
+    assert hostile_calls == []
+
+
 def test_sealed_capture_rejects_mid_call_public_surface_rebind(monkeypatch):
     saved = capture_parlay_complete_game_board
     hostile_calls: list[str] = []

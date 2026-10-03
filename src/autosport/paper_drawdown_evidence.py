@@ -27,6 +27,10 @@ DRAW_DOWN_PATH_SCHEMA = "autosport.paper-realized-equity-path.v1"
 DRAW_DOWN_SOURCE_SCHEMA = "autosport.paper-drawdown-source-state.v1"
 DRAW_DOWN_METRIC_CLASS = "REALIZED_SETTLED_EQUITY_DRAWDOWN"
 DRAW_DOWN_SCOPE = "PAPER_CURRENT_CANONICAL_HISTORY"
+DRAW_DOWN_ECONOMIC_BASIS = (
+    "PAPER_SETTLED_STAKE_PAYOUT_GROSS_OF_UNALLOCATED_EXTERNAL_COSTS"
+)
+DRAW_DOWN_HISTORY_MODE = "RESTATED_CURRENT_HISTORY_ONLY"
 
 
 class PaperDrawdownEvidenceError(ValueError):
@@ -177,6 +181,14 @@ class PaperRealizedDrawdownEvidence:
     schema: str
     scope: str
     metric_class: str
+    economic_basis: str
+    history_mode: str
+    path_point_count: int
+    net_cost_evidence_complete: bool
+    marked_equity_supported: bool
+    capital_at_risk_included: bool
+    risk_of_ruin_included: bool
+    stress_drawdown_included: bool
     goal_id: str
     goal_revision: int
     goal_contract_sha256: str
@@ -205,6 +217,29 @@ class PaperRealizedDrawdownEvidence:
             raise PaperDrawdownEvidenceError("drawdown evidence schema is invalid")
         if self.scope != DRAW_DOWN_SCOPE or self.metric_class != DRAW_DOWN_METRIC_CLASS:
             raise PaperDrawdownEvidenceError("drawdown evidence scope/metric is invalid")
+        if self.economic_basis != DRAW_DOWN_ECONOMIC_BASIS:
+            raise PaperDrawdownEvidenceError(
+                "drawdown evidence economic basis is invalid"
+            )
+        if self.history_mode != DRAW_DOWN_HISTORY_MODE:
+            raise PaperDrawdownEvidenceError(
+                "drawdown evidence history mode is invalid"
+            )
+        if type(self.path_point_count) is not int or self.path_point_count < 1:
+            raise PaperDrawdownEvidenceError(
+                "drawdown evidence path point count is invalid"
+            )
+        for name in (
+            "net_cost_evidence_complete",
+            "marked_equity_supported",
+            "capital_at_risk_included",
+            "risk_of_ruin_included",
+            "stress_drawdown_included",
+        ):
+            if getattr(self, name) is not False:
+                raise PaperDrawdownEvidenceError(
+                    "drawdown evidence cannot upgrade unsupported authority: " + name
+                )
         if type(self.goal_id) is not str or not self.goal_id:
             raise PaperDrawdownEvidenceError("drawdown evidence goal_id is required")
         if type(self.goal_revision) is not int or self.goal_revision < 1:
@@ -308,6 +343,10 @@ class PaperRealizedDrawdownEvidence:
             )
         if type(self.points) is not tuple or not self.points:
             raise PaperDrawdownEvidenceError("drawdown evidence requires a non-empty path")
+        if self.path_point_count != len(self.points):
+            raise PaperDrawdownEvidenceError(
+                "drawdown evidence path point count does not match the path"
+            )
         if any(type(point) is not PaperRealizedEquityPoint for point in self.points):
             raise PaperDrawdownEvidenceError(
                 "drawdown evidence path requires canonical equity points"
@@ -473,6 +512,8 @@ def _make_resolver() -> FunctionType:
     source_schema = DRAW_DOWN_SOURCE_SCHEMA
     metric_class = DRAW_DOWN_METRIC_CLASS
     scope = DRAW_DOWN_SCOPE
+    economic_basis = DRAW_DOWN_ECONOMIC_BASIS
+    history_mode = DRAW_DOWN_HISTORY_MODE
     path_type = Path
     path_new = Path.__new__
     path_init = Path.__init__
@@ -1059,6 +1100,14 @@ def _make_resolver() -> FunctionType:
             "schema": evidence_schema,
             "scope": scope,
             "metric_class": metric_class,
+            "economic_basis": economic_basis,
+            "history_mode": history_mode,
+            "path_point_count": len(points),
+            "net_cost_evidence_complete": False,
+            "marked_equity_supported": False,
+            "capital_at_risk_included": False,
+            "risk_of_ruin_included": False,
+            "stress_drawdown_included": False,
             "goal_id": goal.goal_id,
             "goal_revision": goal.revision,
             "goal_contract_sha256": provenance.contract_sha256,
@@ -1085,6 +1134,14 @@ def _make_resolver() -> FunctionType:
             schema=evidence_schema,
             scope=scope,
             metric_class=metric_class,
+            economic_basis=economic_basis,
+            history_mode=history_mode,
+            path_point_count=len(points),
+            net_cost_evidence_complete=False,
+            marked_equity_supported=False,
+            capital_at_risk_included=False,
+            risk_of_ruin_included=False,
+            stress_drawdown_included=False,
             goal_id=goal.goal_id,
             goal_revision=goal.revision,
             goal_contract_sha256=provenance.contract_sha256,

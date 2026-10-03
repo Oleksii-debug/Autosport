@@ -3,8 +3,6 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import threading
-import weakref
 from dataclasses import dataclass
 from decimal import Decimal, localcontext
 from enum import Enum
@@ -278,11 +276,12 @@ class ExecutionCapitalAtRiskEvidence:
         return CapitalRiskTruth.CONSERVATIVE_BOUND
 
     def assert_issued_current(self, ledger: RealExecutionLedger) -> None:
-        """Prove canonical in-process issuance and unchanged durable ledger bytes.
+        """Prove canonical derivation and unchanged durable ledger bytes.
 
         This is deliberately weaker than provider-origin or execution authority.
-        It only proves that this exact object came from the canonical resolver in
-        this process and still names the current verified ledger snapshot.
+        Positive currentness is earned by re-deriving the complete conservative
+        exposure from canonical durable execution truth, not by registry membership
+        or caller-mutable object provenance.
         """
 
         if type(ledger) is not RealExecutionLedger:
@@ -719,16 +718,6 @@ def _install_capital_risk_dispatch_authority() -> None:
     read_snapshot = _READ_VERIFIED_SNAPSHOT
     exact_globals = globals
     exact_getattr = getattr
-    exact_id = id
-    weakref_ref = weakref.ref
-    issue_lock = threading.RLock()
-    issued: dict[
-        int,
-        tuple[
-            weakref.ReferenceType[ExecutionCapitalAtRiskEvidence],
-            str,
-        ],
-    ] = {}
 
     def require_dispatch() -> None:
         namespace = exact_globals()
@@ -746,37 +735,6 @@ def _install_capital_risk_dispatch_authority() -> None:
                 "capital-risk ledger read dispatch changed"
             )
 
-    def register_product_issued(
-        value: ExecutionCapitalAtRiskEvidence,
-    ) -> None:
-        identity = exact_id(value)
-
-        def cleanup(
-            reference: weakref.ReferenceType[ExecutionCapitalAtRiskEvidence],
-        ) -> None:
-            with issue_lock:
-                current = issued.get(identity)
-                if current is not None and current[0] is reference:
-                    issued.pop(identity, None)
-
-        reference = weakref_ref(value, cleanup)
-        with issue_lock:
-            issued[identity] = (reference, value.evidence_sha256)
-
-    def require_product_issued(
-        value: ExecutionCapitalAtRiskEvidence,
-    ) -> None:
-        with issue_lock:
-            record = issued.get(exact_id(value))
-        if (
-            record is None
-            or record[0]() is not value
-            or record[1] != value.evidence_sha256
-        ):
-            raise ExecutionCapitalAtRiskError(
-                "capital-at-risk evidence is not current product-issued authority"
-            )
-
     def authoritative_resolve(
         ledger: RealExecutionLedger,
         plan_id: str,
@@ -784,22 +742,31 @@ def _install_capital_risk_dispatch_authority() -> None:
         require_dispatch()
         value = raw_resolve(ledger, plan_id)
         require_dispatch()
-        register_product_issued(value)
         return value
 
     def authoritative_currentness(
         self: ExecutionCapitalAtRiskEvidence,
         ledger: RealExecutionLedger,
     ) -> None:
+        # Snapshot/current-source validation is necessary but not sufficient:
+        # caller-created evidence can copy those identities while understating risk.
+        # Re-derive the complete canonical evidence from the same durable ledger and
+        # require exact value equality.  No mutable issuance registry is involved.
         require_dispatch()
-        require_product_issued(self)
         raw_currentness(self, ledger)
         require_dispatch()
-        require_product_issued(self)
+        canonical = raw_resolve(ledger, self.plan_id)
+        require_dispatch()
+        if canonical != self:
+            raise ExecutionCapitalAtRiskError(
+                "capital-at-risk evidence is not current product-issued authority"
+            )
+        # Close the check/use interval if the ledger advanced after re-derivation.
+        raw_currentness(self, ledger)
+        require_dispatch()
 
     globals()["resolve_execution_capital_at_risk"] = authoritative_resolve
     ExecutionCapitalAtRiskEvidence.assert_issued_current = authoritative_currentness
-
 
 _install_capital_risk_dispatch_authority()
 del _install_capital_risk_dispatch_authority

@@ -90,6 +90,7 @@ def _install_https_opener_dispatch(
         )
         response.code = 200
         response.msg = "OK"
+        response.info = lambda: {}
         return response
 
     monkeypatch.setattr(

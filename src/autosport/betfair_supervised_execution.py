@@ -2185,19 +2185,27 @@ def execute_betfair_supervised_action(
             ).get("timezone")
             is not _CANONICAL_PROVIDER_OBSERVATION_TIMEZONE
         ):
+            evidence_id = report.evidence_id
+            ledger.bind_provider_evidence(
+                attempt_id=attempt_id,
+                evidence_id=evidence_id,
+                observed_at=report.observed_at,
+                source=f"betfair:placeOrders:{report.response_sha256}",
+                request_sha256=report.request_sha256,
+            )
             ledger.mark_unknown(
                 attempt_id,
                 reason=(
                     "betfair_placeOrders_code_authority_changed_"
                     "requires_readback"
                 ),
-                observed_at=now(),
+                observed_at=report.observed_at,
             )
             return BetfairSupervisedExecutionResult(
                 PlaceOrdersOutcome.UNKNOWN,
                 attempt_id,
                 ledger.attempt_state(attempt_id),
-                None,
+                evidence_id,
                 None,
             )
 

@@ -21,6 +21,7 @@ import inspect
 import json
 import math
 import os
+import stat
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -48,7 +49,7 @@ from .scheduled_source_universe import (
     ScheduledSourceUniverseError,
     prepare_scheduled_source_universe,
 )
-from .workspace_lock import WorkspaceEconomicLock
+from .workspace_lock import WorkspaceEconomicLock, _open_read_only_descriptor
 
 
 SCHEMA = "autosport.campaign_inception_receipt"
@@ -56,6 +57,7 @@ SCHEMA_VERSION = 1
 AUTHORITY_DOMAIN = "research.forward-campaign-inception-causality"
 _STATE_DIR = "campaign-inception-v1"
 _HEX = frozenset("0123456789abcdef")
+_MAX_STATE_BYTES = 1024 * 1024
 
 _CANONICAL_WITNESS_RESOLVER = resolve_campaign_precommit_publication_witness
 _CANONICAL_MANIFEST_LOADER = load_campaign_precommit_manifest
@@ -65,10 +67,12 @@ _CANONICAL_GATE_STATUS = CollectorDeltaStore._collector_schedule_start_gate_stat
 _CANONICAL_GATE_AUTHORIZE = CollectorDeltaStore._authorize_collector_schedule_start_gate
 _CANONICAL_SCHEDULE_ID = CollectorDeltaStore._collector_schedule_id
 _CANONICAL_SCHEDULE_DUE_AT = CollectorDeltaStore._collector_schedule_due_at
+_CANONICAL_CONCRETE_PATH_TYPE = type(Path())
 _CANONICAL_PATH_EQUALITY = Path.__eq__
 _CANONICAL_PATH_FSPATH = Path.__fspath__
 _CANONICAL_OS_FSPATH = os.fspath
 _CANONICAL_ABSPATH = os.path.abspath
+_CANONICAL_STATE_READ_OPEN = _open_read_only_descriptor
 _CANONICAL_STORE_SEAMS = frozenset(
     {
         "_next_collector_schedule_slot",
@@ -191,6 +195,10 @@ def _write_state(path: Path, payload: Mapping[str, object]) -> None:
 
     path.parent.mkdir(parents=True, exist_ok=True)
     encoded = _canonical_bytes(dict(payload)) + b"\n"
+    if len(encoded) > _MAX_STATE_BYTES:
+        raise CampaignInceptionIntegrityError(
+            "campaign inception state exceeds supported size"
+        )
     temporary = path.parent / f".{path.name}.{uuid.uuid4().hex}.tmp"
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
     if os.name != "nt":
@@ -219,15 +227,105 @@ def _write_state(path: Path, payload: Mapping[str, object]) -> None:
         raise
 
 
-def _read_state(path: Path) -> dict[str, object] | None:
+def _read_stable_state_bytes(path: Path) -> bytes | None:
+    """Read one bounded regular inception-state file from one stable identity."""
+
     try:
-        raw = path.read_bytes()
+        before = os.stat(path, follow_symlinks=False)
     except FileNotFoundError:
         return None
     except OSError as exc:
         raise CampaignInceptionIntegrityError(
+            "cannot inspect campaign inception state"
+        ) from exc
+    if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+        raise CampaignInceptionIntegrityError(
+            "campaign inception state must be one regular file"
+        )
+    if before.st_size > _MAX_STATE_BYTES:
+        raise CampaignInceptionIntegrityError(
+            "campaign inception state exceeds supported size"
+        )
+
+    descriptor: int | None = None
+    primary_error: BaseException | None = None
+    try:
+        descriptor = _CANONICAL_STATE_READ_OPEN(path)
+        opened = os.fstat(descriptor)
+        if (
+            opened.st_dev != before.st_dev
+            or opened.st_ino != before.st_ino
+            or not stat.S_ISREG(opened.st_mode)
+            or opened.st_nlink != 1
+        ):
+            raise CampaignInceptionIntegrityError(
+                "campaign inception state changed during open"
+            )
+
+        chunks: list[bytes] = []
+        remaining = _MAX_STATE_BYTES + 1
+        while remaining:
+            chunk = os.read(descriptor, min(1024 * 1024, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        payload = b"".join(chunks)
+        after_open = os.fstat(descriptor)
+        after = os.stat(path, follow_symlinks=False)
+    except CampaignInceptionIntegrityError as exc:
+        primary_error = exc
+        raise
+    except OSError as exc:
+        primary_error = exc
+        raise CampaignInceptionIntegrityError(
             "cannot read campaign inception state"
         ) from exc
+    finally:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError as close_error:
+                if primary_error is None:
+                    raise CampaignInceptionIntegrityError(
+                        "campaign inception state descriptor cleanup failed"
+                    ) from close_error
+                try:
+                    primary_error.add_note(
+                        "campaign inception state descriptor cleanup also failed"
+                    )
+                except BaseException:
+                    pass
+
+    if len(payload) > _MAX_STATE_BYTES:
+        raise CampaignInceptionIntegrityError(
+            "campaign inception state exceeds supported size"
+        )
+
+    def identity(
+        value: os.stat_result,
+    ) -> tuple[int, int, int, int, int, int, int]:
+        return (
+            value.st_dev,
+            value.st_ino,
+            value.st_mode,
+            value.st_size,
+            value.st_mtime_ns,
+            value.st_ctime_ns,
+            value.st_nlink,
+        )
+
+    if identity(before) != identity(after) or identity(opened) != identity(after_open):
+        raise CampaignInceptionIntegrityError(
+            "campaign inception state changed during stable read"
+        )
+    return payload
+
+
+def _read_state(path: Path) -> dict[str, object] | None:
+    raw = _read_stable_state_bytes(path)
+    if raw is None:
+        return None
     try:
         text = raw.decode("utf-8", errors="strict")
         payload = strict_json_loads(text)
@@ -261,17 +359,24 @@ class CampaignInceptionSourceSpec:
     evaluation_end_slot_ordinal: int
 
     def __post_init__(self) -> None:
-        if not isinstance(self.expected_store_path, Path):
-            raise TypeError("expected_store_path must be pathlib.Path")
-        if not self.expected_store_path.is_absolute():
-            raise CampaignInceptionIntegrityError(
-                "expected_store_path must be absolute"
+        # This DTO is constructed before the sealed positive entrypoint.  Never
+        # invoke Path()/virtual path methods on caller input here: freeze the concrete
+        # platform path type at module import and admit only its canonical absolute
+        # spelling through captured non-virtual dispatch.
+        if type(self.expected_store_path) is not _CANONICAL_CONCRETE_PATH_TYPE:
+            raise TypeError(
+                "expected_store_path must be the exact platform pathlib path type"
             )
-        object.__setattr__(
-            self,
-            "expected_store_path",
-            Path(os.path.abspath(self.expected_store_path)),
-        )
+        raw_store_path = _CANONICAL_PATH_FSPATH(self.expected_store_path)
+        canonical_store_path = _CANONICAL_ABSPATH(raw_store_path)
+        if (
+            type(raw_store_path) is not str
+            or type(canonical_store_path) is not str
+            or raw_store_path != canonical_store_path
+        ):
+            raise CampaignInceptionIntegrityError(
+                "expected_store_path must be a canonical absolute path"
+            )
         for field_name in ("source_id", "run_id", "stream_epoch"):
             object.__setattr__(
                 self,
@@ -280,23 +385,35 @@ class CampaignInceptionSourceSpec:
             )
         canonical_anchor = _instant(self.anchor_at, "anchor_at").isoformat()
         object.__setattr__(self, "anchor_at", canonical_anchor)
-        if (
-            isinstance(self.interval_seconds, bool)
-            or not isinstance(self.interval_seconds, (int, float))
-            or not math.isfinite(float(self.interval_seconds))
-            or float(self.interval_seconds) <= 0
-        ):
+        # This value feeds the durable schedule/gate identity before the sealed
+        # campaign-establishment entrypoint is reached.  Do not invoke caller-defined
+        # numeric protocols (for example a float subclass overriding __float__) while
+        # constructing authority-bearing schedule input.
+        if type(self.interval_seconds) not in {int, float}:
+            raise CampaignInceptionIntegrityError(
+                "interval_seconds must be an exact built-in int or float"
+            )
+        try:
+            interval_seconds = float(self.interval_seconds)
+        except OverflowError as exc:
+            raise CampaignInceptionIntegrityError(
+                "interval_seconds must be representable as a finite float"
+            ) from exc
+        if not math.isfinite(interval_seconds) or interval_seconds <= 0:
             raise CampaignInceptionIntegrityError(
                 "interval_seconds must be positive and finite"
             )
-        object.__setattr__(self, "interval_seconds", float(self.interval_seconds))
+        object.__setattr__(self, "interval_seconds", interval_seconds)
         if type(self.max_items) is not int or self.max_items <= 0:
             raise CampaignInceptionIntegrityError(
                 "max_items must be a positive integer"
             )
-        if self.evaluation_start_slot_ordinal != 0:
+        if (
+            type(self.evaluation_start_slot_ordinal) is not int
+            or self.evaluation_start_slot_ordinal != 0
+        ):
             raise CampaignInceptionIntegrityError(
-                "campaign inception currently requires evaluation slot zero as first slot"
+                "campaign inception requires exact integer slot zero as first slot"
             )
         if (
             type(self.evaluation_end_slot_ordinal) is not int
@@ -464,9 +581,14 @@ def _validate_schedule_window(
     anchor = _instant(spec.anchor_at, "anchor_at")
     not_before = _instant(manifest.observation_not_before, "observation_not_before")
     not_after = _instant(manifest.observation_not_after, "observation_not_after")
-    last_due = anchor + timedelta(
-        seconds=spec.interval_seconds * spec.evaluation_end_slot_ordinal
-    )
+    try:
+        last_due = anchor + timedelta(
+            seconds=spec.interval_seconds * spec.evaluation_end_slot_ordinal
+        )
+    except (OverflowError, ValueError) as exc:
+        raise CampaignInceptionConflictError(
+            "collector evaluation schedule exceeds the representable prospective window"
+        ) from exc
     if anchor < not_before or last_due > not_after:
         raise CampaignInceptionConflictError(
             "collector evaluation schedule falls outside precommitted observation window"
@@ -548,16 +670,27 @@ def _validate_state(
     if (
         set(payload) != expected
         or payload.get("schema") != SCHEMA
+        or type(payload.get("schema_version")) is not int
         or payload.get("schema_version") != SCHEMA_VERSION
     ):
         raise CampaignInceptionIntegrityError(
             "campaign inception state schema is noncanonical"
         )
-    if payload.get("precommit") != dict(precommit):
+    stored_precommit = payload.get("precommit")
+    expected_precommit = dict(precommit)
+    if (
+        type(stored_precommit) is not dict
+        or _canonical_bytes(stored_precommit) != _canonical_bytes(expected_precommit)
+    ):
         raise CampaignInceptionConflictError(
             "campaign identity is already bound to different precommit authority"
         )
-    if payload.get("source_spec") != spec.payload():
+    stored_source_spec = payload.get("source_spec")
+    expected_source_spec = spec.payload()
+    if (
+        type(stored_source_spec) is not dict
+        or _canonical_bytes(stored_source_spec) != _canonical_bytes(expected_source_spec)
+    ):
         raise CampaignInceptionConflictError(
             "campaign identity is already bound to a different collector source/run"
         )
@@ -587,24 +720,58 @@ def _validate_state(
         raise CampaignInceptionIntegrityError(
             "prepared schedule payload schema is noncanonical"
         )
+    prepared_schedule_id = _sha256(
+        prepared.get("schedule_id"),
+        "schedule_id",
+    )
+    expected_schedule_id = _expected_schedule_id(spec)
+    try:
+        expected_due_at = _CANONICAL_SCHEDULE_DUE_AT(
+            anchor_at=spec.anchor_at,
+            interval_seconds=repr(spec.interval_seconds),
+            slot_ordinal=0,
+        )
+    except (TypeError, ValueError) as exc:
+        raise CampaignInceptionIntegrityError(
+            "cannot resolve exact inception slot-zero due time"
+        ) from exc
     if (
-        prepared.get("source_id") != spec.source_id
+        type(prepared.get("schema_version")) is not int
+        or prepared.get("schema_version") != 1
+        or prepared.get("source_id") != spec.source_id
         or prepared.get("run_id") != spec.run_id
         or prepared.get("stream_epoch") != spec.stream_epoch
         or prepared.get("schedule_policy") != "fixed_interval_v1"
+        or prepared_schedule_id != expected_schedule_id
+        or prepared.get("anchor_at") != spec.anchor_at
+        or prepared.get("interval_seconds") != repr(spec.interval_seconds)
+        or type(prepared.get("max_items")) is not int
+        or prepared.get("max_items") != spec.max_items
+        or type(prepared.get("evaluation_start_slot_ordinal")) is not int
         or prepared.get("evaluation_start_slot_ordinal")
         != spec.evaluation_start_slot_ordinal
+        or type(prepared.get("evaluation_end_slot_ordinal")) is not int
         or prepared.get("evaluation_end_slot_ordinal")
         != spec.evaluation_end_slot_ordinal
+        or type(prepared.get("next_slot_ordinal")) is not int
         or prepared.get("next_slot_ordinal") != 0
+        or prepared.get("next_due_at") != expected_due_at
         or prepared.get("gate_binding_sha256")
         != _gate_binding_sha256(precommit=precommit, spec=spec)
     ):
         raise CampaignInceptionIntegrityError(
             "prepared schedule does not match exact inception source specification"
         )
-    _sha256(prepared.get("schedule_id"), "schedule_id")
-    _sha256(prepared.get("prestart_sha256"), "prestart_sha256")
+    claimed_prestart = _sha256(
+        prepared.get("prestart_sha256"),
+        "prestart_sha256",
+    )
+    prestart_material = dict(prepared)
+    prestart_material.pop("prestart_sha256")
+    if claimed_prestart != _digest(prestart_material):
+        raise CampaignInceptionIntegrityError(
+            "prepared schedule prestart digest mismatch"
+        )
     tx_id = _text(payload.get("tx_id"), "tx_id", max_length=256)
     semantic = _sha256(
         payload.get("semantic_binding_sha256"),
@@ -672,9 +839,9 @@ def _expected_schedule_id(spec: CampaignInceptionSourceSpec) -> str:
 
 
 def _canonical_absolute_path_text(value: object) -> str:
-    """Resolve a Path through import-time captured path/filesystem dispatch only."""
+    """Resolve one exact concrete Path through captured filesystem dispatch only."""
 
-    if not isinstance(value, Path):
+    if type(value) is not _CANONICAL_CONCRETE_PATH_TYPE:
         raise CampaignInceptionIntegrityError(
             "campaign inception path identity is unavailable"
         )
@@ -1146,6 +1313,7 @@ def _seal_campaign_inception_dispatch() -> None:
     expected_authority_type = MonotonicWorkspaceAuthority
     expected_lock_type = WorkspaceEconomicLock
     expected_path_type = Path
+    expected_concrete_path_type = _CANONICAL_CONCRETE_PATH_TYPE
     expected_path_equality = _CANONICAL_PATH_EQUALITY
     expected_path_equality_code = getattr(expected_path_equality, "__code__", None)
     expected_path_fspath = _CANONICAL_PATH_FSPATH
@@ -1171,6 +1339,11 @@ def _seal_campaign_inception_dispatch() -> None:
     expected_os_fsync = os.fsync
     expected_os_replace = os.replace
     expected_os_close = os.close
+    expected_os_stat = os.stat
+    expected_os_fstat = os.fstat
+    expected_os_read = os.read
+    expected_stat = stat
+    expected_stat_isreg = stat.S_ISREG
     expected_uuid = uuid
     expected_uuid4 = uuid.uuid4
     expected_math = math
@@ -1184,6 +1357,7 @@ def _seal_campaign_inception_dispatch() -> None:
     expected_authority_domain = AUTHORITY_DOMAIN
     expected_state_dir = _STATE_DIR
     expected_hex = _HEX
+    expected_max_state_bytes = _MAX_STATE_BYTES
     expected_store_seam_names = _CANONICAL_STORE_SEAMS
     expected_store_seam_map = _CANONICAL_STORE_CLASS_SEAMS
 
@@ -1210,6 +1384,7 @@ def _seal_campaign_inception_dispatch() -> None:
             ("_CANONICAL_PATH_FSPATH", _CANONICAL_PATH_FSPATH),
             ("_CANONICAL_OS_FSPATH", _CANONICAL_OS_FSPATH),
             ("_CANONICAL_ABSPATH", _CANONICAL_ABSPATH),
+            ("_CANONICAL_STATE_READ_OPEN", _CANONICAL_STATE_READ_OPEN),
         )
     )
     helper_witnesses = tuple(
@@ -1224,6 +1399,7 @@ def _seal_campaign_inception_dispatch() -> None:
             ("_state_path", _state_path),
             ("_fsync_directory", _fsync_directory),
             ("_write_state", _write_state),
+            ("_read_stable_state_bytes", _read_stable_state_bytes),
             ("_read_state", _read_state),
             ("_require_store_seams", _require_store_seams),
             ("_resolve_precommit", _resolve_precommit),
@@ -1274,6 +1450,17 @@ def _seal_campaign_inception_dispatch() -> None:
             (
                 expected_path_type,
                 ("__new__", "__eq__", "__fspath__"),
+            ),
+            (
+                expected_concrete_path_type,
+                (
+                    "__str__",
+                    "__truediv__",
+                    "parent",
+                    "name",
+                    "mkdir",
+                    "unlink",
+                ),
             ),
             (
                 expected_authority_type,
@@ -1331,11 +1518,14 @@ def _seal_campaign_inception_dispatch() -> None:
             or module_globals.get("AUTHORITY_DOMAIN") != expected_authority_domain
             or module_globals.get("_STATE_DIR") != expected_state_dir
             or module_globals.get("_HEX") is not expected_hex
+            or module_globals.get("_MAX_STATE_BYTES") != expected_max_state_bytes
         ):
             raise expected_error_type("campaign inception schema/domain authority is rebound")
 
         if (
-            module_globals.get("_CANONICAL_PATH_EQUALITY")
+            module_globals.get("_CANONICAL_CONCRETE_PATH_TYPE")
+            is not expected_concrete_path_type
+            or module_globals.get("_CANONICAL_PATH_EQUALITY")
             is not expected_path_equality
             or getattr(expected_path_equality, "__code__", None)
             is not expected_path_equality_code
@@ -1389,9 +1579,19 @@ def _seal_campaign_inception_dispatch() -> None:
             or expected_os.fsync is not expected_os_fsync
             or expected_os.replace is not expected_os_replace
             or expected_os.close is not expected_os_close
+            or expected_os.stat is not expected_os_stat
+            or expected_os.fstat is not expected_os_fstat
+            or expected_os.read is not expected_os_read
         ):
             raise expected_error_type(
                 "campaign inception filesystem dispatch authority is rebound"
+            )
+        if (
+            module_globals.get("stat") is not expected_stat
+            or expected_stat.S_ISREG is not expected_stat_isreg
+        ):
+            raise expected_error_type(
+                "campaign inception file-type dispatch authority is rebound"
             )
         if (
             module_globals.get("uuid") is not expected_uuid

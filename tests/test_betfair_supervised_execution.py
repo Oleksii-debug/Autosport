@@ -55,6 +55,7 @@ from autosport.real_execution_ledger import (
     AttemptState,
     ExecutionStateError,
     RealExecutionLedger,
+    ReconciliationSnapshot,
 )
 from autosport.risk import PaperRiskPolicy, ProposedTicketRiskContext
 from autosport.supervised_execution import (
@@ -2793,3 +2794,68 @@ def test_terminal_redelivery_reports_reconciliation_evidence_over_earlier_ambigu
         assert redelivery.evidence_id == reconciliation.evidence_id
         assert redelivery.evidence_id != initial.evidence_id
         assert len(initial_transport.calls) == 1
+
+
+def test_reconciled_not_found_same_attempt_redelivery_remains_no_write() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
+        attempt_id = "attempt-reconciled-not-found-redelivery"
+        begin_supervised_attempt(
+            ledger,
+            bound,
+            approval,
+            action_id=action.action_id,
+            attempt_id=attempt_id,
+        )
+        ledger.bind_provider_order_reference(
+            attempt_id=attempt_id,
+            provider_id=action.bookmaker_id,
+        )
+        ledger.mark_submitted(
+            attempt_id,
+            submitted_at=SUBMITTED_AT,
+            request_sha256="4" * 64,
+        )
+        ledger.mark_unknown(
+            attempt_id,
+            reason="simulated ambiguous provider effect",
+            observed_at=SUBMITTED_AT,
+        )
+        ledger.reconcile_not_found(
+            ReconciliationSnapshot(
+                attempt_id=attempt_id,
+                evidence_id="5" * 64,
+                observed_at=READBACK_AT,
+                external_effect_found=False,
+                source="test:complete-provider-absence",
+            )
+        )
+        assert (
+            ledger.attempt_state(attempt_id)
+            is AttemptState.RECONCILED_NOT_FOUND
+        )
+        goal_store.persist_automatic_successor(
+            _goal(revision=2, emergency_stop=True)
+        )
+        transport = _Transport(
+            lambda _request: (_ for _ in ()).throw(
+                AssertionError("reconciled absence redelivery must not transmit")
+            )
+        )
+        client = _enabled_client(profile, transport, store=goal_store)
+
+        result = execute_betfair_supervised_action(
+            ledger,
+            bound,
+            approval,
+            action_id=action.action_id,
+            attempt_id=attempt_id,
+            profile=profile,
+            client=client,
+        )
+
+        assert result.outcome is PlaceOrdersOutcome.UNKNOWN
+        assert result.attempt_state is AttemptState.RECONCILED_NOT_FOUND
+        assert result.evidence_id == "5" * 64
+        assert result.external_receipt_id is None
+        assert transport.calls == []

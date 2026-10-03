@@ -350,6 +350,47 @@ def _class_descriptor_function(descriptor: object) -> FunctionType | None:
     return None
 
 
+def _authority_descriptor_function(descriptor: object) -> FunctionType | None:
+    """Return executable code for an authority-bearing method/property descriptor."""
+
+    if type(descriptor) is property:
+        function = descriptor.fget
+        return function if type(function) is FunctionType else None
+    return _class_descriptor_function(descriptor)
+
+
+def _capture_executable_descriptor_witnesses(
+    owner: type,
+    names: tuple[str, ...],
+) -> tuple[tuple[str, object, FunctionType, object], ...]:
+    witnesses: list[tuple[str, object, FunctionType, object]] = []
+    for name in names:
+        descriptor = owner.__dict__.get(name)
+        function = _authority_descriptor_function(descriptor)
+        if function is None:
+            raise RuntimeError("authority executable descriptor is unavailable")
+        witnesses.append((name, descriptor, function, function.__code__))
+    return tuple(witnesses)
+
+
+def _require_executable_descriptor_witnesses(
+    owner: type,
+    witnesses: tuple[tuple[str, object, FunctionType, object], ...],
+    *,
+    error: str,
+) -> None:
+    for name, expected_descriptor, expected_function, expected_code in witnesses:
+        current_descriptor = owner.__dict__.get(name)
+        current_function = _authority_descriptor_function(current_descriptor)
+        if (
+            current_descriptor is not expected_descriptor
+            or current_function is not expected_function
+            or current_function is None
+            or current_function.__code__ is not expected_code
+        ):
+            raise RuntimeError(error)
+
+
 def _capture_class_transition_graph(
     owner: type,
     roots: tuple[str, ...],
@@ -628,8 +669,40 @@ _DAY_AUTHORITY_FIELD_DESCRIPTOR_WITNESSES = tuple(
 )
 
 
+_DAY_AUTHORITY_EXECUTABLE_DESCRIPTOR_WITNESSES = (
+    (
+        _PaperDayTurnoverSnapshot,
+        _capture_executable_descriptor_witnesses(
+            _PaperDayTurnoverSnapshot,
+            ("__init__",),
+        ),
+    ),
+    (
+        _ProductDayAdmissionAuthority,
+        _capture_executable_descriptor_witnesses(
+            _ProductDayAdmissionAuthority,
+            ("__init__",),
+        ),
+    ),
+    (
+        PaperDayTurnoverEvidence,
+        _capture_executable_descriptor_witnesses(
+            PaperDayTurnoverEvidence,
+            ("__init__", "__post_init__"),
+        ),
+    ),
+    (
+        ProductDayRiskWindow,
+        _capture_executable_descriptor_witnesses(
+            ProductDayRiskWindow,
+            ("__init__", "__post_init__", "__eq__"),
+        ),
+    ),
+)
+
+
 def _require_day_authority_data_descriptors() -> None:
-    """Reject class-level rewrites of positive day/turnover evidence fields."""
+    """Reject class-level rewrites of positive day/turnover evidence authority."""
 
     for owner, witnesses in _DAY_AUTHORITY_FIELD_DESCRIPTOR_WITNESSES:
         for name, expected_descriptor in witnesses:
@@ -637,6 +710,12 @@ def _require_day_authority_data_descriptors() -> None:
                 raise RuntimeError(
                     "economic admission day authority data descriptor changed"
                 )
+    for owner, witnesses in _DAY_AUTHORITY_EXECUTABLE_DESCRIPTOR_WITNESSES:
+        _require_executable_descriptor_witnesses(
+            owner,
+            witnesses,
+            error="economic admission day authority executable descriptor changed",
+        )
 
 
 def _canonical_day_authority_field(
@@ -1179,9 +1258,20 @@ _RISK_DECISION_ALLOWED_DESCRIPTOR = RiskDecision.__dict__["allowed"]
 _RISK_DECISION_REASON_DESCRIPTOR = RiskDecision.__dict__["reason"]
 
 
-def _require_risk_decision_authority() -> None:
-    """Bind rejection/approval routing to exact canonical decision slots."""
+_RISK_DECISION_EXECUTABLE_WITNESSES = _capture_executable_descriptor_witnesses(
+    RiskDecision,
+    ("__init__",),
+)
 
+
+def _require_risk_decision_authority() -> None:
+    """Bind rejection/approval routing to exact canonical decision authority."""
+
+    _require_executable_descriptor_witnesses(
+        RiskDecision,
+        _RISK_DECISION_EXECUTABLE_WITNESSES,
+        error="economic admission risk decision executable authority changed",
+    )
     if (
         RiskDecision is not _RISK_DECISION_TYPE
         or _RISK_DECISION_TYPE.__dict__.get("allowed")
@@ -1238,6 +1328,28 @@ _PAPER_TICKET_FIELD_DESCRIPTOR_WITNESSES = tuple(
 _ECONOMIC_GOAL_FIELD_DESCRIPTOR_WITNESSES = tuple(
     (name, EconomicGoalContract.__dict__[name])
     for name in tuple(EconomicGoalContract.__dataclass_fields__)
+)
+
+
+_PROPOSED_CONTEXT_EXECUTABLE_WITNESSES = _capture_executable_descriptor_witnesses(
+    ProposedTicketRiskContext,
+    ("__init__", "__post_init__"),
+)
+_TICKET_LEG_EXECUTABLE_WITNESSES = _capture_executable_descriptor_witnesses(
+    TicketLeg,
+    ("__eq__", "quote_key"),
+)
+_MARKET_EVENT_EXECUTABLE_WITNESSES = _capture_executable_descriptor_witnesses(
+    MarketEvent,
+    ("__eq__", "quote_key", "to_dict", "from_dict"),
+)
+_ECONOMIC_GOAL_EXECUTABLE_WITNESSES = _capture_executable_descriptor_witnesses(
+    EconomicGoalContract,
+    ("__init__", "__post_init__", "__eq__"),
+)
+_PAPER_TICKET_EXECUTABLE_WITNESSES = _capture_executable_descriptor_witnesses(
+    PaperTicket,
+    ("__init__", "__eq__"),
 )
 
 
@@ -1324,6 +1436,11 @@ def _require_paperbook_admission_authority() -> None:
             raise RuntimeError(
                 "economic admission PaperTicket data authority changed"
             )
+    _require_executable_descriptor_witnesses(
+        PaperTicket,
+        _PAPER_TICKET_EXECUTABLE_WITNESSES,
+        error="economic admission PaperTicket executable authority changed",
+    )
 
     _require_class_transition_graph(
         PaperBook,
@@ -1486,6 +1603,25 @@ def _admission_risk_helper_authority_valid() -> bool:
             current_function is not expected_function
             or current_function.__code__ is not expected_code
         ):
+            return False
+
+    for owner, witnesses in (
+        (
+            ProposedTicketRiskContext,
+            _PROPOSED_CONTEXT_EXECUTABLE_WITNESSES,
+        ),
+        (TicketLeg, _TICKET_LEG_EXECUTABLE_WITNESSES),
+        (MarketEvent, _MARKET_EVENT_EXECUTABLE_WITNESSES),
+        (EconomicGoalContract, _ECONOMIC_GOAL_EXECUTABLE_WITNESSES),
+        (PaperTicket, _PAPER_TICKET_EXECUTABLE_WITNESSES),
+    ):
+        try:
+            _require_executable_descriptor_witnesses(
+                owner,
+                witnesses,
+                error="paper risk data executable authority changed",
+            )
+        except RuntimeError:
             return False
 
     for (

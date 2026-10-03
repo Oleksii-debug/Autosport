@@ -635,12 +635,19 @@ def capture_campaign_complete_game_board(
         _public_surface_guard()
 
     require_public_surface()
+    type_error = TypeError
+    value_error = ValueError
+    overflow_error = OverflowError
+    base_exception = BaseException
+    dict_type = dict
+    int_type = int
+    repr_fn = repr
     if _CANONICAL_TYPE(source_spec) is not CampaignInceptionSourceSpec:
-        raise TypeError("source_spec must be exact CampaignInceptionSourceSpec")
+        raise type_error("source_spec must be exact CampaignInceptionSourceSpec")
     if _CANONICAL_TYPE(request) is not CompleteGameBoardRequest:
-        raise TypeError("request must be exact CompleteGameBoardRequest")
+        raise type_error("request must be exact CompleteGameBoardRequest")
     if not _CANONICAL_CALLABLE(clock):
-        raise TypeError("clock must be callable")
+        raise type_error("clock must be callable")
     test_clock_origin = (
         _CANONICAL_TEST_CAMPAIGN_CLOCK_ORIGIN.get()
         is _CANONICAL_TEST_CAMPAIGN_CLOCK_CAPABILITY
@@ -692,6 +699,21 @@ def capture_campaign_complete_game_board(
     expected_codes = tuple(
         (name, target, _CANONICAL_GETATTR(_CANONICAL_GETATTR(target, "__func__", target), "__code__", None))
         for name, target in expected_dispatch
+    )
+    expected_require_seams_code = _CANONICAL_GETATTR(
+        _CANONICAL_GETATTR(require_seams, "__func__", require_seams),
+        "__code__",
+        None,
+    )
+    expected_instant_code = _CANONICAL_GETATTR(
+        _CANONICAL_GETATTR(instant, "__func__", instant),
+        "__code__",
+        None,
+    )
+    expected_finish_code = _CANONICAL_GETATTR(
+        _CANONICAL_GETATTR(finish_cycle, "__func__", finish_cycle),
+        "__code__",
+        None,
     )
     expected_inspect = inspect
     expected_getattr_static = _CANONICAL_GETATTR_STATIC
@@ -924,11 +946,11 @@ def capture_campaign_complete_game_board(
         run_id=source_spec.run_id,
     )
     if (
-        _CANONICAL_TYPE(slot) is not dict
+        _CANONICAL_TYPE(slot) is not dict_type
         or slot.get("schedule_id") != campaign.schedule_id
         or slot.get("stream_epoch") != source_spec.stream_epoch
         or slot.get("max_items") != source_spec.max_items
-        or _CANONICAL_TYPE(slot.get("slot_ordinal")) is not int
+        or _CANONICAL_TYPE(slot.get("slot_ordinal")) is not int_type
         or slot.get("slot_ordinal") < source_spec.evaluation_start_slot_ordinal
         or slot.get("slot_ordinal") > source_spec.evaluation_end_slot_ordinal
     ):
@@ -947,13 +969,13 @@ def capture_campaign_complete_game_board(
     try:
         slot_deadline_at = schedule_due_at(
             anchor_at=source_spec.anchor_at,
-            interval_seconds=repr(source_spec.interval_seconds),
+            interval_seconds=repr_fn(source_spec.interval_seconds),
             slot_ordinal=slot.get("slot_ordinal") + 1,
         )
         slot_deadline_instant = datetime.fromisoformat(
             instant(slot_deadline_at, "collector next slot due_at")
         )
-    except (OverflowError, TypeError, ValueError) as exc:
+    except (overflow_error, type_error, value_error) as exc:
         raise CampaignProviderCycleCaptureIntegrityError(
             "collector fixed schedule slot window is not representable"
         ) from exc
@@ -986,7 +1008,7 @@ def capture_campaign_complete_game_board(
             due_at=slot.get("due_at"),
             attempted_at=attempted_at,
         )
-    except (TypeError, ValueError) as exc:
+    except (type_error, value_error) as exc:
         raise CampaignProviderCycleCaptureIntegrityError(
             "cannot reserve exact campaign collector START before provider I/O"
         ) from exc
@@ -1065,7 +1087,7 @@ def capture_campaign_complete_game_board(
         )
         require_public_surface()
         if (
-            _CANONICAL_TYPE(artifact) is not dict
+            _CANONICAL_TYPE(artifact) is not dict_type
             or artifact.get("artifact_kind") != ARTIFACT_KIND
             or artifact.get("artifact_sha256") != snapshot.evidence_sha256
         ):
@@ -1124,12 +1146,12 @@ def capture_campaign_complete_game_board(
         )
         require_public_surface()
         return snapshot, receipt
-    except BaseException as exc:
+    except base_exception as exc:
         if not terminal_written:
             try:
                 try:
                     raw_failure_completed_at = effective_clock()
-                except BaseException:
+                except base_exception:
                     raw_failure_completed_at = attempted_at
                 instant_function = _CANONICAL_GETATTR(instant, "__func__", instant)
                 finish_function = _CANONICAL_GETATTR(finish_cycle, "__func__", finish_cycle)
@@ -1137,21 +1159,6 @@ def capture_campaign_complete_game_board(
                     require_seams,
                     "__func__",
                     require_seams,
-                )
-                expected_instant_code = next(
-                    code
-                    for name, target, code in expected_codes
-                    if name == "_instant" and target is instant
-                )
-                expected_finish_code = next(
-                    code
-                    for name, target, code in expected_codes
-                    if name == "_FINISH_CYCLE" and target is finish_cycle
-                )
-                expected_require_seams_code = next(
-                    code
-                    for name, target, code in expected_codes
-                    if name == "_require_canonical_seams" and target is require_seams
                 )
                 if (
                     module_globals.get("inspect") is not expected_inspect
@@ -1182,7 +1189,7 @@ def capture_campaign_complete_game_board(
                         raw_failure_completed_at,
                         "collector failure completed_at",
                     )
-                except (TypeError, ValueError):
+                except (type_error, value_error):
                     failure_completed_at = attempted_at
                 if failure_completed_at < attempted_at:
                     failure_completed_at = attempted_at
@@ -1198,13 +1205,13 @@ def capture_campaign_complete_game_board(
                     duplicate_delta_ids=(),
                     error_code=_CANONICAL_TYPE(exc).__name__,
                 )
-            except BaseException as terminal_error:
+            except base_exception as terminal_error:
                 try:
                     exc.add_note(
                         "collector campaign capture failure terminal also failed: "
                         f"{_CANONICAL_TYPE(terminal_error).__name__}: {terminal_error}"
                     )
-                except BaseException:
+                except base_exception:
                     pass
         raise
 
@@ -1335,6 +1342,13 @@ def _seal_campaign_provider_cycle_capture_dispatch() -> None:
             or "set" in module_globals
             or "sorted" in module_globals
             or "tuple" in module_globals
+            or "TypeError" in module_globals
+            or "ValueError" in module_globals
+            or "OverflowError" in module_globals
+            or "BaseException" in module_globals
+            or "dict" in module_globals
+            or "int" in module_globals
+            or "repr" in module_globals
         ):
             raise expected_error(
                 "campaign provider-cycle builtin dispatch shadowed"

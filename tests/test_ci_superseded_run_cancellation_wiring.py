@@ -44,9 +44,15 @@ def test_pr_head_preflight_is_read_only_and_blocks_stale_heavy_work(
     assert concurrency is not None
     group = concurrency.group("body")
     assert "cancel-in-progress: true" in group
-    assert "github.run_id" in group, (
-        "workflow must isolate every PR run before job-level live-head admission"
-    )
+    assert "format('pr-{0}-{1}', github.event.number" in group
+    assert "format('qualify-{0}', github.event.pull_request.head.sha)" in group
+    assert "format('rerun-{0}', github.event.pull_request.head.sha)" in group
+    assert "github.event.action == 'converted_to_draft'" in group
+    assert "github.event.action == 'closed'" in group
+    assert "'lifecycle'" in group
+    assert "format('pr-{0}-run-{1}'" not in group
+    assert "|| format('run-{0}', github.run_id)" in group
+    assert "github.ref" not in group
 
     heavy = _job_body(text, heavy_job)
     assert re.search(
@@ -61,8 +67,20 @@ def test_closed_pr_lifecycle_never_requires_head_checkout(
     workflow_path: Path,
     _heavy_job: str,
 ) -> None:
-    """Closing/deleting a source branch must not turn harmless cleanup into red CI."""
+    """Closed/draft lifecycle must be rejected before allocating the admission runner."""
 
     text = workflow_path.read_text(encoding="utf-8")
-    assert "github.event_name != 'pull_request' || github.event.action == 'closed'" in text
-    assert "github.event_name == 'pull_request' && github.event.action != 'closed'" in text
+    admission = _job_body(text, "superseded_run_admission")
+
+    # Server-side job admission rejects closed or draft PR activity, while non-PR
+    # activity remains admitted. This makes closed/converted-to-draft cleanup runner-free.
+    assert "github.event_name != 'pull_request' ||" in admission
+    assert "github.event.action != 'closed' &&" in admission
+    assert "github.event.pull_request.head.sha &&" in admission
+    assert "github.event.pull_request.head.repo.full_name == github.repository &&" in admission
+    assert "github.event.pull_request.base.repo.full_name == github.repository &&" in admission
+    assert "github.event.pull_request.draft == false)" in admission
+
+    # Any PR checkout/admission step that remains is explicitly non-closed and therefore
+    # cannot dereference a deleted source branch for a closed lifecycle event.
+    assert "github.event_name == 'pull_request' && github.event.action != 'closed'" in admission

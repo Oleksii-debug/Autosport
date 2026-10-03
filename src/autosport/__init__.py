@@ -19,6 +19,7 @@ from . import _paperbook_preload_authority_root_freeze as _paperbook_preload_aut
 from . import _paperbook_preload_load_dispatch_guard as _paperbook_preload_load_dispatch_guard  # noqa: F401,E402
 from . import _paperbook_preload_surface_type_guard as _paperbook_preload_surface_type_guard  # noqa: F401,E402
 from . import _paperbook_preload_wrapper_helper_guard as _paperbook_preload_wrapper_helper_guard  # noqa: F401,E402
+from . import _paperbook_product_day_authority_seal  # noqa: F401,E402
 from . import _paperbook_preload_generation_handle_cleanup as _paperbook_preload_generation_handle_cleanup  # noqa: F401,E402
 
 from . import _paper_execution_append_recovery as _paper_execution_append_recovery  # noqa: F401,E402

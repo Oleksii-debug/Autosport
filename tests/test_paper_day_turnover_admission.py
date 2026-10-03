@@ -92,8 +92,24 @@ def _context(leg: TicketLeg, placed_at: str) -> ProposedTicketRiskContext:
     )
 
 
+def _fixture_epoch_ns(value: str) -> int:
+    instant = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    seconds = int(instant.timestamp())
+    return seconds * 1_000_000_000 + instant.microsecond * 1000
+
+
+def _fixture_causal_advance():
+    record = PaperBook.__dict__["_record_product_day_admission"]
+    closure = record.__closure__
+    assert closure is not None
+    freevars = record.__code__.co_freevars
+    assert "causal_advance" in freevars
+    return closure[freevars.index("causal_advance")].cell_contents
+
+
 def _book_with_settled_turnover(
     *,
+    workspace: Path,
     placed_at: str,
     stake: str,
     product_day_witness: bool = True,
@@ -108,32 +124,86 @@ def _book_with_settled_turnover(
         currency="USD",
     )
     if product_day_witness:
-        admission = datetime.fromisoformat(placed_at.replace("Z", "+00:00"))
-        admission = admission.astimezone(timezone.utc)
-        start = admission.replace(hour=0, minute=0, second=0, microsecond=0)
-        end = start + timedelta(days=1)
-        # This fixture models chronology that was already issued on a prior real
-        # product day. It seeds the causal-history fixture below the production writer
-        # so the writer itself cannot mint historical authority from caller scalars.
+        epoch_ns = _fixture_epoch_ns(placed_at)
+        historical_store = ProductDayRiskWindowStore(
+            workspace,
+            _test_clock=lambda: epoch_ns,
+        )
+        historical_window = historical_store.current()
+        # Model chronology issued while this committed risk-day generation was
+        # current. Production no longer exposes the raw advance capability;
+        # closure reflection is confined to test fixture construction.
         witness = book._validate_product_day_admission_witness(
             (
                 placed_at,
-                start.date().isoformat(),
-                _timestamp(start),
-                _timestamp(end),
-                "a" * 64,
-                1,
+                historical_window.day_key,
+                historical_window.window_start,
+                historical_window.window_end_exclusive,
+                historical_window.state_sha256,
+                historical_window.authority_generation,
             ),
             ticket_id=ticket.ticket_id,
         )
         book._product_day_admissions[ticket.ticket_id] = witness
-        paper_module._advance_paperbook_product_day_admission(
+        _fixture_causal_advance()(
             book,
             ticket.ticket_id,
             witness,
         )
     book.settle(ticket.ticket_id, set(), {ticket.legs[0].quote_key})
     return book
+
+
+def test_product_day_mint_capabilities_are_not_module_reachable() -> None:
+    import autosport._paperbook_preload_authority_guard as preload_guard
+
+    for name in (
+        "_issue_product_day_admission_permit",
+        "_consume_product_day_admission_permit",
+        "_advance_paperbook_product_day_admission",
+        "_install_validated_paperbook_causal_history_authority",
+    ):
+        assert not hasattr(paper_module, name)
+    assert not hasattr(preload_guard, "_INSTALL_CAUSAL")
+
+
+def test_direct_historical_mapping_forgery_cannot_survive_restart(tmp_path) -> None:
+    placed_at = _timestamp(
+        datetime.now(timezone.utc).replace(microsecond=0) - timedelta(days=2)
+    )
+    book = _book_with_settled_turnover(
+        workspace=tmp_path,
+        placed_at=placed_at,
+        stake="5",
+        product_day_witness=False,
+    )
+    path = tmp_path / "paper_book.json"
+    book.save(path)
+    loaded = PaperBook.load(path)
+    ticket_id = next(iter(loaded.tickets))
+    admission = datetime.fromisoformat(placed_at.replace("Z", "+00:00"))
+    start = admission.replace(hour=0, minute=0, second=0, microsecond=0)
+    forged = loaded._validate_product_day_admission_witness(
+        (
+            placed_at,
+            start.date().isoformat(),
+            _timestamp(start),
+            _timestamp(start + timedelta(days=1)),
+            "a" * 64,
+            1,
+        ),
+        ticket_id=ticket_id,
+    )
+    loaded._product_day_admissions[ticket_id] = forged
+
+    with pytest.raises(
+        ValueError,
+        match="PaperBook causal history changed outside product-issued transitions",
+    ):
+        loaded.save(path)
+
+    restarted = PaperBook.load(path)
+    assert restarted._product_day_admissions == {}
 
 
 def _admit(tmp_path, book: PaperBook, goal: EconomicGoalContract, placed_at: str):
@@ -171,7 +241,7 @@ def _assert_day_authority_code_mutation_rejected(tmp_path, target) -> None:
     old = now - timedelta(days=2)
     goal = _goal()
     EconomicGoalStore(tmp_path).initialize_owner(goal)
-    book = _book_with_settled_turnover(placed_at=_timestamp(old), stake="50")
+    book = _book_with_settled_turnover(workspace=tmp_path, placed_at=_timestamp(old), stake="50")
     book.save(tmp_path / "paper_book.json")
     candidate = _leg("day-authority-code")
     context = _context(candidate, _timestamp(now))
@@ -214,6 +284,7 @@ def test_turnover_resolver_wrapper_code_mutation_cannot_mint_headroom(tmp_path):
         "current",
         "require_current",
         "require_current_under_lock",
+        "require_committed_window",
         "_current_under_lock",
         "_publish_day",
         "_evidence",
@@ -229,7 +300,7 @@ def _assert_day_authority_dependency_rejected(tmp_path) -> None:
     old = now - timedelta(days=2)
     goal = _goal()
     EconomicGoalStore(tmp_path).initialize_owner(goal)
-    book = _book_with_settled_turnover(placed_at=_timestamp(old), stake="50")
+    book = _book_with_settled_turnover(workspace=tmp_path, placed_at=_timestamp(old), stake="50")
     book.save(tmp_path / "paper_book.json")
     candidate = _leg("day-authority-dependency")
     context = _context(candidate, _timestamp(now))
@@ -556,7 +627,7 @@ def test_turnover_override_cannot_use_caller_time_to_refresh_stale_quote(tmp_pat
     old = now - timedelta(days=2)
     goal = replace(_goal(), max_quote_age_seconds=Decimal("5"))
     EconomicGoalStore(tmp_path).initialize_owner(goal)
-    book = _book_with_settled_turnover(placed_at=_timestamp(old), stake="50")
+    book = _book_with_settled_turnover(workspace=tmp_path, placed_at=_timestamp(old), stake="50")
     book.save(tmp_path / "paper_book.json")
     candidate = _leg("override-stale-quote")
     context = _context(candidate, _timestamp(requested))
@@ -885,7 +956,7 @@ def test_goal_store_constructor_rebinding_cannot_mint_day_headroom(tmp_path):
     old = now - timedelta(days=2)
     goal = _goal()
     EconomicGoalStore(tmp_path).initialize_owner(goal)
-    book = _book_with_settled_turnover(placed_at=_timestamp(old), stake="50")
+    book = _book_with_settled_turnover(workspace=tmp_path, placed_at=_timestamp(old), stake="50")
     book.save(tmp_path / "paper_book.json")
     candidate = _leg("goal-store-constructor")
     context = _context(candidate, _timestamp(now))
@@ -999,7 +1070,7 @@ def test_product_issued_current_utc_day_releases_old_day_turnover(tmp_path):
     old = now - timedelta(days=2)
     goal = _goal()
     EconomicGoalStore(tmp_path).initialize_owner(goal)
-    book = _book_with_settled_turnover(placed_at=_timestamp(old), stake="50")
+    book = _book_with_settled_turnover(workspace=tmp_path, placed_at=_timestamp(old), stake="50")
 
     baseline, result = _admit(tmp_path, book, goal, _timestamp(now))
 
@@ -1016,8 +1087,8 @@ def test_unproven_previous_day_timestamp_cannot_mint_turnover_headroom(tmp_path)
     old = now - timedelta(days=2)
     goal = _goal()
     EconomicGoalStore(tmp_path).initialize_owner(goal)
-    book = _book_with_settled_turnover(
-        placed_at=_timestamp(old),
+    book = _book_with_settled_turnover(workspace=tmp_path,
+                placed_at=_timestamp(old),
         stake="50",
         product_day_witness=False,
     )
@@ -1035,7 +1106,7 @@ def test_unproven_previous_day_timestamp_cannot_mint_turnover_headroom(tmp_path)
 
 def test_product_day_admission_chronology_survives_restart(tmp_path):
     old = datetime.now(timezone.utc).replace(microsecond=0) - timedelta(days=2)
-    book = _book_with_settled_turnover(placed_at=_timestamp(old), stake="5")
+    book = _book_with_settled_turnover(workspace=tmp_path, placed_at=_timestamp(old), stake="5")
     ticket_id = next(iter(book.tickets))
     expected = book._product_day_admissions[ticket_id]
 
@@ -1047,7 +1118,7 @@ def test_product_day_admission_chronology_survives_restart(tmp_path):
 
 def test_product_day_admission_chronology_mutation_cannot_be_saved(tmp_path):
     old = datetime.now(timezone.utc).replace(microsecond=0) - timedelta(days=2)
-    book = _book_with_settled_turnover(placed_at=_timestamp(old), stake="5")
+    book = _book_with_settled_turnover(workspace=tmp_path, placed_at=_timestamp(old), stake="5")
     ticket_id = next(iter(book.tickets))
     witness = book._product_day_admissions[ticket_id]
     book._product_day_admissions[ticket_id] = (
@@ -1070,7 +1141,7 @@ def test_current_day_turnover_still_consumes_exact_owner_cap(tmp_path):
     now = datetime.now(timezone.utc).replace(microsecond=0)
     goal = _goal()
     EconomicGoalStore(tmp_path).initialize_owner(goal)
-    book = _book_with_settled_turnover(placed_at=_timestamp(now), stake="5")
+    book = _book_with_settled_turnover(workspace=tmp_path, placed_at=_timestamp(now), stake="5")
 
     baseline, result = _admit(tmp_path, book, goal, _timestamp(now))
 
@@ -1087,7 +1158,7 @@ def test_under_lock_goal_successor_cannot_be_hidden_by_live_load_rebinding(tmp_p
     goal_store = EconomicGoalStore(tmp_path)
     goal_store.initialize_owner(goal)
 
-    book = _book_with_settled_turnover(placed_at=_timestamp(old), stake="50")
+    book = _book_with_settled_turnover(workspace=tmp_path, placed_at=_timestamp(old), stake="50")
     book_path = tmp_path / "paper_book.json"
     book.save(book_path)
     policy = _policy(goal)
@@ -1131,7 +1202,7 @@ def test_missing_durable_goal_never_mints_day_turnover_headroom(tmp_path):
     now = datetime.now(timezone.utc).replace(microsecond=0)
     old = now - timedelta(days=2)
     goal = _goal()
-    book = _book_with_settled_turnover(placed_at=_timestamp(old), stake="50")
+    book = _book_with_settled_turnover(workspace=tmp_path, placed_at=_timestamp(old), stake="50")
 
     baseline, result = _admit(tmp_path, book, goal, _timestamp(now))
 
@@ -1215,8 +1286,8 @@ def test_candidate_outside_current_product_day_cannot_spend_current_headroom(tmp
     old = now - timedelta(days=2)
     goal = _goal()
     EconomicGoalStore(tmp_path).initialize_owner(goal)
-    book = _book_with_settled_turnover(
-        placed_at=_timestamp(old - timedelta(days=1)),
+    book = _book_with_settled_turnover(workspace=tmp_path,
+                placed_at=_timestamp(old - timedelta(days=1)),
         stake="50",
     )
 
@@ -1233,7 +1304,7 @@ def test_day_turnover_override_does_not_bypass_local_ticket_limit(tmp_path):
     old = now - timedelta(days=2)
     goal = _goal()
     EconomicGoalStore(tmp_path).initialize_owner(goal)
-    book = _book_with_settled_turnover(placed_at=_timestamp(old), stake="50")
+    book = _book_with_settled_turnover(workspace=tmp_path, placed_at=_timestamp(old), stake="50")
     book.save(tmp_path / "paper_book.json")
     candidate = _leg("candidate")
     context = _context(candidate, _timestamp(now))
@@ -1268,7 +1339,7 @@ def _risk_decision_descriptor_case(tmp_path, *, goal):
     now = datetime.now(timezone.utc).replace(microsecond=0)
     old = now - timedelta(days=2)
     EconomicGoalStore(tmp_path).initialize_owner(goal)
-    book = _book_with_settled_turnover(placed_at=_timestamp(old), stake="50")
+    book = _book_with_settled_turnover(workspace=tmp_path, placed_at=_timestamp(old), stake="50")
     book.save(tmp_path / "paper_book.json")
     candidate = _leg("risk-decision-descriptor")
     context = _context(candidate, _timestamp(now))
@@ -1324,7 +1395,7 @@ def test_day_authority_descriptor_rebind_cannot_mint_headroom(
     old = now - timedelta(days=2)
     goal = _goal()
     EconomicGoalStore(tmp_path).initialize_owner(goal)
-    book = _book_with_settled_turnover(placed_at=_timestamp(old), stake="50")
+    book = _book_with_settled_turnover(workspace=tmp_path, placed_at=_timestamp(old), stake="50")
     book.save(tmp_path / "paper_book.json")
     candidate = _leg(f"day-descriptor-{owner_name}-{field_name}")
     context = _context(candidate, _timestamp(now))
@@ -1539,7 +1610,7 @@ def test_proposal_market_descriptor_rebind_fails_closed(
     old = now - timedelta(days=2)
     goal = _goal()
     EconomicGoalStore(tmp_path).initialize_owner(goal)
-    book = _book_with_settled_turnover(placed_at=_timestamp(old), stake="50")
+    book = _book_with_settled_turnover(workspace=tmp_path, placed_at=_timestamp(old), stake="50")
     book.save(tmp_path / "paper_book.json")
     candidate = _leg(f"proposal-descriptor-{field_name}")
     context = _context(candidate, _timestamp(now))
@@ -1607,7 +1678,7 @@ def test_paper_ticket_descriptor_rebind_cannot_understate_economic_history(
     old = now - timedelta(days=2)
     goal = _goal()
     EconomicGoalStore(tmp_path).initialize_owner(goal)
-    book = _book_with_settled_turnover(placed_at=_timestamp(old), stake="50")
+    book = _book_with_settled_turnover(workspace=tmp_path, placed_at=_timestamp(old), stake="50")
     book.save(tmp_path / "paper_book.json")
     candidate = _leg(f"paper-ticket-descriptor-{field_name}")
     context = _context(candidate, _timestamp(now))
@@ -1687,7 +1758,7 @@ def test_paperbook_class_shadow_cannot_forge_economic_state(
     old = now - timedelta(days=2)
     goal = _goal()
     EconomicGoalStore(tmp_path).initialize_owner(goal)
-    book = _book_with_settled_turnover(placed_at=_timestamp(old), stake="50")
+    book = _book_with_settled_turnover(workspace=tmp_path, placed_at=_timestamp(old), stake="50")
     book.save(tmp_path / "paper_book.json")
     candidate = _leg(f"paperbook-shadow-{field_name}")
     context = _context(candidate, _timestamp(now))
@@ -1869,7 +1940,7 @@ def test_authority_instance_state_class_shadow_fails_closed_before_read(
     old = now - timedelta(days=2)
     goal = _goal()
     EconomicGoalStore(tmp_path).initialize_owner(goal)
-    book = _book_with_settled_turnover(placed_at=_timestamp(old), stake="50")
+    book = _book_with_settled_turnover(workspace=tmp_path, placed_at=_timestamp(old), stake="50")
     book.save(tmp_path / "paper_book.json")
     candidate = _leg(f"authority-shadow-{field_name}")
     context = _context(candidate, _timestamp(now))
@@ -2030,7 +2101,7 @@ def test_carrier_executable_descriptor_rebind_fails_closed_before_dispatch(
     old = now - timedelta(days=2)
     goal = _goal()
     EconomicGoalStore(tmp_path).initialize_owner(goal)
-    book = _book_with_settled_turnover(placed_at=_timestamp(old), stake="50")
+    book = _book_with_settled_turnover(workspace=tmp_path, placed_at=_timestamp(old), stake="50")
     book.save(tmp_path / "paper_book.json")
     candidate = _leg(f"carrier-executable-{descriptor_name}")
     context = _context(candidate, _timestamp(now))
@@ -2140,7 +2211,7 @@ def test_risk_policy_limit_descriptor_rebind_cannot_widen_ticket_cap(tmp_path):
     old = now - timedelta(days=2)
     goal = _goal()
     EconomicGoalStore(tmp_path).initialize_owner(goal)
-    book = _book_with_settled_turnover(placed_at=_timestamp(old), stake="50")
+    book = _book_with_settled_turnover(workspace=tmp_path, placed_at=_timestamp(old), stake="50")
     book.save(tmp_path / "paper_book.json")
     candidate = _leg("policy-descriptor")
     context = _context(candidate, _timestamp(now))
@@ -2188,7 +2259,7 @@ def test_goal_emergency_stop_descriptor_rebind_cannot_disable_stop(tmp_path):
     old = now - timedelta(days=2)
     goal = replace(_goal(), emergency_stop=True)
     EconomicGoalStore(tmp_path).initialize_owner(goal)
-    book = _book_with_settled_turnover(placed_at=_timestamp(old), stake="50")
+    book = _book_with_settled_turnover(workspace=tmp_path, placed_at=_timestamp(old), stake="50")
     book.save(tmp_path / "paper_book.json")
     candidate = _leg("goal-descriptor")
     context = _context(candidate, _timestamp(now))
@@ -2231,7 +2302,7 @@ def test_risk_evaluate_class_rebind_cannot_bypass_local_risk_gates(tmp_path):
     old = now - timedelta(days=2)
     goal = _goal()
     EconomicGoalStore(tmp_path).initialize_owner(goal)
-    book = _book_with_settled_turnover(placed_at=_timestamp(old), stake="50")
+    book = _book_with_settled_turnover(workspace=tmp_path, placed_at=_timestamp(old), stake="50")
     book.save(tmp_path / "paper_book.json")
     candidate = _leg("candidate-evaluate-rebind")
     context = _context(candidate, _timestamp(now))
@@ -2280,7 +2351,7 @@ def test_risk_evaluate_code_replacement_cannot_bypass_local_risk_gates(tmp_path)
     old = now - timedelta(days=2)
     goal = _goal()
     EconomicGoalStore(tmp_path).initialize_owner(goal)
-    book = _book_with_settled_turnover(placed_at=_timestamp(old), stake="50")
+    book = _book_with_settled_turnover(workspace=tmp_path, placed_at=_timestamp(old), stake="50")
     book.save(tmp_path / "paper_book.json")
     candidate = _leg("candidate-evaluate-code")
     context = _context(candidate, _timestamp(now))
@@ -2317,7 +2388,7 @@ def test_day_turnover_override_does_not_bypass_quote_freshness(tmp_path):
     old = now - timedelta(days=2)
     goal = _goal()
     EconomicGoalStore(tmp_path).initialize_owner(goal)
-    book = _book_with_settled_turnover(placed_at=_timestamp(old), stake="50")
+    book = _book_with_settled_turnover(workspace=tmp_path, placed_at=_timestamp(old), stake="50")
     book.save(tmp_path / "paper_book.json")
     candidate = _leg("candidate")
     stale_quote = MarketEvent(
@@ -2366,7 +2437,7 @@ def test_risk_module_timestamp_rebind_cannot_bypass_post_turnover_quote_gate(tmp
     old = now - timedelta(days=2)
     goal = _goal()
     EconomicGoalStore(tmp_path).initialize_owner(goal)
-    book = _book_with_settled_turnover(placed_at=_timestamp(old), stake="50")
+    book = _book_with_settled_turnover(workspace=tmp_path, placed_at=_timestamp(old), stake="50")
     book.save(tmp_path / "paper_book.json")
     candidate = _leg("candidate-risk-global-rebind")
     stale_quote = MarketEvent(
@@ -2421,7 +2492,11 @@ def test_serial_admissions_cannot_double_spend_current_day_headroom(tmp_path):
     old = now - timedelta(days=2)
     goal = _goal()
     EconomicGoalStore(tmp_path).initialize_owner(goal)
-    canonical = _book_with_settled_turnover(placed_at=_timestamp(old), stake="50")
+    canonical = _book_with_settled_turnover(
+        workspace=tmp_path,
+        placed_at=_timestamp(old),
+        stake="50",
+    )
     canonical.save(tmp_path / "paper_book.json")
     first_view = PaperBook.load(tmp_path / "paper_book.json")
     stale_second_view = PaperBook.load(tmp_path / "paper_book.json")
@@ -2471,7 +2546,7 @@ def test_restart_re_resolves_remaining_current_day_headroom(tmp_path):
     old = now - timedelta(days=2)
     goal = _goal()
     EconomicGoalStore(tmp_path).initialize_owner(goal)
-    book = _book_with_settled_turnover(placed_at=_timestamp(old), stake="50")
+    book = _book_with_settled_turnover(workspace=tmp_path, placed_at=_timestamp(old), stake="50")
     book.save(tmp_path / "paper_book.json")
     policy = _policy(goal)
 
@@ -2532,7 +2607,7 @@ def test_live_module_rebind_cannot_mint_turnover_headroom(tmp_path):
     now = datetime.now(timezone.utc).replace(microsecond=0)
     goal = _goal()
     EconomicGoalStore(tmp_path).initialize_owner(goal)
-    book = _book_with_settled_turnover(placed_at=_timestamp(now), stake="5")
+    book = _book_with_settled_turnover(workspace=tmp_path, placed_at=_timestamp(now), stake="5")
     hostile_called = False
 
     original = economic_admission._revalidated_product_day_admission_authority
@@ -2575,7 +2650,7 @@ def test_admission_closure_cell_replacement_cannot_mint_turnover_headroom(tmp_pa
     now = datetime.now(timezone.utc).replace(microsecond=0)
     goal = _goal()
     EconomicGoalStore(tmp_path).initialize_owner(goal)
-    book = _book_with_settled_turnover(placed_at=_timestamp(now), stake="5")
+    book = _book_with_settled_turnover(workspace=tmp_path, placed_at=_timestamp(now), stake="5")
     book.save(tmp_path / "paper_book.json")
 
     consumer = _admission_current_binding_consumer()
@@ -2615,7 +2690,7 @@ def test_admission_closure_helper_code_replacement_cannot_mint_headroom(tmp_path
     now = datetime.now(timezone.utc).replace(microsecond=0)
     goal = _goal()
     EconomicGoalStore(tmp_path).initialize_owner(goal)
-    book = _book_with_settled_turnover(placed_at=_timestamp(now), stake="5")
+    book = _book_with_settled_turnover(workspace=tmp_path, placed_at=_timestamp(now), stake="5")
     book.save(tmp_path / "paper_book.json")
 
     consumer = _admission_current_binding_consumer()
@@ -2642,7 +2717,7 @@ def _assert_recovery_gate_tamper_rejected(tmp_path, match):
     old = now - timedelta(days=2)
     goal = _goal()
     EconomicGoalStore(tmp_path).initialize_owner(goal)
-    book = _book_with_settled_turnover(placed_at=_timestamp(old), stake="50")
+    book = _book_with_settled_turnover(workspace=tmp_path, placed_at=_timestamp(old), stake="50")
     book.save(tmp_path / "paper_book.json")
 
     with pytest.raises(RuntimeError, match=match):
@@ -2694,7 +2769,7 @@ def _paperbook_mutation_gate_case(tmp_path):
     old = now - timedelta(days=2)
     goal = _goal()
     EconomicGoalStore(tmp_path).initialize_owner(goal)
-    book = _book_with_settled_turnover(placed_at=_timestamp(old), stake="50")
+    book = _book_with_settled_turnover(workspace=tmp_path, placed_at=_timestamp(old), stake="50")
     book.save(tmp_path / "paper_book.json")
     candidate = _leg("paperbook-mutation-gate")
     context = _context(candidate, _timestamp(now))
@@ -2954,7 +3029,7 @@ def test_live_resume_helper_rebind_cannot_replace_positive_risk_suffix(tmp_path)
     old = now - timedelta(days=2)
     goal = _goal()
     EconomicGoalStore(tmp_path).initialize_owner(goal)
-    book = _book_with_settled_turnover(placed_at=_timestamp(old), stake="50")
+    book = _book_with_settled_turnover(workspace=tmp_path, placed_at=_timestamp(old), stake="50")
 
     original = economic_admission._resume_after_product_day_turnover
     try:

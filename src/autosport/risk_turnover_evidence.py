@@ -623,6 +623,19 @@ class PaperDayTurnoverResolver(metaclass=_PaperDayTurnoverResolverMeta):
             # future or overlapping-but-different window is ambiguous and cannot
             # create positive current-day headroom.
             if admission_end <= start:
+                try:
+                    _RISK_DAY_REQUIRE_COMMITTED_WINDOW(
+                        window_store,
+                        day_key=admission_day_key,
+                        window_start=admission_window_start,
+                        window_end_exclusive=admission_window_end,
+                        state_sha256=admission_state_sha256,
+                        authority_generation=admission_generation,
+                    )
+                except Exception as exc:
+                    raise PaperDayTurnoverEvidenceIncompleteError(
+                        "historical PAPER product-day admission authority cannot be re-resolved"
+                    ) from exc
                 continue
             if admission_start != start or admission_end != end:
                 raise PaperDayTurnoverEvidenceIncompleteError(
@@ -754,6 +767,7 @@ _ECONOMIC_GOAL_LOAD = EconomicGoalStore.load
 _PAPERBOOK_VALIDATE_LOADED_STATE = PaperBook._validate_loaded_state
 _PAPERBOOK_LOAD = PaperBook.load
 _RISK_DAY_REQUIRE_CURRENT = ProductDayRiskWindowStore.require_current
+_RISK_DAY_REQUIRE_COMMITTED_WINDOW = ProductDayRiskWindowStore.require_committed_window
 
 
 def _freeze_turnover_module_globals() -> dict[str, object]:
@@ -781,6 +795,9 @@ def _freeze_turnover_module_globals() -> dict[str, object]:
     frozen["_PAPERBOOK_LOAD"] = _PAPERBOOK_LOAD
     frozen["_PAPERBOOK_REQUIRE_CURRENT"] = _PAPERBOOK_REQUIRE_CURRENT
     frozen["_RISK_DAY_REQUIRE_CURRENT"] = _RISK_DAY_REQUIRE_CURRENT
+    frozen["_RISK_DAY_REQUIRE_COMMITTED_WINDOW"] = (
+        _RISK_DAY_REQUIRE_COMMITTED_WINDOW
+    )
     if "_RISK_TURNOVER_RESOLVE_BOUND" in source:
         frozen["_RISK_TURNOVER_RESOLVE_BOUND"] = source[
             "_RISK_TURNOVER_RESOLVE_BOUND"

@@ -710,5 +710,54 @@ class ProductClockBoundaryTests(unittest.TestCase):
             self.assertTrue(store.state_path.exists())
 
 
+    def test_committed_historical_window_re_resolves_from_monotonic_history(self) -> None:
+        store = self._store()
+        first = store.current()
+        self.clock.set("2026-09-24T12:30:00Z")
+        store.current()
+
+        resolved = store.require_committed_window(
+            day_key=first.day_key,
+            window_start=first.window_start,
+            window_end_exclusive=first.window_end_exclusive,
+            state_sha256=first.state_sha256,
+            authority_generation=first.authority_generation,
+        )
+
+        self.assertEqual(resolved, first)
+
+    def test_historical_window_rejects_uncommitted_generation(self) -> None:
+        store = self._store()
+        first = store.current()
+
+        with self.assertRaisesRegex(
+            RiskDayWindowMismatchError,
+            "generation is not uniquely committed",
+        ):
+            store.require_committed_window(
+                day_key=first.day_key,
+                window_start=first.window_start,
+                window_end_exclusive=first.window_end_exclusive,
+                state_sha256=first.state_sha256,
+                authority_generation=first.authority_generation + 100,
+            )
+
+    def test_historical_window_rejects_day_forged_around_real_commit(self) -> None:
+        store = self._store()
+        first = store.current()
+
+        with self.assertRaisesRegex(
+            RiskDayWindowMismatchError,
+            "does not match committed authority",
+        ):
+            store.require_committed_window(
+                day_key="2026-09-22",
+                window_start="2026-09-22T00:00:00Z",
+                window_end_exclusive="2026-09-23T00:00:00Z",
+                state_sha256=first.state_sha256,
+                authority_generation=first.authority_generation,
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

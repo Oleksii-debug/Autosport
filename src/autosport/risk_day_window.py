@@ -24,6 +24,7 @@ from typing import Final
 from .integrity import atomic_write_json
 from .json_integrity import strict_json_loads
 from .monotonic_workspace_authority import (
+    AuthorityPhase,
     MonotonicAuthorityRollbackError,
     MonotonicWorkspaceAuthority,
     RecoveryDisposition,
@@ -466,7 +467,7 @@ class _ProductDayRiskWindowStoreMeta(type):
 
     def __setattr__(cls, name: str, value: object) -> None:
         if (
-            name in {"__init__", "current", "product_clock_day_key", "state_snapshot_sha256", "require_current", "require_current_under_lock", "_current_under_lock", "_publish_day", "_evidence"}
+            name in {"__init__", "current", "product_clock_day_key", "state_snapshot_sha256", "require_current", "require_current_under_lock", "require_committed_window", "_current_under_lock", "_publish_day", "_evidence"}
             and name in cls.__dict__
         ):
             raise TypeError(
@@ -476,7 +477,7 @@ class _ProductDayRiskWindowStoreMeta(type):
 
     def __delattr__(cls, name: str) -> None:
         if (
-            name in {"__init__", "current", "product_clock_day_key", "state_snapshot_sha256", "require_current", "require_current_under_lock", "_current_under_lock", "_publish_day", "_evidence"}
+            name in {"__init__", "current", "product_clock_day_key", "state_snapshot_sha256", "require_current", "require_current_under_lock", "require_committed_window", "_current_under_lock", "_publish_day", "_evidence"}
             and name in cls.__dict__
         ):
             raise TypeError(
@@ -653,6 +654,74 @@ class ProductDayRiskWindowStore(metaclass=_ProductDayRiskWindowStoreMeta):
                 "risk day evidence does not match current durable authority"
             )
         return current
+
+    def require_committed_window(
+        self,
+        *,
+        day_key: str,
+        window_start: str,
+        window_end_exclusive: str,
+        state_sha256: str,
+        authority_generation: int,
+    ) -> ProductDayRiskWindow:
+        """Re-resolve one historical UTC-day witness from append-only authority."""
+
+        if type(self) is not ProductDayRiskWindowStore:
+            raise RiskDayWindowIntegrityError(
+                "risk day store must be the canonical exact store type"
+            )
+        candidate = ProductDayRiskWindow(
+            workspace_instance_id=self._authority.workspace_instance_id,
+            day_key=day_key,
+            window_start=window_start,
+            window_end_exclusive=window_end_exclusive,
+            state_sha256=state_sha256,
+            authority_generation=authority_generation,
+            product_clock_authoritative=False,
+        )
+        history = self._authority.read_history()
+        committed = tuple(
+            record
+            for record in history
+            if (
+                record.phase is AuthorityPhase.COMMIT
+                and record.generation == candidate.authority_generation
+            )
+        )
+        if len(committed) != 1:
+            raise RiskDayWindowMismatchError(
+                "historical risk day generation is not uniquely committed"
+            )
+        record = committed[0]
+        prefix = "risk-day-"
+        if type(record.tx_id) is not str or not record.tx_id.startswith(prefix):
+            raise RiskDayWindowIntegrityError(
+                "historical risk day transaction identity is invalid"
+            )
+        transition_id = record.tx_id[len(prefix) :]
+        if not _is_transition_id(transition_id):
+            raise RiskDayWindowIntegrityError(
+                "historical risk day transition identity is invalid"
+            )
+        payload = _state_payload(
+            self._authority.workspace_instance_id,
+            _parse_day_key(candidate.day_key),
+            transition_id=transition_id,
+        )
+        if (
+            payload["window_start"] != candidate.window_start
+            or payload["window_end_exclusive"] != candidate.window_end_exclusive
+            or _state_digest(payload) != candidate.state_sha256
+            or record.intended_state_sha256 != candidate.state_sha256
+            or record.semantic_binding_sha256 != _semantic_binding(payload)
+            or record.workspace_instance_id != self._authority.workspace_instance_id
+            or record.domain != _AUTHORITY_DOMAIN
+            or record.key != str(Path(".autosport") / _STATE_FILE_NAME)
+        ):
+            raise RiskDayWindowMismatchError(
+                "historical risk day witness does not match committed authority"
+            )
+        return candidate
 
     def require_current_under_lock(
         self,

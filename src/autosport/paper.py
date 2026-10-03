@@ -513,7 +513,7 @@ class PaperBook:
         window_evidence: object,
         workspace_lock: object,
     ) -> object:
-        """Issue one opaque current-day chronology permit before ticket mutation."""
+        """Resolve one canonical current-day chronology witness before mutation."""
 
         # PaperBook loads during the early persistence-preload phase. Resolve the
         # finalized day/lock authorities only when this transition executes.
@@ -557,7 +557,7 @@ class PaperBook:
             ),
             ticket_id="pending-product-day-admission",
         )
-        return _issue_product_day_admission_permit(self, witness)
+        return witness
 
     def _record_product_day_admission(
         self,

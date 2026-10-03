@@ -891,7 +891,12 @@ class PaperValueUncertaintyAbstentionTests(unittest.TestCase):
             context, ledger_path = self._context(root, event)
 
             forged_called = False
-            original = UncertaintySizingEvidence.evaluate_canonical
+            missing = object()
+            original = getattr(
+                UncertaintySizingEvidence,
+                "evaluate_canonical",
+                missing,
+            )
 
             def forged_class_dispatch(self, request, sizing_policy):
                 nonlocal forged_called
@@ -908,7 +913,10 @@ class PaperValueUncertaintyAbstentionTests(unittest.TestCase):
                     sizing_policy=policy,
                 ).on_market_event(event, context)
             finally:
-                UncertaintySizingEvidence.evaluate_canonical = original
+                if original is missing:
+                    delattr(UncertaintySizingEvidence, "evaluate_canonical")
+                else:
+                    UncertaintySizingEvidence.evaluate_canonical = original
 
             self.assertFalse(
                 forged_called,

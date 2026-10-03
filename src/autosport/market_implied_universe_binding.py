@@ -38,6 +38,9 @@ class MarketImpliedUniverseBindingError(ValueError):
 _ROW_TOKEN = object()
 _COHORT_TOKEN = object()
 _HEX = frozenset("0123456789abcdef")
+_EVALUATION_STORE_TYPE = EvaluationUniverseStore
+_EVALUATION_STORE_LOAD = _EVALUATION_STORE_TYPE.load
+_EVALUATION_STORE_LOAD_CODE = _EVALUATION_STORE_LOAD.__code__
 
 
 def _text(value: object, name: str) -> str:
@@ -76,6 +79,27 @@ def _digest(payload: Mapping[str, Any] | Sequence[Any]) -> str:
         allow_nan=False,
     ).encode("utf-8")
     return hashlib.sha256(raw).hexdigest()
+
+
+def _load_canonical_evaluation_universe(
+    evaluation_store: EvaluationUniverseStore,
+):
+    if type(evaluation_store) is not _EVALUATION_STORE_TYPE:
+        raise TypeError("evaluation_store must be exact EvaluationUniverseStore")
+    namespace = getattr(evaluation_store, "__dict__", None)
+    if isinstance(namespace, dict) and "load" in namespace:
+        raise MarketImpliedUniverseBindingError(
+            "canonical evaluation-universe store must not shadow load reader"
+        )
+    if _EVALUATION_STORE_TYPE.load is not _EVALUATION_STORE_LOAD:
+        raise MarketImpliedUniverseBindingError(
+            "canonical evaluation-universe load authority was rebound"
+        )
+    if _EVALUATION_STORE_LOAD.__code__ is not _EVALUATION_STORE_LOAD_CODE:
+        raise MarketImpliedUniverseBindingError(
+            "canonical evaluation-universe load executable was mutated"
+        )
+    return _EVALUATION_STORE_LOAD(evaluation_store)
 
 
 @dataclass(frozen=True, slots=True)
@@ -284,9 +308,7 @@ def bind_market_implied_baseline_to_evaluation_universe(
     lower-level outcome-roster origin truth.
     """
 
-    if type(evaluation_store) is not EvaluationUniverseStore:
-        raise TypeError("evaluation_store must be exact EvaluationUniverseStore")
-    ledger = evaluation_store.load()
+    ledger = _load_canonical_evaluation_universe(evaluation_store)
     if ledger is None:
         raise MarketImpliedUniverseBindingError(
             "canonical evaluation-universe store has no durable ledger"

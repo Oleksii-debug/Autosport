@@ -1123,6 +1123,10 @@ _MARKET_EVENT_FIELD_DESCRIPTOR_WITNESSES = tuple(
     (name, MarketEvent.__dict__[name])
     for name in tuple(MarketEvent.__dataclass_fields__)
 )
+_PAPER_TICKET_FIELD_DESCRIPTOR_WITNESSES = tuple(
+    (name, PaperTicket.__dict__[name])
+    for name in tuple(PaperTicket.__dataclass_fields__)
+)
 _ECONOMIC_GOAL_FIELD_DESCRIPTOR_WITNESSES = tuple(
     (name, EconomicGoalContract.__dict__[name])
     for name in tuple(EconomicGoalContract.__dataclass_fields__)
@@ -1180,6 +1184,12 @@ _PAPERBOOK_GATE_METHOD_WITNESS, _PAPERBOOK_GATE_GLOBAL_WITNESS = (
 
 def _require_paperbook_admission_authority() -> None:
     """Bind approved PAPER economics to the exact durable mutation graph."""
+
+    for name, expected_descriptor in _PAPER_TICKET_FIELD_DESCRIPTOR_WITNESSES:
+        if PaperTicket.__dict__.get(name) is not expected_descriptor:
+            raise RuntimeError(
+                "economic admission PaperTicket data authority changed"
+            )
 
     _require_class_transition_graph(
         PaperBook,
@@ -1293,6 +1303,7 @@ def _admission_risk_helper_authority_valid() -> bool:
         ),
         (TicketLeg, _TICKET_LEG_FIELD_DESCRIPTOR_WITNESSES),
         (MarketEvent, _MARKET_EVENT_FIELD_DESCRIPTOR_WITNESSES),
+        (PaperTicket, _PAPER_TICKET_FIELD_DESCRIPTOR_WITNESSES),
     ):
         for name, expected_descriptor in witnesses:
             if owner.__dict__.get(name) is not expected_descriptor:
@@ -1694,6 +1705,7 @@ def admit_paper_ticket(
             bankroll_id=bankroll_id,
             currency=currency,
         )
+        _require_paperbook_admission_authority()
         _PAPERBOOK_SAVE_FUNCTION(working_book, book_path)
         _require_paperbook_admission_authority()
         persisted = _PAPERBOOK_LOAD_FUNCTION(PaperBook, book_path)

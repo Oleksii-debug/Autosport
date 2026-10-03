@@ -24,6 +24,11 @@ from threading import RLock
 from typing import Final, Mapping
 
 from .learning_environment import EnvironmentIdentity, Episode
+from .monotonic_workspace_authority import (
+    MonotonicWorkspaceAuthority,
+    RecoveryDisposition,
+)
+from .workspace_lock import WorkspaceEconomicLock
 
 
 STORE_SCHEMA: Final = "autosport.deployment_runtime_authority_store"
@@ -32,6 +37,9 @@ RECORD_SCHEMA: Final = "autosport.deployment_runtime_authority"
 RECORD_SCHEMA_VERSION: Final = 2
 _EMPTY_CHAIN_SHA256: Final = hashlib.sha256(b"").hexdigest()
 _HEX: Final = frozenset("0123456789abcdef")
+_AUTHORITY_DOMAIN: Final = "deployment-runtime-authority"
+_AUTHORITY_BINDING_SCHEMA: Final = "autosport.deployment_runtime_authority.monotonic_binding"
+_AUTHORITY_BINDING_SCHEMA_VERSION: Final = 1
 
 
 class DeploymentRuntimeAuthorityError(ValueError):
@@ -388,31 +396,65 @@ class DeploymentRuntimeAuthorityRecord:
 
 
 class DeploymentRuntimeAuthorityStore:
-    """One local durable append-only authority file with full-read validation."""
+    """Rollback-resistant append-only runtime authority file.
 
-    def __init__(self, path: str | Path) -> None:
-        self.path = Path(path)
+    The local file remains the canonical domain payload and hash chain. The
+    independent monotonic workspace authority stores only opaque state digests and
+    therefore detects whole-file deletion or restoration of older, locally-valid
+    bytes while its separate machine-state root survives.
+    """
+
+    def __init__(
+        self,
+        path: str | Path,
+        *,
+        authority_root: str | Path | None = None,
+    ) -> None:
+        self.path = Path(path).expanduser().resolve(strict=False)
+        self.workspace = self.path.parent
         self._lock = RLock()
-        self._read_validated_records()
+        self._authority = MonotonicWorkspaceAuthority(
+            workspace=self.workspace,
+            domain=_AUTHORITY_DOMAIN,
+            key=self.path.name,
+            authority_root=authority_root,
+        )
+        self._semantic_binding_sha256 = _digest(
+            {
+                "schema": _AUTHORITY_BINDING_SCHEMA,
+                "schema_version": _AUTHORITY_BINDING_SCHEMA_VERSION,
+                "workspace_instance_id": self._authority.workspace_instance_id,
+                "store_schema": STORE_SCHEMA,
+                "store_schema_version": STORE_SCHEMA_VERSION,
+                "key": self.path.name,
+            }
+        )
+        with self._lock, WorkspaceEconomicLock(self.workspace):
+            self._read_validated_records_locked()
 
     @classmethod
     def initialize_pristine(
         cls,
         path: str | Path,
+        *,
+        authority_root: str | Path | None = None,
     ) -> "DeploymentRuntimeAuthorityStore":
-        destination = Path(path)
+        destination = Path(path).expanduser().resolve(strict=False)
         destination.parent.mkdir(parents=True, exist_ok=True)
-        if destination.exists():
-            raise DeploymentRuntimeAuthorityError("runtime authority store already exists")
-        cls._write_atomic_path(
-            destination,
-            {
-                "schema": STORE_SCHEMA,
-                "schema_version": STORE_SCHEMA_VERSION,
-                "records": [],
-            },
-        )
-        return cls(destination)
+        with WorkspaceEconomicLock(destination.parent):
+            if destination.exists():
+                raise DeploymentRuntimeAuthorityError(
+                    "runtime authority store already exists"
+                )
+            cls._write_atomic_path(
+                destination,
+                {
+                    "schema": STORE_SCHEMA,
+                    "schema_version": STORE_SCHEMA_VERSION,
+                    "records": [],
+                },
+            )
+        return cls(destination, authority_root=authority_root)
 
     @staticmethod
     def _write_atomic_path(path: Path, payload: Mapping[str, object]) -> None:
@@ -441,32 +483,68 @@ class DeploymentRuntimeAuthorityStore:
                 except OSError:
                     pass
 
+    @staticmethod
+    def _state_sha256(payload: Mapping[str, object]) -> str:
+        return hashlib.sha256(
+            (_canonical_json(payload) + "\n").encode("utf-8")
+        ).hexdigest()
+
+    @staticmethod
+    def _transaction_id(state_sha256: str) -> str:
+        return f"deployment-runtime-{_sha(state_sha256, 'state_sha256')}"
+
     def _read_payload(self) -> dict[str, object]:
         try:
             raw = self.path.read_text(encoding="utf-8")
+        except FileNotFoundError as exc:
+            self._authority.recover(observed_state_sha256=None)
+            raise DeploymentRuntimeAuthorityError(
+                "cannot read runtime authority store"
+            ) from exc
         except OSError as exc:
-            raise DeploymentRuntimeAuthorityError("cannot read runtime authority store") from exc
+            raise DeploymentRuntimeAuthorityError(
+                "cannot read runtime authority store"
+            ) from exc
         if not raw.endswith("\n"):
-            raise DeploymentRuntimeAuthorityError("runtime authority store is not canonical text")
+            raise DeploymentRuntimeAuthorityError(
+                "runtime authority store is not canonical text"
+            )
         try:
             payload = json.loads(raw)
         except json.JSONDecodeError as exc:
-            raise DeploymentRuntimeAuthorityError("runtime authority store is not valid JSON") from exc
+            raise DeploymentRuntimeAuthorityError(
+                "runtime authority store is not valid JSON"
+            ) from exc
         if type(payload) is not dict:
-            raise DeploymentRuntimeAuthorityError("runtime authority store must be an object")
+            raise DeploymentRuntimeAuthorityError(
+                "runtime authority store must be an object"
+            )
         if set(payload) != {"schema", "schema_version", "records"}:
-            raise DeploymentRuntimeAuthorityError("runtime authority store envelope is not canonical")
-        if payload.get("schema") != STORE_SCHEMA or payload.get("schema_version") != STORE_SCHEMA_VERSION:
-            raise DeploymentRuntimeAuthorityError("unsupported runtime authority store schema")
+            raise DeploymentRuntimeAuthorityError(
+                "runtime authority store envelope is not canonical"
+            )
+        if (
+            payload.get("schema") != STORE_SCHEMA
+            or payload.get("schema_version") != STORE_SCHEMA_VERSION
+        ):
+            raise DeploymentRuntimeAuthorityError(
+                "unsupported runtime authority store schema"
+            )
         if _canonical_json(payload) + "\n" != raw:
-            raise DeploymentRuntimeAuthorityError("runtime authority store is not canonical JSON")
+            raise DeploymentRuntimeAuthorityError(
+                "runtime authority store is not canonical JSON"
+            )
         records = payload.get("records")
         if type(records) is not list:
-            raise DeploymentRuntimeAuthorityError("runtime authority records must be a list")
+            raise DeploymentRuntimeAuthorityError(
+                "runtime authority records must be a list"
+            )
         return payload
 
-    def _read_validated_records(self) -> tuple[DeploymentRuntimeAuthorityRecord, ...]:
-        payload = self._read_payload()
+    @staticmethod
+    def _records_from_payload(
+        payload: Mapping[str, object],
+    ) -> tuple[DeploymentRuntimeAuthorityRecord, ...]:
         records_raw = payload["records"]
         assert isinstance(records_raw, list)
         previous = _EMPTY_CHAIN_SHA256
@@ -476,25 +554,77 @@ class DeploymentRuntimeAuthorityStore:
         for raw in records_raw:
             record = DeploymentRuntimeAuthorityRecord.from_dict(raw)
             if record.previous_record_sha256 != previous:
-                raise DeploymentRuntimeAuthorityError("runtime authority hash chain is broken")
+                raise DeploymentRuntimeAuthorityError(
+                    "runtime authority hash chain is broken"
+                )
             current_available_at = _instant(record.available_at, "available_at")
-            if previous_available_at is not None and current_available_at < previous_available_at:
+            if (
+                previous_available_at is not None
+                and current_available_at < previous_available_at
+            ):
                 raise DeploymentRuntimeAuthorityError(
                     "runtime authority first-seen time moved backwards"
                 )
             if record.runtime_authority_id in seen_ids:
-                raise DeploymentRuntimeAuthorityError("duplicate runtime authority identity")
+                raise DeploymentRuntimeAuthorityError(
+                    "duplicate runtime authority identity"
+                )
             seen_ids.add(record.runtime_authority_id)
             records.append(record)
             previous = record.record_sha256
             previous_available_at = current_available_at
         return tuple(records)
 
+    def _recover_or_bootstrap_state(
+        self,
+        payload: Mapping[str, object],
+    ) -> None:
+        state_sha256 = self._state_sha256(payload)
+        tx_id = self._transaction_id(state_sha256)
+        history = self._authority.read_history()
+        if not history:
+            self._authority.prepare(
+                tx_id=tx_id,
+                observed_state_sha256=None,
+                intended_state_sha256=state_sha256,
+                semantic_binding_sha256=self._semantic_binding_sha256,
+            )
+            self._authority.commit(
+                tx_id=tx_id,
+                observed_state_sha256=state_sha256,
+                semantic_binding_sha256=self._semantic_binding_sha256,
+            )
+            return
+
+        recovery = self._authority.recover(
+            observed_state_sha256=state_sha256,
+            tx_id=tx_id,
+            semantic_binding_sha256=self._semantic_binding_sha256,
+        )
+        if recovery.disposition not in {
+            RecoveryDisposition.CURRENT,
+            RecoveryDisposition.ABORTED_PREPARE,
+            RecoveryDisposition.COMMITTED_PREPARE,
+        }:
+            raise DeploymentRuntimeAuthorityError(
+                "runtime authority store is not a recoverable authority tip"
+            )
+
+    def _read_validated_records_locked(
+        self,
+    ) -> tuple[DeploymentRuntimeAuthorityRecord, ...]:
+        payload = self._read_payload()
+        records = self._records_from_payload(payload)
+        self._recover_or_bootstrap_state(payload)
+        return records
+
     def _observed_now(self) -> str:
         try:
             value = _utc_now_timestamp()
         except Exception as exc:
-            raise DeploymentRuntimeAuthorityError("runtime authority store clock failed") from exc
+            raise DeploymentRuntimeAuthorityError(
+                "runtime authority store clock failed"
+            ) from exc
         return _timestamp(value, "runtime authority store clock")
 
     def append(
@@ -505,18 +635,28 @@ class DeploymentRuntimeAuthorityStore:
         action_semantics_version: str,
         action_semantics_meanings: tuple[tuple[str, str], ...],
     ) -> DeploymentRuntimeAuthorityRecord:
-        with self._lock:
-            records = self._read_validated_records()
-            previous = records[-1].record_sha256 if records else _EMPTY_CHAIN_SHA256
+        with self._lock, WorkspaceEconomicLock(self.workspace):
+            records = self._read_validated_records_locked()
+            current_payload = {
+                "schema": STORE_SCHEMA,
+                "schema_version": STORE_SCHEMA_VERSION,
+                "records": [record.to_dict() for record in records],
+            }
+            observed_sha256 = self._state_sha256(current_payload)
+            previous = (
+                records[-1].record_sha256 if records else _EMPTY_CHAIN_SHA256
+            )
 
-            # Compute the immutable semantic identity before consulting the clock so an
-            # exact retry returns the original first-seen record even if time advanced.
             probe = DeploymentRuntimeAuthorityRecord.create(
                 environment=environment,
                 episode=episode,
                 action_semantics_version=action_semantics_version,
                 action_semantics_meanings=action_semantics_meanings,
-                available_at=records[-1].available_at if records else "1970-01-01T00:00:00Z",
+                available_at=(
+                    records[-1].available_at
+                    if records
+                    else "1970-01-01T00:00:00Z"
+                ),
                 previous_record_sha256=previous,
             )
             for existing in records:
@@ -524,7 +664,9 @@ class DeploymentRuntimeAuthorityStore:
                     return existing
 
             observed_at = self._observed_now()
-            if records and _instant(observed_at, "runtime authority store clock") < _instant(
+            if records and _instant(
+                observed_at, "runtime authority store clock"
+            ) < _instant(
                 records[-1].available_at,
                 "previous runtime authority available_at",
             ):
@@ -544,20 +686,55 @@ class DeploymentRuntimeAuthorityStore:
                 "schema_version": STORE_SCHEMA_VERSION,
                 "records": [record.to_dict() for record in (*records, candidate)],
             }
+            intended_sha256 = self._state_sha256(payload)
+            tx_id = self._transaction_id(intended_sha256)
+            self._authority.prepare(
+                tx_id=tx_id,
+                observed_state_sha256=observed_sha256,
+                intended_state_sha256=intended_sha256,
+                semantic_binding_sha256=self._semantic_binding_sha256,
+            )
             self._write_atomic_path(self.path, payload)
-            verified = self.get(candidate.runtime_authority_id)
+
+            published = self._read_payload()
+            published_records = self._records_from_payload(published)
+            published_sha256 = self._state_sha256(published)
+            if published_sha256 != intended_sha256:
+                raise DeploymentRuntimeAuthorityError(
+                    "published runtime authority state does not match prepared digest"
+                )
+            self._authority.commit(
+                tx_id=tx_id,
+                observed_state_sha256=published_sha256,
+                semantic_binding_sha256=self._semantic_binding_sha256,
+            )
+            verified = next(
+                (
+                    record
+                    for record in published_records
+                    if record.runtime_authority_id
+                    == candidate.runtime_authority_id
+                ),
+                None,
+            )
             if verified is None:
-                raise DeploymentRuntimeAuthorityError("runtime authority append was not durable")
+                raise DeploymentRuntimeAuthorityError(
+                    "runtime authority append was not durable"
+                )
             return verified
 
-    def get(self, runtime_authority_id: str) -> DeploymentRuntimeAuthorityRecord | None:
+    def get(
+        self,
+        runtime_authority_id: str,
+    ) -> DeploymentRuntimeAuthorityRecord | None:
         identity = _sha(runtime_authority_id, "runtime_authority_id")
-        with self._lock:
-            for record in self._read_validated_records():
+        with self._lock, WorkspaceEconomicLock(self.workspace):
+            for record in self._read_validated_records_locked():
                 if record.runtime_authority_id == identity:
                     return record
         return None
 
     def records(self) -> tuple[DeploymentRuntimeAuthorityRecord, ...]:
-        with self._lock:
-            return self._read_validated_records()
+        with self._lock, WorkspaceEconomicLock(self.workspace):
+            return self._read_validated_records_locked()
+

@@ -3290,6 +3290,64 @@ def test_campaign_capture_rejects_remaining_builtin_shadow_before_execution(
     assert hostile_calls == []
 
 
+@pytest.mark.parametrize(
+    "builtin_name",
+    ["sorted", "ValueError", "isinstance"],
+)
+def test_failure_cleanup_rejects_collector_builtin_shadow(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    builtin_name: str,
+) -> None:
+    locator, store, spec, provider_store = _setup(tmp_path)
+    hostile_calls: list[str] = []
+    finalizer_witness = next(
+        item
+        for item in capture_module._STORE_CLASS_SEAM_GLOBAL_WITNESSES
+        if item[0] == "_finish_collector_cycle"
+    )
+    finalizer_globals = finalizer_witness[2]
+
+    def hostile(*_args, **_kwargs):
+        hostile_calls.append(builtin_name)
+        raise AssertionError(f"hostile collector builtin executed: {builtin_name}")
+
+    def mutating_failure(_request, _timeout):
+        monkeypatch.setitem(finalizer_globals, builtin_name, hostile)
+        raise OSError("forced provider transport failure")
+
+    monkeypatch.setattr(provider_module, "urlopen", mutating_failure)
+    monkeypatch.setattr(provider_module, "_default_clock", lambda: CAPTURED_AT)
+
+    with pytest.raises(
+        ProviderObservationUnsupportedError,
+        match="provider SSE initial-state acquisition failed",
+    ) as exc_info:
+        capture_module.capture_campaign_complete_game_board(
+            precommit_locator=locator,
+            store=store,
+            source_spec=spec,
+            evidence_store=provider_store,
+            request=_request(),
+            api_key="secret-value",
+            timeout_seconds=3.0,
+            clock=_clock(),
+        )
+
+    evidence = store.collector_cycle_evidence(
+        source_id=spec.source_id,
+        start_cycle_seq=1,
+        end_cycle_seq=1,
+    )
+    assert len(evidence) == 1
+    assert evidence[0]["terminal"] is None
+    assert hostile_calls == []
+    assert any(
+        "failure terminal also failed" in note
+        for note in getattr(exc_info.value, "__notes__", ())
+    )
+
+
 def test_failure_cleanup_rejects_collector_finalizer_global_rebind(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

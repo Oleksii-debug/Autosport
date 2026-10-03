@@ -736,6 +736,9 @@ def test_matrix_journal_linearizes_successors_and_rejects_sibling_fork():
     assert journal.publish(first) == first.matrix_id
     assert journal.publish(second) == second.matrix_id
     assert journal.latest_for(first) is second
+    assert journal.latest_for(first, as_of=T2) is None
+    assert journal.latest_for(first, as_of=T3) is first
+    assert journal.latest_for(first, as_of=T4) is second
 
     sibling = build_provider_capability_evidence_matrix(
         first.profile,
@@ -808,6 +811,25 @@ def test_matrix_journal_detects_post_publication_mutation():
         match="mutated after publication",
     ):
         journal.latest_for(first)
+
+
+def test_matrix_journal_historical_lookup_rejects_mutated_future_successor():
+    journal = ProviderCapabilityEvidenceMatrixJournal()
+    first = matrix(as_of=T3)
+    second = matrix(
+        version=2,
+        predecessor=first.matrix_id,
+        as_of=T4,
+    )
+    journal.publish(first)
+    journal.publish(second)
+    object.__setattr__(second, "matrix_ref", "mutated-future-successor")
+
+    with pytest.raises(
+        ProviderCapabilityEvidenceMatrixError,
+        match="mutated after publication",
+    ):
+        journal.latest_for(first, as_of=T3)
 
 
 def test_successor_validation_rejects_post_build_matrix_mutation():

@@ -1110,3 +1110,41 @@ def test_economic_read_rejects_account_transport_class_replacement_before_execut
 
     assert hostile_calls == []
     assert opener.requests == []
+
+
+def test_order_settlement_rejects_local_terminal_status_authority_replacement(
+    monkeypatch,
+):
+    client, opener = economic_client(
+        monkeypatch,
+        order_details(status=99),
+    )
+    monkeypatch.setattr(
+        settlement_module,
+        "_TERMINAL_ORDER_STATUS_CODES",
+        frozenset({4, 5, 99}),
+    )
+
+    with pytest.raises(
+        BetdaqEconomicReadbackError,
+        match="terminal order status authority was replaced",
+    ):
+        client.read_order_details(123)
+
+    assert len(opener.requests) == 1
+
+
+def test_order_dto_rejects_terminal_status_authority_replacement(monkeypatch):
+    client, _ = economic_client(monkeypatch, order_details(status=4))
+    value = client.read_order_details(123)
+    monkeypatch.setattr(
+        settlement_module,
+        "_TERMINAL_ORDER_STATUS_CODES",
+        frozenset({4, 5, 99}),
+    )
+
+    with pytest.raises(
+        BetdaqEconomicReadbackError,
+        match="terminal order status authority was replaced",
+    ):
+        replace(value, order_status_code=99, final_settlement_proven=True)

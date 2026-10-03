@@ -8,6 +8,7 @@ import pytest
 import autosport._risk_randomization_precommit_internal_guard as dispatch_guard
 import autosport.risk_membership_publication as publication
 from autosport.risk_sampling_membership import ResolvedFixedNRiskMembership
+from autosport.run_registry import RunRegistry
 import autosport.risk_randomization_precommit as precommit
 
 
@@ -33,6 +34,7 @@ def _paths(tmp_path):
     workspace.mkdir()
     registry = workspace / "scientific-registry.json"
     registry.write_text("{}\n", encoding="utf-8")
+    RunRegistry.initialize_pristine(workspace / "run_registry.json")
     authority_root = tmp_path / "machine-authority"
     return workspace, registry, authority_root
 

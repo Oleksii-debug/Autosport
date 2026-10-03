@@ -1092,6 +1092,87 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
                 1,
             )
 
+    def test_reentrant_market_mutation_is_blocked_before_pending_write(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            clock = _ManualClock(self.START + timedelta(seconds=1))
+            first_event = self._event(selection="selection-a", sequence=1)
+            concurrent = self._event(
+                selection="selection-a",
+                sequence=2,
+                odds="2.20",
+                observed=self.START + timedelta(milliseconds=1500),
+            )
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(workspace, [(first_event,)]),
+                factory=_EmptyIntentFactory(),
+                clock=clock,
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+            attempted = {"value": False}
+
+            def mutate_during_progress_write(path, payload):
+                self.assertEqual(Path(path), loop.progress_path)
+                attempted["value"] = True
+                loop.mirror_updates.mirror.apply(concurrent)
+                self.fail("reentrant mirror mutation unexpectedly passed revision guard")
+
+            with patch(
+                "autosport.live_decision_loop.atomic_write_json",
+                side_effect=mutate_during_progress_write,
+            ):
+                result = loop.run_cycle()
+
+            self.assertTrue(attempted["value"])
+            self.assertEqual(result.status, LiveCycleStatus.BACKPRESSURE)
+            self.assertIn(
+                "market revision advanced after decision snapshot capture",
+                result.detail,
+            )
+            self.assertIsNone(loop._load_progress())
+            self.assertFalse((workspace / "decisions.jsonl").exists())
+            self.assertEqual(loop.mirror_updates.mirror.revision, 1)
+
+    def test_reentrant_dependency_registration_is_blocked_before_pending_write(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            clock = _ManualClock(self.START + timedelta(seconds=1))
+            first_event = self._event(selection="selection-a", sequence=1)
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(workspace, [(first_event,)]),
+                factory=_EmptyIntentFactory(),
+                clock=clock,
+            )
+            loop.register_input("input-a", selection_ids="selection-a")
+            attempted = {"value": False}
+
+            def mutate_during_progress_write(path, payload):
+                self.assertEqual(Path(path), loop.progress_path)
+                attempted["value"] = True
+                loop.dependencies.register(
+                    "input-b",
+                    selection_ids="selection-b",
+                )
+                self.fail("reentrant dependency mutation unexpectedly passed registry guard")
+
+            with patch(
+                "autosport.live_decision_loop.atomic_write_json",
+                side_effect=mutate_during_progress_write,
+            ):
+                result = loop.run_cycle()
+
+            self.assertTrue(attempted["value"])
+            self.assertEqual(result.status, LiveCycleStatus.BACKPRESSURE)
+            self.assertIn(
+                "dependency registry advanced after decision snapshot capture",
+                result.detail,
+            )
+            self.assertEqual(loop.dependencies.input_ids, ("input-a",))
+            self.assertIsNone(loop._load_progress())
+            self.assertFalse((workspace / "decisions.jsonl").exists())
+
     def test_provider_gap_full_cut_rejects_concurrent_update_before_zero(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

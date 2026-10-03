@@ -5,7 +5,7 @@ import json
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 from enum import Enum
-from typing import Any, Iterable
+from typing import Any
 
 from .domain import MarketEvent, _quote_identity
 from .forecasting import ForecastRecord, parse_iso_timestamp

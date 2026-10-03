@@ -692,27 +692,32 @@ def _install_betfair_timeout_absence_authority() -> None:
     sealed_kind = BetfairTimeoutResolutionKind
     sealed_absence_type = VerifiedProviderAbsenceEvidence
     sealed_retire_anchor = _retire_timeout_elapsed_visibility_anchor
-    sealed_ledger_descriptors = {
-        "attempt_state": RealExecutionLedger.attempt_state,
-        "verified_snapshot": RealExecutionLedger.verified_snapshot,
-        "provider_order_reference": RealExecutionLedger.provider_order_reference,
-    }
-    sealed_action_descriptors = {
-        "to_dict": ExecutionAction.to_dict,
-    }
-    sealed_ledger_descriptor_codes = {
-        name: getattr(value, "__code__", None)
-        for name, value in sealed_ledger_descriptors.items()
-    }
-    sealed_action_descriptor_codes = {
-        name: getattr(value, "__code__", None)
-        for name, value in sealed_action_descriptors.items()
-    }
+    sealed_ledger_descriptors = tuple(
+        (name, value, getattr(value, "__code__", None))
+        for name, value in (
+            ("attempt_state", RealExecutionLedger.attempt_state),
+            ("verified_snapshot", RealExecutionLedger.verified_snapshot),
+            (
+                "provider_order_reference",
+                RealExecutionLedger.provider_order_reference,
+            ),
+        )
+    )
+    sealed_action_descriptors = (
+        (
+            "to_dict",
+            ExecutionAction.to_dict,
+            getattr(ExecutionAction.to_dict, "__code__", None),
+        ),
+    )
     missing = object()
 
-    def seal_function_graph(root: object) -> dict[str, tuple[object, object | None]]:
+    def seal_function_graph(
+        root: object,
+    ) -> tuple[tuple[str, object, object | None], ...]:
         module_globals = globals()
-        sealed: dict[str, tuple[object, object | None]] = {}
+        sealed: list[tuple[str, object, object | None]] = []
+        sealed_names: set[str] = set()
         pending = [root]
         visited: set[int] = set()
         while pending:
@@ -725,31 +730,32 @@ def _install_betfair_timeout_absence_authority() -> None:
             if code is None or function_globals is not module_globals:
                 continue
             for name in code.co_names:
-                if name not in module_globals or name in sealed:
+                if name not in module_globals or name in sealed_names:
                     continue
                 value = module_globals[name]
                 value_code = getattr(value, "__code__", None)
-                sealed[name] = (value, value_code)
+                sealed.append((name, value, value_code))
+                sealed_names.add(name)
                 if (
                     value_code is not None
                     and getattr(value, "__globals__", None) is module_globals
                 ):
                     pending.append(value)
-        return sealed
+        return tuple(sealed)
 
     sealed_resolver_graph = seal_function_graph(raw_resolve)
-    sealed_wrapper_bindings = {
-        "BetfairTimeoutResolutionError": sealed_error,
-        "BetfairTimeoutResolutionKind": sealed_kind,
-        "VerifiedProviderAbsenceEvidence": sealed_absence_type,
-        "_retire_timeout_elapsed_visibility_anchor": sealed_retire_anchor,
-    }
+    sealed_wrapper_bindings = (
+        ("BetfairTimeoutResolutionError", sealed_error),
+        ("BetfairTimeoutResolutionKind", sealed_kind),
+        ("VerifiedProviderAbsenceEvidence", sealed_absence_type),
+        ("_retire_timeout_elapsed_visibility_anchor", sealed_retire_anchor),
+    )
 
     def assert_executable_authority_intact() -> None:
         module_globals = globals()
         if raw_resolve.__code__ is not raw_resolve_code:
             raise sealed_error("timeout resolver executable code changed")
-        for name, (expected, expected_code) in sealed_resolver_graph.items():
+        for name, expected, expected_code in sealed_resolver_graph:
             current = module_globals.get(name, missing)
             if current is not expected:
                 raise sealed_error(
@@ -762,27 +768,25 @@ def _install_betfair_timeout_absence_authority() -> None:
                 raise sealed_error(
                     f"timeout resolver executable code changed: {name}"
                 )
-        for name, expected in sealed_wrapper_bindings.items():
+        for name, expected in sealed_wrapper_bindings:
             if module_globals.get(name, missing) is not expected:
                 raise sealed_error(
                     f"timeout resolver authority binding changed: {name}"
                 )
-        for name, expected in sealed_ledger_descriptors.items():
+        for name, expected, expected_code in sealed_ledger_descriptors:
             current = getattr(RealExecutionLedger, name, missing)
             if (
                 current is not expected
-                or getattr(current, "__code__", None)
-                is not sealed_ledger_descriptor_codes[name]
+                or getattr(current, "__code__", None) is not expected_code
             ):
                 raise sealed_error(
                     f"timeout ledger authority method changed: {name}"
                 )
-        for name, expected in sealed_action_descriptors.items():
+        for name, expected, expected_code in sealed_action_descriptors:
             current = getattr(ExecutionAction, name, missing)
             if (
                 current is not expected
-                or getattr(current, "__code__", None)
-                is not sealed_action_descriptor_codes[name]
+                or getattr(current, "__code__", None) is not expected_code
             ):
                 raise sealed_error(
                     f"timeout action authority method changed: {name}"

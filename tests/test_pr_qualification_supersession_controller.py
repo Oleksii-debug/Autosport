@@ -242,6 +242,7 @@ def test_zero_trigger_identity_does_not_block_workflow_wide_sweep(
             events.append("api")
 
         def cancel_historical_unbound_runs(self, **kwargs) -> tuple[int, ...]:
+            assert kwargs["exclude_run_ids"] == (7000,)
             events.append("orphan")
             return ()
 

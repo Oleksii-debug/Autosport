@@ -648,8 +648,12 @@ def main(argv: list[str] | None = None) -> int:
             workflow_name=args.workflow_name,
             current_run_id=current_run_id,
         )
+        # The triggering source run has its own live-qualification boundary below.
+        # Never let orphan reconciliation consume it first: the Actions list can lose
+        # embedded PR references even when the workflow_run trigger carried explicit
+        # identity, which would otherwise allow a second cancel race on the same run.
         orphan_cancelled = api.cancel_historical_unbound_runs(
-            exclude_run_ids=sweep_cancelled,
+            exclude_run_ids=(current_run_id, *sweep_cancelled),
         )
 
         if trigger_pr_number is not None:

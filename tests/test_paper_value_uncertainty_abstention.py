@@ -11,6 +11,11 @@ from autosport.decision_ledger import JsonlDecisionLedger
 from autosport.domain import MarketEvent
 from autosport.economic_goal import EconomicGoalContract
 from autosport.forecasting import ForecastRecord
+from autosport.opportunity import (
+    ForecastRef,
+    PredictiveEligibilityEvidence,
+    QuoteRef,
+)
 from autosport.paper import PaperBook
 from autosport.paper_execution_adoption import PaperExecutionAdoptionRuntime
 from autosport.paper_execution_reality import (
@@ -18,7 +23,7 @@ from autosport.paper_execution_reality import (
     PaperExecutionLedger,
     PaperExecutionModelConfig,
 )
-from autosport.paper_strategy import PaperValueAgent
+from autosport.paper_strategy import Forecast, PaperValueAgent
 from autosport.risk import PaperRiskPolicy
 
 
@@ -68,6 +73,16 @@ class PaperValueUncertaintyAbstentionTests(unittest.TestCase):
             input_cutoff_ts="2026-09-17T14:59:58+00:00",
             generated_at="2026-09-17T14:59:58+00:00",
             uncertainty=uncertainty,
+            market_snapshot_hash="a" * 64,
+        )
+
+    @staticmethod
+    def _legacy_forecast(event: MarketEvent) -> Forecast:
+        return Forecast(
+            quote_key=event.quote_key,
+            probability=Decimal("0.60"),
+            model_id="legacy-paper-control",
+            as_of_ts="2026-09-17T14:59:58+00:00",
         )
 
     @staticmethod
@@ -116,12 +131,50 @@ class PaperValueUncertaintyAbstentionTests(unittest.TestCase):
     @staticmethod
     def _agent(
         goal: EconomicGoalContract,
-        forecast: ForecastRecord,
+        forecast: Forecast | ForecastRecord,
+        *,
+        predictive_ref: ForecastRef | None = None,
     ) -> PaperValueAgent:
+        refs = (
+            None
+            if predictive_ref is None
+            else {forecast.quote_key: predictive_ref}
+        )
         return PaperValueAgent(
             {forecast.quote_key: forecast},
             stake=Decimal("1"),
             risk_policy=PaperRiskPolicy(economic_goal=goal),
+            predictive_forecast_refs=refs,
+        )
+
+    @staticmethod
+    def _self_attested_ref(
+        event: MarketEvent,
+        forecast: ForecastRecord,
+    ) -> ForecastRef:
+        evidence = PredictiveEligibilityEvidence(
+            evaluation_id="caller-evaluation",
+            evaluation_sha256="1" * 64,
+            protocol_sha256="2" * 64,
+            admission_policy_sha256="3" * 64,
+            model_id=forecast.model_id,
+            model_version=forecast.model_version,
+            strategy_version=forecast.strategy_version,
+            uncertainty_kind="absolute_probability_radius_v1",
+            sample_size=500,
+            minimum_sample_size=3,
+            maximum_uncertainty=Decimal("1"),
+            as_of=event.observed_ts,
+            valid_until=event.observed_ts,
+        )
+        quote = QuoteRef.from_market_event(
+            event,
+            market_snapshot_hash=forecast.market_snapshot_hash,
+        )
+        return ForecastRef.from_forecast(
+            forecast,
+            quote,
+            predictive_eligibility=evidence,
         )
 
     def test_goal_active_paper_value_abstains_when_uncertainty_erases_robust_edge(
@@ -131,23 +184,20 @@ class PaperValueUncertaintyAbstentionTests(unittest.TestCase):
         event = self._event()
 
         # Control case: prove this exact fixture reaches the canonical #623 PAPER
-        # execution path. Without this control, a missing execution/account authority
-        # could make the uncertainty assertion vacuously green.
+        # execution path. This legacy compatibility forecast is intentionally used
+        # only as reachability control; modern ForecastRecord has a stricter
+        # predictive-authority boundary below.
         with tempfile.TemporaryDirectory() as tmp:
             control_root = Path(tmp)
-            control_forecast = self._forecast(
-                event,
-                uncertainty=Decimal("0"),
-            )
             control_context, control_ledger_path = self._context(
                 control_root,
                 event,
             )
 
-            self._agent(goal, control_forecast).on_market_event(
-                event,
-                control_context,
-            )
+            self._agent(
+                goal,
+                self._legacy_forecast(event),
+            ).on_market_event(event, control_context)
 
             self.assertEqual(len(control_context.paper_book.tickets), 1)
             self.assertTrue(control_ledger_path.exists())
@@ -161,10 +211,9 @@ class PaperValueUncertaintyAbstentionTests(unittest.TestCase):
             uncertainty=Decimal("1"),
         )
 
-        # Point EV is +0.20 at decimal odds 2.0, but an absolute-probability
-        # uncertainty radius of 1.0 leaves no positive lower-bound probability
-        # and therefore no robust positive edge. The PAPER path must not turn
-        # this point estimate into a positive material action.
+        # Point EV is +0.20 at decimal odds 2.0, but the canonical predictive
+        # uncertainty semantics are an absolute probability radius. The resulting
+        # lower endpoint is zero, so robust BACK edge is not positive.
         self.assertGreater(
             forecast.probability * event.decimal_odds - Decimal("1"),
             0,
@@ -188,6 +237,86 @@ class PaperValueUncertaintyAbstentionTests(unittest.TestCase):
             self.assertFalse(
                 ledger_path.exists(),
                 "abstention must not persist a positive material decision",
+            )
+            self.assertTrue(
+                any(
+                    "canonical predictive ForecastRef authority" in note
+                    for note in context.notes
+                )
+            )
+
+    def test_zero_uncertainty_is_not_a_substitute_for_predictive_authority(
+        self,
+    ) -> None:
+        goal = self._goal()
+        event = self._event()
+        forecast = self._forecast(event, uncertainty=Decimal("0"))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            context, ledger_path = self._context(Path(tmp), event)
+
+            self._agent(goal, forecast).on_market_event(event, context)
+
+            self.assertEqual(context.paper_book.tickets, {})
+            self.assertFalse(ledger_path.exists())
+            self.assertTrue(
+                any(
+                    "canonical predictive ForecastRef authority" in note
+                    for note in context.notes
+                )
+            )
+
+    def test_self_attested_predictive_evidence_cannot_authorize_paper_exposure(
+        self,
+    ) -> None:
+        goal = self._goal()
+        event = self._event()
+        forecast = self._forecast(event, uncertainty=Decimal("0.01"))
+        caller_ref = self._self_attested_ref(event, forecast)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            context, ledger_path = self._context(Path(tmp), event)
+
+            self._agent(
+                goal,
+                forecast,
+                predictive_ref=caller_ref,
+            ).on_market_event(event, context)
+
+            self.assertEqual(context.paper_book.tickets, {})
+            self.assertFalse(ledger_path.exists())
+            self.assertTrue(
+                any(
+                    "predictive eligibility was not resolved from canonical"
+                    in note
+                    for note in context.notes
+                )
+            )
+
+    def test_predictive_reference_mapping_is_snapshotted_and_key_bound(self) -> None:
+        event = self._event()
+        forecast = self._forecast(event, uncertainty=Decimal("0.01"))
+        caller_ref = self._self_attested_ref(event, forecast)
+        refs = {event.quote_key: caller_ref}
+
+        agent = self._agent(
+            self._goal(),
+            forecast,
+            predictive_ref=caller_ref,
+        )
+        refs.clear()
+        self.assertIs(
+            agent.predictive_forecast_refs[event.quote_key],
+            caller_ref,
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "key must match",
+        ):
+            PaperValueAgent(
+                {event.quote_key: forecast},
+                predictive_forecast_refs={"wrong-key": caller_ref},
             )
 
 

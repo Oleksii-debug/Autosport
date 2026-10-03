@@ -572,3 +572,20 @@ def test_transplant_rejects_authority_helper_guard_rebinding(
         ScientificRegistry(target_path)
 
     assert hostile_calls == []
+
+
+def test_empty_pristine_registry_copy_can_establish_new_workspace_authority(tmp_path):
+    source_path = tmp_path / "empty-source" / "scientific_registry.json"
+    ScientificRegistry.initialize_pristine(source_path)
+    pristine_bytes = source_path.read_bytes()
+
+    target_path = tmp_path / "empty-target" / "scientific_registry.json"
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    target_path.write_bytes(pristine_bytes)
+
+    target = ScientificRegistry(target_path)
+    assert target_path.read_bytes() == pristine_bytes
+    record_id = target.append(_question())
+
+    assert record_id == "question-1"
+    assert ScientificRegistry(target_path).get("ResearchQuestion", "question-1") is not None

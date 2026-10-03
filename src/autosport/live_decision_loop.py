@@ -1696,8 +1696,13 @@ class PersistentLiveDecisionLoop:
             )
             if source_time is None:
                 return
+            if source_time > boundary:
+                raise _ConcurrentDecisionSnapshot(
+                    "decision snapshot contains market source evidence from the "
+                    "future relative to the decision cutoff"
+                )
             source_age = boundary - source_time
-            if not timedelta(0) <= source_age <= self.max_quote_age:
+            if source_age > self.max_quote_age:
                 return
             observed = MarketMirror._utc_timestamp(event.observed_ts)
             ingested = MarketMirror._utc_timestamp(event.ingest_ts)

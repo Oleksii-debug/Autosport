@@ -2269,3 +2269,125 @@ def test_post_provider_outcome_substitution_cannot_terminalize_live_remainder(
         )
         assert attempt.provider_evidence is not None
         assert attempt.acknowledgement is None
+
+
+def test_caller_clock_is_not_executed_inside_provider_write_authority() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
+        transport = _Transport(
+            lambda request: _response(
+                request,
+                matched=action.requested_stake,
+                average=action.requested_odds,
+            )
+        )
+        client = _enabled_client(profile, transport, store=goal_store)
+
+        def hostile_clock() -> str:
+            raise AssertionError("caller clock must not execute in provider write authority")
+
+        result = execute_betfair_supervised_action(
+            ledger,
+            bound,
+            approval,
+            action_id=action.action_id,
+            attempt_id="attempt-hostile-caller-clock",
+            profile=profile,
+            client=client,
+            clock=hostile_clock,
+        )
+
+        assert result.outcome is PlaceOrdersOutcome.ACCEPTED
+        assert result.attempt_state is AttemptState.ACCEPTED
+        assert len(transport.calls) == 1
+        envelopes = [
+            json.loads(line)
+            for line in ledger.path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        submitted = [
+            envelope["event"]
+            for envelope in envelopes
+            if envelope["event"].get("event_type") == "ATTEMPT_SUBMITTED"
+            and envelope["event"].get("attempt_id") == "attempt-hostile-caller-clock"
+        ]
+        assert len(submitted) == 1
+        assert submitted[0]["payload"]["submitted_at"] == RESERVED_AT
+
+
+def test_timeout_unknown_does_not_execute_caller_clock() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
+        transport = _TimeoutTransport()
+        client = _enabled_client(profile, transport, store=goal_store)
+
+        def hostile_clock() -> str:
+            raise AssertionError("caller clock must not execute after ambiguous transport")
+
+        result = execute_betfair_supervised_action(
+            ledger,
+            bound,
+            approval,
+            action_id=action.action_id,
+            attempt_id="attempt-timeout-hostile-clock",
+            profile=profile,
+            client=client,
+            clock=hostile_clock,
+        )
+
+        assert result.outcome is PlaceOrdersOutcome.UNKNOWN
+        assert result.attempt_state is AttemptState.UNKNOWN
+        assert len(transport.calls) == 1
+        restarted = RealExecutionLedger(Path(tmp) / "real.jsonl")
+        assert (
+            restarted.attempt_state("attempt-timeout-hostile-clock")
+            is AttemptState.UNKNOWN
+        )
+
+
+def test_existing_submitted_reentry_does_not_execute_caller_clock() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
+        attempt_id = "attempt-reentry-hostile-clock"
+        begin_supervised_attempt(
+            ledger,
+            bound,
+            approval,
+            action_id=action.action_id,
+            attempt_id=attempt_id,
+        )
+        ledger.bind_provider_order_reference(
+            attempt_id=attempt_id,
+            provider_id=action.bookmaker_id,
+        )
+        ledger.mark_submitted(
+            attempt_id,
+            submitted_at=SUBMITTED_AT,
+            request_sha256="f" * 64,
+        )
+        transport = _Transport(
+            lambda _request: (_ for _ in ()).throw(
+                AssertionError("reentry must not transmit placeOrders")
+            )
+        )
+        client = _enabled_client(profile, transport, store=goal_store)
+
+        def hostile_clock() -> str:
+            raise AssertionError("caller clock must not execute during reentry recovery")
+
+        result = execute_betfair_supervised_action(
+            ledger,
+            bound,
+            approval,
+            action_id=action.action_id,
+            attempt_id=attempt_id,
+            profile=profile,
+            client=client,
+            clock=hostile_clock,
+        )
+
+        assert result.outcome is PlaceOrdersOutcome.UNKNOWN
+        assert result.attempt_state is AttemptState.UNKNOWN
+        assert transport.calls == []
+        restarted = RealExecutionLedger(Path(tmp) / "real.jsonl")
+        assert restarted.attempt_state(attempt_id) is AttemptState.UNKNOWN

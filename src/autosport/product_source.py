@@ -70,6 +70,21 @@ _CANONICAL_STORE_SURFACE = tuple(
         ("resolve_event", _CANONICAL_STORE_RESOLVE_EVENT),
     )
 )
+# The captured public history methods still call these helpers through self/cls.
+# Seal that transitive graph as well: an exact store instance with a shadowed _connect
+# must not redirect canonical history into another SQLite authority while the public
+# method identities remain unchanged.
+_CANONICAL_STORE_TRANSITIVE_SURFACE = tuple(
+    (name, vars(_CANONICAL_COLLECTOR_STORE_TYPE)[name])
+    for name in (
+        "_path_file_identity",
+        "_connect",
+        "_canonical_event_payload",
+        "_append_event_payload_connection",
+        "_bounded_identity_keys",
+        "_delta_by_id",
+    )
+)
 
 
 def _canonical_collector_store_dispatch(
@@ -82,6 +97,15 @@ def _canonical_collector_store_dispatch(
             "collector store is not the exact canonical durable-history authority"
         )
     class_dict = vars(_CANONICAL_COLLECTOR_STORE_TYPE)
+    instance_dict = vars(store)
+    for name, expected_descriptor in _CANONICAL_STORE_TRANSITIVE_SURFACE:
+        if (
+            name in instance_dict
+            or class_dict.get(name) is not expected_descriptor
+        ):
+            raise ProductSourceStateError(
+                "canonical collector-store durable-history dispatch was replaced"
+            )
     for name, expected, expected_code in _CANONICAL_STORE_SURFACE:
         current = class_dict.get(name)
         if (

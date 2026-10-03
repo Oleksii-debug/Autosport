@@ -796,6 +796,41 @@ class ParlayApiProductSourceTests(unittest.TestCase):
             self.assertEqual(page.cursor, "snapshot-1")
             self.assertEqual(hostile_calls, [])
 
+    def test_bound_store_transitive_connect_shadow_fails_before_hostile_dispatch(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory) / "workspace"
+            source = ParlayApiProductSource(
+                _Provider([_batch(cursor="snapshot-1")]),
+                workspace=workspace,
+                authority_root=Path(directory) / "authority",
+                lawful_terms_ref="terms:parlayapi:v1",
+                retention_ref="retention:parlayapi:v1",
+                clock=lambda: "2026-09-20T17:34:02+00:00",
+            )
+            store = CollectorDeltaStore(
+                workspace / "collector_deltas.json",
+                max_bytes=4 * 1024 * 1024,
+            )
+            source.bind_collector_store(store)
+            source.fetch_catalog_page(None)
+            delta = source.fetch_deltas(None, (), 1)[0]
+            _archive_pending_delta(source, delta)
+            source.fetch_deltas(_stream_checkpoint(delta), (), 1)
+            hostile_calls = []
+
+            def hostile_connect():
+                hostile_calls.append(True)
+                raise AssertionError("hostile transitive _connect executed")
+
+            with patch.object(store, "_connect", hostile_connect):
+                with self.assertRaisesRegex(
+                    ProductSourceStateError,
+                    "durable-history dispatch was replaced",
+                ):
+                    source.resolve_event(delta)
+
+            self.assertEqual(hostile_calls, [])
+
     def test_bound_store_class_method_replacement_fails_before_hostile_dispatch(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory) / "workspace"

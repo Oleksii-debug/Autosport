@@ -25,11 +25,14 @@ from threading import RLock
 from typing import Any, Final, Mapping
 
 from .learning_environment import EnvironmentIdentity, Episode
+from .monotonic_authority_root_binding import AuthorityRootSelectionBinding
 from .monotonic_workspace_authority import (
+    AUTHORITY_ID as MONOTONIC_AUTHORITY_ID,
     AuthorityPhase,
     MonotonicWorkspaceAuthority,
     RecoveryDisposition,
 )
+from .monotonic_workspace_binding import WorkspaceIdentityBinding
 from .workspace_lock import WorkspaceEconomicLock
 
 
@@ -52,6 +55,33 @@ _CANONICAL_AUTHORITY_DOMAIN_VALUE: Final = _AUTHORITY_DOMAIN
 _CANONICAL_AUTHORITY_BINDING_SCHEMA_VALUE: Final = _AUTHORITY_BINDING_SCHEMA
 _CANONICAL_AUTHORITY_BINDING_SCHEMA_VERSION_VALUE: Final = _AUTHORITY_BINDING_SCHEMA_VERSION
 _CANONICAL_MONOTONIC_AUTHORITY_TYPE: Final = MonotonicWorkspaceAuthority
+_CANONICAL_MONOTONIC_AUTHORITY_ID: Final = MONOTONIC_AUTHORITY_ID
+_CANONICAL_WORKSPACE_IDENTITY_BINDING_TYPE: Final = WorkspaceIdentityBinding
+_CANONICAL_AUTHORITY_ROOT_SELECTION_BINDING_TYPE: Final = AuthorityRootSelectionBinding
+_CANONICAL_WORKSPACE_BINDING_SURFACE: Final = tuple(
+    (
+        name,
+        descriptor,
+        getattr(descriptor, "__code__", None),
+    )
+    for name in ("validate_existing", "ensure_bound")
+    for descriptor in (vars(WorkspaceIdentityBinding)[name],)
+)
+_CANONICAL_ROOT_SELECTION_SURFACE: Final = tuple(
+    (
+        name,
+        descriptor,
+        getattr(descriptor, "__code__", None),
+    )
+    for name in (
+        "namespace_activation_path",
+        "validate_existing",
+        "ensure_bound",
+        "validate_namespace_activation",
+        "ensure_namespace_activated",
+    )
+    for descriptor in (vars(AuthorityRootSelectionBinding)[name],)
+)
 _CANONICAL_RLOCK_FACTORY: Final = RLock
 _CANONICAL_WORKSPACE_ECONOMIC_LOCK_TYPE: Final = WorkspaceEconomicLock
 _CANONICAL_MONOTONIC_AUTHORITY_INIT: Final = MonotonicWorkspaceAuthority.__init__
@@ -1169,6 +1199,70 @@ class DeploymentRuntimeAuthorityStore:
                 "runtime authority binding integrity mismatch"
             )
         workspace_binding = authority.workspace_binding
+        root_selection = authority.authority_root_selection
+        if (
+            type(workspace_binding) is not _CANONICAL_WORKSPACE_IDENTITY_BINDING_TYPE
+            or type(root_selection)
+            is not _CANONICAL_AUTHORITY_ROOT_SELECTION_BINDING_TYPE
+        ):
+            raise DeploymentRuntimeAuthorityError(
+                "runtime authority nested binding type mismatch"
+            )
+        for binding_type, surface in (
+            (
+                _CANONICAL_WORKSPACE_IDENTITY_BINDING_TYPE,
+                _CANONICAL_WORKSPACE_BINDING_SURFACE,
+            ),
+            (
+                _CANONICAL_AUTHORITY_ROOT_SELECTION_BINDING_TYPE,
+                _CANONICAL_ROOT_SELECTION_SURFACE,
+            ),
+        ):
+            class_dict = vars(binding_type)
+            for name, expected_descriptor, expected_code in surface:
+                current = class_dict.get(name)
+                if (
+                    current is not expected_descriptor
+                    or (
+                        expected_code is not None
+                        and getattr(current, "__code__", None) is not expected_code
+                    )
+                ):
+                    raise DeploymentRuntimeAuthorityError(
+                        "runtime authority nested binding dispatch was replaced"
+                    )
+
+        namespace_material = "\0".join(
+            (
+                _CANONICAL_MONOTONIC_AUTHORITY_ID,
+                authority.workspace_instance_id,
+                authority.domain,
+                authority.key,
+            )
+        ).encode("utf-8")
+        expected_namespace_sha256 = _CANONICAL_HASHLIB_SHA256(
+            namespace_material
+        ).hexdigest()
+        expected_journal_dir = (
+            authority.authority_root
+            / "journals"
+            / expected_namespace_sha256[:2]
+            / expected_namespace_sha256
+        )
+        expected_records_dir = expected_journal_dir / "records"
+        expected_namespace_marker_path = (
+            authority.authority_root
+            / "namespace-bindings"
+            / expected_namespace_sha256[:2]
+            / f"{expected_namespace_sha256}.json"
+        )
+        expected_activation_path = (
+            root_selection.context.store_root
+            / "namespace-activations"
+            / expected_namespace_sha256[:2]
+            / f"{expected_namespace_sha256}.json"
+        )
+
         if (
             path.parent != workspace
             or authority.workspace != workspace
@@ -1180,6 +1274,17 @@ class DeploymentRuntimeAuthorityStore:
             or workspace_binding.authority_root != authority.authority_root
             or authority.workspace_binding_path
             != workspace_binding.workspace_marker_path
+            or root_selection.workspace != workspace
+            or root_selection.workspace_instance_id
+            != authority.workspace_instance_id
+            or root_selection.authority_root != authority.authority_root
+            or authority.authority_root_binding_path
+            != root_selection.context.binding_path
+            or authority.namespace_sha256 != expected_namespace_sha256
+            or authority.journal_dir != expected_journal_dir
+            or authority.records_dir != expected_records_dir
+            or authority.namespace_marker_path != expected_namespace_marker_path
+            or authority.authority_root_activation_path != expected_activation_path
         ):
             raise DeploymentRuntimeAuthorityError(
                 "runtime authority binding integrity mismatch"

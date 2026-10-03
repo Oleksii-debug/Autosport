@@ -275,6 +275,38 @@ def test_staging_copied_payload_does_not_restore_product_provenance(monkeypatch)
     assert restored.to_json() == before
 
 
+def test_latest_evidence_query_keeps_newer_successor_authoritative(monkeypatch):
+    first, _ = _betdaq_authenticated_issuance(monkeypatch)
+    journal = CapabilityEvidenceJournal()
+    journal.publish(first.evidence)
+    fresh, _ = _betdaq_authenticated_issuance(
+        monkeypatch,
+        observed_minute=5,
+        predecessor_id=first.evidence.evidence_id,
+    )
+    journal.publish(fresh.evidence)
+
+    assert journal.latest_evidence_id_for(first.evidence) == fresh.evidence.evidence_id
+    assert journal.latest_evidence_id_for(fresh.evidence) == fresh.evidence.evidence_id
+
+
+def test_staged_historical_exact_object_does_not_displace_newer_successor(monkeypatch):
+    first, _ = _betdaq_authenticated_issuance(monkeypatch)
+    journal = CapabilityEvidenceJournal()
+    journal.publish(first.evidence)
+    fresh, _ = _betdaq_authenticated_issuance(
+        monkeypatch,
+        observed_minute=5,
+        predecessor_id=first.evidence.evidence_id,
+    )
+    journal.publish(fresh.evidence)
+
+    staged = journal.staged_with_exact_evidence(first.evidence)
+
+    assert staged.latest_evidence_id_for(first.evidence) == fresh.evidence.evidence_id
+    assert journal.latest_evidence_id_for(first.evidence) == fresh.evidence.evidence_id
+
+
 def test_betdaq_issuer_rejects_noncanonical_client_before_provider_io(monkeypatch):
     canonical, calls = _canonical_betdaq_balance_client(monkeypatch)
 

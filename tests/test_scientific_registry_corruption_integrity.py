@@ -487,7 +487,7 @@ def test_transplant_rejects_monotonic_constructor_code_replacement(tmp_path):
     try:
         with pytest.raises(
             RuntimeError,
-            match="ScientificRegistry monotonic read/recovery dispatch changed",
+            match="ScientificRegistry monotonic authority constructor changed",
         ):
             ScientificRegistry(target_path)
     finally:
@@ -543,7 +543,7 @@ def test_transplant_rejects_monotonic_new_insertion(
     )
     with pytest.raises(
         RuntimeError,
-        match="ScientificRegistry monotonic read/recovery dispatch changed",
+        match="ScientificRegistry monotonic authority constructor changed",
     ):
         ScientificRegistry(target_path)
 

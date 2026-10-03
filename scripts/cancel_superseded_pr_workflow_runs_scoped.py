@@ -611,7 +611,11 @@ class WorkflowScopedGitHubApi(GitHubApi):
                             isinstance(raw_branch, str)
                             and raw_branch
                             and isinstance(head_repository, dict)
-                            and head_repository.get("full_name") == self._repository
+                            and head_repository.get("full_name")
+                            == object.__getattribute__(
+                                self,
+                                "_GitHubApi__repository",
+                            )
                         ):
                             head_branch = raw_branch
                     candidate = (run.head_sha, head_branch)
@@ -886,7 +890,10 @@ def _build_live_pr_qualification_reader(
             raise CancellationError("live PR qualification dispatch changed")
         if type(pr_number) is not int or pr_number <= 0:
             raise CancellationError("invalid pull request number")
-        repository = api._repository
+        repository = object.__getattribute__(
+            api,
+            "_GitHubApi__repository",
+        )
         # This read is cancellation authority. Avoid the nested dynamic
         # live_pr_qualification -> self._pull_request -> self._request path:
         # a transient nested shadow could restore canonical dispatch before the outer
@@ -894,7 +901,10 @@ def _build_live_pr_qualification_reader(
         payload = request_impl(api, f"/pulls/{pr_number}")
         if not production_dispatch_current():
             raise CancellationError("live PR qualification dispatch changed")
-        if api._repository != repository:
+        if (
+            object.__getattribute__(api, "_GitHubApi__repository")
+            != repository
+        ):
             raise CancellationError("GitHub API repository binding changed")
         if not isinstance(payload, dict):
             raise CancellationError("invalid pull request response")

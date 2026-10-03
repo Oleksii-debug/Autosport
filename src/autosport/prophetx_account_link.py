@@ -219,7 +219,12 @@ class AccountLinkSurfaceContract:
         ("access_key", "Access key"),
         ("secret_key", "Secret key"),
     )
-    masked_fields: tuple[str, ...] = ("password", "secret_key")
+    masked_fields: tuple[str, ...] = (
+        "password",
+        "verification_code",
+        "access_key",
+        "secret_key",
+    )
 
 
 @dataclass(frozen=True, slots=True)

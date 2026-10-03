@@ -269,12 +269,12 @@ def test_equal_caller_copy_cannot_mint_provider_evidence_authority() -> None:
     )
 
     assert isinstance(evidence, VerifiedProviderEffectEvidence)
-    assert_verified_provider_evidence_authoritative(evidence)
-
     forged = replace(evidence)
     assert forged == evidence
-    with pytest.raises(ProviderEvidenceError, match="origin authority"):
-        assert_verified_provider_evidence_authoritative(forged)
+
+    for candidate in (evidence, forged):
+        with pytest.raises(ProviderEvidenceError, match="origin authority"):
+            assert_verified_provider_evidence_authoritative(candidate)
 
 
 def test_reachable_closure_dict_injection_cannot_mint_provider_authority() -> None:
@@ -328,9 +328,9 @@ def test_reachable_closure_dict_injection_cannot_mint_provider_authority() -> No
                     else:
                         candidate.pop(key, None)
 
-    # Old registry-backed authority necessarily exposed at least one such map after
-    # issuing the legitimate evidence; the repaired origin-reverification path may
-    # expose none. Either way the caller-created equal object is never authoritative.
+    # Semantic evidence never enters the product issuance path.  Even if an old
+    # registry-shaped closure were reachable, caller insertion cannot promote the
+    # structural/economic result into product authority.
     with pytest.raises(ProviderEvidenceError):
         provider_evidence.assert_verified_provider_evidence_authoritative(forged)
     assert attacked == 0

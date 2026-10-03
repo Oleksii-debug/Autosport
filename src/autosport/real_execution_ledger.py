@@ -1464,7 +1464,8 @@ class RealExecutionLedger:
     @classmethod
     def _validate_semantics(cls, events: list[dict[str, Any]]) -> None:
         plan_ids: set[str] = set()
-        for event in events:
+        plan_reservation_index: dict[str, int] = {}
+        for event_index, event in enumerate(events):
             if event["event_type"] != EventType.PLAN_RESERVED.value:
                 continue
             if set(event["payload"]) != {"plan_fingerprint", "plan"}:
@@ -1485,20 +1486,26 @@ class RealExecutionLedger:
                     "stored plan fingerprint mismatch"
                 )
             plan_ids.add(plan.plan_id)
+            plan_reservation_index.setdefault(plan.plan_id, event_index)
 
         supervised_issuance: dict[str, tuple[str, str]] = {}
-        for event in events:
+        for event_index, event in enumerate(events):
             if event["event_type"] != EventType.SUPERVISED_PLAN_ISSUED.value:
                 continue
             if event["action_id"] is not None or event["attempt_id"] is not None:
                 raise ExecutionLedgerIntegrityError(
                     "supervised plan issuance cannot claim action/attempt identity"
                 )
-            plan_event = cls._plan_event(events, event["plan_id"])
-            if plan_event is None:
+            reservation_index = plan_reservation_index.get(event["plan_id"])
+            if reservation_index is None:
                 raise ExecutionLedgerIntegrityError(
                     "supervised plan issuance references missing plan"
                 )
+            if reservation_index >= event_index:
+                raise ExecutionLedgerIntegrityError(
+                    "supervised plan issuance precedes plan reservation"
+                )
+            plan_event = cls._plan_event(events, event["plan_id"])
             payload = event["payload"]
             if set(payload) != {"bound_plan_witness", "plan_fingerprint"}:
                 raise ExecutionLedgerIntegrityError(

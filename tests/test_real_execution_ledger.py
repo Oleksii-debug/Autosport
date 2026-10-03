@@ -2396,6 +2396,41 @@ class RealExecutionLedgerTests(unittest.TestCase):
 
 
 
+    def test_supervised_plan_issuance_cannot_precede_plan_reservation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = RealExecutionLedger(Path(tmp) / "real.jsonl")
+            witness = "a" * 64
+            current = plan(
+                action(),
+                plan_id=f"supervised-v2-{witness}",
+            )
+            ledger.reserve_plan(current)
+            ledger._bind_supervised_plan_issuance(
+                plan_id=current.plan_id,
+                bound_plan_witness=witness,
+                plan_fingerprint=current.fingerprint,
+            )
+
+            events = ledger._events()
+            self.assertEqual(len(events), 2)
+            issuance = next(
+                event
+                for event in events
+                if event["event_type"] == EventType.SUPERVISED_PLAN_ISSUED.value
+            )
+            reservation = next(
+                event
+                for event in events
+                if event["event_type"] == EventType.PLAN_RESERVED.value
+            )
+
+            with self.assertRaisesRegex(
+                ExecutionLedgerIntegrityError,
+                "precedes plan reservation",
+            ):
+                RealExecutionLedger._validate_semantics([issuance, reservation])
+
+
     def test_supervised_plan_issuance_is_idempotent_and_survives_restart(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "real.jsonl"

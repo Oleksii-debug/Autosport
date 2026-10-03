@@ -388,6 +388,75 @@ def test_workflow_wide_sweep_never_cancels_multi_reference_run_via_singleton_pr(
     assert api.reads == [401, 401]
 
 
+@pytest.mark.parametrize(
+    "observations",
+    [
+        (
+            _run(49, "8" * 40, (401,)),
+            _run(49, "8" * 40, (401, 402)),
+        ),
+        (
+            _run(49, "8" * 40, (401,)),
+            _run(49, "8" * 40, (402,)),
+        ),
+        (
+            _run(49, "8" * 40, ()),
+            _run(49, "8" * 40, (401,)),
+        ),
+        (
+            _run(49, "8" * 40, (401,)),
+            _run(49, "9" * 40, (401,)),
+        ),
+    ],
+)
+def test_conflicting_same_run_observations_never_authorize_sweep_cancel(
+    observations: tuple[WorkflowRun, WorkflowRun],
+) -> None:
+    one = PullRequestQualification(
+        head_sha="7" * 40,
+        integration_capable=True,
+    )
+    two = PullRequestQualification(
+        head_sha="6" * 40,
+        integration_capable=True,
+    )
+    api = SweepApi(
+        observations,
+        {
+            401: [one, one],
+            402: [two, two],
+        },
+    )
+
+    assert cancel_superseded_explicit_pr_runs(
+        api,  # type: ignore[arg-type]
+        workflow_name="CI",
+        current_run_id=99,
+    ) == ()
+    assert api.cancelled == []
+
+
+def test_consistent_duplicate_run_observations_authorize_only_one_cancel() -> None:
+    qualification = PullRequestQualification(
+        head_sha="7" * 40,
+        integration_capable=True,
+    )
+    api = SweepApi(
+        (
+            _run(49, "8" * 40, (401,)),
+            _run(49, "8" * 40, (401,)),
+        ),
+        {401: [qualification, qualification]},
+    )
+
+    assert cancel_superseded_explicit_pr_runs(
+        api,  # type: ignore[arg-type]
+        workflow_name="CI",
+        current_run_id=99,
+    ) == (49,)
+    assert api.cancelled == [49]
+
+
 def test_one_pr_authority_move_does_not_block_other_pr_group() -> None:
     one_initial = PullRequestQualification(
         head_sha="7" * 40,

@@ -651,11 +651,28 @@ def cancel_superseded_explicit_pr_runs(
         not isinstance(run, WorkflowRun) for run in runs
     ):
         raise CancellationError("invalid exact-workflow active-run snapshot")
-    explicit_singleton_runs = tuple(
-        run
-        for run in runs
-        if run.workflow_name == workflow_name and len(run.pr_numbers) == 1
-    )
+    observations_by_run_id: dict[int, list[WorkflowRun]] = {}
+    for run in runs:
+        if run.workflow_name == workflow_name:
+            observations_by_run_id.setdefault(run.run_id, []).append(run)
+
+    # One moving Actions scan can observe the same run id more than once as its
+    # status/metadata changes between requests. Never let an older singleton view
+    # authorize cancellation when any observation of that exact run disagrees on
+    # head or PR identity. A later controller can clean it once identity is stable.
+    stable_singletons: list[WorkflowRun] = []
+    for observations in observations_by_run_id.values():
+        first = observations[0]
+        if len(first.pr_numbers) != 1:
+            continue
+        if any(
+            observation.head_sha != first.head_sha
+            or observation.pr_numbers != first.pr_numbers
+            for observation in observations[1:]
+        ):
+            continue
+        stable_singletons.append(first)
+    explicit_singleton_runs = tuple(stable_singletons)
     pr_numbers = sorted(
         {
             run.pr_numbers[0]

@@ -803,18 +803,71 @@ def redact_operator_value(
     return redact(value, depth=0)
 
 
+def _safe_exception_scalar_text(value: object) -> str | None:
+    """Render only exact inert scalar arguments without dynamic dispatch."""
+
+    if type(value) is str:
+        return str.__str__(value)
+    if type(value) is bytes:
+        return bytes.__repr__(value)
+    if type(value) is bool:
+        return "True" if value else "False"
+    if type(value) is int:
+        return int.__str__(value)
+    if type(value) is float:
+        return float.__str__(value)
+    if type(value) is complex:
+        return complex.__str__(value)
+    if value is None:
+        return "None"
+    return None
+
+
+def _safe_exception_args_detail(
+    exc: BaseException,
+    *,
+    unavailable_detail: str,
+) -> str:
+    """Render canonical BaseException args without caller-defined methods."""
+
+    try:
+        args = BaseException.args.__get__(exc, BaseException)
+    except BaseException:
+        return unavailable_detail
+    if type(args) is not tuple:
+        return unavailable_detail
+    if not args:
+        return ""
+
+    rendered = tuple(_safe_exception_scalar_text(value) for value in args)
+    if any(value is None for value in rendered):
+        return unavailable_detail
+    if len(rendered) == 1:
+        return rendered[0]
+
+    pieces = []
+    for original, rendered_value in zip(args, rendered):
+        if type(original) is str:
+            pieces.append(str.__repr__(original))
+        else:
+            pieces.append(rendered_value)
+    return "(" + ", ".join(pieces) + ")"
+
+
 def safe_exception_detail(
     exc: BaseException,
     *,
     unavailable_detail: str = "exception details unavailable",
     extra_secret_values: Iterable[str] = (),
 ) -> str:
-    """Render and redact exception detail without trusting hostile __str__ output."""
+    """Render exception detail without executing caller-controlled renderers."""
 
-    try:
-        detail = str.__str__(str(exc))
-    except BaseException:
-        detail = unavailable_detail
+    if not isinstance(exc, BaseException):
+        raise TypeError("exc must be BaseException")
+    detail = _safe_exception_args_detail(
+        exc,
+        unavailable_detail=str.__str__(unavailable_detail),
+    )
     return redact_operator_text(
         detail,
         extra_secret_values=extra_secret_values,

@@ -975,6 +975,94 @@ def test_store_load_rejects_json_reader_rebind_before_dispatch(
         store.load(snapshot.evidence_sha256)
     assert hostile_calls == []
 
+def test_store_load_rejects_nested_json_decoder_dispatch_rebind(
+    tmp_path,
+    monkeypatch,
+):
+    snapshot = _capture(monkeypatch)
+    store = _store(tmp_path)
+    store.save(snapshot)
+    hostile_calls: list[str] = []
+    json_module = authority_module.strict_json_loads.__globals__["json"]
+
+    def hostile_loads(*_args, **_kwargs):
+        hostile_calls.append("json.loads")
+        raise AssertionError("hostile nested JSON decoder executed")
+
+    monkeypatch.setattr(json_module, "loads", hostile_loads)
+
+    with pytest.raises(
+        ProviderObservationIntegrityError,
+        match="provider evidence store dependency module dispatch changed",
+    ):
+        store.load(snapshot.evidence_sha256)
+
+    assert hostile_calls == []
+
+
+def test_store_save_rejects_monotonic_authority_dependency_global_rebind(
+    tmp_path,
+    monkeypatch,
+):
+    snapshot = _capture(monkeypatch)
+    store = _store(tmp_path)
+    prepare = authority_module.MonotonicWorkspaceAuthority.prepare
+    dependency_name = next(
+        name
+        for name in prepare.__code__.co_names
+        if (
+            name in prepare.__globals__
+            and getattr(prepare.__globals__[name], "__code__", None) is not None
+        )
+    )
+    hostile_calls: list[str] = []
+
+    def hostile(*_args, **_kwargs):
+        hostile_calls.append(dependency_name)
+        raise AssertionError("hostile monotonic dependency executed")
+
+    monkeypatch.setitem(prepare.__globals__, dependency_name, hostile)
+
+    with pytest.raises(
+        ProviderObservationIntegrityError,
+        match="provider evidence store dependency globals changed",
+    ):
+        store.save(snapshot)
+
+    assert hostile_calls == []
+
+
+def test_store_save_rejects_workspace_lock_builtin_shadow(
+    tmp_path,
+    monkeypatch,
+):
+    import builtins
+
+    snapshot = _capture(monkeypatch)
+    store = _store(tmp_path)
+    enter = authority_module.WorkspaceEconomicLock.__enter__
+    builtin_name = next(
+        name
+        for name in enter.__code__.co_names
+        if name not in enter.__globals__ and hasattr(builtins, name)
+    )
+    hostile_calls: list[str] = []
+
+    def hostile(*_args, **_kwargs):
+        hostile_calls.append(builtin_name)
+        raise AssertionError("hostile workspace-lock builtin executed")
+
+    monkeypatch.setitem(enter.__globals__, builtin_name, hostile)
+
+    with pytest.raises(
+        ProviderObservationIntegrityError,
+        match="provider evidence store dependency builtin dispatch changed",
+    ):
+        store.save(snapshot)
+
+    assert hostile_calls == []
+
+
 def test_store_save_rejects_surface_reader_rebind_before_hostile_dispatch(
     tmp_path,
     monkeypatch,

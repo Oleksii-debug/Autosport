@@ -92,44 +92,36 @@ def test_arbitrary_module_marker_cannot_promote_official_api(monkeypatch):
     assert result.action is ConfidenceAction.ABSTAIN
 
 
-def test_accept_enum_remains_forward_compatible_but_is_not_currently_mintable():
-    assert ConfidenceAction.ACCEPT.value == "ACCEPT"
-    assert all(
-        assess_source_quality(
-            obs(source_class=source_class, base_confidence=confidence),
-            now=NOW,
-            policy=policy(),
-        ).action is not ConfidenceAction.ACCEPT
-        for source_class in SourceClass
-        for confidence in (Decimal("0"), Decimal("0.49"), Decimal("0.50"), Decimal("0.80"), Decimal("1"))
-    )
-
-
-@pytest.mark.parametrize(
-    "action",
-    [
-        ConfidenceAction.ACCEPT,
+def test_positive_accept_action_is_structurally_absent_from_schema_v1():
+    assert "ACCEPT" not in ConfidenceAction.__members__
+    assert set(ConfidenceAction) == {
         ConfidenceAction.DOWNWEIGHT,
         ConfidenceAction.ABSTAIN,
-    ],
-)
-def test_direct_assessment_construction_is_unavailable(action: ConfidenceAction):
-    with pytest.raises(TypeError, match="issued only by assess_source_quality"):
-        SourceQualityAssessment(
-            action=action,
-            input_confidence=Decimal("0.75"),
-            reasons=("CALLER_MINTED",),
-            corroborated=False,
-        )
+    }
 
 
-def test_direct_assessment_construction_cannot_mint_corroboration():
-    with pytest.raises(TypeError, match="issued only by assess_source_quality"):
+@pytest.mark.parametrize("action", list(ConfidenceAction))
+def test_assessment_is_explicitly_caller_constructible_only_in_nonpositive_states(
+    action: ConfidenceAction,
+):
+    result = SourceQualityAssessment(
+        action=action,
+        input_confidence=Decimal("0.75"),
+        reasons=("DIAGNOSTIC",),
+    )
+    assert result.action is action
+    assert result.input_confidence == Decimal("0.75")
+    assert not hasattr(result, "corroborated")
+    with pytest.raises(AttributeError):
+        object.__setattr__(result, "corroborated", True)
+
+
+def test_assessment_rejects_non_enum_action():
+    with pytest.raises(TypeError, match="exact ConfidenceAction"):
         SourceQualityAssessment(
-            action=ConfidenceAction.DOWNWEIGHT,
-            input_confidence=Decimal("0.75"),
-            reasons=("FORGED_CORROBORATION",),
-            corroborated=True,
+            action="ACCEPT",
+            input_confidence=Decimal("1"),
+            reasons=("FORGED_POSITIVE",),
         )
 
 
@@ -254,11 +246,12 @@ def test_corroboration_never_resolves_official_authority():
 
 def test_caller_declared_corroborators_do_not_mint_positive_truth():
     result = assess_source_quality(obs(corroborator_ids=("peer-1",)), now=NOW, policy=policy())
-    assert result.corroborated is False
+    assert not hasattr(result, "corroborated")
 
 
-def test_no_corroboration_is_false():
-    assert assess_source_quality(obs(), now=NOW, policy=policy()).corroborated is False
+def test_assessment_schema_has_no_positive_corroboration_field():
+    result = assess_source_quality(obs(), now=NOW, policy=policy())
+    assert not hasattr(result, "corroborated")
 
 
 def test_duplicate_corroborators_rejected():
@@ -402,9 +395,9 @@ def test_randomized_fail_closed_invariants_50000_cases():
         )
         result = assess_source_quality(observation, now=NOW, policy=p)
 
-        assert result.action is not ConfidenceAction.ACCEPT
+        assert result.action in {ConfidenceAction.ABSTAIN, ConfidenceAction.DOWNWEIGHT}
         assert result.input_confidence == confidence
-        assert result.corroborated is False
+        assert not hasattr(result, "corroborated")
         assert result == assess_source_quality(observation, now=NOW, policy=p)
 
         hard_invalid = (
@@ -433,7 +426,7 @@ def test_corroboration_identity_never_escalates_action(source_class, confidence)
     corroborated_result = assess_source_quality(corroborated, now=NOW, policy=policy())
     assert corroborated_result.action is plain_result.action
     assert corroborated_result.input_confidence == plain_result.input_confidence
-    assert corroborated_result.corroborated is False
+    assert not hasattr(corroborated_result, "corroborated")
 
 
 def test_exhaustive_fail_closed_truth_matrix():
@@ -457,9 +450,9 @@ def test_exhaustive_fail_closed_truth_matrix():
                                 schema_version=schema_version,
                             )
                             result = assess_source_quality(observation, now=NOW, policy=p)
-                            assert result.action is not ConfidenceAction.ACCEPT
+                            assert result.action in {ConfidenceAction.ABSTAIN, ConfidenceAction.DOWNWEIGHT}
                             assert result.input_confidence == confidence
-                            assert result.corroborated is False
+                            assert not hasattr(result, "corroborated")
 
                             hard_invalid = (
                                 age_seconds < 0

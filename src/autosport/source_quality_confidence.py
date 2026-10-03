@@ -17,7 +17,9 @@ class SourceClass(str, Enum):
 
 
 class ConfidenceAction(str, Enum):
-    ACCEPT = "ACCEPT"
+    # Positive ACCEPT authority is intentionally absent from schema v1. A future
+    # product-owned provider resolver must introduce a separately qualified
+    # positive authority contract instead of reusing this diagnostic enum.
     DOWNWEIGHT = "DOWNWEIGHT"
     ABSTAIN = "ABSTAIN"
 
@@ -26,11 +28,12 @@ class ConfidenceAction(str, Enum):
 class SourceQualityPolicy:
     """Deterministic thresholds for one source-quality assessment boundary.
 
-    ``accept_confidence`` is retained as a forward-compatible policy field.  The
-    current implementation intentionally has no path to ``ACCEPT``: Autosport's
-    canonical bookmaker capability record is caller-constructible and therefore
-    is not, by itself, proof that an observation was issued by authenticated,
-    durable product-owned provider evidence.
+    ``accept_confidence`` is retained as a forward-compatible threshold input
+    for a future, separately qualified positive authority integration. Schema v1
+    has no ACCEPT result state: Autosport's canonical bookmaker capability record
+    is caller-constructible and therefore is not, by itself, proof that an
+    observation was issued by authenticated, durable product-owned provider
+    evidence.
     """
 
     max_age: timedelta
@@ -103,24 +106,27 @@ class SourceQualityObservation:
 
 @dataclass(frozen=True, slots=True)
 class SourceQualityAssessment:
-    """Fail-closed result value without implicit numeric weighting authority.
+    """Caller-constructible diagnostic result with no positive authority state.
 
     ``input_confidence`` preserves the caller/evidence confidence exactly; it is
-    deliberately not named or presented as an already-weighted confidence.  The
-    policy result is ``action``.  ``ACCEPT`` and authority-bearing corroboration
-    remain structurally unavailable until canonical product-owned resolvers are
-    integrated.
+    deliberately not an already-weighted trust score. Schema v1 contains only
+    ABSTAIN and DOWNWEIGHT actions and carries no positive corroboration field.
+    Therefore ordinary construction cannot be confused with provider-origin or
+    ACCEPT authority.
     """
 
     action: ConfidenceAction
     input_confidence: Decimal
     reasons: tuple[str, ...]
-    corroborated: bool
 
-    def __init__(self, *_args: object, **_kwargs: object) -> None:
-        raise TypeError(
-            "SourceQualityAssessment is issued only by assess_source_quality"
-        )
+    def __post_init__(self) -> None:
+        if type(self.action) is not ConfidenceAction:
+            raise TypeError("action must be exact ConfidenceAction")
+        _validate_probability(self.input_confidence, "input_confidence")
+        if type(self.reasons) is not tuple or not self.reasons:
+            raise ValueError("reasons must be a non-empty exact tuple")
+        for reason in self.reasons:
+            _strict_text(reason, "reason")
 
 
 def assess_source_quality(
@@ -131,14 +137,14 @@ def assess_source_quality(
 ) -> SourceQualityAssessment:
     """Assess one observation without allowing caller-minted authority.
 
-    Hard evidence failures always ``ABSTAIN``.  Caller-supplied corroborator IDs
-    are diagnostic identities only and never mint a positive corroboration truth
-    value.  Until authenticated, durable, product-owned provider/corroborator
-    resolvers are wired into this boundary, ``OFFICIAL_API`` also always
-    ``ABSTAIN``: a source-class label is not proof of official issuance.
-    Browser/manual evidence can be used only as bounded ``DOWNWEIGHT`` evidence.
-    The returned numeric field is explicitly the input confidence, not a derived
-    or already-weighted trust score; downstream consumers must respect ``action``.
+    Hard evidence failures always ``ABSTAIN``. Caller-supplied corroborator IDs
+    are diagnostic identities only; schema v1 carries no positive corroboration
+    truth field. Until authenticated, durable, product-owned provider/corroborator
+    resolvers are wired into a separately qualified authority boundary,
+    ``OFFICIAL_API`` also always ``ABSTAIN``: a source-class label is not proof
+    of official issuance. Browser/manual evidence can be used only as bounded
+    ``DOWNWEIGHT`` diagnostics. The returned numeric field is explicitly the
+    input confidence, not a derived or already-weighted trust score.
     """
 
     if not isinstance(observation, SourceQualityObservation):
@@ -164,27 +170,19 @@ def assess_source_quality(
     elif age > policy.max_age:
         reasons.append("STALE_OBSERVATION")
 
-    # Caller-supplied corroborator identities remain useful diagnostic metadata,
-    # but this boundary has no product-owned corroborator authority resolver yet.
-    # Therefore a positive corroboration truth value is structurally unavailable.
-    corroborated = False
+    # Caller-supplied corroborator identities remain diagnostic metadata only.
+    # There is deliberately no positive corroboration field in this schema.
     input_confidence = observation.base_confidence
 
     def _result(
         action: ConfidenceAction,
         result_reasons: tuple[str, ...],
     ) -> SourceQualityAssessment:
-        if action is ConfidenceAction.ACCEPT:
-            raise RuntimeError("ACCEPT is unavailable without canonical provider authority")
-        normalized_reasons = tuple(
-            _strict_text(reason, "reason") for reason in result_reasons
+        return SourceQualityAssessment(
+            action=action,
+            input_confidence=input_confidence,
+            reasons=tuple(_strict_text(reason, "reason") for reason in result_reasons),
         )
-        assessment = object.__new__(SourceQualityAssessment)
-        object.__setattr__(assessment, "action", action)
-        object.__setattr__(assessment, "input_confidence", input_confidence)
-        object.__setattr__(assessment, "reasons", normalized_reasons)
-        object.__setattr__(assessment, "corroborated", corroborated)
-        return assessment
 
     if reasons:
         return _result(ConfidenceAction.ABSTAIN, tuple(reasons))

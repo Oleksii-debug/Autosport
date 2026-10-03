@@ -1010,7 +1010,11 @@ def _current_balance_generation_lock(
 
     _, hold_current = _canonical_account_snapshot_authority()
     required = frozenset({BookmakerCapability.BALANCE_READ})
-    with _current_balance_generation_lock(workspace, acquired):
+    # Lock order is deliberate: serialize the durable economic workspace first,
+    # then hold the exact current BALANCE_READ generation while the caller reads or
+    # commits product-economic state. Calling this context manager recursively here
+    # would never reach either authority boundary.
+    with _canonical_economic_lock(workspace):
         try:
             with hold_current(acquired, required):
                 yield

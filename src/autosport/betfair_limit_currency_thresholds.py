@@ -76,11 +76,11 @@ def _exact_multiply(left: Decimal, right: Decimal) -> Decimal:
 class BetfairCurrencyThresholdState(str, Enum):
     """Truth-bounded result for the represented standard-size LIMIT slice."""
 
-    THRESHOLDS_SATISFIED = "THRESHOLDS_SATISFIED"
-    BELOW_MINIMUM_PAYOUT_EXCEPTION_REQUIRES_JURISDICTION = (
-        "BELOW_MINIMUM_PAYOUT_EXCEPTION_REQUIRES_JURISDICTION"
+    SNAPSHOT_STANDARD_MINIMUM_MET = "SNAPSHOT_STANDARD_MINIMUM_MET"
+    SNAPSHOT_LOWER_PAYOUT_MECHANIC_MET_REQUIRES_JURISDICTION = (
+        "SNAPSHOT_LOWER_PAYOUT_MECHANIC_MET_REQUIRES_JURISDICTION"
     )
-    BELOW_CURRENCY_THRESHOLDS = "BELOW_CURRENCY_THRESHOLDS"
+    SNAPSHOT_BELOW_THRESHOLDS = "SNAPSHOT_BELOW_THRESHOLDS"
     TARGET_SIZING_OUTSIDE_SCOPE = "TARGET_SIZING_OUTSIDE_SCOPE"
     UNSUPPORTED_CURRENCY = "UNSUPPORTED_CURRENCY"
 
@@ -210,14 +210,14 @@ class BetfairCurrencyThresholdAssessment:
             )
 
     @property
-    def currency_thresholds_satisfied(self) -> bool:
-        return self.state is BetfairCurrencyThresholdState.THRESHOLDS_SATISFIED
+    def snapshot_standard_minimum_met(self) -> bool:
+        return self.state is BetfairCurrencyThresholdState.SNAPSHOT_STANDARD_MINIMUM_MET
 
     @property
     def low_stake_exception_candidate(self) -> bool:
         return (
             self.state
-            is BetfairCurrencyThresholdState.BELOW_MINIMUM_PAYOUT_EXCEPTION_REQUIRES_JURISDICTION
+            is BetfairCurrencyThresholdState.SNAPSHOT_LOWER_PAYOUT_MECHANIC_MET_REQUIRES_JURISDICTION
         )
 
     @property
@@ -249,7 +249,7 @@ def evaluate_standard_limit_currency_thresholds(
     size: Decimal | None,
     bet_target_type: str | None = None,
 ) -> BetfairCurrencyThresholdAssessment:
-    """Evaluate only the represented Betfair Currency Parameters threshold slice.
+    """Compare a standard-size LIMIT against the historical threshold snapshot.
 
     ``size`` is Betfair LIMIT's backer's-stake field for both BACK and LAY.
     Target-sized orders use different economics and remain outside this module.
@@ -305,13 +305,13 @@ def evaluate_standard_limit_currency_thresholds(
     gross_payout = _exact_multiply(value_size, value_price)
 
     if value_size >= rules.min_bet_size:
-        state = BetfairCurrencyThresholdState.THRESHOLDS_SATISFIED
+        state = BetfairCurrencyThresholdState.SNAPSHOT_STANDARD_MINIMUM_MET
     elif gross_payout >= rules.min_bet_payout:
         state = (
-            BetfairCurrencyThresholdState.BELOW_MINIMUM_PAYOUT_EXCEPTION_REQUIRES_JURISDICTION
+            BetfairCurrencyThresholdState.SNAPSHOT_LOWER_PAYOUT_MECHANIC_MET_REQUIRES_JURISDICTION
         )
     else:
-        state = BetfairCurrencyThresholdState.BELOW_CURRENCY_THRESHOLDS
+        state = BetfairCurrencyThresholdState.SNAPSHOT_BELOW_THRESHOLDS
 
     return BetfairCurrencyThresholdAssessment(
         state=state,

@@ -26,14 +26,6 @@ from .betdaq_account_readonly import (
 )
 
 _ECONOMIC_SCHEMA = "autosport.betdaq-economic-readback-v1"
-_READ_METHODS = frozenset(
-    {"GetOrderDetails", "ListAccountPostings", "ListAccountPostingsById"}
-)
-_REQUEST_ELEMENT = {
-    "GetOrderDetails": "getOrderDetailsRequest",
-    "ListAccountPostings": "listAccountPostingsRequest",
-    "ListAccountPostingsById": "listAccountPostingsByIdRequest",
-}
 _INTEGER_RE = re.compile(r"[0-9]+\Z")
 _DECIMAL_RE = re.compile(r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)\Z")
 _CANONICAL_ACCOUNT_HTTPS_POST = _account._CANONICAL_HTTPS_POST
@@ -143,7 +135,7 @@ def _canonical_terminal_order_status_codes() -> frozenset[int]:
 def _economic_request_identity(method: str, attributes: dict[str, str]) -> str:
     """Bind an economic claim to the exact provider READ request that produced it."""
 
-    if method not in _READ_METHODS:
+    if method not in ("GetOrderDetails", "ListAccountPostings", "ListAccountPostingsById"):
         raise BetdaqEconomicReadbackError(
             "method is outside economic READ request-identity allowlist"
         )
@@ -183,7 +175,7 @@ class BetdaqEconomicEvidence:
     physical_account_identity_proven: bool = False
 
     def __post_init__(self) -> None:
-        if self.method not in _READ_METHODS:
+        if self.method not in ("GetOrderDetails", "ListAccountPostings", "ListAccountPostingsById"):
             raise BetdaqEconomicReadbackError("economic evidence method is not read-only")
         _sha256_hex(self.request_identity_sha256, "request_identity_sha256")
         _sha256_hex(self.source_payload_sha256, "source_payload_sha256")
@@ -863,7 +855,7 @@ class BetdaqEconomicReadbackClient:
     def _call(
         self, method: str, request_attributes: dict[str, str]
     ) -> tuple[ET.Element, BetdaqEconomicEvidence]:
-        if method not in _READ_METHODS:
+        if method not in ("GetOrderDetails", "ListAccountPostings", "ListAccountPostingsById"):
             raise BetdaqEconomicReadbackError("method is outside economic READ allowlist")
         client = self._account_client
         request_identity = _economic_request_identity(method, request_attributes)
@@ -992,7 +984,16 @@ def _request_xml(
     )
     body = ET.SubElement(envelope, f"{{{_CANONICAL_SOAP11_NS}}}Body")
     method_element = ET.SubElement(body, f"{{{_CANONICAL_EXTERNAL_NS}}}{method}")
-    request_name = _REQUEST_ELEMENT[method]
+    if method == "GetOrderDetails":
+        request_name = "getOrderDetailsRequest"
+    elif method == "ListAccountPostings":
+        request_name = "listAccountPostingsRequest"
+    elif method == "ListAccountPostingsById":
+        request_name = "listAccountPostingsByIdRequest"
+    else:
+        raise BetdaqEconomicReadbackError(
+            "method is outside economic READ request-element allowlist"
+        )
     ET.SubElement(
         method_element,
         f"{{{_CANONICAL_EXTERNAL_NS}}}{request_name}",

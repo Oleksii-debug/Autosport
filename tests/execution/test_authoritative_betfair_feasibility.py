@@ -719,9 +719,7 @@ def test_authoritative_market_book_binds_rest_acquisition_interval() -> None:
     assert acquisition_started_at <= response_received_at
 
 
-def test_authoritative_feasibility_uses_acquisition_start_for_freshness(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_authoritative_feasibility_uses_acquisition_start_for_freshness() -> None:
     receipt, canonical_source = _synthetic_authoritative_receipt(
         MarketBookTransport()
     )
@@ -730,24 +728,7 @@ def test_authoritative_feasibility_uses_acquisition_start_for_freshness(
     )
     response_received_at = datetime.fromisoformat(receipt.evidence.observed_at)
     bound = _bound(datetime.now(timezone.utc))
-    captured: dict[str, object] = {}
-    original_assess = feasibility_module._assess_execution_feasibility
 
-    def capture_request(request, snapshot, limits, *, max_snapshot_age, product_owned):
-        captured["snapshot"] = snapshot
-        return original_assess(
-            request,
-            snapshot,
-            limits,
-            max_snapshot_age=max_snapshot_age,
-            product_owned=product_owned,
-        )
-
-    monkeypatch.setattr(
-        feasibility_module,
-        "_assess_execution_feasibility",
-        capture_request,
-    )
     with tempfile.TemporaryDirectory() as tmp:
         result = assess_authoritative_betfair_execution_feasibility(
             _reserved_ledger(tmp, bound),
@@ -757,11 +738,54 @@ def test_authoritative_feasibility_uses_acquisition_start_for_freshness(
             max_snapshot_age=timedelta(seconds=2),
         )
 
-    snapshot = captured["snapshot"]
-    assert snapshot.observed_at == acquisition_started_at
-    assert snapshot.received_at == response_received_at
-    assert snapshot.observed_at <= snapshot.received_at <= result.decision_at
+    assert result.observed_at == acquisition_started_at
+    assert result.received_at == response_received_at
+    assert result.observed_at <= result.received_at <= result.decision_at
     assert result.state is FeasibilityState.UNKNOWN_UNPROVEN
+
+
+
+def test_assessment_helper_rebind_cannot_mint_authoritative_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    receipt, canonical_source = _synthetic_authoritative_receipt(
+        MarketBookTransport()
+    )
+    bound = _bound(datetime.now(timezone.utc))
+    canonical_assess = feasibility_module._assess_execution_feasibility
+
+    def forged_assess(request, snapshot, limits, *, max_snapshot_age, product_owned):
+        baseline = canonical_assess(
+            request,
+            snapshot,
+            limits,
+            max_snapshot_age=max_snapshot_age,
+            product_owned=product_owned,
+        )
+        return replace(
+            baseline,
+            state=FeasibilityState.SNAPSHOT_DEPTH_SUFFICIENT_BUT_RACY,
+            reasons=(),
+            displayed_acceptable_depth=request.requested_stake,
+        )
+
+    monkeypatch.setattr(
+        feasibility_module,
+        "_assess_execution_feasibility",
+        forged_assess,
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+        with pytest.raises(
+            RuntimeError,
+            match="canonical execution feasibility assessor changed",
+        ):
+            assess_authoritative_betfair_execution_feasibility(
+                _reserved_ledger(tmp, bound),
+                bound,
+                receipt,
+                action_id=ACTION_ID,
+                max_snapshot_age=timedelta(seconds=2),
+            )
 
 
 def test_authoritative_decision_time_is_issued_by_product_clock() -> None:
@@ -824,31 +848,11 @@ def test_expired_action_cannot_be_revived_by_historical_time() -> None:
                 max_snapshot_age=timedelta(seconds=2),
             )
 
-def test_authoritative_path_leaves_market_state_expectations_unbound(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_authoritative_path_leaves_market_state_expectations_unbound() -> None:
     receipt, canonical_source = _synthetic_authoritative_receipt(
         MarketBookTransport()
     )
     bound = _bound(datetime.now(timezone.utc))
-    captured: dict[str, object] = {}
-    original_assess = feasibility_module._assess_execution_feasibility
-
-    def capture_request(request, snapshot, limits, *, max_snapshot_age, product_owned):
-        captured["request"] = request
-        return original_assess(
-            request,
-            snapshot,
-            limits,
-            max_snapshot_age=max_snapshot_age,
-            product_owned=product_owned,
-        )
-
-    monkeypatch.setattr(
-        feasibility_module,
-        "_assess_execution_feasibility",
-        capture_request,
-    )
 
     with tempfile.TemporaryDirectory() as tmp:
         result = assess_authoritative_betfair_execution_feasibility(
@@ -859,10 +863,9 @@ def test_authoritative_path_leaves_market_state_expectations_unbound(
             max_snapshot_age=timedelta(seconds=2),
         )
 
-    request = captured["request"]
-    assert request.expected_market_version is None
-    assert request.expected_inplay is None
-    assert request.expected_bet_delay_seconds is None
+    assert "MARKET_VERSION_MISMATCH" not in result.reasons
+    assert "INPLAY_MISMATCH" not in result.reasons
+    assert "BET_DELAY_MISMATCH" not in result.reasons
     assert result.market_version == receipt.market_version
     assert result.inplay == receipt.inplay
     assert result.bet_delay_seconds == receipt.bet_delay_seconds

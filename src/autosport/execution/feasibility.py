@@ -591,6 +591,9 @@ def _assess_authoritative_betfair_execution_feasibility_unsealed(
 def _install_execution_feasibility_result_authority():
     issued: dict[int, tuple[object, str]] = {}
     raw_assess = _assess_authoritative_betfair_execution_feasibility_unsealed
+    raw_assess_code = raw_assess.__code__
+    canonical_assess = _assess_execution_feasibility
+    canonical_assess_code = canonical_assess.__code__
     fingerprint = _feasibility_result_fingerprint
 
     def assess(
@@ -601,6 +604,14 @@ def _install_execution_feasibility_result_authority():
         action_id: str,
         max_snapshot_age: timedelta,
     ) -> ExecutionFeasibilitySnapshot:
+        if (
+            raw_assess.__code__ is not raw_assess_code
+            or _assess_execution_feasibility is not canonical_assess
+            or canonical_assess.__code__ is not canonical_assess_code
+        ):
+            raise RuntimeError(
+                "canonical execution feasibility assessor changed"
+            )
         result = raw_assess(
             ledger,
             bound,

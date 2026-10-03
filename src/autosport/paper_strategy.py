@@ -43,6 +43,10 @@ _PREDICTIVE_FORECAST_ELIGIBILITY_REASON = (
 _PREDICTIVE_FORECAST_ELIGIBILITY_REASON_CODE = (
     _PREDICTIVE_FORECAST_ELIGIBILITY_REASON.__code__
 )
+_UNCERTAINTY_SIZING_EVALUATOR = evaluate_uncertainty_sizing
+_UNCERTAINTY_SIZING_EVALUATOR_CODE = _UNCERTAINTY_SIZING_EVALUATOR.__code__
+_UNCERTAINTY_SIZING_DECISION_TYPE = UncertaintySizingDecision
+_UNCERTAINTY_SIZING_ELIGIBLE = SizingAction.ELIGIBLE
 
 
 class PaperDecisionReconciliationRequired(RuntimeError):
@@ -352,6 +356,16 @@ class PaperValueAgent:
             )
             return None
 
+        evaluator = _UNCERTAINTY_SIZING_EVALUATOR
+        if (
+            evaluate_uncertainty_sizing is not evaluator
+            or evaluator.__code__ is not _UNCERTAINTY_SIZING_EVALUATOR_CODE
+        ):
+            context.notes.append(
+                "paper-value material action withheld: canonical uncertainty sizing "
+                "evaluator integrity changed"
+            )
+            return None
         try:
             request = UncertaintySizingRequest(
                 candidate_id=forecast.forecast_id,
@@ -361,7 +375,7 @@ class PaperValueAgent:
                 currency=goal.currency,
                 bankroll=sizing_bankroll,
             )
-            decision = evaluate_uncertainty_sizing(
+            decision = evaluator(
                 evidence,
                 request,
                 policy,
@@ -372,8 +386,18 @@ class PaperValueAgent:
                 "could not be evaluated"
             )
             return None
+        if (
+            evaluate_uncertainty_sizing is not evaluator
+            or evaluator.__code__ is not _UNCERTAINTY_SIZING_EVALUATOR_CODE
+            or type(decision) is not _UNCERTAINTY_SIZING_DECISION_TYPE
+        ):
+            context.notes.append(
+                "paper-value material action withheld: canonical uncertainty sizing "
+                "evaluator integrity changed"
+            )
+            return None
 
-        if decision.action is not SizingAction.ELIGIBLE:
+        if decision.action is not _UNCERTAINTY_SIZING_ELIGIBLE:
             reason = ",".join(decision.reasons) if decision.reasons else "abstain"
             context.notes.append(
                 "paper-value material action withheld: canonical uncertainty sizing "
@@ -691,7 +715,7 @@ class PaperValueAgent:
             )
             sizing_eligible = (
                 sizing_decision is not None
-                and sizing_decision.action is SizingAction.ELIGIBLE
+                and sizing_decision.action is _UNCERTAINTY_SIZING_ELIGIBLE
                 and sizing_decision.conservative_ev_per_stake >= self.minimum_edge
             )
             if not sizing_eligible:

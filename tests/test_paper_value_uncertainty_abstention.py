@@ -8,6 +8,7 @@ from decimal import Decimal
 from pathlib import Path
 
 from autosport.agents import AgentContext
+import autosport.paper_strategy as paper_strategy_module
 from autosport.decision_ledger import JsonlDecisionLedger
 from autosport.domain import MarketEvent
 from autosport.economic_goal import EconomicGoalContract
@@ -735,6 +736,50 @@ class PaperValueUncertaintyAbstentionTests(unittest.TestCase):
             self.assertEqual(
                 Decimal(records[0].payload["requested_stake"]),
                 decision.stake_ceiling,
+            )
+
+    def test_uncertainty_sizing_evaluator_rebinding_fails_closed(self) -> None:
+        goal = self._goal()
+        event = self._event()
+        forecast = self._forecast(event, uncertainty=Decimal("0.01"))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            authorized_ref = self._resolver_authorized_ref(root, event, forecast)
+            evidence = self._sizing_evidence(event, forecast)
+            policy = self._sizing_policy()
+            forged_decision = self._sizing_decision(
+                goal,
+                event,
+                forecast,
+                evidence,
+                policy,
+            )
+            self.assertEqual(forged_decision.action, SizingAction.ELIGIBLE)
+            context, ledger_path = self._context(root, event)
+
+            original = paper_strategy_module.evaluate_uncertainty_sizing
+            try:
+                paper_strategy_module.evaluate_uncertainty_sizing = (
+                    lambda evidence, request, policy: forged_decision
+                )
+                self._agent(
+                    goal,
+                    forecast,
+                    predictive_ref=authorized_ref,
+                    sizing_evidence=evidence,
+                    sizing_policy=policy,
+                ).on_market_event(event, context)
+            finally:
+                paper_strategy_module.evaluate_uncertainty_sizing = original
+
+            self.assertEqual(context.paper_book.tickets, {})
+            self.assertFalse(ledger_path.exists())
+            self.assertTrue(
+                any(
+                    "uncertainty sizing evaluator integrity changed" in note
+                    for note in context.notes
+                )
             )
 
     def test_predictive_verifier_rebinding_cannot_authorize_self_attested_ref(

@@ -489,6 +489,56 @@ def test_missing_due_slot_cannot_disappear_from_acquisition_denominator() -> Non
                 expected_end_slot_ordinal=1,
             )
 
+def test_scheduled_resolver_alias_rebinding_cannot_mint_complete_coverage(
+    monkeypatch,
+) -> None:
+    with TemporaryDirectory() as tmp:
+        path = Path(tmp) / "collector.db"
+        store = CollectorDeltaStore(path)
+        _ensure_schedule(store)
+        cycle = _start_slot(store, 0)
+        _finish(
+            store,
+            cycle,
+            completed_at="2026-09-22T00:00:05+00:00",
+        )
+        source = build_source_universe_commitment(
+            store,
+            expected_store_path=path,
+            source_id=SOURCE_ID,
+            start_cycle_seq=cycle,
+            end_cycle_seq=cycle,
+        )
+        hostile_calls: list[object] = []
+
+        def hostile_resolver(*args, **kwargs):
+            hostile_calls.append((args, kwargs))
+            raise AssertionError("hostile scheduled resolver must not execute")
+
+        monkeypatch.setattr(
+            acquisition_denominator_evidence,
+            "resolve_scheduled_source_universe",
+            hostile_resolver,
+        )
+
+        with pytest.raises(
+            AcquisitionDenominatorEvidenceError,
+            match="scheduled source-universe resolver is rebound",
+        ):
+            build_acquisition_denominator_evidence(
+                store,
+                source,
+                _universe(),
+                expected_store_path=path,
+                expected_source_id=SOURCE_ID,
+                expected_run_id=RUN_ID,
+                expected_start_slot_ordinal=0,
+                expected_end_slot_ordinal=0,
+            )
+
+        assert hostile_calls == []
+
+
 def test_internal_issue_constructor_cannot_mint_positive_authority() -> None:
     with TemporaryDirectory() as tmp:
         path = Path(tmp) / "collector.db"

@@ -2008,6 +2008,12 @@ def assess_provider_account_headroom(
     _digest_authority_code=getattr(_assert_headroom_digest_authority, "__code__", None),
     _generation_lock=_current_balance_generation_lock,
     _generation_lock_code=getattr(_current_balance_generation_lock, "__code__", None),
+    _generation_lock_wrapped=getattr(_current_balance_generation_lock, "__wrapped__", None),
+    _generation_lock_wrapped_code=getattr(
+        getattr(_current_balance_generation_lock, "__wrapped__", None),
+        "__code__",
+        None,
+    ),
 ) -> ProviderAccountHeadroomAssessment:
     """Issue conservative capital-axis evidence from exact canonical truth."""
     if type(ledger) is not RealExecutionLedger:
@@ -2020,6 +2026,9 @@ def assess_provider_account_headroom(
     if (
         globals().get("_current_balance_generation_lock") is not _generation_lock
         or getattr(_generation_lock, "__code__", None) is not _generation_lock_code
+        or getattr(_generation_lock, "__wrapped__", None) is not _generation_lock_wrapped
+        or getattr(_generation_lock_wrapped, "__code__", None)
+        is not _generation_lock_wrapped_code
     ):
         raise ProviderAccountHeadroomError(
             "current balance generation lock authority changed"
@@ -2198,6 +2207,12 @@ def reserve_observed_provider_headroom(
     _digest_authority_code=getattr(_assert_headroom_digest_authority, "__code__", None),
     _generation_lock=_current_balance_generation_lock,
     _generation_lock_code=getattr(_current_balance_generation_lock, "__code__", None),
+    _generation_lock_wrapped=getattr(_current_balance_generation_lock, "__wrapped__", None),
+    _generation_lock_wrapped_code=getattr(
+        getattr(_current_balance_generation_lock, "__wrapped__", None),
+        "__code__",
+        None,
+    ),
 ) -> ProductInternalHeadroomReservation:
     """Atomically consume product-internal headroom against exact ledger bytes.
 
@@ -2214,6 +2229,9 @@ def reserve_observed_provider_headroom(
     if (
         globals().get("_current_balance_generation_lock") is not _generation_lock
         or getattr(_generation_lock, "__code__", None) is not _generation_lock_code
+        or getattr(_generation_lock, "__wrapped__", None) is not _generation_lock_wrapped
+        or getattr(_generation_lock_wrapped, "__code__", None)
+        is not _generation_lock_wrapped_code
     ):
         raise ProviderAccountHeadroomError(
             "current balance generation lock authority changed"

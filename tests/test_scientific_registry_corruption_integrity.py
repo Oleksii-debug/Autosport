@@ -471,12 +471,14 @@ def test_transplant_rejects_monotonic_constructor_code_replacement(tmp_path):
     target = MonotonicWorkspaceAuthority.__init__
     original_code = target.__code__
 
-    def hostile_init(self: object, *args: object, **kwargs: object) -> None:
-        del self, args, kwargs
-        raise AssertionError("hostile monotonic constructor executed")
-
-    assert hostile_init.__code__.co_freevars == original_code.co_freevars
-    target.__code__ = hostile_init.__code__
+    # The canonical product constructor is a closure-backed root-selection guard.
+    # Replace only its code-object identity while preserving the exact free-variable
+    # layout so the mutation itself is valid on every supported Python version.
+    mutated_code = original_code.replace(
+        co_firstlineno=original_code.co_firstlineno + 1
+    )
+    assert mutated_code.co_freevars == original_code.co_freevars
+    target.__code__ = mutated_code
     try:
         with pytest.raises(
             RuntimeError,

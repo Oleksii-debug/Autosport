@@ -15,6 +15,18 @@ from .monotonic_workspace_authority import (
     MonotonicWorkspaceAuthority,
 )
 
+# ScientificRegistry shares the product's monotonic machine authority. Compose the
+# canonical root-selection guards before freezing constructor identity below:
+# package __init__ normally installs these later, after ScientificRegistry imports
+# integrity, which would otherwise make the legitimate sealed constructor look like
+# hostile post-capture drift.
+from . import (  # noqa: E402,F401
+    _monotonic_root_selection_os_resolver_guard as _monotonic_root_selection_os_resolver_guard,
+)
+from . import (  # noqa: E402,F401
+    _monotonic_root_selection_dispatch_guard as _monotonic_root_selection_dispatch_guard,
+)
+
 if os.name == "nt":
     import msvcrt
 else:

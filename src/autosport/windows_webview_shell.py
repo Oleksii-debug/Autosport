@@ -605,6 +605,16 @@ class AutosportWebController:
             self.owner_lines = [self.owner_summary]
             self.owner_can_initialize = False
             return
+        if workspace in self._recovery_required_workspaces:
+            self._owner_review = None
+            self.owner_review_lines = []
+            self.owner_state = "blocked"
+            self.owner_summary = text(
+                "ui.windows.owner_authority.error.recovery_required"
+            )
+            self.owner_lines = [self.owner_summary]
+            self.owner_can_initialize = False
+            return
         view = OwnerEconomicAuthorityService(workspace).read_view()
         self.owner_state = view.state
         self.owner_summary = view.summary_uk
@@ -1220,11 +1230,18 @@ class AutosportWebController:
         return self._ok("")
 
     def _action_owner_preview(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        self._poll_workers()
         if self._busy():
             return self._fail(text("ui.windows.owner_authority.error.busy"))
         workspace = self._owner_workspace()
         if workspace is None:
             return self._fail(text("ui.windows.owner_authority.error.strategy_blocked"))
+        if workspace in self._recovery_required_workspaces:
+            self._owner_review = None
+            self.owner_review_lines = []
+            return self._fail(
+                text("ui.windows.owner_authority.error.recovery_required")
+            )
         values = payload.get("values")
         emergency_stop = payload.get("emergency_stop")
         if not isinstance(values, dict) or type(emergency_stop) is not bool:
@@ -1243,12 +1260,19 @@ class AutosportWebController:
         return self._ok(text("ui.windows.owner_authority.review.prompt"), focus_id="owner-review")
 
     def _action_owner_initialize(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        self._poll_workers()
         if self._busy():
             return self._fail(text("ui.windows.owner_authority.error.busy"))
         confirmed = payload.get("confirmed")
         values = payload.get("values")
         emergency_stop = payload.get("emergency_stop")
         workspace = self._owner_workspace()
+        if workspace is not None and workspace in self._recovery_required_workspaces:
+            self._owner_review = None
+            self.owner_review_lines = []
+            return self._fail(
+                text("ui.windows.owner_authority.error.recovery_required")
+            )
         review_pair = self._owner_review
         if (
             confirmed is not True

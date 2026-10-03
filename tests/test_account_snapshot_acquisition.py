@@ -480,6 +480,186 @@ def test_current_generation_guard_serializes_new_publication(
             raise AssertionError("post-refresh old generation must remain stale")
 
 
+def test_durable_current_generation_advances_for_each_new_balance_read(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    database = tmp_path / "durable-generation.sqlite3"
+    _install_transport(monkeypatch, [_DEVELOPER_APPS, _DETAILS, _FUNDS])
+    first = BetfairAccountSnapshotAcquirer(database, _credentials()).acquire(
+        _balance_capabilities(),
+        acquisition_id="durable-generation-1",
+    )
+
+    with sqlite3.connect(database) as connection:
+        row = connection.execute(
+            """
+            SELECT acquisition_id, generation
+            FROM account_snapshot_current_capability_generation
+            WHERE venue_id = ?
+              AND account_id = ?
+              AND authenticated_account_identity_sha256 = ?
+              AND capability = ?
+            """,
+            (
+                first.receipt.venue_id,
+                first.receipt.account_id,
+                first.receipt.authenticated_account_identity_sha256,
+                BookmakerCapability.BALANCE_READ.value,
+            ),
+        ).fetchone()
+    assert row == (first.receipt.acquisition_id, 1)
+
+    _install_transport(monkeypatch, [_DEVELOPER_APPS, _DETAILS, _FUNDS])
+    second = BetfairAccountSnapshotAcquirer(database, _credentials()).acquire(
+        _balance_capabilities(),
+        acquisition_id="durable-generation-2",
+    )
+    with sqlite3.connect(database) as connection:
+        row = connection.execute(
+            """
+            SELECT acquisition_id, generation
+            FROM account_snapshot_current_capability_generation
+            WHERE venue_id = ?
+              AND account_id = ?
+              AND authenticated_account_identity_sha256 = ?
+              AND capability = ?
+            """,
+            (
+                second.receipt.venue_id,
+                second.receipt.account_id,
+                second.receipt.authenticated_account_identity_sha256,
+                BookmakerCapability.BALANCE_READ.value,
+            ),
+        ).fetchone()
+    assert row == (second.receipt.acquisition_id, 2)
+
+
+def test_durable_generation_is_scoped_per_capability(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    database = tmp_path / "durable-generation-scope.sqlite3"
+    _install_transport(monkeypatch, [_DEVELOPER_APPS, _DETAILS, _FUNDS])
+    balance = BetfairAccountSnapshotAcquirer(database, _credentials()).acquire(
+        _balance_capabilities(),
+        acquisition_id="durable-balance",
+    )
+
+    current_empty = _response(
+        {"currentOrders": [], "moreAvailable": False},
+        3,
+    )
+    _install_transport(monkeypatch, [_DEVELOPER_APPS, _DETAILS, current_empty])
+    opened = BetfairAccountSnapshotAcquirer(database, _credentials()).acquire(
+        frozenset({BookmakerCapability.OPEN_POSITIONS_READ}),
+        acquisition_id="durable-open",
+    )
+
+    with sqlite3.connect(database) as connection:
+        rows = connection.execute(
+            """
+            SELECT capability, acquisition_id, generation
+            FROM account_snapshot_current_capability_generation
+            WHERE venue_id = ?
+              AND account_id = ?
+              AND authenticated_account_identity_sha256 = ?
+            ORDER BY capability
+            """,
+            (
+                balance.receipt.venue_id,
+                balance.receipt.account_id,
+                balance.receipt.authenticated_account_identity_sha256,
+            ),
+        ).fetchall()
+    assert rows == [
+        (BookmakerCapability.BALANCE_READ.value, balance.receipt.acquisition_id, 1),
+        (
+            BookmakerCapability.OPEN_POSITIONS_READ.value,
+            opened.receipt.acquisition_id,
+            1,
+        ),
+    ]
+
+
+def test_current_generation_guard_holds_cross_connection_publication_barrier(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    database = tmp_path / "durable-generation-lock.sqlite3"
+    _install_transport(monkeypatch, [_DEVELOPER_APPS, _DETAILS, _FUNDS])
+    acquired = BetfairAccountSnapshotAcquirer(database, _credentials()).acquire(
+        _balance_capabilities(),
+        acquisition_id="durable-lock-1",
+    )
+
+    with hold_current_account_snapshot_acquisition(
+        acquired,
+        _balance_capabilities(),
+    ):
+        competing = sqlite3.connect(database, timeout=0)
+        try:
+            with pytest.raises(sqlite3.OperationalError, match="locked"):
+                competing.execute("BEGIN IMMEDIATE")
+        finally:
+            competing.close()
+
+    competing = sqlite3.connect(database, timeout=0)
+    try:
+        competing.execute("BEGIN IMMEDIATE")
+        competing.rollback()
+    finally:
+        competing.close()
+
+
+def test_current_generation_guard_consults_durable_generation_not_only_process_state(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    database = tmp_path / "durable-generation-truth.sqlite3"
+    _install_transport(monkeypatch, [_DEVELOPER_APPS, _DETAILS, _FUNDS])
+    first = BetfairAccountSnapshotAcquirer(database, _credentials()).acquire(
+        _balance_capabilities(),
+        acquisition_id="durable-truth-1",
+    )
+    _install_transport(monkeypatch, [_DEVELOPER_APPS, _DETAILS, _FUNDS])
+    second = BetfairAccountSnapshotAcquirer(database, _credentials()).acquire(
+        _balance_capabilities(),
+        acquisition_id="durable-truth-2",
+    )
+
+    # Simulate another process having published a different durable generation
+    # while this process still retains its in-memory live/current objects.
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            """
+            UPDATE account_snapshot_current_capability_generation
+            SET acquisition_id = ?, generation = generation + 1
+            WHERE venue_id = ?
+              AND account_id = ?
+              AND authenticated_account_identity_sha256 = ?
+              AND capability = ?
+            """,
+            (
+                first.receipt.acquisition_id,
+                second.receipt.venue_id,
+                second.receipt.account_id,
+                second.receipt.authenticated_account_identity_sha256,
+                BookmakerCapability.BALANCE_READ.value,
+            ),
+        )
+
+    with pytest.raises(
+        AccountSnapshotAcquisitionError,
+        match="durable current canonical provider acquisition.*balance_read",
+    ):
+        with hold_current_account_snapshot_acquisition(
+            second,
+            _balance_capabilities(),
+        ):
+            raise AssertionError("process-local current state must not override durable truth")
+
+
 def test_new_acquisition_id_preserves_later_identical_read_time(
     tmp_path,
     monkeypatch,

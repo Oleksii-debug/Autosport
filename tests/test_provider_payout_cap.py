@@ -88,6 +88,7 @@ def test_per_bet_exact_boundary_is_structurally_within() -> None:
     evidence = _seal(_evidence())
 
     result = assess_provider_payout_cap(
+        as_of=NOW,
         evidence=evidence,
         candidate_amount=Decimal("100.00"),
     )
@@ -104,6 +105,7 @@ def test_one_exact_quantum_over_cap_is_structurally_exceeded() -> None:
     evidence = _seal(_evidence())
 
     result = assess_provider_payout_cap(
+        as_of=NOW,
         evidence=evidence,
         candidate_amount=Decimal("100.01"),
     )
@@ -121,6 +123,7 @@ def test_cumulative_nominal_cap_without_headroom_is_unknown() -> None:
     )
 
     result = assess_provider_payout_cap(
+        as_of=NOW,
         evidence=evidence,
         candidate_amount=Decimal("10"),
     )
@@ -142,10 +145,12 @@ def test_cumulative_current_headroom_not_nominal_ceiling_controls_arithmetic() -
     )
 
     within = assess_provider_payout_cap(
+        as_of=NOW,
         evidence=evidence,
         candidate_amount=Decimal("20"),
     )
     over = assess_provider_payout_cap(
+        as_of=NOW,
         evidence=evidence,
         candidate_amount=Decimal("20.01"),
     )
@@ -283,6 +288,7 @@ def test_copy_does_not_inherit_process_local_structural_seal() -> None:
 
     with pytest.raises(ProviderPayoutCapError, match="lacks structural seal"):
         assess_provider_payout_cap(
+        as_of=NOW,
             evidence=copied,
             candidate_amount=Decimal("1"),
         )
@@ -291,6 +297,7 @@ def test_copy_does_not_inherit_process_local_structural_seal() -> None:
 def test_unsealed_record_cannot_be_assessed() -> None:
     with pytest.raises(ProviderPayoutCapError, match="lacks structural seal"):
         assess_provider_payout_cap(
+        as_of=NOW,
             evidence=_evidence(),
             candidate_amount=Decimal("1"),
         )
@@ -325,6 +332,7 @@ def test_fabricated_large_cap_never_becomes_provider_origin_authority() -> None:
 
     _seal(evidence)
     result = assess_provider_payout_cap(
+        as_of=NOW,
         evidence=evidence,
         candidate_amount=Decimal("500000"),
     )
@@ -348,12 +356,14 @@ def test_float_and_non_finite_values_are_rejected() -> None:
     evidence = _seal(_evidence())
     with pytest.raises(ProviderPayoutCapError, match="exact Decimal"):
         assess_provider_payout_cap(
+        as_of=NOW,
             evidence=evidence,
             candidate_amount=1.0,
         )
 
     with pytest.raises(ProviderPayoutCapError, match="exact Decimal"):
         assess_provider_payout_cap(
+        as_of=NOW,
             evidence=evidence,
             candidate_amount=Decimal("NaN"),
         )
@@ -363,6 +373,7 @@ def test_zero_candidate_is_valid_structural_amount_but_not_execution_proof() -> 
     evidence = _seal(_evidence())
 
     result = assess_provider_payout_cap(
+        as_of=NOW,
         evidence=evidence,
         candidate_amount=Decimal("0"),
     )
@@ -438,6 +449,7 @@ def test_service_scope_changes_evidence_identity_and_assessment_preserves_it() -
     assert exchange.evidence_sha256 != sportsbook.evidence_sha256
 
     result = assess_provider_payout_cap(
+        as_of=NOW,
         evidence=_seal(exchange),
         candidate_amount=Decimal("1"),
     )
@@ -453,3 +465,31 @@ def test_structural_seal_registry_does_not_retain_evidence_forever() -> None:
     gc.collect()
 
     assert weak() is None
+
+
+def test_structural_seal_does_not_keep_payout_cap_active_after_expiry() -> None:
+    evidence = _seal(_evidence())
+
+    with pytest.raises(
+        ProviderPayoutCapError,
+        match="expired at assessment",
+    ):
+        assess_provider_payout_cap(
+            evidence=evidence,
+            candidate_amount=Decimal("1"),
+            as_of=evidence.valid_until,
+        )
+
+
+def test_assessment_cannot_backdate_payout_cap_before_observation() -> None:
+    evidence = _seal(_evidence())
+
+    with pytest.raises(
+        ProviderPayoutCapError,
+        match="future at assessment",
+    ):
+        assess_provider_payout_cap(
+            evidence=evidence,
+            candidate_amount=Decimal("1"),
+            as_of=evidence.observed_at - timedelta(microseconds=1),
+        )

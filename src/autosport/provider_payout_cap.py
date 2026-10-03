@@ -499,6 +499,7 @@ def assess_provider_payout_cap(
     *,
     evidence: ProviderPayoutCapEvidence,
     candidate_amount: Decimal,
+    as_of: datetime,
 ) -> ProviderPayoutCapAssessment:
     """Compare one provider-semantic amount with a sealed structural cap.
 
@@ -507,10 +508,23 @@ def assess_provider_payout_cap(
     apply commission or tax, or guess settlement ordering.
 
     For cumulative scopes, a nominal ceiling without current headroom is not
-    enough even for structural within/exceeds arithmetic.
+    enough even for structural within/exceeds arithmetic. Validity is rechecked at
+    this exact decision/use time so an old structural seal cannot renew expiry or
+    backdate provider evidence into an earlier decision.
     """
 
     assert_provider_payout_cap_structure_sealed(evidence)
+    current = _utc(as_of, "as_of")
+    observed = _utc(evidence.observed_at, "observed_at")
+    valid_until = _utc(evidence.valid_until, "valid_until")
+    if observed > current:
+        raise ProviderPayoutCapError(
+            "provider payout-cap evidence is future at assessment"
+        )
+    if current >= valid_until:
+        raise ProviderPayoutCapError(
+            "provider payout-cap evidence is expired at assessment"
+        )
     candidate = _nonnegative_decimal(
         candidate_amount, "candidate_amount"
     )

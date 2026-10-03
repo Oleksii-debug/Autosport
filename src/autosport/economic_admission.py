@@ -1636,6 +1636,7 @@ def admit_paper_ticket(
 
     root = _canonical_workspace_root(workspace)
     book_path = _ADMISSION_PATH_TRUEDIV(root, "paper_book.json")
+    _require_workspace_lock_dispatch()
     day_turnover_snapshot = _prepare_paper_day_turnover_snapshot(
         root=root,
         book_path=book_path,

@@ -50,12 +50,10 @@ always required.
 must be proved; they are not resolved evidence from the authorities named by
 those requirements.
 
-- missing required label -> `proof_contract_satisfied=False`;
+- missing required label -> `required_labels_present=False`;
 - every required label present -> structural label coverage may be
-  `proof_contract_satisfied=True`;
-- label coverage never mints `positive_action_candidate=True`;
-- `proof_gate_decision` remains `OpportunityDecision.WAIT` even when every
-  label is present;
+  `required_labels_present=True`;
+- the taxonomy exposes no positive-action or Opportunity-decision field at all;
 - `execution_authorized` is always `False`.
 
 A later composition may produce positive proof-gate truth only by consuming and
@@ -73,8 +71,8 @@ defined by #355 and the existing EconomicGoal authority.
 Contracts and evaluations are frozen dataclasses. Required/present/missing proof
 tuples use canonical lexical ordering. Callers cannot construct a shortened
 canonical class contract, inject predictive claims into a non-predictive class,
-turn complete bare requirement labels into actionable truth, or set
-`execution_authorized=True`.
+or set `execution_authorized=True`. Complete bare requirement labels remain
+structural taxonomy data and there is no decision-like result surface to promote.
 
 This slice intentionally contains no adapter into `ResearchDecisionPipeline`;
 a future integration should adapt the proven predictive path into the canonical

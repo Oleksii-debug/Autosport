@@ -1048,7 +1048,7 @@ class BetfairSupervisedPlaceOrdersClient:
         bound: BoundSupervisedExecutionPlan,
         provider_order_ref: str,
         execution_workspace: Path,
-        _before_transport: Callable[[], None] | None = None,
+        _before_transport: Callable[[str], None] | None = None,
         _transport_post: Callable[..., bytes] | None = None,
         _response_parser: Callable[..., BetfairPlaceExecutionReport] | None = None,
         _observation_clock: Callable[[], str] | None = None,
@@ -1125,7 +1125,7 @@ class BetfairSupervisedPlaceOrdersClient:
         try:
             with _CANONICAL_EXECUTION_STOP_ADMISSION_LEASE(stop_authority):
                 if _before_transport is not None:
-                    _before_transport()
+                    _before_transport(request_sha256)
                 try:
                     if _transport_post is None:
                         payload = self._transport.post(
@@ -1887,10 +1887,13 @@ def execute_betfair_supervised_action(
             provider_id=action.bookmaker_id,
         )
 
-        def mark_submitted_after_stop_admission() -> None:
+        def mark_submitted_after_stop_admission(
+            request_sha256: str,
+        ) -> None:
             ledger.mark_submitted(
                 attempt_id,
                 submitted_at=now(),
+                request_sha256=request_sha256,
             )
 
         try:
@@ -2130,16 +2133,18 @@ def execute_betfair_supervised_action(
             )
 
     evidence_id = report.evidence_id
-    ledger.bind_provider_evidence(
-        attempt_id=attempt_id,
-        evidence_id=evidence_id,
-        observed_at=report.observed_at,
-        source=f"betfair:placeOrders:{report.response_sha256}",
-    )
+    evidence_source = f"betfair:placeOrders:{report.response_sha256}"
     outcome = _report_outcome(report, action)
     receipt = report.instruction.bet_id
 
     if outcome is PlaceOrdersOutcome.UNKNOWN:
+        ledger.bind_provider_evidence(
+            attempt_id=attempt_id,
+            evidence_id=evidence_id,
+            observed_at=report.observed_at,
+            source=evidence_source,
+            request_sha256=report.request_sha256,
+        )
         ledger.mark_unknown(
             attempt_id,
             reason="betfair_placeOrders_report_requires_readback",
@@ -2154,6 +2159,13 @@ def execute_betfair_supervised_action(
         )
 
     if outcome is PlaceOrdersOutcome.PLACED_UNMATCHED:
+        ledger.bind_provider_evidence(
+            attempt_id=attempt_id,
+            evidence_id=evidence_id,
+            observed_at=report.observed_at,
+            source=evidence_source,
+            request_sha256=report.request_sha256,
+        )
         if receipt is None:
             raise BetfairSupervisedExecutionError(
                 "placed-unmatched provider order requires betId identity"
@@ -2180,6 +2192,13 @@ def execute_betfair_supervised_action(
         # Never launder Autosport's internal evidence hash into the external
         # receipt namespace.
         if acknowledgement_receipt is None:
+            ledger.bind_provider_evidence(
+                attempt_id=attempt_id,
+                evidence_id=evidence_id,
+                observed_at=report.observed_at,
+                source=evidence_source,
+                request_sha256=report.request_sha256,
+            )
             ledger.mark_unknown(
                 attempt_id,
                 reason=(
@@ -2230,6 +2249,14 @@ def execute_betfair_supervised_action(
             accepted_odds=report.instruction.average_price_matched,
             accepted_stake=report.instruction.size_matched,
         )
+    ledger._bind_provider_acknowledgement_evidence(
+        attempt_id=attempt_id,
+        evidence_id=evidence_id,
+        observed_at=report.observed_at,
+        source=evidence_source,
+        request_sha256=report.request_sha256,
+        acknowledgement=acknowledgement,
+    )
     ledger.acknowledge(acknowledgement)
     return BetfairSupervisedExecutionResult(
         outcome,

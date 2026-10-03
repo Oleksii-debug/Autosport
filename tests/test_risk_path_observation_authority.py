@@ -181,6 +181,8 @@ def _completed_run_with_settlement_bridge(
         base_paper_book_sha256=base_book_sha,
         base_decision_ledger_sha256=base_ledger_sha,
     )
+    book = PaperBook.load(book_path)
+    ticket = book.tickets[ticket.ticket_id]
 
     identity = EnvironmentIdentity(
         source_id="risk-path-source",
@@ -426,7 +428,7 @@ def test_conservative_minimum_never_relies_on_settlement_order(tmp_path) -> None
     base.save(base_path)
     base_loaded = PaperBook.load_bytes(base_path.read_bytes())
 
-    final = PaperBook.load_bytes(base_path.read_bytes())
+    final = PaperBook("100")
     first = final.open_ticket(
         (
             TicketLeg(

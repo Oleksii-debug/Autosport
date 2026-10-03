@@ -2,11 +2,17 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import json
+import urllib.request as _urllib_request
 
 import pytest
 
+from autosport.betfair_account_identity import (
+    build_betfair_authenticated_client,
+    resolve_betfair_authenticated_account_identity,
+)
 from autosport.betfair_account_readonly import (
-    BetfairReadOnlyClient,
+    ACCOUNT_JSON_RPC_ENDPOINT,
+    BETTING_JSON_RPC_ENDPOINT,
     BetfairSessionCredentials,
 )
 from autosport.betfair_price_ladder_admission import (
@@ -23,19 +29,44 @@ class SequencedTransport:
     def __init__(self, responses: list[bytes]) -> None:
         self._responses = list(responses)
 
-    def post(
-        self,
-        url: str,
-        *,
-        headers,
-        body: bytes,
-        timeout_seconds: float,
-    ) -> bytes:
+    class Response:
+        def __init__(self, payload: bytes) -> None:
+            self._payload = payload
+        def __enter__(self):
+            return self
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+        def read(self, limit: int) -> bytes:
+            assert limit >= len(self._payload)
+            return self._payload
+
+    def open(self, request, data=None, timeout: float = 0):
+        assert data is None
+        assert request.data is not None
+        decoded = json.loads(request.data.decode("utf-8"))
+        if request.full_url == ACCOUNT_JSON_RPC_ENDPOINT:
+            raw = json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "id": decoded["id"],
+                    "result": {
+                        "currencyCode": "EUR",
+                        "localeCode": "en",
+                        "region": "GBR",
+                        "timezone": "Europe/London",
+                    },
+                },
+                separators=(",", ":"),
+            ).encode("utf-8")
+            return self.Response(raw)
+        assert request.full_url == BETTING_JSON_RPC_ENDPOINT
         if not self._responses:
             raise AssertionError("unexpected transport call")
-        return self._responses.pop(0)
-
-
+        payload = json.loads(self._responses.pop(0).decode("utf-8"))
+        payload["id"] = decoded["id"]
+        return self.Response(
+            json.dumps(payload, separators=(",", ":")).encode("utf-8")
+        )
 def _response(result: object, request_id: int) -> bytes:
     return json.dumps(
         {"jsonrpc": "2.0", "result": result, "id": request_id},
@@ -55,17 +86,17 @@ def _market_row(
     }
 
 
-def _authority_for(*responses: bytes) -> BetfairPriceLadderAuthority:
-    client = BetfairReadOnlyClient(
-        BetfairSessionCredentials("app-secret", "session-secret"),
-        transport=SequencedTransport(list(responses)),
-        clock=lambda: FIXED_NOW,
+def _authority_for(monkeypatch, *responses: bytes) -> BetfairPriceLadderAuthority:
+    transport = SequencedTransport(list(responses))
+    monkeypatch.setattr(_urllib_request, "_opener", transport)
+    client = build_betfair_authenticated_client(
+        BetfairSessionCredentials("app-secret", "session-secret")
     )
-    return BetfairPriceLadderAuthority(client)
-
+    identity = resolve_betfair_authenticated_account_identity(client)
+    return BetfairPriceLadderAuthority(client, identity)
 
 def test_failed_same_market_refresh_revokes_prior_positive_admission() -> None:
-    authority = _authority_for(
+    authority = _authority_for(monkeypatch, 
         _response([_market_row("1.234")], 1),
         _response([], 2),
     )
@@ -104,7 +135,7 @@ def test_failed_same_market_refresh_revokes_prior_positive_admission() -> None:
 
 
 def test_failed_other_market_refresh_does_not_revoke_unrelated_market() -> None:
-    authority = _authority_for(
+    authority = _authority_for(monkeypatch, 
         _response([_market_row("1.234")], 1),
         _response([], 2),
     )

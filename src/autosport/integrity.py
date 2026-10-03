@@ -246,7 +246,20 @@ def _authority_recover(
 
 def _scientific_registry_authority(destination: Path) -> MonotonicWorkspaceAuthority:
     workspace = destination.parent.resolve(strict=False)
-    if MonotonicWorkspaceAuthority is not _CANONICAL_MONOTONIC_AUTHORITY_TYPE:
+    class_dict = vars(_CANONICAL_MONOTONIC_AUTHORITY_TYPE)
+    current_new = class_dict.get("__new__", _MISSING_MONOTONIC_CLASS_MEMBER)
+    if (
+        MonotonicWorkspaceAuthority is not _CANONICAL_MONOTONIC_AUTHORITY_TYPE
+        or current_new is not _CANONICAL_MONOTONIC_NEW
+        or (
+            _CANONICAL_MONOTONIC_NEW_CODE is not None
+            and getattr(current_new, "__code__", None)
+            is not _CANONICAL_MONOTONIC_NEW_CODE
+        )
+        or class_dict.get("__init__") is not _CANONICAL_MONOTONIC_INIT
+        or _CANONICAL_MONOTONIC_INIT.__code__
+        is not _CANONICAL_MONOTONIC_INIT_CODE
+    ):
         raise RuntimeError("ScientificRegistry monotonic authority constructor changed")
     authority = _CANONICAL_MONOTONIC_AUTHORITY_TYPE(
         workspace=workspace,

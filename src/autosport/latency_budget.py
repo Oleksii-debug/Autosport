@@ -119,8 +119,8 @@ class LatencySummary:
     breach_count: int
 
     def __post_init__(self) -> None:
-        if not isinstance(self.budget, LatencyBudget):
-            raise LatencyBudgetError("budget must be a LatencyBudget")
+        if type(self.budget) is not LatencyBudget:
+            raise LatencyBudgetError("budget must be an exact LatencyBudget")
         integer_fields = {
             "sample_count": self.sample_count,
             "total_ns": self.total_ns,

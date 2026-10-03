@@ -249,6 +249,18 @@ def test_canonical_metric_scalars_and_budget_reject_subclasses() -> None:
     with pytest.raises(LatencyBudgetError, match="exact LatencyBudget"):
         LatencyMeasurement("op", 1, subclassed_budget)
     with pytest.raises(LatencyBudgetError, match="exact LatencyBudget"):
+        LatencySummary(
+            budget=subclassed_budget,
+            sample_count=1,
+            total_ns=1,
+            min_ns=1,
+            p50_ns=1,
+            p95_ns=1,
+            p99_ns=1,
+            max_ns=1,
+            breach_count=0,
+        )
+    with pytest.raises(LatencyBudgetError, match="exact LatencyBudget"):
         summarize_latency([1], budget=subclassed_budget)
     with pytest.raises(LatencyBudgetError, match="exact LatencyBudget"):
         measure_call("op", lambda: None, budget=subclassed_budget)

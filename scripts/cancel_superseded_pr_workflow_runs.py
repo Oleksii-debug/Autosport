@@ -137,6 +137,11 @@ class GitHubApi:
         method: str = "GET",
         allowed_http_errors: frozenset[int] = frozenset(),
     ) -> object:
+        is_cancel_request = (
+            method == "POST"
+            and path.startswith("/actions/runs/")
+            and path.endswith("/cancel")
+        )
         request = Request(
             f"https://api.github.com/repos/{self._repository}{path}",
             method=method,
@@ -149,7 +154,7 @@ class GitHubApi:
         )
         try:
             with urlopen(request, timeout=20) as response:
-                status_code = response.status
+                status_code = response.status if is_cancel_request else None
                 body = response.read()
         except HTTPError as exc:
             if exc.code in allowed_http_errors:
@@ -161,11 +166,8 @@ class GitHubApi:
             raise CancellationError(
                 f"GitHub API request failed: {type(exc).__name__}"
             ) from exc
-        if (
-            method == "POST"
-            and path.startswith("/actions/runs/")
-            and path.endswith("/cancel")
-            and (type(status_code) is not int or status_code != 202)
+        if is_cancel_request and (
+            type(status_code) is not int or status_code != 202
         ):
             raise CancellationError(
                 "workflow run cancellation returned unexpected HTTP status"

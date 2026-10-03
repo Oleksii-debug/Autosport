@@ -1138,6 +1138,7 @@ def _record_catalog_coverage_acquisition_impl(
     leaf_id: str,
     acquisition: BetfairAuthenticatedDiscoveryAcquisition,
     _parse_catalogue_result,
+    _provider_result_resolver,
 ) -> CatalogCoverageRecordResult:
     """Bind one live authenticated response and expand saturated leaves deterministically."""
 
@@ -1147,7 +1148,7 @@ def _record_catalog_coverage_acquisition_impl(
         plan_id=plan_id,
     )
     leaf = _load_leaf(store, plan_id=plan.plan_id, leaf_id=leaf_id)
-    provider_result = _provider_result_from_acquisition(acquisition)
+    provider_result = _provider_result_resolver(acquisition)
     receipt = acquisition.receipt
     if receipt.transport_authority_ref != plan.session_context_id:
         raise BetfairCatalogCoverageError(
@@ -1317,6 +1318,7 @@ def _resolve_catalog_coverage_impl(
     plan_id: str,
     live_acquisitions: Sequence[BetfairAuthenticatedDiscoveryAcquisition] = (),
     _parse_catalogue_result,
+    _provider_result_resolver,
 ) -> CatalogCoverageResolution:
     """Verify the durable partition graph and current-process provider-origin receipts."""
 
@@ -1523,7 +1525,7 @@ def _resolve_catalog_coverage_impl(
         BetfairAuthenticatedDiscoveryAcquisition,
     ] = {}
     for acquisition in live_acquisitions:
-        provider_result = _provider_result_from_acquisition(acquisition)
+        provider_result = _provider_result_resolver(acquisition)
         receipt = acquisition.receipt
         if receipt.transport_authority_ref != plan.session_context_id:
             continue
@@ -1623,6 +1625,8 @@ def _make_catalogue_coverage_runtime():
     catalog_module = _catalog
     parser = catalog_module.parse_market_catalogue_result_for_request
     parser_code = parser.__code__
+    provider_result_resolver = _provider_result_from_acquisition
+    provider_result_resolver_code = provider_result_resolver.__code__
     record_impl = _record_catalog_coverage_acquisition_impl
     resolve_impl = _resolve_catalog_coverage_impl
 
@@ -1649,6 +1653,26 @@ def _make_catalogue_coverage_runtime():
             )
         return parsed
 
+    def provider_result_from_acquisition(
+        acquisition: BetfairAuthenticatedDiscoveryAcquisition,
+    ) -> object:
+        if (
+            _provider_result_from_acquisition is not provider_result_resolver
+            or provider_result_resolver.__code__ is not provider_result_resolver_code
+        ):
+            raise BetfairCatalogCoverageError(
+                "authenticated discovery result resolver dispatch changed"
+            )
+        result = provider_result_resolver(acquisition)
+        if (
+            _provider_result_from_acquisition is not provider_result_resolver
+            or provider_result_resolver.__code__ is not provider_result_resolver_code
+        ):
+            raise BetfairCatalogCoverageError(
+                "authenticated discovery result resolver dispatch changed"
+            )
+        return result
+
     def record_catalog_coverage_acquisition(
         store: CollectorDeltaStore,
         *,
@@ -1664,6 +1688,7 @@ def _make_catalogue_coverage_runtime():
             leaf_id=leaf_id,
             acquisition=acquisition,
             _parse_catalogue_result=parse_catalogue_result,
+            _provider_result_resolver=provider_result_from_acquisition,
         )
 
     def resolve_catalog_coverage(
@@ -1679,6 +1704,7 @@ def _make_catalogue_coverage_runtime():
             plan_id=plan_id,
             live_acquisitions=live_acquisitions,
             _parse_catalogue_result=parse_catalogue_result,
+            _provider_result_resolver=provider_result_from_acquisition,
         )
 
     return record_catalog_coverage_acquisition, resolve_catalog_coverage

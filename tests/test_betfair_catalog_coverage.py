@@ -8,6 +8,7 @@ import urllib.request as _urllib_request
 
 import pytest
 
+import autosport.betfair_catalog_coverage as _coverage
 import autosport.betfair_multisport_catalog as _catalog
 
 from autosport.betfair_account_identity import (
@@ -424,6 +425,110 @@ def test_captured_coverage_record_rejects_catalog_parser_rebinding(
             leaf_id=root.leaf_id,
             acquisition=acquisition,
         )
+
+
+
+def _coverage_plan_root_acquisition_for_dispatch_guard(tmp_path, monkeypatch):
+    store = CollectorDeltaStore(tmp_path / "collector.db")
+    source = _successful_source_window(store)
+    client, scope, _opener = _client_and_scope(monkeypatch)
+    plan = create_catalog_coverage_plan(
+        store,
+        expected_store_path=store.path,
+        source_universe=source,
+        expected_source_id="source-x",
+        expected_start_cycle_seq=1,
+        expected_end_cycle_seq=1,
+        client=client,
+        visibility_scope=scope,
+        causal_cutoff=datetime(2099, 1, 1, tzinfo=timezone.utc),
+        root_request=_root_request(),
+    )
+    root = pending_catalog_coverage_leaves(
+        store,
+        expected_store_path=store.path,
+        plan_id=plan.plan_id,
+    )[0]
+    acquisition = acquire_authenticated_betfair_discovery(client, root.request)
+    return store, plan, root, acquisition
+
+
+def test_coverage_record_rejects_authenticated_result_resolver_rebinding(
+    tmp_path,
+    monkeypatch,
+):
+    store, plan, root, acquisition = _coverage_plan_root_acquisition_for_dispatch_guard(
+        tmp_path,
+        monkeypatch,
+    )
+    forged_calls = []
+
+    def forged_provider_result(_acquisition):
+        forged_calls.append(True)
+        return []
+
+    monkeypatch.setattr(
+        _coverage,
+        "_provider_result_from_acquisition",
+        forged_provider_result,
+    )
+
+    with pytest.raises(
+        BetfairCatalogCoverageError,
+        match="authenticated discovery result resolver dispatch changed",
+    ):
+        record_catalog_coverage_acquisition(
+            store,
+            expected_store_path=store.path,
+            plan_id=plan.plan_id,
+            leaf_id=root.leaf_id,
+            acquisition=acquisition,
+        )
+
+    assert forged_calls == []
+    assert pending_catalog_coverage_leaves(
+        store,
+        expected_store_path=store.path,
+        plan_id=plan.plan_id,
+    ) == (root,)
+
+
+def test_coverage_record_rejects_authenticated_result_resolver_code_mutation(
+    tmp_path,
+    monkeypatch,
+):
+    store, plan, root, acquisition = _coverage_plan_root_acquisition_for_dispatch_guard(
+        tmp_path,
+        monkeypatch,
+    )
+    canonical_resolver = _coverage._provider_result_from_acquisition
+
+    def forged_provider_result(_acquisition):
+        return []
+
+    monkeypatch.setattr(
+        canonical_resolver,
+        "__code__",
+        forged_provider_result.__code__,
+    )
+
+    with pytest.raises(
+        BetfairCatalogCoverageError,
+        match="authenticated discovery result resolver dispatch changed",
+    ):
+        record_catalog_coverage_acquisition(
+            store,
+            expected_store_path=store.path,
+            plan_id=plan.plan_id,
+            leaf_id=root.leaf_id,
+            acquisition=acquisition,
+        )
+
+    assert pending_catalog_coverage_leaves(
+        store,
+        expected_store_path=store.path,
+        plan_id=plan.plan_id,
+    ) == (root,)
 
 
 def test_parent_market_missing_from_categorical_child_fails_reconciliation(
